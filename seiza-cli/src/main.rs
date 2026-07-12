@@ -163,6 +163,12 @@ enum DownloadSource {
         #[arg(long, default_value_t = 15.0)]
         max_mag: f32,
     },
+    /// The Rochester Astronomy active supernova/transient list (refetched)
+    Transients {
+        /// Directory to download into
+        #[arg(long)]
+        output: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -227,6 +233,15 @@ enum BuildDataSource {
         #[arg(long, default_value_t = 180)]
         bands: u32,
     },
+    /// Transient catalog from the downloaded Rochester active list
+    Transients {
+        /// Directory containing snactive.html
+        #[arg(long)]
+        input: PathBuf,
+        /// Output transient catalog file
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// Bundle manifest (sizes + sha256) for hosting data files
     Manifest {
         /// Directory containing built .bin data files
@@ -288,6 +303,7 @@ fn main() -> Result<()> {
             DownloadSource::Gaia { output, max_mag } => {
                 download_data::download_gaia(&output, max_mag)
             }
+            DownloadSource::Transients { output } => download_data::download_transients(&output),
         },
         Command::BuildData { source } => match source {
             BuildDataSource::Astap {
@@ -313,6 +329,9 @@ fn main() -> Result<()> {
                 max_mag,
                 bands,
             } => build_data::build_gaia(&input, &output, epoch, max_mag, bands),
+            BuildDataSource::Transients { input, output } => {
+                build_data::build_transients(&input, &output)
+            }
             BuildDataSource::Manifest {
                 dir,
                 version,

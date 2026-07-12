@@ -155,6 +155,23 @@ fn fetch(url: &str, target: &Path, how: Verify) -> Result<()> {
     Ok(())
 }
 
+/// Rochester Astronomy "Latest Supernovae" active list — no registration
+/// required, updated daily. The canonical source (IAU TNS) needs a bot
+/// account for its dumps; this covers the practical overlay use.
+pub fn download_transients(output: &Path) -> Result<()> {
+    std::fs::create_dir_all(output)?;
+    let target = output.join("snactive.html");
+    // Always refetch: the whole point is freshness
+    std::fs::remove_file(&target).ok();
+    fetch(
+        "https://www.rochesterastronomy.org/snimages/snactive.html",
+        &target,
+        Verify::None,
+    )?;
+    println!("transient list ready in {}", output.display());
+    Ok(())
+}
+
 const GAIA_TAP_SYNC: &str = "https://gea.esac.esa.int/tap-server/tap/sync";
 /// Gaia DR3 source_id encodes the HEALPix level-12 cell in the high bits;
 /// this spans the whole sky.

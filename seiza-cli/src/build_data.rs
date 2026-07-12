@@ -109,6 +109,100 @@ pub fn build_tycho2(input: &Path, output: &Path, epoch: f64, max_mag: f32) -> Re
     Ok(())
 }
 
+/// Build a transient catalog from the Rochester "Latest Supernovae"
+/// active list. Each row becomes a Transient object whose common name
+/// carries the type, latest magnitude, discovery date, and host.
+pub fn build_transients(input: &Path, output: &Path) -> Result<()> {
+    use seiza::objects::{ObjectCatalog, ObjectKind, SkyObject};
+
+    let path = input.join("snactive.html");
+    // The page contains Latin-1 discoverer names; decode lossily
+    let bytes = std::fs::read(&path).with_context(|| {
+        format!(
+            "cannot read {}; run download-data transients",
+            path.display()
+        )
+    })?;
+    let content = String::from_utf8_lossy(&bytes);
+
+    let mut objects = Vec::new();
+    for row in content.split("<tr>").skip(1) {
+        let row = row.split("</tr>").next().unwrap_or("");
+        let cells: Vec<String> = row
+            .split("</td>")
+            .map(|cell| {
+                // Strip tags within the cell
+                let mut text = String::new();
+                let mut in_tag = false;
+                for c in cell.chars() {
+                    match c {
+                        '<' => in_tag = true,
+                        '>' => in_tag = false,
+                        c if !in_tag => text.push(c),
+                        _ => {}
+                    }
+                }
+                text.trim().to_string()
+            })
+            .collect();
+        if cells.len() < 12 {
+            continue;
+        }
+
+        let designation = &cells[0];
+        if designation.is_empty() {
+            continue;
+        }
+        let (Some(ra), Some(dec)) = (
+            parse_sexagesimal(&cells[2]).map(|h| h * 15.0),
+            parse_sexagesimal(&cells[3]),
+        ) else {
+            continue;
+        };
+        let host = &cells[1];
+        let mag: Option<f32> = cells[5].trim_end_matches('*').parse().ok();
+        let sn_type = &cells[7];
+        let discovered = &cells[11];
+
+        let name = if designation.starts_with("AT") || designation.starts_with("SN") {
+            designation.clone()
+        } else {
+            format!("SN {designation}")
+        };
+        let mut details = Vec::new();
+        if !sn_type.is_empty() && sn_type != "unk" {
+            details.push(format!("type {sn_type}"));
+        }
+        if !discovered.is_empty() {
+            details.push(format!("disc. {discovered}"));
+        }
+        if !host.is_empty() && host != "none" {
+            details.push(format!("in {host}"));
+        }
+
+        objects.push(SkyObject {
+            kind: ObjectKind::Transient,
+            ra,
+            dec,
+            mag,
+            major_arcmin: None,
+            minor_arcmin: None,
+            position_angle_deg: None,
+            name,
+            common_name: details.join(", "),
+        });
+    }
+
+    if objects.is_empty() {
+        bail!("no transients parsed from {}", path.display());
+    }
+    let catalog = ObjectCatalog::new(objects);
+    let count = catalog.len();
+    catalog.write_to(output)?;
+    println!("{count} transients written to {}", output.display());
+    Ok(())
+}
+
 /// Cheap spatial hash for deduplicating objects by position.
 struct PositionDedup {
     cells: std::collections::HashMap<(i32, i32), Vec<(f64, f64)>>,

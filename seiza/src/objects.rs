@@ -30,6 +30,8 @@ pub enum ObjectKind {
     DoubleStar = 10,
     Association = 11,
     Other = 12,
+    /// A transient event: supernova, nova, bright AT designation
+    Transient = 13,
 }
 
 impl ObjectKind {
@@ -48,6 +50,7 @@ impl ObjectKind {
             Self::DoubleStar => "double-star",
             Self::Association => "association",
             Self::Other => "other",
+            Self::Transient => "transient",
         }
     }
 
@@ -65,6 +68,7 @@ impl ObjectKind {
             9 => Self::Star,
             10 => Self::DoubleStar,
             11 => Self::Association,
+            13 => Self::Transient,
             _ => Self::Other,
         }
     }
