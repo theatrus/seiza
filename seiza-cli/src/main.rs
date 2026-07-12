@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use seiza::catalog::{StarCatalog, TileCatalog};
+use seiza::solve::{SolveHint, solve};
 use seiza::{DetectConfig, detect_stars};
 use std::path::PathBuf;
 
@@ -30,8 +31,36 @@ enum Command {
         #[arg(long)]
         annotate: Option<PathBuf>,
     },
-    /// Solve an image against a star catalog (not implemented yet)
-    Solve { image: PathBuf },
+    /// Plate-solve an image against a star catalog
+    Solve {
+        /// Image file (PNG, JPEG, TIFF)
+        image: PathBuf,
+        /// Star tile file built by build-data
+        #[arg(long)]
+        data: PathBuf,
+        /// Approximate field center RA, degrees
+        #[arg(long, allow_negative_numbers = true)]
+        ra: f64,
+        /// Approximate field center Dec, degrees
+        #[arg(long, allow_negative_numbers = true)]
+        dec: f64,
+        /// Search radius around the hinted center, degrees
+        #[arg(long, default_value_t = 2.0)]
+        radius: f64,
+        /// Approximate pixel scale, arcseconds per pixel
+        #[arg(long)]
+        scale: f64,
+        /// Allowed relative scale error
+        #[arg(long, default_value_t = 0.2)]
+        scale_tolerance: f64,
+        /// Detection threshold in noise sigmas
+        #[arg(long, default_value_t = 4.0)]
+        sigma: f32,
+        /// Write a copy with detections (green) and catalog stars projected
+        /// through the solution (red)
+        #[arg(long)]
+        annotate: Option<PathBuf>,
+    },
     /// Download source catalogs from their archives
     DownloadData {
         #[command(subcommand)]
@@ -77,6 +106,24 @@ enum DownloadSource {
 
 #[derive(Subcommand)]
 enum BuildDataSource {
+    /// An ASTAP .1476 star database directory (e.g. D80, Gaia DR3)
+    Astap {
+        /// Directory containing *.1476 files
+        #[arg(long)]
+        input: PathBuf,
+        /// Output tile file
+        #[arg(long)]
+        output: PathBuf,
+        /// Epoch of the source positions, Julian year (D80 is epoch 2025)
+        #[arg(long, default_value_t = 2025.0)]
+        epoch: f64,
+        /// Drop stars fainter than this magnitude
+        #[arg(long, default_value_t = 21.0)]
+        max_mag: f32,
+        /// Declination bands (tile granularity); 180 = 1° tiles
+        #[arg(long, default_value_t = 180)]
+        bands: u32,
+    },
     /// Tycho-2 (CDS I/259): the ~2.5M star lite tier
     Tycho2 {
         /// Directory containing tyc2.dat.NN[.gz]
@@ -102,12 +149,38 @@ fn main() -> Result<()> {
             max_stars,
             annotate,
         } => detect(&image, sigma, max_stars, annotate.as_deref()),
-        Command::Solve { .. } => anyhow::bail!("solving is not implemented yet"),
+        Command::Solve {
+            image,
+            data,
+            ra,
+            dec,
+            radius,
+            scale,
+            scale_tolerance,
+            sigma,
+            annotate,
+        } => solve_command(
+            &image,
+            &data,
+            (ra, dec),
+            radius,
+            scale,
+            scale_tolerance,
+            sigma,
+            annotate.as_deref(),
+        ),
         Command::DownloadData { source } => match source {
             DownloadSource::Tycho2 { output } => download_data::download_tycho2(&output),
             DownloadSource::Openngc { output } => download_data::download_openngc(&output),
         },
         Command::BuildData { source } => match source {
+            BuildDataSource::Astap {
+                input,
+                output,
+                epoch,
+                max_mag,
+                bands,
+            } => build_data::build_astap(&input, &output, epoch, max_mag, bands),
             BuildDataSource::Tycho2 {
                 input,
                 output,
@@ -186,4 +259,132 @@ fn cone(data: &std::path::Path, ra: f64, dec: f64, radius: f64, limit: usize) ->
         println!("{:>12.6} {:>12.6} {:>7.3}", star.ra, star.dec, star.mag);
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn solve_command(
+    path: &std::path::Path,
+    data: &std::path::Path,
+    center: (f64, f64),
+    radius: f64,
+    scale: f64,
+    scale_tolerance: f64,
+    sigma: f32,
+    annotate: Option<&std::path::Path>,
+) -> Result<()> {
+    let img = image::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let dims = (img.width(), img.height());
+
+    let config = DetectConfig {
+        sigma,
+        max_stars: 200,
+        ..Default::default()
+    };
+    let stars = detect_stars(&img, &config);
+    println!(
+        "{} stars detected in {}x{} image",
+        stars.len(),
+        dims.0,
+        dims.1
+    );
+
+    let catalog =
+        TileCatalog::open(data).with_context(|| format!("failed to open {}", data.display()))?;
+    let hint = SolveHint {
+        center,
+        radius_deg: radius,
+        scale_arcsec_px: scale,
+        scale_tolerance,
+    };
+    let started = std::time::Instant::now();
+    let solution = solve(&stars, &catalog, &hint, dims).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let elapsed = started.elapsed();
+
+    let wcs = &solution.wcs;
+    let (ra, dec) = wcs.pixel_to_world(dims.0 as f64 / 2.0, dims.1 as f64 / 2.0);
+    let det = wcs.cd[0][0] * wcs.cd[1][1] - wcs.cd[0][1] * wcs.cd[1][0];
+    // Position angle of north, measured in the image
+    let north = wcs.world_to_pixel(wcs.crval.0, wcs.crval.1 + 0.01);
+    let rotation = north
+        .map(|(x, y)| (x - wcs.crpix.0).atan2(-(y - wcs.crpix.1)).to_degrees())
+        .unwrap_or(f64::NAN);
+
+    println!("Solved in {:.2}s:", elapsed.as_secs_f64());
+    println!(
+        "  center     : {} {}  ({ra:.5}°, {dec:.5}°)",
+        hms(ra),
+        dms(dec)
+    );
+    println!("  pixel scale: {:.4}\"/px", wcs.scale_arcsec_per_px());
+    println!("  rotation   : {rotation:.2}° (north angle in image)");
+    println!(
+        "  parity     : {}",
+        if det > 0.0 { "normal" } else { "mirrored" }
+    );
+    println!(
+        "  quality    : {} stars matched, RMS {:.3}\"",
+        solution.matched_stars, solution.rms_arcsec
+    );
+    let footprint = wcs.footprint(dims.0, dims.1);
+    println!(
+        "  footprint  : {:.4},{:.4} / {:.4},{:.4} / {:.4},{:.4} / {:.4},{:.4}",
+        footprint[0].0,
+        footprint[0].1,
+        footprint[1].0,
+        footprint[1].1,
+        footprint[2].0,
+        footprint[2].1,
+        footprint[3].0,
+        footprint[3].1
+    );
+
+    if let Some(out) = annotate {
+        let mut canvas = img.to_rgb8();
+        for star in &stars {
+            imageproc::drawing::draw_hollow_circle_mut(
+                &mut canvas,
+                (star.x.round() as i32, star.y.round() as i32),
+                10,
+                image::Rgb([64, 255, 64]),
+            );
+        }
+        let fov = (dims.0 as f64).hypot(dims.1 as f64) / 2.0 * wcs.scale_arcsec_per_px() / 3600.0;
+        for cat_star in catalog.cone_search(ra, dec, fov, 300) {
+            if let Some((x, y)) = wcs.world_to_pixel(cat_star.ra, cat_star.dec)
+                && x >= 0.0
+                && y >= 0.0
+                && x < dims.0 as f64
+                && y < dims.1 as f64
+            {
+                imageproc::drawing::draw_hollow_circle_mut(
+                    &mut canvas,
+                    (x.round() as i32, y.round() as i32),
+                    6,
+                    image::Rgb([255, 64, 64]),
+                );
+            }
+        }
+        canvas
+            .save(out)
+            .with_context(|| format!("failed to write {}", out.display()))?;
+        println!("annotated image written to {}", out.display());
+    }
+    Ok(())
+}
+
+fn hms(ra: f64) -> String {
+    let hours = ra.rem_euclid(360.0) / 15.0;
+    let h = hours.floor();
+    let m = ((hours - h) * 60.0).floor();
+    let sec = (hours - h - m / 60.0) * 3600.0;
+    format!("{:02}h {:02}m {:05.2}s", h as u32, m as u32, sec)
+}
+
+fn dms(dec: f64) -> String {
+    let sign = if dec < 0.0 { '-' } else { '+' };
+    let a = dec.abs();
+    let d = a.floor();
+    let m = ((a - d) * 60.0).floor();
+    let sec = (a - d - m / 60.0) * 3600.0;
+    format!("{sign}{:02}° {:02}′ {:04.1}″", d as u32, m as u32, sec)
 }

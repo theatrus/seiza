@@ -134,6 +134,88 @@ fn parse_tycho2_line(line: &str, epoch: f64) -> Option<(f64, f64, f32)> {
     Some((ra, dec, mag))
 }
 
+/// Build a star tile file from an ASTAP `.1476` star database directory
+/// (e.g. D80, Gaia DR3). The format is documented in ASTAP's
+/// unit_star_database.pas: each of the 1476 sky-area files has a 110-byte
+/// header (text description, record size in the final byte) followed by
+/// 5-byte records; `FF FF FF` section headers carry the dec high byte
+/// (offset +128) and the section magnitude ((byte - 16) / 10).
+pub fn build_astap(
+    input: &Path,
+    output: &Path,
+    epoch: f64,
+    max_mag: f32,
+    bands: u32,
+) -> Result<()> {
+    let mut parts: Vec<_> = std::fs::read_dir(input)
+        .with_context(|| format!("cannot read {}", input.display()))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "1476"))
+        .collect();
+    parts.sort();
+    if parts.is_empty() {
+        bail!("no .1476 files found in {}", input.display());
+    }
+
+    let mut builder = TileSetBuilder::new(bands, epoch);
+    let mut too_faint = 0u64;
+
+    for part in &parts {
+        let mut reader = BufReader::with_capacity(
+            1 << 20,
+            std::fs::File::open(part).with_context(|| format!("cannot open {}", part.display()))?,
+        );
+        let mut header = [0u8; 110];
+        std::io::Read::read_exact(&mut reader, &mut header)
+            .with_context(|| format!("{} is too short for a header", part.display()))?;
+        let record_size = header[109];
+        if record_size != 5 {
+            bail!(
+                "{}: unsupported record size {record_size} (only the 5-byte \
+                 1476 format is supported)",
+                part.display()
+            );
+        }
+
+        let mut record = [0u8; 5];
+        let mut dec9: i32 = 0;
+        let mut mag: f32 = 0.0;
+        loop {
+            match std::io::Read::read_exact(&mut reader, &mut record) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e.into()),
+            }
+            if record[0] == 0xFF && record[1] == 0xFF && record[2] == 0xFF {
+                dec9 = record[3] as i32 - 128;
+                mag = (record[4] as f32 - 16.0) / 10.0;
+                continue;
+            }
+            if mag > max_mag {
+                too_faint += 1;
+                continue;
+            }
+            let ra = (record[0] as f64 + record[1] as f64 * 256.0 + record[2] as f64 * 65536.0)
+                * 360.0
+                / ((1u32 << 24) - 1) as f64;
+            let dec_int = record[3] as i32 + record[4] as i32 * 256 + dec9 * 65536;
+            let dec = dec_int as f64 * 90.0 / ((128 * 65536) - 1) as f64;
+            builder.add(ra, dec, mag);
+        }
+    }
+
+    let count = builder.star_count();
+    builder.write_to(output)?;
+    println!(
+        "{} stars written to {} (epoch {epoch}, {} fainter than {max_mag})",
+        count,
+        output.display(),
+        too_faint
+    );
+    Ok(())
+}
+
 /// Parse one supplement-1/2 record: positions are ICRS at epoch J1991.25.
 fn parse_tycho2_suppl_line(line: &str, epoch: f64) -> Option<(f64, f64, f32)> {
     let field =
@@ -196,6 +278,48 @@ mod tests {
         let d_dec_arcsec = (dec - -16.71314306) * 3600.0;
         assert!((d_dec_arcsec - -1.2231 * dt).abs() < 0.01);
         assert!(ra < 101.28854105); // moving in -RA
+    }
+
+    #[test]
+    fn astap_record_decoding_matches_the_documented_sirius_example() {
+        // From unit_star_database.pas: RA bytes C3 06 48, DEC bytes D7 39
+        // with section dec9 = -24 (0xE8)
+        let ra = (0xC3 as f64 + 0x06 as f64 * 256.0 + 0x48 as f64 * 65536.0) * 360.0
+            / ((1u32 << 24) - 1) as f64;
+        assert!((ra - 101.2871).abs() < 0.001, "{ra}");
+        let dec_int = 0xD7 as i32 + 0x39 as i32 * 256 + (-24) * 65536;
+        let dec = dec_int as f64 * 90.0 / ((128 * 65536) - 1) as f64;
+        assert!((dec - -16.71614).abs() < 0.0001, "{dec}");
+    }
+
+    #[test]
+    fn astap_builder_reads_a_synthetic_area_file() {
+        let dir = std::env::temp_dir().join(format!("seiza-astap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut data = vec![b' '; 110];
+        data[..9].copy_from_slice(b"TEST FILE");
+        data[109] = 5;
+        // Section: dec9 = -24, magnitude byte 6 => -1.0
+        data.extend_from_slice(&[0xFF, 0xFF, 0xFF, (-24i32 + 128) as u8, 6]);
+        // Sirius
+        data.extend_from_slice(&[0xC3, 0x06, 0x48, 0xD7, 0x39]);
+        // Fainter section at dec9 = 0, magnitude byte 116 => 10.0
+        data.extend_from_slice(&[0xFF, 0xFF, 0xFF, 128, 116]);
+        data.extend_from_slice(&[0x00, 0x00, 0x80, 0x00, 0x40]); // ra=180°, dec small
+        std::fs::write(dir.join("test_0101.1476"), &data).unwrap();
+
+        let out = dir.join("out.bin");
+        build_astap(&dir, &out, 2025.0, 21.0, 45).unwrap();
+
+        let catalog = seiza::catalog::TileCatalog::open(&out).unwrap();
+        assert_eq!(catalog.star_count(), 2);
+        use seiza::catalog::StarCatalog;
+        let sirius = catalog.cone_search(101.287, -16.716, 0.01, 5);
+        assert_eq!(sirius.len(), 1);
+        assert!((sirius[0].mag - -1.0).abs() < 0.01);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
