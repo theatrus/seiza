@@ -287,7 +287,7 @@ mod tests {
         let ra = (0xC3 as f64 + 0x06 as f64 * 256.0 + 0x48 as f64 * 65536.0) * 360.0
             / ((1u32 << 24) - 1) as f64;
         assert!((ra - 101.2871).abs() < 0.001, "{ra}");
-        let dec_int = 0xD7 as i32 + 0x39 as i32 * 256 + (-24) * 65536;
+        let dec_int = 0xD7_i32 + 0x39_i32 * 256 + (-24) * 65536;
         let dec = dec_int as f64 * 90.0 / ((128 * 65536) - 1) as f64;
         assert!((dec - -16.71614).abs() < 0.0001, "{dec}");
     }
