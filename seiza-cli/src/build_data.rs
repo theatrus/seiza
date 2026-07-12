@@ -345,8 +345,9 @@ fn parse_openngc_line(line: &str) -> Option<seiza::objects::SkyObject> {
         "DrkN" => ObjectKind::DarkNebula,
         "Neb" | "EmN" | "RfN" => ObjectKind::Nebula,
         "Cl+N" => ObjectKind::ClusterWithNebula,
-        "*" => ObjectKind::Star,
-        "**" => ObjectKind::DoubleStar,
+        // Bare star entries are catalog-number noise next to the IAU
+        // named-star list (e.g. IC 1318 is typed as the star gamma Cyg)
+        "*" | "**" => return None,
         "*Ass" => ObjectKind::Association,
         "Dup" | "NonEx" => return None,
         _ => ObjectKind::Other,
