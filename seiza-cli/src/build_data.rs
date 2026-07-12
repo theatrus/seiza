@@ -421,6 +421,57 @@ pub fn build_objects(input: &Path, output: &Path) -> Result<()> {
         }
     }
 
+    // PGC/HyperLEDA galaxies: keep those with D25 >= 0.4 arcmin, dedup
+    // against galaxies already present from NGC/IC/UGC
+    for o in &objects {
+        if o.kind == ObjectKind::Galaxy {
+            grid_dedup.insert(o.ra, o.dec);
+        }
+    }
+    let pgc = input.join("pgc.tsv");
+    if pgc.exists() {
+        sources += 1;
+        let content = std::fs::read_to_string(&pgc)?;
+        for line in content.lines() {
+            let fields: Vec<&str> = line.split('\t').map(str::trim).collect();
+            if line.starts_with('#') || fields.len() < 4 {
+                continue;
+            }
+            let (Ok(ra), Ok(dec)) = (fields[0].parse::<f64>(), fields[1].parse::<f64>()) else {
+                continue;
+            };
+            let Ok(number) = fields[2].parse::<u32>() else {
+                continue;
+            };
+            // logD25 is log10 of the diameter in 0.1-arcmin units
+            let Some(major) = fields
+                .get(3)
+                .and_then(|v| v.parse::<f64>().ok())
+                .map(|log_d| 10f64.powf(log_d) * 0.1)
+            else {
+                continue;
+            };
+            if major < 0.4 || grid_dedup.near(ra, dec, 30.0 / 3600.0) {
+                continue;
+            }
+            let minor = fields
+                .get(4)
+                .and_then(|v| v.parse::<f64>().ok())
+                .map(|log_r| major / 10f64.powf(log_r));
+            objects.push(SkyObject {
+                kind: ObjectKind::Galaxy,
+                ra,
+                dec,
+                mag: None,
+                major_arcmin: Some(major as f32),
+                minor_arcmin: minor.map(|m| m as f32),
+                position_angle_deg: fields.get(5).and_then(|v| v.parse().ok()),
+                name: format!("PGC {number}"),
+                common_name: String::new(),
+            });
+        }
+    }
+
     // Bright Star Catalogue: HD-numbered naked-eye stars. IAU-named stars
     // are already present, so skip BSC entries landing on one.
     for o in &objects {

@@ -84,6 +84,12 @@ pub fn download_objects(output: &Path) -> Result<()> {
             "_RAJ2000,_DEJ2000,VdB,BRadMax,Vmag",
         ),
         ("bsc.tsv", "V/50/catalog", "_RAJ2000,_DEJ2000,HD,Name,Vmag"),
+        // ~1M galaxies; the builder keeps the ones large enough to matter
+        (
+            "pgc.tsv",
+            "VII/237/pgc",
+            "_RAJ2000,_DEJ2000,PGC,logD25,logR25,PA",
+        ),
     ] {
         fetch(
             &format!("{vizier}{source}&-out={columns}&-out.max=unlimited"),
