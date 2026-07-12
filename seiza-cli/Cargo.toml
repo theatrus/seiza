@@ -16,3 +16,4 @@ anyhow.workspace = true
 clap.workspace = true
 image = { workspace = true, features = ["png", "jpeg", "tiff"] }
 imageproc.workspace = true
+flate2.workspace = true

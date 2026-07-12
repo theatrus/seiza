@@ -1,10 +1,14 @@
 //! Reference star catalogs.
 //!
-//! The on-disk format (phase 1) is a directory of HEALPix-binned tile files,
-//! each holding packed `(ra, dec, magnitude)` records proper-motion-corrected
-//! to a fixed epoch at build time. Until the builder lands, [`MemoryCatalog`]
-//! provides the same interface from an in-memory list — enough to develop and
-//! test the solver against synthetic or hand-fed data.
+//! [`tiles::TileCatalog`] is the file-backed store: packed
+//! `(ra, dec, magnitude)` records binned into sky tiles,
+//! proper-motion-corrected to a fixed epoch at build time.
+//! [`MemoryCatalog`] provides the same interface from an in-memory list for
+//! tests and synthetic solves.
+
+pub mod tiles;
+
+pub use tiles::{TileCatalog, TileSetBuilder};
 
 /// A reference star position, ICRS degrees.
 #[derive(Debug, Clone, Copy, PartialEq)]

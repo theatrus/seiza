@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use seiza::catalog::{StarCatalog, TileCatalog};
 use seiza::{DetectConfig, detect_stars};
 use std::path::PathBuf;
+
+mod build_data;
 
 #[derive(Parser)]
 #[command(name = "seiza", about = "Star detection and plate solving", version)]
@@ -30,8 +33,45 @@ enum Command {
     Solve { image: PathBuf },
     /// Download prebuilt catalog data bundles (not implemented yet)
     DownloadData,
-    /// Build catalog data bundles from primary sources (not implemented yet)
-    BuildData,
+    /// Build catalog data bundles from primary sources
+    BuildData {
+        #[command(subcommand)]
+        source: BuildDataSource,
+    },
+    /// Query a star tile file: list stars around a sky position
+    Cone {
+        /// Star tile file built by build-data
+        #[arg(long)]
+        data: PathBuf,
+        #[arg(long)]
+        ra: f64,
+        #[arg(long)]
+        dec: f64,
+        /// Search radius in degrees
+        #[arg(long, default_value_t = 1.0)]
+        radius: f64,
+        #[arg(long, default_value_t = 25)]
+        limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum BuildDataSource {
+    /// Tycho-2 (CDS I/259): the ~2.5M star lite tier
+    Tycho2 {
+        /// Directory containing tyc2.dat.NN[.gz]
+        #[arg(long)]
+        input: PathBuf,
+        /// Output tile file
+        #[arg(long)]
+        output: PathBuf,
+        /// Epoch to apply proper motions to, Julian year
+        #[arg(long, default_value_t = 2025.5)]
+        epoch: f64,
+        /// Drop stars fainter than this magnitude
+        #[arg(long, default_value_t = 13.0)]
+        max_mag: f32,
+    },
 }
 
 fn main() -> Result<()> {
@@ -44,7 +84,21 @@ fn main() -> Result<()> {
         } => detect(&image, sigma, max_stars, annotate.as_deref()),
         Command::Solve { .. } => anyhow::bail!("solving is not implemented yet"),
         Command::DownloadData => anyhow::bail!("data download is not implemented yet"),
-        Command::BuildData => anyhow::bail!("data building is not implemented yet"),
+        Command::BuildData { source } => match source {
+            BuildDataSource::Tycho2 {
+                input,
+                output,
+                epoch,
+                max_mag,
+            } => build_data::build_tycho2(&input, &output, epoch, max_mag),
+        },
+        Command::Cone {
+            data,
+            ra,
+            dec,
+            radius,
+            limit,
+        } => cone(&data, ra, dec, radius, limit),
     }
 }
 
@@ -91,5 +145,22 @@ fn detect(
         println!("annotated image written to {}", out.display());
     }
 
+    Ok(())
+}
+
+fn cone(data: &std::path::Path, ra: f64, dec: f64, radius: f64, limit: usize) -> Result<()> {
+    let catalog =
+        TileCatalog::open(data).with_context(|| format!("failed to open {}", data.display()))?;
+    println!(
+        "{} stars in catalog, epoch {}",
+        catalog.star_count(),
+        catalog.epoch()
+    );
+    let stars = catalog.cone_search(ra, dec, radius, limit);
+    println!("{} stars within {radius}° of ({ra}, {dec}):", stars.len());
+    println!("{:>12} {:>12} {:>7}", "ra", "dec", "mag");
+    for star in stars {
+        println!("{:>12.6} {:>12.6} {:>7.3}", star.ra, star.dec, star.mag);
+    }
     Ok(())
 }
