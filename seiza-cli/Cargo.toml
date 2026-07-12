@@ -1,0 +1,18 @@
+[package]
+name = "seiza-cli"
+description = "Command-line interface for seiza: star detection, plate solving, and dataset management"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "seiza"
+path = "src/main.rs"
+
+[dependencies]
+seiza.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+image = { workspace = true, features = ["png", "jpeg", "tiff"] }
+imageproc.workspace = true

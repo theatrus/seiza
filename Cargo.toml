@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = ["seiza", "seiza-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/theatrus/seiza"
+
+[workspace.dependencies]
+seiza = { path = "seiza" }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+thiserror = "2"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+imageproc = "0.25"
