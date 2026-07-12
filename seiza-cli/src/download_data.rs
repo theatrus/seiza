@@ -51,6 +51,29 @@ pub fn download_openngc(output: &Path) -> Result<()> {
     Ok(())
 }
 
+/// All object-overlay sources: OpenNGC, VizieR Sharpless and Barnard (with
+/// VizieR-computed J2000 positions), and the IAU star-name list.
+pub fn download_objects(output: &Path) -> Result<()> {
+    download_openngc(output)?;
+    fetch(
+        "https://vizier.cds.unistra.fr/viz-bin/asu-tsv?-source=VII/20/catalog&-out=_RAJ2000,_DEJ2000,Sh2,Diam&-out.max=unlimited",
+        &output.join("sh2.tsv"),
+        Verify::None,
+    )?;
+    fetch(
+        "https://vizier.cds.unistra.fr/viz-bin/asu-tsv?-source=VII/220A/barnard&-out=_RAJ2000,_DEJ2000,Barn,Diam&-out.max=unlimited",
+        &output.join("barnard.tsv"),
+        Verify::None,
+    )?;
+    fetch(
+        "https://www.pas.rochester.edu/~emamajek/WGSN/IAU-CSN.txt",
+        &output.join("IAU-CSN.txt"),
+        Verify::None,
+    )?;
+    println!("object catalogs ready in {}", output.display());
+    Ok(())
+}
+
 enum Verify {
     None,
     /// The file must decompress fully as gzip

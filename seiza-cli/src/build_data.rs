@@ -237,6 +237,212 @@ fn parse_tycho2_suppl_line(line: &str, epoch: f64) -> Option<(f64, f64, f32)> {
     Some((ra, dec, mag))
 }
 
+/// Build an object catalog from OpenNGC, VizieR Sharpless/Barnard TSVs, and
+/// the IAU star-name list, whichever are present in `input`.
+pub fn build_objects(input: &Path, output: &Path) -> Result<()> {
+    use seiza::objects::{ObjectCatalog, ObjectKind, SkyObject};
+
+    let mut objects = Vec::new();
+    let mut sources = 0;
+
+    for name in ["NGC.csv", "addendum.csv"] {
+        let path = input.join(name);
+        if !path.exists() {
+            continue;
+        }
+        sources += 1;
+        let content = std::fs::read_to_string(&path)?;
+        for line in content.lines().skip(1) {
+            if let Some(object) = parse_openngc_line(line) {
+                objects.push(object);
+            }
+        }
+    }
+
+    for (file, prefix, kind) in [
+        ("sh2.tsv", "Sh2-", ObjectKind::HiiRegion),
+        ("barnard.tsv", "B", ObjectKind::DarkNebula),
+    ] {
+        let path = input.join(file);
+        if !path.exists() {
+            continue;
+        }
+        sources += 1;
+        let content = std::fs::read_to_string(&path)?;
+        for line in content.lines() {
+            if line.starts_with('#') || line.is_empty() {
+                continue;
+            }
+            let fields: Vec<&str> = line.split('\t').map(str::trim).collect();
+            if fields.len() < 3 {
+                continue;
+            }
+            let (Ok(ra), Ok(dec)) = (fields[0].parse::<f64>(), fields[1].parse::<f64>()) else {
+                continue; // column header / units / separator rows
+            };
+            let Ok(number) = fields[2].parse::<u32>() else {
+                continue;
+            };
+            let diam: Option<f32> = fields.get(3).and_then(|d| d.parse().ok());
+            objects.push(SkyObject {
+                kind,
+                ra,
+                dec,
+                mag: None,
+                major_arcmin: diam.filter(|d| *d > 0.0),
+                minor_arcmin: None,
+                position_angle_deg: None,
+                name: format!("{prefix}{number}"),
+                common_name: String::new(),
+            });
+        }
+    }
+
+    let csn = input.join("IAU-CSN.txt");
+    if csn.exists() {
+        sources += 1;
+        let content = std::fs::read_to_string(&csn)?;
+        for line in content.lines() {
+            if let Some(object) = parse_iau_csn_line(line) {
+                objects.push(object);
+            }
+        }
+    }
+
+    if sources == 0 {
+        bail!(
+            "no catalog sources found in {} (expected NGC.csv, sh2.tsv, \
+             barnard.tsv, IAU-CSN.txt); run download-data objects first",
+            input.display()
+        );
+    }
+
+    let catalog = ObjectCatalog::new(objects);
+    let count = catalog.len();
+    catalog.write_to(output)?;
+    println!(
+        "{count} objects from {sources} sources written to {}",
+        output.display()
+    );
+    Ok(())
+}
+
+/// One `;`-separated OpenNGC row. Skips duplicates and non-existent entries.
+fn parse_openngc_line(line: &str) -> Option<seiza::objects::SkyObject> {
+    use seiza::objects::{ObjectKind, SkyObject};
+
+    let fields: Vec<&str> = line.split(';').collect();
+    if fields.len() < 30 {
+        return None;
+    }
+    let kind = match fields[1] {
+        "G" | "GPair" | "GTrpl" | "GGroup" => ObjectKind::Galaxy,
+        "OCl" => ObjectKind::OpenCluster,
+        "GCl" => ObjectKind::GlobularCluster,
+        "PN" => ObjectKind::PlanetaryNebula,
+        "HII" => ObjectKind::HiiRegion,
+        "SNR" => ObjectKind::SupernovaRemnant,
+        "DrkN" => ObjectKind::DarkNebula,
+        "Neb" | "EmN" | "RfN" => ObjectKind::Nebula,
+        "Cl+N" => ObjectKind::ClusterWithNebula,
+        "*" => ObjectKind::Star,
+        "**" => ObjectKind::DoubleStar,
+        "*Ass" => ObjectKind::Association,
+        "Dup" | "NonEx" => return None,
+        _ => ObjectKind::Other,
+    };
+
+    // RA "HH:MM:SS.ss", Dec "+DD:MM:SS.s"
+    let ra = parse_sexagesimal(fields[2])? * 15.0;
+    let dec = parse_sexagesimal(fields[3])?;
+
+    // Prefer the Messier designation, prettify the NGC/IC name
+    let name = match fields.get(23).map(|m| m.trim_start_matches('0')) {
+        Some(m) if !m.is_empty() => format!("M {m}"),
+        _ => {
+            let raw = fields[0];
+            if let Some(rest) = raw.strip_prefix("NGC") {
+                format!("NGC {}", rest.trim_start_matches('0'))
+            } else if let Some(rest) = raw.strip_prefix("IC") {
+                format!("IC {}", rest.trim_start_matches('0'))
+            } else {
+                raw.to_string()
+            }
+        }
+    };
+    let common_name = fields
+        .get(28)
+        .and_then(|names| names.split(',').next())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    Some(SkyObject {
+        kind,
+        ra,
+        dec,
+        mag: fields[9].parse().ok().or_else(|| fields[8].parse().ok()),
+        major_arcmin: fields[5].parse().ok().filter(|v: &f32| *v > 0.0),
+        minor_arcmin: fields[6].parse().ok().filter(|v: &f32| *v > 0.0),
+        position_angle_deg: fields[7].parse().ok(),
+        name,
+        common_name,
+    })
+}
+
+/// "HH:MM:SS.ss" or "+DD:MM:SS.s" to a float in the leading unit.
+fn parse_sexagesimal(value: &str) -> Option<f64> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let negative = value.starts_with('-');
+    let parts: Vec<&str> = value.trim_start_matches(['-', '+']).split(':').collect();
+    let mut total = 0.0;
+    let mut scale = 1.0;
+    for part in parts {
+        total += part.parse::<f64>().ok()? * scale;
+        scale /= 60.0;
+    }
+    Some(if negative { -total } else { total })
+}
+
+/// One line of the IAU-CSN list. The ASCII name occupies the first 18
+/// bytes; RA/Dec (J2000, degrees) are anchored by the date column.
+fn parse_iau_csn_line(line: &str) -> Option<seiza::objects::SkyObject> {
+    use seiza::objects::{ObjectKind, SkyObject};
+
+    if line.starts_with('#') || line.len() < 40 || !line.is_ascii() && line.get(..18).is_none() {
+        return None;
+    }
+    let name = line.get(..18)?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    let date_index = tokens
+        .iter()
+        .position(|t| t.len() == 10 && t.as_bytes()[4] == b'-' && t.as_bytes()[7] == b'-')?;
+    if date_index < 6 {
+        return None;
+    }
+    let ra: f64 = tokens[date_index - 2].parse().ok()?;
+    let dec: f64 = tokens[date_index - 1].parse().ok()?;
+    let mag: Option<f32> = tokens[date_index - 6].parse().ok();
+
+    Some(SkyObject {
+        kind: ObjectKind::Star,
+        ra,
+        dec,
+        mag,
+        major_arcmin: None,
+        minor_arcmin: None,
+        position_angle_deg: None,
+        name: name.to_string(),
+        common_name: name.to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -56,10 +56,18 @@ enum Command {
         /// Detection threshold in noise sigmas
         #[arg(long, default_value_t = 4.0)]
         sigma: f32,
+        /// Ignore detections within this many pixels of the image edges
+        /// (captions and watermarks)
+        #[arg(long, default_value_t = 0)]
+        ignore_border: u32,
         /// Write a copy with detections (green) and catalog stars projected
         /// through the solution (red)
         #[arg(long)]
         annotate: Option<PathBuf>,
+        /// Object catalog file: list objects in the field and draw them
+        /// (cyan) on the annotated copy
+        #[arg(long)]
+        objects: Option<PathBuf>,
     },
     /// Download source catalogs from their archives
     DownloadData {
@@ -102,6 +110,12 @@ enum DownloadSource {
         #[arg(long)]
         output: PathBuf,
     },
+    /// All object-overlay sources: OpenNGC, Sharpless, Barnard, star names
+    Objects {
+        /// Directory to download into
+        #[arg(long)]
+        output: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -139,6 +153,15 @@ enum BuildDataSource {
         #[arg(long, default_value_t = 13.0)]
         max_mag: f32,
     },
+    /// Object catalog from downloaded OpenNGC/Sh2/Barnard/IAU-CSN sources
+    Objects {
+        /// Directory containing the source files
+        #[arg(long)]
+        input: PathBuf,
+        /// Output object catalog file
+        #[arg(long)]
+        output: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -158,7 +181,9 @@ fn main() -> Result<()> {
             scale,
             scale_tolerance,
             sigma,
+            ignore_border,
             annotate,
+            objects,
         } => solve_command(
             &image,
             &data,
@@ -167,11 +192,14 @@ fn main() -> Result<()> {
             scale,
             scale_tolerance,
             sigma,
+            ignore_border,
             annotate.as_deref(),
+            objects.as_deref(),
         ),
         Command::DownloadData { source } => match source {
             DownloadSource::Tycho2 { output } => download_data::download_tycho2(&output),
             DownloadSource::Openngc { output } => download_data::download_openngc(&output),
+            DownloadSource::Objects { output } => download_data::download_objects(&output),
         },
         Command::BuildData { source } => match source {
             BuildDataSource::Astap {
@@ -187,6 +215,9 @@ fn main() -> Result<()> {
                 epoch,
                 max_mag,
             } => build_data::build_tycho2(&input, &output, epoch, max_mag),
+            BuildDataSource::Objects { input, output } => {
+                build_data::build_objects(&input, &output)
+            }
         },
         Command::Cone {
             data,
@@ -270,13 +301,16 @@ fn solve_command(
     scale: f64,
     scale_tolerance: f64,
     sigma: f32,
+    ignore_border: u32,
     annotate: Option<&std::path::Path>,
+    objects: Option<&std::path::Path>,
 ) -> Result<()> {
     let img = image::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let dims = (img.width(), img.height());
 
     let config = DetectConfig {
         sigma,
+        ignore_border,
         max_stars: 200,
         ..Default::default()
     };
@@ -338,6 +372,36 @@ fn solve_command(
         footprint[3].1
     );
 
+    let placed = match objects {
+        Some(path) => {
+            let object_catalog = seiza::objects::ObjectCatalog::open(path)
+                .with_context(|| format!("failed to open {}", path.display()))?;
+            let placed = object_catalog.objects_in_footprint(wcs, dims);
+            println!("{} catalog objects in the field:", placed.len());
+            for p in &placed {
+                let size = match p.object.major_arcmin {
+                    Some(major) => format!("{major:.1}'"),
+                    None => "-".to_string(),
+                };
+                let common = if p.object.common_name.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", p.object.common_name)
+                };
+                println!(
+                    "  {:<12} {:>18} {:>8} at ({:.0}, {:.0}){common}",
+                    p.object.kind.as_str(),
+                    p.object.name,
+                    size,
+                    p.x,
+                    p.y
+                );
+            }
+            placed
+        }
+        None => Vec::new(),
+    };
+
     if let Some(out) = annotate {
         let mut canvas = img.to_rgb8();
         for star in &stars {
@@ -364,12 +428,45 @@ fn solve_command(
                 );
             }
         }
+        for p in &placed {
+            draw_rotated_ellipse(
+                &mut canvas,
+                (p.x, p.y),
+                p.semi_major_px.max(12.0),
+                p.semi_minor_px.max(12.0),
+                p.angle_deg,
+                image::Rgb([64, 220, 255]),
+            );
+        }
         canvas
             .save(out)
             .with_context(|| format!("failed to write {}", out.display()))?;
         println!("annotated image written to {}", out.display());
     }
     Ok(())
+}
+
+fn draw_rotated_ellipse(
+    canvas: &mut image::RgbImage,
+    center: (f64, f64),
+    semi_major: f64,
+    semi_minor: f64,
+    angle_deg: f64,
+    color: image::Rgb<u8>,
+) {
+    let (sin_r, cos_r) = angle_deg.to_radians().sin_cos();
+    let segments = 72;
+    let point = |i: usize| -> (f32, f32) {
+        let t = i as f64 / segments as f64 * std::f64::consts::TAU;
+        let (lx, ly) = (semi_major * t.cos(), semi_minor * t.sin());
+        (
+            (center.0 + lx * cos_r - ly * sin_r) as f32,
+            (center.1 + lx * sin_r + ly * cos_r) as f32,
+        )
+    };
+    for i in 0..segments {
+        imageproc::drawing::draw_line_segment_mut(canvas, point(i), point(i + 1), color);
+    }
 }
 
 fn hms(ra: f64) -> String {

@@ -29,9 +29,14 @@ seiza build-data tycho2 --input raw/tycho2 --output stars-lite.bin
 seiza solve image.jpg --data stars-lite.bin --ra 324.8 --dec 57.5 --scale 2.8
 ```
 
+- **Object catalogs** — OpenNGC (NGC/IC/Messier), Sharpless, Barnard, and
+  IAU named stars built into a compact object store; solved images can be
+  queried for the objects in their footprint with full ellipse geometry
+  (`seiza solve ... --objects objects.bin`).
+
 Planned (see design notes in the tenrankai repository,
-`docs/design/plate-solving.md`): object overlay data (OpenNGC, Sharpless,
-Barnard, named stars), Gaia TAP download, SIP distortion terms.
+`docs/design/plate-solving.md`): Gaia TAP download, SIP distortion terms,
+blind solving.
 
 ## Layout
 

@@ -10,6 +10,7 @@
 
 pub mod catalog;
 pub mod detect;
+pub mod objects;
 pub mod solve;
 pub mod wcs;
 

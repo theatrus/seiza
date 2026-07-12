@@ -26,6 +26,12 @@ pub struct DetectConfig {
     pub min_area: u32,
     /// Reject components larger than this many pixels (nebulosity, trails)
     pub max_area: u32,
+    /// Reject components more elongated than this ratio of principal axes
+    /// (text, trails, and edges; stars are nearly round)
+    pub max_elongation: f32,
+    /// Ignore detections within this many pixels of the image edges —
+    /// captions, watermarks, and frame artifacts live there
+    pub ignore_border: u32,
     /// Keep at most this many stars, brightest first
     pub max_stars: usize,
 }
@@ -37,6 +43,8 @@ impl Default for DetectConfig {
             sigma: 4.0,
             min_area: 3,
             max_area: 2500,
+            max_elongation: 2.5,
+            ignore_border: 0,
             max_stars: 500,
         }
     }
@@ -84,6 +92,9 @@ pub fn detect_stars(image: &image::DynamicImage, config: &DetectConfig) -> Vec<D
             let mut flux = 0.0f64;
             let mut sx = 0.0f64;
             let mut sy = 0.0f64;
+            let mut sxx = 0.0f64;
+            let mut syy = 0.0f64;
+            let mut sxy = 0.0f64;
             let mut peak = 0.0f32;
             let mut area = 0u32;
 
@@ -95,6 +106,9 @@ pub fn detect_stars(image: &image::DynamicImage, config: &DetectConfig) -> Vec<D
                 flux += v;
                 sx += cx as f64 * v;
                 sy += cy as f64 * v;
+                sxx += cx as f64 * cx as f64 * v;
+                syy += cy as f64 * cy as f64 * v;
+                sxy += cx as f64 * cy as f64 * v;
                 peak = peak.max(value);
                 area += 1;
 
@@ -112,13 +126,29 @@ pub fn detect_stars(image: &image::DynamicImage, config: &DetectConfig) -> Vec<D
             }
 
             if area >= config.min_area && area <= config.max_area && flux > 0.0 {
-                stars.push(DetectedStar {
-                    x: sx / flux,
-                    y: sy / flux,
-                    flux,
-                    peak,
-                    area,
-                });
+                let (cx, cy) = (sx / flux, sy / flux);
+                let border = config.ignore_border as f64;
+                if cx < border
+                    || cy < border
+                    || cx >= width as f64 - border
+                    || cy >= height as f64 - border
+                {
+                    continue;
+                }
+                if elongation(
+                    sxx / flux - cx * cx,
+                    syy / flux - cy * cy,
+                    sxy / flux - cx * cy,
+                ) <= config.max_elongation as f64
+                {
+                    stars.push(DetectedStar {
+                        x: cx,
+                        y: cy,
+                        flux,
+                        peak,
+                        area,
+                    });
+                }
             }
         }
     }
@@ -161,6 +191,15 @@ fn estimate_background(
         }
     }
     (background, noise)
+}
+
+/// Ratio of the principal axes of the flux distribution (≥ 1).
+fn elongation(mxx: f64, myy: f64, mxy: f64) -> f64 {
+    let trace = mxx + myy;
+    let root = ((mxx - myy).powi(2) + 4.0 * mxy * mxy).sqrt();
+    let l1 = ((trace + root) / 2.0).max(0.0);
+    let l2 = ((trace - root) / 2.0).max(1e-12);
+    (l1 / l2).sqrt()
 }
 
 fn median_in_place(values: &mut [f32]) -> f32 {
@@ -227,6 +266,33 @@ mod tests {
     fn empty_and_flat_images_yield_nothing() {
         let flat = synthetic_field(128, 128, &[]);
         assert!(detect_stars(&flat, &DetectConfig::default()).is_empty());
+    }
+
+    #[test]
+    fn rejects_elongated_shapes_like_text_strokes() {
+        // A bright horizontal bar (a "watermark stroke") plus one round star
+        let mut noise_state = 0xDEADBEEFu64;
+        let mut rand = move || {
+            noise_state ^= noise_state << 13;
+            noise_state ^= noise_state >> 7;
+            noise_state ^= noise_state << 17;
+            (noise_state >> 40) as f32 / 16777216.0
+        };
+        let buffer = ImageBuffer::from_fn(220, 120, |x, y| {
+            let mut value = 0.05 + 0.01 * rand();
+            if (40..=160).contains(&x) && (90..=93).contains(&y) {
+                value += 0.8; // stroke
+            }
+            let d2 = (x as f64 - 60.0).powi(2) + (y as f64 - 40.0).powi(2);
+            value += 0.7 * (-d2 / (2.0 * 1.6f64.powi(2))).exp() as f32;
+            Luma([(value.min(1.0) * 65535.0) as u16])
+        });
+        let image = DynamicImage::ImageLuma16(buffer);
+
+        let stars = detect_stars(&image, &DetectConfig::default());
+        assert_eq!(stars.len(), 1, "{stars:?}");
+        assert!((stars[0].x - 60.0).abs() < 0.5);
+        assert!((stars[0].y - 40.0).abs() < 0.5);
     }
 
     #[test]

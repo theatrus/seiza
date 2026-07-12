@@ -42,8 +42,8 @@ pub struct Solution {
 
 // Tuning constants. These are deliberately conservative; they can move
 // into SolveHint if a use case needs it.
-const N_IMAGE_TRIANGLE_STARS: usize = 14;
-const N_CATALOG_TRIANGLE_STARS: usize = 40;
+const N_IMAGE_TRIANGLE_STARS: usize = 24;
+const N_CATALOG_TRIANGLE_STARS: usize = 100;
 const N_VOTE_STARS: usize = 60;
 const RATIO_TOLERANCE: f64 = 0.01;
 const MIN_TRIANGLE_RATIO: f64 = 0.12;
@@ -76,7 +76,7 @@ pub fn solve(
     let area_ratio = (search_radius / fov_radius_deg.max(1e-6))
         .powi(2)
         .clamp(1.0, 16.0);
-    let limit = (80.0 * area_ratio) as usize;
+    let limit = (250.0 * area_ratio) as usize;
     let cone = catalog.cone_search(hint.center.0, hint.center.1, search_radius, limit);
     if cone.len() < 4 {
         return Err(crate::Error::Solve(format!(
@@ -94,12 +94,10 @@ pub fn solve(
     // triangles are built per FOV-sized window sliding over the search
     // region — the brightest stars of the whole search cone mostly lie
     // outside the image, so a single global set would rarely overlap the
-    // image's brightest stars.
-    let img_pts: Vec<(f64, f64)> = stars
-        .iter()
-        .take(N_IMAGE_TRIANGLE_STARS)
-        .map(|s| (s.x, s.y))
-        .collect();
+    // image's brightest stars. Image triangle stars are picked with
+    // spatial diversity so a bright localized feature (a galaxy core, a
+    // watermark strip) cannot monopolize the set.
+    let img_pts = diverse_brightest(stars, dimensions, N_IMAGE_TRIANGLE_STARS);
     let img_tris = triangles(&img_pts);
 
     let step = fov_radius_deg.max(0.05);
@@ -122,16 +120,23 @@ pub fn solve(
             .map(|&(x, y, _)| (x, y))
             .collect();
         in_window.truncate(N_CATALOG_TRIANGLE_STARS);
-        let cat_tris = triangles(&in_window);
+        let mut cat_tris = triangles(&in_window);
+        cat_tris.sort_by(|a, b| a.ratio_ba.total_cmp(&b.ratio_ba));
 
         for it in &img_tris {
-            for ct in &cat_tris {
+            // Catalog triangles are sorted by ratio_ba: visit only the
+            // tolerance window instead of the full cross product
+            let start = cat_tris.partition_point(|t| t.ratio_ba < it.ratio_ba - RATIO_TOLERANCE);
+            for ct in &cat_tris[start..] {
+                if ct.ratio_ba > it.ratio_ba + RATIO_TOLERANCE {
+                    break;
+                }
+                if (it.ratio_ca - ct.ratio_ca).abs() > RATIO_TOLERANCE {
+                    continue;
+                }
                 let err = (it.ratio_ba - ct.ratio_ba)
                     .abs()
                     .max((it.ratio_ca - ct.ratio_ca).abs());
-                if err > RATIO_TOLERANCE {
-                    continue;
-                }
                 // The tangent/pixel side length ratio must match the scale hint
                 let tri_scale = ct.longest / it.longest;
                 if (tri_scale / scale_deg - 1.0).abs() > hint.scale_tolerance {
@@ -240,6 +245,34 @@ pub fn solve(
         matched_stars: pairs.len(),
         rms_arcsec,
     })
+}
+
+/// The brightest `count` stars, but at most `count / 4 + 1` from any one
+/// cell of a 4×4 grid over the image — bright non-stellar clutter tends to
+/// cluster, real stars don't.
+fn diverse_brightest(
+    stars: &[DetectedStar],
+    dimensions: (u32, u32),
+    count: usize,
+) -> Vec<(f64, f64)> {
+    let per_cell_cap = count / 8 + 1;
+    let (width, height) = (dimensions.0 as f64, dimensions.1 as f64);
+    let mut per_cell = [0usize; 16];
+    let mut picked = Vec::with_capacity(count);
+    for star in stars {
+        if picked.len() >= count {
+            break;
+        }
+        let gx = ((star.x / width * 4.0) as usize).min(3);
+        let gy = ((star.y / height * 4.0) as usize).min(3);
+        let cell = gy * 4 + gx;
+        if per_cell[cell] >= per_cell_cap {
+            continue;
+        }
+        per_cell[cell] += 1;
+        picked.push((star.x, star.y));
+    }
+    picked
 }
 
 /// A WCS whose pixel plane IS the tangent plane (degrees) about `center`.
