@@ -1,34 +1,39 @@
 //! File-backed star catalog tiles.
 //!
-//! Binary format `SEIZAST1` (little-endian):
+//! Current format `SEIZAST2` (little-endian), designed for memory-mapped,
+//! vectorizable scans:
 //!
 //! ```text
-//! magic        [u8; 8]  = b"SEIZAST1"
+//! magic        [u8; 8]  = b"SEIZAST2"
 //! n_bands      u32          declination bands from -90° to +90°
 //! epoch        f64          positions are proper-motion corrected to this year
 //! star_count   u64
+//! attribution  u16 len + UTF-8 bytes (source + license note)
+//! padding      to an 8-byte boundary
 //! index        n_tiles ×  { offset: u64, count: u32 }
-//! data         packed star records, per tile, brightest first
+//! data         per tile, columnar: ra[u32; n]  dec[u32; n]  mag[u16; n]
+//!              (each tile padded to a 4-byte boundary)
 //! ```
+//!
+//! Records within a tile are sorted brightest-first. Columnar (SoA) layout
+//! keeps each field contiguous so decode loops auto-vectorize, and the file
+//! is memory-mapped so only touched tiles are paged in.
+//!
+//! The legacy `SEIZAST1` interleaved format is still readable.
 //!
 //! The sky is split into `n_bands` equal-height declination bands; each band
 //! is split into RA bins whose count shrinks with `cos(dec)` so bins stay
-//! roughly equal-area. A star record is 10 bytes: quantized RA (u32 over
-//! 360°), quantized Dec (u32 over 180°), magnitude (u16, millimags offset
-//! by +3 mag).
-//!
-//! Readers use positioned reads (`read_exact_at`), so a [`TileCatalog`] is
-//! shareable across threads without interior locking.
+//! roughly equal-area. Quantization: RA as u32 over 360°, Dec as u32 over
+//! 180° (sub-milliarcsecond), magnitude as u16 millimags offset by +3.
 
 use super::{CatalogStar, StarCatalog, angular_separation_deg};
 use std::fs::File;
-use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::FileExt;
+use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
-const MAGIC: &[u8; 8] = b"SEIZAST1";
-const RECORD_SIZE: u64 = 10;
-const HEADER_SIZE: u64 = 8 + 4 + 8 + 8;
+const MAGIC_V1: &[u8; 8] = b"SEIZAST1";
+const MAGIC_V2: &[u8; 8] = b"SEIZAST2";
+const V1_RECORD_SIZE: usize = 10;
 const MAG_OFFSET: f32 = 3.0;
 
 /// Sky-to-tile geometry shared by the builder and the reader.
@@ -148,23 +153,26 @@ fn unpack_mag(q: u16) -> f32 {
     q as f32 / 1000.0 - MAG_OFFSET
 }
 
-/// Accumulates stars in memory, then writes a tile file.
+/// Accumulates stars in memory, then writes a `SEIZAST2` tile file.
 pub struct TileSetBuilder {
     grid: Grid,
     epoch: f64,
+    attribution: String,
     tiles: Vec<Vec<(u32, u32, u16)>>,
     count: u64,
 }
 
 impl TileSetBuilder {
     /// `n_bands` controls tile granularity: 45 bands ≈ 4° tiles (lite),
-    /// 90 bands ≈ 2° tiles (standard tier).
-    pub fn new(n_bands: u32, epoch: f64) -> Self {
+    /// 180 bands ≈ 1° tiles (deep tiers). `attribution` records the data
+    /// source and license inside the file.
+    pub fn new(n_bands: u32, epoch: f64, attribution: &str) -> Self {
         let grid = Grid::new(n_bands);
         let tiles = vec![Vec::new(); grid.n_tiles() as usize];
         Self {
             grid,
             epoch,
+            attribution: attribution.to_string(),
             tiles,
             count: 0,
         }
@@ -182,53 +190,91 @@ impl TileSetBuilder {
 
     pub fn write_to(mut self, path: &Path) -> io::Result<()> {
         let mut out = BufWriter::new(File::create(path)?);
-        out.write_all(MAGIC)?;
+        out.write_all(MAGIC_V2)?;
         out.write_all(&self.grid.n_bands.to_le_bytes())?;
         out.write_all(&self.epoch.to_le_bytes())?;
         out.write_all(&self.count.to_le_bytes())?;
+        let attribution = self.attribution.as_bytes();
+        let attr_len = attribution.len().min(u16::MAX as usize);
+        out.write_all(&(attr_len as u16).to_le_bytes())?;
+        out.write_all(&attribution[..attr_len])?;
+
+        let mut position = 8 + 4 + 8 + 8 + 2 + attr_len as u64;
+        let pad = position.next_multiple_of(8) - position;
+        out.write_all(&vec![0u8; pad as usize])?;
+        position += pad;
 
         let n_tiles = self.grid.n_tiles() as u64;
-        let mut offset = HEADER_SIZE + n_tiles * 12;
+        let mut offset = position + n_tiles * 12;
         for tile in &mut self.tiles {
             tile.sort_by_key(|&(_, _, mag)| mag);
             out.write_all(&offset.to_le_bytes())?;
             out.write_all(&(tile.len() as u32).to_le_bytes())?;
-            offset += tile.len() as u64 * RECORD_SIZE;
+            let data = tile.len() as u64 * 10;
+            offset += data.next_multiple_of(4);
         }
         for tile in &self.tiles {
-            for &(ra, dec, mag) in tile {
+            // Columnar: all RA, then all Dec, then all magnitudes
+            for &(ra, _, _) in tile {
                 out.write_all(&ra.to_le_bytes())?;
+            }
+            for &(_, dec, _) in tile {
                 out.write_all(&dec.to_le_bytes())?;
+            }
+            for &(_, _, mag) in tile {
                 out.write_all(&mag.to_le_bytes())?;
             }
+            let data = tile.len() as u64 * 10;
+            let pad = data.next_multiple_of(4) - data;
+            out.write_all(&vec![0u8; pad as usize])?;
         }
         out.flush()
     }
 }
 
-/// A read-only, file-backed star catalog.
+enum Layout {
+    V1Interleaved,
+    V2Columnar,
+}
+
+/// A read-only, memory-mapped star catalog.
 pub struct TileCatalog {
-    file: File,
+    map: memmap2::Mmap,
+    layout: Layout,
     grid: Grid,
     epoch: f64,
     star_count: u64,
+    attribution: String,
     index: Vec<(u64, u32)>,
 }
 
 impl TileCatalog {
     pub fn open(path: &Path) -> io::Result<Self> {
-        let mut file = File::open(path)?;
-        let mut header = [0u8; HEADER_SIZE as usize];
-        file.read_exact(&mut header)?;
-        if &header[0..8] != MAGIC {
+        let file = File::open(path)?;
+        // Safety: the file is opened read-only; concurrent truncation would
+        // fault, which is acceptable for locally-managed data files.
+        let map = unsafe { memmap2::Mmap::map(&file)? };
+        if map.len() < 28 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "not a seiza star tile file",
+                "file too short for a seiza star tile file",
             ));
         }
-        let n_bands = u32::from_le_bytes(header[8..12].try_into().unwrap());
-        let epoch = f64::from_le_bytes(header[12..20].try_into().unwrap());
-        let star_count = u64::from_le_bytes(header[20..28].try_into().unwrap());
+
+        let layout = match &map[0..8] {
+            m if m == MAGIC_V1 => Layout::V1Interleaved,
+            m if m == MAGIC_V2 => Layout::V2Columnar,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "not a seiza star tile file",
+                ));
+            }
+        };
+
+        let n_bands = u32::from_le_bytes(map[8..12].try_into().unwrap());
+        let epoch = f64::from_le_bytes(map[12..20].try_into().unwrap());
+        let star_count = u64::from_le_bytes(map[20..28].try_into().unwrap());
         if n_bands == 0 || n_bands > 4096 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -237,11 +283,37 @@ impl TileCatalog {
         }
         let grid = Grid::new(n_bands);
 
+        let (attribution, index_start) = match layout {
+            Layout::V1Interleaved => (String::new(), 28usize),
+            Layout::V2Columnar => {
+                if map.len() < 30 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "truncated header",
+                    ));
+                }
+                let len = u16::from_le_bytes(map[28..30].try_into().unwrap()) as usize;
+                let end = 30 + len;
+                if map.len() < end {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "truncated header",
+                    ));
+                }
+                let attribution = String::from_utf8_lossy(&map[30..end]).into_owned();
+                (attribution, end.next_multiple_of(8))
+            }
+        };
+
         let n_tiles = grid.n_tiles() as usize;
-        let mut raw = vec![0u8; n_tiles * 12];
-        file.seek(SeekFrom::Start(HEADER_SIZE))?;
-        file.read_exact(&mut raw)?;
-        let index = raw
+        let index_end = index_start + n_tiles * 12;
+        if map.len() < index_end {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "truncated index",
+            ));
+        }
+        let index = map[index_start..index_end]
             .chunks_exact(12)
             .map(|chunk| {
                 (
@@ -252,10 +324,12 @@ impl TileCatalog {
             .collect();
 
         Ok(Self {
-            file,
+            map,
+            layout,
             grid,
             epoch,
             star_count,
+            attribution,
             index,
         })
     }
@@ -269,18 +343,53 @@ impl TileCatalog {
         self.epoch
     }
 
-    fn read_tile(&self, tile: u32) -> io::Result<Vec<CatalogStar>> {
+    /// Data source and license note embedded in the file (empty for v1).
+    pub fn attribution(&self) -> &str {
+        &self.attribution
+    }
+
+    /// Visit every star in a tile. Decoding runs over contiguous columns in
+    /// the mapped file for the v2 layout.
+    fn for_each_in_tile(&self, tile: u32, mut visit: impl FnMut(CatalogStar)) {
         let (offset, count) = self.index[tile as usize];
-        let mut raw = vec![0u8; count as usize * RECORD_SIZE as usize];
-        self.file.read_exact_at(&mut raw, offset)?;
-        Ok(raw
-            .chunks_exact(RECORD_SIZE as usize)
-            .map(|r| CatalogStar {
-                ra: unpack_ra(u32::from_le_bytes(r[0..4].try_into().unwrap())),
-                dec: unpack_dec(u32::from_le_bytes(r[4..8].try_into().unwrap())),
-                mag: unpack_mag(u16::from_le_bytes(r[8..10].try_into().unwrap())),
-            })
-            .collect())
+        let (offset, count) = (offset as usize, count as usize);
+        match self.layout {
+            Layout::V1Interleaved => {
+                let end = offset + count * V1_RECORD_SIZE;
+                let Some(data) = self.map.get(offset..end) else {
+                    return;
+                };
+                for r in data.chunks_exact(V1_RECORD_SIZE) {
+                    visit(CatalogStar {
+                        ra: unpack_ra(u32::from_le_bytes(r[0..4].try_into().unwrap())),
+                        dec: unpack_dec(u32::from_le_bytes(r[4..8].try_into().unwrap())),
+                        mag: unpack_mag(u16::from_le_bytes(r[8..10].try_into().unwrap())),
+                    });
+                }
+            }
+            Layout::V2Columnar => {
+                let ra_end = offset + count * 4;
+                let dec_end = ra_end + count * 4;
+                let mag_end = dec_end + count * 2;
+                let Some(_) = self.map.get(offset..mag_end) else {
+                    return;
+                };
+                let ra = &self.map[offset..ra_end];
+                let dec = &self.map[ra_end..dec_end];
+                let mag = &self.map[dec_end..mag_end];
+                for i in 0..count {
+                    visit(CatalogStar {
+                        ra: unpack_ra(u32::from_le_bytes(ra[i * 4..i * 4 + 4].try_into().unwrap())),
+                        dec: unpack_dec(u32::from_le_bytes(
+                            dec[i * 4..i * 4 + 4].try_into().unwrap(),
+                        )),
+                        mag: unpack_mag(u16::from_le_bytes(
+                            mag[i * 2..i * 2 + 2].try_into().unwrap(),
+                        )),
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -288,14 +397,11 @@ impl StarCatalog for TileCatalog {
     fn cone_search(&self, ra: f64, dec: f64, radius_deg: f64, limit: usize) -> Vec<CatalogStar> {
         let mut found = Vec::new();
         for tile in self.grid.cone_tiles(ra, dec, radius_deg) {
-            let Ok(stars) = self.read_tile(tile) else {
-                continue;
-            };
-            found.extend(
-                stars
-                    .into_iter()
-                    .filter(|s| angular_separation_deg(ra, dec, s.ra, s.dec) <= radius_deg),
-            );
+            self.for_each_in_tile(tile, |star| {
+                if angular_separation_deg(ra, dec, star.ra, star.dec) <= radius_deg {
+                    found.push(star);
+                }
+            });
         }
         found.sort_by(|a, b| a.mag.total_cmp(&b.mag));
         found.truncate(limit);
@@ -327,6 +433,39 @@ mod tests {
             .collect()
     }
 
+    /// Write a legacy SEIZAST1 interleaved file for reader-compat testing.
+    fn write_v1(stars: &[CatalogStar], n_bands: u32, epoch: f64, path: &Path) {
+        let grid = Grid::new(n_bands);
+        let mut tiles: Vec<Vec<(u32, u32, u16)>> = vec![Vec::new(); grid.n_tiles() as usize];
+        for s in stars {
+            tiles[grid.tile_of(s.ra, s.dec) as usize].push((
+                pack_ra(s.ra),
+                pack_dec(s.dec),
+                pack_mag(s.mag),
+            ));
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(MAGIC_V1);
+        out.extend_from_slice(&n_bands.to_le_bytes());
+        out.extend_from_slice(&epoch.to_le_bytes());
+        out.extend_from_slice(&(stars.len() as u64).to_le_bytes());
+        let mut offset = 28u64 + grid.n_tiles() as u64 * 12;
+        for tile in &mut tiles {
+            tile.sort_by_key(|&(_, _, mag)| mag);
+            out.extend_from_slice(&offset.to_le_bytes());
+            out.extend_from_slice(&(tile.len() as u32).to_le_bytes());
+            offset += tile.len() as u64 * V1_RECORD_SIZE as u64;
+        }
+        for tile in &tiles {
+            for &(ra, dec, mag) in tile {
+                out.extend_from_slice(&ra.to_le_bytes());
+                out.extend_from_slice(&dec.to_le_bytes());
+                out.extend_from_slice(&mag.to_le_bytes());
+            }
+        }
+        std::fs::write(path, out).unwrap();
+    }
+
     #[test]
     fn quantization_error_is_below_a_milliarcsecond() {
         for &(ra, dec) in &[
@@ -356,15 +495,15 @@ mod tests {
     }
 
     #[test]
-    fn tile_catalog_matches_brute_force_cone_search() {
+    fn v2_catalog_matches_brute_force_cone_search() {
         let stars = pseudo_random_stars(20000);
         let reference = MemoryCatalog::new(stars.clone());
 
-        let mut builder = TileSetBuilder::new(45, 2025.5);
+        let mut builder = TileSetBuilder::new(45, 2025.5, "test data (c) nobody");
         for s in &stars {
             builder.add(s.ra, s.dec, s.mag);
         }
-        let dir = std::env::temp_dir().join(format!("seiza-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("seiza-test-v2-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("tiles.bin");
         builder.write_to(&path).unwrap();
@@ -372,6 +511,7 @@ mod tests {
         let catalog = TileCatalog::open(&path).unwrap();
         assert_eq!(catalog.star_count(), 20000);
         assert_eq!(catalog.epoch(), 2025.5);
+        assert_eq!(catalog.attribution(), "test data (c) nobody");
 
         for &(ra, dec, radius) in &[
             (10.0, 20.0, 3.0),
@@ -388,14 +528,32 @@ mod tests {
                 expected.len(),
                 "cone ({ra}, {dec}, r={radius}) mismatch"
             );
-            // Brightest-first and mag-faithful
             assert!(actual.windows(2).all(|w| w[0].mag <= w[1].mag));
         }
 
-        // Limit applies after brightness sort
         let limited = catalog.cone_search(10.0, 20.0, 10.0, 5);
         assert_eq!(limited.len(), 5);
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reads_legacy_v1_files() {
+        let stars = pseudo_random_stars(5000);
+        let reference = MemoryCatalog::new(stars.clone());
+        let dir = std::env::temp_dir().join(format!("seiza-test-v1-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tiles-v1.bin");
+        write_v1(&stars, 45, 2025.0, &path);
+
+        let catalog = TileCatalog::open(&path).unwrap();
+        assert_eq!(catalog.star_count(), 5000);
+        assert_eq!(catalog.attribution(), "");
+        for &(ra, dec, radius) in &[(10.0, 20.0, 4.0), (300.0, 35.0, 2.0), (0.0, -88.0, 3.0)] {
+            let expected = reference.cone_search(ra, dec, radius, usize::MAX);
+            let actual = catalog.cone_search(ra, dec, radius, usize::MAX);
+            assert_eq!(actual.len(), expected.len());
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -404,7 +562,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("seiza-test-bad-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("garbage.bin");
-        std::fs::write(&path, b"definitely not a tile file").unwrap();
+        std::fs::write(
+            &path,
+            b"definitely not a tile file with some length padding",
+        )
+        .unwrap();
         assert!(TileCatalog::open(&path).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }

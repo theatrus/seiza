@@ -31,7 +31,11 @@ pub fn build_tycho2(input: &Path, output: &Path, epoch: f64, max_mag: f32) -> Re
 
     // 45 declination bands ≈ 4° tiles: right-sized for the ~2.5M star
     // lite tier
-    let mut builder = TileSetBuilder::new(45, epoch);
+    let mut builder = TileSetBuilder::new(
+        45,
+        epoch,
+        "Tycho-2 (Hog et al. 2000, CDS I/259) incl. supplement-1; free for scientific use",
+    );
     let mut skipped_no_mag = 0u64;
     let mut too_faint = 0u64;
 
@@ -105,6 +109,46 @@ pub fn build_tycho2(input: &Path, output: &Path, epoch: f64, max_mag: f32) -> Re
     Ok(())
 }
 
+/// Cheap spatial hash for deduplicating objects by position.
+struct PositionDedup {
+    cells: std::collections::HashMap<(i32, i32), Vec<(f64, f64)>>,
+}
+
+impl PositionDedup {
+    fn new() -> Self {
+        Self {
+            cells: std::collections::HashMap::new(),
+        }
+    }
+
+    fn cell(ra: f64, dec: f64) -> (i32, i32) {
+        ((ra * 10.0) as i32, (dec * 10.0) as i32)
+    }
+
+    fn insert(&mut self, ra: f64, dec: f64) {
+        self.cells
+            .entry(Self::cell(ra, dec))
+            .or_default()
+            .push((ra, dec));
+    }
+
+    fn near(&self, ra: f64, dec: f64, radius_deg: f64) -> bool {
+        let (cx, cy) = Self::cell(ra, dec);
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                if let Some(points) = self.cells.get(&(cx + dx, cy + dy))
+                    && points.iter().any(|&(r, d)| {
+                        seiza::catalog::angular_separation_deg(ra, dec, r, d) <= radius_deg
+                    })
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
 /// Parse one fixed-width Tycho-2 record into (ra, dec, mag) at `epoch`.
 fn parse_tycho2_line(line: &str, epoch: f64) -> Option<(f64, f64, f32)> {
     // Byte ranges from the CDS ReadMe are 1-indexed inclusive
@@ -158,7 +202,11 @@ pub fn build_astap(
         bail!("no .1476 files found in {}", input.display());
     }
 
-    let mut builder = TileSetBuilder::new(bands, epoch);
+    let mut builder = TileSetBuilder::new(
+        bands,
+        epoch,
+        "Gaia DR3 via the ASTAP star database (ESA Gaia DPAC; CC BY-SA 3.0 IGO attribution)",
+    );
     let mut too_faint = 0u64;
 
     for part in &parts {
@@ -298,6 +346,70 @@ pub fn build_objects(input: &Path, output: &Path) -> Result<()> {
         }
     }
 
+    // Generic VizieR TSV sources: (file, parse into SkyObject)
+    let mut grid_dedup = PositionDedup::new();
+
+    for (file, kind, prefix) in [
+        ("ugc.tsv", ObjectKind::Galaxy, "UGC "),
+        ("ldn.tsv", ObjectKind::DarkNebula, "LDN "),
+        ("vdb.tsv", ObjectKind::Nebula, "vdB "),
+    ] {
+        let path = input.join(file);
+        if !path.exists() {
+            continue;
+        }
+        sources += 1;
+        let content = std::fs::read_to_string(&path)?;
+        for line in content.lines() {
+            let fields: Vec<&str> = line.split('\t').map(str::trim).collect();
+            if line.starts_with('#') || fields.len() < 3 {
+                continue;
+            }
+            let (Ok(ra), Ok(dec)) = (fields[0].parse::<f64>(), fields[1].parse::<f64>()) else {
+                continue;
+            };
+            let Ok(number) = fields[2].parse::<u32>() else {
+                continue;
+            };
+            let (major, minor, pa) = match file {
+                "ugc.tsv" => (
+                    fields.get(3).and_then(|v| v.parse::<f32>().ok()),
+                    fields.get(4).and_then(|v| v.parse::<f32>().ok()),
+                    fields.get(5).and_then(|v| v.parse::<f32>().ok()),
+                ),
+                // LDN publishes an area in square degrees
+                "ldn.tsv" => (
+                    fields
+                        .get(3)
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .map(|area| (2.0 * (area / std::f64::consts::PI).sqrt() * 60.0) as f32),
+                    None,
+                    None,
+                ),
+                // vdB publishes a max radius in arcminutes
+                _ => (
+                    fields
+                        .get(3)
+                        .and_then(|v| v.parse::<f32>().ok())
+                        .map(|r| r * 2.0),
+                    None,
+                    None,
+                ),
+            };
+            objects.push(SkyObject {
+                kind,
+                ra,
+                dec,
+                mag: None,
+                major_arcmin: major.filter(|v| *v > 0.0),
+                minor_arcmin: minor.filter(|v| *v > 0.0),
+                position_angle_deg: pa,
+                name: format!("{prefix}{number}"),
+                common_name: String::new(),
+            });
+        }
+    }
+
     let csn = input.join("IAU-CSN.txt");
     if csn.exists() {
         sources += 1;
@@ -306,6 +418,46 @@ pub fn build_objects(input: &Path, output: &Path) -> Result<()> {
             if let Some(object) = parse_iau_csn_line(line) {
                 objects.push(object);
             }
+        }
+    }
+
+    // Bright Star Catalogue: HD-numbered naked-eye stars. IAU-named stars
+    // are already present, so skip BSC entries landing on one.
+    for o in &objects {
+        if o.kind == ObjectKind::Star {
+            grid_dedup.insert(o.ra, o.dec);
+        }
+    }
+    let bsc = input.join("bsc.tsv");
+    if bsc.exists() {
+        sources += 1;
+        let content = std::fs::read_to_string(&bsc)?;
+        for line in content.lines() {
+            let fields: Vec<&str> = line.split('\t').map(str::trim).collect();
+            if line.starts_with('#') || fields.len() < 3 {
+                continue;
+            }
+            let (Ok(ra), Ok(dec)) = (fields[0].parse::<f64>(), fields[1].parse::<f64>()) else {
+                continue;
+            };
+            let Ok(hd) = fields[2].parse::<u32>() else {
+                continue;
+            };
+            if grid_dedup.near(ra, dec, 120.0 / 3600.0) {
+                continue;
+            }
+            let bayer = fields.get(3).copied().unwrap_or("").trim().to_string();
+            objects.push(SkyObject {
+                kind: ObjectKind::Star,
+                ra,
+                dec,
+                mag: fields.get(4).and_then(|v| v.parse().ok()),
+                major_arcmin: None,
+                minor_arcmin: None,
+                position_angle_deg: None,
+                name: format!("HD {hd}"),
+                common_name: bayer,
+            });
         }
     }
 
@@ -442,6 +594,105 @@ fn parse_iau_csn_line(line: &str) -> Option<seiza::objects::SkyObject> {
         name: name.to_string(),
         common_name: name.to_string(),
     })
+}
+
+/// Build star tiles from Gaia DR3 TAP CSV chunks (download-data gaia).
+/// Positions are epoch J2016.0; proper motions are applied to `epoch`.
+pub fn build_gaia(input: &Path, output: &Path, epoch: f64, max_mag: f32, bands: u32) -> Result<()> {
+    let mut parts: Vec<_> = std::fs::read_dir(input)
+        .with_context(|| format!("cannot read {}", input.display()))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("gaia-") && n.ends_with(".csv"))
+        })
+        .collect();
+    parts.sort();
+    if parts.is_empty() {
+        bail!(
+            "no gaia-*.csv files in {}; run download-data gaia first",
+            input.display()
+        );
+    }
+
+    let mut builder = TileSetBuilder::new(
+        bands,
+        epoch,
+        "Gaia DR3 (ESA/Gaia/DPAC, CC BY-SA 3.0 IGO); G magnitudes",
+    );
+    let mut too_faint = 0u64;
+    let dt = epoch - 2016.0;
+
+    for part in &parts {
+        let file =
+            std::fs::File::open(part).with_context(|| format!("cannot open {}", part.display()))?;
+        for line in BufReader::new(file).lines().skip(1) {
+            let line = line?;
+            let mut fields = line.split(',');
+            let (Some(ra), Some(dec), pmra, pmdec, Some(mag)) = (
+                fields.next().and_then(|v| v.parse::<f64>().ok()),
+                fields.next().and_then(|v| v.parse::<f64>().ok()),
+                fields.next().and_then(|v| v.parse::<f64>().ok()),
+                fields.next().and_then(|v| v.parse::<f64>().ok()),
+                fields.next().and_then(|v| v.parse::<f32>().ok()),
+            ) else {
+                continue;
+            };
+            if mag > max_mag {
+                too_faint += 1;
+                continue;
+            }
+            let cos_dec = dec.to_radians().cos().max(1e-6);
+            let ra = (ra + pmra.unwrap_or(0.0) * dt / 3_600_000.0 / cos_dec).rem_euclid(360.0);
+            let dec = (dec + pmdec.unwrap_or(0.0) * dt / 3_600_000.0).clamp(-90.0, 90.0);
+            builder.add(ra, dec, mag);
+        }
+    }
+
+    let count = builder.star_count();
+    builder.write_to(output)?;
+    println!(
+        "{count} stars written to {} (epoch {epoch}, {too_faint} fainter than {max_mag})",
+        output.display()
+    );
+    Ok(())
+}
+
+/// Write a bundle manifest (name, size, sha256 per data file) for hosting.
+pub fn build_manifest(dir: &Path, version: &str, output: &Path) -> Result<()> {
+    use sha2::Digest;
+
+    let mut entries: Vec<_> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "bin"))
+        .collect();
+    entries.sort();
+    if entries.is_empty() {
+        bail!("no .bin data files in {}", dir.display());
+    }
+
+    let mut files = String::new();
+    for path in &entries {
+        let data = std::fs::read(path)?;
+        let hash = sha2::Sha256::digest(&data);
+        let hash_hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+        let name = path.file_name().unwrap().to_string_lossy();
+        if !files.is_empty() {
+            files.push_str(",\n");
+        }
+        files.push_str(&format!(
+            "    {{ \"name\": \"{name}\", \"bytes\": {}, \"sha256\": \"{hash_hex}\" }}",
+            data.len()
+        ));
+        println!("  {name}: {} bytes, sha256 {hash_hex}", data.len());
+    }
+    let manifest = format!("{{\n  \"version\": \"{version}\",\n  \"files\": [\n{files}\n  ]\n}}\n");
+    std::fs::write(output, manifest)?;
+    println!("manifest written to {}", output.display());
+    Ok(())
 }
 
 #[cfg(test)]

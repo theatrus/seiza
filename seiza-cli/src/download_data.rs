@@ -70,6 +70,27 @@ pub fn download_objects(output: &Path) -> Result<()> {
         &output.join("IAU-CSN.txt"),
         Verify::None,
     )?;
+    let vizier = "https://vizier.cds.unistra.fr/viz-bin/asu-tsv?-source=";
+    for (name, source, columns) in [
+        (
+            "ugc.tsv",
+            "VII/26D/catalog",
+            "_RAJ2000,_DEJ2000,UGC,MajAxis,MinAxis,PA",
+        ),
+        ("ldn.tsv", "VII/7A/ldn", "_RAJ2000,_DEJ2000,LDN,Area"),
+        (
+            "vdb.tsv",
+            "VII/21/catalog",
+            "_RAJ2000,_DEJ2000,VdB,BRadMax,Vmag",
+        ),
+        ("bsc.tsv", "V/50/catalog", "_RAJ2000,_DEJ2000,HD,Name,Vmag"),
+    ] {
+        fetch(
+            &format!("{vizier}{source}&-out={columns}&-out.max=unlimited"),
+            &output.join(name),
+            Verify::None,
+        )?;
+    }
     println!("object catalogs ready in {}", output.display());
     Ok(())
 }
@@ -126,4 +147,96 @@ fn fetch(url: &str, target: &Path, how: Verify) -> Result<()> {
     }
     std::fs::rename(&temp, target)?;
     Ok(())
+}
+
+const GAIA_TAP_SYNC: &str = "https://gea.esac.esa.int/tap-server/tap/sync";
+/// Gaia DR3 source_id encodes the HEALPix level-12 cell in the high bits;
+/// this spans the whole sky.
+const GAIA_SOURCE_ID_MAX: u64 = 201_326_592 << 35;
+const GAIA_CHUNKS: u64 = 768; // one per HEALPix level-3 cell
+const GAIA_MAXREC: u64 = 3_000_000;
+
+/// Gaia DR3 star positions via ESA TAP, chunked by source_id so the download
+/// resumes cleanly. Roughly 25M rows / 1.5 GB at the default magnitude limit;
+/// expect a couple of hours.
+pub fn download_gaia(output: &Path, max_mag: f32) -> Result<()> {
+    std::fs::create_dir_all(output)?;
+    let mut done = 0u64;
+    for chunk in 0..GAIA_CHUNKS {
+        let target = output.join(format!("gaia-{chunk:04}.csv"));
+        if chunk_complete(&target) {
+            done += 1;
+            continue;
+        }
+        let lo = GAIA_SOURCE_ID_MAX / GAIA_CHUNKS * chunk;
+        let hi = if chunk + 1 == GAIA_CHUNKS {
+            GAIA_SOURCE_ID_MAX
+        } else {
+            GAIA_SOURCE_ID_MAX / GAIA_CHUNKS * (chunk + 1) - 1
+        };
+        let query = format!(
+            "SELECT ra, dec, pmra, pmdec, phot_g_mean_mag FROM gaiadr3.gaia_source \
+             WHERE phot_g_mean_mag <= {max_mag} AND source_id BETWEEN {lo} AND {hi}"
+        );
+
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            match fetch_gaia_chunk(&query, &target) {
+                Ok(rows) => {
+                    if rows >= GAIA_MAXREC {
+                        bail!(
+                            "chunk {chunk} hit the {GAIA_MAXREC}-row cap; rerun with more \
+                             chunks (this should not happen at mag <= 17)"
+                        );
+                    }
+                    done += 1;
+                    println!("  chunk {chunk:04}: {rows} rows ({done}/{GAIA_CHUNKS})");
+                    break;
+                }
+                Err(e) if attempts < 4 => {
+                    eprintln!("  chunk {chunk:04} attempt {attempts} failed: {e}; retrying");
+                    std::thread::sleep(std::time::Duration::from_secs(5 * attempts));
+                }
+                Err(e) => return Err(e.context(format!("chunk {chunk} failed"))),
+            }
+        }
+    }
+    println!("Gaia download complete in {}", output.display());
+    Ok(())
+}
+
+/// A chunk is complete when it exists, ends with a newline, and has a header.
+fn chunk_complete(path: &Path) -> bool {
+    let Ok(data) = std::fs::read(path) else {
+        return false;
+    };
+    data.len() > 10 && data.ends_with(b"\n")
+}
+
+fn fetch_gaia_chunk(query: &str, target: &Path) -> Result<u64> {
+    let response = ureq::post(GAIA_TAP_SYNC)
+        .timeout(std::time::Duration::from_secs(600))
+        .send_form(&[
+            ("REQUEST", "doQuery"),
+            ("LANG", "ADQL"),
+            ("FORMAT", "csv"),
+            ("MAXREC", &GAIA_MAXREC.to_string()),
+            ("QUERY", query),
+        ])
+        .context("TAP request failed")?;
+
+    let temp = target.with_extension("part");
+    let mut out = std::fs::File::create(&temp)?;
+    std::io::copy(&mut response.into_reader(), &mut out)?;
+    drop(out);
+
+    let data = std::fs::read(&temp)?;
+    if !data.starts_with(b"ra,dec") || !data.ends_with(b"\n") {
+        std::fs::remove_file(&temp).ok();
+        bail!("chunk response malformed or truncated");
+    }
+    let rows = data.iter().filter(|&&b| b == b'\n').count() as u64 - 1;
+    std::fs::rename(&temp, target)?;
+    Ok(rows)
 }

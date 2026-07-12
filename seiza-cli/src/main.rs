@@ -110,11 +110,21 @@ enum DownloadSource {
         #[arg(long)]
         output: PathBuf,
     },
-    /// All object-overlay sources: OpenNGC, Sharpless, Barnard, star names
+    /// All object-overlay sources: OpenNGC, Sh2, Barnard, UGC, LDN, vdB,
+    /// IAU + Bright Star Catalogue star names
     Objects {
         /// Directory to download into
         #[arg(long)]
         output: PathBuf,
+    },
+    /// Gaia DR3 star positions via ESA TAP (~1.5 GB, resumable)
+    Gaia {
+        /// Directory to download into
+        #[arg(long)]
+        output: PathBuf,
+        /// Magnitude limit for the download
+        #[arg(long, default_value_t = 15.0)]
+        max_mag: f32,
     },
 }
 
@@ -153,12 +163,42 @@ enum BuildDataSource {
         #[arg(long, default_value_t = 13.0)]
         max_mag: f32,
     },
-    /// Object catalog from downloaded OpenNGC/Sh2/Barnard/IAU-CSN sources
+    /// Object catalog from the downloaded object sources
     Objects {
         /// Directory containing the source files
         #[arg(long)]
         input: PathBuf,
         /// Output object catalog file
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Star tiles from Gaia DR3 TAP chunks (download-data gaia)
+    Gaia {
+        /// Directory containing gaia-*.csv
+        #[arg(long)]
+        input: PathBuf,
+        /// Output tile file
+        #[arg(long)]
+        output: PathBuf,
+        /// Epoch to apply proper motions to, Julian year
+        #[arg(long, default_value_t = 2025.5)]
+        epoch: f64,
+        /// Drop stars fainter than this magnitude
+        #[arg(long, default_value_t = 15.0)]
+        max_mag: f32,
+        /// Declination bands (tile granularity); 180 = 1° tiles
+        #[arg(long, default_value_t = 180)]
+        bands: u32,
+    },
+    /// Bundle manifest (sizes + sha256) for hosting data files
+    Manifest {
+        /// Directory containing built .bin data files
+        #[arg(long)]
+        dir: PathBuf,
+        /// Version string recorded in the manifest
+        #[arg(long)]
+        version: String,
+        /// Output manifest path
         #[arg(long)]
         output: PathBuf,
     },
@@ -200,6 +240,9 @@ fn main() -> Result<()> {
             DownloadSource::Tycho2 { output } => download_data::download_tycho2(&output),
             DownloadSource::Openngc { output } => download_data::download_openngc(&output),
             DownloadSource::Objects { output } => download_data::download_objects(&output),
+            DownloadSource::Gaia { output, max_mag } => {
+                download_data::download_gaia(&output, max_mag)
+            }
         },
         Command::BuildData { source } => match source {
             BuildDataSource::Astap {
@@ -218,6 +261,18 @@ fn main() -> Result<()> {
             BuildDataSource::Objects { input, output } => {
                 build_data::build_objects(&input, &output)
             }
+            BuildDataSource::Gaia {
+                input,
+                output,
+                epoch,
+                max_mag,
+                bands,
+            } => build_data::build_gaia(&input, &output, epoch, max_mag, bands),
+            BuildDataSource::Manifest {
+                dir,
+                version,
+                output,
+            } => build_data::build_manifest(&dir, &version, &output),
         },
         Command::Cone {
             data,
