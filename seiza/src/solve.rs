@@ -188,7 +188,7 @@ pub fn solve(
                 pairs.len()
             )));
         }
-        let fit_pairs: Vec<((f64, f64), (f64, f64))> = pairs
+        let fit_pairs: Vec<PointPair> = pairs
             .iter()
             .map(|&((px, py), ci)| ((px, py), (cat[ci].0, cat[ci].1)))
             .collect();
@@ -201,7 +201,7 @@ pub fn solve(
     let (cx, cy) = affine.apply(center_px.0, center_px.1);
     let crval = tangent.pixel_to_world(cx, cy);
     let recentre = tangent_wcs(crval);
-    let final_pairs: Vec<((f64, f64), (f64, f64))> = pairs
+    let final_pairs: Vec<PointPair> = pairs
         .iter()
         .filter_map(|&((px, py), cat_idx)| {
             let star = &cat[cat_idx].2;
@@ -293,6 +293,9 @@ fn dist(p: (f64, f64), q: (f64, f64)) -> f64 {
     (p.0 - q.0).hypot(p.1 - q.1)
 }
 
+/// A correspondence between a source point and a target point
+type PointPair = ((f64, f64), (f64, f64));
+
 /// 6-parameter affine transform: (x, y) → (a x + b y + c, d x + e y + f)
 #[derive(Debug, Clone)]
 struct Affine {
@@ -332,7 +335,7 @@ impl Affine {
     }
 
     /// Least-squares affine over point pairs ((x, y), (u, v)).
-    fn fit(pairs: &[((f64, f64), (f64, f64))]) -> Option<Self> {
+    fn fit(pairs: &[PointPair]) -> Option<Self> {
         if pairs.len() < 3 {
             return None;
         }
@@ -415,8 +418,9 @@ fn solve3(m: [[f64; 3]; 3], rhs: [f64; 3]) -> Option<[f64; 3]> {
                 continue;
             }
             let factor = aug[row][col] / aug[col][col];
-            for k in col..4 {
-                aug[row][k] -= factor * aug[col][k];
+            let pivot_row = aug[col];
+            for (k, value) in pivot_row.iter().enumerate().skip(col) {
+                aug[row][k] -= factor * value;
             }
         }
     }
