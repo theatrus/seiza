@@ -5,6 +5,7 @@ use seiza::{DetectConfig, detect_stars};
 use std::path::PathBuf;
 
 mod build_data;
+mod download_data;
 
 #[derive(Parser)]
 #[command(name = "seiza", about = "Star detection and plate solving", version)]
@@ -31,8 +32,11 @@ enum Command {
     },
     /// Solve an image against a star catalog (not implemented yet)
     Solve { image: PathBuf },
-    /// Download prebuilt catalog data bundles (not implemented yet)
-    DownloadData,
+    /// Download source catalogs from their archives
+    DownloadData {
+        #[command(subcommand)]
+        source: DownloadSource,
+    },
     /// Build catalog data bundles from primary sources
     BuildData {
         #[command(subcommand)]
@@ -43,15 +47,31 @@ enum Command {
         /// Star tile file built by build-data
         #[arg(long)]
         data: PathBuf,
-        #[arg(long)]
+        #[arg(long, allow_negative_numbers = true)]
         ra: f64,
-        #[arg(long)]
+        #[arg(long, allow_negative_numbers = true)]
         dec: f64,
         /// Search radius in degrees
         #[arg(long, default_value_t = 1.0)]
         radius: f64,
         #[arg(long, default_value_t = 25)]
         limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum DownloadSource {
+    /// Tycho-2 distribution files from CDS (~150 MB)
+    Tycho2 {
+        /// Directory to download into
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// The OpenNGC deep-sky object catalog (~4 MB)
+    Openngc {
+        /// Directory to download into
+        #[arg(long)]
+        output: PathBuf,
     },
 }
 
@@ -83,7 +103,10 @@ fn main() -> Result<()> {
             annotate,
         } => detect(&image, sigma, max_stars, annotate.as_deref()),
         Command::Solve { .. } => anyhow::bail!("solving is not implemented yet"),
-        Command::DownloadData => anyhow::bail!("data download is not implemented yet"),
+        Command::DownloadData { source } => match source {
+            DownloadSource::Tycho2 { output } => download_data::download_tycho2(&output),
+            DownloadSource::Openngc { output } => download_data::download_openngc(&output),
+        },
         Command::BuildData { source } => match source {
             BuildDataSource::Tycho2 {
                 input,

@@ -16,3 +16,4 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 imageproc = "0.25"
 flate2 = "1"
+ureq = "2"

@@ -7,9 +7,12 @@ use std::path::Path;
 
 /// Build a star tile file from the Tycho-2 catalogue (CDS I/259).
 ///
-/// Expects the distribution files `tyc2.dat.NN[.gz]` in `input`. Mean
-/// positions (ICRS, epoch J2000) are proper-motion corrected to `epoch`;
-/// entries without a mean position fall back to the observed position.
+/// Expects the distribution files `tyc2.dat.NN[.gz]` in `input`, plus
+/// `suppl_1.dat[.gz]` — the supplement holds most stars brighter than
+/// magnitude ~2 (Sirius is not in the main catalogue). Mean positions
+/// (ICRS, epoch J2000; supplement epoch J1991.25) are proper-motion
+/// corrected to `epoch`; entries without a mean position fall back to the
+/// observed position.
 pub fn build_tycho2(input: &Path, output: &Path, epoch: f64, max_mag: f32) -> Result<()> {
     let mut parts: Vec<_> = std::fs::read_dir(input)
         .with_context(|| format!("cannot read {}", input.display()))?
@@ -55,6 +58,41 @@ pub fn build_tycho2(input: &Path, output: &Path, epoch: f64, max_mag: f32) -> Re
         }
     }
 
+    let mut suppl_count = 0u64;
+    for name in ["suppl_1.dat.gz", "suppl_1.dat"] {
+        let path = input.join(name);
+        if !path.exists() {
+            continue;
+        }
+        let file = std::fs::File::open(&path)
+            .with_context(|| format!("cannot open {}", path.display()))?;
+        let reader: Box<dyn std::io::Read> = if name.ends_with(".gz") {
+            Box::new(flate2::read::GzDecoder::new(file))
+        } else {
+            Box::new(file)
+        };
+        for line in BufReader::new(reader).lines() {
+            let line = line?;
+            let Some((ra, dec, mag)) = parse_tycho2_suppl_line(&line, epoch) else {
+                skipped_no_mag += 1;
+                continue;
+            };
+            if mag > max_mag {
+                too_faint += 1;
+                continue;
+            }
+            builder.add(ra, dec, mag);
+            suppl_count += 1;
+        }
+        break;
+    }
+    if suppl_count == 0 {
+        eprintln!(
+            "warning: no supplement-1 stars ingested — the brightest stars \
+             (including Sirius) will be missing; run download-data tycho2"
+        );
+    }
+
     let count = builder.star_count();
     builder.write_to(output)?;
     println!(
@@ -96,6 +134,27 @@ fn parse_tycho2_line(line: &str, epoch: f64) -> Option<(f64, f64, f32)> {
     Some((ra, dec, mag))
 }
 
+/// Parse one supplement-1/2 record: positions are ICRS at epoch J1991.25.
+fn parse_tycho2_suppl_line(line: &str, epoch: f64) -> Option<(f64, f64, f32)> {
+    let field =
+        |from: usize, to: usize| -> &str { line.get(from - 1..to).map(str::trim).unwrap_or("") };
+
+    let mag: f32 = field(97, 102)
+        .parse()
+        .or_else(|_| field(84, 89).parse())
+        .ok()?;
+    let ra = field(16, 27).parse::<f64>().ok()?;
+    let dec = field(29, 40).parse::<f64>().ok()?;
+
+    let dt = epoch - 1991.25;
+    let pm_ra: f64 = field(42, 48).parse().unwrap_or(0.0);
+    let pm_dec: f64 = field(50, 56).parse().unwrap_or(0.0);
+    let cos_dec = dec.to_radians().cos().max(1e-6);
+    let ra = (ra + pm_ra * dt / 3_600_000.0 / cos_dec).rem_euclid(360.0);
+    let dec = (dec + pm_dec * dt / 3_600_000.0).clamp(-90.0, 90.0);
+    Some((ra, dec, mag))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,6 +178,24 @@ mod tests {
         assert!((d_ra_arcsec - -0.4075).abs() < 0.01, "{d_ra_arcsec}");
         let d_dec_arcsec = (dec - 2.23184345) * 3600.0;
         assert!((d_dec_arcsec - -0.225).abs() < 0.01, "{d_dec_arcsec}");
+    }
+
+    // The real supplement-1 record for Sirius (TYC 5949-2777-1)
+    const SIRIUS: &str = "5949 02777 1|H|101.28854105|-16.71314306| -546.0|-1223.1|  1.2|  1.0|  1.3|  1.2|H|      |     |-1.088|0.002|999| | 32349 ";
+
+    #[test]
+    fn parses_a_supplement_record_with_proper_motion() {
+        let (ra, dec, mag) = parse_tycho2_suppl_line(SIRIUS, 1991.25).unwrap();
+        assert!((ra - 101.28854105).abs() < 1e-8);
+        assert!((dec - -16.71314306).abs() < 1e-8);
+        assert!((mag - -1.088).abs() < 1e-3);
+
+        // Sirius moves fast: ~-546 mas/yr (RA*cos dec), -1223.1 mas/yr (Dec)
+        let (ra, dec, _) = parse_tycho2_suppl_line(SIRIUS, 2025.5).unwrap();
+        let dt = 2025.5 - 1991.25;
+        let d_dec_arcsec = (dec - -16.71314306) * 3600.0;
+        assert!((d_dec_arcsec - -1.2231 * dt).abs() < 0.01);
+        assert!(ra < 101.28854105); // moving in -RA
     }
 
     #[test]
