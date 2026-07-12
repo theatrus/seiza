@@ -1,0 +1,9 @@
+[package]
+name = "seiza-fits"
+description = "Fast, dependency-free FITS image reading, statistics, and MTF autostretch for astrophotography"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

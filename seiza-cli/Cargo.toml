@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 seiza.workspace = true
+seiza-fits.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 image = { workspace = true, features = ["png", "jpeg", "tiff"] }

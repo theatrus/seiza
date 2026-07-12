@@ -40,8 +40,10 @@ blind solving.
 
 ## Layout
 
-- `seiza/` — library crate: `detect`, `wcs`, `catalog`, `solve`
-- `seiza-cli/` — the `seiza` command-line tool
+- `seiza/` — library crate: `detect`, `wcs`, `catalog`, `objects`, `solve`
+- `seiza-fits/` — dependency-free FITS reading, statistics, MTF autostretch
+- `seiza-cli/` — the `seiza` command-line tool (FITS files solve directly,
+  with RA/DEC hints read from their headers)
 
 ## License
 

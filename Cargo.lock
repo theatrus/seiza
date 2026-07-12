@@ -1447,9 +1447,14 @@ dependencies = [
  "image",
  "imageproc",
  "seiza",
+ "seiza-fits",
  "sha2",
  "ureq",
 ]
+
+[[package]]
+name = "seiza-fits"
+version = "0.1.0"
 
 [[package]]
 name = "serde"

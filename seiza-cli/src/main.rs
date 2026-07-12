@@ -8,6 +8,35 @@ use std::path::PathBuf;
 mod build_data;
 mod download_data;
 
+/// Open an image file; FITS files are MTF-autostretched to 8-bit grayscale.
+fn load_image(path: &std::path::Path) -> Result<image::DynamicImage> {
+    let is_fits = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("fits") || e.eq_ignore_ascii_case("fit"));
+    if is_fits {
+        let fits = seiza_fits::FitsImage::open(path)
+            .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+        let stretched = fits.stretch_to_u8(&seiza_fits::StretchParams::default());
+        let buffer = image::GrayImage::from_raw(fits.width as u32, fits.height as u32, stretched)
+            .ok_or_else(|| anyhow::anyhow!("FITS dimensions mismatch"))?;
+        return Ok(image::DynamicImage::ImageLuma8(buffer));
+    }
+    image::open(path).with_context(|| format!("failed to open {}", path.display()))
+}
+
+/// RA/Dec hint from FITS headers (N.I.N.A. writes RA/DEC in degrees).
+fn fits_hint(path: &std::path::Path) -> Option<(f64, f64)> {
+    let fits = seiza_fits::FitsImage::open(path).ok()?;
+    let ra = fits
+        .header_f64("RA")
+        .or_else(|| fits.header_f64("OBJCTRA"))?;
+    let dec = fits
+        .header_f64("DEC")
+        .or_else(|| fits.header_f64("OBJCTDEC"))?;
+    Some((ra, dec))
+}
+
 #[derive(Parser)]
 #[command(name = "seiza", about = "Star detection and plate solving", version)]
 struct Cli {
@@ -38,12 +67,12 @@ enum Command {
         /// Star tile file built by build-data
         #[arg(long)]
         data: PathBuf,
-        /// Approximate field center RA, degrees
+        /// Approximate field center RA, degrees (default: FITS RA header)
         #[arg(long, allow_negative_numbers = true)]
-        ra: f64,
-        /// Approximate field center Dec, degrees
+        ra: Option<f64>,
+        /// Approximate field center Dec, degrees (default: FITS DEC header)
         #[arg(long, allow_negative_numbers = true)]
-        dec: f64,
+        dec: Option<f64>,
         /// Search radius around the hinted center, degrees
         #[arg(long, default_value_t = 2.0)]
         radius: f64,
@@ -78,6 +107,14 @@ enum Command {
     BuildData {
         #[command(subcommand)]
         source: BuildDataSource,
+    },
+    /// Inspect a FITS file: headers, statistics, optional stretched PNG
+    FitsInfo {
+        /// FITS file
+        image: PathBuf,
+        /// Write an autostretched 8-bit preview
+        #[arg(long)]
+        stretch: Option<PathBuf>,
     },
     /// Query a star tile file: list stars around a sky position
     Cone {
@@ -224,18 +261,26 @@ fn main() -> Result<()> {
             ignore_border,
             annotate,
             objects,
-        } => solve_command(
-            &image,
-            &data,
-            (ra, dec),
-            radius,
-            scale,
-            scale_tolerance,
-            sigma,
-            ignore_border,
-            annotate.as_deref(),
-            objects.as_deref(),
-        ),
+        } => {
+            let hint = match (ra, dec) {
+                (Some(ra), Some(dec)) => (ra, dec),
+                _ => fits_hint(&image).ok_or_else(|| {
+                    anyhow::anyhow!("--ra/--dec required (no RA/DEC headers found in the image)")
+                })?,
+            };
+            solve_command(
+                &image,
+                &data,
+                hint,
+                radius,
+                scale,
+                scale_tolerance,
+                sigma,
+                ignore_border,
+                annotate.as_deref(),
+                objects.as_deref(),
+            )
+        }
         Command::DownloadData { source } => match source {
             DownloadSource::Tycho2 { output } => download_data::download_tycho2(&output),
             DownloadSource::Openngc { output } => download_data::download_openngc(&output),
@@ -274,6 +319,7 @@ fn main() -> Result<()> {
                 output,
             } => build_data::build_manifest(&dir, &version, &output),
         },
+        Command::FitsInfo { image, stretch } => fits_info(&image, stretch.as_deref()),
         Command::Cone {
             data,
             ra,
@@ -284,13 +330,67 @@ fn main() -> Result<()> {
     }
 }
 
+fn fits_info(path: &std::path::Path, stretch: Option<&std::path::Path>) -> Result<()> {
+    let started = std::time::Instant::now();
+    let fits = seiza_fits::FitsImage::open(path)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+    let load_time = started.elapsed();
+    println!(
+        "{}: {}x{} ({:?}-type pixels), loaded in {:.0}ms",
+        path.display(),
+        fits.width,
+        fits.height,
+        match fits.pixels {
+            seiza_fits::Pixels::U8(_) => "u8",
+            seiza_fits::Pixels::U16(_) => "u16",
+            seiza_fits::Pixels::I32(_) => "i32",
+            seiza_fits::Pixels::F32(_) => "f32",
+            seiza_fits::Pixels::F64(_) => "f64",
+        },
+        load_time.as_secs_f64() * 1000.0
+    );
+    for key in [
+        "OBJECT", "FILTER", "EXPOSURE", "EXPTIME", "GAIN", "CCD-TEMP", "RA", "DEC", "INSTRUME",
+        "TELESCOP", "DATE-OBS", "BAYERPAT",
+    ] {
+        if let Some(value) = fits.header(key) {
+            println!("  {key:<10} {value:?}");
+        }
+    }
+    let started = std::time::Instant::now();
+    let stats = fits.statistics();
+    println!(
+        "  stats: median {} mad {:.0} mean {:.0} range {}..{} ({:.0}ms)",
+        stats.median,
+        stats.mad,
+        stats.mean,
+        stats.min,
+        stats.max,
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+    if let Some(out) = stretch {
+        let started = std::time::Instant::now();
+        let data = fits.stretch_to_u8(&seiza_fits::StretchParams::default());
+        let elapsed = started.elapsed();
+        image::GrayImage::from_raw(fits.width as u32, fits.height as u32, data)
+            .ok_or_else(|| anyhow::anyhow!("dimension mismatch"))?
+            .save(out)?;
+        println!(
+            "  stretched preview written to {} ({:.0}ms stretch)",
+            out.display(),
+            elapsed.as_secs_f64() * 1000.0
+        );
+    }
+    Ok(())
+}
+
 fn detect(
     path: &std::path::Path,
     sigma: f32,
     max_stars: usize,
     annotate: Option<&std::path::Path>,
 ) -> Result<()> {
-    let img = image::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let img = load_image(path)?;
     let config = DetectConfig {
         sigma,
         max_stars,
@@ -360,7 +460,7 @@ fn solve_command(
     annotate: Option<&std::path::Path>,
     objects: Option<&std::path::Path>,
 ) -> Result<()> {
-    let img = image::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let img = load_image(path)?;
     let dims = (img.width(), img.height());
 
     let config = DetectConfig {
