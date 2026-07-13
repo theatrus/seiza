@@ -13,8 +13,8 @@ mod stretch;
 
 pub use bayer::{BayerPattern, RgbImage16, debayer_rgb16};
 pub use header::{HeaderValue, parse_header_value};
-pub use stats::Statistics;
-pub use stretch::{StretchParams, midtones_transfer_function};
+pub use stats::{Statistics, statistics_u16};
+pub use stretch::{StretchParams, midtones_transfer_function, stretch_u16_to_u8};
 
 use std::io::Read;
 use std::path::Path;
