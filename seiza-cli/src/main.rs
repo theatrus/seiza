@@ -174,7 +174,8 @@ enum DownloadSource {
         #[arg(long)]
         output: PathBuf,
     },
-    /// Gaia DR3 star positions via ESA TAP (~1.5 GB, resumable)
+    /// Gaia DR3 star positions via ESA TAP (resumable; can take hours —
+    /// prefer `download-data prebuilt` unless you need a custom depth)
     Gaia {
         /// Directory to download into
         #[arg(long)]

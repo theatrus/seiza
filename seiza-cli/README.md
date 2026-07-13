@@ -34,7 +34,9 @@ seiza download-data prebuilt --output data
 seiza download-data prebuilt --output data --file objects.bin --file transients.bin
 ```
 
-Or download primary catalogs and build the compact tile formats yourself:
+Building from primary sources stays supported for custom depths, epochs,
+or tile granularity — note the Gaia TAP download alone can take many
+hours:
 
 ```
 seiza download-data tycho2 --output raw/tycho2

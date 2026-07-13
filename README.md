@@ -43,13 +43,14 @@ Working today:
   hinted solver
   (`seiza solve-blind image.jpg --data stars.bin --min-scale 0.5 --max-scale 15`).
 - **Star catalogs** — memory-mappable tile formats with cone search.
-  Prebuilt sets on the CDN, or build your own from primary sources:
-  Tycho-2, Gaia DR3 via ESA TAP (`--max-mag` and `--chunks` for deeper
-  sets), and ASTAP `.1476` databases.
+  Use the prebuilt sets from `download-data prebuilt` unless you need a
+  custom depth or epoch: building from primary sources stays fully
+  supported (Tycho-2; Gaia DR3 via ESA TAP with `--max-mag` and
+  `--chunks` for deeper sets; ASTAP `.1476` databases) but the Gaia
+  download alone can take many hours against the ESA archive.
 
 ```
-seiza download-data tycho2 --output raw/tycho2
-seiza build-data tycho2 --input raw/tycho2 --output stars-lite.bin
+# custom build from primary sources (the prebuilt sets skip all this)
 seiza download-data gaia --output raw/gaia --max-mag 17 --chunks 3072
 seiza build-data gaia --input raw/gaia --output stars-deep.bin --max-mag 17
 ```
