@@ -3,9 +3,8 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
-  schedule:
-    - cron: "40 7 * * 1"
   workflow_dispatch:
 
 env:
@@ -36,7 +35,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   integration:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
