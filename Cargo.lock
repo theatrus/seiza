@@ -1455,7 +1455,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-fits"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "serde"

@@ -65,6 +65,8 @@ pub enum Pixels {
 pub struct FitsImage {
     pub width: usize,
     pub height: usize,
+    /// Color planes: 1 for mono/CFA, 3 for planar RGB (NAXIS3 = 3)
+    pub planes: usize,
     pub pixels: Pixels,
     /// Header cards in file order (keyword, value)
     pub headers: Vec<(String, HeaderValue)>,
@@ -139,9 +141,16 @@ impl FitsImage {
         let height = header_i64("NAXIS2")
             .ok_or_else(|| FitsError::Malformed("missing NAXIS2".into()))?
             as usize;
-        // NAXIS3 color cubes: take the first plane
+        // Planar color cubes (Siril and friends write RGB as NAXIS3 = 3);
+        // planes beyond the third are ignored
+        let planes = if naxis >= 3 {
+            (header_i64("NAXIS3").unwrap_or(1) as usize).clamp(1, 3)
+        } else {
+            1
+        };
         let count = width
             .checked_mul(height)
+            .and_then(|c| c.checked_mul(planes))
             .ok_or_else(|| FitsError::Malformed("implausible dimensions".into()))?;
         if count == 0 || count > 2_000_000_000 {
             return Err(FitsError::Malformed("implausible dimensions".into()));
@@ -208,6 +217,7 @@ impl FitsImage {
         Ok(FitsImage {
             width,
             height,
+            planes,
             pixels,
             headers,
         })
@@ -226,8 +236,45 @@ impl FitsImage {
     }
 
     /// Pixels as u16, converting float/i32 data by min-max scaling.
-    /// The u16 case is a borrow — no copy, no conversion.
+    /// Planar RGB collapses to luminance; the mono u16 case is a borrow —
+    /// no copy, no conversion.
     pub fn to_u16(&self) -> std::borrow::Cow<'_, [u16]> {
+        if self.planes == 3 {
+            let full = self.planes_u16();
+            let n = self.width * self.height;
+            return std::borrow::Cow::Owned(
+                (0..n)
+                    .map(|i| {
+                        ((full[i] as u32 + full[n + i] as u32 + full[2 * n + i] as u32) / 3) as u16
+                    })
+                    .collect(),
+            );
+        }
+        self.planes_u16()
+    }
+
+    /// Planar RGB as interleaved 16-bit RGB. `None` for mono images.
+    pub fn rgb_planes(&self) -> Option<RgbImage16> {
+        if self.planes != 3 {
+            return None;
+        }
+        let full = self.planes_u16();
+        let n = self.width * self.height;
+        let mut data = vec![0u16; n * 3];
+        for i in 0..n {
+            data[i * 3] = full[i];
+            data[i * 3 + 1] = full[n + i];
+            data[i * 3 + 2] = full[2 * n + i];
+        }
+        Some(RgbImage16 {
+            width: self.width,
+            height: self.height,
+            data,
+        })
+    }
+
+    /// The full stored pixel buffer (all planes, planar order) as u16.
+    fn planes_u16(&self) -> std::borrow::Cow<'_, [u16]> {
         match &self.pixels {
             Pixels::U16(data) => std::borrow::Cow::Borrowed(data),
             Pixels::U8(data) => {
@@ -264,6 +311,9 @@ impl FitsImage {
     /// Debayer a raw one-shot-color mosaic to interleaved RGB, honoring
     /// `XBAYROFF`/`YBAYROFF` origin offsets. `None` for mono images.
     pub fn debayer(&self) -> Option<RgbImage16> {
+        if self.planes != 1 {
+            return None;
+        }
         let pattern = self.bayer_pattern()?;
         let x_off = self.header_f64("XBAYROFF").unwrap_or(0.0) as usize;
         let y_off = self.header_f64("YBAYROFF").unwrap_or(0.0) as usize;
