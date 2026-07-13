@@ -117,11 +117,24 @@ enum Verify {
     None,
     /// The file must decompress fully as gzip
     Gzip,
+    /// The file must hash to this SHA-256 (lowercase hex)
+    Sha256(String),
 }
 
 fn verify(path: &Path, how: &Verify) -> bool {
     match how {
         Verify::None => path.exists(),
+        Verify::Sha256(expected) => {
+            let Ok(mut file) = std::fs::File::open(path) else {
+                return false;
+            };
+            use sha2::Digest;
+            let mut hasher = sha2::Sha256::new();
+            if std::io::copy(&mut file, &mut hasher).is_err() {
+                return false;
+            }
+            format!("{:x}", hasher.finalize()) == *expected
+        }
         Verify::Gzip => {
             let Ok(file) = std::fs::File::open(path) else {
                 return false;
@@ -274,4 +287,55 @@ fn fetch_gaia_chunk(query: &str, target: &Path) -> Result<u64> {
     let rows = data.iter().filter(|&&b| b == b'\n').count() as u64 - 1;
     std::fs::rename(&temp, target)?;
     Ok(rows)
+}
+
+/// Base URL for the hosted, prebuilt seiza datasets.
+const HOSTED_DATA_URL: &str = "https://downloads.seiza.fyi/data";
+
+/// Prebuilt datasets from downloads.seiza.fyi: reads the manifest, then
+/// downloads every listed file (or just `names`) with SHA-256
+/// verification. The quickest route to a working solver — no catalog
+/// building required.
+pub fn download_prebuilt(output: &Path, names: &[String]) -> Result<()> {
+    std::fs::create_dir_all(output)?;
+
+    let manifest_url = format!("{HOSTED_DATA_URL}/manifest.json");
+    println!("  fetching {manifest_url}");
+    let manifest: serde_json::Value = ureq::get(&manifest_url)
+        .timeout(std::time::Duration::from_secs(60))
+        .call()
+        .with_context(|| format!("failed to fetch {manifest_url}"))?
+        .into_json()
+        .context("manifest is not valid JSON")?;
+
+    let files = manifest["files"]
+        .as_array()
+        .context("manifest has no files list")?;
+    let mut fetched = 0;
+    for entry in files {
+        let (Some(name), Some(sha)) = (entry["name"].as_str(), entry["sha256"].as_str()) else {
+            continue;
+        };
+        if !names.is_empty() && !names.iter().any(|n| n == name) {
+            continue;
+        }
+        fetch(
+            &format!("{HOSTED_DATA_URL}/{name}"),
+            &output.join(name),
+            Verify::Sha256(sha.to_string()),
+        )?;
+        fetched += 1;
+    }
+    if fetched == 0 {
+        bail!(
+            "nothing matched; the manifest offers: {}",
+            files
+                .iter()
+                .filter_map(|e| e["name"].as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    println!("{fetched} dataset(s) ready in {}", output.display());
+    Ok(())
 }

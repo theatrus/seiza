@@ -1,9 +1,28 @@
 # seiza (星座)
 
-Star detection, WCS fitting, and near-field plate solving for
+Star detection, WCS fitting, and plate solving — hinted and blind — for
 astrophotography, in Rust. Built to power object overlays and astrometric
 features in [tenrankai](https://github.com/theatrus/tenrankai) and
 [PSF Guard](https://github.com/theatrus/psf-guard).
+
+## Quick start
+
+Install from [crates.io](https://crates.io/crates/seiza-cli) (or grab an
+RPM/deb from the [releases](https://github.com/theatrus/seiza/releases)),
+pull the prebuilt star and object catalogs from our CDN, and solve:
+
+```
+cargo install seiza-cli
+seiza download-data prebuilt --output data       # SHA-256-verified from downloads.seiza.fyi
+seiza solve-blind image.jpg --data data/stars-lite-tycho2.bin --min-scale 0.5 --max-scale 15
+seiza solve image.fits --data data/stars-gaia.bin --scale 1.26 --objects data/objects.bin
+```
+
+Hosted datasets (manifest at
+[downloads.seiza.fyi/data/manifest.json](https://downloads.seiza.fyi/data/manifest.json)):
+`stars-lite-tycho2.bin` (2.5M stars, 25 MB), `stars-gaia.bin` (Gaia DR3
+G≤15, 36.7M stars, 367 MB), `objects.bin` (314k objects), and
+`transients.bin` (active supernovae/novae, refreshed nightly).
 
 ## Status
 
@@ -23,22 +42,32 @@ Working today:
   with smoothing and non-max suppression, parallel verification through the
   hinted solver
   (`seiza solve-blind image.jpg --data stars.bin --min-scale 0.5 --max-scale 15`).
-- **Star catalogs** — memory-mappable tile formats with cone search;
-  builders for Tycho-2 (`lite`, ~2.5M stars / 25 MB), Gaia DR3 via TAP
-  download, and ASTAP `.1476` databases such as the Gaia D80
-  (~241M stars / 2.4 GB).
+- **Star catalogs** — memory-mappable tile formats with cone search.
+  Prebuilt sets on the CDN, or build your own from primary sources:
+  Tycho-2, Gaia DR3 via ESA TAP (`--max-mag` and `--chunks` for deeper
+  sets), and ASTAP `.1476` databases.
 
 ```
 seiza download-data tycho2 --output raw/tycho2
 seiza build-data tycho2 --input raw/tycho2 --output stars-lite.bin
-seiza solve image.jpg --data stars-lite.bin --ra 324.8 --dec 57.5 --scale 2.8
+seiza download-data gaia --output raw/gaia --max-mag 17 --chunks 3072
+seiza build-data gaia --input raw/gaia --output stars-deep.bin --max-mag 17
 ```
 
 - **Object catalogs** — OpenNGC (NGC/IC/Messier), Sharpless, Barnard, UGC,
-  LDN, vdB, PGC, IAU named and HD stars, and live transient
-  (supernova/nova) lists built into a compact object store; solved images
-  can be queried for the objects in their footprint with full ellipse
-  geometry (`seiza solve ... --objects objects.bin`).
+  LDN, vdB, PGC, Green's Galactic supernova remnants, Wolf-Rayet stars,
+  IAU named and HD stars, and live transient (supernova/nova) lists built
+  into a compact object store; solved images can be queried for the
+  objects in their footprint with full ellipse geometry
+  (`seiza solve ... --objects objects.bin`).
+- **FITS** — dependency-free reading with typed headers, exact
+  histogram statistics, N.I.N.A.-style MTF autostretch, planar RGB
+  (NAXIS3) support, and OSC debayering (`BAYERPAT`), in the
+  [`seiza-fits`](https://crates.io/crates/seiza-fits) crate. FITS files
+  plate-solve directly, with RA/DEC hints read from headers.
+- **Packages & CI** — crates.io releases, Fedora RPMs and Ubuntu debs on
+  GitHub releases, and an integration suite that solves real hosted
+  camera frames against known-good solutions on every PR.
 
 Planned (see design notes in the tenrankai repository,
 `docs/design/plate-solving.md`): SIP distortion terms, serialized blind

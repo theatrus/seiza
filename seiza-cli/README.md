@@ -25,7 +25,16 @@ seiza solve image.jpg --data stars.bin ... --objects objects.bin
 
 ## Datasets
 
-Download primary catalogs and build the compact tile formats:
+The quickest route is the prebuilt, SHA-256-verified sets hosted at
+downloads.seiza.fyi (Tycho-2 lite, Gaia DR3 G≤15, the unified object
+catalog, and a nightly-refreshed transient list):
+
+```
+seiza download-data prebuilt --output data
+seiza download-data prebuilt --output data --file objects.bin --file transients.bin
+```
+
+Or download primary catalogs and build the compact tile formats yourself:
 
 ```
 seiza download-data tycho2 --output raw/tycho2
@@ -34,8 +43,9 @@ seiza build-data tycho2 --input raw/tycho2 --output stars-lite.bin
 seiza download-data gaia --output raw/gaia        # Gaia DR3 via TAP, resumable
 seiza build-data gaia --input raw/gaia --output stars-gaia.bin
 
-seiza download-data openngc objects transients ...
-seiza build-data objects --input raw --output objects.bin
+seiza download-data objects --output raw/objects
+seiza build-data objects --input raw/objects --output objects.bin
+seiza download-data transients --output raw/transients
 seiza build-data transients --input raw/transients --output transients.bin
 ```
 

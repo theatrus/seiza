@@ -193,6 +193,16 @@ enum DownloadSource {
         #[arg(long)]
         output: PathBuf,
     },
+    /// Prebuilt datasets from downloads.seiza.fyi (SHA-256 verified) —
+    /// the quickest route to a working solver
+    Prebuilt {
+        /// Directory to download into
+        #[arg(long)]
+        output: PathBuf,
+        /// Specific files (default: everything in the manifest)
+        #[arg(long)]
+        file: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -330,6 +340,9 @@ fn main() -> Result<()> {
                 chunks,
             } => download_data::download_gaia(&output, max_mag, chunks),
             DownloadSource::Transients { output } => download_data::download_transients(&output),
+            DownloadSource::Prebuilt { output, file } => {
+                download_data::download_prebuilt(&output, &file)
+            }
         },
         Command::BuildData { source } => match source {
             BuildDataSource::Astap {

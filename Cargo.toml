@@ -3,14 +3,14 @@ resolver = "3"
 members = ["seiza", "seiza-cli", "seiza-fits"]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/theatrus/seiza"
 authors = ["Yann Ramin <github@theatr.us>"]
 
 [workspace.dependencies]
-seiza = { path = "seiza", version = "0.1.2" }
+seiza = { path = "seiza", version = "0.1.3" }
 seiza-fits = { path = "seiza-fits", version = "0.1.0" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 thiserror = "2"
@@ -18,7 +18,8 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 imageproc = "0.25"
 flate2 = "1"
-ureq = "2"
+ureq = { version = "2", features = ["json"] }
+serde_json = "1"
 memmap2 = "0.9"
 sha2 = "0.10"
 rayon = "1"
