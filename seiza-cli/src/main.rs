@@ -108,6 +108,26 @@ enum Command {
         #[command(subcommand)]
         source: BuildDataSource,
     },
+    /// Plate-solve with no position hint (wide fields, pixel-scale range)
+    SolveBlind {
+        /// Image file (PNG, JPEG, TIFF, FITS)
+        image: PathBuf,
+        /// Star tile file built by build-data
+        #[arg(long)]
+        data: PathBuf,
+        /// Minimum plausible pixel scale, arcseconds per pixel
+        #[arg(long, default_value_t = 0.5)]
+        min_scale: f64,
+        /// Maximum plausible pixel scale, arcseconds per pixel
+        #[arg(long, default_value_t = 20.0)]
+        max_scale: f64,
+        /// Detection threshold in noise sigmas
+        #[arg(long, default_value_t = 4.0)]
+        sigma: f32,
+        /// Ignore detections within this many pixels of the image edges
+        #[arg(long, default_value_t = 0)]
+        ignore_border: u32,
+    },
     /// Inspect a FITS file: headers, statistics, optional stretched PNG
     FitsInfo {
         /// FITS file
@@ -338,6 +358,14 @@ fn main() -> Result<()> {
                 output,
             } => build_data::build_manifest(&dir, &version, &output),
         },
+        Command::SolveBlind {
+            image,
+            data,
+            min_scale,
+            max_scale,
+            sigma,
+            ignore_border,
+        } => solve_blind_command(&image, &data, min_scale, max_scale, sigma, ignore_border),
         Command::FitsInfo { image, stretch } => fits_info(&image, stretch.as_deref()),
         Command::Cone {
             data,
@@ -658,4 +686,64 @@ fn dms(dec: f64) -> String {
     let m = ((a - d) * 60.0).floor();
     let sec = (a - d - m / 60.0) * 3600.0;
     format!("{sign}{:02}° {:02}′ {:04.1}″", d as u32, m as u32, sec)
+}
+
+fn solve_blind_command(
+    path: &std::path::Path,
+    data: &std::path::Path,
+    min_scale: f64,
+    max_scale: f64,
+    sigma: f32,
+    ignore_border: u32,
+) -> Result<()> {
+    use seiza::blind::{BlindIndex, BlindParams, solve_blind};
+
+    let img = load_image(path)?;
+    let dims = (img.width(), img.height());
+    let config = DetectConfig {
+        sigma,
+        ignore_border,
+        max_stars: 600,
+        ..Default::default()
+    };
+    let stars = detect_stars(&img, &config);
+    println!(
+        "{} stars detected in {}x{} image",
+        stars.len(),
+        dims.0,
+        dims.1
+    );
+
+    let catalog =
+        TileCatalog::open(data).with_context(|| format!("failed to open {}", data.display()))?;
+    let params = BlindParams {
+        min_scale_arcsec_px: min_scale,
+        max_scale_arcsec_px: max_scale,
+        ..Default::default()
+    };
+    let started = std::time::Instant::now();
+    let index = BlindIndex::build(&catalog, &params);
+    println!(
+        "pattern index: {} patterns in {:.2}s",
+        index.pattern_count(),
+        started.elapsed().as_secs_f64()
+    );
+
+    let started = std::time::Instant::now();
+    let solution =
+        solve_blind(&stars, &catalog, &index, &params, dims).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let wcs = &solution.wcs;
+    let (ra, dec) = wcs.pixel_to_world(dims.0 as f64 / 2.0, dims.1 as f64 / 2.0);
+    println!("Blind-solved in {:.2}s:", started.elapsed().as_secs_f64());
+    println!(
+        "  center     : {} {}  ({ra:.5}°, {dec:.5}°)",
+        hms(ra),
+        dms(dec)
+    );
+    println!("  pixel scale: {:.4}\"/px", wcs.scale_arcsec_per_px());
+    println!(
+        "  quality    : {} stars matched, RMS {:.3}\"",
+        solution.matched_stars, solution.rms_arcsec
+    );
+    Ok(())
 }

@@ -23,6 +23,15 @@ pub trait StarCatalog {
     /// Stars within `radius_deg` of `(ra, dec)`, brightest first, at most
     /// `limit` entries.
     fn cone_search(&self, ra: f64, dec: f64, radius_deg: f64, limit: usize) -> Vec<CatalogStar>;
+
+    /// Every star brighter than `mag_limit`, in no particular order.
+    /// Backends with magnitude-sorted storage override this cheaply.
+    fn all_brighter_than(&self, mag_limit: f32) -> Vec<CatalogStar> {
+        self.cone_search(0.0, 0.0, 181.0, usize::MAX)
+            .into_iter()
+            .take_while(|s| s.mag <= mag_limit)
+            .collect()
+    }
 }
 
 /// In-memory catalog for tests and synthetic solves.
@@ -44,6 +53,15 @@ impl StarCatalog for MemoryCatalog {
             .iter()
             .filter(|s| angular_separation_deg(ra, dec, s.ra, s.dec) <= radius_deg)
             .take(limit)
+            .copied()
+            .collect()
+    }
+
+    fn all_brighter_than(&self, mag_limit: f32) -> Vec<CatalogStar> {
+        // Stars are pre-sorted by magnitude
+        self.stars
+            .iter()
+            .take_while(|s| s.mag <= mag_limit)
             .copied()
             .collect()
     }

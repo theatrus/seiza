@@ -8,6 +8,7 @@
 //! Solving is *seeded*: it expects an approximate center (RA/Dec hint) and an
 //! approximate pixel scale. Blind solving is out of scope for now.
 
+pub mod blind;
 pub mod catalog;
 pub mod detect;
 pub mod objects;

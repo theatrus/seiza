@@ -275,6 +275,14 @@ fn diverse_brightest(
     picked
 }
 
+/// Least-squares affine fit over point pairs, exposed for the blind
+/// solver's hypothesis generation: returns (a, b, c, d, e, f) for
+/// (x, y) → (a x + b y + c, d x + e y + f).
+pub(crate) fn fit_affine(pairs: &[PointPair]) -> Option<(f64, f64, f64, f64, f64, f64)> {
+    let affine = Affine::fit(pairs)?;
+    Some((affine.a, affine.b, affine.c, affine.d, affine.e, affine.f))
+}
+
 /// A WCS whose pixel plane IS the tangent plane (degrees) about `center`.
 fn tangent_wcs(center: (f64, f64)) -> Wcs {
     Wcs {

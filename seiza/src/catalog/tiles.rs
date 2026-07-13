@@ -351,6 +351,15 @@ impl TileCatalog {
     /// Visit every star in a tile. Decoding runs over contiguous columns in
     /// the mapped file for the v2 layout.
     fn for_each_in_tile(&self, tile: u32, mut visit: impl FnMut(CatalogStar)) {
+        self.for_each_in_tile_while(tile, |star| {
+            visit(star);
+            true
+        });
+    }
+
+    /// Visit stars in a tile until the callback returns false. Records are
+    /// brightest-first, enabling early exit at a magnitude limit.
+    fn for_each_in_tile_while(&self, tile: u32, mut visit: impl FnMut(CatalogStar) -> bool) {
         let (offset, count) = self.index[tile as usize];
         let (offset, count) = (offset as usize, count as usize);
         match self.layout {
@@ -360,11 +369,14 @@ impl TileCatalog {
                     return;
                 };
                 for r in data.chunks_exact(V1_RECORD_SIZE) {
-                    visit(CatalogStar {
+                    let keep_going = visit(CatalogStar {
                         ra: unpack_ra(u32::from_le_bytes(r[0..4].try_into().unwrap())),
                         dec: unpack_dec(u32::from_le_bytes(r[4..8].try_into().unwrap())),
                         mag: unpack_mag(u16::from_le_bytes(r[8..10].try_into().unwrap())),
                     });
+                    if !keep_going {
+                        return;
+                    }
                 }
             }
             Layout::V2Columnar => {
@@ -394,6 +406,22 @@ impl TileCatalog {
 }
 
 impl StarCatalog for TileCatalog {
+    fn all_brighter_than(&self, mag_limit: f32) -> Vec<CatalogStar> {
+        // Tiles store brightest-first: stop at the first fainter record
+        let mut found = Vec::new();
+        for tile in 0..self.grid.n_tiles() {
+            self.for_each_in_tile_while(tile, |star| {
+                if star.mag <= mag_limit {
+                    found.push(star);
+                    true
+                } else {
+                    false
+                }
+            });
+        }
+        found
+    }
+
     fn cone_search(&self, ra: f64, dec: f64, radius_deg: f64, limit: usize) -> Vec<CatalogStar> {
         let mut found = Vec::new();
         for tile in self.grid.cone_tiles(ra, dec, radius_deg) {

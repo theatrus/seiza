@@ -10,3 +10,4 @@ repository.workspace = true
 image.workspace = true
 thiserror.workspace = true
 memmap2.workspace = true
+rayon.workspace = true
