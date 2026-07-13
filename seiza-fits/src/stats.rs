@@ -6,6 +6,7 @@ pub struct Statistics {
     pub min: u16,
     pub max: u16,
     pub mean: f64,
+    pub std_dev: f64,
     pub median: u16,
     /// Median absolute deviation (exact, from the histogram)
     pub mad: f64,
@@ -15,9 +16,11 @@ pub struct Statistics {
 pub fn statistics_u16(data: &[u16]) -> Statistics {
     let mut histogram = vec![0u32; 65536];
     let mut sum = 0u64;
+    let mut sum_sq = 0u128;
     for &v in data {
         histogram[v as usize] += 1;
         sum += v as u64;
+        sum_sq += (v as u64 * v as u64) as u128;
     }
     let count = data.len();
     if count == 0 {
@@ -25,6 +28,7 @@ pub fn statistics_u16(data: &[u16]) -> Statistics {
             min: 0,
             max: 0,
             mean: 0.0,
+            std_dev: 0.0,
             median: 0,
             mad: 0.0,
             count: 0,
@@ -61,10 +65,13 @@ pub fn statistics_u16(data: &[u16]) -> Statistics {
         }
     }
 
+    let mean = sum as f64 / count as f64;
+    let variance = (sum_sq as f64 / count as f64 - mean * mean).max(0.0);
     Statistics {
         min,
         max,
-        mean: sum as f64 / count as f64,
+        mean,
+        std_dev: variance.sqrt(),
         median,
         mad: mad as f64,
         count,

@@ -72,6 +72,61 @@ pub struct FitsImage {
     pub headers: Vec<(String, HeaderValue)>,
 }
 
+/// Parse header cards block by block until END. Returns the cards and the
+/// byte offset where the data section begins.
+fn parse_headers(data: &[u8]) -> Result<(Vec<(String, HeaderValue)>, usize), FitsError> {
+    if data.len() < BLOCK || &data[0..6] != b"SIMPLE" {
+        return Err(FitsError::NotFits);
+    }
+    let mut headers = Vec::new();
+    let mut data_start = None;
+    'blocks: for block in 0.. {
+        let start = block * BLOCK;
+        let Some(block_data) = data.get(start..start + BLOCK) else {
+            return Err(FitsError::Malformed("header runs past EOF".into()));
+        };
+        for card in block_data.chunks_exact(CARD) {
+            let keyword = std::str::from_utf8(&card[0..8])
+                .map_err(|_| FitsError::Malformed("non-ASCII keyword".into()))?
+                .trim_end()
+                .to_string();
+            if keyword == "END" {
+                data_start = Some((block + 1) * BLOCK);
+                break 'blocks;
+            }
+            if keyword.is_empty() || keyword == "COMMENT" || keyword == "HISTORY" {
+                continue;
+            }
+            if card[8] == b'=' {
+                let raw = String::from_utf8_lossy(&card[10..]);
+                headers.push((keyword, parse_header_value(&raw)));
+            }
+        }
+    }
+    let data_start = data_start.ok_or_else(|| FitsError::Malformed("missing END card".into()))?;
+    Ok((headers, data_start))
+}
+
+/// Read only the header cards of a FITS file, without touching the pixel
+/// data — cheap metadata probes on large files.
+pub fn read_header(path: &Path) -> Result<Vec<(String, HeaderValue)>, FitsError> {
+    let mut file = std::fs::File::open(path)?;
+    let mut data = Vec::new();
+    loop {
+        let start = data.len();
+        data.resize(start + BLOCK, 0);
+        file.read_exact(&mut data[start..])
+            .map_err(|_| FitsError::Malformed("header runs past EOF".into()))?;
+        if data[start..]
+            .chunks_exact(CARD)
+            .any(|card| card.starts_with(b"END") && card[3] == b' ')
+        {
+            break;
+        }
+    }
+    parse_headers(&data).map(|(headers, _)| headers)
+}
+
 impl FitsImage {
     pub fn open(path: &Path) -> Result<FitsImage, FitsError> {
         let mut file = std::fs::File::open(path)?;
@@ -81,38 +136,7 @@ impl FitsImage {
     }
 
     pub fn from_bytes(data: &[u8]) -> Result<FitsImage, FitsError> {
-        if data.len() < BLOCK || &data[0..6] != b"SIMPLE" {
-            return Err(FitsError::NotFits);
-        }
-
-        // Parse header cards block by block until END
-        let mut headers = Vec::new();
-        let mut data_start = None;
-        'blocks: for block in 0.. {
-            let start = block * BLOCK;
-            let Some(block_data) = data.get(start..start + BLOCK) else {
-                return Err(FitsError::Malformed("header runs past EOF".into()));
-            };
-            for card in block_data.chunks_exact(CARD) {
-                let keyword = std::str::from_utf8(&card[0..8])
-                    .map_err(|_| FitsError::Malformed("non-ASCII keyword".into()))?
-                    .trim_end()
-                    .to_string();
-                if keyword == "END" {
-                    data_start = Some((block + 1) * BLOCK);
-                    break 'blocks;
-                }
-                if keyword.is_empty() || keyword == "COMMENT" || keyword == "HISTORY" {
-                    continue;
-                }
-                if card[8] == b'=' {
-                    let raw = String::from_utf8_lossy(&card[10..]);
-                    headers.push((keyword, parse_header_value(&raw)));
-                }
-            }
-        }
-        let data_start =
-            data_start.ok_or_else(|| FitsError::Malformed("missing END card".into()))?;
+        let (headers, data_start) = parse_headers(data)?;
 
         let header_i64 = |key: &str| -> Option<i64> {
             headers
