@@ -6,10 +6,12 @@
 //! inflation), statistics come from histograms rather than sorts, and the
 //! midtone-transfer-function autostretch matches N.I.N.A.'s.
 
+mod bayer;
 mod header;
 mod stats;
 mod stretch;
 
+pub use bayer::{BayerPattern, RgbImage16, debayer_rgb16};
 pub use header::{HeaderValue, parse_header_value};
 pub use stats::Statistics;
 pub use stretch::{StretchParams, midtones_transfer_function};
@@ -243,10 +245,36 @@ impl FitsImage {
     }
 
     /// N.I.N.A.-compatible MTF autostretch straight to 8-bit grayscale.
+    /// Raw one-shot-color mosaics are debayered to luminance first.
     pub fn stretch_to_u8(&self, params: &StretchParams) -> Vec<u8> {
-        let data = self.to_u16();
+        let data = match self.debayer() {
+            Some(rgb) => std::borrow::Cow::Owned(rgb.to_luma_u16()),
+            None => self.to_u16(),
+        };
         let stats = stats::statistics_u16(&data);
         stretch::stretch_u16_to_u8(&data, &stats, params)
+    }
+
+    /// The color filter array layout, when the `BAYERPAT` header marks
+    /// this as a raw one-shot-color mosaic.
+    pub fn bayer_pattern(&self) -> Option<BayerPattern> {
+        BayerPattern::parse(self.header_str("BAYERPAT")?)
+    }
+
+    /// Debayer a raw one-shot-color mosaic to interleaved RGB, honoring
+    /// `XBAYROFF`/`YBAYROFF` origin offsets. `None` for mono images.
+    pub fn debayer(&self) -> Option<RgbImage16> {
+        let pattern = self.bayer_pattern()?;
+        let x_off = self.header_f64("XBAYROFF").unwrap_or(0.0) as usize;
+        let y_off = self.header_f64("YBAYROFF").unwrap_or(0.0) as usize;
+        Some(debayer_rgb16(
+            &self.to_u16(),
+            self.width,
+            self.height,
+            pattern,
+            x_off,
+            y_off,
+        ))
     }
 }
 
