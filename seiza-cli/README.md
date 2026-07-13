@@ -23,6 +23,15 @@ seiza detect image.jpg --annotate out.png
 seiza solve image.jpg --data stars.bin ... --objects objects.bin
 ```
 
+## Use with N.I.N.A.
+
+seiza speaks ASTAP's CLI contract: set N.I.N.A.'s plate solver to ASTAP
+and point the ASTAP path at the seiza binary (a copy named `astap.exe`
+also works). Provide a star catalog via the `SEIZA_STAR_DATA`
+environment variable or a `stars-*.bin` next to the executable —
+`seiza download-data prebuilt` fetches one. Hinted and blind-slot
+solving both work; see the repository's `docs/design/astap-mode.md`.
+
 ## Datasets
 
 The quickest route is the prebuilt, SHA-256-verified sets hosted at

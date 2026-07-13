@@ -74,6 +74,34 @@ Planned (see design notes in the tenrankai repository,
 `docs/design/plate-solving.md`): SIP distortion terms, serialized blind
 pattern indexes.
 
+## Use with N.I.N.A. (ASTAP-compatible mode)
+
+seiza speaks ASTAP's command-line contract, so N.I.N.A. can use it as
+its plate solver with no plugin:
+
+1. Grab the Windows build from the
+   [releases](https://github.com/theatrus/seiza/releases) (or
+   `cargo install seiza-cli`).
+2. Download a star catalog once and tell seiza where it lives — either
+   set the `SEIZA_STAR_DATA` environment variable, or simply drop the
+   `.bin` next to the executable:
+
+   ```
+   seiza download-data prebuilt --output C:\seiza-data --file stars-gaia.bin
+   setx SEIZA_STAR_DATA C:\seiza-data\stars-gaia.bin
+   ```
+
+3. In N.I.N.A.: **Options → Plate Solving → Plate Solver: ASTAP**, and
+   point the ASTAP path at `seiza.exe`. It works in the blind-solver
+   slot too.
+
+seiza auto-detects ASTAP-style invocations (`-f image.fits -fov … -ra …
+-spd …`), solves hinted or blind accordingly, and writes the `.ini`
+result file N.I.N.A. reads — including the full CD matrix, so pixel
+scale, rotation, and flip all come through. A copy of the binary
+renamed `astap.exe` behaves identically. Details:
+[docs/design/astap-mode.md](docs/design/astap-mode.md).
+
 ## How fast?
 
 Measured on a 16-core desktop, no GPU, everything from a cold start:
