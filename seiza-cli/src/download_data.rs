@@ -90,6 +90,18 @@ pub fn download_objects(output: &Path) -> Result<()> {
             "VII/237/pgc",
             "_RAJ2000,_DEJ2000,PGC,logD25,logR25,PA",
         ),
+        // Green's catalogue of Galactic supernova remnants
+        (
+            "snr.tsv",
+            "VII/284/snrs",
+            "_RAJ2000,_DEJ2000,SNR,MajDiam,MinDiam,Names",
+        ),
+        // van der Hucht's VIIth catalogue of Galactic Wolf-Rayet stars
+        (
+            "wr.tsv",
+            "III/215/table13",
+            "_RAJ2000,_DEJ2000,WR,Name,GCVS,OName",
+        ),
     ] {
         fetch(
             &format!("{vizier}{source}&-out={columns}&-out.max=unlimited"),

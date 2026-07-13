@@ -606,6 +606,87 @@ pub fn build_objects(input: &Path, output: &Path) -> Result<()> {
         }
     }
 
+    // Green's Galactic supernova remnants: whole-remnant ellipses that
+    // complement the NGC/IC filament entries; skip any that OpenNGC
+    // already carries as an SNR at the same position (e.g. the Crab)
+    let mut snr_dedup = PositionDedup::new();
+    for o in &objects {
+        if o.kind == ObjectKind::SupernovaRemnant {
+            snr_dedup.insert(o.ra, o.dec);
+        }
+    }
+    let snr = input.join("snr.tsv");
+    if snr.exists() {
+        sources += 1;
+        let content = std::fs::read_to_string(&snr)?;
+        for line in content.lines() {
+            let fields: Vec<&str> = line.split('\t').map(str::trim).collect();
+            if line.starts_with('#') || fields.len() < 3 {
+                continue;
+            }
+            let (Ok(ra), Ok(dec)) = (fields[0].parse::<f64>(), fields[1].parse::<f64>()) else {
+                continue;
+            };
+            let designation = fields[2];
+            if !designation.starts_with('G') || snr_dedup.near(ra, dec, 120.0 / 3600.0) {
+                continue;
+            }
+            objects.push(SkyObject {
+                kind: ObjectKind::SupernovaRemnant,
+                ra,
+                dec,
+                mag: None,
+                major_arcmin: fields.get(3).and_then(|v| v.parse().ok()),
+                minor_arcmin: fields.get(4).and_then(|v| v.parse().ok()),
+                position_angle_deg: None,
+                name: format!("SNR {designation}"),
+                common_name: fields.get(5).unwrap_or(&"").to_string(),
+            });
+        }
+    }
+
+    // Galactic Wolf-Rayet stars. Bright ones with an IAU name or a
+    // Bright Star Catalogue entry are already present, so skip those
+    // positions; the WR number becomes the primary designation.
+    let wr = input.join("wr.tsv");
+    if wr.exists() {
+        sources += 1;
+        let content = std::fs::read_to_string(&wr)?;
+        for line in content.lines() {
+            let fields: Vec<&str> = line.split('\t').map(str::trim).collect();
+            if line.starts_with('#') || fields.len() < 3 {
+                continue;
+            }
+            let (Ok(ra), Ok(dec)) = (fields[0].parse::<f64>(), fields[1].parse::<f64>()) else {
+                continue;
+            };
+            let number = fields[2];
+            if number.is_empty()
+                || !number.starts_with(|c: char| c.is_ascii_digit())
+                || grid_dedup.near(ra, dec, 30.0 / 3600.0)
+            {
+                continue;
+            }
+            let common_name = [3usize, 4, 5]
+                .iter()
+                .filter_map(|&i| fields.get(i).copied())
+                .find(|v| !v.is_empty())
+                .unwrap_or("")
+                .to_string();
+            objects.push(SkyObject {
+                kind: ObjectKind::Star,
+                ra,
+                dec,
+                mag: None,
+                major_arcmin: None,
+                minor_arcmin: None,
+                position_angle_deg: None,
+                name: format!("WR {number}"),
+                common_name,
+            });
+        }
+    }
+
     if sources == 0 {
         bail!(
             "no catalog sources found in {} (expected NGC.csv, sh2.tsv, \
