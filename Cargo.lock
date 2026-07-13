@@ -1486,7 +1486,7 @@ dependencies = [
 
 [[package]]
 name = "seiza"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "image",
  "memmap2",
@@ -1499,7 +1499,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-cli"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "clap",
