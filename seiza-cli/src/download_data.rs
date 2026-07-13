@@ -339,3 +339,24 @@ pub fn download_prebuilt(output: &Path, names: &[String]) -> Result<()> {
     println!("{fetched} dataset(s) ready in {}", output.display());
     Ok(())
 }
+
+/// Minor Planet Center orbital element sets: current comets plus the
+/// full MPCORB asteroid file (gzip kept on disk; the builder streams it).
+pub fn download_mpc(output: &Path) -> Result<()> {
+    std::fs::create_dir_all(output)?;
+    // Comet elements change often; always refetch
+    let comets = output.join("CometEls.txt");
+    std::fs::remove_file(&comets).ok();
+    fetch(
+        "https://www.minorplanetcenter.net/iau/MPCORB/CometEls.txt",
+        &comets,
+        Verify::None,
+    )?;
+    fetch(
+        "https://www.minorplanetcenter.net/iau/MPCORB/MPCORB.DAT.gz",
+        &output.join("MPCORB.DAT.gz"),
+        Verify::Gzip,
+    )?;
+    println!("MPC element sets ready in {}", output.display());
+    Ok(())
+}

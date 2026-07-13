@@ -11,6 +11,7 @@
 pub mod blind;
 pub mod catalog;
 pub mod detect;
+pub mod minor_bodies;
 pub mod objects;
 pub mod solve;
 pub mod wcs;

@@ -921,6 +921,219 @@ pub fn build_manifest(dir: &Path, version: &str, output: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Comets (MPC CometEls.txt) and bright numbered asteroids (MPCORB) into
+/// a minor-body element set for time-dependent matching.
+pub fn build_minor_bodies(input: &Path, output: &Path, max_h: f32) -> Result<()> {
+    use seiza::minor_bodies::{MinorBodyCatalog, julian_date};
+
+    let mut bodies = Vec::new();
+
+    let comets = input.join("CometEls.txt");
+    if comets.exists() {
+        let content = std::fs::read_to_string(&comets)?;
+        for line in content.lines() {
+            if let Some(body) = parse_comet_line(line) {
+                bodies.push(body);
+            }
+        }
+    }
+    let comet_count = bodies.len();
+
+    let mpcorb = input.join("MPCORB.DAT.gz");
+    if mpcorb.exists() {
+        let file = std::fs::File::open(&mpcorb)?;
+        let reader = std::io::BufReader::new(flate2::read::GzDecoder::new(file));
+        use std::io::BufRead;
+        let mut in_data = false;
+        for line in reader.lines() {
+            let line = line?;
+            if !in_data {
+                if line.starts_with("----------") {
+                    in_data = true;
+                }
+                continue;
+            }
+            if let Some(body) = parse_mpcorb_line(&line, max_h) {
+                bodies.push(body);
+            }
+        }
+    }
+
+    if bodies.is_empty() {
+        bail!(
+            "no minor bodies parsed from {} (expected CometEls.txt and/or MPCORB.DAT.gz); \
+             run download-data mpc first",
+            input.display()
+        );
+    }
+    let catalog = MinorBodyCatalog::new(bodies);
+    catalog.write_to(output)?;
+    println!(
+        "{} minor bodies ({} comets, {} asteroids H <= {max_h}) written to {}",
+        catalog.len(),
+        comet_count,
+        catalog.len() - comet_count,
+        output.display()
+    );
+
+    // A couple of headline entries as a sanity check
+    for body in catalog.bodies().iter().take(3) {
+        if let Some((ra, dec, mag, _)) =
+            MinorBodyCatalog::position_at(body, julian_date(2026, 7, 13.0))
+        {
+            println!("  {}: now near ({ra:.2}, {dec:.2}) V~{mag:.1}", body.name);
+        }
+    }
+    Ok(())
+}
+
+/// One fixed-width MPC CometEls.txt record.
+fn parse_comet_line(line: &str) -> Option<seiza::minor_bodies::MinorBody> {
+    use seiza::minor_bodies::{MinorBody, MinorBodyKind, julian_date};
+    if line.len() < 103 {
+        return None;
+    }
+    let field = |a: usize, b: usize| line.get(a - 1..b).map(str::trim).unwrap_or("");
+    let year: i32 = field(15, 18).parse().ok()?;
+    let month: u32 = field(20, 21).parse().ok()?;
+    let day: f64 = field(23, 29).parse().ok()?;
+    let q: f64 = field(31, 39).parse().ok()?;
+    let e: f64 = field(41, 49).parse().ok()?;
+    let arg_peri: f64 = field(52, 59).parse().ok()?;
+    let node: f64 = field(62, 69).parse().ok()?;
+    let incl: f64 = field(72, 79).parse().ok()?;
+    let m1: f32 = field(92, 95).parse().unwrap_or(12.0);
+    let k1: f32 = field(97, 100).parse().unwrap_or(4.0);
+    let name = line
+        .get(102..158)
+        .or_else(|| line.get(102..))
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
+    if name.is_empty() {
+        return None;
+    }
+    Some(MinorBody {
+        kind: MinorBodyKind::Comet,
+        name,
+        epoch_jd: julian_date(year, month, day),
+        q_or_a: q,
+        eccentricity: e,
+        inclination_deg: incl,
+        node_deg: node,
+        arg_perihelion_deg: arg_peri,
+        mean_anomaly_deg: 0.0,
+        h_mag: m1,
+        slope: k1,
+    })
+}
+
+/// One fixed-width MPCORB record; numbered asteroids up to `max_h` only.
+fn parse_mpcorb_line(line: &str, max_h: f32) -> Option<seiza::minor_bodies::MinorBody> {
+    use seiza::minor_bodies::{MinorBody, MinorBodyKind};
+    if line.len() < 104 {
+        return None;
+    }
+    let field = |a: usize, b: usize| line.get(a - 1..b).map(str::trim).unwrap_or("");
+    // Numbered objects pack the number in columns 1-5 (base-62 first char
+    // above 99999); provisional-only objects use a different packing that
+    // includes letters past column 5 — skip those
+    let packed = field(1, 7);
+    let number = unpack_asteroid_number(packed)?;
+    let h: f32 = field(9, 13).parse().ok()?;
+    if h > max_h {
+        return None;
+    }
+    let g: f32 = field(15, 19).parse().unwrap_or(0.15);
+    let epoch_jd = unpack_epoch(field(21, 25))?;
+    let mean_anomaly: f64 = field(27, 35).parse().ok()?;
+    let arg_peri: f64 = field(38, 46).parse().ok()?;
+    let node: f64 = field(49, 57).parse().ok()?;
+    let incl: f64 = field(60, 68).parse().ok()?;
+    let e: f64 = field(71, 79).parse().ok()?;
+    let a: f64 = field(93, 103).parse().ok()?;
+
+    // Readable designation ("1 Ceres") lives at columns 167+
+    let name = match line
+        .get(166..194)
+        .or_else(|| line.get(166..))
+        .map(str::trim)
+    {
+        Some(designation) if !designation.is_empty() => match designation.split_once(' ') {
+            Some((num, rest)) if num.chars().all(|c| c.is_ascii_digit()) => {
+                format!("({num}) {}", rest.trim())
+            }
+            _ => designation.to_string(),
+        },
+        _ => format!("({number})"),
+    };
+
+    Some(MinorBody {
+        kind: MinorBodyKind::Asteroid,
+        name,
+        epoch_jd,
+        q_or_a: a,
+        eccentricity: e,
+        inclination_deg: incl,
+        node_deg: node,
+        arg_perihelion_deg: arg_peri,
+        mean_anomaly_deg: mean_anomaly,
+        h_mag: h,
+        slope: g,
+    })
+}
+
+/// MPC packed asteroid number: "00001" -> 1, "A0000" -> 100000, ...
+fn unpack_asteroid_number(packed: &str) -> Option<u32> {
+    if packed.is_empty() || packed.len() > 5 {
+        return None;
+    }
+    let mut chars = packed.chars();
+    let first = chars.next()?;
+    let rest: String = chars.collect();
+    let head = if first.is_ascii_digit() {
+        first.to_digit(10)?
+    } else if first.is_ascii_uppercase() {
+        first as u32 - 'A' as u32 + 10
+    } else if first.is_ascii_lowercase() {
+        first as u32 - 'a' as u32 + 36
+    } else {
+        return None;
+    };
+    let tail: u32 = if rest.is_empty() {
+        0
+    } else {
+        rest.parse().ok()?
+    };
+    Some(head * 10u32.pow(rest.len() as u32) + tail)
+}
+
+/// MPC packed epoch: "K239D" -> JD of 2023-09-13.0 TT.
+fn unpack_epoch(packed: &str) -> Option<f64> {
+    use seiza::minor_bodies::julian_date;
+    let bytes = packed.as_bytes();
+    if bytes.len() != 5 {
+        return None;
+    }
+    let century = match bytes[0] {
+        b'I' => 1800,
+        b'J' => 1900,
+        b'K' => 2000,
+        _ => return None,
+    };
+    let year: i32 = packed.get(1..3)?.parse::<i32>().ok()? + century;
+    let code = |b: u8| -> Option<u32> {
+        match b {
+            b'1'..=b'9' => Some((b - b'0') as u32),
+            b'A'..=b'V' => Some((b - b'A') as u32 + 10),
+            _ => None,
+        }
+    };
+    let month = code(bytes[3])?;
+    let day = code(bytes[4])?;
+    Some(julian_date(year, month, day as f64))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

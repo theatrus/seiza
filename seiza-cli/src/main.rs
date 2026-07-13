@@ -97,6 +97,14 @@ enum Command {
         /// (cyan) on the annotated copy
         #[arg(long)]
         objects: Option<PathBuf>,
+        /// Minor-body element file (comets + asteroids); positions are
+        /// propagated to the acquisition time
+        #[arg(long)]
+        minor_bodies: Option<PathBuf>,
+        /// Acquisition time, ISO 8601 UTC (default: the FITS DATE-OBS
+        /// header). Required for accurate minor-body positions
+        #[arg(long)]
+        time: Option<String>,
     },
     /// Download source catalogs from their archives
     DownloadData {
@@ -194,6 +202,12 @@ enum DownloadSource {
         #[arg(long)]
         output: PathBuf,
     },
+    /// Minor Planet Center element sets: comets + numbered asteroids
+    Mpc {
+        /// Directory to download into
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// Prebuilt datasets from downloads.seiza.fyi (SHA-256 verified) —
     /// the quickest route to a working solver
     Prebuilt {
@@ -277,6 +291,18 @@ enum BuildDataSource {
         #[arg(long)]
         output: PathBuf,
     },
+    /// Comets + bright numbered asteroids from MPC element sets
+    MinorBodies {
+        /// Directory containing CometEls.txt and MPCORB.DAT.gz
+        #[arg(long)]
+        input: PathBuf,
+        /// Output element file
+        #[arg(long)]
+        output: PathBuf,
+        /// Drop asteroids with absolute magnitude H above this
+        #[arg(long, default_value_t = 16.0)]
+        max_h: f32,
+    },
     /// Bundle manifest (sizes + sha256) for hosting data files
     Manifest {
         /// Directory containing built .bin data files
@@ -311,6 +337,8 @@ fn main() -> Result<()> {
             ignore_border,
             annotate,
             objects,
+            minor_bodies,
+            time,
         } => {
             let hint = match (ra, dec) {
                 (Some(ra), Some(dec)) => (ra, dec),
@@ -318,6 +346,7 @@ fn main() -> Result<()> {
                     anyhow::anyhow!("--ra/--dec required (no RA/DEC headers found in the image)")
                 })?,
             };
+            let acquisition_jd = resolve_acquisition_jd(&image, time.as_deref())?;
             solve_command(
                 &image,
                 &data,
@@ -329,6 +358,8 @@ fn main() -> Result<()> {
                 ignore_border,
                 annotate.as_deref(),
                 objects.as_deref(),
+                minor_bodies.as_deref(),
+                acquisition_jd,
             )
         }
         Command::DownloadData { source } => match source {
@@ -341,6 +372,7 @@ fn main() -> Result<()> {
                 chunks,
             } => download_data::download_gaia(&output, max_mag, chunks),
             DownloadSource::Transients { output } => download_data::download_transients(&output),
+            DownloadSource::Mpc { output } => download_data::download_mpc(&output),
             DownloadSource::Prebuilt { output, file } => {
                 download_data::download_prebuilt(&output, &file)
             }
@@ -372,6 +404,11 @@ fn main() -> Result<()> {
             BuildDataSource::Transients { input, output } => {
                 build_data::build_transients(&input, &output)
             }
+            BuildDataSource::MinorBodies {
+                input,
+                output,
+                max_h,
+            } => build_data::build_minor_bodies(&input, &output, max_h),
             BuildDataSource::Manifest {
                 dir,
                 version,
@@ -515,6 +552,54 @@ fn cone(data: &std::path::Path, ra: f64, dec: f64, radius: f64, limit: usize) ->
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Acquisition time as a JD: an explicit ISO 8601 argument wins, else the
+/// FITS DATE-OBS header. `None` when neither is available.
+fn resolve_acquisition_jd(image: &std::path::Path, time: Option<&str>) -> Result<Option<f64>> {
+    let text = match time {
+        Some(text) => Some(text.to_string()),
+        None => {
+            let is_fits = image
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("fits") || e.eq_ignore_ascii_case("fit"));
+            if is_fits {
+                seiza_fits::read_header(image).ok().and_then(|headers| {
+                    headers
+                        .iter()
+                        .find(|(k, _)| k == "DATE-OBS")
+                        .and_then(|(_, v)| v.as_str().map(str::to_string))
+                })
+            } else {
+                None
+            }
+        }
+    };
+    let Some(text) = text else { return Ok(None) };
+    parse_iso_jd(&text)
+        .map(Some)
+        .ok_or_else(|| anyhow::anyhow!("cannot parse acquisition time {text:?} as ISO 8601"))
+}
+
+/// "2025-10-12T08:30:00(.frac)(Z)" to a Julian date.
+fn parse_iso_jd(text: &str) -> Option<f64> {
+    let text = text.trim().trim_end_matches('Z');
+    let (date, clock) = match text.split_once('T') {
+        Some((d, t)) => (d, t),
+        None => (text, "0:0:0"),
+    };
+    let mut date_parts = date.split('-');
+    let year: i32 = date_parts.next()?.parse().ok()?;
+    let month: u32 = date_parts.next()?.parse().ok()?;
+    let day: u32 = date_parts.next()?.parse().ok()?;
+    let mut clock_parts = clock.split(':');
+    let hour: f64 = clock_parts.next()?.parse().ok()?;
+    let minute: f64 = clock_parts.next().unwrap_or("0").parse().ok()?;
+    let second: f64 = clock_parts.next().unwrap_or("0").parse().ok()?;
+    let day_fraction = day as f64 + (hour + minute / 60.0 + second / 3600.0) / 24.0;
+    Some(seiza::minor_bodies::julian_date(year, month, day_fraction))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn solve_command(
     path: &std::path::Path,
     data: &std::path::Path,
@@ -526,6 +611,8 @@ fn solve_command(
     ignore_border: u32,
     annotate: Option<&std::path::Path>,
     objects: Option<&std::path::Path>,
+    minor_bodies: Option<&std::path::Path>,
+    acquisition_jd: Option<f64>,
 ) -> Result<()> {
     let img = load_image(path)?;
     let dims = (img.width(), img.height());
@@ -623,6 +710,30 @@ fn solve_command(
         }
         None => Vec::new(),
     };
+
+    if let Some(path) = minor_bodies {
+        match acquisition_jd {
+            Some(jd) => {
+                let catalog = seiza::minor_bodies::MinorBodyCatalog::open(path)
+                    .with_context(|| format!("failed to open {}", path.display()))?;
+                let moving = catalog.objects_in_footprint(wcs, dims, jd, 20.0);
+                println!("{} minor bodies in the field at JD {jd:.4}:", moving.len());
+                for m in &moving {
+                    let kind = match m.body.kind {
+                        seiza::minor_bodies::MinorBodyKind::Comet => "comet",
+                        seiza::minor_bodies::MinorBodyKind::Asteroid => "asteroid",
+                    };
+                    println!(
+                        "  {:<9} {:<32} V~{:>4.1} at ({:.0}, {:.0})  {:.3} AU",
+                        kind, m.body.name, m.mag, m.x, m.y, m.delta_au
+                    );
+                }
+            }
+            None => println!(
+                "minor bodies skipped: no acquisition time (pass --time or use a FITS with DATE-OBS)"
+            ),
+        }
+    }
 
     if let Some(out) = annotate {
         let mut canvas = img.to_rgb8();
