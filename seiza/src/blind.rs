@@ -601,16 +601,6 @@ fn catalog_pattern(quad: &[([f64; 3], &CatalogStar)]) -> Option<Pattern> {
     })
 }
 
-/// Mean of right ascensions that is safe across the 0/360 wrap.
-fn circular_mean(values: impl Iterator<Item = f64>) -> f64 {
-    let (mut sin, mut cos) = (0.0, 0.0);
-    for v in values {
-        sin += v.to_radians().sin();
-        cos += v.to_radians().cos();
-    }
-    sin.atan2(cos).to_degrees().rem_euclid(360.0)
-}
-
 /// Order quad vertices canonically (by total distance to the other three)
 /// and return the longest edge.
 fn canonical_quad(quad: &[(f64, f64); 4]) -> Option<([(f64, f64); 4], f64)> {
