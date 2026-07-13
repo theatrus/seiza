@@ -43,7 +43,7 @@ impl Default for BlindParams {
         Self {
             min_scale_arcsec_px: 0.3,
             max_scale_arcsec_px: 20.0,
-            index_mag_limit: 12.5,
+            index_mag_limit: 12.7,
             max_pattern_deg: 6.0,
             max_hypotheses: 400,
             min_matches: 12,
@@ -62,6 +62,8 @@ const TIERS: &[(f64, f32)] = &[
     (1.5, 9.2),
     (0.75, 10.7),
     (0.4, 11.8),
+    // Sub-degree fields; only fills from catalogs deeper than Tycho-2
+    (0.2, 12.7),
 ];
 /// Descriptor quantization bins per dimension.
 const BINS: f64 = 128.0;
