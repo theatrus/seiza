@@ -16,7 +16,9 @@ astrophotography, in Rust.
   pixel-scale range. A disc-anchored 4-star pattern index over the whole
   sky is matched against quads of the brightest detections; hypotheses are
   voted on, smoothed, and verified in parallel by the hinted solver.
-  Typically 1–2 seconds per image on wide fields.
+  Under 2 seconds per wide-field image including building the whole-sky
+  index from a 2.5M-star catalog; a 61 MP FITS frame goes from file open
+  to hinted solution in 0.7 s.
 - **Star catalogs** — compact memory-mappable tile formats with cone
   search; builders for Tycho-2, Gaia DR3 (via TAP), and ASTAP databases.
 - **Object catalogs** — NGC/IC/Messier, Sharpless, Barnard, UGC, LDN, vdB,
