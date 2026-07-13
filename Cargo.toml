@@ -22,3 +22,4 @@ ureq = "2"
 memmap2 = "0.9"
 sha2 = "0.10"
 rayon = "1"
+rustc-hash = { version = "2" }

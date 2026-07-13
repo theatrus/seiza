@@ -15,7 +15,7 @@ use crate::detect::DetectedStar;
 use crate::solve::{Solution, SolveHint, solve};
 use crate::wcs::Wcs;
 use rayon::prelude::*;
-use std::collections::HashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 #[derive(Debug, Clone)]
 pub struct BlindParams {
@@ -85,7 +85,7 @@ type Hypothesis = (u32, (f64, f64), f64);
 
 /// A searchable pattern index over a catalog's bright stars.
 pub struct BlindIndex {
-    buckets: HashMap<u64, Vec<u32>>,
+    buckets: FxHashMap<u64, Vec<u32>>,
     patterns: Vec<Pattern>,
 }
 
@@ -98,88 +98,104 @@ impl BlindIndex {
     /// image side enumerates from its brightest detections.
     pub fn build(catalog: &dyn StarCatalog, params: &BlindParams) -> Self {
         let mut stars = catalog.all_brighter_than(params.index_mag_limit);
-        stars.sort_by(|a, b| a.mag.total_cmp(&b.mag));
+        stars.sort_unstable_by(|a, b| a.mag.total_cmp(&b.mag));
+        // Unit vectors once per star: every radius test below becomes a
+        // dot-product compare, with no per-pair trigonometry
+        let units: Vec<[f64; 3]> = stars.iter().map(|s| unit_vector(s.ra, s.dec)).collect();
 
         let mut patterns = Vec::new();
-        let mut buckets: HashMap<u64, Vec<u32>> = HashMap::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut buckets: FxHashMap<u64, Vec<u32>> = FxHashMap::default();
+        let mut seen: FxHashSet<[u32; 4]> = FxHashSet::default();
 
         for &(radius, mag_cap) in TIERS {
             let n_tier = stars.partition_point(|s| s.mag <= mag_cap);
             let tier = &stars[..n_tier];
-            let mut grid: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
+            let tier_units = &units[..n_tier];
+            let cos_radius = radius.to_radians().cos();
+            let mut grid: FxHashMap<(i32, i32), Vec<u32>> = FxHashMap::default();
             for (i, s) in tier.iter().enumerate() {
                 grid.entry(cell_key(s.ra, s.dec, radius))
                     .or_default()
                     .push(i as u32);
             }
 
-            for (i, star) in tier.iter().enumerate() {
-                // Brightest-within-disc anchors only: brightness order is
-                // index order, so any smaller index within the radius
-                // disqualifies this star
-                let mut members: Vec<u32> = Vec::new();
-                let mut anchored = true;
-                let (cx, cy) = cell_key(star.ra, star.dec, radius);
-                'cells: for dx in -1..=1 {
-                    for dy in -1..=1 {
-                        let Some(cell) = grid.get(&(cx + dx, cy + dy)) else {
-                            continue;
-                        };
-                        for &j in cell {
-                            if j as usize == i {
+            // Anchors are independent: generate each anchor's quads in
+            // parallel, then merge sequentially (dedup + bucket insert)
+            let anchor_quads: Vec<Vec<([u32; 4], Pattern)>> = (0..n_tier)
+                .into_par_iter()
+                .map(|i| {
+                    let star = &tier[i];
+                    let unit = tier_units[i];
+                    let mut members: Vec<u32> = Vec::new();
+                    let (cx, cy) = cell_key(star.ra, star.dec, radius);
+                    for dx in -1..=1 {
+                        for dy in -1..=1 {
+                            let Some(cell) = grid.get(&(cx + dx, cy + dy)) else {
                                 continue;
-                            }
-                            let other = &tier[j as usize];
-                            if crate::catalog::angular_separation_deg(
-                                star.ra, star.dec, other.ra, other.dec,
-                            ) <= radius
-                            {
-                                if (j as usize) < i {
-                                    anchored = false;
-                                    break 'cells;
+                            };
+                            for &j in cell {
+                                if j as usize == i {
+                                    continue;
                                 }
-                                members.push(j);
+                                let other = tier_units[j as usize];
+                                let dot =
+                                    unit[0] * other[0] + unit[1] * other[1] + unit[2] * other[2];
+                                if dot >= cos_radius {
+                                    if (j as usize) < i {
+                                        // A brighter star owns this disc
+                                        return Vec::new();
+                                    }
+                                    members.push(j);
+                                }
                             }
                         }
                     }
-                }
-                if !anchored || members.len() < 3 {
-                    continue;
-                }
-                members.sort_unstable();
-                members.truncate(5);
-                members.push(i as u32);
-                members.sort_unstable();
+                    if members.len() < 3 {
+                        return Vec::new();
+                    }
+                    members.sort_unstable();
+                    members.truncate(5);
+                    members.push(i as u32);
+                    members.sort_unstable();
 
-                let m = members.len();
-                for a in 0..m {
-                    for b in a + 1..m {
-                        for c in b + 1..m {
-                            for d in c + 1..m {
-                                // Tier star lists are prefixes of the same
-                                // magnitude-sorted array, so indices are
-                                // comparable across tiers
-                                let ids = [members[a], members[b], members[c], members[d]];
-                                if !seen.insert(ids) {
-                                    continue;
+                    let mut quads = Vec::new();
+                    let m = members.len();
+                    for a in 0..m {
+                        for b in a + 1..m {
+                            for c in b + 1..m {
+                                for d in c + 1..m {
+                                    let ids = [members[a], members[b], members[c], members[d]];
+                                    let quad = [
+                                        (tier_units[ids[0] as usize], &tier[ids[0] as usize]),
+                                        (tier_units[ids[1] as usize], &tier[ids[1] as usize]),
+                                        (tier_units[ids[2] as usize], &tier[ids[2] as usize]),
+                                        (tier_units[ids[3] as usize], &tier[ids[3] as usize]),
+                                    ];
+                                    let Some(pattern) = catalog_pattern(&quad) else {
+                                        continue;
+                                    };
+                                    if pattern.max_edge_deg > params.max_pattern_deg {
+                                        continue;
+                                    }
+                                    quads.push((ids, pattern));
                                 }
-                                let quad: Vec<CatalogStar> =
-                                    ids.iter().map(|&j| tier[j as usize]).collect();
-                                let Some(pattern) = catalog_pattern(&quad) else {
-                                    continue;
-                                };
-                                if pattern.max_edge_deg > params.max_pattern_deg {
-                                    continue;
-                                }
-                                let index = patterns.len() as u32;
-                                for key in descriptor_keys(&descriptor(&pattern.points), 0) {
-                                    buckets.entry(key).or_default().push(index);
-                                }
-                                patterns.push(pattern);
                             }
                         }
                     }
+                    quads
+                })
+                .collect();
+
+            for quads in anchor_quads {
+                for (ids, pattern) in quads {
+                    if !seen.insert(ids) {
+                        continue;
+                    }
+                    let index = patterns.len() as u32;
+                    for key in descriptor_keys(&descriptor(&pattern.points), 0) {
+                        buckets.entry(key).or_default().push(index);
+                    }
+                    patterns.push(pattern);
                 }
             }
         }
@@ -217,7 +233,7 @@ pub fn solve_blind(
     // per grid cell), exactly as the index density-caps its stars, then
     // try a ladder of subset sizes.
     let (width, height) = (dimensions.0 as f64, dimensions.1 as f64);
-    let mut per_cell = HashMap::new();
+    let mut per_cell = FxHashMap::default();
     let all_picked: Vec<(f64, f64)> = stars
         .iter()
         .filter(|s| {
@@ -232,8 +248,8 @@ pub fn solve_blind(
         .take(N_IMAGE_STARS)
         .map(|s| (s.x, s.y))
         .collect();
-    let mut hypotheses: HashMap<HypothesisKey, Hypothesis> = HashMap::new();
-    let mut seen_quads = std::collections::HashSet::new();
+    let mut hypotheses: FxHashMap<HypothesisKey, Hypothesis> = FxHashMap::default();
+    let mut seen_quads = FxHashSet::default();
     let mut stat_quads = 0u64;
     let mut stat_candidates = 0u64;
     let mut stat_scale_ok = 0u64;
@@ -310,7 +326,7 @@ pub fn solve_blind(
     // anchored at the brighter star).
     let min_dim = width.min(height);
     let all_stars: Vec<(f64, f64)> = stars.iter().map(|s| (s.x, s.y)).collect();
-    let mut seen_windows = std::collections::HashSet::new();
+    let mut seen_windows = FxHashSet::default();
     for anchor in 0..all_stars.len() {
         let (ax, ay) = all_stars[anchor];
         for divisor in [16.0, 11.0, 8.0, 5.6, 4.0, 2.8, 2.0] {
@@ -420,7 +436,7 @@ pub fn solve_blind(
     smoothed.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     // Non-max suppression: a strong region floods all its neighbor
     // buckets with the same summed vote; verify each region once
-    let mut taken: std::collections::HashSet<HypothesisKey> = Default::default();
+    let mut taken: FxHashSet<HypothesisKey> = FxHashSet::default();
     let mut ranked: Vec<(u32, (f64, f64), f64)> = Vec::new();
     for (key, votes, implied, scale) in smoothed {
         if taken.contains(&key) {
@@ -530,24 +546,57 @@ fn cell_key(ra: f64, dec: f64, cell_deg: f64) -> (i32, i32) {
     (band, (ra.rem_euclid(360.0) / ra_width) as i32)
 }
 
+/// Unit vector for an ICRS position.
+fn unit_vector(ra: f64, dec: f64) -> [f64; 3] {
+    let (sin_ra, cos_ra) = ra.to_radians().sin_cos();
+    let (sin_dec, cos_dec) = dec.to_radians().sin_cos();
+    [cos_dec * cos_ra, cos_dec * sin_ra, sin_dec]
+}
+
 /// Project a catalog quad to the tangent plane about its centroid and
-/// canonicalize.
-fn catalog_pattern(quad: &[CatalogStar]) -> Option<Pattern> {
-    let center_ra = circular_mean(quad.iter().map(|s| s.ra));
-    let center_dec = quad.iter().map(|s| s.dec).sum::<f64>() / 4.0;
-    let tangent = Wcs {
-        crval: (center_ra, center_dec),
-        crpix: (0.0, 0.0),
-        cd: [[1.0, 0.0], [0.0, 1.0]],
-    };
+/// canonicalize. Works entirely from precomputed unit vectors: the
+/// centroid is the normalized vector sum, and the gnomonic projection is
+/// a pair of dot products per star.
+fn catalog_pattern(quad: &[([f64; 3], &CatalogStar)]) -> Option<Pattern> {
+    let mut center = [0.0f64; 3];
+    for (u, _) in quad {
+        center[0] += u[0];
+        center[1] += u[1];
+        center[2] += u[2];
+    }
+    let norm = (center[0] * center[0] + center[1] * center[1] + center[2] * center[2]).sqrt();
+    if norm <= 0.0 {
+        return None;
+    }
+    for v in &mut center {
+        *v /= norm;
+    }
+    // Local east/north tangent basis at the centroid
+    let horizontal = center[0].hypot(center[1]);
+    if horizontal < 1e-12 {
+        // Degenerate exactly at a pole; fall back to an arbitrary basis
+        return None;
+    }
+    let east = [-center[1] / horizontal, center[0] / horizontal, 0.0];
+    let north = [-center[2] * east[1], center[2] * east[0], horizontal];
+
     let mut points = [(0.0, 0.0); 4];
-    for (i, s) in quad.iter().enumerate() {
-        points[i] = tangent.world_to_pixel(s.ra, s.dec)?;
+    for (i, (u, _)) in quad.iter().enumerate() {
+        let depth = u[0] * center[0] + u[1] * center[1] + u[2] * center[2];
+        if depth <= 0.0 {
+            return None;
+        }
+        let xi = (u[0] * east[0] + u[1] * east[1] + u[2] * east[2]) / depth;
+        let eta = (u[0] * north[0] + u[1] * north[1] + u[2] * north[2]) / depth;
+        points[i] = (xi.to_degrees(), eta.to_degrees());
     }
     let (points, max_edge_deg) = canonical_quad(&points)?;
     Some(Pattern {
         points,
-        center: (center_ra, center_dec),
+        center: (
+            center[1].atan2(center[0]).to_degrees().rem_euclid(360.0),
+            center[2].asin().to_degrees(),
+        ),
         max_edge_deg,
     })
 }
