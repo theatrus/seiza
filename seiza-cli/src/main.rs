@@ -182,6 +182,10 @@ enum DownloadSource {
         /// Magnitude limit for the download
         #[arg(long, default_value_t = 15.0)]
         max_mag: f32,
+        /// Sky chunks (multiples of 192; 768 = HEALPix level 3). Deeper
+        /// magnitude limits need more chunks to stay under the TAP row cap
+        #[arg(long, default_value_t = 768)]
+        chunks: u64,
     },
     /// The Rochester Astronomy active supernova/transient list (refetched)
     Transients {
@@ -320,9 +324,11 @@ fn main() -> Result<()> {
             DownloadSource::Tycho2 { output } => download_data::download_tycho2(&output),
             DownloadSource::Openngc { output } => download_data::download_openngc(&output),
             DownloadSource::Objects { output } => download_data::download_objects(&output),
-            DownloadSource::Gaia { output, max_mag } => {
-                download_data::download_gaia(&output, max_mag)
-            }
+            DownloadSource::Gaia {
+                output,
+                max_mag,
+                chunks,
+            } => download_data::download_gaia(&output, max_mag, chunks),
             DownloadSource::Transients { output } => download_data::download_transients(&output),
         },
         Command::BuildData { source } => match source {

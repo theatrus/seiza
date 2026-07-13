@@ -188,26 +188,25 @@ const GAIA_TAP_SYNC: &str = "https://gea.esac.esa.int/tap-server/tap/sync";
 /// Gaia DR3 source_id encodes the HEALPix level-12 cell in the high bits;
 /// this spans the whole sky.
 const GAIA_SOURCE_ID_MAX: u64 = 201_326_592 << 35;
-const GAIA_CHUNKS: u64 = 768; // one per HEALPix level-3 cell
 const GAIA_MAXREC: u64 = 3_000_000;
 
 /// Gaia DR3 star positions via ESA TAP, chunked by source_id so the download
 /// resumes cleanly. Roughly 25M rows / 1.5 GB at the default magnitude limit;
 /// expect a couple of hours.
-pub fn download_gaia(output: &Path, max_mag: f32) -> Result<()> {
+pub fn download_gaia(output: &Path, max_mag: f32, chunks: u64) -> Result<()> {
     std::fs::create_dir_all(output)?;
     let mut done = 0u64;
-    for chunk in 0..GAIA_CHUNKS {
+    for chunk in 0..chunks {
         let target = output.join(format!("gaia-{chunk:04}.csv"));
         if chunk_complete(&target) {
             done += 1;
             continue;
         }
-        let lo = GAIA_SOURCE_ID_MAX / GAIA_CHUNKS * chunk;
-        let hi = if chunk + 1 == GAIA_CHUNKS {
+        let lo = GAIA_SOURCE_ID_MAX / chunks * chunk;
+        let hi = if chunk + 1 == chunks {
             GAIA_SOURCE_ID_MAX
         } else {
-            GAIA_SOURCE_ID_MAX / GAIA_CHUNKS * (chunk + 1) - 1
+            GAIA_SOURCE_ID_MAX / chunks * (chunk + 1) - 1
         };
         let query = format!(
             "SELECT ra, dec, pmra, pmdec, phot_g_mean_mag FROM gaiadr3.gaia_source \
@@ -221,12 +220,13 @@ pub fn download_gaia(output: &Path, max_mag: f32) -> Result<()> {
                 Ok(rows) => {
                     if rows >= GAIA_MAXREC {
                         bail!(
-                            "chunk {chunk} hit the {GAIA_MAXREC}-row cap; rerun with more \
-                             chunks (this should not happen at mag <= 17)"
+                            "chunk {chunk} hit the {GAIA_MAXREC}-row cap; rerun with \
+                             --chunks {}",
+                            chunks * 4
                         );
                     }
                     done += 1;
-                    println!("  chunk {chunk:04}: {rows} rows ({done}/{GAIA_CHUNKS})");
+                    println!("  chunk {chunk:04}: {rows} rows ({done}/{chunks})");
                     break;
                 }
                 Err(e) if attempts < 4 => {
