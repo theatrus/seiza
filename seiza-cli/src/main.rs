@@ -5,11 +5,12 @@ use seiza::solve::{SolveHint, solve};
 use seiza::{DetectConfig, detect_stars};
 use std::path::PathBuf;
 
+mod astap;
 mod build_data;
 mod download_data;
 
 /// Open an image file; FITS files are MTF-autostretched to 8-bit grayscale.
-fn load_image(path: &std::path::Path) -> Result<image::DynamicImage> {
+pub(crate) fn load_image(path: &std::path::Path) -> Result<image::DynamicImage> {
     let is_fits = path
         .extension()
         .and_then(|e| e.to_str())
@@ -318,6 +319,13 @@ enum BuildDataSource {
 }
 
 fn main() -> Result<()> {
+    // A raw ASTAP-style command line (or a copy of the binary named
+    // astap) routes to the ASTAP-compatible mode before clap sees it
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    if astap::looks_like_astap(&raw) {
+        return astap::run(&raw);
+    }
+
     match Cli::parse().command {
         Command::Detect {
             image,

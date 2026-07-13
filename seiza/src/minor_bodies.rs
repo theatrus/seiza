@@ -60,6 +60,10 @@ pub struct PlacedMinorBody {
     pub mag: f64,
     /// Distance from Earth, AU
     pub delta_au: f64,
+    /// Sky position angle (degrees east of north) of the characteristic
+    /// direction: anti-solar for comets (the tail), apparent motion for
+    /// asteroids (the trail)
+    pub direction_pa_deg: Option<f64>,
 }
 
 pub struct MinorBodyCatalog {
@@ -108,6 +112,7 @@ impl MinorBodyCatalog {
         limit_mag: f64,
     ) -> Vec<PlacedMinorBody> {
         let (width, height) = (dimensions.0 as f64, dimensions.1 as f64);
+        let sun = sun_geocentric_equatorial(jd);
         let mut placed: Vec<PlacedMinorBody> = self
             .bodies
             .iter()
@@ -120,6 +125,16 @@ impl MinorBodyCatalog {
                 if x < 0.0 || y < 0.0 || x >= width || y >= height {
                     return None;
                 }
+                let direction_pa_deg = match body.kind {
+                    // Comet tails point anti-sunward (first order: both
+                    // ion and dust tails)
+                    MinorBodyKind::Comet => {
+                        Some((bearing_deg(ra, dec, sun.0, sun.1) + 180.0).rem_euclid(360.0))
+                    }
+                    // Asteroids trail along their apparent motion
+                    MinorBodyKind::Asteroid => Self::position_at(body, jd + 1.0 / 24.0)
+                        .map(|(ra2, dec2, _, _)| bearing_deg(ra, dec, ra2, dec2)),
+                };
                 Some(PlacedMinorBody {
                     body: body.clone(),
                     ra,
@@ -128,6 +143,7 @@ impl MinorBodyCatalog {
                     y,
                     mag,
                     delta_au,
+                    direction_pa_deg,
                 })
             })
             .collect();
@@ -398,6 +414,31 @@ fn earth_heliocentric_ecliptic(jd: f64) -> [f64; 3] {
     let xi = a * (ecc_anom.cos() - e);
     let eta = a * (1.0 - e * e).sqrt() * ecc_anom.sin();
     rotate_to_ecliptic(xi, eta, arg_peri, incl, node)
+}
+
+/// Geocentric equatorial (RA, Dec) of the Sun at `jd`, degrees.
+fn sun_geocentric_equatorial(jd: f64) -> (f64, f64) {
+    let earth = earth_heliocentric_ecliptic(jd);
+    let (x, y, z) = (-earth[0], -earth[1], -earth[2]);
+    let (sin_ob, cos_ob) = OBLIQUITY_DEG.to_radians().sin_cos();
+    let (eq_y, eq_z) = (y * cos_ob - z * sin_ob, y * sin_ob + z * cos_ob);
+    let r = (x * x + eq_y * eq_y + eq_z * eq_z).sqrt();
+    (
+        eq_y.atan2(x).to_degrees().rem_euclid(360.0),
+        (eq_z / r).asin().to_degrees(),
+    )
+}
+
+/// Initial bearing (position angle east of north, degrees) from point 1
+/// toward point 2 on the celestial sphere.
+fn bearing_deg(ra1: f64, dec1: f64, ra2: f64, dec2: f64) -> f64 {
+    let d_ra = (ra2 - ra1).to_radians();
+    let (sin_d1, cos_d1) = dec1.to_radians().sin_cos();
+    let (sin_d2, cos_d2) = dec2.to_radians().sin_cos();
+    (d_ra.sin() * cos_d2)
+        .atan2(cos_d1 * sin_d2 - sin_d1 * cos_d2 * d_ra.cos())
+        .to_degrees()
+        .rem_euclid(360.0)
 }
 
 /// Julian date (UTC ≈ TT for labeling purposes) from a calendar date.
