@@ -14,10 +14,7 @@ fn main() {
             "seiza plate solver (ASTAP-compatible mode)",
         );
         resource
-            .set_version_info(
-                winresource::VersionInfoAttribute::FileVersion,
-                0x0001_0000_0000_0000,
-            )
+            .set_version_info(winresource::VersionInfo::FILEVERSION, 0x0001_0000_0000_0000)
             .compile()
             .expect("windows resource");
     }
