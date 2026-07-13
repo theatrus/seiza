@@ -357,6 +357,16 @@ pub fn download_mpc(output: &Path) -> Result<()> {
         &output.join("MPCORB.DAT.gz"),
         Verify::Gzip,
     )?;
-    println!("MPC element sets ready in {}", output.display());
+    // JPL SBDB: every catalogued comet with apparition-specific elements —
+    // this is what makes PAST acquisition dates work (CometEls only lists
+    // currently observable comets at current epochs). Always refetched.
+    let sbdb = output.join("sbdb-comets.json");
+    std::fs::remove_file(&sbdb).ok();
+    fetch(
+        "https://ssd-api.jpl.nasa.gov/sbdb_query.api?fields=full_name,epoch,q,e,i,om,w,tp,M1,K1&sb-kind=c",
+        &sbdb,
+        Verify::None,
+    )?;
+    println!("MPC + SBDB element sets ready in {}", output.display());
     Ok(())
 }

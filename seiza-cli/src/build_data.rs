@@ -928,11 +928,32 @@ pub fn build_minor_bodies(input: &Path, output: &Path, max_h: f32) -> Result<()>
 
     let mut bodies = Vec::new();
 
+    // JPL SBDB carries every catalogued comet with apparition-specific
+    // elements (historic acquisition dates need the elements from THAT
+    // apparition); MPC CometEls is the fallback for fresh discoveries
+    let sbdb = input.join("sbdb-comets.json");
+    if sbdb.exists() {
+        let parsed: serde_json::Value = serde_json::from_reader(std::fs::File::open(&sbdb)?)?;
+        for row in parsed["data"]
+            .as_array()
+            .map(|d| d.as_slice())
+            .unwrap_or(&[])
+        {
+            if let Some(body) = parse_sbdb_comet(row) {
+                bodies.push(body);
+            }
+        }
+    }
+    let sbdb_names: std::collections::HashSet<String> =
+        bodies.iter().map(|b| b.name.clone()).collect();
+
     let comets = input.join("CometEls.txt");
     if comets.exists() {
         let content = std::fs::read_to_string(&comets)?;
         for line in content.lines() {
-            if let Some(body) = parse_comet_line(line) {
+            if let Some(body) = parse_comet_line(line)
+                && !sbdb_names.contains(&body.name)
+            {
                 bodies.push(body);
             }
         }
@@ -985,6 +1006,30 @@ pub fn build_minor_bodies(input: &Path, output: &Path, max_h: f32) -> Result<()>
         }
     }
     Ok(())
+}
+
+/// One JPL SBDB comet row: [full_name, epoch, q, e, i, om, w, tp, M1, K1].
+fn parse_sbdb_comet(row: &serde_json::Value) -> Option<seiza::minor_bodies::MinorBody> {
+    use seiza::minor_bodies::{MinorBody, MinorBodyKind};
+    let text = |i: usize| row.get(i).and_then(|v| v.as_str()).map(str::trim);
+    let number = |i: usize| text(i).and_then(|v| v.parse::<f64>().ok());
+    let name = text(0)?.to_string();
+    if name.is_empty() {
+        return None;
+    }
+    Some(MinorBody {
+        kind: MinorBodyKind::Comet,
+        name,
+        epoch_jd: number(7)?, // perihelion time tp (TDB)
+        q_or_a: number(2)?,
+        eccentricity: number(3)?,
+        inclination_deg: number(4)?,
+        node_deg: number(5)?,
+        arg_perihelion_deg: number(6)?,
+        mean_anomaly_deg: 0.0,
+        h_mag: number(8).unwrap_or(12.0) as f32,
+        slope: number(9).unwrap_or(4.0) as f32,
+    })
 }
 
 /// One fixed-width MPC CometEls.txt record.

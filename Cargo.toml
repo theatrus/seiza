@@ -3,14 +3,14 @@ resolver = "3"
 members = ["seiza", "seiza-cli", "seiza-fits"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/theatrus/seiza"
 authors = ["Yann Ramin <github@theatr.us>"]
 
 [workspace.dependencies]
-seiza = { path = "seiza", version = "0.2.0" }
+seiza = { path = "seiza", version = "0.2.1" }
 seiza-fits = { path = "seiza-fits", version = "0.1.0" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 thiserror = "2"
