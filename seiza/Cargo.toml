@@ -16,3 +16,4 @@ thiserror.workspace = true
 memmap2.workspace = true
 rayon.workspace = true
 rustc-hash.workspace = true
+wide.workspace = true

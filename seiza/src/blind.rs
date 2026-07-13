@@ -65,6 +65,10 @@ const TIERS: &[(f64, f32)] = &[
 ];
 /// Descriptor quantization bins per dimension.
 const BINS: f64 = 128.0;
+/// Probe the neighboring bin when a descriptor value is this close to a
+/// bin edge (descriptor units). Measured image-vs-catalog descriptor
+/// noise on real frames is below 0.0007; this is ~3x that.
+const PROBE_EPSILON: f64 = 0.002;
 /// Descriptor match tolerance in bins (probes adjacent bins).
 const N_IMAGE_STARS: usize = 32;
 
@@ -83,10 +87,25 @@ type HypothesisKey = (i64, i64, i64);
 /// Vote count with the implied field center and pixel scale.
 type Hypothesis = (u32, (f64, f64), f64);
 
-/// A searchable pattern index over a catalog's bright stars.
+/// A searchable pattern index over a catalog's bright stars, frozen into
+/// sorted arrays: hash-free branchless binary search per lookup, cache
+/// friendly, and directly serializable.
 pub struct BlindIndex {
-    buckets: FxHashMap<u64, Vec<u32>>,
+    /// Sorted, unique descriptor keys
+    keys: Vec<u64>,
+    /// `keys[i]`'s candidates live at `candidates[starts[i]..starts[i+1]]`
+    starts: Vec<u32>,
+    candidates: Vec<u32>,
     patterns: Vec<Pattern>,
+}
+
+impl BlindIndex {
+    fn lookup(&self, key: u64) -> &[u32] {
+        match self.keys.binary_search(&key) {
+            Ok(i) => &self.candidates[self.starts[i] as usize..self.starts[i + 1] as usize],
+            Err(_) => &[],
+        }
+    }
 }
 
 impl BlindIndex {
@@ -104,7 +123,7 @@ impl BlindIndex {
         let units: Vec<[f64; 3]> = stars.iter().map(|s| unit_vector(s.ra, s.dec)).collect();
 
         let mut patterns = Vec::new();
-        let mut buckets: FxHashMap<u64, Vec<u32>> = FxHashMap::default();
+        let mut entries: Vec<(u64, u32)> = Vec::new();
         let mut seen: FxHashSet<[u32; 4]> = FxHashSet::default();
 
         for &(radius, mag_cap) in TIERS {
@@ -191,16 +210,34 @@ impl BlindIndex {
                     if !seen.insert(ids) {
                         continue;
                     }
-                    let index = patterns.len() as u32;
-                    for key in descriptor_keys(&descriptor(&pattern.points), 0) {
-                        buckets.entry(key).or_default().push(index);
-                    }
+                    entries.push((
+                        descriptor_key(&descriptor(&pattern.points)),
+                        patterns.len() as u32,
+                    ));
                     patterns.push(pattern);
                 }
             }
         }
 
-        Self { buckets, patterns }
+        entries.par_sort_unstable();
+        let mut keys = Vec::new();
+        let mut starts = vec![0u32];
+        let mut candidates = Vec::with_capacity(entries.len());
+        for (key, index) in entries {
+            if keys.last() != Some(&key) {
+                keys.push(key);
+                starts.push(candidates.len() as u32);
+            }
+            candidates.push(index);
+            *starts.last_mut().unwrap() = candidates.len() as u32;
+        }
+
+        Self {
+            keys,
+            starts,
+            candidates,
+            patterns,
+        }
     }
 
     pub fn pattern_count(&self) -> usize {
@@ -275,10 +312,8 @@ pub fn solve_blind(
                         };
                         stat_quads += 1;
                         let desc = descriptor(&points);
-                        for key in descriptor_keys(&desc, 1) {
-                            let Some(candidates) = index.buckets.get(&key) else {
-                                continue;
-                            };
+                        for key in descriptor_keys(&desc) {
+                            let candidates = index.lookup(key);
                             stat_candidates += candidates.len() as u64;
                             for &candidate in candidates {
                                 let pattern = &index.patterns[candidate as usize];
@@ -368,10 +403,8 @@ pub fn solve_blind(
                             };
                             stat_quads += 1;
                             let desc = descriptor(&points);
-                            for key in descriptor_keys(&desc, 1) {
-                                let Some(candidates) = index.buckets.get(&key) else {
-                                    continue;
-                                };
+                            for key in descriptor_keys(&desc) {
+                                let candidates = index.lookup(key);
                                 stat_candidates += candidates.len() as u64;
                                 for &candidate in candidates {
                                     let pattern = &index.patterns[candidate as usize];
@@ -651,33 +684,48 @@ fn descriptor(points: &[(f64, f64); 4]) -> [f64; 5] {
     ]
 }
 
-/// Quantized hash keys for a descriptor. `probe` 0 yields the single home
-/// bucket (index build); 1 yields all 3^5 adjacent buckets (query).
-fn descriptor_keys(desc: &[f64; 5], probe: i64) -> Vec<u64> {
-    let bins: Vec<i64> = desc.iter().map(|&v| (v * BINS) as i64).collect();
-    let mut keys = Vec::new();
-    let range = -probe..=probe;
-    for d0 in range.clone() {
-        for d1 in range.clone() {
-            for d2 in range.clone() {
-                for d3 in range.clone() {
-                    for d4 in range.clone() {
-                        let key = [
-                            bins[0] + d0,
-                            bins[1] + d1,
-                            bins[2] + d2,
-                            bins[3] + d3,
-                            bins[4] + d4,
-                        ];
-                        let mut packed = 0u64;
-                        for k in key {
-                            packed = packed << 8 | (k.clamp(0, 255) as u64);
-                        }
-                        keys.push(packed);
-                    }
-                }
-            }
+/// The home bucket key for a descriptor: floor-quantized bins packed
+/// 8 bits per dimension (insertion side).
+fn descriptor_key(desc: &[f64; 5]) -> u64 {
+    let mut packed = 0u64;
+    for &v in desc {
+        packed = packed << 8 | ((v * BINS) as i64).clamp(0, 255) as u64;
+    }
+    packed
+}
+
+/// Query keys for a descriptor: the home bucket, plus the neighbor bin in
+/// any dimension whose value lies within [`PROBE_EPSILON`] of a bin edge —
+/// measurement noise can only flip a bin near its boundary, so distant
+/// dimensions need no probing (typically 1-4 keys instead of 3^5).
+fn descriptor_keys(desc: &[f64; 5]) -> Vec<u64> {
+    let delta = PROBE_EPSILON * BINS;
+    let mut options: [[i64; 2]; 5] = [[0, i64::MIN]; 5];
+    let mut bins = [0i64; 5];
+    for (dim, &v) in desc.iter().enumerate() {
+        let scaled = v * BINS;
+        let bin = scaled as i64;
+        bins[dim] = bin;
+        let frac = scaled - bin as f64;
+        options[dim][0] = bin;
+        if frac < delta && bin > 0 {
+            options[dim][1] = bin - 1;
+        } else if frac > 1.0 - delta && bin < 255 {
+            options[dim][1] = bin + 1;
         }
+    }
+    let mut keys = Vec::with_capacity(4);
+    let counts = options.map(|o| if o[1] == i64::MIN { 1usize } else { 2 });
+    let total: usize = counts.iter().product();
+    for combo in 0..total {
+        let mut rest = combo;
+        let mut packed = 0u64;
+        for dim in 0..5 {
+            let pick = rest % counts[dim];
+            rest /= counts[dim];
+            packed = packed << 8 | options[dim][pick].clamp(0, 255) as u64;
+        }
+        keys.push(packed);
     }
     keys
 }

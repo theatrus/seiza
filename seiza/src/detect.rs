@@ -63,18 +63,18 @@ pub fn detect_stars(image: &image::DynamicImage, config: &DetectConfig) -> Vec<D
 
     let (background, noise) = estimate_background(pixels, width, height, config.tile_size);
 
-    // Threshold mask
-    let tiles_x = width.div_ceil(config.tile_size);
-    let above = |x: u32, y: u32| -> f32 {
-        let idx = (y * width + x) as usize;
-        let tile = ((y / config.tile_size) * tiles_x + (x / config.tile_size)) as usize;
-        let value = pixels[idx] - background[tile];
-        if value > config.sigma * noise[tile] {
-            value
-        } else {
-            0.0
-        }
-    };
+    // Background-subtracted, thresholded excess, computed once (the flood
+    // fill below revisits pixels up to nine times)
+    let excess = threshold_excess(
+        pixels,
+        width,
+        height,
+        config.tile_size,
+        &background,
+        &noise,
+        config.sigma,
+    );
+    let above = |x: u32, y: u32| -> f32 { excess[(y * width + x) as usize] };
 
     // Connected components over the thresholded mask (8-connectivity),
     // iterative flood fill to keep the stack bounded.
@@ -165,32 +165,79 @@ fn estimate_background(
     height: u32,
     tile_size: u32,
 ) -> (Vec<f32>, Vec<f32>) {
+    use rayon::prelude::*;
+
     let tiles_x = width.div_ceil(tile_size);
     let tiles_y = height.div_ceil(tile_size);
-    let mut background = Vec::with_capacity((tiles_x * tiles_y) as usize);
-    let mut noise = Vec::with_capacity((tiles_x * tiles_y) as usize);
-    let mut tile = Vec::with_capacity((tile_size * tile_size) as usize);
-
-    for ty in 0..tiles_y {
-        for tx in 0..tiles_x {
-            tile.clear();
+    // Tiles are independent: estimate them in parallel
+    (0..tiles_x * tiles_y)
+        .into_par_iter()
+        .map(|t| {
+            let (tx, ty) = (t % tiles_x, t / tiles_x);
             let x1 = ((tx + 1) * tile_size).min(width);
             let y1 = ((ty + 1) * tile_size).min(height);
+            let mut tile = Vec::with_capacity((tile_size * tile_size) as usize);
             for y in ty * tile_size..y1 {
-                for x in tx * tile_size..x1 {
-                    tile.push(pixels[(y * width + x) as usize]);
-                }
+                let row = (y * width) as usize;
+                tile.extend_from_slice(&pixels[row + (tx * tile_size) as usize..row + x1 as usize]);
             }
             let median = median_in_place(&mut tile);
-            let mut deviations: Vec<f32> = tile.iter().map(|v| (v - median).abs()).collect();
-            let mad = median_in_place(&mut deviations);
-            background.push(median);
+            for v in &mut tile {
+                *v = (*v - median).abs();
+            }
+            let mad = median_in_place(&mut tile);
             // 1.4826 * MAD estimates sigma for a normal distribution; floor
             // avoids a zero threshold on perfectly flat synthetic tiles
-            noise.push((1.4826 * mad).max(1e-6));
+            (median, (1.4826 * mad).max(1e-6))
+        })
+        .unzip()
+}
+
+/// `max(pixel - background, 0)` where the excess clears the sigma
+/// threshold, else 0 — vectorized per tile-row segment (the background
+/// and threshold are constant within one).
+fn threshold_excess(
+    pixels: &[f32],
+    width: u32,
+    height: u32,
+    tile_size: u32,
+    background: &[f32],
+    noise: &[f32],
+    sigma: f32,
+) -> Vec<f32> {
+    use wide::{CmpGt, f32x8};
+
+    let tiles_x = width.div_ceil(tile_size);
+    let mut excess = vec![0.0f32; pixels.len()];
+    for y in 0..height {
+        let ty = y / tile_size;
+        let row = (y * width) as usize;
+        for tx in 0..tiles_x {
+            let x0 = (tx * tile_size) as usize;
+            let x1 = (((tx + 1) * tile_size).min(width)) as usize;
+            let tile = (ty * tiles_x + tx) as usize;
+            let bg = f32x8::splat(background[tile]);
+            let threshold = f32x8::splat(sigma * noise[tile]);
+
+            let seg = &pixels[row + x0..row + x1];
+            let out = &mut excess[row + x0..row + x1];
+            let mut chunks = seg.chunks_exact(8);
+            let mut out_chunks = out.chunks_exact_mut(8);
+            for (chunk, out_chunk) in (&mut chunks).zip(&mut out_chunks) {
+                let value = f32x8::from(<[f32; 8]>::try_from(chunk).unwrap()) - bg;
+                let keep = value.cmp_gt(threshold);
+                out_chunk.copy_from_slice(&keep.blend(value, f32x8::ZERO).to_array());
+            }
+            let done = seg.len() - chunks.remainder().len();
+            for (value, out_value) in chunks.remainder().iter().zip(&mut out[done..]) {
+                let v = value - background[tile];
+                if v > sigma * noise[tile] {
+                    *out_value = v;
+                }
+            }
         }
     }
-    (background, noise)
+    excess
 }
 
 /// Ratio of the principal axes of the flux distribution (≥ 1).

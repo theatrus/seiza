@@ -196,11 +196,22 @@ impl FitsImage {
                 // as i16 with BZERO 32768. Fold BZERO in while staying u16.
                 let offset = bzero as i64;
                 if bscale == 1.0 && (offset == 32768 || offset == 0) {
-                    let shift = offset as i32;
+                    // Adding 32768 to an i16 is a sign-bit flip on the raw
+                    // bits: byteswap + XOR, which vectorizes cleanly. The
+                    // offset-0 case keeps the sign bit (negatives clamp to
+                    // zero below, matching the general path).
+                    let flip = if offset == 32768 { 0x8000u16 } else { 0 };
                     let mut out = Vec::with_capacity(count);
-                    for chunk in raw.chunks_exact(2) {
-                        let v = i16::from_be_bytes([chunk[0], chunk[1]]) as i32 + shift;
-                        out.push(v.clamp(0, 65535) as u16);
+                    if flip != 0 {
+                        out.extend(
+                            raw.chunks_exact(2)
+                                .map(|c| u16::from_be_bytes([c[0], c[1]]) ^ 0x8000),
+                        );
+                    } else {
+                        out.extend(
+                            raw.chunks_exact(2)
+                                .map(|c| i16::from_be_bytes([c[0], c[1]]).max(0) as u16),
+                        );
                     }
                     Pixels::U16(out)
                 } else {

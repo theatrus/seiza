@@ -167,9 +167,10 @@ pub fn solve(
         .map(|s| (s.x, s.y))
         .collect();
     let match_tol = MATCH_TOLERANCE_PX * scale_deg;
+    let grid = CatGrid::build(&cat, match_tol);
     let mut best: Option<(usize, Affine)> = None;
     for (_, affine) in &candidates {
-        let inliers = count_inliers(affine, &vote_stars, &cat, match_tol);
+        let inliers = count_inliers(affine, &vote_stars, &cat, &grid, match_tol);
         if best.as_ref().is_none_or(|(count, _)| inliers > *count) {
             best = Some((inliers, affine.clone()));
         }
@@ -186,7 +187,7 @@ pub fn solve(
     let all_stars: Vec<(f64, f64)> = stars.iter().map(|s| (s.x, s.y)).collect();
     let mut pairs = Vec::new();
     for _ in 0..REFINE_ITERATIONS {
-        pairs = match_pairs(&affine, &all_stars, &cat, match_tol);
+        pairs = match_pairs(&affine, &all_stars, &cat, &grid, match_tol);
         if pairs.len() < MIN_INLIERS {
             return Err(crate::Error::Solve(format!(
                 "refinement collapsed to {} matches",
@@ -472,10 +473,45 @@ fn solve3(m: [[f64; 3]; 3], rhs: [f64; 3]) -> Option<[f64; 3]> {
     ])
 }
 
+/// Uniform grid over catalog tangent-plane positions, cell size = match
+/// tolerance: any point within tolerance of a query lies in the query's
+/// 3x3 cell neighborhood, so matching is O(1) per star instead of a scan.
+struct CatGrid {
+    cell: f64,
+    map: rustc_hash::FxHashMap<(i32, i32), Vec<u32>>,
+}
+
+impl CatGrid {
+    fn build(cat: &[(f64, f64, CatalogStar)], cell: f64) -> Self {
+        let mut map: rustc_hash::FxHashMap<(i32, i32), Vec<u32>> = rustc_hash::FxHashMap::default();
+        for (i, &(x, y, _)) in cat.iter().enumerate() {
+            map.entry(((x / cell) as i32, (y / cell) as i32))
+                .or_default()
+                .push(i as u32);
+        }
+        Self { cell, map }
+    }
+
+    /// Indices of catalog entries in the 3x3 neighborhood of `(u, v)`.
+    fn near(&self, u: f64, v: f64) -> impl Iterator<Item = u32> + '_ {
+        let (cx, cy) = ((u / self.cell) as i32, (v / self.cell) as i32);
+        (-1..=1).flat_map(move |dx| {
+            (-1..=1).flat_map(move |dy| {
+                self.map
+                    .get(&(cx + dx, cy + dy))
+                    .map(|v| v.iter().copied())
+                    .into_iter()
+                    .flatten()
+            })
+        })
+    }
+}
+
 fn count_inliers(
     affine: &Affine,
     stars: &[(f64, f64)],
     cat: &[(f64, f64, CatalogStar)],
+    grid: &CatGrid,
     tolerance: f64,
 ) -> usize {
     let tol_sq = tolerance * tolerance;
@@ -483,8 +519,10 @@ fn count_inliers(
         .iter()
         .filter(|&&(x, y)| {
             let (u, v) = affine.apply(x, y);
-            cat.iter()
-                .any(|&(cx, cy, _)| (cx - u).powi(2) + (cy - v).powi(2) <= tol_sq)
+            grid.near(u, v).any(|ci| {
+                let (cx, cy, _) = cat[ci as usize];
+                (cx - u).powi(2) + (cy - v).powi(2) <= tol_sq
+            })
         })
         .count()
 }
@@ -495,6 +533,7 @@ fn match_pairs(
     affine: &Affine,
     stars: &[(f64, f64)],
     cat: &[(f64, f64, CatalogStar)],
+    grid: &CatGrid,
     tolerance: f64,
 ) -> Vec<((f64, f64), usize)> {
     let tol_sq = tolerance * tolerance;
@@ -502,10 +541,11 @@ fn match_pairs(
     for (si, &(x, y)) in stars.iter().enumerate() {
         let (u, v) = affine.apply(x, y);
         let mut best: Option<(f64, usize)> = None;
-        for (ci, &(cx, cy, _)) in cat.iter().enumerate() {
+        for ci in grid.near(u, v) {
+            let (cx, cy, _) = cat[ci as usize];
             let d = (cx - u).powi(2) + (cy - v).powi(2);
             if d <= tol_sq && best.is_none_or(|(bd, _)| d < bd) {
-                best = Some((d, ci));
+                best = Some((d, ci as usize));
             }
         }
         if let Some((d, ci)) = best {
