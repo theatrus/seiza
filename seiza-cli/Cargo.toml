@@ -24,3 +24,20 @@ imageproc.workspace = true
 flate2.workspace = true
 ureq.workspace = true
 sha2.workspace = true
+
+[package.metadata.generate-rpm]
+summary = "Star detection, plate solving, and astro dataset tools"
+assets = [
+    { source = "target/release/seiza", dest = "/usr/bin/seiza", mode = "755" },
+    { source = "README.md", dest = "/usr/share/doc/seiza-cli/README.md", mode = "644", doc = true },
+    { source = "LICENSE", dest = "/usr/share/licenses/seiza-cli/LICENSE", mode = "644" },
+]
+
+[package.metadata.deb]
+maintainer = "Yann Ramin <github@theatr.us>"
+extended-description = "Star detection, hinted and blind plate solving, and star/object dataset management for astrophotography."
+section = "science"
+assets = [
+    ["target/release/seiza", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/seiza-cli/", "644"],
+]
