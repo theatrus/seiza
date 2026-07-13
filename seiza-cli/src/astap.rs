@@ -55,7 +55,10 @@ pub fn run(raw: &[String]) -> Result<()> {
             // Failures still write the result file: the caller ignores
             // the exit code and reads only the ini
             let message = format!("{e:#}").replace(['\r', '\n'], " ");
-            write_ini(&ini, &["PLTSOLVD=F".to_string(), format!("ERROR={message}")])?;
+            write_ini(
+                &ini,
+                &["PLTSOLVD=F".to_string(), format!("ERROR={message}")],
+            )?;
             Err(e)
         }
     }
