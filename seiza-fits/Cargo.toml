@@ -11,3 +11,4 @@ keywords = ["astronomy", "astrophotography", "fits", "image"]
 categories = ["science", "multimedia::images", "parser-implementations"]
 
 [dependencies]
+multiversion = "0.8"

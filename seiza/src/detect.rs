@@ -195,7 +195,9 @@ fn estimate_background(
 
 /// `max(pixel - background, 0)` where the excess clears the sigma
 /// threshold, else 0 — vectorized per tile-row segment (the background
-/// and threshold are constant within one).
+/// and threshold are constant within one). Multiversioned so release
+/// binaries built for baseline x86-64 still dispatch AVX2 at runtime.
+#[multiversion::multiversion(targets("x86_64+avx2+fma", "x86_64+sse4.1", "aarch64+neon"))]
 fn threshold_excess(
     pixels: &[f32],
     width: u32,

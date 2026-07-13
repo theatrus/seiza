@@ -196,23 +196,31 @@ impl FitsImage {
                 // as i16 with BZERO 32768. Fold BZERO in while staying u16.
                 let offset = bzero as i64;
                 if bscale == 1.0 && (offset == 32768 || offset == 0) {
+                    #[multiversion::multiversion(targets(
+                        "x86_64+avx2",
+                        "x86_64+sse4.1",
+                        "aarch64+neon"
+                    ))]
+                    fn fold_be_u16(raw: &[u8], flip: u16, out: &mut Vec<u16>) {
+                        if flip != 0 {
+                            out.extend(
+                                raw.chunks_exact(2)
+                                    .map(|c| u16::from_be_bytes([c[0], c[1]]) ^ 0x8000),
+                            );
+                        } else {
+                            out.extend(
+                                raw.chunks_exact(2)
+                                    .map(|c| i16::from_be_bytes([c[0], c[1]]).max(0) as u16),
+                            );
+                        }
+                    }
                     // Adding 32768 to an i16 is a sign-bit flip on the raw
                     // bits: byteswap + XOR, which vectorizes cleanly. The
                     // offset-0 case keeps the sign bit (negatives clamp to
                     // zero below, matching the general path).
                     let flip = if offset == 32768 { 0x8000u16 } else { 0 };
                     let mut out = Vec::with_capacity(count);
-                    if flip != 0 {
-                        out.extend(
-                            raw.chunks_exact(2)
-                                .map(|c| u16::from_be_bytes([c[0], c[1]]) ^ 0x8000),
-                        );
-                    } else {
-                        out.extend(
-                            raw.chunks_exact(2)
-                                .map(|c| i16::from_be_bytes([c[0], c[1]]).max(0) as u16),
-                        );
-                    }
+                    fold_be_u16(raw, flip, &mut out);
                     Pixels::U16(out)
                 } else {
                     let mut out = Vec::with_capacity(count);
