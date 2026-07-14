@@ -195,6 +195,8 @@ pub fn build_transients(input: &Path, output: &Path) -> Result<()> {
                 source: "Rochester Latest Supernovae".to_string(),
                 aliases: Vec::new(),
                 parent_ids: Vec::new(),
+                alternate_ids: Vec::new(),
+                alternate_sources: Vec::new(),
             },
         });
     }
@@ -385,9 +387,9 @@ fn parse_tycho2_suppl_line(line: &str, epoch: f64) -> Option<(f64, f64, f32)> {
     Some((ra, dec, mag))
 }
 
-/// Build an object catalog from OpenNGC, VizieR Sharpless/Barnard TSVs, and
-/// the IAU star-name list, whichever are present in `input`.
-pub fn build_objects(input: &Path, output: &Path) -> Result<()> {
+/// Build an object catalog from OpenNGC, selected VizieR tables, and the IAU
+/// star-name list, whichever are present in `input`.
+pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>) -> Result<()> {
     use seiza::objects::{ObjectCatalog, ObjectKind, ObjectMetadata, SkyObject};
 
     let mut objects = Vec::new();
@@ -459,6 +461,8 @@ pub fn build_objects(input: &Path, output: &Path) -> Result<()> {
                     source: source.to_string(),
                     aliases: Vec::new(),
                     parent_ids: Vec::new(),
+                    alternate_ids: Vec::new(),
+                    alternate_sources: Vec::new(),
                 },
             });
         }
@@ -507,11 +511,16 @@ pub fn build_objects(input: &Path, output: &Path) -> Result<()> {
             let Ok(number) = fields[2].parse::<u32>() else {
                 continue;
             };
+            let suffix = if file == "ugc.tsv" {
+                fields.get(3).copied().unwrap_or("")
+            } else {
+                ""
+            };
             let (major, minor, pa) = match file {
                 "ugc.tsv" => (
-                    fields.get(3).and_then(|v| v.parse::<f32>().ok()),
                     fields.get(4).and_then(|v| v.parse::<f32>().ok()),
                     fields.get(5).and_then(|v| v.parse::<f32>().ok()),
+                    fields.get(6).and_then(|v| v.parse::<f32>().ok()),
                 ),
                 // LDN publishes an area in square degrees
                 "ldn.tsv" => (
@@ -540,13 +549,15 @@ pub fn build_objects(input: &Path, output: &Path) -> Result<()> {
                 major_arcmin: major.filter(|v| *v > 0.0),
                 minor_arcmin: minor.filter(|v| *v > 0.0),
                 position_angle_deg: pa,
-                name: format!("{prefix}{number}"),
+                name: format!("{prefix}{number}{suffix}"),
                 common_name: String::new(),
                 metadata: ObjectMetadata {
-                    id: format!("{id_prefix}{number}"),
+                    id: format!("{id_prefix}{number}{suffix}"),
                     source: source.to_string(),
                     aliases: Vec::new(),
                     parent_ids: Vec::new(),
+                    alternate_ids: Vec::new(),
+                    alternate_sources: Vec::new(),
                 },
             });
         }
@@ -615,6 +626,8 @@ pub fn build_objects(input: &Path, output: &Path) -> Result<()> {
                     source: "VizieR VII/237/pgc".to_string(),
                     aliases: Vec::new(),
                     parent_ids: Vec::new(),
+                    alternate_ids: Vec::new(),
+                    alternate_sources: Vec::new(),
                 },
             });
         }
@@ -661,6 +674,8 @@ pub fn build_objects(input: &Path, output: &Path) -> Result<()> {
                     source: "VizieR V/50/catalog".to_string(),
                     aliases: Vec::new(),
                     parent_ids: Vec::new(),
+                    alternate_ids: Vec::new(),
+                    alternate_sources: Vec::new(),
                 },
             });
         }
@@ -706,6 +721,8 @@ pub fn build_objects(input: &Path, output: &Path) -> Result<()> {
                     source: "VizieR VII/284/snrs".to_string(),
                     aliases: Vec::new(),
                     parent_ids: Vec::new(),
+                    alternate_ids: Vec::new(),
+                    alternate_sources: Vec::new(),
                 },
             });
         }
@@ -754,8 +771,36 @@ pub fn build_objects(input: &Path, output: &Path) -> Result<()> {
                     source: "VizieR III/215/table13".to_string(),
                     aliases: Vec::new(),
                     parent_ids: Vec::new(),
+                    alternate_ids: Vec::new(),
+                    alternate_sources: Vec::new(),
                 },
             });
+        }
+    }
+
+    // Bright-nebula catalogs contain explicit cross-identifications. Merge
+    // only on those identifiers: the LBN documentation notes that distinct
+    // regions can intentionally share an identical center, so positional
+    // deduplication would destroy real sub-objects.
+    let mut identity_index = ObjectIdentityIndex::new(&objects);
+    let mut merge_stats = ObjectMergeStats::default();
+    for (file, parser) in [
+        (
+            "ced.tsv",
+            parse_cederblad_line as fn(&str) -> Option<SkyObject>,
+        ),
+        ("lbn.tsv", parse_lbn_line as fn(&str) -> Option<SkyObject>),
+    ] {
+        let path = input.join(file);
+        if !path.exists() {
+            continue;
+        }
+        sources += 1;
+        let content = std::fs::read_to_string(&path)?;
+        for line in content.lines() {
+            if let Some(object) = parser(line) {
+                identity_index.merge_or_add(&mut objects, object, &mut merge_stats);
+            }
         }
     }
 
@@ -767,14 +812,458 @@ pub fn build_objects(input: &Path, output: &Path) -> Result<()> {
         );
     }
 
+    let audit = audit_object_metadata(&objects)?;
     let catalog = ObjectCatalog::new(objects);
     let count = catalog.len();
     catalog.write_to(output)?;
+    if let Some(manifest) = source_manifest {
+        write_object_source_manifest(
+            input,
+            output,
+            manifest,
+            catalog.objects(),
+            audit,
+            merge_stats,
+        )?;
+    }
     println!(
-        "{count} objects from {sources} sources written to {}",
-        output.display()
+        "object metadata: {} aliases, {} alternate IDs, {} alternate sources, {} parent links ({} unresolved)",
+        audit.aliases,
+        audit.alternate_ids,
+        audit.alternate_sources,
+        audit.parent_links,
+        audit.unresolved_parent_links,
+    );
+    println!(
+        "{count} objects from {sources} source files written to {} ({} new bright-nebula records, {} cross-catalog merges, {} ambiguous cross-identifications retained separately)",
+        output.display(),
+        merge_stats.added,
+        merge_stats.merged,
+        merge_stats.ambiguous,
     );
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ObjectMergeStats {
+    added: usize,
+    merged: usize,
+    ambiguous: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ObjectMetadataAudit {
+    aliases: usize,
+    alternate_ids: usize,
+    alternate_sources: usize,
+    parent_links: usize,
+    unresolved_parent_links: usize,
+}
+
+fn audit_object_metadata(objects: &[seiza::objects::SkyObject]) -> Result<ObjectMetadataAudit> {
+    let mut primary_ids = std::collections::HashSet::with_capacity(objects.len());
+    let mut audit = ObjectMetadataAudit::default();
+    for object in objects {
+        if object.metadata.id.is_empty() {
+            bail!("object '{}' has no stable ID", object.name);
+        }
+        if !primary_ids.insert(object.metadata.id.as_str()) {
+            bail!("duplicate primary object ID: {}", object.metadata.id);
+        }
+        audit.aliases += object.metadata.aliases.len();
+        audit.alternate_ids += object.metadata.alternate_ids.len();
+        audit.alternate_sources += object.metadata.alternate_sources.len();
+        audit.parent_links += object.metadata.parent_ids.len();
+    }
+    for object in objects {
+        audit.unresolved_parent_links += object
+            .metadata
+            .parent_ids
+            .iter()
+            .filter(|parent| !primary_ids.contains(parent.as_str()))
+            .count();
+    }
+    Ok(audit)
+}
+
+struct ObjectIdentityIndex {
+    by_designation: std::collections::HashMap<String, Vec<usize>>,
+}
+
+impl ObjectIdentityIndex {
+    fn new(objects: &[seiza::objects::SkyObject]) -> Self {
+        let mut index = Self {
+            by_designation: std::collections::HashMap::new(),
+        };
+        for (object_index, object) in objects.iter().enumerate() {
+            index.register(object_index, object);
+        }
+        index
+    }
+
+    fn register(&mut self, object_index: usize, object: &seiza::objects::SkyObject) {
+        for designation in std::iter::once(&object.name).chain(&object.metadata.aliases) {
+            let key = designation_key(designation);
+            if key.is_empty() {
+                continue;
+            }
+            let entries = self.by_designation.entry(key).or_default();
+            if !entries.contains(&object_index) {
+                entries.push(object_index);
+            }
+        }
+    }
+
+    fn merge_or_add(
+        &mut self,
+        objects: &mut Vec<seiza::objects::SkyObject>,
+        incoming: seiza::objects::SkyObject,
+        stats: &mut ObjectMergeStats,
+    ) {
+        let mut matches = Vec::new();
+        for designation in std::iter::once(&incoming.name).chain(&incoming.metadata.aliases) {
+            if let Some(indices) = self.by_designation.get(&designation_key(designation)) {
+                matches.extend(indices.iter().copied().filter(|&index| {
+                    !source_contributes(&objects[index], &incoming.metadata.source)
+                }));
+            }
+        }
+        matches.sort_unstable();
+        matches.dedup();
+
+        if matches.len() == 1 {
+            let object_index = matches[0];
+            merge_catalog_record(&mut objects[object_index], incoming);
+            self.register(object_index, &objects[object_index]);
+            stats.merged += 1;
+        } else {
+            if matches.len() > 1 {
+                stats.ambiguous += 1;
+            }
+            let object_index = objects.len();
+            objects.push(incoming);
+            self.register(object_index, &objects[object_index]);
+            stats.added += 1;
+        }
+    }
+}
+
+fn source_contributes(object: &seiza::objects::SkyObject, source: &str) -> bool {
+    object.metadata.source == source
+        || object
+            .metadata
+            .alternate_sources
+            .iter()
+            .any(|existing| existing == source)
+}
+
+fn merge_catalog_record(
+    target: &mut seiza::objects::SkyObject,
+    incoming: seiza::objects::SkyObject,
+) {
+    if target.kind == seiza::objects::ObjectKind::Other {
+        target.kind = incoming.kind;
+    }
+    target.mag = target.mag.or(incoming.mag);
+    target.major_arcmin = target.major_arcmin.or(incoming.major_arcmin);
+    target.minor_arcmin = target.minor_arcmin.or(incoming.minor_arcmin);
+    target.position_angle_deg = target.position_angle_deg.or(incoming.position_angle_deg);
+    if target.common_name.is_empty() {
+        target.common_name = incoming.common_name;
+    }
+
+    add_alias(target, incoming.name);
+    for alias in incoming.metadata.aliases {
+        add_alias(target, alias);
+    }
+    if incoming.metadata.id != target.metadata.id {
+        add_unique(&mut target.metadata.alternate_ids, incoming.metadata.id);
+    }
+    for id in incoming.metadata.alternate_ids {
+        if id != target.metadata.id {
+            add_unique(&mut target.metadata.alternate_ids, id);
+        }
+    }
+    if incoming.metadata.source != target.metadata.source {
+        add_unique(
+            &mut target.metadata.alternate_sources,
+            incoming.metadata.source,
+        );
+    }
+    for source in incoming.metadata.alternate_sources {
+        if source != target.metadata.source {
+            add_unique(&mut target.metadata.alternate_sources, source);
+        }
+    }
+    for parent in incoming.metadata.parent_ids {
+        add_unique(&mut target.metadata.parent_ids, parent);
+    }
+}
+
+fn add_alias(object: &mut seiza::objects::SkyObject, alias: String) {
+    let key = designation_key(&alias);
+    if key.is_empty()
+        || designation_key(&object.name) == key
+        || object
+            .metadata
+            .aliases
+            .iter()
+            .any(|existing| designation_key(existing) == key)
+    {
+        return;
+    }
+    object.metadata.aliases.push(alias);
+}
+
+fn add_unique(values: &mut Vec<String>, value: String) {
+    if !value.is_empty() && !values.contains(&value) {
+        values.push(value);
+    }
+}
+
+fn designation_key(value: &str) -> String {
+    let compact: String = value
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(char::to_uppercase)
+        .collect();
+    if compact.is_empty() {
+        return compact;
+    }
+    let number_start = if compact.starts_with("SH2") {
+        3
+    } else {
+        compact
+            .char_indices()
+            .find_map(|(index, c)| c.is_ascii_digit().then_some(index))
+            .unwrap_or(compact.len())
+    };
+    if number_start == compact.len() {
+        return compact;
+    }
+    let number_end = compact[number_start..]
+        .char_indices()
+        .find_map(|(index, c)| (!c.is_ascii_digit()).then_some(number_start + index))
+        .unwrap_or(compact.len());
+    let number = compact[number_start..number_end].trim_start_matches('0');
+    let number = if number.is_empty() { "0" } else { number };
+    format!(
+        "{}{}{}",
+        &compact[..number_start],
+        number,
+        &compact[number_end..]
+    )
+}
+
+fn catalog_aliases(value: &str) -> Vec<String> {
+    let mut aliases: Vec<String> = Vec::new();
+    for value in value.split([',', ';', '|']) {
+        let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+        if value.is_empty() {
+            continue;
+        }
+        let compact: String = value
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .flat_map(char::to_uppercase)
+            .collect();
+        let canonical = if let Some(number) = compact.strip_prefix("SH2") {
+            format!("Sh2-{}", normalized_number(number))
+        } else if let Some(number) = compact.strip_prefix("CED") {
+            format!("Ced {}", normalized_number(number))
+        } else if let Some(number) = compact.strip_prefix("LBN") {
+            format!("LBN {}", normalized_number(number))
+        } else {
+            value
+        };
+        if !aliases
+            .iter()
+            .any(|existing| designation_key(existing) == designation_key(&canonical))
+        {
+            aliases.push(canonical);
+        }
+    }
+    aliases
+}
+
+fn lbn_cross_aliases(value: &str) -> Vec<String> {
+    catalog_aliases(value)
+        .into_iter()
+        .map(|alias| {
+            let compact: String = alias
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .flat_map(char::to_uppercase)
+                .collect();
+            if let Some(number) = compact.strip_prefix('S')
+                && number.starts_with(|c: char| c.is_ascii_digit())
+            {
+                format!("Sh2-{}", normalized_number(number))
+            } else if let Some(number) = compact.strip_prefix('C')
+                && number.starts_with(|c: char| c.is_ascii_digit())
+            {
+                format!("Ced {}", normalized_number(number))
+            } else {
+                alias
+            }
+        })
+        .collect()
+}
+
+fn prefixed_catalog_aliases(value: &str, prefix: &str) -> Vec<String> {
+    value
+        .split([',', ';'])
+        .flat_map(|value| {
+            let value = value.trim();
+            if value.is_empty() {
+                Vec::new()
+            } else if value
+                .to_ascii_uppercase()
+                .starts_with(&prefix.to_ascii_uppercase())
+            {
+                catalog_aliases(value)
+            } else {
+                catalog_aliases(&format!("{prefix} {value}"))
+            }
+        })
+        .collect()
+}
+
+fn normalized_number(value: &str) -> String {
+    let number_end = value
+        .char_indices()
+        .find_map(|(index, c)| (!c.is_ascii_digit()).then_some(index))
+        .unwrap_or(value.len());
+    let number = value[..number_end].trim_start_matches('0');
+    let number = if number.is_empty() { "0" } else { number };
+    format!("{number}{}", &value[number_end..])
+}
+
+fn stable_id_for_alias(alias: &str) -> Option<String> {
+    let key = designation_key(alias);
+    for (prefix, namespace) in [
+        ("NGC", "openngc:NGC"),
+        ("IC", "openngc:IC"),
+        ("SH2", "vizier:VII/20:Sh2-"),
+        ("CED", "vizier:VII/231:Ced"),
+        ("LBN", "vizier:VII/9:LBN"),
+        ("UGC", "vizier:VII/26D:UGC"),
+        ("PGC", "vizier:VII/237:PGC"),
+        ("HD", "vizier:V/50:HD"),
+        ("WR", "vizier:III/215:WR"),
+        ("M", "messier:M"),
+        ("B", "vizier:VII/220A:B"),
+        ("C", "caldwell:C"),
+    ] {
+        if let Some(value) = key.strip_prefix(prefix)
+            && value.starts_with(|c: char| c.is_ascii_digit())
+        {
+            return Some(format!("{namespace}{value}"));
+        }
+    }
+    None
+}
+
+fn parse_lbn_line(line: &str) -> Option<seiza::objects::SkyObject> {
+    use seiza::objects::{ObjectKind, ObjectMetadata, SkyObject};
+
+    if line.starts_with('#') {
+        return None;
+    }
+    let fields: Vec<&str> = line.split('\t').map(str::trim).collect();
+    if fields.len() < 6 {
+        return None;
+    }
+    let (ra, dec, number) = (
+        fields[0].parse().ok()?,
+        fields[1].parse().ok()?,
+        fields[2].parse::<u32>().ok()?,
+    );
+    let aliases = lbn_cross_aliases(fields[5]);
+    let primary_id = format!("vizier:VII/9:LBN{number}");
+    let mut alternate_ids = Vec::new();
+    for alias in &aliases {
+        if let Some(id) = stable_id_for_alias(alias)
+            && id != primary_id
+        {
+            add_unique(&mut alternate_ids, id);
+        }
+    }
+    Some(SkyObject {
+        kind: ObjectKind::Nebula,
+        ra,
+        dec,
+        mag: None,
+        major_arcmin: fields[3].parse().ok().filter(|value: &f32| *value > 0.0),
+        minor_arcmin: fields[4].parse().ok().filter(|value: &f32| *value > 0.0),
+        position_angle_deg: None,
+        name: format!("LBN {number}"),
+        common_name: String::new(),
+        metadata: ObjectMetadata {
+            id: primary_id,
+            source: "VizieR VII/9/catalog".to_string(),
+            aliases,
+            parent_ids: Vec::new(),
+            alternate_ids,
+            alternate_sources: Vec::new(),
+        },
+    })
+}
+
+fn parse_cederblad_line(line: &str) -> Option<seiza::objects::SkyObject> {
+    use seiza::objects::{ObjectKind, ObjectMetadata, SkyObject};
+
+    if line.starts_with('#') {
+        return None;
+    }
+    let fields: Vec<&str> = line.split('\t').map(str::trim).collect();
+    if fields.len() < 9 {
+        return None;
+    }
+    let (ra, dec, number) = (
+        fields[0].parse().ok()?,
+        fields[1].parse().ok()?,
+        fields[2].parse::<u32>().ok()?,
+    );
+    let suffix = fields[3];
+    let class = fields[7];
+    let spectrum = fields[8];
+    let kind = if class.starts_with('A') {
+        ObjectKind::ClusterWithNebula
+    } else if spectrum.contains(['E', 'e']) {
+        ObjectKind::HiiRegion
+    } else {
+        ObjectKind::Nebula
+    };
+    let aliases = catalog_aliases(fields[4]);
+    let primary_id = format!("vizier:VII/231:Ced{number}{suffix}");
+    let mut alternate_ids = Vec::new();
+    for alias in &aliases {
+        if let Some(id) = stable_id_for_alias(alias)
+            && id != primary_id
+        {
+            add_unique(&mut alternate_ids, id);
+        }
+    }
+    Some(SkyObject {
+        kind,
+        ra,
+        dec,
+        mag: None,
+        major_arcmin: fields[5].parse().ok().filter(|value: &f32| *value > 0.0),
+        minor_arcmin: fields[6].parse().ok().filter(|value: &f32| *value > 0.0),
+        position_angle_deg: None,
+        name: format!("Ced {number}{suffix}"),
+        common_name: String::new(),
+        metadata: ObjectMetadata {
+            id: primary_id,
+            source: "VizieR VII/231/catalog".to_string(),
+            aliases,
+            parent_ids: Vec::new(),
+            alternate_ids,
+            alternate_sources: Vec::new(),
+        },
+    })
 }
 
 /// One `;`-separated OpenNGC row. Skips duplicates and non-existent entries.
@@ -821,10 +1310,35 @@ fn parse_openngc_line(line: &str) -> Option<seiza::objects::SkyObject> {
         Some(m) if !m.is_empty() => format!("M {m}"),
         _ => catalog_name.clone(),
     };
-    let aliases = (catalog_name != name)
-        .then_some(catalog_name)
+    let primary_id = format!("openngc:{}", designation_key(&catalog_name));
+    let mut aliases: Vec<String> = (catalog_name != name)
+        .then_some(catalog_name.clone())
         .into_iter()
         .collect();
+    for alias in prefixed_catalog_aliases(fields.get(24).copied().unwrap_or(""), "NGC")
+        .into_iter()
+        .chain(prefixed_catalog_aliases(
+            fields.get(25).copied().unwrap_or(""),
+            "IC",
+        ))
+        .chain(catalog_aliases(fields.get(27).copied().unwrap_or("")))
+    {
+        if designation_key(&alias) != designation_key(&name)
+            && !aliases
+                .iter()
+                .any(|existing| designation_key(existing) == designation_key(&alias))
+        {
+            aliases.push(alias);
+        }
+    }
+    let mut alternate_ids = Vec::new();
+    for designation in std::iter::once(&name).chain(&aliases) {
+        if let Some(id) = stable_id_for_alias(designation)
+            && id != primary_id
+        {
+            add_unique(&mut alternate_ids, id);
+        }
+    }
     let common_name = fields
         .get(28)
         .and_then(|names| names.split(',').next())
@@ -843,10 +1357,12 @@ fn parse_openngc_line(line: &str) -> Option<seiza::objects::SkyObject> {
         name,
         common_name,
         metadata: ObjectMetadata {
-            id: format!("openngc:{raw_name}"),
+            id: primary_id,
             source: "OpenNGC".to_string(),
             aliases,
             parent_ids: Vec::new(),
+            alternate_ids,
+            alternate_sources: Vec::new(),
         },
     })
 }
@@ -906,8 +1422,175 @@ fn parse_iau_csn_line(line: &str) -> Option<seiza::objects::SkyObject> {
             source: "IAU Catalog of Star Names".to_string(),
             aliases: Vec::new(),
             parent_ids: Vec::new(),
+            alternate_ids: Vec::new(),
+            alternate_sources: Vec::new(),
         },
     })
+}
+
+struct ObjectSourceDescriptor {
+    label: &'static str,
+    reference_url: &'static str,
+    files: &'static [&'static str],
+}
+
+const OBJECT_SOURCE_DESCRIPTORS: &[ObjectSourceDescriptor] = &[
+    ObjectSourceDescriptor {
+        label: "OpenNGC",
+        reference_url: "https://github.com/mattiaverga/OpenNGC",
+        files: &["NGC.csv", "addendum.csv"],
+    },
+    ObjectSourceDescriptor {
+        label: "VizieR VII/20/catalog",
+        reference_url: "https://cdsarc.cds.unistra.fr/viz-bin/cat/VII/20",
+        files: &["sh2.tsv"],
+    },
+    ObjectSourceDescriptor {
+        label: "VizieR VII/220A/barnard",
+        reference_url: "https://cdsarc.cds.unistra.fr/viz-bin/cat/VII/220A",
+        files: &["barnard.tsv"],
+    },
+    ObjectSourceDescriptor {
+        label: "VizieR VII/26D/catalog",
+        reference_url: "https://cdsarc.cds.unistra.fr/viz-bin/cat/VII/26D",
+        files: &["ugc.tsv"],
+    },
+    ObjectSourceDescriptor {
+        label: "VizieR VII/7A/ldn",
+        reference_url: "https://cdsarc.cds.unistra.fr/viz-bin/cat/VII/7A",
+        files: &["ldn.tsv"],
+    },
+    ObjectSourceDescriptor {
+        label: "VizieR VII/21/catalog",
+        reference_url: "https://cdsarc.cds.unistra.fr/viz-bin/cat/VII/21",
+        files: &["vdb.tsv"],
+    },
+    ObjectSourceDescriptor {
+        label: "VizieR VII/231/catalog",
+        reference_url: "https://cdsarc.cds.unistra.fr/viz-bin/cat/VII/231",
+        files: &["ced.tsv"],
+    },
+    ObjectSourceDescriptor {
+        label: "VizieR VII/9/catalog",
+        reference_url: "https://cdsarc.cds.unistra.fr/viz-bin/cat/VII/9",
+        files: &["lbn.tsv"],
+    },
+    ObjectSourceDescriptor {
+        label: "VizieR V/50/catalog",
+        reference_url: "https://cdsarc.cds.unistra.fr/viz-bin/cat/V/50",
+        files: &["bsc.tsv"],
+    },
+    ObjectSourceDescriptor {
+        label: "VizieR VII/237/pgc",
+        reference_url: "https://cdsarc.cds.unistra.fr/viz-bin/cat/VII/237",
+        files: &["pgc.tsv"],
+    },
+    ObjectSourceDescriptor {
+        label: "VizieR VII/284/snrs",
+        reference_url: "https://cdsarc.cds.unistra.fr/viz-bin/cat/VII/284",
+        files: &["snr.tsv"],
+    },
+    ObjectSourceDescriptor {
+        label: "VizieR III/215/table13",
+        reference_url: "https://cdsarc.cds.unistra.fr/viz-bin/cat/III/215",
+        files: &["wr.tsv"],
+    },
+    ObjectSourceDescriptor {
+        label: "IAU Catalog of Star Names",
+        reference_url: "https://www.iau.org/public/themes/naming_stars/",
+        files: &["IAU-CSN.txt"],
+    },
+];
+
+fn write_object_source_manifest(
+    input: &Path,
+    output: &Path,
+    manifest: &Path,
+    objects: &[seiza::objects::SkyObject],
+    audit: ObjectMetadataAudit,
+    merge_stats: ObjectMergeStats,
+) -> Result<()> {
+    let mut counts = std::collections::BTreeMap::<&str, usize>::new();
+    for object in objects {
+        let mut sources = vec![object.metadata.source.as_str()];
+        sources.extend(object.metadata.alternate_sources.iter().map(String::as_str));
+        sources.sort_unstable();
+        sources.dedup();
+        for source in sources {
+            *counts.entry(source).or_default() += 1;
+        }
+    }
+
+    let mut sources = Vec::new();
+    for descriptor in OBJECT_SOURCE_DESCRIPTORS {
+        let mut files = Vec::new();
+        for name in descriptor.files {
+            let path = input.join(name);
+            if !path.exists() {
+                continue;
+            }
+            let (bytes, sha256) = file_digest(&path)?;
+            files.push(serde_json::json!({
+                "name": name,
+                "bytes": bytes,
+                "sha256": sha256,
+            }));
+        }
+        if files.is_empty() {
+            continue;
+        }
+        sources.push(serde_json::json!({
+            "label": descriptor.label,
+            "reference_url": descriptor.reference_url,
+            "contributing_objects": counts.get(descriptor.label).copied().unwrap_or(0),
+            "files": files,
+        }));
+    }
+
+    let (bytes, sha256) = file_digest(output)?;
+    let document = serde_json::json!({
+        "format": "SEIZAOB2",
+        "artifact": {
+            "name": output.file_name().unwrap_or_default().to_string_lossy(),
+            "objects": objects.len(),
+            "bytes": bytes,
+            "sha256": sha256,
+            "metadata": {
+                "aliases": audit.aliases,
+                "alternate_ids": audit.alternate_ids,
+                "alternate_sources": audit.alternate_sources,
+                "parent_links": audit.parent_links,
+                "unresolved_parent_links": audit.unresolved_parent_links,
+            },
+            "bright_nebula_ingest": {
+                "new_records": merge_stats.added,
+                "cross_catalog_merges": merge_stats.merged,
+                "ambiguous_cross_identifications": merge_stats.ambiguous,
+            },
+        },
+        "sources": sources,
+        "acknowledgements": [
+            "This product includes data retrieved through the VizieR catalogue access tool, CDS, Strasbourg, France.",
+            "Catalog publications and source-specific usage terms are linked by each source entry."
+        ],
+    });
+    let mut json = serde_json::to_string_pretty(&document)?;
+    json.push('\n');
+    std::fs::write(manifest, json)?;
+    println!("object source manifest written to {}", manifest.display());
+    Ok(())
+}
+
+fn file_digest(path: &Path) -> Result<(u64, String)> {
+    use sha2::Digest;
+
+    let mut file = std::fs::File::open(path)?;
+    let bytes = file.metadata()?.len();
+    let mut hasher = sha2::Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    let hash = hasher.finalize();
+    let sha256 = hash.iter().map(|byte| format!("{byte:02x}")).collect();
+    Ok((bytes, sha256))
 }
 
 /// Build star tiles from Gaia DR3 TAP CSV chunks (download-data gaia).
@@ -1276,6 +1959,174 @@ fn unpack_epoch(packed: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn object(name: &str, id: &str, source: &str) -> seiza::objects::SkyObject {
+        seiza::objects::SkyObject {
+            kind: seiza::objects::ObjectKind::Nebula,
+            ra: 312.5,
+            dec: 44.3,
+            mag: None,
+            major_arcmin: None,
+            minor_arcmin: None,
+            position_angle_deg: None,
+            name: name.to_string(),
+            common_name: String::new(),
+            metadata: seiza::objects::ObjectMetadata {
+                id: id.to_string(),
+                source: source.to_string(),
+                aliases: Vec::new(),
+                parent_ids: Vec::new(),
+                alternate_ids: Vec::new(),
+                alternate_sources: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn normalizes_catalog_designations_for_identity_matching() {
+        assert_eq!(designation_key("NGC 0224"), "NGC224");
+        assert_eq!(designation_key("Sh2-001"), "SH21");
+        assert_eq!(designation_key("Ced 055b"), "CED55B");
+
+        assert_eq!(
+            catalog_aliases("NGC 7000; Sh2-117, Ced 55, C 20"),
+            vec!["NGC 7000", "Sh2-117", "Ced 55", "C 20"]
+        );
+        assert_eq!(
+            lbn_cross_aliases("NGC 7000; S 117, C 55"),
+            vec!["NGC 7000", "Sh2-117", "Ced 55"]
+        );
+        assert_eq!(stable_id_for_alias("M 031").as_deref(), Some("messier:M31"));
+    }
+
+    #[test]
+    fn parses_lbn_cross_identifiers_and_extent() {
+        let object = parse_lbn_line("312.5\t44.3\t331\t120\t90\tNGC 7000; C 20\t1").unwrap();
+        assert_eq!(object.name, "LBN 331");
+        assert_eq!(object.metadata.id, "vizier:VII/9:LBN331");
+        assert_eq!(object.major_arcmin, Some(120.0));
+        assert_eq!(object.minor_arcmin, Some(90.0));
+        assert_eq!(object.metadata.aliases, vec!["NGC 7000", "Ced 20"]);
+        assert_eq!(
+            object.metadata.alternate_ids,
+            vec!["openngc:NGC7000", "vizier:VII/231:Ced20"]
+        );
+    }
+
+    #[test]
+    fn parses_cederblad_suffix_cross_identifiers_and_kind() {
+        let object =
+            parse_cederblad_line("83.8\t-5.4\t55\tb\tNGC 1976, M 42\t30\t20\tE\tE").unwrap();
+        assert_eq!(object.name, "Ced 55b");
+        assert_eq!(object.kind, seiza::objects::ObjectKind::HiiRegion);
+        assert_eq!(object.metadata.id, "vizier:VII/231:Ced55b");
+        assert_eq!(
+            object.metadata.alternate_ids,
+            vec!["openngc:NGC1976", "messier:M42"]
+        );
+    }
+
+    #[test]
+    fn openngc_retains_catalog_identifiers_as_aliases_and_ids() {
+        let mut fields = vec![""; 30];
+        fields[0] = "NGC0224";
+        fields[1] = "G";
+        fields[2] = "00:42:44.3";
+        fields[3] = "+41:16:09";
+        fields[5] = "177.8";
+        fields[6] = "69.7";
+        fields[8] = "4.36";
+        fields[23] = "031";
+        fields[25] = "10";
+        fields[27] = "PGC 2557, UGC 454, C 23";
+        fields[28] = "Andromeda Galaxy";
+        let object = parse_openngc_line(&fields.join(";")).unwrap();
+
+        assert_eq!(object.name, "M 31");
+        assert_eq!(object.metadata.id, "openngc:NGC224");
+        assert_eq!(
+            object.metadata.aliases,
+            vec!["NGC 224", "IC 10", "PGC 2557", "UGC 454", "C 23"]
+        );
+        assert_eq!(
+            object.metadata.alternate_ids,
+            vec![
+                "messier:M31",
+                "openngc:IC10",
+                "vizier:VII/237:PGC2557",
+                "vizier:VII/26D:UGC454",
+                "caldwell:C23"
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_cross_identifiers_merge_and_preserve_provenance() {
+        let mut objects = vec![object("NGC 7000", "openngc:NGC7000", "OpenNGC")];
+        let mut incoming = object("LBN 331", "vizier:VII/9:LBN331", "VizieR VII/9/catalog");
+        incoming.metadata.aliases.push("NGC 7000".to_string());
+        incoming.major_arcmin = Some(120.0);
+        let mut index = ObjectIdentityIndex::new(&objects);
+        let mut stats = ObjectMergeStats::default();
+
+        index.merge_or_add(&mut objects, incoming, &mut stats);
+
+        assert_eq!(objects.len(), 1);
+        assert_eq!(stats.merged, 1);
+        assert_eq!(objects[0].major_arcmin, Some(120.0));
+        assert_eq!(objects[0].metadata.aliases, vec!["LBN 331"]);
+        assert_eq!(
+            objects[0].metadata.alternate_ids,
+            vec!["vizier:VII/9:LBN331"]
+        );
+        assert_eq!(
+            objects[0].metadata.alternate_sources,
+            vec!["VizieR VII/9/catalog"]
+        );
+    }
+
+    #[test]
+    fn identical_centers_do_not_merge_without_a_cross_identifier() {
+        let mut objects = vec![object("LBN 1", "vizier:VII/9:LBN1", "VizieR VII/9/catalog")];
+        let incoming = object("LBN 2", "vizier:VII/9:LBN2", "VizieR VII/9/catalog");
+        let mut index = ObjectIdentityIndex::new(&objects);
+        let mut stats = ObjectMergeStats::default();
+
+        index.merge_or_add(&mut objects, incoming, &mut stats);
+
+        assert_eq!(objects.len(), 2);
+        assert_eq!(stats.added, 1);
+        assert_eq!(stats.merged, 0);
+    }
+
+    #[test]
+    fn repeated_cross_identifier_does_not_collapse_rows_from_one_catalog() {
+        let mut objects = vec![object("NGC 7000", "openngc:NGC7000", "OpenNGC")];
+        let mut first = object("LBN 1", "vizier:VII/9:LBN1", "VizieR VII/9/catalog");
+        first.metadata.aliases.push("NGC 7000".to_string());
+        let mut second = object("LBN 2", "vizier:VII/9:LBN2", "VizieR VII/9/catalog");
+        second.metadata.aliases.push("NGC 7000".to_string());
+        let mut index = ObjectIdentityIndex::new(&objects);
+        let mut stats = ObjectMergeStats::default();
+
+        index.merge_or_add(&mut objects, first, &mut stats);
+        index.merge_or_add(&mut objects, second, &mut stats);
+
+        assert_eq!(objects.len(), 2);
+        assert_eq!(stats.merged, 1);
+        assert_eq!(stats.added, 1);
+        assert_eq!(objects[1].name, "LBN 2");
+    }
+
+    #[test]
+    fn metadata_audit_rejects_duplicate_primary_ids() {
+        let objects = vec![
+            object("LBN 1", "vizier:VII/9:LBN1", "VizieR VII/9/catalog"),
+            object("Other", "vizier:VII/9:LBN1", "test"),
+        ];
+        let error = audit_object_metadata(&objects).unwrap_err();
+        assert!(error.to_string().contains("duplicate primary object ID"));
+    }
 
     // A real Tycho-2 record (TYC 1-1-1)
     const SAMPLE: &str = "0001 00008 1| |  2.31750494|  2.23184345|  -16.3|   -9.0| 68| 73| 1.7| 1.8|1958.89|1951.94| 4|1.0|1.0|0.9|1.0|12.146|0.158|12.146|0.223|999| |         |  2.31754222|  2.23186444|1.67|1.54| 88.0|100.8| |-0.2";

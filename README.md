@@ -65,12 +65,12 @@ seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-
 ```
 
 - **Object catalogs** — OpenNGC (NGC/IC/Messier), Sharpless, Barnard, UGC,
-  LDN, vdB, PGC, Green's Galactic supernova remnants, Wolf-Rayet stars,
-  IAU named and HD stars, and live transient (supernova/nova) lists built
-  into a compact object store. Query a known sky cone or ordered image
-  footprint without plate solving (`seiza catalog objects ...`), or query a
-  solved image with projected pixel and ellipse geometry
-  (`seiza solve ... --objects objects.bin`).
+  LDN, LBN, Cederblad, vdB, PGC, Green's Galactic supernova remnants,
+  Wolf-Rayet stars, IAU named and HD stars, and live transient
+  (supernova/nova) lists built into a compact object store. Query a known sky
+  cone or ordered image footprint without plate solving
+  (`seiza catalog objects ...`), or query a solved image with projected pixel
+  and ellipse geometry (`seiza solve ... --objects objects.bin`).
 - **FITS** — dependency-free reading with typed headers, exact
   histogram statistics, N.I.N.A.-style MTF autostretch, planar RGB
   (NAXIS3) support, and OSC debayering (`BAYERPAT`), in the

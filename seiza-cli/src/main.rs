@@ -302,7 +302,7 @@ enum DownloadSource {
         output: PathBuf,
     },
     /// All object-overlay sources: OpenNGC, Sh2, Barnard, UGC, LDN, vdB,
-    /// IAU + Bright Star Catalogue star names
+    /// LBN, Cederblad, IAU + Bright Star Catalogue star names
     Objects {
         /// Directory to download into
         #[arg(long)]
@@ -389,6 +389,9 @@ enum BuildDataSource {
         /// Output object catalog file
         #[arg(long)]
         output: PathBuf,
+        /// Optional deterministic provenance manifest with source-file hashes
+        #[arg(long)]
+        source_manifest: Option<PathBuf>,
     },
     /// Star tiles from Gaia DR3 TAP chunks (download-data gaia)
     Gaia {
@@ -524,9 +527,11 @@ fn main() -> Result<()> {
                 epoch,
                 max_mag,
             } => build_data::build_tycho2(&input, &output, epoch, max_mag),
-            BuildDataSource::Objects { input, output } => {
-                build_data::build_objects(&input, &output)
-            }
+            BuildDataSource::Objects {
+                input,
+                output,
+                source_manifest,
+            } => build_data::build_objects(&input, &output, source_manifest.as_deref()),
             BuildDataSource::Gaia {
                 input,
                 output,
@@ -864,6 +869,8 @@ fn catalog_objects(args: CatalogObjectsArgs) -> Result<()> {
                         "source": object.metadata.source,
                         "aliases": object.metadata.aliases,
                         "parent_ids": object.metadata.parent_ids,
+                        "alternate_ids": object.metadata.alternate_ids,
+                        "alternate_sources": object.metadata.alternate_sources,
                         "ra_deg": object.ra,
                         "dec_deg": object.dec,
                         "mag": object.mag,
@@ -890,12 +897,12 @@ fn catalog_objects(args: CatalogObjectsArgs) -> Result<()> {
         }
         CatalogOutputFormat::Csv => {
             println!(
-                "kind,name,common_name,ra_deg,dec_deg,mag,major_arcmin,minor_arcmin,position_angle_deg,match,distance_from_center_deg,predicted_prominence,id,source,aliases,parent_ids"
+                "kind,name,common_name,ra_deg,dec_deg,mag,major_arcmin,minor_arcmin,position_angle_deg,match,distance_from_center_deg,predicted_prominence,id,source,aliases,parent_ids,alternate_ids,alternate_sources"
             );
             for hit in &hits {
                 let object = hit.object;
                 println!(
-                    "{},{},{},{:.8},{:.8},{},{},{},{},{},{:.8},{:.8},{},{},{},{}",
+                    "{},{},{},{:.8},{:.8},{},{},{},{},{},{:.8},{:.8},{},{},{},{},{},{}",
                     object.kind.as_str(),
                     csv_field(&object.name),
                     csv_field(&object.common_name),
@@ -912,6 +919,8 @@ fn catalog_objects(args: CatalogObjectsArgs) -> Result<()> {
                     csv_field(&object.metadata.source),
                     csv_field(&object.metadata.aliases.join("|")),
                     csv_field(&object.metadata.parent_ids.join("|")),
+                    csv_field(&object.metadata.alternate_ids.join("|")),
+                    csv_field(&object.metadata.alternate_sources.join("|")),
                 );
             }
         }

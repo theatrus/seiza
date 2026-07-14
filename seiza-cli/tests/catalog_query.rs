@@ -17,6 +17,8 @@ fn object(name: &str, ra: f64, dec: f64) -> SkyObject {
             source: "test-catalog".to_string(),
             aliases: vec![format!("{name} alias")],
             parent_ids: Vec::new(),
+            alternate_ids: vec![format!("other:{}", name.to_lowercase())],
+            alternate_sources: vec!["other-catalog".to_string()],
         },
     }
 }
@@ -62,6 +64,7 @@ fn catalog_objects_supports_cone_and_polygon_json_queries() {
     assert_eq!(cone["returned"], 2);
     assert_eq!(cone["objects"][0]["center_inside"], true);
     assert_eq!(cone["objects"][0]["source"], "test-catalog");
+    assert_eq!(cone["objects"][0]["alternate_ids"][0], "other:near");
 
     let polygon = Command::new(env!("CARGO_BIN_EXE_seiza"))
         .args([

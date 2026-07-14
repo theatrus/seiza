@@ -33,9 +33,10 @@ seiza catalog objects --data objects.bin \
 `catalog objects` accepts a cone or a convex polygon whose vertices are in
 boundary order. It can filter by object kind, magnitude, angular size, and
 common-name availability; results can be emitted as a table, JSON, or CSV.
-JSON and CSV include stable IDs, source provenance, aliases, and parent IDs
-when the catalog provides them. The prominence score is a catalog-based
-prediction, not proof that the object is visible in the image pixels.
+JSON and CSV include primary and alternate stable IDs, primary and contributing
+source provenance, aliases, and parent IDs when the catalog provides them. The
+prominence score is a catalog-based prediction, not proof that the object is
+visible in the image pixels.
 
 ## Use with N.I.N.A.
 
@@ -69,10 +70,14 @@ seiza download-data gaia --output raw/gaia        # Gaia DR3 via TAP, resumable
 seiza build-data gaia --input raw/gaia --output stars-gaia.bin
 
 seiza download-data objects --output raw/objects
-seiza build-data objects --input raw/objects --output objects.bin
+seiza build-data objects --input raw/objects --output objects.bin \
+  --source-manifest objects.sources.json
 seiza download-data transients --output raw/transients
 seiza build-data transients --input raw/transients --output transients.bin
 ```
+
+The optional source manifest records the output hash and size, metadata
+coverage counts, source URLs, and hashes of every raw catalog file used.
 
 FITS files are read natively (see
 [seiza-fits](https://crates.io/crates/seiza-fits)) with automatic
