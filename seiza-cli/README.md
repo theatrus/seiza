@@ -21,7 +21,20 @@ seiza solve-blind image.jpg --data stars.bin --min-scale 0.5 --max-scale 15
 # Annotate detections or list objects in a solved field
 seiza detect image.jpg --annotate out.png
 seiza solve image.jpg --data stars.bin ... --objects objects.bin
+
+# Query objects when sky bounds are already known; no image or solve needed
+seiza catalog objects --data objects.bin --ra 10.6848 --dec 41.2691 --radius 3
+seiza catalog objects --data objects.bin \
+  --corner 8.91,42.14 --corner 12.47,42.02 \
+  --corner 12.31,40.35 --corner 9.02,40.46 \
+  --sort prominence --format json
 ```
+
+`catalog objects` accepts a cone or a convex polygon whose vertices are in
+boundary order. It can filter by object kind, magnitude, angular size, and
+common-name availability; results can be emitted as a table, JSON, or CSV.
+The prominence score is a catalog-based prediction, not proof that the object
+is visible in the image pixels.
 
 ## Use with N.I.N.A.
 

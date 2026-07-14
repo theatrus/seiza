@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use seiza::catalog::{StarCatalog, TileCatalog};
+use seiza::objects::{ObjectCatalog, ObjectKind, ObjectQuery, ObjectSort, SkyRegion};
 use seiza::solve::{SolveHint, solve};
 use seiza::{DetectConfig, detect_stars};
 use std::path::PathBuf;
@@ -160,6 +161,101 @@ enum Command {
         #[arg(long, default_value_t = 25)]
         limit: usize,
     },
+    /// Query astronomical catalogs without plate-solving an image
+    Catalog {
+        #[command(subcommand)]
+        query: CatalogCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum CatalogCommand {
+    /// List named and deep-sky objects in a known sky region
+    Objects {
+        #[command(flatten)]
+        args: CatalogObjectsArgs,
+    },
+}
+
+#[derive(Args)]
+struct CatalogObjectsArgs {
+    /// Object catalog file built by build-data objects
+    #[arg(long)]
+    data: PathBuf,
+    /// Cone center RA, ICRS degrees; use with --dec and --radius
+    #[arg(long, allow_negative_numbers = true)]
+    ra: Option<f64>,
+    /// Cone center Dec, ICRS degrees; use with --ra and --radius
+    #[arg(long, allow_negative_numbers = true)]
+    dec: Option<f64>,
+    /// Cone radius in degrees; use with --ra and --dec
+    #[arg(long)]
+    radius: Option<f64>,
+    /// Convex image-footprint vertex as RA,DEC in boundary order; repeat 3+
+    /// times. Conflicts with the cone arguments
+    #[arg(
+        long,
+        value_name = "RA,DEC",
+        allow_hyphen_values = true,
+        value_parser = parse_sky_coordinate
+    )]
+    corner: Vec<SkyCoordinate>,
+    /// Include only these object kinds; repeat or comma-separate values
+    #[arg(long, value_delimiter = ',', value_parser = parse_object_kind)]
+    kind: Vec<ObjectKind>,
+    /// Faintest integrated visual magnitude to include; unknowns are excluded
+    #[arg(long, allow_negative_numbers = true)]
+    max_mag: Option<f32>,
+    /// Minimum catalog major axis in arcminutes; unknowns are excluded
+    #[arg(long)]
+    min_size: Option<f32>,
+    /// Require a common/popular name in addition to a catalog designation
+    #[arg(long)]
+    common_name_only: bool,
+    /// Exclude objects whose extent overlaps the region but center is outside
+    #[arg(long)]
+    center_only: bool,
+    /// Maximum results; zero means unlimited
+    #[arg(long, default_value_t = 25)]
+    limit: usize,
+    #[arg(long, value_enum, default_value_t = CatalogSortArg::Prominence)]
+    sort: CatalogSortArg,
+    #[arg(long, value_enum, default_value_t = CatalogOutputFormat::Table)]
+    format: CatalogOutputFormat,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SkyCoordinate {
+    ra: f64,
+    dec: f64,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CatalogSortArg {
+    Prominence,
+    Size,
+    Magnitude,
+    Distance,
+    Name,
+}
+
+impl From<CatalogSortArg> for ObjectSort {
+    fn from(value: CatalogSortArg) -> Self {
+        match value {
+            CatalogSortArg::Prominence => Self::Prominence,
+            CatalogSortArg::Size => Self::Size,
+            CatalogSortArg::Magnitude => Self::Magnitude,
+            CatalogSortArg::Distance => Self::Distance,
+            CatalogSortArg::Name => Self::Name,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CatalogOutputFormat {
+    Table,
+    Json,
+    Csv,
 }
 
 #[derive(Subcommand)]
@@ -439,6 +535,9 @@ fn main() -> Result<()> {
             radius,
             limit,
         } => cone(&data, ra, dec, radius, limit),
+        Command::Catalog { query } => match query {
+            CatalogCommand::Objects { args } => catalog_objects(args),
+        },
     }
 }
 
@@ -557,6 +656,219 @@ fn cone(data: &std::path::Path, ra: f64, dec: f64, radius: f64, limit: usize) ->
         println!("{:>12.6} {:>12.6} {:>7.3}", star.ra, star.dec, star.mag);
     }
     Ok(())
+}
+
+fn parse_sky_coordinate(value: &str) -> std::result::Result<SkyCoordinate, String> {
+    let (ra, dec) = value
+        .split_once(',')
+        .ok_or_else(|| "expected RA,DEC in decimal degrees".to_string())?;
+    let ra = ra
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| format!("invalid RA in {value:?}"))?;
+    let dec = dec
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| format!("invalid Dec in {value:?}"))?;
+    Ok(SkyCoordinate { ra, dec })
+}
+
+fn parse_object_kind(value: &str) -> std::result::Result<ObjectKind, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "galaxy" => Ok(ObjectKind::Galaxy),
+        "open-cluster" => Ok(ObjectKind::OpenCluster),
+        "globular-cluster" => Ok(ObjectKind::GlobularCluster),
+        "nebula" => Ok(ObjectKind::Nebula),
+        "planetary-nebula" => Ok(ObjectKind::PlanetaryNebula),
+        "hii" | "hii-region" => Ok(ObjectKind::HiiRegion),
+        "snr" | "supernova-remnant" => Ok(ObjectKind::SupernovaRemnant),
+        "dark-nebula" => Ok(ObjectKind::DarkNebula),
+        "cluster-nebula" => Ok(ObjectKind::ClusterWithNebula),
+        "star" => Ok(ObjectKind::Star),
+        "double-star" => Ok(ObjectKind::DoubleStar),
+        "association" => Ok(ObjectKind::Association),
+        "other" => Ok(ObjectKind::Other),
+        "transient" => Ok(ObjectKind::Transient),
+        _ => Err(format!(
+            "unknown kind {value:?}; expected galaxy, open-cluster, globular-cluster, \
+             nebula, planetary-nebula, hii-region, supernova-remnant, dark-nebula, \
+             cluster-nebula, star, double-star, association, other, or transient"
+        )),
+    }
+}
+
+fn catalog_objects(args: CatalogObjectsArgs) -> Result<()> {
+    if args.max_mag.is_some_and(|value| !value.is_finite()) {
+        anyhow::bail!("--max-mag must be finite");
+    }
+    if args
+        .min_size
+        .is_some_and(|value| !value.is_finite() || value < 0.0)
+    {
+        anyhow::bail!("--min-size must be finite and non-negative");
+    }
+
+    let cone_requested = args.ra.is_some() || args.dec.is_some() || args.radius.is_some();
+    let region = if !args.corner.is_empty() {
+        if cone_requested {
+            anyhow::bail!("--corner conflicts with --ra, --dec, and --radius");
+        }
+        SkyRegion::Polygon {
+            vertices: args
+                .corner
+                .iter()
+                .map(|corner| (corner.ra, corner.dec))
+                .collect(),
+        }
+    } else {
+        let (Some(ra), Some(dec), Some(radius_deg)) = (args.ra, args.dec, args.radius) else {
+            anyhow::bail!(
+                "specify either --ra/--dec/--radius or at least three ordered --corner RA,DEC values"
+            );
+        };
+        SkyRegion::Cone {
+            center: (ra, dec),
+            radius_deg,
+        }
+    };
+
+    let catalog = ObjectCatalog::open(&args.data)
+        .with_context(|| format!("failed to open {}", args.data.display()))?;
+    let query = ObjectQuery {
+        kinds: args.kind,
+        max_mag: args.max_mag,
+        min_major_arcmin: args.min_size,
+        common_name_only: args.common_name_only,
+        include_extent_overlaps: !args.center_only,
+        limit: (args.limit > 0).then_some(args.limit),
+        sort: args.sort.into(),
+    };
+    let hits = catalog
+        .query_region(&region, &query)
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+    match args.format {
+        CatalogOutputFormat::Table => {
+            println!(
+                "{} of {} catalog objects matched:",
+                hits.len(),
+                catalog.len()
+            );
+            println!(
+                "{:>6} {:<7} {:<20} {:<30} {:>10} {:>10} {:>7} {:>8}",
+                "score", "match", "kind", "object", "ra", "dec", "mag", "size'"
+            );
+            for hit in &hits {
+                let object = hit.object;
+                let name = if object.common_name.is_empty() {
+                    object.name.clone()
+                } else {
+                    format!("{} ({})", object.name, object.common_name)
+                };
+                let mag = object
+                    .mag
+                    .map(|value| format!("{value:.2}"))
+                    .unwrap_or_else(|| "-".to_string());
+                let size = object
+                    .major_arcmin
+                    .map(|value| format!("{value:.1}"))
+                    .unwrap_or_else(|| "-".to_string());
+                println!(
+                    "{:>5.1}% {:<7} {:<20} {:<30} {:>10.5} {:>10.5} {:>7} {:>8}",
+                    hit.predicted_prominence * 100.0,
+                    if hit.extent_only { "extent" } else { "center" },
+                    object.kind.as_str(),
+                    name,
+                    object.ra,
+                    object.dec,
+                    mag,
+                    size
+                );
+            }
+        }
+        CatalogOutputFormat::Json => {
+            let region_json = match &region {
+                SkyRegion::Cone { center, radius_deg } => serde_json::json!({
+                    "type": "cone",
+                    "center": { "ra_deg": center.0, "dec_deg": center.1 },
+                    "radius_deg": radius_deg,
+                }),
+                SkyRegion::Polygon { vertices } => serde_json::json!({
+                    "type": "polygon",
+                    "vertices": vertices.iter().map(|&(ra, dec)| {
+                        serde_json::json!({ "ra_deg": ra, "dec_deg": dec })
+                    }).collect::<Vec<_>>(),
+                }),
+            };
+            let objects = hits
+                .iter()
+                .map(|hit| {
+                    let object = hit.object;
+                    serde_json::json!({
+                        "kind": object.kind.as_str(),
+                        "name": object.name,
+                        "common_name": object.common_name,
+                        "ra_deg": object.ra,
+                        "dec_deg": object.dec,
+                        "mag": object.mag,
+                        "major_arcmin": object.major_arcmin,
+                        "minor_arcmin": object.minor_arcmin,
+                        "position_angle_deg": object.position_angle_deg,
+                        "center_inside": hit.center_inside,
+                        "extent_only": hit.extent_only,
+                        "distance_from_center_deg": hit.distance_from_center_deg,
+                        "predicted_prominence": hit.predicted_prominence,
+                    })
+                })
+                .collect::<Vec<_>>();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "catalog": args.data.display().to_string(),
+                    "catalog_objects": catalog.len(),
+                    "region": region_json,
+                    "returned": objects.len(),
+                    "objects": objects,
+                }))?
+            );
+        }
+        CatalogOutputFormat::Csv => {
+            println!(
+                "kind,name,common_name,ra_deg,dec_deg,mag,major_arcmin,minor_arcmin,position_angle_deg,match,distance_from_center_deg,predicted_prominence"
+            );
+            for hit in &hits {
+                let object = hit.object;
+                println!(
+                    "{},{},{},{:.8},{:.8},{},{},{},{},{},{:.8},{:.8}",
+                    object.kind.as_str(),
+                    csv_field(&object.name),
+                    csv_field(&object.common_name),
+                    object.ra,
+                    object.dec,
+                    csv_optional(object.mag),
+                    csv_optional(object.major_arcmin),
+                    csv_optional(object.minor_arcmin),
+                    csv_optional(object.position_angle_deg),
+                    if hit.extent_only { "extent" } else { "center" },
+                    hit.distance_from_center_deg,
+                    hit.predicted_prominence,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn csv_field(value: &str) -> String {
+    if value.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+fn csv_optional(value: Option<f32>) -> String {
+    value.map(|value| value.to_string()).unwrap_or_default()
 }
 
 #[allow(clippy::too_many_arguments)]
