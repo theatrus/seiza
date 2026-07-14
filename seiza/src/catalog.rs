@@ -24,6 +24,12 @@ pub trait StarCatalog {
     /// `limit` entries.
     fn cone_search(&self, ra: f64, dec: f64, radius_deg: f64, limit: usize) -> Vec<CatalogStar>;
 
+    /// Total stars in the catalog, 0 when the backend cannot say. Recorded
+    /// in built blind indexes as provenance.
+    fn star_count(&self) -> u64 {
+        0
+    }
+
     /// Every star brighter than `mag_limit`, in no particular order.
     /// Backends with magnitude-sorted storage override this cheaply.
     fn all_brighter_than(&self, mag_limit: f32) -> Vec<CatalogStar> {
@@ -48,6 +54,10 @@ impl MemoryCatalog {
 }
 
 impl StarCatalog for MemoryCatalog {
+    fn star_count(&self) -> u64 {
+        self.stars.len() as u64
+    }
+
     fn cone_search(&self, ra: f64, dec: f64, radius_deg: f64, limit: usize) -> Vec<CatalogStar> {
         self.stars
             .iter()

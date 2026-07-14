@@ -149,14 +149,36 @@ fn solve(args: &AstapArgs, image_path: &Path) -> Result<Vec<String>> {
             // one, otherwise search the practical astrophoto range
             let (min_scale, max_scale) = match scale {
                 Some(scale) => (scale / 2.0, scale * 2.0),
-                None => (0.3, 20.0),
+                None => (0.1, 20.0),
             };
-            let params = seiza::blind::BlindParams {
+            let mut params = seiza::blind::BlindParams {
                 min_scale_arcsec_px: min_scale,
                 max_scale_arcsec_px: max_scale,
                 ..Default::default()
             };
-            let index = seiza::blind::BlindIndex::build(&catalog, &params);
+            let index = if let Some(path) = resolve_blind_index() {
+                let index = seiza::blind::BlindIndex::open(&path)
+                    .map_err(anyhow::Error::from)
+                    .with_context(|| format!("cannot open blind index {}", path.display()))?;
+                params.index_mag_limit = index.index_mag_limit();
+                params.max_pattern_deg = index.max_pattern_deg();
+                let built_from = index.source_star_count();
+                let runtime = catalog.star_count();
+                if built_from > 0 && built_from.max(runtime) > 2 * built_from.min(runtime) {
+                    eprintln!(
+                        "warning: blind index built from {built_from} stars, catalog has \
+                         {runtime}; deep-tier hypotheses may never verify"
+                    );
+                }
+                index
+            } else {
+                // Without a prebuilt index only the default bright tiers
+                // (G<=12.7) build at startup: a deep whole-sky index over a
+                // 154M-star catalog takes minutes and gigabytes, which
+                // inside an imaging loop reads as a hang. Small fine-scale
+                // fields need the hosted index (see resolve_blind_index).
+                seiza::blind::BlindIndex::build(&catalog, &params)
+            };
             seiza::blind::solve_blind(&stars, &catalog, &index, &params, dims)
                 .map_err(anyhow::Error::from)?
         }
@@ -215,12 +237,10 @@ fn resolve_star_data() -> Result<PathBuf> {
         let config = dir.join("seiza.toml");
         if let Ok(content) = std::fs::read_to_string(&config) {
             for line in content.lines() {
-                if let Some(value) = line.trim().strip_prefix("star_data") {
-                    let value = value
-                        .trim_start_matches([' ', '='])
-                        .trim()
-                        .trim_matches('"');
-                    let path = PathBuf::from(value);
+                if let Some((key, value)) = line.split_once('=')
+                    && key.trim() == "star_data"
+                {
+                    let path = PathBuf::from(value.trim().trim_matches('"'));
                     if path.exists() {
                         return Ok(path);
                     }
@@ -228,7 +248,12 @@ fn resolve_star_data() -> Result<PathBuf> {
             }
         }
         // A data file dropped next to the executable also works
-        for name in ["stars-gaia.bin", "stars-lite-tycho2.bin", "stars.bin"] {
+        for name in [
+            "stars-deep-gaia17.bin",
+            "stars-gaia.bin",
+            "stars-lite-tycho2.bin",
+            "stars.bin",
+        ] {
             let path = dir.join(name);
             if path.exists() {
                 return Ok(path);
@@ -242,7 +267,12 @@ fn resolve_star_data() -> Result<PathBuf> {
     .into_iter()
     .flatten()
     {
-        for name in ["stars-gaia.bin", "stars-lite-tycho2.bin", "stars.bin"] {
+        for name in [
+            "stars-deep-gaia17.bin",
+            "stars-gaia.bin",
+            "stars-lite-tycho2.bin",
+            "stars.bin",
+        ] {
             let path = base.join("seiza").join(name);
             if path.exists() {
                 return Ok(path);
@@ -254,6 +284,51 @@ fn resolve_star_data() -> Result<PathBuf> {
          seiza download-data prebuilt --output <data dir> \
          (https://downloads.seiza.fyi)"
     )
+}
+
+/// Optional prebuilt blind index resolution: environment, configuration next
+/// to the executable, then the same well-known data directories as catalogs.
+fn resolve_blind_index() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("SEIZA_BLIND_INDEX") {
+        let path = PathBuf::from(path);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let config = dir.join("seiza.toml");
+        if let Ok(content) = std::fs::read_to_string(&config) {
+            for line in content.lines() {
+                if let Some((key, value)) = line.split_once('=')
+                    && key.trim() == "blind_index"
+                {
+                    let path = PathBuf::from(value.trim().trim_matches('"'));
+                    if path.exists() {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+        let path = dir.join("blind-gaia16.idx");
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    for base in [
+        std::env::var("LOCALAPPDATA").ok().map(PathBuf::from),
+        dirs_data_dir(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let path = base.join("seiza").join("blind-gaia16.idx");
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    None
 }
 
 fn dirs_data_dir() -> Option<PathBuf> {
