@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result, bail};
 use seiza::catalog::TileSetBuilder;
+use seiza::star_ids::{StarIdentifier, StarIdentifierCatalogBuilder};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
@@ -13,7 +14,19 @@ use std::path::Path;
 /// (ICRS, epoch J2000; supplement epoch J1991.25) are proper-motion
 /// corrected to `epoch`; entries without a mean position fall back to the
 /// observed position.
-pub fn build_tycho2(input: &Path, output: &Path, epoch: f64, max_mag: f32) -> Result<()> {
+pub fn build_tycho2(
+    input: &Path,
+    output: &Path,
+    identifier_index: Option<&Path>,
+    epoch: f64,
+    max_mag: f32,
+) -> Result<()> {
+    if identifier_index.is_some_and(|path| path == output) {
+        bail!("--identifier-index must differ from --output");
+    }
+    if !epoch.is_finite() || !max_mag.is_finite() {
+        bail!("epoch and magnitude limit must be finite");
+    }
     let mut parts: Vec<_> = std::fs::read_dir(input)
         .with_context(|| format!("cannot read {}", input.display()))?
         .filter_map(|e| e.ok())
@@ -38,6 +51,12 @@ pub fn build_tycho2(input: &Path, output: &Path, epoch: f64, max_mag: f32) -> Re
     );
     let mut skipped_no_mag = 0u64;
     let mut too_faint = 0u64;
+    let mut identifiers = identifier_index.map(|_| {
+        StarIdentifierCatalogBuilder::new(
+            epoch,
+            "Tycho-2 (Hog et al. 2000, CDS I/259); TYC identifiers and catalog-supplied HIP cross-identifications",
+        )
+    });
 
     for part in &parts {
         let file =
@@ -54,11 +73,12 @@ pub fn build_tycho2(input: &Path, output: &Path, epoch: f64, max_mag: f32) -> Re
                 skipped_no_mag += 1;
                 continue;
             };
-            if star.2 > max_mag {
+            if star.mag > max_mag {
                 too_faint += 1;
                 continue;
             }
-            builder.add(star.0, star.1, star.2);
+            builder.add(star.ra, star.dec, star.mag);
+            add_tycho_identifiers(&mut identifiers, star)?;
         }
     }
 
@@ -77,15 +97,16 @@ pub fn build_tycho2(input: &Path, output: &Path, epoch: f64, max_mag: f32) -> Re
         };
         for line in BufReader::new(reader).lines() {
             let line = line?;
-            let Some((ra, dec, mag)) = parse_tycho2_suppl_line(&line, epoch) else {
+            let Some(star) = parse_tycho2_suppl_line(&line, epoch) else {
                 skipped_no_mag += 1;
                 continue;
             };
-            if mag > max_mag {
+            if star.mag > max_mag {
                 too_faint += 1;
                 continue;
             }
-            builder.add(ra, dec, mag);
+            builder.add(star.ra, star.dec, star.mag);
+            add_tycho_identifiers(&mut identifiers, star)?;
             suppl_count += 1;
         }
         break;
@@ -99,6 +120,14 @@ pub fn build_tycho2(input: &Path, output: &Path, epoch: f64, max_mag: f32) -> Re
 
     let count = builder.star_count();
     builder.write_to(output)?;
+    if let (Some(path), Some(identifiers)) = (identifier_index, identifiers) {
+        let identifier_count = identifiers.len();
+        identifiers.write_to(path)?;
+        println!(
+            "{identifier_count} TYC/HIP identifier entries written to {}",
+            path.display()
+        );
+    }
     println!(
         "{} stars written to {} (epoch {epoch}, {} unusable records skipped, {} fainter than {max_mag})",
         count,
@@ -106,6 +135,20 @@ pub fn build_tycho2(input: &Path, output: &Path, epoch: f64, max_mag: f32) -> Re
         skipped_no_mag,
         too_faint
     );
+    Ok(())
+}
+
+fn add_tycho_identifiers(
+    builder: &mut Option<StarIdentifierCatalogBuilder>,
+    star: ParsedTychoStar,
+) -> Result<()> {
+    let Some(builder) = builder else {
+        return Ok(());
+    };
+    builder.add(star.tyc, star.ra, star.dec, star.mag)?;
+    if let Some(hip) = star.hip {
+        builder.add(hip, star.ra, star.dec, star.mag)?;
+    }
     Ok(())
 }
 
@@ -251,8 +294,18 @@ impl PositionDedup {
     }
 }
 
-/// Parse one fixed-width Tycho-2 record into (ra, dec, mag) at `epoch`.
-fn parse_tycho2_line(line: &str, epoch: f64) -> Option<(f64, f64, f32)> {
+#[derive(Debug, Clone, Copy)]
+struct ParsedTychoStar {
+    ra: f64,
+    dec: f64,
+    mag: f32,
+    tyc: StarIdentifier,
+    hip: Option<StarIdentifier>,
+}
+
+/// Parse one fixed-width Tycho-2 record at `epoch`, retaining its TYC and
+/// optional Hipparcos identifiers for the offline lookup sidecar.
+fn parse_tycho2_line(line: &str, epoch: f64) -> Option<ParsedTychoStar> {
     // Byte ranges from the CDS ReadMe are 1-indexed inclusive
     let field =
         |from: usize, to: usize| -> &str { line.get(from - 1..to).map(str::trim).unwrap_or("") };
@@ -262,22 +315,41 @@ fn parse_tycho2_line(line: &str, epoch: f64) -> Option<(f64, f64, f32)> {
         .parse()
         .or_else(|_| field(111, 116).parse())
         .ok()?;
+    let tyc = StarIdentifier::Tycho2 {
+        region: field(1, 4).parse().ok()?,
+        number: field(6, 10).parse().ok()?,
+        component: field(12, 12).parse().ok()?,
+    };
+    let hip = field(143, 148)
+        .parse::<u32>()
+        .ok()
+        .map(StarIdentifier::Hipparcos);
 
     // Mean position (may be absent when pflag is X), else observed position
-    if let (Ok(ra), Ok(dec)) = (field(16, 27).parse::<f64>(), field(29, 40).parse::<f64>()) {
-        let dt = epoch - 2000.0;
-        // mas/yr; pmRA includes cos(dec)
-        let pm_ra: f64 = field(42, 48).parse().unwrap_or(0.0);
-        let pm_dec: f64 = field(50, 56).parse().unwrap_or(0.0);
-        let cos_dec = dec.to_radians().cos().max(1e-6);
-        let ra = (ra + pm_ra * dt / 3_600_000.0 / cos_dec).rem_euclid(360.0);
-        let dec = (dec + pm_dec * dt / 3_600_000.0).clamp(-90.0, 90.0);
-        return Some((ra, dec, mag));
-    }
-
-    let ra = field(153, 164).parse::<f64>().ok()?;
-    let dec = field(166, 177).parse::<f64>().ok()?;
-    Some((ra, dec, mag))
+    let (ra, dec) =
+        if let (Ok(ra), Ok(dec)) = (field(16, 27).parse::<f64>(), field(29, 40).parse::<f64>()) {
+            let dt = epoch - 2000.0;
+            // mas/yr; pmRA includes cos(dec)
+            let pm_ra: f64 = field(42, 48).parse().unwrap_or(0.0);
+            let pm_dec: f64 = field(50, 56).parse().unwrap_or(0.0);
+            let cos_dec = dec.to_radians().cos().max(1e-6);
+            (
+                (ra + pm_ra * dt / 3_600_000.0 / cos_dec).rem_euclid(360.0),
+                (dec + pm_dec * dt / 3_600_000.0).clamp(-90.0, 90.0),
+            )
+        } else {
+            (
+                field(153, 164).parse::<f64>().ok()?,
+                field(166, 177).parse::<f64>().ok()?,
+            )
+        };
+    Some(ParsedTychoStar {
+        ra,
+        dec,
+        mag,
+        tyc,
+        hip,
+    })
 }
 
 /// Build a star tile file from an ASTAP `.1476` star database directory
@@ -367,7 +439,7 @@ pub fn build_astap(
 }
 
 /// Parse one supplement-1/2 record: positions are ICRS at epoch J1991.25.
-fn parse_tycho2_suppl_line(line: &str, epoch: f64) -> Option<(f64, f64, f32)> {
+fn parse_tycho2_suppl_line(line: &str, epoch: f64) -> Option<ParsedTychoStar> {
     let field =
         |from: usize, to: usize| -> &str { line.get(from - 1..to).map(str::trim).unwrap_or("") };
 
@@ -375,6 +447,15 @@ fn parse_tycho2_suppl_line(line: &str, epoch: f64) -> Option<(f64, f64, f32)> {
         .parse()
         .or_else(|_| field(84, 89).parse())
         .ok()?;
+    let tyc = StarIdentifier::Tycho2 {
+        region: field(1, 4).parse().ok()?,
+        number: field(6, 10).parse().ok()?,
+        component: field(12, 12).parse().ok()?,
+    };
+    let hip = field(116, 121)
+        .parse::<u32>()
+        .ok()
+        .map(StarIdentifier::Hipparcos);
     let ra = field(16, 27).parse::<f64>().ok()?;
     let dec = field(29, 40).parse::<f64>().ok()?;
 
@@ -384,7 +465,13 @@ fn parse_tycho2_suppl_line(line: &str, epoch: f64) -> Option<(f64, f64, f32)> {
     let cos_dec = dec.to_radians().cos().max(1e-6);
     let ra = (ra + pm_ra * dt / 3_600_000.0 / cos_dec).rem_euclid(360.0);
     let dec = (dec + pm_dec * dt / 3_600_000.0).clamp(-90.0, 90.0);
-    Some((ra, dec, mag))
+    Some(ParsedTychoStar {
+        ra,
+        dec,
+        mag,
+        tyc,
+        hip,
+    })
 }
 
 /// Build an object catalog from OpenNGC, selected VizieR tables, and the IAU
@@ -2133,19 +2220,28 @@ mod tests {
 
     #[test]
     fn parses_a_real_record() {
-        let (ra, dec, mag) = parse_tycho2_line(SAMPLE, 2000.0).unwrap();
-        assert!((ra - 2.31750494).abs() < 1e-8);
-        assert!((dec - 2.23184345).abs() < 1e-8);
-        assert!((mag - 12.146).abs() < 1e-3);
+        let star = parse_tycho2_line(SAMPLE, 2000.0).unwrap();
+        assert!((star.ra - 2.31750494).abs() < 1e-8);
+        assert!((star.dec - 2.23184345).abs() < 1e-8);
+        assert!((star.mag - 12.146).abs() < 1e-3);
+        assert_eq!(
+            star.tyc,
+            StarIdentifier::Tycho2 {
+                region: 1,
+                number: 8,
+                component: 1,
+            }
+        );
+        assert_eq!(star.hip, None);
     }
 
     #[test]
     fn applies_proper_motion() {
-        let (ra, dec, _) = parse_tycho2_line(SAMPLE, 2025.0).unwrap();
+        let star = parse_tycho2_line(SAMPLE, 2025.0).unwrap();
         // pmRA = -16.3 mas/yr over 25 years ≈ -0.41" of RA*cos(dec)
-        let d_ra_arcsec = (ra - 2.31750494) * 3600.0 * dec.to_radians().cos();
+        let d_ra_arcsec = (star.ra - 2.31750494) * 3600.0 * star.dec.to_radians().cos();
         assert!((d_ra_arcsec - -0.4075).abs() < 0.01, "{d_ra_arcsec}");
-        let d_dec_arcsec = (dec - 2.23184345) * 3600.0;
+        let d_dec_arcsec = (star.dec - 2.23184345) * 3600.0;
         assert!((d_dec_arcsec - -0.225).abs() < 0.01, "{d_dec_arcsec}");
     }
 
@@ -2154,17 +2250,26 @@ mod tests {
 
     #[test]
     fn parses_a_supplement_record_with_proper_motion() {
-        let (ra, dec, mag) = parse_tycho2_suppl_line(SIRIUS, 1991.25).unwrap();
-        assert!((ra - 101.28854105).abs() < 1e-8);
-        assert!((dec - -16.71314306).abs() < 1e-8);
-        assert!((mag - -1.088).abs() < 1e-3);
+        let star = parse_tycho2_suppl_line(SIRIUS, 1991.25).unwrap();
+        assert!((star.ra - 101.28854105).abs() < 1e-8);
+        assert!((star.dec - -16.71314306).abs() < 1e-8);
+        assert!((star.mag - -1.088).abs() < 1e-3);
+        assert_eq!(
+            star.tyc,
+            StarIdentifier::Tycho2 {
+                region: 5949,
+                number: 2777,
+                component: 1,
+            }
+        );
+        assert_eq!(star.hip, Some(StarIdentifier::Hipparcos(32349)));
 
         // Sirius moves fast: ~-546 mas/yr (RA*cos dec), -1223.1 mas/yr (Dec)
-        let (ra, dec, _) = parse_tycho2_suppl_line(SIRIUS, 2025.5).unwrap();
+        let star = parse_tycho2_suppl_line(SIRIUS, 2025.5).unwrap();
         let dt = 2025.5 - 1991.25;
-        let d_dec_arcsec = (dec - -16.71314306) * 3600.0;
+        let d_dec_arcsec = (star.dec - -16.71314306) * 3600.0;
         assert!((d_dec_arcsec - -1.2231 * dt).abs() < 0.01);
-        assert!(ra < 101.28854105); // moving in -RA
+        assert!(star.ra < 101.28854105); // moving in -RA
     }
 
     #[test]

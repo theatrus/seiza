@@ -3,6 +3,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use seiza::catalog::{StarCatalog, TileCatalog};
 use seiza::objects::{ObjectCatalog, ObjectKind, ObjectQuery, ObjectSort, SkyRegion};
 use seiza::solve::{SolveHint, solve};
+use seiza::star_ids::{StarIdentifier, StarIdentifierCatalog};
 use seiza::{DetectConfig, detect_stars};
 use std::path::PathBuf;
 
@@ -204,6 +205,22 @@ enum CatalogCommand {
         #[command(flatten)]
         args: CatalogObjectsArgs,
     },
+    /// Resolve an exact stellar catalog designation without a network query
+    Star {
+        #[command(flatten)]
+        args: CatalogStarArgs,
+    },
+}
+
+#[derive(Args)]
+struct CatalogStarArgs {
+    /// Star identifier sidecar built with build-data --identifier-index
+    #[arg(long)]
+    data: PathBuf,
+    /// Catalog designation, for example TYC 5949-2777-1 or HIP 32349
+    identifier: String,
+    #[arg(long, value_enum, default_value_t = CatalogOutputFormat::Table)]
+    format: CatalogOutputFormat,
 }
 
 #[derive(Args)]
@@ -374,6 +391,9 @@ enum BuildDataSource {
         /// Output tile file
         #[arg(long)]
         output: PathBuf,
+        /// Optional exact TYC/HIP lookup sidecar
+        #[arg(long)]
+        identifier_index: Option<PathBuf>,
         /// Epoch to apply proper motions to, Julian year
         #[arg(long, default_value_t = 2025.5)]
         epoch: f64,
@@ -524,9 +544,16 @@ fn main() -> Result<()> {
             BuildDataSource::Tycho2 {
                 input,
                 output,
+                identifier_index,
                 epoch,
                 max_mag,
-            } => build_data::build_tycho2(&input, &output, epoch, max_mag),
+            } => build_data::build_tycho2(
+                &input,
+                &output,
+                identifier_index.as_deref(),
+                epoch,
+                max_mag,
+            ),
             BuildDataSource::Objects {
                 input,
                 output,
@@ -594,6 +621,7 @@ fn main() -> Result<()> {
         } => cone(&data, ra, dec, radius, limit),
         Command::Catalog { query } => match query {
             CatalogCommand::Objects { args } => catalog_objects(args),
+            CatalogCommand::Star { args } => catalog_star(args),
         },
     }
 }
@@ -921,6 +949,86 @@ fn catalog_objects(args: CatalogObjectsArgs) -> Result<()> {
                     csv_field(&object.metadata.parent_ids.join("|")),
                     csv_field(&object.metadata.alternate_ids.join("|")),
                     csv_field(&object.metadata.alternate_sources.join("|")),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn catalog_star(args: CatalogStarArgs) -> Result<()> {
+    let identifier: StarIdentifier = args.identifier.parse()?;
+    let catalog = StarIdentifierCatalog::open(&args.data)
+        .with_context(|| format!("failed to open {}", args.data.display()))?;
+    let matches = catalog.lookup(identifier);
+
+    match args.format {
+        CatalogOutputFormat::Table => {
+            println!(
+                "{} exact match{} for {} in {} (epoch J{}):",
+                matches.len(),
+                if matches.len() == 1 { "" } else { "es" },
+                identifier,
+                catalog.attribution(),
+                catalog.epoch()
+            );
+            if !matches.is_empty() {
+                println!(
+                    "{:<24} {:<18} {:>12} {:>12} {:>8}",
+                    "identifier", "catalog", "ra", "dec", "mag"
+                );
+                for star in &matches {
+                    println!(
+                        "{:<24} {:<18} {:>12.7} {:>12.7} {:>8.3}",
+                        star.identifier,
+                        star.identifier.namespace().as_str(),
+                        star.ra,
+                        star.dec,
+                        star.mag
+                    );
+                }
+            }
+        }
+        CatalogOutputFormat::Json => {
+            let matches = matches
+                .iter()
+                .map(|star| {
+                    serde_json::json!({
+                        "identifier": star.identifier.to_string(),
+                        "stable_id": star.identifier.stable_id(),
+                        "catalog": star.identifier.namespace().as_str(),
+                        "ra_deg": star.ra,
+                        "dec_deg": star.dec,
+                        "mag": star.mag,
+                    })
+                })
+                .collect::<Vec<_>>();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "query": identifier.to_string(),
+                    "stable_id": identifier.stable_id(),
+                    "catalog": identifier.namespace().as_str(),
+                    "source": catalog.attribution(),
+                    "epoch": catalog.epoch(),
+                    "returned": matches.len(),
+                    "matches": matches,
+                }))?
+            );
+        }
+        CatalogOutputFormat::Csv => {
+            println!("identifier,stable_id,catalog,ra_deg,dec_deg,mag,epoch,source");
+            for star in &matches {
+                println!(
+                    "{},{},{},{:.8},{:.8},{:.3},{},{}",
+                    csv_field(&star.identifier.to_string()),
+                    csv_field(&star.identifier.stable_id()),
+                    csv_field(star.identifier.namespace().as_str()),
+                    star.ra,
+                    star.dec,
+                    star.mag,
+                    catalog.epoch(),
+                    csv_field(catalog.attribution()),
                 );
             }
         }

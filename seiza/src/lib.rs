@@ -14,6 +14,7 @@ pub mod detect;
 pub mod minor_bodies;
 pub mod objects;
 pub mod solve;
+pub mod star_ids;
 pub mod wcs;
 
 pub use detect::{DetectConfig, DetectedStar, detect_stars};

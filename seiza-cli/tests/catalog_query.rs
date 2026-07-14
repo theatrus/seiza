@@ -1,4 +1,5 @@
 use seiza::objects::{ObjectCatalog, ObjectKind, ObjectMetadata, SkyObject};
+use seiza::star_ids::{StarIdentifier, StarIdentifierCatalogBuilder};
 use std::process::Command;
 
 fn object(name: &str, ra: f64, dec: f64) -> SkyObject {
@@ -122,6 +123,61 @@ fn catalog_objects_supports_cone_and_polygon_json_queries() {
     assert!(csv.starts_with("kind,name,common_name,ra_deg,dec_deg"));
     assert!(csv.contains("galaxy,Near,Near common"));
     assert!(csv.contains("test:near,test-catalog,Near alias"));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn catalog_star_resolves_tyc_and_hip_identifiers() {
+    let dir = std::env::temp_dir().join(format!("seiza-star-cli-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let catalog_path = dir.join("stars.ids.bin");
+    let mut builder = StarIdentifierCatalogBuilder::new(2025.5, "test Tycho-2 source");
+    builder
+        .add(
+            StarIdentifier::Tycho2 {
+                region: 5949,
+                number: 2777,
+                component: 1,
+            },
+            101.28854,
+            -16.71314,
+            -1.088,
+        )
+        .unwrap();
+    builder
+        .add(
+            StarIdentifier::Hipparcos(32349),
+            101.28854,
+            -16.71314,
+            -1.088,
+        )
+        .unwrap();
+    builder.write_to(&catalog_path).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_seiza"))
+        .args([
+            "catalog",
+            "star",
+            "--data",
+            catalog_path.to_str().unwrap(),
+            "HIP 32349",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["query"], "HIP 32349");
+    assert_eq!(json["stable_id"], "hip:32349");
+    assert_eq!(json["returned"], 1);
+    assert_eq!(json["matches"][0]["catalog"], "Hipparcos");
+    assert_eq!(json["matches"][0]["identifier"], "HIP 32349");
 
     std::fs::remove_dir_all(&dir).ok();
 }
