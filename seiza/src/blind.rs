@@ -1474,6 +1474,7 @@ pub(crate) mod tests {
         let index = BlindIndex::open(&path).unwrap();
         assert!(index.lookup(1).is_err());
         assert!(index.validate().is_err());
+        drop(index);
 
         built.write_to(&path).unwrap();
         let mut bytes = std::fs::read(&path).unwrap();
@@ -1485,6 +1486,7 @@ pub(crate) mod tests {
         assert_eq!(candidates, 0..1);
         assert!(index.checked_candidate_at(0).is_err());
         assert!(index.validate().is_err());
+        drop(index);
         std::fs::remove_dir_all(dir).ok();
     }
 }
