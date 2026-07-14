@@ -73,6 +73,12 @@ seiza download-data prebuilt --output data
 seiza download-data prebuilt --output data --file objects.bin --file transients.bin
 ```
 
+The downloader combines `/data/manifest.json` for core datasets with
+`/data/v3/manifest.json` for the `SEIZAOB3` object schema. Both manifests still
+write into the same local output directory. Until the v3 manifest is first
+published, a missing v3 manifest (HTTP 403 or 404, depending on the CDN origin)
+falls back to the legacy object entries in the base manifest.
+
 Building from primary sources stays supported for custom depths, epochs,
 or tile granularity — note the Gaia TAP download alone can take many
 hours:

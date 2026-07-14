@@ -5,6 +5,7 @@
 //! already present and valid — safe to re-run after interruptions.
 
 use anyhow::{Context, Result, bail};
+use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::Path;
 
@@ -339,50 +340,182 @@ fn fetch_gaia_chunk(query: &str, target: &Path) -> Result<u64> {
 
 /// Base URL for the hosted, prebuilt seiza datasets.
 const HOSTED_DATA_URL: &str = "https://downloads.seiza.fyi/data";
+/// Object catalogs are versioned independently from the other hosted formats.
+const HOSTED_OBJECT_V3_URL: &str = "https://downloads.seiza.fyi/data/v3";
+const OBJECT_V3_DATASETS: &[&str] = &["objects.bin", "transients.bin"];
 
-/// Prebuilt datasets from downloads.seiza.fyi: reads the manifest, then
-/// downloads every listed file (or just `names`) with SHA-256
-/// verification. The quickest route to a working solver — no catalog
-/// building required.
-pub fn download_prebuilt(output: &Path, names: &[String]) -> Result<()> {
-    std::fs::create_dir_all(output)?;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HostedSchema {
+    Base,
+    ObjectV3,
+}
 
-    let manifest_url = format!("{HOSTED_DATA_URL}/manifest.json");
-    println!("  fetching {manifest_url}");
-    let manifest: serde_json::Value = ureq::get(&manifest_url)
-        .timeout(std::time::Duration::from_secs(60))
-        .call()
-        .with_context(|| format!("failed to fetch {manifest_url}"))?
-        .into_json()
-        .context("manifest is not valid JSON")?;
+impl HostedSchema {
+    fn base_url(self) -> &'static str {
+        match self {
+            Self::Base => HOSTED_DATA_URL,
+            Self::ObjectV3 => HOSTED_OBJECT_V3_URL,
+        }
+    }
+}
 
+#[derive(Debug, Eq, PartialEq)]
+struct HostedFile {
+    schema: HostedSchema,
+    name: String,
+    sha256: String,
+}
+
+fn is_object_v3_dataset(name: &str) -> bool {
+    OBJECT_V3_DATASETS.contains(&name)
+}
+
+fn manifest_entries(manifest: &serde_json::Value) -> Result<Vec<(String, String)>> {
     let files = manifest["files"]
         .as_array()
         .context("manifest has no files list")?;
-    let mut fetched = 0;
-    for entry in files {
-        let (Some(name), Some(sha)) = (entry["name"].as_str(), entry["sha256"].as_str()) else {
-            continue;
-        };
-        if !names.is_empty() && !names.iter().any(|n| n == name) {
+    Ok(files
+        .iter()
+        .filter_map(|entry| {
+            Some((
+                entry["name"].as_str()?.to_string(),
+                entry["sha256"].as_str()?.to_string(),
+            ))
+        })
+        .collect())
+}
+
+/// Build one effective download set. Once a v3 manifest exists its object
+/// entries replace the legacy copies in the base manifest; a missing v3
+/// manifest deliberately falls back to the base manifest during rollout.
+fn hosted_download_plan(
+    base_manifest: &serde_json::Value,
+    object_v3_manifest: Option<&serde_json::Value>,
+    names: &[String],
+) -> Result<Vec<HostedFile>> {
+    let base_entries = manifest_entries(base_manifest)?;
+    let object_v3_entries = object_v3_manifest
+        .map(manifest_entries)
+        .transpose()?
+        .unwrap_or_default();
+    let has_object_v3 = object_v3_manifest.is_some();
+    let requested = names.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    let mut offered = BTreeSet::new();
+    let mut matched = BTreeSet::new();
+    let mut plan = Vec::new();
+
+    for (name, sha256) in base_entries {
+        if has_object_v3 && is_object_v3_dataset(&name) {
             continue;
         }
-        fetch(
-            &format!("{HOSTED_DATA_URL}/{name}"),
-            &output.join(name),
-            Verify::Sha256(sha.to_string()),
-        )?;
-        fetched += 1;
+        offered.insert(name.clone());
+        if requested.is_empty() || requested.contains(name.as_str()) {
+            matched.insert(name.clone());
+            plan.push(HostedFile {
+                schema: HostedSchema::Base,
+                name,
+                sha256,
+            });
+        }
     }
-    if fetched == 0 {
+
+    if has_object_v3 {
+        for (name, sha256) in object_v3_entries {
+            if !is_object_v3_dataset(&name) {
+                continue;
+            }
+            offered.insert(name.clone());
+            if requested.is_empty() || requested.contains(name.as_str()) {
+                matched.insert(name.clone());
+                plan.push(HostedFile {
+                    schema: HostedSchema::ObjectV3,
+                    name,
+                    sha256,
+                });
+            }
+        }
+
+        let missing_schema_files = OBJECT_V3_DATASETS
+            .iter()
+            .filter(|name| !offered.contains(**name))
+            .copied()
+            .collect::<Vec<_>>();
+        if !missing_schema_files.is_empty() {
+            bail!(
+                "object v3 manifest is incomplete; missing: {}",
+                missing_schema_files.join(", ")
+            );
+        }
+    }
+
+    let missing = requested
+        .iter()
+        .filter(|name| !matched.contains(**name))
+        .copied()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
         bail!(
-            "nothing matched; the manifest offers: {}",
-            files
-                .iter()
-                .filter_map(|e| e["name"].as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            "requested file(s) unavailable: {}; the manifests offer: {}",
+            missing.join(", "),
+            offered.into_iter().collect::<Vec<_>>().join(", ")
         );
+    }
+    if plan.is_empty() {
+        bail!(
+            "nothing matched; the manifests offer: {}",
+            offered.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
+    Ok(plan)
+}
+
+fn fetch_hosted_manifest(base_url: &str, optional: bool) -> Result<Option<serde_json::Value>> {
+    let manifest_url = format!("{base_url}/manifest.json");
+    println!("  fetching {manifest_url}");
+    let response = match ureq::get(&manifest_url)
+        .timeout(std::time::Duration::from_secs(60))
+        .call()
+    {
+        Ok(response) => response,
+        // S3/CloudFront commonly reports a missing private-origin key as 403
+        // rather than 404. This fallback applies only to an optional schema
+        // manifest; the required base manifest never suppresses either.
+        Err(ureq::Error::Status(403 | 404, _)) if optional => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("failed to fetch {manifest_url}")),
+    };
+    let manifest = response
+        .into_json()
+        .with_context(|| format!("{manifest_url} is not valid JSON"))?;
+    Ok(Some(manifest))
+}
+
+/// Prebuilt datasets from downloads.seiza.fyi: combines the base manifest
+/// with the independently versioned object-v3 manifest, then downloads every
+/// listed file (or just `names`) with SHA-256 verification. The quickest route
+/// to a working solver — no catalog building required.
+pub fn download_prebuilt(output: &Path, names: &[String]) -> Result<()> {
+    std::fs::create_dir_all(output)?;
+
+    let base_manifest = fetch_hosted_manifest(HOSTED_DATA_URL, false)?.unwrap();
+    let wants_objects = names.is_empty() || names.iter().any(|name| is_object_v3_dataset(name));
+    let object_v3_manifest = if wants_objects {
+        let manifest = fetch_hosted_manifest(HOSTED_OBJECT_V3_URL, true)?;
+        if manifest.is_none() {
+            println!("  object v3 manifest not published; using base-manifest compatibility files");
+        }
+        manifest
+    } else {
+        None
+    };
+    let plan = hosted_download_plan(&base_manifest, object_v3_manifest.as_ref(), names)?;
+
+    let fetched = plan.len();
+    for file in plan {
+        fetch(
+            &format!("{}/{}", file.schema.base_url(), file.name),
+            &output.join(file.name),
+            Verify::Sha256(file.sha256),
+        )?;
     }
     println!("{fetched} dataset(s) ready in {}", output.display());
     Ok(())
@@ -417,4 +550,110 @@ pub fn download_mpc(output: &Path) -> Result<()> {
     )?;
     println!("MPC + SBDB element sets ready in {}", output.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod prebuilt_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn base_manifest() -> serde_json::Value {
+        json!({"files": [
+            {"name": "stars.bin", "sha256": "stars-v1"},
+            {"name": "objects.bin", "sha256": "objects-v1"},
+            {"name": "transients.bin", "sha256": "transients-v1"},
+            {"name": "minor-bodies.bin", "sha256": "minor-v1"}
+        ]})
+    }
+
+    fn object_v3_manifest() -> serde_json::Value {
+        json!({"files": [
+            {"name": "objects.bin", "sha256": "objects-v3"},
+            {"name": "transients.bin", "sha256": "transients-v3"}
+        ]})
+    }
+
+    #[test]
+    fn default_plan_replaces_legacy_objects_with_v3() {
+        let base = base_manifest();
+        let v3 = object_v3_manifest();
+        let plan = hosted_download_plan(&base, Some(&v3), &[]).unwrap();
+
+        assert!(plan.contains(&HostedFile {
+            schema: HostedSchema::Base,
+            name: "stars.bin".into(),
+            sha256: "stars-v1".into(),
+        }));
+        assert!(plan.contains(&HostedFile {
+            schema: HostedSchema::ObjectV3,
+            name: "objects.bin".into(),
+            sha256: "objects-v3".into(),
+        }));
+        assert!(!plan.iter().any(|file| file.sha256 == "objects-v1"));
+        assert!(!plan.iter().any(|file| file.sha256 == "transients-v1"));
+    }
+
+    #[test]
+    fn explicit_object_download_uses_only_v3_manifest() {
+        let base = base_manifest();
+        let v3 = object_v3_manifest();
+        let plan = hosted_download_plan(&base, Some(&v3), &["objects.bin".into()]).unwrap();
+
+        assert_eq!(
+            plan,
+            vec![HostedFile {
+                schema: HostedSchema::ObjectV3,
+                name: "objects.bin".into(),
+                sha256: "objects-v3".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn absent_v3_manifest_falls_back_to_legacy_objects() {
+        let base = base_manifest();
+        let plan = hosted_download_plan(&base, None, &["objects.bin".into()]).unwrap();
+
+        assert_eq!(
+            plan,
+            vec![HostedFile {
+                schema: HostedSchema::Base,
+                name: "objects.bin".into(),
+                sha256: "objects-v1".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn existing_v3_manifest_does_not_fall_back_for_missing_object() {
+        let base = base_manifest();
+        let incomplete_v3 = json!({"files": []});
+        let error =
+            hosted_download_plan(&base, Some(&incomplete_v3), &["objects.bin".into()]).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("object v3 manifest is incomplete")
+        );
+    }
+
+    #[test]
+    fn default_download_rejects_an_incomplete_v3_manifest() {
+        let base = base_manifest();
+        let incomplete_v3 = json!({"files": [
+            {"name": "transients.bin", "sha256": "transients-v3"}
+        ]});
+        let error = hosted_download_plan(&base, Some(&incomplete_v3), &[]).unwrap_err();
+
+        assert!(error.to_string().contains("missing: objects.bin"));
+    }
+
+    #[test]
+    fn non_object_download_stays_on_base_manifest() {
+        let base = base_manifest();
+        let plan = hosted_download_plan(&base, None, &["minor-bodies.bin".into()]).unwrap();
+
+        assert_eq!(plan[0].schema, HostedSchema::Base);
+    }
 }

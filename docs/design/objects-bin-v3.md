@@ -84,3 +84,15 @@ owned equivalent. Interactive and overlay callers should use indexed queries.
 `ObjectCatalog::write_to` writes v3. `write_v1_to` remains for controlled
 compatibility exports, and the reader remains backward compatible with the
 deployed v1 format.
+
+## Hosted distribution
+
+The object wire format has its own schema-versioned CDN path. `objects.bin`
+and `transients.bin` are published under `/data/v3/` with
+`/data/v3/manifest.json`. Those v3 copies are not substituted into the
+unversioned base manifest, which retains the deployed v1 entries for older
+clients. This prevents clients that only understand v1 from being offered a
+v3 replacement at the same URL. V3-aware `download-data prebuilt` clients
+combine the base and v3 manifests but retain the familiar flat local filenames.
+A 403 or 404 for the v3 manifest temporarily falls back to base-manifest object
+entries so the client can ship before the publisher changes.
