@@ -42,6 +42,13 @@ over sorted memory-mapped records. They return lists because a catalog
 identifier can be associated with multiple components and a WDS coordinate
 identifier intentionally represents multiple discoverer/component rows.
 
+`StarIdentifierCatalog::open` validates only the header and section bounds; it
+does not scan the mapped records or string table. Text lookups validate the
+O(log n + k) records and strings they touch, where `k` is the result count.
+Call `validate` explicitly when a
+complete integrity check of an untrusted sidecar is required; that operation
+intentionally reads the whole mapping.
+
 ## `SEIZASI1` format
 
 ```text

@@ -981,12 +981,12 @@ fn catalog_star(args: CatalogStarArgs) -> Result<()> {
         .with_context(|| format!("failed to open {}", args.data.display()))?;
     let matches = if args.prefix {
         catalog
-            .search_names(&args.query, args.limit)
+            .search_names(&args.query, args.limit)?
             .into_iter()
             .map(StarLookupMatch::Name)
             .collect::<Vec<_>>()
     } else {
-        catalog.lookup_query(&args.query)
+        catalog.lookup_query(&args.query)?
     };
     let rows = matches.iter().map(catalog_star_row).collect::<Vec<_>>();
 

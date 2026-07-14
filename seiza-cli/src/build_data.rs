@@ -2784,18 +2784,18 @@ mod tests {
 
         let catalog = seiza::star_ids::StarIdentifierCatalog::open(&path).unwrap();
         let hr = catalog.lookup(StarIdentifier::HarvardRevised(7001));
-        let vega = catalog.lookup_name("Vega");
+        let vega = catalog.lookup_name("Vega").unwrap();
         assert_eq!(hr.len(), 1);
         assert_eq!(vega.len(), 1);
         assert_eq!(vega[0].stable_id, "hr:7001");
         assert!((vega[0].ra - hr[0].ra).abs() < 1e-8);
-        assert_eq!(catalog.lookup_name("Alpha Lyr").len(), 1);
+        assert_eq!(catalog.lookup_name("Alpha Lyr").unwrap().len(), 1);
         assert_eq!(
-            catalog.lookup_name("RR Lyr")[0].detail,
+            catalog.lookup_name("RR Lyr").unwrap()[0].detail,
             "RRAB; range=7.060-8.120V; period=0.56686776d"
         );
         assert_eq!(
-            catalog.lookup_name("STF 2382 AB")[0].detail,
+            catalog.lookup_name("STF 2382 AB").unwrap()[0].detail,
             "AB; sep=2.5arcsec; pa=123deg; mag2=6.10"
         );
 

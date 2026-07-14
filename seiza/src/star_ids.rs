@@ -760,6 +760,10 @@ pub struct StarIdentifierCatalog {
 }
 
 impl StarIdentifierCatalog {
+    /// Memory-map a stellar identifier sidecar and validate its header and
+    /// section bounds. Opening does not scan the numeric records, textual
+    /// records, or string table; use [`Self::validate`] when accepting an
+    /// untrusted catalog and full-file integrity checking is required.
     pub fn open(path: &Path) -> io::Result<Self> {
         let file = File::open(path)?;
         // Safety: the file is opened read-only; concurrent truncation has the
@@ -801,10 +805,8 @@ impl StarIdentifierCatalog {
         let attribution = std::str::from_utf8(&map[HEADER_FIXED_SIZE..attribution_end])
             .map_err(|_| invalid_data("star identifier attribution is not UTF-8"))?
             .to_string();
-        std::str::from_utf8(&map[strings_offset..])
-            .map_err(|_| invalid_data("star name string table is not UTF-8"))?;
 
-        let catalog = Self {
+        Ok(Self {
             map,
             epoch,
             attribution,
@@ -814,10 +816,19 @@ impl StarIdentifierCatalog {
             name_count,
             strings_offset,
             string_bytes,
-        };
+        })
+    }
+
+    /// Exhaustively validate every record and the complete UTF-8 string
+    /// table. This intentionally touches the whole memory mapping and is
+    /// separate from [`Self::open`] so normal startup remains demand-paged.
+    pub fn validate(&self) -> io::Result<()> {
+        std::str::from_utf8(&self.map[self.strings_offset..])
+            .map_err(|_| invalid_data("star name string table is not UTF-8"))?;
+
         let mut previous = None;
-        for index in 0..catalog.numeric_count {
-            let entry = catalog.packed_entry(index);
+        for index in 0..self.numeric_count {
+            let entry = self.packed_entry(index);
             if StarIdentifier::from_encoded(entry.namespace, entry.value).is_none() {
                 return Err(invalid_data("invalid star identifier record"));
             }
@@ -827,18 +838,17 @@ impl StarIdentifierCatalog {
             previous = Some(entry.sort_key());
         }
         let mut previous_key: Option<&str> = None;
-        for index in 0..catalog.name_count {
-            let entry = catalog.packed_name_entry(index);
+        for index in 0..self.name_count {
+            let entry = self.packed_name_entry(index);
             if StarNameCatalog::from_u8(entry.catalog).is_none()
                 || StarNameKind::from_u8(entry.kind).is_none()
             {
                 return Err(invalid_data("invalid star name catalog or kind"));
             }
-            let key = catalog.name_string(entry.key_offset, entry.key_len)?;
-            let designation =
-                catalog.name_string(entry.designation_offset, entry.designation_len)?;
-            let stable_id = catalog.name_string(entry.stable_id_offset, entry.stable_id_len)?;
-            catalog.name_string(entry.detail_offset, entry.detail_len)?;
+            let key = self.name_string(entry.key_offset, entry.key_len)?;
+            let designation = self.name_string(entry.designation_offset, entry.designation_len)?;
+            let stable_id = self.name_string(entry.stable_id_offset, entry.stable_id_len)?;
+            self.name_string(entry.detail_offset, entry.detail_len)?;
             if key.is_empty() || designation.is_empty() || stable_id.is_empty() {
                 return Err(invalid_data("star name record contains an empty key or ID"));
             }
@@ -847,7 +857,7 @@ impl StarIdentifierCatalog {
             }
             previous_key = Some(key);
         }
-        Ok(catalog)
+        Ok(())
     }
 
     pub fn len(&self) -> usize {
@@ -917,97 +927,104 @@ impl StarIdentifierCatalog {
 
     /// Resolve a human-facing designation such as `Vega`, `RR Lyr`,
     /// `WDS 18367+3849`, or `STF 2382 AB`.
-    pub fn lookup_name(&self, designation: &str) -> Vec<NamedStar<'_>> {
+    pub fn lookup_name(&self, designation: &str) -> io::Result<Vec<NamedStar<'_>>> {
         let key = normalize_star_name(designation);
         if key.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        let mut index = self.lower_bound_name(&key);
+        let mut index = self.lower_bound_name(&key)?;
         let mut matches = Vec::new();
         while index < self.name_count {
             let entry = self.packed_name_entry(index);
-            if self.name_key(entry) != key {
+            if self.name_key(entry)? != key {
                 break;
             }
-            matches.push(self.named_star(entry));
+            matches.push(self.named_star(entry)?);
             index += 1;
         }
-        matches
+        Ok(matches)
     }
 
     /// Prefix completion for interactive name search. Results stay in
     /// normalized lexical order and may contain more than one catalog record
     /// for the same displayed designation.
-    pub fn search_names(&self, prefix: &str, limit: usize) -> Vec<NamedStar<'_>> {
+    pub fn search_names(&self, prefix: &str, limit: usize) -> io::Result<Vec<NamedStar<'_>>> {
         let prefix = normalize_star_name(prefix);
         if prefix.is_empty() || limit == 0 {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        let mut index = self.lower_bound_name(&prefix);
+        let mut index = self.lower_bound_name(&prefix)?;
         let mut matches = Vec::new();
         while index < self.name_count && matches.len() < limit {
             let entry = self.packed_name_entry(index);
-            if !self.name_key(entry).starts_with(&prefix) {
+            if !self.name_key(entry)?.starts_with(&prefix) {
                 break;
             }
-            matches.push(self.named_star(entry));
+            matches.push(self.named_star(entry)?);
             index += 1;
         }
-        matches
+        Ok(matches)
     }
 
     /// Resolve either a typed numeric identifier or a textual designation.
-    pub fn lookup_query(&self, query: &str) -> Vec<StarLookupMatch<'_>> {
+    pub fn lookup_query(&self, query: &str) -> io::Result<Vec<StarLookupMatch<'_>>> {
         if let Ok(identifier) = query.parse::<StarIdentifier>() {
-            return self
+            return Ok(self
                 .lookup(identifier)
                 .into_iter()
                 .map(StarLookupMatch::Identifier)
-                .collect();
+                .collect());
         }
-        self.lookup_name(query)
+        Ok(self
+            .lookup_name(query)?
             .into_iter()
             .map(StarLookupMatch::Name)
-            .collect()
+            .collect())
     }
 
-    fn lower_bound_name(&self, key: &str) -> usize {
+    fn lower_bound_name(&self, key: &str) -> io::Result<usize> {
         let mut low = 0usize;
         let mut high = self.name_count;
         while low < high {
             let middle = low + (high - low) / 2;
             let entry = self.packed_name_entry(middle);
-            if self.name_key(entry) < key {
+            if self.name_key(entry)? < key {
                 low = middle + 1;
             } else {
                 high = middle;
             }
         }
-        low
+        Ok(low)
     }
 
-    fn named_star(&self, entry: PackedNameEntry) -> NamedStar<'_> {
-        NamedStar {
-            designation: self
-                .name_string(entry.designation_offset, entry.designation_len)
-                .expect("validated star name designation"),
-            stable_id: self
-                .name_string(entry.stable_id_offset, entry.stable_id_len)
-                .expect("validated star name stable ID"),
-            catalog: StarNameCatalog::from_u8(entry.catalog).expect("validated star name catalog"),
-            kind: StarNameKind::from_u8(entry.kind).expect("validated star name kind"),
-            detail: self
-                .name_string(entry.detail_offset, entry.detail_len)
-                .expect("validated star name detail"),
+    fn named_star(&self, entry: PackedNameEntry) -> io::Result<NamedStar<'_>> {
+        let designation = self.name_string(entry.designation_offset, entry.designation_len)?;
+        let stable_id = self.name_string(entry.stable_id_offset, entry.stable_id_len)?;
+        if designation.is_empty() || stable_id.is_empty() {
+            return Err(invalid_data(
+                "star name record contains an empty designation or ID",
+            ));
+        }
+        Ok(NamedStar {
+            designation,
+            stable_id,
+            catalog: StarNameCatalog::from_u8(entry.catalog)
+                .ok_or_else(|| invalid_data("invalid star name catalog"))?,
+            kind: StarNameKind::from_u8(entry.kind)
+                .ok_or_else(|| invalid_data("invalid star name kind"))?,
+            detail: self.name_string(entry.detail_offset, entry.detail_len)?,
             ra: unpack_ra(entry.ra),
             dec: unpack_dec(entry.dec),
             mag: (entry.mag != u16::MAX).then(|| unpack_mag(entry.mag)),
-        }
+        })
     }
 
-    fn name_key(&self, entry: PackedNameEntry) -> &str {
-        self.name_string(entry.key_offset, entry.key_len)
-            .expect("validated star name key")
+    fn name_key(&self, entry: PackedNameEntry) -> io::Result<&str> {
+        let key = self.name_string(entry.key_offset, entry.key_len)?;
+        if key.is_empty() {
+            return Err(invalid_data("star name record contains an empty key"));
+        }
+        Ok(key)
     }
 
     fn name_string(&self, offset: u32, len: u16) -> io::Result<&str> {
@@ -1211,6 +1228,7 @@ mod tests {
         builder.write_to(&path).unwrap();
 
         let catalog = StarIdentifierCatalog::open(&path).unwrap();
+        catalog.validate().unwrap();
         assert_eq!(catalog.len(), 6);
         assert_eq!(catalog.numeric_len(), 3);
         assert_eq!(catalog.name_len(), 3);
@@ -1226,24 +1244,74 @@ mod tests {
                 .lookup(StarIdentifier::HenryDraper(48915))
                 .is_empty()
         );
-        let variable = catalog.lookup_name("rr-lyr");
+        let variable = catalog.lookup_name("rr-lyr").unwrap();
         assert_eq!(variable.len(), 1);
         assert_eq!(variable[0].designation, "RR Lyr");
         assert_eq!(variable[0].detail, "RRAB");
         assert_eq!(variable[0].kind, StarNameKind::VariableStar);
-        let double = catalog.lookup_name("stf2382ab");
+        let double = catalog.lookup_name("stf2382ab").unwrap();
         assert_eq!(double.len(), 1);
         assert_eq!(double[0].mag, None);
-        let completion = catalog.search_names("v", 5);
+        let completion = catalog.search_names("v", 5).unwrap();
         assert_eq!(completion.len(), 1);
         assert_eq!(completion[0].designation, "Vega");
         assert!(matches!(
-            catalog.lookup_query("Vega").as_slice(),
+            catalog.lookup_query("Vega").unwrap().as_slice(),
             [StarLookupMatch::Name(NamedStar {
                 designation: "Vega",
                 ..
             })]
         ));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn open_defers_record_and_string_validation_until_touched() {
+        let dir = std::env::temp_dir().join(format!(
+            "seiza-star-identifiers-lazy-open-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let valid_path = dir.join("valid.ids.bin");
+        let mut builder = StarIdentifierCatalogBuilder::new(2025.5, "test source");
+        builder
+            .add_name(
+                StarNameCatalog::GeneralCatalogOfVariableStars,
+                StarNameKind::VariableStar,
+                "RR Lyr",
+                "gcvs:RRLYR",
+                "RRAB",
+                291.3663,
+                42.7844,
+                Some(7.06),
+            )
+            .unwrap();
+        builder.write_to(&valid_path).unwrap();
+
+        let valid = std::fs::read(&valid_path).unwrap();
+        let numeric_count = u64::from_le_bytes(valid[8..16].try_into().unwrap()) as usize;
+        let name_count = u64::from_le_bytes(valid[16..24].try_into().unwrap()) as usize;
+        let attribution_len = u16::from_le_bytes(valid[40..42].try_into().unwrap()) as usize;
+        let numeric_offset = (HEADER_FIXED_SIZE + attribution_len).next_multiple_of(8);
+        let names_offset = numeric_offset + numeric_count * NUMERIC_RECORD_SIZE;
+        let strings_offset = names_offset + name_count * NAME_RECORD_SIZE;
+
+        let invalid_record_path = dir.join("invalid-record.ids.bin");
+        let mut invalid_record = valid.clone();
+        invalid_record[names_offset] = u8::MAX;
+        std::fs::write(&invalid_record_path, invalid_record).unwrap();
+        let catalog = StarIdentifierCatalog::open(&invalid_record_path).unwrap();
+        assert!(catalog.validate().is_err());
+        assert!(catalog.lookup_name("RR Lyr").is_err());
+
+        let invalid_string_path = dir.join("invalid-string.ids.bin");
+        let mut invalid_string = valid;
+        invalid_string[strings_offset] = u8::MAX;
+        std::fs::write(&invalid_string_path, invalid_string).unwrap();
+        let catalog = StarIdentifierCatalog::open(&invalid_string_path).unwrap();
+        assert!(catalog.validate().is_err());
+        assert!(catalog.lookup_name("RR Lyr").is_err());
 
         std::fs::remove_dir_all(&dir).ok();
     }
