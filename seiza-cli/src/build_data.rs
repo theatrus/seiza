@@ -113,7 +113,7 @@ pub fn build_tycho2(input: &Path, output: &Path, epoch: f64, max_mag: f32) -> Re
 /// active list. Each row becomes a Transient object whose common name
 /// carries the type, latest magnitude, discovery date, and host.
 pub fn build_transients(input: &Path, output: &Path) -> Result<()> {
-    use seiza::objects::{ObjectCatalog, ObjectKind, SkyObject};
+    use seiza::objects::{ObjectCatalog, ObjectKind, ObjectMetadata, SkyObject};
 
     let path = input.join("snactive.html");
     // The page contains Latin-1 discoverer names; decode lossily
@@ -190,6 +190,12 @@ pub fn build_transients(input: &Path, output: &Path) -> Result<()> {
             position_angle_deg: None,
             name,
             common_name: details.join(", "),
+            metadata: ObjectMetadata {
+                id: format!("rochester:{designation}"),
+                source: "Rochester Latest Supernovae".to_string(),
+                aliases: Vec::new(),
+                parent_ids: Vec::new(),
+            },
         });
     }
 
@@ -382,7 +388,7 @@ fn parse_tycho2_suppl_line(line: &str, epoch: f64) -> Option<(f64, f64, f32)> {
 /// Build an object catalog from OpenNGC, VizieR Sharpless/Barnard TSVs, and
 /// the IAU star-name list, whichever are present in `input`.
 pub fn build_objects(input: &Path, output: &Path) -> Result<()> {
-    use seiza::objects::{ObjectCatalog, ObjectKind, SkyObject};
+    use seiza::objects::{ObjectCatalog, ObjectKind, ObjectMetadata, SkyObject};
 
     let mut objects = Vec::new();
     let mut sources = 0;
@@ -401,9 +407,21 @@ pub fn build_objects(input: &Path, output: &Path) -> Result<()> {
         }
     }
 
-    for (file, prefix, kind) in [
-        ("sh2.tsv", "Sh2-", ObjectKind::HiiRegion),
-        ("barnard.tsv", "B", ObjectKind::DarkNebula),
+    for (file, prefix, kind, source, id_prefix) in [
+        (
+            "sh2.tsv",
+            "Sh2-",
+            ObjectKind::HiiRegion,
+            "VizieR VII/20/catalog",
+            "vizier:VII/20:Sh2-",
+        ),
+        (
+            "barnard.tsv",
+            "B",
+            ObjectKind::DarkNebula,
+            "VizieR VII/220A/barnard",
+            "vizier:VII/220A:B",
+        ),
     ] {
         let path = input.join(file);
         if !path.exists() {
@@ -436,6 +454,12 @@ pub fn build_objects(input: &Path, output: &Path) -> Result<()> {
                 position_angle_deg: None,
                 name: format!("{prefix}{number}"),
                 common_name: String::new(),
+                metadata: ObjectMetadata {
+                    id: format!("{id_prefix}{number}"),
+                    source: source.to_string(),
+                    aliases: Vec::new(),
+                    parent_ids: Vec::new(),
+                },
             });
         }
     }
@@ -443,10 +467,28 @@ pub fn build_objects(input: &Path, output: &Path) -> Result<()> {
     // Generic VizieR TSV sources: (file, parse into SkyObject)
     let mut grid_dedup = PositionDedup::new();
 
-    for (file, kind, prefix) in [
-        ("ugc.tsv", ObjectKind::Galaxy, "UGC "),
-        ("ldn.tsv", ObjectKind::DarkNebula, "LDN "),
-        ("vdb.tsv", ObjectKind::Nebula, "vdB "),
+    for (file, kind, prefix, source, id_prefix) in [
+        (
+            "ugc.tsv",
+            ObjectKind::Galaxy,
+            "UGC ",
+            "VizieR VII/26D/catalog",
+            "vizier:VII/26D:UGC",
+        ),
+        (
+            "ldn.tsv",
+            ObjectKind::DarkNebula,
+            "LDN ",
+            "VizieR VII/7A/ldn",
+            "vizier:VII/7A:LDN",
+        ),
+        (
+            "vdb.tsv",
+            ObjectKind::Nebula,
+            "vdB ",
+            "VizieR VII/21/catalog",
+            "vizier:VII/21:VdB",
+        ),
     ] {
         let path = input.join(file);
         if !path.exists() {
@@ -500,6 +542,12 @@ pub fn build_objects(input: &Path, output: &Path) -> Result<()> {
                 position_angle_deg: pa,
                 name: format!("{prefix}{number}"),
                 common_name: String::new(),
+                metadata: ObjectMetadata {
+                    id: format!("{id_prefix}{number}"),
+                    source: source.to_string(),
+                    aliases: Vec::new(),
+                    parent_ids: Vec::new(),
+                },
             });
         }
     }
@@ -562,6 +610,12 @@ pub fn build_objects(input: &Path, output: &Path) -> Result<()> {
                 position_angle_deg: fields.get(5).and_then(|v| v.parse().ok()),
                 name: format!("PGC {number}"),
                 common_name: String::new(),
+                metadata: ObjectMetadata {
+                    id: format!("vizier:VII/237:PGC{number}"),
+                    source: "VizieR VII/237/pgc".to_string(),
+                    aliases: Vec::new(),
+                    parent_ids: Vec::new(),
+                },
             });
         }
     }
@@ -602,6 +656,12 @@ pub fn build_objects(input: &Path, output: &Path) -> Result<()> {
                 position_angle_deg: None,
                 name: format!("HD {hd}"),
                 common_name: bayer,
+                metadata: ObjectMetadata {
+                    id: format!("vizier:V/50:HD{hd}"),
+                    source: "VizieR V/50/catalog".to_string(),
+                    aliases: Vec::new(),
+                    parent_ids: Vec::new(),
+                },
             });
         }
     }
@@ -641,6 +701,12 @@ pub fn build_objects(input: &Path, output: &Path) -> Result<()> {
                 position_angle_deg: None,
                 name: format!("SNR {designation}"),
                 common_name: fields.get(5).unwrap_or(&"").to_string(),
+                metadata: ObjectMetadata {
+                    id: format!("vizier:VII/284:{designation}"),
+                    source: "VizieR VII/284/snrs".to_string(),
+                    aliases: Vec::new(),
+                    parent_ids: Vec::new(),
+                },
             });
         }
     }
@@ -683,6 +749,12 @@ pub fn build_objects(input: &Path, output: &Path) -> Result<()> {
                 position_angle_deg: None,
                 name: format!("WR {number}"),
                 common_name,
+                metadata: ObjectMetadata {
+                    id: format!("vizier:III/215:WR{number}"),
+                    source: "VizieR III/215/table13".to_string(),
+                    aliases: Vec::new(),
+                    parent_ids: Vec::new(),
+                },
             });
         }
     }
@@ -707,7 +779,7 @@ pub fn build_objects(input: &Path, output: &Path) -> Result<()> {
 
 /// One `;`-separated OpenNGC row. Skips duplicates and non-existent entries.
 fn parse_openngc_line(line: &str) -> Option<seiza::objects::SkyObject> {
-    use seiza::objects::{ObjectKind, SkyObject};
+    use seiza::objects::{ObjectKind, ObjectMetadata, SkyObject};
 
     let fields: Vec<&str> = line.split(';').collect();
     if fields.len() < 30 {
@@ -735,20 +807,24 @@ fn parse_openngc_line(line: &str) -> Option<seiza::objects::SkyObject> {
     let ra = parse_sexagesimal(fields[2])? * 15.0;
     let dec = parse_sexagesimal(fields[3])?;
 
-    // Prefer the Messier designation, prettify the NGC/IC name
+    // Prefer the Messier designation, prettify the NGC/IC name, and retain
+    // the OpenNGC designation as both a stable ID and an alias when needed.
+    let raw_name = fields[0];
+    let catalog_name = if let Some(rest) = raw_name.strip_prefix("NGC") {
+        format!("NGC {}", rest.trim_start_matches('0'))
+    } else if let Some(rest) = raw_name.strip_prefix("IC") {
+        format!("IC {}", rest.trim_start_matches('0'))
+    } else {
+        raw_name.to_string()
+    };
     let name = match fields.get(23).map(|m| m.trim_start_matches('0')) {
         Some(m) if !m.is_empty() => format!("M {m}"),
-        _ => {
-            let raw = fields[0];
-            if let Some(rest) = raw.strip_prefix("NGC") {
-                format!("NGC {}", rest.trim_start_matches('0'))
-            } else if let Some(rest) = raw.strip_prefix("IC") {
-                format!("IC {}", rest.trim_start_matches('0'))
-            } else {
-                raw.to_string()
-            }
-        }
+        _ => catalog_name.clone(),
     };
+    let aliases = (catalog_name != name)
+        .then_some(catalog_name)
+        .into_iter()
+        .collect();
     let common_name = fields
         .get(28)
         .and_then(|names| names.split(',').next())
@@ -766,6 +842,12 @@ fn parse_openngc_line(line: &str) -> Option<seiza::objects::SkyObject> {
         position_angle_deg: fields[7].parse().ok(),
         name,
         common_name,
+        metadata: ObjectMetadata {
+            id: format!("openngc:{raw_name}"),
+            source: "OpenNGC".to_string(),
+            aliases,
+            parent_ids: Vec::new(),
+        },
     })
 }
 
@@ -789,7 +871,7 @@ fn parse_sexagesimal(value: &str) -> Option<f64> {
 /// One line of the IAU-CSN list. The ASCII name occupies the first 18
 /// bytes; RA/Dec (J2000, degrees) are anchored by the date column.
 fn parse_iau_csn_line(line: &str) -> Option<seiza::objects::SkyObject> {
-    use seiza::objects::{ObjectKind, SkyObject};
+    use seiza::objects::{ObjectKind, ObjectMetadata, SkyObject};
 
     if line.starts_with('#') || line.len() < 40 || !line.is_ascii() && line.get(..18).is_none() {
         return None;
@@ -819,6 +901,12 @@ fn parse_iau_csn_line(line: &str) -> Option<seiza::objects::SkyObject> {
         position_angle_deg: None,
         name: name.to_string(),
         common_name: name.to_string(),
+        metadata: ObjectMetadata {
+            id: format!("iau-csn:{name}"),
+            source: "IAU Catalog of Star Names".to_string(),
+            aliases: Vec::new(),
+            parent_ids: Vec::new(),
+        },
     })
 }
 

@@ -1,4 +1,4 @@
-use seiza::objects::{ObjectCatalog, ObjectKind, SkyObject};
+use seiza::objects::{ObjectCatalog, ObjectKind, ObjectMetadata, SkyObject};
 use std::process::Command;
 
 fn object(name: &str, ra: f64, dec: f64) -> SkyObject {
@@ -12,6 +12,12 @@ fn object(name: &str, ra: f64, dec: f64) -> SkyObject {
         position_angle_deg: Some(35.0),
         name: name.to_string(),
         common_name: format!("{name} common"),
+        metadata: ObjectMetadata {
+            id: format!("test:{}", name.to_lowercase()),
+            source: "test-catalog".to_string(),
+            aliases: vec![format!("{name} alias")],
+            parent_ids: Vec::new(),
+        },
     }
 }
 
@@ -55,6 +61,7 @@ fn catalog_objects_supports_cone_and_polygon_json_queries() {
     let cone: serde_json::Value = serde_json::from_slice(&cone.stdout).unwrap();
     assert_eq!(cone["returned"], 2);
     assert_eq!(cone["objects"][0]["center_inside"], true);
+    assert_eq!(cone["objects"][0]["source"], "test-catalog");
 
     let polygon = Command::new(env!("CARGO_BIN_EXE_seiza"))
         .args([
@@ -111,6 +118,7 @@ fn catalog_objects_supports_cone_and_polygon_json_queries() {
     let csv = String::from_utf8(csv.stdout).unwrap();
     assert!(csv.starts_with("kind,name,common_name,ra_deg,dec_deg"));
     assert!(csv.contains("galaxy,Near,Near common"));
+    assert!(csv.contains("test:near,test-catalog,Near alias"));
 
     std::fs::remove_dir_all(&dir).ok();
 }

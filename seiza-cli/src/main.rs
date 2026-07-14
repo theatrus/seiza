@@ -860,6 +860,10 @@ fn catalog_objects(args: CatalogObjectsArgs) -> Result<()> {
                         "kind": object.kind.as_str(),
                         "name": object.name,
                         "common_name": object.common_name,
+                        "id": object.metadata.id,
+                        "source": object.metadata.source,
+                        "aliases": object.metadata.aliases,
+                        "parent_ids": object.metadata.parent_ids,
                         "ra_deg": object.ra,
                         "dec_deg": object.dec,
                         "mag": object.mag,
@@ -886,12 +890,12 @@ fn catalog_objects(args: CatalogObjectsArgs) -> Result<()> {
         }
         CatalogOutputFormat::Csv => {
             println!(
-                "kind,name,common_name,ra_deg,dec_deg,mag,major_arcmin,minor_arcmin,position_angle_deg,match,distance_from_center_deg,predicted_prominence"
+                "kind,name,common_name,ra_deg,dec_deg,mag,major_arcmin,minor_arcmin,position_angle_deg,match,distance_from_center_deg,predicted_prominence,id,source,aliases,parent_ids"
             );
             for hit in &hits {
                 let object = hit.object;
                 println!(
-                    "{},{},{},{:.8},{:.8},{},{},{},{},{},{:.8},{:.8}",
+                    "{},{},{},{:.8},{:.8},{},{},{},{},{},{:.8},{:.8},{},{},{},{}",
                     object.kind.as_str(),
                     csv_field(&object.name),
                     csv_field(&object.common_name),
@@ -904,6 +908,10 @@ fn catalog_objects(args: CatalogObjectsArgs) -> Result<()> {
                     if hit.extent_only { "extent" } else { "center" },
                     hit.distance_from_center_deg,
                     hit.predicted_prominence,
+                    csv_field(&object.metadata.id),
+                    csv_field(&object.metadata.source),
+                    csv_field(&object.metadata.aliases.join("|")),
+                    csv_field(&object.metadata.parent_ids.join("|")),
                 );
             }
         }
