@@ -108,6 +108,94 @@ pub struct PlacedObject {
     pub angle_deg: f64,
 }
 
+/// A sky region that can be queried without plate-solving an image.
+///
+/// Polygon vertices must describe a convex region in boundary order. Image
+/// footprints returned by [`Wcs::footprint`] satisfy that requirement.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SkyRegion {
+    /// A circular region on the sky.
+    Cone {
+        /// ICRS degrees.
+        center: (f64, f64),
+        radius_deg: f64,
+    },
+    /// A convex spherical polygon, with ICRS vertices in boundary order.
+    Polygon { vertices: Vec<(f64, f64)> },
+}
+
+/// Ordering applied to results from [`ObjectCatalog::query_region`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ObjectSort {
+    /// Heuristic likelihood that an object is a major feature of the field.
+    #[default]
+    Prominence,
+    Size,
+    Magnitude,
+    Distance,
+    Name,
+}
+
+/// Filters and output controls for a coordinate-only object query.
+#[derive(Debug, Clone)]
+pub struct ObjectQuery {
+    /// Empty means every object kind.
+    pub kinds: Vec<ObjectKind>,
+    /// Objects with unknown magnitude are excluded when this is set.
+    pub max_mag: Option<f32>,
+    /// Objects with unknown angular size are excluded when this is set.
+    pub min_major_arcmin: Option<f32>,
+    /// Require a populated common-name field, rather than only a designation.
+    pub common_name_only: bool,
+    /// Include large objects whose catalog extent reaches into the region even
+    /// when their center lies outside it.
+    pub include_extent_overlaps: bool,
+    pub limit: Option<usize>,
+    pub sort: ObjectSort,
+}
+
+impl Default for ObjectQuery {
+    fn default() -> Self {
+        Self {
+            kinds: Vec::new(),
+            max_mag: None,
+            min_major_arcmin: None,
+            common_name_only: false,
+            include_extent_overlaps: true,
+            limit: None,
+            sort: ObjectSort::Prominence,
+        }
+    }
+}
+
+/// A catalog object associated with a coordinate-only sky region.
+#[derive(Debug, Clone, Copy)]
+pub struct ObjectHit<'a> {
+    pub object: &'a SkyObject,
+    /// True when the catalog position itself is inside the region.
+    pub center_inside: bool,
+    /// True when only the object's catalog extent reaches into the region.
+    /// Extents are conservatively approximated by the major-axis radius.
+    pub extent_only: bool,
+    pub distance_from_center_deg: f64,
+    /// A 0..1 heuristic based on angular size relative to the field,
+    /// integrated magnitude, common-name availability, and center placement.
+    /// It predicts likely prominence; it does not prove pixel visibility.
+    pub predicted_prominence: f64,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq)]
+pub enum ObjectQueryError {
+    #[error("invalid ICRS coordinate ({ra}, {dec})")]
+    InvalidCoordinate { ra: f64, dec: f64 },
+    #[error("cone radius must be finite and in the range (0, 180], got {0}")]
+    InvalidRadius(f64),
+    #[error("a polygon needs at least three vertices, got {0}")]
+    TooFewVertices(usize),
+    #[error("polygon vertices must form a non-degenerate convex region in boundary order")]
+    InvalidPolygon,
+}
+
 /// An in-memory object catalog.
 #[derive(Debug, Default)]
 pub struct ObjectCatalog {
@@ -187,6 +275,77 @@ impl ObjectCatalog {
         Ok(Self { objects })
     }
 
+    /// Query catalog objects using known sky coordinates, without detecting
+    /// stars or plate-solving an image.
+    ///
+    /// An object's angular extent is treated as a conservative circle using
+    /// its major-axis radius for boundary intersection. The original ellipse
+    /// metadata remains available on [`ObjectHit::object`].
+    pub fn query_region<'a>(
+        &'a self,
+        region: &SkyRegion,
+        query: &ObjectQuery,
+    ) -> Result<Vec<ObjectHit<'a>>, ObjectQueryError> {
+        let region = PreparedRegion::new(region)?;
+        let mut hits: Vec<_> = self
+            .objects
+            .iter()
+            .filter(|object| {
+                (query.kinds.is_empty() || query.kinds.contains(&object.kind))
+                    && query
+                        .max_mag
+                        .is_none_or(|max| object.mag.is_some_and(|mag| mag <= max))
+                    && query
+                        .min_major_arcmin
+                        .is_none_or(|min| object.major_arcmin.is_some_and(|major| major >= min))
+                    && (!query.common_name_only || !object.common_name.is_empty())
+            })
+            .filter_map(|object| {
+                let point = UnitVector::from_radec(object.ra, object.dec)?;
+                let extent_radius_deg = object.major_arcmin.unwrap_or(0.0) as f64 / 120.0;
+                let distance_from_center_deg = region.distance_from_center_deg(point);
+                let query_reach = if query.include_extent_overlaps {
+                    extent_radius_deg
+                } else {
+                    0.0
+                };
+                // Every supported region lies inside this cap. Rejecting
+                // distant objects here avoids polygon edge calculations for
+                // nearly the entire all-sky catalog.
+                if distance_from_center_deg
+                    > region.characteristic_radius_deg() + query_reach + 1e-10
+                {
+                    return None;
+                }
+                let center_inside = region.contains(point);
+                let intersects = center_inside
+                    || (query.include_extent_overlaps
+                        && extent_radius_deg > 0.0
+                        && region.distance_to_boundary_deg(point) <= extent_radius_deg);
+                if !intersects {
+                    return None;
+                }
+                Some(ObjectHit {
+                    object,
+                    center_inside,
+                    extent_only: !center_inside,
+                    distance_from_center_deg,
+                    predicted_prominence: predicted_prominence(
+                        object,
+                        center_inside,
+                        region.characteristic_radius_deg(),
+                    ),
+                })
+            })
+            .collect();
+
+        sort_hits(&mut hits, query.sort);
+        if let Some(limit) = query.limit {
+            hits.truncate(limit);
+        }
+        Ok(hits)
+    }
+
     /// Objects whose extent intersects a solved image, with pixel geometry.
     /// Sorted large-to-small so prominent objects come first.
     pub fn objects_in_footprint(&self, wcs: &Wcs, dimensions: (u32, u32)) -> Vec<PlacedObject> {
@@ -219,6 +378,255 @@ impl ObjectCatalog {
             .collect();
         placed.sort_by(|a, b| b.semi_major_px.total_cmp(&a.semi_major_px));
         placed
+    }
+}
+
+fn sort_hits(hits: &mut [ObjectHit<'_>], sort: ObjectSort) {
+    hits.sort_by(|a, b| {
+        let primary = match sort {
+            ObjectSort::Prominence => b.predicted_prominence.total_cmp(&a.predicted_prominence),
+            ObjectSort::Size => b
+                .object
+                .major_arcmin
+                .unwrap_or(0.0)
+                .total_cmp(&a.object.major_arcmin.unwrap_or(0.0)),
+            ObjectSort::Magnitude => a
+                .object
+                .mag
+                .unwrap_or(f32::INFINITY)
+                .total_cmp(&b.object.mag.unwrap_or(f32::INFINITY)),
+            ObjectSort::Distance => a
+                .distance_from_center_deg
+                .total_cmp(&b.distance_from_center_deg),
+            ObjectSort::Name => a.object.name.cmp(&b.object.name),
+        };
+        primary.then_with(|| {
+            b.object
+                .major_arcmin
+                .unwrap_or(0.0)
+                .total_cmp(&a.object.major_arcmin.unwrap_or(0.0))
+        })
+    });
+}
+
+fn predicted_prominence(object: &SkyObject, center_inside: bool, region_radius_deg: f64) -> f64 {
+    let frame_diameter_arcmin = (region_radius_deg * 120.0).max(1e-9);
+    let size_score = object
+        .major_arcmin
+        .map(|major| 1.0 - (-2.0 * major as f64 / frame_diameter_arcmin).exp())
+        .unwrap_or(0.0);
+    let magnitude_score = object
+        .mag
+        .map(|mag| ((16.0 - mag as f64) / 16.0).clamp(0.0, 1.0))
+        .unwrap_or(0.0);
+    let common_name_score = if object.common_name.is_empty() {
+        0.0
+    } else {
+        1.0
+    };
+    let placement = if center_inside { 1.0 } else { 0.7 };
+    ((0.65 * size_score + 0.30 * magnitude_score + 0.05 * common_name_score) * placement)
+        .clamp(0.0, 1.0)
+}
+
+#[derive(Debug, Clone)]
+enum PreparedRegion {
+    Cone {
+        center: UnitVector,
+        radius_deg: f64,
+    },
+    Polygon {
+        center: UnitVector,
+        characteristic_radius_deg: f64,
+        vertices: Vec<UnitVector>,
+    },
+}
+
+impl PreparedRegion {
+    fn new(region: &SkyRegion) -> Result<Self, ObjectQueryError> {
+        match region {
+            SkyRegion::Cone { center, radius_deg } => {
+                let center = UnitVector::from_radec(center.0, center.1).ok_or(
+                    ObjectQueryError::InvalidCoordinate {
+                        ra: center.0,
+                        dec: center.1,
+                    },
+                )?;
+                if !radius_deg.is_finite() || *radius_deg <= 0.0 || *radius_deg > 180.0 {
+                    return Err(ObjectQueryError::InvalidRadius(*radius_deg));
+                }
+                Ok(Self::Cone {
+                    center,
+                    radius_deg: *radius_deg,
+                })
+            }
+            SkyRegion::Polygon { vertices } => {
+                if vertices.len() < 3 {
+                    return Err(ObjectQueryError::TooFewVertices(vertices.len()));
+                }
+                let vertices: Vec<_> = vertices
+                    .iter()
+                    .map(|&(ra, dec)| {
+                        UnitVector::from_radec(ra, dec)
+                            .ok_or(ObjectQueryError::InvalidCoordinate { ra, dec })
+                    })
+                    .collect::<Result<_, _>>()?;
+                let center = vertices
+                    .iter()
+                    .copied()
+                    .fold(UnitVector::ZERO, UnitVector::add)
+                    .normalized()
+                    .ok_or(ObjectQueryError::InvalidPolygon)?;
+                let characteristic_radius_deg = vertices
+                    .iter()
+                    .map(|&vertex| center.angle_deg(vertex))
+                    .fold(0.0, f64::max);
+                if !characteristic_radius_deg.is_finite()
+                    || characteristic_radius_deg <= 0.0
+                    || characteristic_radius_deg >= 90.0
+                {
+                    return Err(ObjectQueryError::InvalidPolygon);
+                }
+                // A convex polygon in boundary order keeps the interior point
+                // on the same side of every great-circle edge.
+                for index in 0..vertices.len() {
+                    let edge = vertices[index].cross(vertices[(index + 1) % vertices.len()]);
+                    let center_side = edge.dot(center);
+                    if edge.norm() <= 1e-12 || center_side.abs() <= 1e-12 {
+                        return Err(ObjectQueryError::InvalidPolygon);
+                    }
+                    for (vertex_index, &vertex) in vertices.iter().enumerate() {
+                        if vertex_index != index
+                            && vertex_index != (index + 1) % vertices.len()
+                            && edge.dot(vertex) * center_side < -1e-12
+                        {
+                            return Err(ObjectQueryError::InvalidPolygon);
+                        }
+                    }
+                }
+                Ok(Self::Polygon {
+                    center,
+                    characteristic_radius_deg,
+                    vertices,
+                })
+            }
+        }
+    }
+
+    fn center(&self) -> UnitVector {
+        match self {
+            Self::Cone { center, .. } | Self::Polygon { center, .. } => *center,
+        }
+    }
+
+    fn characteristic_radius_deg(&self) -> f64 {
+        match self {
+            Self::Cone { radius_deg, .. } => *radius_deg,
+            Self::Polygon {
+                characteristic_radius_deg,
+                ..
+            } => *characteristic_radius_deg,
+        }
+    }
+
+    fn distance_from_center_deg(&self, point: UnitVector) -> f64 {
+        self.center().angle_deg(point)
+    }
+
+    fn contains(&self, point: UnitVector) -> bool {
+        match self {
+            Self::Cone { center, radius_deg } => center.angle_deg(point) <= *radius_deg + 1e-10,
+            Self::Polygon {
+                center, vertices, ..
+            } => (0..vertices.len()).all(|index| {
+                let edge = vertices[index].cross(vertices[(index + 1) % vertices.len()]);
+                edge.dot(point) * edge.dot(*center) >= -1e-12
+            }),
+        }
+    }
+
+    fn distance_to_boundary_deg(&self, point: UnitVector) -> f64 {
+        match self {
+            Self::Cone { center, radius_deg } => (center.angle_deg(point) - radius_deg).abs(),
+            Self::Polygon { vertices, .. } => (0..vertices.len())
+                .map(|index| {
+                    distance_to_arc_deg(
+                        point,
+                        vertices[index],
+                        vertices[(index + 1) % vertices.len()],
+                    )
+                })
+                .fold(f64::INFINITY, f64::min),
+        }
+    }
+}
+
+/// Minimum angular distance from a point to the minor great-circle arc AB.
+fn distance_to_arc_deg(point: UnitVector, a: UnitVector, b: UnitVector) -> f64 {
+    let mut best = point.angle_deg(a).min(point.angle_deg(b));
+    let arc_angle = a.angle_deg(b);
+    let Some(normal) = a.cross(b).normalized() else {
+        return best;
+    };
+    let projected = point.add(normal.scale(-point.dot(normal)));
+    let Some(projected) = projected.normalized() else {
+        return best;
+    };
+    for candidate in [projected, projected.scale(-1.0)] {
+        let along = a.angle_deg(candidate) + candidate.angle_deg(b);
+        if (along - arc_angle).abs() <= 1e-7 {
+            best = best.min(point.angle_deg(candidate));
+        }
+    }
+    best
+}
+
+#[derive(Debug, Clone, Copy)]
+struct UnitVector(f64, f64, f64);
+
+impl UnitVector {
+    const ZERO: Self = Self(0.0, 0.0, 0.0);
+
+    fn from_radec(ra: f64, dec: f64) -> Option<Self> {
+        if !ra.is_finite() || !dec.is_finite() || !(-90.0..=90.0).contains(&dec) {
+            return None;
+        }
+        let (sin_ra, cos_ra) = ra.rem_euclid(360.0).to_radians().sin_cos();
+        let (sin_dec, cos_dec) = dec.to_radians().sin_cos();
+        Some(Self(cos_dec * cos_ra, cos_dec * sin_ra, sin_dec))
+    }
+
+    fn add(self, other: Self) -> Self {
+        Self(self.0 + other.0, self.1 + other.1, self.2 + other.2)
+    }
+
+    fn scale(self, factor: f64) -> Self {
+        Self(self.0 * factor, self.1 * factor, self.2 * factor)
+    }
+
+    fn dot(self, other: Self) -> f64 {
+        self.0 * other.0 + self.1 * other.1 + self.2 * other.2
+    }
+
+    fn cross(self, other: Self) -> Self {
+        Self(
+            self.1 * other.2 - self.2 * other.1,
+            self.2 * other.0 - self.0 * other.2,
+            self.0 * other.1 - self.1 * other.0,
+        )
+    }
+
+    fn norm(self) -> f64 {
+        self.dot(self).sqrt()
+    }
+
+    fn normalized(self) -> Option<Self> {
+        let norm = self.norm();
+        (norm > 1e-15).then(|| self.scale(1.0 / norm))
+    }
+
+    fn angle_deg(self, other: Self) -> f64 {
+        self.dot(other).clamp(-1.0, 1.0).acos().to_degrees()
     }
 }
 
@@ -296,6 +704,163 @@ mod tests {
             name: "NGC 224".to_string(),
             common_name: "Andromeda Galaxy".to_string(),
         }
+    }
+
+    fn test_object(name: &str, ra: f64, dec: f64) -> SkyObject {
+        SkyObject {
+            kind: ObjectKind::Nebula,
+            ra,
+            dec,
+            mag: None,
+            major_arcmin: None,
+            minor_arcmin: None,
+            position_angle_deg: None,
+            name: name.to_string(),
+            common_name: String::new(),
+        }
+    }
+
+    #[test]
+    fn cone_query_distinguishes_centers_from_extent_only_hits() {
+        let inside = test_object("Inside", 0.0, 0.0);
+        let mut overlapping = test_object("Overlapping", 1.2, 0.0);
+        // 30' major axis => 0.25-degree radius, reaching into a 1-degree cone.
+        overlapping.major_arcmin = Some(30.0);
+        let outside = test_object("Outside", 3.0, 0.0);
+        let catalog = ObjectCatalog::new(vec![inside, overlapping, outside]);
+        let region = SkyRegion::Cone {
+            center: (0.0, 0.0),
+            radius_deg: 1.0,
+        };
+
+        let hits = catalog
+            .query_region(&region, &ObjectQuery::default())
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        let center = hits.iter().find(|hit| hit.object.name == "Inside").unwrap();
+        assert!(center.center_inside);
+        assert!(!center.extent_only);
+        let extent = hits
+            .iter()
+            .find(|hit| hit.object.name == "Overlapping")
+            .unwrap();
+        assert!(!extent.center_inside);
+        assert!(extent.extent_only);
+
+        let centers_only = ObjectQuery {
+            include_extent_overlaps: false,
+            ..Default::default()
+        };
+        let hits = catalog.query_region(&region, &centers_only).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].object.name, "Inside");
+    }
+
+    #[test]
+    fn polygon_query_handles_ra_wrap() {
+        let inside = test_object("At zero", 0.0, 0.0);
+        let outside = test_object("Far away", 10.0, 0.0);
+        let catalog = ObjectCatalog::new(vec![inside, outside]);
+        let region = SkyRegion::Polygon {
+            vertices: vec![(359.0, -1.0), (1.0, -1.0), (1.0, 1.0), (359.0, 1.0)],
+        };
+
+        let hits = catalog
+            .query_region(&region, &ObjectQuery::default())
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].object.name, "At zero");
+        assert!(hits[0].center_inside);
+        assert!(hits[0].distance_from_center_deg < 1e-6);
+    }
+
+    #[test]
+    fn polygon_query_handles_polar_fields_and_extent_overlap() {
+        let pole = test_object("Pole", 0.0, 90.0);
+        let catalog = ObjectCatalog::new(vec![pole]);
+        let polar_region = SkyRegion::Polygon {
+            vertices: vec![(0.0, 89.0), (90.0, 89.0), (180.0, 89.0), (270.0, 89.0)],
+        };
+        let hits = catalog
+            .query_region(&polar_region, &ObjectQuery::default())
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].center_inside);
+
+        let mut overlap = test_object("Overlap", 1.2, 0.0);
+        overlap.major_arcmin = Some(30.0);
+        let catalog = ObjectCatalog::new(vec![overlap]);
+        let box_region = SkyRegion::Polygon {
+            vertices: vec![(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)],
+        };
+        let hits = catalog
+            .query_region(&box_region, &ObjectQuery::default())
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].extent_only);
+    }
+
+    #[test]
+    fn query_filters_and_prominence_sort_are_explicit() {
+        let mut large = test_object("Large", 0.0, 0.0);
+        large.major_arcmin = Some(120.0);
+        let mut small_named = test_object("Small", 0.1, 0.0);
+        small_named.major_arcmin = Some(1.0);
+        small_named.mag = Some(10.0);
+        small_named.common_name = "Named feature".to_string();
+        let catalog = ObjectCatalog::new(vec![small_named, large]);
+        let region = SkyRegion::Cone {
+            center: (0.0, 0.0),
+            radius_deg: 5.0,
+        };
+
+        let hits = catalog
+            .query_region(&region, &ObjectQuery::default())
+            .unwrap();
+        assert_eq!(hits[0].object.name, "Large");
+        assert!(hits[0].predicted_prominence > hits[1].predicted_prominence);
+
+        let named_and_measured = ObjectQuery {
+            max_mag: Some(12.0),
+            common_name_only: true,
+            ..Default::default()
+        };
+        let hits = catalog.query_region(&region, &named_and_measured).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].object.name, "Small");
+    }
+
+    #[test]
+    fn query_rejects_invalid_regions() {
+        let catalog = ObjectCatalog::default();
+        let polygon = SkyRegion::Polygon {
+            vertices: vec![(0.0, 0.0), (1.0, 0.0)],
+        };
+        assert!(matches!(
+            catalog.query_region(&polygon, &ObjectQuery::default()),
+            Err(ObjectQueryError::TooFewVertices(2))
+        ));
+        let cone = SkyRegion::Cone {
+            center: (0.0, 91.0),
+            radius_deg: 1.0,
+        };
+        assert!(matches!(
+            catalog.query_region(&cone, &ObjectQuery::default()),
+            Err(ObjectQueryError::InvalidCoordinate { .. })
+        ));
+        let concave = SkyRegion::Polygon {
+            vertices: vec![
+                (-2.0, -2.0),
+                (2.0, -2.0),
+                (0.0, 0.0),
+                (2.0, 2.0),
+                (-2.0, 2.0),
+            ],
+        };
+        assert!(matches!(
+            catalog.query_region(&concave, &ObjectQuery::default()),
+            Err(ObjectQueryError::InvalidPolygon)
+        ));
     }
 
     #[test]

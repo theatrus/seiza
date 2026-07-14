@@ -17,6 +17,7 @@ seiza download-data prebuilt --output data       # SHA-256-verified from downloa
 seiza solve-blind image.jpg --data data/stars-lite-tycho2.bin --min-scale 0.5 --max-scale 15
 seiza solve-blind fine-scale.jpg --data data/stars-deep-gaia17.bin --index data/blind-gaia16.idx --min-scale 0.1 --max-scale 5
 seiza solve image.fits --data data/stars-gaia.bin --scale 1.26 --objects data/objects.bin
+seiza catalog objects --data data/objects.bin --ra 10.6848 --dec 41.2691 --radius 3 --format json
 ```
 
 Hosted datasets (manifest at
@@ -66,8 +67,9 @@ seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-
 - **Object catalogs** — OpenNGC (NGC/IC/Messier), Sharpless, Barnard, UGC,
   LDN, vdB, PGC, Green's Galactic supernova remnants, Wolf-Rayet stars,
   IAU named and HD stars, and live transient (supernova/nova) lists built
-  into a compact object store; solved images can be queried for the
-  objects in their footprint with full ellipse geometry
+  into a compact object store. Query a known sky cone or ordered image
+  footprint without plate solving (`seiza catalog objects ...`), or query a
+  solved image with projected pixel and ellipse geometry
   (`seiza solve ... --objects objects.bin`).
 - **FITS** — dependency-free reading with typed headers, exact
   histogram statistics, N.I.N.A.-style MTF autostretch, planar RGB
