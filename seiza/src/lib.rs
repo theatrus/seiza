@@ -12,8 +12,10 @@ pub mod blind;
 pub mod catalog;
 pub mod detect;
 pub mod minor_bodies;
+mod object_catalog_v3;
 pub mod objects;
 pub mod solve;
+pub mod star_ids;
 pub mod wcs;
 
 pub use detect::{DetectConfig, DetectedStar, detect_stars};

@@ -1,8 +1,11 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use seiza::blind::BlindIndex;
 use seiza::catalog::{StarCatalog, TileCatalog};
+use seiza::minor_bodies::MinorBodyCatalog;
 use seiza::objects::{ObjectCatalog, ObjectKind, ObjectQuery, ObjectSort, SkyRegion};
 use seiza::solve::{SolveHint, solve};
+use seiza::star_ids::{StarIdentifierCatalog, StarLookupMatch};
 use seiza::{DetectConfig, detect_stars};
 use std::path::PathBuf;
 
@@ -199,11 +202,61 @@ enum Command {
 
 #[derive(Subcommand)]
 enum CatalogCommand {
+    /// Resolve an object name, alias, or stable ID from objects.bin
+    Object {
+        #[command(flatten)]
+        args: CatalogObjectArgs,
+    },
     /// List named and deep-sky objects in a known sky region
     Objects {
         #[command(flatten)]
         args: CatalogObjectsArgs,
     },
+    /// Resolve an exact stellar catalog designation without a network query
+    Star {
+        #[command(flatten)]
+        args: CatalogStarArgs,
+    },
+    /// Exhaustively validate a catalog or index file
+    Validate {
+        /// Catalog, sidecar, or blind-index file; the format is auto-detected
+        #[arg(long)]
+        data: PathBuf,
+    },
+}
+
+#[derive(Args)]
+struct CatalogObjectArgs {
+    /// Object catalog file built by build-data objects
+    #[arg(long)]
+    data: PathBuf,
+    /// Object designation, common name, alias, or stable ID
+    query: String,
+    /// Return prefix completions instead of an exact lookup
+    #[arg(long)]
+    prefix: bool,
+    /// Maximum prefix completions; ignored for exact lookup
+    #[arg(long, default_value_t = 25)]
+    limit: usize,
+    #[arg(long, value_enum, default_value_t = CatalogOutputFormat::Table)]
+    format: CatalogOutputFormat,
+}
+
+#[derive(Args)]
+struct CatalogStarArgs {
+    /// Star identifier sidecar built with build-data --identifier-index
+    #[arg(long)]
+    data: PathBuf,
+    /// Catalog designation or stellar name, for example HIP 32349 or RR Lyr
+    query: String,
+    /// Return textual-name prefix completions instead of an exact lookup
+    #[arg(long)]
+    prefix: bool,
+    /// Maximum prefix completions; ignored for exact lookup
+    #[arg(long, default_value_t = 25)]
+    limit: usize,
+    #[arg(long, value_enum, default_value_t = CatalogOutputFormat::Table)]
+    format: CatalogOutputFormat,
 }
 
 #[derive(Args)]
@@ -295,6 +348,12 @@ enum DownloadSource {
         #[arg(long)]
         output: PathBuf,
     },
+    /// Bright, variable, double, and IAU-named star identity sources
+    StarIdentifiers {
+        /// Directory to download into
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// The OpenNGC deep-sky object catalog (~4 MB)
     Openngc {
         /// Directory to download into
@@ -334,13 +393,13 @@ enum DownloadSource {
         #[arg(long)]
         output: PathBuf,
     },
-    /// Prebuilt datasets from downloads.seiza.fyi (SHA-256 verified) —
-    /// the quickest route to a working solver
+    /// Prebuilt datasets from versioned downloads.seiza.fyi manifests
+    /// (SHA-256 verified) — the quickest route to a working solver
     Prebuilt {
         /// Directory to download into
         #[arg(long)]
         output: PathBuf,
-        /// Specific files (default: everything in the manifest)
+        /// Specific files (default: everything in the applicable manifests)
         #[arg(long)]
         file: Vec<String>,
     },
@@ -374,6 +433,12 @@ enum BuildDataSource {
         /// Output tile file
         #[arg(long)]
         output: PathBuf,
+        /// Optional exact TYC/HIP lookup sidecar
+        #[arg(long)]
+        identifier_index: Option<PathBuf>,
+        /// Optional directory from download-data star-identifiers
+        #[arg(long, requires = "identifier_index")]
+        identifier_sources: Option<PathBuf>,
         /// Epoch to apply proper motions to, Julian year
         #[arg(long, default_value_t = 2025.5)]
         epoch: f64,
@@ -500,6 +565,9 @@ fn main() -> Result<()> {
         }
         Command::DownloadData { source } => match source {
             DownloadSource::Tycho2 { output } => download_data::download_tycho2(&output),
+            DownloadSource::StarIdentifiers { output } => {
+                download_data::download_star_identifiers(&output)
+            }
             DownloadSource::Openngc { output } => download_data::download_openngc(&output),
             DownloadSource::Objects { output } => download_data::download_objects(&output),
             DownloadSource::Gaia {
@@ -524,9 +592,18 @@ fn main() -> Result<()> {
             BuildDataSource::Tycho2 {
                 input,
                 output,
+                identifier_index,
+                identifier_sources,
                 epoch,
                 max_mag,
-            } => build_data::build_tycho2(&input, &output, epoch, max_mag),
+            } => build_data::build_tycho2(
+                &input,
+                &output,
+                identifier_index.as_deref(),
+                identifier_sources.as_deref(),
+                epoch,
+                max_mag,
+            ),
             BuildDataSource::Objects {
                 input,
                 output,
@@ -593,9 +670,96 @@ fn main() -> Result<()> {
             limit,
         } => cone(&data, ra, dec, radius, limit),
         Command::Catalog { query } => match query {
+            CatalogCommand::Object { args } => catalog_object(args),
             CatalogCommand::Objects { args } => catalog_objects(args),
+            CatalogCommand::Star { args } => catalog_star(args),
+            CatalogCommand::Validate { data } => catalog_validate(&data),
         },
     }
+}
+
+fn catalog_object(args: CatalogObjectArgs) -> Result<()> {
+    let catalog = ObjectCatalog::open(&args.data)
+        .with_context(|| format!("failed to open {}", args.data.display()))?;
+    let matches = if args.prefix {
+        catalog.search_names(&args.query, args.limit)?
+    } else {
+        catalog.lookup_name(&args.query)?
+    };
+
+    match args.format {
+        CatalogOutputFormat::Table => {
+            println!(
+                "{} object name match{}:",
+                matches.len(),
+                if matches.len() == 1 { "" } else { "es" }
+            );
+            println!(
+                "{:<24} {:<18} {:<28} {:>10} {:>10}  id",
+                "matched", "kind", "object", "ra", "dec"
+            );
+            for item in &matches {
+                println!(
+                    "{:<24} {:<18} {:<28} {:>10.5} {:>10.5}  {}",
+                    item.matched_name,
+                    item.object.kind.as_str(),
+                    item.object.name,
+                    item.object.ra,
+                    item.object.dec,
+                    item.object.metadata.id,
+                );
+            }
+        }
+        CatalogOutputFormat::Json => {
+            let values = matches
+                .iter()
+                .map(|item| {
+                    let object = &item.object;
+                    serde_json::json!({
+                        "matched_name": item.matched_name,
+                        "kind": object.kind.as_str(),
+                        "name": object.name,
+                        "common_name": object.common_name,
+                        "id": object.metadata.id,
+                        "source": object.metadata.source,
+                        "aliases": object.metadata.aliases,
+                        "parent_ids": object.metadata.parent_ids,
+                        "alternate_ids": object.metadata.alternate_ids,
+                        "alternate_sources": object.metadata.alternate_sources,
+                        "ra_deg": object.ra,
+                        "dec_deg": object.dec,
+                        "mag": object.mag,
+                        "major_arcmin": object.major_arcmin,
+                        "minor_arcmin": object.minor_arcmin,
+                        "position_angle_deg": object.position_angle_deg,
+                    })
+                })
+                .collect::<Vec<_>>();
+            println!("{}", serde_json::to_string_pretty(&values)?);
+        }
+        CatalogOutputFormat::Csv => {
+            println!(
+                "matched_name,kind,name,common_name,ra_deg,dec_deg,mag,major_arcmin,id,source"
+            );
+            for item in &matches {
+                let object = &item.object;
+                println!(
+                    "{},{},{},{},{:.8},{:.8},{},{},{},{}",
+                    csv_field(&item.matched_name),
+                    object.kind.as_str(),
+                    csv_field(&object.name),
+                    csv_field(&object.common_name),
+                    object.ra,
+                    object.dec,
+                    csv_optional(object.mag),
+                    csv_optional(object.major_arcmin),
+                    csv_field(&object.metadata.id),
+                    csv_field(&object.metadata.source),
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn fits_info(path: &std::path::Path, stretch: Option<&std::path::Path>) -> Result<()> {
@@ -816,7 +980,7 @@ fn catalog_objects(args: CatalogObjectsArgs) -> Result<()> {
                 "score", "match", "kind", "object", "ra", "dec", "mag", "size'"
             );
             for hit in &hits {
-                let object = hit.object;
+                let object = &hit.object;
                 let name = if object.common_name.is_empty() {
                     object.name.clone()
                 } else {
@@ -860,7 +1024,7 @@ fn catalog_objects(args: CatalogObjectsArgs) -> Result<()> {
             let objects = hits
                 .iter()
                 .map(|hit| {
-                    let object = hit.object;
+                    let object = &hit.object;
                     serde_json::json!({
                         "kind": object.kind.as_str(),
                         "name": object.name,
@@ -900,7 +1064,7 @@ fn catalog_objects(args: CatalogObjectsArgs) -> Result<()> {
                 "kind,name,common_name,ra_deg,dec_deg,mag,major_arcmin,minor_arcmin,position_angle_deg,match,distance_from_center_deg,predicted_prominence,id,source,aliases,parent_ids,alternate_ids,alternate_sources"
             );
             for hit in &hits {
-                let object = hit.object;
+                let object = &hit.object;
                 println!(
                     "{},{},{},{:.8},{:.8},{},{},{},{},{},{:.8},{:.8},{},{},{},{},{},{}",
                     object.kind.as_str(),
@@ -926,6 +1090,188 @@ fn catalog_objects(args: CatalogObjectsArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn catalog_star(args: CatalogStarArgs) -> Result<()> {
+    let catalog = StarIdentifierCatalog::open(&args.data)
+        .with_context(|| format!("failed to open {}", args.data.display()))?;
+    let matches = if args.prefix {
+        catalog
+            .search_names(&args.query, args.limit)?
+            .into_iter()
+            .map(StarLookupMatch::Name)
+            .collect::<Vec<_>>()
+    } else {
+        catalog.lookup_query(&args.query)?
+    };
+    let rows = matches.iter().map(catalog_star_row).collect::<Vec<_>>();
+
+    match args.format {
+        CatalogOutputFormat::Table => {
+            println!(
+                "{} {} match{} for {:?} in {} (epoch J{}):",
+                rows.len(),
+                if args.prefix { "prefix" } else { "exact" },
+                if rows.len() == 1 { "" } else { "es" },
+                args.query,
+                catalog.attribution(),
+                catalog.epoch()
+            );
+            if !rows.is_empty() {
+                println!(
+                    "{:<22} {:<18} {:<17} {:<10} {:>11} {:>11} {:>7}  stable ID",
+                    "designation", "catalog", "kind", "detail", "ra", "dec", "mag"
+                );
+                for row in &rows {
+                    println!(
+                        "{:<22} {:<18} {:<17} {:<10} {:>11.6} {:>11.6} {:>7}  {}",
+                        row.designation,
+                        row.catalog,
+                        row.kind,
+                        row.detail,
+                        row.ra,
+                        row.dec,
+                        row.mag
+                            .map(|value| format!("{value:.3}"))
+                            .unwrap_or_else(|| "-".to_string()),
+                        row.stable_id,
+                    );
+                }
+            }
+        }
+        CatalogOutputFormat::Json => {
+            let matches = rows
+                .iter()
+                .map(|row| {
+                    serde_json::json!({
+                        "designation": row.designation,
+                        "stable_id": row.stable_id,
+                        "catalog": row.catalog,
+                        "kind": row.kind,
+                        "detail": row.detail,
+                        "ra_deg": row.ra,
+                        "dec_deg": row.dec,
+                        "mag": row.mag,
+                    })
+                })
+                .collect::<Vec<_>>();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "query": args.query,
+                    "mode": if args.prefix { "prefix" } else { "exact" },
+                    "source": catalog.attribution(),
+                    "epoch": catalog.epoch(),
+                    "numeric_entries": catalog.numeric_len(),
+                    "name_entries": catalog.name_len(),
+                    "returned": matches.len(),
+                    "matches": matches,
+                }))?
+            );
+        }
+        CatalogOutputFormat::Csv => {
+            println!("designation,stable_id,catalog,kind,detail,ra_deg,dec_deg,mag,epoch,source");
+            for row in &rows {
+                println!(
+                    "{},{},{},{},{},{:.8},{:.8},{},{},{}",
+                    csv_field(&row.designation),
+                    csv_field(&row.stable_id),
+                    csv_field(&row.catalog),
+                    csv_field(&row.kind),
+                    csv_field(&row.detail),
+                    row.ra,
+                    row.dec,
+                    row.mag
+                        .map(|value| format!("{value:.3}"))
+                        .unwrap_or_default(),
+                    catalog.epoch(),
+                    csv_field(catalog.attribution()),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn catalog_validate(path: &std::path::Path) -> Result<()> {
+    use std::io::Read;
+
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let mut magic = [0u8; 8];
+    file.read_exact(&mut magic)
+        .with_context(|| format!("failed to read catalog header from {}", path.display()))?;
+
+    let summary = match &magic {
+        b"SEIZASI1" => {
+            let catalog = StarIdentifierCatalog::open(path)?;
+            catalog.validate()?;
+            format!(
+                "stellar identifier sidecar: {} numeric identifiers, {} names",
+                catalog.numeric_len(),
+                catalog.name_len()
+            )
+        }
+        b"SEIZAST1" | b"SEIZAST2" => {
+            let catalog = TileCatalog::open(path)?;
+            catalog.validate()?;
+            format!("star tile catalog: {} stars", catalog.star_count())
+        }
+        b"SEIZABI1" => {
+            let index = BlindIndex::open(path)?;
+            index.validate()?;
+            format!("blind-pattern index: {} patterns", index.pattern_count())
+        }
+        b"SEIZAOB1" | b"SEIZAOB3" => {
+            let catalog = ObjectCatalog::open(path)?;
+            catalog.validate()?;
+            format!("object catalog: {} objects", catalog.len())
+        }
+        b"SEIZAMB1" => {
+            let catalog = MinorBodyCatalog::open(path)?;
+            catalog.validate()?;
+            format!("minor-body catalog: {} bodies", catalog.len())
+        }
+        _ => anyhow::bail!("{} is not a recognized seiza catalog", path.display()),
+    };
+    println!("{}: valid {summary}", path.display());
+    Ok(())
+}
+
+struct CatalogStarRow {
+    designation: String,
+    stable_id: String,
+    catalog: String,
+    kind: String,
+    detail: String,
+    ra: f64,
+    dec: f64,
+    mag: Option<f32>,
+}
+
+fn catalog_star_row(value: &StarLookupMatch<'_>) -> CatalogStarRow {
+    match value {
+        StarLookupMatch::Identifier(star) => CatalogStarRow {
+            designation: star.identifier.to_string(),
+            stable_id: star.identifier.stable_id(),
+            catalog: star.identifier.namespace().as_str().to_string(),
+            kind: "catalog-identifier".to_string(),
+            detail: String::new(),
+            ra: star.ra,
+            dec: star.dec,
+            mag: Some(star.mag),
+        },
+        StarLookupMatch::Name(star) => CatalogStarRow {
+            designation: star.designation.to_string(),
+            stable_id: star.stable_id.to_string(),
+            catalog: star.catalog.as_str().to_string(),
+            kind: star.kind.as_str().to_string(),
+            detail: star.detail.to_string(),
+            ra: star.ra,
+            dec: star.dec,
+            mag: star.mag,
+        },
+    }
 }
 
 fn csv_field(value: &str) -> String {
@@ -1074,7 +1420,9 @@ fn solve_command(
         Some(path) => {
             let object_catalog = seiza::objects::ObjectCatalog::open(path)
                 .with_context(|| format!("failed to open {}", path.display()))?;
-            let placed = object_catalog.objects_in_footprint(wcs, dims);
+            let placed = object_catalog
+                .objects_in_footprint(wcs, dims)
+                .map_err(|error| anyhow::anyhow!(error))?;
             println!("{} catalog objects in the field:", placed.len());
             for p in &placed {
                 let size = match p.object.major_arcmin {
