@@ -4,8 +4,8 @@
 //! Current binary format `SEIZAOB3` uses fixed records, shared string/list
 //! tables, and embedded sky/name indices in a read-only memory map. Opening a
 //! v3 catalog validates only its header and section bounds; records and index
-//! pages are touched on demand. Legacy `SEIZAOB1` and `SEIZAOB2` files remain
-//! readable, although those older formats must be decoded into memory.
+//! pages are touched on demand. Legacy deployed `SEIZAOB1` files remain
+//! readable, although that older format must be decoded into memory.
 
 use crate::wcs::Wcs;
 use std::fs::File;
@@ -14,8 +14,6 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 const MAGIC_V1: &[u8; 8] = b"SEIZAOB1";
-const MAGIC_V2: &[u8; 8] = b"SEIZAOB2";
-const MAX_RECORD_BYTES: u32 = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -310,28 +308,6 @@ impl ObjectCatalog {
         }
     }
 
-    /// Write the legacy extensible `SEIZAOB2` format.
-    pub fn write_v2_to(&self, path: &Path) -> io::Result<()> {
-        let objects = self.read_all()?;
-        let mut out = BufWriter::new(File::create(path)?);
-        write_header(&mut out, MAGIC_V2, objects.len())?;
-        for o in &objects {
-            let record_len = v2_record_len(o)?;
-            let mut record = Vec::with_capacity(record_len as usize);
-            write_v1_object(&mut record, o)?;
-            write_string(&mut record, &o.metadata.id)?;
-            write_string(&mut record, &o.metadata.source)?;
-            write_string_list(&mut record, &o.metadata.aliases)?;
-            write_string_list(&mut record, &o.metadata.parent_ids)?;
-            write_string_list(&mut record, &o.metadata.alternate_ids)?;
-            write_string_list(&mut record, &o.metadata.alternate_sources)?;
-            debug_assert_eq!(record.len(), record_len as usize);
-            out.write_all(&record_len.to_le_bytes())?;
-            out.write_all(&record)?;
-        }
-        out.flush()
-    }
-
     /// Write the legacy `SEIZAOB1` format.
     ///
     /// Identity, hierarchy, and provenance metadata cannot be represented and
@@ -360,51 +336,22 @@ impl ObjectCatalog {
                 materialized: OnceLock::new(),
             });
         }
-        let is_v2 = if &magic == MAGIC_V2 {
-            true
-        } else if &magic == MAGIC_V1 {
-            false
-        } else {
+        if &magic != MAGIC_V1 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "not a seiza object catalog",
             ));
-        };
+        }
         let count = read_u32(&mut input)?;
-        let minimum_record_bytes = if is_v2 { 53 } else { 37 };
-        if count as u64 > file_len.saturating_sub(12) / minimum_record_bytes {
+        if count as u64 > file_len.saturating_sub(12) / 37 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "object count cannot fit in the catalog file",
             ));
         }
         let mut objects = Vec::with_capacity(count as usize);
-        if is_v2 {
-            for _ in 0..count {
-                let record_len = read_u32(&mut input)?;
-                if record_len > MAX_RECORD_BYTES {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "object record exceeds the 16 MiB safety limit",
-                    ));
-                }
-                let mut record = vec![0u8; record_len as usize];
-                input.read_exact(&mut record)?;
-                let mut record = io::Cursor::new(record);
-                let mut object = read_v1_object(&mut record)?;
-                object.metadata.id = read_string(&mut record)?;
-                object.metadata.source = read_string(&mut record)?;
-                object.metadata.aliases = read_string_list(&mut record)?;
-                object.metadata.parent_ids = read_string_list(&mut record)?;
-                object.metadata.alternate_ids = read_string_list(&mut record)?;
-                object.metadata.alternate_sources = read_string_list(&mut record)?;
-                // Any remaining bytes belong to a future v2 extension.
-                objects.push(object);
-            }
-        } else {
-            for _ in 0..count {
-                objects.push(read_v1_object(&mut input)?);
-            }
+        for _ in 0..count {
+            objects.push(read_v1_object(&mut input)?);
         }
         let trailing_bytes = file_len.saturating_sub(input.stream_position()?);
         Ok(Self {
@@ -1017,62 +964,6 @@ fn read_v1_object(input: &mut impl Read) -> io::Result<SkyObject> {
     })
 }
 
-fn v2_record_len(object: &SkyObject) -> io::Result<u32> {
-    // Fixed numeric prefix plus four scalar strings and four string-list counts.
-    let mut len = 33usize;
-    for value in [
-        &object.name,
-        &object.common_name,
-        &object.metadata.id,
-        &object.metadata.source,
-    ] {
-        len = len
-            .checked_add(encoded_string_len(value)?)
-            .ok_or_else(record_too_large)?;
-    }
-    for values in [
-        &object.metadata.aliases,
-        &object.metadata.parent_ids,
-        &object.metadata.alternate_ids,
-        &object.metadata.alternate_sources,
-    ] {
-        u16::try_from(values.len()).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "object catalog string list exceeds 65535 entries",
-            )
-        })?;
-        len = len.checked_add(2).ok_or_else(record_too_large)?;
-        for value in values {
-            len = len
-                .checked_add(encoded_string_len(value)?)
-                .ok_or_else(record_too_large)?;
-        }
-    }
-    let len = u32::try_from(len).map_err(|_| record_too_large())?;
-    if len > MAX_RECORD_BYTES {
-        return Err(record_too_large());
-    }
-    Ok(len)
-}
-
-fn encoded_string_len(value: &str) -> io::Result<usize> {
-    u16::try_from(value.len()).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "object catalog string exceeds 65535 bytes",
-        )
-    })?;
-    Ok(2 + value.len())
-}
-
-fn record_too_large() -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidInput,
-        "object record exceeds the 16 MiB safety limit",
-    )
-}
-
 fn write_string(out: &mut impl Write, s: &str) -> io::Result<()> {
     let bytes = s.as_bytes();
     let len = u16::try_from(bytes.len()).map_err(|_| {
@@ -1091,31 +982,6 @@ fn read_string(input: &mut impl Read) -> io::Result<String> {
     let mut buf = vec![0u8; u16::from_le_bytes(len) as usize];
     input.read_exact(&mut buf)?;
     String::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-}
-
-fn write_string_list(out: &mut impl Write, values: &[String]) -> io::Result<()> {
-    let count = u16::try_from(values.len()).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "object catalog string list exceeds 65535 entries",
-        )
-    })?;
-    out.write_all(&count.to_le_bytes())?;
-    for value in values {
-        write_string(out, value)?;
-    }
-    Ok(())
-}
-
-fn read_string_list(input: &mut impl Read) -> io::Result<Vec<String>> {
-    let mut count = [0u8; 2];
-    input.read_exact(&mut count)?;
-    let count = u16::from_le_bytes(count) as usize;
-    let mut values = Vec::with_capacity(count);
-    for _ in 0..count {
-        values.push(read_string(input)?);
-    }
-    Ok(values)
 }
 
 fn read_u32(input: &mut impl Read) -> io::Result<u32> {
@@ -1437,29 +1303,10 @@ mod tests {
     }
 
     #[test]
-    fn v2_reader_ignores_unknown_record_tail() {
-        let dir = std::env::temp_dir().join(format!("seiza-obj-tail-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("objects-v2.bin");
-        ObjectCatalog::new(vec![m31()]).write_v2_to(&path).unwrap();
-
-        let mut bytes = std::fs::read(&path).unwrap();
-        let record_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
-        bytes[12..16].copy_from_slice(&(record_len + 4).to_le_bytes());
-        bytes.extend_from_slice(&[1, 2, 3, 4]);
-        std::fs::write(&path, bytes).unwrap();
-
-        let catalog = ObjectCatalog::open(&path).unwrap();
-        assert_eq!(catalog.objects()[0].metadata.id, "openngc:NGC224");
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
     fn writer_rejects_oversized_metadata_without_truncation() {
         let dir = std::env::temp_dir().join(format!("seiza-obj-large-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("objects-v2.bin");
+        let path = dir.join("objects-v3.bin");
         let mut object = m31();
         object.metadata.id = "x".repeat(u16::MAX as usize + 1);
 

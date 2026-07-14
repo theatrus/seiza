@@ -1222,7 +1222,7 @@ fn catalog_validate(path: &std::path::Path) -> Result<()> {
             index.validate()?;
             format!("blind-pattern index: {} patterns", index.pattern_count())
         }
-        b"SEIZAOB1" | b"SEIZAOB2" | b"SEIZAOB3" => {
+        b"SEIZAOB1" | b"SEIZAOB3" => {
             let catalog = ObjectCatalog::open(path)?;
             catalog.validate()?;
             format!("object catalog: {} objects", catalog.len())

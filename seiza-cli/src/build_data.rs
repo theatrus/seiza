@@ -2084,7 +2084,7 @@ fn write_object_source_manifest(
 
     let (bytes, sha256) = file_digest(output)?;
     let document = serde_json::json!({
-        "format": "SEIZAOB2",
+        "format": "SEIZAOB3",
         "artifact": {
             "name": output.file_name().unwrap_or_default().to_string_lossy(),
             "objects": objects.len(),

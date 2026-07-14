@@ -62,8 +62,8 @@ seiza catalog object --data objects.bin "andro" --prefix --limit 10
 
 Normal open checks header and section bounds only. `ObjectCatalog::validate` or
 `seiza catalog validate --data objects.bin` deliberately scans all records,
-strings, and indices when full integrity validation is needed. The older
-`SEIZAOB1` and `SEIZAOB2` formats remain readable but require heap decoding.
+strings, and indices when full integrity validation is needed. The deployed
+`SEIZAOB1` format remains readable but requires heap decoding.
 
 ## Which catalog should supply sub-objects?
 

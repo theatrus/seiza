@@ -4,17 +4,17 @@ Status: implemented
 
 ## Purpose
 
-`SEIZAOB3` keeps the v2 identity, hierarchy, provenance, point, and ellipse
-model while making normal catalog use demand-paged. Opening a catalog no longer
-creates one `SkyObject` plus several heap allocations for every record.
+`SEIZAOB3` adds identity, hierarchy, provenance, and indexed point/ellipse
+storage while making normal catalog use demand-paged. Opening a catalog no
+longer creates one `SkyObject` plus several heap allocations for every record.
 Viewport and name queries touch only relevant mmap pages and materialize owned
 `SkyObject` values only for returned candidates.
 
 The cost moves to disk: fixed records, shared metadata, spatial candidate
 lists, and the normalized name index make the current 315,434-object bundle
-about 60 MB rather than the v2 file's 33 MB. Measured release-process peak RSS
-is about 3.7 MB for an exact name lookup and 5.8 MB for a 3-degree cone,
-compared with about 110.7 MB when v2 is decoded in full.
+about 60 MB. Measured release-process peak RSS is about 3.7 MB for an exact
+name lookup and 5.8 MB for a 3-degree cone, compared with about 110.7 MB for
+the previous eager-decoded implementation.
 
 ## Wire format
 
@@ -81,6 +81,6 @@ candidate ordering, and name-index ordering. The CLI auto-detects v3 with
 materializes and caches the complete mmap catalog. `read_all` is its fallible,
 owned equivalent. Interactive and overlay callers should use indexed queries.
 
-`ObjectCatalog::write_to` writes v3. `write_v1_to` and `write_v2_to` remain for
-controlled compatibility exports, and the reader remains backward compatible
-with both legacy formats.
+`ObjectCatalog::write_to` writes v3. `write_v1_to` remains for controlled
+compatibility exports, and the reader remains backward compatible with the
+deployed v1 format.
