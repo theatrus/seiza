@@ -399,8 +399,9 @@ impl BlindIndex {
         }
     }
 
-    /// Open a versioned blind-pattern index without copying its arrays into
-    /// memory. The file remains memory-mapped for the lifetime of the index.
+    /// Open a versioned blind-pattern index without copying or exhaustively
+    /// validating its arrays. The file remains memory-mapped for the lifetime
+    /// of the index; call [`Self::validate`] for a deliberate full scan.
     pub fn open(path: &Path) -> Result<Self, crate::Error> {
         let file = File::open(path).map_err(|error| invalid_index(path, error))?;
         // SAFETY: the map is read-only and owned by the returned index. A
@@ -444,42 +445,6 @@ impl BlindIndex {
             ));
         }
 
-        let start_at =
-            |index: usize| read_u32(&map, starts_offset + index * size_of::<u32>()) as usize;
-        let mut previous = 0;
-        for index in 0..=keys_len {
-            let current = start_at(index);
-            if current < previous || current > candidates_len {
-                return Err(invalid_index(path, "candidate offsets are not monotonic"));
-            }
-            previous = current;
-        }
-        if start_at(0) != 0 || start_at(keys_len) != candidates_len {
-            return Err(invalid_index(
-                path,
-                "candidate offsets do not span the array",
-            ));
-        }
-        for index in 1..keys_len {
-            let prior = read_u64(&map, keys_offset + (index - 1) * size_of::<u64>());
-            let current = read_u64(&map, keys_offset + index * size_of::<u64>());
-            if prior >= current {
-                return Err(invalid_index(
-                    path,
-                    "descriptor keys are not strictly sorted",
-                ));
-            }
-        }
-        for index in 0..candidates_len {
-            let candidate = read_u32(&map, candidates_offset + index * size_of::<u32>()) as usize;
-            if candidate >= patterns_len {
-                return Err(invalid_index(
-                    path,
-                    "candidate refers past the pattern array",
-                ));
-            }
-        }
-
         Ok(Self {
             index_mag_limit,
             max_pattern_deg,
@@ -495,6 +460,55 @@ impl BlindIndex {
                 patterns_len,
             }),
         })
+    }
+
+    /// Exhaustively validate index ordering, candidate ranges, and pattern
+    /// values. This intentionally touches every mapped array.
+    pub fn validate(&self) -> Result<(), crate::Error> {
+        let invalid = |message| crate::Error::Catalog(format!("invalid blind index: {message}"));
+        if !self.index_mag_limit.is_finite()
+            || !self.max_pattern_deg.is_finite()
+            || self.max_pattern_deg <= 0.0
+        {
+            return Err(invalid("invalid build parameters"));
+        }
+
+        let mut previous = 0;
+        for index in 0..=self.keys_len() {
+            let current = self.start_at(index) as usize;
+            if current < previous || current > self.candidates_len() {
+                return Err(invalid("candidate offsets are not monotonic"));
+            }
+            previous = current;
+        }
+        if self.start_at(0) != 0 || self.start_at(self.keys_len()) as usize != self.candidates_len()
+        {
+            return Err(invalid("candidate offsets do not span the array"));
+        }
+        for index in 1..self.keys_len() {
+            if self.key_at(index - 1) >= self.key_at(index) {
+                return Err(invalid("descriptor keys are not strictly sorted"));
+            }
+        }
+        for index in 0..self.candidates_len() {
+            if self.candidate_at(index) as usize >= self.pattern_count() {
+                return Err(invalid("candidate refers past the pattern array"));
+            }
+        }
+        for index in 0..self.pattern_count() {
+            let pattern = self.pattern_at(index);
+            if pattern
+                .points
+                .iter()
+                .flat_map(|point| [point.0, point.1])
+                .chain([pattern.center.0, pattern.center.1, pattern.max_edge_deg])
+                .any(|value| !value.is_finite())
+                || pattern.max_edge_deg <= 0.0
+            {
+                return Err(invalid("pattern contains invalid geometry"));
+            }
+        }
+        Ok(())
     }
 
     /// Persist the index in the little-endian `SEIZABI1` format. The
@@ -1380,6 +1394,7 @@ pub(crate) mod tests {
         let path = dir.join("blind-gaia16.idx");
         built.write_to(&path).unwrap();
         let index = BlindIndex::open(&path).unwrap();
+        index.validate().unwrap();
         assert_eq!(index.pattern_count(), built.pattern_count());
         assert_eq!(index.index_mag_limit(), 16.0);
         assert_eq!(index.max_pattern_deg(), params.max_pattern_deg);
@@ -1392,6 +1407,41 @@ pub(crate) mod tests {
         let separation = crate::catalog::angular_separation_deg(ra, dec, center.0, center.1);
         assert!(separation < 0.01, "center off by {separation} degrees");
         assert!((solution.wcs.scale_arcsec_per_px() - 1.0).abs() < 0.05);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn open_defers_exhaustive_blind_index_validation() {
+        let dir = std::env::temp_dir().join(format!(
+            "seiza-blind-index-lazy-open-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("blind.idx");
+        let built = BlindIndex {
+            index_mag_limit: 6.5,
+            max_pattern_deg: 10.0,
+            source_star_count: 4,
+            storage: BlindIndexStorage::Built {
+                keys: vec![1],
+                starts: vec![0, 1],
+                candidates: vec![0],
+                patterns: vec![Pattern {
+                    points: [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)],
+                    center: (10.0, 20.0),
+                    max_edge_deg: 1.0,
+                }],
+            },
+        };
+        built.write_to(&path).unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        let starts_offset = INDEX_HEADER_SIZE + size_of::<u64>();
+        bytes[starts_offset + 4..starts_offset + 8].copy_from_slice(&u32::MAX.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+
+        let index = BlindIndex::open(&path).unwrap();
+        assert!(index.validate().is_err());
         std::fs::remove_dir_all(dir).ok();
     }
 }

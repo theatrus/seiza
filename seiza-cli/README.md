@@ -93,6 +93,16 @@ SAO/FK5 lookup plus exact and prefix search over IAU proper names,
 Bayer/Flamsteed names, GCVS variables, and WDS double-star designations. It
 does not change the solver's compact star tile file.
 
+Normal catalog opens do not perform exhaustive validation. Validate any seiza
+star tile, identifier sidecar, blind index, object catalog, or minor-body
+catalog explicitly when required; the file format is auto-detected:
+
+```
+seiza catalog validate --data stars-lite.ids.bin
+seiza catalog validate --data stars-lite.bin
+seiza catalog validate --data objects.bin
+```
+
 FITS files are read natively (see
 [seiza-fits](https://crates.io/crates/seiza-fits)) with automatic
 autostretch before detection, and RA/DEC hints taken from headers.

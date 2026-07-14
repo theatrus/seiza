@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use seiza::blind::BlindIndex;
 use seiza::catalog::{StarCatalog, TileCatalog};
+use seiza::minor_bodies::MinorBodyCatalog;
 use seiza::objects::{ObjectCatalog, ObjectKind, ObjectQuery, ObjectSort, SkyRegion};
 use seiza::solve::{SolveHint, solve};
 use seiza::star_ids::{StarIdentifierCatalog, StarLookupMatch};
@@ -209,6 +211,12 @@ enum CatalogCommand {
     Star {
         #[command(flatten)]
         args: CatalogStarArgs,
+    },
+    /// Exhaustively validate a catalog or index file
+    Validate {
+        /// Catalog, sidecar, or blind-index file; the format is auto-detected
+        #[arg(long)]
+        data: PathBuf,
     },
 }
 
@@ -642,6 +650,7 @@ fn main() -> Result<()> {
         Command::Catalog { query } => match query {
             CatalogCommand::Objects { args } => catalog_objects(args),
             CatalogCommand::Star { args } => catalog_star(args),
+            CatalogCommand::Validate { data } => catalog_validate(&data),
         },
     }
 }
@@ -1074,6 +1083,51 @@ fn catalog_star(args: CatalogStarArgs) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+fn catalog_validate(path: &std::path::Path) -> Result<()> {
+    use std::io::Read;
+
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let mut magic = [0u8; 8];
+    file.read_exact(&mut magic)
+        .with_context(|| format!("failed to read catalog header from {}", path.display()))?;
+
+    let summary = match &magic {
+        b"SEIZASI1" => {
+            let catalog = StarIdentifierCatalog::open(path)?;
+            catalog.validate()?;
+            format!(
+                "stellar identifier sidecar: {} numeric identifiers, {} names",
+                catalog.numeric_len(),
+                catalog.name_len()
+            )
+        }
+        b"SEIZAST1" | b"SEIZAST2" => {
+            let catalog = TileCatalog::open(path)?;
+            catalog.validate()?;
+            format!("star tile catalog: {} stars", catalog.star_count())
+        }
+        b"SEIZABI1" => {
+            let index = BlindIndex::open(path)?;
+            index.validate()?;
+            format!("blind-pattern index: {} patterns", index.pattern_count())
+        }
+        b"SEIZAOB1" | b"SEIZAOB2" => {
+            let catalog = ObjectCatalog::open(path)?;
+            catalog.validate()?;
+            format!("object catalog: {} objects", catalog.len())
+        }
+        b"SEIZAMB1" => {
+            let catalog = MinorBodyCatalog::open(path)?;
+            catalog.validate()?;
+            format!("minor-body catalog: {} bodies", catalog.len())
+        }
+        _ => anyhow::bail!("{} is not a recognized seiza catalog", path.display()),
+    };
+    println!("{}: valid {summary}", path.display());
     Ok(())
 }
 

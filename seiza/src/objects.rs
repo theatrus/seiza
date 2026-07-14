@@ -10,7 +10,7 @@
 
 use crate::wcs::Wcs;
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufReader, BufWriter, Read, Seek, Write};
 use std::path::Path;
 
 const MAGIC_V1: &[u8; 8] = b"SEIZAOB1";
@@ -226,11 +226,15 @@ pub enum ObjectQueryError {
 #[derive(Debug, Default)]
 pub struct ObjectCatalog {
     objects: Vec<SkyObject>,
+    trailing_bytes: u64,
 }
 
 impl ObjectCatalog {
     pub fn new(objects: Vec<SkyObject>) -> Self {
-        Self { objects }
+        Self {
+            objects,
+            trailing_bytes: 0,
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -331,7 +335,52 @@ impl ObjectCatalog {
                 objects.push(read_v1_object(&mut input)?);
             }
         }
-        Ok(Self { objects })
+        let trailing_bytes = file_len.saturating_sub(input.stream_position()?);
+        Ok(Self {
+            objects,
+            trailing_bytes,
+        })
+    }
+
+    /// Validate catalog-wide semantic invariants. Opening only performs the
+    /// structural decoding needed to construct the in-memory catalog; this
+    /// explicit pass checks coordinates, measurements, and stable-ID
+    /// uniqueness.
+    pub fn validate(&self) -> io::Result<()> {
+        if self.trailing_bytes != 0 {
+            return Err(invalid_object_data("object catalog has trailing bytes"));
+        }
+        let mut ids = std::collections::HashSet::new();
+        for object in &self.objects {
+            if object.name.trim().is_empty() {
+                return Err(invalid_object_data("object has an empty name"));
+            }
+            if !object.ra.is_finite()
+                || !object.dec.is_finite()
+                || !(-90.0..=90.0).contains(&object.dec)
+            {
+                return Err(invalid_object_data("object has invalid coordinates"));
+            }
+            if object.mag.is_some_and(|value| !value.is_finite())
+                || object
+                    .major_arcmin
+                    .is_some_and(|value| !value.is_finite() || value < 0.0)
+                || object
+                    .minor_arcmin
+                    .is_some_and(|value| !value.is_finite() || value < 0.0)
+                || object
+                    .position_angle_deg
+                    .is_some_and(|value| !value.is_finite())
+            {
+                return Err(invalid_object_data("object has invalid measurements"));
+            }
+            if !object.metadata.id.is_empty() && !ids.insert(object.metadata.id.as_str()) {
+                return Err(invalid_object_data(
+                    "object catalog has duplicate stable IDs",
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Query catalog objects using known sky coordinates, without detecting
@@ -733,6 +782,10 @@ fn write_v1_object(out: &mut impl Write, object: &SkyObject) -> io::Result<()> {
     write_string(out, &object.common_name)
 }
 
+fn invalid_object_data(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
 fn read_v1_object(input: &mut impl Read) -> io::Result<SkyObject> {
     let mut kind = [0u8; 1];
     input.read_exact(&mut kind)?;
@@ -1084,6 +1137,7 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(&bytes[..8], MAGIC_V2);
         let catalog = ObjectCatalog::open(&path).unwrap();
+        catalog.validate().unwrap();
         assert_eq!(catalog.len(), 2);
         let a = &catalog.objects()[0];
         assert_eq!(a.kind, ObjectKind::Galaxy);
@@ -1105,6 +1159,20 @@ mod tests {
     }
 
     #[test]
+    fn open_defers_object_semantic_validation() {
+        let dir = std::env::temp_dir().join(format!("seiza-obj-lazy-open-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("objects.bin");
+        let mut invalid = test_object("Invalid", 10.0, 100.0);
+        invalid.metadata.id = "test:invalid".to_string();
+        ObjectCatalog::new(vec![invalid]).write_to(&path).unwrap();
+
+        let catalog = ObjectCatalog::open(&path).unwrap();
+        assert!(catalog.validate().is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn opens_v1_catalogs_with_empty_metadata() {
         let dir = std::env::temp_dir().join(format!("seiza-obj-v1-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1114,6 +1182,7 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(&bytes[..8], MAGIC_V1);
         let catalog = ObjectCatalog::open(&path).unwrap();
+        catalog.validate().unwrap();
         let object = &catalog.objects()[0];
         assert_eq!(object.name, "NGC 224");
         assert_eq!(object.metadata, ObjectMetadata::default());

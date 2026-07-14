@@ -47,7 +47,10 @@ does not scan the mapped records or string table. Text lookups validate the
 O(log n + k) records and strings they touch, where `k` is the result count.
 Call `validate` explicitly when a
 complete integrity check of an untrusted sidecar is required; that operation
-intentionally reads the whole mapping.
+intentionally reads the whole mapping. The CLI equivalent is
+`seiza catalog validate --data stars-lite-tycho2.ids.bin`; the command also
+auto-detects star tiles, blind indexes, object catalogs, and minor-body
+catalogs.
 
 ## `SEIZASI1` format
 

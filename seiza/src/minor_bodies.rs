@@ -68,11 +68,15 @@ pub struct PlacedMinorBody {
 
 pub struct MinorBodyCatalog {
     bodies: Vec<MinorBody>,
+    trailing_bytes: usize,
 }
 
 impl MinorBodyCatalog {
     pub fn new(bodies: Vec<MinorBody>) -> Self {
-        Self { bodies }
+        Self {
+            bodies,
+            trailing_bytes: 0,
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -245,8 +249,57 @@ impl MinorBodyCatalog {
                 slope,
             });
         }
-        Ok(Self { bodies })
+        Ok(Self {
+            bodies,
+            trailing_bytes: data.len().saturating_sub(at),
+        })
     }
+
+    /// Validate catalog-wide orbital-element invariants. Opening decodes the
+    /// file but deliberately leaves this semantic pass to the caller.
+    pub fn validate(&self) -> std::io::Result<()> {
+        if self.trailing_bytes != 0 {
+            return Err(invalid_minor_body_data(
+                "minor-body catalog has trailing bytes",
+            ));
+        }
+        for body in &self.bodies {
+            if body.name.trim().is_empty() {
+                return Err(invalid_minor_body_data("minor body has an empty name"));
+            }
+            if [
+                body.epoch_jd,
+                body.q_or_a,
+                body.eccentricity,
+                body.inclination_deg,
+                body.node_deg,
+                body.arg_perihelion_deg,
+                body.mean_anomaly_deg,
+                body.h_mag as f64,
+                body.slope as f64,
+            ]
+            .into_iter()
+            .any(|value| !value.is_finite())
+            {
+                return Err(invalid_minor_body_data(
+                    "minor body has non-finite orbital elements",
+                ));
+            }
+            if body.q_or_a <= 0.0
+                || body.eccentricity < 0.0
+                || !(0.0..=180.0).contains(&body.inclination_deg)
+            {
+                return Err(invalid_minor_body_data(
+                    "minor body has invalid orbital geometry",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn invalid_minor_body_data(message: &'static str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message)
 }
 
 /// Geocentric J2000 RA/Dec (degrees) plus heliocentric and geocentric
@@ -522,5 +575,33 @@ mod tests {
                 "r = {r}"
             );
         }
+    }
+
+    #[test]
+    fn open_defers_minor_body_semantic_validation() {
+        let dir =
+            std::env::temp_dir().join(format!("seiza-minor-body-lazy-open-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("minor-bodies.bin");
+        let invalid = MinorBody {
+            kind: MinorBodyKind::Asteroid,
+            name: "invalid".into(),
+            epoch_jd: 2_460_000.5,
+            q_or_a: -1.0,
+            eccentricity: 0.2,
+            inclination_deg: 12.0,
+            node_deg: 45.0,
+            arg_perihelion_deg: 110.0,
+            mean_anomaly_deg: 30.0,
+            h_mag: 10.0,
+            slope: 0.15,
+        };
+        MinorBodyCatalog::new(vec![invalid])
+            .write_to(&path)
+            .unwrap();
+
+        let catalog = MinorBodyCatalog::open(&path).unwrap();
+        assert!(catalog.validate().is_err());
+        std::fs::remove_dir_all(dir).ok();
     }
 }

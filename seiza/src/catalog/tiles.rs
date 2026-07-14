@@ -246,6 +246,7 @@ pub struct TileCatalog {
     star_count: u64,
     attribution: String,
     index: Vec<(u64, u32)>,
+    data_offset: usize,
 }
 
 impl TileCatalog {
@@ -331,7 +332,69 @@ impl TileCatalog {
             star_count,
             attribution,
             index,
+            data_offset: index_end,
         })
+    }
+
+    /// Exhaustively validate tile ranges, total counts, and the documented
+    /// brightest-first ordering. Normal [`Self::open`] does not scan star
+    /// records; this method intentionally touches the complete mapped data.
+    pub fn validate(&self) -> io::Result<()> {
+        if !self.epoch.is_finite() {
+            return Err(invalid_data("star tile epoch is not finite"));
+        }
+        let mut total = 0u64;
+        let mut previous_end = self.data_offset;
+        for &(offset, count) in &self.index {
+            let start = usize::try_from(offset)
+                .map_err(|_| invalid_data("star tile offset does not fit this platform"))?;
+            let count = count as usize;
+            let bytes = count
+                .checked_mul(V1_RECORD_SIZE)
+                .ok_or_else(|| invalid_data("star tile byte count overflows"))?;
+            let end = start
+                .checked_add(bytes)
+                .ok_or_else(|| invalid_data("star tile range overflows"))?;
+            if start < previous_end
+                || start > self.map.len()
+                || end > self.map.len()
+                || start - previous_end > 3
+                || self.map[previous_end..start].iter().any(|byte| *byte != 0)
+            {
+                return Err(invalid_data(
+                    "star tile range or alignment padding is invalid",
+                ));
+            }
+            total = total
+                .checked_add(count as u64)
+                .ok_or_else(|| invalid_data("star tile count overflows"))?;
+
+            let mut previous_mag = None;
+            for index in 0..count {
+                let mag_offset = match self.layout {
+                    Layout::V1Interleaved => start + index * V1_RECORD_SIZE + 8,
+                    Layout::V2Columnar => start + count * 8 + index * 2,
+                };
+                let magnitude =
+                    u16::from_le_bytes(self.map[mag_offset..mag_offset + 2].try_into().unwrap());
+                if previous_mag.is_some_and(|previous| previous > magnitude) {
+                    return Err(invalid_data("stars within a tile are not magnitude-sorted"));
+                }
+                previous_mag = Some(magnitude);
+            }
+            previous_end = end;
+        }
+        if self.map.len() - previous_end > 3
+            || self.map[previous_end..].iter().any(|byte| *byte != 0)
+        {
+            return Err(invalid_data("star tile has invalid trailing padding"));
+        }
+        if total != self.star_count {
+            return Err(invalid_data(
+                "star tile counts do not match the catalog header",
+            ));
+        }
+        Ok(())
     }
 
     pub fn star_count(&self) -> u64 {
@@ -396,6 +459,10 @@ impl TileCatalog {
             }
         }
     }
+}
+
+fn invalid_data(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
 impl StarCatalog for TileCatalog {
@@ -564,6 +631,7 @@ mod tests {
         builder.write_to(&path).unwrap();
 
         let catalog = TileCatalog::open(&path).unwrap();
+        catalog.validate().unwrap();
         assert_eq!(catalog.star_count(), 20000);
         assert_eq!(catalog.epoch(), 2025.5);
         assert_eq!(catalog.attribution(), "test data (c) nobody");
@@ -602,6 +670,7 @@ mod tests {
         write_v1(&stars, 45, 2025.0, &path);
 
         let catalog = TileCatalog::open(&path).unwrap();
+        catalog.validate().unwrap();
         assert_eq!(catalog.star_count(), 5000);
         assert_eq!(catalog.attribution(), "");
         for &(ra, dec, radius) in &[(10.0, 20.0, 4.0), (300.0, 35.0, 2.0), (0.0, -88.0, 3.0)] {
@@ -623,6 +692,26 @@ mod tests {
         )
         .unwrap();
         assert!(TileCatalog::open(&path).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn open_defers_exhaustive_tile_validation() {
+        let dir = std::env::temp_dir().join(format!("seiza-test-lazy-tile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tiles.bin");
+        let mut builder = TileSetBuilder::new(2, 2025.5, "test");
+        builder.add(10.0, 20.0, 5.0);
+        builder.write_to(&path).unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        let attribution_len = u16::from_le_bytes(bytes[28..30].try_into().unwrap()) as usize;
+        let index_offset = (30 + attribution_len).next_multiple_of(8);
+        bytes[index_offset + 8..index_offset + 12].copy_from_slice(&u32::MAX.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+
+        let catalog = TileCatalog::open(&path).unwrap();
+        assert!(catalog.validate().is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -62,6 +62,9 @@ Working today:
   IAU and Bayer/Flamsteed names, GCVS variables, and WDS double-star
   designations without a network request or plate solve. Its normalized name
   index also supports prefix completion for interactive search.
+  Catalog readers keep normal opens non-exhaustive; run
+  `seiza catalog validate --data FILE` when a deliberate full integrity scan
+  is needed.
 
 ```
 # custom build from primary sources (the prebuilt sets skip all this)
