@@ -51,7 +51,7 @@ pub fn download_openngc(output: &Path) -> Result<()> {
     Ok(())
 }
 
-/// All object-overlay sources: OpenNGC, VizieR Sharpless and Barnard (with
+/// All object-overlay sources: OpenNGC, selected VizieR catalogs (with
 /// VizieR-computed J2000 positions), and the IAU star-name list.
 pub fn download_objects(output: &Path) -> Result<()> {
     download_openngc(output)?;
@@ -75,13 +75,23 @@ pub fn download_objects(output: &Path) -> Result<()> {
         (
             "ugc.tsv",
             "VII/26D/catalog",
-            "_RAJ2000,_DEJ2000,UGC,MajAxis,MinAxis,PA",
+            "_RAJ2000,_DEJ2000,UGC,A,MajAxis,MinAxis,PA",
         ),
         ("ldn.tsv", "VII/7A/ldn", "_RAJ2000,_DEJ2000,LDN,Area"),
         (
             "vdb.tsv",
             "VII/21/catalog",
             "_RAJ2000,_DEJ2000,VdB,BRadMax,Vmag",
+        ),
+        (
+            "ced.tsv",
+            "VII/231/catalog",
+            "_RAJ2000,_DEJ2000,Ced,m_Ced,Name,Dim1,Dim2,Class,SpNeb",
+        ),
+        (
+            "lbn.tsv",
+            "VII/9/catalog",
+            "_RAJ2000,_DEJ2000,Seq,Diam1,Diam2,Name,ID",
         ),
         ("bsc.tsv", "V/50/catalog", "_RAJ2000,_DEJ2000,HD,Name,Vmag"),
         // ~1M galaxies; the builder keeps the ones large enough to matter

@@ -39,6 +39,8 @@ string    stable source-qualified ID
 string    source/provenance label
 strings   alternate designations
 strings   stable IDs of containing parent objects
+strings   stable IDs assigned by other source catalogs
+strings   other contributing source labels
 ...       future fields may be appended inside record_bytes
 ```
 
@@ -56,7 +58,7 @@ IDs are opaque to the library. Dataset builders use source-qualified values,
 for example:
 
 ```text
-openngc:NGC0224
+openngc:NGC224
 vizier:VII/20:Sh2-101
 vizier:VII/237:PGC2557
 iau-csn:Sirius
@@ -65,7 +67,10 @@ iau-csn:Sirius
 The source field records the contributing dataset or VizieR table. Aliases are
 alternate catalog designations, not informal feature labels. Parent IDs may be
 empty and may contain more than one value when a region participates in
-multiple useful containment relationships.
+multiple useful containment relationships. When records from multiple catalogs
+are confidently cross-identified, the retained object carries the other stable
+IDs and contributing sources in dedicated v2 fields instead of producing
+duplicate viewport hits.
 
 ## Compatibility and rollout
 

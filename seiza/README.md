@@ -21,11 +21,12 @@ astrophotography, in Rust.
   to hinted solution in 0.7 s.
 - **Star catalogs** — compact memory-mappable tile formats with cone
   search; builders for Tycho-2, Gaia DR3 (via TAP), and ASTAP databases.
-- **Object catalogs** — NGC/IC/Messier, Sharpless, Barnard, UGC, LDN, vdB,
-  PGC, named/HD stars, and live transient (supernova/nova) lists built into
-  a compact, versioned store with stable source IDs, aliases, hierarchy, and
-  provenance; query known sky cones and convex footprints without plate
-  solving, or project objects into solved images with full ellipse geometry.
+- **Object catalogs** — NGC/IC/Messier, Sharpless, Barnard, UGC, LDN, LBN,
+  Cederblad, vdB, PGC, named/HD stars, and live transient (supernova/nova)
+  lists built into a compact, versioned store with stable source IDs, aliases,
+  hierarchy, and provenance; query known sky cones and convex footprints
+  without plate solving, or project objects into solved images with full
+  ellipse geometry.
 
 See the [`seiza-cli`](https://crates.io/crates/seiza-cli) crate for the
 command-line tool, and [`seiza-fits`](https://crates.io/crates/seiza-fits)

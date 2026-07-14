@@ -80,7 +80,7 @@ impl ObjectKind {
 /// Identity, hierarchy, and provenance carried by a catalog object.
 ///
 /// IDs are opaque to seiza, but producers should make them stable and
-/// source-qualified (for example `openngc:NGC0224`). Parent IDs use the same
+/// source-qualified (for example `openngc:NGC224`). Parent IDs use the same
 /// namespace and may point to containing nebulae, galaxies, or clusters.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ObjectMetadata {
@@ -92,6 +92,10 @@ pub struct ObjectMetadata {
     pub aliases: Vec<String>,
     /// Stable IDs of containing catalog objects.
     pub parent_ids: Vec<String>,
+    /// Stable IDs assigned to the same object by other source catalogs.
+    pub alternate_ids: Vec<String>,
+    /// Additional catalogs that contributed aliases or measurements.
+    pub alternate_sources: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -253,6 +257,8 @@ impl ObjectCatalog {
             write_string(&mut record, &o.metadata.source)?;
             write_string_list(&mut record, &o.metadata.aliases)?;
             write_string_list(&mut record, &o.metadata.parent_ids)?;
+            write_string_list(&mut record, &o.metadata.alternate_ids)?;
+            write_string_list(&mut record, &o.metadata.alternate_sources)?;
             debug_assert_eq!(record.len(), record_len as usize);
             out.write_all(&record_len.to_le_bytes())?;
             out.write_all(&record)?;
@@ -290,7 +296,7 @@ impl ObjectCatalog {
             ));
         };
         let count = read_u32(&mut input)?;
-        let minimum_record_bytes = if is_v2 { 49 } else { 37 };
+        let minimum_record_bytes = if is_v2 { 53 } else { 37 };
         if count as u64 > file_len.saturating_sub(12) / minimum_record_bytes {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -315,6 +321,8 @@ impl ObjectCatalog {
                 object.metadata.source = read_string(&mut record)?;
                 object.metadata.aliases = read_string_list(&mut record)?;
                 object.metadata.parent_ids = read_string_list(&mut record)?;
+                object.metadata.alternate_ids = read_string_list(&mut record)?;
+                object.metadata.alternate_sources = read_string_list(&mut record)?;
                 // Any remaining bytes belong to a future v2 extension.
                 objects.push(object);
             }
@@ -749,7 +757,7 @@ fn read_v1_object(input: &mut impl Read) -> io::Result<SkyObject> {
 }
 
 fn v2_record_len(object: &SkyObject) -> io::Result<u32> {
-    // Fixed numeric prefix plus four scalar strings and two string-list counts.
+    // Fixed numeric prefix plus four scalar strings and four string-list counts.
     let mut len = 33usize;
     for value in [
         &object.name,
@@ -761,7 +769,12 @@ fn v2_record_len(object: &SkyObject) -> io::Result<u32> {
             .checked_add(encoded_string_len(value)?)
             .ok_or_else(record_too_large)?;
     }
-    for values in [&object.metadata.aliases, &object.metadata.parent_ids] {
+    for values in [
+        &object.metadata.aliases,
+        &object.metadata.parent_ids,
+        &object.metadata.alternate_ids,
+        &object.metadata.alternate_sources,
+    ] {
         u16::try_from(values.len()).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -878,10 +891,12 @@ mod tests {
             name: "NGC 224".to_string(),
             common_name: "Andromeda Galaxy".to_string(),
             metadata: ObjectMetadata {
-                id: "openngc:NGC0224".to_string(),
+                id: "openngc:NGC224".to_string(),
                 source: "OpenNGC".to_string(),
                 aliases: vec!["M 31".to_string(), "PGC 2557".to_string()],
                 parent_ids: vec!["curated:local-group".to_string()],
+                alternate_ids: vec!["messier:M31".to_string()],
+                alternate_sources: vec!["Messier catalog".to_string()],
             },
         }
     }
@@ -1075,10 +1090,12 @@ mod tests {
         assert_eq!(a.common_name, "Andromeda Galaxy");
         assert_eq!(a.mag, Some(3.44));
         assert_eq!(a.position_angle_deg, Some(35.0));
-        assert_eq!(a.metadata.id, "openngc:NGC0224");
+        assert_eq!(a.metadata.id, "openngc:NGC224");
         assert_eq!(a.metadata.source, "OpenNGC");
         assert_eq!(a.metadata.aliases, ["M 31", "PGC 2557"]);
         assert_eq!(a.metadata.parent_ids, ["curated:local-group"]);
+        assert_eq!(a.metadata.alternate_ids, ["messier:M31"]);
+        assert_eq!(a.metadata.alternate_sources, ["Messier catalog"]);
         let b = &catalog.objects()[1];
         assert_eq!(b.mag, None);
         assert_eq!(b.major_arcmin, None);
@@ -1118,7 +1135,7 @@ mod tests {
         std::fs::write(&path, bytes).unwrap();
 
         let catalog = ObjectCatalog::open(&path).unwrap();
-        assert_eq!(catalog.objects()[0].metadata.id, "openngc:NGC0224");
+        assert_eq!(catalog.objects()[0].metadata.id, "openngc:NGC224");
 
         std::fs::remove_dir_all(&dir).ok();
     }

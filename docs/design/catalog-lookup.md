@@ -43,6 +43,13 @@ Table, JSON, and CSV outputs distinguish center matches from extent-only
 matches. Filters cover object type, magnitude, angular size, common names, and
 result count.
 
+For interactive use, load one `ObjectCatalog` per process and reuse it while
+the viewport pans or zooms. Debounce viewport queries in the UI and discard
+stale results when newer bounds arrive. The current all-sky scan is already
+small enough for interactive fields; a normalized ID/name index is the next
+useful addition for autocomplete and direct lookup. A spatial index should be
+added only if measurements of a larger catalog make the scan the bottleneck.
+
 ## Which catalog should supply sub-objects?
 
 There is no single authoritative all-sky catalog of visually named structures
@@ -57,20 +64,24 @@ region catalogs. The existing object builder already ingests Sharpless
 Lynds dark nebulae (VII/7A), Barnard, and van den Bergh reflection nebulae
 ([VII/21](https://vizier.cds.unistra.fr/viz-bin/VizieR?-source=VII%2F21)).
 
-The highest-value additions for broad visible nebulosity are:
+The default object builder now includes the two highest-value additions for
+broad visible nebulosity:
 
 - Lynds' bright-nebula catalog
   ([LBN, VII/9](https://vizier.cds.unistra.fr/viz-bin/VizieR?-source=VII%2F9));
 - Cederblad bright diffuse Galactic nebulae
   ([VII/231](https://vizier.cds.unistra.fr/viz-bin/VizieR?-source=VII%2F231));
-- RCW southern H-alpha regions and other published regional catalogs selected
-  from VizieR;
-- galaxy-specific H II-region catalogs, such as PHANGS products, as optional
-  packs rather than an all-sky default.
+
+Logical follow-on catalogs are RCW southern H-alpha regions and other
+published regional catalogs selected from VizieR. Galaxy-specific H II-region
+catalogs, such as PHANGS products, fit better as optional packs than as part of
+the all-sky default.
 
 These describe physical/cataloged regions. Most supply a center and sometimes
 a diameter, brightness class, or morphology, but rarely a faithful visual
-outline.
+outline. LBN's `ID` field says whether a brightness region belongs to a more
+extensive complex, but does not identify a containing catalog record, so the
+builder does not invent a `parent_id` from it.
 
 ### Identifiers and hierarchy: SIMBAD enrichment
 
@@ -103,14 +114,17 @@ coverage, the IVOA Multi-Order Coverage representation used by
 extension. Every informal feature must carry provenance and confidence so the
 UI can distinguish catalog facts from editorial annotations.
 
-## Recommended sequence
+## Rollout sequence
 
-1. Use the versioned `SEIZAOB2` metadata for source-qualified IDs, aliases,
+1. Done: use `SEIZAOB2` metadata for source-qualified IDs, aliases,
    parent links, and provenance while retaining v1 read compatibility.
-2. Add LBN and Cederblad through the existing VizieR build pipeline, with
-   positional deduplication and aliases.
-3. Define a source-controlled `features.json` schema and seed a small reviewed
-   set of genuinely useful named structures.
-4. Add optional image-evidence scoring inside predicted feature regions. This
-   verifies visibility but still does not require a global plate solve when the
-   supplied bounds and orientation are trusted.
+2. Done: add LBN and Cederblad through the existing VizieR build pipeline, with
+   explicit cross-identifier merging and no positional deduplication. LBN can
+   intentionally assign the same center to distinct regions.
+3. Next: add normalized ID and designation lookup for autocomplete and direct
+   object retrieval alongside the existing viewport query.
+4. Next: define a source-controlled `features.json` schema and seed a small
+   reviewed set of genuinely useful named structures.
+5. Later: add optional image-evidence scoring inside predicted feature regions.
+   This verifies visibility but still does not require a global plate solve
+   when the supplied bounds and orientation are trusted.
