@@ -33,8 +33,9 @@ seiza catalog objects --data objects.bin \
 `catalog objects` accepts a cone or a convex polygon whose vertices are in
 boundary order. It can filter by object kind, magnitude, angular size, and
 common-name availability; results can be emitted as a table, JSON, or CSV.
-The prominence score is a catalog-based prediction, not proof that the object
-is visible in the image pixels.
+JSON and CSV include stable IDs, source provenance, aliases, and parent IDs
+when the catalog provides them. The prominence score is a catalog-based
+prediction, not proof that the object is visible in the image pixels.
 
 ## Use with N.I.N.A.
 

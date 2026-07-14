@@ -105,8 +105,8 @@ UI can distinguish catalog facts from editorial annotations.
 
 ## Recommended sequence
 
-1. Keep the current coordinate lookup on `objects.bin` and benchmark its
-   in-memory scan before changing the binary format.
+1. Use the versioned `SEIZAOB2` metadata for source-qualified IDs, aliases,
+   parent links, and provenance while retaining v1 read compatibility.
 2. Add LBN and Cederblad through the existing VizieR build pipeline, with
    positional deduplication and aliases.
 3. Define a source-controlled `features.json` schema and seed a small reviewed

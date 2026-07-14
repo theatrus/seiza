@@ -1,18 +1,21 @@
 //! Deep-sky object and named-star catalogs, and their projection into a
 //! solved image for overlays.
 //!
-//! Binary format `SEIZAOB1` (little-endian): magic, u32 count, then per
-//! object: kind u8, ra f64, dec f64, mag f32 (NaN = unknown), major axis
-//! f32 arcmin (0 = unknown), minor axis f32 arcmin, position angle f32
-//! degrees E of N (NaN = unknown), then two length-prefixed (u16) UTF-8
-//! strings: designation and common name.
+//! Binary format `SEIZAOB2` (little-endian): magic, u32 count, then a u32
+//! byte length and payload for each object. Payloads begin with the complete
+//! `SEIZAOB1` object record, followed by a stable ID, source, aliases, and
+//! parent IDs. Length-delimited records let newer writers append fields while
+//! older v2 readers safely skip the unknown tail. [`ObjectCatalog::open`]
+//! remains backward-compatible with `SEIZAOB1` files.
 
 use crate::wcs::Wcs;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
-const MAGIC: &[u8; 8] = b"SEIZAOB1";
+const MAGIC_V1: &[u8; 8] = b"SEIZAOB1";
+const MAGIC_V2: &[u8; 8] = b"SEIZAOB2";
+const MAX_RECORD_BYTES: u32 = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -74,6 +77,23 @@ impl ObjectKind {
     }
 }
 
+/// Identity, hierarchy, and provenance carried by a catalog object.
+///
+/// IDs are opaque to seiza, but producers should make them stable and
+/// source-qualified (for example `openngc:NGC0224`). Parent IDs use the same
+/// namespace and may point to containing nebulae, galaxies, or clusters.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ObjectMetadata {
+    /// Stable, source-qualified record ID. Empty for legacy v1 records.
+    pub id: String,
+    /// Dataset or table that supplied this record.
+    pub source: String,
+    /// Alternate catalog designations, excluding the primary display name.
+    pub aliases: Vec<String>,
+    /// Stable IDs of containing catalog objects.
+    pub parent_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SkyObject {
     pub kind: ObjectKind,
@@ -91,6 +111,8 @@ pub struct SkyObject {
     pub name: String,
     /// Popular name when one exists, e.g. "Andromeda Galaxy"
     pub common_name: String,
+    /// Identity, hierarchy, and provenance. Empty when read from v1.
+    pub metadata: ObjectMetadata,
 }
 
 /// An object projected into a solved image.
@@ -219,58 +241,87 @@ impl ObjectCatalog {
         &self.objects
     }
 
+    /// Write the current, extensible `SEIZAOB2` format.
     pub fn write_to(&self, path: &Path) -> io::Result<()> {
         let mut out = BufWriter::new(File::create(path)?);
-        out.write_all(MAGIC)?;
-        out.write_all(&(self.objects.len() as u32).to_le_bytes())?;
+        write_header(&mut out, MAGIC_V2, self.objects.len())?;
         for o in &self.objects {
-            out.write_all(&[o.kind as u8])?;
-            out.write_all(&o.ra.to_le_bytes())?;
-            out.write_all(&o.dec.to_le_bytes())?;
-            out.write_all(&o.mag.unwrap_or(f32::NAN).to_le_bytes())?;
-            out.write_all(&o.major_arcmin.unwrap_or(0.0).to_le_bytes())?;
-            out.write_all(&o.minor_arcmin.unwrap_or(0.0).to_le_bytes())?;
-            out.write_all(&o.position_angle_deg.unwrap_or(f32::NAN).to_le_bytes())?;
-            write_string(&mut out, &o.name)?;
-            write_string(&mut out, &o.common_name)?;
+            let record_len = v2_record_len(o)?;
+            let mut record = Vec::with_capacity(record_len as usize);
+            write_v1_object(&mut record, o)?;
+            write_string(&mut record, &o.metadata.id)?;
+            write_string(&mut record, &o.metadata.source)?;
+            write_string_list(&mut record, &o.metadata.aliases)?;
+            write_string_list(&mut record, &o.metadata.parent_ids)?;
+            debug_assert_eq!(record.len(), record_len as usize);
+            out.write_all(&record_len.to_le_bytes())?;
+            out.write_all(&record)?;
+        }
+        out.flush()
+    }
+
+    /// Write the legacy `SEIZAOB1` format.
+    ///
+    /// Identity, hierarchy, and provenance metadata cannot be represented and
+    /// is omitted. This is intended only for controlled compatibility exports.
+    pub fn write_v1_to(&self, path: &Path) -> io::Result<()> {
+        let mut out = BufWriter::new(File::create(path)?);
+        write_header(&mut out, MAGIC_V1, self.objects.len())?;
+        for object in &self.objects {
+            write_v1_object(&mut out, object)?;
         }
         out.flush()
     }
 
     pub fn open(path: &Path) -> io::Result<Self> {
-        let mut input = BufReader::new(File::open(path)?);
+        let file = File::open(path)?;
+        let file_len = file.metadata()?.len();
+        let mut input = BufReader::new(file);
         let mut magic = [0u8; 8];
         input.read_exact(&mut magic)?;
-        if &magic != MAGIC {
+        let is_v2 = if &magic == MAGIC_V2 {
+            true
+        } else if &magic == MAGIC_V1 {
+            false
+        } else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "not a seiza object catalog",
             ));
-        }
+        };
         let count = read_u32(&mut input)?;
+        let minimum_record_bytes = if is_v2 { 49 } else { 37 };
+        if count as u64 > file_len.saturating_sub(12) / minimum_record_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "object count cannot fit in the catalog file",
+            ));
+        }
         let mut objects = Vec::with_capacity(count as usize);
-        for _ in 0..count {
-            let mut kind = [0u8; 1];
-            input.read_exact(&mut kind)?;
-            let ra = read_f64(&mut input)?;
-            let dec = read_f64(&mut input)?;
-            let mag = read_f32(&mut input)?;
-            let major = read_f32(&mut input)?;
-            let minor = read_f32(&mut input)?;
-            let pa = read_f32(&mut input)?;
-            let name = read_string(&mut input)?;
-            let common_name = read_string(&mut input)?;
-            objects.push(SkyObject {
-                kind: ObjectKind::from_u8(kind[0]),
-                ra,
-                dec,
-                mag: if mag.is_nan() { None } else { Some(mag) },
-                major_arcmin: if major > 0.0 { Some(major) } else { None },
-                minor_arcmin: if minor > 0.0 { Some(minor) } else { None },
-                position_angle_deg: if pa.is_nan() { None } else { Some(pa) },
-                name,
-                common_name,
-            });
+        if is_v2 {
+            for _ in 0..count {
+                let record_len = read_u32(&mut input)?;
+                if record_len > MAX_RECORD_BYTES {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "object record exceeds the 16 MiB safety limit",
+                    ));
+                }
+                let mut record = vec![0u8; record_len as usize];
+                input.read_exact(&mut record)?;
+                let mut record = io::Cursor::new(record);
+                let mut object = read_v1_object(&mut record)?;
+                object.metadata.id = read_string(&mut record)?;
+                object.metadata.source = read_string(&mut record)?;
+                object.metadata.aliases = read_string_list(&mut record)?;
+                object.metadata.parent_ids = read_string_list(&mut record)?;
+                // Any remaining bytes belong to a future v2 extension.
+                objects.push(object);
+            }
+        } else {
+            for _ in 0..count {
+                objects.push(read_v1_object(&mut input)?);
+            }
         }
         Ok(Self { objects })
     }
@@ -655,11 +706,109 @@ fn normalize(v: (f64, f64)) -> (f64, f64) {
     (v.0 / len, v.1 / len)
 }
 
+fn write_header(out: &mut impl Write, magic: &[u8; 8], count: usize) -> io::Result<()> {
+    let count = u32::try_from(count)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "too many catalog objects"))?;
+    out.write_all(magic)?;
+    out.write_all(&count.to_le_bytes())
+}
+
+fn write_v1_object(out: &mut impl Write, object: &SkyObject) -> io::Result<()> {
+    out.write_all(&[object.kind as u8])?;
+    out.write_all(&object.ra.to_le_bytes())?;
+    out.write_all(&object.dec.to_le_bytes())?;
+    out.write_all(&object.mag.unwrap_or(f32::NAN).to_le_bytes())?;
+    out.write_all(&object.major_arcmin.unwrap_or(0.0).to_le_bytes())?;
+    out.write_all(&object.minor_arcmin.unwrap_or(0.0).to_le_bytes())?;
+    out.write_all(&object.position_angle_deg.unwrap_or(f32::NAN).to_le_bytes())?;
+    write_string(out, &object.name)?;
+    write_string(out, &object.common_name)
+}
+
+fn read_v1_object(input: &mut impl Read) -> io::Result<SkyObject> {
+    let mut kind = [0u8; 1];
+    input.read_exact(&mut kind)?;
+    let ra = read_f64(input)?;
+    let dec = read_f64(input)?;
+    let mag = read_f32(input)?;
+    let major = read_f32(input)?;
+    let minor = read_f32(input)?;
+    let pa = read_f32(input)?;
+    Ok(SkyObject {
+        kind: ObjectKind::from_u8(kind[0]),
+        ra,
+        dec,
+        mag: if mag.is_nan() { None } else { Some(mag) },
+        major_arcmin: if major > 0.0 { Some(major) } else { None },
+        minor_arcmin: if minor > 0.0 { Some(minor) } else { None },
+        position_angle_deg: if pa.is_nan() { None } else { Some(pa) },
+        name: read_string(input)?,
+        common_name: read_string(input)?,
+        metadata: ObjectMetadata::default(),
+    })
+}
+
+fn v2_record_len(object: &SkyObject) -> io::Result<u32> {
+    // Fixed numeric prefix plus four scalar strings and two string-list counts.
+    let mut len = 33usize;
+    for value in [
+        &object.name,
+        &object.common_name,
+        &object.metadata.id,
+        &object.metadata.source,
+    ] {
+        len = len
+            .checked_add(encoded_string_len(value)?)
+            .ok_or_else(record_too_large)?;
+    }
+    for values in [&object.metadata.aliases, &object.metadata.parent_ids] {
+        u16::try_from(values.len()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "object catalog string list exceeds 65535 entries",
+            )
+        })?;
+        len = len.checked_add(2).ok_or_else(record_too_large)?;
+        for value in values {
+            len = len
+                .checked_add(encoded_string_len(value)?)
+                .ok_or_else(record_too_large)?;
+        }
+    }
+    let len = u32::try_from(len).map_err(|_| record_too_large())?;
+    if len > MAX_RECORD_BYTES {
+        return Err(record_too_large());
+    }
+    Ok(len)
+}
+
+fn encoded_string_len(value: &str) -> io::Result<usize> {
+    u16::try_from(value.len()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "object catalog string exceeds 65535 bytes",
+        )
+    })?;
+    Ok(2 + value.len())
+}
+
+fn record_too_large() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "object record exceeds the 16 MiB safety limit",
+    )
+}
+
 fn write_string(out: &mut impl Write, s: &str) -> io::Result<()> {
     let bytes = s.as_bytes();
-    let len = bytes.len().min(u16::MAX as usize);
-    out.write_all(&(len as u16).to_le_bytes())?;
-    out.write_all(&bytes[..len])
+    let len = u16::try_from(bytes.len()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "object catalog string exceeds 65535 bytes",
+        )
+    })?;
+    out.write_all(&len.to_le_bytes())?;
+    out.write_all(bytes)
 }
 
 fn read_string(input: &mut impl Read) -> io::Result<String> {
@@ -668,6 +817,31 @@ fn read_string(input: &mut impl Read) -> io::Result<String> {
     let mut buf = vec![0u8; u16::from_le_bytes(len) as usize];
     input.read_exact(&mut buf)?;
     String::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+fn write_string_list(out: &mut impl Write, values: &[String]) -> io::Result<()> {
+    let count = u16::try_from(values.len()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "object catalog string list exceeds 65535 entries",
+        )
+    })?;
+    out.write_all(&count.to_le_bytes())?;
+    for value in values {
+        write_string(out, value)?;
+    }
+    Ok(())
+}
+
+fn read_string_list(input: &mut impl Read) -> io::Result<Vec<String>> {
+    let mut count = [0u8; 2];
+    input.read_exact(&mut count)?;
+    let count = u16::from_le_bytes(count) as usize;
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        values.push(read_string(input)?);
+    }
+    Ok(values)
 }
 
 fn read_u32(input: &mut impl Read) -> io::Result<u32> {
@@ -703,6 +877,12 @@ mod tests {
             position_angle_deg: Some(35.0),
             name: "NGC 224".to_string(),
             common_name: "Andromeda Galaxy".to_string(),
+            metadata: ObjectMetadata {
+                id: "openngc:NGC0224".to_string(),
+                source: "OpenNGC".to_string(),
+                aliases: vec!["M 31".to_string(), "PGC 2557".to_string()],
+                parent_ids: vec!["curated:local-group".to_string()],
+            },
         }
     }
 
@@ -717,6 +897,7 @@ mod tests {
             position_angle_deg: None,
             name: name.to_string(),
             common_name: String::new(),
+            metadata: ObjectMetadata::default(),
         }
     }
 
@@ -879,11 +1060,14 @@ mod tests {
             position_angle_deg: None,
             name: "Sirius".to_string(),
             common_name: String::new(),
+            metadata: ObjectMetadata::default(),
         };
         ObjectCatalog::new(vec![m31(), sizeless])
             .write_to(&path)
             .unwrap();
 
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[..8], MAGIC_V2);
         let catalog = ObjectCatalog::open(&path).unwrap();
         assert_eq!(catalog.len(), 2);
         let a = &catalog.objects()[0];
@@ -891,10 +1075,66 @@ mod tests {
         assert_eq!(a.common_name, "Andromeda Galaxy");
         assert_eq!(a.mag, Some(3.44));
         assert_eq!(a.position_angle_deg, Some(35.0));
+        assert_eq!(a.metadata.id, "openngc:NGC0224");
+        assert_eq!(a.metadata.source, "OpenNGC");
+        assert_eq!(a.metadata.aliases, ["M 31", "PGC 2557"]);
+        assert_eq!(a.metadata.parent_ids, ["curated:local-group"]);
         let b = &catalog.objects()[1];
         assert_eq!(b.mag, None);
         assert_eq!(b.major_arcmin, None);
         assert_eq!(b.position_angle_deg, None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn opens_v1_catalogs_with_empty_metadata() {
+        let dir = std::env::temp_dir().join(format!("seiza-obj-v1-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("objects-v1.bin");
+        ObjectCatalog::new(vec![m31()]).write_v1_to(&path).unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[..8], MAGIC_V1);
+        let catalog = ObjectCatalog::open(&path).unwrap();
+        let object = &catalog.objects()[0];
+        assert_eq!(object.name, "NGC 224");
+        assert_eq!(object.metadata, ObjectMetadata::default());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn v2_reader_ignores_unknown_record_tail() {
+        let dir = std::env::temp_dir().join(format!("seiza-obj-tail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("objects-v2.bin");
+        ObjectCatalog::new(vec![m31()]).write_to(&path).unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        let record_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+        bytes[12..16].copy_from_slice(&(record_len + 4).to_le_bytes());
+        bytes.extend_from_slice(&[1, 2, 3, 4]);
+        std::fs::write(&path, bytes).unwrap();
+
+        let catalog = ObjectCatalog::open(&path).unwrap();
+        assert_eq!(catalog.objects()[0].metadata.id, "openngc:NGC0224");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn writer_rejects_oversized_metadata_without_truncation() {
+        let dir = std::env::temp_dir().join(format!("seiza-obj-large-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("objects-v2.bin");
+        let mut object = m31();
+        object.metadata.id = "x".repeat(u16::MAX as usize + 1);
+
+        let error = ObjectCatalog::new(vec![object])
+            .write_to(&path)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
 
         std::fs::remove_dir_all(&dir).ok();
     }
