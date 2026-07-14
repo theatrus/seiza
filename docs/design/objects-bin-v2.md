@@ -1,6 +1,6 @@
 # Object catalog binary format v2
 
-Status: implemented
+Status: implemented legacy format; superseded by `SEIZAOB3`
 
 ## Purpose
 
@@ -74,10 +74,10 @@ duplicate viewport hits.
 
 ## Compatibility and rollout
 
-`ObjectCatalog::write_to` writes v2. `ObjectCatalog::open` reads both
-`SEIZAOB1` and `SEIZAOB2`; v1 records receive empty metadata. A controlled
-`write_v1_to` compatibility export is available, but necessarily drops all v2
-metadata.
+`ObjectCatalog::write_v2_to` writes v2. `ObjectCatalog::open` reads
+`SEIZAOB1`, `SEIZAOB2`, and the current `SEIZAOB3`; v1 records receive empty
+metadata. Controlled `write_v1_to` and `write_v2_to` compatibility exports are
+available, though v1 necessarily drops all v2 metadata.
 
-Publishing a v2 hosted catalog therefore requires a reader upgrade, while the
-new reader can continue using every previously published v1 catalog.
+The current mmap-native format is documented in
+[`objects-bin-v3.md`](objects-bin-v3.md).

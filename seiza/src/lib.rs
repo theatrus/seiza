@@ -12,6 +12,7 @@ pub mod blind;
 pub mod catalog;
 pub mod detect;
 pub mod minor_bodies;
+mod object_catalog_v3;
 pub mod objects;
 pub mod solve;
 pub mod star_ids;

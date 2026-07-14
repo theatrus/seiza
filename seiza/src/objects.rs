@@ -1,17 +1,17 @@
 //! Deep-sky object and named-star catalogs, and their projection into a
 //! solved image for overlays.
 //!
-//! Binary format `SEIZAOB2` (little-endian): magic, u32 count, then a u32
-//! byte length and payload for each object. Payloads begin with the complete
-//! `SEIZAOB1` object record, followed by a stable ID, source, aliases, and
-//! parent IDs. Length-delimited records let newer writers append fields while
-//! older v2 readers safely skip the unknown tail. [`ObjectCatalog::open`]
-//! remains backward-compatible with `SEIZAOB1` files.
+//! Current binary format `SEIZAOB3` uses fixed records, shared string/list
+//! tables, and embedded sky/name indices in a read-only memory map. Opening a
+//! v3 catalog validates only its header and section bounds; records and index
+//! pages are touched on demand. Legacy `SEIZAOB1` and `SEIZAOB2` files remain
+//! readable, although those older formats must be decoded into memory.
 
 use crate::wcs::Wcs;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, Write};
 use std::path::Path;
+use std::sync::OnceLock;
 
 const MAGIC_V1: &[u8; 8] = b"SEIZAOB1";
 const MAGIC_V2: &[u8; 8] = b"SEIZAOB2";
@@ -57,7 +57,7 @@ impl ObjectKind {
         }
     }
 
-    fn from_u8(value: u8) -> Self {
+    pub(crate) fn from_u8(value: u8) -> Self {
         match value {
             0 => Self::Galaxy,
             1 => Self::OpenCluster,
@@ -195,9 +195,10 @@ impl Default for ObjectQuery {
 }
 
 /// A catalog object associated with a coordinate-only sky region.
-#[derive(Debug, Clone, Copy)]
-pub struct ObjectHit<'a> {
-    pub object: &'a SkyObject,
+#[derive(Debug, Clone)]
+pub struct ObjectHit {
+    /// Owned so mmap-backed queries only materialize returned records.
+    pub object: SkyObject,
     /// True when the catalog position itself is inside the region.
     pub center_inside: bool,
     /// True when only the object's catalog extent reaches into the region.
@@ -210,6 +211,14 @@ pub struct ObjectHit<'a> {
     pub predicted_prominence: f64,
 }
 
+/// A designation resolved through the embedded exact/prefix name index.
+#[derive(Debug, Clone)]
+pub struct ObjectNameMatch {
+    pub object: SkyObject,
+    /// The primary name, common name, alias, or stable ID that matched.
+    pub matched_name: String,
+}
+
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum ObjectQueryError {
     #[error("invalid ICRS coordinate ({ra}, {dec})")]
@@ -220,40 +229,93 @@ pub enum ObjectQueryError {
     TooFewVertices(usize),
     #[error("polygon vertices must form a non-degenerate convex region in boundary order")]
     InvalidPolygon,
+    #[error("object catalog query failed: {0}")]
+    Catalog(String),
 }
 
-/// An in-memory object catalog.
-#[derive(Debug, Default)]
+#[derive(Debug)]
+enum ObjectStorage {
+    Memory {
+        objects: Vec<SkyObject>,
+        trailing_bytes: u64,
+    },
+    MappedV3(crate::object_catalog_v3::MappedObjectCatalog),
+}
+
+/// An object catalog. Newly written catalogs are mmap-backed `SEIZAOB3`;
+/// catalogs constructed with [`Self::new`] remain in memory until written.
+#[derive(Debug)]
 pub struct ObjectCatalog {
-    objects: Vec<SkyObject>,
-    trailing_bytes: u64,
+    storage: ObjectStorage,
+    materialized: OnceLock<Vec<SkyObject>>,
+}
+
+impl Default for ObjectCatalog {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
 }
 
 impl ObjectCatalog {
     pub fn new(objects: Vec<SkyObject>) -> Self {
         Self {
-            objects,
-            trailing_bytes: 0,
+            storage: ObjectStorage::Memory {
+                objects,
+                trailing_bytes: 0,
+            },
+            materialized: OnceLock::new(),
         }
     }
 
     pub fn len(&self) -> usize {
-        self.objects.len()
+        match &self.storage {
+            ObjectStorage::Memory { objects, .. } => objects.len(),
+            ObjectStorage::MappedV3(catalog) => catalog.len(),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.objects.is_empty()
+        self.len() == 0
     }
 
+    /// Return every object, materializing an mmap-backed catalog on first use.
+    /// Region and name queries do not call this method.
     pub fn objects(&self) -> &[SkyObject] {
-        &self.objects
+        match &self.storage {
+            ObjectStorage::Memory { objects, .. } => objects,
+            ObjectStorage::MappedV3(catalog) => self.materialized.get_or_init(|| {
+                catalog
+                    .read_all()
+                    .expect("mmap object records are invalid; call validate() for a fallible check")
+            }),
+        }
     }
 
-    /// Write the current, extensible `SEIZAOB2` format.
+    /// Decode and return every object with corruption reported as an error.
+    pub fn read_all(&self) -> io::Result<Vec<SkyObject>> {
+        match &self.storage {
+            ObjectStorage::Memory { objects, .. } => Ok(objects.clone()),
+            ObjectStorage::MappedV3(catalog) => catalog.read_all(),
+        }
+    }
+
+    /// Write the mmap-native `SEIZAOB3` format with sky and name indices.
     pub fn write_to(&self, path: &Path) -> io::Result<()> {
+        match &self.storage {
+            ObjectStorage::Memory { objects, .. } => crate::object_catalog_v3::write(path, objects),
+            ObjectStorage::MappedV3(catalog) => {
+                let objects = catalog.read_all()?;
+                crate::object_catalog_v3::write(path, &objects)
+            }
+        }
+    }
+
+    /// Write the legacy extensible `SEIZAOB2` format.
+    pub fn write_v2_to(&self, path: &Path) -> io::Result<()> {
+        let objects = self.read_all()?;
         let mut out = BufWriter::new(File::create(path)?);
-        write_header(&mut out, MAGIC_V2, self.objects.len())?;
-        for o in &self.objects {
+        write_header(&mut out, MAGIC_V2, objects.len())?;
+        for o in &objects {
             let record_len = v2_record_len(o)?;
             let mut record = Vec::with_capacity(record_len as usize);
             write_v1_object(&mut record, o)?;
@@ -275,9 +337,10 @@ impl ObjectCatalog {
     /// Identity, hierarchy, and provenance metadata cannot be represented and
     /// is omitted. This is intended only for controlled compatibility exports.
     pub fn write_v1_to(&self, path: &Path) -> io::Result<()> {
+        let objects = self.read_all()?;
         let mut out = BufWriter::new(File::create(path)?);
-        write_header(&mut out, MAGIC_V1, self.objects.len())?;
-        for object in &self.objects {
+        write_header(&mut out, MAGIC_V1, objects.len())?;
+        for object in &objects {
             write_v1_object(&mut out, object)?;
         }
         out.flush()
@@ -289,6 +352,14 @@ impl ObjectCatalog {
         let mut input = BufReader::new(file);
         let mut magic = [0u8; 8];
         input.read_exact(&mut magic)?;
+        if &magic == crate::object_catalog_v3::MAGIC {
+            return Ok(Self {
+                storage: ObjectStorage::MappedV3(
+                    crate::object_catalog_v3::MappedObjectCatalog::open(path)?,
+                ),
+                materialized: OnceLock::new(),
+            });
+        }
         let is_v2 = if &magic == MAGIC_V2 {
             true
         } else if &magic == MAGIC_V1 {
@@ -337,8 +408,11 @@ impl ObjectCatalog {
         }
         let trailing_bytes = file_len.saturating_sub(input.stream_position()?);
         Ok(Self {
-            objects,
-            trailing_bytes,
+            storage: ObjectStorage::Memory {
+                objects,
+                trailing_bytes,
+            },
+            materialized: OnceLock::new(),
         })
     }
 
@@ -347,37 +421,24 @@ impl ObjectCatalog {
     /// explicit pass checks coordinates, measurements, and stable-ID
     /// uniqueness.
     pub fn validate(&self) -> io::Result<()> {
-        if self.trailing_bytes != 0 {
-            return Err(invalid_object_data("object catalog has trailing bytes"));
-        }
         let mut ids = std::collections::HashSet::new();
-        for object in &self.objects {
-            if object.name.trim().is_empty() {
-                return Err(invalid_object_data("object has an empty name"));
+        match &self.storage {
+            ObjectStorage::Memory {
+                objects,
+                trailing_bytes,
+            } => {
+                if *trailing_bytes != 0 {
+                    return Err(invalid_object_data("object catalog has trailing bytes"));
+                }
+                for object in objects {
+                    validate_object(object, &mut ids)?;
+                }
             }
-            if !object.ra.is_finite()
-                || !object.dec.is_finite()
-                || !(-90.0..=90.0).contains(&object.dec)
-            {
-                return Err(invalid_object_data("object has invalid coordinates"));
-            }
-            if object.mag.is_some_and(|value| !value.is_finite())
-                || object
-                    .major_arcmin
-                    .is_some_and(|value| !value.is_finite() || value < 0.0)
-                || object
-                    .minor_arcmin
-                    .is_some_and(|value| !value.is_finite() || value < 0.0)
-                || object
-                    .position_angle_deg
-                    .is_some_and(|value| !value.is_finite())
-            {
-                return Err(invalid_object_data("object has invalid measurements"));
-            }
-            if !object.metadata.id.is_empty() && !ids.insert(object.metadata.id.as_str()) {
-                return Err(invalid_object_data(
-                    "object catalog has duplicate stable IDs",
-                ));
+            ObjectStorage::MappedV3(catalog) => {
+                catalog.validate()?;
+                for index in 0..catalog.len() {
+                    validate_object(&catalog.object(index)?, &mut ids)?;
+                }
             }
         }
         Ok(())
@@ -389,63 +450,36 @@ impl ObjectCatalog {
     /// An object's angular extent is treated as a conservative circle using
     /// its major-axis radius for boundary intersection. The original ellipse
     /// metadata remains available on [`ObjectHit::object`].
-    pub fn query_region<'a>(
-        &'a self,
+    pub fn query_region(
+        &self,
         region: &SkyRegion,
         query: &ObjectQuery,
-    ) -> Result<Vec<ObjectHit<'a>>, ObjectQueryError> {
+    ) -> Result<Vec<ObjectHit>, ObjectQueryError> {
         let region = PreparedRegion::new(region)?;
-        let mut hits: Vec<_> = self
-            .objects
-            .iter()
-            .filter(|object| {
-                (query.kinds.is_empty() || query.kinds.contains(&object.kind))
-                    && query
-                        .max_mag
-                        .is_none_or(|max| object.mag.is_some_and(|mag| mag <= max))
-                    && query
-                        .min_major_arcmin
-                        .is_none_or(|min| object.major_arcmin.is_some_and(|major| major >= min))
-                    && (!query.common_name_only || !object.common_name.is_empty())
-            })
-            .filter_map(|object| {
-                let point = UnitVector::from_radec(object.ra, object.dec)?;
-                let extent_radius_deg = object.major_arcmin.unwrap_or(0.0) as f64 / 120.0;
-                let distance_from_center_deg = region.distance_from_center_deg(point);
-                let query_reach = if query.include_extent_overlaps {
-                    extent_radius_deg
-                } else {
-                    0.0
-                };
-                // Every supported region lies inside this cap. Rejecting
-                // distant objects here avoids polygon edge calculations for
-                // nearly the entire all-sky catalog.
-                if distance_from_center_deg
-                    > region.characteristic_radius_deg() + query_reach + 1e-10
-                {
-                    return None;
+        let mut hits = Vec::new();
+        match &self.storage {
+            ObjectStorage::Memory { objects, .. } => {
+                for object in objects {
+                    if let Some(metrics) = query_metrics(object, &region, query) {
+                        hits.push(metrics.into_hit(object.clone()));
+                    }
                 }
-                let center_inside = region.contains(point);
-                let intersects = center_inside
-                    || (query.include_extent_overlaps
-                        && extent_radius_deg > 0.0
-                        && region.distance_to_boundary_deg(point) <= extent_radius_deg);
-                if !intersects {
-                    return None;
+            }
+            ObjectStorage::MappedV3(catalog) => {
+                let (ra, dec) = region.center().to_radec();
+                let candidates = catalog
+                    .candidates(ra, dec, region.characteristic_radius_deg())
+                    .map_err(|error| ObjectQueryError::Catalog(error.to_string()))?;
+                for index in candidates {
+                    let object = catalog
+                        .object(index as usize)
+                        .map_err(|error| ObjectQueryError::Catalog(error.to_string()))?;
+                    if let Some(metrics) = query_metrics(&object, &region, query) {
+                        hits.push(metrics.into_hit(object));
+                    }
                 }
-                Some(ObjectHit {
-                    object,
-                    center_inside,
-                    extent_only: !center_inside,
-                    distance_from_center_deg,
-                    predicted_prominence: predicted_prominence(
-                        object,
-                        center_inside,
-                        region.characteristic_radius_deg(),
-                    ),
-                })
-            })
-            .collect();
+            }
+        }
 
         sort_hits(&mut hits, query.sort);
         if let Some(limit) = query.limit {
@@ -454,15 +488,81 @@ impl ObjectCatalog {
         Ok(hits)
     }
 
+    /// Resolve all primary names, common names, aliases, and stable IDs that
+    /// normalize to `designation`.
+    pub fn lookup_name(&self, designation: &str) -> io::Result<Vec<ObjectNameMatch>> {
+        match &self.storage {
+            ObjectStorage::MappedV3(catalog) => catalog.lookup_name(designation),
+            ObjectStorage::Memory { objects, .. } => {
+                let target = crate::object_catalog_v3::normalize_name(designation);
+                if target.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let mut matches = Vec::new();
+                for object in objects {
+                    if let Some(name) = object_designations(object)
+                        .find(|name| crate::object_catalog_v3::normalize_name(name) == target)
+                    {
+                        matches.push(ObjectNameMatch {
+                            object: object.clone(),
+                            matched_name: name.to_string(),
+                        });
+                    }
+                }
+                Ok(matches)
+            }
+        }
+    }
+
+    /// Prefix search over primary names, common names, aliases, and stable IDs.
+    pub fn search_names(&self, prefix: &str, limit: usize) -> io::Result<Vec<ObjectNameMatch>> {
+        match &self.storage {
+            ObjectStorage::MappedV3(catalog) => catalog.search_names(prefix, limit),
+            ObjectStorage::Memory { objects, .. } => {
+                let target = crate::object_catalog_v3::normalize_name(prefix);
+                if target.is_empty() || limit == 0 {
+                    return Ok(Vec::new());
+                }
+                let mut matches = Vec::new();
+                for object in objects {
+                    let mut seen = std::collections::HashSet::new();
+                    for name in object_designations(object) {
+                        let key = crate::object_catalog_v3::normalize_name(name);
+                        if key.starts_with(&target) && seen.insert(key.clone()) {
+                            matches.push((
+                                key,
+                                ObjectNameMatch {
+                                    object: object.clone(),
+                                    matched_name: name.to_string(),
+                                },
+                            ));
+                        }
+                    }
+                }
+                matches.sort_by(|left, right| left.0.cmp(&right.0));
+                matches.truncate(limit);
+                Ok(matches.into_iter().map(|(_, value)| value).collect())
+            }
+        }
+    }
+
     /// Objects whose extent intersects a solved image, with pixel geometry.
     /// Sorted large-to-small so prominent objects come first.
-    pub fn objects_in_footprint(&self, wcs: &Wcs, dimensions: (u32, u32)) -> Vec<PlacedObject> {
+    pub fn objects_in_footprint(
+        &self,
+        wcs: &Wcs,
+        dimensions: (u32, u32),
+    ) -> Result<Vec<PlacedObject>, ObjectQueryError> {
         let (width, height) = (dimensions.0 as f64, dimensions.1 as f64);
         let scale = wcs.scale_arcsec_per_px();
+        let region = SkyRegion::Polygon {
+            vertices: wcs.footprint(dimensions.0, dimensions.1).to_vec(),
+        };
         let mut placed: Vec<PlacedObject> = self
-            .objects
-            .iter()
-            .filter_map(|o| {
+            .query_region(&region, &ObjectQuery::default())?
+            .into_iter()
+            .filter_map(|hit| {
+                let o = hit.object;
                 let (x, y) = wcs.world_to_pixel(o.ra, o.dec)?;
                 let semi_major_px = o.major_arcmin.unwrap_or(0.0) as f64 * 60.0 / 2.0 / scale;
                 let semi_minor_px = match o.minor_arcmin {
@@ -473,9 +573,9 @@ impl ObjectCatalog {
                 if x < -margin || y < -margin || x >= width + margin || y >= height + margin {
                     return None;
                 }
-                let angle_deg = major_axis_image_angle(wcs, o, x, y);
+                let angle_deg = major_axis_image_angle(wcs, &o, x, y);
                 Some(PlacedObject {
-                    object: o.clone(),
+                    object: o,
                     x,
                     y,
                     semi_major_px,
@@ -485,11 +585,113 @@ impl ObjectCatalog {
             })
             .collect();
         placed.sort_by(|a, b| b.semi_major_px.total_cmp(&a.semi_major_px));
-        placed
+        Ok(placed)
     }
 }
 
-fn sort_hits(hits: &mut [ObjectHit<'_>], sort: ObjectSort) {
+fn validate_object(
+    object: &SkyObject,
+    ids: &mut std::collections::HashSet<String>,
+) -> io::Result<()> {
+    if object.name.trim().is_empty() {
+        return Err(invalid_object_data("object has an empty name"));
+    }
+    if !object.ra.is_finite() || !object.dec.is_finite() || !(-90.0..=90.0).contains(&object.dec) {
+        return Err(invalid_object_data("object has invalid coordinates"));
+    }
+    if object.mag.is_some_and(|value| !value.is_finite())
+        || object
+            .major_arcmin
+            .is_some_and(|value| !value.is_finite() || value < 0.0)
+        || object
+            .minor_arcmin
+            .is_some_and(|value| !value.is_finite() || value < 0.0)
+        || object
+            .position_angle_deg
+            .is_some_and(|value| !value.is_finite())
+    {
+        return Err(invalid_object_data("object has invalid measurements"));
+    }
+    if !object.metadata.id.is_empty() && !ids.insert(object.metadata.id.clone()) {
+        return Err(invalid_object_data(
+            "object catalog has duplicate stable IDs",
+        ));
+    }
+    Ok(())
+}
+
+fn object_designations(object: &SkyObject) -> impl Iterator<Item = &str> {
+    std::iter::once(object.name.as_str())
+        .chain(std::iter::once(object.common_name.as_str()))
+        .chain(std::iter::once(object.metadata.id.as_str()))
+        .chain(object.metadata.aliases.iter().map(String::as_str))
+        .chain(object.metadata.alternate_ids.iter().map(String::as_str))
+        .filter(|value| !value.is_empty())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HitMetrics {
+    center_inside: bool,
+    distance_from_center_deg: f64,
+    predicted_prominence: f64,
+}
+
+impl HitMetrics {
+    fn into_hit(self, object: SkyObject) -> ObjectHit {
+        ObjectHit {
+            object,
+            center_inside: self.center_inside,
+            extent_only: !self.center_inside,
+            distance_from_center_deg: self.distance_from_center_deg,
+            predicted_prominence: self.predicted_prominence,
+        }
+    }
+}
+
+fn query_metrics(
+    object: &SkyObject,
+    region: &PreparedRegion,
+    query: &ObjectQuery,
+) -> Option<HitMetrics> {
+    if (!query.kinds.is_empty() && !query.kinds.contains(&object.kind))
+        || query
+            .max_mag
+            .is_some_and(|max| object.mag.is_none_or(|mag| mag > max))
+        || query
+            .min_major_arcmin
+            .is_some_and(|min| object.major_arcmin.is_none_or(|major| major < min))
+        || (query.common_name_only && object.common_name.is_empty())
+    {
+        return None;
+    }
+    let point = UnitVector::from_radec(object.ra, object.dec)?;
+    let extent_radius_deg = object.major_arcmin.unwrap_or(0.0) as f64 / 120.0;
+    let distance_from_center_deg = region.distance_from_center_deg(point);
+    let query_reach = if query.include_extent_overlaps {
+        extent_radius_deg
+    } else {
+        0.0
+    };
+    if distance_from_center_deg > region.characteristic_radius_deg() + query_reach + 1e-10 {
+        return None;
+    }
+    let center_inside = region.contains(point);
+    let intersects = center_inside
+        || (query.include_extent_overlaps
+            && extent_radius_deg > 0.0
+            && region.distance_to_boundary_deg(point) <= extent_radius_deg);
+    intersects.then(|| HitMetrics {
+        center_inside,
+        distance_from_center_deg,
+        predicted_prominence: predicted_prominence(
+            object,
+            center_inside,
+            region.characteristic_radius_deg(),
+        ),
+    })
+}
+
+fn sort_hits(hits: &mut [ObjectHit], sort: ObjectSort) {
     hits.sort_by(|a, b| {
         let primary = match sort {
             ObjectSort::Prominence => b.predicted_prominence.total_cmp(&a.predicted_prominence),
@@ -735,6 +937,12 @@ impl UnitVector {
 
     fn angle_deg(self, other: Self) -> f64 {
         self.dot(other).clamp(-1.0, 1.0).acos().to_degrees()
+    }
+
+    fn to_radec(self) -> (f64, f64) {
+        let ra = self.1.atan2(self.0).to_degrees().rem_euclid(360.0);
+        let dec = self.2.clamp(-1.0, 1.0).asin().to_degrees();
+        (ra, dec)
     }
 }
 
@@ -1135,7 +1343,7 @@ mod tests {
             .unwrap();
 
         let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(&bytes[..8], MAGIC_V2);
+        assert_eq!(&bytes[..8], crate::object_catalog_v3::MAGIC);
         let catalog = ObjectCatalog::open(&path).unwrap();
         catalog.validate().unwrap();
         assert_eq!(catalog.len(), 2);
@@ -1154,6 +1362,44 @@ mod tests {
         assert_eq!(b.mag, None);
         assert_eq!(b.major_arcmin, None);
         assert_eq!(b.position_angle_deg, None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn mmap_catalog_queries_sky_tiles_and_name_index() {
+        let dir = std::env::temp_dir().join(format!("seiza-obj-index-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("objects.bin");
+        let mut overlap = test_object("Overlap", 1.2, 0.0);
+        overlap.major_arcmin = Some(30.0);
+        let far = test_object("Far", 30.0, 20.0);
+        ObjectCatalog::new(vec![m31(), overlap, far])
+            .write_to(&path)
+            .unwrap();
+
+        let catalog = ObjectCatalog::open(&path).unwrap();
+        let region = SkyRegion::Cone {
+            center: (0.0, 0.0),
+            radius_deg: 1.0,
+        };
+        let hits = catalog
+            .query_region(&region, &ObjectQuery::default())
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].object.name, "Overlap");
+        assert!(hits[0].extent_only);
+
+        let exact = catalog.lookup_name("M31").unwrap();
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].object.name, "NGC 224");
+        assert_eq!(exact[0].matched_name, "M 31");
+        let stable_id = catalog.lookup_name("openngc:NGC224").unwrap();
+        assert_eq!(stable_id.len(), 1);
+        let prefix = catalog.search_names("andro", 10).unwrap();
+        assert_eq!(prefix.len(), 1);
+        assert_eq!(prefix[0].matched_name, "Andromeda Galaxy");
+        catalog.validate().unwrap();
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1195,7 +1441,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("seiza-obj-tail-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("objects-v2.bin");
-        ObjectCatalog::new(vec![m31()]).write_to(&path).unwrap();
+        ObjectCatalog::new(vec![m31()]).write_v2_to(&path).unwrap();
 
         let mut bytes = std::fs::read(&path).unwrap();
         let record_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
@@ -1241,7 +1487,7 @@ mod tests {
             ..m31()
         };
         let catalog = ObjectCatalog::new(vec![m31(), far]);
-        let placed = catalog.objects_in_footprint(&wcs, (4000, 3000));
+        let placed = catalog.objects_in_footprint(&wcs, (4000, 3000)).unwrap();
         assert_eq!(placed.len(), 1);
 
         let p = &placed[0];

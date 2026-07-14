@@ -129,6 +129,48 @@ fn catalog_objects_supports_cone_and_polygon_json_queries() {
     assert!(csv.contains("galaxy,Near,Near common"));
     assert!(csv.contains("test:near,test-catalog,Near alias"));
 
+    let name = Command::new(env!("CARGO_BIN_EXE_seiza"))
+        .args([
+            "catalog",
+            "object",
+            "--data",
+            catalog_path.to_str().unwrap(),
+            "near-alias",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        name.status.success(),
+        "{}",
+        String::from_utf8_lossy(&name.stderr)
+    );
+    let name: serde_json::Value = serde_json::from_slice(&name.stdout).unwrap();
+    assert_eq!(name[0]["matched_name"], "Near alias");
+    assert_eq!(name[0]["id"], "test:near");
+
+    let prefix = Command::new(env!("CARGO_BIN_EXE_seiza"))
+        .args([
+            "catalog",
+            "object",
+            "--data",
+            catalog_path.to_str().unwrap(),
+            "near-c",
+            "--prefix",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        prefix.status.success(),
+        "{}",
+        String::from_utf8_lossy(&prefix.stderr)
+    );
+    let prefix: serde_json::Value = serde_json::from_slice(&prefix.stdout).unwrap();
+    assert_eq!(prefix[0]["matched_name"], "Near common");
+
     std::fs::remove_dir_all(&dir).ok();
 }
 

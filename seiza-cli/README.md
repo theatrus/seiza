@@ -30,6 +30,9 @@ seiza catalog objects --data objects.bin \
   --sort prominence --format json
 
 # Resolve exact IDs/names or complete names; no image, solve, or network needed
+seiza catalog object --data objects.bin "M 31"
+seiza catalog object --data objects.bin "openngc:NGC224"
+seiza catalog object --data objects.bin "andro" --prefix --limit 10
 seiza catalog star --data stars-lite-tycho2.ids.bin "TYC 5949-2777-1" --format json
 seiza catalog star --data stars-lite-tycho2.ids.bin "HIP 32349"
 seiza catalog star --data stars-lite-tycho2.ids.bin "RR Lyr"
@@ -44,6 +47,11 @@ JSON and CSV include primary and alternate stable IDs, primary and contributing
 source provenance, aliases, and parent IDs when the catalog provides them. The
 prominence score is a catalog-based prediction, not proof that the object is
 visible in the image pixels.
+
+`catalog object` resolves primary/common names, aliases, and stable or
+alternate IDs. Both object viewport queries and name completion use indices
+embedded in the memory-mapped `objects.bin`; normal open does not decode every
+record or touch every index page.
 
 ## Use with N.I.N.A.
 

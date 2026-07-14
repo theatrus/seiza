@@ -1,7 +1,7 @@
 # Coordinate-only catalog lookup and feature overlays
 
-Status: coordinate-only object API and CLI implemented; feature-overlay data
-model proposed
+Status: indexed coordinate/name object API and CLI implemented; feature-overlay
+data model proposed
 
 ## Goal
 
@@ -45,10 +45,25 @@ result count.
 
 For interactive use, load one `ObjectCatalog` per process and reuse it while
 the viewport pans or zooms. Debounce viewport queries in the UI and discard
-stale results when newer bounds arrive. The current all-sky scan is already
-small enough for interactive fields; a normalized ID/name index is the next
-useful addition for autocomplete and direct lookup. A spatial index should be
-added only if measurements of a larger catalog make the scan the bottleneck.
+stale results when newer bounds arrive. `SEIZAOB3` memory-maps fixed records and
+uses an embedded sky-tile candidate index, so a viewport query decodes only
+records near the requested bounds. Large objects are listed in every tile
+touched by their conservative major-axis extent, preserving extent-only hits.
+
+The same file contains a sorted normalized index over primary/common names,
+aliases, stable IDs, and alternate IDs. Exact and prefix queries are available
+through `ObjectCatalog::lookup_name`, `ObjectCatalog::search_names`, and:
+
+```shell
+seiza catalog object --data objects.bin "M 31"
+seiza catalog object --data objects.bin "openngc:NGC224"
+seiza catalog object --data objects.bin "andro" --prefix --limit 10
+```
+
+Normal open checks header and section bounds only. `ObjectCatalog::validate` or
+`seiza catalog validate --data objects.bin` deliberately scans all records,
+strings, and indices when full integrity validation is needed. The older
+`SEIZAOB1` and `SEIZAOB2` formats remain readable but require heap decoding.
 
 ## Which catalog should supply sub-objects?
 
@@ -116,13 +131,13 @@ UI can distinguish catalog facts from editorial annotations.
 
 ## Rollout sequence
 
-1. Done: use `SEIZAOB2` metadata for source-qualified IDs, aliases,
+1. Done: use object metadata for source-qualified IDs, aliases,
    parent links, and provenance while retaining v1 read compatibility.
 2. Done: add LBN and Cederblad through the existing VizieR build pipeline, with
    explicit cross-identifier merging and no positional deduplication. LBN can
    intentionally assign the same center to distinct regions.
-3. Next: add normalized ID and designation lookup for autocomplete and direct
-   object retrieval alongside the existing viewport query.
+3. Done: add mmap-native fixed records plus on-disk sky and normalized-name
+   indices for bounded-memory viewport, autocomplete, and direct retrieval.
 4. Next: define a source-controlled `features.json` schema and seed a small
    reviewed set of genuinely useful named structures.
 5. Later: add optional image-evidence scoring inside predicted feature regions.

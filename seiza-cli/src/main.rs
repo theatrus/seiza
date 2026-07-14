@@ -202,6 +202,11 @@ enum Command {
 
 #[derive(Subcommand)]
 enum CatalogCommand {
+    /// Resolve an object name, alias, or stable ID from objects.bin
+    Object {
+        #[command(flatten)]
+        args: CatalogObjectArgs,
+    },
     /// List named and deep-sky objects in a known sky region
     Objects {
         #[command(flatten)]
@@ -218,6 +223,23 @@ enum CatalogCommand {
         #[arg(long)]
         data: PathBuf,
     },
+}
+
+#[derive(Args)]
+struct CatalogObjectArgs {
+    /// Object catalog file built by build-data objects
+    #[arg(long)]
+    data: PathBuf,
+    /// Object designation, common name, alias, or stable ID
+    query: String,
+    /// Return prefix completions instead of an exact lookup
+    #[arg(long)]
+    prefix: bool,
+    /// Maximum prefix completions; ignored for exact lookup
+    #[arg(long, default_value_t = 25)]
+    limit: usize,
+    #[arg(long, value_enum, default_value_t = CatalogOutputFormat::Table)]
+    format: CatalogOutputFormat,
 }
 
 #[derive(Args)]
@@ -648,11 +670,96 @@ fn main() -> Result<()> {
             limit,
         } => cone(&data, ra, dec, radius, limit),
         Command::Catalog { query } => match query {
+            CatalogCommand::Object { args } => catalog_object(args),
             CatalogCommand::Objects { args } => catalog_objects(args),
             CatalogCommand::Star { args } => catalog_star(args),
             CatalogCommand::Validate { data } => catalog_validate(&data),
         },
     }
+}
+
+fn catalog_object(args: CatalogObjectArgs) -> Result<()> {
+    let catalog = ObjectCatalog::open(&args.data)
+        .with_context(|| format!("failed to open {}", args.data.display()))?;
+    let matches = if args.prefix {
+        catalog.search_names(&args.query, args.limit)?
+    } else {
+        catalog.lookup_name(&args.query)?
+    };
+
+    match args.format {
+        CatalogOutputFormat::Table => {
+            println!(
+                "{} object name match{}:",
+                matches.len(),
+                if matches.len() == 1 { "" } else { "es" }
+            );
+            println!(
+                "{:<24} {:<18} {:<28} {:>10} {:>10}  id",
+                "matched", "kind", "object", "ra", "dec"
+            );
+            for item in &matches {
+                println!(
+                    "{:<24} {:<18} {:<28} {:>10.5} {:>10.5}  {}",
+                    item.matched_name,
+                    item.object.kind.as_str(),
+                    item.object.name,
+                    item.object.ra,
+                    item.object.dec,
+                    item.object.metadata.id,
+                );
+            }
+        }
+        CatalogOutputFormat::Json => {
+            let values = matches
+                .iter()
+                .map(|item| {
+                    let object = &item.object;
+                    serde_json::json!({
+                        "matched_name": item.matched_name,
+                        "kind": object.kind.as_str(),
+                        "name": object.name,
+                        "common_name": object.common_name,
+                        "id": object.metadata.id,
+                        "source": object.metadata.source,
+                        "aliases": object.metadata.aliases,
+                        "parent_ids": object.metadata.parent_ids,
+                        "alternate_ids": object.metadata.alternate_ids,
+                        "alternate_sources": object.metadata.alternate_sources,
+                        "ra_deg": object.ra,
+                        "dec_deg": object.dec,
+                        "mag": object.mag,
+                        "major_arcmin": object.major_arcmin,
+                        "minor_arcmin": object.minor_arcmin,
+                        "position_angle_deg": object.position_angle_deg,
+                    })
+                })
+                .collect::<Vec<_>>();
+            println!("{}", serde_json::to_string_pretty(&values)?);
+        }
+        CatalogOutputFormat::Csv => {
+            println!(
+                "matched_name,kind,name,common_name,ra_deg,dec_deg,mag,major_arcmin,id,source"
+            );
+            for item in &matches {
+                let object = &item.object;
+                println!(
+                    "{},{},{},{},{:.8},{:.8},{},{},{},{}",
+                    csv_field(&item.matched_name),
+                    object.kind.as_str(),
+                    csv_field(&object.name),
+                    csv_field(&object.common_name),
+                    object.ra,
+                    object.dec,
+                    csv_optional(object.mag),
+                    csv_optional(object.major_arcmin),
+                    csv_field(&object.metadata.id),
+                    csv_field(&object.metadata.source),
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn fits_info(path: &std::path::Path, stretch: Option<&std::path::Path>) -> Result<()> {
@@ -873,7 +980,7 @@ fn catalog_objects(args: CatalogObjectsArgs) -> Result<()> {
                 "score", "match", "kind", "object", "ra", "dec", "mag", "size'"
             );
             for hit in &hits {
-                let object = hit.object;
+                let object = &hit.object;
                 let name = if object.common_name.is_empty() {
                     object.name.clone()
                 } else {
@@ -917,7 +1024,7 @@ fn catalog_objects(args: CatalogObjectsArgs) -> Result<()> {
             let objects = hits
                 .iter()
                 .map(|hit| {
-                    let object = hit.object;
+                    let object = &hit.object;
                     serde_json::json!({
                         "kind": object.kind.as_str(),
                         "name": object.name,
@@ -957,7 +1064,7 @@ fn catalog_objects(args: CatalogObjectsArgs) -> Result<()> {
                 "kind,name,common_name,ra_deg,dec_deg,mag,major_arcmin,minor_arcmin,position_angle_deg,match,distance_from_center_deg,predicted_prominence,id,source,aliases,parent_ids,alternate_ids,alternate_sources"
             );
             for hit in &hits {
-                let object = hit.object;
+                let object = &hit.object;
                 println!(
                     "{},{},{},{:.8},{:.8},{},{},{},{},{},{:.8},{:.8},{},{},{},{},{},{}",
                     object.kind.as_str(),
@@ -1115,7 +1222,7 @@ fn catalog_validate(path: &std::path::Path) -> Result<()> {
             index.validate()?;
             format!("blind-pattern index: {} patterns", index.pattern_count())
         }
-        b"SEIZAOB1" | b"SEIZAOB2" => {
+        b"SEIZAOB1" | b"SEIZAOB2" | b"SEIZAOB3" => {
             let catalog = ObjectCatalog::open(path)?;
             catalog.validate()?;
             format!("object catalog: {} objects", catalog.len())
@@ -1313,7 +1420,9 @@ fn solve_command(
         Some(path) => {
             let object_catalog = seiza::objects::ObjectCatalog::open(path)
                 .with_context(|| format!("failed to open {}", path.display()))?;
-            let placed = object_catalog.objects_in_footprint(wcs, dims);
+            let placed = object_catalog
+                .objects_in_footprint(wcs, dims)
+                .map_err(|error| anyhow::anyhow!(error))?;
             println!("{} catalog objects in the field:", placed.len());
             for p in &placed {
                 let size = match p.object.major_arcmin {

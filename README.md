@@ -17,6 +17,7 @@ seiza download-data prebuilt --output data       # SHA-256-verified from downloa
 seiza solve-blind image.jpg --data data/stars-lite-tycho2.bin --min-scale 0.5 --max-scale 15
 seiza solve-blind fine-scale.jpg --data data/stars-deep-gaia17.bin --index data/blind-gaia16.idx --min-scale 0.1 --max-scale 5
 seiza solve image.fits --data data/stars-gaia.bin --scale 1.26 --objects data/objects.bin
+seiza catalog object --data data/objects.bin "Andromeda Galaxy"
 seiza catalog objects --data data/objects.bin --ra 10.6848 --dec 41.2691 --radius 3 --format json
 seiza catalog star --data data/stars-lite-tycho2.ids.bin "TYC 5949-2777-1" --format json
 seiza catalog star --data data/stars-lite-tycho2.ids.bin "RR Lyr"
@@ -27,7 +28,7 @@ Hosted datasets (manifest at
 `stars-lite-tycho2.bin` (2.5M stars, 25 MB), `stars-gaia.bin` (Gaia DR3
 G≤15, 36.7M stars, 367 MB), `stars-deep-gaia17.bin` (Gaia DR3 G≤17,
 154.1M stars, 1.54 GB), `blind-gaia16.idx` (the memory-mapped G≤16 blind
-pattern index, 1.63 GB), `objects.bin` (314k objects), and `transients.bin` (active
+pattern index, 1.63 GB), `objects.bin` (315k objects), and `transients.bin` (active
 supernovae/novae, refreshed nightly). The deep catalog and maintained index
 enable blind solving of small, fine-scale fields whose brightest detections
 are fainter than the G≤15 catalog's small-field pattern tiers without
@@ -76,10 +77,13 @@ seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-
 - **Object catalogs** — OpenNGC (NGC/IC/Messier), Sharpless, Barnard, UGC,
   LDN, LBN, Cederblad, vdB, PGC, Green's Galactic supernova remnants,
   Wolf-Rayet stars, IAU named and HD stars, and live transient
-  (supernova/nova) lists built into a compact object store. Query a known sky
-  cone or ordered image footprint without plate solving
-  (`seiza catalog objects ...`), or query a solved image with projected pixel
-  and ellipse geometry (`seiza solve ... --objects objects.bin`).
+  (supernova/nova) lists built into a memory-mapped object store. Its embedded
+  tile and normalized-name indices page in only relevant records for viewport,
+  exact-name/ID, and prefix queries. Query a known sky cone or ordered image
+  footprint without plate solving (`seiza catalog objects ...`), resolve a
+  name or alias with `seiza catalog object ...`, or query a solved image with
+  projected pixel and ellipse geometry
+  (`seiza solve ... --objects objects.bin`).
 - **FITS** — dependency-free reading with typed headers, exact
   histogram statistics, N.I.N.A.-style MTF autostretch, planar RGB
   (NAXIS3) support, and OSC debayering (`BAYERPAT`), in the
