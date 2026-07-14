@@ -12,9 +12,9 @@ jobs:
   deb:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.0
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.1
       - run: cargo install cargo-deb --locked
       - run: cargo deb -p seiza-cli
       - name: Rename with distro suffix
@@ -23,11 +23,11 @@ jobs:
           for f in target/debian/*.deb; do
             cp "$f" "dist/$(basename "${f%.deb}")-ubuntu.deb"
           done
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3.0.2
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: dist/*.deb
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: deb
           path: dist/*.deb
@@ -41,8 +41,8 @@ jobs:
     steps:
       - name: Install build dependencies
         run: dnf install -y rust cargo rpm-build git
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@v7.0.0
+      - uses: Swatinem/rust-cache@v2.9.1
       - run: cargo install cargo-generate-rpm --locked
       - run: cargo build --release -p seiza-cli
       - run: ~/.cargo/bin/cargo-generate-rpm -p seiza-cli --payload-compress zstd
@@ -53,11 +53,11 @@ jobs:
             base=$(basename "$f" .rpm)
             cp "$f" "dist/${base}.fc${{ matrix.fedora }}.rpm"
           done
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3.0.2
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: dist/*.rpm
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: rpm-fc${{ matrix.fedora }}
           path: dist/*.rpm
@@ -65,9 +65,9 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.0
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.1
       - run: cargo build --release -p seiza-cli
       - name: Package
         shell: pwsh
@@ -75,11 +75,11 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           $version = "${{ github.ref_name }}"
           Compress-Archive -Path target/release/seiza.exe, README.md, LICENSE -DestinationPath "dist/seiza-cli-$version-windows-x86_64.zip"
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3.0.2
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: dist/*.zip
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: windows
           path: dist/*.zip
