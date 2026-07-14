@@ -11,7 +11,7 @@ Viewport and name queries touch only relevant mmap pages and materialize owned
 `SkyObject` values only for returned candidates.
 
 The cost moves to disk: fixed records, shared metadata, spatial candidate
-lists, and the normalized name index make the current 315,434-object bundle
+lists, and the normalized name index make the current 311,466-object bundle
 about 60 MB. Measured release-process peak RSS is about 3.7 MB for an exact
 name lookup and 5.8 MB for a 3-degree cone, compared with about 110.7 MB for
 the previous eager-decoded implementation.

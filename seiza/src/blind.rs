@@ -229,7 +229,7 @@ impl BlindIndex {
         }
     }
 
-    fn lookup(&self, key: u64) -> Range<usize> {
+    fn lookup(&self, key: u64) -> Result<Range<usize>, crate::Error> {
         let mut left = 0;
         let mut right = self.keys_len();
         while left < right {
@@ -238,11 +238,38 @@ impl BlindIndex {
                 std::cmp::Ordering::Less => left = middle + 1,
                 std::cmp::Ordering::Greater => right = middle,
                 std::cmp::Ordering::Equal => {
-                    return self.start_at(middle) as usize..self.start_at(middle + 1) as usize;
+                    let start = self.start_at(middle) as usize;
+                    let end = self.start_at(middle + 1) as usize;
+                    if start > end || end > self.candidates_len() {
+                        return Err(invalid_mapped_index(
+                            "candidate range is out of bounds or reversed",
+                        ));
+                    }
+                    return Ok(start..end);
                 }
             }
         }
-        0..0
+        Ok(0..0)
+    }
+
+    fn checked_candidate_at(&self, index: usize) -> Result<u32, crate::Error> {
+        if index >= self.candidates_len() {
+            return Err(invalid_mapped_index("candidate offset is out of bounds"));
+        }
+        let candidate = self.candidate_at(index);
+        if candidate as usize >= self.pattern_count() {
+            return Err(invalid_mapped_index(
+                "candidate refers past the pattern array",
+            ));
+        }
+        Ok(candidate)
+    }
+
+    fn checked_pattern_at(&self, index: usize) -> Result<Pattern, crate::Error> {
+        if index >= self.pattern_count() {
+            return Err(invalid_mapped_index("pattern index is out of bounds"));
+        }
+        Ok(self.pattern_at(index))
     }
 }
 
@@ -626,6 +653,10 @@ fn invalid_index(path: &Path, message: impl std::fmt::Display) -> crate::Error {
     crate::Error::Catalog(format!("invalid blind index {}: {message}", path.display()))
 }
 
+fn invalid_mapped_index(message: impl std::fmt::Display) -> crate::Error {
+    crate::Error::Catalog(format!("invalid blind index: {message}"))
+}
+
 /// Solve with no position hint. `stars` must be sorted brightest-first
 /// (as produced by [`crate::detect::detect_stars`]). Hypotheses are
 /// verified in parallel across CPU cores.
@@ -694,11 +725,11 @@ pub fn solve_blind(
                         stat_quads += 1;
                         let desc = descriptor(&points);
                         for key in descriptor_keys(&desc) {
-                            let candidates = index.lookup(key);
+                            let candidates = index.lookup(key)?;
                             stat_candidates += candidates.len() as u64;
                             for candidate_offset in candidates {
-                                let candidate = index.candidate_at(candidate_offset);
-                                let pattern = index.pattern_at(candidate as usize);
+                                let candidate = index.checked_candidate_at(candidate_offset)?;
+                                let pattern = index.checked_pattern_at(candidate as usize)?;
                                 // Implied pixel scale from the size ratio
                                 let scale = pattern.max_edge_deg as f64 * 3600.0 / max_edge_px;
                                 if scale < params.min_scale_arcsec_px
@@ -788,11 +819,11 @@ pub fn solve_blind(
                             stat_quads += 1;
                             let desc = descriptor(&points);
                             for key in descriptor_keys(&desc) {
-                                let candidates = index.lookup(key);
+                                let candidates = index.lookup(key)?;
                                 stat_candidates += candidates.len() as u64;
                                 for candidate_offset in candidates {
-                                    let candidate = index.candidate_at(candidate_offset);
-                                    let pattern = index.pattern_at(candidate as usize);
+                                    let candidate = index.checked_candidate_at(candidate_offset)?;
+                                    let pattern = index.checked_pattern_at(candidate as usize)?;
                                     let scale = pattern.max_edge_deg as f64 * 3600.0 / max_edge_px;
                                     if scale < params.min_scale_arcsec_px
                                         || scale > params.max_scale_arcsec_px
@@ -1441,6 +1472,18 @@ pub(crate) mod tests {
         std::fs::write(&path, bytes).unwrap();
 
         let index = BlindIndex::open(&path).unwrap();
+        assert!(index.lookup(1).is_err());
+        assert!(index.validate().is_err());
+
+        built.write_to(&path).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        let candidates_offset = starts_offset + 2 * size_of::<u32>();
+        bytes[candidates_offset..candidates_offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        let index = BlindIndex::open(&path).unwrap();
+        let candidates = index.lookup(1).unwrap();
+        assert_eq!(candidates, 0..1);
+        assert!(index.checked_candidate_at(0).is_err());
         assert!(index.validate().is_err());
         std::fs::remove_dir_all(dir).ok();
     }

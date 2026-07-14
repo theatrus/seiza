@@ -138,24 +138,31 @@ impl Grid {
         if radius_deg >= 180.0 {
             return (0..self.n_tiles()).collect();
         }
-        let band_height = 180.0 / self.n_bands as f64;
         let dec_lo = (dec - radius_deg).max(-90.0);
         let dec_hi = (dec + radius_deg).min(90.0);
         let band_lo = self.band_of(dec_lo);
         let band_hi = self.band_of(dec_hi);
         let mut tiles = Vec::new();
 
+        // Maximum longitude displacement anywhere in a spherical cap. The
+        // previous radius/cos(dec-band-edge) approximation is not conservative
+        // near the poles: for example, a 9-degree cap at Dec -80 reaches more
+        // than 50 degrees in RA. When the cap contains a pole, every longitude
+        // is possible; otherwise this is the exact tangent longitude.
+        let ra_radius = if dec.abs() + radius_deg >= 90.0 {
+            180.0
+        } else {
+            (radius_deg.to_radians().sin() / dec.to_radians().cos())
+                .clamp(-1.0, 1.0)
+                .asin()
+                .abs()
+                .to_degrees()
+        };
+
         for band in band_lo..=band_hi {
             let count = self.bins[band as usize];
             let offset = self.offsets[band as usize];
-            let band_dec_lo = -90.0 + band as f64 * band_height;
-            let band_dec_hi = band_dec_lo + band_height;
-            let max_abs_dec = band_dec_lo.abs().max(band_dec_hi.abs()).min(89.999);
-            let ra_radius = radius_deg / max_abs_dec.to_radians().cos();
-            if ra_radius >= 180.0
-                || (dec_hi >= 90.0 && band == band_hi)
-                || (dec_lo <= -90.0 && band == band_lo)
-            {
+            if ra_radius >= 180.0 {
                 tiles.extend(offset..offset + count);
                 continue;
             }
@@ -858,11 +865,39 @@ fn optional_f32(bytes: &[u8], offset: usize) -> Option<f32> {
 }
 
 pub(crate) fn normalize_name(value: &str) -> String {
-    value
+    let compact: String = value
         .chars()
         .filter(|character| character.is_alphanumeric())
         .flat_map(char::to_uppercase)
-        .collect()
+        .collect();
+    if compact.is_empty() {
+        return compact;
+    }
+    let number_start = if compact.starts_with("SH2") {
+        3
+    } else {
+        compact
+            .char_indices()
+            .find_map(|(index, character)| character.is_ascii_digit().then_some(index))
+            .unwrap_or(compact.len())
+    };
+    if number_start == compact.len() {
+        return compact;
+    }
+    let number_end = compact[number_start..]
+        .char_indices()
+        .find_map(|(index, character)| {
+            (!character.is_ascii_digit()).then_some(number_start + index)
+        })
+        .unwrap_or(compact.len());
+    let number = compact[number_start..number_end].trim_start_matches('0');
+    let number = if number.is_empty() { "0" } else { number };
+    format!(
+        "{}{}{}",
+        &compact[..number_start],
+        number,
+        &compact[number_end..]
+    )
 }
 
 fn catalog_too_large() -> io::Error {

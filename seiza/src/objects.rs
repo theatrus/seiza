@@ -1124,6 +1124,36 @@ mod tests {
     }
 
     #[test]
+    fn mmap_cone_query_is_conservative_near_the_pole() {
+        let inside = test_object("Inside polar cone", 50.0, -79.0);
+        let memory = ObjectCatalog::new(vec![inside]);
+        let region = SkyRegion::Cone {
+            center: (0.0, -80.0),
+            radius_deg: 9.0,
+        };
+        assert_eq!(
+            memory
+                .query_region(&region, &ObjectQuery::default())
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let dir =
+            std::env::temp_dir().join(format!("seiza-object-polar-cone-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("objects.bin");
+        memory.write_to(&path).unwrap();
+        let mapped = ObjectCatalog::open(&path).unwrap();
+        let hits = mapped
+            .query_region(&region, &ObjectQuery::default())
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].object.name, "Inside polar cone");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn query_filters_and_prominence_sort_are_explicit() {
         let mut large = test_object("Large", 0.0, 0.0);
         large.major_arcmin = Some(120.0);
@@ -1240,7 +1270,9 @@ mod tests {
         let mut overlap = test_object("Overlap", 1.2, 0.0);
         overlap.major_arcmin = Some(30.0);
         let far = test_object("Far", 30.0, 20.0);
-        ObjectCatalog::new(vec![m31(), overlap, far])
+        let mut andromeda = m31();
+        andromeda.metadata.aliases.push("UGC 00454".to_string());
+        ObjectCatalog::new(vec![andromeda, overlap, far])
             .write_to(&path)
             .unwrap();
 
@@ -1260,6 +1292,9 @@ mod tests {
         assert_eq!(exact.len(), 1);
         assert_eq!(exact[0].object.name, "NGC 224");
         assert_eq!(exact[0].matched_name, "M 31");
+        let zero_padded_alias = catalog.lookup_name("UGC 454").unwrap();
+        assert_eq!(zero_padded_alias.len(), 1);
+        assert_eq!(zero_padded_alias[0].matched_name, "UGC 00454");
         let stable_id = catalog.lookup_name("openngc:NGC224").unwrap();
         assert_eq!(stable_id.len(), 1);
         let prefix = catalog.search_names("andro", 10).unwrap();

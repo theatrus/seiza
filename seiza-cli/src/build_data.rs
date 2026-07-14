@@ -944,6 +944,12 @@ pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>
         }
     }
 
+    // Every later source is checked against explicit designations and stable
+    // IDs already ingested. Positional proximity remains only a fallback for
+    // catalogs that do not provide a usable cross-identification.
+    let mut identity_index = ObjectIdentityIndex::new(&objects);
+    let mut merge_stats = ObjectMergeStats::default();
+
     for (file, prefix, kind, source, id_prefix) in [
         (
             "sh2.tsv",
@@ -981,7 +987,7 @@ pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>
                 continue;
             };
             let diam: Option<f32> = fields.get(3).and_then(|d| d.parse().ok());
-            objects.push(SkyObject {
+            let object = SkyObject {
                 kind,
                 ra,
                 dec,
@@ -999,7 +1005,8 @@ pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>
                     alternate_ids: Vec::new(),
                     alternate_sources: Vec::new(),
                 },
-            });
+            };
+            identity_index.merge_or_add(&mut objects, object, &mut merge_stats);
         }
     }
 
@@ -1076,7 +1083,7 @@ pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>
                     None,
                 ),
             };
-            objects.push(SkyObject {
+            let object = SkyObject {
                 kind,
                 ra,
                 dec,
@@ -1094,7 +1101,8 @@ pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>
                     alternate_ids: Vec::new(),
                     alternate_sources: Vec::new(),
                 },
-            });
+            };
+            identity_index.merge_or_add(&mut objects, object, &mut merge_stats);
         }
     }
 
@@ -1104,7 +1112,7 @@ pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>
         let content = std::fs::read_to_string(&csn)?;
         for line in content.lines() {
             if let Some(object) = parse_iau_csn_line(line) {
-                objects.push(object);
+                identity_index.merge_or_add(&mut objects, object, &mut merge_stats);
             }
         }
     }
@@ -1139,14 +1147,14 @@ pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>
             else {
                 continue;
             };
-            if major < 0.4 || grid_dedup.near(ra, dec, 30.0 / 3600.0) {
+            if major < 0.4 {
                 continue;
             }
             let minor = fields
                 .get(4)
                 .and_then(|v| v.parse::<f64>().ok())
                 .map(|log_r| major / 10f64.powf(log_r));
-            objects.push(SkyObject {
+            let object = SkyObject {
                 kind: ObjectKind::Galaxy,
                 ra,
                 dec,
@@ -1164,7 +1172,17 @@ pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>
                     alternate_ids: Vec::new(),
                     alternate_sources: Vec::new(),
                 },
-            });
+            };
+            let matches = identity_index.matching_indices(&objects, &object);
+            if matches.is_empty() && grid_dedup.near(ra, dec, 30.0 / 3600.0) {
+                continue;
+            }
+            identity_index.merge_or_add_with_matches(
+                &mut objects,
+                object,
+                matches,
+                &mut merge_stats,
+            );
         }
     }
 
@@ -1194,7 +1212,7 @@ pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>
                 continue;
             }
             let bayer = fields.get(3).copied().unwrap_or("").trim().to_string();
-            objects.push(SkyObject {
+            let object = SkyObject {
                 kind: ObjectKind::Star,
                 ra,
                 dec,
@@ -1212,7 +1230,8 @@ pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>
                     alternate_ids: Vec::new(),
                     alternate_sources: Vec::new(),
                 },
-            });
+            };
+            identity_index.merge_or_add(&mut objects, object, &mut merge_stats);
         }
     }
 
@@ -1241,7 +1260,7 @@ pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>
             if !designation.starts_with('G') || snr_dedup.near(ra, dec, 120.0 / 3600.0) {
                 continue;
             }
-            objects.push(SkyObject {
+            let object = SkyObject {
                 kind: ObjectKind::SupernovaRemnant,
                 ra,
                 dec,
@@ -1259,7 +1278,8 @@ pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>
                     alternate_ids: Vec::new(),
                     alternate_sources: Vec::new(),
                 },
-            });
+            };
+            identity_index.merge_or_add(&mut objects, object, &mut merge_stats);
         }
     }
 
@@ -1291,7 +1311,7 @@ pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>
                 .find(|v| !v.is_empty())
                 .unwrap_or("")
                 .to_string();
-            objects.push(SkyObject {
+            let object = SkyObject {
                 kind: ObjectKind::Star,
                 ra,
                 dec,
@@ -1309,7 +1329,8 @@ pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>
                     alternate_ids: Vec::new(),
                     alternate_sources: Vec::new(),
                 },
-            });
+            };
+            identity_index.merge_or_add(&mut objects, object, &mut merge_stats);
         }
     }
 
@@ -1317,8 +1338,6 @@ pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>
     // only on those identifiers: the LBN documentation notes that distinct
     // regions can intentionally share an identical center, so positional
     // deduplication would destroy real sub-objects.
-    let mut identity_index = ObjectIdentityIndex::new(&objects);
-    let mut merge_stats = ObjectMergeStats::default();
     for (file, parser) in [
         (
             "ced.tsv",
@@ -1370,7 +1389,7 @@ pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>
         audit.unresolved_parent_links,
     );
     println!(
-        "{count} objects from {sources} source files written to {} ({} new bright-nebula records, {} cross-catalog merges, {} ambiguous cross-identifications retained separately)",
+        "{count} objects from {sources} source files written to {} ({} new identity-indexed records, {} explicit cross-catalog merges, {} ambiguous cross-identifications retained separately)",
         output.display(),
         merge_stats.added,
         merge_stats.merged,
@@ -1437,7 +1456,7 @@ impl ObjectIdentityIndex {
     }
 
     fn register(&mut self, object_index: usize, object: &seiza::objects::SkyObject) {
-        for designation in std::iter::once(&object.name).chain(&object.metadata.aliases) {
+        for designation in identity_designations(object) {
             let key = designation_key(designation);
             if key.is_empty() {
                 continue;
@@ -1455,8 +1474,17 @@ impl ObjectIdentityIndex {
         incoming: seiza::objects::SkyObject,
         stats: &mut ObjectMergeStats,
     ) {
+        let matches = self.matching_indices(objects, &incoming);
+        self.merge_or_add_with_matches(objects, incoming, matches, stats);
+    }
+
+    fn matching_indices(
+        &self,
+        objects: &[seiza::objects::SkyObject],
+        incoming: &seiza::objects::SkyObject,
+    ) -> Vec<usize> {
         let mut matches = Vec::new();
-        for designation in std::iter::once(&incoming.name).chain(&incoming.metadata.aliases) {
+        for designation in identity_designations(incoming) {
             if let Some(indices) = self.by_designation.get(&designation_key(designation)) {
                 matches.extend(indices.iter().copied().filter(|&index| {
                     !source_contributes(&objects[index], &incoming.metadata.source)
@@ -1465,7 +1493,16 @@ impl ObjectIdentityIndex {
         }
         matches.sort_unstable();
         matches.dedup();
+        matches
+    }
 
+    fn merge_or_add_with_matches(
+        &mut self,
+        objects: &mut Vec<seiza::objects::SkyObject>,
+        incoming: seiza::objects::SkyObject,
+        matches: Vec<usize>,
+        stats: &mut ObjectMergeStats,
+    ) {
         if matches.len() == 1 {
             let object_index = matches[0];
             merge_catalog_record(&mut objects[object_index], incoming);
@@ -1481,6 +1518,14 @@ impl ObjectIdentityIndex {
             stats.added += 1;
         }
     }
+}
+
+fn identity_designations(object: &seiza::objects::SkyObject) -> impl Iterator<Item = &str> {
+    std::iter::once(object.name.as_str())
+        .chain(object.metadata.aliases.iter().map(String::as_str))
+        .chain(std::iter::once(object.metadata.id.as_str()))
+        .chain(object.metadata.alternate_ids.iter().map(String::as_str))
+        .filter(|value| !value.is_empty())
 }
 
 fn source_contributes(object: &seiza::objects::SkyObject, source: &str) -> bool {
@@ -2097,7 +2142,7 @@ fn write_object_source_manifest(
                 "parent_links": audit.parent_links,
                 "unresolved_parent_links": audit.unresolved_parent_links,
             },
-            "bright_nebula_ingest": {
+            "identity_ingest": {
                 "new_records": merge_stats.added,
                 "cross_catalog_merges": merge_stats.merged,
                 "ambiguous_cross_identifications": merge_stats.ambiguous,
@@ -2617,6 +2662,30 @@ mod tests {
         assert_eq!(
             objects[0].metadata.alternate_sources,
             vec!["VizieR VII/9/catalog"]
+        );
+    }
+
+    #[test]
+    fn explicit_ugc_identity_merges_despite_zero_padding() {
+        let mut existing = object("M 31", "openngc:NGC224", "OpenNGC");
+        existing.metadata.aliases.push("UGC 00454".to_string());
+        existing
+            .metadata
+            .alternate_ids
+            .push("vizier:VII/26D:UGC454".to_string());
+        let incoming = object("UGC 454", "vizier:VII/26D:UGC454", "VizieR VII/26D/catalog");
+        let mut objects = vec![existing];
+        let mut index = ObjectIdentityIndex::new(&objects);
+        let mut stats = ObjectMergeStats::default();
+
+        index.merge_or_add(&mut objects, incoming, &mut stats);
+
+        assert_eq!(objects.len(), 1);
+        assert_eq!(stats.merged, 1);
+        assert_eq!(objects[0].metadata.alternate_sources.len(), 1);
+        assert_eq!(
+            objects[0].metadata.alternate_sources[0],
+            "VizieR VII/26D/catalog"
         );
     }
 
