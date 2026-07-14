@@ -3,7 +3,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use seiza::catalog::{StarCatalog, TileCatalog};
 use seiza::objects::{ObjectCatalog, ObjectKind, ObjectQuery, ObjectSort, SkyRegion};
 use seiza::solve::{SolveHint, solve};
-use seiza::star_ids::{StarIdentifier, StarIdentifierCatalog};
+use seiza::star_ids::{StarIdentifierCatalog, StarLookupMatch};
 use seiza::{DetectConfig, detect_stars};
 use std::path::PathBuf;
 
@@ -217,8 +217,14 @@ struct CatalogStarArgs {
     /// Star identifier sidecar built with build-data --identifier-index
     #[arg(long)]
     data: PathBuf,
-    /// Catalog designation, for example TYC 5949-2777-1 or HIP 32349
-    identifier: String,
+    /// Catalog designation or stellar name, for example HIP 32349 or RR Lyr
+    query: String,
+    /// Return textual-name prefix completions instead of an exact lookup
+    #[arg(long)]
+    prefix: bool,
+    /// Maximum prefix completions; ignored for exact lookup
+    #[arg(long, default_value_t = 25)]
+    limit: usize,
     #[arg(long, value_enum, default_value_t = CatalogOutputFormat::Table)]
     format: CatalogOutputFormat,
 }
@@ -312,6 +318,12 @@ enum DownloadSource {
         #[arg(long)]
         output: PathBuf,
     },
+    /// Bright, variable, double, and IAU-named star identity sources
+    StarIdentifiers {
+        /// Directory to download into
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// The OpenNGC deep-sky object catalog (~4 MB)
     Openngc {
         /// Directory to download into
@@ -394,6 +406,9 @@ enum BuildDataSource {
         /// Optional exact TYC/HIP lookup sidecar
         #[arg(long)]
         identifier_index: Option<PathBuf>,
+        /// Optional directory from download-data star-identifiers
+        #[arg(long, requires = "identifier_index")]
+        identifier_sources: Option<PathBuf>,
         /// Epoch to apply proper motions to, Julian year
         #[arg(long, default_value_t = 2025.5)]
         epoch: f64,
@@ -520,6 +535,9 @@ fn main() -> Result<()> {
         }
         Command::DownloadData { source } => match source {
             DownloadSource::Tycho2 { output } => download_data::download_tycho2(&output),
+            DownloadSource::StarIdentifiers { output } => {
+                download_data::download_star_identifiers(&output)
+            }
             DownloadSource::Openngc { output } => download_data::download_openngc(&output),
             DownloadSource::Objects { output } => download_data::download_objects(&output),
             DownloadSource::Gaia {
@@ -545,12 +563,14 @@ fn main() -> Result<()> {
                 input,
                 output,
                 identifier_index,
+                identifier_sources,
                 epoch,
                 max_mag,
             } => build_data::build_tycho2(
                 &input,
                 &output,
                 identifier_index.as_deref(),
+                identifier_sources.as_deref(),
                 epoch,
                 max_mag,
             ),
@@ -957,76 +977,97 @@ fn catalog_objects(args: CatalogObjectsArgs) -> Result<()> {
 }
 
 fn catalog_star(args: CatalogStarArgs) -> Result<()> {
-    let identifier: StarIdentifier = args.identifier.parse()?;
     let catalog = StarIdentifierCatalog::open(&args.data)
         .with_context(|| format!("failed to open {}", args.data.display()))?;
-    let matches = catalog.lookup(identifier);
+    let matches = if args.prefix {
+        catalog
+            .search_names(&args.query, args.limit)
+            .into_iter()
+            .map(StarLookupMatch::Name)
+            .collect::<Vec<_>>()
+    } else {
+        catalog.lookup_query(&args.query)
+    };
+    let rows = matches.iter().map(catalog_star_row).collect::<Vec<_>>();
 
     match args.format {
         CatalogOutputFormat::Table => {
             println!(
-                "{} exact match{} for {} in {} (epoch J{}):",
-                matches.len(),
-                if matches.len() == 1 { "" } else { "es" },
-                identifier,
+                "{} {} match{} for {:?} in {} (epoch J{}):",
+                rows.len(),
+                if args.prefix { "prefix" } else { "exact" },
+                if rows.len() == 1 { "" } else { "es" },
+                args.query,
                 catalog.attribution(),
                 catalog.epoch()
             );
-            if !matches.is_empty() {
+            if !rows.is_empty() {
                 println!(
-                    "{:<24} {:<18} {:>12} {:>12} {:>8}",
-                    "identifier", "catalog", "ra", "dec", "mag"
+                    "{:<22} {:<18} {:<17} {:<10} {:>11} {:>11} {:>7}  stable ID",
+                    "designation", "catalog", "kind", "detail", "ra", "dec", "mag"
                 );
-                for star in &matches {
+                for row in &rows {
                     println!(
-                        "{:<24} {:<18} {:>12.7} {:>12.7} {:>8.3}",
-                        star.identifier,
-                        star.identifier.namespace().as_str(),
-                        star.ra,
-                        star.dec,
-                        star.mag
+                        "{:<22} {:<18} {:<17} {:<10} {:>11.6} {:>11.6} {:>7}  {}",
+                        row.designation,
+                        row.catalog,
+                        row.kind,
+                        row.detail,
+                        row.ra,
+                        row.dec,
+                        row.mag
+                            .map(|value| format!("{value:.3}"))
+                            .unwrap_or_else(|| "-".to_string()),
+                        row.stable_id,
                     );
                 }
             }
         }
         CatalogOutputFormat::Json => {
-            let matches = matches
+            let matches = rows
                 .iter()
-                .map(|star| {
+                .map(|row| {
                     serde_json::json!({
-                        "identifier": star.identifier.to_string(),
-                        "stable_id": star.identifier.stable_id(),
-                        "catalog": star.identifier.namespace().as_str(),
-                        "ra_deg": star.ra,
-                        "dec_deg": star.dec,
-                        "mag": star.mag,
+                        "designation": row.designation,
+                        "stable_id": row.stable_id,
+                        "catalog": row.catalog,
+                        "kind": row.kind,
+                        "detail": row.detail,
+                        "ra_deg": row.ra,
+                        "dec_deg": row.dec,
+                        "mag": row.mag,
                     })
                 })
                 .collect::<Vec<_>>();
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
-                    "query": identifier.to_string(),
-                    "stable_id": identifier.stable_id(),
-                    "catalog": identifier.namespace().as_str(),
+                    "query": args.query,
+                    "mode": if args.prefix { "prefix" } else { "exact" },
                     "source": catalog.attribution(),
                     "epoch": catalog.epoch(),
+                    "numeric_entries": catalog.numeric_len(),
+                    "name_entries": catalog.name_len(),
                     "returned": matches.len(),
                     "matches": matches,
                 }))?
             );
         }
         CatalogOutputFormat::Csv => {
-            println!("identifier,stable_id,catalog,ra_deg,dec_deg,mag,epoch,source");
-            for star in &matches {
+            println!("designation,stable_id,catalog,kind,detail,ra_deg,dec_deg,mag,epoch,source");
+            for row in &rows {
                 println!(
-                    "{},{},{},{:.8},{:.8},{:.3},{},{}",
-                    csv_field(&star.identifier.to_string()),
-                    csv_field(&star.identifier.stable_id()),
-                    csv_field(star.identifier.namespace().as_str()),
-                    star.ra,
-                    star.dec,
-                    star.mag,
+                    "{},{},{},{},{},{:.8},{:.8},{},{},{}",
+                    csv_field(&row.designation),
+                    csv_field(&row.stable_id),
+                    csv_field(&row.catalog),
+                    csv_field(&row.kind),
+                    csv_field(&row.detail),
+                    row.ra,
+                    row.dec,
+                    row.mag
+                        .map(|value| format!("{value:.3}"))
+                        .unwrap_or_default(),
                     catalog.epoch(),
                     csv_field(catalog.attribution()),
                 );
@@ -1034,6 +1075,42 @@ fn catalog_star(args: CatalogStarArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+struct CatalogStarRow {
+    designation: String,
+    stable_id: String,
+    catalog: String,
+    kind: String,
+    detail: String,
+    ra: f64,
+    dec: f64,
+    mag: Option<f32>,
+}
+
+fn catalog_star_row(value: &StarLookupMatch<'_>) -> CatalogStarRow {
+    match value {
+        StarLookupMatch::Identifier(star) => CatalogStarRow {
+            designation: star.identifier.to_string(),
+            stable_id: star.identifier.stable_id(),
+            catalog: star.identifier.namespace().as_str().to_string(),
+            kind: "catalog-identifier".to_string(),
+            detail: String::new(),
+            ra: star.ra,
+            dec: star.dec,
+            mag: Some(star.mag),
+        },
+        StarLookupMatch::Name(star) => CatalogStarRow {
+            designation: star.designation.to_string(),
+            stable_id: star.stable_id.to_string(),
+            catalog: star.catalog.as_str().to_string(),
+            kind: star.kind.as_str().to_string(),
+            detail: star.detail.to_string(),
+            ra: star.ra,
+            dec: star.dec,
+            mag: star.mag,
+        },
+    }
 }
 
 fn csv_field(value: &str) -> String {

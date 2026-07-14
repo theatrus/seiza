@@ -2,7 +2,10 @@
 
 use anyhow::{Context, Result, bail};
 use seiza::catalog::TileSetBuilder;
-use seiza::star_ids::{StarIdentifier, StarIdentifierCatalogBuilder};
+use seiza::star_ids::{
+    StarIdentifier, StarIdentifierCatalogBuilder, StarNameCatalog, StarNameKind,
+    normalize_star_name,
+};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
@@ -18,11 +21,15 @@ pub fn build_tycho2(
     input: &Path,
     output: &Path,
     identifier_index: Option<&Path>,
+    identifier_sources: Option<&Path>,
     epoch: f64,
     max_mag: f32,
 ) -> Result<()> {
     if identifier_index.is_some_and(|path| path == output) {
         bail!("--identifier-index must differ from --output");
+    }
+    if identifier_sources.is_some() && identifier_index.is_none() {
+        bail!("--identifier-sources requires --identifier-index");
     }
     if !epoch.is_finite() || !max_mag.is_finite() {
         bail!("epoch and magnitude limit must be finite");
@@ -52,9 +59,14 @@ pub fn build_tycho2(
     let mut skipped_no_mag = 0u64;
     let mut too_faint = 0u64;
     let mut identifiers = identifier_index.map(|_| {
+        let attribution = if identifier_sources.is_some() {
+            "Tycho-2 I/259; Bright Star Catalogue V/50; GCVS B/gcvs; Washington Double Star B/wds; IAU Catalog of Star Names"
+        } else {
+            "Tycho-2 (Hog et al. 2000, CDS I/259); TYC identifiers and catalog-supplied HIP cross-identifications"
+        };
         StarIdentifierCatalogBuilder::new(
             epoch,
-            "Tycho-2 (Hog et al. 2000, CDS I/259); TYC identifiers and catalog-supplied HIP cross-identifications",
+            attribution,
         )
     });
 
@@ -120,11 +132,19 @@ pub fn build_tycho2(
 
     let count = builder.star_count();
     builder.write_to(output)?;
-    if let (Some(path), Some(identifiers)) = (identifier_index, identifiers) {
-        let identifier_count = identifiers.len();
-        identifiers.write_to(path)?;
+    if let (Some(sources), Some(identifiers)) = (identifier_sources, identifiers.as_mut()) {
+        let stats = add_stellar_identifier_sources(identifiers, sources, epoch)?;
         println!(
-            "{identifier_count} TYC/HIP identifier entries written to {}",
+            "added {} Bright Star aliases, {} GCVS variables, {} WDS designations, and {} IAU names",
+            stats.bright, stats.variables, stats.doubles, stats.proper_names
+        );
+    }
+    if let (Some(path), Some(identifiers)) = (identifier_index, identifiers) {
+        let stats = identifiers.write_to(path)?;
+        println!(
+            "{} numeric identifiers and {} names written to {}",
+            stats.numeric_entries,
+            stats.name_entries,
             path.display()
         );
     }
@@ -150,6 +170,434 @@ fn add_tycho_identifiers(
         builder.add(hip, star.ra, star.dec, star.mag)?;
     }
     Ok(())
+}
+
+#[derive(Debug, Default)]
+struct StellarIdentifierStats {
+    bright: usize,
+    variables: usize,
+    doubles: usize,
+    proper_names: usize,
+}
+
+type BrightStarPositions = std::collections::HashMap<u32, (f64, f64, Option<f32>)>;
+
+fn add_stellar_identifier_sources(
+    builder: &mut StarIdentifierCatalogBuilder,
+    input: &Path,
+    epoch: f64,
+) -> Result<StellarIdentifierStats> {
+    for name in ["bsc-identifiers.tsv", "gcvs.tsv", "wds.tsv", "IAU-CSN.txt"] {
+        if !input.join(name).exists() {
+            bail!(
+                "{} is missing {}; run download-data star-identifiers first",
+                input.display(),
+                name
+            );
+        }
+    }
+
+    let mut stats = StellarIdentifierStats::default();
+    let bright_positions = add_bright_star_identifiers(
+        builder,
+        &input.join("bsc-identifiers.tsv"),
+        epoch,
+        &mut stats,
+    )?;
+    add_gcvs_identifiers(builder, &input.join("gcvs.tsv"), epoch, &mut stats)?;
+    add_wds_identifiers(builder, &input.join("wds.tsv"), epoch, &mut stats)?;
+
+    let file = std::fs::File::open(input.join("IAU-CSN.txt"))?;
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        let Some(star) = parse_iau_csn_line(&line) else {
+            continue;
+        };
+        let hr = iau_csn_hr(&line);
+        let (ra, dec, mag) = hr
+            .and_then(|number| bright_positions.get(&number).copied())
+            .unwrap_or((star.ra, star.dec, star.mag));
+        let stable_id = hr
+            .map(|number| format!("hr:{number}"))
+            .unwrap_or_else(|| star.metadata.id.clone());
+        builder.add_name(
+            StarNameCatalog::IauCatalogOfStarNames,
+            StarNameKind::ProperName,
+            &star.name,
+            &stable_id,
+            "",
+            ra,
+            dec,
+            mag,
+        )?;
+        stats.proper_names += 1;
+    }
+    Ok(stats)
+}
+
+fn add_bright_star_identifiers(
+    builder: &mut StarIdentifierCatalogBuilder,
+    path: &Path,
+    epoch: f64,
+    stats: &mut StellarIdentifierStats,
+) -> Result<BrightStarPositions> {
+    let mut positions = std::collections::HashMap::new();
+    let file = std::fs::File::open(path)?;
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        if line.starts_with('#') {
+            continue;
+        }
+        let raw_fields = line.split('\t').collect::<Vec<_>>();
+        let fields = raw_fields
+            .iter()
+            .map(|field| field.trim())
+            .collect::<Vec<_>>();
+        if fields.len() < 13 {
+            continue;
+        }
+        let (Ok(ra), Ok(dec), Ok(hr), Ok(mag)) = (
+            fields[0].parse::<f64>(),
+            fields[1].parse::<f64>(),
+            fields[2].parse::<u32>(),
+            fields[10].parse::<f32>(),
+        ) else {
+            continue;
+        };
+        let (ra, dec) = propagate_catalog_position(
+            ra,
+            dec,
+            fields[11].parse().ok(),
+            fields[12].parse().ok(),
+            1.0,
+            epoch,
+        );
+        let stable_id = format!("hr:{hr}");
+        positions.insert(hr, (ra, dec, Some(mag)));
+        for identifier in [
+            Some(StarIdentifier::HarvardRevised(hr)),
+            fields[4]
+                .parse::<u32>()
+                .ok()
+                .map(StarIdentifier::HenryDraper),
+            fields[5].parse::<u32>().ok().map(StarIdentifier::Sao),
+            fields[6].parse::<u32>().ok().map(StarIdentifier::Fk5),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            builder.add(identifier, ra, dec, mag)?;
+            stats.bright += 1;
+        }
+
+        for bayer_flamsteed in bright_star_designations(raw_fields[3]) {
+            builder.add_name(
+                StarNameCatalog::BrightStarCatalog,
+                StarNameKind::BayerFlamsteed,
+                &bayer_flamsteed,
+                &stable_id,
+                "",
+                ra,
+                dec,
+                Some(mag),
+            )?;
+            stats.bright += 1;
+        }
+        if !fields[7].is_empty() {
+            let components = fields[8];
+            let designation = collapse_whitespace(&format!("ADS {} {}", fields[7], components));
+            builder.add_name(
+                StarNameCatalog::BrightStarCatalog,
+                StarNameKind::DoubleStar,
+                &designation,
+                &stable_id,
+                components,
+                ra,
+                dec,
+                Some(mag),
+            )?;
+            stats.bright += 1;
+        }
+        if !fields[9].is_empty() && !fields[9].eq_ignore_ascii_case("Var?") {
+            builder.add_name(
+                StarNameCatalog::BrightStarCatalog,
+                StarNameKind::VariableStar,
+                fields[9],
+                &stable_id,
+                "",
+                ra,
+                dec,
+                Some(mag),
+            )?;
+            stats.bright += 1;
+        }
+    }
+    Ok(positions)
+}
+
+fn add_gcvs_identifiers(
+    builder: &mut StarIdentifierCatalogBuilder,
+    path: &Path,
+    epoch: f64,
+    stats: &mut StellarIdentifierStats,
+) -> Result<()> {
+    let file = std::fs::File::open(path)?;
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        if line.starts_with('#') {
+            continue;
+        }
+        let fields = line.split('\t').map(str::trim).collect::<Vec<_>>();
+        if fields.len() < 14 || !fields[13].is_empty() {
+            continue;
+        }
+        let (Ok(ra), Ok(dec)) = (fields[0].parse::<f64>(), fields[1].parse::<f64>()) else {
+            continue;
+        };
+        let designation = collapse_whitespace(fields[2]);
+        if designation.is_empty() {
+            continue;
+        }
+        let (ra, dec) = propagate_catalog_position(
+            ra,
+            dec,
+            fields[10].parse().ok(),
+            fields[11].parse().ok(),
+            1.0,
+            epoch,
+        );
+        let stable_id = format!("gcvs:{}", stable_name_fragment(&designation));
+        let detail = gcvs_detail(&fields);
+        builder.add_name(
+            StarNameCatalog::GeneralCatalogOfVariableStars,
+            StarNameKind::VariableStar,
+            &designation,
+            &stable_id,
+            &detail,
+            ra,
+            dec,
+            parse_identifier_mag(fields[4]),
+        )?;
+        stats.variables += 1;
+    }
+    Ok(())
+}
+
+fn add_wds_identifiers(
+    builder: &mut StarIdentifierCatalogBuilder,
+    path: &Path,
+    epoch: f64,
+    stats: &mut StellarIdentifierStats,
+) -> Result<()> {
+    let file = std::fs::File::open(path)?;
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        if line.starts_with('#') {
+            continue;
+        }
+        let fields = line.split('\t').map(str::trim).collect::<Vec<_>>();
+        if fields.len() < 11 {
+            continue;
+        }
+        let (Ok(ra), Ok(dec)) = (fields[0].parse::<f64>(), fields[1].parse::<f64>()) else {
+            continue;
+        };
+        if fields[2].is_empty() || fields[3].is_empty() {
+            continue;
+        }
+        let (ra, dec) = propagate_catalog_position(
+            ra,
+            dec,
+            fields[9].parse().ok(),
+            fields[10].parse().ok(),
+            0.001,
+            epoch,
+        );
+        let discoverer = collapse_whitespace(fields[3]);
+        let components = if fields[4].is_empty() {
+            "AB"
+        } else {
+            fields[4]
+        };
+        let stable_id = format!(
+            "wds:{}:{}:{}",
+            fields[2],
+            stable_name_fragment(&discoverer),
+            stable_wds_component(components)
+        );
+        let mag = parse_identifier_mag(fields[5]);
+        let detail = wds_detail(&fields, components);
+        for designation in [
+            format!("WDS {}", fields[2]),
+            collapse_whitespace(&format!("{discoverer} {components}")),
+        ] {
+            builder.add_name(
+                StarNameCatalog::WashingtonDoubleStar,
+                StarNameKind::DoubleStar,
+                &designation,
+                &stable_id,
+                &detail,
+                ra,
+                dec,
+                mag,
+            )?;
+            stats.doubles += 1;
+        }
+    }
+    Ok(())
+}
+
+fn propagate_catalog_position(
+    ra: f64,
+    dec: f64,
+    pm_ra: Option<f64>,
+    pm_dec: Option<f64>,
+    arcsec_per_unit: f64,
+    epoch: f64,
+) -> (f64, f64) {
+    let dt = epoch - 2000.0;
+    let cos_dec = dec.to_radians().cos().max(1e-6);
+    let ra =
+        (ra + pm_ra.unwrap_or(0.0) * arcsec_per_unit * dt / 3600.0 / cos_dec).rem_euclid(360.0);
+    let dec = (dec + pm_dec.unwrap_or(0.0) * arcsec_per_unit * dt / 3600.0).clamp(-90.0, 90.0);
+    (ra, dec)
+}
+
+fn collapse_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn bright_star_designations(value: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let Some(flamsteed) = value.get(0..3).map(str::trim) else {
+        let name = collapse_whitespace(value);
+        return (!name.is_empty()).then_some(name).into_iter().collect();
+    };
+    let greek = value.get(3..6).map(str::trim).unwrap_or("");
+    let component = value.get(6..7).map(str::trim).unwrap_or("");
+    let constellation = value.get(7..10).map(str::trim).unwrap_or("");
+    if constellation.is_empty() {
+        return names;
+    }
+    if !flamsteed.is_empty() {
+        names.push(format!("{flamsteed} {constellation}"));
+    }
+    if !greek.is_empty() {
+        let abbreviation = format!("{greek}{component} {constellation}");
+        names.push(abbreviation);
+        if let Some((full, symbol)) = greek_name(greek) {
+            names.push(format!("{full}{component} {constellation}"));
+            names.push(format!("{symbol}{component} {constellation}"));
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn greek_name(abbreviation: &str) -> Option<(&'static str, &'static str)> {
+    match abbreviation {
+        "Alp" => Some(("Alpha", "α")),
+        "Bet" => Some(("Beta", "β")),
+        "Gam" => Some(("Gamma", "γ")),
+        "Del" => Some(("Delta", "δ")),
+        "Eps" => Some(("Epsilon", "ε")),
+        "Zet" => Some(("Zeta", "ζ")),
+        "Eta" => Some(("Eta", "η")),
+        "The" => Some(("Theta", "θ")),
+        "Iot" => Some(("Iota", "ι")),
+        "Kap" => Some(("Kappa", "κ")),
+        "Lam" => Some(("Lambda", "λ")),
+        "Mu" => Some(("Mu", "μ")),
+        "Nu" => Some(("Nu", "ν")),
+        "Xi" => Some(("Xi", "ξ")),
+        "Omi" => Some(("Omicron", "ο")),
+        "Pi" => Some(("Pi", "π")),
+        "Rho" => Some(("Rho", "ρ")),
+        "Sig" => Some(("Sigma", "σ")),
+        "Tau" => Some(("Tau", "τ")),
+        "Ups" => Some(("Upsilon", "υ")),
+        "Phi" => Some(("Phi", "φ")),
+        "Chi" => Some(("Chi", "χ")),
+        "Psi" => Some(("Psi", "ψ")),
+        "Ome" => Some(("Omega", "ω")),
+        _ => None,
+    }
+}
+
+fn iau_csn_hr(line: &str) -> Option<u32> {
+    let tokens = line.split_whitespace().collect::<Vec<_>>();
+    tokens
+        .windows(2)
+        .find(|pair| pair[0] == "HR")
+        .and_then(|pair| pair[1].parse().ok())
+}
+
+fn stable_name_fragment(value: &str) -> String {
+    normalize_star_name(value)
+}
+
+fn stable_wds_component(value: &str) -> String {
+    let mut result = String::new();
+    for byte in value.to_ascii_uppercase().bytes() {
+        if byte.is_ascii_alphanumeric() || byte == b'-' {
+            result.push(byte as char);
+        } else {
+            result.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    result
+}
+
+fn parse_identifier_mag(value: &str) -> Option<f32> {
+    value
+        .parse::<f32>()
+        .ok()
+        .filter(|magnitude| (-3.0..62.0).contains(magnitude))
+}
+
+fn gcvs_detail(fields: &[&str]) -> String {
+    let mut parts = Vec::new();
+    if !fields[3].is_empty() {
+        parts.push(fields[3].to_string());
+    }
+    let minimum = parse_identifier_mag(fields[6]);
+    let band = if fields[7].is_empty() {
+        fields[8]
+    } else {
+        fields[7]
+    };
+    if fields[5].contains('(') {
+        if let Some(amplitude) = minimum {
+            parts.push(format!("amplitude={amplitude:.3}{band}"));
+        }
+    } else if let (Some(maximum), Some(minimum)) = (parse_identifier_mag(fields[4]), minimum) {
+        parts.push(format!(
+            "range={maximum:.3}-{}{minimum:.3}{band}",
+            fields[5]
+        ));
+    }
+    if let Ok(period) = fields[9].parse::<f64>()
+        && period.is_finite()
+        && period > 0.0
+    {
+        parts.push(format!("period={period}d"));
+    }
+    parts.join("; ")
+}
+
+fn wds_detail(fields: &[&str], components: &str) -> String {
+    let mut parts = vec![components.to_string()];
+    if let Ok(separation) = fields[8].parse::<f32>() {
+        parts.push(format!("sep={separation}arcsec"));
+    }
+    if let Ok(position_angle) = fields[7].parse::<u16>() {
+        parts.push(format!("pa={position_angle}deg"));
+    }
+    if let Some(secondary_mag) = parse_identifier_mag(fields[6]) {
+        parts.push(format!("mag2={secondary_mag:.2}"));
+    }
+    parts.join("; ")
 }
 
 /// Build a transient catalog from the Rochester "Latest Supernovae"
@@ -2270,6 +2718,88 @@ mod tests {
         let d_dec_arcsec = (star.dec - -16.71314306) * 3600.0;
         assert!((d_dec_arcsec - -1.2231 * dt).abs() < 0.01);
         assert!(star.ra < 101.28854105); // moving in -RA
+    }
+
+    #[test]
+    fn expands_bright_star_bayer_and_flamsteed_designations() {
+        assert_eq!(
+            bright_star_designations("  3Alp Lyr"),
+            vec!["3 Lyr", "Alp Lyr", "Alpha Lyr", "α Lyr"]
+        );
+        assert_eq!(bright_star_designations(" 33    Psc"), vec!["33 Psc"]);
+        assert_eq!(
+            bright_star_designations("   Alp1Cen"),
+            vec!["Alp1 Cen", "Alpha1 Cen", "α1 Cen"]
+        );
+        assert_eq!(
+            iau_csn_hr("Vega              Vega              HR 7001      alf"),
+            Some(7001)
+        );
+        assert_eq!(stable_wds_component("A,Ia"), "A%2CIA");
+        assert_eq!(stable_wds_component("AB-C"), "AB-C");
+        assert_eq!(
+            gcvs_detail(&[
+                "", "", "", "ROT", "10.0", "(", "0.25", "", "V", "2.5", "", "", "", "",
+            ]),
+            "ROT; amplitude=0.250V; period=2.5d"
+        );
+    }
+
+    #[test]
+    fn builds_bright_variable_double_and_proper_name_indexes() {
+        let dir =
+            std::env::temp_dir().join(format!("seiza-stellar-source-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("bsc-identifiers.tsv"),
+            "279.234583\t+38.783611\t7001\t  3Alp Lyr\t172167\t 67174\t 699\t11510\t  \tAlp Lyr  \t 0.03\t 0.202\t 0.286\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("gcvs.tsv"),
+            "291.3662917\t+42.7843611\tRR Lyr    \tRRAB      \t 7.060\t\t8.120\t\tV\t0.56686776\t-0.110\t-0.196\t2000.000\t\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("wds.tsv"),
+            "281.0847473\t+39.6701126\t18443+3940\tSTF2382\tAB   \t 5.150\t 6.10\t123\t2.50\t  11\t  61\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("IAU-CSN.txt"),
+            "Vega              Vega              HR 7001      alf   α     Lyr _    18369+3846  0.03  V  91262 172167 279.234735  38.783689 2016-06-30 \n",
+        )
+        .unwrap();
+
+        let mut builder = StarIdentifierCatalogBuilder::new(2025.5, "test catalogs");
+        let stats = add_stellar_identifier_sources(&mut builder, &dir, 2025.5).unwrap();
+        assert_eq!(stats.bright, 10);
+        assert_eq!(stats.variables, 1);
+        assert_eq!(stats.doubles, 2);
+        assert_eq!(stats.proper_names, 1);
+        let path = dir.join("stars.ids.bin");
+        let written = builder.write_to(&path).unwrap();
+        assert_eq!(written.numeric_entries, 4);
+        assert_eq!(written.name_entries, 10);
+
+        let catalog = seiza::star_ids::StarIdentifierCatalog::open(&path).unwrap();
+        let hr = catalog.lookup(StarIdentifier::HarvardRevised(7001));
+        let vega = catalog.lookup_name("Vega");
+        assert_eq!(hr.len(), 1);
+        assert_eq!(vega.len(), 1);
+        assert_eq!(vega[0].stable_id, "hr:7001");
+        assert!((vega[0].ra - hr[0].ra).abs() < 1e-8);
+        assert_eq!(catalog.lookup_name("Alpha Lyr").len(), 1);
+        assert_eq!(
+            catalog.lookup_name("RR Lyr")[0].detail,
+            "RRAB; range=7.060-8.120V; period=0.56686776d"
+        );
+        assert_eq!(
+            catalog.lookup_name("STF 2382 AB")[0].detail,
+            "AB; sep=2.5arcsec; pa=123deg; mag2=6.10"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

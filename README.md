@@ -19,6 +19,7 @@ seiza solve-blind fine-scale.jpg --data data/stars-deep-gaia17.bin --index data/
 seiza solve image.fits --data data/stars-gaia.bin --scale 1.26 --objects data/objects.bin
 seiza catalog objects --data data/objects.bin --ra 10.6848 --dec 41.2691 --radius 3 --format json
 seiza catalog star --data data/stars-lite-tycho2.ids.bin "TYC 5949-2777-1" --format json
+seiza catalog star --data data/stars-lite-tycho2.ids.bin "RR Lyr"
 ```
 
 Hosted datasets (manifest at
@@ -57,9 +58,10 @@ Working today:
   supported (Tycho-2; Gaia DR3 via ESA TAP with `--max-mag` and
   `--chunks` for deeper sets; ASTAP `.1476` databases) but the Gaia
   download alone can take many hours against the ESA archive.
-  An optional memory-mapped identifier sidecar resolves exact TYC and HIP
-  designations without a network request or a plate solve; its typed namespace
-  format is ready for release-qualified Gaia IDs and other catalog aliases.
+  An optional memory-mapped identifier sidecar resolves TYC/HIP/HR/HD/SAO/FK5,
+  IAU and Bayer/Flamsteed names, GCVS variables, and WDS double-star
+  designations without a network request or plate solve. Its normalized name
+  index also supports prefix completion for interactive search.
 
 ```
 # custom build from primary sources (the prebuilt sets skip all this)

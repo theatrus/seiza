@@ -37,6 +37,44 @@ pub fn download_tycho2(output: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Textual and bright-star identity sources used to enrich a Tycho identifier
+/// sidecar: Bright Star Catalogue, GCVS, WDS, and the IAU Catalog of Star
+/// Names. VizieR supplies computed J2000 positions in tab-separated form.
+pub fn download_star_identifiers(output: &Path) -> Result<()> {
+    std::fs::create_dir_all(output)?;
+    let vizier = "https://vizier.cds.unistra.fr/viz-bin/asu-tsv?-source=";
+    for (name, source, columns) in [
+        (
+            "bsc-identifiers.tsv",
+            "V/50/catalog",
+            "_RAJ2000,_DEJ2000,HR,Name,HD,SAO,FK5,ADS,ADScomp,VarID,Vmag,pmRA,pmDE",
+        ),
+        (
+            "gcvs.tsv",
+            "B/gcvs/gcvs_cat",
+            "_RAJ2000,_DEJ2000,GCVS,VarType,magMax,l_Min1,Min1,n_Min1,flt,Period,pmRA,pmDE,Ep-coor,Exists",
+        ),
+        (
+            "wds.tsv",
+            "B/wds/wds",
+            "_RAJ2000,_DEJ2000,WDS,Disc,Comp,mag1,mag2,pa2,sep2,pmRA1,pmDE1",
+        ),
+    ] {
+        fetch(
+            &format!("{vizier}{source}&-out={columns}&-out.max=unlimited"),
+            &output.join(name),
+            Verify::None,
+        )?;
+    }
+    fetch(
+        "https://www.pas.rochester.edu/~emamajek/WGSN/IAU-CSN.txt",
+        &output.join("IAU-CSN.txt"),
+        Verify::None,
+    )?;
+    println!("stellar identifier sources ready in {}", output.display());
+    Ok(())
+}
+
 /// OpenNGC: the NGC/IC object list and its addendum.
 pub fn download_openngc(output: &Path) -> Result<()> {
     std::fs::create_dir_all(output)?;

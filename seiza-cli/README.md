@@ -29,9 +29,12 @@ seiza catalog objects --data objects.bin \
   --corner 12.31,40.35 --corner 9.02,40.46 \
   --sort prominence --format json
 
-# Resolve an exact star catalog identifier; no image, solve, or network needed
+# Resolve exact IDs/names or complete names; no image, solve, or network needed
 seiza catalog star --data stars-lite-tycho2.ids.bin "TYC 5949-2777-1" --format json
 seiza catalog star --data stars-lite-tycho2.ids.bin "HIP 32349"
+seiza catalog star --data stars-lite-tycho2.ids.bin "RR Lyr"
+seiza catalog star --data stars-lite-tycho2.ids.bin "STF 2382 AB"
+seiza catalog star --data stars-lite-tycho2.ids.bin "RR L" --prefix --limit 10
 ```
 
 `catalog objects` accepts a cone or a convex polygon whose vertices are in
@@ -68,8 +71,10 @@ hours:
 
 ```
 seiza download-data tycho2 --output raw/tycho2
+seiza download-data star-identifiers --output raw/star-identifiers
 seiza build-data tycho2 --input raw/tycho2 --output stars-lite.bin \
-  --identifier-index stars-lite.ids.bin
+  --identifier-index stars-lite.ids.bin \
+  --identifier-sources raw/star-identifiers
 
 seiza download-data gaia --output raw/gaia        # Gaia DR3 via TAP, resumable
 seiza build-data gaia --input raw/gaia --output stars-gaia.bin
@@ -83,8 +88,10 @@ seiza build-data transients --input raw/transients --output transients.bin
 
 The optional source manifest records the output hash and size, metadata
 coverage counts, source URLs, and hashes of every raw catalog file used.
-The optional Tycho-2 identifier sidecar provides memory-mapped exact TYC and
-HIP lookup without changing the solver's compact star tile file.
+The optional identifier sidecar provides memory-mapped exact TYC/HIP/HR/HD/
+SAO/FK5 lookup plus exact and prefix search over IAU proper names,
+Bayer/Flamsteed names, GCVS variables, and WDS double-star designations. It
+does not change the solver's compact star tile file.
 
 FITS files are read natively (see
 [seiza-fits](https://crates.io/crates/seiza-fits)) with automatic

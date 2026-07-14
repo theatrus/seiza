@@ -1,5 +1,7 @@
 use seiza::objects::{ObjectCatalog, ObjectKind, ObjectMetadata, SkyObject};
-use seiza::star_ids::{StarIdentifier, StarIdentifierCatalogBuilder};
+use seiza::star_ids::{
+    StarIdentifier, StarIdentifierCatalogBuilder, StarNameCatalog, StarNameKind,
+};
 use std::process::Command;
 
 fn object(name: &str, ra: f64, dec: f64) -> SkyObject {
@@ -146,6 +148,18 @@ fn catalog_star_resolves_tyc_and_hip_identifiers() {
         )
         .unwrap();
     builder
+        .add_name(
+            StarNameCatalog::GeneralCatalogOfVariableStars,
+            StarNameKind::VariableStar,
+            "RR Lyr",
+            "gcvs:RRLYR",
+            "RRAB",
+            291.3663,
+            42.7844,
+            Some(7.06),
+        )
+        .unwrap();
+    builder
         .add(
             StarIdentifier::Hipparcos(32349),
             101.28854,
@@ -174,10 +188,34 @@ fn catalog_star_resolves_tyc_and_hip_identifiers() {
     );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["query"], "HIP 32349");
-    assert_eq!(json["stable_id"], "hip:32349");
     assert_eq!(json["returned"], 1);
     assert_eq!(json["matches"][0]["catalog"], "Hipparcos");
-    assert_eq!(json["matches"][0]["identifier"], "HIP 32349");
+    assert_eq!(json["matches"][0]["designation"], "HIP 32349");
+    assert_eq!(json["matches"][0]["stable_id"], "hip:32349");
+
+    let names = Command::new(env!("CARGO_BIN_EXE_seiza"))
+        .args([
+            "catalog",
+            "star",
+            "--data",
+            catalog_path.to_str().unwrap(),
+            "rr-l",
+            "--prefix",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        names.status.success(),
+        "{}",
+        String::from_utf8_lossy(&names.stderr)
+    );
+    let names: serde_json::Value = serde_json::from_slice(&names.stdout).unwrap();
+    assert_eq!(names["mode"], "prefix");
+    assert_eq!(names["returned"], 1);
+    assert_eq!(names["matches"][0]["designation"], "RR Lyr");
+    assert_eq!(names["matches"][0]["detail"], "RRAB");
 
     std::fs::remove_dir_all(&dir).ok();
 }
