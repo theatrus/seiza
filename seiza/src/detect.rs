@@ -42,7 +42,10 @@ impl Default for DetectConfig {
             tile_size: 64,
             sigma: 4.0,
             min_area: 3,
-            max_area: 2500,
+            // Broad and saturated stars in high-resolution processed images
+            // can cover several thousand pixels. Elongation still rejects
+            // trails and text-like components.
+            max_area: 20_000,
             max_elongation: 2.5,
             ignore_border: 0,
             max_stars: 500,
@@ -363,5 +366,32 @@ mod tests {
         let stars = detect_stars(&image, &config);
         assert_eq!(stars.len(), 7);
         assert!(stars.windows(2).all(|w| w[0].flux >= w[1].flux));
+    }
+
+    #[test]
+    fn retains_broad_saturated_stars_in_processed_images() {
+        let mut noise_state = 0xA11CE5EEDu64;
+        let mut rand = move || {
+            noise_state ^= noise_state << 13;
+            noise_state ^= noise_state >> 7;
+            noise_state ^= noise_state << 17;
+            (noise_state >> 40) as f32 / 16777216.0
+        };
+        let buffer = ImageBuffer::from_fn(320, 320, |x, y| {
+            let d2 = (x as f64 - 160.0).powi(2) + (y as f64 - 160.0).powi(2);
+            let value = 0.04 + 0.01 * rand() + 0.95 * (-d2 / (2.0 * 22.0f64.powi(2))).exp() as f32;
+            Luma([(value.min(1.0) * 65535.0) as u16])
+        });
+        let image = DynamicImage::ImageLuma16(buffer);
+
+        let stars = detect_stars(&image, &DetectConfig::default());
+        assert_eq!(stars.len(), 1, "{stars:?}");
+        assert!(
+            stars[0].area > 2500,
+            "broad star area was {}",
+            stars[0].area
+        );
+        let offset = (stars[0].x - 160.0).hypot(stars[0].y - 160.0);
+        assert!(offset < 2.0, "broad star centroid shifted by {offset}px");
     }
 }

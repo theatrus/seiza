@@ -15,14 +15,20 @@ pull the prebuilt star and object catalogs from our CDN, and solve:
 cargo install seiza-cli
 seiza download-data prebuilt --output data       # SHA-256-verified from downloads.seiza.fyi
 seiza solve-blind image.jpg --data data/stars-lite-tycho2.bin --min-scale 0.5 --max-scale 15
+seiza solve-blind fine-scale.jpg --data data/stars-deep-gaia17.bin --index data/blind-gaia16.idx --min-scale 0.1 --max-scale 5
 seiza solve image.fits --data data/stars-gaia.bin --scale 1.26 --objects data/objects.bin
 ```
 
 Hosted datasets (manifest at
 [downloads.seiza.fyi/data/manifest.json](https://downloads.seiza.fyi/data/manifest.json)):
 `stars-lite-tycho2.bin` (2.5M stars, 25 MB), `stars-gaia.bin` (Gaia DR3
-G≤15, 36.7M stars, 367 MB), `objects.bin` (314k objects), and
-`transients.bin` (active supernovae/novae, refreshed nightly).
+G≤15, 36.7M stars, 367 MB), `stars-deep-gaia17.bin` (Gaia DR3 G≤17,
+154.1M stars, 1.54 GB), `blind-gaia16.idx` (the memory-mapped G≤16 blind
+pattern index, 1.63 GB), `objects.bin` (314k objects), and `transients.bin` (active
+supernovae/novae, refreshed nightly). The deep catalog and maintained index
+enable blind solving of small, fine-scale fields whose brightest detections
+are fainter than the G≤15 catalog's small-field pattern tiers without
+rebuilding the whole-sky index for every process.
 
 ## Status
 
@@ -40,8 +46,9 @@ Working today:
 - **Blind plate solving** — no position hint, only a plausible pixel-scale
   range: a disc-anchored whole-sky 4-star pattern index, hypothesis voting
   with smoothing and non-max suppression, parallel verification through the
-  hinted solver
-  (`seiza solve-blind image.jpg --data stars.bin --min-scale 0.5 --max-scale 15`).
+  hinted solver. The hosted G≤16 index is versioned, SHA-256 verified, and
+  memory-mapped
+  (`seiza solve-blind image.jpg --data stars-deep-gaia17.bin --index blind-gaia16.idx --min-scale 0.1 --max-scale 15`).
 - **Star catalogs** — memory-mappable tile formats with cone search.
   Use the prebuilt sets from `download-data prebuilt` unless you need a
   custom depth or epoch: building from primary sources stays fully
@@ -53,6 +60,7 @@ Working today:
 # custom build from primary sources (the prebuilt sets skip all this)
 seiza download-data gaia --output raw/gaia --max-mag 17 --chunks 3072
 seiza build-data gaia --input raw/gaia --output stars-deep.bin --max-mag 17
+seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-mag-limit 16
 ```
 
 - **Object catalogs** — OpenNGC (NGC/IC/Messier), Sharpless, Barnard, UGC,

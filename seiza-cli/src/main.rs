@@ -117,6 +117,21 @@ enum Command {
         #[command(subcommand)]
         source: BuildDataSource,
     },
+    /// Build a reusable, memory-mapped blind pattern index
+    BuildBlindIndex {
+        /// Star tile file used to build the index
+        #[arg(long)]
+        data: PathBuf,
+        /// Output blind index (use blind-gaia16.idx for the hosted G<=16 set)
+        #[arg(long)]
+        output: PathBuf,
+        /// Catalog magnitude limit used to build the blind pattern index
+        #[arg(long, default_value_t = 16.0)]
+        index_mag_limit: f32,
+        /// Longest allowed catalog pattern edge, degrees
+        #[arg(long, default_value_t = 6.0)]
+        max_pattern_deg: f64,
+    },
     /// Plate-solve with no position hint (wide fields, pixel-scale range)
     SolveBlind {
         /// Image file (PNG, JPEG, TIFF, FITS)
@@ -124,12 +139,19 @@ enum Command {
         /// Star tile file built by build-data
         #[arg(long)]
         data: PathBuf,
+        /// Prebuilt blind pattern index; avoids rebuilding it for each run
+        #[arg(long)]
+        index: Option<PathBuf>,
         /// Minimum plausible pixel scale, arcseconds per pixel
-        #[arg(long, default_value_t = 0.5)]
+        #[arg(long, default_value_t = 0.1)]
         min_scale: f64,
         /// Maximum plausible pixel scale, arcseconds per pixel
         #[arg(long, default_value_t = 20.0)]
         max_scale: f64,
+        /// Catalog magnitude limit used to build the blind pattern index.
+        /// Use 16 with the deep Gaia catalog for small, fine-scale fields.
+        #[arg(long, default_value_t = 12.7)]
+        index_mag_limit: f32,
         /// Detection threshold in noise sigmas
         #[arg(long, default_value_t = 4.0)]
         sigma: f32,
@@ -306,7 +328,7 @@ enum BuildDataSource {
     },
     /// Bundle manifest (sizes + sha256) for hosting data files
     Manifest {
-        /// Directory containing built .bin data files
+        /// Directory containing built .bin and .idx data files
         #[arg(long)]
         dir: PathBuf,
         /// Version string recorded in the manifest
@@ -423,14 +445,33 @@ fn main() -> Result<()> {
                 output,
             } => build_data::build_manifest(&dir, &version, &output),
         },
+        Command::BuildBlindIndex {
+            data,
+            output,
+            index_mag_limit,
+            max_pattern_deg,
+        } => build_blind_index_command(&data, &output, index_mag_limit, max_pattern_deg),
         Command::SolveBlind {
             image,
             data,
+            index,
             min_scale,
             max_scale,
+            index_mag_limit,
             sigma,
             ignore_border,
-        } => solve_blind_command(&image, &data, min_scale, max_scale, sigma, ignore_border),
+        } => solve_blind_command(
+            &image,
+            &data,
+            SolveBlindOptions {
+                index_path: index.as_deref(),
+                min_scale,
+                max_scale,
+                index_mag_limit,
+                sigma,
+                ignore_border,
+            },
+        ),
         Command::FitsInfo { image, stretch } => fits_info(&image, stretch.as_deref()),
         Command::Cone {
             data,
@@ -827,21 +868,27 @@ fn dms(dec: f64) -> String {
     format!("{sign}{:02}° {:02}′ {:04.1}″", d as u32, m as u32, sec)
 }
 
+struct SolveBlindOptions<'a> {
+    index_path: Option<&'a std::path::Path>,
+    min_scale: f64,
+    max_scale: f64,
+    index_mag_limit: f32,
+    sigma: f32,
+    ignore_border: u32,
+}
+
 fn solve_blind_command(
     path: &std::path::Path,
     data: &std::path::Path,
-    min_scale: f64,
-    max_scale: f64,
-    sigma: f32,
-    ignore_border: u32,
+    options: SolveBlindOptions<'_>,
 ) -> Result<()> {
     use seiza::blind::{BlindIndex, BlindParams, solve_blind};
 
     let img = load_image(path)?;
     let dims = (img.width(), img.height());
     let config = DetectConfig {
-        sigma,
-        ignore_border,
+        sigma: options.sigma,
+        ignore_border: options.ignore_border,
         max_stars: 600,
         ..Default::default()
     };
@@ -855,18 +902,36 @@ fn solve_blind_command(
 
     let catalog =
         TileCatalog::open(data).with_context(|| format!("failed to open {}", data.display()))?;
-    let params = BlindParams {
-        min_scale_arcsec_px: min_scale,
-        max_scale_arcsec_px: max_scale,
+    let mut params = BlindParams {
+        min_scale_arcsec_px: options.min_scale,
+        max_scale_arcsec_px: options.max_scale,
+        index_mag_limit: options.index_mag_limit,
         ..Default::default()
     };
     let started = std::time::Instant::now();
-    let index = BlindIndex::build(&catalog, &params);
-    println!(
-        "pattern index: {} patterns in {:.2}s",
-        index.pattern_count(),
-        started.elapsed().as_secs_f64()
-    );
+    let index = if let Some(path) = options.index_path {
+        let index = BlindIndex::open(path)
+            .map_err(anyhow::Error::from)
+            .with_context(|| format!("failed to open {}", path.display()))?;
+        params.index_mag_limit = index.index_mag_limit();
+        params.max_pattern_deg = index.max_pattern_deg();
+        println!(
+            "pattern index: {} patterns mapped from {} in {:.2}s (G<={:.1})",
+            index.pattern_count(),
+            path.display(),
+            started.elapsed().as_secs_f64(),
+            index.index_mag_limit()
+        );
+        index
+    } else {
+        let index = BlindIndex::build(&catalog, &params);
+        println!(
+            "pattern index: {} patterns built in {:.2}s",
+            index.pattern_count(),
+            started.elapsed().as_secs_f64()
+        );
+        index
+    };
 
     let started = std::time::Instant::now();
     let solution =
@@ -883,6 +948,40 @@ fn solve_blind_command(
     println!(
         "  quality    : {} stars matched, RMS {:.3}\"",
         solution.matched_stars, solution.rms_arcsec
+    );
+    Ok(())
+}
+
+fn build_blind_index_command(
+    data: &std::path::Path,
+    output: &std::path::Path,
+    index_mag_limit: f32,
+    max_pattern_deg: f64,
+) -> Result<()> {
+    use seiza::blind::{BlindIndex, BlindParams};
+
+    let catalog =
+        TileCatalog::open(data).with_context(|| format!("failed to open {}", data.display()))?;
+    let params = BlindParams {
+        index_mag_limit,
+        max_pattern_deg,
+        ..Default::default()
+    };
+    let started = std::time::Instant::now();
+    let index = BlindIndex::build(&catalog, &params);
+    println!(
+        "built {} G<={index_mag_limit:.1} patterns in {:.2}s",
+        index.pattern_count(),
+        started.elapsed().as_secs_f64()
+    );
+    let started = std::time::Instant::now();
+    index
+        .write_to(output)
+        .with_context(|| format!("failed to write {}", output.display()))?;
+    println!(
+        "wrote {} in {:.2}s",
+        output.display(),
+        started.elapsed().as_secs_f64()
     );
     Ok(())
 }

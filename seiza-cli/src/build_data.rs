@@ -893,17 +893,23 @@ pub fn build_manifest(dir: &Path, version: &str, output: &Path) -> Result<()> {
     let mut entries: Vec<_> = std::fs::read_dir(dir)?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|ext| ext == "bin"))
+        .filter(|p| {
+            p.extension()
+                .is_some_and(|ext| ext == "bin" || ext == "idx")
+        })
         .collect();
     entries.sort();
     if entries.is_empty() {
-        bail!("no .bin data files in {}", dir.display());
+        bail!("no .bin or .idx data files in {}", dir.display());
     }
 
     let mut files = String::new();
     for path in &entries {
-        let data = std::fs::read(path)?;
-        let hash = sha2::Sha256::digest(&data);
+        let mut data = std::fs::File::open(path)?;
+        let bytes = data.metadata()?.len();
+        let mut hasher = sha2::Sha256::new();
+        std::io::copy(&mut data, &mut hasher)?;
+        let hash = hasher.finalize();
         let hash_hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
         let name = path.file_name().unwrap().to_string_lossy();
         if !files.is_empty() {
@@ -911,9 +917,9 @@ pub fn build_manifest(dir: &Path, version: &str, output: &Path) -> Result<()> {
         }
         files.push_str(&format!(
             "    {{ \"name\": \"{name}\", \"bytes\": {}, \"sha256\": \"{hash_hex}\" }}",
-            data.len()
+            bytes
         ));
-        println!("  {name}: {} bytes, sha256 {hash_hex}", data.len());
+        println!("  {name}: {bytes} bytes, sha256 {hash_hex}");
     }
     let manifest = format!("{{\n  \"version\": \"{version}\",\n  \"files\": [\n{files}\n  ]\n}}\n");
     std::fs::write(output, manifest)?;

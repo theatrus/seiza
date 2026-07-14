@@ -118,8 +118,15 @@ data on its own, in order:
    (downloads.seiza.fyi) rather than attempting a surprise 400 MB
    download inside an imaging loop.
 
-The Gaia G≤15 set (367 MB) is the recommended default; Tycho-2 lite
-(25 MB) suffices for wide fields.
+The Gaia G≤15 set (367 MB) is the recommended general-purpose default;
+the Gaia G≤17 set plus the maintained `blind-gaia16.idx` is recommended
+for blind solving small, fine-scale fields. Tycho-2 lite (25 MB) suffices
+for wide fields.
+
+The optional blind index is resolved independently in the same locations,
+using `SEIZA_BLIND_INDEX`, `blind_index = ...` in `seiza.toml`, or the
+well-known filename `blind-gaia16.idx`. It is memory-mapped and reused as-is;
+if it is absent, ASTAP mode retains the slower runtime-build fallback.
 
 ## Mode detection
 

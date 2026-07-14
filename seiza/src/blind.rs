@@ -14,8 +14,13 @@ use crate::catalog::{CatalogStar, StarCatalog};
 use crate::detect::DetectedStar;
 use crate::solve::{Solution, SolveHint, solve};
 use crate::wcs::Wcs;
+use memmap2::{Mmap, MmapOptions};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::fs::File;
+use std::io::{self, BufWriter, Write};
+use std::ops::Range;
+use std::path::Path;
 
 #[derive(Debug, Clone)]
 pub struct BlindParams {
@@ -41,7 +46,7 @@ pub struct BlindParams {
 impl Default for BlindParams {
     fn default() -> Self {
         Self {
-            min_scale_arcsec_px: 0.3,
+            min_scale_arcsec_px: 0.1,
             max_scale_arcsec_px: 20.0,
             index_mag_limit: 12.7,
             max_pattern_deg: 6.0,
@@ -64,6 +69,8 @@ const TIERS: &[(f64, f32)] = &[
     (0.4, 11.8),
     // Sub-degree fields; only fills from catalogs deeper than Tycho-2
     (0.2, 12.7),
+    (0.1, 14.2),
+    (0.06, 16.0),
 ];
 /// Descriptor quantization bins per dimension.
 const BINS: f64 = 128.0;
@@ -73,40 +80,152 @@ const BINS: f64 = 128.0;
 const PROBE_EPSILON: f64 = 0.002;
 /// Descriptor match tolerance in bins (probes adjacent bins).
 const N_IMAGE_STARS: usize = 32;
+/// Bound the temporary per-anchor vectors created by parallel index
+/// generation. Deep Gaia tiers contain tens of millions of stars; collecting
+/// one `Vec` per anchor for an entire tier can otherwise consume gigabytes
+/// before any patterns are merged.
+const INDEX_ANCHOR_BATCH: usize = 65_536;
+const INDEX_MAGIC: &[u8; 8] = b"SEIZABI1";
+const INDEX_HEADER_SIZE: usize = 64;
+const PATTERN_RECORD_SIZE: usize = 11 * size_of::<f32>();
+const SERIALIZE_BATCH: usize = 65_536;
+const INDEX_TIER_SCHEMA: u32 = 1;
 
+#[derive(Clone, Copy)]
 struct Pattern {
     /// Tangent-plane coordinates (degrees) of the four stars about the
     /// pattern centroid, in canonical vertex order
-    points: [(f64, f64); 4],
+    points: [(f32, f32); 4],
     /// Pattern centroid on the sky
-    center: (f64, f64),
+    center: (f32, f32),
     /// Longest pairwise separation, degrees
-    max_edge_deg: f64,
+    max_edge_deg: f32,
+}
+
+impl Pattern {
+    fn points_f64(&self) -> [(f64, f64); 4] {
+        self.points.map(|(x, y)| (x as f64, y as f64))
+    }
 }
 
 /// Coarse (RA, Dec, log-scale) vote bucket for a field hypothesis.
 type HypothesisKey = (i64, i64, i64);
 /// Vote count with the implied field center and pixel scale.
-type Hypothesis = (u32, (f64, f64), f64);
+type Hypothesis = (u32, (f64, f64), f64, Wcs);
+type SmoothedHypothesis = (HypothesisKey, u32, (f64, f64), f64, Wcs);
+type RankedHypothesis = (usize, u32, (f64, f64), f64, Wcs);
 
 /// A searchable pattern index over a catalog's bright stars, frozen into
 /// sorted arrays: hash-free branchless binary search per lookup, cache
 /// friendly, and directly serializable.
 pub struct BlindIndex {
-    /// Sorted, unique descriptor keys
-    keys: Vec<u64>,
-    /// `keys[i]`'s candidates live at `candidates[starts[i]..starts[i+1]]`
-    starts: Vec<u32>,
-    candidates: Vec<u32>,
-    patterns: Vec<Pattern>,
+    index_mag_limit: f32,
+    max_pattern_deg: f32,
+    storage: BlindIndexStorage,
+}
+
+enum BlindIndexStorage {
+    Built {
+        keys: Vec<u64>,
+        starts: Vec<u32>,
+        candidates: Vec<u32>,
+        patterns: Vec<Pattern>,
+    },
+    Mapped(MappedIndex),
+}
+
+struct MappedIndex {
+    map: Mmap,
+    keys_offset: usize,
+    starts_offset: usize,
+    candidates_offset: usize,
+    patterns_offset: usize,
+    keys_len: usize,
+    candidates_len: usize,
+    patterns_len: usize,
 }
 
 impl BlindIndex {
-    fn lookup(&self, key: u64) -> &[u32] {
-        match self.keys.binary_search(&key) {
-            Ok(i) => &self.candidates[self.starts[i] as usize..self.starts[i + 1] as usize],
-            Err(_) => &[],
+    fn keys_len(&self) -> usize {
+        match &self.storage {
+            BlindIndexStorage::Built { keys, .. } => keys.len(),
+            BlindIndexStorage::Mapped(index) => index.keys_len,
         }
+    }
+
+    fn candidates_len(&self) -> usize {
+        match &self.storage {
+            BlindIndexStorage::Built { candidates, .. } => candidates.len(),
+            BlindIndexStorage::Mapped(index) => index.candidates_len,
+        }
+    }
+
+    fn key_at(&self, index: usize) -> u64 {
+        match &self.storage {
+            BlindIndexStorage::Built { keys, .. } => keys[index],
+            BlindIndexStorage::Mapped(mapped) => {
+                read_u64(&mapped.map, mapped.keys_offset + index * size_of::<u64>())
+            }
+        }
+    }
+
+    fn start_at(&self, index: usize) -> u32 {
+        match &self.storage {
+            BlindIndexStorage::Built { starts, .. } => starts[index],
+            BlindIndexStorage::Mapped(mapped) => {
+                read_u32(&mapped.map, mapped.starts_offset + index * size_of::<u32>())
+            }
+        }
+    }
+
+    fn candidate_at(&self, index: usize) -> u32 {
+        match &self.storage {
+            BlindIndexStorage::Built { candidates, .. } => candidates[index],
+            BlindIndexStorage::Mapped(mapped) => read_u32(
+                &mapped.map,
+                mapped.candidates_offset + index * size_of::<u32>(),
+            ),
+        }
+    }
+
+    fn pattern_at(&self, index: usize) -> Pattern {
+        match &self.storage {
+            BlindIndexStorage::Built { patterns, .. } => patterns[index],
+            BlindIndexStorage::Mapped(mapped) => {
+                let mut offset = mapped.patterns_offset + index * PATTERN_RECORD_SIZE;
+                let mut points = [(0.0, 0.0); 4];
+                for point in &mut points {
+                    point.0 = read_f32(&mapped.map, offset);
+                    point.1 = read_f32(&mapped.map, offset + 4);
+                    offset += 8;
+                }
+                let center = (
+                    read_f32(&mapped.map, offset),
+                    read_f32(&mapped.map, offset + 4),
+                );
+                Pattern {
+                    points,
+                    center,
+                    max_edge_deg: read_f32(&mapped.map, offset + 8),
+                }
+            }
+        }
+    }
+
+    fn lookup(&self, key: u64) -> Range<usize> {
+        let mut left = 0;
+        let mut right = self.keys_len();
+        while left < right {
+            let middle = left + (right - left) / 2;
+            match self.key_at(middle).cmp(&key) {
+                std::cmp::Ordering::Less => left = middle + 1,
+                std::cmp::Ordering::Greater => right = middle,
+                std::cmp::Ordering::Equal => {
+                    return self.start_at(middle) as usize..self.start_at(middle + 1) as usize;
+                }
+            }
+        }
+        0..0
     }
 }
 
@@ -129,6 +248,7 @@ impl BlindIndex {
         let mut seen: FxHashSet<[u32; 4]> = FxHashSet::default();
 
         for &(radius, mag_cap) in TIERS {
+            let tier_pattern_start = patterns.len();
             let n_tier = stars.partition_point(|s| s.mag <= mag_cap);
             let tier = &stars[..n_tier];
             let tier_units = &units[..n_tier];
@@ -140,84 +260,99 @@ impl BlindIndex {
                     .push(i as u32);
             }
 
-            // Anchors are independent: generate each anchor's quads in
-            // parallel, then merge sequentially (dedup + bucket insert)
-            let anchor_quads: Vec<Vec<([u32; 4], Pattern)>> = (0..n_tier)
-                .into_par_iter()
-                .map(|i| {
-                    let star = &tier[i];
-                    let unit = tier_units[i];
-                    let mut members: Vec<u32> = Vec::new();
-                    let (cx, cy) = cell_key(star.ra, star.dec, radius);
-                    for dx in -1..=1 {
-                        for dy in -1..=1 {
-                            let Some(cell) = grid.get(&(cx + dx, cy + dy)) else {
-                                continue;
-                            };
-                            for &j in cell {
-                                if j as usize == i {
+            // Anchors are independent: generate bounded batches in parallel,
+            // then merge sequentially (dedup + bucket insert). Batching keeps
+            // deep Gaia tiers from retaining one temporary Vec per catalog
+            // star for the duration of the whole tier.
+            for anchor_start in (0..n_tier).step_by(INDEX_ANCHOR_BATCH) {
+                let anchor_end = (anchor_start + INDEX_ANCHOR_BATCH).min(n_tier);
+                let anchor_quads: Vec<Vec<([u32; 4], Pattern)>> = (anchor_start..anchor_end)
+                    .into_par_iter()
+                    .map(|i| {
+                        let star = &tier[i];
+                        let unit = tier_units[i];
+                        let mut members: Vec<u32> = Vec::new();
+                        let (cx, cy) = cell_key(star.ra, star.dec, radius);
+                        for dx in -1..=1 {
+                            for dy in -1..=1 {
+                                let Some(cell) = grid.get(&(cx + dx, cy + dy)) else {
                                     continue;
-                                }
-                                let other = tier_units[j as usize];
-                                let dot =
-                                    unit[0] * other[0] + unit[1] * other[1] + unit[2] * other[2];
-                                if dot >= cos_radius {
-                                    if (j as usize) < i {
-                                        // A brighter star owns this disc
-                                        return Vec::new();
+                                };
+                                for &j in cell {
+                                    if j as usize == i {
+                                        continue;
                                     }
-                                    members.push(j);
+                                    let other = tier_units[j as usize];
+                                    let dot = unit[0] * other[0]
+                                        + unit[1] * other[1]
+                                        + unit[2] * other[2];
+                                    if dot >= cos_radius {
+                                        if (j as usize) < i {
+                                            // A brighter star owns this disc
+                                            return Vec::new();
+                                        }
+                                        members.push(j);
+                                    }
                                 }
                             }
                         }
-                    }
-                    if members.len() < 3 {
-                        return Vec::new();
-                    }
-                    members.sort_unstable();
-                    members.truncate(5);
-                    members.push(i as u32);
-                    members.sort_unstable();
+                        if members.len() < 3 {
+                            return Vec::new();
+                        }
+                        members.sort_unstable();
+                        // The deep tiers dominate index size. Five total
+                        // members still provide five alternative quads while
+                        // avoiding the 15 combinations produced by six.
+                        members.truncate(if mag_cap > 12.7 { 4 } else { 5 });
+                        members.push(i as u32);
+                        members.sort_unstable();
 
-                    let mut quads = Vec::new();
-                    let m = members.len();
-                    for a in 0..m {
-                        for b in a + 1..m {
-                            for c in b + 1..m {
-                                for d in c + 1..m {
-                                    let ids = [members[a], members[b], members[c], members[d]];
-                                    let quad = [
-                                        (tier_units[ids[0] as usize], &tier[ids[0] as usize]),
-                                        (tier_units[ids[1] as usize], &tier[ids[1] as usize]),
-                                        (tier_units[ids[2] as usize], &tier[ids[2] as usize]),
-                                        (tier_units[ids[3] as usize], &tier[ids[3] as usize]),
-                                    ];
-                                    let Some(pattern) = catalog_pattern(&quad) else {
-                                        continue;
-                                    };
-                                    if pattern.max_edge_deg > params.max_pattern_deg {
-                                        continue;
+                        let mut quads = Vec::new();
+                        let m = members.len();
+                        for a in 0..m {
+                            for b in a + 1..m {
+                                for c in b + 1..m {
+                                    for d in c + 1..m {
+                                        let ids = [members[a], members[b], members[c], members[d]];
+                                        let quad = [
+                                            (tier_units[ids[0] as usize], &tier[ids[0] as usize]),
+                                            (tier_units[ids[1] as usize], &tier[ids[1] as usize]),
+                                            (tier_units[ids[2] as usize], &tier[ids[2] as usize]),
+                                            (tier_units[ids[3] as usize], &tier[ids[3] as usize]),
+                                        ];
+                                        let Some(pattern) = catalog_pattern(&quad) else {
+                                            continue;
+                                        };
+                                        if pattern.max_edge_deg as f64 > params.max_pattern_deg {
+                                            continue;
+                                        }
+                                        quads.push((ids, pattern));
                                     }
-                                    quads.push((ids, pattern));
                                 }
                             }
                         }
-                    }
-                    quads
-                })
-                .collect();
+                        quads
+                    })
+                    .collect();
 
-            for quads in anchor_quads {
-                for (ids, pattern) in quads {
-                    if !seen.insert(ids) {
-                        continue;
+                for quads in anchor_quads {
+                    for (ids, pattern) in quads {
+                        if !seen.insert(ids) {
+                            continue;
+                        }
+                        entries.push((
+                            descriptor_key(&descriptor(&pattern.points_f64())),
+                            patterns.len() as u32,
+                        ));
+                        patterns.push(pattern);
                     }
-                    entries.push((
-                        descriptor_key(&descriptor(&pattern.points)),
-                        patterns.len() as u32,
-                    ));
-                    patterns.push(pattern);
                 }
+            }
+            if std::env::var("SEIZA_DEBUG").is_ok() {
+                eprintln!(
+                    "blind-index-tier: radius={radius:.2} mag<={mag_cap:.1} patterns={}",
+                    patterns.len() - tier_pattern_start
+                );
             }
         }
 
@@ -235,16 +370,217 @@ impl BlindIndex {
         }
 
         Self {
-            keys,
-            starts,
-            candidates,
-            patterns,
+            index_mag_limit: params.index_mag_limit,
+            max_pattern_deg: params.max_pattern_deg as f32,
+            storage: BlindIndexStorage::Built {
+                keys,
+                starts,
+                candidates,
+                patterns,
+            },
         }
     }
 
-    pub fn pattern_count(&self) -> usize {
-        self.patterns.len()
+    /// Open a versioned blind-pattern index without copying its arrays into
+    /// memory. The file remains memory-mapped for the lifetime of the index.
+    pub fn open(path: &Path) -> Result<Self, crate::Error> {
+        let file = File::open(path).map_err(|error| invalid_index(path, error))?;
+        // SAFETY: the map is read-only and owned by the returned index. A
+        // caller replacing the file while it is mapped has the same platform
+        // constraints as the existing memory-mapped star catalog.
+        let map =
+            unsafe { MmapOptions::new().map(&file) }.map_err(|error| invalid_index(path, error))?;
+        if map.len() < INDEX_HEADER_SIZE || &map[..8] != INDEX_MAGIC {
+            return Err(invalid_index(path, "not a SEIZABI1 blind index"));
+        }
+
+        let keys_len = usize::try_from(read_u64(&map, 8))
+            .map_err(|_| invalid_index(path, "key count does not fit this platform"))?;
+        let candidates_len = usize::try_from(read_u64(&map, 16))
+            .map_err(|_| invalid_index(path, "candidate count does not fit this platform"))?;
+        let patterns_len = usize::try_from(read_u64(&map, 24))
+            .map_err(|_| invalid_index(path, "pattern count does not fit this platform"))?;
+        let index_mag_limit = read_f32(&map, 32);
+        let max_pattern_deg = read_f32(&map, 36);
+        if !index_mag_limit.is_finite() || !max_pattern_deg.is_finite() || max_pattern_deg <= 0.0 {
+            return Err(invalid_index(path, "invalid build parameters"));
+        }
+        if read_u32(&map, 40) != BINS as u32 || read_u32(&map, 44) != INDEX_TIER_SCHEMA {
+            return Err(invalid_index(path, "unsupported descriptor or tier schema"));
+        }
+        if candidates_len > u32::MAX as usize || patterns_len > u32::MAX as usize {
+            return Err(invalid_index(path, "index arrays exceed the format limits"));
+        }
+
+        let Some((keys_offset, starts_offset, candidates_offset, patterns_offset, end)) =
+            index_layout(keys_len, candidates_len, patterns_len)
+        else {
+            return Err(invalid_index(path, "index size overflows this platform"));
+        };
+        if end != map.len() {
+            return Err(invalid_index(
+                path,
+                format!("file length is {}, expected {end}", map.len()),
+            ));
+        }
+
+        let start_at =
+            |index: usize| read_u32(&map, starts_offset + index * size_of::<u32>()) as usize;
+        let mut previous = 0;
+        for index in 0..=keys_len {
+            let current = start_at(index);
+            if current < previous || current > candidates_len {
+                return Err(invalid_index(path, "candidate offsets are not monotonic"));
+            }
+            previous = current;
+        }
+        if start_at(0) != 0 || start_at(keys_len) != candidates_len {
+            return Err(invalid_index(
+                path,
+                "candidate offsets do not span the array",
+            ));
+        }
+        for index in 1..keys_len {
+            let prior = read_u64(&map, keys_offset + (index - 1) * size_of::<u64>());
+            let current = read_u64(&map, keys_offset + index * size_of::<u64>());
+            if prior >= current {
+                return Err(invalid_index(
+                    path,
+                    "descriptor keys are not strictly sorted",
+                ));
+            }
+        }
+        for index in 0..candidates_len {
+            let candidate = read_u32(&map, candidates_offset + index * size_of::<u32>()) as usize;
+            if candidate >= patterns_len {
+                return Err(invalid_index(
+                    path,
+                    "candidate refers past the pattern array",
+                ));
+            }
+        }
+
+        Ok(Self {
+            index_mag_limit,
+            max_pattern_deg,
+            storage: BlindIndexStorage::Mapped(MappedIndex {
+                map,
+                keys_offset,
+                starts_offset,
+                candidates_offset,
+                patterns_offset,
+                keys_len,
+                candidates_len,
+                patterns_len,
+            }),
+        })
     }
+
+    /// Persist the index in the little-endian `SEIZABI1` format. The
+    /// resulting file is suitable for memory-mapped reuse and CDN hosting.
+    pub fn write_to(&self, path: &Path) -> io::Result<()> {
+        let mut out = BufWriter::with_capacity(4 * 1024 * 1024, File::create(path)?);
+        let mut header = [0u8; INDEX_HEADER_SIZE];
+        header[..8].copy_from_slice(INDEX_MAGIC);
+        header[8..16].copy_from_slice(&(self.keys_len() as u64).to_le_bytes());
+        header[16..24].copy_from_slice(&(self.candidates_len() as u64).to_le_bytes());
+        header[24..32].copy_from_slice(&(self.pattern_count() as u64).to_le_bytes());
+        header[32..36].copy_from_slice(&self.index_mag_limit.to_le_bytes());
+        header[36..40].copy_from_slice(&self.max_pattern_deg.to_le_bytes());
+        header[40..44].copy_from_slice(&(BINS as u32).to_le_bytes());
+        header[44..48].copy_from_slice(&INDEX_TIER_SCHEMA.to_le_bytes());
+        out.write_all(&header)?;
+
+        let mut buffer = Vec::with_capacity(SERIALIZE_BATCH * PATTERN_RECORD_SIZE);
+        for start in (0..self.keys_len()).step_by(SERIALIZE_BATCH) {
+            buffer.clear();
+            for index in start..(start + SERIALIZE_BATCH).min(self.keys_len()) {
+                buffer.extend_from_slice(&self.key_at(index).to_le_bytes());
+            }
+            out.write_all(&buffer)?;
+        }
+        for start in (0..=self.keys_len()).step_by(SERIALIZE_BATCH) {
+            buffer.clear();
+            for index in start..(start + SERIALIZE_BATCH).min(self.keys_len() + 1) {
+                buffer.extend_from_slice(&self.start_at(index).to_le_bytes());
+            }
+            out.write_all(&buffer)?;
+        }
+        for start in (0..self.candidates_len()).step_by(SERIALIZE_BATCH) {
+            buffer.clear();
+            for index in start..(start + SERIALIZE_BATCH).min(self.candidates_len()) {
+                buffer.extend_from_slice(&self.candidate_at(index).to_le_bytes());
+            }
+            out.write_all(&buffer)?;
+        }
+        for start in (0..self.pattern_count()).step_by(SERIALIZE_BATCH) {
+            buffer.clear();
+            for index in start..(start + SERIALIZE_BATCH).min(self.pattern_count()) {
+                let pattern = self.pattern_at(index);
+                for (x, y) in pattern.points {
+                    buffer.extend_from_slice(&x.to_le_bytes());
+                    buffer.extend_from_slice(&y.to_le_bytes());
+                }
+                buffer.extend_from_slice(&pattern.center.0.to_le_bytes());
+                buffer.extend_from_slice(&pattern.center.1.to_le_bytes());
+                buffer.extend_from_slice(&pattern.max_edge_deg.to_le_bytes());
+            }
+            out.write_all(&buffer)?;
+        }
+        out.flush()
+    }
+
+    pub fn pattern_count(&self) -> usize {
+        match &self.storage {
+            BlindIndexStorage::Built { patterns, .. } => patterns.len(),
+            BlindIndexStorage::Mapped(index) => index.patterns_len,
+        }
+    }
+
+    pub fn index_mag_limit(&self) -> f32 {
+        self.index_mag_limit
+    }
+
+    pub fn max_pattern_deg(&self) -> f64 {
+        self.max_pattern_deg as f64
+    }
+}
+
+fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+}
+
+fn read_u64(bytes: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+}
+
+fn read_f32(bytes: &[u8], offset: usize) -> f32 {
+    f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+}
+
+fn index_layout(
+    keys_len: usize,
+    candidates_len: usize,
+    patterns_len: usize,
+) -> Option<(usize, usize, usize, usize, usize)> {
+    let keys_offset = INDEX_HEADER_SIZE;
+    let starts_offset = keys_offset.checked_add(keys_len.checked_mul(size_of::<u64>())?)?;
+    let candidates_offset =
+        starts_offset.checked_add(keys_len.checked_add(1)?.checked_mul(size_of::<u32>())?)?;
+    let patterns_offset =
+        candidates_offset.checked_add(candidates_len.checked_mul(size_of::<u32>())?)?;
+    let end = patterns_offset.checked_add(patterns_len.checked_mul(PATTERN_RECORD_SIZE)?)?;
+    Some((
+        keys_offset,
+        starts_offset,
+        candidates_offset,
+        patterns_offset,
+        end,
+    ))
+}
+
+fn invalid_index(path: &Path, message: impl std::fmt::Display) -> crate::Error {
+    crate::Error::Catalog(format!("invalid blind index {}: {message}", path.display()))
 }
 
 /// Solve with no position hint. `stars` must be sorted brightest-first
@@ -317,10 +653,11 @@ pub fn solve_blind(
                         for key in descriptor_keys(&desc) {
                             let candidates = index.lookup(key);
                             stat_candidates += candidates.len() as u64;
-                            for &candidate in candidates {
-                                let pattern = &index.patterns[candidate as usize];
+                            for candidate_offset in candidates {
+                                let candidate = index.candidate_at(candidate_offset);
+                                let pattern = index.pattern_at(candidate as usize);
                                 // Implied pixel scale from the size ratio
-                                let scale = pattern.max_edge_deg * 3600.0 / max_edge_px;
+                                let scale = pattern.max_edge_deg as f64 * 3600.0 / max_edge_px;
                                 if scale < params.min_scale_arcsec_px
                                     || scale > params.max_scale_arcsec_px
                                 {
@@ -330,9 +667,9 @@ pub fn solve_blind(
                                 // The canonical vertex order gives a tentative
                                 // correspondence: fit the affine and read off
                                 // a precise implied field center
-                                let Some(implied) = implied_center(
+                                let Some((implied, coarse_wcs)) = implied_wcs(
                                     &points,
-                                    pattern,
+                                    &pattern,
                                     (dimensions.0 as f64 / 2.0, dimensions.1 as f64 / 2.0),
                                     scale,
                                 ) else {
@@ -345,7 +682,9 @@ pub fn solve_blind(
                                     (implied.1 * 2.0) as i64,
                                     (scale.ln() * 10.0) as i64,
                                 );
-                                let entry = hypotheses.entry(bucket).or_insert((0, implied, scale));
+                                let entry = hypotheses
+                                    .entry(bucket)
+                                    .or_insert((0, implied, scale, coarse_wcs));
                                 entry.0 += 1;
                             }
                         }
@@ -408,17 +747,18 @@ pub fn solve_blind(
                             for key in descriptor_keys(&desc) {
                                 let candidates = index.lookup(key);
                                 stat_candidates += candidates.len() as u64;
-                                for &candidate in candidates {
-                                    let pattern = &index.patterns[candidate as usize];
-                                    let scale = pattern.max_edge_deg * 3600.0 / max_edge_px;
+                                for candidate_offset in candidates {
+                                    let candidate = index.candidate_at(candidate_offset);
+                                    let pattern = index.pattern_at(candidate as usize);
+                                    let scale = pattern.max_edge_deg as f64 * 3600.0 / max_edge_px;
                                     if scale < params.min_scale_arcsec_px
                                         || scale > params.max_scale_arcsec_px
                                     {
                                         continue;
                                     }
-                                    let Some(implied) = implied_center(
+                                    let Some((implied, coarse_wcs)) = implied_wcs(
                                         &points,
-                                        pattern,
+                                        &pattern,
                                         (width / 2.0, height / 2.0),
                                         scale,
                                     ) else {
@@ -429,8 +769,9 @@ pub fn solve_blind(
                                         (implied.1 * 2.0) as i64,
                                         (scale.ln() * 10.0) as i64,
                                     );
-                                    let entry =
-                                        hypotheses.entry(bucket).or_insert((0, implied, scale));
+                                    let entry = hypotheses
+                                        .entry(bucket)
+                                        .or_insert((0, implied, scale, coarse_wcs));
                                     entry.0 += 1;
                                 }
                             }
@@ -450,30 +791,30 @@ pub fn solve_blind(
     // Correct quads vote for the same field but their implied centers
     // straddle bucket boundaries; sum each bucket with its neighbors so
     // split votes recombine while uniform junk stays flat
-    let mut smoothed: Vec<(HypothesisKey, u32, (f64, f64), f64)> = hypotheses
+    let mut smoothed: Vec<SmoothedHypothesis> = hypotheses
         .iter()
-        .map(|(&key, &(_, implied, scale))| {
+        .map(|(&key, (_, implied, scale, coarse_wcs))| {
             let mut sum = 0;
             for dx in -1..=1i64 {
                 for dy in -1..=1i64 {
                     for dz in -1..=1i64 {
-                        if let Some(&(v, _, _)) =
+                        if let Some((v, _, _, _)) =
                             hypotheses.get(&(key.0 + dx, key.1 + dy, key.2 + dz))
                         {
-                            sum += v;
+                            sum += *v;
                         }
                     }
                 }
             }
-            (key, sum, implied, scale)
+            (key, sum, *implied, *scale, coarse_wcs.clone())
         })
         .collect();
     smoothed.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     // Non-max suppression: a strong region floods all its neighbor
     // buckets with the same summed vote; verify each region once
     let mut taken: FxHashSet<HypothesisKey> = FxHashSet::default();
-    let mut ranked: Vec<(u32, (f64, f64), f64)> = Vec::new();
-    for (key, votes, implied, scale) in smoothed {
+    let mut ranked: Vec<(u32, (f64, f64), f64, Wcs)> = Vec::new();
+    for (key, votes, implied, scale, coarse_wcs) in smoothed {
         if taken.contains(&key) {
             continue;
         }
@@ -484,18 +825,52 @@ pub fn solve_blind(
                 }
             }
         }
-        ranked.push((votes, implied, scale));
+        ranked.push((votes, implied, scale, coarse_wcs));
     }
+
+    // Deep, small-field tiers often yield only one or two matching quads;
+    // vote-only ordering buries those among whole-sky descriptor collisions.
+    // Re-rank every multi-vote region (and at least the verification budget)
+    // by cheaply projecting catalog stars through the quad's coarse WCS.
+    let score_count = ranked
+        .partition_point(|hypothesis| hypothesis.0 >= 2)
+        .max(params.max_hypotheses)
+        .min(ranked.len());
+    let detection_grid = DetectionGrid::new(
+        stars.iter().take(200),
+        (width.min(height) / 250.0).clamp(8.0, 32.0),
+    );
+    let mut ranked: Vec<RankedHypothesis> = ranked
+        .into_par_iter()
+        .take(score_count)
+        .map(|(votes, center, scale, coarse_wcs)| {
+            let matches = coarse_match_count(
+                &coarse_wcs,
+                center,
+                scale,
+                dimensions,
+                catalog,
+                &detection_grid,
+            );
+            (matches, votes, center, scale, coarse_wcs)
+        })
+        .collect();
+    ranked.par_sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+
     if let Ok(truth) = std::env::var("SEIZA_DEBUG_TRUTH") {
         let parts: Vec<f64> = truth.split(',').filter_map(|v| v.parse().ok()).collect();
         if parts.len() == 2 {
-            let near = ranked.iter().enumerate().find(|(_, h)| {
-                crate::catalog::angular_separation_deg(h.1.0, h.1.1, parts[0], parts[1]) < 1.5
+            let near = ranked.iter().enumerate().min_by(|(_, a), (_, b)| {
+                let a_sep =
+                    crate::catalog::angular_separation_deg(a.2.0, a.2.1, parts[0], parts[1]);
+                let b_sep =
+                    crate::catalog::angular_separation_deg(b.2.0, b.2.1, parts[0], parts[1]);
+                a_sep.total_cmp(&b_sep)
             });
             eprintln!(
                 "blind-debug: {} hypotheses; nearest-to-truth rank {:?}",
                 ranked.len(),
-                near.map(|(rank, h)| (rank, h.0, h.1, h.2))
+                near.map(|(rank, h)| (rank, h.0, h.1, h.2, h.3))
             );
         }
     }
@@ -509,19 +884,22 @@ pub fn solve_blind(
     // whole-sky search, chance alignments of a few stars are routine.
     let batch = rayon::current_num_threads().max(1);
     for chunk in ranked.chunks(batch) {
-        let solution = chunk.par_iter().find_map_any(|&(_votes, center, scale)| {
-            let hint = SolveHint {
-                center,
-                // The implied center is precise; a tight radius keeps
-                // each verification fast
-                radius_deg: 0.4,
-                scale_arcsec_px: scale,
-                scale_tolerance: 0.15,
-            };
-            solve(stars, catalog, &hint, dimensions).ok().filter(|s| {
-                s.matched_stars >= params.min_matches && s.rms_arcsec < params.max_rms_px * scale
-            })
-        });
+        let solution = chunk.par_iter().find_map_any(
+            |(_coarse_matches, _votes, center, scale, _coarse_wcs)| {
+                let hint = SolveHint {
+                    center: *center,
+                    // The implied center is precise; a tight radius keeps
+                    // each verification fast
+                    radius_deg: 0.4,
+                    scale_arcsec_px: *scale,
+                    scale_tolerance: 0.15,
+                };
+                solve(stars, catalog, &hint, dimensions).ok().filter(|s| {
+                    s.matched_stars >= params.min_matches
+                        && s.rms_arcsec < params.max_rms_px * *scale
+                })
+            },
+        );
         if let Some(solution) = solution {
             return Ok(solution);
         }
@@ -533,19 +911,86 @@ pub fn solve_blind(
     )))
 }
 
+struct DetectionGrid {
+    cell_size: f64,
+    cells: FxHashMap<(i32, i32), Vec<(f64, f64)>>,
+}
+
+impl DetectionGrid {
+    fn new<'a>(stars: impl Iterator<Item = &'a DetectedStar>, cell_size: f64) -> Self {
+        let mut cells: FxHashMap<(i32, i32), Vec<(f64, f64)>> = FxHashMap::default();
+        for star in stars {
+            cells
+                .entry((
+                    (star.x / cell_size).floor() as i32,
+                    (star.y / cell_size).floor() as i32,
+                ))
+                .or_default()
+                .push((star.x, star.y));
+        }
+        Self { cell_size, cells }
+    }
+
+    fn contains_near(&self, x: f64, y: f64) -> bool {
+        let cell = (
+            (x / self.cell_size).floor() as i32,
+            (y / self.cell_size).floor() as i32,
+        );
+        let tolerance_sq = self.cell_size * self.cell_size;
+        (-1..=1).any(|dx| {
+            (-1..=1).any(|dy| {
+                self.cells
+                    .get(&(cell.0 + dx, cell.1 + dy))
+                    .is_some_and(|points| {
+                        points
+                            .iter()
+                            .any(|&(px, py)| (px - x).powi(2) + (py - y).powi(2) <= tolerance_sq)
+                    })
+            })
+        })
+    }
+}
+
+/// Cheaply score a quad-derived WCS before invoking the triangle solver.
+/// Correct deep-field quads project many bright catalog stars near image
+/// detections; random descriptor collisions almost always project zero or one.
+fn coarse_match_count(
+    wcs: &Wcs,
+    center: (f64, f64),
+    scale_arcsec_px: f64,
+    dimensions: (u32, u32),
+    catalog: &(dyn StarCatalog + Sync),
+    detections: &DetectionGrid,
+) -> usize {
+    let radius_deg =
+        (dimensions.0 as f64).hypot(dimensions.1 as f64) * 0.5 * scale_arcsec_px / 3600.0 * 1.1;
+    catalog
+        .cone_search(center.0, center.1, radius_deg, 512)
+        .into_iter()
+        .filter_map(|star| wcs.world_to_pixel(star.ra, star.dec))
+        .filter(|&(x, y)| {
+            x >= 0.0
+                && y >= 0.0
+                && x < dimensions.0 as f64
+                && y < dimensions.1 as f64
+                && detections.contains_near(x, y)
+        })
+        .count()
+}
+
 /// Fit the quad correspondence and project the image center onto the sky.
 /// The canonical vertex order gives the correspondence; wrong matches are
 /// rejected by shear and scale disagreement.
-fn implied_center(
+fn implied_wcs(
     image_points: &[(f64, f64); 4],
     pattern: &Pattern,
     image_center: (f64, f64),
     scale_arcsec_px: f64,
-) -> Option<(f64, f64)> {
+) -> Option<((f64, f64), Wcs)> {
     let pairs: Vec<((f64, f64), (f64, f64))> = image_points
         .iter()
         .copied()
-        .zip(pattern.points.iter().copied())
+        .zip(pattern.points_f64())
         .collect();
     let (a, b, c, d, e, f) = crate::solve::fit_affine(&pairs)?;
     let c1 = a.hypot(d);
@@ -562,14 +1007,17 @@ fn implied_center(
         return None;
     }
 
-    let tangent = Wcs {
-        crval: pattern.center,
-        crpix: (0.0, 0.0),
-        cd: [[1.0, 0.0], [0.0, 1.0]],
+    let det = a * e - b * d;
+    if det.abs() < 1e-18 {
+        return None;
+    }
+    let wcs = Wcs {
+        crval: (pattern.center.0 as f64, pattern.center.1 as f64),
+        // cd * (pixel - crpix) is the fitted affine tangent plane.
+        crpix: ((b * f - e * c) / det, (d * c - a * f) / det),
+        cd: [[a, b], [d, e]],
     };
-    let x = a * image_center.0 + b * image_center.1 + c;
-    let y = d * image_center.0 + e * image_center.1 + f;
-    Some(tangent.pixel_to_world(x, y))
+    Some((wcs.pixel_to_world(image_center.0, image_center.1), wcs))
 }
 
 /// Sky cell for a position: declination band index plus an RA bin whose
@@ -627,12 +1075,12 @@ fn catalog_pattern(quad: &[([f64; 3], &CatalogStar)]) -> Option<Pattern> {
     }
     let (points, max_edge_deg) = canonical_quad(&points)?;
     Some(Pattern {
-        points,
+        points: points.map(|(x, y)| (x as f32, y as f32)),
         center: (
-            center[1].atan2(center[0]).to_degrees().rem_euclid(360.0),
-            center[2].asin().to_degrees(),
+            center[1].atan2(center[0]).to_degrees().rem_euclid(360.0) as f32,
+            center[2].asin().to_degrees() as f32,
         ),
-        max_edge_deg,
+        max_edge_deg: max_edge_deg as f32,
     })
 }
 
@@ -847,6 +1295,68 @@ pub(crate) mod tests {
             })
             .collect();
         assert!(solve_blind(&detected, &catalog, &index, &params, (4000, 3000)).is_err());
+    }
+
+    #[test]
+    fn blind_solves_a_deep_small_field() {
+        let mut rng = Lcg(0x5E1A_D33F);
+        let mut stars = whole_sky_catalog(&mut rng).all_brighter_than(30.0);
+        let center: (f64, f64) = (202.43, 47.20);
+        let cos_dec = center.1.to_radians().cos();
+
+        // A Gaia-like dense patch whose brightest stars are all fainter than
+        // the old G<=12.7 cutoff. The 0.33 x 0.28 degree image is also smaller
+        // than the old 0.2-degree-radius tier expects.
+        for _ in 0..600 {
+            stars.push(CatalogStar {
+                ra: center.0 + (rng.next() - 0.5) * 0.8 / cos_dec,
+                dec: center.1 + (rng.next() - 0.5) * 0.8,
+                mag: 12.8 + rng.next() as f32 * 3.2,
+            });
+        }
+        let catalog = MemoryCatalog::new(stars);
+        let dims = (1200, 1000);
+        let truth = Wcs::from_center_scale_rotation(
+            center,
+            (dims.0 as f64 / 2.0, dims.1 as f64 / 2.0),
+            1.0,
+            17.0,
+            false,
+        );
+        let detected = detections_for(&truth, &catalog, dims, &mut rng);
+        assert!(
+            detected.len() > 40,
+            "test scene too sparse: {}",
+            detected.len()
+        );
+
+        let params = BlindParams {
+            min_scale_arcsec_px: 0.5,
+            max_scale_arcsec_px: 2.0,
+            index_mag_limit: 16.0,
+            ..Default::default()
+        };
+        let built = BlindIndex::build(&catalog, &params);
+        let dir = std::env::temp_dir().join(format!(
+            "seiza-blind-index-{}-{}",
+            std::process::id(),
+            rng.0
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("blind-gaia16.idx");
+        built.write_to(&path).unwrap();
+        let index = BlindIndex::open(&path).unwrap();
+        assert_eq!(index.pattern_count(), built.pattern_count());
+        assert_eq!(index.index_mag_limit(), 16.0);
+        assert_eq!(index.max_pattern_deg(), params.max_pattern_deg);
+        let solution = solve_blind(&detected, &catalog, &index, &params, dims).unwrap();
+        let (ra, dec) = solution
+            .wcs
+            .pixel_to_world(dims.0 as f64 / 2.0, dims.1 as f64 / 2.0);
+        let separation = crate::catalog::angular_separation_deg(ra, dec, center.0, center.1);
+        assert!(separation < 0.01, "center off by {separation} degrees");
+        assert!((solution.wcs.scale_arcsec_per_px() - 1.0).abs() < 0.05);
+        std::fs::remove_dir_all(dir).ok();
     }
 }
 
