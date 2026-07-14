@@ -34,6 +34,12 @@ pub struct BlindParams {
     pub max_pattern_deg: f64,
     /// How many hypotheses to verify before giving up
     pub max_hypotheses: usize,
+    /// How many hypotheses to score with the coarse catalog projection
+    /// before verification, at least `max_hypotheses`. Smoothed multi-vote
+    /// regions are cheap to produce across a whole-sky search, so an image
+    /// that will never solve pays to score every one of them — this caps
+    /// that worst case.
+    pub max_coarse_hypotheses: usize,
     /// Minimum matched stars to accept a blind verification — chance
     /// alignments of a handful of stars are common across a whole-sky
     /// search, so this must be stricter than the hinted solver's floor
@@ -51,6 +57,7 @@ impl Default for BlindParams {
             index_mag_limit: 12.7,
             max_pattern_deg: 6.0,
             max_hypotheses: 400,
+            max_coarse_hypotheses: 20_000,
             min_matches: 12,
             max_rms_px: 2.0,
         }
@@ -61,6 +68,12 @@ impl Default for BlindParams {
 /// magnitude cap that keeps a typical disc at ~15-20 stars. Patterns are
 /// anchored at stars that are the brightest within their disc; a field
 /// that fully contains a disc sees the identical star set the index saw.
+///
+/// These tiers are part of the serialized index contract: any change to
+/// this table, `BINS`, `descriptor`, `canonical_quad`, or the per-tier
+/// disc-member truncation rule in `BlindIndex::build` changes which
+/// patterns exist or how they hash, and MUST bump `INDEX_TIER_SCHEMA` or
+/// every previously hosted `.idx` silently stops matching images.
 const TIERS: &[(f64, f32)] = &[
     (6.0, 6.1),
     (3.0, 7.6),
@@ -121,6 +134,10 @@ type RankedHypothesis = (usize, u32, (f64, f64), f64, Wcs);
 pub struct BlindIndex {
     index_mag_limit: f32,
     max_pattern_deg: f32,
+    /// Star count of the catalog the index was built from; 0 when unknown
+    /// (indexes written before the field existed). Purely diagnostic — a
+    /// mismatched runtime catalog still fails safe (nothing verifies).
+    source_star_count: u64,
     storage: BlindIndexStorage,
 }
 
@@ -372,6 +389,7 @@ impl BlindIndex {
         Self {
             index_mag_limit: params.index_mag_limit,
             max_pattern_deg: params.max_pattern_deg as f32,
+            source_star_count: catalog.star_count(),
             storage: BlindIndexStorage::Built {
                 keys,
                 starts,
@@ -402,6 +420,8 @@ impl BlindIndex {
             .map_err(|_| invalid_index(path, "pattern count does not fit this platform"))?;
         let index_mag_limit = read_f32(&map, 32);
         let max_pattern_deg = read_f32(&map, 36);
+        // Zero in indexes written before provenance was recorded
+        let source_star_count = read_u64(&map, 48);
         if !index_mag_limit.is_finite() || !max_pattern_deg.is_finite() || max_pattern_deg <= 0.0 {
             return Err(invalid_index(path, "invalid build parameters"));
         }
@@ -463,6 +483,7 @@ impl BlindIndex {
         Ok(Self {
             index_mag_limit,
             max_pattern_deg,
+            source_star_count,
             storage: BlindIndexStorage::Mapped(MappedIndex {
                 map,
                 keys_offset,
@@ -489,6 +510,7 @@ impl BlindIndex {
         header[36..40].copy_from_slice(&self.max_pattern_deg.to_le_bytes());
         header[40..44].copy_from_slice(&(BINS as u32).to_le_bytes());
         header[44..48].copy_from_slice(&INDEX_TIER_SCHEMA.to_le_bytes());
+        header[48..56].copy_from_slice(&self.source_star_count.to_le_bytes());
         out.write_all(&header)?;
 
         let mut buffer = Vec::with_capacity(SERIALIZE_BATCH * PATTERN_RECORD_SIZE);
@@ -543,6 +565,13 @@ impl BlindIndex {
 
     pub fn max_pattern_deg(&self) -> f64 {
         self.max_pattern_deg as f64
+    }
+
+    /// Star count of the catalog this index was built from, 0 if unknown.
+    /// Callers can compare against the runtime catalog to flag a likely
+    /// index/catalog mismatch before paying for a doomed solve.
+    pub fn source_star_count(&self) -> u64 {
+        self.source_star_count
     }
 }
 
@@ -835,6 +864,7 @@ pub fn solve_blind(
     let score_count = ranked
         .partition_point(|hypothesis| hypothesis.0 >= 2)
         .max(params.max_hypotheses)
+        .min(params.max_coarse_hypotheses.max(params.max_hypotheses))
         .min(ranked.len());
     let detection_grid = DetectionGrid::new(
         stars.iter().take(200),
@@ -886,11 +916,15 @@ pub fn solve_blind(
     for chunk in ranked.chunks(batch) {
         let solution = chunk.par_iter().find_map_any(
             |(_coarse_matches, _votes, center, scale, _coarse_wcs)| {
+                // The implied center is precise and its error scales with
+                // the field, so the search radius does too: a fixed radius
+                // makes fine-scale verification cover dozens of FOV-sized
+                // triangle windows, and a whole-sky search verifies
+                // hundreds of fine-scale junk hypotheses per image
+                let fov_radius_deg = (width.hypot(height) / 2.0) * *scale / 3600.0;
                 let hint = SolveHint {
                     center: *center,
-                    // The implied center is precise; a tight radius keeps
-                    // each verification fast
-                    radius_deg: 0.4,
+                    radius_deg: (fov_radius_deg * 0.25).clamp(0.02, 0.4),
                     scale_arcsec_px: *scale,
                     scale_tolerance: 0.15,
                 };
@@ -1349,6 +1383,8 @@ pub(crate) mod tests {
         assert_eq!(index.pattern_count(), built.pattern_count());
         assert_eq!(index.index_mag_limit(), 16.0);
         assert_eq!(index.max_pattern_deg(), params.max_pattern_deg);
+        assert_eq!(index.source_star_count(), catalog.star_count());
+        assert!(index.source_star_count() > 0);
         let solution = solve_blind(&detected, &catalog, &index, &params, dims).unwrap();
         let (ra, dec) = solution
             .wcs

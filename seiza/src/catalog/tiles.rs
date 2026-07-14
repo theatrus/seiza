@@ -350,13 +350,6 @@ impl TileCatalog {
 
     /// Visit every star in a tile. Decoding runs over contiguous columns in
     /// the mapped file for the v2 layout.
-    fn for_each_in_tile(&self, tile: u32, mut visit: impl FnMut(CatalogStar)) {
-        self.for_each_in_tile_while(tile, |star| {
-            visit(star);
-            true
-        });
-    }
-
     /// Visit stars in a tile until the callback returns false. Records are
     /// brightest-first, enabling early exit at a magnitude limit.
     fn for_each_in_tile_while(&self, tile: u32, mut visit: impl FnMut(CatalogStar) -> bool) {
@@ -406,6 +399,10 @@ impl TileCatalog {
 }
 
 impl StarCatalog for TileCatalog {
+    fn star_count(&self) -> u64 {
+        self.star_count()
+    }
+
     fn all_brighter_than(&self, mag_limit: f32) -> Vec<CatalogStar> {
         // Tiles store brightest-first: stop at the first fainter record
         let mut found = Vec::new();
@@ -423,16 +420,46 @@ impl StarCatalog for TileCatalog {
     }
 
     fn cone_search(&self, ra: f64, dec: f64, radius_deg: f64, limit: usize) -> Vec<CatalogStar> {
-        let mut found = Vec::new();
+        // Keep the brightest `limit` with a bounded max-heap. Tiles store
+        // brightest-first, so once the heap is full each tile's scan stops
+        // at the first record fainter than the faintest kept star — on a
+        // deep catalog a wide cone would otherwise collect (and sort)
+        // millions of faint stars just to keep a few hundred.
+        struct ByMag(CatalogStar);
+        impl PartialEq for ByMag {
+            fn eq(&self, other: &Self) -> bool {
+                self.0.mag.total_cmp(&other.0.mag).is_eq()
+            }
+        }
+        impl Eq for ByMag {}
+        impl PartialOrd for ByMag {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+        impl Ord for ByMag {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                self.0.mag.total_cmp(&other.0.mag)
+            }
+        }
+        let mut heap: std::collections::BinaryHeap<ByMag> =
+            std::collections::BinaryHeap::with_capacity(limit.min(8192) + 1);
         for tile in self.grid.cone_tiles(ra, dec, radius_deg) {
-            self.for_each_in_tile(tile, |star| {
-                if angular_separation_deg(ra, dec, star.ra, star.dec) <= radius_deg {
-                    found.push(star);
+            self.for_each_in_tile_while(tile, |star| {
+                if heap.len() == limit && star.mag.total_cmp(&heap.peek().unwrap().0.mag).is_ge() {
+                    return false;
                 }
+                if angular_separation_deg(ra, dec, star.ra, star.dec) <= radius_deg {
+                    heap.push(ByMag(star));
+                    if heap.len() > limit {
+                        heap.pop();
+                    }
+                }
+                true
             });
         }
+        let mut found: Vec<CatalogStar> = heap.into_iter().map(|s| s.0).collect();
         found.sort_by(|a, b| a.mag.total_cmp(&b.mag));
-        found.truncate(limit);
         found
     }
 }

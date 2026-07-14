@@ -154,14 +154,6 @@ fn solve(args: &AstapArgs, image_path: &Path) -> Result<Vec<String>> {
             let mut params = seiza::blind::BlindParams {
                 min_scale_arcsec_px: min_scale,
                 max_scale_arcsec_px: max_scale,
-                // The hosted deep catalog contains enough stars for the
-                // G<=16 small-field tier; retain the fast bright index for
-                // Gaia G<=15, Tycho-2, and custom shallow catalogs.
-                index_mag_limit: if catalog.star_count() > 50_000_000 {
-                    16.0
-                } else {
-                    12.7
-                },
                 ..Default::default()
             };
             let index = if let Some(path) = resolve_blind_index() {
@@ -170,8 +162,21 @@ fn solve(args: &AstapArgs, image_path: &Path) -> Result<Vec<String>> {
                     .with_context(|| format!("cannot open blind index {}", path.display()))?;
                 params.index_mag_limit = index.index_mag_limit();
                 params.max_pattern_deg = index.max_pattern_deg();
+                let built_from = index.source_star_count();
+                let runtime = catalog.star_count();
+                if built_from > 0 && built_from.max(runtime) > 2 * built_from.min(runtime) {
+                    eprintln!(
+                        "warning: blind index built from {built_from} stars, catalog has \
+                         {runtime}; deep-tier hypotheses may never verify"
+                    );
+                }
                 index
             } else {
+                // Without a prebuilt index only the default bright tiers
+                // (G<=12.7) build at startup: a deep whole-sky index over a
+                // 154M-star catalog takes minutes and gigabytes, which
+                // inside an imaging loop reads as a hang. Small fine-scale
+                // fields need the hosted index (see resolve_blind_index).
                 seiza::blind::BlindIndex::build(&catalog, &params)
             };
             seiza::blind::solve_blind(&stars, &catalog, &index, &params, dims)
@@ -232,12 +237,10 @@ fn resolve_star_data() -> Result<PathBuf> {
         let config = dir.join("seiza.toml");
         if let Ok(content) = std::fs::read_to_string(&config) {
             for line in content.lines() {
-                if let Some(value) = line.trim().strip_prefix("star_data") {
-                    let value = value
-                        .trim_start_matches([' ', '='])
-                        .trim()
-                        .trim_matches('"');
-                    let path = PathBuf::from(value);
+                if let Some((key, value)) = line.split_once('=')
+                    && key.trim() == "star_data"
+                {
+                    let path = PathBuf::from(value.trim().trim_matches('"'));
                     if path.exists() {
                         return Ok(path);
                     }
@@ -298,12 +301,10 @@ fn resolve_blind_index() -> Option<PathBuf> {
         let config = dir.join("seiza.toml");
         if let Ok(content) = std::fs::read_to_string(&config) {
             for line in content.lines() {
-                if let Some(value) = line.trim().strip_prefix("blind_index") {
-                    let value = value
-                        .trim_start_matches([' ', '='])
-                        .trim()
-                        .trim_matches('"');
-                    let path = PathBuf::from(value);
+                if let Some((key, value)) = line.split_once('=')
+                    && key.trim() == "blind_index"
+                {
+                    let path = PathBuf::from(value.trim().trim_matches('"'));
                     if path.exists() {
                         return Some(path);
                     }

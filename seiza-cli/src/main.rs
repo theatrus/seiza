@@ -152,6 +152,13 @@ enum Command {
         /// Use 16 with the deep Gaia catalog for small, fine-scale fields.
         #[arg(long, default_value_t = 12.7)]
         index_mag_limit: f32,
+        /// Field hypotheses to verify before giving up
+        #[arg(long, default_value_t = 400)]
+        max_hypotheses: usize,
+        /// Field hypotheses to pre-rank by coarse catalog projection;
+        /// bounds the cost of an image that never solves
+        #[arg(long, default_value_t = 20_000)]
+        max_coarse_hypotheses: usize,
         /// Detection threshold in noise sigmas
         #[arg(long, default_value_t = 4.0)]
         sigma: f32,
@@ -458,6 +465,8 @@ fn main() -> Result<()> {
             min_scale,
             max_scale,
             index_mag_limit,
+            max_hypotheses,
+            max_coarse_hypotheses,
             sigma,
             ignore_border,
         } => solve_blind_command(
@@ -468,6 +477,8 @@ fn main() -> Result<()> {
                 min_scale,
                 max_scale,
                 index_mag_limit,
+                max_hypotheses,
+                max_coarse_hypotheses,
                 sigma,
                 ignore_border,
             },
@@ -873,6 +884,8 @@ struct SolveBlindOptions<'a> {
     min_scale: f64,
     max_scale: f64,
     index_mag_limit: f32,
+    max_hypotheses: usize,
+    max_coarse_hypotheses: usize,
     sigma: f32,
     ignore_border: u32,
 }
@@ -906,6 +919,8 @@ fn solve_blind_command(
         min_scale_arcsec_px: options.min_scale,
         max_scale_arcsec_px: options.max_scale,
         index_mag_limit: options.index_mag_limit,
+        max_hypotheses: options.max_hypotheses,
+        max_coarse_hypotheses: options.max_coarse_hypotheses,
         ..Default::default()
     };
     let started = std::time::Instant::now();
@@ -915,6 +930,7 @@ fn solve_blind_command(
             .with_context(|| format!("failed to open {}", path.display()))?;
         params.index_mag_limit = index.index_mag_limit();
         params.max_pattern_deg = index.max_pattern_deg();
+        warn_on_index_catalog_mismatch(&index, &catalog);
         println!(
             "pattern index: {} patterns mapped from {} in {:.2}s (G<={:.1})",
             index.pattern_count(),
@@ -950,6 +966,23 @@ fn solve_blind_command(
         solution.matched_stars, solution.rms_arcsec
     );
     Ok(())
+}
+
+/// A blind index only produces hypotheses its build catalog supports; a
+/// much shallower runtime catalog cannot verify the deep tiers and every
+/// solve pays the full failure path with no diagnostic.
+fn warn_on_index_catalog_mismatch(
+    index: &seiza::blind::BlindIndex,
+    catalog: &seiza::catalog::TileCatalog,
+) {
+    let built_from = index.source_star_count();
+    let runtime = catalog.star_count();
+    if built_from > 0 && runtime > 0 && built_from.max(runtime) > 2 * built_from.min(runtime) {
+        eprintln!(
+            "warning: blind index was built from a {built_from}-star catalog but solving \
+             against {runtime} stars; deep-tier hypotheses may never verify"
+        );
+    }
 }
 
 fn build_blind_index_command(

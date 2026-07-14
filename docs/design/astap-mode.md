@@ -125,8 +125,11 @@ for wide fields.
 
 The optional blind index is resolved independently in the same locations,
 using `SEIZA_BLIND_INDEX`, `blind_index = ...` in `seiza.toml`, or the
-well-known filename `blind-gaia16.idx`. It is memory-mapped and reused as-is;
-if it is absent, ASTAP mode retains the slower runtime-build fallback.
+well-known filename `blind-gaia16.idx`. It is memory-mapped and reused as-is.
+If it is absent, the runtime-build fallback covers only the bright
+(G≤12.7) tiers regardless of catalog depth — building the deep tiers over
+a 154M-star catalog takes minutes and gigabytes, which inside an imaging
+loop reads as a hang. Small fine-scale fields need the prebuilt index.
 
 ## Mode detection
 
