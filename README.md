@@ -23,6 +23,33 @@ seiza catalog star --data data/stars-lite-tycho2.ids.bin "TYC 5949-2777-1" --for
 seiza catalog star --data data/stars-lite-tycho2.ids.bin "RR Lyr"
 ```
 
+Applications that perform repeated solves can keep the catalog and blind
+index open through the versioned JSON-RPC worker protocol:
+
+```text
+seiza worker --data data/stars-deep-gaia17.bin --index data/blind-gaia16.idx
+```
+
+The worker reads one JSON request per stdin line, writes one response per
+stdout line, accepts FITS and normal raster image paths, and exits cleanly at
+EOF. See [the worker protocol](docs/design/worker-protocol.md).
+
+The same worker contract can submit to the existing
+[`seiza-server`](https://github.com/theatrus/seiza-server). The local worker
+opens and stretches the FITS file, then uploads a lossless 8-bit grayscale PNG
+through the server's native queued API instead of sending the original FITS:
+
+```text
+seiza worker --server http://solver-host:8080
+```
+
+Pass `--server-token` or set `SEIZA_SERVER_TOKEN` when the server requires an
+API key. Compact PNG upload is the default; `--server-upload fits` preserves
+and streams the original FITS payload when its headers or full bit depth are
+desired. Remote solves time out after five minutes by default; use
+`--server-timeout SECONDS` to change that deadline.
+Local and remote operation use the same JSON-RPC contract.
+
 ## Performance
 
 Seiza is built to solve inside an imaging loop. On our Windows 11 test machine

@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 mod astap;
 mod build_data;
+mod worker;
 
 fn is_fits_path(path: &std::path::Path) -> bool {
     path.extension()
@@ -71,6 +72,24 @@ impl LoadedImage {
                     rgb.extend_from_slice(&[value; 3]);
                 }
                 image::RgbImage::from_raw(*width, *height, rgb)
+                    .expect("FITS luma dimensions were validated when loaded")
+            }
+        }
+    }
+
+    fn to_luma8(&self) -> image::GrayImage {
+        match self {
+            Self::Dynamic(image) => image.to_luma8(),
+            Self::FitsF32 {
+                luma,
+                width,
+                height,
+            } => {
+                let luma = luma
+                    .iter()
+                    .map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u8)
+                    .collect();
+                image::GrayImage::from_raw(*width, *height, luma)
                     .expect("FITS luma dimensions were validated when loaded")
             }
         }
@@ -400,6 +419,32 @@ enum Command {
         /// Ignore detections within this many pixels of the image edges
         #[arg(long, default_value_t = 0)]
         ignore_border: u32,
+    },
+    /// Serve versioned JSON-RPC plate-solve requests over stdin/stdout
+    Worker {
+        /// Star tile file kept open for the lifetime of the worker
+        #[arg(long, required_unless_present = "server", conflicts_with = "server")]
+        data: Option<PathBuf>,
+        /// Optional prebuilt blind pattern index kept open by the worker
+        #[arg(long, requires = "data", conflicts_with = "server")]
+        index: Option<PathBuf>,
+        /// Remote seiza-server base URL; local images are converted according to --server-upload
+        #[arg(long)]
+        server: Option<String>,
+        /// Remote bearer token; defaults to SEIZA_SERVER_TOKEN when set
+        #[arg(long, requires = "server")]
+        server_token: Option<String>,
+        /// Remote upload representation (PNG is usually smaller and lossless for star detection)
+        #[arg(long, value_enum, requires = "server")]
+        server_upload: Option<worker::ServerUploadFormat>,
+        /// Maximum remote upload, queue, and solve time in seconds (default: 300)
+        #[arg(
+            long,
+            value_name = "SECONDS",
+            requires = "server",
+            value_parser = clap::value_parser!(u64).range(1..)
+        )]
+        server_timeout: Option<u64>,
     },
     /// Inspect a FITS file: headers, statistics, optional stretched PNG
     FitsInfo {
@@ -894,6 +939,27 @@ fn main() -> Result<()> {
                 detection_fallback_hypotheses,
             },
         ),
+        Command::Worker {
+            data,
+            index,
+            server,
+            server_token,
+            server_upload,
+            server_timeout,
+        } => {
+            let server_token = server_token.or_else(|| std::env::var("SEIZA_SERVER_TOKEN").ok());
+            worker::run(worker::WorkerOptions {
+                data_path: data.as_deref(),
+                index_path: index.as_deref(),
+                server: server.as_deref(),
+                server_token: server_token.as_deref(),
+                server_upload: server_upload.unwrap_or(worker::ServerUploadFormat::Png),
+                server_timeout: std::time::Duration::from_secs(server_timeout.unwrap_or(300)),
+                detection_backend,
+                detection_fallback,
+                detection_fallback_hypotheses,
+            })
+        }
         Command::FitsInfo { image, stretch } => fits_info(&image, stretch.as_deref()),
         Command::Cone {
             data,
