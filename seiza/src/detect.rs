@@ -16,8 +16,23 @@ pub struct DetectedStar {
     pub area: u32,
 }
 
+/// Numeric representation used by the star detector.
+///
+/// `Auto` keeps 8-bit inputs compact and preserves higher-precision inputs by
+/// using the f32 path. The forced modes are useful for reproducible A/B tests
+/// and callers that need the previous f32 behavior for an 8-bit image.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum DetectBackend {
+    #[default]
+    Auto,
+    U8,
+    F32,
+}
+
 #[derive(Debug, Clone)]
 pub struct DetectConfig {
+    /// Numeric representation used for background estimation and thresholding.
+    pub backend: DetectBackend,
     /// Background/noise estimation tile size in pixels
     pub tile_size: u32,
     /// Detection threshold in noise sigmas above background
@@ -39,6 +54,7 @@ pub struct DetectConfig {
 impl Default for DetectConfig {
     fn default() -> Self {
         Self {
+            backend: DetectBackend::Auto,
             tile_size: 64,
             sigma: 4.0,
             min_area: 3,
@@ -53,8 +69,8 @@ impl Default for DetectConfig {
     }
 }
 
-/// Detect stars in an image. Native 8-bit grayscale stays in its compact
-/// representation; other formats are converted to f32 luma internally.
+/// Detect stars in an image. In [`DetectBackend::Auto`], all 8-bit image
+/// variants use compact u8 luma while higher-precision formats use f32 luma.
 /// Callers with large images may downsample first for speed (centroids are in
 /// the coordinates of the image as passed).
 pub fn detect_stars(image: &image::DynamicImage, config: &DetectConfig) -> Vec<DetectedStar> {
@@ -62,17 +78,58 @@ pub fn detect_stars(image: &image::DynamicImage, config: &DetectConfig) -> Vec<D
     if width == 0 || height == 0 {
         return Vec::new();
     }
-    if let image::DynamicImage::ImageLuma8(luma) = image {
-        return detect_stars_luma8(luma.as_raw(), width, height, config);
+
+    match config.backend {
+        DetectBackend::Auto if is_8_bit(image) => detect_stars_u8(image, width, height, config),
+        DetectBackend::Auto | DetectBackend::F32 => detect_stars_f32(image, width, height, config),
+        DetectBackend::U8 => detect_stars_u8(image, width, height, config),
     }
+}
+
+fn is_8_bit(image: &image::DynamicImage) -> bool {
+    matches!(
+        image,
+        image::DynamicImage::ImageLuma8(_)
+            | image::DynamicImage::ImageLumaA8(_)
+            | image::DynamicImage::ImageRgb8(_)
+            | image::DynamicImage::ImageRgba8(_)
+    )
+}
+
+fn detect_stars_f32(
+    image: &image::DynamicImage,
+    width: u32,
+    height: u32,
+    config: &DetectConfig,
+) -> Vec<DetectedStar> {
     let luma = image.to_luma32f();
-    let pixels = luma.as_raw();
+    detect_stars_luma(luma.as_raw(), width, height, config)
+}
 
-    let (background, noise) = estimate_background(pixels, width, height, config.tile_size);
+fn detect_stars_u8(
+    image: &image::DynamicImage,
+    width: u32,
+    height: u32,
+    config: &DetectConfig,
+) -> Vec<DetectedStar> {
+    if let image::DynamicImage::ImageLuma8(luma) = image {
+        return detect_stars_luma(luma.as_raw(), width, height, config);
+    }
+    let luma = image.to_luma8();
+    detect_stars_luma(luma.as_raw(), width, height, config)
+}
 
-    // Background-subtracted, thresholded excess, computed once (the flood
-    // fill below revisits pixels up to nine times)
-    let excess = threshold_excess(
+/// Shared, statically-dispatched detector pipeline. Each sample type can use
+/// its own optimized background and threshold implementation while component
+/// extraction remains monomorphized over the same representation.
+fn detect_stars_luma<T: DetectionSample>(
+    pixels: &[T],
+    width: u32,
+    height: u32,
+    config: &DetectConfig,
+) -> Vec<DetectedStar> {
+    let (background, noise) = T::estimate_background(pixels, width, height, config.tile_size);
+    let excess = T::threshold_excess(
         pixels,
         width,
         height,
@@ -84,33 +141,54 @@ pub fn detect_stars(image: &image::DynamicImage, config: &DetectConfig) -> Vec<D
     extract_stars(&excess, width, height, config)
 }
 
-/// Detect directly from stretched 8-bit grayscale without materializing a
-/// full f32 image and f32 threshold buffer. Differences are normalized back
-/// to the public detector's existing 0-1 flux scale during component fitting.
-fn detect_stars_luma8(
-    pixels: &[u8],
-    width: u32,
-    height: u32,
-    config: &DetectConfig,
-) -> Vec<DetectedStar> {
-    let (background, noise) = estimate_background_u8(pixels, width, height, config.tile_size);
-    let excess = threshold_excess_u8(
-        pixels,
-        width,
-        config.tile_size,
-        &background,
-        &noise,
-        config.sigma,
-    );
-    extract_stars(&excess, width, height, config)
-}
+trait DetectionSample: Copy {
+    type Background: Copy + Send + Sync;
 
-trait ExcessValue: Copy {
+    fn estimate_background(
+        pixels: &[Self],
+        width: u32,
+        height: u32,
+        tile_size: u32,
+    ) -> (Vec<Self::Background>, Vec<f32>);
+
+    fn threshold_excess(
+        pixels: &[Self],
+        width: u32,
+        height: u32,
+        tile_size: u32,
+        background: &[Self::Background],
+        noise: &[f32],
+        sigma: f32,
+    ) -> Vec<Self>;
+
     fn is_positive(self) -> bool;
     fn normalized(self) -> f32;
 }
 
-impl ExcessValue for f32 {
+impl DetectionSample for f32 {
+    type Background = f32;
+
+    fn estimate_background(
+        pixels: &[Self],
+        width: u32,
+        height: u32,
+        tile_size: u32,
+    ) -> (Vec<Self::Background>, Vec<f32>) {
+        estimate_background(pixels, width, height, tile_size)
+    }
+
+    fn threshold_excess(
+        pixels: &[Self],
+        width: u32,
+        height: u32,
+        tile_size: u32,
+        background: &[Self::Background],
+        noise: &[f32],
+        sigma: f32,
+    ) -> Vec<Self> {
+        threshold_excess(pixels, width, height, tile_size, background, noise, sigma)
+    }
+
     fn is_positive(self) -> bool {
         self > 0.0
     }
@@ -120,7 +198,30 @@ impl ExcessValue for f32 {
     }
 }
 
-impl ExcessValue for u8 {
+impl DetectionSample for u8 {
+    type Background = u8;
+
+    fn estimate_background(
+        pixels: &[Self],
+        width: u32,
+        height: u32,
+        tile_size: u32,
+    ) -> (Vec<Self::Background>, Vec<f32>) {
+        estimate_background_u8(pixels, width, height, tile_size)
+    }
+
+    fn threshold_excess(
+        pixels: &[Self],
+        width: u32,
+        _height: u32,
+        tile_size: u32,
+        background: &[Self::Background],
+        noise: &[f32],
+        sigma: f32,
+    ) -> Vec<Self> {
+        threshold_excess_u8(pixels, width, tile_size, background, noise, sigma)
+    }
+
     fn is_positive(self) -> bool {
         self != 0
     }
@@ -130,7 +231,7 @@ impl ExcessValue for u8 {
     }
 }
 
-fn extract_stars<T: ExcessValue>(
+fn extract_stars<T: DetectionSample>(
     excess: &[T],
     width: u32,
     height: u32,
@@ -413,7 +514,7 @@ fn median_in_place(values: &mut [f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{DynamicImage, ImageBuffer, Luma};
+    use image::{DynamicImage, ImageBuffer, Luma, Rgb};
 
     /// Deterministic synthetic star field: Gaussian spots + mild noise
     fn synthetic_field(width: u32, height: u32, stars: &[(f64, f64, f32)]) -> DynamicImage {
@@ -471,23 +572,16 @@ mod tests {
         ];
         let luma = synthetic_field(256, 192, &truth).to_luma8();
         let image = DynamicImage::ImageLuma8(luma);
-        let config = DetectConfig::default();
-        let actual = detect_stars(&image, &config);
-
-        let reference_luma = image.to_luma32f();
-        let (width, height) = reference_luma.dimensions();
-        let (background, noise) =
-            estimate_background(reference_luma.as_raw(), width, height, config.tile_size);
-        let excess = threshold_excess(
-            reference_luma.as_raw(),
-            width,
-            height,
-            config.tile_size,
-            &background,
-            &noise,
-            config.sigma,
-        );
-        let expected = extract_stars(&excess, width, height, &config);
+        let u8_config = DetectConfig {
+            backend: DetectBackend::U8,
+            ..Default::default()
+        };
+        let f32_config = DetectConfig {
+            backend: DetectBackend::F32,
+            ..Default::default()
+        };
+        let actual = detect_stars(&image, &u8_config);
+        let expected = detect_stars(&image, &f32_config);
 
         assert_eq!(actual.len(), expected.len());
         for (actual, expected) in actual.iter().zip(&expected) {
@@ -497,6 +591,81 @@ mod tests {
             assert!((actual.flux - expected.flux).abs() < 1e-6);
             assert!((actual.peak - expected.peak).abs() < 1e-6);
         }
+    }
+
+    /// A signal that is real in 16-bit/f32 luma but rounds into the same u8
+    /// bucket as its background. This makes it impossible for a test to pass
+    /// by accidentally routing both forced backends through one code path.
+    fn sub_u8_contrast_field() -> DynamicImage {
+        let buffer = ImageBuffer::from_fn(64, 64, |x, y| {
+            let value: u16 = if (30..33).contains(&x) && (30..33).contains(&y) {
+                32_868
+            } else {
+                32_768
+            };
+            Luma([value])
+        });
+        DynamicImage::ImageLuma16(buffer)
+    }
+
+    #[test]
+    fn forced_backends_execute_distinct_numeric_paths() {
+        let image = sub_u8_contrast_field();
+        let f32_stars = detect_stars(
+            &image,
+            &DetectConfig {
+                backend: DetectBackend::F32,
+                ..Default::default()
+            },
+        );
+        let u8_stars = detect_stars(
+            &image,
+            &DetectConfig {
+                backend: DetectBackend::U8,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(f32_stars.len(), 1, "f32 must retain sub-u8 contrast");
+        assert!(u8_stars.is_empty(), "u8 must quantize the contrast away");
+    }
+
+    #[test]
+    fn auto_uses_f32_backend_for_high_precision_input() {
+        let image = sub_u8_contrast_field();
+        let auto = detect_stars(&image, &DetectConfig::default());
+        let forced = detect_stars(
+            &image,
+            &DetectConfig {
+                backend: DetectBackend::F32,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(auto, forced);
+        assert_eq!(auto.len(), 1);
+    }
+
+    #[test]
+    fn auto_uses_u8_backend_for_rgb8() {
+        let truth = vec![(40.3, 55.7, 0.9), (170.5, 35.2, 0.6)];
+        let luma = synthetic_field(224, 128, &truth).to_luma8();
+        let rgb = ImageBuffer::from_fn(luma.width(), luma.height(), |x, y| {
+            let value = luma.get_pixel(x, y).0[0];
+            Rgb([value, value, value])
+        });
+        let image = DynamicImage::ImageRgb8(rgb);
+        let auto = detect_stars(&image, &DetectConfig::default());
+        let forced = detect_stars(
+            &image,
+            &DetectConfig {
+                backend: DetectBackend::U8,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(auto, forced);
+        assert_eq!(auto.len(), truth.len());
     }
 
     #[test]

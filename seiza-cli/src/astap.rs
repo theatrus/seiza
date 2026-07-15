@@ -25,6 +25,8 @@ struct AstapArgs {
     max_stars: Option<usize>,
     /// `-o`: output base path override (ASTAP extension some tools use)
     output: Option<PathBuf>,
+    /// Seiza extension: detector numeric representation.
+    detection_backend: seiza::DetectBackend,
 }
 
 /// True when the raw command line looks like an ASTAP invocation
@@ -83,6 +85,13 @@ fn parse_args(raw: &[String]) -> AstapArgs {
             "-ra" => args.ra_hours = value(&mut iter).and_then(|v| v.parse().ok()),
             "-spd" => args.spd_deg = value(&mut iter).and_then(|v| v.parse().ok()),
             "-s" => args.max_stars = value(&mut iter).and_then(|v| v.parse().ok()),
+            "--detection-backend" => {
+                args.detection_backend = match value(&mut iter).as_deref() {
+                    Some("u8") => seiza::DetectBackend::U8,
+                    Some("f32") => seiza::DetectBackend::F32,
+                    _ => seiza::DetectBackend::Auto,
+                }
+            }
             // -z (downsample), -log, -wcs, and anything future: accept
             // and ignore, consuming a value only for flags known to take
             // one
@@ -106,6 +115,7 @@ fn solve(args: &AstapArgs, image_path: &Path) -> Result<Vec<String>> {
     let image = crate::load_image(image_path)?;
     let dims = (image.width(), image.height());
     let config = seiza::DetectConfig {
+        backend: args.detection_backend,
         max_stars: args.max_stars.unwrap_or(0).clamp(0, 2000).max(200),
         ..Default::default()
     };
@@ -385,6 +395,16 @@ mod tests {
         let args = parse_args(&raw);
         assert!(args.ra_hours.is_none());
         assert!((args.radius_deg - 180.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parses_detection_backend_extension() {
+        let raw: Vec<String> = ["-f", "x.jpg", "--detection-backend", "f32"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let args = parse_args(&raw);
+        assert_eq!(args.detection_backend, seiza::DetectBackend::F32);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use seiza::minor_bodies::MinorBodyCatalog;
 use seiza::objects::{ObjectCatalog, ObjectKind, ObjectQuery, ObjectSort, SkyRegion};
 use seiza::solve::{SolveHint, solve};
 use seiza::star_ids::{StarIdentifierCatalog, StarLookupMatch};
-use seiza::{DetectConfig, detect_stars};
+use seiza::{DetectBackend, DetectConfig, detect_stars};
 use std::path::PathBuf;
 
 mod astap;
@@ -29,6 +29,19 @@ pub(crate) fn load_image(path: &std::path::Path) -> Result<image::DynamicImage> 
     image::open(path).with_context(|| format!("failed to open {}", path.display()))
 }
 
+/// Auto normally converts these 8-bit variants to luma8. Unlike native
+/// luma8, that conversion can change sub-level ordering relative to f32 luma,
+/// so a failed solve may benefit from a compatibility retry.
+fn auto_can_retry_f32(image: &image::DynamicImage, backend: DetectBackend) -> bool {
+    backend == DetectBackend::Auto
+        && matches!(
+            image,
+            image::DynamicImage::ImageLumaA8(_)
+                | image::DynamicImage::ImageRgb8(_)
+                | image::DynamicImage::ImageRgba8(_)
+        )
+}
+
 /// RA/Dec hint from FITS headers (N.I.N.A. writes RA/DEC in degrees).
 fn fits_hint(path: &std::path::Path) -> Option<(f64, f64)> {
     let fits = seiza_fits::FitsImage::open(path).ok()?;
@@ -44,8 +57,29 @@ fn fits_hint(path: &std::path::Path) -> Option<(f64, f64)> {
 #[derive(Parser)]
 #[command(name = "seiza", about = "Star detection and plate solving", version)]
 struct Cli {
+    /// Detector numeric representation. Auto uses u8 for 8-bit images and
+    /// f32 for higher-precision inputs.
+    #[arg(long, value_enum, default_value = "auto", global = true)]
+    detection_backend: DetectionBackendArg,
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum DetectionBackendArg {
+    Auto,
+    U8,
+    F32,
+}
+
+impl From<DetectionBackendArg> for DetectBackend {
+    fn from(value: DetectionBackendArg) -> Self {
+        match value {
+            DetectionBackendArg::Auto => Self::Auto,
+            DetectionBackendArg::U8 => Self::U8,
+            DetectionBackendArg::F32 => Self::F32,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -522,13 +556,21 @@ fn main() -> Result<()> {
         return astap::run(&raw);
     }
 
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    let detection_backend = cli.detection_backend.into();
+    match cli.command {
         Command::Detect {
             image,
             sigma,
             max_stars,
             annotate,
-        } => detect(&image, sigma, max_stars, annotate.as_deref()),
+        } => detect(
+            &image,
+            sigma,
+            max_stars,
+            detection_backend,
+            annotate.as_deref(),
+        ),
         Command::Solve {
             image,
             data,
@@ -560,6 +602,7 @@ fn main() -> Result<()> {
                 scale_tolerance,
                 sigma,
                 ignore_border,
+                detection_backend,
                 annotate.as_deref(),
                 objects.as_deref(),
                 minor_bodies.as_deref(),
@@ -645,6 +688,7 @@ fn main() -> Result<()> {
                 max_coarse_hypotheses,
                 sigma,
                 ignore_border,
+                detection_backend,
             },
         ),
         Command::FitsInfo { image, stretch } => fits_info(&image, stretch.as_deref()),
@@ -902,10 +946,12 @@ fn detect(
     path: &std::path::Path,
     sigma: f32,
     max_stars: usize,
+    detection_backend: DetectBackend,
     annotate: Option<&std::path::Path>,
 ) -> Result<()> {
     let img = load_image(path)?;
     let config = DetectConfig {
+        backend: detection_backend,
         sigma,
         max_stars,
         ..Default::default()
@@ -1426,6 +1472,7 @@ fn solve_command(
     scale_tolerance: f64,
     sigma: f32,
     ignore_border: u32,
+    detection_backend: DetectBackend,
     annotate: Option<&std::path::Path>,
     objects: Option<&std::path::Path>,
     minor_bodies: Option<&std::path::Path>,
@@ -1435,6 +1482,7 @@ fn solve_command(
     let dims = (img.width(), img.height());
 
     let config = DetectConfig {
+        backend: detection_backend,
         sigma,
         ignore_border,
         max_stars: 200,
@@ -1457,7 +1505,22 @@ fn solve_command(
         scale_tolerance,
     };
     let started = std::time::Instant::now();
-    let solution = solve(&stars, &catalog, &hint, dims).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let solution = match solve(&stars, &catalog, &hint, dims) {
+        Ok(solution) => Ok(solution),
+        Err(seiza::Error::Solve(_)) if auto_can_retry_f32(&img, detection_backend) => {
+            eprintln!("u8 detection did not solve; retrying with f32 detection");
+            let f32_stars = detect_stars(
+                &img,
+                &DetectConfig {
+                    backend: DetectBackend::F32,
+                    ..config.clone()
+                },
+            );
+            solve(&f32_stars, &catalog, &hint, dims)
+        }
+        Err(error) => Err(error),
+    }
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
     let elapsed = started.elapsed();
 
     let wcs = &solution.wcs;
@@ -1647,6 +1710,7 @@ struct SolveBlindOptions<'a> {
     max_coarse_hypotheses: usize,
     sigma: f32,
     ignore_border: u32,
+    detection_backend: DetectBackend,
 }
 
 fn solve_blind_command(
@@ -1659,6 +1723,7 @@ fn solve_blind_command(
     let img = load_image(path)?;
     let dims = (img.width(), img.height());
     let config = DetectConfig {
+        backend: options.detection_backend,
         sigma: options.sigma,
         ignore_border: options.ignore_border,
         max_stars: 600,
@@ -1709,8 +1774,22 @@ fn solve_blind_command(
     };
 
     let started = std::time::Instant::now();
-    let solution =
-        solve_blind(&stars, &catalog, &index, &params, dims).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let solution = match solve_blind(&stars, &catalog, &index, &params, dims) {
+        Ok(solution) => Ok(solution),
+        Err(seiza::Error::Solve(_)) if auto_can_retry_f32(&img, options.detection_backend) => {
+            eprintln!("u8 detection did not solve; retrying with f32 detection");
+            let f32_stars = detect_stars(
+                &img,
+                &DetectConfig {
+                    backend: DetectBackend::F32,
+                    ..config.clone()
+                },
+            );
+            solve_blind(&f32_stars, &catalog, &index, &params, dims)
+        }
+        Err(error) => Err(error),
+    }
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
     let wcs = &solution.wcs;
     let (ra, dec) = wcs.pixel_to_world(dims.0 as f64 / 2.0, dims.1 as f64 / 2.0);
     println!("Blind-solved in {:.2}s:", started.elapsed().as_secs_f64());
@@ -1781,6 +1860,42 @@ fn build_blind_index_command(
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+
+    #[test]
+    fn detection_backend_is_global_and_selectable() {
+        let automatic = Cli::try_parse_from(["seiza", "detect", "image.jpg"]).unwrap();
+        let before =
+            Cli::try_parse_from(["seiza", "--detection-backend", "f32", "detect", "image.jpg"])
+                .unwrap();
+        let after =
+            Cli::try_parse_from(["seiza", "detect", "image.jpg", "--detection-backend", "u8"])
+                .unwrap();
+        assert!(matches!(
+            automatic.detection_backend,
+            DetectionBackendArg::Auto
+        ));
+        assert!(matches!(before.detection_backend, DetectionBackendArg::F32));
+        assert!(matches!(after.detection_backend, DetectionBackendArg::U8));
+        assert!(
+            Cli::try_parse_from([
+                "seiza",
+                "detect",
+                "image.jpg",
+                "--detection-backend",
+                "other",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn only_converted_auto_u8_inputs_retry_f32() {
+        let rgb = image::DynamicImage::ImageRgb8(image::RgbImage::new(1, 1));
+        let luma = image::DynamicImage::ImageLuma8(image::GrayImage::new(1, 1));
+        assert!(auto_can_retry_f32(&rgb, DetectBackend::Auto));
+        assert!(!auto_can_retry_f32(&rgb, DetectBackend::U8));
+        assert!(!auto_can_retry_f32(&luma, DetectBackend::Auto));
+    }
 
     #[test]
     fn gaia_accepts_a_separated_negative_magnitude() {

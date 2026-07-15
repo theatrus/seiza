@@ -103,7 +103,7 @@ fine-, medium-, and wide-scale frames produced 15 successful pairs: median
 wall time fell from 247 ms to 205 ms, with identical match counts and RMS.
 
 The exact final source passes formatting, strict Clippy, the release build,
-and all 106 local workspace tests. The two hosted/network integration tests
+and all 112 local workspace tests. The two hosted/network integration tests
 remain intentionally ignored.
 
 ## JPEG validation corpus (2026-07-15)
@@ -163,11 +163,54 @@ hypothesis ordering and does not monotonically reduce search work.
 Six additional JPEGs have descriptive Markdown with approximate object
 coordinates but no full WCS and were excluded from quantitative agreement
 counts. One AVIF plus TOML pair was also outside this JPEG validation. Because
-the tested JPEGs decode as RGB, they exercise the detector's general f32 luma
-path rather than the new native `ImageLuma8` path. The corpus therefore adds a
-useful format and detector-path regression case, not merely more samples of
-the optimized FITS path.
+the tested JPEGs decode as RGB, this initial matrix exercised the detector's
+general f32 luma path rather than the native `ImageLuma8` path. It therefore
+provided the comparison corpus for the follow-up below.
 
 These are single-run validation timings, retained with per-image stdout and
 stderr, rather than a repeated microbenchmark. They are suitable for checking
 format support, solution correctness, and large search regressions.
+
+## Accepted: selectable generic u8/f32 detection for JPEG
+
+The detector now exposes `DetectBackend::{Auto, U8, F32}` through
+`DetectConfig` and the global CLI option `--detection-backend`. `Auto` uses u8
+for all decoded 8-bit image variants, including RGB JPEGs, and retains f32 for
+higher-precision inputs. Forced u8 and f32 modes remain available for callers,
+diagnostics, and reproducible comparisons.
+
+The shared implementation is statically generic rather than a runtime loop
+over an erased pixel type. `detect_stars_luma<T: DetectionSample>` orchestrates
+background estimation, thresholding, and connected components. Trait methods
+retain the optimized histogram/parallel implementation for u8 and the
+selection/SIMD implementation for f32, and Rust monomorphizes component
+extraction for each excess type.
+
+CI exercises both monomorphized implementations on Ubuntu, Windows, and macOS.
+A sub-u8-contrast 16-bit fixture must produce a detection through forced f32
+and no detection through forced u8, so the test cannot pass if both enum values
+accidentally route to one backend. Separate tests require auto to match forced
+u8 for RGB8 and forced f32 for 16-bit input. CLI parsing covers the default and
+all explicit backend values and rejects unknown values.
+
+A detection-only A/B used all 25 WCS-backed JPEGs twice per backend, alternating
+backend order within each image. Across 50 pairs, u8 saved a median 8.3 ms wall
+and 39.1 ms CPU and won 38 wall-time pairs. On the 11622 x 8056 Whirlpool JPEG,
+three alternating runs reduced median peak private memory from 1080.6 MiB to
+543.1 MiB (537.5 MiB, 49.7%) and median CPU from 1.17 seconds to 0.92 seconds.
+
+The solve validation deliberately forced each backend:
+
+| Backend | Hinted | Position blind | Median center-error change vs f32 |
+|---|---:|---:|---:|
+| f32 | 25/25 | 25/25 | baseline |
+| u8 | 25/25 | 24/25 | +0.011 arcsec hinted / +0.001 arcsec blind |
+| auto | 25/25 | 25/25 | uses the selected successful result |
+
+Forced u8 changed the detection ordering enough for Sh2-101 to exhaust the
+default 400 blind hypotheses, while forced f32 solved it. To avoid silently
+trading coverage for memory, normal `auto` solves retry detection and solving
+with f32 only when converted 8-bit luma fails. The final auto matrix therefore
+preserved all 50 hinted/position-blind successes; the one compatibility retry
+took 35.5 seconds. Explicit `u8` never falls back, and explicit `f32` goes
+directly through the preserved high-precision path.
