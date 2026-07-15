@@ -13,6 +13,8 @@ use std::time::{Duration, SystemTime};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const READ_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Controls when the small hosted bundle manifest may use the cached copy.
 /// Catalog artifacts themselves are immutable and content-addressed.
@@ -129,14 +131,18 @@ impl CatalogBundle {
                 std::process::id(),
                 next_sequence()
             ));
-            tokio::fs::copy(&artifact.path, &temp)
-                .await
-                .map_err(|source| io("copy cached artifact to", &temp, source))?;
-            if let Err(error) = verify_artifact(&temp, artifact).await {
+            let install = async {
+                tokio::fs::copy(&artifact.path, &temp)
+                    .await
+                    .map_err(|source| io("copy cached artifact to", &temp, source))?;
+                verify_artifact(&temp, artifact).await?;
+                replace_file(&temp, &target).await
+            }
+            .await;
+            if let Err(error) = install {
                 let _ = tokio::fs::remove_file(&temp).await;
                 return Err(error);
             }
-            replace_file(&temp, &target).await?;
             paths.push(target);
         }
         Ok(paths)
@@ -187,7 +193,8 @@ impl CatalogManagerBuilder {
             })
             .ok_or(Error::CacheDirectoryUnavailable)?;
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(300))
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_TIMEOUT)
             .user_agent(format!("seiza-download/{}", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|source| Error::Http {
@@ -374,19 +381,26 @@ impl CatalogManager {
             std::process::id(),
             next_sequence()
         ));
-        let mut output = tokio::fs::File::create(&temp)
-            .await
-            .map_err(|source| io("create", &temp, source))?;
-        output
-            .write_all(bytes)
-            .await
-            .map_err(|source| io("write", &temp, source))?;
-        output
-            .sync_all()
-            .await
-            .map_err(|source| io("sync", &temp, source))?;
-        drop(output);
-        replace_file(&temp, &path).await
+        let write = async {
+            let mut output = tokio::fs::File::create(&temp)
+                .await
+                .map_err(|source| io("create", &temp, source))?;
+            output
+                .write_all(bytes)
+                .await
+                .map_err(|source| io("write", &temp, source))?;
+            output
+                .sync_all()
+                .await
+                .map_err(|source| io("sync", &temp, source))?;
+            drop(output);
+            replace_file(&temp, &path).await
+        }
+        .await;
+        if write.is_err() {
+            let _ = tokio::fs::remove_file(&temp).await;
+        }
+        write
     }
 
     async fn ensure_file<F>(&self, file: &ManifestFile, report: &F) -> Result<PathBuf>
@@ -424,20 +438,26 @@ impl CatalogManager {
             next_sequence(),
             file.name
         ));
-        let result = self.download_file(file, &temp, report).await;
-        if let Err(error) = result {
+        let install = async {
+            self.download_file(file, &temp, report).await?;
+
+            let parent = target.parent().expect("object path has a parent");
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|source| io("create directory", parent, source))?;
+            if metadata_matches(&target, file.bytes).await? {
+                tokio::fs::remove_file(&temp)
+                    .await
+                    .map_err(|source| io("remove", &temp, source))?;
+            } else {
+                replace_file(&temp, &target).await?;
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = install {
             let _ = tokio::fs::remove_file(&temp).await;
             return Err(error);
-        }
-
-        let parent = target.parent().expect("object path has a parent");
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|source| io("create directory", parent, source))?;
-        if metadata_matches(&target, file.bytes).await? {
-            let _ = tokio::fs::remove_file(&temp).await;
-        } else {
-            replace_file(&temp, &target).await?;
         }
         report(DownloadEvent::DownloadComplete {
             name: file.name.clone(),
@@ -615,14 +635,6 @@ async fn verify_artifact(path: &Path, artifact: &CatalogArtifact) -> Result<()> 
 }
 
 async fn replace_file(temp: &Path, target: &Path) -> Result<()> {
-    // Unix rename atomically replaces the old path. Windows rename does not,
-    // so remove there immediately before installing the completed temp file.
-    #[cfg(windows)]
-    if target.exists() {
-        tokio::fs::remove_file(target)
-            .await
-            .map_err(|source| io("replace", target, source))?;
-    }
     tokio::fs::rename(temp, target)
         .await
         .map_err(|source| io("rename", temp, source))
@@ -744,6 +756,44 @@ mod tests {
         assert_eq!(
             std::fs::read(output.path().join("objects.bin")).unwrap(),
             original
+        );
+    }
+
+    #[tokio::test]
+    async fn materialize_removes_temporary_file_when_install_fails() {
+        let cache = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let content = b"object catalog";
+        let source = cache.path().join("objects.bin");
+        std::fs::write(&source, content).unwrap();
+
+        let name = "objects.bin".to_string();
+        let bundle = CatalogBundle {
+            version: "catalog-bundle-v2-test".into(),
+            artifacts: BTreeMap::from([(
+                name.clone(),
+                CatalogArtifact {
+                    name: name.clone(),
+                    bytes: content.len() as u64,
+                    sha256: sha256(content),
+                    path: source,
+                },
+            )]),
+        };
+
+        // A directory at the destination forces the final file replacement to
+        // fail after the artifact has been copied and verified.
+        std::fs::create_dir(output.path().join(&name)).unwrap();
+        assert!(bundle.materialize(output.path()).await.is_err());
+
+        let entries = std::fs::read_dir(output.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| { entry.to_string_lossy().starts_with(".objects.bin.part-") })
         );
     }
 

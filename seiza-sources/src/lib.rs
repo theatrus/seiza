@@ -20,6 +20,8 @@ const GAIA_TAP_SYNC: &str = "https://gea.esac.esa.int/tap-server/tap/sync";
 const GAIA_SOURCE_ID_MAX: u64 = 201_326_592 << 35;
 const GAIA_MAXREC: u64 = 3_000_000;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const READ_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -120,7 +122,8 @@ impl SourceDownloader {
         F: Fn(SourceEvent) + Send + Sync + 'static,
     {
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(300))
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_TIMEOUT)
             .user_agent(format!("seiza-sources/{}", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|source| Error::Http {
@@ -445,13 +448,13 @@ impl SourceDownloader {
         }
         let total = response.content_length();
         let temp = partial_path(target);
-        let mut output = tokio::fs::File::create(&temp)
-            .await
-            .map_err(|source| io("create", &temp, source))?;
-        let mut stream = response.bytes_stream();
-        let mut downloaded = 0u64;
-        let mut reported = 0u64;
         let transfer = async {
+            let mut output = tokio::fs::File::create(&temp)
+                .await
+                .map_err(|source| io("create", &temp, source))?;
+            let mut stream = response.bytes_stream();
+            let mut downloaded = 0u64;
+            let mut reported = 0u64;
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(|source| Error::Http {
                     url: url.into(),
@@ -484,19 +487,17 @@ impl SourceDownloader {
                 .sync_all()
                 .await
                 .map_err(|source| io("sync", &temp, source))?;
-            Ok(())
+            drop(output);
+            if !verify_file(&temp, verify).await? {
+                return Err(Error::Integrity(url.into()));
+            }
+            replace_file(&temp, target).await
         }
         .await;
-        drop(output);
-        if let Err(error) = transfer {
+        if transfer.is_err() {
             let _ = tokio::fs::remove_file(&temp).await;
-            return Err(error);
         }
-        if !verify_file(&temp, verify).await? {
-            let _ = tokio::fs::remove_file(&temp).await;
-            return Err(Error::Integrity(url.into()));
-        }
-        replace_file(&temp, target).await
+        transfer
     }
 
     async fn fetch_gaia_chunk(&self, query: &str, target: &Path) -> Result<u64> {
@@ -510,7 +511,6 @@ impl SourceDownloader {
         let response = self
             .client
             .post(GAIA_TAP_SYNC)
-            .timeout(Duration::from_secs(600))
             .form(&form)
             .send()
             .await
@@ -526,14 +526,14 @@ impl SourceDownloader {
         }
 
         let temp = partial_path(target);
-        let mut output = tokio::fs::File::create(&temp)
-            .await
-            .map_err(|source| io("create", &temp, source))?;
-        let mut stream = response.bytes_stream();
-        let mut prefix = Vec::with_capacity(6);
-        let mut last = None;
-        let mut newline_count = 0u64;
         let transfer = async {
+            let mut output = tokio::fs::File::create(&temp)
+                .await
+                .map_err(|source| io("create", &temp, source))?;
+            let mut stream = response.bytes_stream();
+            let mut prefix = Vec::with_capacity(6);
+            let mut last = None;
+            let mut newline_count = 0u64;
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(|source| Error::Http {
                     url: GAIA_TAP_SYNC.into(),
@@ -554,20 +554,18 @@ impl SourceDownloader {
                 .sync_all()
                 .await
                 .map_err(|source| io("sync", &temp, source))?;
-            Ok(())
+            drop(output);
+            if !prefix.starts_with(b"ra,dec") || last != Some(b'\n') || newline_count == 0 {
+                return Err(Error::MalformedGaiaChunk);
+            }
+            replace_file(&temp, target).await?;
+            Ok(newline_count - 1)
         }
         .await;
-        drop(output);
-        if let Err(error) = transfer {
+        if transfer.is_err() {
             let _ = tokio::fs::remove_file(&temp).await;
-            return Err(error);
         }
-        if !prefix.starts_with(b"ra,dec") || last != Some(b'\n') || newline_count == 0 {
-            let _ = tokio::fs::remove_file(&temp).await;
-            return Err(Error::MalformedGaiaChunk);
-        }
-        replace_file(&temp, target).await?;
-        Ok(newline_count - 1)
+        transfer
     }
 
     fn ready(&self, source: &'static str, output: &Path) {
@@ -653,18 +651,7 @@ async fn create_dir_all(path: &Path) -> Result<()> {
         .map_err(|source| io("create directory", path, source))
 }
 
-#[cfg(windows)]
-async fn remove_if_exists(path: &Path) -> Result<()> {
-    match tokio::fs::remove_file(path).await {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(io("remove", path, source)),
-    }
-}
-
 async fn replace_file(temp: &Path, target: &Path) -> Result<()> {
-    #[cfg(windows)]
-    remove_if_exists(target).await?;
     tokio::fs::rename(temp, target)
         .await
         .map_err(|source| io("rename", temp, source))
@@ -723,5 +710,19 @@ mod tests {
         let truncated = temp.path().join("truncated.gz");
         std::fs::write(&truncated, &bytes[..bytes.len() / 2]).unwrap();
         assert!(!verify_file(&truncated, Verify::Gzip).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn replace_file_overwrites_existing_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let temp = directory.path().join("download.part");
+        let target = directory.path().join("catalog.dat");
+        tokio::fs::write(&temp, b"new catalog").await.unwrap();
+        tokio::fs::write(&target, b"old catalog").await.unwrap();
+
+        replace_file(&temp, &target).await.unwrap();
+
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), b"new catalog");
+        assert!(!temp.exists());
     }
 }
