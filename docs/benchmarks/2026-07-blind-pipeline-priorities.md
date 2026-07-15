@@ -262,3 +262,56 @@ and disabling fallback produces exactly one solve attempt. Together with the
 existing backend-routing tests, the exact source passes formatting, strict
 Clippy, the locked release build, and all 116 local workspace tests. The two
 hosted/network integration tests remain intentionally ignored.
+
+## Full detection rerun and linear-f32 threshold check
+
+After the fallback implementation, detection was rerun once per backend on
+all 13 FITS frames and all 25 WCS-backed JPEGs. Backend order alternated by
+image, every one of the 76 release-process invocations succeeded, and output
+was capped at the brightest 100 stars only to avoid timing console output.
+Detection still performed its normal complete component search before that
+final output truncation.
+
+On FITS, u8 saved a paired median 27.7 ms of wall time and was faster on 12 of
+13 images. Median CPU was 93.8 ms for u8 and 203.1 ms for linear f32. On JPEG,
+u8 saved a paired median 7.3 ms and won 18 of 25 images; median CPU was 281.2
+ms for u8 and 312.5 ms for f32. The single-run JPEG result is consistent with
+the earlier 50-pair timing, but the repeated result remains the stronger
+performance measurement.
+
+Position matching exposed the expected effect of using different numeric
+representations. The median FITS frame had 49 of its u8 top 50 detections
+within two pixels of an f32 top-100 detection, while the median top-10 set
+overlap was 7 of 10. JPEGs were closer: the corresponding medians were 49 of
+50 and 10 of 10. Most FITS differences were ranking changes rather than lost
+objects.
+
+One 30-second green-filter Bode's Galaxy frame (`0003`) was the important
+outlier. Only 22 of the u8 top 50 appeared anywhere in the f32 candidate list
+within two pixels. U8 found 428 candidates, linear f32 found 534, and 319 were
+spatially common. Inspection against the solved catalog overlay confirmed that
+several high-ranked u8-only components were real bright stars rather than hot
+pixels or galaxy structure.
+
+Running the already-MTF-compressed pixels through f32 arithmetic reproduced
+all 428 u8 detections and the complete top-50 ordering. The discrepancy is
+therefore caused by the nonlinear MTF input representation, not by the generic
+u8 and f32 detector implementations disagreeing on equivalent samples.
+
+A linear-f32 sigma sweep initially looked promising: increasing sigma from 4
+to 6 improved the outlier's u8-top-50 recovery from 22 to 43 and reduced its
+candidate count from 534 to 411. Across all 13 FITS frames, sigma 6 improved
+the minimum top-50 recovery from 22 to 43 without materially changing the
+other 12 frames. It is not safe for solving, however:
+
+| Linear-f32 setting | Hinted FITS solves | Blind FITS solves | Median hinted/blind matches |
+|---|---:|---:|---:|
+| sigma 4 | 13/13 | 13/13 | 87 / 103 |
+| sigma 6 | 12/13 | 12/13 | 96 / 110 among successes |
+
+The same `0003` frame failed in both modes at sigma 6. A focused sweep showed
+that sigma 4 solved it with 16 hinted and 27 blind matches, whereas every
+tested value from 4.5 through 6 failed both modes; blind attempts exhausted
+the 400-hypothesis budget. This is a brightness-ordering and solver-funnel
+interaction, not a simple count or geometric-overlap problem. Consequently,
+the detector keeps sigma 4 and no tuning change was accepted from this rerun.
