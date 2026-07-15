@@ -445,3 +445,59 @@ tested value from 4.5 through 6 failed both modes; blind attempts exhausted
 the 400-hypothesis budget. This is a brightness-ordering and solver-funnel
 interaction, not a simple count or geometric-overlap problem. Consequently,
 the detector keeps sigma 4 and no tuning change was accepted from this rerun.
+
+## Supplemental mixed-format regression (2026-07-15)
+
+An additional external corpus supplied 22 public processed JPEGs and three
+16-bit FITS frames. Five JPEGs contained ordinary image data without object
+labels or overlay circles: two Tulip fields at different scales, Rho
+Ophiuchi, M101, and the Draco Triplet. Their solved fields were checked
+against the visible subjects and catalog coordinates; ASTAP independently
+returned the same center and scale on the first Tulip field.
+
+Default Auto solved all five clean JPEGs in all three modes. Median process
+wall times were 190 ms hinted, 470 ms position blind, and 704 ms fully blind.
+None needed the f32 retry. Forced u8 and forced f32 fully blind runs were also
+5/5 and returned the same fields; their median wall times were 686 and 700 ms
+respectively. On these modest 2-5 MP images, compact u8 therefore preserved
+coverage but did not produce a meaningful wall-time separation from f32. Its
+larger demonstrated benefit remains peak memory on high-resolution images.
+
+The FITS additions covered 1920 x 1080, 3840 x 2160, and 9576 x 6388 pixels
+at solved scales of 1.206, 1.358, and 1.259 arcsec/pixel. Every default Auto,
+forced-u8, and forced-f32 invocation succeeded in hinted, position-blind, and
+fully blind modes: 27/27 total. All centers and scales agreed to displayed
+precision, and no Auto invocation needed its fallback. The table gives
+single-run release-process wall times in milliseconds for the default Auto
+path and ASTAP CLI 2026.06.29 with D50:
+
+| Mode | NGC 253: seiza / ASTAP | M31: seiza / ASTAP | IC5070: seiza / ASTAP |
+|---|---:|---:|---:|
+| Hinted | 187 / 109 | 285 / 389 | 352 / 644 |
+| Position blind | 421 / 4,221 | 613 / 4,291 | 701 / 1,214 |
+| Fully blind | 412 / 41,802 | 984 / 11,894 | 975 / 4,577 |
+
+Both programs solved all nine FITS comparisons. Seiza's median wall time was
+1.36x faster hinted, 6.89x faster position blind, and 12.20x faster fully
+blind when comparing the medians. ASTAP won the smallest hinted frame, where
+the difference is dominated by loading and detection rather than blind
+hypothesis verification. These are regression and range checks rather than
+repeated benchmark replacements for the measurements above.
+
+The other 17 JPEGs had large catalog labels, leader lines, and object-outline
+circles rendered into the pixels. Ten still solved to their named fields, one
+failed, and six returned demonstrably unrelated fields. The false accepts had
+only 12-21 matches and 1.51-2.04 pixels RMS: synthetic overlay geometry can
+look enough like a sparse star pattern to satisfy the current minimum blind
+acceptance rule. A correct labeled field also had only 18 matches and 1.80
+pixels RMS, so raising a global match floor or tightening RMS specifically for
+this curiosity set would discard real low-signal answers without establishing
+a generally sound threshold.
+
+These annotated rasters are consequently retained as an adversarial
+confidence/rejection observation, not a release performance gate. Supporting
+them robustly would call for an independent validation signal or explicit
+confidence model rather than tuning the normal astronomical-image solver to
+artwork. Four of them did exercise the bounded u8-to-f32 retry sequence, while
+the complete clean JPEG and FITS matrices show that the 64-hypothesis primary
+cap did not reduce normal coverage in this expanded corpus.
