@@ -61,6 +61,15 @@ Mapping to seiza:
 - Timeout budget: N.I.N.A. kills the process after 10 minutes; stay
   far under it (we do).
 
+Seiza also accepts its `--detection-backend auto|u8|f32`,
+`--detection-fallback none|f32`, and
+`--detection-fallback-hypotheses N` extensions in this mode. Auto uses compact
+u8 detection first and defaults to a lazy f32 retry after a solve miss. Blind
+u8 verification is capped at 64 hypotheses when that retry is available; the
+f32 retry receives the full configured budget. Set the cap to zero to give u8
+the full budget. For FITS, an f32 retry reopens the source and uses linear
+high-precision samples rather than applying the u8 MTF display stretch.
+
 ### Result file
 
 Write `<image-basename>.ini` **next to the input FITS** (same stem).
