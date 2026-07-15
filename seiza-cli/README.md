@@ -118,8 +118,9 @@ seiza catalog validate --data objects.bin
 ```
 
 FITS files are read natively (see
-[seiza-fits](https://crates.io/crates/seiza-fits)) with automatic
-autostretch before detection, and RA/DEC hints taken from headers.
+[seiza-fits](https://crates.io/crates/seiza-fits)) with bounded-memory
+streaming into the final typed pixel buffer, automatic autostretch before
+detection, and RA/DEC hints taken from headers.
 
 ## License
 

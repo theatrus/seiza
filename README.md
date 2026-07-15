@@ -91,7 +91,8 @@ seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-
   (`seiza solve ... --objects objects.bin`).
 - **FITS** — dependency-free reading with typed headers, exact
   histogram statistics, N.I.N.A.-style MTF autostretch, planar RGB
-  (NAXIS3) support, and OSC debayering (`BAYERPAT`), in the
+  (NAXIS3) support, OSC debayering (`BAYERPAT`), and bounded-memory
+  streaming into native pixel storage, in the
   [`seiza-fits`](https://crates.io/crates/seiza-fits) crate. FITS files
   plate-solve directly, with RA/DEC hints read from headers.
 - **Packages & CI** — crates.io releases, Fedora RPMs and Ubuntu debs on

@@ -1518,6 +1518,7 @@ dependencies = [
 name = "seiza-fits"
 version = "0.1.3"
 dependencies = [
+ "memmap2",
  "multiversion",
 ]
 
