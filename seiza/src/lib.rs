@@ -21,6 +21,13 @@ pub mod wcs;
 pub use detect::{DetectConfig, DetectedStar, detect_stars};
 pub use wcs::Wcs;
 
+/// Async installation and caching of published catalog bundles.
+///
+/// Available with the non-default `downloads` feature. Catalog opening itself
+/// remains synchronous, local, and network-free.
+#[cfg(feature = "downloads")]
+pub use seiza_download as downloads;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("image error: {0}")]

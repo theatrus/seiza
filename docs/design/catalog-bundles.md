@@ -31,6 +31,25 @@ manifest, verify its SHA-256, validate the complete mapped file, and perform a
 semantic name lookup. This turns a missing data upload into a release-gate
 failure instead of a documentation-only feature.
 
+## Client cache
+
+`seiza-download` stores hosted artifacts under their manifest SHA-256 and
+returns those immutable paths directly to library callers. A normal cache hit
+checks file metadata and does not hash or page through a multi-gigabyte mmap.
+The bytes are hashed during their initial streaming download; exhaustive later
+verification is an explicit API operation. A per-hash cross-process lock
+prevents concurrent applications from downloading the same artifact twice.
+
+The small manifest has configurable offline, prefer-cached, age-based refresh,
+and force-refresh policies. The default refreshes it after 24 hours and falls
+back to a valid stale copy when the network is unavailable. Network access only
+occurs through an explicitly awaited `ensure` call, never through a normal
+catalog `open`.
+
+Raw source distributions are a separate concern owned by `seiza-sources`.
+Gaia TAP, VizieR, MPC, and similar inputs are not installed into the runtime
+bundle cache.
+
 When a future incompatible catalog set is needed, publish a complete
 `/data/v3/` bundle. Unchanged large objects can be copied server-side; clients
 must never assemble a bundle by mixing v2 and v3 manifests.
