@@ -45,6 +45,7 @@ fn fetch(path: &str, dest: &Path) {
     });
     let mut bytes = Vec::new();
     response
+        .into_body()
         .into_reader()
         .read_to_end(&mut bytes)
         .unwrap_or_else(|e| panic!("failed to read {url}: {e}"));

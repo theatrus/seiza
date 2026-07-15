@@ -478,7 +478,7 @@ fn threshold_excess(
     noise: &[f32],
     sigma: f32,
 ) -> Vec<f32> {
-    use wide::{CmpGt, f32x8};
+    use wide::f32x8;
 
     let tiles_x = width.div_ceil(tile_size);
     let mut excess = vec![0.0f32; pixels.len()];
@@ -498,7 +498,7 @@ fn threshold_excess(
             let mut out_chunks = out.chunks_exact_mut(8);
             for (chunk, out_chunk) in (&mut chunks).zip(&mut out_chunks) {
                 let value = f32x8::from(<[f32; 8]>::try_from(chunk).unwrap()) - bg;
-                let keep = value.cmp_gt(threshold);
+                let keep = value.simd_gt(threshold);
                 out_chunk.copy_from_slice(&keep.blend(value, f32x8::ZERO).to_array());
             }
             let done = seg.len() - chunks.remainder().len();
