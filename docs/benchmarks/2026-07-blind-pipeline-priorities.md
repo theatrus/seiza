@@ -501,3 +501,22 @@ confidence model rather than tuning the normal astronomical-image solver to
 artwork. Four of them did exercise the bounded u8-to-f32 retry sequence, while
 the complete clean JPEG and FITS matrices show that the 64-hypothesis primary
 cap did not reduce normal coverage in this expanded corpus.
+
+A follow-up ran all 17 annotated JPEGs fully blind through ASTAP with the
+same D50 catalog and a 120-second per-image ceiling. Each returned WCS was
+checked by requiring a named object visible in the image to fall inside the
+solved footprint. ASTAP returned 5 correct fields, no false fields, and 12
+timeouts. Its correct solves were Pelican (60.2 s), Horsehead (18.0 s), the
+second Iris rendering (7.0 s), M106 (59.3 s), and IC2944 (7.6 s), for an
+18.0-second median among successes.
+
+The different tradeoff is stark on this adversarial subset. ASTAP spent
+1,592 seconds in total under the timeout policy and never reported an
+unrelated field. Seiza spent 80.4 seconds total, returned 10 correct fields,
+6 unrelated fields, and one failure. Three fields were solved correctly by
+both programs; Seiza took 0.59-0.67 seconds on those versus ASTAP's
+7.0-60.2 seconds. ASTAP uniquely recovered Horsehead, where Seiza failed,
+and M106, where Seiza false-accepted. Seiza uniquely recovered seven fields
+that exhausted ASTAP's time limit. This supports treating rendered labels as
+a confidence-calibration problem: Seiza is much faster and recovers more of
+the artwork-altered fields, while ASTAP is substantially more conservative.
