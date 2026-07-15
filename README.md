@@ -34,17 +34,19 @@ The worker reads one JSON request per stdin line, writes one response per
 stdout line, accepts FITS paths, and exits cleanly at EOF. See
 [the worker protocol](docs/design/worker-protocol.md).
 
-The same worker contract can use a warm solver on another machine. The local
-worker opens and stretches the FITS file, then sends losslessly compressed
-8-bit pixels instead of the original FITS payload:
+The same worker contract can submit to the existing
+[`seiza-server`](https://github.com/theatrus/seiza-server). The local worker
+opens and stretches the FITS file, then uploads a lossless 8-bit grayscale PNG
+through the server's native queued API instead of sending the original FITS:
 
 ```text
-seiza-server --data data/stars-deep-gaia17.bin --index data/blind-gaia16.idx --listen 0.0.0.0:7878
-seiza worker --server http://solver-host:7878
+seiza worker --server http://solver-host:8080
 ```
 
-Set `SEIZA_SERVER_TOKEN` on both processes to require a bearer token. See the
-[remote server protocol](docs/design/remote-server-protocol.md).
+Pass `--server-token` or set `SEIZA_SERVER_TOKEN` when the server requires an
+API key. Compact PNG upload is the default; `--server-upload fits` preserves
+the original FITS payload when its headers or full bit depth are desired.
+Local and remote operation use the same JSON-RPC contract.
 
 Current hosted datasets use one complete, versioned
 [v2 catalog-bundle manifest](https://downloads.seiza.fyi/data/v2/manifest.json).

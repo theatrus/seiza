@@ -167,6 +167,9 @@ enum Command {
         /// Remote bearer token; defaults to SEIZA_SERVER_TOKEN when set
         #[arg(long, requires = "server")]
         server_token: Option<String>,
+        /// Remote upload representation (PNG is usually smaller and lossless for star detection)
+        #[arg(long, value_enum, requires = "server")]
+        server_upload: Option<worker::ServerUploadFormat>,
     },
     /// Inspect a FITS file: headers, statistics, optional stretched PNG
     FitsInfo {
@@ -651,6 +654,7 @@ fn main() -> Result<()> {
             index,
             server,
             server_token,
+            server_upload,
         } => {
             let server_token = server_token.or_else(|| std::env::var("SEIZA_SERVER_TOKEN").ok());
             worker::run(
@@ -658,6 +662,7 @@ fn main() -> Result<()> {
                 index.as_deref(),
                 server.as_deref(),
                 server_token.as_deref(),
+                server_upload.unwrap_or(worker::ServerUploadFormat::Png),
             )
         }
         Command::FitsInfo { image, stretch } => fits_info(&image, stretch.as_deref()),

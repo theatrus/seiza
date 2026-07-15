@@ -14,10 +14,6 @@ categories = ["science", "command-line-utilities"]
 name = "seiza"
 path = "src/main.rs"
 
-[[bin]]
-name = "seiza-server"
-path = "src/server_main.rs"
-
 [dependencies]
 seiza.workspace = true
 seiza-download.workspace = true
@@ -31,16 +27,13 @@ flate2.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 sha2.workspace = true
-tiny_http.workspace = true
 tokio.workspace = true
 ureq.workspace = true
-zstd.workspace = true
 
 [package.metadata.generate-rpm]
 summary = "Star detection, plate solving, and astro dataset tools"
 assets = [
     { source = "target/release/seiza", dest = "/usr/bin/seiza", mode = "755" },
-    { source = "target/release/seiza-server", dest = "/usr/bin/seiza-server", mode = "755" },
     { source = "README.md", dest = "/usr/share/doc/seiza-cli/README.md", mode = "644", doc = true },
     { source = "LICENSE", dest = "/usr/share/licenses/seiza-cli/LICENSE", mode = "644" },
 ]
@@ -51,7 +44,6 @@ extended-description = "Star detection, hinted and blind plate solving, and star
 section = "science"
 assets = [
     ["target/release/seiza", "usr/bin/", "755"],
-    ["target/release/seiza-server", "usr/bin/", "755"],
     ["README.md", "usr/share/doc/seiza-cli/", "644"],
 ]
 

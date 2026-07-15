@@ -8,8 +8,7 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{Command, Stdio};
 
 const BASE: &str = "https://downloads.seiza.fyi";
 /// (file, ra, dec, arcsec/px, blind). Mirrors testdata/solutions.json;
@@ -247,45 +246,22 @@ fn hosted_worker_solves_fits_path_twice_in_one_process() {
     assert_eq!(responses[3]["result"]["shutdown"], true);
 }
 
-struct ChildGuard(Child);
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        self.0.kill().ok();
-        self.0.wait().ok();
-    }
-}
-
 #[test]
-#[ignore = "network: downloads one FITS image and the hosted Tycho-2 lite catalog"]
-fn hosted_remote_worker_sends_compressed_pixels_and_solves() {
+#[ignore = "network: requires SEIZA_SERVER_TEST_URL and downloads one FITS image"]
+fn hosted_remote_worker_uses_seiza_server_native_api() {
     let dir = cache_dir();
-    let stars = dir.join("stars-lite-tycho2.bin");
     let image = dir.join("m31-asi585mc-rggb-osc.fits");
-    fetch("data/stars-lite-tycho2.bin", &stars);
     fetch("testdata/m31-asi585mc-rggb-osc.fits", &image);
-
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    let base_url = format!("http://127.0.0.1:{port}");
-    let server = Command::new(env!("CARGO_BIN_EXE_seiza-server"))
-        .args(["--listen", &format!("127.0.0.1:{port}"), "--data"])
-        .arg(&stars)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("failed to start seiza-server");
-    let _server = ChildGuard(server);
-
-    let started = Instant::now();
-    while ureq::get(&format!("{base_url}/v1/status")).call().is_err() {
-        assert!(started.elapsed() < Duration::from_secs(10));
-        std::thread::sleep(Duration::from_millis(25));
+    let Ok(server_url) = std::env::var("SEIZA_SERVER_TEST_URL") else {
+        eprintln!("skipping: set SEIZA_SERVER_TEST_URL to a configured seiza-server");
+        return;
+    };
+    let mut command = Command::new(env!("CARGO_BIN_EXE_seiza"));
+    command.args(["worker", "--server", &server_url]);
+    if let Ok(token) = std::env::var("SEIZA_SERVER_TOKEN") {
+        command.args(["--server-token", &token]);
     }
-
-    let mut worker = Command::new(env!("CARGO_BIN_EXE_seiza"))
-        .args(["worker", "--server", &base_url])
+    let mut worker = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -336,7 +312,7 @@ fn hosted_remote_worker_sends_compressed_pixels_and_solves() {
     let ra = result["center"]["raDeg"].as_f64().unwrap();
     let dec = result["center"]["decDeg"].as_f64().unwrap();
     assert!(angular_separation_deg(10.66661, 41.26876, ra, dec) < 0.02);
-    assert_eq!(result["transfer"]["encoding"], "gray8-zstd");
+    assert_eq!(result["transfer"]["encoding"], "png-gray8");
     eprintln!(
         "remote payload: {} bytes from {}-byte FITS",
         result["transfer"]["encodedBytes"].as_u64().unwrap(),

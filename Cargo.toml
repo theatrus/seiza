@@ -27,8 +27,6 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 serde = { version = "1", features = ["derive"] }
 ureq = { version = "2", features = ["json"] }
 serde_json = "1"
-tiny_http = "0.12"
-zstd = "0.13"
 memmap2 = "0.9"
 sha2 = "0.10"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "rt", "time"] }

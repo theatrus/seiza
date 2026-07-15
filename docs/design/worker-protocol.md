@@ -13,7 +13,7 @@ seiza worker --data C:\seiza-data\stars-deep-gaia17.bin --index C:\seiza-data\bl
 Remote-backed worker:
 
 ```text
-seiza worker --server http://solver-host:7878
+seiza worker --server http://solver-host:8080
 ```
 
 The JSON-RPC boundary accepts FITS file paths only. The caller remains
@@ -90,16 +90,28 @@ builds an index lazily, the build time is reported there rather than in
 `solveMs`.
 
 Remote results also include `timings.encodeMs`, `timings.transportMs`, and a
-`transfer` object containing the encoding and byte counts. Local results use
-zero for those timings and omit `transfer`.
+`transfer` object containing the encoding and byte counts. `transportMs`
+includes upload, queue wait, solve, polling, and result download. Local results
+use zero for those timings and omit `transfer`.
 
 ## Remote backend
 
 With `--server`, the worker still receives a local FITS path. It applies the
-same MTF stretch as local solving, converts the solver input to one 8-bit
-grayscale plane, compresses it losslessly with Zstandard, and sends that plane
-to `seiza-server`. The server never receives or resolves the client's path.
-See [the remote server protocol](remote-server-protocol.md).
+same MTF stretch as local solving and encodes the solver input as a lossless
+8-bit grayscale PNG. It submits that PNG and the mapped solve options through
+`seiza-server`'s native `POST /api/v1/solves` multipart API, then polls
+`GET /api/v1/solves/{id}` until the queued solve completes. The server never
+receives or resolves the client's path, and no server-side protocol extension
+is required.
+
+`--server-token` or `SEIZA_SERVER_TOKEN` supplies a bearer token for servers
+running in API-key mode. Blind-index build controls that are local engine
+details are not sent; the remote service uses its configured maintained index
+and queue policy.
+
+`--server-upload png` is the default. `--server-upload fits` uploads the
+original file instead, preserving FITS headers such as `DATE-OBS` and the
+source bit depth at the cost of a larger transfer.
 
 ## Other methods
 

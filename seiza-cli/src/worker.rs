@@ -6,24 +6,23 @@
 //! so the same protocol supports both long-lived and one-shot clients.
 
 use anyhow::{Context, Result};
+use image::ImageEncoder;
 use seiza::blind::{BlindIndex, BlindParams, solve_blind};
 use seiza::catalog::TileCatalog;
 use seiza::solve::{Solution, SolveHint, solve};
 use seiza::{DetectConfig, Wcs, detect_stars};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::io::{self, BufRead, BufReader, BufWriter, Cursor, Read, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 const JSON_RPC_VERSION: &str = "2.0";
 const PROTOCOL_VERSION: u32 = 1;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-const MAX_REMOTE_REQUEST_BYTES: u64 = 128 * 1024 * 1024;
-const REMOTE_SCHEMA_VERSION: u32 = 1;
-const REMOTE_MAGIC: &[u8; 8] = b"SEIZA\0I1";
-const REMOTE_CONTENT_TYPE: &str = "application/vnd.seiza.solve-image+zstd";
+const SERVER_POLL_INTERVAL: Duration = Duration::from_millis(250);
+static MULTIPART_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;
@@ -38,10 +37,11 @@ pub fn run(
     index_path: Option<&Path>,
     server: Option<&str>,
     server_token: Option<&str>,
+    server_upload: ServerUploadFormat,
 ) -> Result<()> {
     let service = match (data_path, server) {
         (Some(data_path), None) => WorkerService::local(data_path, index_path)?,
-        (None, Some(server)) => WorkerService::remote(server, server_token)?,
+        (None, Some(server)) => WorkerService::remote(server, server_token, server_upload)?,
         _ => {
             anyhow::bail!("provide either --data for local solving or --server for remote solving")
         }
@@ -53,6 +53,14 @@ pub fn run(
         BufWriter::new(stdout.lock()),
         service,
     )
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum ServerUploadFormat {
+    /// MTF-stretched lossless 8-bit grayscale PNG
+    Png,
+    /// Original FITS bytes, including headers and source bit depth
+    Fits,
 }
 
 #[derive(Debug, Deserialize)]
@@ -201,9 +209,13 @@ impl WorkerService {
         })
     }
 
-    fn remote(server: &str, token: Option<&str>) -> Result<Self> {
+    fn remote(
+        server: &str,
+        token: Option<&str>,
+        upload_format: ServerUploadFormat,
+    ) -> Result<Self> {
         Ok(Self {
-            backend: WorkerBackend::Remote(RemoteSolver::new(server, token)?),
+            backend: WorkerBackend::Remote(RemoteSolver::new(server, token, upload_format)?),
             initialized: false,
         })
     }
@@ -333,8 +345,8 @@ impl LocalSolver {
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
             catalog: CatalogStatus {
-                star_count: self.catalog.star_count(),
-                blind_index_loaded: self.index.is_some(),
+                star_count: Some(self.catalog.star_count()),
+                blind_index_loaded: Some(self.index.is_some()),
                 blind_index_pattern_count: self.index.as_ref().map(BlindIndex::pattern_count),
                 blind_index_magnitude_limit: self.index.as_ref().map(BlindIndex::index_mag_limit),
             },
@@ -453,8 +465,10 @@ struct ServerIdentity {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CatalogStatus {
-    star_count: u64,
-    blind_index_loaded: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    star_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blind_index_loaded: Option<bool>,
     blind_index_pattern_count: Option<usize>,
     blind_index_magnitude_limit: Option<f32>,
 }
@@ -463,10 +477,11 @@ struct RemoteSolver {
     base_url: String,
     token: Option<String>,
     agent: ureq::Agent,
+    upload_format: ServerUploadFormat,
 }
 
 impl RemoteSolver {
-    fn new(base_url: &str, token: Option<&str>) -> Result<Self> {
+    fn new(base_url: &str, token: Option<&str>, upload_format: ServerUploadFormat) -> Result<Self> {
         let base_url = base_url.trim_end_matches('/');
         if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
             anyhow::bail!("remote server URL must start with http:// or https://");
@@ -475,45 +490,129 @@ impl RemoteSolver {
             base_url: base_url.to_string(),
             token: token.map(str::to_string),
             agent: ureq::AgentBuilder::new().build(),
+            upload_format,
         })
     }
 
     fn status(&self) -> Result<BackendStatus> {
-        let response = self.call(self.agent.get(&format!("{}/v1/status", self.base_url)))?;
-        response
+        let response = self.call(self.agent.get(&format!("{}/api/v1/health", self.base_url)))?;
+        let health: ServerHealth = response
             .into_json()
-            .context("invalid status response from seiza-server")
+            .context("invalid health response from seiza-server")?;
+        if !health.solver_ready {
+            anyhow::bail!(
+                "seiza-server is {} but its solver is not ready",
+                health.status
+            );
+        }
+        Ok(BackendStatus {
+            kind: "remote".to_string(),
+            server: ServerIdentity {
+                name: "seiza-server".to_string(),
+                version: "api-v1".to_string(),
+            },
+            catalog: CatalogStatus {
+                star_count: None,
+                blind_index_loaded: None,
+                blind_index_pattern_count: None,
+                blind_index_magnitude_limit: None,
+            },
+            remote_image_encoding: Some(self.upload_format.encoding().to_string()),
+        })
     }
 
     fn solve_path(&self, params: &SolveParams) -> Result<WorkerSolveResult> {
         let total_started = Instant::now();
         let load_started = Instant::now();
-        let image = crate::load_image(&params.image_path)?.into_luma8();
+        let source = match self.upload_format {
+            ServerUploadFormat::Png => {
+                RemoteUploadSource::Image(crate::load_image(&params.image_path)?.into_luma8())
+            }
+            ServerUploadFormat::Fits => {
+                RemoteUploadSource::Fits(std::fs::read(&params.image_path).with_context(|| {
+                    format!("failed to read {} for upload", params.image_path.display())
+                })?)
+            }
+        };
         let load_elapsed = load_started.elapsed();
 
         let encode_started = Instant::now();
-        let body = encode_remote_request(&image, params)?;
+        let upload = match source {
+            RemoteUploadSource::Image(image) => RemoteUpload {
+                bytes: encode_png(&image)?,
+                filename: "nina-solve.png",
+                content_type: "image/png",
+                encoding: self.upload_format.encoding(),
+                uncompressed_bytes: image.as_raw().len(),
+            },
+            RemoteUploadSource::Fits(bytes) => RemoteUpload {
+                uncompressed_bytes: bytes.len(),
+                bytes,
+                filename: "nina-solve.fits",
+                content_type: "application/fits",
+                encoding: self.upload_format.encoding(),
+            },
+        };
+        let options = server_options(params);
+        let (boundary, body) = multipart_solve_body(
+            &upload.bytes,
+            upload.filename,
+            upload.content_type,
+            &options,
+        )?;
         let encode_elapsed = encode_started.elapsed();
 
         let transport_started = Instant::now();
         let request = self
             .agent
-            .post(&format!("{}/v1/solve", self.base_url))
-            .set("Content-Type", REMOTE_CONTENT_TYPE);
+            .post(&format!("{}/api/v1/solves", self.base_url))
+            .set(
+                "Content-Type",
+                &format!("multipart/form-data; boundary={boundary}"),
+            );
         let response = self.call_with_body(request, &body)?;
-        let mut result: WorkerSolveResult = response
+        let mut job: ServerJob = response
             .into_json()
-            .context("invalid solve response from seiza-server")?;
+            .context("invalid job response from seiza-server")?;
+        loop {
+            match job.status {
+                ServerJobStatus::Queued | ServerJobStatus::Solving => {
+                    std::thread::sleep(SERVER_POLL_INTERVAL);
+                    let response = self.call(
+                        self.agent
+                            .get(&format!("{}/api/v1/solves/{}", self.base_url, job.id)),
+                    )?;
+                    job = response
+                        .into_json()
+                        .context("invalid polling response from seiza-server")?;
+                }
+                ServerJobStatus::Failed => {
+                    anyhow::bail!(
+                        "seiza-server solve failed: {}",
+                        job.error.as_deref().unwrap_or("unknown server error")
+                    );
+                }
+                ServerJobStatus::Succeeded => break,
+            }
+        }
+        let solution = job
+            .solution
+            .context("seiza-server reported success without a solution")?;
         let transport_elapsed = transport_started.elapsed();
-
-        result.timings.load_ms = milliseconds(load_elapsed);
-        result.timings.encode_ms = milliseconds(encode_elapsed);
-        result.timings.transport_ms = milliseconds(transport_elapsed);
-        result.timings.total_ms = milliseconds(total_started.elapsed());
+        let mut result = solution.into_worker_result(params.mode);
+        result.timings = SolveTimings {
+            load_ms: milliseconds(load_elapsed),
+            encode_ms: milliseconds(encode_elapsed),
+            transport_ms: milliseconds(transport_elapsed),
+            detect_ms: 0.0,
+            index_ms: 0.0,
+            solve_ms: 0.0,
+            total_ms: milliseconds(total_started.elapsed()),
+        };
         result.transfer = Some(RemoteTransfer {
-            encoding: "gray8-zstd".to_string(),
-            uncompressed_bytes: image.as_raw().len(),
-            encoded_bytes: body.len(),
+            encoding: upload.encoding.to_string(),
+            uncompressed_bytes: upload.uncompressed_bytes,
+            encoded_bytes: upload.bytes.len(),
         });
         Ok(result)
     }
@@ -533,6 +632,28 @@ impl RemoteSolver {
     }
 }
 
+impl ServerUploadFormat {
+    fn encoding(self) -> &'static str {
+        match self {
+            Self::Png => "png-gray8",
+            Self::Fits => "fits",
+        }
+    }
+}
+
+enum RemoteUploadSource {
+    Image(image::GrayImage),
+    Fits(Vec<u8>),
+}
+
+struct RemoteUpload {
+    bytes: Vec<u8>,
+    filename: &'static str,
+    content_type: &'static str,
+    encoding: &'static str,
+    uncompressed_bytes: usize,
+}
+
 fn map_remote_response(
     response: std::result::Result<ureq::Response, ureq::Error>,
 ) -> Result<ureq::Response> {
@@ -546,197 +667,146 @@ fn map_remote_response(
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RemoteSolveRequest {
-    schema_version: u32,
-    mode: SolveMode,
-    hint: Option<HintParams>,
-    blind: Option<BlindSolveParams>,
-    detection: DetectionParams,
-    image: RemoteImageMetadata,
+#[derive(Debug, Deserialize)]
+struct ServerHealth {
+    status: String,
+    solver_ready: bool,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RemoteImageMetadata {
-    width: u32,
-    height: u32,
-    encoding: String,
-    uncompressed_bytes: usize,
+#[derive(Debug, Deserialize)]
+struct ServerJob {
+    id: String,
+    status: ServerJobStatus,
+    solution: Option<ServerSolution>,
+    error: Option<String>,
 }
 
-fn encode_remote_request(image: &image::GrayImage, params: &SolveParams) -> Result<Vec<u8>> {
-    let metadata = RemoteSolveRequest {
-        schema_version: REMOTE_SCHEMA_VERSION,
-        mode: params.mode,
-        hint: params.hint.clone(),
-        blind: params.blind.clone(),
-        detection: params.detection.clone(),
-        image: RemoteImageMetadata {
-            width: image.width(),
-            height: image.height(),
-            encoding: "gray8-zstd".to_string(),
-            uncompressed_bytes: image.as_raw().len(),
-        },
-    };
-    let metadata = serde_json::to_vec(&metadata)?;
-    let metadata_len = u32::try_from(metadata.len()).context("remote metadata is too large")?;
-    let compressed = zstd::stream::encode_all(Cursor::new(image.as_raw()), 3)
-        .context("failed to compress remote image")?;
-
-    let mut body = Vec::with_capacity(REMOTE_MAGIC.len() + 4 + metadata.len() + compressed.len());
-    body.extend_from_slice(REMOTE_MAGIC);
-    body.extend_from_slice(&metadata_len.to_le_bytes());
-    body.extend_from_slice(&metadata);
-    body.extend_from_slice(&compressed);
-    Ok(body)
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ServerJobStatus {
+    Queued,
+    Solving,
+    Succeeded,
+    Failed,
 }
 
-fn decode_remote_request(body: &[u8]) -> Result<(RemoteSolveRequest, image::GrayImage)> {
-    if body.len() < REMOTE_MAGIC.len() + 4 || &body[..REMOTE_MAGIC.len()] != REMOTE_MAGIC {
-        anyhow::bail!("invalid Seiza remote image envelope");
-    }
-    let metadata_offset = REMOTE_MAGIC.len() + 4;
-    let metadata_len = u32::from_le_bytes(
-        body[REMOTE_MAGIC.len()..metadata_offset]
-            .try_into()
-            .expect("four-byte metadata length"),
-    ) as usize;
-    let image_offset = metadata_offset
-        .checked_add(metadata_len)
-        .filter(|offset| *offset <= body.len())
-        .context("remote metadata length exceeds request body")?;
-    let metadata: RemoteSolveRequest = serde_json::from_slice(&body[metadata_offset..image_offset])
-        .context("invalid remote solve metadata")?;
-    if metadata.schema_version != REMOTE_SCHEMA_VERSION {
-        anyhow::bail!(
-            "unsupported remote schema version {}; expected {REMOTE_SCHEMA_VERSION}",
-            metadata.schema_version
+#[derive(Debug, Deserialize)]
+struct ServerSolution {
+    center_ra_deg: f64,
+    center_dec_deg: f64,
+    pixel_scale_arcsec_per_pixel: f64,
+    matched_stars: usize,
+    rms_arcsec: f64,
+    image_width: u32,
+    image_height: u32,
+    wcs: ServerWcs,
+}
+
+impl ServerSolution {
+    fn into_worker_result(self, mode: SolveMode) -> WorkerSolveResult {
+        let solution = Solution {
+            wcs: Wcs {
+                crval: (self.wcs.crval[0], self.wcs.crval[1]),
+                crpix: (self.wcs.crpix[0], self.wcs.crpix[1]),
+                cd: self.wcs.cd,
+            },
+            matched_stars: self.matched_stars,
+            rms_arcsec: self.rms_arcsec,
+        };
+        let mut result = solution_result(
+            mode,
+            &solution,
+            (self.image_width, self.image_height),
+            SolveTimings::default(),
         );
+        result.center = SkyCoordinate {
+            ra_deg: self.center_ra_deg,
+            dec_deg: self.center_dec_deg,
+        };
+        result.pixel_scale_arcsec_per_pixel = self.pixel_scale_arcsec_per_pixel;
+        result
     }
-    if metadata.image.encoding != "gray8-zstd" {
-        anyhow::bail!(
-            "unsupported remote image encoding {}",
-            metadata.image.encoding
-        );
-    }
-    let expected = (metadata.image.width as usize)
-        .checked_mul(metadata.image.height as usize)
-        .context("remote image dimensions overflow")?;
-    if expected == 0 || expected > MAX_REMOTE_REQUEST_BYTES as usize {
-        anyhow::bail!("remote image dimensions are empty or too large");
-    }
-    if metadata.image.uncompressed_bytes != expected {
-        anyhow::bail!("remote image byte count does not match its dimensions");
-    }
-    let mut pixels = Vec::with_capacity(expected);
-    zstd::stream::read::Decoder::new(&body[image_offset..])
-        .context("invalid Zstandard image stream")?
-        .take(expected as u64 + 1)
-        .read_to_end(&mut pixels)
-        .context("failed to decompress remote image")?;
-    if pixels.len() != expected {
-        anyhow::bail!("decompressed image size does not match its dimensions");
-    }
-    let image = image::GrayImage::from_raw(metadata.image.width, metadata.image.height, pixels)
-        .context("failed to construct remote image")?;
-    Ok((metadata, image))
 }
 
-/// Run the warm HTTP service used by remote-backed workers.
-pub fn run_server(
-    listen: &str,
-    data_path: &Path,
-    index_path: Option<&Path>,
-    token: Option<&str>,
-) -> Result<()> {
-    let mut solver = LocalSolver::open(data_path, index_path)?;
-    let server = Server::http(listen)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))
-        .with_context(|| format!("failed to listen on {listen}"))?;
-    eprintln!("seiza-server listening on http://{listen}");
+#[derive(Debug, Deserialize)]
+struct ServerWcs {
+    crval: [f64; 2],
+    crpix: [f64; 2],
+    cd: [[f64; 2]; 2],
+}
 
-    for mut request in server.incoming_requests() {
-        if !authorized(&request, token) {
-            request.respond(text_response(StatusCode(401), "unauthorized"))?;
-            continue;
-        }
-        match (request.method(), request.url()) {
-            (&Method::Get, "/v1/status") => {
-                let mut status = solver.status();
-                status.kind = "remote".to_string();
-                status.server.name = "seiza-server".to_string();
-                status.remote_image_encoding = Some("gray8-zstd".to_string());
-                request.respond(json_response(StatusCode(200), &status)?)?;
-            }
-            (&Method::Post, "/v1/solve") => {
-                let is_expected_type = request.headers().iter().any(|header| {
-                    header.field.equiv("Content-Type")
-                        && header.value.as_str().starts_with(REMOTE_CONTENT_TYPE)
-                });
-                if !is_expected_type {
-                    request.respond(text_response(StatusCode(415), "unsupported content type"))?;
-                    continue;
-                }
-                let mut body = Vec::new();
-                request
-                    .as_reader()
-                    .take(MAX_REMOTE_REQUEST_BYTES + 1)
-                    .read_to_end(&mut body)?;
-                if body.len() as u64 > MAX_REMOTE_REQUEST_BYTES {
-                    request.respond(text_response(StatusCode(413), "request body too large"))?;
-                    continue;
-                }
-                let response = (|| -> Result<WorkerSolveResult> {
-                    let (metadata, image) = decode_remote_request(&body)?;
-                    let params = SolveParams {
-                        image_path: PathBuf::from("<remote>"),
-                        mode: metadata.mode,
-                        hint: metadata.hint,
-                        blind: metadata.blind,
-                        detection: metadata.detection,
-                    };
-                    params.validate().map_err(anyhow::Error::msg)?;
-                    solver.solve_image(
-                        &image::DynamicImage::ImageLuma8(image),
-                        &params,
-                        Duration::ZERO,
-                        Duration::ZERO,
-                        Instant::now(),
-                    )
-                })();
-                match response {
-                    Ok(result) => request.respond(json_response(StatusCode(200), &result)?)?,
-                    Err(error) => {
-                        request.respond(text_response(StatusCode(422), &format!("{error:#}")))?
-                    }
-                }
-            }
-            _ => request.respond(text_response(StatusCode(404), "not found"))?,
-        }
+#[derive(Debug, Serialize)]
+struct ServerSolveOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    center_ra_deg: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    center_dec_deg: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    radius_deg: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scale_arcsec_per_pixel: Option<f64>,
+    scale_tolerance: f64,
+    min_scale_arcsec_per_pixel: f64,
+    max_scale_arcsec_per_pixel: f64,
+    sigma: f32,
+    ignore_border: u32,
+    max_stars: usize,
+}
+
+fn server_options(params: &SolveParams) -> ServerSolveOptions {
+    let hint = params.hint.as_ref();
+    let blind = params.blind.clone().unwrap_or_default();
+    ServerSolveOptions {
+        center_ra_deg: hint.map(|hint| hint.center_ra_deg),
+        center_dec_deg: hint.map(|hint| hint.center_dec_deg),
+        radius_deg: hint.map(|hint| hint.radius_deg),
+        scale_arcsec_per_pixel: hint.map(|hint| hint.scale_arcsec_per_pixel),
+        scale_tolerance: hint.map_or_else(default_scale_tolerance, |hint| hint.scale_tolerance),
+        min_scale_arcsec_per_pixel: blind.min_scale_arcsec_per_pixel,
+        max_scale_arcsec_per_pixel: blind.max_scale_arcsec_per_pixel,
+        sigma: params.detection.sigma,
+        ignore_border: params.detection.ignore_border,
+        max_stars: params.detection.max_stars,
     }
-    Ok(())
 }
 
-fn authorized(request: &tiny_http::Request, token: Option<&str>) -> bool {
-    let Some(token) = token else { return true };
-    request.headers().iter().any(|header| {
-        header.field.equiv("Authorization") && header.value.as_str() == format!("Bearer {token}")
-    })
+fn encode_png(image: &image::GrayImage) -> Result<Vec<u8>> {
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            image::ExtendedColorType::L8,
+        )
+        .context("failed to encode compact PNG for seiza-server")?;
+    Ok(png)
 }
 
-fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Result<Response<Cursor<Vec<u8>>>> {
-    let body = serde_json::to_vec(value)?;
-    let content_type = Header::from_bytes("Content-Type", "application/json")
-        .map_err(|_| anyhow::anyhow!("invalid JSON content-type header"))?;
-    Ok(Response::from_data(body)
-        .with_status_code(status)
-        .with_header(content_type))
-}
-
-fn text_response(status: StatusCode, value: &str) -> Response<Cursor<Vec<u8>>> {
-    Response::from_string(value).with_status_code(status)
+fn multipart_solve_body(
+    image: &[u8],
+    filename: &str,
+    content_type: &str,
+    options: &ServerSolveOptions,
+) -> Result<(String, Vec<u8>)> {
+    let sequence = MULTIPART_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let boundary = format!("seiza-cli-{}-{sequence}", std::process::id());
+    let options = serde_json::to_vec(options)?;
+    let mut body = Vec::with_capacity(image.len() + options.len() + 512);
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"options\"\r\n");
+    body.extend_from_slice(b"Content-Type: application/json\r\n\r\n");
+    body.extend_from_slice(&options);
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!("Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n")
+            .as_bytes(),
+    );
+    body.extend_from_slice(format!("Content-Type: {content_type}\r\n\r\n").as_bytes());
+    body.extend_from_slice(image);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    Ok((boundary, body))
 }
 
 impl RpcService for WorkerService {
@@ -1007,7 +1077,7 @@ struct WorkerWcs {
     cd: [[f64; 2]; 2],
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SolveTimings {
     load_ms: f64,
@@ -1246,7 +1316,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_envelope_round_trips_compact_gray_pixels() {
+    fn remote_multipart_contains_compact_png_and_server_options() {
         let image = image::GrayImage::from_pixel(1024, 768, image::Luma([7]));
         let params = SolveParams {
             image_path: PathBuf::from("image.fits"),
@@ -1262,11 +1332,20 @@ mod tests {
             detection: DetectionParams::default(),
         };
 
-        let encoded = encode_remote_request(&image, &params).unwrap();
-        assert!(encoded.len() < image.as_raw().len() / 10);
-        let (metadata, decoded) = decode_remote_request(&encoded).unwrap();
-        assert_eq!(metadata.image.encoding, "gray8-zstd");
-        assert_eq!(decoded.dimensions(), image.dimensions());
-        assert_eq!(decoded.as_raw(), image.as_raw());
+        let png = encode_png(&image).unwrap();
+        assert!(png.len() < image.as_raw().len() / 10);
+        let (boundary, body) = multipart_solve_body(
+            &png,
+            "nina-solve.png",
+            "image/png",
+            &server_options(&params),
+        )
+        .unwrap();
+        assert!(body.windows(8).any(|window| window == b"\x89PNG\r\n\x1a\n"));
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.starts_with(&format!("--{boundary}\r\n")));
+        assert!(text.contains("name=\"options\""));
+        assert!(text.contains("\"center_ra_deg\":10.0"));
+        assert!(text.contains("name=\"file\"; filename=\"nina-solve.png\""));
     }
 }
