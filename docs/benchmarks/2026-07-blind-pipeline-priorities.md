@@ -105,3 +105,69 @@ wall time fell from 247 ms to 205 ms, with identical match counts and RMS.
 The exact final source passes formatting, strict Clippy, the release build,
 and all 106 local workspace tests. The two hosted/network integration tests
 remain intentionally ignored.
+
+## JPEG validation corpus (2026-07-15)
+
+An external AstroBin-derived corpus was added after the FITS measurements. It
+contains 25 RGB JPEGs with independent TOML WCS sidecars, spanning 3311 x 3312
+through 11622 x 8056 pixels and 0.163 through 2.822 arcsec/pixel. The sidecars
+provide `crval`, `crpix`, and a CD matrix; the expected pixel scale was computed
+as `3600 * sqrt(abs(det(CD)))`. Sidecar dimensions matched the decoded JPEG
+dimensions in every case.
+
+The Seiza release executable at `e6f24aa` and ASTAP CLI 2026.06.29 with its
+D50 database were run once per image and mode. Hinted solves used the sidecar
+center, a 2-degree radius, and the sidecar scale/FOV. Position-blind solves
+omitted the center and used the same scale knowledge. For Seiza that was a 20%
+scale envelope; for ASTAP it was the sidecar-derived image height and a
+180-degree search. Seiza fully blind solves used the CLI defaults of 0.1
+through 20 arcsec/pixel and 400 verified hypotheses. Seiza blind modes used
+the prebuilt G<=16 index with `--index-mag-limit 16`.
+
+| Solver and mode | Result | Median wall (successes) | Median CPU (successes) | Median center error | Maximum center error |
+|---|---:|---:|---:|---:|---:|
+| Seiza hinted | 25/25 | 398 ms | 453 ms | 4.63 arcsec | 7.86 arcsec |
+| ASTAP hinted | 13/25 | 1.17 s | 1.09 s | 2.80 arcsec | 8.60 arcsec |
+| Seiza position blind, scale +/-20% | 25/25 | 798 ms | 1.50 s | 4.57 arcsec | 7.92 arcsec |
+| ASTAP position blind, known FOV | 12/25 | 4.71 s | 3.69 s | 2.76 arcsec | 8.60 arcsec |
+| Seiza fully blind, 0.1-20 arcsec/pixel | 23/25 | 969 ms | 2.44 s | 4.85 arcsec | 7.92 arcsec |
+
+For both complete Seiza 25-image matrices, median Seiza RMS was 2.18 arcsec
+and median absolute scale disagreement with the sidecars was 0.016%. ASTAP's
+successful hinted and position-blind solves had median absolute scale
+disagreement of 0.035% and 0.037%, respectively. Every reported success from
+both solvers agreed with the independent WCS; there were no false positive
+solutions.
+
+Among images both programs solved, Seiza was faster in all 13 hinted pairs
+(3.48x median ASTAP/Seiza wall ratio) and 9 of 12 position-blind pairs (2.91x
+median ratio). ASTAP won the three difficult Seiza position-blind outliers:
+Crescent, Sh2-101, and the full-frame NGC 7331 image. Conversely, ASTAP's
+position-blind fine-scale NGC 3310 pair took 87 and 117 seconds, and the
+Whirlpool image took 83 seconds; Seiza solved those three in 0.3 through 1.1
+seconds.
+
+ASTAP's failed cases wrote `PLTSOLVD=F` and reported `No solution found`; none
+timed out. Its failures cluster in heavily processed narrowband fields,
+including all three C34 images, all four sidecar-backed Sh2-119 images, and all
+three WR134 images. Seiza solved every one of those in both primary modes.
+
+The two fully blind misses were the Crescent and full-frame NGC 7331 images.
+Both cleanly exhausted the default 400-hypothesis budget in approximately 26
+seconds rather than timing out. The position-blind sweep also exposed four
+search-funnel outliers: Sh2-101 at 11.6 seconds, Crescent at 10.8 seconds, and
+the two NGC 7331 variants at 6.3 and 2.5 seconds. Sh2-101 then solved fully
+blind in 0.84 seconds, showing that scale filtering currently changes
+hypothesis ordering and does not monotonically reduce search work.
+
+Six additional JPEGs have descriptive Markdown with approximate object
+coordinates but no full WCS and were excluded from quantitative agreement
+counts. One AVIF plus TOML pair was also outside this JPEG validation. Because
+the tested JPEGs decode as RGB, they exercise the detector's general f32 luma
+path rather than the new native `ImageLuma8` path. The corpus therefore adds a
+useful format and detector-path regression case, not merely more samples of
+the optimized FITS path.
+
+These are single-run validation timings, retained with per-image stdout and
+stderr, rather than a repeated microbenchmark. They are suitable for checking
+format support, solution correctness, and large search regressions.
