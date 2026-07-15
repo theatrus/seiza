@@ -47,7 +47,10 @@ comparison, using the catalog recommended for each solver:
 | Accurate hint, 26 MP narrow field | 0.25-0.27 s | 0.27-0.29 s | Roughly tied; seiza 9-11% faster |
 | Accurate hint, 61 MP wide field | 0.42 s | 0.63 s | seiza 1.5x faster |
 | Position blind, 26 MP narrow field | 1.61 s | 31.28 s | seiza 19x faster |
-| Position blind, 61 MP wide field | 1.75 s | 1.02 s | ASTAP 1.7x faster |
+| Position blind, 61 MP wide field | 0.65 s | 1.09 s | seiza 1.7x faster |
+
+The 61 MP position-blind row was rerun after the blind-pipeline improvements
+(three runs each: seiza 0.62-0.65 s, ASTAP 1.08-1.16 s).
 
 On a separate set of 25 heavily processed JPEGs, seiza solved all 25 with a
 hint and all 25 position-blind. ASTAP solved 13 and 12 respectively. Among

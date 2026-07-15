@@ -160,6 +160,70 @@ the two NGC 7331 variants at 6.3 and 2.5 seconds. Sh2-101 then solved fully
 blind in 0.84 seconds, showing that scale filtering currently changes
 hypothesis ordering and does not monotonically reduce search work.
 
+### Remaining ASTAP wins and representative-selection regression
+
+A current three-run rerun of the 61 MP FITS position-blind comparison erased
+the earlier ASTAP win: seiza measured 0.648 seconds median versus ASTAP at
+1.094 seconds, so seiza is now 1.69x faster. The remaining ASTAP wins are the
+three difficult JPEG fields below. The saved validated runs show that their
+loss is almost entirely blind-solver work rather than loading, detection, or
+process startup:
+
+| Image | ASTAP known scale | seiza auto | seiza forced f32 | Auto CPU |
+|---|---:|---:|---:|---:|
+| Sh2-101 | 5.22 s | 35.45 s | 11.36 s | 554.0 s |
+| Full-frame NGC 7331 | 2.93 s | 5.96 s | 6.13 s | 88.3 s |
+| Crescent | 5.86 s | 10.49 s | 10.62 s | 163.1 s |
+
+`SEIZA_DEBUG_TRUTH` on the exact release-mode, forced-f32 position-blind
+commands exposed the ranking failure before the 400-hypothesis truncation:
+
+| Image | Nearest truth rank | Coarse matches | Smoothed votes |
+|---|---:|---:|---:|
+| Sh2-101, scale +/-20% | 364 of 400 | 1 | 73 |
+| Full-frame NGC 7331, scale +/-20% | 185 of 722 | 4 | 146 |
+| Crescent, scale +/-20% | 334 of 692 | 3 | 196 |
+| Sh2-101, full 0.1-20 scale range | 0 of 1811 | 144 | 74 |
+
+The Sh2-101 pair isolates the regression. Its same strong vote region receives
+73-74 votes in either search, but the known-scale run retains a poor WCS
+representative and ranks it 364th. The full-blind run retains an accurate
+representative and ranks it first, solving in 0.44 seconds of reported solver
+time instead of 11.22 seconds in the diagnostic rerun.
+
+The implementation explains this sensitivity. Each coarse RA/Dec/log-scale
+bucket stores the first implied WCS through `or_insert`; later candidates only
+increment its vote count. Smoothing sums votes from neighboring buckets but
+continues to carry one bucket's original WCS. Non-max suppression then keeps a
+single region representative, and the coarse matcher scores only that WCS.
+Changing the allowed scale population can therefore change which tied bucket
+and arbitrary representative survives, even when the correct scale is inside
+both ranges.
+
+The improvement order is consequently:
+
+1. Preserve and coarse-score several representatives per vote region, or pick
+   a robust medoid/refined WCS from the region, instead of retaining its first
+   candidate. This should turn the demonstrated 73-196-vote outliers into
+   first-batch verifications.
+2. Strengthen coarse scoring with unique image/catalog assignments, residual
+   quality, and brightness-rank evidence. The current binary proximity count
+   can promote accidental alignments, but this comes after fixing the WCS it
+   is asked to score.
+3. Add a cheap refinement/validation stage before invoking a complete hinted
+   triangle solve. Full verification is the source of the high speculative
+   CPU totals once a true region ranks hundreds deep.
+4. Bound the initial u8 attempt before an auto f32 retry. Sh2-101 currently
+   spends about 24 seconds exhausting u8 and then repeats the successful
+   11-second f32 path. This is a secondary worst-case multiplier, not the root
+   ranking bug.
+
+More threads and a persistent process are not remedies for these outliers.
+They already consume roughly 15-16 CPU-seconds per wall-second, while
+non-solver overhead is only a few tenths of a second. Reducing speculative
+verification has materially more leverage than increasing parallelism or
+amortizing startup.
+
 Six additional JPEGs have descriptive Markdown with approximate object
 coordinates but no full WCS and were excluded from quantitative agreement
 counts. One AVIF plus TOML pair was also outside this JPEG validation. Because
