@@ -2163,11 +2163,19 @@ fn write_object_source_manifest(
 
 fn file_digest(path: &Path) -> Result<(u64, String)> {
     use sha2::Digest;
+    use std::io::Read;
 
     let mut file = std::fs::File::open(path)?;
     let bytes = file.metadata()?.len();
     let mut hasher = sha2::Sha256::new();
-    std::io::copy(&mut file, &mut hasher)?;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
     let hash = hasher.finalize();
     let sha256 = hash.iter().map(|byte| format!("{byte:02x}")).collect();
     Ok((bytes, sha256))
@@ -2239,8 +2247,6 @@ pub fn build_gaia(input: &Path, output: &Path, epoch: f64, max_mag: f32, bands: 
 
 /// Write a bundle manifest (name, size, sha256 per data file) for hosting.
 pub fn build_manifest(dir: &Path, version: &str, output: &Path) -> Result<()> {
-    use sha2::Digest;
-
     let mut entries: Vec<_> = std::fs::read_dir(dir)?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
@@ -2256,12 +2262,7 @@ pub fn build_manifest(dir: &Path, version: &str, output: &Path) -> Result<()> {
 
     let mut files = String::new();
     for path in &entries {
-        let mut data = std::fs::File::open(path)?;
-        let bytes = data.metadata()?.len();
-        let mut hasher = sha2::Sha256::new();
-        std::io::copy(&mut data, &mut hasher)?;
-        let hash = hasher.finalize();
-        let hash_hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+        let (bytes, hash_hex) = file_digest(path)?;
         let name = path.file_name().unwrap().to_string_lossy();
         if !files.is_empty() {
             files.push_str(",\n");
