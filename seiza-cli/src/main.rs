@@ -393,13 +393,13 @@ enum DownloadSource {
         #[arg(long)]
         output: PathBuf,
     },
-    /// Prebuilt datasets from versioned downloads.seiza.fyi manifests
+    /// Prebuilt datasets from the current downloads.seiza.fyi catalog bundle
     /// (SHA-256 verified) — the quickest route to a working solver
     Prebuilt {
         /// Directory to download into
         #[arg(long)]
         output: PathBuf,
-        /// Specific files (default: everything in the applicable manifests)
+        /// Specific files (default: everything in the bundle manifest)
         #[arg(long)]
         file: Vec<String>,
     },

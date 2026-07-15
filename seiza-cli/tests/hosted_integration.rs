@@ -1,5 +1,5 @@
 //! Integration suite against real camera images hosted at
-//! downloads.seiza.fyi. Ignored by default (network + ~250 MB download,
+//! downloads.seiza.fyi. Ignored by default (network + ~350 MB download,
 //! cached under target/): run with
 //!
 //! ```text
@@ -147,4 +147,53 @@ fn hosted_images_solve_to_known_solutions() {
     }
 
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+#[ignore = "network: downloads and validates the hosted stellar identifier sidecar"]
+fn hosted_star_identifiers_are_downloadable_and_queryable() {
+    let dir = cache_dir().join("catalog-bundle-v2");
+    std::fs::create_dir_all(&dir).unwrap();
+    let seiza = env!("CARGO_BIN_EXE_seiza");
+
+    let download = Command::new(seiza)
+        .args(["download-data", "prebuilt", "--output"])
+        .arg(&dir)
+        .args(["--file", "stars-lite-tycho2.ids.bin"])
+        .output()
+        .expect("failed to run seiza download-data prebuilt");
+    assert!(
+        download.status.success(),
+        "hosted sidecar download failed:\n{}{}",
+        String::from_utf8_lossy(&download.stdout),
+        String::from_utf8_lossy(&download.stderr)
+    );
+
+    let identifiers = dir.join("stars-lite-tycho2.ids.bin");
+    let validate = Command::new(seiza)
+        .args(["catalog", "validate", "--data"])
+        .arg(&identifiers)
+        .output()
+        .expect("failed to validate hosted stellar identifier sidecar");
+    let validation_text = String::from_utf8_lossy(&validate.stdout).to_string()
+        + &String::from_utf8_lossy(&validate.stderr);
+    assert!(validate.status.success(), "{validation_text}");
+    assert!(
+        validation_text.contains("2698290 numeric identifiers, 387099 names"),
+        "unexpected hosted sidecar contents:\n{validation_text}"
+    );
+
+    let query = Command::new(seiza)
+        .args(["catalog", "star", "--data"])
+        .arg(&identifiers)
+        .args(["RR Lyr", "--format", "json"])
+        .output()
+        .expect("failed to query hosted stellar identifier sidecar");
+    let query_text = String::from_utf8_lossy(&query.stdout).to_string()
+        + &String::from_utf8_lossy(&query.stderr);
+    assert!(query.status.success(), "{query_text}");
+    assert!(
+        query_text.contains("\"stable_id\": \"gcvs:RRLYR\""),
+        "RR Lyr was not resolved through the hosted sidecar:\n{query_text}"
+    );
 }

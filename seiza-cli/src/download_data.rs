@@ -338,114 +338,82 @@ fn fetch_gaia_chunk(query: &str, target: &Path) -> Result<u64> {
     Ok(rows)
 }
 
-/// Base URL for the hosted, prebuilt seiza datasets.
-const HOSTED_DATA_URL: &str = "https://downloads.seiza.fyi/data";
-/// Object catalogs are versioned independently from the other hosted formats.
-const HOSTED_OBJECT_V3_URL: &str = "https://downloads.seiza.fyi/data/v3";
-const OBJECT_V3_DATASETS: &[&str] = &["objects.bin", "transients.bin"];
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum HostedSchema {
-    Base,
-    ObjectV3,
-}
-
-impl HostedSchema {
-    fn base_url(self) -> &'static str {
-        match self {
-            Self::Base => HOSTED_DATA_URL,
-            Self::ObjectV3 => HOSTED_OBJECT_V3_URL,
-        }
-    }
-}
+/// Current complete catalog bundle. The unversioned `/data` prefix remains a
+/// legacy v1 compatibility surface and is not consulted by new clients.
+const HOSTED_DATA_V2_URL: &str = "https://downloads.seiza.fyi/data/v2";
+const HOSTED_DATA_V2_REQUIRED: &[&str] = &[
+    "blind-gaia16.idx",
+    "minor-bodies.bin",
+    "objects.bin",
+    "stars-deep-gaia17.bin",
+    "stars-gaia.bin",
+    "stars-lite-tycho2.bin",
+    "stars-lite-tycho2.ids.bin",
+    "transients.bin",
+];
 
 #[derive(Debug, Eq, PartialEq)]
 struct HostedFile {
-    schema: HostedSchema,
     name: String,
     sha256: String,
-}
-
-fn is_object_v3_dataset(name: &str) -> bool {
-    OBJECT_V3_DATASETS.contains(&name)
 }
 
 fn manifest_entries(manifest: &serde_json::Value) -> Result<Vec<(String, String)>> {
     let files = manifest["files"]
         .as_array()
         .context("manifest has no files list")?;
-    Ok(files
+    files
         .iter()
-        .filter_map(|entry| {
-            Some((
-                entry["name"].as_str()?.to_string(),
-                entry["sha256"].as_str()?.to_string(),
-            ))
+        .enumerate()
+        .map(|(index, entry)| {
+            let name = entry["name"]
+                .as_str()
+                .with_context(|| format!("manifest file {index} has no name"))?;
+            let sha256 = entry["sha256"]
+                .as_str()
+                .with_context(|| format!("manifest file {index} has no sha256"))?;
+            Ok((name.to_string(), sha256.to_string()))
         })
-        .collect())
+        .collect()
 }
 
-/// Build one effective download set. Once a v3 manifest exists its object
-/// entries replace the legacy copies in the base manifest; a missing v3
-/// manifest deliberately falls back to the base manifest during rollout.
-fn hosted_download_plan(
-    base_manifest: &serde_json::Value,
-    object_v3_manifest: Option<&serde_json::Value>,
-    names: &[String],
-) -> Result<Vec<HostedFile>> {
-    let base_entries = manifest_entries(base_manifest)?;
-    let object_v3_entries = object_v3_manifest
-        .map(manifest_entries)
-        .transpose()?
-        .unwrap_or_default();
-    let has_object_v3 = object_v3_manifest.is_some();
+/// Select files from the complete v2 catalog bundle. The required-file check
+/// turns a missed publication into an explicit error instead of silently
+/// shipping a partial default download.
+fn hosted_download_plan(manifest: &serde_json::Value, names: &[String]) -> Result<Vec<HostedFile>> {
+    let version = manifest["version"]
+        .as_str()
+        .context("manifest has no version")?;
+    if !version.starts_with("catalog-bundle-v2-") {
+        bail!("unsupported catalog bundle manifest version: {version}");
+    }
+
+    let entries = manifest_entries(manifest)?;
     let requested = names.iter().map(String::as_str).collect::<BTreeSet<_>>();
     let mut offered = BTreeSet::new();
     let mut matched = BTreeSet::new();
     let mut plan = Vec::new();
 
-    for (name, sha256) in base_entries {
-        if has_object_v3 && is_object_v3_dataset(&name) {
-            continue;
+    for (name, sha256) in entries {
+        if !offered.insert(name.clone()) {
+            bail!("catalog bundle v2 manifest has duplicate file: {name}");
         }
-        offered.insert(name.clone());
         if requested.is_empty() || requested.contains(name.as_str()) {
             matched.insert(name.clone());
-            plan.push(HostedFile {
-                schema: HostedSchema::Base,
-                name,
-                sha256,
-            });
+            plan.push(HostedFile { name, sha256 });
         }
     }
 
-    if has_object_v3 {
-        for (name, sha256) in object_v3_entries {
-            if !is_object_v3_dataset(&name) {
-                continue;
-            }
-            offered.insert(name.clone());
-            if requested.is_empty() || requested.contains(name.as_str()) {
-                matched.insert(name.clone());
-                plan.push(HostedFile {
-                    schema: HostedSchema::ObjectV3,
-                    name,
-                    sha256,
-                });
-            }
-        }
-
-        let missing_schema_files = OBJECT_V3_DATASETS
-            .iter()
-            .filter(|name| !offered.contains(**name))
-            .copied()
-            .collect::<Vec<_>>();
-        if !missing_schema_files.is_empty() {
-            bail!(
-                "object v3 manifest is incomplete; missing: {}",
-                missing_schema_files.join(", ")
-            );
-        }
+    let missing_bundle_files = HOSTED_DATA_V2_REQUIRED
+        .iter()
+        .filter(|name| !offered.contains(**name))
+        .copied()
+        .collect::<Vec<_>>();
+    if !missing_bundle_files.is_empty() {
+        bail!(
+            "catalog bundle v2 manifest is incomplete; missing: {}",
+            missing_bundle_files.join(", ")
+        );
     }
 
     let missing = requested
@@ -469,50 +437,31 @@ fn hosted_download_plan(
     Ok(plan)
 }
 
-fn fetch_hosted_manifest(base_url: &str, optional: bool) -> Result<Option<serde_json::Value>> {
+fn fetch_hosted_manifest(base_url: &str) -> Result<serde_json::Value> {
     let manifest_url = format!("{base_url}/manifest.json");
     println!("  fetching {manifest_url}");
-    let response = match ureq::get(&manifest_url)
+    let response = ureq::get(&manifest_url)
         .timeout(std::time::Duration::from_secs(60))
         .call()
-    {
-        Ok(response) => response,
-        // S3/CloudFront commonly reports a missing private-origin key as 403
-        // rather than 404. This fallback applies only to an optional schema
-        // manifest; the required base manifest never suppresses either.
-        Err(ureq::Error::Status(403 | 404, _)) if optional => return Ok(None),
-        Err(error) => return Err(error).with_context(|| format!("failed to fetch {manifest_url}")),
-    };
-    let manifest = response
+        .with_context(|| format!("failed to fetch {manifest_url}"))?;
+    response
         .into_json()
-        .with_context(|| format!("{manifest_url} is not valid JSON"))?;
-    Ok(Some(manifest))
+        .with_context(|| format!("{manifest_url} is not valid JSON"))
 }
 
-/// Prebuilt datasets from downloads.seiza.fyi: combines the base manifest
-/// with the independently versioned object-v3 manifest, then downloads every
-/// listed file (or just `names`) with SHA-256 verification. The quickest route
-/// to a working solver — no catalog building required.
+/// Prebuilt datasets from the complete v2 bundle at downloads.seiza.fyi.
+/// Downloads every listed file (or just `names`) with SHA-256 verification.
+/// The quickest route to a working solver — no catalog building required.
 pub fn download_prebuilt(output: &Path, names: &[String]) -> Result<()> {
     std::fs::create_dir_all(output)?;
 
-    let base_manifest = fetch_hosted_manifest(HOSTED_DATA_URL, false)?.unwrap();
-    let wants_objects = names.is_empty() || names.iter().any(|name| is_object_v3_dataset(name));
-    let object_v3_manifest = if wants_objects {
-        let manifest = fetch_hosted_manifest(HOSTED_OBJECT_V3_URL, true)?;
-        if manifest.is_none() {
-            println!("  object v3 manifest not published; using base-manifest compatibility files");
-        }
-        manifest
-    } else {
-        None
-    };
-    let plan = hosted_download_plan(&base_manifest, object_v3_manifest.as_ref(), names)?;
+    let manifest = fetch_hosted_manifest(HOSTED_DATA_V2_URL)?;
+    let plan = hosted_download_plan(&manifest, names)?;
 
     let fetched = plan.len();
     for file in plan {
         fetch(
-            &format!("{}/{}", file.schema.base_url(), file.name),
+            &format!("{HOSTED_DATA_V2_URL}/{}", file.name),
             &output.join(file.name),
             Verify::Sha256(file.sha256),
         )?;
@@ -557,103 +506,117 @@ mod prebuilt_tests {
     use super::*;
     use serde_json::json;
 
-    fn base_manifest() -> serde_json::Value {
-        json!({"files": [
-            {"name": "stars.bin", "sha256": "stars-v1"},
-            {"name": "objects.bin", "sha256": "objects-v1"},
-            {"name": "transients.bin", "sha256": "transients-v1"},
-            {"name": "minor-bodies.bin", "sha256": "minor-v1"}
-        ]})
-    }
-
-    fn object_v3_manifest() -> serde_json::Value {
-        json!({"files": [
-            {"name": "objects.bin", "sha256": "objects-v3"},
-            {"name": "transients.bin", "sha256": "transients-v3"}
-        ]})
+    fn v2_manifest() -> serde_json::Value {
+        json!({
+            "version": "catalog-bundle-v2-test",
+            "files": [
+                {"name": "blind-gaia16.idx", "sha256": "blind-v2"},
+                {"name": "minor-bodies.bin", "sha256": "minor-v2"},
+                {"name": "objects.bin", "sha256": "objects-v3"},
+                {"name": "stars-deep-gaia17.bin", "sha256": "deep-v2"},
+                {"name": "stars-gaia.bin", "sha256": "gaia-v2"},
+                {"name": "stars-lite-tycho2.bin", "sha256": "tycho-v2"},
+                {"name": "stars-lite-tycho2.ids.bin", "sha256": "identifiers-v1"},
+                {"name": "transients.bin", "sha256": "transients-v3"}
+            ]
+        })
     }
 
     #[test]
-    fn default_plan_replaces_legacy_objects_with_v3() {
-        let base = base_manifest();
-        let v3 = object_v3_manifest();
-        let plan = hosted_download_plan(&base, Some(&v3), &[]).unwrap();
-
+    fn default_plan_contains_the_complete_v2_bundle() {
+        let plan = hosted_download_plan(&v2_manifest(), &[]).unwrap();
+        assert_eq!(plan.len(), HOSTED_DATA_V2_REQUIRED.len());
         assert!(plan.contains(&HostedFile {
-            schema: HostedSchema::Base,
-            name: "stars.bin".into(),
-            sha256: "stars-v1".into(),
-        }));
-        assert!(plan.contains(&HostedFile {
-            schema: HostedSchema::ObjectV3,
             name: "objects.bin".into(),
             sha256: "objects-v3".into(),
         }));
-        assert!(!plan.iter().any(|file| file.sha256 == "objects-v1"));
-        assert!(!plan.iter().any(|file| file.sha256 == "transients-v1"));
+        assert!(plan.contains(&HostedFile {
+            name: "stars-lite-tycho2.ids.bin".into(),
+            sha256: "identifiers-v1".into(),
+        }));
     }
 
     #[test]
-    fn explicit_object_download_uses_only_v3_manifest() {
-        let base = base_manifest();
-        let v3 = object_v3_manifest();
-        let plan = hosted_download_plan(&base, Some(&v3), &["objects.bin".into()]).unwrap();
-
+    fn explicit_download_selects_only_requested_v2_files() {
+        let plan = hosted_download_plan(
+            &v2_manifest(),
+            &["objects.bin".into(), "stars-lite-tycho2.ids.bin".into()],
+        )
+        .unwrap();
         assert_eq!(
             plan,
-            vec![HostedFile {
-                schema: HostedSchema::ObjectV3,
-                name: "objects.bin".into(),
-                sha256: "objects-v3".into(),
-            }]
+            vec![
+                HostedFile {
+                    name: "objects.bin".into(),
+                    sha256: "objects-v3".into(),
+                },
+                HostedFile {
+                    name: "stars-lite-tycho2.ids.bin".into(),
+                    sha256: "identifiers-v1".into(),
+                },
+            ]
         );
     }
 
     #[test]
-    fn absent_v3_manifest_falls_back_to_legacy_objects() {
-        let base = base_manifest();
-        let plan = hosted_download_plan(&base, None, &["objects.bin".into()]).unwrap();
-
-        assert_eq!(
-            plan,
-            vec![HostedFile {
-                schema: HostedSchema::Base,
-                name: "objects.bin".into(),
-                sha256: "objects-v1".into(),
-            }]
-        );
+    fn incomplete_v2_bundle_is_rejected_even_for_an_explicit_file() {
+        let mut manifest = v2_manifest();
+        manifest["files"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|entry| entry["name"] != "stars-lite-tycho2.ids.bin");
+        let error = hosted_download_plan(&manifest, &["objects.bin".into()]).unwrap_err();
+        assert!(error.to_string().contains(
+            "catalog bundle v2 manifest is incomplete; missing: stars-lite-tycho2.ids.bin"
+        ));
     }
 
     #[test]
-    fn existing_v3_manifest_does_not_fall_back_for_missing_object() {
-        let base = base_manifest();
-        let incomplete_v3 = json!({"files": []});
-        let error =
-            hosted_download_plan(&base, Some(&incomplete_v3), &["objects.bin".into()]).unwrap_err();
-
+    fn unavailable_requested_file_lists_the_bundle() {
+        let error = hosted_download_plan(&v2_manifest(), &["missing.bin".into()]).unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("object v3 manifest is incomplete")
+                .contains("requested file(s) unavailable: missing.bin")
+        );
+        assert!(error.to_string().contains("objects.bin"));
+    }
+
+    #[test]
+    fn wrong_bundle_version_is_rejected() {
+        let mut manifest = v2_manifest();
+        manifest["version"] = json!("object-v3-test");
+        let error = hosted_download_plan(&manifest, &[]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported catalog bundle manifest version")
         );
     }
 
     #[test]
-    fn default_download_rejects_an_incomplete_v3_manifest() {
-        let base = base_manifest();
-        let incomplete_v3 = json!({"files": [
-            {"name": "transients.bin", "sha256": "transients-v3"}
-        ]});
-        let error = hosted_download_plan(&base, Some(&incomplete_v3), &[]).unwrap_err();
-
-        assert!(error.to_string().contains("missing: objects.bin"));
+    fn duplicate_bundle_file_is_rejected() {
+        let mut manifest = v2_manifest();
+        manifest["files"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name": "objects.bin", "sha256": "other"}));
+        let error = hosted_download_plan(&manifest, &[]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("catalog bundle v2 manifest has duplicate file: objects.bin")
+        );
     }
 
     #[test]
-    fn non_object_download_stays_on_base_manifest() {
-        let base = base_manifest();
-        let plan = hosted_download_plan(&base, None, &["minor-bodies.bin".into()]).unwrap();
-
-        assert_eq!(plan[0].schema, HostedSchema::Base);
+    fn malformed_bundle_entry_is_rejected() {
+        let mut manifest = v2_manifest();
+        manifest["files"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("sha256");
+        let error = hosted_download_plan(&manifest, &[]).unwrap_err();
+        assert!(error.to_string().contains("manifest file 0 has no sha256"));
     }
 }

@@ -64,20 +64,22 @@ solving both work; see the repository's `docs/design/astap-mode.md`.
 
 ## Datasets
 
-The quickest route is the prebuilt, SHA-256-verified sets hosted at
-downloads.seiza.fyi (Tycho-2 lite, Gaia DR3 G≤15, the unified object
-catalog, and a nightly-refreshed transient list):
+The quickest route is the prebuilt, SHA-256-verified set hosted at
+downloads.seiza.fyi (Tycho-2 and Gaia solver tiles, the blind index, the
+unified object catalog, minor bodies, the
+Tycho/Bright Star/GCVS/WDS/IAU identifier sidecar, and a nightly-refreshed
+transient list):
 
 ```
 seiza download-data prebuilt --output data
 seiza download-data prebuilt --output data --file objects.bin --file transients.bin
 ```
 
-The downloader combines `/data/manifest.json` for core datasets with
-`/data/v3/manifest.json` for the `SEIZAOB3` object schema. Both manifests still
-write into the same local output directory. Until the v3 manifest is first
-published, a missing v3 manifest (HTTP 403 or 404, depending on the CDN origin)
-falls back to the legacy object entries in the base manifest.
+The downloader reads one complete bundle from `/data/v2/manifest.json` and
+writes its files into the same flat local output directory. It never combines
+catalogs from different hosted bundle versions. The unversioned `/data/`
+manifest and files remain temporarily as the classic v1 compatibility surface
+for older clients.
 
 Building from primary sources stays supported for custom depths, epochs,
 or tile granularity — note the Gaia TAP download alone can take many

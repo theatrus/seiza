@@ -87,12 +87,9 @@ deployed v1 format.
 
 ## Hosted distribution
 
-The object wire format has its own schema-versioned CDN path. `objects.bin`
-and `transients.bin` are published under `/data/v3/` with
-`/data/v3/manifest.json`. Those v3 copies are not substituted into the
-unversioned base manifest, which retains the deployed v1 entries for older
-clients. This prevents clients that only understand v1 from being offered a
-v3 replacement at the same URL. V3-aware `download-data prebuilt` clients
-combine the base and v3 manifests but retain the familiar flat local filenames.
-A 403 or 404 for the v3 manifest temporarily falls back to base-manifest object
-entries so the client can ship before the publisher changes.
+The v3 object wire format is published inside the complete `/data/v2/` catalog
+bundle. Bundle versions and wire-format versions are deliberately separate:
+the bundle selects one coherent set of catalogs, while each mapped file keeps
+its own magic/version header. The unversioned `/data/` bundle temporarily
+retains `SEIZAOB1` objects for classic clients; new clients never combine those
+legacy objects with files from the v2 bundle.
