@@ -472,6 +472,32 @@ impl FitsImage {
         stretch::stretch_u16_to_u8(&data, &stats, params)
     }
 
+    /// Linear grayscale samples normalized to `[0, 1]` for numeric processing.
+    ///
+    /// Unlike [`Self::stretch_to_u8`], this does not apply an MTF display
+    /// stretch. Positive affine normalization preserves local sigma
+    /// significance while retaining more-than-8-bit sample distinctions.
+    /// Raw one-shot-color mosaics are debayered to luminance first.
+    pub fn to_luma_f32(&self) -> Vec<f32> {
+        if let Some(rgb) = self.debayer() {
+            return rgb
+                .to_luma_u16()
+                .into_iter()
+                .map(|value| value as f32 / u16::MAX as f32)
+                .collect();
+        }
+
+        let full = self.planes_f32();
+        if self.planes != 3 {
+            return full;
+        }
+
+        let count = self.width * self.height;
+        (0..count)
+            .map(|index| (full[index] + full[count + index] + full[2 * count + index]) / 3.0)
+            .collect()
+    }
+
     /// The color filter array layout, when the `BAYERPAT` header marks
     /// this as a raw one-shot-color mosaic.
     pub fn bayer_pattern(&self) -> Option<BayerPattern> {
@@ -496,6 +522,19 @@ impl FitsImage {
             y_off,
         ))
     }
+
+    fn planes_f32(&self) -> Vec<f32> {
+        match &self.pixels {
+            Pixels::U8(data) => data.iter().map(|&value| value as f32 / 255.0).collect(),
+            Pixels::U16(data) => data
+                .iter()
+                .map(|&value| value as f32 / u16::MAX as f32)
+                .collect(),
+            Pixels::I32(data) => scale_to_f32(data.iter().map(|&value| value as f64)),
+            Pixels::F32(data) => scale_to_f32(data.iter().map(|&value| value as f64)),
+            Pixels::F64(data) => scale_to_f32(data.iter().copied()),
+        }
+    }
 }
 
 fn scale_to_u16(values: impl Iterator<Item = f64> + Clone) -> std::borrow::Cow<'static, [u16]> {
@@ -512,6 +551,33 @@ fn scale_to_u16(values: impl Iterator<Item = f64> + Clone) -> std::borrow::Cow<'
             .map(|v| (((v - min) / span).clamp(0.0, 1.0) * 65535.0) as u16)
             .collect(),
     )
+}
+
+fn scale_to_f32(values: impl Iterator<Item = f64> + Clone) -> Vec<f32> {
+    let (mut min, mut max) = (f64::INFINITY, f64::NEG_INFINITY);
+    for value in values.clone() {
+        if value.is_finite() {
+            min = min.min(value);
+            max = max.max(value);
+        }
+    }
+    if !min.is_finite() || !max.is_finite() {
+        return values.map(|_| 0.0).collect();
+    }
+
+    let span = max - min;
+    if span <= f64::EPSILON {
+        return values.map(|_| 0.0).collect();
+    }
+    values
+        .map(|value| {
+            if value.is_finite() {
+                ((value - min) / span).clamp(0.0, 1.0) as f32
+            } else {
+                0.0
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -630,6 +696,38 @@ mod io_tests {
         let image =
             FitsImage::from_bytes(&image_bytes(-64, &[2, 1], &[], &payload, false)).unwrap();
         assert!(matches!(image.pixels, Pixels::F64(ref values) if values == &[1.5, -2.25]));
+    }
+
+    #[test]
+    fn linear_f32_luma_preserves_more_than_eight_bits() {
+        let values = [1000, 1001, 32768, 65535];
+        let payload = unsigned_u16_payload(&values);
+        let image = FitsImage::from_bytes(&image_bytes(
+            16,
+            &[2, 2],
+            &[("BZERO", "32768")],
+            &payload,
+            false,
+        ))
+        .unwrap();
+
+        let luma = image.to_luma_f32();
+        for (actual, expected) in luma.iter().zip(values) {
+            assert_eq!(*actual, expected as f32 / u16::MAX as f32);
+        }
+        assert_ne!(luma[0], luma[1]);
+    }
+
+    #[test]
+    fn linear_f32_luma_affine_normalizes_float_data() {
+        let image = FitsImage {
+            width: 4,
+            height: 1,
+            planes: 1,
+            pixels: Pixels::F32(vec![10.0, 15.0, 20.0, f32::NAN]),
+            headers: Vec::new(),
+        };
+        assert_eq!(image.to_luma_f32(), [0.0, 0.5, 1.0, 0.0]);
     }
 
     #[test]

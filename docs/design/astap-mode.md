@@ -61,6 +61,12 @@ Mapping to seiza:
 - Timeout budget: N.I.N.A. kills the process after 10 minutes; stay
   far under it (we do).
 
+Seiza also accepts its `--detection-backend auto|u8|f32` and
+`--detection-fallback none|f32` extensions in this mode. Auto uses compact u8
+detection first and defaults to a lazy f32 retry after a solve miss. For FITS,
+that retry reopens the source and uses linear high-precision samples rather
+than applying the u8 MTF display stretch.
+
 ### Result file
 
 Write `<image-basename>.ini` **next to the input FITS** (same stem).

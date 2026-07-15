@@ -6,40 +6,201 @@ use seiza::minor_bodies::MinorBodyCatalog;
 use seiza::objects::{ObjectCatalog, ObjectKind, ObjectQuery, ObjectSort, SkyRegion};
 use seiza::solve::{SolveHint, solve};
 use seiza::star_ids::{StarIdentifierCatalog, StarLookupMatch};
-use seiza::{DetectBackend, DetectConfig, detect_stars};
+use seiza::{DetectBackend, DetectConfig, DetectedStar};
 use std::path::PathBuf;
 
 mod astap;
 mod build_data;
 
-/// Open an image file; FITS files are MTF-autostretched to 8-bit grayscale.
-pub(crate) fn load_image(path: &std::path::Path) -> Result<image::DynamicImage> {
-    let is_fits = path
-        .extension()
+fn is_fits_path(path: &std::path::Path) -> bool {
+    path.extension()
         .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("fits") || e.eq_ignore_ascii_case("fit"));
-    if is_fits {
-        let fits = seiza_fits::FitsImage::open(path)
-            .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
-        let stretched = fits.stretch_to_u8(&seiza_fits::StretchParams::default());
-        let buffer = image::GrayImage::from_raw(fits.width as u32, fits.height as u32, stretched)
-            .ok_or_else(|| anyhow::anyhow!("FITS dimensions mismatch"))?;
-        return Ok(image::DynamicImage::ImageLuma8(buffer));
-    }
-    image::open(path).with_context(|| format!("failed to open {}", path.display()))
+        .is_some_and(|e| e.eq_ignore_ascii_case("fits") || e.eq_ignore_ascii_case("fit"))
 }
 
-/// Auto normally converts these 8-bit variants to luma8. Unlike native
-/// luma8, that conversion can change sub-level ordering relative to f32 luma,
-/// so a failed solve may benefit from a compatibility retry.
-fn auto_can_retry_f32(image: &image::DynamicImage, backend: DetectBackend) -> bool {
-    backend == DetectBackend::Auto
-        && matches!(
-            image,
-            image::DynamicImage::ImageLumaA8(_)
-                | image::DynamicImage::ImageRgb8(_)
-                | image::DynamicImage::ImageRgba8(_)
+pub(crate) enum LoadedImage {
+    Dynamic(image::DynamicImage),
+    FitsF32 {
+        luma: Vec<f32>,
+        width: u32,
+        height: u32,
+    },
+}
+
+impl LoadedImage {
+    pub(crate) fn dimensions(&self) -> (u32, u32) {
+        match self {
+            Self::Dynamic(image) => (image.width(), image.height()),
+            Self::FitsF32 { width, height, .. } => (*width, *height),
+        }
+    }
+
+    pub(crate) fn detect_stars(&self, config: &DetectConfig) -> Vec<DetectedStar> {
+        match self {
+            Self::Dynamic(image) => seiza::detect_stars(image, config),
+            Self::FitsF32 {
+                luma,
+                width,
+                height,
+            } => seiza::detect_stars_luma_f32(luma, *width, *height, config),
+        }
+    }
+
+    fn is_converted_8bit_color(&self) -> bool {
+        matches!(
+            self,
+            Self::Dynamic(
+                image::DynamicImage::ImageLumaA8(_)
+                    | image::DynamicImage::ImageRgb8(_)
+                    | image::DynamicImage::ImageRgba8(_)
+            )
         )
+    }
+
+    fn to_rgb8(&self) -> image::RgbImage {
+        match self {
+            Self::Dynamic(image) => image.to_rgb8(),
+            Self::FitsF32 {
+                luma,
+                width,
+                height,
+            } => {
+                let mut rgb = Vec::with_capacity(luma.len() * 3);
+                for &value in luma {
+                    let value = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+                    rgb.extend_from_slice(&[value; 3]);
+                }
+                image::RgbImage::from_raw(*width, *height, rgb)
+                    .expect("FITS luma dimensions were validated when loaded")
+            }
+        }
+    }
+}
+
+/// Open an image in the representation selected for detection. FITS uses an
+/// MTF-compressed u8 buffer for Auto/U8 and native-precision linear f32 for
+/// F32, which also lets a compatibility retry genuinely reload the source.
+pub(crate) fn load_image(path: &std::path::Path, backend: DetectBackend) -> Result<LoadedImage> {
+    if is_fits_path(path) {
+        let fits = seiza_fits::FitsImage::open(path)
+            .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+        let width = u32::try_from(fits.width)
+            .map_err(|_| anyhow::anyhow!("FITS width exceeds supported image dimensions"))?;
+        let height = u32::try_from(fits.height)
+            .map_err(|_| anyhow::anyhow!("FITS height exceeds supported image dimensions"))?;
+        if backend == DetectBackend::F32 {
+            return Ok(LoadedImage::FitsF32 {
+                luma: fits.to_luma_f32(),
+                width,
+                height,
+            });
+        }
+        let stretched = fits.stretch_to_u8(&seiza_fits::StretchParams::default());
+        let buffer = image::GrayImage::from_raw(width, height, stretched)
+            .ok_or_else(|| anyhow::anyhow!("FITS dimensions mismatch"))?;
+        return Ok(LoadedImage::Dynamic(image::DynamicImage::ImageLuma8(
+            buffer,
+        )));
+    }
+    image::open(path)
+        .map(LoadedImage::Dynamic)
+        .with_context(|| format!("failed to open {}", path.display()))
+}
+
+/// Auto FITS begins with its compact MTF/u8 representation, while converted
+/// 8-bit color can change sub-level ordering relative to f32 luma. Either may
+/// benefit from a compatibility retry after a solve miss.
+fn auto_can_retry_f32(path: &std::path::Path, image: &LoadedImage, backend: DetectBackend) -> bool {
+    backend == DetectBackend::Auto && (is_fits_path(path) || image.is_converted_8bit_color())
+}
+
+fn redetect_f32(
+    path: &std::path::Path,
+    image: &LoadedImage,
+    config: &DetectConfig,
+) -> Result<Vec<DetectedStar>> {
+    let config = DetectConfig {
+        backend: DetectBackend::F32,
+        ..config.clone()
+    };
+    if is_fits_path(path) {
+        return Ok(load_image(path, DetectBackend::F32)?.detect_stars(&config));
+    }
+    Ok(image.detect_stars(&config))
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum DetectionFallback {
+    None,
+    #[default]
+    F32,
+}
+
+/// Common detection and retry state for every hinted or blind solve
+/// invocation. The f32 representation is loaded lazily after a solve miss and
+/// cached when a command tries more than one solving strategy.
+pub(crate) struct SolveInvocation<'a> {
+    path: &'a std::path::Path,
+    image: &'a LoadedImage,
+    config: DetectConfig,
+    fallback: DetectionFallback,
+    primary_stars: Vec<DetectedStar>,
+    f32_stars: Option<Vec<DetectedStar>>,
+    active_f32: bool,
+}
+
+impl<'a> SolveInvocation<'a> {
+    pub(crate) fn new(
+        path: &'a std::path::Path,
+        image: &'a LoadedImage,
+        config: DetectConfig,
+        fallback: DetectionFallback,
+    ) -> Self {
+        let primary_stars = image.detect_stars(&config);
+        Self {
+            path,
+            image,
+            config,
+            fallback,
+            primary_stars,
+            f32_stars: None,
+            active_f32: false,
+        }
+    }
+
+    pub(crate) fn stars(&self) -> &[DetectedStar] {
+        if self.active_f32 {
+            self.f32_stars
+                .as_deref()
+                .expect("active f32 solve has f32 detections")
+        } else {
+            &self.primary_stars
+        }
+    }
+
+    pub(crate) fn solve<T>(
+        &mut self,
+        mut solver: impl FnMut(&[DetectedStar]) -> std::result::Result<T, seiza::Error>,
+    ) -> Result<T> {
+        match solver(&self.primary_stars) {
+            Ok(solution) => Ok(solution),
+            Err(seiza::Error::Solve(_))
+                if self.fallback == DetectionFallback::F32
+                    && auto_can_retry_f32(self.path, self.image, self.config.backend) =>
+            {
+                eprintln!("u8 detection did not solve; retrying with f32 detection");
+                if self.f32_stars.is_none() {
+                    self.f32_stars = Some(redetect_f32(self.path, self.image, &self.config)?);
+                }
+                let result = solver(self.f32_stars.as_deref().expect("f32 stars were populated"));
+                if result.is_ok() {
+                    self.active_f32 = true;
+                }
+                result.map_err(anyhow::Error::from)
+            }
+            Err(error) => Err(anyhow::Error::from(error)),
+        }
+    }
 }
 
 /// RA/Dec hint from FITS headers (N.I.N.A. writes RA/DEC in degrees).
@@ -57,10 +218,14 @@ fn fits_hint(path: &std::path::Path) -> Option<(f64, f64)> {
 #[derive(Parser)]
 #[command(name = "seiza", about = "Star detection and plate solving", version)]
 struct Cli {
-    /// Detector numeric representation. Auto uses u8 for 8-bit images and
-    /// f32 for higher-precision inputs.
+    /// Detector numeric representation. Auto uses compact u8 for decoded
+    /// 8-bit images and FITS, and f32 for other higher-precision inputs.
     #[arg(long, value_enum, default_value = "auto", global = true)]
     detection_backend: DetectionBackendArg,
+    /// Retry a failed Auto/u8 solve using f32 detection. FITS is reloaded from
+    /// its native-precision linear samples.
+    #[arg(long, value_enum, default_value = "f32", global = true)]
+    detection_fallback: DetectionFallback,
     #[command(subcommand)]
     command: Command,
 }
@@ -558,6 +723,7 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let detection_backend = cli.detection_backend.into();
+    let detection_fallback = cli.detection_fallback;
     match cli.command {
         Command::Detect {
             image,
@@ -603,6 +769,7 @@ fn main() -> Result<()> {
                 sigma,
                 ignore_border,
                 detection_backend,
+                detection_fallback,
                 annotate.as_deref(),
                 objects.as_deref(),
                 minor_bodies.as_deref(),
@@ -689,6 +856,7 @@ fn main() -> Result<()> {
                 sigma,
                 ignore_border,
                 detection_backend,
+                detection_fallback,
             },
         ),
         Command::FitsInfo { image, stretch } => fits_info(&image, stretch.as_deref()),
@@ -949,14 +1117,14 @@ fn detect(
     detection_backend: DetectBackend,
     annotate: Option<&std::path::Path>,
 ) -> Result<()> {
-    let img = load_image(path)?;
+    let img = load_image(path, detection_backend)?;
     let config = DetectConfig {
         backend: detection_backend,
         sigma,
         max_stars,
         ..Default::default()
     };
-    let stars = detect_stars(&img, &config);
+    let stars = img.detect_stars(&config);
 
     println!("{} stars detected in {}", stars.len(), path.display());
     println!(
@@ -1473,13 +1641,14 @@ fn solve_command(
     sigma: f32,
     ignore_border: u32,
     detection_backend: DetectBackend,
+    detection_fallback: DetectionFallback,
     annotate: Option<&std::path::Path>,
     objects: Option<&std::path::Path>,
     minor_bodies: Option<&std::path::Path>,
     acquisition_jd: Option<f64>,
 ) -> Result<()> {
-    let img = load_image(path)?;
-    let dims = (img.width(), img.height());
+    let img = load_image(path, detection_backend)?;
+    let dims = img.dimensions();
 
     let config = DetectConfig {
         backend: detection_backend,
@@ -1488,10 +1657,10 @@ fn solve_command(
         max_stars: 200,
         ..Default::default()
     };
-    let stars = detect_stars(&img, &config);
+    let mut invocation = SolveInvocation::new(path, &img, config, detection_fallback);
     println!(
         "{} stars detected in {}x{} image",
-        stars.len(),
+        invocation.stars().len(),
         dims.0,
         dims.1
     );
@@ -1505,22 +1674,7 @@ fn solve_command(
         scale_tolerance,
     };
     let started = std::time::Instant::now();
-    let solution = match solve(&stars, &catalog, &hint, dims) {
-        Ok(solution) => Ok(solution),
-        Err(seiza::Error::Solve(_)) if auto_can_retry_f32(&img, detection_backend) => {
-            eprintln!("u8 detection did not solve; retrying with f32 detection");
-            let f32_stars = detect_stars(
-                &img,
-                &DetectConfig {
-                    backend: DetectBackend::F32,
-                    ..config.clone()
-                },
-            );
-            solve(&f32_stars, &catalog, &hint, dims)
-        }
-        Err(error) => Err(error),
-    }
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let solution = invocation.solve(|stars| solve(stars, &catalog, &hint, dims))?;
     let elapsed = started.elapsed();
 
     let wcs = &solution.wcs;
@@ -1619,7 +1773,7 @@ fn solve_command(
 
     if let Some(out) = annotate {
         let mut canvas = img.to_rgb8();
-        for star in &stars {
+        for star in invocation.stars() {
             imageproc::drawing::draw_hollow_circle_mut(
                 &mut canvas,
                 (star.x.round() as i32, star.y.round() as i32),
@@ -1711,6 +1865,7 @@ struct SolveBlindOptions<'a> {
     sigma: f32,
     ignore_border: u32,
     detection_backend: DetectBackend,
+    detection_fallback: DetectionFallback,
 }
 
 fn solve_blind_command(
@@ -1720,8 +1875,8 @@ fn solve_blind_command(
 ) -> Result<()> {
     use seiza::blind::{BlindIndex, BlindParams, solve_blind};
 
-    let img = load_image(path)?;
-    let dims = (img.width(), img.height());
+    let img = load_image(path, options.detection_backend)?;
+    let dims = img.dimensions();
     let config = DetectConfig {
         backend: options.detection_backend,
         sigma: options.sigma,
@@ -1729,10 +1884,10 @@ fn solve_blind_command(
         max_stars: 600,
         ..Default::default()
     };
-    let stars = detect_stars(&img, &config);
+    let mut invocation = SolveInvocation::new(path, &img, config, options.detection_fallback);
     println!(
         "{} stars detected in {}x{} image",
-        stars.len(),
+        invocation.stars().len(),
         dims.0,
         dims.1
     );
@@ -1774,22 +1929,7 @@ fn solve_blind_command(
     };
 
     let started = std::time::Instant::now();
-    let solution = match solve_blind(&stars, &catalog, &index, &params, dims) {
-        Ok(solution) => Ok(solution),
-        Err(seiza::Error::Solve(_)) if auto_can_retry_f32(&img, options.detection_backend) => {
-            eprintln!("u8 detection did not solve; retrying with f32 detection");
-            let f32_stars = detect_stars(
-                &img,
-                &DetectConfig {
-                    backend: DetectBackend::F32,
-                    ..config.clone()
-                },
-            );
-            solve_blind(&f32_stars, &catalog, &index, &params, dims)
-        }
-        Err(error) => Err(error),
-    }
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let solution = invocation.solve(|stars| solve_blind(stars, &catalog, &index, &params, dims))?;
     let wcs = &solution.wcs;
     let (ra, dec) = wcs.pixel_to_world(dims.0 as f64 / 2.0, dims.1 as f64 / 2.0);
     println!("Blind-solved in {:.2}s:", started.elapsed().as_secs_f64());
@@ -1876,6 +2016,18 @@ mod cli_tests {
         ));
         assert!(matches!(before.detection_backend, DetectionBackendArg::F32));
         assert!(matches!(after.detection_backend, DetectionBackendArg::U8));
+        assert_eq!(automatic.detection_fallback, DetectionFallback::F32);
+        let no_fallback = Cli::try_parse_from([
+            "seiza",
+            "solve-blind",
+            "image.fits",
+            "--data",
+            "stars.bin",
+            "--detection-fallback",
+            "none",
+        ])
+        .unwrap();
+        assert_eq!(no_fallback.detection_fallback, DetectionFallback::None);
         assert!(
             Cli::try_parse_from([
                 "seiza",
@@ -1889,12 +2041,111 @@ mod cli_tests {
     }
 
     #[test]
-    fn only_converted_auto_u8_inputs_retry_f32() {
-        let rgb = image::DynamicImage::ImageRgb8(image::RgbImage::new(1, 1));
-        let luma = image::DynamicImage::ImageLuma8(image::GrayImage::new(1, 1));
-        assert!(auto_can_retry_f32(&rgb, DetectBackend::Auto));
-        assert!(!auto_can_retry_f32(&rgb, DetectBackend::U8));
-        assert!(!auto_can_retry_f32(&luma, DetectBackend::Auto));
+    fn auto_retries_fits_and_converted_color_inputs() {
+        let rgb = LoadedImage::Dynamic(image::DynamicImage::ImageRgb8(image::RgbImage::new(1, 1)));
+        let luma =
+            LoadedImage::Dynamic(image::DynamicImage::ImageLuma8(image::GrayImage::new(1, 1)));
+        let jpeg = std::path::Path::new("image.jpg");
+        let fits = std::path::Path::new("image.fits");
+        assert!(auto_can_retry_f32(jpeg, &rgb, DetectBackend::Auto));
+        assert!(!auto_can_retry_f32(jpeg, &rgb, DetectBackend::U8));
+        assert!(!auto_can_retry_f32(jpeg, &luma, DetectBackend::Auto));
+        assert!(auto_can_retry_f32(fits, &luma, DetectBackend::Auto));
+        assert!(!auto_can_retry_f32(fits, &luma, DetectBackend::U8));
+    }
+
+    #[test]
+    fn fits_loader_keeps_u8_mtf_and_linear_f32_paths_distinct() {
+        const CARD: usize = 80;
+        let card = |keyword: &str, value: &str| {
+            let mut card = [b' '; CARD];
+            card[..keyword.len()].copy_from_slice(keyword.as_bytes());
+            card[8] = b'=';
+            card[9] = b' ';
+            card[10..10 + value.len()].copy_from_slice(value.as_bytes());
+            card
+        };
+        let mut bytes = Vec::new();
+        for (keyword, value) in [
+            ("SIMPLE", "T"),
+            ("BITPIX", "16"),
+            ("NAXIS", "2"),
+            ("NAXIS1", "2"),
+            ("NAXIS2", "2"),
+            ("BZERO", "32768"),
+            ("BSCALE", "1"),
+        ] {
+            bytes.extend_from_slice(&card(keyword, value));
+        }
+        let mut end = [b' '; CARD];
+        end[..3].copy_from_slice(b"END");
+        bytes.extend_from_slice(&end);
+        bytes.resize(bytes.len().next_multiple_of(2880), b' ');
+        for value in [1000u16, 1001, 32768, 65535] {
+            bytes.extend_from_slice(&(value ^ 0x8000).to_be_bytes());
+        }
+
+        let path = std::env::temp_dir().join(format!(
+            "seiza-cli-detection-backends-{}-{}.fits",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        let compact = load_image(&path, DetectBackend::Auto).unwrap();
+        let precise = load_image(&path, DetectBackend::F32).unwrap();
+
+        assert!(matches!(
+            compact,
+            LoadedImage::Dynamic(image::DynamicImage::ImageLuma8(_))
+        ));
+        let LoadedImage::FitsF32 { luma, .. } = precise else {
+            panic!("forced f32 FITS must retain a linear f32 buffer");
+        };
+        assert_eq!(luma[0], 1000.0 / u16::MAX as f32);
+        assert_eq!(luma[1], 1001.0 / u16::MAX as f32);
+        assert_ne!(luma[0], luma[1]);
+
+        let mut invocation = SolveInvocation::new(
+            &path,
+            &compact,
+            DetectConfig::default(),
+            DetectionFallback::F32,
+        );
+        let mut attempts = 0;
+        invocation
+            .solve(|_| {
+                attempts += 1;
+                if attempts == 1 {
+                    Err(seiza::Error::Solve("exercise f32 reload".into()))
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap();
+        assert_eq!(attempts, 2);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn solve_invocation_honors_disabled_fallback() {
+        let image =
+            LoadedImage::Dynamic(image::DynamicImage::ImageRgb8(image::RgbImage::new(2, 2)));
+        let mut invocation = SolveInvocation::new(
+            std::path::Path::new("image.jpg"),
+            &image,
+            DetectConfig::default(),
+            DetectionFallback::None,
+        );
+        let mut attempts = 0;
+        let result: Result<()> = invocation.solve(|_| {
+            attempts += 1;
+            Err(seiza::Error::Solve("expected miss".into()))
+        });
+        assert!(result.is_err());
+        assert_eq!(attempts, 1);
     }
 
     #[test]

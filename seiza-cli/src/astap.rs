@@ -27,6 +27,8 @@ struct AstapArgs {
     output: Option<PathBuf>,
     /// Seiza extension: detector numeric representation.
     detection_backend: seiza::DetectBackend,
+    /// Seiza extension: retry policy after an Auto/u8 solve miss.
+    detection_fallback: crate::DetectionFallback,
 }
 
 /// True when the raw command line looks like an ASTAP invocation
@@ -92,6 +94,12 @@ fn parse_args(raw: &[String]) -> AstapArgs {
                     _ => seiza::DetectBackend::Auto,
                 }
             }
+            "--detection-fallback" => {
+                args.detection_fallback = match value(&mut iter).as_deref() {
+                    Some("none") => crate::DetectionFallback::None,
+                    _ => crate::DetectionFallback::F32,
+                }
+            }
             // -z (downsample), -log, -wcs, and anything future: accept
             // and ignore, consuming a value only for flags known to take
             // one
@@ -112,14 +120,15 @@ fn solve(args: &AstapArgs, image_path: &Path) -> Result<Vec<String>> {
     let catalog = seiza::catalog::TileCatalog::open(&star_data)
         .with_context(|| format!("cannot open star catalog {}", star_data.display()))?;
 
-    let image = crate::load_image(image_path)?;
-    let dims = (image.width(), image.height());
+    let image = crate::load_image(image_path, args.detection_backend)?;
+    let dims = image.dimensions();
     let config = seiza::DetectConfig {
         backend: args.detection_backend,
         max_stars: args.max_stars.unwrap_or(0).clamp(0, 2000).max(200),
         ..Default::default()
     };
-    let stars = seiza::detect_stars(&image, &config);
+    let mut invocation =
+        crate::SolveInvocation::new(image_path, &image, config, args.detection_fallback);
 
     // Pixel scale from the height FOV when provided
     let scale = if args.fov_deg > 0.0 {
@@ -137,18 +146,21 @@ fn solve(args: &AstapArgs, image_path: &Path) -> Result<Vec<String>> {
     // passes wide ones (30 deg). Try near the hint first, then fall back
     // to a blind search, which covers any radius
     let hinted = match (hint, scale) {
-        (Some(center), Some(scale)) => seiza::solve::solve(
-            &stars,
-            &catalog,
-            &seiza::solve::SolveHint {
-                center,
-                radius_deg: args.radius_deg.clamp(0.5, 3.0),
-                scale_arcsec_px: scale,
-                scale_tolerance: 0.3,
-            },
-            dims,
-        )
-        .ok(),
+        (Some(center), Some(scale)) => invocation
+            .solve(|stars| {
+                seiza::solve::solve(
+                    stars,
+                    &catalog,
+                    &seiza::solve::SolveHint {
+                        center,
+                        radius_deg: args.radius_deg.clamp(0.5, 3.0),
+                        scale_arcsec_px: scale,
+                        scale_tolerance: 0.3,
+                    },
+                    dims,
+                )
+            })
+            .ok(),
         _ => None,
     };
 
@@ -189,8 +201,8 @@ fn solve(args: &AstapArgs, image_path: &Path) -> Result<Vec<String>> {
                 // fields need the hosted index (see resolve_blind_index).
                 seiza::blind::BlindIndex::build(&catalog, &params)
             };
-            seiza::blind::solve_blind(&stars, &catalog, &index, &params, dims)
-                .map_err(anyhow::Error::from)?
+            invocation
+                .solve(|stars| seiza::blind::solve_blind(stars, &catalog, &index, &params, dims))?
         }
     };
 
@@ -399,12 +411,20 @@ mod tests {
 
     #[test]
     fn parses_detection_backend_extension() {
-        let raw: Vec<String> = ["-f", "x.jpg", "--detection-backend", "f32"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let raw: Vec<String> = [
+            "-f",
+            "x.jpg",
+            "--detection-backend",
+            "f32",
+            "--detection-fallback",
+            "none",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         let args = parse_args(&raw);
         assert_eq!(args.detection_backend, seiza::DetectBackend::F32);
+        assert_eq!(args.detection_fallback, crate::DetectionFallback::None);
     }
 
     #[test]

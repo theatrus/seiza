@@ -86,6 +86,26 @@ pub fn detect_stars(image: &image::DynamicImage, config: &DetectConfig) -> Vec<D
     }
 }
 
+/// Detect stars from a normalized, row-major f32 luma buffer.
+///
+/// This entry point is useful for image containers such as FITS whose native
+/// precision cannot be represented by a grayscale [`image::DynamicImage`]
+/// variant. Invalid dimensions return no detections.
+pub fn detect_stars_luma_f32(
+    pixels: &[f32],
+    width: u32,
+    height: u32,
+    config: &DetectConfig,
+) -> Vec<DetectedStar> {
+    let expected = width
+        .checked_mul(height)
+        .and_then(|count| usize::try_from(count).ok());
+    if width == 0 || height == 0 || expected != Some(pixels.len()) {
+        return Vec::new();
+    }
+    detect_stars_luma(pixels, width, height, config)
+}
+
 fn is_8_bit(image: &image::DynamicImage) -> bool {
     matches!(
         image,

@@ -102,9 +102,9 @@ Every pair returned identical match counts and RMS. A separate hinted A/B on
 fine-, medium-, and wide-scale frames produced 15 successful pairs: median
 wall time fell from 247 ms to 205 ms, with identical match counts and RMS.
 
-The exact final source passes formatting, strict Clippy, the release build,
-and all 112 local workspace tests. The two hosted/network integration tests
-remain intentionally ignored.
+At that checkpoint the source passed formatting, strict Clippy, the release
+build, and all 112 local workspace tests. The two hosted/network integration
+tests remained intentionally ignored.
 
 ## JPEG validation corpus (2026-07-15)
 
@@ -214,3 +214,51 @@ with f32 only when converted 8-bit luma fails. The final auto matrix therefore
 preserved all 50 hinted/position-blind successes; the one compatibility retry
 took 35.5 seconds. Explicit `u8` never falls back, and explicit `f32` goes
 directly through the preserved high-precision path.
+
+## Accepted: linear f32 FITS detection and selectable fallback
+
+The first FITS fallback prototype reused the MTF display stretch and merely
+changed its output type to f32. That is not the right numeric representation
+for this detector. Its local median/MAD threshold is invariant under positive
+affine scaling, so a nonlinear visibility stretch adds no detection power. It
+can instead amplify background noise, compress bright cores, change component
+areas, and reorder the stars supplied to the solver.
+
+Forced f32 FITS loading now produces linear normalized grayscale samples:
+u8 and u16 values retain their full source distinctions through division by
+their type maximum, while integer and floating-point FITS types receive finite
+min/max affine normalization. Planar RGB collapses to linear luminance and CFA
+input follows the existing debayer path. Non-finite float samples become zero.
+The MTF remains in the compact u8 path and in preview generation, where
+compressing the sensor range is necessary.
+
+Solve retry behavior is centralized in one `SolveInvocation` used by hinted,
+blind, and ASTAP-compatible calls. It owns the primary detections, lazily
+reloads f32 detections after a normal solve miss, caches them across multiple
+solve strategies, and exposes the detections that produced the successful
+solution. The global `--detection-fallback none|f32` option defaults to `f32`;
+forced backends remain reproducible and never retry. FITS fallback explicitly
+reopens the source rather than trying to recover precision from the MTF/u8
+buffer.
+
+A release validation forced both backends with fallback disabled on fine,
+medium, and wide 16-bit FITS fields:
+
+| Mode | Backend | Solved | Matched stars (fine / medium / wide) | RMS arcsec (fine / medium / wide) |
+|---|---|---:|---|---|
+| Hinted | u8 MTF | 3/3 | 81 / 87 / 107 | 0.639 / 0.430 / 1.768 |
+| Hinted | linear f32 | 3/3 | 81 / 87 / 107 | 0.623 / 0.252 / 1.704 |
+| Blind | u8 MTF | 3/3 | 89 / 103 / 120 | 0.640 / 0.429 / 1.725 |
+| Blind | linear f32 | 3/3 | 89 / 103 / 119 | 0.624 / 0.259 / 1.673 |
+
+Every solution agreed with the earlier validation. The f32 result had lower
+reported RMS in all six pairs, while match counts were identical except for
+one star on the wide blind field. These are correctness checks, not a timing
+claim; each case was run once.
+
+CI fixtures now prove that adjacent 16-bit FITS values survive the f32 loader,
+Auto still selects the MTF/u8 loader, a solve miss really reopens FITS for f32,
+and disabling fallback produces exactly one solve attempt. Together with the
+existing backend-routing tests, the exact source passes formatting, strict
+Clippy, the locked release build, and all 116 local workspace tests. The two
+hosted/network integration tests remain intentionally ignored.

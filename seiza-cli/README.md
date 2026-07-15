@@ -41,12 +41,17 @@ seiza catalog star --data stars-lite-tycho2.ids.bin "RR L" --prefix --limit 10
 ```
 
 Star detection defaults to `--detection-backend auto`: decoded 8-bit images
-(including color JPEGs) use the compact u8 pipeline, while higher-precision
-images use f32. Pass `--detection-backend f32` to retain fractional luma during
-an 8-bit solve, or `--detection-backend u8` to explicitly quantize any input.
-The option is global and applies to `detect`, `solve`, and `solve-blind`.
-Normal auto solves retry converted 8-bit inputs with f32 only after a solve
-miss; explicitly selected backends never fall back.
+(including color JPEGs) and MTF-compressed FITS use the compact u8 pipeline,
+while other higher-precision images use f32. Pass `--detection-backend f32` to
+retain fractional luma during an 8-bit solve or to detect directly from linear,
+native-precision FITS samples; pass `--detection-backend u8` to explicitly
+quantize any input. The option is global and applies to `detect`, `solve`, and
+`solve-blind`.
+
+Auto solves default to `--detection-fallback f32`. After an Auto/u8 solve miss,
+converted 8-bit color is redetected as f32 and FITS is reopened so detection can
+use its linear high-precision samples. `--detection-fallback none` disables the
+retry. Explicitly selected detection backends never fall back.
 
 `catalog objects` accepts a cone or a convex polygon whose vertices are in
 boundary order. It can filter by object kind, magnitude, angular size, and
@@ -135,8 +140,9 @@ seiza catalog validate --data objects.bin
 
 FITS files are read natively (see
 [seiza-fits](https://crates.io/crates/seiza-fits)) with bounded-memory
-streaming into the final typed pixel buffer, automatic autostretch before
-detection, and RA/DEC hints taken from headers.
+streaming into the final typed pixel buffer, an automatic MTF stretch for u8
+detection and previews, a linear normalized representation for f32 detection,
+and RA/DEC hints taken from headers.
 
 ## License
 
