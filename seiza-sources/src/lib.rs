@@ -49,6 +49,12 @@ pub enum Error {
     #[error("Gaia TAP chunk response was malformed or truncated")]
     MalformedGaiaChunk,
 
+    #[error("Gaia magnitude limit must be finite; got {0}")]
+    InvalidGaiaMagnitude(f32),
+
+    #[error("Gaia chunk count must be between 1 and {max}; got {chunks}")]
+    InvalidGaiaChunks { chunks: u64, max: u64 },
+
     #[error("Gaia chunk {chunk} hit the {limit}-row cap; rerun with --chunks {suggested_chunks}")]
     GaiaRowCap {
         chunk: u64,
@@ -316,6 +322,16 @@ impl SourceDownloader {
         max_mag: f32,
         chunks: u64,
     ) -> Result<()> {
+        if !max_mag.is_finite() {
+            return Err(Error::InvalidGaiaMagnitude(max_mag));
+        }
+        if chunks == 0 || chunks > GAIA_SOURCE_ID_MAX {
+            return Err(Error::InvalidGaiaChunks {
+                chunks,
+                max: GAIA_SOURCE_ID_MAX,
+            });
+        }
+
         let output = output.as_ref();
         create_dir_all(output).await?;
         let mut completed = 0u64;
@@ -346,7 +362,7 @@ impl SourceDownloader {
                             return Err(Error::GaiaRowCap {
                                 chunk,
                                 limit: GAIA_MAXREC,
-                                suggested_chunks: chunks * 4,
+                                suggested_chunks: chunks.saturating_mul(4).min(GAIA_SOURCE_ID_MAX),
                             });
                         }
                         completed += 1;
@@ -690,6 +706,35 @@ mod tests {
             .unwrap();
         assert!(chunk_complete(&complete).await.unwrap());
         assert!(!chunk_complete(&truncated).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn gaia_rejects_invalid_arguments_before_creating_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let downloader = SourceDownloader::new().unwrap();
+
+        let zero = directory.path().join("zero");
+        assert!(matches!(
+            downloader.download_gaia(&zero, 15.0, 0).await,
+            Err(Error::InvalidGaiaChunks { chunks: 0, .. })
+        ));
+        assert!(!zero.exists());
+
+        let excessive = directory.path().join("excessive");
+        assert!(matches!(
+            downloader
+                .download_gaia(&excessive, 15.0, GAIA_SOURCE_ID_MAX + 1)
+                .await,
+            Err(Error::InvalidGaiaChunks { .. })
+        ));
+        assert!(!excessive.exists());
+
+        let non_finite = directory.path().join("non-finite");
+        assert!(matches!(
+            downloader.download_gaia(&non_finite, f32::NAN, 1).await,
+            Err(Error::InvalidGaiaMagnitude(value)) if value.is_nan()
+        ));
+        assert!(!non_finite.exists());
     }
 
     #[tokio::test]

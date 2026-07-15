@@ -373,11 +373,15 @@ enum DownloadSource {
         #[arg(long)]
         output: PathBuf,
         /// Magnitude limit for the download
-        #[arg(long, default_value_t = 15.0)]
+        #[arg(long, default_value_t = 15.0, allow_negative_numbers = true)]
         max_mag: f32,
         /// Sky chunks (multiples of 192; 768 = HEALPix level 3). Deeper
         /// magnitude limits need more chunks to stay under the TAP row cap
-        #[arg(long, default_value_t = 768)]
+        #[arg(
+            long,
+            default_value_t = 768,
+            value_parser = clap::value_parser!(u64).range(1..)
+        )]
         chunks: u64,
     },
     /// The Rochester Astronomy active supernova/transient list (refetched)
@@ -1772,4 +1776,52 @@ fn build_blind_index_command(
         started.elapsed().as_secs_f64()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn gaia_accepts_a_separated_negative_magnitude() {
+        let cli = Cli::try_parse_from([
+            "seiza",
+            "download-data",
+            "gaia",
+            "--output",
+            "gaia",
+            "--max-mag",
+            "-1.5",
+            "--chunks",
+            "1",
+        ])
+        .unwrap();
+
+        let Command::DownloadData {
+            source: DownloadSource::Gaia {
+                max_mag, chunks, ..
+            },
+        } = cli.command
+        else {
+            panic!("expected Gaia download command");
+        };
+        assert_eq!(max_mag, -1.5);
+        assert_eq!(chunks, 1);
+    }
+
+    #[test]
+    fn gaia_rejects_zero_chunks_at_parse_time() {
+        assert!(
+            Cli::try_parse_from([
+                "seiza",
+                "download-data",
+                "gaia",
+                "--output",
+                "gaia",
+                "--chunks",
+                "0",
+            ])
+            .is_err()
+        );
+    }
 }
