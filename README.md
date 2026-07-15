@@ -23,17 +23,19 @@ seiza catalog star --data data/stars-lite-tycho2.ids.bin "TYC 5949-2777-1" --for
 seiza catalog star --data data/stars-lite-tycho2.ids.bin "RR Lyr"
 ```
 
-Hosted datasets use a base
-[manifest](https://downloads.seiza.fyi/data/manifest.json) for star catalogs,
-blind indexes, and minor bodies, plus a schema-versioned
-[object-v3 manifest](https://downloads.seiza.fyi/data/v3/manifest.json) for
-`SEIZAOB3` files:
+Current hosted datasets use one complete, versioned
+[v2 catalog-bundle manifest](https://downloads.seiza.fyi/data/v2/manifest.json).
+The unversioned [legacy manifest](https://downloads.seiza.fyi/data/manifest.json)
+remains temporarily for classic v1 clients, but new clients never combine
+files from different bundle versions:
 `stars-lite-tycho2.bin` (2.5M stars, 25 MB), `stars-gaia.bin` (Gaia DR3
 G≤15, 36.7M stars, 367 MB), `stars-deep-gaia17.bin` (Gaia DR3 G≤17,
 154.1M stars, 1.54 GB), `blind-gaia16.idx` (the memory-mapped G≤16 blind
-pattern index, 1.63 GB), `objects.bin` (315k objects), and `transients.bin`
-(active supernovae/novae, refreshed nightly). `download-data prebuilt` combines
-the manifests while keeping the downloaded files in one local data directory.
+pattern index, 1.63 GB), `stars-lite-tycho2.ids.bin` (2.7M numeric identifiers
+and 387k names, 100 MB), `objects.bin` (315k objects), `minor-bodies.bin`
+(comets and asteroids), and `transients.bin` (active supernovae/novae,
+refreshed nightly). `download-data prebuilt` combines the bundle into one
+local data directory.
 The deep catalog and maintained index
 enable blind solving of small, fine-scale fields whose brightest detections
 are fainter than the G≤15 catalog's small-field pattern tiers without

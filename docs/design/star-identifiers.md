@@ -13,6 +13,11 @@ The identifier data stays in an optional sidecar. Solver-oriented
 `SEIZAST2` tiles remain compact and unchanged, and applications that need
 identity lookup can memory-map the sidecar once and reuse it.
 
+The complete sidecar is published as `stars-lite-tycho2.ids.bin` in the current
+`/data/v2/` catalog bundle. The bundle version selects a coherent set of
+catalog wire formats; the `SEIZASI1` header remains the sidecar's independent
+on-disk schema identifier.
+
 ```shell
 seiza download-data star-identifiers --output raw/star-identifiers
 
