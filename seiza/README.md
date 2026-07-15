@@ -5,7 +5,8 @@ astrophotography, in Rust.
 
 - **Star detection** — tile-based background/noise estimation (median +
   MAD), sigma thresholding, connected components, flux-weighted sub-pixel
-  centroids.
+  centroids. `DetectConfig::backend` selects automatic, u8, or f32 sampling;
+  the shared pipeline is statically dispatched over the sample type.
 - **WCS** — TAN (gnomonic) projection with a CD matrix: pixel ↔ world
   transforms, scale/footprint helpers.
 - **Hinted plate solving** — triangle matching over FOV-sized windows,

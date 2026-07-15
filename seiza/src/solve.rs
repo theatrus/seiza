@@ -52,10 +52,52 @@ const MAX_CANDIDATES: usize = 4000;
 const MATCH_TOLERANCE_PX: f64 = 4.0;
 const MIN_INLIERS: usize = 6;
 const REFINE_ITERATIONS: usize = 3;
+// A center-window fast path must be stricter than the general hinted floor:
+// if the mount hint is stale, a chance six-star alignment must not prevent
+// the requested surrounding search. These are the same acceptance thresholds
+// used when the blind solver verifies a whole-sky hypothesis.
+const FAST_HINT_MIN_INLIERS: usize = 12;
+const FAST_HINT_MAX_RMS_PX: f64 = 2.0;
 
 /// Solve the field for an image of `(width, height)` given detected stars,
 /// a catalog, and a hint.
 pub fn solve(
+    stars: &[DetectedStar],
+    catalog: &dyn StarCatalog,
+    hint: &SolveHint,
+    dimensions: (u32, u32),
+) -> Result<Solution, crate::Error> {
+    // Mount coordinates are usually already inside the image. Try that one
+    // FOV-sized window before constructing triangles for every window in the
+    // fallback radius. A 2-degree search on a fine-scale frame can contain
+    // dozens of windows and millions of catalog triangles.
+    // When the requested radius is smaller than one window step, the fallback
+    // already contains only the center window. Do not run it twice; blind
+    // verification deliberately uses such tightly localized hints.
+    let window_step_deg = fov_radius_deg(hint, dimensions).max(0.05);
+    if hint.radius_deg >= window_step_deg {
+        let center_hint = SolveHint {
+            center: hint.center,
+            radius_deg: 0.0,
+            scale_arcsec_px: hint.scale_arcsec_px,
+            scale_tolerance: hint.scale_tolerance,
+        };
+        if let Ok(solution) = solve_search(stars, catalog, &center_hint, dimensions)
+            && solution.matched_stars >= FAST_HINT_MIN_INLIERS
+            && solution.rms_arcsec < FAST_HINT_MAX_RMS_PX * hint.scale_arcsec_px
+        {
+            return Ok(solution);
+        }
+    }
+
+    solve_search(stars, catalog, hint, dimensions)
+}
+
+/// Run the triangle matcher across every FOV-sized window in `hint`.
+///
+/// [`solve`] first calls this with a zero radius for the common accurate-hint
+/// case, then preserves the caller's full search radius as a fallback.
+fn solve_search(
     stars: &[DetectedStar],
     catalog: &dyn StarCatalog,
     hint: &SolveHint,
@@ -67,9 +109,9 @@ pub fn solve(
             stars.len()
         )));
     }
-    let scale_deg = hint.scale_arcsec_px / 3600.0;
     let (width, height) = (dimensions.0 as f64, dimensions.1 as f64);
-    let fov_radius_deg = (width.hypot(height) / 2.0) * scale_deg * (1.0 + hint.scale_tolerance);
+    let scale_deg = hint.scale_arcsec_px / 3600.0;
+    let fov_radius_deg = fov_radius_deg(hint, dimensions);
 
     // Catalog stars around the hint, on the tangent plane about the hint
     let search_radius = hint.radius_deg + fov_radius_deg;
@@ -246,6 +288,13 @@ pub fn solve(
         matched_stars: pairs.len(),
         rms_arcsec,
     })
+}
+
+fn fov_radius_deg(hint: &SolveHint, dimensions: (u32, u32)) -> f64 {
+    let scale_deg = hint.scale_arcsec_px / 3600.0;
+    (dimensions.0 as f64).hypot(dimensions.1 as f64) / 2.0
+        * scale_deg
+        * (1.0 + hint.scale_tolerance)
 }
 
 /// The brightest `count` stars, but at most `count / 4 + 1` from any one
@@ -570,7 +619,35 @@ fn match_pairs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::MemoryCatalog;
+    use crate::catalog::{MemoryCatalog, StarCatalog};
+    use std::cell::Cell;
+
+    struct CountingCatalog {
+        inner: MemoryCatalog,
+        searches: Cell<usize>,
+    }
+
+    impl CountingCatalog {
+        fn new(inner: MemoryCatalog) -> Self {
+            Self {
+                inner,
+                searches: Cell::new(0),
+            }
+        }
+    }
+
+    impl StarCatalog for CountingCatalog {
+        fn cone_search(
+            &self,
+            ra: f64,
+            dec: f64,
+            radius_deg: f64,
+            limit: usize,
+        ) -> Vec<CatalogStar> {
+            self.searches.set(self.searches.get() + 1);
+            self.inner.cone_search(ra, dec, radius_deg, limit)
+        }
+    }
 
     struct Lcg(u64);
     impl Lcg {
@@ -692,6 +769,80 @@ mod tests {
         };
         let solution = solve(&detected, &catalog, &hint, dims).unwrap();
         assert_solution_matches(&truth, &solution, dims);
+    }
+
+    #[test]
+    fn strong_center_solution_skips_the_radius_grid() {
+        let dims = (4000u32, 3000u32);
+        let truth =
+            Wcs::from_center_scale_rotation((150.5, 33.2), (2000.0, 1500.0), 2.0, 31.0, false);
+        let mut rng = Lcg(101);
+        let (catalog, detected) = synthetic_scene(&truth, dims, &mut rng);
+        let catalog = CountingCatalog::new(catalog);
+        let hint = SolveHint {
+            center: truth.crval,
+            radius_deg: 2.0,
+            scale_arcsec_px: 2.0,
+            scale_tolerance: 0.2,
+        };
+
+        let solution = solve(&detected, &catalog, &hint, dims).unwrap();
+        assert_solution_matches(&truth, &solution, dims);
+        assert_eq!(
+            catalog.searches.get(),
+            1,
+            "a strong center solution should not search the fallback grid"
+        );
+    }
+
+    #[test]
+    fn stale_center_falls_back_to_the_requested_radius() {
+        let dims = (4000u32, 3000u32);
+        let truth =
+            Wcs::from_center_scale_rotation((150.5, 33.2), (2000.0, 1500.0), 1.0, 73.0, true);
+        let mut rng = Lcg(202);
+        let (catalog, detected) = synthetic_scene(&truth, dims, &mut rng);
+        let catalog = CountingCatalog::new(catalog);
+        let hint = SolveHint {
+            // About 1.5 degrees from the true center: outside the center
+            // window, but inside the requested 2-degree fallback radius.
+            center: (152.3, 33.2),
+            radius_deg: 2.0,
+            scale_arcsec_px: 1.0,
+            scale_tolerance: 0.2,
+        };
+
+        let solution = solve(&detected, &catalog, &hint, dims).unwrap();
+        assert_solution_matches(&truth, &solution, dims);
+        assert!(
+            catalog.searches.get() >= 2,
+            "a stale center should run the full-radius fallback"
+        );
+    }
+
+    #[test]
+    fn one_window_failure_is_not_retried() {
+        let dims = (4000u32, 3000u32);
+        let truth =
+            Wcs::from_center_scale_rotation((150.5, 33.2), (2000.0, 1500.0), 2.0, 10.0, false);
+        let mut rng = Lcg(303);
+        let (catalog, detected) = synthetic_scene(&truth, dims, &mut rng);
+        let catalog = CountingCatalog::new(catalog);
+        let hint = SolveHint {
+            center: (190.0, 10.0),
+            // Below the ~1.67-degree FOV window step, so this search contains
+            // no surrounding grid windows to defer to a second pass.
+            radius_deg: 0.4,
+            scale_arcsec_px: 2.0,
+            scale_tolerance: 0.2,
+        };
+
+        assert!(solve(&detected, &catalog, &hint, dims).is_err());
+        assert_eq!(
+            catalog.searches.get(),
+            1,
+            "a one-window search must not retry the same center"
+        );
     }
 
     #[test]

@@ -26,7 +26,7 @@
 //! roughly equal-area. Quantization: RA as u32 over 360°, Dec as u32 over
 //! 180° (sub-milliarcsecond), magnitude as u16 millimags offset by +3.
 
-use super::{CatalogStar, StarCatalog, angular_separation_deg};
+use super::{CatalogStar, StarCatalog};
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
@@ -446,7 +446,7 @@ impl TileCatalog {
                 let dec = &self.map[ra_end..dec_end];
                 let mag = &self.map[dec_end..mag_end];
                 for i in 0..count {
-                    visit(CatalogStar {
+                    let keep_going = visit(CatalogStar {
                         ra: unpack_ra(u32::from_le_bytes(ra[i * 4..i * 4 + 4].try_into().unwrap())),
                         dec: unpack_dec(u32::from_le_bytes(
                             dec[i * 4..i * 4 + 4].try_into().unwrap(),
@@ -455,6 +455,9 @@ impl TileCatalog {
                             mag[i * 2..i * 2 + 2].try_into().unwrap(),
                         )),
                     });
+                    if !keep_going {
+                        return;
+                    }
                 }
             }
         }
@@ -487,6 +490,10 @@ impl StarCatalog for TileCatalog {
     }
 
     fn cone_search(&self, ra: f64, dec: f64, radius_deg: f64, limit: usize) -> Vec<CatalogStar> {
+        if limit == 0 {
+            return Vec::new();
+        }
+
         // Keep the brightest `limit` with a bounded max-heap. Tiles store
         // brightest-first, so once the heap is full each tile's scan stops
         // at the first record fainter than the faintest kept star — on a
@@ -511,12 +518,21 @@ impl StarCatalog for TileCatalog {
         }
         let mut heap: std::collections::BinaryHeap<ByMag> =
             std::collections::BinaryHeap::with_capacity(limit.min(8192) + 1);
+        // Cone membership only needs a threshold comparison. Precompute the
+        // fixed side of the spherical dot product instead of evaluating a
+        // full separation angle (including sqrt and atan2) for every star.
+        let center_ra = ra.to_radians();
+        let (center_sin_dec, center_cos_dec) = dec.to_radians().sin_cos();
+        let cos_radius = radius_deg.to_radians().cos();
         for tile in self.grid.cone_tiles(ra, dec, radius_deg) {
             self.for_each_in_tile_while(tile, |star| {
                 if heap.len() == limit && star.mag.total_cmp(&heap.peek().unwrap().0.mag).is_ge() {
                     return false;
                 }
-                if angular_separation_deg(ra, dec, star.ra, star.dec) <= radius_deg {
+                let (star_sin_dec, star_cos_dec) = star.dec.to_radians().sin_cos();
+                let dot = center_sin_dec * star_sin_dec
+                    + center_cos_dec * star_cos_dec * (star.ra.to_radians() - center_ra).cos();
+                if radius_deg >= 180.0 || dot >= cos_radius {
                     heap.push(ByMag(star));
                     if heap.len() > limit {
                         heap.pop();
@@ -656,6 +672,31 @@ mod tests {
 
         let limited = catalog.cone_search(10.0, 20.0, 10.0, 5);
         assert_eq!(limited.len(), 5);
+        assert!(catalog.cone_search(10.0, 20.0, 10.0, 0).is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn v2_tile_iteration_honors_early_stop() {
+        let dir =
+            std::env::temp_dir().join(format!("seiza-test-v2-early-stop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tiles.bin");
+        let mut builder = TileSetBuilder::new(1, 2025.5, "test");
+        for mag in 1..=10 {
+            builder.add(10.0, 20.0, mag as f32);
+        }
+        builder.write_to(&path).unwrap();
+
+        let catalog = TileCatalog::open(&path).unwrap();
+        let tile = catalog.grid.tile_of(10.0, 20.0);
+        let mut visited = 0;
+        catalog.for_each_in_tile_while(tile, |_| {
+            visited += 1;
+            false
+        });
+        assert_eq!(visited, 1);
 
         std::fs::remove_dir_all(&dir).ok();
     }
