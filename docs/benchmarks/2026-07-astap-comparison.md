@@ -137,6 +137,12 @@ the center window even before the optimization proposed below.
 | Position blind, scale known (3 each) | 1.022 s | 1.747 s | ASTAP 1.71x faster |
 | Full blind (1 each) | 3.874 s | 2.500 s | seiza 1.55x faster |
 
+These position-blind measurements predate the adaptive-verification and
+compact-funnel work in the
+[blind-pipeline follow-up](2026-07-blind-pipeline-priorities.md). A current
+three-run rerun measured seiza at 0.648 s (0.617-0.650 s) and ASTAP at
+1.094 s (1.081-1.155 s), making seiza 1.69x faster on this case.
+
 The hinted seiza solve reported 107 matched stars at 1.768 arcsecond RMS; its
 full-blind solve reported 120 matches at 1.725 arcsecond RMS. This independent
 case reinforces the diagnosis: hinted performance is already good when the

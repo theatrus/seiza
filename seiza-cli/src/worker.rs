@@ -10,19 +10,20 @@ use image::ImageEncoder;
 use seiza::blind::{BlindIndex, BlindParams, solve_blind};
 use seiza::catalog::TileCatalog;
 use seiza::solve::{Solution, SolveHint, solve};
-use seiza::{DetectConfig, Wcs, detect_stars};
-use serde::{Deserialize, Serialize};
+use seiza::{DetectBackend, DetectConfig, Wcs};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use ureq::unversioned::multipart::{Form, Part};
 
 const JSON_RPC_VERSION: &str = "2.0";
 const PROTOCOL_VERSION: u32 = 1;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const SERVER_POLL_INTERVAL: Duration = Duration::from_millis(250);
-static MULTIPART_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+const SERVER_STATUS_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_ERROR_BODY_BYTES: u64 = 64 * 1024;
 
 const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;
@@ -32,16 +33,41 @@ const NOT_INITIALIZED: i64 = -32002;
 const SOLVE_FAILED: i64 = -32010;
 
 /// Run a local or remote-backed worker on the process standard streams.
-pub fn run(
-    data_path: Option<&Path>,
-    index_path: Option<&Path>,
-    server: Option<&str>,
-    server_token: Option<&str>,
-    server_upload: ServerUploadFormat,
-) -> Result<()> {
+pub(crate) struct WorkerOptions<'a> {
+    pub(crate) data_path: Option<&'a Path>,
+    pub(crate) index_path: Option<&'a Path>,
+    pub(crate) server: Option<&'a str>,
+    pub(crate) server_token: Option<&'a str>,
+    pub(crate) server_upload: ServerUploadFormat,
+    pub(crate) server_timeout: Duration,
+    pub(crate) detection_backend: DetectBackend,
+    pub(crate) detection_fallback: crate::DetectionFallback,
+    pub(crate) detection_fallback_hypotheses: usize,
+}
+
+pub(crate) fn run(options: WorkerOptions<'_>) -> Result<()> {
+    let WorkerOptions {
+        data_path,
+        index_path,
+        server,
+        server_token,
+        server_upload,
+        server_timeout,
+        detection_backend,
+        detection_fallback,
+        detection_fallback_hypotheses,
+    } = options;
     let service = match (data_path, server) {
-        (Some(data_path), None) => WorkerService::local(data_path, index_path)?,
-        (None, Some(server)) => WorkerService::remote(server, server_token, server_upload)?,
+        (Some(data_path), None) => WorkerService::local(
+            data_path,
+            index_path,
+            detection_backend,
+            detection_fallback,
+            detection_fallback_hypotheses,
+        )?,
+        (None, Some(server)) => {
+            WorkerService::remote(server, server_token, server_upload, server_timeout)?
+        }
         _ => {
             anyhow::bail!("provide either --data for local solving or --server for remote solving")
         }
@@ -56,7 +82,7 @@ pub fn run(
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
-pub enum ServerUploadFormat {
+pub(crate) enum ServerUploadFormat {
     /// MTF-stretched lossless 8-bit grayscale PNG
     Png,
     /// Original FITS bytes, including headers and source bit depth
@@ -67,10 +93,46 @@ pub enum ServerUploadFormat {
 struct RpcRequest {
     jsonrpc: String,
     #[serde(default)]
-    id: Value,
+    id: RequestId,
     method: String,
     #[serde(default)]
     params: Value,
+}
+
+#[derive(Debug, Default)]
+enum RequestId {
+    #[default]
+    Missing,
+    Present(Value),
+}
+
+impl RequestId {
+    fn is_present(&self) -> bool {
+        matches!(self, Self::Present(_))
+    }
+
+    fn is_valid(&self) -> bool {
+        matches!(
+            self,
+            Self::Missing | Self::Present(Value::Null | Value::String(_) | Value::Number(_))
+        )
+    }
+
+    fn into_value(self) -> Value {
+        match self {
+            Self::Missing => Value::Null,
+            Self::Present(value) => value,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RequestId {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Value::deserialize(deserializer).map(Self::Present)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -143,42 +205,69 @@ where
     W: Write,
     S: RpcService,
 {
-    let mut line = String::new();
     loop {
-        line.clear();
-        if reader.read_line(&mut line)? == 0 {
-            break;
-        }
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let handled = if line.len() > MAX_REQUEST_BYTES {
-            HandledResponse {
-                response: RpcResponse::error(
-                    Value::Null,
-                    INVALID_REQUEST,
-                    format!("request exceeds {MAX_REQUEST_BYTES} bytes"),
-                ),
-                shutdown: false,
-            }
-        } else {
-            match serde_json::from_str::<RpcRequest>(&line) {
-                Ok(request) => service.handle(request),
-                Err(error) => HandledResponse {
+        let (handled, respond) = match read_request_line(&mut reader)? {
+            RequestLine::Eof => break,
+            RequestLine::TooLong => (
+                HandledResponse {
                     response: RpcResponse::error(
                         Value::Null,
-                        PARSE_ERROR,
-                        format!("invalid JSON: {error}"),
+                        INVALID_REQUEST,
+                        format!("request exceeds {MAX_REQUEST_BYTES} bytes"),
                     ),
                     shutdown: false,
                 },
-            }
+                true,
+            ),
+            RequestLine::Line(line) if line.iter().all(u8::is_ascii_whitespace) => continue,
+            RequestLine::Line(line) => match serde_json::from_slice::<Value>(&line) {
+                Err(error) => (
+                    HandledResponse {
+                        response: RpcResponse::error(
+                            Value::Null,
+                            PARSE_ERROR,
+                            format!("invalid JSON: {error}"),
+                        ),
+                        shutdown: false,
+                    },
+                    true,
+                ),
+                Ok(value) => match serde_json::from_value::<RpcRequest>(value) {
+                    Err(error) => (
+                        HandledResponse {
+                            response: RpcResponse::error(
+                                Value::Null,
+                                INVALID_REQUEST,
+                                format!("invalid JSON-RPC request: {error}"),
+                            ),
+                            shutdown: false,
+                        },
+                        true,
+                    ),
+                    Ok(request) if !request.id.is_valid() => (
+                        HandledResponse {
+                            response: RpcResponse::error(
+                                Value::Null,
+                                INVALID_REQUEST,
+                                "request id must be a string, number, or null",
+                            ),
+                            shutdown: false,
+                        },
+                        true,
+                    ),
+                    Ok(request) => {
+                        let respond = request.id.is_present();
+                        (service.handle(request), respond)
+                    }
+                },
+            },
         };
 
-        serde_json::to_writer(&mut writer, &handled.response)?;
-        writer.write_all(b"\n")?;
-        writer.flush()?;
+        if respond {
+            serde_json::to_writer(&mut writer, &handled.response)?;
+            writer.write_all(b"\n")?;
+            writer.flush()?;
+        }
         if handled.shutdown {
             break;
         }
@@ -186,9 +275,60 @@ where
     Ok(())
 }
 
+enum RequestLine {
+    Eof,
+    Line(Vec<u8>),
+    TooLong,
+}
+
+/// Read and drain exactly one newline-delimited request without ever retaining
+/// more than the protocol limit. `BufRead::read_line` cannot enforce this: it
+/// allocates the complete line before the caller can inspect its length.
+fn read_request_line<R: BufRead>(reader: &mut R) -> io::Result<RequestLine> {
+    let mut line = Vec::with_capacity(8 * 1024);
+    let mut too_long = false;
+
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(if too_long {
+                RequestLine::TooLong
+            } else if line.is_empty() {
+                RequestLine::Eof
+            } else {
+                RequestLine::Line(line)
+            });
+        }
+
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map_or(available.len(), |offset| offset + 1);
+        let payload_len = newline.unwrap_or(consumed);
+        if !too_long {
+            if line.len().saturating_add(payload_len) > MAX_REQUEST_BYTES {
+                too_long = true;
+                line.clear();
+            } else {
+                line.extend_from_slice(&available[..payload_len]);
+            }
+        }
+        reader.consume(consumed);
+
+        if newline.is_some() {
+            return Ok(if too_long {
+                RequestLine::TooLong
+            } else {
+                RequestLine::Line(line)
+            });
+        }
+    }
+}
+
 struct LocalSolver {
     catalog: TileCatalog,
     index: Option<BlindIndex>,
+    detection_backend: DetectBackend,
+    detection_fallback: crate::DetectionFallback,
+    detection_fallback_hypotheses: usize,
 }
 
 enum WorkerBackend {
@@ -202,9 +342,21 @@ struct WorkerService {
 }
 
 impl WorkerService {
-    fn local(data_path: &Path, index_path: Option<&Path>) -> Result<Self> {
+    fn local(
+        data_path: &Path,
+        index_path: Option<&Path>,
+        detection_backend: DetectBackend,
+        detection_fallback: crate::DetectionFallback,
+        detection_fallback_hypotheses: usize,
+    ) -> Result<Self> {
         Ok(Self {
-            backend: WorkerBackend::Local(Box::new(LocalSolver::open(data_path, index_path)?)),
+            backend: WorkerBackend::Local(Box::new(LocalSolver::open(
+                data_path,
+                index_path,
+                detection_backend,
+                detection_fallback,
+                detection_fallback_hypotheses,
+            )?)),
             initialized: false,
         })
     }
@@ -213,9 +365,15 @@ impl WorkerService {
         server: &str,
         token: Option<&str>,
         upload_format: ServerUploadFormat,
+        timeout: Duration,
     ) -> Result<Self> {
         Ok(Self {
-            backend: WorkerBackend::Remote(RemoteSolver::new(server, token, upload_format)?),
+            backend: WorkerBackend::Remote(RemoteSolver::new(
+                server,
+                token,
+                upload_format,
+                timeout,
+            )?),
             initialized: false,
         })
     }
@@ -268,7 +426,7 @@ impl WorkerService {
                 },
                 "capabilities": {
                     "solveModes": ["hinted", "blind"],
-                    "imageInputs": ["fits_path"],
+                    "imageInputs": ["image_path"],
                     "remoteImageEncoding": backend.remote_image_encoding,
                     "maxConcurrentRequests": 1
                 },
@@ -319,7 +477,13 @@ impl WorkerService {
 }
 
 impl LocalSolver {
-    fn open(data_path: &Path, index_path: Option<&Path>) -> Result<Self> {
+    fn open(
+        data_path: &Path,
+        index_path: Option<&Path>,
+        detection_backend: DetectBackend,
+        detection_fallback: crate::DetectionFallback,
+        detection_fallback_hypotheses: usize,
+    ) -> Result<Self> {
         let catalog = TileCatalog::open(data_path)
             .with_context(|| format!("failed to open star catalog {}", data_path.display()))?;
         let index = index_path
@@ -334,7 +498,13 @@ impl LocalSolver {
             warn_on_index_catalog_mismatch(index, &catalog);
         }
 
-        Ok(Self { catalog, index })
+        Ok(Self {
+            catalog,
+            index,
+            detection_backend,
+            detection_fallback,
+            detection_fallback_hypotheses,
+        })
     }
 
     fn status(&self) -> BackendStatus {
@@ -358,50 +528,39 @@ impl LocalSolver {
         let total_started = Instant::now();
 
         let load_started = Instant::now();
-        let image = crate::load_image(&params.image_path)?;
+        let image = crate::load_image(&params.image_path, self.detection_backend)?;
         let load_elapsed = load_started.elapsed();
-        self.solve_image(&image, params, load_elapsed, Duration::ZERO, total_started)
-    }
-
-    fn solve_image(
-        &mut self,
-        image: &image::DynamicImage,
-        params: &SolveParams,
-        load_elapsed: Duration,
-        transport_elapsed: Duration,
-        total_started: Instant,
-    ) -> Result<WorkerSolveResult> {
-        let dimensions = (image.width(), image.height());
+        let dimensions = image.dimensions();
 
         let detect_started = Instant::now();
-        let stars = detect_stars(
-            image,
-            &DetectConfig {
-                sigma: params.detection.sigma,
-                ignore_border: params.detection.ignore_border,
-                max_stars: params.detection.max_stars,
-                ..Default::default()
-            },
+        let config = DetectConfig {
+            backend: self.detection_backend,
+            sigma: params.detection.sigma,
+            ignore_border: params.detection.ignore_border,
+            max_stars: params.detection.max_stars,
+            ..Default::default()
+        };
+        let can_retry_f32 = self.detection_fallback == crate::DetectionFallback::F32
+            && crate::auto_can_retry_f32(&params.image_path, &image, self.detection_backend);
+        let mut invocation = crate::SolveInvocation::new(
+            &params.image_path,
+            &image,
+            config,
+            self.detection_fallback,
         );
         let detect_elapsed = detect_started.elapsed();
 
         let mut index_elapsed = Duration::ZERO;
-        let solve_started = Instant::now();
         let solution = match params.mode {
             SolveMode::Hinted => {
                 let hint = params.hint.as_ref().expect("validated hinted parameters");
-                solve(
-                    &stars,
-                    &self.catalog,
-                    &SolveHint {
-                        center: (hint.center_ra_deg, hint.center_dec_deg),
-                        radius_deg: hint.radius_deg,
-                        scale_arcsec_px: hint.scale_arcsec_per_pixel,
-                        scale_tolerance: hint.scale_tolerance,
-                    },
-                    dimensions,
-                )
-                .map_err(anyhow::Error::from)?
+                let hint = SolveHint {
+                    center: (hint.center_ra_deg, hint.center_dec_deg),
+                    radius_deg: hint.radius_deg,
+                    scale_arcsec_px: hint.scale_arcsec_per_pixel,
+                    scale_tolerance: hint.scale_tolerance,
+                };
+                invocation.solve(|stars| solve(stars, &self.catalog, &hint, dimensions))?
             }
             SolveMode::Blind => {
                 let blind = params.blind.clone().unwrap_or_default();
@@ -423,11 +582,22 @@ impl LocalSolver {
                 blind_params.index_mag_limit = index.index_mag_limit();
                 blind_params.max_pattern_deg = index.max_pattern_deg();
 
-                solve_blind(&stars, &self.catalog, index, &blind_params, dimensions)
-                    .map_err(anyhow::Error::from)?
+                invocation.solve_with_pass(|stars, pass| {
+                    let attempt_params = crate::blind_params_for_detection_pass(
+                        &blind_params,
+                        can_retry_f32,
+                        self.detection_fallback_hypotheses,
+                        pass,
+                    );
+                    solve_blind(stars, &self.catalog, index, &attempt_params, dimensions)
+                })?
             }
         };
-        let solve_elapsed = solve_started.elapsed().saturating_sub(index_elapsed);
+        let solve_elapsed = total_started
+            .elapsed()
+            .saturating_sub(load_elapsed)
+            .saturating_sub(detect_elapsed)
+            .saturating_sub(index_elapsed);
 
         Ok(solution_result(
             params.mode,
@@ -436,7 +606,7 @@ impl LocalSolver {
             SolveTimings {
                 load_ms: milliseconds(load_elapsed),
                 encode_ms: 0.0,
-                transport_ms: milliseconds(transport_elapsed),
+                transport_ms: 0.0,
                 detect_ms: milliseconds(detect_elapsed),
                 index_ms: milliseconds(index_elapsed),
                 solve_ms: milliseconds(solve_elapsed),
@@ -478,26 +648,41 @@ struct RemoteSolver {
     token: Option<String>,
     agent: ureq::Agent,
     upload_format: ServerUploadFormat,
+    timeout: Duration,
 }
 
 impl RemoteSolver {
-    fn new(base_url: &str, token: Option<&str>, upload_format: ServerUploadFormat) -> Result<Self> {
+    fn new(
+        base_url: &str,
+        token: Option<&str>,
+        upload_format: ServerUploadFormat,
+        timeout: Duration,
+    ) -> Result<Self> {
         let base_url = base_url.trim_end_matches('/');
         if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
             anyhow::bail!("remote server URL must start with http:// or https://");
         }
+        if timeout.is_zero() {
+            anyhow::bail!("remote server timeout must be greater than zero");
+        }
         Ok(Self {
             base_url: base_url.to_string(),
             token: token.map(str::to_string),
-            agent: ureq::AgentBuilder::new().build(),
+            agent: ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .build()
+                .new_agent(),
             upload_format,
+            timeout,
         })
     }
 
     fn status(&self) -> Result<BackendStatus> {
-        let response = self.call(self.agent.get(&format!("{}/api/v1/health", self.base_url)))?;
+        let timeout = self.timeout.min(SERVER_STATUS_TIMEOUT);
+        let mut response = self.get(&format!("{}/api/v1/health", self.base_url), timeout)?;
         let health: ServerHealth = response
-            .into_json()
+            .body_mut()
+            .read_json()
             .context("invalid health response from seiza-server")?;
         if !health.solver_ready {
             anyhow::bail!(
@@ -509,7 +694,10 @@ impl RemoteSolver {
             kind: "remote".to_string(),
             server: ServerIdentity {
                 name: "seiza-server".to_string(),
-                version: "api-v1".to_string(),
+                version: health
+                    .versions
+                    .and_then(|versions| versions.seiza_server)
+                    .unwrap_or_else(|| "api-v1".to_string()),
             },
             catalog: CatalogStatus {
                 star_count: None,
@@ -525,65 +713,77 @@ impl RemoteSolver {
         let total_started = Instant::now();
         let load_started = Instant::now();
         let source = match self.upload_format {
-            ServerUploadFormat::Png => {
-                RemoteUploadSource::Image(crate::load_image(&params.image_path)?.into_luma8())
-            }
-            ServerUploadFormat::Fits => {
-                RemoteUploadSource::Fits(std::fs::read(&params.image_path).with_context(|| {
-                    format!("failed to read {} for upload", params.image_path.display())
-                })?)
-            }
+            ServerUploadFormat::Png => RemoteUploadSource::Image(
+                crate::load_image(&params.image_path, DetectBackend::U8)?.to_luma8(),
+            ),
+            ServerUploadFormat::Fits => RemoteUploadSource::Fits {
+                path: if crate::is_fits_path(&params.image_path) {
+                    params.image_path.clone()
+                } else {
+                    anyhow::bail!("--server-upload fits requires a FITS image path");
+                },
+                bytes: usize::try_from(
+                    std::fs::metadata(&params.image_path)
+                        .with_context(|| {
+                            format!(
+                                "failed to inspect {} for upload",
+                                params.image_path.display()
+                            )
+                        })?
+                        .len(),
+                )
+                .context("FITS upload is too large for this platform")?,
+            },
         };
         let load_elapsed = load_started.elapsed();
 
         let encode_started = Instant::now();
         let upload = match source {
             RemoteUploadSource::Image(image) => RemoteUpload {
-                bytes: encode_png(&image)?,
+                data: RemoteUploadData::Bytes(encode_png(&image)?),
                 filename: "nina-solve.png",
                 content_type: "image/png",
                 encoding: self.upload_format.encoding(),
                 uncompressed_bytes: image.as_raw().len(),
+                encoded_bytes: 0,
             },
-            RemoteUploadSource::Fits(bytes) => RemoteUpload {
-                uncompressed_bytes: bytes.len(),
-                bytes,
+            RemoteUploadSource::Fits { path, bytes } => RemoteUpload {
+                data: RemoteUploadData::File(path),
                 filename: "nina-solve.fits",
                 content_type: "application/fits",
                 encoding: self.upload_format.encoding(),
+                uncompressed_bytes: bytes,
+                encoded_bytes: bytes,
             },
         };
+        let upload = upload.with_encoded_size();
         let options = server_options(params);
-        let (boundary, body) = multipart_solve_body(
-            &upload.bytes,
-            upload.filename,
-            upload.content_type,
-            &options,
-        )?;
+        let options = serde_json::to_string(&options)?;
         let encode_elapsed = encode_started.elapsed();
 
         let transport_started = Instant::now();
-        let request = self
-            .agent
-            .post(&format!("{}/api/v1/solves", self.base_url))
-            .set(
-                "Content-Type",
-                &format!("multipart/form-data; boundary={boundary}"),
-            );
-        let response = self.call_with_body(request, &body)?;
+        let form = upload.form(&options)?;
+        let mut response = self.post_form(
+            &format!("{}/api/v1/solves", self.base_url),
+            self.remaining(transport_started)?,
+            form,
+        )?;
         let mut job: ServerJob = response
-            .into_json()
+            .body_mut()
+            .read_json()
             .context("invalid job response from seiza-server")?;
         loop {
             match job.status {
                 ServerJobStatus::Queued | ServerJobStatus::Solving => {
-                    std::thread::sleep(SERVER_POLL_INTERVAL);
-                    let response = self.call(
-                        self.agent
-                            .get(&format!("{}/api/v1/solves/{}", self.base_url, job.id)),
+                    let remaining = self.remaining(transport_started)?;
+                    std::thread::sleep(SERVER_POLL_INTERVAL.min(remaining));
+                    let mut response = self.get(
+                        &format!("{}/api/v1/solves/{}", self.base_url, job.id),
+                        self.remaining(transport_started)?,
                     )?;
                     job = response
-                        .into_json()
+                        .body_mut()
+                        .read_json()
                         .context("invalid polling response from seiza-server")?;
                 }
                 ServerJobStatus::Failed => {
@@ -612,23 +812,38 @@ impl RemoteSolver {
         result.transfer = Some(RemoteTransfer {
             encoding: upload.encoding.to_string(),
             uncompressed_bytes: upload.uncompressed_bytes,
-            encoded_bytes: upload.bytes.len(),
+            encoded_bytes: upload.encoded_bytes,
         });
         Ok(result)
     }
 
-    fn call(&self, mut request: ureq::Request) -> Result<ureq::Response> {
+    fn get(&self, url: &str, timeout: Duration) -> Result<HttpResponse> {
+        let mut request = self.agent.get(url);
         if let Some(token) = &self.token {
-            request = request.set("Authorization", &format!("Bearer {token}"));
+            request = request.header("Authorization", &format!("Bearer {token}"));
         }
+        let request = request.config().timeout_global(Some(timeout)).build();
         map_remote_response(request.call())
     }
 
-    fn call_with_body(&self, mut request: ureq::Request, body: &[u8]) -> Result<ureq::Response> {
+    fn post_form(&self, url: &str, timeout: Duration, form: Form<'_>) -> Result<HttpResponse> {
+        let mut request = self.agent.post(url);
         if let Some(token) = &self.token {
-            request = request.set("Authorization", &format!("Bearer {token}"));
+            request = request.header("Authorization", &format!("Bearer {token}"));
         }
-        map_remote_response(request.send_bytes(body))
+        let request = request.config().timeout_global(Some(timeout)).build();
+        map_remote_response(request.send(form))
+    }
+
+    fn remaining(&self, started: Instant) -> Result<Duration> {
+        let remaining = self.timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            anyhow::bail!(
+                "seiza-server solve timed out after {:.1} seconds",
+                self.timeout.as_secs_f64()
+            );
+        }
+        Ok(remaining)
     }
 }
 
@@ -643,34 +858,75 @@ impl ServerUploadFormat {
 
 enum RemoteUploadSource {
     Image(image::GrayImage),
-    Fits(Vec<u8>),
+    Fits { path: PathBuf, bytes: usize },
+}
+
+enum RemoteUploadData {
+    Bytes(Vec<u8>),
+    File(PathBuf),
 }
 
 struct RemoteUpload {
-    bytes: Vec<u8>,
+    data: RemoteUploadData,
     filename: &'static str,
     content_type: &'static str,
     encoding: &'static str,
     uncompressed_bytes: usize,
+    encoded_bytes: usize,
 }
 
-fn map_remote_response(
-    response: std::result::Result<ureq::Response, ureq::Error>,
-) -> Result<ureq::Response> {
-    match response {
-        Ok(response) => Ok(response),
-        Err(ureq::Error::Status(code, response)) => {
-            let message = response.into_string().unwrap_or_default();
-            anyhow::bail!("seiza-server returned HTTP {code}: {message}")
+impl RemoteUpload {
+    fn with_encoded_size(mut self) -> Self {
+        if let RemoteUploadData::Bytes(bytes) = &self.data {
+            self.encoded_bytes = bytes.len();
         }
-        Err(error) => Err(anyhow::Error::new(error).context("seiza-server request failed")),
+        self
     }
+
+    fn form<'a>(&'a self, options: &'a str) -> Result<Form<'a>> {
+        let part = match &self.data {
+            RemoteUploadData::Bytes(bytes) => Part::bytes(bytes),
+            RemoteUploadData::File(path) => Part::file(path)
+                .with_context(|| format!("failed to open {} for upload", path.display()))?,
+        }
+        .file_name(self.filename)
+        .mime_str(self.content_type)?;
+        Ok(Form::new().text("options", options).part("file", part))
+    }
+}
+
+type HttpResponse = ureq::http::Response<ureq::Body>;
+
+fn map_remote_response(
+    response: std::result::Result<HttpResponse, ureq::Error>,
+) -> Result<HttpResponse> {
+    let mut response = response
+        .map_err(|error| anyhow::Error::new(error).context("seiza-server request failed"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let message = response
+            .body_mut()
+            .with_config()
+            .limit(MAX_ERROR_BODY_BYTES)
+            .read_to_string()
+            .unwrap_or_else(|error| format!("failed to read error response: {error}"));
+        anyhow::bail!("seiza-server returned HTTP {status}: {message}");
+    }
+    Ok(response)
 }
 
 #[derive(Debug, Deserialize)]
 struct ServerHealth {
     status: String,
     solver_ready: bool,
+    #[serde(default)]
+    versions: Option<ServerVersions>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServerVersions {
+    #[serde(default)]
+    seiza_server: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -754,7 +1010,13 @@ struct ServerSolveOptions {
 }
 
 fn server_options(params: &SolveParams) -> ServerSolveOptions {
-    let hint = params.hint.as_ref();
+    // A client may retain both option objects while switching modes. Only the
+    // selected mode may influence the server request, or a nominally blind
+    // remote request would silently become hinted while local mode stays blind.
+    let hint = match params.mode {
+        SolveMode::Hinted => params.hint.as_ref(),
+        SolveMode::Blind => None,
+    };
     let blind = params.blind.clone().unwrap_or_default();
     ServerSolveOptions {
         center_ra_deg: hint.map(|hint| hint.center_ra_deg),
@@ -783,35 +1045,9 @@ fn encode_png(image: &image::GrayImage) -> Result<Vec<u8>> {
     Ok(png)
 }
 
-fn multipart_solve_body(
-    image: &[u8],
-    filename: &str,
-    content_type: &str,
-    options: &ServerSolveOptions,
-) -> Result<(String, Vec<u8>)> {
-    let sequence = MULTIPART_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let boundary = format!("seiza-cli-{}-{sequence}", std::process::id());
-    let options = serde_json::to_vec(options)?;
-    let mut body = Vec::with_capacity(image.len() + options.len() + 512);
-    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-    body.extend_from_slice(b"Content-Disposition: form-data; name=\"options\"\r\n");
-    body.extend_from_slice(b"Content-Type: application/json\r\n\r\n");
-    body.extend_from_slice(&options);
-    body.extend_from_slice(b"\r\n");
-    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-    body.extend_from_slice(
-        format!("Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n")
-            .as_bytes(),
-    );
-    body.extend_from_slice(format!("Content-Type: {content_type}\r\n\r\n").as_bytes());
-    body.extend_from_slice(image);
-    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
-    Ok((boundary, body))
-}
-
 impl RpcService for WorkerService {
     fn handle(&mut self, request: RpcRequest) -> HandledResponse {
-        let id = request.id;
+        let id = request.id.into_value();
         if request.jsonrpc != JSON_RPC_VERSION {
             return HandledResponse {
                 response: RpcResponse::error(
@@ -917,6 +1153,9 @@ impl HintParams {
         finite("hint.radiusDeg", self.radius_deg)?;
         finite("hint.scaleArcsecPerPixel", self.scale_arcsec_per_pixel)?;
         finite("hint.scaleTolerance", self.scale_tolerance)?;
+        if !(0.0..=360.0).contains(&self.center_ra_deg) {
+            return Err("hint.centerRaDeg must be between 0 and 360".to_string());
+        }
         if !(-90.0..=90.0).contains(&self.center_dec_deg) {
             return Err("hint.centerDecDeg must be between -90 and 90".to_string());
         }
@@ -926,8 +1165,8 @@ impl HintParams {
         if self.scale_arcsec_per_pixel <= 0.0 {
             return Err("hint.scaleArcsecPerPixel must be greater than 0".to_string());
         }
-        if self.scale_tolerance <= 0.0 {
-            return Err("hint.scaleTolerance must be greater than 0".to_string());
+        if !(0.01..=1.0).contains(&self.scale_tolerance) {
+            return Err("hint.scaleTolerance must be between 0.01 and 1.0".to_string());
         }
         Ok(())
     }
@@ -965,6 +1204,9 @@ impl BlindSolveParams {
             "blind.maxScaleArcsecPerPixel",
             self.max_scale_arcsec_per_pixel,
         )?;
+        if !self.index_magnitude_limit.is_finite() {
+            return Err("blind.indexMagnitudeLimit must be finite".to_string());
+        }
         if self.min_scale_arcsec_per_pixel <= 0.0
             || self.max_scale_arcsec_per_pixel <= self.min_scale_arcsec_per_pixel
         {
@@ -1173,7 +1415,7 @@ fn warn_on_index_catalog_mismatch(index: &BlindIndex, catalog: &TileCatalog) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use std::io::{Cursor, Read};
 
     struct TestService {
         calls: usize,
@@ -1185,7 +1427,7 @@ mod tests {
             let shutdown = request.method == "shutdown";
             HandledResponse {
                 response: RpcResponse::success(
-                    request.id,
+                    request.id.into_value(),
                     json!({ "method": request.method, "call": self.calls }),
                 ),
                 shutdown,
@@ -1235,6 +1477,39 @@ mod tests {
     }
 
     #[test]
+    fn notification_executes_without_writing_a_response() {
+        let input = concat!(
+            "{\"jsonrpc\":\"2.0\",\"method\":\"ping\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n"
+        );
+        let mut output = Vec::new();
+        run_loop(
+            Cursor::new(input.as_bytes()),
+            &mut output,
+            TestService { calls: 0 },
+        )
+        .unwrap();
+        let response: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(response["id"], 2);
+        assert_eq!(response["result"]["call"], 2);
+    }
+
+    #[test]
+    fn compound_request_id_is_rejected() {
+        let input = "{\"jsonrpc\":\"2.0\",\"id\":{},\"method\":\"ping\"}\n";
+        let mut output = Vec::new();
+        run_loop(
+            Cursor::new(input.as_bytes()),
+            &mut output,
+            TestService { calls: 0 },
+        )
+        .unwrap();
+        let response: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(response["id"], Value::Null);
+        assert_eq!(response["error"]["code"], INVALID_REQUEST);
+    }
+
+    #[test]
     fn malformed_json_returns_parse_error_and_keeps_reading() {
         let input = concat!(
             "not json\n",
@@ -1247,6 +1522,44 @@ mod tests {
             TestService { calls: 0 },
         )
         .unwrap();
+        let responses: Vec<Value> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(responses[0]["error"]["code"], PARSE_ERROR);
+        assert_eq!(responses[1]["id"], 9);
+    }
+
+    #[test]
+    fn valid_json_with_no_method_is_an_invalid_request() {
+        let mut output = Vec::new();
+        run_loop(Cursor::new(b"{}\n"), &mut output, TestService { calls: 0 }).unwrap();
+        let response: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(response["error"]["code"], INVALID_REQUEST);
+    }
+
+    #[test]
+    fn oversized_request_is_drained_before_the_next_request() {
+        let mut input = vec![b' '; MAX_REQUEST_BYTES + 1];
+        input.extend_from_slice(b"\n{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"ping\"}\n");
+        let mut output = Vec::new();
+        run_loop(Cursor::new(input), &mut output, TestService { calls: 0 }).unwrap();
+        let responses: Vec<Value> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0]["error"]["code"], INVALID_REQUEST);
+        assert_eq!(responses[1]["id"], 9);
+    }
+
+    #[test]
+    fn invalid_utf8_returns_parse_error_and_keeps_reading() {
+        let input = b"\xff\n{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"ping\"}\n";
+        let mut output = Vec::new();
+        run_loop(Cursor::new(input), &mut output, TestService { calls: 0 }).unwrap();
         let responses: Vec<Value> = String::from_utf8(output)
             .unwrap()
             .lines()
@@ -1282,6 +1595,46 @@ mod tests {
         assert_eq!(
             params.validate().unwrap_err(),
             "hint is required for hinted solves"
+        );
+    }
+
+    #[test]
+    fn blind_server_options_ignore_a_stale_hint() {
+        let params: SolveParams = serde_json::from_value(json!({
+            "imagePath": "image.fits",
+            "mode": "blind",
+            "hint": {
+                "centerRaDeg": 10.0,
+                "centerDecDeg": 20.0,
+                "radiusDeg": 2.0,
+                "scaleArcsecPerPixel": 1.5
+            }
+        }))
+        .unwrap();
+        params.validate().unwrap();
+        let options = server_options(&params);
+        assert!(options.center_ra_deg.is_none());
+        assert!(options.center_dec_deg.is_none());
+        assert!(options.radius_deg.is_none());
+        assert!(options.scale_arcsec_per_pixel.is_none());
+    }
+
+    #[test]
+    fn expired_remote_deadline_is_reported() {
+        let solver = RemoteSolver::new(
+            "http://127.0.0.1:1",
+            None,
+            ServerUploadFormat::Png,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let started = Instant::now().checked_sub(Duration::from_secs(2)).unwrap();
+        assert!(
+            solver
+                .remaining(started)
+                .unwrap_err()
+                .to_string()
+                .contains("timed out")
         );
     }
 
@@ -1334,13 +1687,19 @@ mod tests {
 
         let png = encode_png(&image).unwrap();
         assert!(png.len() < image.as_raw().len() / 10);
-        let (boundary, body) = multipart_solve_body(
-            &png,
-            "nina-solve.png",
-            "image/png",
-            &server_options(&params),
-        )
-        .unwrap();
+        let upload = RemoteUpload {
+            encoded_bytes: png.len(),
+            data: RemoteUploadData::Bytes(png),
+            filename: "nina-solve.png",
+            content_type: "image/png",
+            encoding: "png-gray8",
+            uncompressed_bytes: image.as_raw().len(),
+        };
+        let options = serde_json::to_string(&server_options(&params)).unwrap();
+        let mut form = upload.form(&options).unwrap();
+        let boundary = form.boundary().to_string();
+        let mut body = Vec::new();
+        form.read_to_end(&mut body).unwrap();
         assert!(body.windows(8).any(|window| window == b"\x89PNG\r\n\x1a\n"));
         let text = String::from_utf8_lossy(&body);
         assert!(text.starts_with(&format!("--{boundary}\r\n")));

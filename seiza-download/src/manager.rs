@@ -540,7 +540,7 @@ impl CatalogManager {
                 actual: downloaded,
             });
         }
-        let actual = format!("{:x}", hasher.finalize());
+        let actual = lowercase_hex(&hasher.finalize());
         if actual != file.sha256 {
             return Err(Error::Checksum {
                 name: file.name.clone(),
@@ -623,7 +623,7 @@ async fn verify_artifact(path: &Path, artifact: &CatalogArtifact) -> Result<()> 
         }
         hasher.update(&buffer[..read]);
     }
-    let actual = format!("{:x}", hasher.finalize());
+    let actual = lowercase_hex(&hasher.finalize());
     if actual != artifact.sha256 {
         return Err(Error::Checksum {
             name: artifact.name.clone(),
@@ -644,6 +644,16 @@ fn next_sequence() -> u64 {
     TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
 }
 
+fn lowercase_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -652,7 +662,7 @@ mod tests {
     use std::net::TcpListener;
 
     fn sha256(bytes: &[u8]) -> String {
-        format!("{:x}", Sha256::digest(bytes))
+        lowercase_hex(&Sha256::digest(bytes))
     }
 
     fn cached_manifest(selected_bytes: &[u8]) -> BundleManifest {

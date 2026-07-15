@@ -40,6 +40,19 @@ seiza catalog star --data stars-lite-tycho2.ids.bin "STF 2382 AB"
 seiza catalog star --data stars-lite-tycho2.ids.bin "RR L" --prefix --limit 10
 ```
 
+Star detection defaults to `--detection-backend auto`: decoded 8-bit images
+(including color JPEGs) and MTF-compressed FITS use the compact u8 pipeline,
+while other higher-precision images use f32. Pass `--detection-backend f32` to
+retain fractional luma during an 8-bit solve or to detect directly from linear,
+native-precision FITS samples; pass `--detection-backend u8` to explicitly
+quantize any input. The option is global and applies to `detect`, `solve`,
+`solve-blind`, and local `worker` solves.
+
+Auto solves default to `--detection-fallback f32`. After an Auto/u8 solve miss,
+converted 8-bit color is redetected as f32 and FITS is reopened so detection can
+use its linear high-precision samples. `--detection-fallback none` disables the
+retry. Explicitly selected detection backends never fall back.
+
 `catalog objects` accepts a cone or a convex polygon whose vertices are in
 boundary order. It can filter by object kind, magnitude, angular size, and
 common-name availability; results can be emitted as a table, JSON, or CSV.
@@ -52,6 +65,28 @@ visible in the image pixels.
 alternate IDs. Both object viewport queries and name completion use indices
 embedded in the memory-mapped `objects.bin`; normal open does not decode every
 record or touch every index page.
+
+## Persistent worker
+
+Applications performing repeated solves can keep a catalog and blind index
+open behind a newline-delimited JSON-RPC 2.0 process:
+
+```
+seiza worker --data stars-deep-gaia17.bin --index blind-gaia16.idx
+```
+
+The same protocol can adapt local image paths to a queued `seiza-server`:
+
+```
+seiza worker --server http://solver-host:8080
+```
+
+Remote mode defaults to a compact grayscale PNG upload. Use
+`--server-upload fits` to stream the original FITS file and preserve headers,
+or `--server-timeout SECONDS` to change the default five-minute deadline.
+Bearer authentication uses `--server-token` or `SEIZA_SERVER_TOKEN`. See the
+[versioned wire contract](https://github.com/theatrus/seiza/blob/main/docs/design/worker-protocol.md)
+for request and response details.
 
 ## Use with N.I.N.A.
 
@@ -127,8 +162,9 @@ seiza catalog validate --data objects.bin
 
 FITS files are read natively (see
 [seiza-fits](https://crates.io/crates/seiza-fits)) with bounded-memory
-streaming into the final typed pixel buffer, automatic autostretch before
-detection, and RA/DEC hints taken from headers.
+streaming into the final typed pixel buffer, an automatic MTF stretch for u8
+detection and previews, a linear normalized representation for f32 detection,
+and RA/DEC hints taken from headers.
 
 ## License
 

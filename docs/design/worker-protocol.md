@@ -16,10 +16,10 @@ Remote-backed worker:
 seiza worker --server http://solver-host:8080
 ```
 
-The JSON-RPC boundary accepts FITS file paths only. The caller remains
-responsible for creating and deleting the temporary FITS file. A worker may
-solve locally or use a remote `seiza-server`; remote operation does not change
-the client-facing JSON protocol.
+The JSON-RPC boundary accepts local image paths, including FITS, PNG, JPEG,
+and TIFF. The caller remains responsible for the file's lifetime. A worker
+may solve locally or use a remote `seiza-server`; remote operation does not
+change the client-facing JSON protocol.
 
 ## Transport and lifetime
 
@@ -29,6 +29,8 @@ the client-facing JSON protocol.
   stderr.
 - Requests are handled synchronously, one at a time.
 - The maximum request line is 1 MiB.
+- Notifications (requests without an `id`) execute without a response, per
+  JSON-RPC 2.0. Request IDs may be strings, numbers, or null.
 - EOF on stdin is a clean shutdown. A one-shot client sends `initialize` and
   one `solve`, then closes stdin. A persistent client keeps stdin open and
   sends additional `solve` requests.
@@ -50,7 +52,7 @@ The response reports server identity, supported solve modes and image inputs,
 and the loaded catalog/index metadata:
 
 ```json
-{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"server":{"name":"seiza","version":"0.4.1"},"client":{"name":"N.I.N.A.","version":"4.x"},"capabilities":{"solveModes":["hinted","blind"],"imageInputs":["fits_path"],"maxConcurrentRequests":1},"catalog":{"starCount":154100000,"blindIndexLoaded":true,"blindIndexPatternCount":1234567,"blindIndexMagnitudeLimit":16.0}}}
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"server":{"name":"seiza","version":"0.4.1"},"client":{"name":"N.I.N.A.","version":"4.x"},"capabilities":{"solveModes":["hinted","blind"],"imageInputs":["image_path"],"maxConcurrentRequests":1},"catalog":{"starCount":154100000,"blindIndexLoaded":true,"blindIndexPatternCount":1234567,"blindIndexMagnitudeLimit":16.0}}}
 ```
 
 Protocol version 1 is currently the only supported version.
@@ -74,6 +76,8 @@ The `blind` and `detection` objects may be omitted to use their defaults. When
 the worker starts without `--index`, the first blind request builds an index in
 memory and later blind requests reuse it. Production clients should provide a
 maintained prebuilt index for predictable startup time and fine-scale fields.
+The CLI's global `--detection-backend`, `--detection-fallback`, and
+`--detection-fallback-hypotheses` settings also apply to local worker solves.
 
 ## Solve result
 
@@ -110,8 +114,13 @@ details are not sent; the remote service uses its configured maintained index
 and queue policy.
 
 `--server-upload png` is the default. `--server-upload fits` uploads the
-original file instead, preserving FITS headers such as `DATE-OBS` and the
-source bit depth at the cost of a larger transfer.
+original file as a streamed multipart part instead, preserving FITS headers
+such as `DATE-OBS` and the source bit depth without buffering the whole FITS
+payload in memory. It requires a FITS input path and costs more bandwidth.
+
+The upload, queue wait, solve, and result fetch share a five-minute deadline.
+Use `--server-timeout SECONDS` to change it. Individual health checks are
+capped at 30 seconds.
 
 ## Other methods
 

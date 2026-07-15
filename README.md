@@ -31,8 +31,8 @@ seiza worker --data data/stars-deep-gaia17.bin --index data/blind-gaia16.idx
 ```
 
 The worker reads one JSON request per stdin line, writes one response per
-stdout line, accepts FITS paths, and exits cleanly at EOF. See
-[the worker protocol](docs/design/worker-protocol.md).
+stdout line, accepts FITS and normal raster image paths, and exits cleanly at
+EOF. See [the worker protocol](docs/design/worker-protocol.md).
 
 The same worker contract can submit to the existing
 [`seiza-server`](https://github.com/theatrus/seiza-server). The local worker
@@ -45,8 +45,53 @@ seiza worker --server http://solver-host:8080
 
 Pass `--server-token` or set `SEIZA_SERVER_TOKEN` when the server requires an
 API key. Compact PNG upload is the default; `--server-upload fits` preserves
-the original FITS payload when its headers or full bit depth are desired.
+and streams the original FITS payload when its headers or full bit depth are
+desired. Remote solves time out after five minutes by default; use
+`--server-timeout SECONDS` to change that deadline.
 Local and remote operation use the same JSON-RPC contract.
+
+## Performance
+
+Seiza is built to solve inside an imaging loop. On our Windows 11 test machine
+(Intel Core i7-12700H, release builds, no GPU), process startup, image loading,
+star detection, catalog access, solving, and result output are all included:
+
+- A real hinted FITS solve usually finishes in **0.2-0.4 seconds**.
+- Blind solving with a prebuilt index took **0.53 seconds median** across 13
+  real FITS frames ranging from 26 to 61 megapixels.
+- Compact u8 detection cut peak detector memory from **1.08 GiB to 543 MiB**
+  on a 94 MP JPEG, and from **590 MiB to 179 MiB** on a 61 MP FITS frame.
+
+### Compared with ASTAP
+
+[ASTAP](https://www.hnsky.org/astap.htm) is a mature, highly regarded plate
+solver and a serious reference point. There is no universal winner: different
+search strategies do better on different fields. In our repeated real-FITS
+comparison, using the catalog recommended for each solver:
+
+| Workload | seiza | ASTAP | Result |
+|---|---:|---:|---|
+| Accurate hint, 26 MP narrow field | 0.25-0.27 s | 0.27-0.29 s | Roughly tied; seiza 9-11% faster |
+| Accurate hint, 61 MP wide field | 0.42 s | 0.63 s | seiza 1.5x faster |
+| Position blind, 26 MP narrow field | 1.61 s | 31.28 s | seiza 19x faster |
+| Position blind, 61 MP wide field | 0.65 s | 1.09 s | seiza 1.7x faster |
+
+The 61 MP position-blind row was rerun after the blind-pipeline improvements
+(three runs each: seiza 0.62-0.65 s, ASTAP 1.08-1.16 s).
+
+On a separate set of 25 heavily processed JPEGs, seiza solved all 25 with a
+hint and all 25 position-blind. ASTAP solved 13 and 12 respectively. Among
+images both programs solved, seiza was **3.5x faster hinted** and **6.5x faster
+position-blind** by median wall-time ratio. Seiza also solved all 25 with no
+position or scale hint in 0.90 seconds median. This is deliberately unusual
+input for a plate solver, so it measures robustness on processed web images
+rather than ASTAP's normal FITS workflow.
+
+These are measurements on one system, not universal promises. Runs used the
+normal OS file cache and included complete command-line wall time. See the
+[FITS comparison](docs/benchmarks/2026-07-astap-comparison.md) and
+[blind/detection follow-up](docs/benchmarks/2026-07-blind-pipeline-priorities.md)
+for the images, catalogs, repetitions, correctness checks, and caveats.
 
 Current hosted datasets use one complete, versioned
 [v2 catalog-bundle manifest](https://downloads.seiza.fyi/data/v2/manifest.json).
@@ -176,28 +221,6 @@ result file N.I.N.A. reads — including the full CD matrix, so pixel
 scale, rotation, and flip all come through. A copy of the binary
 renamed `astap.exe` behaves identically. Details:
 [docs/design/astap-mode.md](docs/design/astap-mode.md).
-
-## How fast?
-
-Measured on a 16-core desktop, no GPU, everything from a cold start:
-
-- A 24 MP wide field **blind-solves in under 2 seconds** against a
-  2.5M-star Tycho-2 catalog — and that includes building the entire
-  2M-pattern whole-sky index from scratch (1.2 s) before searching it
-  (0.4 s). A 36.7M-star Gaia catalog builds a 6.9M-pattern index in ~5 s
-  and blind-solves sub-degree galaxy fields in ~3 s.
-- A **61-megapixel** raw FITS frame goes from file open to hinted
-  solution in **0.7 s** (load, autostretch, star detection, solve).
-- Hinted solving itself runs in tens of milliseconds; typical RMS on real
-  frames is 0.2–0.5″ at fine pixel scales.
-- A 26 MP camera sub loads in ~75 ms with exact median/MAD statistics in
-  8 ms (single histogram pass, no sort) and an MTF autostretch in 25 ms.
-
-The tricks: star unit vectors so every radius test is a dot product
-(no per-pair trigonometry), boundary-aware descriptor hashing (1–4 probes
-per quad instead of 3⁵), a frozen sorted-array index with branchless
-binary search, uniform-grid matching, rayon across cores, and
-SIMD kernels with runtime AVX2 dispatch in released binaries.
 
 ## Layout
 
