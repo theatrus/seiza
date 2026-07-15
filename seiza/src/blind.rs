@@ -674,6 +674,33 @@ pub fn solve_blind(
         )));
     }
 
+    match solve_blind_with_global_ladder(stars, catalog, index, params, dimensions, &[8]) {
+        Ok(solution) => return Ok(solution),
+        Err(crate::Error::Solve(_)) => {}
+        Err(error) => return Err(error),
+    }
+
+    solve_blind_with_global_ladder(
+        stars,
+        catalog,
+        index,
+        params,
+        dimensions,
+        &[8, 10, 12, 16, 20, 26, 32],
+    )
+}
+
+/// Run the blind funnel with a selected ladder of globally bright image-star
+/// subsets. The public entry point first tries the compact rung, then retains
+/// this function's complete ladder as a fallback for difficult fields.
+fn solve_blind_with_global_ladder(
+    stars: &[DetectedStar],
+    catalog: &(dyn StarCatalog + Sync),
+    index: &BlindIndex,
+    params: &BlindParams,
+    dimensions: (u32, u32),
+    global_ladder: &[usize],
+) -> Result<Solution, crate::Error> {
     // Image patterns: each of the brightest stars with 3-subsets of its
     // nearest bright neighbors, mirroring the index construction. The
     // catalog's bright stars are usually the *locally* brightest
@@ -708,7 +735,7 @@ pub fn solve_blind(
     // among mag <= index_mag_limit spans degrees), so matching image quads
     // are wide — combinations of the brightest detections, not
     // nearest-neighbor cliques among a dense detection list.
-    for k in [8usize, 10, 12, 16, 20, 26, 32] {
+    for &k in global_ladder {
         let picked = &all_picked[..k.min(all_picked.len())];
         let n = picked.len();
         for i in 0..n {
@@ -952,13 +979,18 @@ pub fn solve_blind(
 
     ranked.truncate(params.max_hypotheses);
 
-    // Verify hypotheses in vote order, in parallel batches sized to the
-    // core count — the true field usually ranks near the top, so small
-    // batches keep the win cheap while parallelism absorbs the misses.
+    // Verify hypotheses in vote order. The true field usually ranks first,
+    // so begin with a small batch instead of speculatively launching one
+    // full triangle solve per logical CPU. Widen after misses to recover
+    // the machine's full throughput on difficult or unsolvable fields.
     // Blind acceptance is stricter than the hinted floor: across a
     // whole-sky search, chance alignments of a few stars are routine.
-    let batch = rayon::current_num_threads().max(1);
-    for chunk in ranked.chunks(batch) {
+    let max_batch = rayon::current_num_threads().max(1);
+    let mut batch = max_batch.min(4);
+    let mut attempted = 0;
+    while attempted < ranked.len() {
+        let end = (attempted + batch).min(ranked.len());
+        let chunk = &ranked[attempted..end];
         let solution = chunk.par_iter().find_map_any(
             |(_coarse_matches, _votes, center, scale, _coarse_wcs)| {
                 // The implied center is precise and its error scales with
@@ -982,6 +1014,8 @@ pub fn solve_blind(
         if let Some(solution) = solution {
             return Ok(solution);
         }
+        attempted = end;
+        batch = (batch * 2).min(max_batch);
     }
 
     Err(crate::Error::Solve(format!(
