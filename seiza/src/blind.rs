@@ -128,6 +128,39 @@ type Hypothesis = (u32, (f64, f64), f64, Wcs);
 type SmoothedHypothesis = (HypothesisKey, u32, (f64, f64), f64, Wcs);
 type RankedHypothesis = (usize, u32, (f64, f64), f64, Wcs);
 
+fn smooth_hypotheses(hypotheses: &FxHashMap<HypothesisKey, Hypothesis>) -> Vec<SmoothedHypothesis> {
+    hypotheses
+        .keys()
+        .map(|&key| {
+            let mut sum = 0;
+            let mut representative: Option<(HypothesisKey, &Hypothesis)> = None;
+            for dx in -1..=1i64 {
+                for dy in -1..=1i64 {
+                    for dz in -1..=1i64 {
+                        let neighbor_key = (key.0 + dx, key.1 + dy, key.2 + dz);
+                        if let Some(hypothesis) = hypotheses.get(&neighbor_key) {
+                            sum += hypothesis.0;
+                            let replace = representative.is_none_or(|(best_key, best)| {
+                                hypothesis.0 > best.0
+                                    || (hypothesis.0 == best.0 && neighbor_key < best_key)
+                            });
+                            if replace {
+                                representative = Some((neighbor_key, hypothesis));
+                            }
+                        }
+                    }
+                }
+            }
+            // `key` came from the map, so its own bucket always supplies a
+            // representative. Carry the strongest direct-vote bucket's WCS
+            // instead of the WCS attached to whichever smoothed bucket NMS
+            // happens to retain.
+            let (_, (_, implied, scale, coarse_wcs)) = representative.unwrap();
+            (key, sum, *implied, *scale, coarse_wcs.clone())
+        })
+        .collect()
+}
+
 /// A searchable pattern index over a catalog's bright stars, frozen into
 /// sorted arrays: hash-free branchless binary search per lookup, cache
 /// friendly, and directly serializable.
@@ -892,24 +925,7 @@ fn solve_blind_with_global_ladder(
     // Correct quads vote for the same field but their implied centers
     // straddle bucket boundaries; sum each bucket with its neighbors so
     // split votes recombine while uniform junk stays flat
-    let mut smoothed: Vec<SmoothedHypothesis> = hypotheses
-        .iter()
-        .map(|(&key, (_, implied, scale, coarse_wcs))| {
-            let mut sum = 0;
-            for dx in -1..=1i64 {
-                for dy in -1..=1i64 {
-                    for dz in -1..=1i64 {
-                        if let Some((v, _, _, _)) =
-                            hypotheses.get(&(key.0 + dx, key.1 + dy, key.2 + dz))
-                        {
-                            sum += *v;
-                        }
-                    }
-                }
-            }
-            (key, sum, *implied, *scale, coarse_wcs.clone())
-        })
-        .collect();
+    let mut smoothed = smooth_hypotheses(&hypotheses);
     smoothed.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     // Non-max suppression: a strong region floods all its neighbor
     // buckets with the same summed vote; verify each region once
@@ -1358,6 +1374,60 @@ pub(crate) mod tests {
         }
         detected.sort_by(|a, b| b.flux.total_cmp(&a.flux));
         detected
+    }
+
+    #[test]
+    fn smoothing_uses_the_strongest_bucket_representative() {
+        let crpix = (2000.0, 1500.0);
+        let good_center = (150.1, 35.1);
+        let bad_center = (150.8, 35.6);
+        let good_wcs = Wcs::from_center_scale_rotation(good_center, crpix, 1.0, 20.0, false);
+        let bad_wcs = Wcs::from_center_scale_rotation(bad_center, crpix, 1.0, 80.0, false);
+        let mut hypotheses = FxHashMap::default();
+        hypotheses.insert((300, 70, 0), (12, good_center, 1.0, good_wcs));
+        hypotheses.insert((301, 70, 0), (1, bad_center, 1.0, bad_wcs));
+
+        let smoothed = smooth_hypotheses(&hypotheses);
+        let (_, votes, center, _, wcs) = smoothed
+            .iter()
+            .find(|(key, _, _, _, _)| *key == (301, 70, 0))
+            .unwrap();
+        assert_eq!(*votes, 13);
+        assert_eq!(*center, good_center);
+        assert_eq!(wcs.crval, good_center);
+    }
+
+    #[test]
+    fn smoothing_breaks_equal_vote_ties_by_bucket_key() {
+        let crpix = (2000.0, 1500.0);
+        let lower_center = (150.1, 35.1);
+        let upper_center = (150.8, 35.6);
+        let mut hypotheses = FxHashMap::default();
+        hypotheses.insert(
+            (300, 70, 0),
+            (
+                4,
+                lower_center,
+                1.0,
+                Wcs::from_center_scale_rotation(lower_center, crpix, 1.0, 20.0, false),
+            ),
+        );
+        hypotheses.insert(
+            (301, 70, 0),
+            (
+                4,
+                upper_center,
+                1.0,
+                Wcs::from_center_scale_rotation(upper_center, crpix, 1.0, 80.0, false),
+            ),
+        );
+
+        let smoothed = smooth_hypotheses(&hypotheses);
+        assert!(
+            smoothed
+                .iter()
+                .all(|(_, _, center, _, _)| *center == lower_center)
+        );
     }
 
     #[test]

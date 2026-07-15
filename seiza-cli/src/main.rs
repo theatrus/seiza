@@ -136,6 +136,12 @@ pub(crate) enum DetectionFallback {
     F32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DetectionPass {
+    Primary,
+    F32Fallback,
+}
+
 /// Common detection and retry state for every hinted or blind solve
 /// invocation. The f32 representation is loaded lazily after a solve miss and
 /// cached when a command tries more than one solving strategy.
@@ -182,7 +188,14 @@ impl<'a> SolveInvocation<'a> {
         &mut self,
         mut solver: impl FnMut(&[DetectedStar]) -> std::result::Result<T, seiza::Error>,
     ) -> Result<T> {
-        match solver(&self.primary_stars) {
+        self.solve_with_pass(|stars, _| solver(stars))
+    }
+
+    pub(crate) fn solve_with_pass<T>(
+        &mut self,
+        mut solver: impl FnMut(&[DetectedStar], DetectionPass) -> std::result::Result<T, seiza::Error>,
+    ) -> Result<T> {
+        match solver(&self.primary_stars, DetectionPass::Primary) {
             Ok(solution) => Ok(solution),
             Err(seiza::Error::Solve(_))
                 if self.fallback == DetectionFallback::F32
@@ -192,7 +205,10 @@ impl<'a> SolveInvocation<'a> {
                 if self.f32_stars.is_none() {
                     self.f32_stars = Some(redetect_f32(self.path, self.image, &self.config)?);
                 }
-                let result = solver(self.f32_stars.as_deref().expect("f32 stars were populated"));
+                let result = solver(
+                    self.f32_stars.as_deref().expect("f32 stars were populated"),
+                    DetectionPass::F32Fallback,
+                );
                 if result.is_ok() {
                     self.active_f32 = true;
                 }
@@ -201,6 +217,19 @@ impl<'a> SolveInvocation<'a> {
             Err(error) => Err(anyhow::Error::from(error)),
         }
     }
+}
+
+fn blind_params_for_detection_pass(
+    params: &seiza::blind::BlindParams,
+    can_retry_f32: bool,
+    fallback_hypotheses: usize,
+    pass: DetectionPass,
+) -> seiza::blind::BlindParams {
+    let mut attempt = params.clone();
+    if can_retry_f32 && pass == DetectionPass::Primary && fallback_hypotheses > 0 {
+        attempt.max_hypotheses = attempt.max_hypotheses.min(fallback_hypotheses);
+    }
+    attempt
 }
 
 /// RA/Dec hint from FITS headers (N.I.N.A. writes RA/DEC in degrees).
@@ -226,6 +255,10 @@ struct Cli {
     /// its native-precision linear samples.
     #[arg(long, value_enum, default_value = "f32", global = true)]
     detection_fallback: DetectionFallback,
+    /// Blind hypotheses to verify with Auto/u8 before an available f32 retry.
+    /// Zero gives u8 the full --max-hypotheses budget.
+    #[arg(long, default_value_t = 64, global = true)]
+    detection_fallback_hypotheses: usize,
     #[command(subcommand)]
     command: Command,
 }
@@ -724,6 +757,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let detection_backend = cli.detection_backend.into();
     let detection_fallback = cli.detection_fallback;
+    let detection_fallback_hypotheses = cli.detection_fallback_hypotheses;
     match cli.command {
         Command::Detect {
             image,
@@ -857,6 +891,7 @@ fn main() -> Result<()> {
                 ignore_border,
                 detection_backend,
                 detection_fallback,
+                detection_fallback_hypotheses,
             },
         ),
         Command::FitsInfo { image, stretch } => fits_info(&image, stretch.as_deref()),
@@ -1866,6 +1901,7 @@ struct SolveBlindOptions<'a> {
     ignore_border: u32,
     detection_backend: DetectBackend,
     detection_fallback: DetectionFallback,
+    detection_fallback_hypotheses: usize,
 }
 
 fn solve_blind_command(
@@ -1884,6 +1920,8 @@ fn solve_blind_command(
         max_stars: 600,
         ..Default::default()
     };
+    let can_retry_f32 = options.detection_fallback == DetectionFallback::F32
+        && auto_can_retry_f32(path, &img, options.detection_backend);
     let mut invocation = SolveInvocation::new(path, &img, config, options.detection_fallback);
     println!(
         "{} stars detected in {}x{} image",
@@ -1929,7 +1967,15 @@ fn solve_blind_command(
     };
 
     let started = std::time::Instant::now();
-    let solution = invocation.solve(|stars| solve_blind(stars, &catalog, &index, &params, dims))?;
+    let solution = invocation.solve_with_pass(|stars, pass| {
+        let attempt_params = blind_params_for_detection_pass(
+            &params,
+            can_retry_f32,
+            options.detection_fallback_hypotheses,
+            pass,
+        );
+        solve_blind(stars, &catalog, &index, &attempt_params, dims)
+    })?;
     let wcs = &solution.wcs;
     let (ra, dec) = wcs.pixel_to_world(dims.0 as f64 / 2.0, dims.1 as f64 / 2.0);
     println!("Blind-solved in {:.2}s:", started.elapsed().as_secs_f64());
@@ -2017,6 +2063,7 @@ mod cli_tests {
         assert!(matches!(before.detection_backend, DetectionBackendArg::F32));
         assert!(matches!(after.detection_backend, DetectionBackendArg::U8));
         assert_eq!(automatic.detection_fallback, DetectionFallback::F32);
+        assert_eq!(automatic.detection_fallback_hypotheses, 64);
         let no_fallback = Cli::try_parse_from([
             "seiza",
             "solve-blind",
@@ -2025,9 +2072,12 @@ mod cli_tests {
             "stars.bin",
             "--detection-fallback",
             "none",
+            "--detection-fallback-hypotheses",
+            "0",
         ])
         .unwrap();
         assert_eq!(no_fallback.detection_fallback, DetectionFallback::None);
+        assert_eq!(no_fallback.detection_fallback_hypotheses, 0);
         assert!(
             Cli::try_parse_from([
                 "seiza",
@@ -2114,18 +2164,18 @@ mod cli_tests {
             DetectConfig::default(),
             DetectionFallback::F32,
         );
-        let mut attempts = 0;
+        let mut passes = Vec::new();
         invocation
-            .solve(|_| {
-                attempts += 1;
-                if attempts == 1 {
+            .solve_with_pass(|_, pass| {
+                passes.push(pass);
+                if pass == DetectionPass::Primary {
                     Err(seiza::Error::Solve("exercise f32 reload".into()))
                 } else {
                     Ok(())
                 }
             })
             .unwrap();
-        assert_eq!(attempts, 2);
+        assert_eq!(passes, [DetectionPass::Primary, DetectionPass::F32Fallback]);
         std::fs::remove_file(path).unwrap();
     }
 
@@ -2139,13 +2189,32 @@ mod cli_tests {
             DetectConfig::default(),
             DetectionFallback::None,
         );
-        let mut attempts = 0;
-        let result: Result<()> = invocation.solve(|_| {
-            attempts += 1;
+        let mut passes = Vec::new();
+        let result: Result<()> = invocation.solve_with_pass(|_, pass| {
+            passes.push(pass);
             Err(seiza::Error::Solve("expected miss".into()))
         });
         assert!(result.is_err());
-        assert_eq!(attempts, 1);
+        assert_eq!(passes, [DetectionPass::Primary]);
+    }
+
+    #[test]
+    fn blind_fallback_budget_only_caps_the_primary_pass() {
+        let params = seiza::blind::BlindParams {
+            max_hypotheses: 400,
+            ..Default::default()
+        };
+        let primary = blind_params_for_detection_pass(&params, true, 64, DetectionPass::Primary);
+        let fallback =
+            blind_params_for_detection_pass(&params, true, 64, DetectionPass::F32Fallback);
+        let unavailable =
+            blind_params_for_detection_pass(&params, false, 64, DetectionPass::Primary);
+        let unlimited = blind_params_for_detection_pass(&params, true, 0, DetectionPass::Primary);
+
+        assert_eq!(primary.max_hypotheses, 64);
+        assert_eq!(fallback.max_hypotheses, 400);
+        assert_eq!(unavailable.max_hypotheses, 400);
+        assert_eq!(unlimited.max_hypotheses, 400);
     }
 
     #[test]

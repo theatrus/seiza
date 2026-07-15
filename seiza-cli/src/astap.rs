@@ -29,6 +29,8 @@ struct AstapArgs {
     detection_backend: seiza::DetectBackend,
     /// Seiza extension: retry policy after an Auto/u8 solve miss.
     detection_fallback: crate::DetectionFallback,
+    /// Seiza extension: primary blind budget before an available f32 retry.
+    detection_fallback_hypotheses: usize,
 }
 
 /// True when the raw command line looks like an ASTAP invocation
@@ -69,7 +71,10 @@ pub fn run(raw: &[String]) -> Result<()> {
 }
 
 fn parse_args(raw: &[String]) -> AstapArgs {
-    let mut args = AstapArgs::default();
+    let mut args = AstapArgs {
+        detection_fallback_hypotheses: 64,
+        ..Default::default()
+    };
     let mut iter = raw.iter().peekable();
     fn value(iter: &mut std::iter::Peekable<std::slice::Iter<String>>) -> Option<String> {
         iter.next().cloned()
@@ -99,6 +104,10 @@ fn parse_args(raw: &[String]) -> AstapArgs {
                     Some("none") => crate::DetectionFallback::None,
                     _ => crate::DetectionFallback::F32,
                 }
+            }
+            "--detection-fallback-hypotheses" => {
+                args.detection_fallback_hypotheses =
+                    value(&mut iter).and_then(|v| v.parse().ok()).unwrap_or(64)
             }
             // -z (downsample), -log, -wcs, and anything future: accept
             // and ignore, consuming a value only for flags known to take
@@ -201,8 +210,17 @@ fn solve(args: &AstapArgs, image_path: &Path) -> Result<Vec<String>> {
                 // fields need the hosted index (see resolve_blind_index).
                 seiza::blind::BlindIndex::build(&catalog, &params)
             };
-            invocation
-                .solve(|stars| seiza::blind::solve_blind(stars, &catalog, &index, &params, dims))?
+            let can_retry_f32 = args.detection_fallback == crate::DetectionFallback::F32
+                && crate::auto_can_retry_f32(image_path, &image, args.detection_backend);
+            invocation.solve_with_pass(|stars, pass| {
+                let attempt_params = crate::blind_params_for_detection_pass(
+                    &params,
+                    can_retry_f32,
+                    args.detection_fallback_hypotheses,
+                    pass,
+                );
+                seiza::blind::solve_blind(stars, &catalog, &index, &attempt_params, dims)
+            })?
         }
     };
 
@@ -396,6 +414,7 @@ mod tests {
         assert!((args.radius_deg - 30.0).abs() < 1e-9);
         assert!((args.ra_hours.unwrap() - 19.7275).abs() < 1e-9);
         assert!((args.spd_deg.unwrap() - 113.379).abs() < 1e-9);
+        assert_eq!(args.detection_fallback_hypotheses, 64);
     }
 
     #[test]
@@ -418,6 +437,8 @@ mod tests {
             "f32",
             "--detection-fallback",
             "none",
+            "--detection-fallback-hypotheses",
+            "32",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -425,6 +446,7 @@ mod tests {
         let args = parse_args(&raw);
         assert_eq!(args.detection_backend, seiza::DetectBackend::F32);
         assert_eq!(args.detection_fallback, crate::DetectionFallback::None);
+        assert_eq!(args.detection_fallback_hypotheses, 32);
     }
 
     #[test]

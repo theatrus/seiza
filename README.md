@@ -54,10 +54,11 @@ The 61 MP position-blind row was rerun after the blind-pipeline improvements
 
 On a separate set of 25 heavily processed JPEGs, seiza solved all 25 with a
 hint and all 25 position-blind. ASTAP solved 13 and 12 respectively. Among
-images both programs solved, seiza was **3.5x faster hinted** and **2.9x faster
-position-blind** by median wall-time ratio. This is deliberately unusual input
-for a plate solver, so it measures robustness on processed web images rather
-than ASTAP's normal FITS workflow.
+images both programs solved, seiza was **3.5x faster hinted** and **6.5x faster
+position-blind** by median wall-time ratio. Seiza also solved all 25 with no
+position or scale hint in 0.90 seconds median. This is deliberately unusual
+input for a plate solver, so it measures robustness on processed web images
+rather than ASTAP's normal FITS workflow.
 
 These are measurements on one system, not universal promises. Runs used the
 normal OS file cache and included complete command-line wall time. See the

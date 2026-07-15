@@ -224,6 +224,67 @@ non-solver overhead is only a few tenths of a second. Reducing speculative
 verification has materially more leverage than increasing parallelism or
 amortizing startup.
 
+### Accepted: strongest-bucket region representative
+
+The first priority was sufficient without retaining or catalog-scoring
+multiple WCSes per bucket. Every smoothed vote region now carries the WCS from
+its strongest directly contributing bucket rather than the WCS attached to
+whichever neighboring bucket survives non-max suppression. Equal direct-vote
+ties use the bucket key, making the choice independent of hash-map iteration
+order. Two unit tests exercise both the strongest-bucket selection and the tie
+rule.
+
+The exact forced-f32 truth-rank diagnostics changed all three former outliers
+from ranks 185-364 to rank zero:
+
+| Image | Before: rank / coarse matches | After: rank / coarse matches | New reported solve |
+|---|---:|---:|---:|
+| Sh2-101 | 364 / 1 | 0 / 144 | 0.33 s |
+| Full-frame NGC 7331 | 185 / 4 | 0 / 95 | 0.33 s |
+| Crescent | 334 / 3 | 0 / 179 | 0.32 s |
+
+A new default-Auto position-blind matrix then validated every solution against
+the independent WCS sidecars. None of the 25 images needed its f32 retry:
+
+| Image | Previous seiza auto | Fixed seiza auto | ASTAP | Fixed result vs ASTAP |
+|---|---:|---:|---:|---:|
+| Sh2-101 | 35.45 s | 0.736 s | 5.22 s | seiza 7.10x faster |
+| Full-frame NGC 7331 | 5.96 s | 0.588 s | 2.93 s | seiza 4.98x faster |
+| Crescent | 10.49 s | 0.624 s | 5.86 s | seiza 9.39x faster |
+
+Across the complete position-blind matrix, seiza remained 25/25 and measured
+661 ms median wall and 1.16 CPU-seconds, down from 709 ms and 1.39 CPU-seconds
+in the saved pre-fix Auto matrix. Among the 12 images ASTAP also solved, the
+median pairwise ASTAP/seiza wall ratio improved from 2.91x in the original
+release to 6.47x.
+
+The full 0.1-20 arcsec/pixel rerun improved from 23/25 to 25/25: Crescent and
+full-frame NGC 7331 changed from approximately 26-second failures to 0.823 and
+0.801-second successes. Median wall time across all 25 successes was 899 ms.
+
+### Accepted: bounded primary detection pass
+
+The representative fix made a small u8 budget safe on this corpus: all 25
+position-blind images solved correctly with at most 64 hypotheses per blind
+funnel, including Sh2-101, which previously exhausted all 400. Normal Auto
+solves therefore cap the primary u8 pass at 64 when an f32 fallback is
+available. `--detection-fallback-hypotheses N` makes the cap selectable and
+zero restores the full u8 budget. The f32 pass always receives the caller's
+full `--max-hypotheses` value; explicit u8/f32 backends and disabled fallback
+remain uncapped and reproducible.
+
+The pass identity lives in the common `SolveInvocation` retry path, so normal
+blind commands and ASTAP-compatible blind calls share the policy. CI checks
+the primary and f32 pass sequence, verifies that only the primary pass is
+capped, covers disabled fallback and a zero cap, and parses the option through
+both CLI surfaces.
+
+A final one-run FITS smoke comparison solved the two 26 MP narrow fields and
+the 61 MP wide field with both programs. Seiza measured 0.588, 1.176, and
+1.483 seconds versus ASTAP at 37.991, 55.701, and 2.726 seconds respectively.
+These cold single runs are validation rather than replacements for the
+repeated README numbers; they show no format, scale, or FOV regression.
+
 Six additional JPEGs have descriptive Markdown with approximate object
 coordinates but no full WCS and were excluded from quantitative agreement
 counts. One AVIF plus TOML pair was also outside this JPEG validation. Because
@@ -304,6 +365,11 @@ solution. The global `--detection-fallback none|f32` option defaults to `f32`;
 forced backends remain reproducible and never retry. FITS fallback explicitly
 reopens the source rather than trying to recover precision from the MTF/u8
 buffer.
+
+Blind Auto solves also use `--detection-fallback-hypotheses 64` by default to
+bound the primary u8 verification pass before that retry. The f32 pass keeps
+the complete `--max-hypotheses` budget, and a zero fallback-hypothesis value
+disables the cap.
 
 A release validation forced both backends with fallback disabled on fine,
 medium, and wide 16-bit FITS fields:
