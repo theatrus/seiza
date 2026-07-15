@@ -11,7 +11,6 @@ use std::path::PathBuf;
 
 mod astap;
 mod build_data;
-mod download_data;
 
 /// Open an image file; FITS files are MTF-autostretched to 8-bit grayscale.
 pub(crate) fn load_image(path: &std::path::Path) -> Result<image::DynamicImage> {
@@ -374,11 +373,15 @@ enum DownloadSource {
         #[arg(long)]
         output: PathBuf,
         /// Magnitude limit for the download
-        #[arg(long, default_value_t = 15.0)]
+        #[arg(long, default_value_t = 15.0, allow_negative_numbers = true)]
         max_mag: f32,
         /// Sky chunks (multiples of 192; 768 = HEALPix level 3). Deeper
         /// magnitude limits need more chunks to stay under the TAP row cap
-        #[arg(long, default_value_t = 768)]
+        #[arg(
+            long,
+            default_value_t = 768,
+            value_parser = clap::value_parser!(u64).range(1..)
+        )]
         chunks: u64,
     },
     /// The Rochester Astronomy active supernova/transient list (refetched)
@@ -563,24 +566,7 @@ fn main() -> Result<()> {
                 acquisition_jd,
             )
         }
-        Command::DownloadData { source } => match source {
-            DownloadSource::Tycho2 { output } => download_data::download_tycho2(&output),
-            DownloadSource::StarIdentifiers { output } => {
-                download_data::download_star_identifiers(&output)
-            }
-            DownloadSource::Openngc { output } => download_data::download_openngc(&output),
-            DownloadSource::Objects { output } => download_data::download_objects(&output),
-            DownloadSource::Gaia {
-                output,
-                max_mag,
-                chunks,
-            } => download_data::download_gaia(&output, max_mag, chunks),
-            DownloadSource::Transients { output } => download_data::download_transients(&output),
-            DownloadSource::Mpc { output } => download_data::download_mpc(&output),
-            DownloadSource::Prebuilt { output, file } => {
-                download_data::download_prebuilt(&output, &file)
-            }
-        },
+        Command::DownloadData { source } => run_download_command(source),
         Command::BuildData { source } => match source {
             BuildDataSource::Astap {
                 input,
@@ -675,6 +661,102 @@ fn main() -> Result<()> {
             CatalogCommand::Star { args } => catalog_star(args),
             CatalogCommand::Validate { data } => catalog_validate(&data),
         },
+    }
+}
+
+fn run_download_command(source: DownloadSource) -> Result<()> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to start the download runtime")?
+        .block_on(download_command(source))
+}
+
+async fn download_command(source: DownloadSource) -> Result<()> {
+    match source {
+        DownloadSource::Prebuilt { output, file } => {
+            let selection = seiza_download::CatalogSet::from_names(file)?;
+            let manager = seiza_download::CatalogManager::builder()
+                .policy(seiza_download::CachePolicy::ForceRefresh)
+                .build()?;
+            let bundle = manager
+                .ensure_with(&selection, report_download_event)
+                .await?;
+            let paths = bundle.materialize(&output).await?;
+            println!(
+                "{} dataset(s) from {} ready in {}",
+                paths.len(),
+                bundle.version,
+                output.display()
+            );
+        }
+        source => download_source(source).await?,
+    }
+    Ok(())
+}
+
+async fn download_source(source: DownloadSource) -> Result<()> {
+    let downloader = seiza_sources::SourceDownloader::with_reporter(report_source_event)?;
+    match source {
+        DownloadSource::Tycho2 { output } => downloader.download_tycho2(output).await,
+        DownloadSource::StarIdentifiers { output } => {
+            downloader.download_star_identifiers(output).await
+        }
+        DownloadSource::Openngc { output } => downloader.download_openngc(output).await,
+        DownloadSource::Objects { output } => downloader.download_objects(output).await,
+        DownloadSource::Gaia {
+            output,
+            max_mag,
+            chunks,
+        } => downloader.download_gaia(output, max_mag, chunks).await,
+        DownloadSource::Transients { output } => downloader.download_transients(output).await,
+        DownloadSource::Mpc { output } => downloader.download_mpc(output).await,
+        DownloadSource::Prebuilt { .. } => unreachable!("handled by download_command"),
+    }?;
+    Ok(())
+}
+
+fn report_download_event(event: seiza_download::DownloadEvent) {
+    use seiza_download::DownloadEvent;
+    match event {
+        DownloadEvent::FetchingManifest { url } => println!("  fetching {url}"),
+        DownloadEvent::UsingCachedManifest { version, stale } => {
+            let qualifier = if stale { "stale " } else { "" };
+            println!("  using {qualifier}cached manifest {version}");
+        }
+        DownloadEvent::CacheHit { name, .. } => println!("  {name} already cached"),
+        DownloadEvent::DownloadStarted { name, bytes } => {
+            println!("  fetching {name} ({bytes} bytes)")
+        }
+        DownloadEvent::DownloadComplete { name, .. } => println!("  cached {name}"),
+        DownloadEvent::DownloadProgress { .. } => {}
+    }
+}
+
+fn report_source_event(event: seiza_sources::SourceEvent) {
+    use seiza_sources::SourceEvent;
+    match event {
+        SourceEvent::AlreadyPresent { path } => println!("  {} already present", path.display()),
+        SourceEvent::Fetching { url, .. } => println!("  fetching {url}"),
+        SourceEvent::Progress { .. } => {}
+        SourceEvent::Retry {
+            label,
+            attempt,
+            delay,
+            error,
+        } => eprintln!(
+            "  {label} attempt {attempt} failed: {error}; retrying in {}s",
+            delay.as_secs()
+        ),
+        SourceEvent::GaiaChunkComplete {
+            chunk,
+            rows,
+            completed,
+            total,
+        } => println!("  chunk {chunk:04}: {rows} rows ({completed}/{total})"),
+        SourceEvent::Ready { source, directory } => {
+            println!("{source} ready in {}", directory.display())
+        }
     }
 }
 
@@ -1694,4 +1776,52 @@ fn build_blind_index_command(
         started.elapsed().as_secs_f64()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn gaia_accepts_a_separated_negative_magnitude() {
+        let cli = Cli::try_parse_from([
+            "seiza",
+            "download-data",
+            "gaia",
+            "--output",
+            "gaia",
+            "--max-mag",
+            "-1.5",
+            "--chunks",
+            "1",
+        ])
+        .unwrap();
+
+        let Command::DownloadData {
+            source: DownloadSource::Gaia {
+                max_mag, chunks, ..
+            },
+        } = cli.command
+        else {
+            panic!("expected Gaia download command");
+        };
+        assert_eq!(max_mag, -1.5);
+        assert_eq!(chunks, 1);
+    }
+
+    #[test]
+    fn gaia_rejects_zero_chunks_at_parse_time() {
+        assert!(
+            Cli::try_parse_from([
+                "seiza",
+                "download-data",
+                "gaia",
+                "--output",
+                "gaia",
+                "--chunks",
+                "0",
+            ])
+            .is_err()
+        );
+    }
 }

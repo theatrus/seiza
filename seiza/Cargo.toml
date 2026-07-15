@@ -10,9 +10,13 @@ readme = "README.md"
 keywords = ["astronomy", "astrophotography", "plate-solving", "wcs", "astrometry"]
 categories = ["science", "multimedia::images"]
 
+[features]
+downloads = ["dep:seiza-download"]
+
 [dependencies]
 image.workspace = true
 thiserror.workspace = true
+seiza-download = { workspace = true, optional = true }
 memmap2.workspace = true
 rayon.workspace = true
 rustc-hash.workspace = true

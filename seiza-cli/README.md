@@ -76,10 +76,16 @@ seiza download-data prebuilt --output data --file objects.bin --file transients.
 ```
 
 The downloader reads one complete bundle from `/data/v2/manifest.json` and
-writes its files into the same flat local output directory. It never combines
-catalogs from different hosted bundle versions. The unversioned `/data/`
-manifest and files remain temporarily as the classic v1 compatibility surface
-for older clients.
+caches its immutable files by SHA-256 before copying the requested selection
+into the same flat local output directory. The shared platform cache can be
+overridden with `SEIZA_CACHE_DIR`. It never combines catalogs from different
+hosted bundle versions. The unversioned `/data/` manifest and files remain
+temporarily as the classic v1 compatibility surface for older clients.
+
+Library integrations can use `seiza-download` directly for async, automatic
+cache management. The raw catalog commands below are implemented by the
+separate `seiza-sources` crate so applications do not inherit Gaia/VizieR/MPC
+source-acquisition behavior.
 
 Building from primary sources stays supported for custom depths, epochs,
 or tile granularity — note the Gaia TAP download alone can take many

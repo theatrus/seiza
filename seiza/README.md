@@ -27,10 +27,15 @@ astrophotography, in Rust.
   hierarchy, and provenance; query known sky cones and convex footprints
   without plate solving, or project objects into solved images with full
   ellipse geometry.
+- **Optional catalog downloads** — enable the non-default `downloads` feature
+  for `seiza::downloads`, an async, verified shared cache of published catalog
+  bundles. Normal catalog opens never access the network.
 
 See the [`seiza-cli`](https://crates.io/crates/seiza-cli) crate for the
 command-line tool, and [`seiza-fits`](https://crates.io/crates/seiza-fits)
-for dependency-free FITS reading and autostretch.
+for dependency-free FITS reading and autostretch. Raw catalog-building source
+acquisition is separately available from
+[`seiza-sources`](https://crates.io/crates/seiza-sources).
 
 ## License
 

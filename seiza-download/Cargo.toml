@@ -1,0 +1,25 @@
+[package]
+name = "seiza-download"
+description = "Async download and cache management for published Seiza catalog bundles"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "README.md"
+keywords = ["astronomy", "catalog", "download", "cache"]
+categories = ["science", "caching"]
+
+[dependencies]
+directories.workspace = true
+fs2.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

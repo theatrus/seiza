@@ -41,6 +41,25 @@ enable blind solving of small, fine-scale fields whose brightest detections
 are fainter than the G≤15 catalog's small-field pattern tiers without
 rebuilding the whole-sky index for every process.
 
+Applications can install only the catalogs they need without invoking the CLI:
+
+```rust,no_run
+// Enable seiza's non-default `downloads` feature first.
+let manager = seiza::downloads::CatalogManager::builder().build()?;
+let files = manager
+    .ensure(&seiza::downloads::CatalogSet::solver_lite()
+        .with(seiza::downloads::Dataset::Objects))
+    .await?;
+let stars = seiza::catalog::TileCatalog::open(
+    files.path(seiza::downloads::Dataset::StarsLiteTycho2)?,
+)?;
+```
+
+[`seiza-download`](seiza-download/README.md) owns the async, verified runtime
+bundle cache. [`seiza-sources`](seiza-sources/README.md) separately owns raw
+Gaia, VizieR, MPC, OpenNGC, and other catalog-building downloads, keeping those
+large and rate-limited workflows out of application integrations.
+
 ## Status
 
 Working today:

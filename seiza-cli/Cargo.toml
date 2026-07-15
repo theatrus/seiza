@@ -16,15 +16,20 @@ path = "src/main.rs"
 
 [dependencies]
 seiza.workspace = true
+seiza-download.workspace = true
 seiza-fits.workspace = true
+seiza-sources.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 image = { workspace = true, features = ["png", "jpeg", "tiff"] }
 imageproc.workspace = true
 flate2.workspace = true
-ureq.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+ureq.workspace = true
 
 [package.metadata.generate-rpm]
 summary = "Star detection, plate solving, and astro dataset tools"
