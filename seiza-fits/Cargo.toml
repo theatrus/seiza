@@ -12,3 +12,6 @@ categories = ["science", "multimedia::images", "parser-implementations"]
 
 [dependencies]
 multiversion = "0.8"
+
+[dev-dependencies]
+memmap2.workspace = true
