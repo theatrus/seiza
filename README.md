@@ -23,6 +23,29 @@ seiza catalog star --data data/stars-lite-tycho2.ids.bin "TYC 5949-2777-1" --for
 seiza catalog star --data data/stars-lite-tycho2.ids.bin "RR Lyr"
 ```
 
+Applications that perform repeated solves can keep the catalog and blind
+index open through the versioned JSON-RPC worker protocol:
+
+```text
+seiza worker --data data/stars-deep-gaia17.bin --index data/blind-gaia16.idx
+```
+
+The worker reads one JSON request per stdin line, writes one response per
+stdout line, accepts FITS paths, and exits cleanly at EOF. See
+[the worker protocol](docs/design/worker-protocol.md).
+
+The same worker contract can use a warm solver on another machine. The local
+worker opens and stretches the FITS file, then sends losslessly compressed
+8-bit pixels instead of the original FITS payload:
+
+```text
+seiza-server --data data/stars-deep-gaia17.bin --index data/blind-gaia16.idx --listen 0.0.0.0:7878
+seiza worker --server http://solver-host:7878
+```
+
+Set `SEIZA_SERVER_TOKEN` on both processes to require a bearer token. See the
+[remote server protocol](docs/design/remote-server-protocol.md).
+
 Current hosted datasets use one complete, versioned
 [v2 catalog-bundle manifest](https://downloads.seiza.fyi/data/v2/manifest.json).
 The unversioned [legacy manifest](https://downloads.seiza.fyi/data/manifest.json)

@@ -7,27 +7,11 @@ use seiza::objects::{ObjectCatalog, ObjectKind, ObjectQuery, ObjectSort, SkyRegi
 use seiza::solve::{SolveHint, solve};
 use seiza::star_ids::{StarIdentifierCatalog, StarLookupMatch};
 use seiza::{DetectConfig, detect_stars};
+use seiza_cli::{load_image, worker};
 use std::path::PathBuf;
 
 mod astap;
 mod build_data;
-
-/// Open an image file; FITS files are MTF-autostretched to 8-bit grayscale.
-pub(crate) fn load_image(path: &std::path::Path) -> Result<image::DynamicImage> {
-    let is_fits = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("fits") || e.eq_ignore_ascii_case("fit"));
-    if is_fits {
-        let fits = seiza_fits::FitsImage::open(path)
-            .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
-        let stretched = fits.stretch_to_u8(&seiza_fits::StretchParams::default());
-        let buffer = image::GrayImage::from_raw(fits.width as u32, fits.height as u32, stretched)
-            .ok_or_else(|| anyhow::anyhow!("FITS dimensions mismatch"))?;
-        return Ok(image::DynamicImage::ImageLuma8(buffer));
-    }
-    image::open(path).with_context(|| format!("failed to open {}", path.display()))
-}
 
 /// RA/Dec hint from FITS headers (N.I.N.A. writes RA/DEC in degrees).
 fn fits_hint(path: &std::path::Path) -> Option<(f64, f64)> {
@@ -168,6 +152,21 @@ enum Command {
         /// Ignore detections within this many pixels of the image edges
         #[arg(long, default_value_t = 0)]
         ignore_border: u32,
+    },
+    /// Serve versioned JSON-RPC plate-solve requests over stdin/stdout
+    Worker {
+        /// Star tile file kept open for the lifetime of the worker
+        #[arg(long, required_unless_present = "server", conflicts_with = "server")]
+        data: Option<PathBuf>,
+        /// Optional prebuilt blind pattern index kept open by the worker
+        #[arg(long, requires = "data", conflicts_with = "server")]
+        index: Option<PathBuf>,
+        /// Remote seiza-server base URL; local FITS images are stretched and compressed before upload
+        #[arg(long)]
+        server: Option<String>,
+        /// Remote bearer token; defaults to SEIZA_SERVER_TOKEN when set
+        #[arg(long, requires = "server")]
+        server_token: Option<String>,
     },
     /// Inspect a FITS file: headers, statistics, optional stretched PNG
     FitsInfo {
@@ -647,6 +646,20 @@ fn main() -> Result<()> {
                 ignore_border,
             },
         ),
+        Command::Worker {
+            data,
+            index,
+            server,
+            server_token,
+        } => {
+            let server_token = server_token.or_else(|| std::env::var("SEIZA_SERVER_TOKEN").ok());
+            worker::run(
+                data.as_deref(),
+                index.as_deref(),
+                server.as_deref(),
+                server_token.as_deref(),
+            )
+        }
         Command::FitsInfo { image, stretch } => fits_info(&image, stretch.as_deref()),
         Command::Cone {
             data,

@@ -6,9 +6,10 @@
 //! cargo test -p seiza-cli --test hosted_integration -- --ignored
 //! ```
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 const BASE: &str = "https://downloads.seiza.fyi";
 /// (file, ra, dec, arcsec/px, blind). Mirrors testdata/solutions.json;
@@ -147,6 +148,204 @@ fn hosted_images_solve_to_known_solutions() {
     }
 
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+#[ignore = "network: downloads one FITS image and the hosted Tycho-2 lite catalog"]
+fn hosted_worker_solves_fits_path_twice_in_one_process() {
+    let dir = cache_dir();
+    let stars = dir.join("stars-lite-tycho2.bin");
+    let image = dir.join("m31-asi585mc-rggb-osc.fits");
+    fetch("data/stars-lite-tycho2.bin", &stars);
+    fetch("testdata/m31-asi585mc-rggb-osc.fits", &image);
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_seiza"))
+        .args(["worker", "--data"])
+        .arg(&stars)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to start seiza worker");
+
+    let solve_params = serde_json::json!({
+        "imagePath": image,
+        "mode": "hinted",
+        "hint": {
+            "centerRaDeg": 10.66661,
+            "centerDecDeg": 41.26876,
+            "radiusDeg": 2.0,
+            "scaleArcsecPerPixel": 1.3581,
+            "scaleTolerance": 0.2
+        }
+    });
+    let requests = [
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "protocolVersion": 1, "clientName": "hosted-test" }
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "solve",
+            "params": solve_params
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "solve",
+            "params": solve_params
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "shutdown"
+        }),
+    ];
+
+    {
+        let stdin = child.stdin.as_mut().expect("worker stdin was not piped");
+        for request in requests {
+            serde_json::to_writer(&mut *stdin, &request).unwrap();
+            stdin.write_all(b"\n").unwrap();
+        }
+    }
+    drop(child.stdin.take());
+
+    let output = child
+        .wait_with_output()
+        .expect("failed to wait for seiza worker");
+    assert!(
+        output.status.success(),
+        "worker failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let responses: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .expect("worker output was not UTF-8")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("worker emitted invalid JSON"))
+        .collect();
+    assert_eq!(responses.len(), 4);
+
+    let initialized = &responses[0]["result"];
+    assert_eq!(initialized["protocolVersion"], 1);
+    assert!(initialized["catalog"]["starCount"].as_u64().unwrap() > 0);
+
+    for response in &responses[1..=2] {
+        assert!(response.get("error").is_none(), "solve failed: {response}");
+        let result = &response["result"];
+        let ra = result["center"]["raDeg"].as_f64().unwrap();
+        let dec = result["center"]["decDeg"].as_f64().unwrap();
+        let scale = result["pixelScaleArcsecPerPixel"].as_f64().unwrap();
+        assert!(angular_separation_deg(10.66661, 41.26876, ra, dec) < 0.02);
+        assert!((scale / 1.3581 - 1.0).abs() < 0.005);
+        assert_eq!(result["wcs"]["pixelOrigin"], 1);
+    }
+
+    assert_eq!(responses[3]["result"]["shutdown"], true);
+}
+
+struct ChildGuard(Child);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        self.0.kill().ok();
+        self.0.wait().ok();
+    }
+}
+
+#[test]
+#[ignore = "network: downloads one FITS image and the hosted Tycho-2 lite catalog"]
+fn hosted_remote_worker_sends_compressed_pixels_and_solves() {
+    let dir = cache_dir();
+    let stars = dir.join("stars-lite-tycho2.bin");
+    let image = dir.join("m31-asi585mc-rggb-osc.fits");
+    fetch("data/stars-lite-tycho2.bin", &stars);
+    fetch("testdata/m31-asi585mc-rggb-osc.fits", &image);
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let base_url = format!("http://127.0.0.1:{port}");
+    let server = Command::new(env!("CARGO_BIN_EXE_seiza-server"))
+        .args(["--listen", &format!("127.0.0.1:{port}"), "--data"])
+        .arg(&stars)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to start seiza-server");
+    let _server = ChildGuard(server);
+
+    let started = Instant::now();
+    while ureq::get(&format!("{base_url}/v1/status")).call().is_err() {
+        assert!(started.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    let mut worker = Command::new(env!("CARGO_BIN_EXE_seiza"))
+        .args(["worker", "--server", &base_url])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to start remote-backed worker");
+    let requests = [
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "protocolVersion": 1, "clientName": "hosted-remote-test" }
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "solve",
+            "params": {
+                "imagePath": image,
+                "mode": "hinted",
+                "hint": {
+                    "centerRaDeg": 10.66661,
+                    "centerDecDeg": 41.26876,
+                    "radiusDeg": 2.0,
+                    "scaleArcsecPerPixel": 1.3581,
+                    "scaleTolerance": 0.2
+                }
+            }
+        }),
+        serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "shutdown" }),
+    ];
+    {
+        let stdin = worker.stdin.as_mut().unwrap();
+        for request in requests {
+            serde_json::to_writer(&mut *stdin, &request).unwrap();
+            stdin.write_all(b"\n").unwrap();
+        }
+    }
+    drop(worker.stdin.take());
+    let output = worker.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let responses: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(responses[0]["result"]["backend"], "remote");
+    let result = &responses[1]["result"];
+    let ra = result["center"]["raDeg"].as_f64().unwrap();
+    let dec = result["center"]["decDeg"].as_f64().unwrap();
+    assert!(angular_separation_deg(10.66661, 41.26876, ra, dec) < 0.02);
+    assert_eq!(result["transfer"]["encoding"], "gray8-zstd");
+    eprintln!(
+        "remote payload: {} bytes from {}-byte FITS",
+        result["transfer"]["encodedBytes"].as_u64().unwrap(),
+        std::fs::metadata(&image).unwrap().len()
+    );
+    assert!(
+        result["transfer"]["encodedBytes"].as_u64().unwrap()
+            < std::fs::metadata(&image).unwrap().len()
+    );
 }
 
 #[test]
