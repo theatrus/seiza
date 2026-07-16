@@ -22,6 +22,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2.9.1
       - run: cargo test --workspace --all-features
       - run: cargo build --workspace --release --all-features
+      - name: Verify Windows CRT is statically linked
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./.github/scripts/assert-static-crt.ps1 -Binary target/release/seiza.exe
 
   lint:
     runs-on: ubuntu-latest
