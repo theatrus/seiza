@@ -1,0 +1,4 @@
+# Keep repository-built Windows binaries independent of the Visual C++
+# Redistributable. This configuration is not included in published crates.
+[target.'cfg(all(target_os = "windows", target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]
