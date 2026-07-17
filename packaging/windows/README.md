@@ -11,6 +11,9 @@ it updates the system `PATH`. The final page can launch `seiza setup` to guide t
 user through catalog selection and downloading. That work remains entirely in
 the CLI; the MSI contains no catalog URLs or download custom actions.
 
+The welcome, completion, and banner artwork in `assets/` uses Seiza-specific
+constellation and astrometry imagery instead of the stock WiX graphics.
+
 The project pins WiX 4, which provides the required MSI and WixUI features
 without requiring CI to accept the maintenance-fee EULA introduced by newer
 WiX releases.

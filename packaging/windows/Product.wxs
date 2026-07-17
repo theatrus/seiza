@@ -126,6 +126,12 @@
     <WixVariable
         Id="WixUILicenseRtf"
         Value="$(var.RepoRoot)packaging\windows\License.rtf" />
+    <WixVariable
+        Id="WixUIDialogBmp"
+        Value="$(var.RepoRoot)packaging\windows\assets\dialog.png" />
+    <WixVariable
+        Id="WixUIBannerBmp"
+        Value="$(var.RepoRoot)packaging\windows\assets\banner.png" />
     <Property
         Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT"
         Value="Download and configure Seiza catalogs now" />
