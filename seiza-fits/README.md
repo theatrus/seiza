@@ -8,6 +8,8 @@ Fast, dependency-free FITS image reading for astrophotography, part of the
   layout is folded directly into the big-endian decode).
 - Streams full-image opens directly into the final typed pixel vector using a
   fixed 1 MiB conversion buffer; it does not retain a second whole-file copy.
+- Planar RGB (`NAXIS3`) support and OSC debayering from the `BAYERPAT`
+  header.
 - Typed header access (logicals, integers, floats, strings, FORTRAN `D`
   exponents, quote escapes).
 - Exact median and MAD statistics via a single histogram pass

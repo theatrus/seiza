@@ -1,10 +1,11 @@
 # Coordinate-only catalog lookup and feature overlays
 
-Status: indexed coordinate/name object API and CLI implemented; feature-overlay
-data model proposed
+Status: indexed coordinate/name object API and CLI implemented; the curated
+informal-feature overlay layer (`features.bin`) remains proposed
 
-The provenance-preserving object and geometry model is specified in the
-[extensible object catalog v4 proposal](objects-bin-v4.md).
+The provenance-preserving object and geometry model is specified and
+implemented by the
+[extensible object catalog container v4](objects-bin-v4.md).
 
 ## Goal
 

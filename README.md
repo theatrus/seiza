@@ -5,11 +5,44 @@ astrophotography, in Rust. Built to power object overlays and astrometric
 features in [tenrankai](https://github.com/theatrus/tenrankai) and
 [PSF Guard](https://github.com/theatrus/psf-guard).
 
+It is fast. A typical hinted solve of a real telescope frame finishes in
+0.2–0.4 seconds, and a blind solve — no position hint at all — takes about
+half a second with the prebuilt index. In side-by-side benchmarks seiza
+matched or beat ASTAP on every workload we tested, up to 19x faster on blind
+solves. The numbers and caveats are in [Performance](#performance).
+
+**Try it without installing anything:** go to [seiza.fyi](https://seiza.fyi),
+upload an image, and get a solution and object overlay in your browser. The
+site runs [seiza-server](https://github.com/theatrus/seiza-server); the CLI
+can submit to the same server with `seiza worker --server`.
+
+## Install
+
+- **Windows** — download the MSI installer from the
+  [releases](https://github.com/theatrus/seiza/releases). It puts `seiza` on
+  your `PATH` and offers to download catalogs for you when it finishes.
+- **Fedora / Ubuntu** — install the RPM or deb from the same releases page.
+- **Anywhere with Rust** — `cargo install seiza-cli`.
+
+## Ways to use it
+
+- **As N.I.N.A.'s plate solver** — seiza answers ASTAP's command line, so
+  select ASTAP in N.I.N.A. and point it at `seiza.exe`. No plugin needed.
+  [Steps below](#use-with-nina-astap-compatible-mode).
+- **From your own application** — run `seiza worker` to keep the catalogs
+  and blind index open between solves, and send it one JSON request per
+  line. It can also forward solves to a seiza-server, local or hosted.
+  [Wire protocol](docs/design/worker-protocol.md).
+- **From Rust** — use the crates directly: [`seiza`](seiza/README.md)
+  (detection, WCS, solving, catalogs),
+  [`seiza-fits`](seiza-fits/README.md) (FITS reading),
+  [`seiza-download`](seiza-download/README.md) (catalog download and
+  caching), and [`seiza-sources`](seiza-sources/README.md) (raw upstream
+  data for custom catalog builds).
+
 ## Quick start
 
-Install from [crates.io](https://crates.io/crates/seiza-cli) (or grab an
-RPM/deb from the [releases](https://github.com/theatrus/seiza/releases)),
-pull the prebuilt star and object catalogs from our CDN, and solve:
+Download the ready-made catalogs once, then solve:
 
 ```
 cargo install seiza-cli
@@ -23,45 +56,45 @@ seiza catalog star --data data/stars-lite-tycho2.ids.bin "TYC 5949-2777-1" --for
 seiza catalog star --data data/stars-lite-tycho2.ids.bin "RR Lyr"
 ```
 
-On Windows, the MSI installer adds `seiza` to the user's `PATH` and offers to
-run the guided catalog setup when installation finishes. The same setup can be
-run again at any time:
+Not sure which catalogs you need? Run the guided setup — the same one the
+Windows installer offers, available on every platform:
 
 ```text
 seiza setup
 ```
 
-It can install only the object catalog, combine it with a lightweight or Gaia
-solver catalog, add the deep blind-solving index, or install the complete
-published bundle. Downloads use the same versioned, SHA-256-verified path as
-`download-data prebuilt`.
+It walks you through the choices: just the object catalog, a lightweight or
+Gaia solver catalog, the deep blind-solving index, or everything. All
+downloads are versioned and SHA-256 verified.
 
-Applications that perform repeated solves can keep the catalog and blind
-index open through the versioned JSON-RPC worker protocol:
+Solving many images from your own application? Start a worker so the
+catalogs and blind index stay open instead of being reloaded for every solve:
 
 ```text
 seiza worker --data data/stars-deep-gaia17.bin --index data/blind-gaia16.idx
 ```
 
-The worker reads one JSON request per stdin line, writes one response per
-stdout line, accepts FITS and normal raster image paths, and exits cleanly at
-EOF. See [the worker protocol](docs/design/worker-protocol.md).
+Send it one JSON request per line on stdin; it writes one response per line
+on stdout, takes FITS or normal image paths, and exits cleanly at EOF. The
+full request and response format is in
+[the worker protocol](docs/design/worker-protocol.md).
 
-The same worker contract can submit to the existing
-[`seiza-server`](https://github.com/theatrus/seiza-server). The local worker
-opens and stretches the FITS file, then uploads a lossless 8-bit grayscale PNG
-through the server's native queued API instead of sending the original FITS:
+The same worker can send solves to a
+[`seiza-server`](https://github.com/theatrus/seiza-server) instead of solving
+locally — your own, or the hosted one at [seiza.fyi](https://seiza.fyi). It
+converts each FITS to a lossless 8-bit PNG before upload to keep transfers
+small:
 
 ```text
 seiza worker --server http://solver-host:8080
 ```
 
-Pass `--server-token` or set `SEIZA_SERVER_TOKEN` when the server requires an
-API key. Compact PNG upload is the default; `--server-upload fits` preserves
-and streams the original FITS payload when its headers or full bit depth are
-desired. Remote solves time out after five minutes by default; use
-`--server-timeout SECONDS` to change that deadline.
-Local and remote operation use the same JSON-RPC contract.
+If the server needs an API key, pass `--server-token` or set
+`SEIZA_SERVER_TOKEN`. To upload the original FITS instead of the PNG (for
+example, to preserve headers or full bit depth), pass `--server-upload fits`.
+Remote solves give up after five minutes; change that with
+`--server-timeout SECONDS`. Local and remote workers speak the same JSON
+protocol, so your application code does not change.
 
 ## Performance
 
@@ -105,6 +138,12 @@ normal OS file cache and included complete command-line wall time. See the
 [FITS comparison](docs/benchmarks/2026-07-astap-comparison.md) and
 [blind/detection follow-up](docs/benchmarks/2026-07-blind-pipeline-priorities.md)
 for the images, catalogs, repetitions, correctness checks, and caveats.
+
+## Catalogs and data
+
+Most users only need `seiza download-data prebuilt` or `seiza setup` from the
+Quick start; this section is the detail behind them — what is in each hosted
+bundle and how the compatibility paths work.
 
 V4-capable clients use one complete, versioned
 [v4 catalog-bundle manifest](https://downloads.seiza.fyi/data/v4/manifest.json).
@@ -197,19 +236,25 @@ seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-
   name or alias with `seiza catalog object ...`, or query a solved image with
   projected pixel and ellipse geometry
   (`seiza solve ... --objects objects.bin`).
+  The current [extensible v4 container](docs/design/objects-bin-v4.md) also
+  preserves every contributing upstream record, typed relations, preferred
+  facet selections, source-qualified geometry (including hand-drawn OpenNGC
+  outlines), pinned build provenance, and externally curated corrections;
+  `seiza catalog object --all-sources` audits all of it. Earlier `SEIZAOB1`
+  and `SEIZAOB3` files remain readable.
 - **FITS** — dependency-free reading with typed headers, exact
   histogram statistics, N.I.N.A.-style MTF autostretch, planar RGB
   (NAXIS3) support, OSC debayering (`BAYERPAT`), and bounded-memory
   streaming into native pixel storage, in the
   [`seiza-fits`](https://crates.io/crates/seiza-fits) crate. FITS files
   plate-solve directly, with RA/DEC hints read from headers.
-- **Packages & CI** — crates.io releases, Fedora RPMs and Ubuntu debs on
-  GitHub releases, and an integration suite that solves real hosted
-  camera frames against known-good solutions on every PR.
+- **Packages & CI** — crates.io releases, a guided
+  [Windows MSI installer](packaging/windows/README.md), Fedora RPMs and
+  Ubuntu debs on GitHub releases, and an integration suite that solves real
+  hosted camera frames against known-good solutions on every PR.
 
 Planned (see design notes in the tenrankai repository,
-`docs/design/plate-solving.md`): SIP distortion terms, serialized blind
-pattern indexes.
+`docs/design/plate-solving.md`): SIP distortion terms.
 
 ## Use with N.I.N.A. (ASTAP-compatible mode)
 
@@ -244,8 +289,12 @@ renamed `astap.exe` behaves identically. Details:
 
 - `seiza/` — library crate: `detect`, `wcs`, `catalog`, `objects`, `solve`
 - `seiza-fits/` — dependency-free FITS reading, statistics, MTF autostretch
-- `seiza-cli/` — the `seiza` command-line tool (FITS files solve directly,
-  with RA/DEC hints read from their headers)
+- `seiza-cli/` — the `seiza` command-line tool: solving, ASTAP mode, the
+  JSON-RPC worker, guided `seiza setup`, and dataset building
+- `seiza-download/` — async, verified runtime catalog-bundle cache
+- `seiza-sources/` — raw upstream catalog acquisition for custom builds
+- `packaging/windows/` — the WiX MSI installer
+- `docs/` — design notes and benchmark reports
 
 ## License
 

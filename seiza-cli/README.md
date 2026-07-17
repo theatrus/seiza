@@ -76,7 +76,8 @@ open behind a newline-delimited JSON-RPC 2.0 process:
 seiza worker --data stars-deep-gaia17.bin --index blind-gaia16.idx
 ```
 
-The same protocol can adapt local image paths to a queued `seiza-server`:
+The same protocol can adapt local image paths to a queued `seiza-server`
+(self-hosted, or the hosted instance at [seiza.fyi](https://seiza.fyi)):
 
 ```
 seiza worker --server http://solver-host:8080
