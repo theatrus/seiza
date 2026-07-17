@@ -411,17 +411,53 @@ fn assemble_object_catalog_data(
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CurationMetadataFile {
     repository: String,
     #[serde(default)]
     commit: Option<String>,
-    schema_version: String,
+    schema_version: u32,
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct CuratedGeometryRow {
-    correction_id: String,
+#[serde(deny_unknown_fields)]
+struct CuratedObjectFile {
+    schema_version: u32,
+    id: String,
     target_id: String,
+    #[serde(default)]
+    notes: String,
+    #[serde(default)]
+    evidence: Vec<CuratedEvidence>,
+    #[serde(default)]
+    geometries: Vec<CuratedGeometry>,
+    #[serde(default)]
+    outlines: Vec<CuratedOutline>,
+    #[serde(default)]
+    relations: Vec<CuratedRelation>,
+    #[serde(default)]
+    selections: Vec<CuratedSelection>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CuratedEvidence {
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    citation: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    notes: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CuratedGeometry {
+    id: String,
+    #[serde(rename = "type")]
+    geometry_type: String,
     center_ra_deg: f64,
     center_dec_deg: f64,
     major_arcmin: f32,
@@ -436,50 +472,58 @@ struct CuratedGeometryRow {
     #[serde(default)]
     method: String,
     #[serde(default)]
-    evidence: String,
+    evidence: Vec<CuratedEvidence>,
     #[serde(default)]
-    note: String,
+    notes: String,
     #[serde(default)]
     preferred: bool,
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct CuratedSelectionRow {
-    target_id: String,
+#[serde(deny_unknown_fields)]
+struct CuratedSelection {
     facet: String,
     #[serde(default)]
     source_record_id: Option<String>,
     #[serde(default)]
     geometry_id: Option<String>,
     #[serde(default)]
-    reason: String,
+    notes: String,
+    #[serde(default)]
+    evidence: Vec<CuratedEvidence>,
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct CuratedRelationRow {
-    target_id: String,
+#[serde(deny_unknown_fields)]
+struct CuratedRelation {
     kind: String,
     related_id: String,
     #[serde(default)]
     source_record_id: Option<String>,
     #[serde(default)]
-    note: String,
+    notes: String,
+    #[serde(default)]
+    evidence: Vec<CuratedEvidence>,
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct OpenNgcOutlineRow {
+#[serde(deny_unknown_fields)]
+struct CuratedOutline {
     file: String,
-    target_id: String,
     #[serde(default)]
     source_record_id: Option<String>,
     #[serde(default = "default_brightness_geometry_role")]
     role: String,
+    #[serde(default = "default_catalog_quality")]
+    quality: String,
+    #[serde(default = "default_openngc_outline_method")]
+    method: String,
     #[serde(default)]
     preferred: bool,
     #[serde(default)]
-    evidence: String,
+    evidence: Vec<CuratedEvidence>,
     #[serde(default)]
-    note: String,
+    notes: String,
 }
 
 fn default_fallback_geometry_role() -> String {
@@ -492,6 +536,14 @@ fn default_brightness_geometry_role() -> String {
 
 fn default_estimated_quality() -> String {
     "estimated".into()
+}
+
+fn default_catalog_quality() -> String {
+    "catalog".into()
+}
+
+fn default_openngc_outline_method() -> String {
+    "OpenNGC hand-drawn DSS2 contour".into()
 }
 
 fn apply_object_curation(
@@ -513,218 +565,258 @@ fn apply_object_curation(
                 metadata_path.display()
             )
         })?)?;
-    if metadata.repository.trim().is_empty() || metadata.schema_version.trim().is_empty() {
+    if metadata.repository.trim().is_empty() {
         bail!("curation.json must record repository and schema_version");
+    }
+    if metadata.schema_version != 2 {
+        bail!(
+            "unsupported curation schema {}; expected per-object schema 2",
+            metadata.schema_version
+        );
     }
     let commit = resolve_curation_commit(curation_dir, metadata.commit.as_deref())?;
 
-    let catalogs = curation_dir.join("catalogs");
+    let documents = read_curation_documents(curation_dir, metadata.schema_version)?;
     let mut curated_facets = std::collections::HashSet::<(String, String)>::new();
-    for row in read_optional_csv::<CuratedGeometryRow>(&catalogs.join("geometry.csv"))? {
-        let index = resolve_canonical_index(data, &row.target_id)?;
-        let role = parse_geometry_role(&row.role)?;
-        let quality = parse_geometry_quality(&row.quality)?;
-        let source_record_id = format!("curation:{}", row.correction_id);
-        if data.details[index]
-            .source_records
-            .iter()
-            .any(|record| record.id == source_record_id)
-        {
-            bail!("duplicate curation correction ID {}", row.correction_id);
-        }
-        let geometry_id = format!("{source_record_id}#ellipse");
-        let mut corrected = data.objects[index].clone();
-        corrected.ra = row.center_ra_deg;
-        corrected.dec = row.center_dec_deg;
-        corrected.major_arcmin = Some(row.major_arcmin);
-        corrected.minor_arcmin = row.minor_arcmin;
-        corrected.position_angle_deg = row.position_angle_deg;
-        corrected.metadata.id = source_record_id.clone();
-        corrected.metadata.source = "Seiza catalog curation".into();
-        let mut properties = Vec::new();
-        for (name, value) in [
-            ("note", row.note.as_str()),
-            ("method", row.method.as_str()),
-            ("evidence", row.evidence.as_str()),
-        ] {
-            if !value.is_empty() {
-                properties.push(ObjectProperty {
-                    name: name.into(),
-                    value: value.into(),
-                    unit: None,
-                });
-            }
-        }
-        data.details[index].source_records.push(ObjectSourceRecord {
-            id: source_record_id.clone(),
-            source: "Seiza catalog curation".into(),
-            object: corrected,
-            properties,
-        });
-        let geometry = ObjectGeometry {
-            id: geometry_id.clone(),
-            source_record_id: source_record_id.clone(),
-            role,
-            quality,
-            method: row.method,
-            evidence: row.evidence,
-            data: GeometryData::Ellipse {
-                center_ra_deg: row.center_ra_deg,
-                center_dec_deg: row.center_dec_deg,
-                major_arcmin: row.major_arcmin,
-                minor_arcmin: row.minor_arcmin,
-                position_angle_deg: row.position_angle_deg,
-            },
-        };
-        data.details[index].geometries.push(geometry.clone());
-        if row.preferred {
-            register_curated_facet(&mut curated_facets, &row.target_id, "preferred-geometry")?;
-            replace_selection(
-                &mut data.details[index].selections,
-                ObjectSelection {
-                    facet: ObjectFacet::PreferredGeometry,
-                    source_record_id: Some(source_record_id),
-                    geometry_id: Some(geometry_id),
-                    reason: row.note,
-                },
-            );
-            apply_geometry_to_hot_object(&mut data.objects[index], &geometry)?;
-        }
-    }
+    let mut correction_ids = std::collections::HashSet::<String>::new();
+    let mut outline_files = std::collections::HashSet::<String>::new();
+    for document in documents {
+        let target_id = document.target_id.as_str();
+        let index = resolve_canonical_index(data, target_id)?;
 
-    for row in read_optional_csv::<OpenNgcOutlineRow>(&catalogs.join("openngc-outlines.csv"))? {
-        let index = resolve_canonical_index(data, &row.target_id)?;
-        let source_record_id = row.source_record_id.clone().unwrap_or_else(|| {
-            data.details[index]
-                .source_records
-                .iter()
-                .find(|record| record.source == "OpenNGC")
-                .map(|record| record.id.clone())
-                .unwrap_or_default()
-        });
-        if source_record_id.is_empty()
-            || !data.details[index]
+        for row in document.geometries {
+            if row.geometry_type != "ellipse" {
+                bail!(
+                    "curation {} geometry {} has unsupported type {}",
+                    document.id,
+                    row.id,
+                    row.geometry_type
+                );
+            }
+            if !correction_ids.insert(row.id.clone()) {
+                bail!("duplicate curation correction ID {}", row.id);
+            }
+            validate_curated_ellipse(&document.id, &row)?;
+            let role = parse_geometry_role(&row.role)?;
+            let quality = parse_geometry_quality(&row.quality)?;
+            let source_record_id = format!("curation:{}", row.id);
+            if data.details[index]
                 .source_records
                 .iter()
                 .any(|record| record.id == source_record_id)
-        {
-            bail!(
-                "OpenNGC outline {} has no valid source record for {}",
-                row.file,
-                row.target_id
-            );
-        }
-        let path = [
-            input.join("outlines").join("objects").join(&row.file),
-            input.join("outlines").join(&row.file),
-        ]
-        .into_iter()
-        .find(|path| path.exists())
-        .with_context(|| format!("OpenNGC outline {} is missing", row.file))?;
-        let contours = parse_openngc_outline(&std::fs::read_to_string(&path)?)?;
-        let (bytes, sha256) = file_digest(&path)?;
-        let outline_source = if let Some(source) = data
-            .provenance
-            .sources
-            .iter_mut()
-            .find(|source| source.name == "OpenNGC outlines")
-        {
-            source
-        } else {
-            data.provenance.sources.push(ObjectProvenanceSource {
-                name: "OpenNGC outlines".into(),
-                reference_url: "https://github.com/mattiaverga/OpenNGC/tree/master/outlines".into(),
-                revision: String::new(),
-                files: Vec::new(),
+            {
+                bail!("duplicate curation correction ID {}", row.id);
+            }
+            let geometry_id = format!("{source_record_id}#ellipse");
+            let notes = combine_curation_notes(&document.notes, &row.notes);
+            let evidence = combine_curation_evidence(&document.evidence, &row.evidence);
+            let mut corrected = data.objects[index].clone();
+            corrected.ra = row.center_ra_deg;
+            corrected.dec = row.center_dec_deg;
+            corrected.major_arcmin = Some(row.major_arcmin);
+            corrected.minor_arcmin = row.minor_arcmin;
+            corrected.position_angle_deg = row.position_angle_deg;
+            corrected.metadata.id = source_record_id.clone();
+            corrected.metadata.source = "Seiza catalog curation".into();
+            let mut properties = Vec::new();
+            for (name, value) in [
+                ("note", notes.as_str()),
+                ("method", row.method.as_str()),
+                ("evidence", evidence.as_str()),
+            ] {
+                if !value.is_empty() {
+                    properties.push(ObjectProperty {
+                        name: name.into(),
+                        value: value.into(),
+                        unit: None,
+                    });
+                }
+            }
+            data.details[index].source_records.push(ObjectSourceRecord {
+                id: source_record_id.clone(),
+                source: "Seiza catalog curation".into(),
+                object: corrected,
+                properties,
             });
-            data.provenance.sources.last_mut().unwrap()
-        };
-        if !outline_source
-            .files
-            .iter()
-            .any(|file| file.path == format!("outlines/objects/{}", row.file))
-        {
-            outline_source.files.push(ObjectProvenanceFile {
-                path: format!("outlines/objects/{}", row.file),
-                bytes,
-                sha256,
-            });
-        }
-        let level = row
-            .file
-            .rsplit_once("_lv")
-            .and_then(|(_, suffix)| suffix.strip_suffix(".txt"))
-            .map(|level| format!("level-{level}"));
-        let geometry_id = format!("openngc-outline:{}", row.file);
-        let geometry = ObjectGeometry {
-            id: geometry_id.clone(),
-            source_record_id: source_record_id.clone(),
-            role: parse_geometry_role(&row.role)?,
-            quality: seiza::objects::GeometryQuality::Catalog,
-            method: "OpenNGC hand-drawn DSS2 contour".into(),
-            evidence: if row.evidence.is_empty() {
-                format!("outlines/objects/{}", row.file)
-            } else {
-                row.evidence
-            },
-            data: GeometryData::OutlineSet { level, contours },
-        };
-        data.details[index].geometries.push(geometry.clone());
-        if row.preferred {
-            register_curated_facet(&mut curated_facets, &row.target_id, "preferred-geometry")?;
-            replace_selection(
-                &mut data.details[index].selections,
-                ObjectSelection {
-                    facet: ObjectFacet::PreferredGeometry,
-                    source_record_id: Some(source_record_id),
-                    geometry_id: Some(geometry_id),
-                    reason: row.note,
+            let geometry = ObjectGeometry {
+                id: geometry_id.clone(),
+                source_record_id: source_record_id.clone(),
+                role,
+                quality,
+                method: row.method,
+                evidence,
+                data: GeometryData::Ellipse {
+                    center_ra_deg: row.center_ra_deg,
+                    center_dec_deg: row.center_dec_deg,
+                    major_arcmin: row.major_arcmin,
+                    minor_arcmin: row.minor_arcmin,
+                    position_angle_deg: row.position_angle_deg,
                 },
-            );
-            apply_geometry_to_hot_object(&mut data.objects[index], &geometry)?;
+            };
+            data.details[index].geometries.push(geometry.clone());
+            if row.preferred {
+                register_curated_facet(&mut curated_facets, target_id, "preferred-geometry")?;
+                replace_selection(
+                    &mut data.details[index].selections,
+                    ObjectSelection {
+                        facet: ObjectFacet::PreferredGeometry,
+                        source_record_id: Some(source_record_id),
+                        geometry_id: Some(geometry_id),
+                        reason: preferred_curation_reason(&document.notes, &row.notes),
+                    },
+                );
+                apply_geometry_to_hot_object(&mut data.objects[index], &geometry)?;
+            }
         }
-    }
 
-    for row in read_optional_csv::<CuratedRelationRow>(&catalogs.join("identities.csv"))? {
-        let index = resolve_canonical_index(data, &row.target_id)?;
-        let source_record_id = row.source_record_id.unwrap_or_else(|| {
-            data.details[index]
-                .selections
+        for row in document.outlines {
+            if !outline_files.insert(row.file.clone()) {
+                bail!("OpenNGC outline {} is mapped more than once", row.file);
+            }
+            let source_record_id = row.source_record_id.clone().unwrap_or_else(|| {
+                data.details[index]
+                    .source_records
+                    .iter()
+                    .find(|record| record.source == "OpenNGC")
+                    .map(|record| record.id.clone())
+                    .unwrap_or_default()
+            });
+            if source_record_id.is_empty()
+                || !data.details[index]
+                    .source_records
+                    .iter()
+                    .any(|record| record.id == source_record_id)
+            {
+                bail!(
+                    "OpenNGC outline {} has no valid source record for {}",
+                    row.file,
+                    target_id
+                );
+            }
+            let path = [
+                input.join("outlines").join("objects").join(&row.file),
+                input.join("outlines").join(&row.file),
+            ]
+            .into_iter()
+            .find(|path| path.exists())
+            .with_context(|| format!("OpenNGC outline {} is missing", row.file))?;
+            let contours = parse_openngc_outline(&std::fs::read_to_string(&path)?)?;
+            let (bytes, sha256) = file_digest(&path)?;
+            let outline_source = if let Some(source) = data
+                .provenance
+                .sources
+                .iter_mut()
+                .find(|source| source.name == "OpenNGC outlines")
+            {
+                source
+            } else {
+                data.provenance.sources.push(ObjectProvenanceSource {
+                    name: "OpenNGC outlines".into(),
+                    reference_url: "https://github.com/mattiaverga/OpenNGC/tree/master/outlines"
+                        .into(),
+                    revision: String::new(),
+                    files: Vec::new(),
+                });
+                data.provenance.sources.last_mut().unwrap()
+            };
+            if !outline_source
+                .files
                 .iter()
-                .find(|selection| selection.facet == ObjectFacet::PreferredIdentity)
-                .and_then(|selection| selection.source_record_id.clone())
-                .unwrap_or_default()
-        });
-        if !data.details[index]
-            .source_records
-            .iter()
-            .any(|record| record.id == source_record_id)
-        {
-            bail!(
-                "identity relation for {} has an invalid source record",
-                row.target_id
+                .any(|file| file.path == format!("outlines/objects/{}", row.file))
+            {
+                outline_source.files.push(ObjectProvenanceFile {
+                    path: format!("outlines/objects/{}", row.file),
+                    bytes,
+                    sha256,
+                });
+            }
+            let level = row
+                .file
+                .rsplit_once("_lv")
+                .and_then(|(_, suffix)| suffix.strip_suffix(".txt"))
+                .map(|level| format!("level-{level}"));
+            let geometry_id = format!("openngc-outline:{}", row.file);
+            let narrative = curation_narrative(
+                &document.notes,
+                &row.notes,
+                &document.evidence,
+                &row.evidence,
             );
+            let geometry = ObjectGeometry {
+                id: geometry_id.clone(),
+                source_record_id: source_record_id.clone(),
+                role: parse_geometry_role(&row.role)?,
+                quality: parse_geometry_quality(&row.quality)?,
+                method: row.method,
+                evidence: if narrative.is_empty() {
+                    format!("outlines/objects/{}", row.file)
+                } else {
+                    narrative
+                },
+                data: GeometryData::OutlineSet { level, contours },
+            };
+            data.details[index].geometries.push(geometry.clone());
+            if row.preferred {
+                register_curated_facet(&mut curated_facets, target_id, "preferred-geometry")?;
+                replace_selection(
+                    &mut data.details[index].selections,
+                    ObjectSelection {
+                        facet: ObjectFacet::PreferredGeometry,
+                        source_record_id: Some(source_record_id),
+                        geometry_id: Some(geometry_id),
+                        reason: preferred_curation_reason(&document.notes, &row.notes),
+                    },
+                );
+                apply_geometry_to_hot_object(&mut data.objects[index], &geometry)?;
+            }
         }
-        data.details[index].relations.push(ObjectRelation {
-            kind: parse_relation_kind(&row.kind)?,
-            target_id: row.related_id,
-            source_record_id,
-            note: row.note,
-        });
-    }
 
-    for row in read_optional_csv::<CuratedSelectionRow>(&catalogs.join("selections.csv"))? {
-        let index = resolve_canonical_index(data, &row.target_id)?;
-        let facet = parse_object_facet(&row.facet)?;
-        register_curated_facet(&mut curated_facets, &row.target_id, &row.facet)?;
-        let selection = ObjectSelection {
-            facet,
-            source_record_id: row.source_record_id,
-            geometry_id: row.geometry_id,
-            reason: row.reason,
-        };
-        apply_selected_facet(&mut data.objects[index], &data.details[index], &selection)?;
-        replace_selection(&mut data.details[index].selections, selection);
+        for row in document.relations {
+            let source_record_id = row.source_record_id.unwrap_or_else(|| {
+                data.details[index]
+                    .selections
+                    .iter()
+                    .find(|selection| selection.facet == ObjectFacet::PreferredIdentity)
+                    .and_then(|selection| selection.source_record_id.clone())
+                    .unwrap_or_default()
+            });
+            if !data.details[index]
+                .source_records
+                .iter()
+                .any(|record| record.id == source_record_id)
+            {
+                bail!("relation for {target_id} has an invalid source record");
+            }
+            data.details[index].relations.push(ObjectRelation {
+                kind: parse_relation_kind(&row.kind)?,
+                target_id: row.related_id,
+                source_record_id,
+                note: curation_narrative(
+                    &document.notes,
+                    &row.notes,
+                    &document.evidence,
+                    &row.evidence,
+                ),
+            });
+        }
+
+        for row in document.selections {
+            let facet = parse_object_facet(&row.facet)?;
+            register_curated_facet(&mut curated_facets, target_id, &row.facet)?;
+            let selection = ObjectSelection {
+                facet,
+                source_record_id: row.source_record_id,
+                geometry_id: row.geometry_id,
+                reason: curation_narrative(
+                    &document.notes,
+                    &row.notes,
+                    &document.evidence,
+                    &row.evidence,
+                ),
+            };
+            apply_selected_facet(&mut data.objects[index], &data.details[index], &selection)?;
+            replace_selection(&mut data.details[index].selections, selection);
+        }
     }
 
     let mut curation_files = Vec::new();
@@ -741,7 +833,7 @@ fn apply_object_curation(
     data.provenance.curation = Some(ObjectCurationRevision {
         repository: metadata.repository,
         commit,
-        schema_version: metadata.schema_version,
+        schema_version: metadata.schema_version.to_string(),
         files: curation_files,
     });
     Ok(())
@@ -791,18 +883,218 @@ fn resolve_curation_commit(curation_dir: &Path, declared: Option<&str>) -> Resul
         .context("non-Git curation snapshots must declare commit in curation.json")
 }
 
-fn read_optional_csv<T: for<'de> serde::Deserialize<'de>>(path: &Path) -> Result<Vec<T>> {
-    if !path.exists() {
-        return Ok(Vec::new());
+fn read_curation_documents(
+    curation_dir: &Path,
+    schema_version: u32,
+) -> Result<Vec<CuratedObjectFile>> {
+    let objects_dir = curation_dir.join("objects");
+    if !objects_dir.is_dir() {
+        bail!(
+            "curation schema {schema_version} requires an objects directory at {}",
+            objects_dir.display()
+        );
     }
-    let mut reader = csv::ReaderBuilder::new()
-        .trim(csv::Trim::All)
-        .from_path(path)
-        .with_context(|| format!("cannot read curation table {}", path.display()))?;
-    reader
-        .deserialize()
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .with_context(|| format!("invalid curation table {}", path.display()))
+    let mut document_ids = std::collections::HashSet::new();
+    let mut target_ids = std::collections::HashSet::new();
+    let mut documents = Vec::new();
+    for path in recursive_files(&objects_dir)? {
+        if path.extension().and_then(|extension| extension.to_str()) != Some("toml") {
+            bail!("unexpected non-TOML curation file {}", path.display());
+        }
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("cannot read curation document {}", path.display()))?;
+        let document: CuratedObjectFile = toml::from_str(&text)
+            .with_context(|| format!("invalid curation document {}", path.display()))?;
+        if document.schema_version != schema_version {
+            bail!(
+                "curation document {} uses schema {}, expected {}",
+                path.display(),
+                document.schema_version,
+                schema_version
+            );
+        }
+        validate_curation_document(&path, &document)?;
+        if !document_ids.insert(document.id.clone()) {
+            bail!("duplicate curation document ID {}", document.id);
+        }
+        if !target_ids.insert(document.target_id.clone()) {
+            bail!(
+                "multiple curation documents target {}; keep one file per object",
+                document.target_id
+            );
+        }
+        documents.push(document);
+    }
+    Ok(documents)
+}
+
+fn validate_curation_document(path: &Path, document: &CuratedObjectFile) -> Result<()> {
+    let file_id = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("");
+    if document.id.is_empty()
+        || !document
+            .id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        || !document
+            .id
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+    {
+        bail!(
+            "curation document {} has invalid ID {}; use lowercase letters, digits, and hyphens",
+            path.display(),
+            document.id
+        );
+    }
+    if file_id != document.id {
+        bail!(
+            "curation document {} must be named {}.toml",
+            path.display(),
+            document.id
+        );
+    }
+    if document.target_id.trim().is_empty() {
+        bail!(
+            "curation document {} has an empty target_id",
+            path.display()
+        );
+    }
+    validate_curation_evidence(path, "document", &document.evidence)?;
+    for geometry in &document.geometries {
+        if geometry.id.trim().is_empty() {
+            bail!(
+                "curation document {} has an empty geometry ID",
+                path.display()
+            );
+        }
+        validate_curation_evidence(path, "geometry", &geometry.evidence)?;
+    }
+    for outline in &document.outlines {
+        if outline.file.trim().is_empty()
+            || outline.file.contains(['/', '\\'])
+            || !outline.file.ends_with(".txt")
+        {
+            bail!(
+                "curation document {} has invalid outline file {}",
+                path.display(),
+                outline.file
+            );
+        }
+        validate_curation_evidence(path, "outline", &outline.evidence)?;
+    }
+    for relation in &document.relations {
+        validate_curation_evidence(path, "relation", &relation.evidence)?;
+    }
+    for selection in &document.selections {
+        validate_curation_evidence(path, "selection", &selection.evidence)?;
+    }
+    Ok(())
+}
+
+fn validate_curation_evidence(
+    path: &Path,
+    owner: &str,
+    evidence: &[CuratedEvidence],
+) -> Result<()> {
+    if evidence.iter().any(|item| {
+        item.kind.trim().is_empty()
+            && item.citation.trim().is_empty()
+            && item.url.trim().is_empty()
+            && item.notes.trim().is_empty()
+    }) {
+        bail!(
+            "curation document {} has empty {owner} evidence",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn validate_curated_ellipse(document_id: &str, geometry: &CuratedGeometry) -> Result<()> {
+    if !(0.0..360.0).contains(&geometry.center_ra_deg)
+        || !(-90.0..=90.0).contains(&geometry.center_dec_deg)
+        || !geometry.major_arcmin.is_finite()
+        || geometry.major_arcmin <= 0.0
+        || geometry
+            .minor_arcmin
+            .is_some_and(|value| !value.is_finite() || value <= 0.0)
+        || geometry
+            .position_angle_deg
+            .is_some_and(|value| !value.is_finite() || !(0.0..180.0).contains(&value))
+    {
+        bail!(
+            "curation {document_id} geometry {} has invalid ellipse coordinates or dimensions",
+            geometry.id
+        );
+    }
+    Ok(())
+}
+
+fn combine_curation_notes(document: &str, item: &str) -> String {
+    [document.trim(), item.trim()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn combine_curation_evidence(document: &[CuratedEvidence], item: &[CuratedEvidence]) -> String {
+    let mut evidence = Vec::new();
+    for entry in document.iter().chain(item) {
+        let entry = format_curation_evidence(entry);
+        if !evidence.contains(&entry) {
+            evidence.push(entry);
+        }
+    }
+    evidence.join("\n")
+}
+
+fn format_curation_evidence(evidence: &CuratedEvidence) -> String {
+    let mut heading = [evidence.kind.trim(), evidence.citation.trim()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(": ");
+    if !evidence.url.trim().is_empty() {
+        if !heading.is_empty() {
+            heading.push_str(": ");
+        }
+        heading.push_str(evidence.url.trim());
+    }
+    match (heading.is_empty(), evidence.notes.trim().is_empty()) {
+        (false, false) => format!("{heading} — {}", evidence.notes.trim()),
+        (false, true) => heading,
+        (true, false) => evidence.notes.trim().to_string(),
+        (true, true) => String::new(),
+    }
+}
+
+fn preferred_curation_reason(document: &str, item: &str) -> String {
+    if item.trim().is_empty() {
+        document.trim().to_string()
+    } else {
+        item.trim().to_string()
+    }
+}
+
+fn curation_narrative(
+    document_notes: &str,
+    item_notes: &str,
+    document_evidence: &[CuratedEvidence],
+    item_evidence: &[CuratedEvidence],
+) -> String {
+    let notes = combine_curation_notes(document_notes, item_notes);
+    let evidence = combine_curation_evidence(document_evidence, item_evidence);
+    match (notes.is_empty(), evidence.is_empty()) {
+        (false, false) => format!("{notes}\n\nEvidence:\n{evidence}"),
+        (false, true) => notes,
+        (true, false) => format!("Evidence:\n{evidence}"),
+        (true, true) => String::new(),
+    }
 }
 
 fn resolve_canonical_index(
@@ -1086,8 +1378,12 @@ fn recursive_files(root: &Path) -> Result<Vec<std::path::PathBuf>> {
         {
             let path = entry?.path();
             if path.is_dir() {
-                directories.push(path);
-            } else if path.is_file() {
+                if path.file_name().and_then(|name| name.to_str()) != Some(".git") {
+                    directories.push(path);
+                }
+            } else if path.is_file()
+                && path.file_name().and_then(|name| name.to_str()) != Some(".seiza-revision")
+            {
                 files.push(path);
             }
         }
@@ -4231,16 +4527,69 @@ mod tests {
 
         let input = tempfile::tempdir().unwrap();
         let curation = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(curation.path().join("catalogs")).unwrap();
+        std::fs::create_dir_all(input.path().join("outlines/objects")).unwrap();
+        std::fs::write(
+            input.path().join("outlines/objects/LBN437_lv1.txt"),
+            "Object\tCont_Flag\tRAJ2000\tDEJ2000\tX\tY\tLabel_Flag\tInfo\n\
+line\t+\t338.0\t40.5\t0\t0\tfalse\t\n\
+line\t*\t338.1\t40.6\t0\t0\tfalse\t\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(curation.path().join("objects")).unwrap();
         std::fs::write(
             curation.path().join("curation.json"),
-            r#"{"repository":"https://github.com/example/seiza-catalog-curation","commit":"0123456789abcdef","schema_version":"1"}"#,
+            r#"{"repository":"https://github.com/example/seiza-catalog-curation","commit":"0123456789abcdef","schema_version":2}"#,
         )
         .unwrap();
         std::fs::write(
-            curation.path().join("catalogs/geometry.csv"),
-            "correction_id,target_id,center_ra_deg,center_dec_deg,major_arcmin,minor_arcmin,position_angle_deg,role,quality,method,evidence,note,preferred\n\
-lbn437-pa,vizier:VII/9:LBN437,338.0509,40.5910,75,20,90,fallback-extent,estimated,WCS image review,local evidence,rotate major axis east-west,true\n",
+            curation.path().join("objects/lbn-437.toml"),
+            r#"schema_version = 2
+id = "lbn-437"
+target_id = "vizier:VII/9:LBN437"
+notes = "The catalog ellipse has no position angle."
+
+[[evidence]]
+kind = "catalog"
+citation = "VizieR VII/9"
+
+[[geometries]]
+id = "lbn437-pa"
+type = "ellipse"
+center_ra_deg = 338.0509
+center_dec_deg = 40.5910
+major_arcmin = 75
+minor_arcmin = 20
+position_angle_deg = 90
+role = "fallback-extent"
+quality = "estimated"
+method = "WCS image review"
+notes = "Rotate the major axis east-west."
+preferred = true
+
+[[geometries.evidence]]
+kind = "image-review"
+notes = "Two WCS-solved images"
+
+[[outlines]]
+file = "LBN437_lv1.txt"
+source_record_id = "vizier:VII/9:LBN437"
+notes = "Keep the reviewed contour as a candidate."
+
+[[outlines.evidence]]
+kind = "upstream-source"
+url = "https://example.test/LBN437_lv1.txt"
+
+[[relations]]
+kind = "catalog-alias"
+related_id = "DG 187"
+source_record_id = "vizier:VII/9:LBN437"
+notes = "Retain the historical designation."
+
+[[selections]]
+facet = "preferred-classification"
+source_record_id = "vizier:VII/9:LBN437"
+notes = "Use the catalog classification."
+"#,
         )
         .unwrap();
         let mut lbn = object("LBN 437", "vizier:VII/9:LBN437", "VizieR VII/9/catalog");
@@ -4286,7 +4635,90 @@ lbn437-pa,vizier:VII/9:LBN437,338.0509,40.5910,75,20,90,fallback-extent,estimate
             .object_details("vizier:VII/9:LBN437")
             .unwrap()
             .unwrap();
-        assert_eq!(details.geometries.len(), 2);
+        assert_eq!(details.geometries.len(), 3);
+        assert_eq!(details.relations.len(), 1);
+        assert!(details.selections.iter().any(|selection| {
+            selection.facet == seiza::objects::ObjectFacet::PreferredClassification
+                && selection.source_record_id.as_deref() == Some("vizier:VII/9:LBN437")
+        }));
+        let curated = details
+            .geometries
+            .iter()
+            .find(|geometry| geometry.id == "curation:lbn437-pa#ellipse")
+            .unwrap();
+        assert_eq!(
+            curated.evidence,
+            "catalog: VizieR VII/9\nimage-review — Two WCS-solved images"
+        );
+        let outline = details
+            .geometries
+            .iter()
+            .find(|geometry| geometry.id == "openngc-outline:LBN437_lv1.txt")
+            .unwrap();
+        assert!(
+            outline
+                .evidence
+                .contains("Keep the reviewed contour as a candidate.")
+        );
+        assert!(outline.evidence.contains("upstream-source"));
+    }
+
+    #[test]
+    fn per_object_curation_rejects_unknown_fields_and_duplicate_targets() {
+        let curation = tempfile::tempdir().unwrap();
+        let objects = curation.path().join("objects");
+        std::fs::create_dir_all(&objects).unwrap();
+        let first = objects.join("first.toml");
+        std::fs::write(
+            &first,
+            "schema_version = 2\nid = \"first\"\ntarget_id = \"catalog:A\"\nsurprise = true\n",
+        )
+        .unwrap();
+        let error = read_curation_documents(curation.path(), 2).unwrap_err();
+        assert!(error.to_string().contains("invalid curation document"));
+
+        std::fs::write(
+            &first,
+            "schema_version = 2\nid = \"first\"\ntarget_id = \"catalog:A\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            objects.join("second.toml"),
+            "schema_version = 2\nid = \"second\"\ntarget_id = \"catalog:A\"\n",
+        )
+        .unwrap();
+        let error = read_curation_documents(curation.path(), 2).unwrap_err();
+        assert!(error.to_string().contains("keep one file per object"));
+    }
+
+    #[test]
+    fn per_object_curation_rejects_outline_paths_on_every_platform() {
+        let curation = tempfile::tempdir().unwrap();
+        let objects = curation.path().join("objects");
+        std::fs::create_dir_all(&objects).unwrap();
+        std::fs::write(
+            objects.join("unsafe.toml"),
+            "schema_version = 2\nid = \"unsafe\"\ntarget_id = \"catalog:A\"\n\n\
+             [[outlines]]\nfile = \"nested\\\\outline.txt\"\n",
+        )
+        .unwrap();
+
+        let error = read_curation_documents(curation.path(), 2).unwrap_err();
+        assert!(error.to_string().contains("invalid outline file"));
+    }
+
+    #[test]
+    fn curation_provenance_excludes_git_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".git/objects")).unwrap();
+        std::fs::create_dir_all(root.path().join("objects")).unwrap();
+        std::fs::write(root.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(root.path().join(".git/objects/ignored"), "ignored").unwrap();
+        std::fs::write(root.path().join(".seiza-revision"), "0123456789abcdef\n").unwrap();
+        std::fs::write(root.path().join("objects/kept.toml"), "kept").unwrap();
+
+        let files = recursive_files(root.path()).unwrap();
+        assert_eq!(files, vec![root.path().join("objects/kept.toml")]);
     }
 
     #[test]

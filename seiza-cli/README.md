@@ -151,11 +151,12 @@ seiza build-data minor-bodies --input raw/minor-bodies --output minor-bodies.bin
 ```
 
 The optional curation directory is a pinned local checkout; the builder never
-fetches it. Its `curation.json` records repository, commit, and schema version,
-and its `catalogs/*.csv` tables supply corrections, relations, selections, and
-OpenNGC outline mappings. The optional source manifest records the output hash
-and size, metadata coverage counts, source URLs, curation revision, and hashes
-of every raw catalog and curation file used.
+fetches it. Its `curation.json` records repository, commit, and schema version.
+Each `objects/<id>.toml` file owns the corrections, relations, selections,
+OpenNGC outline mappings, notes, and structured evidence for one canonical
+target. The optional source manifest records the output hash and size,
+metadata coverage counts, source URLs, curation revision, and hashes of every
+raw catalog and curation file used.
 The optional identifier sidecar provides memory-mapped exact TYC/HIP/HR/HD/
 SAO/FK5 lookup plus exact and prefix search over IAU proper names,
 Bayer/Flamsteed names, GCVS variables, and WDS double-star designations. It

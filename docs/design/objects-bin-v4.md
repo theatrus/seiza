@@ -187,42 +187,69 @@ The proposed source of truth is a separate repository such as
 relationships, source-outline mappings, and selection decisions. It does not
 fork complete upstream catalogs.
 
-Suggested layout:
+Current layout:
 
 ```text
+curation.json
+.taplo.toml
 schema/
-  v1/
-catalogs/
-  identities.csv
-  geometry.csv
-  selections.csv
-  openngc-outlines.csv
-outlines/
-  <curated contour files when needed>
-evidence/
-  README.md
+  v2/
+    object-curation.schema.json
+objects/
+  lbn-437.toml
+  openngc-ngc7000.toml
+  ...
 ```
 
 The root `curation.json` records `repository` and `schema_version`. A normal Git
 checkout derives the exact commit from `HEAD` and must be clean; an exported
-snapshot additionally records `commit` in that file. The initial CSV contracts
-are:
+snapshot additionally records `commit` in that file. Schema v2 stores one
+strict TOML document per canonical target. The filename stem equals the
+document's stable lowercase `id`; the source-qualified `target_id` identifies
+the canonical object. Geometry corrections, OpenNGC outline mappings, typed
+relations, facet selections, notes, and evidence arrays are co-located so one
+review diff contains the complete decision.
 
-- `geometry.csv`: `correction_id`, `target_id`, complete ellipse center/axes/
-  angle, role, quality, method, evidence, note, and `preferred`.
-- `selections.csv`: target, facet, source-record ID, geometry ID, and reason.
-- `identities.csv`: target, typed relation, related ID, source-record ID, and
-  note.
-- `openngc-outlines.csv`: upstream filename, target, source-record ID, role,
-  preferred flag, evidence, and note.
+For example:
 
-Missing optional tables are empty. Duplicate corrections, conflicting curated
-facet selections, unresolved targets, dangling source/geometry references, and
-dirty Git checkouts fail the build.
+```toml
+schema_version = 2
+id = "lbn-437"
+target_id = "vizier:VII/9:LBN437"
+notes = """The catalog extent has no position angle; keep it unoriented."""
+
+[[evidence]]
+kind = "catalog"
+citation = "VizieR VII/9"
+url = "https://vizier.cds.unistra.fr/viz-bin/VizieR?-source=VII%2F9"
+
+[[geometries]]
+id = "lbn437-pa"
+type = "ellipse"
+center_ra_deg = 338.0509
+center_dec_deg = 40.5910
+major_arcmin = 75
+minor_arcmin = 20
+position_angle_deg = 90
+role = "fallback-extent"
+quality = "estimated"
+method = "WCS-aligned image review"
+notes = "Estimated east-west fallback orientation."
+preferred = true
+```
+
+Document-level evidence applies to every contained decision; individual
+geometries, outlines, relations, and selections may add nested evidence with
+`kind`, `citation`, `url`, and multiline `notes`. The JSON Schema is suitable
+for Taplo/editor validation. The builder additionally rejects unknown fields,
+schema mismatches, duplicate documents or correction IDs, multiple documents
+for one target, conflicting curated facets, unresolved targets, dangling
+source/geometry references, invalid geometry ranges, duplicate outline
+mappings, and dirty Git checkouts.
 
 Every production correction has a stable correction ID, target
-source-qualified ID, evidence reference, method, explanation, and quality or
-confidence. Curation CI checks:
+source-qualified ID, evidence, method, explanation, and quality or confidence.
+Curation CI checks:
 
 - schema and unique-key validity;
 - that referenced upstream identifiers exist;
@@ -235,7 +262,10 @@ The Seiza object builder accepts local `--input` and `--curation-dir`
 inputs and performs no network access. `seiza-sources` owns fetching and caching
 both upstream archives and a pinned curation snapshot. Release builds record
 the curation repository URL, exact commit, schema version, and file checksums in
-the generated provenance section and bundle manifest.
+the generated provenance section and bundle manifest. VCS internals and the
+download cache's `.seiza-revision` marker are excluded because the commit is
+recorded explicitly; a clean Git checkout and its pinned exported snapshot
+therefore produce byte-identical object catalogs.
 
 The compiled preferred values live in the generated database so it remains
 fast and fully offline. The correction tables themselves are not hard-coded or
