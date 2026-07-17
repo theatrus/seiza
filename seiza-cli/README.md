@@ -4,6 +4,24 @@ The `seiza` command-line tool: star detection, hinted and blind plate
 solving, and star/object dataset management for astrophotography. The
 library lives in the [seiza](https://crates.io/crates/seiza) crate.
 
+## Install
+
+### Windows
+
+Download the x86-64 MSI from the
+[latest GitHub release](https://github.com/theatrus/seiza/releases/latest).
+The installer supports all-users and current-user installs, adds `seiza` to
+`PATH` by default, and can launch the guided catalog setup when installation
+finishes. All-users installs place catalogs in the shared
+`%ProgramData%\Seiza\catalogs` directory; current-user installs use the
+user's local application-data directory.
+
+A portable x86-64 ZIP is available on the same release page. See the
+[Windows installer documentation](https://github.com/theatrus/seiza/blob/main/packaging/windows/README.md)
+for feature selection, unattended installation, and catalog-directory details.
+
+### Cargo
+
 ```
 cargo install seiza-cli
 ```
