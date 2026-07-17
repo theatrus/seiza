@@ -797,10 +797,16 @@ enum BuildDataSource {
     },
     /// Bundle manifest (sizes + sha256) for hosting data files
     Manifest {
-        /// Directory containing built .bin and .idx data files
+        /// Directory containing new or replacement .bin and .idx data files
         #[arg(long)]
         dir: PathBuf,
-        /// Version string recorded in the manifest
+        /// Existing complete v2 or v4 manifest to roll forward. Files in
+        /// `dir` replace matching entries; all other entries are retained.
+        #[arg(long)]
+        base_manifest: Option<PathBuf>,
+        /// Version string and output layout: catalog-bundle-v2-* writes the
+        /// flat compatibility bundle; catalog-bundle-v4-* writes immutable
+        /// content-addressed artifact keys
         #[arg(long)]
         version: String,
         /// Output manifest path
@@ -925,9 +931,10 @@ fn main() -> Result<()> {
             } => build_data::build_minor_bodies(&input, &output, max_h),
             BuildDataSource::Manifest {
                 dir,
+                base_manifest,
                 version,
                 output,
-            } => build_data::build_manifest(&dir, &version, &output),
+            } => build_data::build_manifest(&dir, base_manifest.as_deref(), &version, &output),
         },
         Command::BuildBlindIndex {
             data,

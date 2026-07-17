@@ -3371,8 +3371,40 @@ pub fn build_gaia(input: &Path, output: &Path, epoch: f64, max_mag: f32, bands: 
     Ok(())
 }
 
-/// Write a bundle manifest (name, size, sha256 per data file) for hosting.
-pub fn build_manifest(dir: &Path, version: &str, output: &Path) -> Result<()> {
+/// Write or roll forward a complete bundle manifest for hosting.
+pub fn build_manifest(
+    dir: &Path,
+    base_manifest: Option<&Path>,
+    version: &str,
+    output: &Path,
+) -> Result<()> {
+    use seiza_download::{BundleManifest, ManifestFile};
+    use std::collections::BTreeMap;
+
+    let content_addressed = if version.starts_with("catalog-bundle-v4-") {
+        true
+    } else if version.starts_with("catalog-bundle-v2-") {
+        false
+    } else {
+        bail!(
+            "unsupported bundle version {version}; expected catalog-bundle-v2-* or catalog-bundle-v4-*"
+        );
+    };
+
+    let mut files = if let Some(path) = base_manifest {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("cannot read base manifest {}", path.display()))?;
+        let manifest = BundleManifest::parse(&bytes)
+            .with_context(|| format!("invalid base manifest {}", path.display()))?;
+        manifest
+            .files
+            .into_iter()
+            .map(|file| (file.name.clone(), file))
+            .collect::<BTreeMap<_, _>>()
+    } else {
+        BTreeMap::new()
+    };
+
     let mut entries: Vec<_> = std::fs::read_dir(dir)?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
@@ -3382,26 +3414,53 @@ pub fn build_manifest(dir: &Path, version: &str, output: &Path) -> Result<()> {
         })
         .collect();
     entries.sort();
-    if entries.is_empty() {
+    if entries.is_empty() && files.is_empty() {
         bail!("no .bin or .idx data files in {}", dir.display());
     }
 
-    let mut files = String::new();
+    let replacement_count = entries.len();
     for path in &entries {
         let (bytes, hash_hex) = file_digest(path)?;
-        let name = path.file_name().unwrap().to_string_lossy();
-        if !files.is_empty() {
-            files.push_str(",\n");
-        }
-        files.push_str(&format!(
-            "    {{ \"name\": \"{name}\", \"bytes\": {}, \"sha256\": \"{hash_hex}\" }}",
-            bytes
-        ));
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("bundle artifact filename is not UTF-8")?
+            .to_string();
+        let key = content_addressed.then(|| format!("artifacts/{hash_hex}/{name}"));
+        files.insert(
+            name.clone(),
+            ManifestFile {
+                name: name.clone(),
+                key,
+                bytes,
+                sha256: hash_hex.clone(),
+            },
+        );
         println!("  {name}: {bytes} bytes, sha256 {hash_hex}");
     }
-    let manifest = format!("{{\n  \"version\": \"{version}\",\n  \"files\": [\n{files}\n  ]\n}}\n");
-    std::fs::write(output, manifest)?;
-    println!("manifest written to {}", output.display());
+
+    // A previous v2 or v4 manifest may be rolled into either output
+    // generation. V4 always rekeys retained artifacts by content hash; v2
+    // deliberately retains the flat layout required by released readers.
+    for file in files.values_mut() {
+        file.key = content_addressed.then(|| format!("artifacts/{}/{}", file.sha256, file.name));
+    }
+    let manifest = BundleManifest {
+        version: version.to_string(),
+        files: files.into_values().collect(),
+    };
+    manifest
+        .validate()
+        .context("generated bundle is incomplete")?;
+    let mut encoded = serde_json::to_vec_pretty(&manifest)?;
+    encoded.push(b'\n');
+    std::fs::write(output, encoded)?;
+    println!(
+        "manifest written to {} ({} replaced, {} retained)",
+        output.display(),
+        replacement_count,
+        manifest.files.len().saturating_sub(replacement_count)
+    );
     Ok(())
 }
 
@@ -3667,6 +3726,12 @@ fn unpack_epoch(packed: &str) -> Option<f64> {
 mod tests {
     use super::*;
 
+    fn write_complete_bundle_inputs(dir: &Path, marker: &str) {
+        for name in seiza_download::REQUIRED_BUNDLE_FILES {
+            std::fs::write(dir.join(name), format!("{marker}:{name}")).unwrap();
+        }
+    }
+
     fn object(name: &str, id: &str, source: &str) -> seiza::objects::SkyObject {
         seiza::objects::SkyObject {
             kind: seiza::objects::ObjectKind::Nebula,
@@ -3687,6 +3752,81 @@ mod tests {
                 alternate_sources: Vec::new(),
             },
         }
+    }
+
+    #[test]
+    fn v4_manifest_builder_emits_content_addressed_complete_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        write_complete_bundle_inputs(dir.path(), "initial");
+        let output = dir.path().join("manifest.json");
+        build_manifest(dir.path(), None, "catalog-bundle-v4-test", &output).unwrap();
+
+        let manifest =
+            seiza_download::BundleManifest::parse(&std::fs::read(output).unwrap()).unwrap();
+        assert_eq!(
+            manifest.files.len(),
+            seiza_download::REQUIRED_BUNDLE_FILES.len()
+        );
+        for file in manifest.files {
+            assert_eq!(
+                file.key.as_deref(),
+                Some(format!("artifacts/{}/{}", file.sha256, file.name).as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn one_dynamic_update_rolls_forward_v2_and_v4_bundles() {
+        let full = tempfile::tempdir().unwrap();
+        write_complete_bundle_inputs(full.path(), "initial");
+        let base = full.path().join("base-v2.json");
+        build_manifest(full.path(), None, "catalog-bundle-v2-base", &base).unwrap();
+        let original =
+            seiza_download::BundleManifest::parse(&std::fs::read(&base).unwrap()).unwrap();
+
+        let delta = tempfile::tempdir().unwrap();
+        std::fs::write(delta.path().join("transients.bin"), b"new transients").unwrap();
+        std::fs::write(delta.path().join("minor-bodies.bin"), b"new minor bodies").unwrap();
+
+        let v2 = delta.path().join("next-v2.json");
+        let v4 = delta.path().join("next-v4.json");
+        build_manifest(delta.path(), Some(&base), "catalog-bundle-v2-next", &v2).unwrap();
+        build_manifest(delta.path(), Some(&base), "catalog-bundle-v4-next", &v4).unwrap();
+
+        let v2 = seiza_download::BundleManifest::parse(&std::fs::read(v2).unwrap()).unwrap();
+        let v4 = seiza_download::BundleManifest::parse(&std::fs::read(v4).unwrap()).unwrap();
+        let original_objects = original
+            .files
+            .iter()
+            .find(|file| file.name == "objects.bin")
+            .unwrap();
+        let original_transients = original
+            .files
+            .iter()
+            .find(|file| file.name == "transients.bin")
+            .unwrap();
+        for manifest in [&v2, &v4] {
+            assert_eq!(
+                manifest
+                    .files
+                    .iter()
+                    .find(|file| file.name == "objects.bin")
+                    .unwrap()
+                    .sha256,
+                original_objects.sha256
+            );
+            assert_ne!(
+                manifest
+                    .files
+                    .iter()
+                    .find(|file| file.name == "transients.bin")
+                    .unwrap()
+                    .sha256,
+                original_transients.sha256
+            );
+        }
+        assert!(v2.files.iter().all(|file| file.key.is_none()));
+        assert!(v4.files.iter().all(|file| file.key.is_some()));
     }
 
     #[test]

@@ -9,7 +9,7 @@ wire format.
 | Hosted path | Contents | Readers |
 | --- | --- | --- |
 | `/data/` | classic files with `SEIZAOB1` objects | v0.3 and classic-v1 clients |
-| `/data/v3/` | historical standalone `SEIZAOB3` object/transient manifest | v0.4.0 |
+| `/data/v3/` | reserved historical standalone object-v3 rollout URL; may be absent | v0.4.0 falls back to `/data/` |
 | `/data/v2/` | frozen complete bundle with `SEIZAOB3` objects | v0.4.1 and v0.5 |
 | `/data/v4/` | current complete bundle with sectioned `SEIZAOB\0` objects | v4-capable clients |
 
@@ -77,6 +77,42 @@ clients have refreshed their cached manifest.
 
 The compatibility paths `/data/`, `/data/v3/`, and `/data/v2/` are not part of
 the v4 publication transaction and remain untouched.
+
+## Recurring transient and Solar-system bundles
+
+`transients.bin` and `minor-bodies.bin` are independently rebuilt data products.
+A single directory containing new copies of either or both can roll forward
+both supported complete bundles while retaining the object database and all
+unchanged solver catalogs from each base manifest:
+
+```shell
+seiza build-data manifest \
+  --dir next-dynamic \
+  --base-manifest current-v2.json \
+  --version catalog-bundle-v2-2026-07-17 \
+  --output next-v2.json
+
+seiza build-data manifest \
+  --dir next-dynamic \
+  --base-manifest current-v4.json \
+  --version catalog-bundle-v4-2026-07-17 \
+  --output next-v4.json
+```
+
+The first output serves the frozen v3-object compatibility bundle at
+`/data/v2/`; it uses the flat keys required by v0.4.1/v0.5 readers. The second
+serves v4 readers and automatically assigns every retained or replaced entry
+its `artifacts/<sha256>/<name>` key. Both generated manifests are rejected if
+the resulting catalog set is incomplete. A v2 base can also be converted to a
+v4 manifest: retained hashes become content-addressed without downloading the
+unchanged multi-gigabyte files, which can then be copied server-side.
+
+For v4, upload the new content-addressed dynamic artifacts and archive the
+manifest before changing the current pointer. For legacy v2, the old flat URL
+contract cannot be made fully atomic: upload both dynamic files first and the
+v2 manifest last. A client holding a stale v2 manifest may need to refresh it
+if it did not already cache the old artifact. The v2 object catalog itself is
+never changed during a dynamic-data publication.
 
 ## Client cache
 

@@ -371,9 +371,9 @@ The CLI should display the selected record for each facet and support an
 
 V4 is published only in the complete `/data/v4/` bundle. Previously released
 paths are immutable compatibility contracts: `/data/` retains `SEIZAOB1`, the
-historical standalone `/data/v3/` surface retains `SEIZAOB3` for v0.4.0, and
-the complete `/data/v2/` bundle retains `SEIZAOB3` for v0.4.1/v0.5. Old
-readers therefore never encounter v4 bytes at a URL they already know.
+historical standalone `/data/v3/` URL remains reserved for v0.4.0, and the
+complete `/data/v2/` bundle retains `SEIZAOB3` for v0.4.1/v0.5. Old readers
+therefore never encounter v4 bytes at a URL they already know.
 
 The v4 manifest uses `catalog-bundle-v4-*` and requires each artifact key to
 be `artifacts/<sha256>/<name>`. The public `/data/v4/manifest.json` pointer is

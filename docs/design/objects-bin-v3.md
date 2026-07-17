@@ -94,8 +94,9 @@ compatible with both deployed formats.
 
 The v3 object wire format remains published inside the frozen complete
 `/data/v2/` catalog bundle for v0.4.1/v0.5 clients. The historical `/data/v3/`
-path also remains frozen because v0.4.0 used it for a standalone object-v3
-manifest. Bundle versions and wire-format versions are separate: each bundle
-selects one coherent catalog set, while every mapped file keeps its own
-magic/version header. The unversioned `/data/` bundle retains `SEIZAOB1`
-objects for classic clients. V4 objects are published only under `/data/v4/`.
+URL remains reserved because v0.4.0 probed it for a standalone object-v3
+manifest and falls back to `/data/` when it is absent. Bundle versions and
+wire-format versions are separate: each bundle selects one coherent catalog
+set, while every mapped file keeps its own magic/version header. The
+unversioned `/data/` bundle retains `SEIZAOB1` objects for classic clients. V4
+objects are published only under `/data/v4/`.

@@ -145,6 +145,8 @@ seiza build-data objects --input raw/objects --output objects.bin \
   --source-manifest objects.sources.json
 seiza download-data transients --output raw/transients
 seiza build-data transients --input raw/transients --output transients.bin
+seiza download-data mpc --output raw/minor-bodies
+seiza build-data minor-bodies --input raw/minor-bodies --output minor-bodies.bin
 ```
 
 The optional curation directory is a pinned local checkout; the builder never
@@ -157,6 +159,23 @@ The optional identifier sidecar provides memory-mapped exact TYC/HIP/HR/HD/
 SAO/FK5 lookup plus exact and prefix search over IAU proper names,
 Bayer/Flamsteed names, GCVS variables, and WDS double-star designations. It
 does not change the solver's compact star tile file.
+
+To publish new transient and Solar-system data without rebuilding the object or
+star catalogs, put only the replacement `transients.bin` and
+`minor-bodies.bin` in a directory and roll forward each complete manifest:
+
+```shell
+seiza build-data manifest --dir next-dynamic \
+  --base-manifest current-v2.json \
+  --version catalog-bundle-v2-YYYY-MM-DD --output next-v2.json
+seiza build-data manifest --dir next-dynamic \
+  --base-manifest current-v4.json \
+  --version catalog-bundle-v4-YYYY-MM-DD --output next-v4.json
+```
+
+The v2 output retains flat keys for released v3-object readers. The v4 output
+uses content-addressed artifact keys. Both commands require the resulting
+bundle to contain every required catalog.
 
 Normal catalog opens do not perform exhaustive validation. Validate any seiza
 star tile, identifier sidecar, blind index, object catalog, or minor-body
