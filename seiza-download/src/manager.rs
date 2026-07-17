@@ -1,6 +1,7 @@
 use crate::error::io;
 use crate::{
-    BundleManifest, CatalogSet, DEFAULT_BUNDLE_BASE_URL, Dataset, Error, ManifestFile, Result,
+    BundleManifest, CatalogSet, DEFAULT_BUNDLE_BASE_URL, Dataset, Error, LEGACY_V2_BUNDLE_BASE_URL,
+    ManifestFile, Result,
 };
 use directories::ProjectDirs;
 use fs2::FileExt;
@@ -377,7 +378,10 @@ impl CatalogManager {
             .await
             .map_err(|source| io("create directory", parent, source))?;
         let temp = parent.join(format!(
-            ".catalog-bundle-v2.json.part-{}-{}",
+            ".{}.part-{}-{}",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("catalog-manifest.json"),
             std::process::id(),
             next_sequence()
         ));
@@ -470,7 +474,7 @@ impl CatalogManager {
     where
         F: Fn(DownloadEvent) + Send + Sync,
     {
-        let url = format!("{}/{}", self.base_url, file.name);
+        let url = format!("{}/{}", self.base_url, file.artifact_key());
         let response = self
             .client
             .get(&url)
@@ -554,7 +558,7 @@ impl CatalogManager {
     fn manifest_path(&self) -> PathBuf {
         self.cache_dir
             .join("manifests")
-            .join("catalog-bundle-v2.json")
+            .join(manifest_cache_file_name(&self.base_url))
     }
 
     fn object_path(&self, file: &ManifestFile) -> PathBuf {
@@ -654,10 +658,22 @@ fn lowercase_hex(bytes: &[u8]) -> String {
     encoded
 }
 
+fn manifest_cache_file_name(base_url: &str) -> String {
+    if base_url == DEFAULT_BUNDLE_BASE_URL {
+        return "catalog-bundle-v4.json".into();
+    }
+    if base_url == LEGACY_V2_BUNDLE_BASE_URL {
+        // Preserve the v0.5 cache location for explicitly configured v2 use.
+        return "catalog-bundle-v2.json".into();
+    }
+    let digest = lowercase_hex(&Sha256::digest(base_url.as_bytes()));
+    format!("catalog-bundle-{}.json", &digest[..16])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::REQUIRED_V2_FILES;
+    use crate::REQUIRED_BUNDLE_FILES;
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -667,20 +683,22 @@ mod tests {
 
     fn cached_manifest(selected_bytes: &[u8]) -> BundleManifest {
         BundleManifest {
-            version: "catalog-bundle-v2-test".into(),
-            files: REQUIRED_V2_FILES
+            version: "catalog-bundle-v4-test".into(),
+            files: REQUIRED_BUNDLE_FILES
                 .iter()
                 .enumerate()
-                .map(|(index, name)| {
-                    let bytes = if *name == "objects.bin" {
+                .map(|(index, &name)| {
+                    let bytes = if name == "objects.bin" {
                         selected_bytes.to_vec()
                     } else {
                         vec![index as u8 + 1]
                     };
+                    let sha256 = sha256(&bytes);
                     ManifestFile {
-                        name: (*name).into(),
+                        name: name.into(),
+                        key: Some(format!("artifacts/{sha256}/{name}")),
                         bytes: bytes.len() as u64,
-                        sha256: sha256(&bytes),
+                        sha256,
                     }
                 })
                 .collect(),
@@ -692,7 +710,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let original = b"object catalog";
         let manifest = cached_manifest(original);
-        let manifest_path = temp.path().join("manifests/catalog-bundle-v2.json");
+        let manager = CatalogManager::builder()
+            .cache_dir(temp.path())
+            .base_url("http://127.0.0.1:1/unreachable")
+            .policy(CachePolicy::OfflineOnly)
+            .build()
+            .unwrap();
+        let manifest_path = manager.manifest_path();
         std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
         std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
 
@@ -709,12 +733,6 @@ mod tests {
         std::fs::create_dir_all(object_path.parent().unwrap()).unwrap();
         std::fs::write(&object_path, original).unwrap();
 
-        let manager = CatalogManager::builder()
-            .cache_dir(temp.path())
-            .base_url("http://127.0.0.1:1/unreachable")
-            .policy(CachePolicy::OfflineOnly)
-            .build()
-            .unwrap();
         let bundle = manager
             .ensure(&CatalogSet::dataset(Dataset::Objects))
             .await
@@ -736,7 +754,12 @@ mod tests {
         let output = tempfile::tempdir().unwrap();
         let original = b"object catalog";
         let manifest = cached_manifest(original);
-        let manifest_path = temp.path().join("manifests/catalog-bundle-v2.json");
+        let manager = CatalogManager::builder()
+            .cache_dir(temp.path())
+            .policy(CachePolicy::OfflineOnly)
+            .build()
+            .unwrap();
+        let manifest_path = manager.manifest_path();
         std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
         std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         let entry = manifest
@@ -753,11 +776,6 @@ mod tests {
         std::fs::write(&object_path, original).unwrap();
         std::fs::write(output.path().join("objects.bin"), b"broken catalog").unwrap();
 
-        let manager = CatalogManager::builder()
-            .cache_dir(temp.path())
-            .policy(CachePolicy::OfflineOnly)
-            .build()
-            .unwrap();
         let bundle = manager
             .ensure(&CatalogSet::dataset(Dataset::Objects))
             .await
@@ -779,7 +797,7 @@ mod tests {
 
         let name = "objects.bin".to_string();
         let bundle = CatalogBundle {
-            version: "catalog-bundle-v2-test".into(),
+            version: "catalog-bundle-v4-test".into(),
             artifacts: BTreeMap::from([(
                 name.clone(),
                 CatalogArtifact {
@@ -811,6 +829,15 @@ mod tests {
     async fn remote_manifest_and_artifact_are_streamed_into_the_cache() {
         let content = b"hosted object catalog".to_vec();
         let manifest = cached_manifest(&content);
+        let artifact_request = format!(
+            "GET /{} ",
+            manifest
+                .files
+                .iter()
+                .find(|file| file.name == "objects.bin")
+                .unwrap()
+                .artifact_key()
+        );
         let manifest_json = serde_json::to_vec(&manifest).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -824,7 +851,7 @@ mod tests {
                 let request = String::from_utf8_lossy(&request[..read]);
                 let body = if request.starts_with("GET /manifest.json ") {
                     manifest_json.as_slice()
-                } else if request.starts_with("GET /objects.bin ") {
+                } else if request.starts_with(&artifact_request) {
                     content.as_slice()
                 } else {
                     panic!("unexpected request: {request}");
@@ -857,5 +884,74 @@ mod tests {
             b"hosted object catalog"
         );
         server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn explicitly_configured_v2_manifest_uses_the_legacy_flat_url() {
+        let content = b"legacy object catalog".to_vec();
+        let mut manifest = cached_manifest(&content);
+        manifest.version = "catalog-bundle-v2-test".into();
+        for file in &mut manifest.files {
+            file.key = None;
+        }
+        let manifest_json = serde_json::to_vec(&manifest).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 4096];
+                let read = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..read]);
+                let body = if request.starts_with("GET /manifest.json ") {
+                    manifest_json.as_slice()
+                } else if request.starts_with("GET /objects.bin ") {
+                    content.as_slice()
+                } else {
+                    panic!("unexpected request: {request}");
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(body).unwrap();
+            }
+        });
+
+        let cache = tempfile::tempdir().unwrap();
+        let manager = CatalogManager::builder()
+            .cache_dir(cache.path())
+            .base_url(format!("http://{address}"))
+            .policy(CachePolicy::ForceRefresh)
+            .build()
+            .unwrap();
+        let bundle = manager
+            .ensure(&CatalogSet::dataset(Dataset::Objects))
+            .await
+            .unwrap();
+        bundle.verify().await.unwrap();
+        assert_eq!(
+            std::fs::read(bundle.path(Dataset::Objects).unwrap()).unwrap(),
+            b"legacy object catalog"
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn manifest_caches_are_scoped_without_discarding_the_legacy_v2_path() {
+        assert_eq!(
+            manifest_cache_file_name(DEFAULT_BUNDLE_BASE_URL),
+            "catalog-bundle-v4.json"
+        );
+        assert_eq!(
+            manifest_cache_file_name(LEGACY_V2_BUNDLE_BASE_URL),
+            "catalog-bundle-v2.json"
+        );
+        assert_ne!(
+            manifest_cache_file_name("https://example.test/one"),
+            manifest_cache_file_name("https://example.test/two")
+        );
     }
 }

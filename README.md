@@ -93,11 +93,15 @@ normal OS file cache and included complete command-line wall time. See the
 [blind/detection follow-up](docs/benchmarks/2026-07-blind-pipeline-priorities.md)
 for the images, catalogs, repetitions, correctness checks, and caveats.
 
-Current hosted datasets use one complete, versioned
-[v2 catalog-bundle manifest](https://downloads.seiza.fyi/data/v2/manifest.json).
-The unversioned [legacy manifest](https://downloads.seiza.fyi/data/manifest.json)
-remains temporarily for classic v1 clients, but new clients never combine
-files from different bundle versions:
+V4-capable clients use one complete, versioned
+[v4 catalog-bundle manifest](https://downloads.seiza.fyi/data/v4/manifest.json).
+Previously released paths remain frozen: the unversioned
+[legacy manifest](https://downloads.seiza.fyi/data/manifest.json) serves
+classic v1 clients, `/data/v3/` remains the historical v0.4.0 standalone
+object-v3 surface, and the
+[v2 bundle](https://downloads.seiza.fyi/data/v2/manifest.json) remains for
+v0.4.1/v0.5 clients. New clients never combine files from different bundle
+versions:
 `stars-lite-tycho2.bin` (2.5M stars, 25 MB), `stars-gaia.bin` (Gaia DR3
 G≤15, 36.7M stars, 367 MB), `stars-deep-gaia17.bin` (Gaia DR3 G≤17,
 154.1M stars, 1.54 GB), `blind-gaia16.idx` (the memory-mapped G≤16 blind

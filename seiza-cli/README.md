@@ -111,12 +111,13 @@ seiza download-data prebuilt --output data
 seiza download-data prebuilt --output data --file objects.bin --file transients.bin
 ```
 
-The downloader reads one complete bundle from `/data/v2/manifest.json` and
-caches its immutable files by SHA-256 before copying the requested selection
-into the same flat local output directory. The shared platform cache can be
-overridden with `SEIZA_CACHE_DIR`. It never combines catalogs from different
-hosted bundle versions. The unversioned `/data/` manifest and files remain
-temporarily as the classic v1 compatibility surface for older clients.
+The downloader reads one complete bundle from `/data/v4/manifest.json` and
+caches its immutable, content-addressed files by SHA-256 before copying the
+requested selection into the same flat local output directory. The shared
+platform cache can be overridden with `SEIZA_CACHE_DIR`. It never combines
+catalogs from different hosted bundle versions. Previously released `/data/`,
+`/data/v3/`, and `/data/v2/` paths remain frozen for classic v1, v0.4.0, and
+v0.4.1/v0.5 readers respectively.
 
 Library integrations can use `seiza-download` directly for async, automatic
 cache management. The raw catalog commands below are implemented by the

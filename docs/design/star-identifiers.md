@@ -14,7 +14,8 @@ The identifier data stays in an optional sidecar. Solver-oriented
 identity lookup can memory-map the sidecar once and reuse it.
 
 The complete sidecar is published as `stars-lite-tycho2.ids.bin` in the current
-`/data/v2/` catalog bundle. The bundle version selects a coherent set of
+`/data/v4/` catalog bundle. The frozen `/data/v2/` bundle retains the same
+sidecar for v0.4.1/v0.5 clients. The bundle version selects a coherent set of
 catalog wire formats; the `SEIZASI1` header remains the sidecar's independent
 on-disk schema identifier.
 

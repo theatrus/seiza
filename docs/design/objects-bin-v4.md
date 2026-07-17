@@ -367,6 +367,20 @@ capabilities()
 The CLI should display the selected record for each facet and support an
 `--all-sources` form for comparison and audit work.
 
+## Hosted transition
+
+V4 is published only in the complete `/data/v4/` bundle. Previously released
+paths are immutable compatibility contracts: `/data/` retains `SEIZAOB1`, the
+historical standalone `/data/v3/` surface retains `SEIZAOB3` for v0.4.0, and
+the complete `/data/v2/` bundle retains `SEIZAOB3` for v0.4.1/v0.5. Old
+readers therefore never encounter v4 bytes at a URL they already know.
+
+The v4 manifest uses `catalog-bundle-v4-*` and requires each artifact key to
+be `artifacts/<sha256>/<name>`. The public `/data/v4/manifest.json` pointer is
+published last; content-addressed artifact keys and archived manifests are
+never overwritten. See [Hosted catalog bundles](catalog-bundles.md) for the
+complete S3 and cache contract.
+
 ## Build and publication flow
 
 1. Download and cache upstream catalogs and OpenNGC outlines independently of
@@ -379,7 +393,9 @@ The CLI should display the selected record for each facet and support an
 7. Write the sectioned container and provenance.
 8. Run exhaustive validation, deterministic rebuild comparison, and release
    profiling for file size, open cost, RSS, and representative queries.
-9. Publish the database and complete bundle manifest atomically.
+9. Upload the database under its content-addressed `/data/v4/` artifact key.
+10. Publish the archived complete manifest and then the current manifest
+    pointer, leaving every older compatibility path untouched.
 
 ## Acceptance criteria
 

@@ -13,10 +13,17 @@ pub use manager::{
     CachePolicy, CatalogArtifact, CatalogBundle, CatalogManager, CatalogManagerBuilder,
     DownloadEvent,
 };
-pub use manifest::{BundleManifest, CatalogSet, Dataset, ManifestFile, REQUIRED_V2_FILES};
+pub use manifest::{
+    BundleManifest, CatalogSet, Dataset, ManifestFile, REQUIRED_BUNDLE_FILES, REQUIRED_V2_FILES,
+};
 
 /// Current complete hosted catalog bundle.
 ///
-/// The unversioned `/data` path remains a classic-v1 compatibility surface and
-/// is intentionally not consulted by this crate.
-pub const DEFAULT_BUNDLE_BASE_URL: &str = "https://downloads.seiza.fyi/data/v2";
+/// `/data`, `/data/v3`, and `/data/v2` remain frozen compatibility surfaces
+/// for v1, the historical standalone v3 object bundle, and the complete v2
+/// bundle respectively. New clients never replace artifacts under those URLs.
+pub const DEFAULT_BUNDLE_BASE_URL: &str = "https://downloads.seiza.fyi/data/v4";
+
+/// Frozen complete v2 bundle for applications that explicitly need the
+/// previous `SEIZAOB3` object artifact.
+pub const LEGACY_V2_BUNDLE_BASE_URL: &str = "https://downloads.seiza.fyi/data/v2";

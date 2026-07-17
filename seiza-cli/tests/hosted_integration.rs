@@ -328,7 +328,7 @@ fn hosted_remote_worker_uses_seiza_server_native_api() {
 #[test]
 #[ignore = "network: downloads and validates the hosted stellar identifier sidecar"]
 fn hosted_star_identifiers_are_downloadable_and_queryable() {
-    let dir = cache_dir().join("catalog-bundle-v2");
+    let dir = cache_dir().join("catalog-bundle-v4");
     std::fs::create_dir_all(&dir).unwrap();
     let seiza = env!("CARGO_BIN_EXE_seiza");
 
