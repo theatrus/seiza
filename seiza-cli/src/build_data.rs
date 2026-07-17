@@ -3797,8 +3797,10 @@ pub fn build_manifest(
     base_manifest: Option<&Path>,
     version: &str,
     output: &Path,
+    artifact_dir: Option<&Path>,
+    zstd_level: i32,
 ) -> Result<()> {
-    use seiza_download::{BundleManifest, ManifestFile};
+    use seiza_download::{BundleManifest, BundleManifestDocument, ManifestFile};
     use std::collections::BTreeMap;
 
     let content_addressed = if version.starts_with("catalog-bundle-v4-") {
@@ -3810,19 +3812,37 @@ pub fn build_manifest(
             "unsupported bundle version {version}; expected catalog-bundle-v2-* or catalog-bundle-v4-*"
         );
     };
+    if artifact_dir.is_some() && !content_addressed {
+        bail!("staged alternate transports require a catalog-bundle-v4-* manifest");
+    }
+    if artifact_dir.is_some() && !(1..=22).contains(&zstd_level) {
+        bail!("zstd compression level must be between 1 and 22");
+    }
 
-    let mut files = if let Some(path) = base_manifest {
+    let (mut files, mut transports) = if let Some(path) = base_manifest {
         let bytes = std::fs::read(path)
             .with_context(|| format!("cannot read base manifest {}", path.display()))?;
-        let manifest = BundleManifest::parse(&bytes)
+        let document = BundleManifestDocument::parse(&bytes)
             .with_context(|| format!("invalid base manifest {}", path.display()))?;
-        manifest
+        let files = document
+            .manifest
             .files
             .into_iter()
             .map(|file| (file.name.clone(), file))
-            .collect::<BTreeMap<_, _>>()
+            .collect::<BTreeMap<_, _>>();
+        let transports = document
+            .transports
+            .into_iter()
+            .map(|transport| {
+                (
+                    (transport.name.clone(), transport.encoding.clone()),
+                    transport,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        (files, transports)
     } else {
-        BTreeMap::new()
+        (BTreeMap::new(), BTreeMap::new())
     };
 
     let mut entries: Vec<_> = std::fs::read_dir(dir)?
@@ -3846,7 +3866,20 @@ pub fn build_manifest(
             .and_then(|name| name.to_str())
             .context("bundle artifact filename is not UTF-8")?
             .to_string();
+        if bytes == 0 {
+            bail!("bundle artifact {name} is empty");
+        }
         let key = content_addressed.then(|| format!("artifacts/{hash_hex}/{name}"));
+        if let Some(artifact_dir) = artifact_dir {
+            stage_uncompressed_artifact(path, &name, artifact_dir, bytes, &hash_hex)?;
+        }
+        transports.retain(|(transport_name, _), _| transport_name != &name);
+        if let Some(transport) = artifact_dir
+            .map(|artifact_dir| write_zstd_encoding(path, &name, artifact_dir, zstd_level))
+            .transpose()?
+        {
+            transports.insert((name.clone(), transport.encoding.clone()), transport);
+        }
         files.insert(
             name.clone(),
             ManifestFile {
@@ -3869,19 +3902,162 @@ pub fn build_manifest(
         version: version.to_string(),
         files: files.into_values().collect(),
     };
-    manifest
+    if !content_addressed {
+        transports.clear();
+    }
+    let document = BundleManifestDocument {
+        manifest,
+        transports: transports.into_values().collect(),
+    };
+    document
         .validate()
         .context("generated bundle is incomplete")?;
-    let mut encoded = serde_json::to_vec_pretty(&manifest)?;
+    let mut encoded = serde_json::to_vec_pretty(&document)?;
     encoded.push(b'\n');
     std::fs::write(output, encoded)?;
     println!(
         "manifest written to {} ({} replaced, {} retained)",
         output.display(),
         replacement_count,
-        manifest.files.len().saturating_sub(replacement_count)
+        document
+            .manifest
+            .files
+            .len()
+            .saturating_sub(replacement_count)
     );
     Ok(())
+}
+
+fn stage_uncompressed_artifact(
+    input: &Path,
+    name: &str,
+    output_root: &Path,
+    bytes: u64,
+    sha256: &str,
+) -> Result<()> {
+    let key = format!("artifacts/{sha256}/{name}");
+    let target = output_root.join(&key);
+    let parent = target.parent().context("bundle artifact has no parent")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("cannot create {}", parent.display()))?;
+    if target.exists() {
+        let (existing_bytes, existing_sha256) = file_digest(&target)?;
+        if existing_bytes != bytes || existing_sha256 != sha256 {
+            bail!("existing staged artifact {} is corrupt", target.display());
+        }
+    } else {
+        let partial_dir = output_root.join(".partial");
+        std::fs::create_dir_all(&partial_dir)
+            .with_context(|| format!("cannot create {}", partial_dir.display()))?;
+        let temp = partial_dir.join(format!("{name}.{}.raw.part", std::process::id()));
+        let install = (|| {
+            let copied = std::fs::copy(input, &temp).with_context(|| {
+                format!("cannot stage {} as {}", input.display(), temp.display())
+            })?;
+            if copied != bytes {
+                bail!(
+                    "staged artifact {} has {copied} bytes; expected {bytes}",
+                    temp.display()
+                );
+            }
+            let (staged_bytes, staged_sha256) = file_digest(&temp)?;
+            if staged_bytes != bytes || staged_sha256 != sha256 {
+                bail!("staged artifact {} failed verification", temp.display());
+            }
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&temp)?
+                .sync_all()
+                .with_context(|| format!("cannot sync {}", temp.display()))?;
+            std::fs::rename(&temp, &target).with_context(|| {
+                format!("cannot install {} as {}", temp.display(), target.display())
+            })?;
+            Ok(())
+        })();
+        if install.is_err() {
+            let _ = std::fs::remove_file(&temp);
+        }
+        let _ = std::fs::remove_dir(&partial_dir);
+        install?;
+    }
+    println!("    staged uncompressed: {key}");
+    Ok(())
+}
+
+fn write_zstd_encoding(
+    input: &Path,
+    name: &str,
+    output_root: &Path,
+    level: i32,
+) -> Result<seiza_download::ManifestTransport> {
+    use std::io::Read;
+
+    let partial_dir = output_root.join(".partial");
+    std::fs::create_dir_all(&partial_dir)
+        .with_context(|| format!("cannot create {}", partial_dir.display()))?;
+    let temp = partial_dir.join(format!("{name}.{}.zst.part", std::process::id()));
+    let result = (|| {
+        let mut source = std::fs::File::open(input)
+            .with_context(|| format!("cannot open {}", input.display()))?;
+        let output = std::fs::File::create(&temp)
+            .with_context(|| format!("cannot create {}", temp.display()))?;
+        let mut encoder = zstd::stream::Encoder::new(output, level)
+            .with_context(|| format!("cannot initialize zstd level {level}"))?;
+        encoder
+            .include_checksum(true)
+            .context("cannot enable zstd frame checksum")?;
+        let mut buffer = vec![0u8; 1024 * 1024];
+        loop {
+            let read = source
+                .read(&mut buffer)
+                .with_context(|| format!("cannot read {}", input.display()))?;
+            if read == 0 {
+                break;
+            }
+            std::io::Write::write_all(&mut encoder, &buffer[..read])
+                .with_context(|| format!("cannot compress {}", input.display()))?;
+        }
+        let output = encoder
+            .finish()
+            .with_context(|| format!("cannot finish compressing {}", input.display()))?;
+        output
+            .sync_all()
+            .with_context(|| format!("cannot sync {}", temp.display()))?;
+
+        let (bytes, sha256) = file_digest(&temp)?;
+        let key = format!("artifacts/{sha256}/{name}.zst");
+        let target = output_root.join(&key);
+        let parent = target.parent().context("zstd artifact has no parent")?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+        if target.exists() {
+            let (existing_bytes, existing_sha256) = file_digest(&target)?;
+            if existing_bytes != bytes || existing_sha256 != sha256 {
+                bail!("existing encoded artifact {} is corrupt", target.display());
+            }
+            std::fs::remove_file(&temp)
+                .with_context(|| format!("cannot remove {}", temp.display()))?;
+        } else {
+            std::fs::rename(&temp, &target).with_context(|| {
+                format!("cannot install {} as {}", temp.display(), target.display())
+            })?;
+        }
+        let source_bytes = std::fs::metadata(input)?.len();
+        let saved = 100.0 * (1.0 - bytes as f64 / source_bytes as f64);
+        println!("    zstd level {level}: {bytes} bytes ({saved:.1}% smaller), sha256 {sha256}");
+        Ok(seiza_download::ManifestTransport {
+            name: name.into(),
+            encoding: "zstd".into(),
+            key,
+            bytes,
+            sha256,
+        })
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    let _ = std::fs::remove_dir(&partial_dir);
+    result
 }
 
 /// Comets (MPC CometEls.txt) and bright numbered asteroids (MPCORB) into
@@ -4177,20 +4353,40 @@ mod tests {
     #[test]
     fn v4_manifest_builder_emits_content_addressed_complete_bundle() {
         let dir = tempfile::tempdir().unwrap();
+        let artifact_dir = tempfile::tempdir().unwrap();
         write_complete_bundle_inputs(dir.path(), "initial");
         let output = dir.path().join("manifest.json");
-        build_manifest(dir.path(), None, "catalog-bundle-v4-test", &output).unwrap();
+        build_manifest(
+            dir.path(),
+            None,
+            "catalog-bundle-v4-test",
+            &output,
+            Some(artifact_dir.path()),
+            22,
+        )
+        .unwrap();
 
-        let manifest =
-            seiza_download::BundleManifest::parse(&std::fs::read(output).unwrap()).unwrap();
+        let json = std::fs::read(output).unwrap();
+        let document = seiza_download::BundleManifestDocument::parse(&json).unwrap();
+        let legacy_manifest = seiza_download::BundleManifest::parse(&json).unwrap();
         assert_eq!(
-            manifest.files.len(),
+            document.manifest.files.len(),
             seiza_download::REQUIRED_BUNDLE_FILES.len()
         );
-        for file in manifest.files {
+        assert_eq!(legacy_manifest, document.manifest);
+        for file in &document.manifest.files {
             assert_eq!(
                 file.key.as_deref(),
                 Some(format!("artifacts/{}/{}", file.sha256, file.name).as_str())
+            );
+            let transport = document.preferred_transport(&file.name).unwrap();
+            let encoded = std::fs::read(artifact_dir.path().join(&transport.key)).unwrap();
+            assert_eq!(encoded.len() as u64, transport.bytes);
+            let decoded = zstd::stream::decode_all(encoded.as_slice()).unwrap();
+            assert_eq!(decoded, std::fs::read(dir.path().join(&file.name)).unwrap());
+            assert_eq!(
+                std::fs::read(artifact_dir.path().join(file.artifact_key())).unwrap(),
+                decoded
             );
         }
     }
@@ -4200,7 +4396,7 @@ mod tests {
         let full = tempfile::tempdir().unwrap();
         write_complete_bundle_inputs(full.path(), "initial");
         let base = full.path().join("base-v2.json");
-        build_manifest(full.path(), None, "catalog-bundle-v2-base", &base).unwrap();
+        build_manifest(full.path(), None, "catalog-bundle-v2-base", &base, None, 22).unwrap();
         let original =
             seiza_download::BundleManifest::parse(&std::fs::read(&base).unwrap()).unwrap();
 
@@ -4210,8 +4406,24 @@ mod tests {
 
         let v2 = delta.path().join("next-v2.json");
         let v4 = delta.path().join("next-v4.json");
-        build_manifest(delta.path(), Some(&base), "catalog-bundle-v2-next", &v2).unwrap();
-        build_manifest(delta.path(), Some(&base), "catalog-bundle-v4-next", &v4).unwrap();
+        build_manifest(
+            delta.path(),
+            Some(&base),
+            "catalog-bundle-v2-next",
+            &v2,
+            None,
+            22,
+        )
+        .unwrap();
+        build_manifest(
+            delta.path(),
+            Some(&base),
+            "catalog-bundle-v4-next",
+            &v4,
+            None,
+            22,
+        )
+        .unwrap();
 
         let v2 = seiza_download::BundleManifest::parse(&std::fs::read(v2).unwrap()).unwrap();
         let v4 = seiza_download::BundleManifest::parse(&std::fs::read(v4).unwrap()).unwrap();
@@ -4247,6 +4459,65 @@ mod tests {
         }
         assert!(v2.files.iter().all(|file| file.key.is_none()));
         assert!(v4.files.iter().all(|file| file.key.is_some()));
+    }
+
+    #[test]
+    fn retained_transports_roll_forward_in_v4_and_are_stripped_from_v2() {
+        let full = tempfile::tempdir().unwrap();
+        let initial_artifacts = tempfile::tempdir().unwrap();
+        write_complete_bundle_inputs(full.path(), "initial");
+        let base = full.path().join("base-v4.json");
+        build_manifest(
+            full.path(),
+            None,
+            "catalog-bundle-v4-base",
+            &base,
+            Some(initial_artifacts.path()),
+            22,
+        )
+        .unwrap();
+        let original =
+            seiza_download::BundleManifestDocument::parse(&std::fs::read(&base).unwrap()).unwrap();
+
+        let delta = tempfile::tempdir().unwrap();
+        let next_artifacts = tempfile::tempdir().unwrap();
+        std::fs::write(delta.path().join("transients.bin"), b"new transients").unwrap();
+        let next_v4 = delta.path().join("next-v4.json");
+        build_manifest(
+            delta.path(),
+            Some(&base),
+            "catalog-bundle-v4-next",
+            &next_v4,
+            Some(next_artifacts.path()),
+            22,
+        )
+        .unwrap();
+        let next = seiza_download::BundleManifestDocument::parse(&std::fs::read(&next_v4).unwrap())
+            .unwrap();
+        assert_eq!(
+            original.preferred_transport("objects.bin"),
+            next.preferred_transport("objects.bin")
+        );
+        assert_ne!(
+            original.preferred_transport("transients.bin"),
+            next.preferred_transport("transients.bin")
+        );
+
+        let empty = tempfile::tempdir().unwrap();
+        let next_v2 = empty.path().join("next-v2.json");
+        build_manifest(
+            empty.path(),
+            Some(&next_v4),
+            "catalog-bundle-v2-next",
+            &next_v2,
+            None,
+            22,
+        )
+        .unwrap();
+        let v2 = seiza_download::BundleManifestDocument::parse(&std::fs::read(next_v2).unwrap())
+            .unwrap();
+        assert!(v2.transports.is_empty());
+        assert!(v2.manifest.files.iter().all(|file| file.key.is_none()));
     }
 
     #[test]

@@ -39,6 +39,15 @@ after a newer manifest is published:
       "bytes": 123456789,
       "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     }
+  ],
+  "transports": [
+    {
+      "name": "objects.bin",
+      "encoding": "zstd",
+      "key": "artifacts/fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210/objects.bin.zst",
+      "bytes": 23456789,
+      "sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    }
   ]
 }
 ```
@@ -51,6 +60,21 @@ omit `key` and resolve files directly under that bundle URL. A
 `catalog-bundle-v3-*` complete manifest is intentionally rejected so the
 historical `/data/v3/` contract cannot be repurposed accidentally.
 
+`transports` is optional additive metadata. The file-level `key`, `bytes`, and
+`sha256` always describe the canonical uncompressed artifact and are retained
+for old v4 readers. New readers select a supported alternate, verify its
+encoded size and SHA-256, stream-decompress it into the normal cache path, and
+then verify the uncompressed size and SHA-256 before installation. They never
+mmap compressed bytes and do not retain a second compressed cache file.
+Old readers ignore the entire top-level field, preserving both JSON and Rust
+source compatibility with the existing public manifest structs. Unknown JSON
+fields and unknown encoding names are ignored, so additional
+transport encodings can be introduced without another bundle generation. V2
+manifests remain frozen and cannot advertise alternate encodings.
+
+See the [catalog zstd benchmark](../benchmarks/2026-07-catalog-zstd.md) for
+measured complete-bundle and setup-preset savings.
+
 The complete v4 manifest must contain the Tycho-2 and Gaia solver tiles, blind
 index, stellar identifier sidecar, object and transient catalogs, and minor
 bodies. The downloader rejects an incomplete manifest even when the caller
@@ -59,13 +83,16 @@ requested only one artifact.
 ## S3 publication contract
 
 1. Build and exhaustively validate every changed catalog.
-2. Upload changed bytes, or server-side copy unchanged bytes, to
+2. Upload changed uncompressed bytes, or server-side copy unchanged bytes, to
    `/data/v4/artifacts/<sha256>/<name>`.
-3. Verify every hosted object's byte length and SHA-256.
-4. Publish an immutable copy at
+3. Upload each alternate transport to its own content-addressed key, such as
+   `/data/v4/artifacts/<encoded-sha256>/<name>.zst`.
+4. Verify every hosted object's byte length and SHA-256, both encoded and
+   uncompressed.
+5. Publish an immutable copy at
    `/data/v4/manifests/<catalog-bundle-version>.json`.
-5. Publish `/data/v4/manifest.json` last as the small current-bundle pointer.
-6. Run hosted download, validation, and semantic lookup tests through that
+6. Publish `/data/v4/manifest.json` last as the small current-bundle pointer.
+7. Run hosted download, validation, and semantic lookup tests through that
    public manifest.
 
 Artifact keys should use long-lived `immutable` cache headers. The current
@@ -96,16 +123,28 @@ seiza build-data manifest \
   --dir next-dynamic \
   --base-manifest current-v4.json \
   --version catalog-bundle-v4-2026-07-17 \
-  --output next-v4.json
+  --output next-v4.json \
+  --artifact-dir next-v4-artifacts
 ```
 
 The first output serves the frozen v3-object compatibility bundle at
 `/data/v2/`; it uses the flat keys required by v0.4.1/v0.5 readers. The second
 serves v4 readers and automatically assigns every retained or replaced entry
-its `artifacts/<sha256>/<name>` key. Both generated manifests are rejected if
-the resulting catalog set is incomplete. A v2 base can also be converted to a
-v4 manifest: retained hashes become content-addressed without downloading the
-unchanged multi-gigabyte files, which can then be copied server-side.
+its `artifacts/<sha256>/<name>` key. `--artifact-dir` stages both the canonical
+uncompressed file and a maximum-compression zstd transport for every
+replacement into one upload-ready content-addressed tree; one S3 sync therefore
+publishes both old-reader and new-reader paths. `--zstd-level` can override the
+default level 22. Existing transports for retained v4 entries roll forward
+unchanged. Both generated manifests are rejected if the resulting catalog set
+is incomplete. A v2 base can also be converted to a v4 manifest: retained
+hashes become content-addressed without downloading the unchanged
+multi-gigabyte files, which can then be copied server-side, but alternate
+transports require access to their source bytes.
+
+Sync the generated artifact tree to `/data/v4/` before uploading either
+manifest. The tree contains both keys referenced by every replacement entry;
+do not upload only the `.zst` objects. Archive `next-v4.json`, verify both
+hosted representations, and update the mutable manifest pointer last.
 
 For v4, upload the new content-addressed dynamic artifacts and archive the
 manifest before changing the current pointer. For legacy v2, the old flat URL
@@ -126,6 +165,11 @@ multi-gigabyte mmap. Bytes are hashed during their initial streaming download;
 exhaustive later verification is an explicit API operation. A per-hash
 cross-process lock prevents concurrent applications from downloading the same
 artifact twice.
+
+When a zstd transport is available, transfer progress reports encoded bytes.
+Decompression writes the same uncompressed temporary file that is atomically
+installed into the content-addressed cache, so peak cache storage does not
+include a retained `.zst` copy and all existing mmap readers remain unchanged.
 
 The small manifest has configurable offline, prefer-cached, age-based refresh,
 and force-refresh policies. The default refreshes it after 24 hours and falls

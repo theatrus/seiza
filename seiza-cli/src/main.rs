@@ -798,7 +798,7 @@ enum BuildDataSource {
         #[arg(long, default_value_t = 16.0)]
         max_h: f32,
     },
-    /// Bundle manifest (sizes + sha256) for hosting data files
+    /// Bundle manifest and optional upload-ready artifacts for hosting
     Manifest {
         /// Directory containing new or replacement .bin and .idx data files
         #[arg(long)]
@@ -815,6 +815,19 @@ enum BuildDataSource {
         /// Output manifest path
         #[arg(long)]
         output: PathBuf,
+        /// Stage both uncompressed and zstd artifacts below this directory.
+        /// V4 only; the resulting content-addressed tree can be uploaded as
+        /// one compatibility-safe publication step.
+        #[arg(long)]
+        artifact_dir: Option<PathBuf>,
+        /// Zstd compression level (1-22). Defaults to maximum compression
+        /// when --artifact-dir is supplied.
+        #[arg(
+            long,
+            requires = "artifact_dir",
+            value_parser = clap::value_parser!(i32).range(1..=22)
+        )]
+        zstd_level: Option<i32>,
     },
 }
 
@@ -938,7 +951,16 @@ fn main() -> Result<()> {
                 base_manifest,
                 version,
                 output,
-            } => build_data::build_manifest(&dir, base_manifest.as_deref(), &version, &output),
+                artifact_dir,
+                zstd_level,
+            } => build_data::build_manifest(
+                &dir,
+                base_manifest.as_deref(),
+                &version,
+                &output,
+                artifact_dir.as_deref(),
+                zstd_level.unwrap_or(22),
+            ),
         },
         Command::BuildBlindIndex {
             data,

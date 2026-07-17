@@ -26,6 +26,13 @@ access occurs only when `ensure` is explicitly awaited. Normal cache hits check
 the manifest's file size without hashing or paging through large catalogs.
 Call `CatalogBundle::verify` for an exhaustive SHA-256 check.
 
+When a manifest offers a zstd transport, the manager verifies the encoded
+stream, decompresses it directly into the cache temporary file, and verifies
+the canonical uncompressed bytes before atomically installing them. The cache
+contains only the uncompressed file expected by mmap readers. Older readers
+ignore the optional encoding metadata and continue downloading the retained
+uncompressed artifact.
+
 The default cache follows the platform cache directory and can be overridden
 with `SEIZA_CACHE_DIR` or `CatalogManagerBuilder::cache_dir`. The default
 selection is the small Tycho-2 solver catalog; downloading the complete bundle

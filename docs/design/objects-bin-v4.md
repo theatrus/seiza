@@ -409,7 +409,8 @@ The v4 manifest uses `catalog-bundle-v4-*` and requires each artifact key to
 be `artifacts/<sha256>/<name>`. The public `/data/v4/manifest.json` pointer is
 published last; content-addressed artifact keys and archived manifests are
 never overwritten. See [Hosted catalog bundles](catalog-bundles.md) for the
-complete S3 and cache contract.
+complete S3 and cache contract, including optional transport encodings that
+unpack to the same mmap-ready v4 artifact without changing this file format.
 
 ## Build and publication flow
 
