@@ -86,18 +86,7 @@ jobs:
           $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
           $version = ($metadata.packages | Where-Object name -eq "seiza-cli").version
           $msi = Resolve-Path "dist/seiza-cli-$version-windows-x86_64.msi"
-          $log = Join-Path $env:RUNNER_TEMP "seiza-msi-install.log"
-          $install = Start-Process msiexec.exe -ArgumentList "/i", "`"$msi`"", "/qn", "/norestart", "/l*v", "`"$log`"" -Wait -PassThru
-          if ($install.ExitCode -ne 0) {
-            Get-Content $log
-            throw "MSI install failed with exit code $($install.ExitCode)"
-          }
-          $installed = Join-Path $env:LOCALAPPDATA "Programs\Seiza\seiza.exe"
-          if (-not (Test-Path $installed)) { throw "Installed binary not found at $installed" }
-          & $installed --version
-          $uninstall = Start-Process msiexec.exe -ArgumentList "/x", "`"$msi`"", "/qn", "/norestart" -Wait -PassThru
-          if ($uninstall.ExitCode -ne 0) { throw "MSI uninstall failed with exit code $($uninstall.ExitCode)" }
-          if (Test-Path $installed) { throw "MSI uninstall left $installed behind" }
+          ./.github/scripts/test-windows-installer.ps1 -Msi $msi
       - uses: softprops/action-gh-release@v3.0.2
         if: startsWith(github.ref, 'refs/tags/')
         with:

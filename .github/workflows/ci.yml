@@ -26,6 +26,24 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./.github/scripts/assert-static-crt.ps1 -Binary target/release/seiza.exe
+      - name: Build Windows MSI
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $version = ($metadata.packages | Where-Object name -eq "seiza-cli").version
+          dotnet build packaging/windows/seiza.wixproj -c Release -p:SeizaVersion=$version
+      - name: Smoke-test Windows MSI
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem dist/*.msi | Select-Object -First 1
+          ./.github/scripts/test-windows-installer.ps1 -Msi $msi.FullName
+      - uses: actions/upload-artifact@v7.0.1
+        if: runner.os == 'Windows'
+        with:
+          name: windows-installer
+          path: dist/*.msi
 
   lint:
     runs-on: ubuntu-latest
