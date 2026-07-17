@@ -47,6 +47,7 @@ enum NextAction {
 }
 
 impl SetupPreset {
+    #[cfg(windows)]
     fn cli_name(self) -> &'static str {
         match self {
             Self::SolverLite => "solver-lite",
@@ -85,12 +86,11 @@ impl SetupPreset {
     }
 }
 
-pub(crate) fn run(mut args: SetupArgs) -> Result<()> {
+pub(crate) fn run(args: SetupArgs) -> Result<()> {
     let from_installer = args.from_installer;
 
     #[cfg(windows)]
     let result = if args.elevate {
-        args.elevate = false;
         launch_elevated(&args)
     } else {
         run_setup(args)
