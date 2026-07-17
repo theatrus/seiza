@@ -1,44 +1,131 @@
 # Hosted catalog bundles
 
-Hosted paths version complete, coherent catalog bundles rather than individual
-wire formats.
+Hosted paths are compatibility contracts. Once a released reader knows a URL,
+the manifest and artifacts at that URL are never replaced with an incompatible
+wire format.
 
-## Layout
+## Compatibility layout
 
-- `/data/manifest.json` and immediate `/data/*` files are the temporary
-  classic-v1 compatibility surface.
-- `/data/v2/manifest.json` describes every current prebuilt catalog, all stored
-  immediately under `/data/v2/`.
-- Downloads remain flat locally, so existing CLI arguments and environment
-  variables use the familiar filenames.
+| Hosted path | Contents | Readers |
+| --- | --- | --- |
+| `/data/` | classic files with `SEIZAOB1` objects | v0.3 and classic-v1 clients |
+| `/data/v3/` | reserved historical standalone object-v3 rollout URL; may be absent | v0.4.0 falls back to `/data/` |
+| `/data/v2/` | frozen complete bundle with `SEIZAOB3` objects | v0.4.1 and v0.5 |
+| `/data/v4/` | current complete bundle with sectioned `SEIZAOB\0` objects | v4-capable clients |
 
-The v2 bundle contains the Tycho-2 and Gaia solver tiles, the blind index, the
-stellar identifier sidecar, object and transient catalogs, and minor bodies.
-Individual files retain their own self-describing wire headers (`SEIZAST2`,
-`SEIZASI1`, `SEIZAOB3`, and so on); the bundle version only selects a tested
-combination of those formats and datasets.
+The complete bundle generation deliberately skips v3 because that path was
+already released for the standalone object-v3 transition. Bundle generations
+and individual wire-format versions remain separate concepts even when v4 is
+currently shared by both names.
 
-## Publication contract
+Downloads remain flat locally, so CLI arguments, server configuration, and
+environment variables continue to use familiar names such as `objects.bin`.
+New readers accept v1, v3, and v4 object files, but old readers never receive a
+v4 file from a URL they already know.
 
-The publisher uploads or server-side copies every data object first, verifies
-that the required filenames are present, builds the manifest from the hosted
-bytes, and publishes `manifest.json` last. It refuses to publish a partial v2
-bundle. The downloader likewise rejects a v2 manifest that omits any required
-catalog, even when the user requested only one file.
+## V4 manifest
 
-Hosted integration tests download the stellar sidecar through the public
-manifest, verify its SHA-256, validate the complete mapped file, and perform a
-semantic name lookup. This turns a missing data upload into a release-gate
-failure instead of a documentation-only feature.
+`/data/v4/manifest.json` describes one complete, coherent catalog set. Every
+artifact is addressed by its SHA-256 so an older cached manifest remains valid
+after a newer manifest is published:
+
+```json
+{
+  "version": "catalog-bundle-v4-2026-07-16",
+  "files": [
+    {
+      "name": "objects.bin",
+      "key": "artifacts/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/objects.bin",
+      "bytes": 123456789,
+      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    }
+  ]
+}
+```
+
+For v4, `key` is mandatory and must be exactly
+`artifacts/<sha256>/<name>`. `name` is the safe flat filename used in the local
+cache and materialized output directory. Legacy `catalog-bundle-v2-*`
+manifests remain readable when a caller explicitly configures `/data/v2`; they
+omit `key` and resolve files directly under that bundle URL. A
+`catalog-bundle-v3-*` complete manifest is intentionally rejected so the
+historical `/data/v3/` contract cannot be repurposed accidentally.
+
+The complete v4 manifest must contain the Tycho-2 and Gaia solver tiles, blind
+index, stellar identifier sidecar, object and transient catalogs, and minor
+bodies. The downloader rejects an incomplete manifest even when the caller
+requested only one artifact.
+
+## S3 publication contract
+
+1. Build and exhaustively validate every changed catalog.
+2. Upload changed bytes, or server-side copy unchanged bytes, to
+   `/data/v4/artifacts/<sha256>/<name>`.
+3. Verify every hosted object's byte length and SHA-256.
+4. Publish an immutable copy at
+   `/data/v4/manifests/<catalog-bundle-version>.json`.
+5. Publish `/data/v4/manifest.json` last as the small current-bundle pointer.
+6. Run hosted download, validation, and semantic lookup tests through that
+   public manifest.
+
+Artifact keys should use long-lived `immutable` cache headers. The current
+manifest pointer should have a short lifetime or require revalidation. No
+artifact referenced by a published manifest is overwritten; a changed nightly
+transient catalog receives a new hash key. This ordering makes both old and new
+manifests usable throughout a rollout, unlike replacing a flat artifact before
+clients have refreshed their cached manifest.
+
+The compatibility paths `/data/`, `/data/v3/`, and `/data/v2/` are not part of
+the v4 publication transaction and remain untouched.
+
+## Recurring transient and Solar-system bundles
+
+`transients.bin` and `minor-bodies.bin` are independently rebuilt data products.
+A single directory containing new copies of either or both can roll forward
+both supported complete bundles while retaining the object database and all
+unchanged solver catalogs from each base manifest:
+
+```shell
+seiza build-data manifest \
+  --dir next-dynamic \
+  --base-manifest current-v2.json \
+  --version catalog-bundle-v2-2026-07-17 \
+  --output next-v2.json
+
+seiza build-data manifest \
+  --dir next-dynamic \
+  --base-manifest current-v4.json \
+  --version catalog-bundle-v4-2026-07-17 \
+  --output next-v4.json
+```
+
+The first output serves the frozen v3-object compatibility bundle at
+`/data/v2/`; it uses the flat keys required by v0.4.1/v0.5 readers. The second
+serves v4 readers and automatically assigns every retained or replaced entry
+its `artifacts/<sha256>/<name>` key. Both generated manifests are rejected if
+the resulting catalog set is incomplete. A v2 base can also be converted to a
+v4 manifest: retained hashes become content-addressed without downloading the
+unchanged multi-gigabyte files, which can then be copied server-side.
+
+For v4, upload the new content-addressed dynamic artifacts and archive the
+manifest before changing the current pointer. For legacy v2, the old flat URL
+contract cannot be made fully atomic: upload both dynamic files first and the
+v2 manifest last. A client holding a stale v2 manifest may need to refresh it
+if it did not already cache the old artifact. The v2 object catalog itself is
+never changed during a dynamic-data publication.
 
 ## Client cache
 
-`seiza-download` stores hosted artifacts under their manifest SHA-256 and
-returns those immutable paths directly to library callers. A normal cache hit
-checks file metadata and does not hash or page through a multi-gigabyte mmap.
-The bytes are hashed during their initial streaming download; exhaustive later
-verification is an explicit API operation. A per-hash cross-process lock
-prevents concurrent applications from downloading the same artifact twice.
+`seiza-download` scopes cached manifests by endpoint and stores artifacts under
+their SHA-256. The explicitly configured `/data/v2` endpoint retains the v0.5
+manifest-cache filename; `/data/v4` uses its own manifest cache. Artifact bytes
+with the same hash are shared regardless of which manifest selected them.
+
+A normal cache hit checks file metadata and does not hash or page through a
+multi-gigabyte mmap. Bytes are hashed during their initial streaming download;
+exhaustive later verification is an explicit API operation. A per-hash
+cross-process lock prevents concurrent applications from downloading the same
+artifact twice.
 
 The small manifest has configurable offline, prefer-cached, age-based refresh,
 and force-refresh policies. The default refreshes it after 24 hours and falls
@@ -49,7 +136,3 @@ catalog `open`.
 Raw source distributions are a separate concern owned by `seiza-sources`.
 Gaia TAP, VizieR, MPC, and similar inputs are not installed into the runtime
 bundle cache.
-
-When a future incompatible catalog set is needed, publish a complete
-`/data/v3/` bundle. Unchanged large objects can be copied server-side; clients
-must never assemble a bundle by mixing v2 and v3 manifests.

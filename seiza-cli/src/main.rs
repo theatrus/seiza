@@ -511,6 +511,9 @@ struct CatalogObjectArgs {
     /// Return prefix completions instead of an exact lookup
     #[arg(long)]
     prefix: bool,
+    /// Include every contributing source record, selection, and geometry
+    #[arg(long)]
+    all_sources: bool,
     /// Maximum prefix completions; ignored for exact lookup
     #[arg(long, default_value_t = 25)]
     limit: usize,
@@ -636,6 +639,18 @@ enum DownloadSource {
         #[arg(long)]
         output: PathBuf,
     },
+    /// A pinned Seiza catalog-curation GitHub snapshot
+    Curation {
+        /// Directory to download into; must be empty or the same pinned snapshot
+        #[arg(long)]
+        output: PathBuf,
+        /// GitHub owner/repository
+        #[arg(long, default_value = "theatrus/seiza-catalog-curation")]
+        repository: String,
+        /// Exact Git commit (7-40 hexadecimal characters)
+        #[arg(long)]
+        commit: String,
+    },
     /// All object-overlay sources: OpenNGC, Sh2, Barnard, UGC, LDN, vdB,
     /// LBN, Cederblad, IAU + Bright Star Catalogue star names
     Objects {
@@ -731,6 +746,9 @@ enum BuildDataSource {
         /// Directory containing the source files
         #[arg(long)]
         input: PathBuf,
+        /// Pinned seiza-catalog-curation checkout; no network access is used
+        #[arg(long)]
+        curation_dir: Option<PathBuf>,
         /// Output object catalog file
         #[arg(long)]
         output: PathBuf,
@@ -779,10 +797,16 @@ enum BuildDataSource {
     },
     /// Bundle manifest (sizes + sha256) for hosting data files
     Manifest {
-        /// Directory containing built .bin and .idx data files
+        /// Directory containing new or replacement .bin and .idx data files
         #[arg(long)]
         dir: PathBuf,
-        /// Version string recorded in the manifest
+        /// Existing complete v2 or v4 manifest to roll forward. Files in
+        /// `dir` replace matching entries; all other entries are retained.
+        #[arg(long)]
+        base_manifest: Option<PathBuf>,
+        /// Version string and output layout: catalog-bundle-v2-* writes the
+        /// flat compatibility bundle; catalog-bundle-v4-* writes immutable
+        /// content-addressed artifact keys
         #[arg(long)]
         version: String,
         /// Output manifest path
@@ -881,9 +905,15 @@ fn main() -> Result<()> {
             ),
             BuildDataSource::Objects {
                 input,
+                curation_dir,
                 output,
                 source_manifest,
-            } => build_data::build_objects(&input, &output, source_manifest.as_deref()),
+            } => build_data::build_objects(
+                &input,
+                &output,
+                source_manifest.as_deref(),
+                curation_dir.as_deref(),
+            ),
             BuildDataSource::Gaia {
                 input,
                 output,
@@ -901,9 +931,10 @@ fn main() -> Result<()> {
             } => build_data::build_minor_bodies(&input, &output, max_h),
             BuildDataSource::Manifest {
                 dir,
+                base_manifest,
                 version,
                 output,
-            } => build_data::build_manifest(&dir, &version, &output),
+            } => build_data::build_manifest(&dir, base_manifest.as_deref(), &version, &output),
         },
         Command::BuildBlindIndex {
             data,
@@ -1016,6 +1047,15 @@ async fn download_source(source: DownloadSource) -> Result<()> {
             downloader.download_star_identifiers(output).await
         }
         DownloadSource::Openngc { output } => downloader.download_openngc(output).await,
+        DownloadSource::Curation {
+            output,
+            repository,
+            commit,
+        } => {
+            downloader
+                .download_curation(&repository, &commit, output)
+                .await
+        }
         DownloadSource::Objects { output } => downloader.download_objects(output).await,
         DownloadSource::Gaia {
             output,
@@ -1081,6 +1121,9 @@ fn catalog_object(args: CatalogObjectArgs) -> Result<()> {
     } else {
         catalog.lookup_name(&args.query)?
     };
+    if args.all_sources {
+        return catalog_object_all_sources(&catalog, &matches, args.format);
+    }
 
     match args.format {
         CatalogOutputFormat::Table => {
@@ -1155,6 +1198,136 @@ fn catalog_object(args: CatalogObjectArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn catalog_object_all_sources(
+    catalog: &ObjectCatalog,
+    matches: &[seiza::objects::ObjectNameMatch],
+    format: CatalogOutputFormat,
+) -> Result<()> {
+    match format {
+        CatalogOutputFormat::Json => {
+            let values = matches
+                .iter()
+                .map(|item| {
+                    let details = catalog.object_details(&item.object.metadata.id)?;
+                    Ok(serde_json::json!({
+                        "matched_name": item.matched_name,
+                        "canonical": item.object,
+                        "details": details,
+                    }))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            println!("{}", serde_json::to_string_pretty(&values)?);
+        }
+        CatalogOutputFormat::Csv => {
+            println!(
+                "canonical_id,record_id,source,name,ra_deg,dec_deg,mag,major_arcmin,minor_arcmin,position_angle_deg"
+            );
+            for item in matches {
+                for record in catalog.catalog_records(&item.object.metadata.id)? {
+                    println!(
+                        "{},{},{},{},{:.8},{:.8},{},{},{},{}",
+                        csv_field(&item.object.metadata.id),
+                        csv_field(&record.id),
+                        csv_field(&record.source),
+                        csv_field(&record.object.name),
+                        record.object.ra,
+                        record.object.dec,
+                        csv_optional(record.object.mag),
+                        csv_optional(record.object.major_arcmin),
+                        csv_optional(record.object.minor_arcmin),
+                        csv_optional(record.object.position_angle_deg),
+                    );
+                }
+            }
+        }
+        CatalogOutputFormat::Table => {
+            println!(
+                "{} object name match{} (format v{}):",
+                matches.len(),
+                if matches.len() == 1 { "" } else { "es" },
+                catalog.format_version(),
+            );
+            for item in matches {
+                println!(
+                    "\n{} [{}]  {}  {:.5}, {:+.5}",
+                    item.object.name,
+                    item.object.metadata.id,
+                    item.object.kind.as_str(),
+                    item.object.ra,
+                    item.object.dec,
+                );
+                let Some(details) = catalog.object_details(&item.object.metadata.id)? else {
+                    println!("  no source detail section");
+                    continue;
+                };
+                println!("  selections:");
+                for selection in &details.selections {
+                    println!(
+                        "    {:?}: source={} geometry={}{}",
+                        selection.facet,
+                        selection.source_record_id.as_deref().unwrap_or("-"),
+                        selection.geometry_id.as_deref().unwrap_or("-"),
+                        if selection.reason.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" ({})", selection.reason)
+                        },
+                    );
+                }
+                println!("  source records:");
+                for record in &details.source_records {
+                    println!(
+                        "    {}  {}  {}  {:.5}, {:+.5}  size={}x{} pa={}",
+                        record.id,
+                        record.source,
+                        record.object.name,
+                        record.object.ra,
+                        record.object.dec,
+                        display_optional(record.object.major_arcmin),
+                        display_optional(record.object.minor_arcmin),
+                        display_optional(record.object.position_angle_deg),
+                    );
+                }
+                println!("  geometries:");
+                for geometry in &details.geometries {
+                    let description = match &geometry.data {
+                        seiza::objects::GeometryData::Point { .. } => "point".to_string(),
+                        seiza::objects::GeometryData::Ellipse {
+                            major_arcmin,
+                            minor_arcmin,
+                            position_angle_deg,
+                            ..
+                        } => format!(
+                            "ellipse {}x{} arcmin pa={}",
+                            major_arcmin,
+                            display_optional(*minor_arcmin),
+                            display_optional(*position_angle_deg),
+                        ),
+                        seiza::objects::GeometryData::OutlineSet { level, contours } => format!(
+                            "outline-set {} contours, {} vertices, {}",
+                            contours.len(),
+                            contours
+                                .iter()
+                                .map(|contour| contour.vertices.len())
+                                .sum::<usize>(),
+                            level.as_deref().unwrap_or("no level"),
+                        ),
+                    };
+                    println!(
+                        "    {}  {:?}/{:?}  {}",
+                        geometry.id, geometry.role, geometry.quality, description
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn display_optional(value: Option<f32>) -> String {
+    value.map_or_else(|| "-".into(), |value| format!("{value}"))
 }
 
 fn fits_info(path: &std::path::Path, stretch: Option<&std::path::Path>) -> Result<()> {
@@ -1619,10 +1792,14 @@ fn catalog_validate(path: &std::path::Path) -> Result<()> {
             index.validate()?;
             format!("blind-pattern index: {} patterns", index.pattern_count())
         }
-        b"SEIZAOB1" | b"SEIZAOB3" => {
+        b"SEIZAOB1" | b"SEIZAOB3" | b"SEIZAOB\0" => {
             let catalog = ObjectCatalog::open(path)?;
             catalog.validate()?;
-            format!("object catalog: {} objects", catalog.len())
+            format!(
+                "object catalog v{}: {} objects",
+                catalog.format_version(),
+                catalog.len()
+            )
         }
         b"SEIZAMB1" => {
             let catalog = MinorBodyCatalog::open(path)?;
@@ -1899,12 +2076,19 @@ fn solve_command(
             }
         }
         for p in &placed {
+            // An asymmetric extent with an unknown position angle must not be
+            // drawn at a guessed orientation; fall back to the conservative
+            // major-axis circle.
+            let (semi_minor_px, angle_deg) = match p.angle_deg {
+                Some(angle) => (p.semi_minor_px, angle),
+                None => (p.semi_major_px, 0.0),
+            };
             draw_rotated_ellipse(
                 &mut canvas,
                 (p.x, p.y),
                 p.semi_major_px.max(12.0),
-                p.semi_minor_px.max(12.0),
-                p.angle_deg,
+                semi_minor_px.max(12.0),
+                angle_deg,
                 image::Rgb([64, 220, 255]),
             );
         }

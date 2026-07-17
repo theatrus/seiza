@@ -35,6 +35,19 @@ fn cache_dir() -> PathBuf {
     dir
 }
 
+fn publish_cache_bytes(dest: &Path, bytes: &[u8]) {
+    let parent = dest.parent().expect("cache destination has no parent");
+    let mut partial = tempfile::NamedTempFile::new_in(parent).unwrap();
+    partial.write_all(bytes).unwrap();
+    match partial.persist_noclobber(dest) {
+        Ok(_) => {}
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Another parallel test fetched and published the same file first.
+        }
+        Err(error) => panic!("failed to publish {}: {}", dest.display(), error.error),
+    }
+}
+
 fn fetch(path: &str, dest: &Path) {
     if dest.exists() {
         return;
@@ -49,9 +62,26 @@ fn fetch(path: &str, dest: &Path) {
         .into_reader()
         .read_to_end(&mut bytes)
         .unwrap_or_else(|e| panic!("failed to read {url}: {e}"));
-    let partial = dest.with_extension("part");
-    std::fs::write(&partial, &bytes).unwrap();
-    std::fs::rename(&partial, dest).unwrap();
+    publish_cache_bytes(dest, &bytes);
+}
+
+#[test]
+fn concurrent_cache_publication_is_atomic() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("shared.bin");
+    let barrier = std::sync::Barrier::new(8);
+
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            scope.spawn(|| {
+                barrier.wait();
+                publish_cache_bytes(&dest, b"identical hosted bytes");
+            });
+        }
+    });
+
+    assert_eq!(std::fs::read(&dest).unwrap(), b"identical hosted bytes");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 }
 
 fn parse_solution(output: &str) -> Option<(f64, f64, f64)> {
@@ -328,7 +358,7 @@ fn hosted_remote_worker_uses_seiza_server_native_api() {
 #[test]
 #[ignore = "network: downloads and validates the hosted stellar identifier sidecar"]
 fn hosted_star_identifiers_are_downloadable_and_queryable() {
-    let dir = cache_dir().join("catalog-bundle-v2");
+    let dir = cache_dir().join("catalog-bundle-v4");
     std::fs::create_dir_all(&dir).unwrap();
     let seiza = env!("CARGO_BIN_EXE_seiza");
 

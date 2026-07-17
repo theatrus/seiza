@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
+use std::sync::Arc;
 
 pub(crate) const MAGIC: &[u8; 8] = b"SEIZAOB3";
 const HEADER_SIZE: usize = 104;
@@ -181,6 +182,34 @@ impl Grid {
     }
 }
 
+/// Stable canonical-record order used by v4 for spatial page locality. The
+/// tile index still carries overlap entries for large objects; this is only the
+/// primary-center order of the single canonical record.
+pub(crate) fn spatial_order(objects: &[SkyObject]) -> Vec<usize> {
+    let grid = Grid::new(DEFAULT_BANDS);
+    let tiles = objects
+        .iter()
+        .map(|object| {
+            if object.ra.is_finite()
+                && object.dec.is_finite()
+                && (-90.0..=90.0).contains(&object.dec)
+            {
+                grid.tile_of(object.ra, object.dec)
+            } else {
+                u32::MAX
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut order = (0..objects.len()).collect::<Vec<_>>();
+    order.sort_by(|&left, &right| {
+        tiles[left]
+            .cmp(&tiles[right])
+            .then_with(|| objects[left].metadata.id.cmp(&objects[right].metadata.id))
+            .then(left.cmp(&right))
+    });
+    order
+}
+
 #[derive(Debug)]
 struct Layout {
     records_offset: usize,
@@ -232,6 +261,15 @@ fn section_end(offset: usize, count: usize, size: usize) -> io::Result<usize> {
 
 /// Write a new memory-mapped object catalog.
 pub(crate) fn write(path: &Path, objects: &[SkyObject]) -> io::Result<()> {
+    let bytes = encode(objects)?;
+    let mut output = BufWriter::new(File::create(path)?);
+    output.write_all(&bytes)?;
+    output.flush()
+}
+
+/// Encode the complete v3 catalog. V4 embeds this proven demand-paged query
+/// representation as one independently versioned hot section.
+pub(crate) fn encode(objects: &[SkyObject]) -> io::Result<Vec<u8>> {
     let record_count = u32::try_from(objects.len()).map_err(|_| catalog_too_large())?;
     let grid = Grid::new(DEFAULT_BANDS);
     let mut strings = StringTable::default();
@@ -339,7 +377,7 @@ pub(crate) fn write(path: &Path, objects: &[SkyObject]) -> io::Result<()> {
         string_bytes,
     )?;
 
-    let mut output = BufWriter::new(File::create(path)?);
+    let mut output = Vec::with_capacity(layout.file_size);
     output.write_all(MAGIC)?;
     output.write_all(&(HEADER_SIZE as u32).to_le_bytes())?;
     output.write_all(&DEFAULT_BANDS.to_le_bytes())?;
@@ -414,7 +452,10 @@ pub(crate) fn write(path: &Path, objects: &[SkyObject]) -> io::Result<()> {
         layout.strings_offset,
     )?;
     output.write_all(&strings.bytes)?;
-    output.flush()
+    if output.len() != layout.file_size {
+        return Err(catalog_too_large());
+    }
+    Ok(output)
 }
 
 fn pack_list(
@@ -475,7 +516,9 @@ fn write_padding(output: &mut impl Write, current: usize, target: usize) -> io::
 
 /// Read-only mmap view. Opening validates only the header and section bounds.
 pub(crate) struct MappedObjectCatalog {
-    map: memmap2::Mmap,
+    map: Arc<memmap2::Mmap>,
+    base: usize,
+    section_len: usize,
     grid: Grid,
     record_count: usize,
     tile_count: usize,
@@ -502,21 +545,34 @@ impl MappedObjectCatalog {
         let file = File::open(path)?;
         // Safety: the catalog is mapped read-only and retained for the lifetime
         // of every borrowed byte slice.
-        let map = unsafe { memmap2::Mmap::map(&file)? };
-        if map.len() < HEADER_SIZE || &map[..8] != MAGIC {
+        let map = Arc::new(unsafe { memmap2::Mmap::map(&file)? });
+        let section_len = map.len();
+        Self::from_mmap(map, 0, section_len)
+    }
+
+    pub(crate) fn from_mmap(
+        map: Arc<memmap2::Mmap>,
+        base: usize,
+        section_len: usize,
+    ) -> io::Result<Self> {
+        if base > map.len() || section_len > map.len() - base {
+            return Err(invalid_data("v3 object catalog section is out of bounds"));
+        }
+        let bytes = &map[base..base + section_len];
+        if bytes.len() < HEADER_SIZE || &bytes[..8] != MAGIC {
             return Err(invalid_data("not a seiza v3 object catalog"));
         }
-        let header_size = read_u32_at(&map, 8)? as usize;
-        let n_bands = read_u32_at(&map, 12)?;
+        let header_size = read_u32_at(bytes, 8)? as usize;
+        let n_bands = read_u32_at(bytes, 12)?;
         if header_size != HEADER_SIZE || n_bands == 0 || n_bands > 4096 {
             return Err(invalid_data("invalid object catalog header"));
         }
-        let record_count = read_count(&map, 16, "object")?;
-        let tile_count = read_count(&map, 20, "tile")?;
-        let candidate_count = read_count(&map, 24, "tile candidate")?;
-        let name_count = read_count(&map, 28, "name")?;
-        let list_ref_count = read_count(&map, 32, "list string")?;
-        let string_bytes = read_u64_at(&map, 40)?;
+        let record_count = read_count(bytes, 16, "object")?;
+        let tile_count = read_count(bytes, 20, "tile")?;
+        let candidate_count = read_count(bytes, 24, "tile candidate")?;
+        let name_count = read_count(bytes, 28, "name")?;
+        let list_ref_count = read_count(bytes, 32, "list string")?;
+        let string_bytes = read_u64_at(bytes, 40)?;
         let string_bytes = usize::try_from(string_bytes)
             .map_err(|_| invalid_data("object string table is too large"))?;
         let layout = Layout::calculate(
@@ -528,13 +584,13 @@ impl MappedObjectCatalog {
             string_bytes,
         )?;
         let stored_offsets = [
-            read_u64_at(&map, 48)?,
-            read_u64_at(&map, 56)?,
-            read_u64_at(&map, 64)?,
-            read_u64_at(&map, 72)?,
-            read_u64_at(&map, 80)?,
-            read_u64_at(&map, 88)?,
-            read_u64_at(&map, 96)?,
+            read_u64_at(bytes, 48)?,
+            read_u64_at(bytes, 56)?,
+            read_u64_at(bytes, 64)?,
+            read_u64_at(bytes, 72)?,
+            read_u64_at(bytes, 80)?,
+            read_u64_at(bytes, 88)?,
+            read_u64_at(bytes, 96)?,
         ];
         let expected_offsets = [
             layout.records_offset,
@@ -549,7 +605,7 @@ impl MappedObjectCatalog {
             .iter()
             .zip(expected_offsets)
             .any(|(&stored, expected)| usize::try_from(stored).ok() != Some(expected))
-            || layout.file_size != map.len()
+            || layout.file_size != bytes.len()
         {
             return Err(invalid_data(
                 "object catalog section bounds are inconsistent",
@@ -561,6 +617,8 @@ impl MappedObjectCatalog {
         }
         Ok(Self {
             map,
+            base,
+            section_len,
             grid,
             record_count,
             tile_count,
@@ -569,6 +627,10 @@ impl MappedObjectCatalog {
             list_ref_count,
             layout,
         })
+    }
+
+    fn bytes(&self) -> &[u8] {
+        &self.map[self.base..self.base + self.section_len]
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -580,7 +642,7 @@ impl MappedObjectCatalog {
             return Err(invalid_data("object record index is out of bounds"));
         }
         let start = self.layout.records_offset + index * RECORD_SIZE;
-        let record = &self.map[start..start + RECORD_SIZE];
+        let record = &self.bytes()[start..start + RECORD_SIZE];
         if record[1..4] != [0, 0, 0] {
             return Err(invalid_data("object record reserved bytes are nonzero"));
         }
@@ -615,19 +677,18 @@ impl MappedObjectCatalog {
     /// Return record indices from tiles covering a query cap. Candidate lists
     /// include every tile touched by each object's conservative extent.
     pub(crate) fn candidates(&self, ra: f64, dec: f64, radius_deg: f64) -> io::Result<Vec<u32>> {
-        let mut seen = vec![false; self.record_count];
+        let mut seen = HashSet::new();
         let mut result = Vec::new();
         for tile in self.grid.cone_tiles(ra, dec, radius_deg) {
             let (start, count) = self.tile_range(tile as usize)?;
             for candidate_index in start..start + count {
                 let offset = self.layout.candidates_offset + candidate_index * CANDIDATE_SIZE;
-                let object_index = read_u32_at(&self.map, offset)?;
+                let object_index = read_u32_at(self.bytes(), offset)?;
                 let index = object_index as usize;
                 if index >= self.record_count {
                     return Err(invalid_data("object tile candidate is out of bounds"));
                 }
-                if !seen[index] {
-                    seen[index] = true;
+                if seen.insert(object_index) {
                     result.push(object_index);
                 }
             }
@@ -651,6 +712,28 @@ impl MappedObjectCatalog {
                 object: self.object(entry.object_index as usize)?,
                 matched_name: self.string_from_ref(entry.designation)?.to_string(),
             });
+            index += 1;
+        }
+        Ok(matches)
+    }
+
+    /// Resolve exact-name index entries to canonical ordinals without scanning
+    /// the object-core section. Used by v4 cold-detail lookup.
+    pub(crate) fn lookup_name_indices(&self, designation: &str) -> io::Result<Vec<u32>> {
+        let key = normalize_name(designation);
+        if key.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut index = self.lower_bound_name(&key)?;
+        let mut matches = Vec::new();
+        while index < self.name_count {
+            let entry = self.name_entry(index)?;
+            if self.string_from_ref(entry.key)? != key {
+                break;
+            }
+            if matches.last().copied() != Some(entry.object_index) {
+                matches.push(entry.object_index);
+            }
             index += 1;
         }
         Ok(matches)
@@ -683,7 +766,7 @@ impl MappedObjectCatalog {
 
     /// Exhaustive file validation, intentionally separate from open.
     pub(crate) fn validate(&self) -> io::Result<()> {
-        std::str::from_utf8(&self.map[self.layout.strings_offset..])
+        std::str::from_utf8(&self.bytes()[self.layout.strings_offset..])
             .map_err(|_| invalid_data("object string table is not UTF-8"))?;
 
         for index in 0..self.list_ref_count {
@@ -691,7 +774,7 @@ impl MappedObjectCatalog {
         }
         for index in 0..self.record_count {
             let start = self.layout.records_offset + index * RECORD_SIZE;
-            if self.map[start] > 13 {
+            if self.bytes()[start] > 13 {
                 return Err(invalid_data("object record kind is invalid"));
             }
             self.object(index)?;
@@ -709,7 +792,7 @@ impl MappedObjectCatalog {
             let mut previous_object = None;
             for candidate in start..start + count {
                 let offset = self.layout.candidates_offset + candidate * CANDIDATE_SIZE;
-                let object = read_u32_at(&self.map, offset)? as usize;
+                let object = read_u32_at(self.bytes(), offset)? as usize;
                 if object >= self.record_count
                     || previous_object.is_some_and(|previous| previous >= object)
                 {
@@ -750,8 +833,8 @@ impl MappedObjectCatalog {
             return Err(invalid_data("object tile index is out of bounds"));
         }
         let offset = self.layout.tile_index_offset + tile * TILE_INDEX_SIZE;
-        let start = read_u32_at(&self.map, offset)? as usize;
-        let count = read_u32_at(&self.map, offset + 4)? as usize;
+        let start = read_u32_at(self.bytes(), offset)? as usize;
+        let count = read_u32_at(self.bytes(), offset + 4)? as usize;
         if start > self.candidate_count || count > self.candidate_count - start {
             return Err(invalid_data("object tile candidate range is out of bounds"));
         }
@@ -777,18 +860,18 @@ impl MappedObjectCatalog {
             return Err(invalid_data("object list string index is out of bounds"));
         }
         let offset = self.layout.list_refs_offset + index * STRING_REF_SIZE;
-        Ok(read_string_ref(&self.map, offset))
+        Ok(read_string_ref(self.bytes(), offset))
     }
 
     fn string_from_ref(&self, reference: StringRef) -> io::Result<&str> {
         let start = reference.offset as usize;
         let count = reference.len as usize;
-        let string_bytes = self.map.len() - self.layout.strings_offset;
+        let string_bytes = self.section_len - self.layout.strings_offset;
         if start > string_bytes || count > string_bytes - start {
             return Err(invalid_data("object string reference is out of bounds"));
         }
         let start = self.layout.strings_offset + start;
-        std::str::from_utf8(&self.map[start..start + count])
+        std::str::from_utf8(&self.bytes()[start..start + count])
             .map_err(|_| invalid_data("object string is not UTF-8"))
     }
 
@@ -798,9 +881,9 @@ impl MappedObjectCatalog {
         }
         let offset = self.layout.names_offset + index * NAME_INDEX_SIZE;
         Ok(PackedName {
-            key: read_string_ref(&self.map, offset),
-            designation: read_string_ref(&self.map, offset + 6),
-            object_index: read_u32_at(&self.map, offset + 12)?,
+            key: read_string_ref(self.bytes(), offset),
+            designation: read_string_ref(self.bytes(), offset + 6),
+            object_index: read_u32_at(self.bytes(), offset + 12)?,
         })
     }
 

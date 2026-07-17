@@ -2,8 +2,8 @@ use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-/// Files that make a coherent hosted v2 catalog bundle.
-pub const REQUIRED_V2_FILES: &[&str] = &[
+/// Files that make a coherent hosted catalog bundle.
+pub const REQUIRED_BUNDLE_FILES: &[&str] = &[
     "blind-gaia16.idx",
     "minor-bodies.bin",
     "objects.bin",
@@ -13,6 +13,13 @@ pub const REQUIRED_V2_FILES: &[&str] = &[
     "stars-lite-tycho2.ids.bin",
     "transients.bin",
 ];
+
+/// Files required by the previous v2 bundle.
+///
+/// V2 and v4 intentionally contain the same logical datasets. New code should
+/// use [`REQUIRED_BUNDLE_FILES`]; this alias remains so existing library users
+/// do not need to change merely to read a legacy manifest.
+pub const REQUIRED_V2_FILES: &[&str] = REQUIRED_BUNDLE_FILES;
 
 /// A known artifact in the current hosted bundle.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -124,8 +131,19 @@ impl Default for CatalogSet {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ManifestFile {
     pub name: String,
+    /// Immutable S3 key relative to the bundle base URL. Required by v4.
+    /// Legacy v2 manifests omit it and resolve artifacts directly by `name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
     pub bytes: u64,
     pub sha256: String,
+}
+
+impl ManifestFile {
+    /// Relative URL used to download this artifact.
+    pub fn artifact_key(&self) -> &str {
+        self.key.as_deref().unwrap_or(&self.name)
+    }
 }
 
 /// A complete, coherent set of hosted catalog artifacts.
@@ -143,12 +161,16 @@ impl BundleManifest {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if !self.version.starts_with("catalog-bundle-v2-") {
+        let generation = if self.version.starts_with("catalog-bundle-v2-") {
+            2
+        } else if self.version.starts_with("catalog-bundle-v4-") {
+            4
+        } else {
             return Err(Error::Manifest(format!(
-                "unsupported version {}",
+                "unsupported version {}; expected catalog-bundle-v2-* or catalog-bundle-v4-*",
                 self.version
             )));
-        }
+        };
 
         let mut offered = BTreeSet::new();
         for file in &self.files {
@@ -167,19 +189,37 @@ impl BundleManifest {
                     file.name
                 )));
             }
+            match generation {
+                2 if file.key.is_some() => {
+                    return Err(Error::Manifest(format!(
+                        "legacy v2 artifact {} must not define a key",
+                        file.name
+                    )));
+                }
+                4 => {
+                    let expected = format!("artifacts/{}/{}", file.sha256, file.name);
+                    if file.key.as_deref() != Some(expected.as_str()) {
+                        return Err(Error::Manifest(format!(
+                            "v4 artifact {} must use immutable key {}",
+                            file.name, expected
+                        )));
+                    }
+                }
+                _ => {}
+            }
             if !offered.insert(file.name.as_str()) {
                 return Err(Error::Manifest(format!("duplicate file: {}", file.name)));
             }
         }
 
-        let missing = REQUIRED_V2_FILES
+        let missing = REQUIRED_BUNDLE_FILES
             .iter()
             .filter(|name| !offered.contains(**name))
             .copied()
             .collect::<Vec<_>>();
         if !missing.is_empty() {
             return Err(Error::Manifest(format!(
-                "catalog bundle v2 is incomplete; missing: {}",
+                "catalog bundle v{generation} is incomplete; missing: {}",
                 missing.join(", ")
             )));
         }
@@ -240,17 +280,30 @@ mod tests {
 
     fn manifest() -> BundleManifest {
         BundleManifest {
-            version: "catalog-bundle-v2-test".into(),
-            files: REQUIRED_V2_FILES
+            version: "catalog-bundle-v4-test".into(),
+            files: REQUIRED_BUNDLE_FILES
                 .iter()
                 .enumerate()
-                .map(|(index, name)| ManifestFile {
-                    name: (*name).into(),
-                    bytes: index as u64 + 1,
-                    sha256: hash(char::from(b"abcdef"[index % 6])),
+                .map(|(index, &name)| {
+                    let sha256 = hash(char::from(b"abcdef"[index % 6]));
+                    ManifestFile {
+                        name: name.into(),
+                        key: Some(format!("artifacts/{sha256}/{name}")),
+                        bytes: index as u64 + 1,
+                        sha256,
+                    }
                 })
                 .collect(),
         }
+    }
+
+    fn legacy_v2_manifest() -> BundleManifest {
+        let mut manifest = manifest();
+        manifest.version = "catalog-bundle-v2-test".into();
+        for file in &mut manifest.files {
+            file.key = None;
+        }
+        manifest
     }
 
     #[test]
@@ -264,6 +317,49 @@ mod tests {
                 .map(|file| file.name.as_str())
                 .collect::<Vec<_>>(),
             ["objects.bin", "transients.bin"]
+        );
+    }
+
+    #[test]
+    fn legacy_v2_manifest_without_keys_remains_accepted() {
+        let manifest = legacy_v2_manifest();
+        manifest.validate().unwrap();
+        assert_eq!(manifest.files[0].artifact_key(), manifest.files[0].name);
+    }
+
+    #[test]
+    fn v4_requires_content_addressed_artifact_keys() {
+        let mut missing = manifest();
+        missing.files[0].key = None;
+        assert!(
+            missing
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("immutable key")
+        );
+
+        let mut mismatched = manifest();
+        mismatched.files[0].key = Some("artifacts/not-the-hash/objects.bin".into());
+        assert!(
+            mismatched
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("immutable key")
+        );
+    }
+
+    #[test]
+    fn historical_v3_bundle_version_is_not_repurposed() {
+        let mut manifest = manifest();
+        manifest.version = "catalog-bundle-v3-test".into();
+        assert!(
+            manifest
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported version")
         );
     }
 

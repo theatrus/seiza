@@ -64,7 +64,8 @@ visible in the image pixels.
 `catalog object` resolves primary/common names, aliases, and stable or
 alternate IDs. Both object viewport queries and name completion use indices
 embedded in the memory-mapped `objects.bin`; normal open does not decode every
-record or touch every index page.
+record or touch every index page. Add `--all-sources` to audit every normalized
+upstream row, preferred facet selection, and source-qualified geometry.
 
 ## Persistent worker
 
@@ -110,12 +111,14 @@ seiza download-data prebuilt --output data
 seiza download-data prebuilt --output data --file objects.bin --file transients.bin
 ```
 
-The downloader reads one complete bundle from `/data/v2/manifest.json` and
-caches its immutable files by SHA-256 before copying the requested selection
-into the same flat local output directory. The shared platform cache can be
-overridden with `SEIZA_CACHE_DIR`. It never combines catalogs from different
-hosted bundle versions. The unversioned `/data/` manifest and files remain
-temporarily as the classic v1 compatibility surface for older clients.
+The downloader reads one complete bundle from `/data/v4/manifest.json` and
+caches its immutable, content-addressed files by SHA-256 before copying the
+requested selection into the same flat local output directory. The shared
+platform cache can be overridden with `SEIZA_CACHE_DIR`. It never combines
+catalogs from different hosted bundle versions. Previously released `/data/`
+and `/data/v2/` paths remain frozen for classic v1 and v0.4.1/v0.5 readers.
+The historical `/data/v3/` probe used by v0.4.0 remains reserved and may be
+absent; those readers retain their existing fallback behavior.
 
 Library integrations can use `seiza-download` directly for async, automatic
 cache management. The raw catalog commands below are implemented by the
@@ -137,18 +140,46 @@ seiza download-data gaia --output raw/gaia        # Gaia DR3 via TAP, resumable
 seiza build-data gaia --input raw/gaia --output stars-gaia.bin
 
 seiza download-data objects --output raw/objects
+seiza download-data curation --output raw/curation --commit <git-sha>
 seiza build-data objects --input raw/objects --output objects.bin \
+  --curation-dir raw/curation \
   --source-manifest objects.sources.json
 seiza download-data transients --output raw/transients
 seiza build-data transients --input raw/transients --output transients.bin
+seiza download-data mpc --output raw/minor-bodies
+seiza build-data minor-bodies --input raw/minor-bodies --output minor-bodies.bin
 ```
 
-The optional source manifest records the output hash and size, metadata
-coverage counts, source URLs, and hashes of every raw catalog file used.
+The optional curation directory is a pinned local checkout; the builder never
+fetches it. Its `curation.json` records repository, commit, and schema version.
+Each `objects/<id>.toml` file owns the corrections, relations, selections,
+exceptional outline remappings, notes, and structured evidence for one
+canonical target. Normally named OpenNGC outlines are associated directly
+during upstream ingestion and do not require curation documents. The optional
+source manifest records the output hash and size, metadata coverage counts,
+source URLs, curation revision, and hashes of every raw catalog and curation
+file used.
 The optional identifier sidecar provides memory-mapped exact TYC/HIP/HR/HD/
 SAO/FK5 lookup plus exact and prefix search over IAU proper names,
 Bayer/Flamsteed names, GCVS variables, and WDS double-star designations. It
 does not change the solver's compact star tile file.
+
+To publish new transient and Solar-system data without rebuilding the object or
+star catalogs, put only the replacement `transients.bin` and
+`minor-bodies.bin` in a directory and roll forward each complete manifest:
+
+```shell
+seiza build-data manifest --dir next-dynamic \
+  --base-manifest current-v2.json \
+  --version catalog-bundle-v2-YYYY-MM-DD --output next-v2.json
+seiza build-data manifest --dir next-dynamic \
+  --base-manifest current-v4.json \
+  --version catalog-bundle-v4-YYYY-MM-DD --output next-v4.json
+```
+
+The v2 output retains flat keys for released v3-object readers. The v4 output
+uses content-addressed artifact keys. Both commands require the resulting
+bundle to contain every required catalog.
 
 Normal catalog opens do not perform exhaustive validation. Validate any seiza
 star tile, identifier sidecar, blind index, object catalog, or minor-body

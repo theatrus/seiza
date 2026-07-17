@@ -2,6 +2,11 @@
 
 Status: implemented
 
+Successor proposal: [Extensible object catalog container
+v4](objects-bin-v4.md). V3 remains the implemented and published wire-format
+specification; the proposal preserves complete source records, supports typed
+geometry, and moves future evolution to independently versioned sections.
+
 ## Purpose
 
 `SEIZAOB3` adds identity, hierarchy, provenance, and indexed point/ellipse
@@ -81,15 +86,17 @@ candidate ordering, and name-index ordering. The CLI auto-detects v3 with
 materializes and caches the complete mmap catalog. `read_all` is its fallible,
 owned equivalent. Interactive and overlay callers should use indexed queries.
 
-`ObjectCatalog::write_to` writes v3. `write_v1_to` remains for controlled
-compatibility exports, and the reader remains backward compatible with the
-deployed v1 format.
+`ObjectCatalog::write_to` now writes v4. `write_v3_to` and `write_v1_to` remain
+for controlled compatibility exports, and the reader remains backward
+compatible with both deployed formats.
 
 ## Hosted distribution
 
-The v3 object wire format is published inside the complete `/data/v2/` catalog
-bundle. Bundle versions and wire-format versions are deliberately separate:
-the bundle selects one coherent set of catalogs, while each mapped file keeps
-its own magic/version header. The unversioned `/data/` bundle temporarily
-retains `SEIZAOB1` objects for classic clients; new clients never combine those
-legacy objects with files from the v2 bundle.
+The v3 object wire format remains published inside the frozen complete
+`/data/v2/` catalog bundle for v0.4.1/v0.5 clients. The historical `/data/v3/`
+URL remains reserved because v0.4.0 probed it for a standalone object-v3
+manifest and falls back to `/data/` when it is absent. Bundle versions and
+wire-format versions are separate: each bundle selects one coherent catalog
+set, while every mapped file keeps its own magic/version header. The
+unversioned `/data/` bundle retains `SEIZAOB1` objects for classic clients. V4
+objects are published only under `/data/v4/`.
