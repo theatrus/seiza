@@ -26,9 +26,10 @@ failure, prints the complete error chain, and waits for Enter so download or
 filesystem errors cannot disappear with the window. The Start menu shortcut
 uses the same behavior and can be used to retry setup later.
 
-Every setup-wizard choice includes the object catalog and at least one usable
-plate-solving catalog. The menu describes choices by use case: lightweight
-hinted solving, denser Gaia solving, deep blind solving, or the complete bundle.
+Every setup-wizard choice includes the object catalog, Solar System objects,
+active transients, and at least one usable plate-solving catalog. The menu
+describes choices by use case: lightweight hinted solving, denser Gaia solving,
+deep blind solving, or the complete bundle.
 
 The welcome, completion, and banner artwork in `assets/` uses Seiza-specific
 constellation and astrometry imagery instead of the stock WiX graphics.
