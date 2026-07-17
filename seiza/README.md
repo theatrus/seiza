@@ -24,10 +24,15 @@ astrophotography, in Rust.
   search; builders for Tycho-2, Gaia DR3 (via TAP), and ASTAP databases.
 - **Object catalogs** — NGC/IC/Messier, Sharpless, Barnard, UGC, LDN, LBN,
   Cederblad, vdB, PGC, named/HD stars, and live transient (supernova/nova)
-  lists built into a compact, versioned store with stable source IDs, aliases,
-  hierarchy, and provenance; query known sky cones and convex footprints
-  without plate solving, or project objects into solved images with full
-  ellipse geometry.
+  lists built into an extensible, memory-mapped sectioned container with
+  stable source IDs, aliases, hierarchy, and provenance; query known sky
+  cones and convex footprints without plate solving, or project objects into
+  solved images with full ellipse geometry. Cold detail sections keep every
+  contributing upstream record, typed relations, preferred facet selections,
+  and source-qualified geometry (ellipses and outline contours) behind
+  `object_details`, `catalog_records`, `geometries`, `relations`, and
+  `capabilities`, without touching normal query paths. Legacy `SEIZAOB1` and
+  `SEIZAOB3` files remain readable.
 - **Optional catalog downloads** — enable the non-default `downloads` feature
   for `seiza::downloads`, an async, verified shared cache of published catalog
   bundles. Normal catalog opens never access the network.

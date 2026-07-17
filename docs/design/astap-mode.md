@@ -1,6 +1,7 @@
 # ASTAP-compatible mode: seiza as a N.I.N.A. plate solver
 
-Status: design (task tracked; implementation not started)
+Status: implemented (`seiza` auto-detects ASTAP-style invocations; a copy
+renamed `astap.exe` behaves identically)
 
 ## Goal
 

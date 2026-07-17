@@ -1,6 +1,6 @@
 # Streaming FITS image I/O follow-up
 
-Status: implemented on `codex/fits-streaming`
+Status: implemented
 
 ## Previous behavior
 

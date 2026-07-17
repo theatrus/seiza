@@ -1,11 +1,13 @@
 # Object catalog binary format v3
 
-Status: implemented
+Status: implemented; superseded as the written format by the
+[extensible object catalog container v4](objects-bin-v4.md)
 
-Successor proposal: [Extensible object catalog container
-v4](objects-bin-v4.md). V3 remains the implemented and published wire-format
-specification; the proposal preserves complete source records, supports typed
-geometry, and moves future evolution to independently versioned sections.
+New catalogs are written as v4 containers, which embed this v3 layout as
+their required hot canonical query section, so this document still specifies
+that section's wire format. Standalone `SEIZAOB3` files remain readable, and
+`ObjectCatalog::write_v3_to` still produces them for controlled compatibility
+exports.
 
 ## Purpose
 
