@@ -1,11 +1,11 @@
 //! Deep-sky object and named-star catalogs, and their projection into a
 //! solved image for overlays.
 //!
-//! Current binary format `SEIZAOB3` uses fixed records, shared string/list
-//! tables, and embedded sky/name indices in a read-only memory map. Opening a
-//! v3 catalog validates only its header and section bounds; records and index
-//! pages are touched on demand. Legacy deployed `SEIZAOB1` files remain
-//! readable, although that older format must be decoded into memory.
+//! Current binary format v4 uses an extensible section directory around a
+//! demand-paged canonical query index and source-qualified detail records.
+//! Opening a catalog validates only its envelope and section bounds; records,
+//! detail payloads, and checksums are touched on demand. Legacy `SEIZAOB1` and
+//! `SEIZAOB3` files remain readable.
 
 use crate::wcs::Wcs;
 use std::fs::File;
@@ -13,10 +13,13 @@ use std::io::{self, BufReader, BufWriter, Read, Seek, Write};
 use std::path::Path;
 use std::sync::OnceLock;
 
+use serde::{Deserialize, Serialize};
+
 const MAGIC_V1: &[u8; 8] = b"SEIZAOB1";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
+#[serde(rename_all = "kebab-case")]
 pub enum ObjectKind {
     Galaxy = 0,
     OpenCluster = 1,
@@ -80,7 +83,7 @@ impl ObjectKind {
 /// IDs are opaque to seiza, but producers should make them stable and
 /// source-qualified (for example `openngc:NGC224`). Parent IDs use the same
 /// namespace and may point to containing nebulae, galaxies, or clusters.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectMetadata {
     /// Stable, source-qualified record ID. Empty for legacy v1 records.
     pub id: String,
@@ -96,7 +99,7 @@ pub struct ObjectMetadata {
     pub alternate_sources: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkyObject {
     pub kind: ObjectKind,
     /// ICRS degrees
@@ -115,6 +118,287 @@ pub struct SkyObject {
     pub common_name: String,
     /// Identity, hierarchy, and provenance. Empty when read from v1.
     pub metadata: ObjectMetadata,
+}
+
+/// Complete build input for an extensible v4 object catalog.
+///
+/// `details` is ordinal-aligned with `objects`: entry N describes canonical
+/// object N. A minimal catalog may leave it empty, in which case source detail
+/// is synthesized from each canonical object when the file is written.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ObjectCatalogData {
+    pub objects: Vec<SkyObject>,
+    pub details: Vec<ObjectDetails>,
+    pub provenance: ObjectCatalogProvenance,
+}
+
+impl ObjectCatalogData {
+    pub fn from_objects(objects: Vec<SkyObject>) -> Self {
+        let details = objects
+            .iter()
+            .enumerate()
+            .map(|(index, object)| {
+                let record_id = if object.metadata.id.is_empty() {
+                    format!("legacy:ordinal:{index}")
+                } else {
+                    object.metadata.id.clone()
+                };
+                ObjectDetails::from_canonical_with_record_id(object, record_id)
+            })
+            .collect();
+        Self {
+            objects,
+            details,
+            provenance: ObjectCatalogProvenance::default(),
+        }
+    }
+}
+
+/// All source-qualified information retained for one canonical object.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ObjectDetails {
+    pub canonical_id: String,
+    pub source_records: Vec<ObjectSourceRecord>,
+    pub relations: Vec<ObjectRelation>,
+    pub selections: Vec<ObjectSelection>,
+    pub geometries: Vec<ObjectGeometry>,
+}
+
+impl ObjectDetails {
+    pub fn from_canonical(object: &SkyObject) -> Self {
+        Self::from_canonical_with_record_id(object, object.metadata.id.clone())
+    }
+
+    pub(crate) fn from_canonical_with_record_id(object: &SkyObject, record_id: String) -> Self {
+        let mut geometries = Vec::new();
+        if let Some(major_arcmin) = object.major_arcmin {
+            geometries.push(ObjectGeometry {
+                id: format!("{}#catalog-ellipse", record_id),
+                source_record_id: record_id.clone(),
+                role: GeometryRole::CatalogExtent,
+                quality: GeometryQuality::Catalog,
+                method: String::new(),
+                evidence: String::new(),
+                data: GeometryData::Ellipse {
+                    center_ra_deg: object.ra,
+                    center_dec_deg: object.dec,
+                    major_arcmin,
+                    minor_arcmin: object.minor_arcmin,
+                    position_angle_deg: object.position_angle_deg,
+                },
+            });
+        } else {
+            geometries.push(ObjectGeometry {
+                id: format!("{}#catalog-point", record_id),
+                source_record_id: record_id.clone(),
+                role: GeometryRole::CatalogExtent,
+                quality: GeometryQuality::Catalog,
+                method: String::new(),
+                evidence: String::new(),
+                data: GeometryData::Point {
+                    ra_deg: object.ra,
+                    dec_deg: object.dec,
+                },
+            });
+        }
+        let geometry_id = geometries.first().map(|geometry| geometry.id.clone());
+        Self {
+            canonical_id: object.metadata.id.clone(),
+            source_records: vec![ObjectSourceRecord {
+                id: record_id.clone(),
+                source: object.metadata.source.clone(),
+                object: object.clone(),
+                properties: Vec::new(),
+            }],
+            relations: object
+                .metadata
+                .parent_ids
+                .iter()
+                .map(|target_id| ObjectRelation {
+                    kind: ObjectRelationKind::ComponentOf,
+                    target_id: target_id.clone(),
+                    source_record_id: record_id.clone(),
+                    note: String::new(),
+                })
+                .collect(),
+            selections: [
+                ObjectSelection {
+                    facet: ObjectFacet::PreferredIdentity,
+                    source_record_id: Some(record_id.clone()),
+                    geometry_id: None,
+                    reason: String::new(),
+                },
+                ObjectSelection {
+                    facet: ObjectFacet::PreferredPosition,
+                    source_record_id: Some(record_id.clone()),
+                    geometry_id: None,
+                    reason: String::new(),
+                },
+                ObjectSelection {
+                    facet: ObjectFacet::PreferredGeometry,
+                    source_record_id: Some(record_id),
+                    geometry_id,
+                    reason: String::new(),
+                },
+            ]
+            .into_iter()
+            .collect(),
+            geometries,
+        }
+    }
+}
+
+/// One immutable normalized upstream catalog row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObjectSourceRecord {
+    /// Stable source-record identifier.
+    pub id: String,
+    pub source: String,
+    pub object: SkyObject,
+    /// Source-specific columns that are not promoted into common fields.
+    pub properties: Vec<ObjectProperty>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectProperty {
+    pub name: String,
+    pub value: String,
+    pub unit: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ObjectRelationKind {
+    SameAs,
+    ComponentOf,
+    ParentOf,
+    DuplicateOf,
+    CatalogAlias,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectRelation {
+    pub kind: ObjectRelationKind,
+    pub target_id: String,
+    pub source_record_id: String,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ObjectFacet {
+    PreferredIdentity,
+    PreferredPosition,
+    PreferredGeometry,
+    PreferredPhotometry,
+    PreferredClassification,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectSelection {
+    pub facet: ObjectFacet,
+    pub source_record_id: Option<String>,
+    pub geometry_id: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GeometryRole {
+    CatalogExtent,
+    PreferredRender,
+    FallbackExtent,
+    BrightnessLevel,
+    Component,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GeometryQuality {
+    Catalog,
+    Curated,
+    Estimated,
+    Derived,
+}
+
+/// Source-qualified render or indexing geometry. Ellipse members are atomic:
+/// the writer never fills missing members from a different source record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObjectGeometry {
+    pub id: String,
+    pub source_record_id: String,
+    pub role: GeometryRole,
+    pub quality: GeometryQuality,
+    pub method: String,
+    pub evidence: String,
+    pub data: GeometryData,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum GeometryData {
+    Point {
+        ra_deg: f64,
+        dec_deg: f64,
+    },
+    Ellipse {
+        center_ra_deg: f64,
+        center_dec_deg: f64,
+        major_arcmin: f32,
+        minor_arcmin: Option<f32>,
+        position_angle_deg: Option<f32>,
+    },
+    OutlineSet {
+        level: Option<String>,
+        contours: Vec<ObjectContour>,
+    },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ObjectContour {
+    pub closed: bool,
+    pub vertices: Vec<(f64, f64)>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectCatalogProvenance {
+    pub sources: Vec<ObjectProvenanceSource>,
+    pub curation: Option<ObjectCurationRevision>,
+    pub build_policy: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectProvenanceSource {
+    pub name: String,
+    pub reference_url: String,
+    pub revision: String,
+    pub files: Vec<ObjectProvenanceFile>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectProvenanceFile {
+    pub path: String,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectCurationRevision {
+    pub repository: String,
+    pub commit: String,
+    pub schema_version: String,
+    pub files: Vec<ObjectProvenanceFile>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ObjectCatalogCapabilities {
+    pub source_records: bool,
+    pub relations: bool,
+    pub selections: bool,
+    pub ellipses: bool,
+    pub outlines: bool,
+    pub provenance: bool,
+    pub unknown_optional_sections: usize,
 }
 
 /// An object projected into a solved image.
@@ -234,13 +518,16 @@ pub enum ObjectQueryError {
 #[derive(Debug)]
 enum ObjectStorage {
     Memory {
-        objects: Vec<SkyObject>,
+        data: ObjectCatalogData,
         trailing_bytes: u64,
+        format_version: u8,
     },
     MappedV3(crate::object_catalog_v3::MappedObjectCatalog),
+    MappedV4(crate::object_catalog_v4::MappedObjectCatalog),
 }
 
-/// An object catalog. Newly written catalogs are mmap-backed `SEIZAOB3`;
+/// An object catalog. Newly written catalogs use the mmap-backed extensible v4
+/// container;
 /// catalogs constructed with [`Self::new`] remain in memory until written.
 #[derive(Debug)]
 pub struct ObjectCatalog {
@@ -258,17 +545,59 @@ impl ObjectCatalog {
     pub fn new(objects: Vec<SkyObject>) -> Self {
         Self {
             storage: ObjectStorage::Memory {
-                objects,
+                data: ObjectCatalogData::from_objects(objects),
                 trailing_bytes: 0,
+                format_version: 4,
             },
             materialized: OnceLock::new(),
         }
     }
 
+    /// Construct a catalog with complete source records, selections,
+    /// geometries, and reproducibility provenance.
+    pub fn from_data(mut data: ObjectCatalogData) -> io::Result<Self> {
+        if data.details.is_empty() {
+            data.details = data
+                .objects
+                .iter()
+                .enumerate()
+                .map(|(index, object)| {
+                    let record_id = if object.metadata.id.is_empty() {
+                        format!("legacy:ordinal:{index}")
+                    } else {
+                        object.metadata.id.clone()
+                    };
+                    ObjectDetails::from_canonical_with_record_id(object, record_id)
+                })
+                .collect();
+        }
+        if data.details.len() != data.objects.len()
+            || data
+                .objects
+                .iter()
+                .zip(&data.details)
+                .any(|(object, detail)| object.metadata.id != detail.canonical_id)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "object details must match canonical object order and IDs",
+            ));
+        }
+        Ok(Self {
+            storage: ObjectStorage::Memory {
+                data,
+                trailing_bytes: 0,
+                format_version: 4,
+            },
+            materialized: OnceLock::new(),
+        })
+    }
+
     pub fn len(&self) -> usize {
         match &self.storage {
-            ObjectStorage::Memory { objects, .. } => objects.len(),
+            ObjectStorage::Memory { data, .. } => data.objects.len(),
             ObjectStorage::MappedV3(catalog) => catalog.len(),
+            ObjectStorage::MappedV4(catalog) => catalog.len(),
         }
     }
 
@@ -280,8 +609,13 @@ impl ObjectCatalog {
     /// Region and name queries do not call this method.
     pub fn objects(&self) -> &[SkyObject] {
         match &self.storage {
-            ObjectStorage::Memory { objects, .. } => objects,
+            ObjectStorage::Memory { data, .. } => &data.objects,
             ObjectStorage::MappedV3(catalog) => self.materialized.get_or_init(|| {
+                catalog
+                    .read_all()
+                    .expect("mmap object records are invalid; call validate() for a fallible check")
+            }),
+            ObjectStorage::MappedV4(catalog) => self.materialized.get_or_init(|| {
                 catalog
                     .read_all()
                     .expect("mmap object records are invalid; call validate() for a fallible check")
@@ -292,20 +626,46 @@ impl ObjectCatalog {
     /// Decode and return every object with corruption reported as an error.
     pub fn read_all(&self) -> io::Result<Vec<SkyObject>> {
         match &self.storage {
-            ObjectStorage::Memory { objects, .. } => Ok(objects.clone()),
+            ObjectStorage::Memory { data, .. } => Ok(data.objects.clone()),
             ObjectStorage::MappedV3(catalog) => catalog.read_all(),
+            ObjectStorage::MappedV4(catalog) => catalog.read_all(),
         }
     }
 
-    /// Write the mmap-native `SEIZAOB3` format with sky and name indices.
+    /// Write the mmap-native extensible v4 format with sky and name indices.
     pub fn write_to(&self, path: &Path) -> io::Result<()> {
         match &self.storage {
-            ObjectStorage::Memory { objects, .. } => crate::object_catalog_v3::write(path, objects),
+            ObjectStorage::Memory { data, .. } => crate::object_catalog_v4::write(path, data),
             ObjectStorage::MappedV3(catalog) => {
                 let objects = catalog.read_all()?;
-                crate::object_catalog_v3::write(path, &objects)
+                crate::object_catalog_v4::write(path, &ObjectCatalogData::from_objects(objects))
+            }
+            ObjectStorage::MappedV4(catalog) => {
+                let objects = catalog.read_all()?;
+                let mut details = Vec::with_capacity(objects.len());
+                for (index, object) in objects.iter().enumerate() {
+                    details.push(
+                        catalog
+                            .details(index)?
+                            .unwrap_or_else(|| ObjectDetails::from_canonical(object)),
+                    );
+                }
+                crate::object_catalog_v4::write(
+                    path,
+                    &ObjectCatalogData {
+                        objects,
+                        details,
+                        provenance: catalog.provenance()?.unwrap_or_default(),
+                    },
+                )
             }
         }
+    }
+
+    /// Write the previous fixed-layout `SEIZAOB3` format for controlled
+    /// compatibility exports. Source-record details are omitted.
+    pub fn write_v3_to(&self, path: &Path) -> io::Result<()> {
+        crate::object_catalog_v3::write(path, &self.read_all()?)
     }
 
     /// Write the legacy `SEIZAOB1` format.
@@ -328,6 +688,14 @@ impl ObjectCatalog {
         let mut input = BufReader::new(file);
         let mut magic = [0u8; 8];
         input.read_exact(&mut magic)?;
+        if &magic == crate::object_catalog_v4::MAGIC {
+            return Ok(Self {
+                storage: ObjectStorage::MappedV4(
+                    crate::object_catalog_v4::MappedObjectCatalog::open(path)?,
+                ),
+                materialized: OnceLock::new(),
+            });
+        }
         if &magic == crate::object_catalog_v3::MAGIC {
             return Ok(Self {
                 storage: ObjectStorage::MappedV3(
@@ -356,8 +724,9 @@ impl ObjectCatalog {
         let trailing_bytes = file_len.saturating_sub(input.stream_position()?);
         Ok(Self {
             storage: ObjectStorage::Memory {
-                objects,
+                data: ObjectCatalogData::from_objects(objects),
                 trailing_bytes,
+                format_version: 1,
             },
             materialized: OnceLock::new(),
         })
@@ -371,13 +740,14 @@ impl ObjectCatalog {
         let mut ids = std::collections::HashSet::new();
         match &self.storage {
             ObjectStorage::Memory {
-                objects,
+                data,
                 trailing_bytes,
+                ..
             } => {
                 if *trailing_bytes != 0 {
                     return Err(invalid_object_data("object catalog has trailing bytes"));
                 }
-                for object in objects {
+                for object in &data.objects {
                     validate_object(object, &mut ids)?;
                 }
             }
@@ -387,8 +757,97 @@ impl ObjectCatalog {
                     validate_object(&catalog.object(index)?, &mut ids)?;
                 }
             }
+            ObjectStorage::MappedV4(catalog) => {
+                catalog.validate()?;
+                for index in 0..catalog.len() {
+                    validate_object(&catalog.object(index)?, &mut ids)?;
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Binary format generation (`1`, `3`, or `4`).
+    pub fn format_version(&self) -> u8 {
+        match &self.storage {
+            ObjectStorage::Memory { format_version, .. } => *format_version,
+            ObjectStorage::MappedV4(_) => 4,
+            ObjectStorage::MappedV3(_) => 3,
+        }
+    }
+
+    pub fn capabilities(&self) -> ObjectCatalogCapabilities {
+        match &self.storage {
+            ObjectStorage::Memory { data, .. } => capabilities_from_details(
+                &data.details,
+                !data.provenance.sources.is_empty() || data.provenance.curation.is_some(),
+            ),
+            ObjectStorage::MappedV3(_) => ObjectCatalogCapabilities::default(),
+            ObjectStorage::MappedV4(catalog) => catalog.capabilities(),
+        }
+    }
+
+    /// Fetch cold source-qualified data for one canonical stable ID. Only the
+    /// selected detail record is decoded for a v4 mmap catalog.
+    pub fn object_details(&self, canonical_id: &str) -> io::Result<Option<ObjectDetails>> {
+        match &self.storage {
+            ObjectStorage::Memory { data, .. } => Ok(data
+                .objects
+                .iter()
+                .position(|object| object.metadata.id == canonical_id)
+                .map(|index| data.details[index].clone())),
+            ObjectStorage::MappedV3(catalog) => {
+                for item in catalog.lookup_name(canonical_id)? {
+                    if item.object.metadata.id == canonical_id {
+                        return Ok(Some(ObjectDetails::from_canonical(&item.object)));
+                    }
+                }
+                Ok(None)
+            }
+            ObjectStorage::MappedV4(catalog) => catalog.details_by_id(canonical_id),
+        }
+    }
+
+    /// Fetch normalized upstream rows without paging packed outline vertices.
+    pub fn catalog_records(&self, canonical_id: &str) -> io::Result<Vec<ObjectSourceRecord>> {
+        match &self.storage {
+            ObjectStorage::MappedV4(catalog) => Ok(catalog
+                .source_records_by_id(canonical_id)?
+                .unwrap_or_default()),
+            _ => Ok(self
+                .object_details(canonical_id)?
+                .map(|details| details.source_records)
+                .unwrap_or_default()),
+        }
+    }
+
+    pub fn geometries(&self, canonical_id: &str) -> io::Result<Vec<ObjectGeometry>> {
+        Ok(self
+            .object_details(canonical_id)?
+            .map(|details| details.geometries)
+            .unwrap_or_default())
+    }
+
+    pub fn relations(&self, canonical_id: &str) -> io::Result<Vec<ObjectRelation>> {
+        Ok(self
+            .object_details(canonical_id)?
+            .map(|details| details.relations)
+            .unwrap_or_default())
+    }
+
+    pub fn selections(&self, canonical_id: &str) -> io::Result<Vec<ObjectSelection>> {
+        Ok(self
+            .object_details(canonical_id)?
+            .map(|details| details.selections)
+            .unwrap_or_default())
+    }
+
+    pub fn provenance(&self) -> io::Result<Option<ObjectCatalogProvenance>> {
+        match &self.storage {
+            ObjectStorage::Memory { data, .. } => Ok(Some(data.provenance.clone())),
+            ObjectStorage::MappedV3(_) => Ok(None),
+            ObjectStorage::MappedV4(catalog) => catalog.provenance(),
+        }
     }
 
     /// Query catalog objects using known sky coordinates, without detecting
@@ -405,14 +864,28 @@ impl ObjectCatalog {
         let region = PreparedRegion::new(region)?;
         let mut hits = Vec::new();
         match &self.storage {
-            ObjectStorage::Memory { objects, .. } => {
-                for object in objects {
+            ObjectStorage::Memory { data, .. } => {
+                for object in &data.objects {
                     if let Some(metrics) = query_metrics(object, &region, query) {
                         hits.push(metrics.into_hit(object.clone()));
                     }
                 }
             }
             ObjectStorage::MappedV3(catalog) => {
+                let (ra, dec) = region.center().to_radec();
+                let candidates = catalog
+                    .candidates(ra, dec, region.characteristic_radius_deg())
+                    .map_err(|error| ObjectQueryError::Catalog(error.to_string()))?;
+                for index in candidates {
+                    let object = catalog
+                        .object(index as usize)
+                        .map_err(|error| ObjectQueryError::Catalog(error.to_string()))?;
+                    if let Some(metrics) = query_metrics(&object, &region, query) {
+                        hits.push(metrics.into_hit(object));
+                    }
+                }
+            }
+            ObjectStorage::MappedV4(catalog) => {
                 let (ra, dec) = region.center().to_radec();
                 let candidates = catalog
                     .candidates(ra, dec, region.characteristic_radius_deg())
@@ -440,13 +913,14 @@ impl ObjectCatalog {
     pub fn lookup_name(&self, designation: &str) -> io::Result<Vec<ObjectNameMatch>> {
         match &self.storage {
             ObjectStorage::MappedV3(catalog) => catalog.lookup_name(designation),
-            ObjectStorage::Memory { objects, .. } => {
+            ObjectStorage::MappedV4(catalog) => catalog.lookup_name(designation),
+            ObjectStorage::Memory { data, .. } => {
                 let target = crate::object_catalog_v3::normalize_name(designation);
                 if target.is_empty() {
                     return Ok(Vec::new());
                 }
                 let mut matches = Vec::new();
-                for object in objects {
+                for object in &data.objects {
                     if let Some(name) = object_designations(object)
                         .find(|name| crate::object_catalog_v3::normalize_name(name) == target)
                     {
@@ -465,13 +939,14 @@ impl ObjectCatalog {
     pub fn search_names(&self, prefix: &str, limit: usize) -> io::Result<Vec<ObjectNameMatch>> {
         match &self.storage {
             ObjectStorage::MappedV3(catalog) => catalog.search_names(prefix, limit),
-            ObjectStorage::Memory { objects, .. } => {
+            ObjectStorage::MappedV4(catalog) => catalog.search_names(prefix, limit),
+            ObjectStorage::Memory { data, .. } => {
                 let target = crate::object_catalog_v3::normalize_name(prefix);
                 if target.is_empty() || limit == 0 {
                     return Ok(Vec::new());
                 }
                 let mut matches = Vec::new();
-                for object in objects {
+                for object in &data.objects {
                     let mut seen = std::collections::HashSet::new();
                     for name in object_designations(object) {
                         let key = crate::object_catalog_v3::normalize_name(name);
@@ -574,6 +1049,29 @@ fn object_designations(object: &SkyObject) -> impl Iterator<Item = &str> {
         .chain(object.metadata.aliases.iter().map(String::as_str))
         .chain(object.metadata.alternate_ids.iter().map(String::as_str))
         .filter(|value| !value.is_empty())
+}
+
+fn capabilities_from_details(
+    details: &[ObjectDetails],
+    provenance: bool,
+) -> ObjectCatalogCapabilities {
+    let mut capabilities = ObjectCatalogCapabilities {
+        provenance,
+        ..ObjectCatalogCapabilities::default()
+    };
+    for detail in details {
+        capabilities.source_records |= !detail.source_records.is_empty();
+        capabilities.relations |= !detail.relations.is_empty();
+        capabilities.selections |= !detail.selections.is_empty();
+        for geometry in &detail.geometries {
+            match geometry.data {
+                GeometryData::Ellipse { .. } => capabilities.ellipses = true,
+                GeometryData::OutlineSet { .. } => capabilities.outlines = true,
+                GeometryData::Point { .. } => {}
+            }
+        }
+    }
+    capabilities
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1239,11 +1737,12 @@ mod tests {
             .unwrap();
 
         let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(&bytes[..8], crate::object_catalog_v3::MAGIC);
+        assert_eq!(&bytes[..8], crate::object_catalog_v4::MAGIC);
         let catalog = ObjectCatalog::open(&path).unwrap();
         catalog.validate().unwrap();
         assert_eq!(catalog.len(), 2);
-        let a = &catalog.objects()[0];
+        let matches = catalog.lookup_name("openngc:NGC224").unwrap();
+        let a = &matches[0].object;
         assert_eq!(a.kind, ObjectKind::Galaxy);
         assert_eq!(a.common_name, "Andromeda Galaxy");
         assert_eq!(a.mag, Some(3.44));
@@ -1254,7 +1753,8 @@ mod tests {
         assert_eq!(a.metadata.parent_ids, ["curated:local-group"]);
         assert_eq!(a.metadata.alternate_ids, ["messier:M31"]);
         assert_eq!(a.metadata.alternate_sources, ["Messier catalog"]);
-        let b = &catalog.objects()[1];
+        let matches = catalog.lookup_name("Sirius").unwrap();
+        let b = &matches[0].object;
         assert_eq!(b.mag, None);
         assert_eq!(b.major_arcmin, None);
         assert_eq!(b.position_angle_deg, None);

@@ -15,7 +15,7 @@ wire formats.
 The v2 bundle contains the Tycho-2 and Gaia solver tiles, the blind index, the
 stellar identifier sidecar, object and transient catalogs, and minor bodies.
 Individual files retain their own self-describing wire headers (`SEIZAST2`,
-`SEIZASI1`, `SEIZAOB3`, and so on); the bundle version only selects a tested
+`SEIZASI1`, the sectioned `SEIZAOB\0` object container, and so on); the bundle version only selects a tested
 combination of those formats and datasets.
 
 ## Publication contract

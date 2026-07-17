@@ -64,7 +64,8 @@ visible in the image pixels.
 `catalog object` resolves primary/common names, aliases, and stable or
 alternate IDs. Both object viewport queries and name completion use indices
 embedded in the memory-mapped `objects.bin`; normal open does not decode every
-record or touch every index page.
+record or touch every index page. Add `--all-sources` to audit every normalized
+upstream row, preferred facet selection, and source-qualified geometry.
 
 ## Persistent worker
 
@@ -137,14 +138,20 @@ seiza download-data gaia --output raw/gaia        # Gaia DR3 via TAP, resumable
 seiza build-data gaia --input raw/gaia --output stars-gaia.bin
 
 seiza download-data objects --output raw/objects
+seiza download-data curation --output raw/curation --commit <git-sha>
 seiza build-data objects --input raw/objects --output objects.bin \
+  --curation-dir raw/curation \
   --source-manifest objects.sources.json
 seiza download-data transients --output raw/transients
 seiza build-data transients --input raw/transients --output transients.bin
 ```
 
-The optional source manifest records the output hash and size, metadata
-coverage counts, source URLs, and hashes of every raw catalog file used.
+The optional curation directory is a pinned local checkout; the builder never
+fetches it. Its `curation.json` records repository, commit, and schema version,
+and its `catalogs/*.csv` tables supply corrections, relations, selections, and
+OpenNGC outline mappings. The optional source manifest records the output hash
+and size, metadata coverage counts, source URLs, curation revision, and hashes
+of every raw catalog and curation file used.
 The optional identifier sidecar provides memory-mapped exact TYC/HIP/HR/HD/
 SAO/FK5 lookup plus exact and prefix search over IAU proper names,
 Bayer/Flamsteed names, GCVS variables, and WDS double-star designations. It

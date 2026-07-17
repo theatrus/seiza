@@ -13,6 +13,7 @@ pub mod catalog;
 pub mod detect;
 pub mod minor_bodies;
 mod object_catalog_v3;
+mod object_catalog_v4;
 pub mod objects;
 pub mod solve;
 pub mod star_ids;

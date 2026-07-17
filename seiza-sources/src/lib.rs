@@ -15,6 +15,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 const CDS_TYCHO2: &str = "https://cdsarc.cds.unistra.fr/ftp/I/259";
 const OPENNGC: &str = "https://raw.githubusercontent.com/mattiaverga/OpenNGC/master/database_files";
+const OPENNGC_ARCHIVE: &str =
+    "https://github.com/mattiaverga/OpenNGC/archive/refs/heads/master.tar.gz";
 const GAIA_TAP_SYNC: &str = "https://gea.esac.esa.int/tap-server/tap/sync";
 /// Gaia DR3 source_id encodes the HEALPix level-12 cell in the high bits.
 const GAIA_SOURCE_ID_MAX: u64 = 201_326_592 << 35;
@@ -64,6 +66,12 @@ pub enum Error {
 
     #[error("background verification task failed: {0}")]
     BackgroundTask(String),
+
+    #[error("invalid GitHub repository name: {0}")]
+    InvalidRepository(String),
+
+    #[error("invalid pinned Git commit: {0}")]
+    InvalidRevision(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -223,7 +231,80 @@ impl SourceDownloader {
             )
             .await?;
         }
+        let marker = output.join("outlines").join(".complete");
+        if tokio::fs::metadata(&marker).await.is_err() {
+            let archive = output.join("openngc-master.tar.gz");
+            self.fetch(OPENNGC_ARCHIVE, &archive, Verify::Gzip).await?;
+            let archive_for_task = archive.clone();
+            let output_for_task = output.to_path_buf();
+            tokio::task::spawn_blocking(move || {
+                extract_openngc_outlines(&archive_for_task, &output_for_task)
+            })
+            .await
+            .map_err(|error| Error::BackgroundTask(error.to_string()))??;
+            tokio::fs::write(&marker, b"OpenNGC master outlines extracted\n")
+                .await
+                .map_err(|source| io("write", &marker, source))?;
+        }
         self.ready("OpenNGC", output);
+        Ok(())
+    }
+
+    /// Download a pinned GitHub curation repository snapshot without invoking
+    /// Git. Existing snapshots are reused only when their recorded commit
+    /// matches exactly.
+    pub async fn download_curation(
+        &self,
+        repository: &str,
+        commit: &str,
+        output: impl AsRef<Path>,
+    ) -> Result<()> {
+        if !valid_repository(repository) {
+            return Err(Error::InvalidRepository(repository.into()));
+        }
+        if !(7..=40).contains(&commit.len()) || !commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(Error::InvalidRevision(commit.into()));
+        }
+        let output = output.as_ref();
+        let marker = output.join(".seiza-revision");
+        if tokio::fs::read_to_string(&marker)
+            .await
+            .is_ok_and(|value| value.trim() == commit)
+        {
+            self.ready("catalog curation", output);
+            return Ok(());
+        }
+        if let Ok(mut entries) = tokio::fs::read_dir(output).await
+            && entries
+                .next_entry()
+                .await
+                .map_err(|source| io("read directory", output, source))?
+                .is_some()
+        {
+            return Err(Error::Integrity(format!(
+                "{} contains a different or unpinned curation snapshot",
+                output.display()
+            )));
+        }
+        create_dir_all(output).await?;
+        let archive = output.join("curation.tar.gz");
+        let url = format!("https://github.com/{repository}/archive/{commit}.tar.gz");
+        self.fetch(&url, &archive, Verify::Gzip).await?;
+        let archive_for_task = archive.clone();
+        let output_for_task = output.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            extract_github_snapshot(&archive_for_task, &output_for_task)
+        })
+        .await
+        .map_err(|error| Error::BackgroundTask(error.to_string()))??;
+        tokio::fs::remove_file(&archive)
+            .await
+            .map_err(|source| io("remove", &archive, source))?;
+        tokio::fs::write(&marker, format!("{commit}\n"))
+            .await
+            .map_err(|source| io("write", &marker, source))?;
+        self.ready("catalog curation", output);
         Ok(())
     }
 
@@ -592,6 +673,110 @@ impl SourceDownloader {
     }
 }
 
+fn extract_openngc_outlines(archive_path: &Path, output: &Path) -> Result<()> {
+    let file =
+        std::fs::File::open(archive_path).map_err(|source| io("open", archive_path, source))?;
+    let decoder = GzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+    let target = output.join("outlines").join("objects");
+    std::fs::create_dir_all(&target).map_err(|source| io("create", &target, source))?;
+    let entries = archive
+        .entries()
+        .map_err(|source| io("read archive", archive_path, source))?;
+    let mut extracted = 0usize;
+    for entry in entries {
+        let mut entry = entry.map_err(|source| io("read archive entry", archive_path, source))?;
+        let path = entry
+            .path()
+            .map_err(|source| io("read archive entry path", archive_path, source))?;
+        let components = path.components().collect::<Vec<_>>();
+        let Some(index) = components
+            .windows(2)
+            .position(|pair| pair[0].as_os_str() == "outlines" && pair[1].as_os_str() == "objects")
+        else {
+            continue;
+        };
+        if components.len() != index + 3 {
+            continue;
+        }
+        let file_name = components[index + 2].as_os_str();
+        if !file_name.to_string_lossy().ends_with(".txt") {
+            continue;
+        }
+        let destination = target.join(file_name);
+        let mut output_file = std::fs::File::create(&destination)
+            .map_err(|source| io("create", &destination, source))?;
+        std::io::copy(&mut entry, &mut output_file)
+            .map_err(|source| io("extract", &destination, source))?;
+        extracted += 1;
+    }
+    if extracted == 0 {
+        return Err(Error::Integrity(
+            "OpenNGC archive contained no outline files".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn extract_github_snapshot(archive_path: &Path, output: &Path) -> Result<()> {
+    let file =
+        std::fs::File::open(archive_path).map_err(|source| io("open", archive_path, source))?;
+    let decoder = GzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+    let entries = archive
+        .entries()
+        .map_err(|source| io("read archive", archive_path, source))?;
+    let mut extracted = 0usize;
+    for entry in entries {
+        let mut entry = entry.map_err(|source| io("read archive entry", archive_path, source))?;
+        let path = entry
+            .path()
+            .map_err(|source| io("read archive entry path", archive_path, source))?;
+        let relative = path.components().skip(1).collect::<PathBuf>();
+        if relative.as_os_str().is_empty()
+            || relative
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            continue;
+        }
+        let destination = output.join(&relative);
+        if entry.header().entry_type().is_dir() {
+            std::fs::create_dir_all(&destination)
+                .map_err(|source| io("create", &destination, source))?;
+            continue;
+        }
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| io("create", parent, source))?;
+        }
+        let mut output_file = std::fs::File::create(&destination)
+            .map_err(|source| io("create", &destination, source))?;
+        std::io::copy(&mut entry, &mut output_file)
+            .map_err(|source| io("extract", &destination, source))?;
+        extracted += 1;
+    }
+    if extracted == 0 {
+        return Err(Error::Integrity(
+            "curation archive contained no regular files".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn valid_repository(value: &str) -> bool {
+    let mut parts = value.split('/');
+    let valid_part = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    };
+    matches!((parts.next(), parts.next(), parts.next()), (Some(owner), Some(repo), None) if valid_part(owner) && valid_part(repo))
+}
+
 #[derive(Clone, Copy)]
 enum Verify {
     None,
@@ -769,5 +954,51 @@ mod tests {
 
         assert_eq!(tokio::fs::read(&target).await.unwrap(), b"new catalog");
         assert!(!temp.exists());
+    }
+
+    #[test]
+    fn extracts_only_openngc_outline_objects() {
+        use std::io::Write;
+
+        let directory = tempfile::tempdir().unwrap();
+        let archive_path = directory.path().join("openngc.tar.gz");
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut archive = tar::Builder::new(encoder);
+        for (path, bytes) in [
+            (
+                "OpenNGC-master/outlines/objects/NGC7000_lv1.txt",
+                b"outline".as_slice(),
+            ),
+            (
+                "OpenNGC-master/database_files/NGC.csv",
+                b"catalog".as_slice(),
+            ),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            archive.append_data(&mut header, path, bytes).unwrap();
+        }
+        let mut encoder = archive.into_inner().unwrap();
+        encoder.flush().unwrap();
+        encoder.finish().unwrap();
+
+        let output = directory.path().join("output");
+        extract_openngc_outlines(&archive_path, &output).unwrap();
+        assert_eq!(
+            std::fs::read(output.join("outlines/objects/NGC7000_lv1.txt")).unwrap(),
+            b"outline"
+        );
+        assert!(!output.join("database_files/NGC.csv").exists());
+    }
+
+    #[test]
+    fn validates_github_repository_names() {
+        assert!(valid_repository("theatrus/seiza-catalog-curation"));
+        assert!(!valid_repository("theatrus"));
+        assert!(!valid_repository("https://github.com/theatrus/seiza"));
+        assert!(!valid_repository("owner/repo/extra"));
     }
 }

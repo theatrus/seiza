@@ -158,6 +158,944 @@ pub fn build_tycho2(
     Ok(())
 }
 
+fn assemble_object_catalog_data(
+    input: &Path,
+    curation_dir: Option<&Path>,
+    mut objects: Vec<seiza::objects::SkyObject>,
+    source_records: Vec<seiza::objects::ObjectSourceRecord>,
+) -> Result<seiza::objects::ObjectCatalogData> {
+    use seiza::objects::{
+        GeometryData, GeometryQuality, GeometryRole, ObjectCatalogData, ObjectCatalogProvenance,
+        ObjectDetails, ObjectFacet, ObjectGeometry, ObjectProvenanceFile, ObjectProvenanceSource,
+        ObjectRelation, ObjectRelationKind, ObjectSelection,
+    };
+
+    let mut id_to_objects = std::collections::HashMap::<String, Vec<usize>>::new();
+    let mut primary_id_to_object = std::collections::HashMap::<String, usize>::new();
+    for (index, object) in objects.iter().enumerate() {
+        if primary_id_to_object
+            .insert(object.metadata.id.clone(), index)
+            .is_some()
+        {
+            bail!("duplicate canonical object ID: {}", object.metadata.id);
+        }
+        for id in std::iter::once(&object.metadata.id).chain(&object.metadata.alternate_ids) {
+            let entries = id_to_objects.entry(id.clone()).or_default();
+            if !entries.contains(&index) {
+                entries.push(index);
+            }
+        }
+    }
+    let mut details = objects
+        .iter()
+        .map(|object| ObjectDetails {
+            canonical_id: object.metadata.id.clone(),
+            ..ObjectDetails::default()
+        })
+        .collect::<Vec<_>>();
+    let mut seen_source_ids = std::collections::HashSet::new();
+    for record in source_records {
+        if record.id.is_empty() || !seen_source_ids.insert(record.id.clone()) {
+            bail!("duplicate or empty source-record ID: {}", record.id);
+        }
+        let exact = primary_id_to_object.get(&record.id).copied();
+        let candidates = id_to_objects.get(&record.id).cloned().unwrap_or_default();
+        let index = exact
+            .or_else(|| (candidates.len() == 1).then_some(candidates[0]))
+            .with_context(|| {
+                format!(
+                    "source record {} has no unambiguous canonical object",
+                    record.id
+                )
+            })?;
+        let geometry = if let Some(major_arcmin) = record.object.major_arcmin {
+            ObjectGeometry {
+                id: format!("{}#catalog-ellipse", record.id),
+                source_record_id: record.id.clone(),
+                role: GeometryRole::CatalogExtent,
+                quality: GeometryQuality::Catalog,
+                method: String::new(),
+                evidence: String::new(),
+                data: GeometryData::Ellipse {
+                    center_ra_deg: record.object.ra,
+                    center_dec_deg: record.object.dec,
+                    major_arcmin,
+                    minor_arcmin: record.object.minor_arcmin,
+                    position_angle_deg: record.object.position_angle_deg,
+                },
+            }
+        } else {
+            ObjectGeometry {
+                id: format!("{}#catalog-point", record.id),
+                source_record_id: record.id.clone(),
+                role: GeometryRole::CatalogExtent,
+                quality: GeometryQuality::Catalog,
+                method: String::new(),
+                evidence: String::new(),
+                data: GeometryData::Point {
+                    ra_deg: record.object.ra,
+                    dec_deg: record.object.dec,
+                },
+            }
+        };
+        details[index].geometries.push(geometry);
+        details[index].source_records.push(record);
+    }
+
+    for (object, detail) in objects.iter_mut().zip(&mut details) {
+        if detail.source_records.is_empty() {
+            bail!(
+                "canonical object {} has no source records",
+                object.metadata.id
+            );
+        }
+        let canonical_id = object.metadata.id.clone();
+        let identity_index = detail
+            .source_records
+            .iter()
+            .position(|record| record.id == canonical_id)
+            .unwrap_or(0);
+        let identity = detail.source_records[identity_index].clone();
+        let geometry_source = detail
+            .source_records
+            .iter()
+            .position(|record| record.object.major_arcmin.is_some())
+            .unwrap_or(identity_index);
+        let photometry_source = detail
+            .source_records
+            .iter()
+            .position(|record| record.object.mag.is_some());
+
+        let mut canonical = identity.object.clone();
+        canonical.metadata.id = canonical_id.clone();
+        canonical.metadata.source = identity.source.clone();
+        canonical.metadata.aliases.clear();
+        canonical.metadata.parent_ids.clear();
+        canonical.metadata.alternate_ids.clear();
+        canonical.metadata.alternate_sources.clear();
+        if let Some(record) = detail.source_records.get(geometry_source) {
+            canonical.major_arcmin = record.object.major_arcmin;
+            canonical.minor_arcmin = record.object.minor_arcmin;
+            canonical.position_angle_deg = record.object.position_angle_deg;
+        }
+        canonical.mag = photometry_source.and_then(|index| detail.source_records[index].object.mag);
+        for record in &detail.source_records {
+            if record.object.kind != seiza::objects::ObjectKind::Other
+                && canonical.kind == seiza::objects::ObjectKind::Other
+            {
+                canonical.kind = record.object.kind;
+            }
+            if canonical.common_name.is_empty() && !record.object.common_name.is_empty() {
+                canonical.common_name = record.object.common_name.clone();
+            }
+            add_alias(&mut canonical, record.object.name.clone());
+            for alias in &record.object.metadata.aliases {
+                add_alias(&mut canonical, alias.clone());
+            }
+            if record.id != canonical_id {
+                add_unique(&mut canonical.metadata.alternate_ids, record.id.clone());
+                detail.relations.push(ObjectRelation {
+                    kind: ObjectRelationKind::SameAs,
+                    target_id: record.id.clone(),
+                    source_record_id: record.id.clone(),
+                    note: String::new(),
+                });
+            }
+            for id in &record.object.metadata.alternate_ids {
+                if id != &canonical_id {
+                    add_unique(&mut canonical.metadata.alternate_ids, id.clone());
+                }
+            }
+            if record.source != canonical.metadata.source {
+                add_unique(
+                    &mut canonical.metadata.alternate_sources,
+                    record.source.clone(),
+                );
+            }
+            for source in &record.object.metadata.alternate_sources {
+                if source != &canonical.metadata.source {
+                    add_unique(&mut canonical.metadata.alternate_sources, source.clone());
+                }
+            }
+            for parent in &record.object.metadata.parent_ids {
+                add_unique(&mut canonical.metadata.parent_ids, parent.clone());
+                detail.relations.push(ObjectRelation {
+                    kind: ObjectRelationKind::ComponentOf,
+                    target_id: parent.clone(),
+                    source_record_id: record.id.clone(),
+                    note: String::new(),
+                });
+            }
+        }
+        let identity_id = identity.id.clone();
+        detail.selections.extend([
+            ObjectSelection {
+                facet: ObjectFacet::PreferredIdentity,
+                source_record_id: Some(identity_id.clone()),
+                geometry_id: None,
+                reason: String::new(),
+            },
+            ObjectSelection {
+                facet: ObjectFacet::PreferredPosition,
+                source_record_id: Some(identity_id.clone()),
+                geometry_id: None,
+                reason: String::new(),
+            },
+            ObjectSelection {
+                facet: ObjectFacet::PreferredClassification,
+                source_record_id: Some(identity_id),
+                geometry_id: None,
+                reason: String::new(),
+            },
+        ]);
+        if let Some(index) = photometry_source {
+            detail.selections.push(ObjectSelection {
+                facet: ObjectFacet::PreferredPhotometry,
+                source_record_id: Some(detail.source_records[index].id.clone()),
+                geometry_id: None,
+                reason: String::new(),
+            });
+        }
+        let geometry_record_id = detail.source_records[geometry_source].id.clone();
+        let geometry_id = detail
+            .geometries
+            .iter()
+            .find(|geometry| geometry.source_record_id == geometry_record_id)
+            .map(|geometry| geometry.id.clone());
+        detail.selections.push(ObjectSelection {
+            facet: ObjectFacet::PreferredGeometry,
+            source_record_id: Some(geometry_record_id),
+            geometry_id,
+            reason: String::new(),
+        });
+        *object = canonical;
+    }
+
+    let mut provenance = ObjectCatalogProvenance {
+        build_policy: "v4 source records; explicit identity links; atomic geometry selection"
+            .into(),
+        ..ObjectCatalogProvenance::default()
+    };
+    for descriptor in OBJECT_SOURCE_DESCRIPTORS {
+        let mut files = Vec::new();
+        for name in descriptor.files {
+            let path = input.join(name);
+            if path.exists() {
+                let (bytes, sha256) = file_digest(&path)?;
+                files.push(ObjectProvenanceFile {
+                    path: (*name).into(),
+                    bytes,
+                    sha256,
+                });
+            }
+        }
+        if !files.is_empty() {
+            provenance.sources.push(ObjectProvenanceSource {
+                name: descriptor.label.into(),
+                reference_url: descriptor.reference_url.into(),
+                revision: String::new(),
+                files,
+            });
+        }
+    }
+
+    let mut data = ObjectCatalogData {
+        objects,
+        details,
+        provenance,
+    };
+    if let Some(curation_dir) = curation_dir {
+        apply_object_curation(input, curation_dir, &mut data)?;
+    }
+    Ok(data)
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CurationMetadataFile {
+    repository: String,
+    #[serde(default)]
+    commit: Option<String>,
+    schema_version: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CuratedGeometryRow {
+    correction_id: String,
+    target_id: String,
+    center_ra_deg: f64,
+    center_dec_deg: f64,
+    major_arcmin: f32,
+    #[serde(default)]
+    minor_arcmin: Option<f32>,
+    #[serde(default)]
+    position_angle_deg: Option<f32>,
+    #[serde(default = "default_fallback_geometry_role")]
+    role: String,
+    #[serde(default = "default_estimated_quality")]
+    quality: String,
+    #[serde(default)]
+    method: String,
+    #[serde(default)]
+    evidence: String,
+    #[serde(default)]
+    note: String,
+    #[serde(default)]
+    preferred: bool,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CuratedSelectionRow {
+    target_id: String,
+    facet: String,
+    #[serde(default)]
+    source_record_id: Option<String>,
+    #[serde(default)]
+    geometry_id: Option<String>,
+    #[serde(default)]
+    reason: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CuratedRelationRow {
+    target_id: String,
+    kind: String,
+    related_id: String,
+    #[serde(default)]
+    source_record_id: Option<String>,
+    #[serde(default)]
+    note: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct OpenNgcOutlineRow {
+    file: String,
+    target_id: String,
+    #[serde(default)]
+    source_record_id: Option<String>,
+    #[serde(default = "default_brightness_geometry_role")]
+    role: String,
+    #[serde(default)]
+    preferred: bool,
+    #[serde(default)]
+    evidence: String,
+    #[serde(default)]
+    note: String,
+}
+
+fn default_fallback_geometry_role() -> String {
+    "fallback-extent".into()
+}
+
+fn default_brightness_geometry_role() -> String {
+    "brightness-level".into()
+}
+
+fn default_estimated_quality() -> String {
+    "estimated".into()
+}
+
+fn apply_object_curation(
+    input: &Path,
+    curation_dir: &Path,
+    data: &mut seiza::objects::ObjectCatalogData,
+) -> Result<()> {
+    use seiza::objects::{
+        GeometryData, ObjectCurationRevision, ObjectFacet, ObjectGeometry, ObjectProperty,
+        ObjectProvenanceFile, ObjectProvenanceSource, ObjectRelation, ObjectSelection,
+        ObjectSourceRecord,
+    };
+
+    let metadata_path = curation_dir.join("curation.json");
+    let metadata: CurationMetadataFile =
+        serde_json::from_reader(std::fs::File::open(&metadata_path).with_context(|| {
+            format!(
+                "missing pinned curation metadata {}",
+                metadata_path.display()
+            )
+        })?)?;
+    if metadata.repository.trim().is_empty() || metadata.schema_version.trim().is_empty() {
+        bail!("curation.json must record repository and schema_version");
+    }
+    let commit = resolve_curation_commit(curation_dir, metadata.commit.as_deref())?;
+
+    let catalogs = curation_dir.join("catalogs");
+    let mut curated_facets = std::collections::HashSet::<(String, String)>::new();
+    for row in read_optional_csv::<CuratedGeometryRow>(&catalogs.join("geometry.csv"))? {
+        let index = resolve_canonical_index(data, &row.target_id)?;
+        let role = parse_geometry_role(&row.role)?;
+        let quality = parse_geometry_quality(&row.quality)?;
+        let source_record_id = format!("curation:{}", row.correction_id);
+        if data.details[index]
+            .source_records
+            .iter()
+            .any(|record| record.id == source_record_id)
+        {
+            bail!("duplicate curation correction ID {}", row.correction_id);
+        }
+        let geometry_id = format!("{source_record_id}#ellipse");
+        let mut corrected = data.objects[index].clone();
+        corrected.ra = row.center_ra_deg;
+        corrected.dec = row.center_dec_deg;
+        corrected.major_arcmin = Some(row.major_arcmin);
+        corrected.minor_arcmin = row.minor_arcmin;
+        corrected.position_angle_deg = row.position_angle_deg;
+        corrected.metadata.id = source_record_id.clone();
+        corrected.metadata.source = "Seiza catalog curation".into();
+        let mut properties = Vec::new();
+        for (name, value) in [
+            ("note", row.note.as_str()),
+            ("method", row.method.as_str()),
+            ("evidence", row.evidence.as_str()),
+        ] {
+            if !value.is_empty() {
+                properties.push(ObjectProperty {
+                    name: name.into(),
+                    value: value.into(),
+                    unit: None,
+                });
+            }
+        }
+        data.details[index].source_records.push(ObjectSourceRecord {
+            id: source_record_id.clone(),
+            source: "Seiza catalog curation".into(),
+            object: corrected,
+            properties,
+        });
+        let geometry = ObjectGeometry {
+            id: geometry_id.clone(),
+            source_record_id: source_record_id.clone(),
+            role,
+            quality,
+            method: row.method,
+            evidence: row.evidence,
+            data: GeometryData::Ellipse {
+                center_ra_deg: row.center_ra_deg,
+                center_dec_deg: row.center_dec_deg,
+                major_arcmin: row.major_arcmin,
+                minor_arcmin: row.minor_arcmin,
+                position_angle_deg: row.position_angle_deg,
+            },
+        };
+        data.details[index].geometries.push(geometry.clone());
+        if row.preferred {
+            register_curated_facet(&mut curated_facets, &row.target_id, "preferred-geometry")?;
+            replace_selection(
+                &mut data.details[index].selections,
+                ObjectSelection {
+                    facet: ObjectFacet::PreferredGeometry,
+                    source_record_id: Some(source_record_id),
+                    geometry_id: Some(geometry_id),
+                    reason: row.note,
+                },
+            );
+            apply_geometry_to_hot_object(&mut data.objects[index], &geometry)?;
+        }
+    }
+
+    for row in read_optional_csv::<OpenNgcOutlineRow>(&catalogs.join("openngc-outlines.csv"))? {
+        let index = resolve_canonical_index(data, &row.target_id)?;
+        let source_record_id = row.source_record_id.clone().unwrap_or_else(|| {
+            data.details[index]
+                .source_records
+                .iter()
+                .find(|record| record.source == "OpenNGC")
+                .map(|record| record.id.clone())
+                .unwrap_or_default()
+        });
+        if source_record_id.is_empty()
+            || !data.details[index]
+                .source_records
+                .iter()
+                .any(|record| record.id == source_record_id)
+        {
+            bail!(
+                "OpenNGC outline {} has no valid source record for {}",
+                row.file,
+                row.target_id
+            );
+        }
+        let path = [
+            input.join("outlines").join("objects").join(&row.file),
+            input.join("outlines").join(&row.file),
+        ]
+        .into_iter()
+        .find(|path| path.exists())
+        .with_context(|| format!("OpenNGC outline {} is missing", row.file))?;
+        let contours = parse_openngc_outline(&std::fs::read_to_string(&path)?)?;
+        let (bytes, sha256) = file_digest(&path)?;
+        let outline_source = if let Some(source) = data
+            .provenance
+            .sources
+            .iter_mut()
+            .find(|source| source.name == "OpenNGC outlines")
+        {
+            source
+        } else {
+            data.provenance.sources.push(ObjectProvenanceSource {
+                name: "OpenNGC outlines".into(),
+                reference_url: "https://github.com/mattiaverga/OpenNGC/tree/master/outlines".into(),
+                revision: String::new(),
+                files: Vec::new(),
+            });
+            data.provenance.sources.last_mut().unwrap()
+        };
+        if !outline_source
+            .files
+            .iter()
+            .any(|file| file.path == format!("outlines/objects/{}", row.file))
+        {
+            outline_source.files.push(ObjectProvenanceFile {
+                path: format!("outlines/objects/{}", row.file),
+                bytes,
+                sha256,
+            });
+        }
+        let level = row
+            .file
+            .rsplit_once("_lv")
+            .and_then(|(_, suffix)| suffix.strip_suffix(".txt"))
+            .map(|level| format!("level-{level}"));
+        let geometry_id = format!("openngc-outline:{}", row.file);
+        let geometry = ObjectGeometry {
+            id: geometry_id.clone(),
+            source_record_id: source_record_id.clone(),
+            role: parse_geometry_role(&row.role)?,
+            quality: seiza::objects::GeometryQuality::Catalog,
+            method: "OpenNGC hand-drawn DSS2 contour".into(),
+            evidence: if row.evidence.is_empty() {
+                format!("outlines/objects/{}", row.file)
+            } else {
+                row.evidence
+            },
+            data: GeometryData::OutlineSet { level, contours },
+        };
+        data.details[index].geometries.push(geometry.clone());
+        if row.preferred {
+            register_curated_facet(&mut curated_facets, &row.target_id, "preferred-geometry")?;
+            replace_selection(
+                &mut data.details[index].selections,
+                ObjectSelection {
+                    facet: ObjectFacet::PreferredGeometry,
+                    source_record_id: Some(source_record_id),
+                    geometry_id: Some(geometry_id),
+                    reason: row.note,
+                },
+            );
+            apply_geometry_to_hot_object(&mut data.objects[index], &geometry)?;
+        }
+    }
+
+    for row in read_optional_csv::<CuratedRelationRow>(&catalogs.join("identities.csv"))? {
+        let index = resolve_canonical_index(data, &row.target_id)?;
+        let source_record_id = row.source_record_id.unwrap_or_else(|| {
+            data.details[index]
+                .selections
+                .iter()
+                .find(|selection| selection.facet == ObjectFacet::PreferredIdentity)
+                .and_then(|selection| selection.source_record_id.clone())
+                .unwrap_or_default()
+        });
+        if !data.details[index]
+            .source_records
+            .iter()
+            .any(|record| record.id == source_record_id)
+        {
+            bail!(
+                "identity relation for {} has an invalid source record",
+                row.target_id
+            );
+        }
+        data.details[index].relations.push(ObjectRelation {
+            kind: parse_relation_kind(&row.kind)?,
+            target_id: row.related_id,
+            source_record_id,
+            note: row.note,
+        });
+    }
+
+    for row in read_optional_csv::<CuratedSelectionRow>(&catalogs.join("selections.csv"))? {
+        let index = resolve_canonical_index(data, &row.target_id)?;
+        let facet = parse_object_facet(&row.facet)?;
+        register_curated_facet(&mut curated_facets, &row.target_id, &row.facet)?;
+        let selection = ObjectSelection {
+            facet,
+            source_record_id: row.source_record_id,
+            geometry_id: row.geometry_id,
+            reason: row.reason,
+        };
+        apply_selected_facet(&mut data.objects[index], &data.details[index], &selection)?;
+        replace_selection(&mut data.details[index].selections, selection);
+    }
+
+    let mut curation_files = Vec::new();
+    for path in recursive_files(curation_dir)? {
+        let relative = path.strip_prefix(curation_dir).unwrap_or(&path);
+        let (bytes, sha256) = file_digest(&path)?;
+        curation_files.push(ObjectProvenanceFile {
+            path: relative.to_string_lossy().replace('\\', "/"),
+            bytes,
+            sha256,
+        });
+    }
+    curation_files.sort_by(|left, right| left.path.cmp(&right.path));
+    data.provenance.curation = Some(ObjectCurationRevision {
+        repository: metadata.repository,
+        commit,
+        schema_version: metadata.schema_version,
+        files: curation_files,
+    });
+    Ok(())
+}
+
+fn resolve_curation_commit(curation_dir: &Path, declared: Option<&str>) -> Result<String> {
+    if curation_dir.join(".git").exists() {
+        let head = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(curation_dir)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .context("cannot inspect curation Git revision")?;
+        if !head.status.success() {
+            bail!("cannot resolve curation Git revision");
+        }
+        let head = String::from_utf8(head.stdout)?.trim().to_string();
+        if declared.is_some_and(|declared| declared != head) {
+            bail!("curation.json commit does not match checkout HEAD {head}");
+        }
+        let status = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(curation_dir)
+            .args(["status", "--porcelain", "--untracked-files=all"])
+            .output()
+            .context("cannot inspect curation Git status")?;
+        if !status.status.success() || !status.stdout.is_empty() {
+            bail!("curation checkout must be clean before building");
+        }
+        return Ok(head);
+    }
+    let snapshot_revision = curation_dir.join(".seiza-revision");
+    if snapshot_revision.exists() {
+        let commit = std::fs::read_to_string(&snapshot_revision)
+            .with_context(|| format!("cannot read {}", snapshot_revision.display()))?;
+        let commit = commit.trim();
+        if declared.is_some_and(|declared| declared != commit) {
+            bail!("curation.json commit does not match downloaded snapshot {commit}");
+        }
+        if !commit.is_empty() {
+            return Ok(commit.to_string());
+        }
+    }
+    declared
+        .filter(|commit| !commit.trim().is_empty())
+        .map(str::to_string)
+        .context("non-Git curation snapshots must declare commit in curation.json")
+}
+
+fn read_optional_csv<T: for<'de> serde::Deserialize<'de>>(path: &Path) -> Result<Vec<T>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut reader = csv::ReaderBuilder::new()
+        .trim(csv::Trim::All)
+        .from_path(path)
+        .with_context(|| format!("cannot read curation table {}", path.display()))?;
+    reader
+        .deserialize()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .with_context(|| format!("invalid curation table {}", path.display()))
+}
+
+fn resolve_canonical_index(
+    data: &seiza::objects::ObjectCatalogData,
+    target_id: &str,
+) -> Result<usize> {
+    let exact = data
+        .objects
+        .iter()
+        .enumerate()
+        .filter(|(_, object)| object.metadata.id == target_id)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if exact.len() == 1 {
+        return Ok(exact[0]);
+    }
+    if exact.len() > 1 {
+        bail!("curation target {target_id} has duplicate canonical primary IDs");
+    }
+    let matches = data
+        .objects
+        .iter()
+        .enumerate()
+        .filter(|(_, object)| {
+            object
+                .metadata
+                .alternate_ids
+                .iter()
+                .any(|id| id == target_id)
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        bail!(
+            "curation target {target_id} resolves to {} canonical objects",
+            matches.len()
+        );
+    }
+    Ok(matches[0])
+}
+
+fn register_curated_facet(
+    seen: &mut std::collections::HashSet<(String, String)>,
+    target_id: &str,
+    facet: &str,
+) -> Result<()> {
+    let key = (target_id.to_string(), facet.to_ascii_lowercase());
+    if !seen.insert(key) {
+        bail!("multiple curated selections for {target_id} facet {facet}");
+    }
+    Ok(())
+}
+
+fn replace_selection(
+    selections: &mut Vec<seiza::objects::ObjectSelection>,
+    selection: seiza::objects::ObjectSelection,
+) {
+    selections.retain(|existing| existing.facet != selection.facet);
+    selections.push(selection);
+}
+
+fn apply_selected_facet(
+    object: &mut seiza::objects::SkyObject,
+    detail: &seiza::objects::ObjectDetails,
+    selection: &seiza::objects::ObjectSelection,
+) -> Result<()> {
+    use seiza::objects::ObjectFacet;
+    let source = selection.source_record_id.as_deref().map(|id| {
+        detail
+            .source_records
+            .iter()
+            .find(|record| record.id == id)
+            .with_context(|| format!("selection references unknown source record {id}"))
+    });
+    let source = source.transpose()?;
+    match selection.facet {
+        ObjectFacet::PreferredIdentity => {
+            let source = source.context("preferred identity requires source_record_id")?;
+            let canonical_id = object.metadata.id.clone();
+            object.name = source.object.name.clone();
+            object.common_name = source.object.common_name.clone();
+            object.metadata.source = source.source.clone();
+            object.metadata.id = canonical_id;
+        }
+        ObjectFacet::PreferredPosition => {
+            let source = source.context("preferred position requires source_record_id")?;
+            object.ra = source.object.ra;
+            object.dec = source.object.dec;
+        }
+        ObjectFacet::PreferredPhotometry => {
+            let source = source.context("preferred photometry requires source_record_id")?;
+            object.mag = source.object.mag;
+        }
+        ObjectFacet::PreferredClassification => {
+            let source = source.context("preferred classification requires source_record_id")?;
+            object.kind = source.object.kind;
+        }
+        ObjectFacet::PreferredGeometry => {
+            let geometry_id = selection
+                .geometry_id
+                .as_deref()
+                .context("preferred geometry requires geometry_id")?;
+            let geometry = detail
+                .geometries
+                .iter()
+                .find(|geometry| geometry.id == geometry_id)
+                .with_context(|| format!("selection references unknown geometry {geometry_id}"))?;
+            apply_geometry_to_hot_object(object, geometry)?;
+        }
+    }
+    Ok(())
+}
+
+fn apply_geometry_to_hot_object(
+    object: &mut seiza::objects::SkyObject,
+    geometry: &seiza::objects::ObjectGeometry,
+) -> Result<()> {
+    match &geometry.data {
+        seiza::objects::GeometryData::Point { ra_deg, dec_deg } => {
+            object.ra = *ra_deg;
+            object.dec = *dec_deg;
+            object.major_arcmin = None;
+            object.minor_arcmin = None;
+            object.position_angle_deg = None;
+        }
+        seiza::objects::GeometryData::Ellipse {
+            center_ra_deg,
+            center_dec_deg,
+            major_arcmin,
+            minor_arcmin,
+            position_angle_deg,
+        } => {
+            object.ra = *center_ra_deg;
+            object.dec = *center_dec_deg;
+            object.major_arcmin = Some(*major_arcmin);
+            object.minor_arcmin = *minor_arcmin;
+            object.position_angle_deg = *position_angle_deg;
+        }
+        seiza::objects::GeometryData::OutlineSet { contours, .. } => {
+            let (ra, dec, radius_deg) = outline_bounding_cap(contours)?;
+            object.ra = ra;
+            object.dec = dec;
+            object.major_arcmin = Some((radius_deg * 120.0) as f32);
+            object.minor_arcmin = None;
+            object.position_angle_deg = None;
+        }
+    }
+    Ok(())
+}
+
+fn outline_bounding_cap(contours: &[seiza::objects::ObjectContour]) -> Result<(f64, f64, f64)> {
+    let vertices = contours
+        .iter()
+        .flat_map(|contour| contour.vertices.iter().copied())
+        .collect::<Vec<_>>();
+    if vertices.is_empty() {
+        bail!("outline contains no vertices");
+    }
+    let mut sum = [0.0f64; 3];
+    for (ra, dec) in &vertices {
+        let ra = ra.to_radians();
+        let dec = dec.to_radians();
+        sum[0] += dec.cos() * ra.cos();
+        sum[1] += dec.cos() * ra.sin();
+        sum[2] += dec.sin();
+    }
+    let norm = (sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]).sqrt();
+    if norm <= 1e-12 {
+        bail!("outline has a degenerate spherical center");
+    }
+    let center = [sum[0] / norm, sum[1] / norm, sum[2] / norm];
+    let ra = center[1].atan2(center[0]).to_degrees().rem_euclid(360.0);
+    let dec = center[2].asin().to_degrees();
+    let radius = vertices
+        .iter()
+        .map(|&(vertex_ra, vertex_dec)| {
+            let vertex_ra = vertex_ra.to_radians();
+            let vertex_dec = vertex_dec.to_radians();
+            let dot = center[0] * vertex_dec.cos() * vertex_ra.cos()
+                + center[1] * vertex_dec.cos() * vertex_ra.sin()
+                + center[2] * vertex_dec.sin();
+            dot.clamp(-1.0, 1.0).acos().to_degrees()
+        })
+        .fold(0.0, f64::max);
+    Ok((ra, dec, radius))
+}
+
+fn parse_openngc_outline(content: &str) -> Result<Vec<seiza::objects::ObjectContour>> {
+    let mut contours = Vec::new();
+    let mut vertices = Vec::new();
+    for line in content.lines().skip(1) {
+        let fields = line.split('\t').collect::<Vec<_>>();
+        if fields.len() < 4 || fields[0] != "line" {
+            continue;
+        }
+        let ra = fields[2]
+            .parse::<f64>()
+            .with_context(|| format!("invalid OpenNGC outline RA in {line}"))?;
+        let dec = fields[3]
+            .parse::<f64>()
+            .with_context(|| format!("invalid OpenNGC outline Dec in {line}"))?;
+        vertices.push((ra, dec));
+        if fields[1] == "*" {
+            if vertices.len() < 2 {
+                bail!("OpenNGC outline contour has fewer than two vertices");
+            }
+            contours.push(seiza::objects::ObjectContour {
+                closed: true,
+                vertices: std::mem::take(&mut vertices),
+            });
+        }
+    }
+    if !vertices.is_empty() {
+        if vertices.len() < 2 {
+            bail!("OpenNGC outline contour has fewer than two vertices");
+        }
+        contours.push(seiza::objects::ObjectContour {
+            closed: false,
+            vertices,
+        });
+    }
+    if contours.is_empty() {
+        bail!("OpenNGC outline has no contours");
+    }
+    Ok(contours)
+}
+
+fn parse_geometry_role(value: &str) -> Result<seiza::objects::GeometryRole> {
+    use seiza::objects::GeometryRole;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "catalog-extent" => Ok(GeometryRole::CatalogExtent),
+        "preferred-render" => Ok(GeometryRole::PreferredRender),
+        "fallback-extent" => Ok(GeometryRole::FallbackExtent),
+        "brightness-level" => Ok(GeometryRole::BrightnessLevel),
+        "component" => Ok(GeometryRole::Component),
+        _ => bail!("unknown geometry role {value}"),
+    }
+}
+
+fn parse_geometry_quality(value: &str) -> Result<seiza::objects::GeometryQuality> {
+    use seiza::objects::GeometryQuality;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "catalog" => Ok(GeometryQuality::Catalog),
+        "curated" => Ok(GeometryQuality::Curated),
+        "estimated" => Ok(GeometryQuality::Estimated),
+        "derived" => Ok(GeometryQuality::Derived),
+        _ => bail!("unknown geometry quality {value}"),
+    }
+}
+
+fn parse_object_facet(value: &str) -> Result<seiza::objects::ObjectFacet> {
+    use seiza::objects::ObjectFacet;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "preferred-identity" => Ok(ObjectFacet::PreferredIdentity),
+        "preferred-position" => Ok(ObjectFacet::PreferredPosition),
+        "preferred-geometry" => Ok(ObjectFacet::PreferredGeometry),
+        "preferred-photometry" => Ok(ObjectFacet::PreferredPhotometry),
+        "preferred-classification" => Ok(ObjectFacet::PreferredClassification),
+        _ => bail!("unknown object selection facet {value}"),
+    }
+}
+
+fn parse_relation_kind(value: &str) -> Result<seiza::objects::ObjectRelationKind> {
+    use seiza::objects::ObjectRelationKind;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "same-as" => Ok(ObjectRelationKind::SameAs),
+        "component-of" => Ok(ObjectRelationKind::ComponentOf),
+        "parent-of" => Ok(ObjectRelationKind::ParentOf),
+        "duplicate-of" => Ok(ObjectRelationKind::DuplicateOf),
+        "catalog-alias" => Ok(ObjectRelationKind::CatalogAlias),
+        _ => bail!("unknown object relation kind {value}"),
+    }
+}
+
+fn recursive_files(root: &Path) -> Result<Vec<std::path::PathBuf>> {
+    let mut files = Vec::new();
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        for entry in std::fs::read_dir(&directory)
+            .with_context(|| format!("cannot read curation directory {}", directory.display()))?
+        {
+            let path = entry?.path();
+            if path.is_dir() {
+                directories.push(path);
+            } else if path.is_file() {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
 fn add_tycho_identifiers(
     builder: &mut Option<StarIdentifierCatalogBuilder>,
     star: ParsedTychoStar,
@@ -924,10 +1862,18 @@ fn parse_tycho2_suppl_line(line: &str, epoch: f64) -> Option<ParsedTychoStar> {
 
 /// Build an object catalog from OpenNGC, selected VizieR tables, and the IAU
 /// star-name list, whichever are present in `input`.
-pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>) -> Result<()> {
-    use seiza::objects::{ObjectCatalog, ObjectKind, ObjectMetadata, SkyObject};
+pub fn build_objects(
+    input: &Path,
+    output: &Path,
+    source_manifest: Option<&Path>,
+    curation_dir: Option<&Path>,
+) -> Result<()> {
+    use seiza::objects::{
+        ObjectCatalog, ObjectKind, ObjectMetadata, ObjectProperty, ObjectSourceRecord, SkyObject,
+    };
 
     let mut objects = Vec::new();
+    let mut source_records = Vec::new();
     let mut sources = 0;
 
     for name in ["NGC.csv", "addendum.csv"] {
@@ -937,8 +1883,31 @@ pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>
         }
         sources += 1;
         let content = std::fs::read_to_string(&path)?;
-        for line in content.lines().skip(1) {
+        let mut lines = content.lines();
+        let headers = lines
+            .next()
+            .map(|line| line.split(';').map(str::trim).collect::<Vec<_>>())
+            .unwrap_or_default();
+        for line in lines {
             if let Some(object) = parse_openngc_line(line) {
+                let properties = headers
+                    .iter()
+                    .zip(line.split(';'))
+                    .filter_map(|(name, value)| {
+                        let value = value.trim();
+                        (!name.is_empty() && !value.is_empty()).then(|| ObjectProperty {
+                            name: (*name).to_string(),
+                            value: value.to_string(),
+                            unit: None,
+                        })
+                    })
+                    .collect();
+                source_records.push(ObjectSourceRecord {
+                    id: object.metadata.id.clone(),
+                    source: object.metadata.source.clone(),
+                    object: object.clone(),
+                    properties,
+                });
                 objects.push(object);
             }
         }
@@ -1006,7 +1975,16 @@ pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>
                     alternate_sources: Vec::new(),
                 },
             };
-            identity_index.merge_or_add(&mut objects, object, &mut merge_stats);
+            identity_index.ingest(
+                &mut objects,
+                &mut source_records,
+                object,
+                catalog_properties(
+                    &fields,
+                    &["ra_deg", "dec_deg", "catalog_number", "diameter_arcmin"],
+                ),
+                &mut merge_stats,
+            );
         }
     }
 
@@ -1102,7 +2080,28 @@ pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>
                     alternate_sources: Vec::new(),
                 },
             };
-            identity_index.merge_or_add(&mut objects, object, &mut merge_stats);
+            identity_index.ingest(
+                &mut objects,
+                &mut source_records,
+                object,
+                catalog_properties(
+                    &fields,
+                    match file {
+                        "ugc.tsv" => &[
+                            "ra_deg",
+                            "dec_deg",
+                            "catalog_number",
+                            "suffix",
+                            "major_arcmin",
+                            "minor_arcmin",
+                            "position_angle_deg",
+                        ][..],
+                        "ldn.tsv" => &["ra_deg", "dec_deg", "catalog_number", "area_sq_deg"][..],
+                        _ => &["ra_deg", "dec_deg", "catalog_number", "max_radius_arcmin"][..],
+                    },
+                ),
+                &mut merge_stats,
+            );
         }
     }
 
@@ -1112,7 +2111,17 @@ pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>
         let content = std::fs::read_to_string(&csn)?;
         for line in content.lines() {
             if let Some(object) = parse_iau_csn_line(line) {
-                identity_index.merge_or_add(&mut objects, object, &mut merge_stats);
+                identity_index.ingest(
+                    &mut objects,
+                    &mut source_records,
+                    object,
+                    vec![ObjectProperty {
+                        name: "raw_record".into(),
+                        value: line.into(),
+                        unit: None,
+                    }],
+                    &mut merge_stats,
+                );
             }
         }
     }
@@ -1177,6 +2186,22 @@ pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>
             if matches.is_empty() && grid_dedup.near(ra, dec, 30.0 / 3600.0) {
                 continue;
             }
+            source_records.push(ObjectSourceRecord {
+                id: object.metadata.id.clone(),
+                source: object.metadata.source.clone(),
+                object: object.clone(),
+                properties: catalog_properties(
+                    &fields,
+                    &[
+                        "ra_deg",
+                        "dec_deg",
+                        "pgc",
+                        "log_d25",
+                        "log_r25",
+                        "position_angle_deg",
+                    ],
+                ),
+            });
             identity_index.merge_or_add_with_matches(
                 &mut objects,
                 object,
@@ -1231,7 +2256,16 @@ pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>
                     alternate_sources: Vec::new(),
                 },
             };
-            identity_index.merge_or_add(&mut objects, object, &mut merge_stats);
+            identity_index.ingest(
+                &mut objects,
+                &mut source_records,
+                object,
+                catalog_properties(
+                    &fields,
+                    &["ra_deg", "dec_deg", "hd", "name", "visual_magnitude"],
+                ),
+                &mut merge_stats,
+            );
         }
     }
 
@@ -1279,7 +2313,23 @@ pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>
                     alternate_sources: Vec::new(),
                 },
             };
-            identity_index.merge_or_add(&mut objects, object, &mut merge_stats);
+            identity_index.ingest(
+                &mut objects,
+                &mut source_records,
+                object,
+                catalog_properties(
+                    &fields,
+                    &[
+                        "ra_deg",
+                        "dec_deg",
+                        "snr",
+                        "major_arcmin",
+                        "minor_arcmin",
+                        "names",
+                    ],
+                ),
+                &mut merge_stats,
+            );
         }
     }
 
@@ -1330,7 +2380,16 @@ pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>
                     alternate_sources: Vec::new(),
                 },
             };
-            identity_index.merge_or_add(&mut objects, object, &mut merge_stats);
+            identity_index.ingest(
+                &mut objects,
+                &mut source_records,
+                object,
+                catalog_properties(
+                    &fields,
+                    &["ra_deg", "dec_deg", "wr", "name", "gcvs", "other_name"],
+                ),
+                &mut merge_stats,
+            );
         }
     }
 
@@ -1353,7 +2412,37 @@ pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>
         let content = std::fs::read_to_string(&path)?;
         for line in content.lines() {
             if let Some(object) = parser(line) {
-                identity_index.merge_or_add(&mut objects, object, &mut merge_stats);
+                let fields = line.split('\t').map(str::trim).collect::<Vec<_>>();
+                let names = if file == "ced.tsv" {
+                    &[
+                        "ra_deg",
+                        "dec_deg",
+                        "ced",
+                        "suffix",
+                        "name",
+                        "major_arcmin",
+                        "minor_arcmin",
+                        "class",
+                        "spectrum",
+                    ][..]
+                } else {
+                    &[
+                        "ra_deg",
+                        "dec_deg",
+                        "lbn",
+                        "major_arcmin",
+                        "minor_arcmin",
+                        "name",
+                        "id",
+                    ][..]
+                };
+                identity_index.ingest(
+                    &mut objects,
+                    &mut source_records,
+                    object,
+                    catalog_properties(&fields, names),
+                    &mut merge_stats,
+                );
             }
         }
     }
@@ -1366,11 +2455,13 @@ pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>
         );
     }
 
-    let audit = audit_object_metadata(&objects)?;
-    let catalog = ObjectCatalog::new(objects);
+    let data = assemble_object_catalog_data(input, curation_dir, objects, source_records)?;
+    let audit = audit_object_metadata(&data.objects)?;
+    let catalog = ObjectCatalog::from_data(data)?;
     let count = catalog.len();
     catalog.write_to(output)?;
     if let Some(manifest) = source_manifest {
+        let provenance = catalog.provenance()?;
         write_object_source_manifest(
             input,
             output,
@@ -1378,6 +2469,7 @@ pub fn build_objects(input: &Path, output: &Path, source_manifest: Option<&Path>
             catalog.objects(),
             audit,
             merge_stats,
+            provenance.as_ref(),
         )?;
     }
     println!(
@@ -1476,6 +2568,23 @@ impl ObjectIdentityIndex {
     ) {
         let matches = self.matching_indices(objects, &incoming);
         self.merge_or_add_with_matches(objects, incoming, matches, stats);
+    }
+
+    fn ingest(
+        &mut self,
+        objects: &mut Vec<seiza::objects::SkyObject>,
+        source_records: &mut Vec<seiza::objects::ObjectSourceRecord>,
+        incoming: seiza::objects::SkyObject,
+        properties: Vec<seiza::objects::ObjectProperty>,
+        stats: &mut ObjectMergeStats,
+    ) {
+        source_records.push(seiza::objects::ObjectSourceRecord {
+            id: incoming.metadata.id.clone(),
+            source: incoming.metadata.source.clone(),
+            object: incoming.clone(),
+            properties,
+        });
+        self.merge_or_add(objects, incoming, stats);
     }
 
     fn matching_indices(
@@ -1599,6 +2708,21 @@ fn add_unique(values: &mut Vec<String>, value: String) {
     if !value.is_empty() && !values.contains(&value) {
         values.push(value);
     }
+}
+
+fn catalog_properties(fields: &[&str], names: &[&str]) -> Vec<seiza::objects::ObjectProperty> {
+    names
+        .iter()
+        .zip(fields)
+        .filter_map(|(name, value)| {
+            let value = value.trim();
+            (!value.is_empty()).then(|| seiza::objects::ObjectProperty {
+                name: (*name).into(),
+                value: value.into(),
+                unit: None,
+            })
+        })
+        .collect()
 }
 
 fn designation_key(value: &str) -> String {
@@ -2089,6 +3213,7 @@ fn write_object_source_manifest(
     objects: &[seiza::objects::SkyObject],
     audit: ObjectMetadataAudit,
     merge_stats: ObjectMergeStats,
+    provenance: Option<&seiza::objects::ObjectCatalogProvenance>,
 ) -> Result<()> {
     let mut counts = std::collections::BTreeMap::<&str, usize>::new();
     for object in objects {
@@ -2129,7 +3254,7 @@ fn write_object_source_manifest(
 
     let (bytes, sha256) = file_digest(output)?;
     let document = serde_json::json!({
-        "format": "SEIZAOB3",
+        "format": "SEIZAOB-v4-container-1",
         "artifact": {
             "name": output.file_name().unwrap_or_default().to_string_lossy(),
             "objects": objects.len(),
@@ -2149,6 +3274,7 @@ fn write_object_source_manifest(
             },
         },
         "sources": sources,
+        "curation": provenance.and_then(|provenance| provenance.curation.as_ref()),
         "acknowledgements": [
             "This product includes data retrieved through the VizieR catalogue access tool, CDS, Strasbourg, France.",
             "Catalog publications and source-specific usage terms are linked by each source entry."
@@ -2919,5 +4045,122 @@ mod tests {
         let mut broken = SAMPLE.to_string();
         broken.replace_range(110..135, &" ".repeat(25));
         assert!(parse_tycho2_line(&broken, 2000.0).is_none());
+    }
+
+    #[test]
+    fn canonical_geometry_is_selected_as_an_atomic_source_tuple() {
+        use seiza::objects::{ObjectProperty, ObjectSourceRecord};
+
+        let mut first = object("Catalog A", "catalog:a", "Catalog A");
+        first.major_arcmin = Some(10.0);
+        first.metadata.alternate_ids.push("catalog:b".into());
+        let mut second = object("Catalog B", "catalog:b", "Catalog B");
+        second.major_arcmin = Some(20.0);
+        second.minor_arcmin = Some(5.0);
+        second.position_angle_deg = Some(30.0);
+        let records = [first.clone(), second.clone()]
+            .into_iter()
+            .map(|object| ObjectSourceRecord {
+                id: object.metadata.id.clone(),
+                source: object.metadata.source.clone(),
+                object,
+                properties: Vec::<ObjectProperty>::new(),
+            })
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let data = assemble_object_catalog_data(dir.path(), None, vec![first], records).unwrap();
+
+        assert_eq!(data.objects[0].major_arcmin, Some(10.0));
+        assert_eq!(data.objects[0].minor_arcmin, None);
+        assert_eq!(data.objects[0].position_angle_deg, None);
+        assert_eq!(data.details[0].source_records.len(), 2);
+        assert!(data.details[0].geometries.iter().any(|geometry| matches!(
+            geometry.data,
+            seiza::objects::GeometryData::Ellipse {
+                major_arcmin: 20.0,
+                minor_arcmin: Some(5.0),
+                position_angle_deg: Some(30.0),
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn external_curation_preserves_lbn_measurement_and_selects_correction() {
+        use seiza::objects::{ObjectCatalog, ObjectSourceRecord};
+
+        let input = tempfile::tempdir().unwrap();
+        let curation = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(curation.path().join("catalogs")).unwrap();
+        std::fs::write(
+            curation.path().join("curation.json"),
+            r#"{"repository":"https://github.com/example/seiza-catalog-curation","commit":"0123456789abcdef","schema_version":"1"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            curation.path().join("catalogs/geometry.csv"),
+            "correction_id,target_id,center_ra_deg,center_dec_deg,major_arcmin,minor_arcmin,position_angle_deg,role,quality,method,evidence,note,preferred\n\
+lbn437-pa,vizier:VII/9:LBN437,338.0509,40.5910,75,20,90,fallback-extent,estimated,WCS image review,local evidence,rotate major axis east-west,true\n",
+        )
+        .unwrap();
+        let mut lbn = object("LBN 437", "vizier:VII/9:LBN437", "VizieR VII/9/catalog");
+        lbn.ra = 338.0509;
+        lbn.dec = 40.5910;
+        lbn.major_arcmin = Some(75.0);
+        lbn.minor_arcmin = Some(20.0);
+        let record = ObjectSourceRecord {
+            id: lbn.metadata.id.clone(),
+            source: lbn.metadata.source.clone(),
+            object: lbn.clone(),
+            properties: Vec::new(),
+        };
+        let data = assemble_object_catalog_data(
+            input.path(),
+            Some(curation.path()),
+            vec![lbn],
+            vec![record],
+        )
+        .unwrap();
+        assert_eq!(data.objects[0].position_angle_deg, Some(90.0));
+        assert_eq!(data.details[0].source_records.len(), 2);
+        assert!(data.details[0].geometries.iter().any(|geometry| matches!(
+            geometry.data,
+            seiza::objects::GeometryData::Ellipse {
+                position_angle_deg: None,
+                ..
+            }
+        )));
+        assert_eq!(
+            data.provenance.curation.as_ref().unwrap().commit,
+            "0123456789abcdef"
+        );
+
+        let path = input.path().join("objects.bin");
+        ObjectCatalog::from_data(data)
+            .unwrap()
+            .write_to(&path)
+            .unwrap();
+        let mapped = ObjectCatalog::open(&path).unwrap();
+        mapped.validate().unwrap();
+        let details = mapped
+            .object_details("vizier:VII/9:LBN437")
+            .unwrap()
+            .unwrap();
+        assert_eq!(details.geometries.len(), 2);
+    }
+
+    #[test]
+    fn parses_disconnected_openngc_contours() {
+        let contours = parse_openngc_outline(
+            "Object\tCont_Flag\tRAJ2000\tDEJ2000\tX\tY\tLabel_Flag\tInfo\n\
+line\t+\t10.0\t20.0\t0\t0\tfalse\t\n\
+line\t*\t11.0\t21.0\t0\t0\tfalse\t\n\
+line\t+\t30.0\t40.0\t0\t0\tfalse\t\n\
+line\t*\t31.0\t41.0\t0\t0\tfalse\t\n",
+        )
+        .unwrap();
+        assert_eq!(contours.len(), 2);
+        assert!(contours.iter().all(|contour| contour.closed));
+        assert_eq!(contours[1].vertices, vec![(30.0, 40.0), (31.0, 41.0)]);
     }
 }

@@ -2,6 +2,11 @@
 
 Status: implemented
 
+Successor proposal: [Extensible object catalog container
+v4](objects-bin-v4.md). V3 remains the implemented and published wire-format
+specification; the proposal preserves complete source records, supports typed
+geometry, and moves future evolution to independently versioned sections.
+
 ## Purpose
 
 `SEIZAOB3` adds identity, hierarchy, provenance, and indexed point/ellipse

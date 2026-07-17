@@ -3,6 +3,9 @@
 `seiza-sources` asynchronously acquires the upstream astronomy distributions
 used to build custom Seiza catalogs: Tycho-2, Gaia DR3 TAP queries, OpenNGC,
 selected VizieR catalogs, stellar identifiers, transients, MPC, and JPL SBDB.
+The OpenNGC acquisition includes both database CSVs and the hand-drawn contour
+files under `outlines/objects`; the object builder associates outlines only
+through explicit curation mappings.
 
 ```rust,no_run
 use seiza_sources::SourceDownloader;
@@ -10,6 +13,13 @@ use seiza_sources::SourceDownloader;
 # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 let sources = SourceDownloader::new()?;
 sources.download_objects("raw/objects").await?;
+sources
+    .download_curation(
+        "theatrus/seiza-catalog-curation",
+        "0123456789abcdef0123456789abcdef01234567",
+        "raw/curation",
+    )
+    .await?;
 sources.download_gaia("raw/gaia", 15.0, 768).await?;
 # Ok(())
 # }

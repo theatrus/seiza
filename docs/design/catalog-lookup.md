@@ -3,6 +3,9 @@
 Status: indexed coordinate/name object API and CLI implemented; feature-overlay
 data model proposed
 
+The provenance-preserving object and geometry model is specified in the
+[extensible object catalog v4 proposal](objects-bin-v4.md).
+
 ## Goal
 
 When an application already knows an image's sky bounds, identify the catalog
@@ -45,9 +48,11 @@ result count.
 
 For interactive use, load one `ObjectCatalog` per process and reuse it while
 the viewport pans or zooms. Debounce viewport queries in the UI and discard
-stale results when newer bounds arrive. `SEIZAOB3` memory-maps fixed records and
-uses an embedded sky-tile candidate index, so a viewport query decodes only
-records near the requested bounds. Large objects are listed in every tile
+stale results when newer bounds arrive. Object catalog v4 memory-maps a
+sectioned container and uses an embedded sky-tile candidate index, so a
+viewport query decodes only records near the requested bounds. Canonical
+records are stored in primary-center tile order for page locality. Large
+objects are listed in every tile
 touched by their conservative major-axis extent, preserving extent-only hits.
 
 The same file contains a sorted normalized index over primary/common names,
@@ -58,12 +63,14 @@ through `ObjectCatalog::lookup_name`, `ObjectCatalog::search_names`, and:
 seiza catalog object --data objects.bin "M 31"
 seiza catalog object --data objects.bin "openngc:NGC224"
 seiza catalog object --data objects.bin "andro" --prefix --limit 10
+seiza catalog object --data objects.bin "openngc:NGC224" --all-sources --format json
 ```
 
 Normal open checks header and section bounds only. `ObjectCatalog::validate` or
-`seiza catalog validate --data objects.bin` deliberately scans all records,
-strings, and indices when full integrity validation is needed. The deployed
-`SEIZAOB1` format remains readable but requires heap decoding.
+`seiza catalog validate --data objects.bin` deliberately scans all sections,
+checksums, records, strings, details, and indices when full integrity
+validation is needed. Deployed `SEIZAOB1` and `SEIZAOB3` files remain readable;
+v1 requires heap decoding while v3 remains mmap-backed.
 
 ## Which catalog should supply sub-objects?
 
