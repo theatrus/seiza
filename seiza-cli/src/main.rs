@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 mod astap;
 mod build_data;
+mod setup;
 mod worker;
 
 fn is_fits_path(path: &std::path::Path) -> bool {
@@ -301,6 +302,8 @@ impl From<DetectionBackendArg> for DetectBackend {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Guided installation of published star and object catalogs
+    Setup(setup::SetupArgs),
     /// Detect stars in an image and print their positions
     Detect {
         /// Image file (PNG, JPEG, TIFF)
@@ -828,6 +831,7 @@ fn main() -> Result<()> {
     let detection_fallback = cli.detection_fallback;
     let detection_fallback_hypotheses = cli.detection_fallback_hypotheses;
     match cli.command {
+        Command::Setup(args) => setup::run(args),
         Command::Detect {
             image,
             sigma,
@@ -1016,23 +1020,36 @@ fn run_download_command(source: DownloadSource) -> Result<()> {
         .block_on(download_command(source))
 }
 
+pub(crate) fn run_prebuilt_download(output: PathBuf, file: Vec<String>) -> Result<()> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to start the download runtime")?
+        .block_on(download_prebuilt(output, file))
+}
+
+async fn download_prebuilt(output: PathBuf, file: Vec<String>) -> Result<()> {
+    let selection = seiza_download::CatalogSet::from_names(file)?;
+    let manager = seiza_download::CatalogManager::builder()
+        .policy(seiza_download::CachePolicy::ForceRefresh)
+        .build()?;
+    let bundle = manager
+        .ensure_with(&selection, report_download_event)
+        .await?;
+    let paths = bundle.materialize(&output).await?;
+    println!(
+        "{} dataset(s) from {} ready in {}",
+        paths.len(),
+        bundle.version,
+        output.display()
+    );
+    Ok(())
+}
+
 async fn download_command(source: DownloadSource) -> Result<()> {
     match source {
         DownloadSource::Prebuilt { output, file } => {
-            let selection = seiza_download::CatalogSet::from_names(file)?;
-            let manager = seiza_download::CatalogManager::builder()
-                .policy(seiza_download::CachePolicy::ForceRefresh)
-                .build()?;
-            let bundle = manager
-                .ensure_with(&selection, report_download_event)
-                .await?;
-            let paths = bundle.materialize(&output).await?;
-            println!(
-                "{} dataset(s) from {} ready in {}",
-                paths.len(),
-                bundle.version,
-                output.display()
-            );
+            download_prebuilt(output, file).await?;
         }
         source => download_source(source).await?,
     }
@@ -1071,6 +1088,8 @@ async fn download_source(source: DownloadSource) -> Result<()> {
 
 fn report_download_event(event: seiza_download::DownloadEvent) {
     use seiza_download::DownloadEvent;
+    use std::io::{IsTerminal, Write};
+
     match event {
         DownloadEvent::FetchingManifest { url } => println!("  fetching {url}"),
         DownloadEvent::UsingCachedManifest { version, stale } => {
@@ -1079,9 +1098,27 @@ fn report_download_event(event: seiza_download::DownloadEvent) {
         }
         DownloadEvent::CacheHit { name, .. } => println!("  {name} already cached"),
         DownloadEvent::DownloadStarted { name, bytes } => {
-            println!("  fetching {name} ({bytes} bytes)")
+            println!(
+                "  downloading {name} ({:.1} MiB)",
+                bytes as f64 / 1_048_576.0
+            )
         }
-        DownloadEvent::DownloadComplete { name, .. } => println!("  cached {name}"),
+        DownloadEvent::DownloadComplete { name, .. } => {
+            println!("\r  cached {name}                         ")
+        }
+        DownloadEvent::DownloadProgress {
+            name,
+            downloaded,
+            total,
+        } if std::io::stdout().is_terminal() => {
+            let percent = downloaded.saturating_mul(100) / total.max(1);
+            print!(
+                "\r  {name}: {percent:>3}% ({:.1}/{:.1} MiB)",
+                downloaded as f64 / 1_048_576.0,
+                total as f64 / 1_048_576.0
+            );
+            let _ = std::io::stdout().flush();
+        }
         DownloadEvent::DownloadProgress { .. } => {}
     }
 }

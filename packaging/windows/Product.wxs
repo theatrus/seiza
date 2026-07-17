@@ -1,0 +1,95 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package
+      Name="Seiza"
+      Manufacturer="Seiza"
+      Version="$(var.SeizaVersion)"
+      UpgradeCode="41A2FCFF-0856-4AB3-BB0E-F15ED0A46264"
+      Language="1033"
+      InstallerVersion="500"
+      Scope="perUser"
+      Compressed="yes">
+    <SummaryInformation Description="Seiza plate solver and catalog tools" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Seiza is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="LocalProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="Seiza">
+          <Component Id="SeizaProgramFiles" Guid="7261E2CA-D4A8-459F-B1A3-23E58C10E3F5">
+            <File Id="SeizaExe" Source="$(var.SeizaBinary)" />
+            <File Id="SeizaReadme" Source="$(var.RepoRoot)README.md" />
+            <File Id="SeizaLicense" Source="$(var.RepoRoot)LICENSE" />
+            <Environment
+                Id="SeizaUserPath"
+                Name="PATH"
+                Value="[INSTALLFOLDER]"
+                Action="set"
+                Part="last"
+                System="no" />
+            <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />
+            <RemoveFolder
+                Id="RemoveLocalProgramsFolderIfEmpty"
+                Directory="LocalProgramsFolder"
+                On="uninstall" />
+            <RegistryValue
+                Root="HKCU"
+                Key="Software\Seiza"
+                Name="InstallDirectory"
+                Type="string"
+                Value="[INSTALLFOLDER]"
+                KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="SeizaProgramMenu" Name="Seiza">
+        <Component Id="SeizaShortcuts">
+          <Shortcut
+              Id="CatalogSetupShortcut"
+              Name="Seiza Catalog Setup"
+              Description="Download or update Seiza catalogs"
+              Target="[INSTALLFOLDER]seiza.exe"
+              Arguments="setup"
+              WorkingDirectory="INSTALLFOLDER" />
+          <RemoveFolder Id="RemoveSeizaProgramMenu" On="uninstall" />
+          <RegistryValue
+              Root="HKCU"
+              Key="Software\Seiza"
+              Name="InstallerShortcuts"
+              Type="integer"
+              Value="1"
+              KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="MainFeature" Title="Seiza" Level="1">
+      <ComponentRef Id="SeizaProgramFiles" />
+      <ComponentRef Id="SeizaShortcuts" />
+    </Feature>
+
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <Property
+        Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT"
+        Value="Download and configure Seiza catalogs now" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <CustomAction
+        Id="LaunchCatalogSetup"
+        FileRef="SeizaExe"
+        ExeCommand="setup --from-installer"
+        Execute="immediate"
+        Return="asyncNoWait"
+        Impersonate="yes" />
+    <UI>
+      <Publish
+          Dialog="ExitDialog"
+          Control="Finish"
+          Event="DoAction"
+          Value="LaunchCatalogSetup"
+          Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" />
+    </UI>
+  </Package>
+</Wix>

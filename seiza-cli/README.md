@@ -111,6 +111,10 @@ seiza download-data prebuilt --output data
 seiza download-data prebuilt --output data --file objects.bin --file transients.bin
 ```
 
+For an interactive selection, run `seiza setup`. This is also the command
+offered by the Windows installer. It presents object-only, solver, blind, and
+complete presets, then delegates to the same verified prebuilt downloader.
+
 The downloader reads one complete bundle from `/data/v4/manifest.json` and
 caches its immutable, content-addressed files by SHA-256 before copying the
 requested selection into the same flat local output directory. The shared

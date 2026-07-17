@@ -2158,6 +2158,7 @@ dependencies = [
  "anyhow",
  "clap",
  "csv",
+ "directories",
  "flate2",
  "image",
  "imageproc",
