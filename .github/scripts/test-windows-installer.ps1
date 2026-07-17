@@ -50,8 +50,26 @@ $installArguments = @(
 ) + $scopeProperties + $featureProperties
 $installed = $false
 
+function Get-OptionalRegistryValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$LiteralPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    $registryItem = Get-ItemProperty -LiteralPath $LiteralPath -ErrorAction Stop
+    $property = $registryItem.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        return $null
+    }
+
+    return $property.Value
+}
+
 function Get-InstallerPathEntries {
-    $pathValue = Get-ItemPropertyValue -LiteralPath $pathRegistry -Name Path -ErrorAction SilentlyContinue
+    $pathValue = Get-OptionalRegistryValue -LiteralPath $pathRegistry -Name Path
     if (-not $pathValue) {
         return @()
     }
@@ -87,10 +105,9 @@ try {
             throw "Shared catalog directory not found at $machineCatalogDirectory"
         }
 
-        $catalogDirectoryValue = Get-ItemPropertyValue `
+        $catalogDirectoryValue = Get-OptionalRegistryValue `
             -LiteralPath $pathRegistry `
-            -Name "SEIZA_CATALOG_DIR" `
-            -ErrorAction SilentlyContinue
+            -Name "SEIZA_CATALOG_DIR"
         if (-not $catalogDirectoryValue -or $catalogDirectoryValue.TrimEnd("\") -ne $machineCatalogDirectory.TrimEnd("\")) {
             throw "SEIZA_CATALOG_DIR is not set to $machineCatalogDirectory"
         }
@@ -135,10 +152,9 @@ finally {
             throw "MSI uninstall left $installDirectory in PATH"
         }
         if ($Scope -eq "perMachine") {
-            $catalogDirectoryValue = Get-ItemPropertyValue `
+            $catalogDirectoryValue = Get-OptionalRegistryValue `
                 -LiteralPath $pathRegistry `
-                -Name "SEIZA_CATALOG_DIR" `
-                -ErrorAction SilentlyContinue
+                -Name "SEIZA_CATALOG_DIR"
             if ($catalogDirectoryValue) {
                 throw "MSI uninstall left SEIZA_CATALOG_DIR configured"
             }
