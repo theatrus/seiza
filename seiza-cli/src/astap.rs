@@ -300,20 +300,14 @@ fn resolve_star_data() -> Result<PathBuf> {
             }
         }
     }
-    for base in [
-        std::env::var("LOCALAPPDATA").ok().map(PathBuf::from),
-        dirs_data_dir(),
-    ]
-    .into_iter()
-    .flatten()
-    {
+    for base in catalog_search_dirs() {
         for name in [
             "stars-deep-gaia17.bin",
             "stars-gaia.bin",
             "stars-lite-tycho2.bin",
             "stars.bin",
         ] {
-            let path = base.join("seiza").join(name);
+            let path = base.join(name);
             if path.exists() {
                 return Ok(path);
             }
@@ -356,19 +350,30 @@ fn resolve_blind_index() -> Option<PathBuf> {
             return Some(path);
         }
     }
+    for base in catalog_search_dirs() {
+        let path = base.join("blind-gaia16.idx");
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn catalog_search_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![crate::setup::default_catalog_dir()];
     for base in [
         std::env::var("LOCALAPPDATA").ok().map(PathBuf::from),
         dirs_data_dir(),
     ]
     .into_iter()
     .flatten()
+    .map(|base| base.join("seiza"))
     {
-        let path = base.join("seiza").join("blind-gaia16.idx");
-        if path.exists() {
-            return Some(path);
+        if !dirs.contains(&base) {
+            dirs.push(base);
         }
     }
-    None
+    dirs
 }
 
 fn dirs_data_dir() -> Option<PathBuf> {
@@ -426,6 +431,14 @@ mod tests {
         let args = parse_args(&raw);
         assert!(args.ra_hours.is_none());
         assert!((args.radius_deg - 180.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn catalog_search_starts_with_setup_directory() {
+        assert_eq!(
+            catalog_search_dirs().first(),
+            Some(&crate::setup::default_catalog_dir())
+        );
     }
 
     #[test]
