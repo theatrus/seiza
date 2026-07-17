@@ -135,9 +135,10 @@ converted into an ellipse. See OpenNGC's
 [`metodology.txt`](https://github.com/mattiaverga/OpenNGC/blob/master/outlines/metodology.txt)
 and [`shape.py`](https://github.com/mattiaverga/OpenNGC/blob/master/outlines/shape.py).
 
-All outline levels are preserved as candidate geometries. An explicit curation
-record maps an outline to a canonical identity and decides whether one level is
-preferred for rendering.
+All normally named outline levels are associated with their matching catalog
+designation during OpenNGC ingestion and preserved as candidate geometries.
+Curation is needed only for an exceptional remapping or to nominate one level
+as preferred for rendering.
 
 ### LBN 437 initial curation decision
 
@@ -184,8 +185,8 @@ fallback and indexing extent.
 
 The proposed source of truth is a separate repository such as
 `seiza-catalog-curation`. It stores only Seiza-authored corrections,
-relationships, source-outline mappings, and selection decisions. It does not
-fork complete upstream catalogs.
+relationships, exceptional source remappings, and selection decisions. It does
+not fork or enumerate ordinary upstream catalog data.
 
 Current layout:
 
@@ -197,7 +198,6 @@ schema/
     object-curation.schema.json
 objects/
   lbn-437.toml
-  openngc-ngc7000.toml
   ...
 ```
 
@@ -206,9 +206,9 @@ checkout derives the exact commit from `HEAD` and must be clean; an exported
 snapshot additionally records `commit` in that file. Schema v2 stores one
 strict TOML document per canonical target. The filename stem equals the
 document's stable lowercase `id`; the source-qualified `target_id` identifies
-the canonical object. Geometry corrections, OpenNGC outline mappings, typed
-relations, facet selections, notes, and evidence arrays are co-located so one
-review diff contains the complete decision.
+the canonical object. Geometry corrections, exceptional outline remappings,
+typed relations, facet selections, notes, and evidence arrays are co-located
+so one review diff contains the complete decision.
 
 For example:
 
@@ -417,14 +417,15 @@ complete S3 and cache contract.
    the builder.
 2. Fetch a curation snapshot pinned by commit and checksum.
 3. Parse every upstream row into an immutable source record.
-4. Build identity groups from explicit identifiers and curated relations.
-5. Apply deterministic selection policy and curated nominations.
-6. Derive conservative geometry bounds and on-disk query indices.
-7. Write the sectioned container and provenance.
-8. Run exhaustive validation, deterministic rebuild comparison, and release
+4. Associate normally named OpenNGC outlines with matching source records.
+5. Build identity groups from explicit identifiers and curated relations.
+6. Apply deterministic selection policy and curated nominations.
+7. Derive conservative geometry bounds and on-disk query indices.
+8. Write the sectioned container and provenance.
+9. Run exhaustive validation, deterministic rebuild comparison, and release
    profiling for file size, open cost, RSS, and representative queries.
-9. Upload the database under its content-addressed `/data/v4/` artifact key.
-10. Publish the archived complete manifest and then the current manifest
+10. Upload the database under its content-addressed `/data/v4/` artifact key.
+11. Publish the archived complete manifest and then the current manifest
     pointer, leaving every older compatibility path untouched.
 
 ## Acceptance criteria

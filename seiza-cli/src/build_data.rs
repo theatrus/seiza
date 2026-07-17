@@ -404,6 +404,7 @@ fn assemble_object_catalog_data(
         details,
         provenance,
     };
+    ingest_openngc_outlines(input, &mut data)?;
     if let Some(curation_dir) = curation_dir {
         apply_object_curation(input, curation_dir, &mut data)?;
     }
@@ -546,6 +547,163 @@ fn default_openngc_outline_method() -> String {
     "OpenNGC hand-drawn DSS2 contour".into()
 }
 
+fn ingest_openngc_outlines(
+    input: &Path,
+    data: &mut seiza::objects::ObjectCatalogData,
+) -> Result<usize> {
+    use seiza::objects::{GeometryQuality, GeometryRole};
+
+    let outline_dir = input.join("outlines").join("objects");
+    if !outline_dir.is_dir() {
+        return Ok(0);
+    }
+
+    let mut by_designation = std::collections::HashMap::<String, Vec<(usize, String, bool)>>::new();
+    for (object_index, detail) in data.details.iter().enumerate() {
+        for record in &detail.source_records {
+            for designation in std::iter::once(record.object.name.as_str())
+                .chain(record.object.metadata.aliases.iter().map(String::as_str))
+            {
+                let key = designation_key(designation);
+                if key.is_empty() {
+                    continue;
+                }
+                let candidate = (object_index, record.id.clone(), record.source == "OpenNGC");
+                let candidates = by_designation.entry(key).or_default();
+                if !candidates.contains(&candidate) {
+                    candidates.push(candidate);
+                }
+            }
+        }
+    }
+
+    let mut attached = 0;
+    for path in recursive_files(&outline_dir)? {
+        let Some(file) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some((key, _)) = openngc_outline_key_and_level(file) else {
+            continue;
+        };
+        let Some(candidates) = by_designation.get(&key) else {
+            continue;
+        };
+        let mut candidates = candidates.clone();
+        if candidates.iter().any(|(_, _, openngc)| *openngc) {
+            candidates.retain(|(_, _, openngc)| *openngc);
+        }
+        candidates.sort();
+        candidates.dedup();
+        if candidates.len() != 1 {
+            // Ambiguous associations remain unattached unless an explicit
+            // curation document remaps the outline later in the build.
+            continue;
+        }
+        let (object_index, source_record_id, _) = candidates.pop().unwrap();
+        let geometry = load_openngc_outline_geometry(
+            input,
+            &mut data.provenance,
+            file,
+            source_record_id,
+            GeometryRole::BrightnessLevel,
+            GeometryQuality::Catalog,
+            default_openngc_outline_method(),
+            String::new(),
+        )?;
+        data.details[object_index].geometries.push(geometry);
+        attached += 1;
+    }
+    Ok(attached)
+}
+
+fn openngc_outline_key_and_level(file: &str) -> Option<(String, String)> {
+    let stem = file.strip_suffix(".txt")?;
+    let (designation, _) = stem.rsplit_once("_lv")?;
+    let level = openngc_outline_level(file)?;
+    stable_id_for_alias(designation)?;
+    Some((designation_key(designation), level))
+}
+
+fn openngc_outline_level(file: &str) -> Option<String> {
+    let stem = file.strip_suffix(".txt")?;
+    let (_, level) = stem.rsplit_once("_lv")?;
+    if level.is_empty() || !level.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(format!("level-{level}"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn load_openngc_outline_geometry(
+    input: &Path,
+    provenance: &mut seiza::objects::ObjectCatalogProvenance,
+    file: &str,
+    source_record_id: String,
+    role: seiza::objects::GeometryRole,
+    quality: seiza::objects::GeometryQuality,
+    method: String,
+    evidence: String,
+) -> Result<seiza::objects::ObjectGeometry> {
+    use seiza::objects::{
+        GeometryData, ObjectGeometry, ObjectProvenanceFile, ObjectProvenanceSource,
+    };
+
+    let path = [
+        input.join("outlines").join("objects").join(file),
+        input.join("outlines").join(file),
+    ]
+    .into_iter()
+    .find(|path| path.exists())
+    .with_context(|| format!("OpenNGC outline {file} is missing"))?;
+    let contours = parse_openngc_outline(&std::fs::read_to_string(&path)?)?;
+    let (bytes, sha256) = file_digest(&path)?;
+    let outline_source = if let Some(source) = provenance
+        .sources
+        .iter_mut()
+        .find(|source| source.name == "OpenNGC outlines")
+    {
+        source
+    } else {
+        provenance.sources.push(ObjectProvenanceSource {
+            name: "OpenNGC outlines".into(),
+            reference_url: "https://github.com/mattiaverga/OpenNGC/tree/master/outlines".into(),
+            revision: String::new(),
+            files: Vec::new(),
+        });
+        provenance.sources.last_mut().unwrap()
+    };
+    let provenance_path = format!("outlines/objects/{file}");
+    if !outline_source
+        .files
+        .iter()
+        .any(|source_file| source_file.path == provenance_path)
+    {
+        outline_source.files.push(ObjectProvenanceFile {
+            path: provenance_path.clone(),
+            bytes,
+            sha256,
+        });
+    }
+    let level = openngc_outline_level(file)
+        .with_context(|| format!("OpenNGC outline {file} has an invalid filename"))?;
+    Ok(ObjectGeometry {
+        id: format!("openngc-outline:{file}"),
+        source_record_id,
+        role,
+        quality,
+        method,
+        evidence: if evidence.is_empty() {
+            provenance_path
+        } else {
+            evidence
+        },
+        data: GeometryData::OutlineSet {
+            level: Some(level),
+            contours,
+        },
+    })
+}
+
 fn apply_object_curation(
     input: &Path,
     curation_dir: &Path,
@@ -553,8 +711,7 @@ fn apply_object_curation(
 ) -> Result<()> {
     use seiza::objects::{
         GeometryData, ObjectCurationRevision, ObjectFacet, ObjectGeometry, ObjectProperty,
-        ObjectProvenanceFile, ObjectProvenanceSource, ObjectRelation, ObjectSelection,
-        ObjectSourceRecord,
+        ObjectProvenanceFile, ObjectRelation, ObjectSelection, ObjectSourceRecord,
     };
 
     let metadata_path = curation_dir.join("curation.json");
@@ -693,68 +850,28 @@ fn apply_object_curation(
                     target_id
                 );
             }
-            let path = [
-                input.join("outlines").join("objects").join(&row.file),
-                input.join("outlines").join(&row.file),
-            ]
-            .into_iter()
-            .find(|path| path.exists())
-            .with_context(|| format!("OpenNGC outline {} is missing", row.file))?;
-            let contours = parse_openngc_outline(&std::fs::read_to_string(&path)?)?;
-            let (bytes, sha256) = file_digest(&path)?;
-            let outline_source = if let Some(source) = data
-                .provenance
-                .sources
-                .iter_mut()
-                .find(|source| source.name == "OpenNGC outlines")
-            {
-                source
-            } else {
-                data.provenance.sources.push(ObjectProvenanceSource {
-                    name: "OpenNGC outlines".into(),
-                    reference_url: "https://github.com/mattiaverga/OpenNGC/tree/master/outlines"
-                        .into(),
-                    revision: String::new(),
-                    files: Vec::new(),
-                });
-                data.provenance.sources.last_mut().unwrap()
-            };
-            if !outline_source
-                .files
-                .iter()
-                .any(|file| file.path == format!("outlines/objects/{}", row.file))
-            {
-                outline_source.files.push(ObjectProvenanceFile {
-                    path: format!("outlines/objects/{}", row.file),
-                    bytes,
-                    sha256,
-                });
-            }
-            let level = row
-                .file
-                .rsplit_once("_lv")
-                .and_then(|(_, suffix)| suffix.strip_suffix(".txt"))
-                .map(|level| format!("level-{level}"));
-            let geometry_id = format!("openngc-outline:{}", row.file);
             let narrative = curation_narrative(
                 &document.notes,
                 &row.notes,
                 &document.evidence,
                 &row.evidence,
             );
-            let geometry = ObjectGeometry {
-                id: geometry_id.clone(),
-                source_record_id: source_record_id.clone(),
-                role: parse_geometry_role(&row.role)?,
-                quality: parse_geometry_quality(&row.quality)?,
-                method: row.method,
-                evidence: if narrative.is_empty() {
-                    format!("outlines/objects/{}", row.file)
-                } else {
-                    narrative
-                },
-                data: GeometryData::OutlineSet { level, contours },
-            };
+            let geometry = load_openngc_outline_geometry(
+                input,
+                &mut data.provenance,
+                &row.file,
+                source_record_id.clone(),
+                parse_geometry_role(&row.role)?,
+                parse_geometry_quality(&row.quality)?,
+                row.method,
+                narrative,
+            )?;
+            let geometry_id = geometry.id.clone();
+            for detail in &mut data.details {
+                detail
+                    .geometries
+                    .retain(|existing| existing.id != geometry_id);
+            }
             data.details[index].geometries.push(geometry.clone());
             if row.preferred {
                 register_curated_facet(&mut curated_facets, target_id, "preferred-geometry")?;
@@ -2752,6 +2869,13 @@ pub fn build_objects(
     }
 
     let data = assemble_object_catalog_data(input, curation_dir, objects, source_records)?;
+    let outline_count = data
+        .provenance
+        .sources
+        .iter()
+        .find(|source| source.name == "OpenNGC outlines")
+        .map(|source| source.files.len())
+        .unwrap_or(0);
     let audit = audit_object_metadata(&data.objects)?;
     let catalog = ObjectCatalog::from_data(data)?;
     let count = catalog.len();
@@ -2777,7 +2901,7 @@ pub fn build_objects(
         audit.unresolved_parent_links,
     );
     println!(
-        "{count} objects from {sources} source files written to {} ({} new identity-indexed records, {} explicit cross-catalog merges, {} ambiguous cross-identifications retained separately)",
+        "{count} objects and {outline_count} OpenNGC outlines from {sources} source files written to {} ({} new identity-indexed records, {} explicit cross-catalog merges, {} ambiguous cross-identifications retained separately)",
         output.display(),
         merge_stats.added,
         merge_stats.merged,
@@ -4519,6 +4643,68 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn openngc_outlines_attach_without_curation() {
+        use seiza::objects::ObjectSourceRecord;
+
+        let input = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(input.path().join("outlines/objects")).unwrap();
+        let outline = "Object\tCont_Flag\tRAJ2000\tDEJ2000\tX\tY\tLabel_Flag\tInfo\n\
+line\t+\t314.0\t44.0\t0\t0\tfalse\t\n\
+line\t*\t315.0\t45.0\t0\t0\tfalse\t\n";
+        for file in ["NGC7000_lv2.txt", "M045_lv1.txt", "Orion_lv1.txt"] {
+            std::fs::write(input.path().join("outlines/objects").join(file), outline).unwrap();
+        }
+        let ngc = object("NGC 7000", "openngc:NGC7000", "OpenNGC");
+        let pleiades = object("M 45", "openngc:MEL22", "OpenNGC");
+        let records = [&ngc, &pleiades]
+            .into_iter()
+            .map(|object| ObjectSourceRecord {
+                id: object.metadata.id.clone(),
+                source: object.metadata.source.clone(),
+                object: object.clone(),
+                properties: Vec::new(),
+            })
+            .collect();
+
+        let data =
+            assemble_object_catalog_data(input.path(), None, vec![ngc, pleiades], records).unwrap();
+        let outline = data.details[0]
+            .geometries
+            .iter()
+            .find(|geometry| geometry.id == "openngc-outline:NGC7000_lv2.txt")
+            .unwrap();
+        assert_eq!(outline.source_record_id, "openngc:NGC7000");
+        assert!(matches!(
+            &outline.data,
+            seiza::objects::GeometryData::OutlineSet {
+                level: Some(level),
+                ..
+            } if level == "level-2"
+        ));
+        let pleiades_outline = data
+            .details
+            .iter()
+            .flat_map(|detail| &detail.geometries)
+            .find(|geometry| geometry.id == "openngc-outline:M045_lv1.txt")
+            .unwrap();
+        assert_eq!(pleiades_outline.source_record_id, "openngc:MEL22");
+        assert!(data.provenance.curation.is_none());
+        let source = data
+            .provenance
+            .sources
+            .iter()
+            .find(|source| source.name == "OpenNGC outlines")
+            .unwrap();
+        assert_eq!(source.files.len(), 2);
+        assert!(
+            !source
+                .files
+                .iter()
+                .any(|file| file.path.ends_with("Orion_lv1.txt"))
+        );
     }
 
     #[test]
