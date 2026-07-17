@@ -38,7 +38,9 @@ jobs:
         shell: pwsh
         run: |
           $msi = Get-ChildItem dist/*.msi | Select-Object -First 1
-          ./.github/scripts/test-windows-installer.ps1 -Msi $msi.FullName
+          ./.github/scripts/test-windows-installer.ps1 -Msi $msi.FullName -Scope perUser
+          ./.github/scripts/test-windows-installer.ps1 -Msi $msi.FullName -Scope perMachine
+          ./.github/scripts/test-windows-installer.ps1 -Msi $msi.FullName -Scope perUser -WithoutPath
       - uses: actions/upload-artifact@v7.0.1
         if: runner.os == 'Windows'
         with:
