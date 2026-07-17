@@ -2134,7 +2134,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "seiza"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "image",
  "memmap2",
@@ -2153,7 +2153,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-cli"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2179,7 +2179,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-download"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "directories",
  "fs2",
@@ -2195,7 +2195,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-fits"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "memmap2",
  "multiversion",
@@ -2203,7 +2203,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-sources"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "futures-util",
