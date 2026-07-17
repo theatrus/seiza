@@ -59,10 +59,22 @@ impl SetupPreset {
 
     fn files(self) -> Vec<String> {
         let datasets: &[Dataset] = match self {
-            Self::SolverLite => &[Dataset::Objects, Dataset::StarsLiteTycho2],
-            Self::SolverGaia => &[Dataset::Objects, Dataset::StarsGaia],
+            Self::SolverLite => &[
+                Dataset::Objects,
+                Dataset::MinorBodies,
+                Dataset::Transients,
+                Dataset::StarsLiteTycho2,
+            ],
+            Self::SolverGaia => &[
+                Dataset::Objects,
+                Dataset::MinorBodies,
+                Dataset::Transients,
+                Dataset::StarsGaia,
+            ],
             Self::BlindDeep => &[
                 Dataset::Objects,
+                Dataset::MinorBodies,
+                Dataset::Transients,
                 Dataset::StarsDeepGaia17,
                 Dataset::BlindGaia16,
             ],
@@ -77,10 +89,14 @@ impl SetupPreset {
     fn description(self) -> &'static str {
         match self {
             Self::SolverLite => {
-                "Telescope control and hinted solves: objects + compact Tycho-2 catalog"
+                "Telescope control and hinted solves: objects + Solar System + transients + compact Tycho-2 catalog"
             }
-            Self::SolverGaia => "Narrow or crowded fields: objects + denser Gaia solver catalog",
-            Self::BlindDeep => "Unknown sky position: objects + deep Gaia catalog + blind index",
+            Self::SolverGaia => {
+                "Narrow or crowded fields: objects + Solar System + transients + denser Gaia solver catalog"
+            }
+            Self::BlindDeep => {
+                "Unknown sky position: objects + Solar System + transients + deep Gaia catalog + blind index"
+            }
             Self::All => "Development and offline use: every published catalog",
         }
     }
@@ -310,7 +326,7 @@ fn prompt_next_action<R: BufRead, W: Write>(input: &mut R, output: &mut W) -> Re
 fn prompt_preset<R: BufRead, W: Write>(input: &mut R, output: &mut W) -> Result<SetupPreset> {
     writeln!(
         output,
-        "Every option includes object search and at least one plate-solving catalog.\n"
+        "Every option includes object search, Solar System objects, active transients, and at least one plate-solving catalog.\n"
     )?;
     writeln!(
         output,
@@ -374,12 +390,18 @@ mod tests {
         assert_eq!(preset, SetupPreset::BlindDeep);
         assert_eq!(
             preset.files(),
-            ["objects.bin", "stars-deep-gaia17.bin", "blind-gaia16.idx"]
+            [
+                "objects.bin",
+                "minor-bodies.bin",
+                "transients.bin",
+                "stars-deep-gaia17.bin",
+                "blind-gaia16.idx",
+            ]
         );
     }
 
     #[test]
-    fn every_selective_preset_includes_objects_and_plate_solving() {
+    fn every_selective_preset_includes_sky_objects_and_plate_solving() {
         for preset in [
             SetupPreset::SolverLite,
             SetupPreset::SolverGaia,
@@ -387,6 +409,8 @@ mod tests {
         ] {
             let files = preset.files();
             assert!(files.iter().any(|file| file == "objects.bin"));
+            assert!(files.iter().any(|file| file == "minor-bodies.bin"));
+            assert!(files.iter().any(|file| file == "transients.bin"));
             assert!(files.iter().any(|file| file.starts_with("stars-")));
         }
     }
