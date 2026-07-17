@@ -21,6 +21,13 @@ else {
 }
 $installedBinary = Join-Path $installDirectory "seiza.exe"
 $machineCatalogDirectory = Join-Path $env:ProgramData "Seiza\catalogs"
+$programMenuDirectory = if ($Scope -eq "perMachine") {
+    Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\Seiza"
+}
+else {
+    Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Seiza"
+}
+$catalogSetupShortcut = Join-Path $programMenuDirectory "Seiza Catalog Setup.lnk"
 $pathRegistry = if ($Scope -eq "perMachine") {
     "Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
 }
@@ -90,6 +97,25 @@ try {
     if (-not (Test-Path -LiteralPath $installedBinary)) {
         throw "Installed binary not found at $installedBinary"
     }
+    if (-not (Test-Path -LiteralPath $catalogSetupShortcut -PathType Leaf)) {
+        throw "Catalog setup shortcut not found at $catalogSetupShortcut"
+    }
+
+    $shortcutArguments = (New-Object -ComObject WScript.Shell).CreateShortcut($catalogSetupShortcut).Arguments
+    if ($shortcutArguments -notmatch "(?:^|\s)--from-installer(?:\s|$)") {
+        throw "Catalog setup shortcut does not enable durable installer-mode errors"
+    }
+    if ($Scope -eq "perMachine") {
+        if ($shortcutArguments -notmatch "(?:^|\s)--elevate(?:\s|$)") {
+            throw "All-users catalog setup shortcut does not request elevation"
+        }
+        if ($shortcutArguments -notlike "*$($machineCatalogDirectory.TrimEnd('\'))*") {
+            throw "All-users catalog setup shortcut does not target $machineCatalogDirectory"
+        }
+    }
+    elseif ($shortcutArguments -match "(?:^|\s)--elevate(?:\s|$)") {
+        throw "Current-user catalog setup shortcut unexpectedly requests elevation"
+    }
 
     $pathEntries = Get-InstallerPathEntries
     $installedPathEntry = $installDirectory.TrimEnd("\")
@@ -146,6 +172,9 @@ finally {
         }
         if (Test-Path -LiteralPath $installedBinary) {
             throw "MSI uninstall left $installedBinary behind"
+        }
+        if (Test-Path -LiteralPath $catalogSetupShortcut) {
+            throw "MSI uninstall left $catalogSetupShortcut behind"
         }
         $pathEntries = Get-InstallerPathEntries
         if ($pathEntries -contains $installDirectory.TrimEnd("\")) {

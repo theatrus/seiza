@@ -100,19 +100,42 @@
 
     <StandardDirectory Id="ProgramMenuFolder">
       <Directory Id="SeizaProgramMenu" Name="Seiza">
-        <Component Id="SeizaShortcuts" Guid="479C7219-B87D-4BC4-B8F4-FABBB923EC9C">
+        <Component
+            Id="SeizaUserShortcuts"
+            Guid="479C7219-B87D-4BC4-B8F4-FABBB923EC9C"
+            Condition="MSIINSTALLPERUSER = 1">
           <Shortcut
-              Id="CatalogSetupShortcut"
+              Id="UserCatalogSetupShortcut"
               Name="Seiza Catalog Setup"
               Description="Download or update Seiza catalogs"
               Target="[APPLICATIONFOLDER]seiza.exe"
-              Arguments="setup"
+              Arguments="setup --from-installer"
               WorkingDirectory="APPLICATIONFOLDER" />
-          <RemoveFolder Id="RemoveSeizaProgramMenu" On="uninstall" />
+          <RemoveFolder Id="RemoveUserSeizaProgramMenu" On="uninstall" />
           <RegistryValue
               Root="HKCU"
               Key="Software\Seiza"
               Name="InstallerShortcuts"
+              Type="integer"
+              Value="1"
+              KeyPath="yes" />
+        </Component>
+        <Component
+            Id="SeizaMachineShortcuts"
+            Guid="5DAA7611-CDB2-438E-8872-01C90A12F7DB"
+            Condition="NOT MSIINSTALLPERUSER">
+          <Shortcut
+              Id="MachineCatalogSetupShortcut"
+              Name="Seiza Catalog Setup"
+              Description="Download or update shared Seiza catalogs"
+              Target="[APPLICATIONFOLDER]seiza.exe"
+              Arguments="setup --from-installer --elevate --output &quot;[CommonAppDataFolder]Seiza\catalogs&quot;"
+              WorkingDirectory="APPLICATIONFOLDER" />
+          <RemoveFolder Id="RemoveMachineSeizaProgramMenu" On="uninstall" />
+          <RegistryValue
+              Root="HKCU"
+              Key="Software\Seiza"
+              Name="MachineInstallerShortcuts"
               Type="integer"
               Value="1"
               KeyPath="yes" />
@@ -130,7 +153,8 @@
         AllowAdvertise="no"
         ConfigurableDirectory="APPLICATIONFOLDER">
       <ComponentRef Id="SeizaProgramFiles" />
-      <ComponentRef Id="SeizaShortcuts" />
+      <ComponentRef Id="SeizaUserShortcuts" />
+      <ComponentRef Id="SeizaMachineShortcuts" />
       <ComponentRef Id="SeizaMachineCatalogConfiguration" />
       <Feature
           Id="PathFeature"
@@ -177,7 +201,7 @@
     <CustomAction
         Id="LaunchMachineCatalogSetup"
         FileRef="SeizaExe"
-        ExeCommand="setup --from-installer --output &quot;[SeizaMachineCatalogFolder]&quot;"
+        ExeCommand="setup --from-installer --elevate --output &quot;[CommonAppDataFolder]Seiza\catalogs&quot;"
         Execute="immediate"
         Return="asyncNoWait"
         Impersonate="yes" />

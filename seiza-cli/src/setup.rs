@@ -6,6 +6,11 @@ use std::ffi::OsString;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
+#[cfg(windows)]
+use std::ffi::OsStr;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+
 const CATALOG_DIR_ENV: &str = "SEIZA_CATALOG_DIR";
 
 #[derive(Args)]
@@ -22,6 +27,9 @@ pub(crate) struct SetupArgs {
     /// Adjust the welcome text for setup launched by the Windows installer
     #[arg(long, hide = true)]
     from_installer: bool,
+    /// Relaunch catalog setup with administrator privileges (Windows installer use only)
+    #[arg(long, hide = true)]
+    elevate: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -39,6 +47,15 @@ enum NextAction {
 }
 
 impl SetupPreset {
+    fn cli_name(self) -> &'static str {
+        match self {
+            Self::SolverLite => "solver-lite",
+            Self::SolverGaia => "solver-gaia",
+            Self::BlindDeep => "blind-deep",
+            Self::All => "all",
+        }
+    }
+
     fn files(self) -> Vec<String> {
         let datasets: &[Dataset] = match self {
             Self::SolverLite => &[Dataset::Objects, Dataset::StarsLiteTycho2],
@@ -68,7 +85,35 @@ impl SetupPreset {
     }
 }
 
-pub(crate) fn run(args: SetupArgs) -> Result<()> {
+pub(crate) fn run(mut args: SetupArgs) -> Result<()> {
+    let from_installer = args.from_installer;
+
+    #[cfg(windows)]
+    let result = if args.elevate {
+        args.elevate = false;
+        launch_elevated(&args)
+    } else {
+        run_setup(args)
+    };
+
+    #[cfg(not(windows))]
+    let result = run_setup(args);
+
+    if let Err(error) = &result
+        && from_installer
+    {
+        eprintln!("\nSeiza catalog setup failed:\n{error:#}");
+        if io::stdin().is_terminal() {
+            eprintln!("\nPress Enter to close this window.");
+            let mut answer = String::new();
+            let _ = io::stdin().read_line(&mut answer);
+        }
+    }
+
+    result
+}
+
+fn run_setup(args: SetupArgs) -> Result<()> {
     let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
     if args.preset.is_none() && !interactive {
         anyhow::bail!(
@@ -127,6 +172,109 @@ pub(crate) fn run(args: SetupArgs) -> Result<()> {
             NextAction::Quit => return Ok(()),
         }
     }
+}
+
+#[cfg(windows)]
+fn launch_elevated(args: &SetupArgs) -> Result<()> {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let executable = std::env::current_exe().context("failed to locate seiza.exe")?;
+    let executable = wide_null(executable.as_os_str());
+    let verb = wide_null(OsStr::new("runas"));
+    let parameters = elevated_parameters(args);
+
+    // SAFETY: All pointers refer to nul-terminated UTF-16 buffers that remain
+    // alive for the duration of ShellExecuteW. Null window/directory handles
+    // request the shell defaults. The elevated child owns its new process.
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            executable.as_ptr(),
+            parameters.as_ptr(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if result as usize <= 32 {
+        anyhow::bail!(
+            "administrator approval was declined or Windows could not start elevated setup (ShellExecute error {})",
+            result as usize
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn elevated_parameters(args: &SetupArgs) -> Vec<u16> {
+    let mut arguments = vec![OsString::from("setup")];
+    if args.from_installer {
+        arguments.push(OsString::from("--from-installer"));
+    }
+    if let Some(output) = &args.output {
+        arguments.push(OsString::from("--output"));
+        arguments.push(output.as_os_str().to_os_string());
+    }
+    if let Some(preset) = args.preset {
+        arguments.push(OsString::from("--preset"));
+        arguments.push(OsString::from(preset.cli_name()));
+    }
+    if args.yes {
+        arguments.push(OsString::from("--yes"));
+    }
+
+    quote_windows_arguments(&arguments)
+}
+
+#[cfg(windows)]
+fn quote_windows_arguments(arguments: &[OsString]) -> Vec<u16> {
+    let mut command_line = Vec::new();
+    for argument in arguments {
+        if !command_line.is_empty() {
+            command_line.push(u16::from(b' '));
+        }
+        append_quoted_windows_argument(&mut command_line, argument.as_os_str());
+    }
+    command_line.push(0);
+    command_line
+}
+
+#[cfg(windows)]
+fn append_quoted_windows_argument(command_line: &mut Vec<u16>, argument: &OsStr) {
+    let units: Vec<u16> = argument.encode_wide().collect();
+    let requires_quotes = units.is_empty()
+        || units.iter().any(|unit| {
+            *unit == u16::from(b' ') || *unit == u16::from(b'\t') || *unit == u16::from(b'"')
+        });
+    if !requires_quotes {
+        command_line.extend_from_slice(&units);
+        return;
+    }
+
+    command_line.push(u16::from(b'"'));
+    let mut backslashes = 0;
+    for unit in units {
+        if unit == u16::from(b'\\') {
+            backslashes += 1;
+        } else if unit == u16::from(b'"') {
+            command_line.extend(std::iter::repeat_n(u16::from(b'\\'), backslashes * 2 + 1));
+            command_line.push(unit);
+            backslashes = 0;
+        } else {
+            command_line.extend(std::iter::repeat_n(u16::from(b'\\'), backslashes));
+            command_line.push(unit);
+            backslashes = 0;
+        }
+    }
+    command_line.extend(std::iter::repeat_n(u16::from(b'\\'), backslashes * 2));
+    command_line.push(u16::from(b'"'));
+}
+
+#[cfg(windows)]
+fn wide_null(value: &OsStr) -> Vec<u16> {
+    value.encode_wide().chain(std::iter::once(0)).collect()
 }
 
 pub(crate) fn default_catalog_dir() -> PathBuf {
@@ -272,6 +420,22 @@ mod tests {
         assert_eq!(
             prompt_next_action(&mut Cursor::new("quit\n"), &mut Vec::new()).unwrap(),
             NextAction::Quit
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn elevated_command_line_quotes_spaces_and_trailing_backslashes() {
+        let arguments = [
+            OsString::from("setup"),
+            OsString::from("--output"),
+            OsString::from("C:\\Program Data\\Seiza\\catalogs\\"),
+        ];
+        let encoded = quote_windows_arguments(&arguments);
+        let command_line = String::from_utf16(&encoded[..encoded.len() - 1]).unwrap();
+        assert_eq!(
+            command_line,
+            "setup --output \"C:\\Program Data\\Seiza\\catalogs\\\\\""
         );
     }
 }

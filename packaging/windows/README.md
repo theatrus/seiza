@@ -19,6 +19,13 @@ continues to use `%LOCALAPPDATA%\Seiza\seiza\data\catalogs`. Explicit
 `SEIZA_STAR_DATA` and `SEIZA_BLIND_INDEX` environment variables remain
 higher-priority file overrides.
 
+The all-users catalog wizard explicitly relaunches itself with the Windows
+`runas` verb, so Windows requests administrator approval before downloading to
+the shared directory. Installer-launched setup also keeps its console open on
+failure, prints the complete error chain, and waits for Enter so download or
+filesystem errors cannot disappear with the window. The Start menu shortcut
+uses the same behavior and can be used to retry setup later.
+
 Every setup-wizard choice includes the object catalog and at least one usable
 plate-solving catalog. The menu describes choices by use case: lightweight
 hinted solving, denser Gaia solving, deep blind solving, or the complete bundle.
