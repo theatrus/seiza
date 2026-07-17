@@ -30,6 +30,12 @@ enum SetupPreset {
     All,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NextAction {
+    Menu,
+    Quit,
+}
+
 impl SetupPreset {
     fn files(self) -> Vec<String> {
         let datasets: &[Dataset] = match self {
@@ -75,40 +81,74 @@ pub(crate) fn run(args: SetupArgs) -> Result<()> {
     }
 
     let output = args.output.unwrap_or_else(default_catalog_dir);
-    let preset = match args.preset {
-        Some(preset) => preset,
-        None => {
+    loop {
+        let preset = match args.preset {
+            Some(preset) => preset,
+            None => {
+                let mut input = io::stdin().lock();
+                let mut output = io::stdout().lock();
+                prompt_preset(&mut input, &mut output)?
+            }
+        };
+
+        println!("Selection : {}", preset.description());
+        println!("Directory : {}", output.display());
+        println!("Downloads are SHA-256 verified and safe to retry.\n");
+
+        if !args.yes {
+            if !interactive {
+                anyhow::bail!(
+                    "confirmation requires a terminal; pass --yes to continue unattended"
+                );
+            }
             let mut input = io::stdin().lock();
-            let mut output = io::stdout().lock();
-            prompt_preset(&mut input, &mut output)?
+            let mut output_stream = io::stdout().lock();
+            if !prompt_confirm(&mut input, &mut output_stream)? {
+                println!("Setup cancelled; Seiza remains installed.");
+                return Ok(());
+            }
         }
-    };
 
-    println!("Selection : {}", preset.description());
-    println!("Directory : {}", output.display());
-    println!("Downloads are SHA-256 verified and safe to retry.\n");
+        crate::run_prebuilt_download(output.clone(), preset.files())?;
+        println!("\nSuccess! Catalog setup is complete.");
+        println!("Catalogs are ready in {}.", output.display());
+        println!("Seiza's ASTAP-compatible solver mode will discover them automatically.");
 
-    if !args.yes {
-        if !interactive {
-            anyhow::bail!("confirmation requires a terminal; pass --yes to continue unattended");
-        }
-        let mut input = io::stdin().lock();
-        let mut output_stream = io::stdout().lock();
-        if !prompt_confirm(&mut input, &mut output_stream)? {
-            println!("Setup cancelled; Seiza remains installed.");
+        if args.preset.is_some() || !interactive {
             return Ok(());
         }
-    }
 
-    crate::run_prebuilt_download(output, preset.files())?;
-    println!("\nCatalog setup complete. You can run `seiza setup` again at any time.");
-    Ok(())
+        let mut input = io::stdin().lock();
+        let mut output_stream = io::stdout().lock();
+        match prompt_next_action(&mut input, &mut output_stream)? {
+            NextAction::Menu => println!(),
+            NextAction::Quit => return Ok(()),
+        }
+    }
 }
 
-fn default_catalog_dir() -> PathBuf {
+pub(crate) fn default_catalog_dir() -> PathBuf {
     ProjectDirs::from("fyi", "Seiza", "seiza")
         .map(|dirs| dirs.data_local_dir().join("catalogs"))
         .unwrap_or_else(|| PathBuf::from("seiza-data"))
+}
+
+fn prompt_next_action<R: BufRead, W: Write>(input: &mut R, output: &mut W) -> Result<NextAction> {
+    writeln!(output, "\nWhat would you like to do next?")?;
+    writeln!(output, "  1. Return to the catalog menu")?;
+    writeln!(output, "  2. Quit")?;
+    write!(output, "\nChoose an option [2]: ")?;
+    output.flush()?;
+
+    let mut answer = String::new();
+    input
+        .read_line(&mut answer)
+        .context("failed to read next action")?;
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "1" | "m" | "menu" => Ok(NextAction::Menu),
+        "" | "2" | "q" | "quit" => Ok(NextAction::Quit),
+        other => anyhow::bail!("invalid selection {other:?}; enter 1 for the menu or 2 to quit"),
+    }
 }
 
 fn prompt_preset<R: BufRead, W: Write>(input: &mut R, output: &mut W) -> Result<SetupPreset> {
@@ -177,5 +217,21 @@ mod tests {
     fn confirmation_accepts_default_and_no() {
         assert!(prompt_confirm(&mut Cursor::new("\n"), &mut Vec::new()).unwrap());
         assert!(!prompt_confirm(&mut Cursor::new("no\n"), &mut Vec::new()).unwrap());
+    }
+
+    #[test]
+    fn next_action_returns_to_menu_or_quits() {
+        assert_eq!(
+            prompt_next_action(&mut Cursor::new("1\n"), &mut Vec::new()).unwrap(),
+            NextAction::Menu
+        );
+        assert_eq!(
+            prompt_next_action(&mut Cursor::new("\n"), &mut Vec::new()).unwrap(),
+            NextAction::Quit
+        );
+        assert_eq!(
+            prompt_next_action(&mut Cursor::new("quit\n"), &mut Vec::new()).unwrap(),
+            NextAction::Quit
+        );
     }
 }

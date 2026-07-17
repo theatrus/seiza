@@ -11,6 +11,13 @@ it updates the system `PATH`. The final page can launch `seiza setup` to guide t
 user through catalog selection and downloading. That work remains entirely in
 the CLI; the MSI contains no catalog URLs or download custom actions.
 
+Catalog setup runs as the signed-in user, including after an all-users install.
+Each Windows user therefore gets their own catalog directory. By default it is
+`%LOCALAPPDATA%\Seiza\seiza\data\catalogs`, and Seiza discovers solver catalogs
+there automatically in ASTAP-compatible mode. Explicit `SEIZA_STAR_DATA` and
+`SEIZA_BLIND_INDEX` environment variables remain higher-priority overrides;
+setup does not replace them.
+
 The welcome, completion, and banner artwork in `assets/` uses Seiza-specific
 constellation and astrometry imagery instead of the stock WiX graphics.
 
