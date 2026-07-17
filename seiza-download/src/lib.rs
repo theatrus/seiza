@@ -19,9 +19,9 @@ pub use manifest::{
 
 /// Current complete hosted catalog bundle.
 ///
-/// `/data`, `/data/v3`, and `/data/v2` remain frozen compatibility surfaces
-/// for v1, the historical standalone v3 object bundle, and the complete v2
-/// bundle respectively. New clients never replace artifacts under those URLs.
+/// `/data` and `/data/v2` remain frozen compatibility surfaces for v1 and the
+/// complete v2 bundle. The historical `/data/v3` probe URL remains reserved
+/// and may be absent. New clients never replace artifacts under those URLs.
 pub const DEFAULT_BUNDLE_BASE_URL: &str = "https://downloads.seiza.fyi/data/v4";
 
 /// Frozen complete v2 bundle for applications that explicitly need the

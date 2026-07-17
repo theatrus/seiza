@@ -115,9 +115,10 @@ The downloader reads one complete bundle from `/data/v4/manifest.json` and
 caches its immutable, content-addressed files by SHA-256 before copying the
 requested selection into the same flat local output directory. The shared
 platform cache can be overridden with `SEIZA_CACHE_DIR`. It never combines
-catalogs from different hosted bundle versions. Previously released `/data/`,
-`/data/v3/`, and `/data/v2/` paths remain frozen for classic v1, v0.4.0, and
-v0.4.1/v0.5 readers respectively.
+catalogs from different hosted bundle versions. Previously released `/data/`
+and `/data/v2/` paths remain frozen for classic v1 and v0.4.1/v0.5 readers.
+The historical `/data/v3/` probe used by v0.4.0 remains reserved and may be
+absent; those readers retain their existing fallback behavior.
 
 Library integrations can use `seiza-download` directly for async, automatic
 cache management. The raw catalog commands below are implemented by the
