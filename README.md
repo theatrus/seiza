@@ -63,9 +63,14 @@ Windows installer offers, available on every platform:
 seiza setup
 ```
 
-It walks you through the choices: just the object catalog, a lightweight or
-Gaia solver catalog, the deep blind-solving index, or everything. All
-downloads are versioned and SHA-256 verified.
+It walks you through use-case-based choices: lightweight hinted solving,
+denser Gaia solving, deep blind solving, or the complete bundle. Every choice
+includes object search and at least one plate-solving catalog. All downloads
+are versioned and SHA-256 verified.
+
+Set `SEIZA_CATALOG_DIR` to choose the default setup and ASTAP-compatible
+catalog directory. The all-users Windows installer sets it system-wide to the
+shared `%ProgramData%\Seiza\catalogs` directory.
 
 Solving many images from your own application? Start a worker so the
 catalogs and blind index stay open instead of being reloaded for every solve:

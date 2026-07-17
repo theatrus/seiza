@@ -1,5 +1,6 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
-     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Package
       Name="Seiza"
       Manufacturer="Seiza"
@@ -68,6 +69,35 @@
       </Directory>
     </StandardDirectory>
 
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="SeizaCommonDataFolder" Name="Seiza">
+        <Directory Id="SeizaMachineCatalogFolder" Name="catalogs">
+          <Component
+              Id="SeizaMachineCatalogConfiguration"
+              Guid="3399622F-1934-4070-A826-522E7BC135D4"
+              Condition="NOT MSIINSTALLPERUSER">
+            <CreateFolder>
+              <util:PermissionEx User="Users" GenericAll="yes" />
+            </CreateFolder>
+            <Environment
+                Id="SeizaMachineCatalogDirectoryEnvironment"
+                Name="SEIZA_CATALOG_DIR"
+                Value="[SeizaMachineCatalogFolder]"
+                Action="set"
+                Part="all"
+                System="yes" />
+            <RegistryValue
+                Root="HKLM"
+                Key="Software\Seiza"
+                Name="MachineCatalogDirectory"
+                Type="string"
+                Value="[SeizaMachineCatalogFolder]"
+                KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
     <StandardDirectory Id="ProgramMenuFolder">
       <Directory Id="SeizaProgramMenu" Name="Seiza">
         <Component Id="SeizaShortcuts" Guid="479C7219-B87D-4BC4-B8F4-FABBB923EC9C">
@@ -101,6 +131,7 @@
         ConfigurableDirectory="APPLICATIONFOLDER">
       <ComponentRef Id="SeizaProgramFiles" />
       <ComponentRef Id="SeizaShortcuts" />
+      <ComponentRef Id="SeizaMachineCatalogConfiguration" />
       <Feature
           Id="PathFeature"
           Title="Add Seiza to PATH"
@@ -116,7 +147,7 @@
     </Feature>
 
     <Property Id="ApplicationFolderName" Value="Seiza" />
-    <Property Id="WixAppFolder" Value="WixPerUserFolder" />
+    <Property Id="WixAppFolder" Value="WixPerMachineFolder" />
     <SetProperty
         Id="WixPerMachineFolder"
         Value="[ProgramFiles64Folder]Seiza"
@@ -137,9 +168,16 @@
         Value="Download and configure Seiza catalogs now" />
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
     <CustomAction
-        Id="LaunchCatalogSetup"
+        Id="LaunchUserCatalogSetup"
         FileRef="SeizaExe"
         ExeCommand="setup --from-installer"
+        Execute="immediate"
+        Return="asyncNoWait"
+        Impersonate="yes" />
+    <CustomAction
+        Id="LaunchMachineCatalogSetup"
+        FileRef="SeizaExe"
+        ExeCommand="setup --from-installer --output &quot;[SeizaMachineCatalogFolder]&quot;"
         Execute="immediate"
         Return="asyncNoWait"
         Impersonate="yes" />
@@ -148,8 +186,14 @@
           Dialog="ExitDialog"
           Control="Finish"
           Event="DoAction"
-          Value="LaunchCatalogSetup"
-          Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" />
+          Value="LaunchUserCatalogSetup"
+          Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed AND MSIINSTALLPERUSER = 1" />
+      <Publish
+          Dialog="ExitDialog"
+          Control="Finish"
+          Event="DoAction"
+          Value="LaunchMachineCatalogSetup"
+          Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed AND NOT MSIINSTALLPERUSER" />
     </UI>
   </Package>
 </Wix>

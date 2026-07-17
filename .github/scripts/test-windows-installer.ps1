@@ -20,6 +20,7 @@ else {
     Join-Path $env:LOCALAPPDATA "Apps\Seiza"
 }
 $installedBinary = Join-Path $installDirectory "seiza.exe"
+$machineCatalogDirectory = Join-Path $env:ProgramData "Seiza\catalogs"
 $pathRegistry = if ($Scope -eq "perMachine") {
     "Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
 }
@@ -81,6 +82,35 @@ try {
         throw "PATH does not contain $installDirectory"
     }
 
+    if ($Scope -eq "perMachine") {
+        if (-not (Test-Path -LiteralPath $machineCatalogDirectory -PathType Container)) {
+            throw "Shared catalog directory not found at $machineCatalogDirectory"
+        }
+
+        $catalogDirectoryValue = Get-ItemPropertyValue `
+            -LiteralPath $pathRegistry `
+            -Name "SEIZA_CATALOG_DIR" `
+            -ErrorAction SilentlyContinue
+        if (-not $catalogDirectoryValue -or $catalogDirectoryValue.TrimEnd("\") -ne $machineCatalogDirectory.TrimEnd("\")) {
+            throw "SEIZA_CATALOG_DIR is not set to $machineCatalogDirectory"
+        }
+
+        $usersSid = "S-1-5-32-545"
+        $requiredRights = [System.Security.AccessControl.FileSystemRights]::Modify
+        $usersCanModify = (Get-Acl -LiteralPath $machineCatalogDirectory).Access | Where-Object {
+            try {
+                $sid = $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+                $sid -eq $usersSid -and ($_.FileSystemRights -band $requiredRights) -eq $requiredRights
+            }
+            catch {
+                $false
+            }
+        }
+        if (-not $usersCanModify) {
+            throw "Built-in Users group does not have modify access to $machineCatalogDirectory"
+        }
+    }
+
     & $installedBinary --version
     if ($LASTEXITCODE -ne 0) {
         throw "Installed seiza --version failed with exit code $LASTEXITCODE"
@@ -103,6 +133,15 @@ finally {
         $pathEntries = Get-InstallerPathEntries
         if ($pathEntries -contains $installDirectory.TrimEnd("\")) {
             throw "MSI uninstall left $installDirectory in PATH"
+        }
+        if ($Scope -eq "perMachine") {
+            $catalogDirectoryValue = Get-ItemPropertyValue `
+                -LiteralPath $pathRegistry `
+                -Name "SEIZA_CATALOG_DIR" `
+                -ErrorAction SilentlyContinue
+            if ($catalogDirectoryValue) {
+                throw "MSI uninstall left SEIZA_CATALOG_DIR configured"
+            }
         }
     }
 }

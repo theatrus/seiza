@@ -2,15 +2,18 @@ use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use directories::ProjectDirs;
 use seiza_download::Dataset;
+use std::ffi::OsString;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
+
+const CATALOG_DIR_ENV: &str = "SEIZA_CATALOG_DIR";
 
 #[derive(Args)]
 pub(crate) struct SetupArgs {
     /// Catalog package to install without prompting for a selection
     #[arg(long, value_enum)]
     preset: Option<SetupPreset>,
-    /// Directory that receives the selected catalog files
+    /// Directory that receives the selected files (defaults to SEIZA_CATALOG_DIR when set)
     #[arg(long)]
     output: Option<PathBuf>,
     /// Accept the displayed selection without confirmation
@@ -23,7 +26,6 @@ pub(crate) struct SetupArgs {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum SetupPreset {
-    Objects,
     SolverLite,
     SolverGaia,
     BlindDeep,
@@ -39,7 +41,6 @@ enum NextAction {
 impl SetupPreset {
     fn files(self) -> Vec<String> {
         let datasets: &[Dataset] = match self {
-            Self::Objects => &[Dataset::Objects],
             Self::SolverLite => &[Dataset::Objects, Dataset::StarsLiteTycho2],
             Self::SolverGaia => &[Dataset::Objects, Dataset::StarsGaia],
             Self::BlindDeep => &[
@@ -57,11 +58,12 @@ impl SetupPreset {
 
     fn description(self) -> &'static str {
         match self {
-            Self::Objects => "Object catalog for search and image overlays",
-            Self::SolverLite => "Object catalog and compact Tycho-2 solver catalog",
-            Self::SolverGaia => "Object catalog and Gaia solver catalog",
-            Self::BlindDeep => "Object catalog, deep Gaia catalog, and blind index",
-            Self::All => "Every catalog in the published bundle",
+            Self::SolverLite => {
+                "Telescope control and hinted solves: objects + compact Tycho-2 catalog"
+            }
+            Self::SolverGaia => "Narrow or crowded fields: objects + denser Gaia solver catalog",
+            Self::BlindDeep => "Unknown sky position: objects + deep Gaia catalog + blind index",
+            Self::All => "Development and offline use: every published catalog",
         }
     }
 }
@@ -128,9 +130,15 @@ pub(crate) fn run(args: SetupArgs) -> Result<()> {
 }
 
 pub(crate) fn default_catalog_dir() -> PathBuf {
-    ProjectDirs::from("fyi", "Seiza", "seiza")
-        .map(|dirs| dirs.data_local_dir().join("catalogs"))
-        .unwrap_or_else(|| PathBuf::from("seiza-data"))
+    configured_catalog_dir(std::env::var_os(CATALOG_DIR_ENV)).unwrap_or_else(|| {
+        ProjectDirs::from("fyi", "Seiza", "seiza")
+            .map(|dirs| dirs.data_local_dir().join("catalogs"))
+            .unwrap_or_else(|| PathBuf::from("seiza-data"))
+    })
+}
+
+fn configured_catalog_dir(value: Option<OsString>) -> Option<PathBuf> {
+    value.filter(|value| !value.is_empty()).map(PathBuf::from)
 }
 
 fn prompt_next_action<R: BufRead, W: Write>(input: &mut R, output: &mut W) -> Result<NextAction> {
@@ -152,11 +160,20 @@ fn prompt_next_action<R: BufRead, W: Write>(input: &mut R, output: &mut W) -> Re
 }
 
 fn prompt_preset<R: BufRead, W: Write>(input: &mut R, output: &mut W) -> Result<SetupPreset> {
-    writeln!(output, "  1. Object catalog")?;
-    writeln!(output, "  2. Object catalog + lightweight plate solver")?;
-    writeln!(output, "  3. Object catalog + Gaia plate solver")?;
-    writeln!(output, "  4. Object catalog + deep blind solver")?;
-    writeln!(output, "  5. Complete catalog bundle")?;
+    writeln!(
+        output,
+        "Every option includes object search and at least one plate-solving catalog.\n"
+    )?;
+    writeln!(
+        output,
+        "  1. Telescope control / N.I.N.A.: lightweight hinted solving (recommended)"
+    )?;
+    writeln!(output, "  2. Narrow or crowded fields: denser Gaia solving")?;
+    writeln!(output, "  3. Unknown sky position: deep blind solving")?;
+    writeln!(
+        output,
+        "  4. Development / offline use: complete catalog bundle"
+    )?;
     write!(output, "\nChoose a package [1]: ")?;
     output.flush()?;
 
@@ -165,12 +182,11 @@ fn prompt_preset<R: BufRead, W: Write>(input: &mut R, output: &mut W) -> Result<
         .read_line(&mut answer)
         .context("failed to read catalog selection")?;
     match answer.trim() {
-        "" | "1" => Ok(SetupPreset::Objects),
-        "2" => Ok(SetupPreset::SolverLite),
-        "3" => Ok(SetupPreset::SolverGaia),
-        "4" => Ok(SetupPreset::BlindDeep),
-        "5" => Ok(SetupPreset::All),
-        other => anyhow::bail!("invalid selection {other:?}; expected a number from 1 to 5"),
+        "" | "1" => Ok(SetupPreset::SolverLite),
+        "2" => Ok(SetupPreset::SolverGaia),
+        "3" => Ok(SetupPreset::BlindDeep),
+        "4" => Ok(SetupPreset::All),
+        other => anyhow::bail!("invalid selection {other:?}; expected a number from 1 to 4"),
     }
 }
 
@@ -194,22 +210,46 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
-    fn preset_prompt_defaults_to_objects() {
+    fn preset_prompt_defaults_to_lightweight_solver() {
         let mut output = Vec::new();
         assert_eq!(
             prompt_preset(&mut Cursor::new("\n"), &mut output).unwrap(),
-            SetupPreset::Objects
+            SetupPreset::SolverLite
         );
+        assert!(String::from_utf8(output).unwrap().contains("N.I.N.A."));
     }
 
     #[test]
     fn preset_prompt_selects_deep_blind_package() {
         let mut output = Vec::new();
-        let preset = prompt_preset(&mut Cursor::new("4\n"), &mut output).unwrap();
+        let preset = prompt_preset(&mut Cursor::new("3\n"), &mut output).unwrap();
         assert_eq!(preset, SetupPreset::BlindDeep);
         assert_eq!(
             preset.files(),
             ["objects.bin", "stars-deep-gaia17.bin", "blind-gaia16.idx"]
+        );
+    }
+
+    #[test]
+    fn every_selective_preset_includes_objects_and_plate_solving() {
+        for preset in [
+            SetupPreset::SolverLite,
+            SetupPreset::SolverGaia,
+            SetupPreset::BlindDeep,
+        ] {
+            let files = preset.files();
+            assert!(files.iter().any(|file| file == "objects.bin"));
+            assert!(files.iter().any(|file| file.starts_with("stars-")));
+        }
+    }
+
+    #[test]
+    fn configured_catalog_directory_ignores_empty_values() {
+        assert_eq!(configured_catalog_dir(None), None);
+        assert_eq!(configured_catalog_dir(Some(OsString::new())), None);
+        assert_eq!(
+            configured_catalog_dir(Some(OsString::from("shared-catalogs"))),
+            Some(PathBuf::from("shared-catalogs"))
         );
     }
 

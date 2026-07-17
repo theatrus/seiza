@@ -1,7 +1,7 @@
 # Windows installer
 
 The WiX package presents the Apache 2.0 license and lets the user choose between
-a current-user install (the default) and an all-users install. The all-users
+an all-users install (the default) and a current-user install. The all-users
 choice installs under 64-bit Program Files and causes Windows Installer to
 request administrator approval through UAC.
 
@@ -11,12 +11,17 @@ it updates the system `PATH`. The final page can launch `seiza setup` to guide t
 user through catalog selection and downloading. That work remains entirely in
 the CLI; the MSI contains no catalog URLs or download custom actions.
 
-Catalog setup runs as the signed-in user, including after an all-users install.
-Each Windows user therefore gets their own catalog directory. By default it is
-`%LOCALAPPDATA%\Seiza\seiza\data\catalogs`, and Seiza discovers solver catalogs
-there automatically in ASTAP-compatible mode. Explicit `SEIZA_STAR_DATA` and
-`SEIZA_BLIND_INDEX` environment variables remain higher-priority overrides;
-setup does not replace them.
+For an all-users install, the MSI creates the shared
+`%ProgramData%\Seiza\catalogs` directory, grants local users write access, and
+sets the system `SEIZA_CATALOG_DIR` environment variable. The final-page setup
+wizard downloads directly to that shared directory. A current-user install
+continues to use `%LOCALAPPDATA%\Seiza\seiza\data\catalogs`. Explicit
+`SEIZA_STAR_DATA` and `SEIZA_BLIND_INDEX` environment variables remain
+higher-priority file overrides.
+
+Every setup-wizard choice includes the object catalog and at least one usable
+plate-solving catalog. The menu describes choices by use case: lightweight
+hinted solving, denser Gaia solving, deep blind solving, or the complete bundle.
 
 The welcome, completion, and banner artwork in `assets/` uses Seiza-specific
 constellation and astrometry imagery instead of the stock WiX graphics.
