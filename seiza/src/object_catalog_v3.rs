@@ -187,9 +187,9 @@ impl Grid {
 /// primary-center order of the single canonical record.
 pub(crate) fn spatial_order(objects: &[SkyObject]) -> Vec<usize> {
     let grid = Grid::new(DEFAULT_BANDS);
-    let mut order = (0..objects.len()).collect::<Vec<_>>();
-    order.sort_by(|&left, &right| {
-        let tile = |object: &SkyObject| {
+    let tiles = objects
+        .iter()
+        .map(|object| {
             if object.ra.is_finite()
                 && object.dec.is_finite()
                 && (-90.0..=90.0).contains(&object.dec)
@@ -198,9 +198,12 @@ pub(crate) fn spatial_order(objects: &[SkyObject]) -> Vec<usize> {
             } else {
                 u32::MAX
             }
-        };
-        tile(&objects[left])
-            .cmp(&tile(&objects[right]))
+        })
+        .collect::<Vec<_>>();
+    let mut order = (0..objects.len()).collect::<Vec<_>>();
+    order.sort_by(|&left, &right| {
+        tiles[left]
+            .cmp(&tiles[right])
             .then_with(|| objects[left].metadata.id.cmp(&objects[right].metadata.id))
             .then(left.cmp(&right))
     });

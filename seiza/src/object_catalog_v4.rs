@@ -294,19 +294,7 @@ fn build_sections(data: &ObjectCatalogData) -> io::Result<Vec<BuildSection>> {
     }
     let synthesized;
     let details = if data.details.is_empty() {
-        synthesized = data
-            .objects
-            .iter()
-            .enumerate()
-            .map(|(index, object)| {
-                let record_id = if object.metadata.id.is_empty() {
-                    format!("legacy:ordinal:{index}")
-                } else {
-                    object.metadata.id.clone()
-                };
-                ObjectDetails::from_canonical_with_record_id(object, record_id)
-            })
-            .collect::<Vec<_>>();
+        synthesized = crate::objects::synthesized_details(&data.objects);
         synthesized.as_slice()
     } else {
         data.details.as_slice()
@@ -343,7 +331,8 @@ fn build_sections(data: &ObjectCatalogData) -> io::Result<Vec<BuildSection>> {
         detail_data.extend_from_slice(&encoded);
     }
     let provenance = serde_json::to_vec(&data.provenance).map_err(json_error)?;
-    let capability_bits = capability_bits(details, true);
+    let has_provenance = !data.provenance.sources.is_empty() || data.provenance.curation.is_some();
+    let capability_bits = capability_bits(details, has_provenance);
 
     let mut canonical_section = BuildSection::required(CANONICAL_V3, 3, canonical);
     canonical_section.record_count = data.objects.len() as u64;
@@ -373,23 +362,18 @@ fn build_sections(data: &ObjectCatalogData) -> io::Result<Vec<BuildSection>> {
 }
 
 fn capability_bits(details: &[ObjectDetails], provenance: bool) -> u64 {
-    let mut bits = if provenance { CAP_PROVENANCE } else { 0 };
-    for detail in details {
-        if !detail.source_records.is_empty() {
-            bits |= CAP_SOURCE_RECORDS;
-        }
-        if !detail.relations.is_empty() {
-            bits |= CAP_RELATIONS;
-        }
-        if !detail.selections.is_empty() {
-            bits |= CAP_SELECTIONS;
-        }
-        for geometry in &detail.geometries {
-            match geometry.data {
-                GeometryData::Ellipse { .. } => bits |= CAP_ELLIPSES,
-                GeometryData::OutlineSet { .. } => bits |= CAP_OUTLINES,
-                GeometryData::Point { .. } => {}
-            }
+    let capabilities = crate::objects::capabilities_from_details(details, provenance);
+    let mut bits = 0;
+    for (present, bit) in [
+        (capabilities.source_records, CAP_SOURCE_RECORDS),
+        (capabilities.relations, CAP_RELATIONS),
+        (capabilities.selections, CAP_SELECTIONS),
+        (capabilities.ellipses, CAP_ELLIPSES),
+        (capabilities.outlines, CAP_OUTLINES),
+        (capabilities.provenance, CAP_PROVENANCE),
+    ] {
+        if present {
+            bits |= bit;
         }
     }
     bits
@@ -506,18 +490,23 @@ impl MappedObjectCatalog {
             return Err(invalid_data("not a seiza v4 object catalog"));
         }
         let major = read_u16(&map, 8)?;
-        let _minor = read_u16(&map, 10)?;
+        let minor = read_u16(&map, 10)?;
         let header_size = read_u32(&map, 12)? as usize;
         let directory_offset = read_usize_u64(&map, 16, "directory offset")?;
         let section_count = read_u32(&map, 24)? as usize;
         let entry_size = read_u32(&map, 28)? as usize;
         let file_size = read_usize_u64(&map, 32, "file size")?;
+        // Reserved envelope bytes must be zero only in minor versions this
+        // reader fully understands; a newer same-major writer may assign them
+        // as a backward-compatible addition.
+        #[allow(clippy::absurd_extreme_comparisons)] // valid once CONTAINER_MINOR > 0
+        let enforce_reserved = minor <= CONTAINER_MINOR;
         if major != CONTAINER_MAJOR
             || header_size != HEADER_SIZE
             || directory_offset != HEADER_SIZE
             || entry_size != DIRECTORY_ENTRY_SIZE
             || file_size != map.len()
-            || map[40..64].iter().any(|byte| *byte != 0)
+            || (enforce_reserved && map[40..64].iter().any(|byte| *byte != 0))
         {
             return Err(invalid_data(
                 "unsupported or invalid object container header",
@@ -538,7 +527,7 @@ impl MappedObjectCatalog {
         let mut unknown_optional_sections = 0usize;
         for index in 0..section_count {
             let offset = directory_offset + index * entry_size;
-            let entry = read_directory_entry(&map, offset)?;
+            let entry = read_directory_entry(&map, offset, enforce_reserved)?;
             if !seen.insert((entry.kind, entry.instance)) {
                 return Err(invalid_data("duplicate object section instance"));
             }
@@ -692,9 +681,13 @@ impl MappedObjectCatalog {
         let record_offset = index_entry.offset + index * DETAIL_INDEX_STRIDE as usize;
         let offset = read_usize_u64(&self.map, record_offset, "object detail offset")?;
         let len = read_u32(&self.map, record_offset + 8)? as usize;
-        if self.map[record_offset + 12..record_offset + 16]
-            .iter()
-            .any(|byte| *byte != 0)
+        // The reserved record word must be zero only in schema minors this
+        // reader fully understands; a newer minor may assign it.
+        let enforce_reserved = index_entry.schema_minor == 0;
+        if (enforce_reserved
+            && self.map[record_offset + 12..record_offset + 16]
+                .iter()
+                .any(|byte| *byte != 0))
             || offset > data_entry.len
             || len > data_entry.len - offset
         {
@@ -866,11 +859,18 @@ fn validate_geometry(data: &GeometryData) -> io::Result<()> {
     Ok(())
 }
 
-fn read_directory_entry(bytes: &[u8], offset: usize) -> io::Result<SectionEntry> {
+fn read_directory_entry(
+    bytes: &[u8],
+    offset: usize,
+    enforce_reserved: bool,
+) -> io::Result<SectionEntry> {
     let entry = bytes
         .get(offset..offset + DIRECTORY_ENTRY_SIZE)
         .ok_or_else(|| invalid_data("truncated object section directory entry"))?;
-    if entry[24..28].iter().any(|byte| *byte != 0) || entry[60..64].iter().any(|byte| *byte != 0) {
+    if enforce_reserved
+        && (entry[24..28].iter().any(|byte| *byte != 0)
+            || entry[60..64].iter().any(|byte| *byte != 0))
+    {
         return Err(invalid_data("object section reserved fields are nonzero"));
     }
     Ok(SectionEntry {
@@ -1040,6 +1040,23 @@ mod tests {
         assert!(catalog.capabilities().source_records);
         assert!(catalog.capabilities().ellipses);
         catalog.validate().unwrap();
+    }
+
+    #[test]
+    fn newer_minor_versions_may_use_reserved_envelope_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("objects.bin");
+        let data = ObjectCatalogData::from_objects(vec![object()]);
+        write(&path, &data).unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[40] = 0xAB;
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(MappedObjectCatalog::open(&path).is_err());
+
+        bytes[10..12].copy_from_slice(&(CONTAINER_MINOR + 1).to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        MappedObjectCatalog::open(&path).unwrap();
     }
 
     #[test]

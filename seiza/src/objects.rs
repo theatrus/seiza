@@ -134,24 +134,30 @@ pub struct ObjectCatalogData {
 
 impl ObjectCatalogData {
     pub fn from_objects(objects: Vec<SkyObject>) -> Self {
-        let details = objects
-            .iter()
-            .enumerate()
-            .map(|(index, object)| {
-                let record_id = if object.metadata.id.is_empty() {
-                    format!("legacy:ordinal:{index}")
-                } else {
-                    object.metadata.id.clone()
-                };
-                ObjectDetails::from_canonical_with_record_id(object, record_id)
-            })
-            .collect();
+        let details = synthesized_details(&objects);
         Self {
             objects,
             details,
             provenance: ObjectCatalogProvenance::default(),
         }
     }
+}
+
+/// Ordinal-aligned details synthesized from canonical objects alone, for
+/// callers and legacy formats that carry no source-qualified records.
+pub(crate) fn synthesized_details(objects: &[SkyObject]) -> Vec<ObjectDetails> {
+    objects
+        .iter()
+        .enumerate()
+        .map(|(index, object)| {
+            let record_id = if object.metadata.id.is_empty() {
+                format!("legacy:ordinal:{index}")
+            } else {
+                object.metadata.id.clone()
+            };
+            ObjectDetails::from_canonical_with_record_id(object, record_id)
+        })
+        .collect()
 }
 
 /// All source-qualified information retained for one canonical object.
@@ -412,8 +418,12 @@ pub struct PlacedObject {
     pub semi_major_px: f64,
     pub semi_minor_px: f64,
     /// Rotation of the major axis in image coordinates, degrees
-    /// counter-clockwise from the +x axis
-    pub angle_deg: f64,
+    /// counter-clockwise from the +x axis.
+    ///
+    /// `None` when the catalog supplies an asymmetric extent without a
+    /// position angle. Such an ellipse must not be drawn at an assumed
+    /// orientation; render a conservative circle of the major axis instead.
+    pub angle_deg: Option<f64>,
 }
 
 /// A sky region that can be queried without plate-solving an image.
@@ -557,19 +567,7 @@ impl ObjectCatalog {
     /// geometries, and reproducibility provenance.
     pub fn from_data(mut data: ObjectCatalogData) -> io::Result<Self> {
         if data.details.is_empty() {
-            data.details = data
-                .objects
-                .iter()
-                .enumerate()
-                .map(|(index, object)| {
-                    let record_id = if object.metadata.id.is_empty() {
-                        format!("legacy:ordinal:{index}")
-                    } else {
-                        object.metadata.id.clone()
-                    };
-                    ObjectDetails::from_canonical_with_record_id(object, record_id)
-                })
-                .collect();
+            data.details = synthesized_details(&data.objects);
         }
         if data.details.len() != data.objects.len()
             || data
@@ -995,7 +993,12 @@ impl ObjectCatalog {
                 if x < -margin || y < -margin || x >= width + margin || y >= height + margin {
                     return None;
                 }
-                let angle_deg = major_axis_image_angle(wcs, &o, x, y);
+                // An asymmetric extent with an unknown position angle has no
+                // renderable orientation; a symmetric extent needs none.
+                let oriented = o.position_angle_deg.is_some()
+                    || o.minor_arcmin.is_none()
+                    || o.minor_arcmin == o.major_arcmin;
+                let angle_deg = oriented.then(|| major_axis_image_angle(wcs, &o, x, y));
                 Some(PlacedObject {
                     object: o,
                     x,
@@ -1051,7 +1054,7 @@ fn object_designations(object: &SkyObject) -> impl Iterator<Item = &str> {
         .filter(|value| !value.is_empty())
 }
 
-fn capabilities_from_details(
+pub(crate) fn capabilities_from_details(
     details: &[ObjectDetails],
     provenance: bool,
 ) -> ObjectCatalogCapabilities {
@@ -1885,8 +1888,38 @@ mod tests {
         let expected = (-(35.0f64.to_radians().cos()))
             .atan2(-(35.0f64.to_radians().sin()))
             .to_degrees();
-        let diff = ((p.angle_deg - expected).abs() + 180.0) % 360.0 - 180.0;
-        assert!(diff.abs() < 0.5, "{} vs {expected}", p.angle_deg);
+        let angle = p
+            .angle_deg
+            .expect("known position angle must orient the ellipse");
+        let diff = ((angle - expected).abs() + 180.0) % 360.0 - 180.0;
+        assert!(diff.abs() < 0.5, "{angle} vs {expected}");
+    }
+
+    #[test]
+    fn footprint_projection_withholds_unknown_orientation() {
+        let wcs =
+            Wcs::from_center_scale_rotation((338.0509, 40.591), (2000.0, 1500.0), 2.0, 0.0, false);
+        // LBN 437: asymmetric 75x20 arcmin extent with no cataloged position
+        // angle must not be silently oriented; a circle needs no orientation.
+        let mut lbn = m31();
+        lbn.ra = 338.0509;
+        lbn.dec = 40.591;
+        lbn.major_arcmin = Some(75.0);
+        lbn.minor_arcmin = Some(20.0);
+        lbn.position_angle_deg = None;
+        let mut circle = m31();
+        circle.name = "Round".into();
+        circle.metadata.id = "test:round".into();
+        circle.ra = 338.0509;
+        circle.dec = 40.591;
+        circle.major_arcmin = Some(10.0);
+        circle.minor_arcmin = None;
+        circle.position_angle_deg = None;
+        let catalog = ObjectCatalog::new(vec![lbn, circle]);
+        let placed = catalog.objects_in_footprint(&wcs, (4000, 3000)).unwrap();
+        assert_eq!(placed.len(), 2);
+        assert_eq!(placed[0].angle_deg, None);
+        assert!(placed[1].angle_deg.is_some());
     }
 
     #[test]

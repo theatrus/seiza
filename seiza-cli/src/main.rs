@@ -2069,12 +2069,19 @@ fn solve_command(
             }
         }
         for p in &placed {
+            // An asymmetric extent with an unknown position angle must not be
+            // drawn at a guessed orientation; fall back to the conservative
+            // major-axis circle.
+            let (semi_minor_px, angle_deg) = match p.angle_deg {
+                Some(angle) => (p.semi_minor_px, angle),
+                None => (p.semi_major_px, 0.0),
+            };
             draw_rotated_ellipse(
                 &mut canvas,
                 (p.x, p.y),
                 p.semi_major_px.max(12.0),
-                p.semi_minor_px.max(12.0),
-                p.angle_deg,
+                semi_minor_px.max(12.0),
+                angle_deg,
                 image::Rgb([64, 220, 255]),
             );
         }
