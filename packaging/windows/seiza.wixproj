@@ -1,0 +1,18 @@
+<Project Sdk="WixToolset.Sdk/4.0.6">
+  <PropertyGroup>
+    <OutputType>Package</OutputType>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <RepoRoot Condition="'$(RepoRoot)' == ''">$(MSBuildThisFileDirectory)..\..\</RepoRoot>
+    <SeizaBinary Condition="'$(SeizaBinary)' == ''">$(RepoRoot)target\release\seiza.exe</SeizaBinary>
+    <SeizaVersion Condition="'$(SeizaVersion)' == ''">0.0.0</SeizaVersion>
+    <OutputName>seiza-cli-$(SeizaVersion)-windows-x86_64</OutputName>
+    <OutputPath>$(RepoRoot)dist\</OutputPath>
+    <IntermediateOutputPath>$(RepoRoot)target\wix\</IntermediateOutputPath>
+    <SuppressIces>ICE91</SuppressIces>
+    <DefineConstants>SeizaVersion=$(SeizaVersion);SeizaBinary=$(SeizaBinary);RepoRoot=$(RepoRoot)</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.UI.wixext" Version="4.0.6" />
+  </ItemGroup>
+</Project>

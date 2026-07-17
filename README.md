@@ -23,6 +23,19 @@ seiza catalog star --data data/stars-lite-tycho2.ids.bin "TYC 5949-2777-1" --for
 seiza catalog star --data data/stars-lite-tycho2.ids.bin "RR Lyr"
 ```
 
+On Windows, the MSI installer adds `seiza` to the user's `PATH` and offers to
+run the guided catalog setup when installation finishes. The same setup can be
+run again at any time:
+
+```text
+seiza setup
+```
+
+It can install only the object catalog, combine it with a lightweight or Gaia
+solver catalog, add the deep blind-solving index, or install the complete
+published bundle. Downloads use the same versioned, SHA-256-verified path as
+`download-data prebuilt`.
+
 Applications that perform repeated solves can keep the catalog and blind
 index open through the versioned JSON-RPC worker protocol:
 
@@ -203,9 +216,10 @@ pattern indexes.
 seiza speaks ASTAP's command-line contract, so N.I.N.A. can use it as
 its plate solver with no plugin:
 
-1. Grab the Windows build from the
-   [releases](https://github.com/theatrus/seiza/releases) (or
-   `cargo install seiza-cli`).
+1. Grab the Windows MSI from the
+   [releases](https://github.com/theatrus/seiza/releases) (or use the portable
+   ZIP or `cargo install seiza-cli`). The installer offers to run
+   `seiza setup` after installation.
 2. Download a star catalog once and tell seiza where it lives — either
    set the `SEIZA_STAR_DATA` environment variable, or simply drop the
    `.bin` next to the executable:
