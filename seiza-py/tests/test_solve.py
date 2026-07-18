@@ -160,3 +160,58 @@ def test_star_catalog_cone_search_and_metadata():
     nearby = catalog.cone_search(10.0, 10.0, 1.0)
     assert len(nearby) == 2
     assert nearby[0][2] == pytest.approx(5.0)
+
+
+def test_sip_fit_on_distorted_field_and_header_output():
+    rng = random.Random(21)
+    truth = seiza.Wcs.from_center_scale_rotation(
+        CENTER, ((WIDTH - 1) / 2.0, (HEIGHT - 1) / 2.0), SCALE, 10.0
+    )
+
+    def distort(x, y):
+        dx, dy = x - WIDTH / 2.0, y - HEIGHT / 2.0
+        factor = 1.0 + 2e-9 * (dx * dx + dy * dy)
+        return WIDTH / 2.0 + dx * factor, HEIGHT / 2.0 + dy * factor
+
+    catalog_stars = []
+    image_stars = []
+    for index in range(400):
+        x = rng.uniform(20.0, WIDTH - 20.0)
+        y = rng.uniform(20.0, HEIGHT - 20.0)
+        ra, dec = truth.pixel_to_world(x, y)
+        mag = 5.0 + 8.0 * index / 400
+        catalog_stars.append((ra, dec, mag))
+        xd, yd = distort(x, y)
+        image_stars.append((xd, yd, 10.0 ** (-0.4 * mag) * 1e6))
+    catalog = seiza.StarCatalog.from_stars(catalog_stars)
+
+    kwargs = dict(ra=CENTER[0], dec=CENTER[1], scale_arcsec_px=SCALE)
+    linear = seiza.solve(image_stars, catalog, WIDTH, HEIGHT, **kwargs)
+    assert linear.wcs.sip_order is None
+    solution = seiza.solve(image_stars, catalog, WIDTH, HEIGHT, sip_order=3, **kwargs)
+    assert solution.wcs.sip_order is not None and solution.wcs.sip_order >= 2
+    assert solution.rms_arcsec < linear.rms_arcsec
+
+    coefficients = solution.wcs.sip_coefficients()
+    assert set(coefficients) == {"A", "B", "AP", "BP"}
+    assert (2, 0) in coefficients["A"]
+
+    cards = solution.fits_header_cards()
+    assert cards["CTYPE1"] == "RA---TAN-SIP"
+    assert cards["A_ORDER"] == solution.wcs.sip_order
+    assert "A_2_0" in cards and "BP_0_0" in cards
+
+    text = solution.fits_header_text()
+    assert len(text) % 80 == 0
+    assert "A_ORDER" in text and "AP_0_0" in text
+
+    # Distorted pixels land on true sky positions and round-trip through
+    # the inverse polynomials.
+    x, y = 200.0, 900.0
+    ra_t, dec_t = truth.pixel_to_world(x, y)
+    xd, yd = distort(x, y)
+    ra_s, dec_s = solution.wcs.pixel_to_world(xd, yd)
+    assert abs(ra_s - ra_t) * 3600.0 < 2.0
+    assert abs(dec_s - dec_t) * 3600.0 < 2.0
+    xi, yi = solution.wcs.world_to_pixel(ra_t, dec_t)
+    assert math.hypot(xi - xd, yi - yd) < 1.0

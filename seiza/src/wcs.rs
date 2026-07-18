@@ -2,10 +2,81 @@
 //! matrix, following FITS WCS conventions (degrees, 1-indexed CRPIX is NOT
 //! used here — pixel coordinates are 0-indexed image coordinates).
 
+/// SIP polynomial distortion terms (Shupe et al. 2005).
+///
+/// Forward model: with `u = x - crpix.0` and `v = y - crpix.1`,
+/// `(xi, eta) = cd * (u + f(u, v), v + g(u, v))` where
+/// `f(u, v) = sum A_pq u^p v^q` over [`Sip::forward_terms`] and `g` uses the
+/// `B` coefficients. The inverse polynomials `AP`/`BP` approximate the
+/// reverse mapping over [`Sip::inverse_terms`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Sip {
+    /// Polynomial order (2..=5); forward terms have `2 <= p + q <= order`.
+    pub order: u8,
+    /// `A_p_q` coefficients in [`Sip::forward_terms`] order.
+    pub a: Vec<f64>,
+    /// `B_p_q` coefficients in [`Sip::forward_terms`] order.
+    pub b: Vec<f64>,
+    /// `AP_p_q` inverse coefficients in [`Sip::inverse_terms`] order.
+    pub ap: Vec<f64>,
+    /// `BP_p_q` inverse coefficients in [`Sip::inverse_terms`] order.
+    pub bp: Vec<f64>,
+}
+
+impl Sip {
+    /// `(p, q)` exponent pairs for the forward `A`/`B` polynomials:
+    /// `2 <= p + q <= order`, ascending in `p` then `q`.
+    pub fn forward_terms(order: u8) -> Vec<(u8, u8)> {
+        Self::terms(order, 2)
+    }
+
+    /// `(p, q)` exponent pairs for the inverse `AP`/`BP` polynomials:
+    /// `0 <= p + q <= order`, ascending in `p` then `q`. The inverse
+    /// deliberately includes constant and linear terms — the inverse of an
+    /// identity-plus-polynomial is not itself identity-plus-polynomial.
+    pub fn inverse_terms(order: u8) -> Vec<(u8, u8)> {
+        Self::terms(order, 0)
+    }
+
+    fn terms(order: u8, min_total: u8) -> Vec<(u8, u8)> {
+        let mut terms = Vec::new();
+        for p in 0..=order {
+            for q in 0..=order.saturating_sub(p) {
+                if p + q >= min_total {
+                    terms.push((p, q));
+                }
+            }
+        }
+        terms
+    }
+
+    /// `(f(u, v), g(u, v))`: the forward distortion correction in pixels.
+    pub fn forward(&self, u: f64, v: f64) -> (f64, f64) {
+        Self::eval(&self.a, &self.b, Self::forward_terms(self.order), u, v)
+    }
+
+    /// `(F(U, V), G(U, V))`: the inverse correction in pixels.
+    pub fn inverse(&self, u: f64, v: f64) -> (f64, f64) {
+        Self::eval(&self.ap, &self.bp, Self::inverse_terms(self.order), u, v)
+    }
+
+    fn eval(a: &[f64], b: &[f64], terms: Vec<(u8, u8)>, u: f64, v: f64) -> (f64, f64) {
+        let mut f = 0.0;
+        let mut g = 0.0;
+        for (index, (p, q)) in terms.iter().enumerate() {
+            let monomial = u.powi(*p as i32) * v.powi(*q as i32);
+            f += a.get(index).copied().unwrap_or(0.0) * monomial;
+            g += b.get(index).copied().unwrap_or(0.0) * monomial;
+        }
+        (f, g)
+    }
+}
+
 /// A TAN-projection WCS solution.
 ///
 /// `pixel -> world`: intermediate coordinates `(xi, eta) = cd * (p - crpix)`
-/// in degrees on the tangent plane, then de-projected around `crval`.
+/// in degrees on the tangent plane, then de-projected around `crval`. When
+/// `sip` is present the SIP forward polynomial corrects `(p - crpix)` first.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Wcs {
     /// Sky coordinates of the reference point, degrees (RA, Dec)
@@ -14,6 +85,8 @@ pub struct Wcs {
     pub crpix: (f64, f64),
     /// Linear transform, degrees per pixel: [[cd1_1, cd1_2], [cd2_1, cd2_2]]
     pub cd: [[f64; 2]; 2],
+    /// Optional SIP distortion polynomials.
+    pub sip: Option<Sip>,
 }
 
 impl Wcs {
@@ -44,6 +117,7 @@ impl Wcs {
             crval: center,
             crpix,
             cd,
+            sip: None,
         }
     }
 
@@ -55,8 +129,13 @@ impl Wcs {
 
     /// Map a pixel coordinate to sky coordinates (RA, Dec) in degrees.
     pub fn pixel_to_world(&self, x: f64, y: f64) -> (f64, f64) {
-        let dx = x - self.crpix.0;
-        let dy = y - self.crpix.1;
+        let mut dx = x - self.crpix.0;
+        let mut dy = y - self.crpix.1;
+        if let Some(sip) = &self.sip {
+            let (f, g) = sip.forward(dx, dy);
+            dx += f;
+            dy += g;
+        }
         let xi = (self.cd[0][0] * dx + self.cd[0][1] * dy).to_radians();
         let eta = (self.cd[1][0] * dx + self.cd[1][1] * dy).to_radians();
 
@@ -100,8 +179,13 @@ impl Wcs {
         if det == 0.0 {
             return None;
         }
-        let dx = (self.cd[1][1] * xi - self.cd[0][1] * eta) / det;
-        let dy = (-self.cd[1][0] * xi + self.cd[0][0] * eta) / det;
+        let mut dx = (self.cd[1][1] * xi - self.cd[0][1] * eta) / det;
+        let mut dy = (-self.cd[1][0] * xi + self.cd[0][0] * eta) / det;
+        if let Some(sip) = &self.sip {
+            let (f, g) = sip.inverse(dx, dy);
+            dx += f;
+            dy += g;
+        }
         Some((self.crpix.0 + dx, self.crpix.1 + dy))
     }
 
@@ -183,6 +267,47 @@ mod tests {
         // one pixel apart => ~2 arcsec on the sky
         let d = angular_separation_deg(ra1, dec1, ra2, dec2) * 3600.0;
         assert_close(d, 2.0, 1e-3);
+    }
+
+    #[test]
+    fn sip_forward_terms_follow_the_documented_order() {
+        assert_eq!(Sip::forward_terms(2), vec![(0, 2), (1, 1), (2, 0)]);
+        assert_eq!(
+            Sip::forward_terms(3),
+            vec![(0, 2), (0, 3), (1, 1), (1, 2), (2, 0), (2, 1), (3, 0)]
+        );
+        assert_eq!(Sip::inverse_terms(2).len(), 6);
+        assert_eq!(Sip::inverse_terms(2)[0], (0, 0));
+    }
+
+    #[test]
+    fn sip_distortion_shifts_pixels_and_round_trips() {
+        let mut wcs =
+            Wcs::from_center_scale_rotation((150.0, 35.0), (1000.0, 800.0), 2.0, 15.0, false);
+        let undistorted = wcs.pixel_to_world(200.0, 300.0);
+        // A pure quadratic barrel-like term. The inverse coefficients are a
+        // first-order approximation: -A for the same terms, plus exact
+        // agreement is verified only to the tolerance such a small
+        // distortion permits.
+        let a = 1e-6;
+        wcs.sip = Some(Sip {
+            order: 2,
+            a: vec![a, 0.0, a],
+            b: vec![0.0, a, 0.0],
+            ap: vec![0.0, 0.0, -a, 0.0, 0.0, -a],
+            bp: vec![0.0, 0.0, 0.0, 0.0, -a, 0.0],
+        });
+        let distorted = wcs.pixel_to_world(200.0, 300.0);
+        // u = -800, v = -500: f = a(v^2 + u^2) = 0.889 px at 2"/px
+        let separation =
+            angular_separation_deg(undistorted.0, undistorted.1, distorted.0, distorted.1) * 3600.0;
+        assert!((1.0..3.0).contains(&separation), "{separation}");
+
+        let (x, y) = wcs.world_to_pixel(distorted.0, distorted.1).unwrap();
+        // The hand-written inverse is approximate; the round trip must land
+        // within a small fraction of the applied distortion.
+        assert!((x - 200.0).abs() < 0.01, "{x}");
+        assert!((y - 300.0).abs() < 0.01, "{y}");
     }
 
     #[test]

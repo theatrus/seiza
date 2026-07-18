@@ -245,22 +245,45 @@ impl PyWcs {
         self.wcs.footprint(width, height).to_vec()
     }
 
-    /// FITS WCS keywords as a dict (1-indexed `CRPIX`, TAN projection).
+    /// SIP distortion order, or `None` for a purely linear solution.
+    #[getter]
+    fn sip_order(&self) -> Option<u8> {
+        self.wcs.sip.as_ref().map(|sip| sip.order)
+    }
+
+    /// SIP coefficients as `{"A": {(p, q): value, ...}, "B": ..., "AP": ...,
+    /// "BP": ...}`, or `None` for a purely linear solution.
+    fn sip_coefficients<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let Some(sip) = &self.wcs.sip else {
+            return Ok(None);
+        };
+        let cards = PyDict::new(py);
+        for (name, terms, values) in [
+            ("A", seiza::Sip::forward_terms(sip.order), &sip.a),
+            ("B", seiza::Sip::forward_terms(sip.order), &sip.b),
+            ("AP", seiza::Sip::inverse_terms(sip.order), &sip.ap),
+            ("BP", seiza::Sip::inverse_terms(sip.order), &sip.bp),
+        ] {
+            let inner = PyDict::new(py);
+            for ((p, q), value) in terms.iter().zip(values) {
+                inner.set_item((*p, *q), *value)?;
+            }
+            cards.set_item(name, inner)?;
+        }
+        Ok(Some(cards))
+    }
+
+    /// FITS WCS keywords as a dict: 1-indexed `CRPIX`, TAN projection, and
+    /// the complete SIP keyword set when distortion was fitted.
     fn fits_header_cards<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let cards = PyDict::new(py);
-        cards.set_item("CTYPE1", "RA---TAN")?;
-        cards.set_item("CTYPE2", "DEC--TAN")?;
-        cards.set_item("CUNIT1", "deg")?;
-        cards.set_item("CUNIT2", "deg")?;
-        cards.set_item("EQUINOX", 2000.0)?;
-        cards.set_item("CRVAL1", self.wcs.crval.0)?;
-        cards.set_item("CRVAL2", self.wcs.crval.1)?;
-        cards.set_item("CRPIX1", self.wcs.crpix.0 + 1.0)?;
-        cards.set_item("CRPIX2", self.wcs.crpix.1 + 1.0)?;
-        cards.set_item("CD1_1", self.wcs.cd[0][0])?;
-        cards.set_item("CD1_2", self.wcs.cd[0][1])?;
-        cards.set_item("CD2_1", self.wcs.cd[1][0])?;
-        cards.set_item("CD2_2", self.wcs.cd[1][1])?;
+        for (keyword, value) in header_entries(&self.wcs) {
+            match value {
+                HeaderValue::Text(text) => cards.set_item(keyword, text)?,
+                HeaderValue::Integer(value) => cards.set_item(keyword, value)?,
+                HeaderValue::Number(value) => cards.set_item(keyword, value)?,
+            }
+        }
         Ok(cards)
     }
 
@@ -332,27 +355,20 @@ impl PySolution {
     }
 
     /// A minimal FITS header string (80-column cards ending with `END`)
-    /// carrying the WCS keywords. Suitable for header-injection APIs such
-    /// as sirilpy's `set_image_header`.
+    /// carrying the WCS keywords, including SIP keywords when distortion
+    /// was fitted. Suitable for header-injection APIs such as sirilpy's
+    /// `set_image_header`.
     fn fits_header_text(&self) -> String {
         let mut header = String::new();
-        let mut push = |keyword: &str, value: String| {
-            header.push_str(&format!("{keyword:<8}= {value:>20}"));
+        for (keyword, value) in header_entries(&self.wcs.wcs) {
+            let formatted = match value {
+                HeaderValue::Text(text) => format!("'{text}'"),
+                HeaderValue::Integer(value) => value.to_string(),
+                HeaderValue::Number(value) => format!("{value:.13E}"),
+            };
+            header.push_str(&format!("{keyword:<8}= {formatted:>20}"));
             header.push_str(&" ".repeat(80 - 30));
-        };
-        push("CTYPE1", "'RA---TAN'".into());
-        push("CTYPE2", "'DEC--TAN'".into());
-        push("CUNIT1", "'deg'".into());
-        push("CUNIT2", "'deg'".into());
-        push("EQUINOX", format!("{:.1}", 2000.0));
-        push("CRVAL1", format!("{:.13E}", self.wcs.wcs.crval.0));
-        push("CRVAL2", format!("{:.13E}", self.wcs.wcs.crval.1));
-        push("CRPIX1", format!("{:.13E}", self.wcs.wcs.crpix.0 + 1.0));
-        push("CRPIX2", format!("{:.13E}", self.wcs.wcs.crpix.1 + 1.0));
-        push("CD1_1", format!("{:.13E}", self.wcs.wcs.cd[0][0]));
-        push("CD1_2", format!("{:.13E}", self.wcs.wcs.cd[0][1]));
-        push("CD2_1", format!("{:.13E}", self.wcs.wcs.cd[1][0]));
-        push("CD2_2", format!("{:.13E}", self.wcs.wcs.cd[1][1]));
+        }
         header.push_str(&format!("{:<80}", "END"));
         header
     }
@@ -366,6 +382,70 @@ impl PySolution {
             self.rms_arcsec,
         )
     }
+}
+
+enum HeaderValue {
+    Text(&'static str),
+    Integer(u8),
+    Number(f64),
+}
+
+/// The FITS keyword sequence shared by the dict and header-text outputs.
+fn header_entries(wcs: &SeizaWcs) -> Vec<(String, HeaderValue)> {
+    use HeaderValue::{Integer, Number, Text};
+    let sip = wcs.sip.as_ref();
+    let mut entries = vec![
+        (
+            "CTYPE1".into(),
+            Text(if sip.is_some() {
+                "RA---TAN-SIP"
+            } else {
+                "RA---TAN"
+            }),
+        ),
+        (
+            "CTYPE2".into(),
+            Text(if sip.is_some() {
+                "DEC--TAN-SIP"
+            } else {
+                "DEC--TAN"
+            }),
+        ),
+        ("CUNIT1".into(), Text("deg")),
+        ("CUNIT2".into(), Text("deg")),
+        ("EQUINOX".into(), Number(2000.0)),
+        ("CRVAL1".into(), Number(wcs.crval.0)),
+        ("CRVAL2".into(), Number(wcs.crval.1)),
+        ("CRPIX1".into(), Number(wcs.crpix.0 + 1.0)),
+        ("CRPIX2".into(), Number(wcs.crpix.1 + 1.0)),
+        ("CD1_1".into(), Number(wcs.cd[0][0])),
+        ("CD1_2".into(), Number(wcs.cd[0][1])),
+        ("CD2_1".into(), Number(wcs.cd[1][0])),
+        ("CD2_2".into(), Number(wcs.cd[1][1])),
+    ];
+    if let Some(sip) = sip {
+        entries.push(("A_ORDER".into(), Integer(sip.order)));
+        entries.push(("B_ORDER".into(), Integer(sip.order)));
+        for (prefix, terms, values) in [
+            ("A", seiza::Sip::forward_terms(sip.order), &sip.a),
+            ("B", seiza::Sip::forward_terms(sip.order), &sip.b),
+        ] {
+            for ((p, q), value) in terms.iter().zip(values) {
+                entries.push((format!("{prefix}_{p}_{q}"), Number(*value)));
+            }
+        }
+        entries.push(("AP_ORDER".into(), Integer(sip.order)));
+        entries.push(("BP_ORDER".into(), Integer(sip.order)));
+        for (prefix, terms, values) in [
+            ("AP", seiza::Sip::inverse_terms(sip.order), &sip.ap),
+            ("BP", seiza::Sip::inverse_terms(sip.order), &sip.bp),
+        ] {
+            for ((p, q), value) in terms.iter().zip(values) {
+                entries.push((format!("{prefix}_{p}_{q}"), Number(*value)));
+            }
+        }
+    }
+    entries
 }
 
 fn solution_to_py(solution: seiza::solve::Solution, dimensions: (u32, u32)) -> PySolution {
@@ -480,7 +560,7 @@ fn detect(
 /// Plate solve with an approximate position and pixel-scale hint.
 #[pyfunction]
 #[pyo3(signature = (stars, catalog, width, height, *, ra, dec, scale_arcsec_px,
-    radius_deg=2.0, scale_tolerance=0.2))]
+    radius_deg=2.0, scale_tolerance=0.2, sip_order=0))]
 #[allow(clippy::too_many_arguments)]
 fn solve(
     py: Python<'_>,
@@ -493,7 +573,11 @@ fn solve(
     scale_arcsec_px: f64,
     radius_deg: f64,
     scale_tolerance: f64,
+    sip_order: u8,
 ) -> PyResult<PySolution> {
+    if sip_order > 5 {
+        return Err(PyValueError::new_err("sip_order must be between 0 and 5"));
+    }
     let stars = extract_stars(stars)?;
     let catalog = catalog.get();
     let hint = seiza::solve::SolveHint {
@@ -501,6 +585,7 @@ fn solve(
         radius_deg,
         scale_arcsec_px,
         scale_tolerance,
+        sip_order,
     };
     let solution = py.allow_threads(|| {
         seiza::solve::solve(&stars, catalog.backend.as_trait(), &hint, (width, height))
@@ -513,7 +598,7 @@ fn solve(
 /// Plate solve with no position hint using a whole-sky pattern index.
 #[pyfunction]
 #[pyo3(signature = (stars, catalog, index, width, height, *,
-    min_scale_arcsec_px=0.1, max_scale_arcsec_px=20.0))]
+    min_scale_arcsec_px=0.1, max_scale_arcsec_px=20.0, sip_order=0))]
 #[allow(clippy::too_many_arguments)]
 fn solve_blind(
     py: Python<'_>,
@@ -524,13 +609,18 @@ fn solve_blind(
     height: u32,
     min_scale_arcsec_px: f64,
     max_scale_arcsec_px: f64,
+    sip_order: u8,
 ) -> PyResult<PySolution> {
+    if sip_order > 5 {
+        return Err(PyValueError::new_err("sip_order must be between 0 and 5"));
+    }
     let stars = extract_stars(stars)?;
     let catalog = catalog.get();
     let index = index.get();
     let params = seiza::blind::BlindParams {
         min_scale_arcsec_px,
         max_scale_arcsec_px,
+        sip_order,
         ..seiza::blind::BlindParams::default()
     };
     let solution = py.allow_threads(|| {

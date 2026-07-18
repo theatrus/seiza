@@ -21,10 +21,11 @@ catalog = seiza.StarCatalog.open(paths["stars-lite-tycho2.bin"])
 # Detect stars in a 2D float32 (or uint8) luma array.
 stars = seiza.detect(image_array)
 
-# Hinted solve: approximate center and pixel scale.
+# Hinted solve: approximate center and pixel scale. sip_order=3 also fits
+# SIP distortion polynomials when enough matched stars support them.
 solution = seiza.solve(
     stars, catalog, width, height,
-    ra=150.1, dec=35.2, scale_arcsec_px=2.5,
+    ra=150.1, dec=35.2, scale_arcsec_px=2.5, sip_order=3,
 )
 print(solution)                 # center, scale, matches, RMS
 print(solution.rotation_deg, solution.flipped)
@@ -54,8 +55,9 @@ solution = seiza.solve_blind(stars, catalog, index, width, height,
 
 ## FITS WCS output
 
-Solutions convert directly to FITS WCS keywords (1-indexed `CRPIX`, TAN
-projection, CD matrix):
+Solutions convert directly to FITS WCS keywords (1-indexed `CRPIX`, TAN or
+TAN-SIP projection, CD matrix, and the complete `A_p_q`/`B_p_q`/`AP_p_q`/
+`BP_p_q` set when distortion was fitted):
 
 ```python
 cards = solution.fits_header_cards()   # dict of keyword -> value

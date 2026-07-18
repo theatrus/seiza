@@ -262,8 +262,9 @@ seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-
   Ubuntu debs on GitHub releases, and an integration suite that solves real
   hosted camera frames against known-good solutions on every PR.
 
-Planned (see design notes in the tenrankai repository,
-`docs/design/plate-solving.md`): SIP distortion terms.
+Both solvers can fit SIP distortion polynomials (orders 2-5, forward and
+inverse) on the accepted solution with `--sip-order`; the linear solution is
+kept whenever the polynomial does not improve the residual.
 
 ## Use with N.I.N.A. (ASTAP-compatible mode)
 

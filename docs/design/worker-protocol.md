@@ -65,6 +65,9 @@ Protocol version 1 is currently the only supported version.
 
 The `hint` object is required in hinted mode. Coordinates are ICRS/J2000
 degrees. `scaleTolerance` is fractional, so `0.2` allows +/-20 percent.
+The optional `sipOrder` field (0-5, default 0) requests SIP distortion
+polynomials of that order; 0 keeps the linear solution. Older workers reject
+unknown fields, so send it only to workers advertising `schemaVersion >= 1`.
 
 ## Blind solve
 
@@ -72,7 +75,9 @@ degrees. `scaleTolerance` is fractional, so `0.2` allows +/-20 percent.
 {"jsonrpc":"2.0","id":3,"method":"solve","params":{"imagePath":"C:\\NINA\\PlateSolver\\image.fits","mode":"blind","blind":{"minScaleArcsecPerPixel":0.1,"maxScaleArcsecPerPixel":20.0,"indexMagnitudeLimit":12.7,"maxHypotheses":400,"maxCoarseHypotheses":20000},"detection":{"sigma":4.0,"ignoreBorder":0,"maxStars":600}}}
 ```
 
-The `blind` and `detection` objects may be omitted to use their defaults. When
+The `blind` and `detection` objects may be omitted to use their defaults.
+`blind` also accepts the optional `sipOrder` field: hypothesis verification
+always runs linear, and the accepted solution is re-fitted at that order. When
 the worker starts without `--index`, the first blind request builds an index in
 memory and later blind requests reuse it. Production clients should provide a
 maintained prebuilt index for predictable startup time and fine-scale fields.
@@ -88,6 +93,14 @@ The CLI's global `--detection-backend`, `--detection-fallback`, and
 The WCS uses the FITS TAN/CD convention. `crpix` is one-based as indicated by
 `pixelOrigin`; this differs from Seiza's internal zero-based pixel centers and
 allows clients to pass the values directly to FITS/WCS consumers.
+
+When a solve fits SIP distortion, `projection` becomes `"TAN-SIP"` and the
+`wcs` object gains a `sip` block with the polynomial `order` and the
+`a`/`b` (forward) and `ap`/`bp` (inverse) coefficient lists. Each coefficient
+is an explicit `[p, q, value]` triple, so the wire format does not depend on
+an implied term ordering; values map directly to FITS `A_p_q`/`B_p_q`/
+`AP_p_q`/`BP_p_q` keywords. Clients that ignore `sip` still receive the
+correct linear part in `cd`.
 
 `indexMs` is normally zero for a worker started with `--index`. If the worker
 builds an index lazily, the build time is reported there rather than in

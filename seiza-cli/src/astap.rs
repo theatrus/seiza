@@ -165,6 +165,7 @@ fn solve(args: &AstapArgs, image_path: &Path) -> Result<Vec<String>> {
                         radius_deg: args.radius_deg.clamp(0.5, 3.0),
                         scale_arcsec_px: scale,
                         scale_tolerance: 0.3,
+                        sip_order: 0,
                     },
                     dims,
                 )
@@ -474,6 +475,7 @@ mod tests {
                 [-s * theta.cos(), s * theta.sin()],
                 [s * theta.sin(), s * theta.cos()],
             ],
+            sip: None,
         };
         let lines = ini_lines(&wcs, (4000, 3000));
         let get = |key: &str| -> f64 {

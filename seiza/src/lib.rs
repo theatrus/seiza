@@ -20,7 +20,7 @@ pub mod star_ids;
 pub mod wcs;
 
 pub use detect::{DetectBackend, DetectConfig, DetectedStar, detect_stars, detect_stars_luma_f32};
-pub use wcs::Wcs;
+pub use wcs::{Sip, Wcs};
 
 /// Async installation and caching of published catalog bundles.
 ///

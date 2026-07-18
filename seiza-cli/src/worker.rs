@@ -559,6 +559,7 @@ impl LocalSolver {
                     radius_deg: hint.radius_deg,
                     scale_arcsec_px: hint.scale_arcsec_per_pixel,
                     scale_tolerance: hint.scale_tolerance,
+                    sip_order: hint.sip_order,
                 };
                 invocation.solve(|stars| solve(stars, &self.catalog, &hint, dimensions))?
             }
@@ -570,6 +571,7 @@ impl LocalSolver {
                     index_mag_limit: blind.index_magnitude_limit,
                     max_hypotheses: blind.max_hypotheses,
                     max_coarse_hypotheses: blind.max_coarse_hypotheses,
+                    sip_order: blind.sip_order,
                     ..Default::default()
                 };
 
@@ -965,6 +967,7 @@ impl ServerSolution {
                 crval: (self.wcs.crval[0], self.wcs.crval[1]),
                 crpix: (self.wcs.crpix[0], self.wcs.crpix[1]),
                 cd: self.wcs.cd,
+                sip: None,
             },
             matched_stars: self.matched_stars,
             rms_arcsec: self.rms_arcsec,
@@ -1144,6 +1147,10 @@ struct HintParams {
     scale_arcsec_per_pixel: f64,
     #[serde(default = "default_scale_tolerance")]
     scale_tolerance: f64,
+    /// SIP distortion polynomial order (0 = linear solution). Optional and
+    /// additive: older clients omit it and keep the previous behavior.
+    #[serde(default)]
+    sip_order: u8,
 }
 
 impl HintParams {
@@ -1153,6 +1160,9 @@ impl HintParams {
         finite("hint.radiusDeg", self.radius_deg)?;
         finite("hint.scaleArcsecPerPixel", self.scale_arcsec_per_pixel)?;
         finite("hint.scaleTolerance", self.scale_tolerance)?;
+        if self.sip_order > 5 {
+            return Err("hint.sipOrder must be between 0 and 5".to_string());
+        }
         if !(0.0..=360.0).contains(&self.center_ra_deg) {
             return Err("hint.centerRaDeg must be between 0 and 360".to_string());
         }
@@ -1180,6 +1190,10 @@ struct BlindSolveParams {
     index_magnitude_limit: f32,
     max_hypotheses: usize,
     max_coarse_hypotheses: usize,
+    /// SIP distortion polynomial order (0 = linear solution). Optional and
+    /// additive: older clients omit it and keep the previous behavior.
+    #[serde(default)]
+    sip_order: u8,
 }
 
 impl Default for BlindSolveParams {
@@ -1190,6 +1204,7 @@ impl Default for BlindSolveParams {
             index_magnitude_limit: 12.7,
             max_hypotheses: 400,
             max_coarse_hypotheses: 20_000,
+            sip_order: 0,
         }
     }
 }
@@ -1206,6 +1221,9 @@ impl BlindSolveParams {
         )?;
         if !self.index_magnitude_limit.is_finite() {
             return Err("blind.indexMagnitudeLimit must be finite".to_string());
+        }
+        if self.sip_order > 5 {
+            return Err("blind.sipOrder must be between 0 and 5".to_string());
         }
         if self.min_scale_arcsec_per_pixel <= 0.0
             || self.max_scale_arcsec_per_pixel <= self.min_scale_arcsec_per_pixel
@@ -1317,6 +1335,40 @@ struct WorkerWcs {
     crval: [f64; 2],
     crpix: [f64; 2],
     cd: [[f64; 2]; 2],
+    /// SIP distortion polynomials, present when the solve fitted them. Each
+    /// coefficient is an explicit `[p, q, value]` triple so the wire format
+    /// does not depend on an implied term ordering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sip: Option<WorkerSip>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkerSip {
+    order: u8,
+    a: Vec<(u8, u8, f64)>,
+    b: Vec<(u8, u8, f64)>,
+    ap: Vec<(u8, u8, f64)>,
+    bp: Vec<(u8, u8, f64)>,
+}
+
+impl WorkerSip {
+    fn from_wcs(sip: &seiza::Sip) -> Self {
+        let triples = |terms: Vec<(u8, u8)>, values: &[f64]| {
+            terms
+                .into_iter()
+                .zip(values)
+                .map(|((p, q), &value)| (p, q, value))
+                .collect()
+        };
+        Self {
+            order: sip.order,
+            a: triples(seiza::Sip::forward_terms(sip.order), &sip.a),
+            b: triples(seiza::Sip::forward_terms(sip.order), &sip.b),
+            ap: triples(seiza::Sip::inverse_terms(sip.order), &sip.ap),
+            bp: triples(seiza::Sip::inverse_terms(sip.order), &sip.bp),
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -1372,13 +1424,18 @@ fn solution_result(
         matched_stars: solution.matched_stars,
         rms_arcsec: solution.rms_arcsec,
         wcs: WorkerWcs {
-            projection: "TAN".to_string(),
+            projection: if wcs.sip.is_some() {
+                "TAN-SIP".to_string()
+            } else {
+                "TAN".to_string()
+            },
             pixel_origin: 1,
             crval: [wcs.crval.0, wcs.crval.1],
             // The library uses zero-based pixel centers. The wire contract
             // uses FITS-standard one-based CRPIX values.
             crpix: [wcs.crpix.0 + 1.0, wcs.crpix.1 + 1.0],
             cd: wcs.cd,
+            sip: wcs.sip.as_ref().map(WorkerSip::from_wcs),
         },
         footprint,
         timings,
@@ -1645,6 +1702,7 @@ mod tests {
                 crval: (123.0, -20.0),
                 crpix: (1999.0, 1499.0),
                 cd: [[-0.001, 0.0], [0.0, 0.001]],
+                sip: None,
             },
             matched_stars: 42,
             rms_arcsec: 0.5,
@@ -1680,6 +1738,7 @@ mod tests {
                 radius_deg: 2.0,
                 scale_arcsec_per_pixel: 1.5,
                 scale_tolerance: 0.2,
+                sip_order: 0,
             }),
             blind: None,
             detection: DetectionParams::default(),
