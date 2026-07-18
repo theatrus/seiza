@@ -101,9 +101,36 @@ pub fn solve(
         // brightness; when it fails, retry with the rank-robust quad
         // search that treats ordering as a prior only.
         Err(triangle_error) => {
-            solve_rank_robust(stars, catalog, hint, dimensions).map_err(|robust_error| {
-                crate::Error::Solve(format!("{triangle_error}; {robust_error}"))
-            })
+            let tables = RankRobustTables::build(stars, dimensions);
+            solve_rank_robust(stars, catalog, hint, dimensions, &tables, RR_PROBE_BUDGET).map_err(
+                |robust_error| crate::Error::Solve(format!("{triangle_error}; {robust_error}")),
+            )
+        }
+    }
+}
+
+/// [`solve`] for blind hypothesis verification: identical semantics, but
+/// the caller decides whether this hypothesis has earned the rank-robust
+/// fallback. A whole-sky search verifies hundreds of junk hypotheses per
+/// image, so those pass `None` and fail at triangle cost; the few whose
+/// position-only coarse score shows real catalog agreement pass prebuilt
+/// tables and get the full search.
+pub(crate) fn solve_for_blind_hypothesis(
+    stars: &[DetectedStar],
+    catalog: &dyn StarCatalog,
+    hint: &SolveHint,
+    dimensions: (u32, u32),
+    tables: Option<&RankRobustTables>,
+) -> Result<Solution, crate::Error> {
+    match solve_search(stars, catalog, hint, dimensions) {
+        Ok(solution) => Ok(solution),
+        Err(triangle_error) => {
+            let Some(tables) = tables else {
+                return Err(triangle_error);
+            };
+            solve_rank_robust(stars, catalog, hint, dimensions, tables, RR_PROBE_BUDGET).map_err(
+                |robust_error| crate::Error::Solve(format!("{triangle_error}; {robust_error}")),
+            )
         }
     }
 }
@@ -401,6 +428,51 @@ const RR_PROBE_TOL_PX: f64 = 2.5;
 const RR_COUNT_MIN: usize = 10;
 /// Total quads examined before giving up.
 const RR_MAX_QUADS: usize = 400;
+/// Probe budget per rank-robust search: bounds the worst case on an
+/// unsolvable field to a few seconds of CPU, well under the cost of the
+/// blind fallback that follows a failed hinted solve.
+const RR_PROBE_BUDGET: usize = 200_000_000;
+
+/// Star-list-side tables for the rank-robust search: the position hash
+/// and the length-sorted pair table. They depend only on the detected
+/// star list, so blind verification builds them once per image and
+/// reuses them across every hypothesis.
+pub(crate) struct RankRobustTables {
+    pair_stars: Vec<(f64, f64)>,
+    /// `(length_px, i, j)` sorted by length so a backbone length selects
+    /// a candidate window by binary search.
+    pairs: Vec<(f32, u32, u32)>,
+    probe_grid: ImageGrid,
+}
+
+impl RankRobustTables {
+    pub(crate) fn build(stars: &[DetectedStar], dimensions: (u32, u32)) -> Self {
+        let probe_grid = ImageGrid::build(stars, RR_PROBE_TOL_PX);
+        // Pair table over the (prior-ordered) star list.
+        let pair_stars: Vec<(f64, f64)> = stars
+            .iter()
+            .take(RR_MAX_PAIR_STARS)
+            .map(|s| (s.x, s.y))
+            .collect();
+        let diag_px = (dimensions.0 as f64).hypot(dimensions.1 as f64);
+        let mut pairs: Vec<(f32, u32, u32)> = Vec::new();
+        for i in 0..pair_stars.len() {
+            for j in (i + 1)..pair_stars.len() {
+                let length =
+                    (pair_stars[i].0 - pair_stars[j].0).hypot(pair_stars[i].1 - pair_stars[j].1);
+                if length > 8.0 && length <= diag_px {
+                    pairs.push((length as f32, i as u32, j as u32));
+                }
+            }
+        }
+        pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+        Self {
+            pair_stars,
+            pairs,
+            probe_grid,
+        }
+    }
+}
 
 /// Hinted solve that does not trust the star list's flux ordering.
 fn solve_rank_robust(
@@ -408,6 +480,8 @@ fn solve_rank_robust(
     catalog: &dyn StarCatalog,
     hint: &SolveHint,
     dimensions: (u32, u32),
+    tables: &RankRobustTables,
+    probe_budget: usize,
 ) -> Result<Solution, crate::Error> {
     if stars.len() < RR_MIN_STARS {
         return Err(crate::Error::Solve(format!(
@@ -470,30 +544,14 @@ fn solve_rank_robust(
     }
     quads.truncate(RR_MAX_QUADS);
 
-    // Position hash over every image star; probes are tolerance circles.
-    let probe_grid = ImageGrid::build(stars, RR_PROBE_TOL_PX);
-
-    // Pair table over the (prior-ordered) star list, sorted by length so
-    // each quad's backbone selects a window by binary search.
-    let pair_stars: Vec<(f64, f64)> = stars
-        .iter()
-        .take(RR_MAX_PAIR_STARS)
-        .map(|s| (s.x, s.y))
-        .collect();
+    let RankRobustTables {
+        pair_stars,
+        pairs,
+        probe_grid,
+    } = tables;
     let scale_low = hint.scale_arcsec_px * (1.0 - hint.scale_tolerance.min(0.9));
     let scale_high = hint.scale_arcsec_px * (1.0 + hint.scale_tolerance);
-    let (diag_px, _) = ((dimensions.0 as f64).hypot(dimensions.1 as f64), ());
-    let mut pairs: Vec<(f32, u32, u32)> = Vec::new();
-    for i in 0..pair_stars.len() {
-        for j in (i + 1)..pair_stars.len() {
-            let length =
-                (pair_stars[i].0 - pair_stars[j].0).hypot(pair_stars[i].1 - pair_stars[j].1);
-            if length > 8.0 && length <= diag_px {
-                pairs.push((length as f32, i as u32, j as u32));
-            }
-        }
-    }
-    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut probes_left = probe_budget;
 
     for quad in &quads {
         // Backbone: the quad's widest pair; the other two verify.
@@ -526,6 +584,12 @@ fn solve_rank_robust(
             let image_j = pair_stars[j as usize];
             for (a_img, b_img) in [(image_i, image_j), (image_j, image_i)] {
                 for mirrored in [false, true] {
+                    probes_left = probes_left.saturating_sub(1);
+                    if probes_left == 0 {
+                        return Err(crate::Error::Solve(format!(
+                            "rank-robust search exhausted its {probe_budget}-probe budget"
+                        )));
+                    }
                     let Some(transform) =
                         SimilarityTransform::from_pair(p1, p2, a_img, b_img, mirrored)
                     else {
@@ -538,12 +602,29 @@ fn solve_rank_robust(
                     {
                         continue;
                     }
-                    // Cheap census before paying for refinement.
-                    let count = window
-                        .iter()
-                        .filter(|&&p| probe_grid.hit(transform.apply(p), RR_PROBE_TOL_PX * 1.5))
-                        .count();
-                    if count < RR_COUNT_MIN {
+                    // Cheap census before paying for refinement: only
+                    // window stars the transform places inside the frame
+                    // can match, so the floor adapts when the hint offset
+                    // leaves few of them in view.
+                    probes_left = probes_left.saturating_sub(window.len());
+                    let margin = RR_PROBE_TOL_PX * 1.5;
+                    let (width, height) = (dimensions.0 as f64, dimensions.1 as f64);
+                    let mut in_frame = 0usize;
+                    let mut count = 0usize;
+                    for &p in &window {
+                        let t = transform.apply(p);
+                        if t.0 >= -margin
+                            && t.1 >= -margin
+                            && t.0 < width + margin
+                            && t.1 < height + margin
+                        {
+                            in_frame += 1;
+                            if probe_grid.hit(t, margin) {
+                                count += 1;
+                            }
+                        }
+                    }
+                    if count < RR_COUNT_MIN.min((in_frame * 2 / 3).max(4)) {
                         continue;
                     }
                     // Convert tangent->pixel similarity into the solver's
@@ -649,7 +730,10 @@ impl ImageGrid {
         for (index, star) in stars.iter().enumerate() {
             positions.push((star.x, star.y));
             cells
-                .entry(((star.x / cell) as i64, (star.y / cell) as i64))
+                .entry((
+                    (star.x / cell).floor() as i64,
+                    (star.y / cell).floor() as i64,
+                ))
                 .or_default()
                 .push(index as u32);
         }
@@ -661,8 +745,8 @@ impl ImageGrid {
     }
 
     fn hit(&self, point: (f64, f64), tolerance: f64) -> bool {
-        let cx = (point.0 / self.cell) as i64;
-        let cy = (point.1 / self.cell) as i64;
+        let cx = (point.0 / self.cell).floor() as i64;
+        let cy = (point.1 / self.cell).floor() as i64;
         let tol_sq = tolerance * tolerance;
         for dx in -1..=1 {
             for dy in -1..=1 {

@@ -108,12 +108,37 @@ the shared `refine_to_solution` tail (iterative re-matching,
 re-centering, SIP) is reused verbatim, so the fallback produces
 solutions with identical semantics to the triangle path.
 
-Position-blind solving with an unranked list is harder: the whole-sky
-pattern index is already catalog-seeded, but the image-side query
-patterns are rank-selected today. The first step there is a
-junk-tolerant, deeper image-pattern generation ladder with a larger
-hypothesis budget (hash verification is cheap); index-format changes are
-not required for that.
+Two cost controls keep the worst case bounded (added after review
+measured an unbudgeted 47x wall-clock regression on unsolvable fields):
+
+- The star-list-side tables (position hash, length-sorted pair table)
+  are `RankRobustTables`, built once per image and reused — blind
+  verification must not rebuild an O(n^2) sorted pair table per
+  hypothesis.
+- Every search runs under a probe budget (`RR_PROBE_BUDGET`) so an
+  unsolvable field costs a bounded few CPU-seconds instead of an
+  open-ended scan. The census floor also adapts to how many catalog
+  window stars the candidate transform actually places inside the frame,
+  so an offset hint cannot starve a correct transform of votes.
+
+## Blind rescue
+
+The fallback also runs inside blind hypothesis verification, which
+partially delivers the blind half of this design for free: the coarse
+hypothesis score (`coarse_match_count`) is position-only and therefore
+already rank-robust, so a hypothesis whose projected catalog stars agree
+with detections — but whose triangle verification is defeated by the
+flux ordering — earns the rank-robust search (gated at
+`RR_VERIFY_COARSE_FLOOR`; random collisions project zero or one).
+Measured on the amplitude-ranked M31 table with a *wrong* position hint:
+0.7.2 fails after 6.5 s; this branch solves it through the blind path.
+Junk hypotheses skip the fallback entirely and fail at plain triangle
+cost, keeping unsolvable-field behavior at baseline speed.
+
+What remains open for fully-blind unranked lists is image-side pattern
+generation, which is still rank-selected: a junk-tolerant, deeper
+image-pattern ladder with a larger hypothesis budget (hash verification
+is cheap). Index-format changes are not required for that.
 
 ## Data-format implications
 
