@@ -359,7 +359,7 @@ fn solve(args: &SolveFieldArgs, table: &Path) -> Result<(seiza::solve::Solution,
         sip_order: args.sip_order,
         ..Default::default()
     };
-    let index = if let Some(path) = crate::astap::resolve_blind_index() {
+    let index = if let Some(path) = crate::astap::resolve_blind_index()? {
         let index = seiza::blind::BlindIndex::open(&path)
             .map_err(anyhow::Error::from)
             .with_context(|| format!("cannot open blind index {}", path.display()))?;

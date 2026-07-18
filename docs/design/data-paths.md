@@ -65,5 +65,9 @@ have to hard-code the file name the rest of the pipeline treats as standard.
 Before 0.7.2, only the ASTAP and solve-field compatibility modes had this
 search; every normal CLI command required explicit file paths, and the logic
 was private to the CLI crate. 0.7.2 unified the commands behind one CLI
-module; this design moves that module into the library unchanged so
+module; this design moves that module into the library with two
+deliberate behavior changes — a set environment variable that resolves
+to nothing is now an error instead of a silent fall-through, and the
+macOS fallback search directory follows the platform convention
+(`~/Library/Application Support/seiza`) instead of the Linux one — so
 applications resolve catalogs the same way the CLI does.
