@@ -19,6 +19,7 @@ use tokio_util::io::StreamReader;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const READ_TIMEOUT: Duration = Duration::from_secs(300);
+const IO_BUFFER_BYTES: usize = 1024 * 1024;
 
 /// Controls when the small hosted bundle manifest may use the cached copy.
 /// Catalog artifacts themselves are immutable and content-addressed.
@@ -651,7 +652,7 @@ impl CatalogManager {
         let mut decoded_hasher = Sha256::new();
         let mut decoded = 0u64;
         let mut reported = 0u64;
-        let mut buffer = vec![0u8; 1024 * 1024];
+        let mut buffer = vec![0u8; IO_BUFFER_BYTES];
         loop {
             let read = decoder
                 .read(&mut buffer)
@@ -660,22 +661,29 @@ impl CatalogManager {
             if read == 0 {
                 break;
             }
+            let next_decoded = decoded
+                .checked_add(read as u64)
+                .ok_or_else(|| Error::Size {
+                    name: file.name.clone(),
+                    expected: file.bytes,
+                    actual: u64::MAX,
+                })?;
+            // Reject the decoded chunk before writing it when it would exceed
+            // the canonical size. This bounds temporary disk usage as well as
+            // the amount of work performed on a wrong or malicious frame.
+            if next_decoded > file.bytes {
+                return Err(Error::Size {
+                    name: file.name.clone(),
+                    expected: file.bytes,
+                    actual: next_decoded,
+                });
+            }
             output
                 .write_all(&buffer[..read])
                 .await
                 .map_err(|source| io("write", temp, source))?;
             decoded_hasher.update(&buffer[..read]);
-            decoded += read as u64;
-            // Abort as soon as the frame exceeds its canonical decoded size,
-            // so a wrong or malicious high-ratio artifact cannot fill the
-            // disk before the post-download verification runs.
-            if decoded > file.bytes {
-                return Err(Error::Size {
-                    name: file.name.clone(),
-                    expected: file.bytes,
-                    actual: decoded,
-                });
-            }
+            decoded = next_decoded;
             if decoded.saturating_sub(reported) >= 4 * 1024 * 1024 {
                 report(DownloadEvent::DownloadProgress {
                     name: file.name.clone(),
@@ -800,7 +808,7 @@ async fn verify_artifact(path: &Path, artifact: &CatalogArtifact) -> Result<()> 
     }
 
     let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1024 * 1024];
+    let mut buffer = vec![0u8; IO_BUFFER_BYTES];
     loop {
         let read = input
             .read(&mut buffer)
@@ -1310,8 +1318,8 @@ mod tests {
                 assert_eq!(expected, content.len() as u64);
                 assert!(actual > expected);
                 assert!(
-                    actual <= 8 * 1024 * 1024,
-                    "decoding continued long after exceeding the declared size: {actual} bytes"
+                    actual <= expected + IO_BUFFER_BYTES as u64,
+                    "decoding continued beyond the first oversized chunk: {actual} bytes"
                 );
             }
             other => panic!("expected a size error, got {other:?}"),

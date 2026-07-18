@@ -11,7 +11,7 @@ authors = ["Yann Ramin <github@theatr.us>"]
 
 [workspace.dependencies]
 seiza = { path = "seiza", version = "0.6.0" }
-seiza-download = { path = "seiza-download", version = "0.2.0" }
+seiza-download = { path = "seiza-download", version = "0.3.0" }
 seiza-fits = { path = "seiza-fits", version = "0.1.6" }
 seiza-sources = { path = "seiza-sources", version = "0.2.0" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
