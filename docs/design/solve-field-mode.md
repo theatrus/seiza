@@ -56,11 +56,24 @@ Siril's `local_asnet_platesolve` (src/algos/astrometry_solver.c):
 
 ## Platform notes
 
-Linux and macOS work as a plain drop-in. On Windows Siril launches
-astrometry.net through a cygwin `bin/bash` wrapper, so a bare renamed
-binary is not sufficient; Windows support would require emulating that
-shell layout and is out of scope for now (Windows Siril users can use the
-worker-protocol integration path instead when it lands upstream).
+Linux and macOS work as a plain drop-in: a copy of seiza named
+`solve-field`.
+
+On Windows Siril launches astrometry.net through
+`<asnet_dir>/bin/bash -l -c ...` — historically a cygwin shell. Seiza does
+not need the shell: a copy installed as `<asnet_dir>/bin/bash.exe`
+recognizes the two commands Siril issues. The version probe
+(`-c "solve-field --version"`) is answered directly, and the solve
+invocation (`-c /tmp/asnet.sh`) resolves the cygwin-style path against the
+layout root (`<asnet_dir>/tmp/asnet.sh`), parses the deterministic script
+Siril writes there (`p="<table>"`, `c="<stopfile>"`, one solve-field
+command line), substitutes the variables, and dispatches into the same
+solve path. Windows paths in the script are treated literally — no shell
+escaping semantics apply.
+
+`seiza install-solve-field --dir <dir>` creates the complete layout on any
+platform: `solve-field`, `bin/bash`, and the `tmp/` directory Siril
+requires to exist before it writes its script.
 
 ## Known limitation: brightness-faithful FLUX ranking required
 
@@ -88,4 +101,6 @@ Unit tests cover the xyls parser, Siril's exact argument shape, and the
 `.wcs` card structure. An end-to-end rehearsal (real image, Siril-format
 xyls written via astropy, Siril's literal argv, `.wcs` parsed with wcslib)
 solved a 6165x4026 M31 frame blind-in-position with SIP order 3 at 1.45"
-RMS over 130 matched stars.
+RMS over 130 matched stars. The Windows launch path was simulated
+end-to-end: the version probe and an `asnet.sh` in Siril's exact format,
+invoked through an installed `bin/bash`, produced the same solution.

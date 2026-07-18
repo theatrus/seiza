@@ -308,15 +308,15 @@ renamed `astap.exe` behaves identically. Details:
 
 ## Use with Siril (solve-field compatible mode)
 
-seiza speaks astrometry.net's `solve-field` command line, so Siril's
-existing astrometry.net integration drives it with no plugin (Linux and
-macOS; Windows Siril wraps astrometry.net in a cygwin shell that a bare
-binary cannot satisfy):
+seiza speaks astrometry.net's `solve-field` command line — and on Windows
+it also answers Siril's `bin/bash` launch wrapper itself, so no cygwin is
+needed. Siril's existing astrometry.net integration drives it with no
+plugin on every platform:
 
-1. Put a copy of (or symlink to) the seiza binary named `solve-field` in a
-   directory, e.g. `~/.local/share/seiza-solver/solve-field`.
+1. Run `seiza install-solve-field --dir <dir>` — it installs the complete
+   layout (`solve-field`, `bin/bash`, `tmp/`) Siril expects.
 2. Give seiza a star catalog once: `seiza setup`, or set `SEIZA_STAR_DATA`,
-   or drop a `stars-*.bin` next to the renamed binary.
+   or drop a `stars-*.bin` next to the installed binaries.
 3. In Siril: **Preferences → Astrometry → astrometry.net install dir**, set
    it to that directory, and pick the astrometry.net solver when plate
    solving.

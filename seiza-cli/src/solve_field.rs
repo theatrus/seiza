@@ -40,11 +40,154 @@ struct SolveFieldArgs {
     version: bool,
 }
 
+/// True when the binary is named like a shell. Windows Siril launches
+/// astrometry.net through `<asnet_dir>/bin/bash -l -c ...`, so a copy of
+/// seiza installed as `bin/bash.exe` receives those invocations and
+/// interprets the two commands Siril issues — no cygwin required.
+pub fn invoked_as_bash(program: &str) -> bool {
+    binary_name_matches(program, "bash")
+}
+
+/// Compare the final path component (without `.exe`) case-insensitively,
+/// accepting both separator styles regardless of host platform.
+fn binary_name_matches(program: &str, expected: &str) -> bool {
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let stem = name
+        .strip_suffix(".exe")
+        .or_else(|| name.strip_suffix(".EXE"))
+        .unwrap_or(name);
+    stem.eq_ignore_ascii_case(expected)
+}
+
+/// Handle a Siril-style `bash -l -c <command>` invocation: either the
+/// version handshake (`solve-field --version`) or a generated `asnet.sh`
+/// script containing `p="<table>"`, `c="<stopfile>"`, and one solve-field
+/// command line.
+pub fn run_as_bash(raw: &[String]) -> Result<()> {
+    let mut command = None;
+    let mut iter = raw.iter();
+    while let Some(argument) = iter.next() {
+        if argument == "-c" {
+            command = iter.next().cloned();
+        }
+    }
+    let Some(command) = command else {
+        anyhow::bail!("bash compatibility mode understands only -l -c <command>");
+    };
+    let command = command.trim();
+    if command.contains("solve-field") && command.contains("--version") {
+        println!("{COMPAT_VERSION}");
+        return Ok(());
+    }
+    let script = resolve_shell_path(command)?;
+    let content = std::fs::read_to_string(&script)
+        .with_context(|| format!("cannot read {}", script.display()))?;
+    let argv = parse_asnet_script(&content)?;
+    run(&argv)
+}
+
+/// Resolve a cygwin-style absolute path such as `/tmp/asnet.sh` against
+/// the shell root: this binary is installed at `<root>/bin/bash`, so
+/// `/tmp/asnet.sh` maps to `<root>/tmp/asnet.sh`. A path that already
+/// exists as given is used directly.
+fn resolve_shell_path(path: &str) -> Result<PathBuf> {
+    let direct = PathBuf::from(path);
+    if direct.exists() {
+        return Ok(direct);
+    }
+    let exe = std::env::current_exe().context("cannot locate the running binary")?;
+    let root = exe
+        .parent()
+        .and_then(Path::parent)
+        .context("binary is not installed under a <root>/bin directory")?;
+    let mapped = root.join(path.trim_start_matches(['/', '\\']));
+    if mapped.exists() {
+        return Ok(mapped);
+    }
+    anyhow::bail!(
+        "cannot resolve shell path {path} (tried {})",
+        mapped.display()
+    )
+}
+
+/// Parse the deterministic script Siril writes: shell variable assignments
+/// (`name="value"`) followed by one solve-field command line whose words
+/// may reference the variables as `"$name"`.
+fn parse_asnet_script(content: &str) -> Result<Vec<String>> {
+    let mut variables: Vec<(String, String)> = Vec::new();
+    let mut command = None;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((name, rest)) = line.split_once("=\"")
+            && !name.is_empty()
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && let Some(value) = rest.strip_suffix('"')
+        {
+            variables.push((name.to_string(), value.to_string()));
+        } else if line.starts_with("solve-field") {
+            command = Some(line.to_string());
+        }
+    }
+    let command = command.context("no solve-field command line in script")?;
+    let words = split_command_words(&command, &variables);
+    if words.first().map(String::as_str) != Some("solve-field") {
+        anyhow::bail!("unexpected script command {:?}", words.first());
+    }
+    Ok(words[1..].to_vec())
+}
+
+/// Split a command line into words, honoring double quotes and expanding
+/// `$name` variable references. Backslashes are literal — the values are
+/// Windows paths, not shell escapes.
+fn split_command_words(command: &str, variables: &[(String, String)]) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut in_word = false;
+    let mut in_quotes = false;
+    let mut chars = command.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                in_quotes = !in_quotes;
+                in_word = true;
+            }
+            c if c.is_whitespace() && !in_quotes => {
+                if in_word {
+                    words.push(std::mem::take(&mut current));
+                    in_word = false;
+                }
+            }
+            '$' => {
+                in_word = true;
+                let mut name = String::new();
+                while chars
+                    .peek()
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_')
+                {
+                    name.push(chars.next().unwrap());
+                }
+                if let Some((_, value)) = variables.iter().find(|(n, _)| *n == name) {
+                    current.push_str(value);
+                }
+            }
+            c => {
+                in_word = true;
+                current.push(c);
+            }
+        }
+    }
+    if in_word {
+        words.push(current);
+    }
+    words
+}
+
 /// True when the binary itself is named like astrometry.net's solver.
 pub fn invoked_as_solve_field(program: &str) -> bool {
-    Path::new(program)
-        .file_stem()
-        .is_some_and(|stem| stem.eq_ignore_ascii_case("solve-field"))
+    binary_name_matches(program, "solve-field")
 }
 
 /// True when the raw arguments carry solve-field-specific markers. Siril
@@ -52,6 +195,36 @@ pub fn invoked_as_solve_field(program: &str) -> bool {
 pub fn looks_like_solve_field(args: &[String]) -> bool {
     args.iter()
         .any(|arg| arg == "--crpix-center" || arg == "--temp-axy")
+}
+
+/// Install the drop-in layout Siril expects: `<dir>/solve-field` for
+/// Linux/macOS, and `<dir>/bin/bash` plus `<dir>/tmp/` for the Windows
+/// launch path. Both are copies of the running binary, so one layout works
+/// on every platform and survives either invocation style.
+pub fn install_layout(dir: &Path) -> Result<()> {
+    let exe = std::env::current_exe().context("cannot locate the running binary")?;
+    let extension = if cfg!(windows) { ".exe" } else { "" };
+    std::fs::create_dir_all(dir.join("bin"))
+        .with_context(|| format!("cannot create {}", dir.join("bin").display()))?;
+    std::fs::create_dir_all(dir.join("tmp"))
+        .with_context(|| format!("cannot create {}", dir.join("tmp").display()))?;
+    for target in [
+        dir.join(format!("solve-field{extension}")),
+        dir.join("bin").join(format!("bash{extension}")),
+    ] {
+        std::fs::copy(&exe, &target)
+            .with_context(|| format!("cannot install {}", target.display()))?;
+        println!("installed {}", target.display());
+    }
+    println!(
+        "\nPoint Siril's astrometry.net directory preference at:\n  {}\n\
+         Give seiza a star catalog (any one of):\n  \
+         - run: seiza setup\n  \
+         - set SEIZA_STAR_DATA to a stars-*.bin\n  \
+         - drop a stars-*.bin next to the installed solve-field",
+        dir.display()
+    );
+    Ok(())
 }
 
 /// Run solve-field mode over raw (post program-name) arguments.
@@ -592,6 +765,38 @@ mod tests {
         assert!(invoked_as_solve_field("/opt/astrometry/bin/solve-field"));
         assert!(invoked_as_solve_field("solve-field.exe"));
         assert!(!invoked_as_solve_field("seiza"));
+    }
+
+    #[test]
+    fn parses_sirils_windows_asnet_script() {
+        let script = "p=\"C:\\Users\\astro\\NINA\\image.xyls\"\n\
+c=\"C:\\Users\\astro\\NINA\\stop\"\n\
+solve-field -C \"$c\" -p -O -N none -R none -M none -B none -U none -S none --crpix-center -s FLUX -u arcsecperpix -L 1.8 -H 2.2 -t 3 --ra 150.5 --dec 35.25 --radius 10.0 \"$p\"\n";
+        let argv = parse_asnet_script(script).unwrap();
+        let args = parse_args(&argv);
+        assert_eq!(
+            args.stop_file.as_deref(),
+            Some(Path::new("C:\\Users\\astro\\NINA\\stop"))
+        );
+        assert_eq!(
+            args.table.as_deref(),
+            Some(Path::new("C:\\Users\\astro\\NINA\\image.xyls"))
+        );
+        assert_eq!(args.sip_order, 3);
+        assert_eq!(args.scale_low, Some(1.8));
+        assert!(invoked_as_bash("C:\\solver\\bin\\bash.exe"));
+        assert!(invoked_as_bash("/opt/solver/bin/bash"));
+        assert!(!invoked_as_bash("seiza"));
+    }
+
+    #[test]
+    fn bash_mode_answers_the_version_handshake() {
+        // Siril's Windows version probe is `bash -l -c "solve-field --version"`.
+        let raw: Vec<String> = ["-l", "-c", "solve-field --version"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        run_as_bash(&raw).unwrap();
     }
 
     #[test]
