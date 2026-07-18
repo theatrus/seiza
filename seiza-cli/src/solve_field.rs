@@ -69,7 +69,7 @@ pub fn run(raw: &[String]) -> Result<()> {
     // real solve-field exits zero on an unsolved field: report failures on
     // stdout with the expected prefix instead of propagating them.
     match solve(&args, &table) {
-        Ok(solution) => report_solution(&args, &table, &solution),
+        Ok((solution, dimensions)) => report_solution(&args, &table, &solution, dimensions),
         Err(error) => {
             let message = format!("{error:#}").replace(['\r', '\n'], " ");
             println!("Did not solve (seiza: {message}).");
@@ -125,7 +125,7 @@ fn stop_requested(args: &SolveFieldArgs) -> bool {
         .is_some_and(|stop_file| stop_file.exists())
 }
 
-fn solve(args: &SolveFieldArgs, table: &Path) -> Result<seiza::solve::Solution> {
+fn solve(args: &SolveFieldArgs, table: &Path) -> Result<(seiza::solve::Solution, (u32, u32))> {
     let (stars, dimensions) = read_xyls(table)?;
     if stars.len() < 4 {
         anyhow::bail!("only {} stars in {}", stars.len(), table.display());
@@ -155,7 +155,7 @@ fn solve(args: &SolveFieldArgs, table: &Path) -> Result<seiza::solve::Solution> 
             sip_order: args.sip_order,
         };
         if let Ok(solution) = seiza::solve::solve(&stars, &catalog, &hint, dimensions) {
-            return Ok(solution);
+            return Ok((solution, dimensions));
         }
         if stop_requested(args) {
             anyhow::bail!("cancelled");
@@ -185,6 +185,7 @@ fn solve(args: &SolveFieldArgs, table: &Path) -> Result<seiza::solve::Solution> 
         anyhow::bail!("cancelled");
     }
     seiza::blind::solve_blind(&stars, &catalog, &index, &params, dimensions)
+        .map(|solution| (solution, dimensions))
         .map_err(anyhow::Error::from)
 }
 
@@ -192,12 +193,13 @@ fn report_solution(
     args: &SolveFieldArgs,
     table: &Path,
     solution: &seiza::solve::Solution,
+    dimensions: (u32, u32),
 ) -> Result<()> {
     let wcs_path = table.with_extension("wcs");
     write_wcs_file(&wcs_path, &solution.wcs)
         .with_context(|| format!("cannot write {}", wcs_path.display()))?;
 
-    let (width, height) = xyls_dimensions_hint(solution);
+    let (width, height) = (dimensions.0 as f64, dimensions.1 as f64);
     let (ra, dec) = solution
         .wcs
         .pixel_to_world((width - 1.0) / 2.0, (height - 1.0) / 2.0);
@@ -228,15 +230,6 @@ fn report_solution(
         }
     );
     Ok(())
-}
-
-/// The solved frame dimensions, recovered from the re-centred reference
-/// pixel (`--crpix-center` semantics place it at the image center).
-fn xyls_dimensions_hint(solution: &seiza::solve::Solution) -> (f64, f64) {
-    (
-        (solution.wcs.crpix.0 * 2.0).max(2.0),
-        (solution.wcs.crpix.1 * 2.0).max(2.0),
-    )
 }
 
 // ---------------------------------------------------------------------------

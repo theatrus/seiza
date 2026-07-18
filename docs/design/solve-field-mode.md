@@ -43,6 +43,9 @@ Siril's `local_asnet_platesolve` (src/algos/astrometry_solver.c):
   `SEIZA_BLIND_INDEX`, `seiza.toml` or a `stars-*.bin` next to the binary,
   then the shared catalog directories (`SEIZA_CATALOG_DIR`, `seiza setup`
   locations).
+- `-l <seconds>` is accepted but not enforced: typical seiza solves are
+  sub-second and Siril retains its own cancel path via the `-C` stop file,
+  which seiza checks between solve phases (not mid-search).
 - `-t <order>` maps to seiza's SIP fit. When the polynomial fails its
   acceptance guards the `.wcs` is linear, which Siril reports as
   `SOLVE_LINONLY` and handles gracefully — the same semantics as a real
@@ -58,6 +61,26 @@ astrometry.net through a cygwin `bin/bash` wrapper, so a bare renamed
 binary is not sufficient; Windows support would require emulating that
 shell layout and is out of scope for now (Windows Siril users can use the
 worker-protocol integration path instead when it lands upstream).
+
+## Known limitation: brightness-faithful FLUX ranking required
+
+Seiza's matcher seeds triangles from the brightest image stars and assumes
+the list's flux ordering roughly tracks catalog brightness. Siril's `.xyls`
+FLUX column is the fitted PSF **amplitude**, which on stretched or
+nonlinear images correlates poorly with photometric brightness (measured on
+a real M31 export: only 2 of the 24 highest-amplitude stars were among the
+100 photometrically brightest; the catalog-bright stars sat at amplitude
+ranks 48-1875). Star positions in such a table are excellent (sub-0.2 px
+against seiza's own detection), but no brightness-ranked subset overlaps
+the catalog's bright stars, so hinted and blind solving both fail where
+seiza's own detector on the same pixels succeeds.
+
+This is a solver-robustness gap, not a contract gap — the drop-in works
+end-to-end when the star list is brightness-faithful (e.g. linear data,
+or any producer whose FLUX is integrated flux). Rank-robust matching
+(catalog-seeded quads verified against a position hash of the full star
+list, in the spirit of astrometry.net's depth scanning) is the planned
+follow-up.
 
 ## Validation
 
