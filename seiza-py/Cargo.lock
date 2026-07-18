@@ -1317,7 +1317,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "seiza"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "image",
  "memmap2",
@@ -1352,7 +1352,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-py"
-version = "0.7.1"
+version = "0.7.3"
 dependencies = [
  "image",
  "numpy",
