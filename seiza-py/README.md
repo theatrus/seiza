@@ -8,6 +8,10 @@ implemented in Rust. Solves typical frames in a fraction of a second.
 pip install seiza
 ```
 
+Binary wheels cover Linux (x86_64, aarch64), macOS (universal2), and
+Windows (x64); each is a single abi3 wheel for every CPython from 3.9 up.
+Type stubs are included, and solving releases the GIL.
+
 ## Solve an image
 
 ```python

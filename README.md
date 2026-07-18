@@ -22,6 +22,7 @@ can submit to the same server with `seiza worker --server`.
   [releases](https://github.com/theatrus/seiza/releases). It puts `seiza` on
   your `PATH` and offers to download catalogs for you when it finishes.
 - **Fedora / Ubuntu** — install the RPM or deb from the same releases page.
+- **Python** — `pip install seiza` for the library with binary wheels.
 - **Anywhere with Rust** — `cargo install seiza-cli`.
 
 ## Ways to use it
@@ -34,9 +35,10 @@ can submit to the same server with `seiza worker --server`.
   line. It can also forward solves to a seiza-server, local or hosted.
   [Wire protocol](docs/design/worker-protocol.md).
 - **From Python** — `pip install seiza`: detection, hinted and blind
-  solving, WCS transforms, FITS WCS keyword output, and verified catalog
-  downloads, with binary wheels for the common platforms
-  ([seiza-py](seiza-py/README.md)).
+  solving with optional SIP distortion, WCS transforms, FITS WCS keyword
+  output, and verified catalog downloads. One binary wheel per platform
+  (Linux x86_64 and aarch64, macOS, Windows) covers every CPython from
+  3.9 up, with type stubs included ([seiza-py](seiza-py/README.md)).
 - **From Rust** — use the crates directly: [`seiza`](seiza/README.md)
   (detection, WCS, solving, catalogs),
   [`seiza-fits`](seiza-fits/README.md) (FITS reading),
