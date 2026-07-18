@@ -6,7 +6,9 @@ local astrometry.net; Siril's astrometry.net integration drives it unchanged)
 ## Goal
 
 Let Siril (and anything else that shells out to a local astrometry.net
-`solve-field`) use seiza with zero changes on their side: the user points
+`solve-field`) use seiza with zero changes on their side (for the wider
+Siril solver landscape and the other integration paths, see
+[siril-integration.md](siril-integration.md)): the user points
 Siril's astrometry.net path preference at a directory containing seiza named
 `solve-field`. This mirrors the ASTAP-compatible mode used by N.I.N.A.
 
