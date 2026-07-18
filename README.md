@@ -33,6 +33,10 @@ can submit to the same server with `seiza worker --server`.
   and blind index open between solves, and send it one JSON request per
   line. It can also forward solves to a seiza-server, local or hosted.
   [Wire protocol](docs/design/worker-protocol.md).
+- **From Python** — `pip install seiza`: detection, hinted and blind
+  solving, WCS transforms, FITS WCS keyword output, and verified catalog
+  downloads, with binary wheels for the common platforms
+  ([seiza-py](seiza-py/README.md)).
 - **From Rust** — use the crates directly: [`seiza`](seiza/README.md)
   (detection, WCS, solving, catalogs),
   [`seiza-fits`](seiza-fits/README.md) (FITS reading),
@@ -298,6 +302,8 @@ renamed `astap.exe` behaves identically. Details:
   JSON-RPC worker, guided `seiza setup`, and dataset building
 - `seiza-download/` — async, verified runtime catalog-bundle cache
 - `seiza-sources/` — raw upstream catalog acquisition for custom builds
+- `seiza-py/` — Python bindings (`pip install seiza`), outside the cargo
+  workspace so workspace builds never need libpython
 - `packaging/windows/` — the WiX MSI installer
 - `docs/` — design notes and benchmark reports
 
