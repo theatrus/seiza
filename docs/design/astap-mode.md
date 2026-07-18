@@ -116,7 +116,8 @@ FileVersion ≥ `0.9.1.0` (the `winres`/`winresource` crate in
 ## Star catalog resolution
 
 N.I.N.A. passes no catalog argument, so ASTAP mode resolves its star
-data on its own, in order:
+data on its own through the shared rules in
+[catalog path resolution](data-paths.md), in order:
 
 1. `SEIZA_STAR_DATA` environment variable;
 2. a `seiza.toml` next to the executable (`star_data = ...`);

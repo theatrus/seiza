@@ -1,12 +1,32 @@
 //! Catalog and index path resolution shared by the CLI, the
 //! compatibility modes, and embedding applications.
 //!
-//! Each resolver accepts what the caller has: an explicit file, a
-//! directory to search (picking the right file inside), or nothing at
-//! all — in which case the standard locations are searched: the kind's
-//! environment variable, a `seiza.toml` or data file next to the
-//! executable, then the shared catalog directories used by
-//! `seiza setup` ([`CATALOG_DIR_ENV`] and the platform data dirs).
+//! Each resolver accepts what the caller has:
+//!
+//! - **A file** — used as given.
+//! - **A directory** — the right file inside is picked: the deepest
+//!   star catalog present, `objects.bin`, `minor-bodies.bin`,
+//!   `transients.bin`, any `.idx` blind index, any `.ids.bin` star
+//!   identifier sidecar.
+//! - **Nothing** — the standard places are checked in order: the
+//!   kind's environment variable (`SEIZA_STAR_DATA`,
+//!   `SEIZA_BLIND_INDEX`; each takes a file or a directory), a
+//!   `seiza.toml` or data file next to the executable, then the shared
+//!   catalog directories `seiza setup` installs into ([`CATALOG_DIR_ENV`]
+//!   and the platform data dirs).
+//!
+//! An application that keeps every catalog in one directory needs a
+//! single configured path:
+//!
+//! ```no_run
+//! use std::path::Path;
+//!
+//! let dir = Some(Path::new("/var/lib/seiza/catalogs"));
+//! let stars = seiza::data_paths::star_data(dir)?;
+//! let objects = seiza::data_paths::objects(dir)?;
+//! let transients = seiza::data_paths::transients(dir)?;
+//! # Ok::<(), seiza::data_paths::DataPathError>(())
+//! ```
 
 use directories::ProjectDirs;
 use std::ffi::OsString;
