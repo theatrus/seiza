@@ -2,7 +2,7 @@
 //! plate solving. The Python module is named `seiza`.
 
 use numpy::{PyReadonlyArray2, PyUntypedArrayMethods};
-use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyFileNotFoundError, PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use seiza::catalog::{CatalogStar, MemoryCatalog, StarCatalog as StarCatalogTrait};
@@ -103,8 +103,15 @@ struct PyStarCatalog {
 #[pymethods]
 impl PyStarCatalog {
     /// Open a memory-mapped seiza star tile catalog (`stars-*.bin`).
+    /// `path` may be a file, a directory holding catalogs (the deepest star
+    /// catalog inside is picked), or omitted to search the standard
+    /// locations (`SEIZA_STAR_DATA`, files next to the program, and the
+    /// `seiza setup` directories) — the same rules as the CLI's `--data`.
     #[staticmethod]
-    fn open(path: PathBuf) -> PyResult<Self> {
+    #[pyo3(signature = (path=None))]
+    fn open(path: Option<PathBuf>) -> PyResult<Self> {
+        let path = seiza::data_paths::star_data(path.as_deref())
+            .map_err(|error| PyFileNotFoundError::new_err(error.to_string()))?;
         let catalog = seiza::catalog::TileCatalog::open(&path)
             .map_err(|error| PyIOError::new_err(format!("{}: {error}", path.display())))?;
         Ok(Self {
@@ -157,8 +164,23 @@ struct PyBlindIndex {
 
 #[pymethods]
 impl PyBlindIndex {
+    /// Open a prebuilt blind pattern index (`*.idx`). `path` may be a file,
+    /// a directory holding one, or omitted to search the standard locations
+    /// (`SEIZA_BLIND_INDEX`, files next to the program, and the
+    /// `seiza setup` directories).
     #[staticmethod]
-    fn open(path: PathBuf) -> PyResult<Self> {
+    #[pyo3(signature = (path=None))]
+    fn open(path: Option<PathBuf>) -> PyResult<Self> {
+        let path = seiza::data_paths::blind_index(path.as_deref())
+            .map_err(|error| PyFileNotFoundError::new_err(error.to_string()))?
+            .ok_or_else(|| {
+                PyFileNotFoundError::new_err(
+                    seiza::data_paths::DataPathError::NoDefault {
+                        kind: "blind index",
+                    }
+                    .to_string(),
+                )
+            })?;
         let index = seiza::blind::BlindIndex::open(&path)
             .map_err(|error| PyIOError::new_err(error.to_string()))?;
         Ok(Self { index })

@@ -36,6 +36,17 @@ print(solution.rotation_deg, solution.flipped)
 ra, dec = solution.wcs.pixel_to_world(100.0, 200.0)
 ```
 
+`open` takes a file, a directory (the right catalog inside is picked — the
+deepest star catalog wins), or nothing at all. With no argument the standard
+places are searched: `SEIZA_STAR_DATA` / `SEIZA_BLIND_INDEX`, files next to
+the program, and the `seiza setup` directories (`SEIZA_CATALOG_DIR`). These
+are the same rules as the CLI's `--data`:
+
+```python
+catalog = seiza.StarCatalog.open("data")   # directory
+catalog = seiza.StarCatalog.open()         # after seiza setup
+```
+
 Stars can also be plain `(x, y, flux)` tuples from any other detector — the
 solver only needs positions and relative brightness:
 
