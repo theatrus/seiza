@@ -2228,7 +2228,7 @@ fn solve_command(
         None => Vec::new(),
     };
 
-    if let Some(path) = minor_bodies {
+    let moving = if let Some(path) = minor_bodies {
         match acquisition_jd {
             Some(jd) => {
                 let catalog = seiza::minor_bodies::MinorBodyCatalog::open(path)
@@ -2240,17 +2240,27 @@ fn solve_command(
                         seiza::minor_bodies::MinorBodyKind::Comet => "comet",
                         seiza::minor_bodies::MinorBodyKind::Asteroid => "asteroid",
                     };
+                    let rate = match m.motion_arcsec_per_hour {
+                        Some(rate) => format!("{rate:.1}\"/hr"),
+                        None => "-".to_string(),
+                    };
                     println!(
-                        "  {:<9} {:<32} V~{:>4.1} at ({:.0}, {:.0})  {:.3} AU",
+                        "  {:<9} {:<32} V~{:>4.1} at ({:.0}, {:.0})  {:.3} AU  {rate}",
                         kind, m.body.name, m.mag, m.x, m.y, m.delta_au
                     );
                 }
+                moving
             }
-            None => println!(
-                "minor bodies skipped: no acquisition time (pass --time or use a FITS with DATE-OBS)"
-            ),
+            None => {
+                println!(
+                    "minor bodies skipped: no acquisition time (pass --time or use a FITS with DATE-OBS)"
+                );
+                Vec::new()
+            }
         }
-    }
+    } else {
+        Vec::new()
+    };
 
     if let Some(out) = annotate {
         let mut canvas = img.to_rgb8();
@@ -2295,12 +2305,83 @@ fn solve_command(
                 image::Rgb([64, 220, 255]),
             );
         }
+        for m in &moving {
+            let center = (m.x, m.y);
+            imageproc::drawing::draw_hollow_circle_mut(
+                &mut canvas,
+                (m.x.round() as i32, m.y.round() as i32),
+                8,
+                image::Rgb([255, 200, 64]),
+            );
+            // Arrow along the characteristic direction, one hour of
+            // apparent motion long, clamped so slow movers stay legible
+            // and near-Earth flybys don't shoot off the frame.
+            if let (Some(pa), Some(rate)) = (m.direction_pa_deg, m.motion_arcsec_per_hour) {
+                let max_px = (dims.0 as f64).hypot(dims.1 as f64) * 0.06;
+                let length = (rate / wcs.scale_arcsec_per_px()).clamp(14.0, max_px);
+                draw_motion_arrow(&mut canvas, center, (m.ra, m.dec), wcs, pa, length);
+            }
+        }
         canvas
             .save(out)
             .with_context(|| format!("failed to write {}", out.display()))?;
         println!("annotated image written to {}", out.display());
     }
     Ok(())
+}
+
+/// Draw an arrow from a body's pixel position along a sky position angle
+/// (degrees east of north). `length_px` is the *displayed* shaft length —
+/// the caller derives it from the apparent rate and clamps it; the sky
+/// PA is converted to a pixel direction through the WCS so flips and
+/// rotation come out right.
+fn draw_motion_arrow(
+    canvas: &mut image::RgbImage,
+    from: (f64, f64),
+    sky: (f64, f64),
+    wcs: &seiza::wcs::Wcs,
+    pa_deg: f64,
+    length_px: f64,
+) {
+    // Step a small angle along the position angle on the sphere and
+    // project it: the great-circle destination formula, with the step
+    // small enough that the pixel direction is exact at any latitude.
+    let (sin_pa, cos_pa) = pa_deg.to_radians().sin_cos();
+    let dec1 = sky.1.to_radians();
+    let delta = (30.0_f64 / 3600.0).to_radians();
+    let dec2 = (dec1.sin() * delta.cos() + dec1.cos() * delta.sin() * cos_pa).asin();
+    let ra2 = sky.0.to_radians()
+        + (sin_pa * delta.sin() * dec1.cos()).atan2(delta.cos() - dec1.sin() * dec2.sin());
+    let Some((px, py)) = wcs.world_to_pixel(ra2.to_degrees(), dec2.to_degrees()) else {
+        return;
+    };
+    let (dx, dy) = (px - from.0, py - from.1);
+    let norm = dx.hypot(dy);
+    if norm < 1e-9 {
+        return;
+    }
+    let (ux, uy) = (dx / norm, dy / norm);
+    let tip = (from.0 + ux * length_px, from.1 + uy * length_px);
+    let color = image::Rgb([255, 200, 64]);
+    imageproc::drawing::draw_line_segment_mut(
+        canvas,
+        (from.0 as f32, from.1 as f32),
+        (tip.0 as f32, tip.1 as f32),
+        color,
+    );
+    let head = 6.0_f64.min(length_px * 0.4);
+    for sign in [1.0_f64, -1.0] {
+        let angle = uy.atan2(ux) + sign * 150.0_f64.to_radians();
+        imageproc::drawing::draw_line_segment_mut(
+            canvas,
+            (tip.0 as f32, tip.1 as f32),
+            (
+                (tip.0 + angle.cos() * head) as f32,
+                (tip.1 + angle.sin() * head) as f32,
+            ),
+            color,
+        );
+    }
 }
 
 fn draw_rotated_ellipse(
