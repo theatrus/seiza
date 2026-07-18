@@ -166,10 +166,14 @@ exhaustive later verification is an explicit API operation. A per-hash
 cross-process lock prevents concurrent applications from downloading the same
 artifact twice.
 
-When a zstd transport is available, transfer progress reports encoded bytes.
-Decompression writes the same uncompressed temporary file that is atomically
-installed into the content-addressed cache, so peak cache storage does not
-include a retained `.zst` copy and all existing mmap readers remain unchanged.
+When a zstd transport is available, progress events carry both the
+transferred encoded bytes and the decompressed bytes already written, so a
+client can display transfer speed and expansion together. Decoding aborts as
+soon as the output exceeds the file's canonical size, so a wrong or malicious
+high-ratio frame cannot exhaust the disk before verification. Decompression
+writes the same uncompressed temporary file that is atomically installed into
+the content-addressed cache, so peak cache storage does not include a
+retained `.zst` copy and all existing mmap readers remain unchanged.
 
 The small manifest has configurable offline, prefer-cached, age-based refresh,
 and force-refresh policies. The default refreshes it after 24 hours and falls

@@ -62,8 +62,13 @@ pub enum DownloadEvent {
     },
     DownloadProgress {
         name: String,
+        /// Transferred bytes: encoded bytes for a compressed transport.
         downloaded: u64,
+        /// Total transfer size in bytes.
         total: u64,
+        /// Bytes written to the local file so far. Equal to `downloaded` for
+        /// an uncompressed transfer; ahead of it while decompressing.
+        written: u64,
     },
     DownloadComplete {
         name: String,
@@ -553,6 +558,7 @@ impl CatalogManager {
                     name: file.name.clone(),
                     downloaded,
                     total: file.bytes,
+                    written: downloaded,
                 });
                 reported = downloaded;
             }
@@ -626,25 +632,13 @@ impl CatalogManager {
         let stream_downloaded = Arc::clone(&downloaded);
         let encoded_hasher = Arc::new(Mutex::new(Sha256::new()));
         let stream_hasher = Arc::clone(&encoded_hasher);
-        let mut reported = 0u64;
-        let total = transport.bytes;
-        let name = file.name.clone();
         let stream = response.bytes_stream().map(move |chunk| match chunk {
             Ok(chunk) => {
                 stream_hasher
                     .lock()
                     .expect("encoded hash mutex poisoned")
                     .update(&chunk);
-                let current = stream_downloaded.fetch_add(chunk.len() as u64, Ordering::Relaxed)
-                    + chunk.len() as u64;
-                if current == total || current.saturating_sub(reported) >= 4 * 1024 * 1024 {
-                    report(DownloadEvent::DownloadProgress {
-                        name: name.clone(),
-                        downloaded: current,
-                        total,
-                    });
-                    reported = current;
-                }
+                stream_downloaded.fetch_add(chunk.len() as u64, Ordering::Relaxed);
                 Ok(chunk)
             }
             Err(source) => Err(std::io::Error::other(source)),
@@ -656,6 +650,7 @@ impl CatalogManager {
             .map_err(|source| io("create", temp, source))?;
         let mut decoded_hasher = Sha256::new();
         let mut decoded = 0u64;
+        let mut reported = 0u64;
         let mut buffer = vec![0u8; 1024 * 1024];
         loop {
             let read = decoder
@@ -671,8 +666,33 @@ impl CatalogManager {
                 .map_err(|source| io("write", temp, source))?;
             decoded_hasher.update(&buffer[..read]);
             decoded += read as u64;
+            // Abort as soon as the frame exceeds its canonical decoded size,
+            // so a wrong or malicious high-ratio artifact cannot fill the
+            // disk before the post-download verification runs.
+            if decoded > file.bytes {
+                return Err(Error::Size {
+                    name: file.name.clone(),
+                    expected: file.bytes,
+                    actual: decoded,
+                });
+            }
+            if decoded.saturating_sub(reported) >= 4 * 1024 * 1024 {
+                report(DownloadEvent::DownloadProgress {
+                    name: file.name.clone(),
+                    downloaded: downloaded.load(Ordering::Relaxed),
+                    total: transport.bytes,
+                    written: decoded,
+                });
+                reported = decoded;
+            }
         }
         drop(decoder);
+        report(DownloadEvent::DownloadProgress {
+            name: file.name.clone(),
+            downloaded: downloaded.load(Ordering::Relaxed),
+            total: transport.bytes,
+            written: decoded,
+        });
         output
             .sync_all()
             .await
@@ -1197,6 +1217,105 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, Error::Checksum { name, .. } if name.contains("zstd transport")));
+        assert!(
+            !cache
+                .path()
+                .join("objects")
+                .join(logical_sha256)
+                .join("objects.bin")
+                .exists()
+        );
+        assert!(
+            std::fs::read_dir(cache.path().join("partial"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn oversized_zstd_frame_aborts_before_decompressing_completely() {
+        let content = b"hosted object catalog\n".repeat(128);
+        // A ~64 MiB frame that transfers as a few kilobytes. The declared
+        // canonical size is only a few KiB, so decoding must stop within the
+        // first buffers instead of writing the complete expansion.
+        let bomb = vec![0u8; 64 * 1024 * 1024];
+        let encoded = zstd::stream::encode_all(bomb.as_slice(), 3).unwrap();
+        let mut manifest = cached_manifest(&content);
+        let encoded_sha256 = sha256(&encoded);
+        manifest.transports.push(ManifestTransport {
+            name: "objects.bin".into(),
+            encoding: "zstd".into(),
+            key: format!("artifacts/{encoded_sha256}/objects.bin.zst"),
+            bytes: encoded.len() as u64,
+            sha256: encoded_sha256,
+        });
+        let logical_sha256 = manifest
+            .manifest
+            .files
+            .iter()
+            .find(|file| file.name == "objects.bin")
+            .unwrap()
+            .sha256
+            .clone();
+        let artifact_request = format!(
+            "GET /{} ",
+            manifest.preferred_transport("objects.bin").unwrap().key
+        );
+        let manifest_json = serde_json::to_vec(&manifest).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 4096];
+                let read = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..read]);
+                let body = if request.starts_with("GET /manifest.json ") {
+                    manifest_json.as_slice()
+                } else if request.starts_with(&artifact_request) {
+                    encoded.as_slice()
+                } else {
+                    panic!("unexpected request: {request}");
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(body).unwrap();
+            }
+        });
+
+        let cache = tempfile::tempdir().unwrap();
+        let manager = CatalogManager::builder()
+            .cache_dir(cache.path())
+            .base_url(format!("http://{address}"))
+            .policy(CachePolicy::ForceRefresh)
+            .build()
+            .unwrap();
+        let error = manager
+            .ensure(&CatalogSet::dataset(Dataset::Objects))
+            .await
+            .unwrap_err();
+        match error {
+            Error::Size {
+                name,
+                expected,
+                actual,
+            } => {
+                assert_eq!(name, "objects.bin");
+                assert_eq!(expected, content.len() as u64);
+                assert!(actual > expected);
+                assert!(
+                    actual <= 8 * 1024 * 1024,
+                    "decoding continued long after exceeding the declared size: {actual} bytes"
+                );
+            }
+            other => panic!("expected a size error, got {other:?}"),
+        }
         assert!(
             !cache
                 .path()

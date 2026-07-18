@@ -1111,6 +1111,19 @@ async fn download_source(source: DownloadSource) -> Result<()> {
 fn report_download_event(event: seiza_download::DownloadEvent) {
     use seiza_download::DownloadEvent;
     use std::io::{IsTerminal, Write};
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    struct ActiveDownload {
+        name: String,
+        started: Instant,
+        downloaded: u64,
+        written: u64,
+    }
+    // Downloads are sequential; remember the active one so progress and
+    // completion lines can report elapsed-time transfer speed.
+    static ACTIVE: Mutex<Option<ActiveDownload>> = Mutex::new(None);
+    let mib = |bytes: u64| bytes as f64 / 1_048_576.0;
 
     match event {
         DownloadEvent::FetchingManifest { url } => println!("  fetching {url}"),
@@ -1120,28 +1133,74 @@ fn report_download_event(event: seiza_download::DownloadEvent) {
         }
         DownloadEvent::CacheHit { name, .. } => println!("  {name} already cached"),
         DownloadEvent::DownloadStarted { name, bytes } => {
-            println!(
-                "  downloading {name} ({:.1} MiB)",
-                bytes as f64 / 1_048_576.0
-            )
-        }
-        DownloadEvent::DownloadComplete { name, .. } => {
-            println!("\r  cached {name}                         ")
+            *ACTIVE.lock().unwrap() = Some(ActiveDownload {
+                name: name.clone(),
+                started: Instant::now(),
+                downloaded: 0,
+                written: 0,
+            });
+            println!("  downloading {name} ({:.1} MiB)", mib(bytes))
         }
         DownloadEvent::DownloadProgress {
             name,
             downloaded,
             total,
-        } if std::io::stdout().is_terminal() => {
+            written,
+        } => {
+            let mut active = ACTIVE.lock().unwrap();
+            let elapsed = match active.as_mut() {
+                Some(active) if active.name == name => {
+                    active.downloaded = downloaded;
+                    active.written = written;
+                    active.started.elapsed().as_secs_f64()
+                }
+                _ => 0.0,
+            };
+            drop(active);
+            if !std::io::stdout().is_terminal() {
+                return;
+            }
             let percent = downloaded.saturating_mul(100) / total.max(1);
+            let speed = if elapsed > 0.0 {
+                mib(downloaded) / elapsed
+            } else {
+                0.0
+            };
+            let unpacked = if written > downloaded {
+                format!(", unpacked {:.1} MiB", mib(written))
+            } else {
+                String::new()
+            };
             print!(
-                "\r  {name}: {percent:>3}% ({:.1}/{:.1} MiB)",
-                downloaded as f64 / 1_048_576.0,
-                total as f64 / 1_048_576.0
+                "\r  {name}: {percent:>3}% ({:.1}/{:.1} MiB, {speed:.1} MiB/s{unpacked})   ",
+                mib(downloaded),
+                mib(total),
             );
             let _ = std::io::stdout().flush();
         }
-        DownloadEvent::DownloadProgress { .. } => {}
+        DownloadEvent::DownloadComplete { name, .. } => {
+            let active = ACTIVE.lock().unwrap().take();
+            match active.filter(|active| active.name == name && active.downloaded > 0) {
+                Some(active) => {
+                    let elapsed = active
+                        .started
+                        .elapsed()
+                        .as_secs_f64()
+                        .max(f64::MIN_POSITIVE);
+                    let speed = mib(active.downloaded) / elapsed;
+                    let unpacked = if active.written > active.downloaded {
+                        format!(", unpacked to {:.1} MiB", mib(active.written))
+                    } else {
+                        String::new()
+                    };
+                    println!(
+                        "\r  cached {name}: {:.1} MiB in {elapsed:.1}s ({speed:.1} MiB/s{unpacked})      ",
+                        mib(active.downloaded),
+                    );
+                }
+                None => println!("\r  cached {name}                         "),
+            }
+        }
     }
 }
 
