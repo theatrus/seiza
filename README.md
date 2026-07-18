@@ -57,14 +57,17 @@ Download the ready-made catalogs once, then solve:
 ```
 cargo install seiza-cli
 seiza download-data prebuilt --output data       # SHA-256-verified from downloads.seiza.fyi
-seiza solve-blind image.jpg --data data/stars-lite-tycho2.bin --min-scale 0.5 --max-scale 15
-seiza solve-blind fine-scale.jpg --data data/stars-deep-gaia17.bin --index data/blind-gaia16.idx --min-scale 0.1 --max-scale 5
-seiza solve image.fits --data data/stars-gaia.bin --scale 1.26 --objects data/objects.bin
-seiza catalog object --data data/objects.bin "Andromeda Galaxy"
-seiza catalog objects --data data/objects.bin --ra 10.6848 --dec 41.2691 --radius 3 --format json
-seiza catalog star --data data/stars-lite-tycho2.ids.bin "TYC 5949-2777-1" --format json
-seiza catalog star --data data/stars-lite-tycho2.ids.bin "RR Lyr"
+seiza solve-blind image.jpg --data data --min-scale 0.5 --max-scale 15
+seiza solve image.fits --data data --scale 1.26 --objects data
+seiza catalog object --data data "Andromeda Galaxy"
+seiza catalog objects --data data --ra 10.6848 --dec 41.2691 --radius 3 --format json
+seiza catalog star --data data "TYC 5949-2777-1" --format json
 ```
+
+`--data` takes a file or a directory: a directory picks the right catalog
+automatically (the deepest star catalog present, the blind pattern index
+when one is there). After `seiza setup`, every `--data` and `--index` can
+be omitted entirely — the standard catalog locations are searched.
 
 Not sure which catalogs you need? Run the guided setup — the same one the
 Windows installer offers, available on every platform:
