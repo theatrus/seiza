@@ -299,10 +299,26 @@ fn stop_requested(args: &SolveFieldArgs) -> bool {
 }
 
 fn solve(args: &SolveFieldArgs, table: &Path) -> Result<(seiza::solve::Solution, (u32, u32))> {
-    let (stars, dimensions) = read_xyls(table)?;
-    if stars.len() < 4 {
-        anyhow::bail!("only {} stars in {}", stars.len(), table.display());
+    let (table_stars, dimensions) = read_xyls(table)?;
+    if table_stars.len() < 4 {
+        anyhow::bail!("only {} stars in {}", table_stars.len(), table.display());
     }
+    // The table's flux column may not rank stars photometrically (Siril
+    // writes PSF amplitudes, which drift far from photometric order on
+    // stretched data — see docs/design/rank-robust-matching.md). When the
+    // source image sits next to the table, re-detect with seiza's own
+    // photometric flux; the table's excellent positions calibrate the
+    // orientation and frame offset.
+    let stars = match redetect_from_source_image(table, &table_stars, dimensions) {
+        Some(stars) => {
+            println!(
+                "seiza: re-measured {} stars from the source image (table flux may not be photometric)",
+                stars.len()
+            );
+            stars
+        }
+        None => table_stars,
+    };
     if stop_requested(args) {
         anyhow::bail!("cancelled before solving");
     }
@@ -403,6 +419,89 @@ fn report_solution(
         }
     );
     Ok(())
+}
+
+/// Re-detect stars from the source image sitting next to the star table,
+/// restoring photometric flux ordering. The table's positions calibrate
+/// the coordinate frame: detection happens in loader orientation, so the
+/// cross-match selects the orientation (Siril tables are bottom-up) and
+/// measures the constant sub-pixel offset between the frames, and the
+/// returned stars live in the exact frame the table — and therefore the
+/// `.wcs` consumer — uses. Returns `None` when no matching image is found
+/// or the cross-match cannot confirm the frames describe the same pixels.
+fn redetect_from_source_image(
+    table: &Path,
+    table_stars: &[seiza::DetectedStar],
+    dimensions: (u32, u32),
+) -> Option<Vec<seiza::DetectedStar>> {
+    let image = ["fit", "fits", "fts", "tif", "tiff", "png", "jpg", "jpeg"]
+        .iter()
+        .map(|extension| table.with_extension(extension))
+        .find_map(|path| {
+            path.exists()
+                .then(|| crate::load_image(&path, seiza::DetectBackend::Auto).ok())
+                .flatten()
+        })?;
+    if image.dimensions() != dimensions {
+        return None; // cropped or downsampled selection; trust the table
+    }
+    let detected = image.detect_stars(&seiza::DetectConfig {
+        max_stars: 600,
+        ..Default::default()
+    });
+    if detected.len() < 20 {
+        return None;
+    }
+
+    // Try both orientations; require a decisive majority of close matches.
+    let height = dimensions.1 as f64;
+    let candidates = [false, true].map(|flip| {
+        let mapped: Vec<(f64, f64)> = detected
+            .iter()
+            .map(|star| (star.x, if flip { height - 1.0 - star.y } else { star.y }))
+            .collect();
+        let mut offsets = Vec::new();
+        for &(x, y) in mapped.iter().take(200) {
+            let nearest = table_stars
+                .iter()
+                .map(|table_star| {
+                    let (dx, dy) = (table_star.x - x, table_star.y - y);
+                    (dx.hypot(dy), dx, dy)
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0));
+            if let Some((distance, dx, dy)) = nearest
+                && distance < 2.0
+            {
+                offsets.push((dx, dy));
+            }
+        }
+        (mapped, offsets)
+    });
+    let (mapped, offsets) = candidates
+        .into_iter()
+        .max_by_key(|(_, offsets)| offsets.len())?;
+    let checked = detected.len().min(200);
+    if offsets.len() * 2 < checked {
+        return None; // frames disagree; wrong file or transformed image
+    }
+    let median = |mut values: Vec<f64>| {
+        values.sort_by(f64::total_cmp);
+        values[values.len() / 2]
+    };
+    let dx = median(offsets.iter().map(|offset| offset.0).collect());
+    let dy = median(offsets.iter().map(|offset| offset.1).collect());
+
+    Some(
+        detected
+            .iter()
+            .zip(mapped)
+            .map(|(star, (x, y))| seiza::DetectedStar {
+                x: x + dx,
+                y: y + dy,
+                ..*star
+            })
+            .collect(),
+    )
 }
 
 // ---------------------------------------------------------------------------

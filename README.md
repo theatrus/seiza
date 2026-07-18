@@ -325,12 +325,11 @@ Siril hands seiza its own detected star list and reads the solution back
 from the standard `.wcs` file — no pixels are exchanged, and the SIP
 distortion order Siril requests is fitted by seiza's solver.
 
-Known limitation: seiza's matcher currently needs the star list's flux
-ordering to roughly track real brightness. Siril reports fitted PSF
-amplitudes, which drift far from photometric order on stretched or
-heavily processed images, and such fields may fail to solve for now —
-rank-robust matching is planned. Contract details and the measurements
-behind this:
+Siril reports fitted PSF amplitudes rather than photometric flux, which
+would defeat the matcher's brightness ranking on stretched images — so
+when the source image is present next to the star table (the normal
+Siril case), seiza automatically re-measures star flux from the pixels
+and solves in the table's exact frame. Contract details:
 [docs/design/solve-field-mode.md](docs/design/solve-field-mode.md).
 
 ## Layout

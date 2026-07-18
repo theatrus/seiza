@@ -88,12 +88,20 @@ against seiza's own detection), but no brightness-ranked subset overlaps
 the catalog's bright stars, so hinted and blind solving both fail where
 seiza's own detector on the same pixels succeeds.
 
-This is a solver-robustness gap, not a contract gap — the drop-in works
-end-to-end when the star list is brightness-faithful (e.g. linear data,
-or any producer whose FLUX is integrated flux). Rank-robust matching
-(catalog-seeded quads verified against a position hash of the full star
-list, in the spirit of astrometry.net's depth scanning) is the planned
-follow-up.
+The mode works around this automatically: when the source image sits
+next to the `.xyls` (Siril derives the table path from the image path)
+and its dimensions match `IMAGEW`/`IMAGEH`, seiza re-detects stars with
+its own photometric flux and cross-matches the table's positions to
+calibrate orientation and sub-pixel frame offset, then solves in the
+exact table frame. Verified end-to-end against Siril 1.4.4: the
+previously failing stretched M31 export now plate-solves inside Siril
+with SIP order 3. The fallback (no image found, dimensions mismatch from
+a cropped/downsampled selection, or a weak cross-match) uses the table
+stars unchanged and still requires brightness-faithful ranking.
+
+Removing the root — so pure star-list inputs solve regardless of flux
+quality — is the catalog-seeded quad design recorded in
+[rank-robust-matching.md](rank-robust-matching.md).
 
 ## Validation
 

@@ -124,10 +124,10 @@ Siril's Windows `bin/bash` launch wrapper itself (no cygwin needed). Run
 `seiza install-solve-field --dir <dir>`, point Siril's astrometry.net
 directory preference at that directory, and Siril's normal astrometry.net
 solving works unchanged, including SIP distortion orders. Catalogs resolve
-the same way as ASTAP mode. Stretched images may currently fail: Siril
-reports PSF amplitudes rather than photometric flux, and seiza's matcher
-still assumes brightness-faithful ordering — see the repository's
-`docs/design/solve-field-mode.md` for details and status.
+the same way as ASTAP mode. Siril reports PSF amplitudes rather than photometric
+flux, so seiza automatically re-measures star flux from the source image
+next to the star table when present — see the repository's
+`docs/design/solve-field-mode.md` for details.
 
 ## Datasets
 
