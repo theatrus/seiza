@@ -264,14 +264,14 @@ fn write_ini(path: &Path, lines: &[String]) -> Result<()> {
 }
 
 /// Star catalog resolution shared with every compatibility mode; see
-/// [`crate::data_paths`].
+/// [`seiza::data_paths`].
 pub(crate) fn resolve_star_data() -> Result<PathBuf> {
-    crate::data_paths::star_data(None)
+    Ok(seiza::data_paths::star_data(None)?)
 }
 
-/// Optional prebuilt blind index resolution; see [`crate::data_paths`].
+/// Optional prebuilt blind index resolution; see [`seiza::data_paths`].
 pub(crate) fn resolve_blind_index() -> Option<PathBuf> {
-    crate::data_paths::blind_index(None).ok().flatten()
+    seiza::data_paths::blind_index(None).ok().flatten()
 }
 
 #[cfg(test)]

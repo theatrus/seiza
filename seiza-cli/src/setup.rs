@@ -1,8 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
-use directories::ProjectDirs;
+use seiza::data_paths::default_catalog_dir;
 use seiza_download::Dataset;
-use std::ffi::OsString;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
@@ -10,8 +9,6 @@ use std::path::PathBuf;
 use std::ffi::OsStr;
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
-
-const CATALOG_DIR_ENV: &str = "SEIZA_CATALOG_DIR";
 
 #[derive(Args)]
 pub(crate) struct SetupArgs {
@@ -293,18 +290,6 @@ fn wide_null(value: &OsStr) -> Vec<u16> {
     value.encode_wide().chain(std::iter::once(0)).collect()
 }
 
-pub(crate) fn default_catalog_dir() -> PathBuf {
-    configured_catalog_dir(std::env::var_os(CATALOG_DIR_ENV)).unwrap_or_else(|| {
-        ProjectDirs::from("fyi", "Seiza", "seiza")
-            .map(|dirs| dirs.data_local_dir().join("catalogs"))
-            .unwrap_or_else(|| PathBuf::from("seiza-data"))
-    })
-}
-
-fn configured_catalog_dir(value: Option<OsString>) -> Option<PathBuf> {
-    value.filter(|value| !value.is_empty()).map(PathBuf::from)
-}
-
 fn prompt_next_action<R: BufRead, W: Write>(input: &mut R, output: &mut W) -> Result<NextAction> {
     writeln!(output, "\nWhat would you like to do next?")?;
     writeln!(output, "  1. Return to the catalog menu")?;
@@ -413,16 +398,6 @@ mod tests {
             assert!(files.iter().any(|file| file == "transients.bin"));
             assert!(files.iter().any(|file| file.starts_with("stars-")));
         }
-    }
-
-    #[test]
-    fn configured_catalog_directory_ignores_empty_values() {
-        assert_eq!(configured_catalog_dir(None), None);
-        assert_eq!(configured_catalog_dir(Some(OsString::new())), None);
-        assert_eq!(
-            configured_catalog_dir(Some(OsString::from("shared-catalogs"))),
-            Some(PathBuf::from("shared-catalogs"))
-        );
     }
 
     #[test]

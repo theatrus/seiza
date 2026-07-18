@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use seiza::blind::BlindIndex;
 use seiza::catalog::{StarCatalog, TileCatalog};
+use seiza::data_paths;
 use seiza::minor_bodies::MinorBodyCatalog;
 use seiza::objects::{ObjectCatalog, ObjectKind, ObjectQuery, ObjectSort, SkyRegion};
 use seiza::solve::{SolveHint, solve};
@@ -11,7 +12,6 @@ use std::path::PathBuf;
 
 mod astap;
 mod build_data;
-mod data_paths;
 mod setup;
 mod solve_field;
 mod worker;

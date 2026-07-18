@@ -35,6 +35,12 @@ astrophotography, in Rust.
   `object_details`, `catalog_records`, `geometries`, `relations`, and
   `capabilities`, without touching normal query paths. Legacy `SEIZAOB1` and
   `SEIZAOB3` files remain readable.
+- **Catalog path resolution** — `seiza::data_paths` resolves each catalog kind
+  from a file, a directory (picking the right file inside, deepest star
+  catalog first), or the standard locations: per-kind environment variables
+  (`SEIZA_STAR_DATA`, `SEIZA_BLIND_INDEX`), files next to the executable, and
+  the `seiza setup` catalog directories (`SEIZA_CATALOG_DIR` and the platform
+  data dirs). The CLI and embedding applications share the same rules.
 - **Optional catalog downloads** — enable the non-default `downloads` feature
   for `seiza::downloads`, an async, verified shared cache of published catalog
   bundles. Normal catalog opens never access the network.

@@ -1,15 +1,37 @@
-//! Catalog and index path resolution shared by every command and
-//! compatibility mode.
+//! Catalog and index path resolution shared by the CLI, the
+//! compatibility modes, and embedding applications.
 //!
-//! Each resolver accepts what the user gave it: an explicit file, a
-//! directory to search (`--data <dir>` picks the right file inside), or
-//! nothing at all — in which case the standard locations are searched:
-//! the kind's environment variable, a `seiza.toml` or data file next to
-//! the executable, then the shared catalog directories used by
-//! `seiza setup` (`SEIZA_CATALOG_DIR` and the platform data dirs).
+//! Each resolver accepts what the caller has: an explicit file, a
+//! directory to search (picking the right file inside), or nothing at
+//! all — in which case the standard locations are searched: the kind's
+//! environment variable, a `seiza.toml` or data file next to the
+//! executable, then the shared catalog directories used by
+//! `seiza setup` ([`CATALOG_DIR_ENV`] and the platform data dirs).
 
-use anyhow::Result;
+use directories::ProjectDirs;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+
+/// Environment variable naming the shared catalog directory that
+/// `seiza setup` installs into.
+pub const CATALOG_DIR_ENV: &str = "SEIZA_CATALOG_DIR";
+
+#[derive(Debug, thiserror::Error)]
+pub enum DataPathError {
+    #[error("no {kind} found in {} (expected one of: {expected})", path.display())]
+    NotFoundInDirectory {
+        kind: &'static str,
+        path: PathBuf,
+        expected: String,
+    },
+    #[error("{kind} {} does not exist", path.display())]
+    Missing { kind: &'static str, path: PathBuf },
+    #[error(
+        "no {kind} found; pass a file or a directory, run `seiza setup`, \
+         or run: seiza download-data prebuilt --output <dir> (https://downloads.seiza.fyi)"
+    )]
+    NoDefault { kind: &'static str },
+}
 
 /// Solver star tile catalogs, preferring the deepest available.
 const STAR_DATA_NAMES: &[&str] = &[
@@ -19,7 +41,7 @@ const STAR_DATA_NAMES: &[&str] = &[
     "stars.bin",
 ];
 
-pub(crate) fn star_data(arg: Option<&Path>) -> Result<PathBuf> {
+pub fn star_data(arg: Option<&Path>) -> Result<PathBuf, DataPathError> {
     resolve(
         arg,
         "star catalog",
@@ -33,7 +55,7 @@ pub(crate) fn star_data(arg: Option<&Path>) -> Result<PathBuf> {
 /// Prebuilt blind pattern index. Optional: `Ok(None)` means "none found,
 /// build in memory"; an explicitly given path that resolves to nothing is
 /// an error.
-pub(crate) fn blind_index(arg: Option<&Path>) -> Result<Option<PathBuf>> {
+pub fn blind_index(arg: Option<&Path>) -> Result<Option<PathBuf>, DataPathError> {
     match arg {
         Some(_) => resolve(
             arg,
@@ -56,11 +78,11 @@ pub(crate) fn blind_index(arg: Option<&Path>) -> Result<Option<PathBuf>> {
     }
 }
 
-pub(crate) fn objects(arg: Option<&Path>) -> Result<PathBuf> {
+pub fn objects(arg: Option<&Path>) -> Result<PathBuf, DataPathError> {
     resolve(arg, "object catalog", None, None, &["objects.bin"], None)
 }
 
-pub(crate) fn star_identifiers(arg: Option<&Path>) -> Result<PathBuf> {
+pub fn star_identifiers(arg: Option<&Path>) -> Result<PathBuf, DataPathError> {
     resolve(
         arg,
         "star identifier sidecar",
@@ -71,7 +93,7 @@ pub(crate) fn star_identifiers(arg: Option<&Path>) -> Result<PathBuf> {
     )
 }
 
-pub(crate) fn minor_bodies(arg: Option<&Path>) -> Result<PathBuf> {
+pub fn minor_bodies(arg: Option<&Path>) -> Result<PathBuf, DataPathError> {
     resolve(
         arg,
         "minor-body catalog",
@@ -82,28 +104,42 @@ pub(crate) fn minor_bodies(arg: Option<&Path>) -> Result<PathBuf> {
     )
 }
 
+pub fn transients(arg: Option<&Path>) -> Result<PathBuf, DataPathError> {
+    resolve(
+        arg,
+        "transient catalog",
+        None,
+        None,
+        &["transients.bin"],
+        None,
+    )
+}
+
 fn resolve(
     arg: Option<&Path>,
-    kind: &str,
+    kind: &'static str,
     env: Option<&str>,
     toml_key: Option<&str>,
     names: &[&str],
     extension: Option<&str>,
-) -> Result<PathBuf> {
+) -> Result<PathBuf, DataPathError> {
     if let Some(path) = arg {
         if path.is_dir() {
             return find_in_dir(path, names, extension).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no {kind} found in {} (expected one of: {})",
-                    path.display(),
-                    names.join(", ")
-                )
+                DataPathError::NotFoundInDirectory {
+                    kind,
+                    path: path.to_path_buf(),
+                    expected: names.join(", "),
+                }
             });
         }
         if path.exists() {
             return Ok(path.to_path_buf());
         }
-        anyhow::bail!("{kind} {} does not exist", path.display());
+        return Err(DataPathError::Missing {
+            kind,
+            path: path.to_path_buf(),
+        });
     }
 
     if let Some(env) = env
@@ -146,10 +182,7 @@ fn resolve(
             return Ok(found);
         }
     }
-    anyhow::bail!(
-        "no {kind} found; pass --data (a file or a directory), run `seiza setup`, \
-         or run: seiza download-data prebuilt --output <dir> (https://downloads.seiza.fyi)"
-    )
+    Err(DataPathError::NoDefault { kind })
 }
 
 /// Search one directory: exact names in priority order, then any file
@@ -179,8 +212,8 @@ fn find_in_dir(dir: &Path, names: &[&str], extension: Option<&str>) -> Option<Pa
 }
 
 /// The shared catalog directories `seiza setup` installs into.
-pub(crate) fn search_dirs() -> Vec<PathBuf> {
-    let mut dirs = vec![crate::setup::default_catalog_dir()];
+pub fn search_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![default_catalog_dir()];
     for base in [
         std::env::var("LOCALAPPDATA").ok().map(PathBuf::from),
         dirs_data_dir(),
@@ -194,6 +227,20 @@ pub(crate) fn search_dirs() -> Vec<PathBuf> {
         }
     }
     dirs
+}
+
+/// The directory `seiza setup` installs into by default:
+/// [`CATALOG_DIR_ENV`] when set, else the platform data directory.
+pub fn default_catalog_dir() -> PathBuf {
+    configured_catalog_dir(std::env::var_os(CATALOG_DIR_ENV)).unwrap_or_else(|| {
+        ProjectDirs::from("fyi", "Seiza", "seiza")
+            .map(|dirs| dirs.data_local_dir().join("catalogs"))
+            .unwrap_or_else(|| PathBuf::from("seiza-data"))
+    })
+}
+
+fn configured_catalog_dir(value: Option<OsString>) -> Option<PathBuf> {
+    value.filter(|value| !value.is_empty()).map(PathBuf::from)
 }
 
 fn dirs_data_dir() -> Option<PathBuf> {
@@ -213,9 +260,16 @@ mod tests {
 
     #[test]
     fn catalog_search_starts_with_setup_directory() {
+        assert_eq!(search_dirs().first(), Some(&default_catalog_dir()));
+    }
+
+    #[test]
+    fn configured_catalog_directory_ignores_empty_values() {
+        assert_eq!(configured_catalog_dir(None), None);
+        assert_eq!(configured_catalog_dir(Some(OsString::new())), None);
         assert_eq!(
-            search_dirs().first(),
-            Some(&crate::setup::default_catalog_dir())
+            configured_catalog_dir(Some(OsString::from("shared-catalogs"))),
+            Some(PathBuf::from("shared-catalogs"))
         );
     }
 
@@ -249,12 +303,32 @@ mod tests {
     }
 
     #[test]
+    fn directory_argument_resolves_sky_annotation_catalogs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("minor-bodies.bin"), b"mb").unwrap();
+        std::fs::write(dir.path().join("transients.bin"), b"tr").unwrap();
+
+        assert!(
+            minor_bodies(Some(dir.path()))
+                .unwrap()
+                .ends_with("minor-bodies.bin")
+        );
+        assert!(
+            transients(Some(dir.path()))
+                .unwrap()
+                .ends_with("transients.bin")
+        );
+    }
+
+    #[test]
     fn missing_paths_error_and_empty_directories_explain_expectations() {
         let dir = tempfile::tempdir().unwrap();
         let error = star_data(Some(&dir.path().join("nope.bin"))).unwrap_err();
         assert!(error.to_string().contains("does not exist"));
         let error = objects(Some(dir.path())).unwrap_err();
         assert!(error.to_string().contains("objects.bin"), "{error}");
+        let error = transients(Some(dir.path())).unwrap_err();
+        assert!(error.to_string().contains("transients.bin"), "{error}");
         // An explicit missing index errors; an omitted one is simply absent.
         assert!(blind_index(Some(&dir.path().join("no.idx"))).is_err());
     }
