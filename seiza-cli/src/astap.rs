@@ -265,7 +265,7 @@ fn write_ini(path: &Path, lines: &[String]) -> Result<()> {
 
 /// Star catalog resolution: env var, a config next to the executable,
 /// then well-known data directories.
-fn resolve_star_data() -> Result<PathBuf> {
+pub(crate) fn resolve_star_data() -> Result<PathBuf> {
     if let Ok(path) = std::env::var("SEIZA_STAR_DATA") {
         let path = PathBuf::from(path);
         if path.exists() {
@@ -323,7 +323,7 @@ fn resolve_star_data() -> Result<PathBuf> {
 
 /// Optional prebuilt blind index resolution: environment, configuration next
 /// to the executable, then the same well-known data directories as catalogs.
-fn resolve_blind_index() -> Option<PathBuf> {
+pub(crate) fn resolve_blind_index() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("SEIZA_BLIND_INDEX") {
         let path = PathBuf::from(path);
         if path.exists() {

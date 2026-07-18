@@ -80,6 +80,14 @@ impl Sip {
     }
 }
 
+/// One FITS header card value emitted by [`Wcs::fits_header_cards`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum FitsCardValue {
+    Text(&'static str),
+    Integer(u8),
+    Number(f64),
+}
+
 /// A TAN-projection WCS solution.
 ///
 /// `pixel -> world`: intermediate coordinates `(xi, eta) = cd * (p - crpix)`
@@ -195,6 +203,68 @@ impl Wcs {
             dy += g;
         }
         Some((self.crpix.0 + dx, self.crpix.1 + dy))
+    }
+
+    /// FITS WCS keywords describing this solution: 1-indexed `CRPIX`, TAN
+    /// or TAN-SIP `CTYPE`, the CD matrix, and the complete
+    /// `A_p_q`/`B_p_q`/`AP_p_q`/`BP_p_q` set when distortion is present.
+    /// Shared by every serializer (FITS header text, `.wcs` files, Python
+    /// dicts) so the keyword contract has one implementation.
+    pub fn fits_header_cards(&self) -> Vec<(String, FitsCardValue)> {
+        use FitsCardValue::{Integer, Number, Text};
+        let sip = self.sip.as_ref();
+        let mut cards = vec![
+            (
+                "CTYPE1".into(),
+                Text(if sip.is_some() {
+                    "RA---TAN-SIP"
+                } else {
+                    "RA---TAN"
+                }),
+            ),
+            (
+                "CTYPE2".into(),
+                Text(if sip.is_some() {
+                    "DEC--TAN-SIP"
+                } else {
+                    "DEC--TAN"
+                }),
+            ),
+            ("CUNIT1".into(), Text("deg")),
+            ("CUNIT2".into(), Text("deg")),
+            ("EQUINOX".into(), Number(2000.0)),
+            ("CRVAL1".into(), Number(self.crval.0)),
+            ("CRVAL2".into(), Number(self.crval.1)),
+            ("CRPIX1".into(), Number(self.crpix.0 + 1.0)),
+            ("CRPIX2".into(), Number(self.crpix.1 + 1.0)),
+            ("CD1_1".into(), Number(self.cd[0][0])),
+            ("CD1_2".into(), Number(self.cd[0][1])),
+            ("CD2_1".into(), Number(self.cd[1][0])),
+            ("CD2_2".into(), Number(self.cd[1][1])),
+        ];
+        if let Some(sip) = sip {
+            cards.push(("A_ORDER".into(), Integer(sip.order)));
+            cards.push(("B_ORDER".into(), Integer(sip.order)));
+            for (prefix, terms, values) in [
+                ("A", Sip::forward_terms(sip.order), &sip.a),
+                ("B", Sip::forward_terms(sip.order), &sip.b),
+            ] {
+                for ((p, q), value) in terms.iter().zip(values) {
+                    cards.push((format!("{prefix}_{p}_{q}"), Number(*value)));
+                }
+            }
+            cards.push(("AP_ORDER".into(), Integer(sip.order)));
+            cards.push(("BP_ORDER".into(), Integer(sip.order)));
+            for (prefix, terms, values) in [
+                ("AP", Sip::inverse_terms(sip.order), &sip.ap),
+                ("BP", Sip::inverse_terms(sip.order), &sip.bp),
+            ] {
+                for ((p, q), value) in terms.iter().zip(values) {
+                    cards.push((format!("{prefix}_{p}_{q}"), Number(*value)));
+                }
+            }
+        }
+        cards
     }
 
     /// Sky footprint of an image of the given dimensions: the RA/Dec of the

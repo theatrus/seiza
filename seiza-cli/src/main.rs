@@ -12,6 +12,7 @@ use std::path::PathBuf;
 mod astap;
 mod build_data;
 mod setup;
+mod solve_field;
 mod worker;
 
 fn is_fits_path(path: &std::path::Path) -> bool {
@@ -844,6 +845,13 @@ fn main() -> Result<()> {
     // A raw ASTAP-style command line (or a copy of the binary named
     // astap) routes to the ASTAP-compatible mode before clap sees it
     let raw: Vec<String> = std::env::args().skip(1).collect();
+    // A copy of the binary named solve-field (or a solve-field-shaped
+    // command line) routes to the astrometry.net-compatible mode used by
+    // Siril; ASTAP-style invocations route to the ASTAP-compatible mode.
+    let program = std::env::args().next().unwrap_or_default();
+    if solve_field::invoked_as_solve_field(&program) || solve_field::looks_like_solve_field(&raw) {
+        return solve_field::run(&raw);
+    }
     if astap::looks_like_astap(&raw) {
         return astap::run(&raw);
     }

@@ -285,11 +285,11 @@ impl PyWcs {
     /// the complete SIP keyword set when distortion was fitted.
     fn fits_header_cards<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let cards = PyDict::new(py);
-        for (keyword, value) in header_entries(&self.wcs) {
+        for (keyword, value) in self.wcs.fits_header_cards() {
             match value {
-                HeaderValue::Text(text) => cards.set_item(keyword, text)?,
-                HeaderValue::Integer(value) => cards.set_item(keyword, value)?,
-                HeaderValue::Number(value) => cards.set_item(keyword, value)?,
+                seiza::FitsCardValue::Text(text) => cards.set_item(keyword, text)?,
+                seiza::FitsCardValue::Integer(value) => cards.set_item(keyword, value)?,
+                seiza::FitsCardValue::Number(value) => cards.set_item(keyword, value)?,
             }
         }
         Ok(cards)
@@ -368,11 +368,11 @@ impl PySolution {
     /// `set_image_header`.
     fn fits_header_text(&self) -> String {
         let mut header = String::new();
-        for (keyword, value) in header_entries(&self.wcs.wcs) {
+        for (keyword, value) in self.wcs.wcs.fits_header_cards() {
             let formatted = match value {
-                HeaderValue::Text(text) => format!("'{text}'"),
-                HeaderValue::Integer(value) => value.to_string(),
-                HeaderValue::Number(value) => format!("{value:.13E}"),
+                seiza::FitsCardValue::Text(text) => format!("'{text}'"),
+                seiza::FitsCardValue::Integer(value) => value.to_string(),
+                seiza::FitsCardValue::Number(value) => format!("{value:.13E}"),
             };
             header.push_str(&format!("{keyword:<8}= {formatted:>20}"));
             header.push_str(&" ".repeat(80 - 30));
@@ -390,70 +390,6 @@ impl PySolution {
             self.rms_arcsec,
         )
     }
-}
-
-enum HeaderValue {
-    Text(&'static str),
-    Integer(u8),
-    Number(f64),
-}
-
-/// The FITS keyword sequence shared by the dict and header-text outputs.
-fn header_entries(wcs: &SeizaWcs) -> Vec<(String, HeaderValue)> {
-    use HeaderValue::{Integer, Number, Text};
-    let sip = wcs.sip.as_ref();
-    let mut entries = vec![
-        (
-            "CTYPE1".into(),
-            Text(if sip.is_some() {
-                "RA---TAN-SIP"
-            } else {
-                "RA---TAN"
-            }),
-        ),
-        (
-            "CTYPE2".into(),
-            Text(if sip.is_some() {
-                "DEC--TAN-SIP"
-            } else {
-                "DEC--TAN"
-            }),
-        ),
-        ("CUNIT1".into(), Text("deg")),
-        ("CUNIT2".into(), Text("deg")),
-        ("EQUINOX".into(), Number(2000.0)),
-        ("CRVAL1".into(), Number(wcs.crval.0)),
-        ("CRVAL2".into(), Number(wcs.crval.1)),
-        ("CRPIX1".into(), Number(wcs.crpix.0 + 1.0)),
-        ("CRPIX2".into(), Number(wcs.crpix.1 + 1.0)),
-        ("CD1_1".into(), Number(wcs.cd[0][0])),
-        ("CD1_2".into(), Number(wcs.cd[0][1])),
-        ("CD2_1".into(), Number(wcs.cd[1][0])),
-        ("CD2_2".into(), Number(wcs.cd[1][1])),
-    ];
-    if let Some(sip) = sip {
-        entries.push(("A_ORDER".into(), Integer(sip.order)));
-        entries.push(("B_ORDER".into(), Integer(sip.order)));
-        for (prefix, terms, values) in [
-            ("A", seiza::Sip::forward_terms(sip.order), &sip.a),
-            ("B", seiza::Sip::forward_terms(sip.order), &sip.b),
-        ] {
-            for ((p, q), value) in terms.iter().zip(values) {
-                entries.push((format!("{prefix}_{p}_{q}"), Number(*value)));
-            }
-        }
-        entries.push(("AP_ORDER".into(), Integer(sip.order)));
-        entries.push(("BP_ORDER".into(), Integer(sip.order)));
-        for (prefix, terms, values) in [
-            ("AP", seiza::Sip::inverse_terms(sip.order), &sip.ap),
-            ("BP", seiza::Sip::inverse_terms(sip.order), &sip.bp),
-        ] {
-            for ((p, q), value) in terms.iter().zip(values) {
-                entries.push((format!("{prefix}_{p}_{q}"), Number(*value)));
-            }
-        }
-    }
-    entries
 }
 
 fn solution_to_py(solution: seiza::solve::Solution, dimensions: (u32, u32)) -> PySolution {
