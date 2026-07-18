@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use seiza::blind::BlindIndex;
 use seiza::catalog::{StarCatalog, TileCatalog};
+use seiza::data_paths;
 use seiza::minor_bodies::MinorBodyCatalog;
 use seiza::objects::{ObjectCatalog, ObjectKind, ObjectQuery, ObjectSort, SkyRegion};
 use seiza::solve::{SolveHint, solve};
@@ -11,7 +12,6 @@ use std::path::PathBuf;
 
 mod astap;
 mod build_data;
-mod data_paths;
 mod setup;
 mod solve_field;
 mod worker;
@@ -859,6 +859,18 @@ enum BuildDataSource {
     },
 }
 
+/// Falling through every standard location earns the CLI flag hint the
+/// library error cannot give.
+fn with_data_flag_hint<T>(result: Result<T, data_paths::DataPathError>) -> Result<T> {
+    result.map_err(|error| match error {
+        data_paths::DataPathError::NoDefault { kind } => anyhow::anyhow!(
+            "no {kind} found; pass --data (a file or a directory), run `seiza setup`, \
+             or run: seiza download-data prebuilt --output <dir> (https://downloads.seiza.fyi)"
+        ),
+        other => anyhow::Error::new(other),
+    })
+}
+
 fn main() -> Result<()> {
     // A raw ASTAP-style command line (or a copy of the binary named
     // astap) routes to the ASTAP-compatible mode before clap sees it
@@ -919,7 +931,7 @@ fn main() -> Result<()> {
                 })?,
             };
             let acquisition_jd = resolve_acquisition_jd(&image, time.as_deref())?;
-            let data = data_paths::star_data(data.as_deref())?;
+            let data = with_data_flag_hint(data_paths::star_data(data.as_deref()))?;
             let objects = objects
                 .map(|path| data_paths::objects(Some(&path)))
                 .transpose()?;
@@ -1029,7 +1041,7 @@ fn main() -> Result<()> {
             sigma,
             ignore_border,
         } => {
-            let data = data_paths::star_data(data.as_deref())?;
+            let data = with_data_flag_hint(data_paths::star_data(data.as_deref()))?;
             let index = data_paths::blind_index(index.as_deref())?;
             solve_blind_command(
                 &image,
@@ -1061,7 +1073,7 @@ fn main() -> Result<()> {
             let server_token = server_token.or_else(|| std::env::var("SEIZA_SERVER_TOKEN").ok());
             let data = match &server {
                 Some(_) => None,
-                None => Some(data_paths::star_data(data.as_deref())?),
+                None => Some(with_data_flag_hint(data_paths::star_data(data.as_deref()))?),
             };
             let index = index
                 .map(|path| data_paths::blind_index(Some(&path)))
@@ -1294,7 +1306,7 @@ fn report_source_event(event: seiza_sources::SourceEvent) {
 }
 
 fn catalog_object(args: CatalogObjectArgs) -> Result<()> {
-    let data = data_paths::objects(args.data.as_deref())?;
+    let data = with_data_flag_hint(data_paths::objects(args.data.as_deref()))?;
     let catalog =
         ObjectCatalog::open(&data).with_context(|| format!("failed to open {}", data.display()))?;
     let matches = if args.prefix {
@@ -1704,7 +1716,7 @@ fn catalog_objects(args: CatalogObjectsArgs) -> Result<()> {
         }
     };
 
-    let data = data_paths::objects(args.data.as_deref())?;
+    let data = with_data_flag_hint(data_paths::objects(args.data.as_deref()))?;
     let catalog =
         ObjectCatalog::open(&data).with_context(|| format!("failed to open {}", data.display()))?;
     let query = ObjectQuery {
@@ -1845,7 +1857,7 @@ fn catalog_objects(args: CatalogObjectsArgs) -> Result<()> {
 }
 
 fn catalog_star(args: CatalogStarArgs) -> Result<()> {
-    let data = data_paths::star_identifiers(args.data.as_deref())?;
+    let data = with_data_flag_hint(data_paths::star_identifiers(args.data.as_deref()))?;
     let catalog = StarIdentifierCatalog::open(&data)
         .with_context(|| format!("failed to open {}", data.display()))?;
     let matches = if args.prefix {

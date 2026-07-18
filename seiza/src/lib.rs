@@ -10,6 +10,7 @@
 
 pub mod blind;
 pub mod catalog;
+pub mod data_paths;
 pub mod detect;
 pub mod minor_bodies;
 mod object_catalog_v3;

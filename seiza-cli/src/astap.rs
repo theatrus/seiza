@@ -188,7 +188,7 @@ fn solve(args: &AstapArgs, image_path: &Path) -> Result<Vec<String>> {
                 max_scale_arcsec_px: max_scale,
                 ..Default::default()
             };
-            let index = if let Some(path) = resolve_blind_index() {
+            let index = if let Some(path) = resolve_blind_index()? {
                 let index = seiza::blind::BlindIndex::open(&path)
                     .map_err(anyhow::Error::from)
                     .with_context(|| format!("cannot open blind index {}", path.display()))?;
@@ -264,14 +264,18 @@ fn write_ini(path: &Path, lines: &[String]) -> Result<()> {
 }
 
 /// Star catalog resolution shared with every compatibility mode; see
-/// [`crate::data_paths`].
+/// [`seiza::data_paths`].
 pub(crate) fn resolve_star_data() -> Result<PathBuf> {
-    crate::data_paths::star_data(None)
+    Ok(seiza::data_paths::star_data(None)?)
 }
 
-/// Optional prebuilt blind index resolution; see [`crate::data_paths`].
-pub(crate) fn resolve_blind_index() -> Option<PathBuf> {
-    crate::data_paths::blind_index(None).ok().flatten()
+/// Optional prebuilt blind index resolution; see [`seiza::data_paths`].
+/// `Ok(None)` means "build the index in memory". A set `SEIZA_BLIND_INDEX`
+/// that resolves to nothing propagates as an error here too: silently
+/// falling back to a startup-built bright index would honor the pin
+/// everywhere except the compatibility modes.
+pub(crate) fn resolve_blind_index() -> Result<Option<PathBuf>> {
+    Ok(seiza::data_paths::blind_index(None)?)
 }
 
 #[cfg(test)]

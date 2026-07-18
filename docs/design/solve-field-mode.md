@@ -41,7 +41,8 @@ Siril's `local_asnet_platesolve` (src/algos/astrometry_solver.c):
   clamped to a practical window) with blind fallback; otherwise the blind
   solver runs over the requested or default scale range, using a prebuilt
   index when one is resolvable.
-- Star catalogs resolve exactly as in ASTAP mode: `SEIZA_STAR_DATA` /
+- Star catalogs resolve exactly as in ASTAP mode (see
+  [catalog path resolution](data-paths.md)): `SEIZA_STAR_DATA` /
   `SEIZA_BLIND_INDEX`, `seiza.toml` or a `stars-*.bin` next to the binary,
   then the shared catalog directories (`SEIZA_CATALOG_DIR`, `seiza setup`
   locations).
