@@ -126,9 +126,15 @@ Tycho/Bright Star/GCVS/WDS/IAU identifier sidecar, and a nightly-refreshed
 transient list):
 
 ```
+# Running this by itself prints the recommended prebuilt and setup routes:
+seiza download-data
+
 seiza download-data prebuilt --output data
 seiza download-data prebuilt --output data --file objects.bin --file transients.bin
 ```
+
+The other `download-data` subcommands acquire upstream source material for
+custom catalog builds; they are not required for normal Seiza use.
 
 For an interactive selection, run `seiza setup`. This is also the command
 offered by the Windows installer. It presents solver, blind, and complete
