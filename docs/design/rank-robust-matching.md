@@ -1,8 +1,9 @@
 # Rank-robust star matching
 
-Status: analysis and design recorded; first mitigation (source-image
-redetection in solve-field mode) implemented; the catalog-seeded quad
-fallback is the planned core change
+Status: implemented for hinted solving — the catalog-seeded quad
+fallback runs automatically when triangle matching fails; source-image
+redetection in solve-field mode remains as the first-choice mitigation.
+Position-blind solving with unranked lists is the remaining follow-up
 
 ## The root of the problem
 
@@ -74,7 +75,7 @@ detection pass, but it is a workaround: it restores the precondition
 rather than removing it, and it cannot help callers who genuinely only
 have a star list.
 
-## Mitigation 2 (planned): catalog-seeded quads
+## Mitigation 2 (implemented): catalog-seeded quads
 
 Remove the root by demoting brightness from load-bearing precondition to
 optional search-ordering hint:
@@ -95,8 +96,17 @@ optional search-ordering hint:
   measured case, so typical solves stay fast and the worst case is
   bounded work instead of failure.
 
-Estimated cost on the measured M31 case: tens of milliseconds typical,
-sub-second bounded worst case.
+Measured on the real M31 case (Siril's amplitude-ranked table, no
+source image, hinted): solved in 0.33 s end to end at 0.489" RMS over 57
+matched stars with SIP order 3 — a case that previously could not solve
+at all. A synthetic regression (deep flux-shuffled star list against a
+magnitude-limited catalog) verifies the triangle stage fails and the
+fallback solves, and that well-ranked inputs keep the fast path.
+
+The implementation lives in `solve_rank_robust` (seiza/src/solve.rs):
+the shared `refine_to_solution` tail (iterative re-matching,
+re-centering, SIP) is reused verbatim, so the fallback produces
+solutions with identical semantics to the triangle path.
 
 Position-blind solving with an unranked list is harder: the whole-sky
 pattern index is already catalog-seeded, but the image-side query

@@ -99,9 +99,12 @@ with SIP order 3. The fallback (no image found, dimensions mismatch from
 a cropped/downsampled selection, or a weak cross-match) uses the table
 stars unchanged and still requires brightness-faithful ranking.
 
-Removing the root — so pure star-list inputs solve regardless of flux
-quality — is the catalog-seeded quad design recorded in
-[rank-robust-matching.md](rank-robust-matching.md).
+For hinted solves the root is now removed entirely: when triangle
+matching fails, the solver retries with catalog-seeded quads that use
+flux ordering only as a search prior
+([rank-robust-matching.md](rank-robust-matching.md)) — the raw
+amplitude-ranked M31 table solves in 0.33 s without any source image.
+Position-blind solving with an unranked list remains the follow-up.
 
 ## Validation
 
