@@ -42,26 +42,26 @@ Build the release binary and MSI from PowerShell:
 
 ```powershell
 cargo build --release -p seiza-cli
-dotnet build packaging/windows/seiza.wixproj -c Release -p:SeizaVersion=0.7.2
+dotnet build packaging/windows/seiza.wixproj -c Release -p:SeizaVersion=0.8.0
 ```
 
 The MSI is written to `dist/`. A silent current-user install with the default
 PATH feature can be performed with:
 
 ```powershell
-msiexec /i dist/seiza-cli-0.7.2-windows-x86_64.msi ALLUSERS=2 MSIINSTALLPERUSER=1 ADDLOCAL=MainFeature,PathFeature /qn /norestart
+msiexec /i dist/seiza-cli-0.8.0-windows-x86_64.msi ALLUSERS=2 MSIINSTALLPERUSER=1 ADDLOCAL=MainFeature,PathFeature /qn /norestart
 ```
 
 An elevated all-users install uses `ALLUSERS=1`:
 
 ```powershell
-msiexec /i dist/seiza-cli-0.7.2-windows-x86_64.msi ALLUSERS=1 ADDLOCAL=MainFeature,PathFeature /qn /norestart
+msiexec /i dist/seiza-cli-0.8.0-windows-x86_64.msi ALLUSERS=1 ADDLOCAL=MainFeature,PathFeature /qn /norestart
 ```
 
 To omit the PATH change, install only the required feature:
 
 ```powershell
-msiexec /i dist/seiza-cli-0.7.2-windows-x86_64.msi ALLUSERS=2 MSIINSTALLPERUSER=1 ADDLOCAL=MainFeature REMOVE=PathFeature /qn /norestart
+msiexec /i dist/seiza-cli-0.8.0-windows-x86_64.msi ALLUSERS=2 MSIINSTALLPERUSER=1 ADDLOCAL=MainFeature REMOVE=PathFeature /qn /norestart
 ```
 
 Silent installs never launch catalog setup.
