@@ -368,7 +368,10 @@ enum Command {
         #[arg(long)]
         time: Option<String>,
     },
-    /// Download source catalogs from their archives
+    /// Download ready-to-use catalogs (recommended) or advanced source data
+    #[command(
+        after_help = "RECOMMENDED:\n  seiza download-data prebuilt --output <directory>\n      Download the complete ready-to-use, SHA-256-verified catalog bundle.\n\n  seiza setup\n      Choose a smaller use-case-based preset interactively.\n\nRun `seiza download-data prebuilt --help` to select individual ready-to-use files.\nThe other subcommands fetch upstream source data for custom catalog builds and are not needed to use Seiza."
+    )]
     DownloadData {
         #[command(subcommand)]
         source: DownloadSource,
@@ -633,25 +636,34 @@ enum CatalogOutputFormat {
 
 #[derive(Subcommand)]
 enum DownloadSource {
-    /// Tycho-2 distribution files from CDS (~150 MB)
+    /// Ready-to-use catalog bundle (recommended; SHA-256 verified)
+    Prebuilt {
+        /// Directory to download into
+        #[arg(long)]
+        output: PathBuf,
+        /// Specific files (default: everything in the bundle manifest)
+        #[arg(long)]
+        file: Vec<String>,
+    },
+    /// Advanced source: Tycho-2 distribution files from CDS (~150 MB)
     Tycho2 {
         /// Directory to download into
         #[arg(long)]
         output: PathBuf,
     },
-    /// Bright, variable, double, and IAU-named star identity sources
+    /// Advanced source: bright, variable, double, and IAU star identities
     StarIdentifiers {
         /// Directory to download into
         #[arg(long)]
         output: PathBuf,
     },
-    /// The OpenNGC deep-sky object catalog (~4 MB)
+    /// Advanced source: the OpenNGC deep-sky object catalog (~4 MB)
     Openngc {
         /// Directory to download into
         #[arg(long)]
         output: PathBuf,
     },
-    /// A pinned Seiza catalog-curation GitHub snapshot
+    /// Advanced source: a pinned Seiza catalog-curation GitHub snapshot
     Curation {
         /// Directory to download into; must be empty or the same pinned snapshot
         #[arg(long)]
@@ -663,15 +675,14 @@ enum DownloadSource {
         #[arg(long)]
         commit: String,
     },
-    /// All object-overlay sources: OpenNGC, Sh2, Barnard, UGC, LDN, vdB,
+    /// Advanced source: OpenNGC, Sh2, Barnard, UGC, LDN, vdB,
     /// LBN, Cederblad, IAU + Bright Star Catalogue star names
     Objects {
         /// Directory to download into
         #[arg(long)]
         output: PathBuf,
     },
-    /// Gaia DR3 star positions via ESA TAP (resumable; can take hours —
-    /// prefer `download-data prebuilt` unless you need a custom depth)
+    /// Advanced source: Gaia DR3 via ESA TAP (resumable; can take hours)
     Gaia {
         /// Directory to download into
         #[arg(long)]
@@ -688,27 +699,17 @@ enum DownloadSource {
         )]
         chunks: u64,
     },
-    /// The Rochester Astronomy active supernova/transient list (refetched)
+    /// Advanced source: Rochester active supernova/transient list
     Transients {
         /// Directory to download into
         #[arg(long)]
         output: PathBuf,
     },
-    /// Minor Planet Center element sets: comets + numbered asteroids
+    /// Advanced source: MPC comet and numbered-asteroid elements
     Mpc {
         /// Directory to download into
         #[arg(long)]
         output: PathBuf,
-    },
-    /// Prebuilt datasets from the current downloads.seiza.fyi catalog bundle
-    /// (SHA-256 verified) — the quickest route to a working solver
-    Prebuilt {
-        /// Directory to download into
-        #[arg(long)]
-        output: PathBuf,
-        /// Specific files (default: everything in the bundle manifest)
-        #[arg(long)]
-        file: Vec<String>,
     },
 }
 
@@ -2437,6 +2438,31 @@ fn build_blind_index_command(
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+
+    #[test]
+    fn download_data_help_leads_with_the_ready_to_use_route() {
+        let error = match Cli::try_parse_from(["seiza", "download-data"]) {
+            Ok(_) => panic!("download-data without a selection should show guidance"),
+            Err(error) => error,
+        };
+        let help = error.to_string();
+        let prebuilt = help.find("\n  prebuilt").expect("prebuilt command in help");
+        let tycho2 = help.find("\n  tycho2").expect("advanced command in help");
+
+        assert!(
+            help.starts_with(
+                "Download ready-to-use catalogs (recommended) or advanced source data"
+            )
+        );
+        assert!(
+            prebuilt < tycho2,
+            "prebuilt should be listed first:\n{help}"
+        );
+        assert!(help.contains("RECOMMENDED:"));
+        assert!(help.contains("seiza download-data prebuilt --output <directory>"));
+        assert!(help.contains("seiza setup"));
+        assert!(help.contains("are not needed to use Seiza"));
+    }
 
     #[test]
     fn detection_backend_is_global_and_selectable() {
