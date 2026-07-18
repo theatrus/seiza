@@ -6,7 +6,7 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
 #[cfg(windows)]
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 
