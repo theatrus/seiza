@@ -264,7 +264,10 @@ seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-
 
 Both solvers can fit SIP distortion polynomials (orders 2-5, forward and
 inverse) on the accepted solution with `--sip-order`; the linear solution is
-kept whenever the polynomial does not improve the residual.
+kept whenever the polynomial does not improve the residual beyond what its
+extra coefficients buy for free. On real wide-field images this cuts the
+astrometric residual by a third to a half
+([measurements](docs/benchmarks/2026-07-sip-real-field-validation.md)).
 
 ## Use with N.I.N.A. (ASTAP-compatible mode)
 
