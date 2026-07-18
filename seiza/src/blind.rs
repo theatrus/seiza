@@ -47,6 +47,10 @@ pub struct BlindParams {
     /// Maximum accepted RMS residual, in pixels (scale-relative — an
     /// arcsecond cap would reject coarse-scale images out of hand)
     pub max_rms_px: f64,
+    /// SIP distortion polynomial order for the accepted solution (0 or 1 =
+    /// linear only). Hypothesis verification always runs linear; the final
+    /// solution is re-fitted at this order when it improves the residual.
+    pub sip_order: u8,
 }
 
 impl Default for BlindParams {
@@ -60,6 +64,7 @@ impl Default for BlindParams {
             max_coarse_hypotheses: 20_000,
             min_matches: 12,
             max_rms_px: 2.0,
+            sip_order: 0,
         }
     }
 }
@@ -707,20 +712,38 @@ pub fn solve_blind(
         )));
     }
 
-    match solve_blind_with_global_ladder(stars, catalog, index, params, dimensions, &[8]) {
-        Ok(solution) => return Ok(solution),
-        Err(crate::Error::Solve(_)) => {}
-        Err(error) => return Err(error),
+    let solution =
+        match solve_blind_with_global_ladder(stars, catalog, index, params, dimensions, &[8]) {
+            Ok(solution) => solution,
+            Err(crate::Error::Solve(_)) => solve_blind_with_global_ladder(
+                stars,
+                catalog,
+                index,
+                params,
+                dimensions,
+                &[8, 10, 12, 16, 20, 26, 32],
+            )?,
+            Err(error) => return Err(error),
+        };
+    if params.sip_order < 2 {
+        return Ok(solution);
     }
-
-    solve_blind_with_global_ladder(
-        stars,
-        catalog,
-        index,
-        params,
-        dimensions,
-        &[8, 10, 12, 16, 20, 26, 32],
-    )
+    // Hypothesis verification deliberately stays linear so acceptance
+    // thresholds keep their meaning across the whole-sky search; the one
+    // accepted solution is then re-solved at the requested SIP order.
+    let center_px = (dimensions.0 as f64 / 2.0, dimensions.1 as f64 / 2.0);
+    let center = solution.wcs.pixel_to_world(center_px.0, center_px.1);
+    let hint = SolveHint {
+        center,
+        radius_deg: 0.0,
+        scale_arcsec_px: solution.wcs.scale_arcsec_per_px(),
+        scale_tolerance: 0.05,
+        sip_order: params.sip_order,
+    };
+    match solve(stars, catalog, &hint, dimensions) {
+        Ok(refined) if refined.matched_stars >= solution.matched_stars => Ok(refined),
+        _ => Ok(solution),
+    }
 }
 
 /// Run the blind funnel with a selected ladder of globally bright image-star
@@ -1020,6 +1043,7 @@ fn solve_blind_with_global_ladder(
                     radius_deg: (fov_radius_deg * 0.25).clamp(0.02, 0.4),
                     scale_arcsec_px: *scale,
                     scale_tolerance: 0.15,
+                    sip_order: 0,
                 };
                 solve(stars, catalog, &hint, dimensions).ok().filter(|s| {
                     s.matched_stars >= params.min_matches
@@ -1145,6 +1169,7 @@ fn implied_wcs(
         // cd * (pixel - crpix) is the fitted affine tangent plane.
         crpix: ((b * f - e * c) / det, (d * c - a * f) / det),
         cd: [[a, b], [d, e]],
+        sip: None,
     };
     Some((wcs.pixel_to_world(image_center.0, image_center.1), wcs))
 }
@@ -1458,6 +1483,20 @@ pub(crate) mod tests {
         let sep = crate::catalog::angular_separation_deg(ra, dec, 212.4, -35.7);
         assert!(sep < 0.01, "center off by {sep}°");
         assert!((solution.wcs.scale_arcsec_per_px() - 6.0).abs() < 0.05);
+
+        // A requested SIP order refines the accepted solution without
+        // regressing it. This undistorted scene must not lose matches, and
+        // may legitimately keep the linear solution when the polynomial
+        // cannot beat it.
+        let sip_params = BlindParams {
+            sip_order: 3,
+            ..params
+        };
+        let refined = solve_blind(&detected, &catalog, &index, &sip_params, dims).unwrap();
+        assert!(refined.matched_stars >= solution.matched_stars);
+        let (ra, dec) = refined.wcs.pixel_to_world(2000.0, 1500.0);
+        let sep = crate::catalog::angular_separation_deg(ra, dec, 212.4, -35.7);
+        assert!(sep < 0.01, "refined center off by {sep}°");
     }
 
     #[test]
@@ -1615,6 +1654,7 @@ mod debug_tests {
             radius_deg: 0.4,
             scale_arcsec_px: 6.0,
             scale_tolerance: 0.15,
+            sip_order: 0,
         };
         let solution = crate::solve::solve(&detected, &catalog, &hint, dims);
         eprintln!("hinted with truth: {solution:?}");

@@ -22,6 +22,7 @@ can submit to the same server with `seiza worker --server`.
   [releases](https://github.com/theatrus/seiza/releases). It puts `seiza` on
   your `PATH` and offers to download catalogs for you when it finishes.
 - **Fedora / Ubuntu** — install the RPM or deb from the same releases page.
+- **Python** — `pip install seiza` for the library with binary wheels.
 - **Anywhere with Rust** — `cargo install seiza-cli`.
 
 ## Ways to use it
@@ -33,6 +34,11 @@ can submit to the same server with `seiza worker --server`.
   and blind index open between solves, and send it one JSON request per
   line. It can also forward solves to a seiza-server, local or hosted.
   [Wire protocol](docs/design/worker-protocol.md).
+- **From Python** — `pip install seiza`: detection, hinted and blind
+  solving with optional SIP distortion, WCS transforms, FITS WCS keyword
+  output, and verified catalog downloads. One binary wheel per platform
+  (Linux x86_64 and aarch64, macOS, Windows) covers every CPython from
+  3.9 up, with type stubs included ([seiza-py](seiza-py/README.md)).
 - **From Rust** — use the crates directly: [`seiza`](seiza/README.md)
   (detection, WCS, solving, catalogs),
   [`seiza-fits`](seiza-fits/README.md) (FITS reading),
@@ -260,8 +266,12 @@ seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-
   Ubuntu debs on GitHub releases, and an integration suite that solves real
   hosted camera frames against known-good solutions on every PR.
 
-Planned (see design notes in the tenrankai repository,
-`docs/design/plate-solving.md`): SIP distortion terms.
+Both solvers can fit SIP distortion polynomials (orders 2-5, forward and
+inverse) on the accepted solution with `--sip-order`; the linear solution is
+kept whenever the polynomial does not improve the residual beyond what its
+extra coefficients buy for free. On real wide-field images this cuts the
+astrometric residual by a third to a half
+([measurements](docs/benchmarks/2026-07-sip-real-field-validation.md)).
 
 ## Use with N.I.N.A. (ASTAP-compatible mode)
 
@@ -300,6 +310,8 @@ renamed `astap.exe` behaves identically. Details:
   JSON-RPC worker, guided `seiza setup`, and dataset building
 - `seiza-download/` — async, verified runtime catalog-bundle cache
 - `seiza-sources/` — raw upstream catalog acquisition for custom builds
+- `seiza-py/` — Python bindings (`pip install seiza`), outside the cargo
+  workspace so workspace builds never need libpython
 - `packaging/windows/` — the WiX MSI installer
 - `docs/` — design notes and benchmark reports
 

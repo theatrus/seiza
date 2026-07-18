@@ -340,6 +340,10 @@ enum Command {
         /// Allowed relative scale error
         #[arg(long, default_value_t = 0.2)]
         scale_tolerance: f64,
+        /// SIP distortion polynomial order to fit (0 = linear solution,
+        /// 2-5 = fit when enough matched stars support it)
+        #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=5))]
+        sip_order: u8,
         /// Detection threshold in noise sigmas
         #[arg(long, default_value_t = 4.0)]
         sigma: f32,
@@ -416,6 +420,11 @@ enum Command {
         /// bounds the cost of an image that never solves
         #[arg(long, default_value_t = 20_000)]
         max_coarse_hypotheses: usize,
+        /// SIP distortion polynomial order to fit on the accepted solution
+        /// (0 = linear solution, 2-5 = fit when enough matched stars
+        /// support it)
+        #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=5))]
+        sip_order: u8,
         /// Detection threshold in noise sigmas
         #[arg(long, default_value_t = 4.0)]
         sigma: f32,
@@ -865,6 +874,7 @@ fn main() -> Result<()> {
             radius,
             scale,
             scale_tolerance,
+            sip_order,
             sigma,
             ignore_border,
             annotate,
@@ -886,6 +896,7 @@ fn main() -> Result<()> {
                 radius,
                 scale,
                 scale_tolerance,
+                sip_order,
                 sigma,
                 ignore_border,
                 detection_backend,
@@ -977,6 +988,7 @@ fn main() -> Result<()> {
             index_mag_limit,
             max_hypotheses,
             max_coarse_hypotheses,
+            sip_order,
             sigma,
             ignore_border,
         } => solve_blind_command(
@@ -989,6 +1001,7 @@ fn main() -> Result<()> {
                 index_mag_limit,
                 max_hypotheses,
                 max_coarse_hypotheses,
+                sip_order,
                 sigma,
                 ignore_border,
                 detection_backend,
@@ -2034,6 +2047,7 @@ fn solve_command(
     radius: f64,
     scale: f64,
     scale_tolerance: f64,
+    sip_order: u8,
     sigma: f32,
     ignore_border: u32,
     detection_backend: DetectBackend,
@@ -2068,6 +2082,7 @@ fn solve_command(
         radius_deg: radius,
         scale_arcsec_px: scale,
         scale_tolerance,
+        sip_order,
     };
     let started = std::time::Instant::now();
     let solution = invocation.solve(|stars| solve(stars, &catalog, &hint, dims))?;
@@ -2098,6 +2113,12 @@ fn solve_command(
         "  quality    : {} stars matched, RMS {:.3}\"",
         solution.matched_stars, solution.rms_arcsec
     );
+    if let Some(sip) = &wcs.sip {
+        println!(
+            "  distortion : SIP order {} (forward and inverse)",
+            sip.order
+        );
+    }
     let footprint = wcs.footprint(dims.0, dims.1);
     println!(
         "  footprint  : {:.4},{:.4} / {:.4},{:.4} / {:.4},{:.4} / {:.4},{:.4}",
@@ -2265,6 +2286,7 @@ struct SolveBlindOptions<'a> {
     index_mag_limit: f32,
     max_hypotheses: usize,
     max_coarse_hypotheses: usize,
+    sip_order: u8,
     sigma: f32,
     ignore_border: u32,
     detection_backend: DetectBackend,
@@ -2306,6 +2328,7 @@ fn solve_blind_command(
         index_mag_limit: options.index_mag_limit,
         max_hypotheses: options.max_hypotheses,
         max_coarse_hypotheses: options.max_coarse_hypotheses,
+        sip_order: options.sip_order,
         ..Default::default()
     };
     let started = std::time::Instant::now();

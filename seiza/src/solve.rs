@@ -28,6 +28,10 @@ pub struct SolveHint {
     pub scale_arcsec_px: f64,
     /// Allowed relative scale error (e.g. 0.2 = ±20 %)
     pub scale_tolerance: f64,
+    /// SIP distortion polynomial order to fit (0 or 1 = linear solution
+    /// only). Orders 2..=5 fit forward and inverse polynomials when enough
+    /// matched stars support them and the fit reduces the residual.
+    pub sip_order: u8,
 }
 
 /// A successful plate solution with quality metrics.
@@ -81,6 +85,7 @@ pub fn solve(
             radius_deg: 0.0,
             scale_arcsec_px: hint.scale_arcsec_px,
             scale_tolerance: hint.scale_tolerance,
+            sip_order: hint.sip_order,
         };
         if let Ok(solution) = solve_search(stars, catalog, &center_hint, dimensions)
             && solution.matched_stars >= FAST_HINT_MIN_INLIERS
@@ -264,30 +269,403 @@ fn solve_search(
     let crpix = final_affine
         .zero_point()
         .ok_or_else(|| crate::Error::Solve("solution transform is singular".to_string()))?;
-    let wcs = Wcs {
+    let mut wcs = Wcs {
         crval,
         crpix,
         cd: [
             [final_affine.a, final_affine.b],
             [final_affine.d, final_affine.e],
         ],
+        sip: None,
     };
 
     // Quality metrics against the final WCS
-    let mut sum_sq = 0.0;
-    for &((px, py), cat_idx) in &pairs {
-        let star = &cat[cat_idx].2;
-        let (ra, dec) = wcs.pixel_to_world(px, py);
-        let sep = angular_separation_deg(ra, dec, star.ra, star.dec) * 3600.0;
-        sum_sq += sep * sep;
+    let rms = |wcs: &Wcs| {
+        let mut sum_sq = 0.0;
+        for &((px, py), cat_idx) in &pairs {
+            let star = &cat[cat_idx].2;
+            let (ra, dec) = wcs.pixel_to_world(px, py);
+            let sep = angular_separation_deg(ra, dec, star.ra, star.dec) * 3600.0;
+            sum_sq += sep * sep;
+        }
+        (sum_sq / pairs.len() as f64).sqrt()
+    };
+    let mut rms_arcsec = rms(&wcs);
+
+    let mut matched_stars = pairs.len();
+
+    // Optional SIP distortion fit. Fit on the current inliers, then
+    // re-match against the distorted model and fit again: stars whose
+    // distortion pushed them past the linear matching tolerance only
+    // become available once the polynomial predicts their positions.
+    // Accepted only when the polynomial beats the linear solution over the
+    // same matched set; the linear solution otherwise stands.
+    if hint.sip_order >= 2 {
+        let linear = wcs.clone();
+        let mut fit_set: Vec<PointPair> = final_pairs.clone();
+        for _ in 0..2 {
+            let Some(candidate) = fit_sip(hint.sip_order, &wcs, &fit_set, dimensions) else {
+                break;
+            };
+            let matched = match_sky_pairs(&candidate, stars, &cat, &recentre, dimensions);
+            if matched.len() < MIN_INLIERS || matched.len() < fit_set.len() {
+                break;
+            }
+            let sum_sq_over = |wcs: &Wcs| {
+                matched
+                    .iter()
+                    .map(|pair| {
+                        let (ra, dec) = wcs.pixel_to_world(pair.pixel.0, pair.pixel.1);
+                        let sep = angular_separation_deg(ra, dec, pair.sky.0, pair.sky.1) * 3600.0;
+                        sep * sep
+                    })
+                    .sum::<f64>()
+            };
+            // In-sample residuals always shrink when parameters are added,
+            // so compare degrees-of-freedom-corrected residuals: the
+            // polynomial must explain more than its extra coefficients buy
+            // for free, or a sparse noisy field would always "improve".
+            let observations = 2.0 * matched.len() as f64;
+            let candidate_parameters = candidate.sip.as_ref().map_or(6.0, |sip| {
+                2.0 * crate::wcs::Sip::inverse_terms(sip.order).len() as f64
+            });
+            let candidate_sum_sq = sum_sq_over(&candidate);
+            let reduced_candidate = candidate_sum_sq / (observations - candidate_parameters);
+            let reduced_linear = sum_sq_over(&linear) / (observations - 6.0);
+            if !reduced_candidate.is_finite() || reduced_candidate >= reduced_linear {
+                break;
+            }
+            wcs = candidate;
+            rms_arcsec = (candidate_sum_sq / matched.len() as f64).sqrt();
+            matched_stars = matched.len();
+            fit_set = matched
+                .iter()
+                .map(|pair| (pair.pixel, pair.tangent))
+                .collect();
+        }
     }
-    let rms_arcsec = (sum_sq / pairs.len() as f64).sqrt();
 
     Ok(Solution {
         wcs,
-        matched_stars: pairs.len(),
+        matched_stars,
         rms_arcsec,
     })
+}
+
+/// One matched star for SIP refinement: the detected pixel position, the
+/// exact tangent-plane target about the solution's `crval`, and the sky
+/// position for residual metrics.
+struct SkyPair {
+    pixel: (f64, f64),
+    tangent: (f64, f64),
+    sky: (f64, f64),
+}
+
+/// Match detected stars to catalog stars by projecting the catalog through
+/// a (possibly distorted) WCS into pixel space.
+fn match_sky_pairs(
+    wcs: &Wcs,
+    stars: &[DetectedStar],
+    cat: &[(f64, f64, CatalogStar)],
+    recentre: &Wcs,
+    dimensions: (u32, u32),
+) -> Vec<SkyPair> {
+    let (width, height) = (dimensions.0 as f64, dimensions.1 as f64);
+    let margin = 2.0 * MATCH_TOLERANCE_PX;
+    let mut proposals: Vec<(f64, usize, usize)> = Vec::new();
+    for (cat_index, &(_, _, star)) in cat.iter().enumerate() {
+        let Some((sx, sy)) = wcs.world_to_pixel(star.ra, star.dec) else {
+            continue;
+        };
+        if sx < -margin || sy < -margin || sx > width + margin || sy > height + margin {
+            continue;
+        }
+        let nearest = stars
+            .iter()
+            .enumerate()
+            .map(|(star_index, s)| ((s.x - sx).hypot(s.y - sy), star_index))
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((distance, star_index)) = nearest
+            && distance <= MATCH_TOLERANCE_PX
+        {
+            proposals.push((distance, star_index, cat_index));
+        }
+    }
+    // Greedy mutual exclusion, closest matches first: without it, two
+    // nearby catalog stars can both claim one detected star, inflating the
+    // match count and double-weighting that star in the fit and residual.
+    proposals.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut used_star = vec![false; stars.len()];
+    let mut used_cat = vec![false; cat.len()];
+    let mut result = Vec::new();
+    for (_, star_index, cat_index) in proposals {
+        if used_star[star_index] || used_cat[cat_index] {
+            continue;
+        }
+        let star = &cat[cat_index].2;
+        let Some(tangent) = recentre.world_to_pixel(star.ra, star.dec) else {
+            continue;
+        };
+        used_star[star_index] = true;
+        used_cat[cat_index] = true;
+        result.push(SkyPair {
+            pixel: (stars[star_index].x, stars[star_index].y),
+            tangent,
+            sky: (star.ra, star.dec),
+        });
+    }
+    result
+}
+
+/// Fit SIP distortion to the matched pairs of one accepted linear solution
+/// and return the complete distorted WCS. `pairs` maps pixel positions to
+/// exact tangent-plane coordinates (degrees) about `wcs.crval`.
+///
+/// The fit solves the full polynomial including constant and linear terms:
+/// the linear stage's CD matrix has already absorbed part of the average
+/// distortion scale, so the residual field contains a linear component the
+/// (order >= 2) SIP terms cannot express. The fitted constant and linear
+/// parts are folded back into CRPIX and CD, leaving a pure SIP polynomial.
+/// Returns `None` when the pair count cannot support even a quadratic fit
+/// or the fitted distortion is implausibly large.
+fn fit_sip(order: u8, wcs: &Wcs, pairs: &[PointPair], dimensions: (u32, u32)) -> Option<Wcs> {
+    use crate::wcs::Sip;
+
+    // Reduce the order until the matched pairs comfortably constrain the
+    // coefficient count; each axis needs its own fit.
+    let mut order = order.min(5);
+    let (terms, sip_terms) = loop {
+        if order < 2 {
+            return None;
+        }
+        // The fit basis includes constant and linear terms; `sip_terms` is
+        // the (p + q >= 2) subset retained as SIP coefficients.
+        let terms = Sip::inverse_terms(order);
+        let sip_terms = Sip::forward_terms(order);
+        if pairs.len() >= terms.len() * 3 {
+            break (terms, sip_terms);
+        }
+        order -= 1;
+    };
+
+    let det = wcs.cd[0][0] * wcs.cd[1][1] - wcs.cd[0][1] * wcs.cd[1][0];
+    if det.abs() < 1e-18 {
+        return None;
+    }
+    // Normalize pixel offsets so high-order monomials stay well conditioned.
+    let (width, height) = (dimensions.0 as f64, dimensions.1 as f64);
+    let norm = width.hypot(height).max(1.0);
+    let scale = 1.0 / norm;
+
+    let mut rows = Vec::with_capacity(pairs.len());
+    let mut target_u = Vec::with_capacity(pairs.len());
+    let mut target_v = Vec::with_capacity(pairs.len());
+    for &((px, py), (xi, eta)) in pairs {
+        let u = px - wcs.crpix.0;
+        let v = py - wcs.crpix.1;
+        // The undistorted offsets the linear CD matrix would need to land
+        // exactly on the catalog star.
+        let cap_u = (wcs.cd[1][1] * xi - wcs.cd[0][1] * eta) / det;
+        let cap_v = (-wcs.cd[1][0] * xi + wcs.cd[0][0] * eta) / det;
+        rows.push(monomials(&terms, u * scale, v * scale));
+        target_u.push(cap_u * scale);
+        target_v.push(cap_v * scale);
+    }
+    let unscale = |coefficients: &[f64], terms: &[(u8, u8)]| -> Option<Vec<f64>> {
+        let scaled = coefficients
+            .iter()
+            .zip(terms)
+            .map(|(value, &(p, q))| value * scale.powi(i32::from(p + q) - 1))
+            .collect::<Vec<_>>();
+        scaled
+            .iter()
+            .all(|value| value.is_finite())
+            .then_some(scaled)
+    };
+    let w_u = unscale(&solve_least_squares(&rows, &target_u)?, &terms)?;
+    let w_v = unscale(&solve_least_squares(&rows, &target_v)?, &terms)?;
+
+    // Split the full fit T(u, v) = c + M*(u, v) + H(u, v): the affine part
+    // becomes CRPIX/CD corrections, the higher-order part becomes SIP.
+    let coefficient = |values: &[f64], term: (u8, u8)| {
+        terms
+            .iter()
+            .position(|&t| t == term)
+            .map_or(0.0, |index| values[index])
+    };
+    let c = (coefficient(&w_u, (0, 0)), coefficient(&w_v, (0, 0)));
+    let m = [
+        [coefficient(&w_u, (1, 0)), coefficient(&w_u, (0, 1))],
+        [coefficient(&w_v, (1, 0)), coefficient(&w_v, (0, 1))],
+    ];
+    let m_det = m[0][0] * m[1][1] - m[0][1] * m[1][0];
+    // The affine correction must stay a refinement of the linear stage,
+    // including its off-diagonals: an unchecked shear or rotation drift is
+    // as much a warp as a scale drift.
+    if m_det.abs() < 1e-12
+        || (m[0][0] - 1.0).abs() > 0.05
+        || (m[1][1] - 1.0).abs() > 0.05
+        || m[0][1].abs() > 0.05
+        || m[1][0].abs() > 0.05
+    {
+        return None;
+    }
+    let m_inverse = [
+        [m[1][1] / m_det, -m[0][1] / m_det],
+        [-m[1][0] / m_det, m[0][0] / m_det],
+    ];
+    // T = c + M u + H(u) = M (u + M^-1 c) + H(u): with the reference pixel
+    // shifted by -M^-1 c and CD scaled by M, the remaining distortion is
+    // M^-1 H expressed about the new reference. The shift is subpixel, so
+    // evaluating H about the old reference is within the fit noise.
+    let shift = (
+        m_inverse[0][0] * c.0 + m_inverse[0][1] * c.1,
+        m_inverse[1][0] * c.0 + m_inverse[1][1] * c.1,
+    );
+    if shift.0.hypot(shift.1) > 8.0 * MATCH_TOLERANCE_PX {
+        return None;
+    }
+    let crpix = (wcs.crpix.0 - shift.0, wcs.crpix.1 - shift.1);
+    let cd = [
+        [
+            wcs.cd[0][0] * m[0][0] + wcs.cd[0][1] * m[1][0],
+            wcs.cd[0][0] * m[0][1] + wcs.cd[0][1] * m[1][1],
+        ],
+        [
+            wcs.cd[1][0] * m[0][0] + wcs.cd[1][1] * m[1][0],
+            wcs.cd[1][0] * m[0][1] + wcs.cd[1][1] * m[1][1],
+        ],
+    ];
+    let mut a = Vec::with_capacity(sip_terms.len());
+    let mut b = Vec::with_capacity(sip_terms.len());
+    for &term in &sip_terms {
+        let h = (coefficient(&w_u, term), coefficient(&w_v, term));
+        a.push(m_inverse[0][0] * h.0 + m_inverse[0][1] * h.1);
+        b.push(m_inverse[1][0] * h.0 + m_inverse[1][1] * h.1);
+    }
+    let mut sip = Sip {
+        order,
+        a,
+        b,
+        ap: Vec::new(),
+        bp: Vec::new(),
+    };
+
+    // A polynomial that "improves" matched stars by warping the frame is
+    // worse than no polynomial: cap the correction at the corners.
+    let max_correction = norm * 0.02;
+    for (x, y) in [
+        (0.0, 0.0),
+        (width - 1.0, 0.0),
+        (width - 1.0, height - 1.0),
+        (0.0, height - 1.0),
+    ] {
+        let (f, g) = sip.forward(x - crpix.0, y - crpix.1);
+        if !f.is_finite() || !g.is_finite() || f.abs() > max_correction || g.abs() > max_correction
+        {
+            return None;
+        }
+    }
+
+    // Inverse polynomials fitted over a uniform grid of forward-distorted
+    // offsets, so `world_to_pixel` works everywhere in the frame, not just
+    // at the matched stars.
+    let inverse_terms = Sip::inverse_terms(order);
+    let mut inverse_rows = Vec::new();
+    let mut inverse_u = Vec::new();
+    let mut inverse_v = Vec::new();
+    const GRID: usize = 12;
+    for gy in 0..GRID {
+        for gx in 0..GRID {
+            let u = (width - 1.0) * gx as f64 / (GRID - 1) as f64 - crpix.0;
+            let v = (height - 1.0) * gy as f64 / (GRID - 1) as f64 - crpix.1;
+            let (f, g) = sip.forward(u, v);
+            let cap_u = u + f;
+            let cap_v = v + g;
+            inverse_rows.push(monomials(&inverse_terms, cap_u * scale, cap_v * scale));
+            inverse_u.push((u - cap_u) * scale);
+            inverse_v.push((v - cap_v) * scale);
+        }
+    }
+    sip.ap = unscale(
+        &solve_least_squares(&inverse_rows, &inverse_u)?,
+        &inverse_terms,
+    )?;
+    sip.bp = unscale(
+        &solve_least_squares(&inverse_rows, &inverse_v)?,
+        &inverse_terms,
+    )?;
+    // The inverse is an approximation; a solution whose world_to_pixel
+    // cannot reproduce its own forward mapping is not worth keeping.
+    for gy in 0..GRID {
+        for gx in 0..GRID {
+            let u = (width - 1.0) * gx as f64 / (GRID - 1) as f64 - crpix.0;
+            let v = (height - 1.0) * gy as f64 / (GRID - 1) as f64 - crpix.1;
+            let (f, g) = sip.forward(u, v);
+            let (cap_u, cap_v) = (u + f, v + g);
+            let (fi, gi) = sip.inverse(cap_u, cap_v);
+            if (cap_u + fi - u).hypot(cap_v + gi - v) > 0.1 {
+                return None;
+            }
+        }
+    }
+    Some(Wcs {
+        crval: wcs.crval,
+        crpix,
+        cd,
+        sip: Some(sip),
+    })
+}
+
+fn monomials(terms: &[(u8, u8)], u: f64, v: f64) -> Vec<f64> {
+    terms
+        .iter()
+        .map(|&(p, q)| u.powi(i32::from(p)) * v.powi(i32::from(q)))
+        .collect()
+}
+
+/// Solve `rows * x = targets` in the least-squares sense via normal
+/// equations with partial-pivot Gaussian elimination. The systems here are
+/// tiny (at most 20 unknowns) and the inputs are pre-normalized.
+fn solve_least_squares(rows: &[Vec<f64>], targets: &[f64]) -> Option<Vec<f64>> {
+    let n = rows.first()?.len();
+    let mut normal = vec![vec![0.0; n + 1]; n];
+    for (row, &target) in rows.iter().zip(targets) {
+        for i in 0..n {
+            for j in 0..n {
+                normal[i][j] += row[i] * row[j];
+            }
+            normal[i][n] += row[i] * target;
+        }
+    }
+    for column in 0..n {
+        let pivot = (column..n)
+            .max_by(|&a, &b| normal[a][column].abs().total_cmp(&normal[b][column].abs()))?;
+        if normal[pivot][column].abs() < 1e-12 {
+            return None;
+        }
+        normal.swap(column, pivot);
+        let (pivot_rows, elimination_rows) = normal.split_at_mut(column + 1);
+        let pivot_row = &pivot_rows[column];
+        for row in elimination_rows {
+            let factor = row[column] / pivot_row[column];
+            for (target, &source) in row[column..=n].iter_mut().zip(&pivot_row[column..=n]) {
+                *target -= factor * source;
+            }
+        }
+    }
+    let mut solution = vec![0.0; n];
+    for row in (0..n).rev() {
+        let mut value = normal[row][n];
+        for k in row + 1..n {
+            value -= normal[row][k] * solution[k];
+        }
+        solution[row] = value / normal[row][row];
+    }
+    solution
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(solution)
 }
 
 fn fov_radius_deg(hint: &SolveHint, dimensions: (u32, u32)) -> f64 {
@@ -339,6 +717,7 @@ fn tangent_wcs(center: (f64, f64)) -> Wcs {
         crval: center,
         crpix: (0.0, 0.0),
         cd: [[1.0, 0.0], [0.0, 1.0]],
+        sip: None,
     }
 }
 
@@ -746,11 +1125,83 @@ mod tests {
                     radius_deg: 1.5,
                     scale_arcsec_px: 2.2, // 10 % off
                     scale_tolerance: 0.25,
+                    sip_order: 0,
                 };
                 let solution = solve(&detected, &catalog, &hint, dims)
                     .unwrap_or_else(|e| panic!("rot {rotation} flip {flipped}: {e}"));
                 assert_solution_matches(&truth, &solution, dims);
             }
+        }
+    }
+
+    #[test]
+    fn sip_fit_reduces_distorted_field_residuals() {
+        let dims = (4000u32, 3000u32);
+        let truth =
+            Wcs::from_center_scale_rotation((150.5, 33.2), (2000.0, 1500.0), 2.0, 30.0, false);
+        let mut rng = Lcg(99);
+        // Barrel distortion about the image center: ~4.7 px at the corners,
+        // well inside the matcher's tolerance near the center and a strong
+        // systematic residual for the polynomial to absorb. The scene is
+        // deliberately noise-free so the residual is purely the distortion.
+        let distort = |x: f64, y: f64| {
+            let (dx, dy) = (x - 2000.0, y - 1500.0);
+            let factor = 1.0 + 3e-10 * (dx * dx + dy * dy);
+            (2000.0 + dx * factor, 1500.0 + dy * factor)
+        };
+        let mut catalog = Vec::new();
+        let mut detected = Vec::new();
+        for _ in 0..2500 {
+            let ra = truth.crval.0 + (rng.next() - 0.5) * 6.0;
+            let dec = (truth.crval.1 + (rng.next() - 0.5) * 6.0).clamp(-89.9, 89.9);
+            let mag = (4.0 + rng.next() * 8.0) as f32;
+            catalog.push(CatalogStar { ra, dec, mag });
+            if let Some((x, y)) = truth.world_to_pixel(ra, dec)
+                && (20.0..dims.0 as f64 - 20.0).contains(&x)
+                && (20.0..dims.1 as f64 - 20.0).contains(&y)
+            {
+                let (xd, yd) = distort(x, y);
+                detected.push(DetectedStar {
+                    x: xd,
+                    y: yd,
+                    flux: 10f64.powf(-0.4 * mag as f64) * 1e6,
+                    peak: 0.5,
+                    area: 20,
+                });
+            }
+        }
+        detected.sort_by(|a, b| b.flux.total_cmp(&a.flux));
+        let catalog = MemoryCatalog::new(catalog);
+        let hint = |sip_order| SolveHint {
+            center: (150.5, 33.2),
+            radius_deg: 0.5,
+            scale_arcsec_px: 2.0,
+            scale_tolerance: 0.2,
+            sip_order,
+        };
+        let linear = solve(&detected, &catalog, &hint(0), dims).unwrap();
+        assert!(linear.wcs.sip.is_none());
+        let solution = solve(&detected, &catalog, &hint(3), dims).unwrap();
+        let sip = solution.wcs.sip.as_ref().expect("SIP polynomials fitted");
+        assert!(sip.order >= 2, "{sip:?}");
+        assert!(
+            solution.rms_arcsec < linear.rms_arcsec * 0.6,
+            "linear rms {:.2}\" vs SIP rms {:.2}\"",
+            linear.rms_arcsec,
+            solution.rms_arcsec
+        );
+
+        // The solution must map distorted pixels onto true sky positions,
+        // and its inverse polynomials must map those positions back.
+        for &(x, y) in &[(400.0, 300.0), (3600.0, 2700.0), (2000.0, 320.0)] {
+            let (ra_t, dec_t) = truth.pixel_to_world(x, y);
+            let (xd, yd) = distort(x, y);
+            let (ra_s, dec_s) = solution.wcs.pixel_to_world(xd, yd);
+            let sep = angular_separation_deg(ra_t, dec_t, ra_s, dec_s) * 3600.0;
+            assert!(sep < 1.5, "({x}, {y}) off by {sep:.2}\"");
+            let (xi, yi) = solution.wcs.world_to_pixel(ra_t, dec_t).unwrap();
+            let miss = (xi - xd).hypot(yi - yd);
+            assert!(miss < 1.0, "inverse missed by {miss:.2} px");
         }
     }
 
@@ -766,6 +1217,7 @@ mod tests {
             radius_deg: 2.0,
             scale_arcsec_px: 3.0,
             scale_tolerance: 0.2,
+            sip_order: 0,
         };
         let solution = solve(&detected, &catalog, &hint, dims).unwrap();
         assert_solution_matches(&truth, &solution, dims);
@@ -784,6 +1236,7 @@ mod tests {
             radius_deg: 2.0,
             scale_arcsec_px: 2.0,
             scale_tolerance: 0.2,
+            sip_order: 0,
         };
 
         let solution = solve(&detected, &catalog, &hint, dims).unwrap();
@@ -810,6 +1263,7 @@ mod tests {
             radius_deg: 2.0,
             scale_arcsec_px: 1.0,
             scale_tolerance: 0.2,
+            sip_order: 0,
         };
 
         let solution = solve(&detected, &catalog, &hint, dims).unwrap();
@@ -835,6 +1289,7 @@ mod tests {
             radius_deg: 0.4,
             scale_arcsec_px: 2.0,
             scale_tolerance: 0.2,
+            sip_order: 0,
         };
 
         assert!(solve(&detected, &catalog, &hint, dims).is_err());
@@ -858,6 +1313,7 @@ mod tests {
             radius_deg: 1.0,
             scale_arcsec_px: 2.0,
             scale_tolerance: 0.2,
+            sip_order: 0,
         };
         assert!(solve(&detected, &catalog, &hint, dims).is_err());
     }
@@ -870,7 +1326,51 @@ mod tests {
             radius_deg: 1.0,
             scale_arcsec_px: 1.0,
             scale_tolerance: 0.2,
+            sip_order: 0,
         };
         assert!(solve(&[], &catalog, &hint, (100, 100)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod sip_fit {
+    use super::*;
+
+    #[test]
+    fn fit_sip_recovers_an_exact_cubic_distortion() {
+        let s = 2.0 / 3600.0;
+        let wcs = Wcs {
+            crval: (150.0, 33.0),
+            crpix: (2000.0, 1500.0),
+            cd: [[-s, 0.0], [0.0, -s]],
+            sip: None,
+        };
+        let k = 3e-10;
+        let mut pairs: Vec<PointPair> = Vec::new();
+        for gy in 0..20 {
+            for gx in 0..20 {
+                let u = (gx as f64 / 19.0) * 3999.0 - 2000.0;
+                let v = (gy as f64 / 19.0) * 2999.0 - 1500.0;
+                // True offsets (u, v); measured (distorted) offsets:
+                let factor = 1.0 + k * (u * u + v * v);
+                let (ud, vd) = (u * factor, v * factor);
+                let (xi, eta) = (-s * u, -s * v);
+                pairs.push(((2000.0 + ud, 1500.0 + vd), (xi, eta)));
+            }
+        }
+        let full = fit_sip(3, &wcs, &pairs, (4000, 3000)).expect("fit");
+        assert!(full.sip.is_some());
+        let mut worst: f64 = 0.0;
+        for &((px, py), (xi, eta)) in &pairs {
+            let true_wcs = Wcs {
+                sip: None,
+                ..wcs.clone()
+            };
+            let (ra, dec) = true_wcs.pixel_to_world(2000.0 + (-xi / s), 1500.0 + (-eta / s));
+            let (ra2, dec2) = full.pixel_to_world(px, py);
+            let sep = angular_separation_deg(ra, dec, ra2, dec2) * 3600.0;
+            worst = worst.max(sep);
+        }
+        assert!(worst < 0.05, "worst {worst}");
     }
 }

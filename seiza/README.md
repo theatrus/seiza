@@ -12,7 +12,9 @@ astrophotography, in Rust.
 - **Hinted plate solving** — triangle matching over FOV-sized windows,
   affine candidate voting, iterative least-squares refinement, seeded by an
   approximate center and pixel scale. Solves real telescope images in tens
-  of milliseconds with sub-arcsecond RMS.
+  of milliseconds with sub-arcsecond RMS. Optionally fits SIP distortion
+  polynomials (orders 2-5, forward and inverse) when they improve the
+  residual.
 - **Blind plate solving** — no position needed, only a plausible
   pixel-scale range. A disc-anchored 4-star pattern index over the whole
   sky is matched against quads of the brightest detections; hypotheses are

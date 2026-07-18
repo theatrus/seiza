@@ -1,0 +1,36 @@
+[package]
+name = "seiza-py"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/theatrus/seiza"
+authors = ["Yann Ramin <github@theatr.us>"]
+description = "Python bindings for seiza: star detection, WCS fitting, and plate solving"
+readme = "README.md"
+publish = false
+
+# Deliberately outside the cargo workspace: building against libpython must
+# never become a requirement of `cargo build --workspace`. Wheels are built
+# with maturin from this directory.
+[workspace]
+
+[lib]
+name = "seiza_py"
+crate-type = ["cdylib"]
+
+[features]
+default = []
+# Enabled by maturin (see pyproject.toml). Off by default so plain
+# `cargo check` in this directory links against a discovered libpython.
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+seiza = { path = "../seiza", features = ["downloads"] }
+pyo3 = { version = "0.25", features = ["abi3-py39"] }
+numpy = "0.25"
+image = { version = "0.25", default-features = false }
+tokio = { version = "1", features = ["rt"] }
+
+[profile.release]
+lto = true
+codegen-units = 1

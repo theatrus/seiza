@@ -1,0 +1,117 @@
+name: Python wheels
+
+on:
+  push:
+    branches: [main]
+    tags: ["py-v*"]
+    paths:
+      - "seiza-py/**"
+      - "seiza/**"
+      - "seiza-download/**"
+      - ".github/workflows/python-wheels.yml"
+  pull_request:
+    paths:
+      - "seiza-py/**"
+      - "seiza/**"
+      - "seiza-download/**"
+      - ".github/workflows/python-wheels.yml"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.9.1
+        with:
+          workspaces: seiza-py
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build and test bindings
+        working-directory: seiza-py
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install maturin numpy pytest astropy
+          maturin develop --release
+          python -m pytest tests/ -q
+      - name: Lint bindings
+        working-directory: seiza-py
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+
+  # abi3 wheels: one artifact per platform/arch covers CPython >= 3.9.
+  wheels:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64
+            manylinux: "2014"
+          # ring's ARM assembly needs a toolchain defining __ARM_ARCH; the
+          # manylinux2014 cross container is too old, 2_28 works.
+          - os: ubuntu-latest
+            target: aarch64
+            manylinux: "2_28"
+          - os: macos-latest
+            target: universal2-apple-darwin
+          - os: windows-latest
+            target: x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: seiza-py
+          target: ${{ matrix.target }}
+          args: --release --out ../dist
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.target }}
+          path: dist/*.whl
+
+  sdist:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: seiza-py
+          command: sdist
+          args: --out ../dist
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheels-sdist
+          path: dist/*.tar.gz
+
+  # Publishing runs only for py-v* tags, via PyPI trusted publishing (OIDC);
+  # enable the publisher for this repository on PyPI before the first tag.
+  publish:
+    if: startsWith(github.ref, 'refs/tags/py-v')
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
