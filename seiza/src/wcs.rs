@@ -52,21 +52,29 @@ impl Sip {
 
     /// `(f(u, v), g(u, v))`: the forward distortion correction in pixels.
     pub fn forward(&self, u: f64, v: f64) -> (f64, f64) {
-        Self::eval(&self.a, &self.b, Self::forward_terms(self.order), u, v)
+        Self::eval(&self.a, &self.b, self.order, 2, u, v)
     }
 
     /// `(F(U, V), G(U, V))`: the inverse correction in pixels.
     pub fn inverse(&self, u: f64, v: f64) -> (f64, f64) {
-        Self::eval(&self.ap, &self.bp, Self::inverse_terms(self.order), u, v)
+        Self::eval(&self.ap, &self.bp, self.order, 0, u, v)
     }
 
-    fn eval(a: &[f64], b: &[f64], terms: Vec<(u8, u8)>, u: f64, v: f64) -> (f64, f64) {
+    /// Allocation-free evaluation: transforms run per pixel in overlay and
+    /// fitting loops. Term visit order matches [`Sip::terms`] exactly.
+    fn eval(a: &[f64], b: &[f64], order: u8, min_total: u8, u: f64, v: f64) -> (f64, f64) {
         let mut f = 0.0;
         let mut g = 0.0;
-        for (index, (p, q)) in terms.iter().enumerate() {
-            let monomial = u.powi(*p as i32) * v.powi(*q as i32);
-            f += a.get(index).copied().unwrap_or(0.0) * monomial;
-            g += b.get(index).copied().unwrap_or(0.0) * monomial;
+        let mut index = 0;
+        for p in 0..=order {
+            for q in 0..=order.saturating_sub(p) {
+                if p + q >= min_total {
+                    let monomial = u.powi(i32::from(p)) * v.powi(i32::from(q));
+                    f += a.get(index).copied().unwrap_or(0.0) * monomial;
+                    g += b.get(index).copied().unwrap_or(0.0) * monomial;
+                    index += 1;
+                }
+            }
         }
         (f, g)
     }

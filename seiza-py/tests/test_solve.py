@@ -140,7 +140,8 @@ def test_wcs_transform_round_trip():
 
 def test_solve_failure_raises():
     catalog = seiza.StarCatalog.from_stars([(10.0, 10.0, 5.0)])
-    with pytest.raises(RuntimeError):
+    assert issubclass(seiza.SolveError, RuntimeError)
+    with pytest.raises(seiza.SolveError):
         seiza.solve(
             [(10.0, 10.0, 100.0), (20.0, 20.0, 90.0)],
             catalog,

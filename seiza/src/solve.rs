@@ -311,23 +311,32 @@ fn solve_search(
             if matched.len() < MIN_INLIERS || matched.len() < fit_set.len() {
                 break;
             }
-            let rms_over = |wcs: &Wcs| {
-                let sum_sq: f64 = matched
+            let sum_sq_over = |wcs: &Wcs| {
+                matched
                     .iter()
                     .map(|pair| {
                         let (ra, dec) = wcs.pixel_to_world(pair.pixel.0, pair.pixel.1);
                         let sep = angular_separation_deg(ra, dec, pair.sky.0, pair.sky.1) * 3600.0;
                         sep * sep
                     })
-                    .sum();
-                (sum_sq / matched.len() as f64).sqrt()
+                    .sum::<f64>()
             };
-            let candidate_rms = rms_over(&candidate);
-            if candidate_rms >= rms_over(&linear).min(rms_arcsec) {
+            // In-sample residuals always shrink when parameters are added,
+            // so compare degrees-of-freedom-corrected residuals: the
+            // polynomial must explain more than its extra coefficients buy
+            // for free, or a sparse noisy field would always "improve".
+            let observations = 2.0 * matched.len() as f64;
+            let candidate_parameters = candidate.sip.as_ref().map_or(6.0, |sip| {
+                2.0 * crate::wcs::Sip::inverse_terms(sip.order).len() as f64
+            });
+            let candidate_sum_sq = sum_sq_over(&candidate);
+            let reduced_candidate = candidate_sum_sq / (observations - candidate_parameters);
+            let reduced_linear = sum_sq_over(&linear) / (observations - 6.0);
+            if !reduced_candidate.is_finite() || reduced_candidate >= reduced_linear {
                 break;
             }
             wcs = candidate;
-            rms_arcsec = candidate_rms;
+            rms_arcsec = (candidate_sum_sq / matched.len() as f64).sqrt();
             matched_stars = matched.len();
             fit_set = matched
                 .iter()
@@ -363,8 +372,8 @@ fn match_sky_pairs(
 ) -> Vec<SkyPair> {
     let (width, height) = (dimensions.0 as f64, dimensions.1 as f64);
     let margin = 2.0 * MATCH_TOLERANCE_PX;
-    let mut result = Vec::new();
-    for &(_, _, star) in cat {
+    let mut proposals: Vec<(f64, usize, usize)> = Vec::new();
+    for (cat_index, &(_, _, star)) in cat.iter().enumerate() {
         let Some((sx, sy)) = wcs.world_to_pixel(star.ra, star.dec) else {
             continue;
         };
@@ -373,18 +382,37 @@ fn match_sky_pairs(
         }
         let nearest = stars
             .iter()
-            .map(|s| ((s.x - sx).hypot(s.y - sy), (s.x, s.y)))
+            .enumerate()
+            .map(|(star_index, s)| ((s.x - sx).hypot(s.y - sy), star_index))
             .min_by(|a, b| a.0.total_cmp(&b.0));
-        if let Some((distance, pixel)) = nearest
+        if let Some((distance, star_index)) = nearest
             && distance <= MATCH_TOLERANCE_PX
-            && let Some(tangent) = recentre.world_to_pixel(star.ra, star.dec)
         {
-            result.push(SkyPair {
-                pixel,
-                tangent,
-                sky: (star.ra, star.dec),
-            });
+            proposals.push((distance, star_index, cat_index));
         }
+    }
+    // Greedy mutual exclusion, closest matches first: without it, two
+    // nearby catalog stars can both claim one detected star, inflating the
+    // match count and double-weighting that star in the fit and residual.
+    proposals.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut used_star = vec![false; stars.len()];
+    let mut used_cat = vec![false; cat.len()];
+    let mut result = Vec::new();
+    for (_, star_index, cat_index) in proposals {
+        if used_star[star_index] || used_cat[cat_index] {
+            continue;
+        }
+        let star = &cat[cat_index].2;
+        let Some(tangent) = recentre.world_to_pixel(star.ra, star.dec) else {
+            continue;
+        };
+        used_star[star_index] = true;
+        used_cat[cat_index] = true;
+        result.push(SkyPair {
+            pixel: (stars[star_index].x, stars[star_index].y),
+            tangent,
+            sky: (star.ra, star.dec),
+        });
     }
     result
 }
@@ -471,8 +499,15 @@ fn fit_sip(order: u8, wcs: &Wcs, pairs: &[PointPair], dimensions: (u32, u32)) ->
         [coefficient(&w_v, (1, 0)), coefficient(&w_v, (0, 1))],
     ];
     let m_det = m[0][0] * m[1][1] - m[0][1] * m[1][0];
-    // The affine correction must stay a refinement of the linear stage.
-    if m_det.abs() < 1e-12 || (m[0][0] - 1.0).abs() > 0.05 || (m[1][1] - 1.0).abs() > 0.05 {
+    // The affine correction must stay a refinement of the linear stage,
+    // including its off-diagonals: an unchecked shear or rotation drift is
+    // as much a warp as a scale drift.
+    if m_det.abs() < 1e-12
+        || (m[0][0] - 1.0).abs() > 0.05
+        || (m[1][1] - 1.0).abs() > 0.05
+        || m[0][1].abs() > 0.05
+        || m[1][0].abs() > 0.05
+    {
         return None;
     }
     let m_inverse = [
@@ -560,6 +595,20 @@ fn fit_sip(order: u8, wcs: &Wcs, pairs: &[PointPair], dimensions: (u32, u32)) ->
         &solve_least_squares(&inverse_rows, &inverse_v)?,
         &inverse_terms,
     )?;
+    // The inverse is an approximation; a solution whose world_to_pixel
+    // cannot reproduce its own forward mapping is not worth keeping.
+    for gy in 0..GRID {
+        for gx in 0..GRID {
+            let u = (width - 1.0) * gx as f64 / (GRID - 1) as f64 - crpix.0;
+            let v = (height - 1.0) * gy as f64 / (GRID - 1) as f64 - crpix.1;
+            let (f, g) = sip.forward(u, v);
+            let (cap_u, cap_v) = (u + f, v + g);
+            let (fi, gi) = sip.inverse(cap_u, cap_v);
+            if (cap_u + fi - u).hypot(cap_v + gi - v) > 0.1 {
+                return None;
+            }
+        }
+    }
     Some(Wcs {
         crval: wcs.crval,
         crpix,

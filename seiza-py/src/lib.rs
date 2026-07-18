@@ -10,6 +10,14 @@ use seiza::detect::{DetectConfig, DetectedStar, detect_stars, detect_stars_luma_
 use seiza::wcs::Wcs as SeizaWcs;
 use std::path::PathBuf;
 
+pyo3::create_exception!(
+    seiza,
+    SolveError,
+    PyRuntimeError,
+    "The field could not be solved (too few stars, no catalog match, or no \
+     verified hypothesis)."
+);
+
 /// A detected or externally supplied star in 0-indexed pixel coordinates.
 #[pyclass(frozen, name = "Star", module = "seiza")]
 #[derive(Clone)]
@@ -592,7 +600,7 @@ fn solve(
     });
     solution
         .map(|solution| solution_to_py(solution, (width, height)))
-        .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+        .map_err(|error| SolveError::new_err(error.to_string()))
 }
 
 /// Plate solve with no position hint using a whole-sky pattern index.
@@ -634,7 +642,7 @@ fn solve_blind(
     });
     solution
         .map(|solution| solution_to_py(solution, (width, height)))
-        .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+        .map_err(|error| SolveError::new_err(error.to_string()))
 }
 
 fn dataset_by_file_name(name: &str) -> PyResult<seiza::downloads::Dataset> {
@@ -732,6 +740,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solve, m)?)?;
     m.add_function(wrap_pyfunction!(solve_blind, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_catalogs, m)?)?;
+    m.add("SolveError", m.py().get_type::<SolveError>())?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

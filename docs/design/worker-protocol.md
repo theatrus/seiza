@@ -66,7 +66,9 @@ Protocol version 1 is currently the only supported version.
 The `hint` object is required in hinted mode. Coordinates are ICRS/J2000
 degrees. `scaleTolerance` is fractional, so `0.2` allows +/-20 percent.
 The optional `sipOrder` field (0-5, default 0) requests SIP distortion
-polynomials of that order; 0 keeps the linear solution. Older workers reject
+polynomials of that order; 0 keeps the linear solution. Remote
+(`--server`) workers accept the field but do not fit distortion — their
+responses always carry a linear `TAN` solution. Older workers reject
 unknown fields, so send it only to workers advertising `schemaVersion >= 1`.
 
 ## Blind solve
