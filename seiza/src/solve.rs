@@ -95,7 +95,44 @@ pub fn solve(
         }
     }
 
-    solve_search(stars, catalog, hint, dimensions)
+    match solve_search(stars, catalog, hint, dimensions) {
+        Ok(solution) => Ok(solution),
+        // Triangle matching assumes the list's flux ordering tracks real
+        // brightness; when it fails, retry with the rank-robust quad
+        // search that treats ordering as a prior only.
+        Err(triangle_error) => {
+            let tables = RankRobustTables::build(stars, dimensions);
+            solve_rank_robust(stars, catalog, hint, dimensions, &tables, RR_PROBE_BUDGET).map_err(
+                |robust_error| crate::Error::Solve(format!("{triangle_error}; {robust_error}")),
+            )
+        }
+    }
+}
+
+/// [`solve`] for blind hypothesis verification: identical semantics, but
+/// the caller decides whether this hypothesis has earned the rank-robust
+/// fallback. A whole-sky search verifies hundreds of junk hypotheses per
+/// image, so those pass `None` and fail at triangle cost; the few whose
+/// position-only coarse score shows real catalog agreement pass prebuilt
+/// tables and get the full search.
+pub(crate) fn solve_for_blind_hypothesis(
+    stars: &[DetectedStar],
+    catalog: &dyn StarCatalog,
+    hint: &SolveHint,
+    dimensions: (u32, u32),
+    tables: Option<&RankRobustTables>,
+) -> Result<Solution, crate::Error> {
+    match solve_search(stars, catalog, hint, dimensions) {
+        Ok(solution) => Ok(solution),
+        Err(triangle_error) => {
+            let Some(tables) = tables else {
+                return Err(triangle_error);
+            };
+            solve_rank_robust(stars, catalog, hint, dimensions, tables, RR_PROBE_BUDGET).map_err(
+                |robust_error| crate::Error::Solve(format!("{triangle_error}; {robust_error}")),
+            )
+        }
+    }
 }
 
 /// Run the triangle matcher across every FOV-sized window in `hint`.
@@ -114,7 +151,6 @@ fn solve_search(
             stars.len()
         )));
     }
-    let (width, height) = (dimensions.0 as f64, dimensions.1 as f64);
     let scale_deg = hint.scale_arcsec_px / 3600.0;
     let fov_radius_deg = fov_radius_deg(hint, dimensions);
 
@@ -222,7 +258,7 @@ fn solve_search(
             best = Some((inliers, affine.clone()));
         }
     }
-    let (votes, mut affine) = best.unwrap();
+    let (votes, affine) = best.unwrap();
     if votes < MIN_INLIERS.min(vote_stars.len() * 2 / 3) {
         return Err(crate::Error::Solve(format!(
             "best candidate matched only {votes} of {} stars",
@@ -230,11 +266,32 @@ fn solve_search(
         )));
     }
 
+    refine_to_solution(
+        affine, stars, &cat, &grid, match_tol, &tangent, hint, dimensions,
+    )
+}
+
+/// Refine one plausible pixel-to-tangent affine into a complete solution:
+/// iterative re-matching with least-squares fits, re-centering about the
+/// image center, quality metrics, and the optional SIP stage. Shared by
+/// the triangle path and the rank-robust quad path.
+#[allow(clippy::too_many_arguments)]
+fn refine_to_solution(
+    mut affine: Affine,
+    stars: &[DetectedStar],
+    cat: &[(f64, f64, CatalogStar)],
+    grid: &CatGrid,
+    match_tol: f64,
+    tangent: &Wcs,
+    hint: &SolveHint,
+    dimensions: (u32, u32),
+) -> Result<Solution, crate::Error> {
+    let (width, height) = (dimensions.0 as f64, dimensions.1 as f64);
     // Iterative least-squares refinement with re-matching
     let all_stars: Vec<(f64, f64)> = stars.iter().map(|s| (s.x, s.y)).collect();
     let mut pairs = Vec::new();
     for _ in 0..REFINE_ITERATIONS {
-        pairs = match_pairs(&affine, &all_stars, &cat, &grid, match_tol);
+        pairs = match_pairs(&affine, &all_stars, cat, grid, match_tol);
         if pairs.len() < MIN_INLIERS {
             return Err(crate::Error::Solve(format!(
                 "refinement collapsed to {} matches",
@@ -307,7 +364,7 @@ fn solve_search(
             let Some(candidate) = fit_sip(hint.sip_order, &wcs, &fit_set, dimensions) else {
                 break;
             };
-            let matched = match_sky_pairs(&candidate, stars, &cat, &recentre, dimensions);
+            let matched = match_sky_pairs(&candidate, stars, cat, &recentre, dimensions);
             if matched.len() < MIN_INLIERS || matched.len() < fit_set.len() {
                 break;
             }
@@ -350,6 +407,362 @@ fn solve_search(
         matched_stars,
         rms_arcsec,
     })
+}
+
+// --------------------------------------------------------------------------
+// Rank-robust fallback: catalog-seeded quads verified against a position
+// hash over the full star list. Used when triangle matching fails, which
+// happens when the input list's flux ordering does not track photometric
+// brightness (see docs/design/rank-robust-matching.md). Brightness is used
+// only as a search-ordering prior here, never as a correctness assumption.
+
+/// Minimum stars for the fallback to be worth running.
+const RR_MIN_STARS: usize = 30;
+/// Stars (in given order, a soft prior) admitted to the pair table.
+const RR_MAX_PAIR_STARS: usize = 2500;
+/// Bright catalog window stars forming quads.
+const RR_CATALOG_WINDOW: usize = 100;
+/// Positional tolerance for quad-star probes, pixels.
+const RR_PROBE_TOL_PX: f64 = 2.5;
+/// Cheap-count acceptance floor before full refinement runs.
+const RR_COUNT_MIN: usize = 10;
+/// Total quads examined before giving up.
+const RR_MAX_QUADS: usize = 400;
+/// Probe budget per rank-robust search: bounds the worst case on an
+/// unsolvable field to a few seconds of CPU, well under the cost of the
+/// blind fallback that follows a failed hinted solve.
+const RR_PROBE_BUDGET: usize = 200_000_000;
+
+/// Star-list-side tables for the rank-robust search: the position hash
+/// and the length-sorted pair table. They depend only on the detected
+/// star list, so blind verification builds them once per image and
+/// reuses them across every hypothesis.
+pub(crate) struct RankRobustTables {
+    pair_stars: Vec<(f64, f64)>,
+    /// `(length_px, i, j)` sorted by length so a backbone length selects
+    /// a candidate window by binary search.
+    pairs: Vec<(f32, u32, u32)>,
+    probe_grid: ImageGrid,
+}
+
+impl RankRobustTables {
+    pub(crate) fn build(stars: &[DetectedStar], dimensions: (u32, u32)) -> Self {
+        let probe_grid = ImageGrid::build(stars, RR_PROBE_TOL_PX);
+        // Pair table over the (prior-ordered) star list.
+        let pair_stars: Vec<(f64, f64)> = stars
+            .iter()
+            .take(RR_MAX_PAIR_STARS)
+            .map(|s| (s.x, s.y))
+            .collect();
+        let diag_px = (dimensions.0 as f64).hypot(dimensions.1 as f64);
+        let mut pairs: Vec<(f32, u32, u32)> = Vec::new();
+        for i in 0..pair_stars.len() {
+            for j in (i + 1)..pair_stars.len() {
+                let length =
+                    (pair_stars[i].0 - pair_stars[j].0).hypot(pair_stars[i].1 - pair_stars[j].1);
+                if length > 8.0 && length <= diag_px {
+                    pairs.push((length as f32, i as u32, j as u32));
+                }
+            }
+        }
+        pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+        Self {
+            pair_stars,
+            pairs,
+            probe_grid,
+        }
+    }
+}
+
+/// Hinted solve that does not trust the star list's flux ordering.
+fn solve_rank_robust(
+    stars: &[DetectedStar],
+    catalog: &dyn StarCatalog,
+    hint: &SolveHint,
+    dimensions: (u32, u32),
+    tables: &RankRobustTables,
+    probe_budget: usize,
+) -> Result<Solution, crate::Error> {
+    if stars.len() < RR_MIN_STARS {
+        return Err(crate::Error::Solve(format!(
+            "only {} stars; rank-robust matching needs at least {RR_MIN_STARS}",
+            stars.len()
+        )));
+    }
+    let scale_deg = hint.scale_arcsec_px / 3600.0;
+    let fov_radius_deg = fov_radius_deg(hint, dimensions);
+    let search_radius = hint.radius_deg + fov_radius_deg;
+    let cone = catalog.cone_search(hint.center.0, hint.center.1, search_radius, 400);
+    if cone.len() < 8 {
+        return Err(crate::Error::Solve(format!(
+            "only {} catalog stars within {search_radius:.2}\u{b0} of the hint",
+            cone.len()
+        )));
+    }
+    let tangent = tangent_wcs(hint.center);
+    let cat: Vec<(f64, f64, CatalogStar)> = cone
+        .iter()
+        .filter_map(|s| tangent.world_to_pixel(s.ra, s.dec).map(|(x, y)| (x, y, *s)))
+        .collect();
+    let match_tol = MATCH_TOLERANCE_PX * scale_deg;
+    let grid = CatGrid::build(&cat, match_tol);
+
+    // Catalog quads: each bright window star anchors quads with three of
+    // its four nearest bright neighbors. Catalog brightness is reliable,
+    // so these quads are near-certainly present among the image stars.
+    let window: Vec<(f64, f64)> = cat
+        .iter()
+        .take(RR_CATALOG_WINDOW)
+        .map(|&(x, y, _)| (x, y))
+        .collect();
+    let mut quads: Vec<[(f64, f64); 4]> = Vec::new();
+    for (anchor_index, &anchor) in window.iter().enumerate() {
+        let mut neighbors: Vec<(f64, (f64, f64))> = window
+            .iter()
+            .enumerate()
+            .filter(|&(other, _)| other != anchor_index)
+            .map(|(_, &p)| ((p.0 - anchor.0).hypot(p.1 - anchor.1), p))
+            .collect();
+        neighbors.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let near: Vec<(f64, f64)> = neighbors.iter().take(4).map(|&(_, p)| p).collect();
+        if near.len() < 3 {
+            continue;
+        }
+        for skip in 0..near.len() {
+            let mut quad = [anchor; 4];
+            let mut slot = 1;
+            for (index, &p) in near.iter().enumerate() {
+                if index != skip && slot < 4 {
+                    quad[slot] = p;
+                    slot += 1;
+                }
+            }
+            if slot == 4 {
+                quads.push(quad);
+            }
+        }
+    }
+    quads.truncate(RR_MAX_QUADS);
+
+    let RankRobustTables {
+        pair_stars,
+        pairs,
+        probe_grid,
+    } = tables;
+    let scale_low = hint.scale_arcsec_px * (1.0 - hint.scale_tolerance.min(0.9));
+    let scale_high = hint.scale_arcsec_px * (1.0 + hint.scale_tolerance);
+    let mut probes_left = probe_budget;
+
+    for quad in &quads {
+        // Backbone: the quad's widest pair; the other two verify.
+        let mut backbone = (0, 1);
+        let mut widest = 0.0;
+        for a in 0..4 {
+            for b in (a + 1)..4 {
+                let d = (quad[a].0 - quad[b].0).hypot(quad[a].1 - quad[b].1);
+                if d > widest {
+                    widest = d;
+                    backbone = (a, b);
+                }
+            }
+        }
+        let p1 = quad[backbone.0];
+        let p2 = quad[backbone.1];
+        let others: Vec<(f64, f64)> = (0..4)
+            .filter(|&k| k != backbone.0 && k != backbone.1)
+            .map(|k| quad[k])
+            .collect();
+        let backbone_deg = widest;
+        // Pixel-length window implied by the scale tolerance.
+        let low = (backbone_deg * 3600.0 / scale_high - RR_PROBE_TOL_PX).max(8.0) as f32;
+        let high = (backbone_deg * 3600.0 / scale_low + RR_PROBE_TOL_PX) as f32;
+        let from = pairs.partition_point(|pair| pair.0 < low);
+        let to = pairs.partition_point(|pair| pair.0 <= high);
+
+        for &(_, i, j) in &pairs[from..to] {
+            let image_i = pair_stars[i as usize];
+            let image_j = pair_stars[j as usize];
+            for (a_img, b_img) in [(image_i, image_j), (image_j, image_i)] {
+                for mirrored in [false, true] {
+                    probes_left = probes_left.saturating_sub(1);
+                    if probes_left == 0 {
+                        return Err(crate::Error::Solve(format!(
+                            "rank-robust search exhausted its {probe_budget}-probe budget"
+                        )));
+                    }
+                    let Some(transform) =
+                        SimilarityTransform::from_pair(p1, p2, a_img, b_img, mirrored)
+                    else {
+                        continue;
+                    };
+                    // Both remaining quad stars must land on image stars.
+                    if !others
+                        .iter()
+                        .all(|&p| probe_grid.hit(transform.apply(p), RR_PROBE_TOL_PX))
+                    {
+                        continue;
+                    }
+                    // Cheap census before paying for refinement: only
+                    // window stars the transform places inside the frame
+                    // can match, so the floor adapts when the hint offset
+                    // leaves few of them in view.
+                    probes_left = probes_left.saturating_sub(window.len());
+                    let margin = RR_PROBE_TOL_PX * 1.5;
+                    let (width, height) = (dimensions.0 as f64, dimensions.1 as f64);
+                    let mut in_frame = 0usize;
+                    let mut count = 0usize;
+                    for &p in &window {
+                        let t = transform.apply(p);
+                        if t.0 >= -margin
+                            && t.1 >= -margin
+                            && t.0 < width + margin
+                            && t.1 < height + margin
+                        {
+                            in_frame += 1;
+                            if probe_grid.hit(t, margin) {
+                                count += 1;
+                            }
+                        }
+                    }
+                    if count < RR_COUNT_MIN.min((in_frame * 2 / 3).max(4)) {
+                        continue;
+                    }
+                    // Convert tangent->pixel similarity into the solver's
+                    // pixel->tangent affine and hand off to the shared
+                    // refinement machinery.
+                    let inverse = Affine::from_three_points(
+                        &[
+                            transform.apply((0.0, 0.0)),
+                            transform.apply((0.01, 0.0)),
+                            transform.apply((0.0, 0.01)),
+                        ],
+                        &[(0.0, 0.0), (0.01, 0.0), (0.0, 0.01)],
+                    );
+                    let Some(inverse) = inverse else { continue };
+                    if let Ok(solution) = refine_to_solution(
+                        inverse, stars, &cat, &grid, match_tol, &tangent, hint, dimensions,
+                    ) && solution.matched_stars >= FAST_HINT_MIN_INLIERS
+                        && solution.rms_arcsec < FAST_HINT_MAX_RMS_PX * hint.scale_arcsec_px
+                    {
+                        return Ok(solution);
+                    }
+                }
+            }
+        }
+    }
+    Err(crate::Error::Solve(
+        "rank-robust search found no verified transform".to_string(),
+    ))
+}
+
+/// A tangent-degrees to pixel similarity (rotation + uniform scale +
+/// translation, optionally mirrored), built from one point correspondence
+/// pair via complex ratios.
+struct SimilarityTransform {
+    a: (f64, f64),
+    b: (f64, f64),
+    mirrored: bool,
+}
+
+impl SimilarityTransform {
+    fn from_pair(
+        p1: (f64, f64),
+        p2: (f64, f64),
+        i1: (f64, f64),
+        i2: (f64, f64),
+        mirrored: bool,
+    ) -> Option<Self> {
+        let source = if mirrored {
+            complex_sub(conj(p2), conj(p1))
+        } else {
+            complex_sub(p2, p1)
+        };
+        let target = complex_sub(i2, i1);
+        let a = complex_div(target, source)?;
+        let anchor = if mirrored { conj(p1) } else { p1 };
+        let b = complex_sub(i1, complex_mul(a, anchor));
+        Some(Self { a, b, mirrored })
+    }
+
+    fn apply(&self, p: (f64, f64)) -> (f64, f64) {
+        let z = if self.mirrored { conj(p) } else { p };
+        let t = complex_mul(self.a, z);
+        (t.0 + self.b.0, t.1 + self.b.1)
+    }
+}
+
+fn conj(z: (f64, f64)) -> (f64, f64) {
+    (z.0, -z.1)
+}
+
+fn complex_sub(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    (a.0 - b.0, a.1 - b.1)
+}
+
+fn complex_mul(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0)
+}
+
+fn complex_div(a: (f64, f64), b: (f64, f64)) -> Option<(f64, f64)> {
+    let norm = b.0 * b.0 + b.1 * b.1;
+    if norm < 1e-24 {
+        return None;
+    }
+    Some((
+        (a.0 * b.0 + a.1 * b.1) / norm,
+        (a.1 * b.0 - a.0 * b.1) / norm,
+    ))
+}
+
+/// Position hash over image stars for O(1) tolerance-circle probes.
+struct ImageGrid {
+    cell: f64,
+    cells: rustc_hash::FxHashMap<(i64, i64), Vec<u32>>,
+    positions: Vec<(f64, f64)>,
+}
+
+impl ImageGrid {
+    fn build(stars: &[DetectedStar], tolerance: f64) -> Self {
+        let cell = (tolerance * 2.0).max(1.0);
+        let mut cells: rustc_hash::FxHashMap<(i64, i64), Vec<u32>> =
+            rustc_hash::FxHashMap::default();
+        let mut positions = Vec::with_capacity(stars.len());
+        for (index, star) in stars.iter().enumerate() {
+            positions.push((star.x, star.y));
+            cells
+                .entry((
+                    (star.x / cell).floor() as i64,
+                    (star.y / cell).floor() as i64,
+                ))
+                .or_default()
+                .push(index as u32);
+        }
+        Self {
+            cell,
+            cells,
+            positions,
+        }
+    }
+
+    fn hit(&self, point: (f64, f64), tolerance: f64) -> bool {
+        let cx = (point.0 / self.cell).floor() as i64;
+        let cy = (point.1 / self.cell).floor() as i64;
+        let tol_sq = tolerance * tolerance;
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                if let Some(indices) = self.cells.get(&(cx + dx, cy + dy)) {
+                    for &index in indices {
+                        let p = self.positions[index as usize];
+                        let d = (p.0 - point.0).powi(2) + (p.1 - point.1).powi(2);
+                        if d <= tol_sq {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
 }
 
 /// One matched star for SIP refinement: the detected pixel position, the
@@ -1206,6 +1619,63 @@ mod tests {
     }
 
     #[test]
+    fn rank_robust_fallback_solves_a_flux_shuffled_field() {
+        let dims = (4000u32, 3000u32);
+        let truth =
+            Wcs::from_center_scale_rotation((150.5, 33.2), (2000.0, 1500.0), 2.0, 25.0, false);
+        let mut rng = Lcg(77);
+        // The Siril condition: the image list goes much deeper than the
+        // catalog's bright stars, and its flux ordering is uncorrelated
+        // with real brightness — the brightest-N subsets share almost no
+        // members with the catalog's top stars.
+        let mut catalog = Vec::new();
+        let mut detected = Vec::new();
+        for _ in 0..6000 {
+            let ra = truth.crval.0 + (rng.next() - 0.5) * 8.0;
+            let dec = (truth.crval.1 + (rng.next() - 0.5) * 8.0).clamp(-89.9, 89.9);
+            let mag = (4.0 + rng.next() * 8.0) as f32;
+            // The catalog is magnitude-limited; the image list goes much
+            // deeper, so a shuffled ranking floods the brightest-N image
+            // subsets with stars the catalog does not contain.
+            if mag < 8.0 {
+                catalog.push(CatalogStar { ra, dec, mag });
+            }
+            if let Some((x, y)) = truth.world_to_pixel(ra, dec)
+                && x > 20.0
+                && y > 20.0
+                && x < dims.0 as f64 - 20.0
+                && y < dims.1 as f64 - 20.0
+            {
+                detected.push(DetectedStar {
+                    x,
+                    y,
+                    flux: rng.next() * 1e6, // shuffled: unrelated to mag
+                    peak: 0.5,
+                    area: 10,
+                });
+            }
+        }
+        detected.sort_by(|a, b| b.flux.total_cmp(&a.flux));
+        assert!(detected.len() > 100, "scene too sparse: {}", detected.len());
+        let catalog = CountingCatalog::new(MemoryCatalog::new(catalog));
+
+        let hint = SolveHint {
+            center: (150.6, 33.1),
+            radius_deg: 0.5,
+            scale_arcsec_px: 2.0,
+            scale_tolerance: 0.2,
+            sip_order: 0,
+        };
+        let solution = solve(&detected, &catalog, &hint, dims).unwrap();
+        assert_solution_matches(&truth, &solution, dims);
+        assert!(
+            catalog.searches.get() >= 2,
+            "the shuffled ordering must defeat the triangle stage and be \
+             solved by the rank-robust fallback"
+        );
+    }
+
+    #[test]
     fn solves_near_the_pole() {
         let dims = (3000u32, 2000u32);
         let truth =
@@ -1293,10 +1763,13 @@ mod tests {
         };
 
         assert!(solve(&detected, &catalog, &hint, dims).is_err());
+        // One triangle-stage search plus one rank-robust fallback search:
+        // the guarantee is that the triangle stage never retries the same
+        // center, not that the fallback is skipped.
         assert_eq!(
             catalog.searches.get(),
-            1,
-            "a one-window search must not retry the same center"
+            2,
+            "one triangle search and one rank-robust fallback search"
         );
     }
 

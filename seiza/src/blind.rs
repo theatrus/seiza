@@ -98,6 +98,10 @@ const BINS: f64 = 128.0;
 const PROBE_EPSILON: f64 = 0.002;
 /// Descriptor match tolerance in bins (probes adjacent bins).
 const N_IMAGE_STARS: usize = 32;
+/// Coarse position-only matches a hypothesis needs before verification
+/// engages the rank-robust fallback ([`coarse_match_count`] projects
+/// zero or one for random descriptor collisions).
+const RR_VERIFY_COARSE_FLOOR: usize = 10;
 /// Bound the temporary per-anchor vectors created by parallel index
 /// generation. Deep Gaia tiers contain tens of millions of stars; collecting
 /// one `Vec` per anchor for an entire tier can otherwise consume gigabytes
@@ -712,19 +716,30 @@ pub fn solve_blind(
         )));
     }
 
-    let solution =
-        match solve_blind_with_global_ladder(stars, catalog, index, params, dimensions, &[8]) {
-            Ok(solution) => solution,
-            Err(crate::Error::Solve(_)) => solve_blind_with_global_ladder(
-                stars,
-                catalog,
-                index,
-                params,
-                dimensions,
-                &[8, 10, 12, 16, 20, 26, 32],
-            )?,
-            Err(error) => return Err(error),
-        };
+    // Shared by every hypothesis verification: the rank-robust fallback's
+    // star-list tables depend only on the image, not the hypothesis.
+    let rr_tables = crate::solve::RankRobustTables::build(stars, dimensions);
+    let solution = match solve_blind_with_global_ladder(
+        stars,
+        catalog,
+        index,
+        params,
+        dimensions,
+        &[8],
+        &rr_tables,
+    ) {
+        Ok(solution) => solution,
+        Err(crate::Error::Solve(_)) => solve_blind_with_global_ladder(
+            stars,
+            catalog,
+            index,
+            params,
+            dimensions,
+            &[8, 10, 12, 16, 20, 26, 32],
+            &rr_tables,
+        )?,
+        Err(error) => return Err(error),
+    };
     if params.sip_order < 2 {
         return Ok(solution);
     }
@@ -749,6 +764,7 @@ pub fn solve_blind(
 /// Run the blind funnel with a selected ladder of globally bright image-star
 /// subsets. The public entry point first tries the compact rung, then retains
 /// this function's complete ladder as a fallback for difficult fields.
+#[allow(clippy::too_many_arguments)]
 fn solve_blind_with_global_ladder(
     stars: &[DetectedStar],
     catalog: &(dyn StarCatalog + Sync),
@@ -756,6 +772,7 @@ fn solve_blind_with_global_ladder(
     params: &BlindParams,
     dimensions: (u32, u32),
     global_ladder: &[usize],
+    rr_tables: &crate::solve::RankRobustTables,
 ) -> Result<Solution, crate::Error> {
     // Image patterns: each of the brightest stars with 3-subsets of its
     // nearest bright neighbors, mirroring the index construction. The
@@ -1031,7 +1048,7 @@ fn solve_blind_with_global_ladder(
         let end = (attempted + batch).min(ranked.len());
         let chunk = &ranked[attempted..end];
         let solution = chunk.par_iter().find_map_any(
-            |(_coarse_matches, _votes, center, scale, _coarse_wcs)| {
+            |(coarse_matches, _votes, center, scale, _coarse_wcs)| {
                 // The implied center is precise and its error scales with
                 // the field, so the search radius does too: a fixed radius
                 // makes fine-scale verification cover dozens of FOV-sized
@@ -1045,7 +1062,22 @@ fn solve_blind_with_global_ladder(
                     scale_tolerance: 0.15,
                     sip_order: 0,
                 };
-                solve(stars, catalog, &hint, dimensions).ok().filter(|s| {
+                // The rank-robust fallback is reserved for hypotheses
+                // whose position-only coarse score shows real catalog
+                // agreement (random collisions project zero or one): a
+                // correct field defeated by untrustworthy flux ordering
+                // is rescued, while the hundreds of junk hypotheses fail
+                // at plain triangle cost.
+                let rank_robust = (*coarse_matches >= RR_VERIFY_COARSE_FLOOR).then_some(rr_tables);
+                crate::solve::solve_for_blind_hypothesis(
+                    stars,
+                    catalog,
+                    &hint,
+                    dimensions,
+                    rank_robust,
+                )
+                .ok()
+                .filter(|s| {
                     s.matched_stars >= params.min_matches
                         && s.rms_arcsec < params.max_rms_px * *scale
                 })

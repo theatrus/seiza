@@ -1,8 +1,9 @@
 # Rank-robust star matching
 
-Status: analysis and design recorded; first mitigation (source-image
-redetection in solve-field mode) implemented; the catalog-seeded quad
-fallback is the planned core change
+Status: implemented for hinted solving — the catalog-seeded quad
+fallback runs automatically when triangle matching fails; source-image
+redetection in solve-field mode remains as the first-choice mitigation.
+Position-blind solving with unranked lists is the remaining follow-up
 
 ## The root of the problem
 
@@ -74,7 +75,7 @@ detection pass, but it is a workaround: it restores the precondition
 rather than removing it, and it cannot help callers who genuinely only
 have a star list.
 
-## Mitigation 2 (planned): catalog-seeded quads
+## Mitigation 2 (implemented): catalog-seeded quads
 
 Remove the root by demoting brightness from load-bearing precondition to
 optional search-ordering hint:
@@ -95,15 +96,49 @@ optional search-ordering hint:
   measured case, so typical solves stay fast and the worst case is
   bounded work instead of failure.
 
-Estimated cost on the measured M31 case: tens of milliseconds typical,
-sub-second bounded worst case.
+Measured on the real M31 case (Siril's amplitude-ranked table, no
+source image, hinted): solved in 0.33 s end to end at 0.489" RMS over 57
+matched stars with SIP order 3 — a case that previously could not solve
+at all. A synthetic regression (deep flux-shuffled star list against a
+magnitude-limited catalog) verifies the triangle stage fails and the
+fallback solves, and that well-ranked inputs keep the fast path.
 
-Position-blind solving with an unranked list is harder: the whole-sky
-pattern index is already catalog-seeded, but the image-side query
-patterns are rank-selected today. The first step there is a
-junk-tolerant, deeper image-pattern generation ladder with a larger
-hypothesis budget (hash verification is cheap); index-format changes are
-not required for that.
+The implementation lives in `solve_rank_robust` (seiza/src/solve.rs):
+the shared `refine_to_solution` tail (iterative re-matching,
+re-centering, SIP) is reused verbatim, so the fallback produces
+solutions with identical semantics to the triangle path.
+
+Two cost controls keep the worst case bounded (added after review
+measured an unbudgeted 47x wall-clock regression on unsolvable fields):
+
+- The star-list-side tables (position hash, length-sorted pair table)
+  are `RankRobustTables`, built once per image and reused — blind
+  verification must not rebuild an O(n^2) sorted pair table per
+  hypothesis.
+- Every search runs under a probe budget (`RR_PROBE_BUDGET`) so an
+  unsolvable field costs a bounded few CPU-seconds instead of an
+  open-ended scan. The census floor also adapts to how many catalog
+  window stars the candidate transform actually places inside the frame,
+  so an offset hint cannot starve a correct transform of votes.
+
+## Blind rescue
+
+The fallback also runs inside blind hypothesis verification, which
+partially delivers the blind half of this design for free: the coarse
+hypothesis score (`coarse_match_count`) is position-only and therefore
+already rank-robust, so a hypothesis whose projected catalog stars agree
+with detections — but whose triangle verification is defeated by the
+flux ordering — earns the rank-robust search (gated at
+`RR_VERIFY_COARSE_FLOOR`; random collisions project zero or one).
+Measured on the amplitude-ranked M31 table with a *wrong* position hint:
+0.7.2 fails after 6.5 s; this branch solves it through the blind path.
+Junk hypotheses skip the fallback entirely and fail at plain triangle
+cost, keeping unsolvable-field behavior at baseline speed.
+
+What remains open for fully-blind unranked lists is image-side pattern
+generation, which is still rank-selected: a junk-tolerant, deeper
+image-pattern ladder with a larger hypothesis budget (hash verification
+is cheap). Index-format changes are not required for that.
 
 ## Data-format implications
 
