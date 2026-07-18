@@ -11,12 +11,13 @@ authors = ["Yann Ramin <github@theatr.us>"]
 
 [workspace.dependencies]
 seiza = { path = "seiza", version = "0.6.0" }
-seiza-download = { path = "seiza-download", version = "0.2.0" }
+seiza-download = { path = "seiza-download", version = "0.3.0" }
 seiza-fits = { path = "seiza-fits", version = "0.1.6" }
 seiza-sources = { path = "seiza-sources", version = "0.2.0" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 thiserror = "2"
 anyhow = "1"
+async-compression = { version = "0.4.42", features = ["tokio", "zstd"] }
 clap = { version = "4", features = ["derive"] }
 imageproc = "0.27"
 flate2 = "1"
@@ -34,6 +35,8 @@ postcard = { version = "1", features = ["use-std"] }
 memmap2 = "0.9"
 sha2 = "0.11"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "rt", "time"] }
+tokio-util = { version = "0.7.18", features = ["io"] }
+zstd = "0.13.3"
 rayon = "1"
 rustc-hash = { version = "2" }
 wide = "1.5"

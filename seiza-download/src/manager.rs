@@ -1,8 +1,9 @@
 use crate::error::io;
 use crate::{
-    BundleManifest, CatalogSet, DEFAULT_BUNDLE_BASE_URL, Dataset, Error, LEGACY_V2_BUNDLE_BASE_URL,
-    ManifestFile, Result,
+    BundleManifestDocument, CatalogSet, DEFAULT_BUNDLE_BASE_URL, Dataset, Error,
+    LEGACY_V2_BUNDLE_BASE_URL, ManifestFile, ManifestTransport, Result,
 };
+use async_compression::tokio::bufread::ZstdDecoder;
 use directories::ProjectDirs;
 use fs2::FileExt;
 use futures_util::StreamExt;
@@ -10,12 +11,15 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_util::io::StreamReader;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const READ_TIMEOUT: Duration = Duration::from_secs(300);
+const IO_BUFFER_BYTES: usize = 1024 * 1024;
 
 /// Controls when the small hosted bundle manifest may use the cached copy.
 /// Catalog artifacts themselves are immutable and content-addressed.
@@ -59,8 +63,13 @@ pub enum DownloadEvent {
     },
     DownloadProgress {
         name: String,
+        /// Transferred bytes: encoded bytes for a compressed transport.
         downloaded: u64,
+        /// Total transfer size in bytes.
         total: u64,
+        /// Bytes written to the local file so far. Equal to `downloaded` for
+        /// an uncompressed transfer; ahead of it while decompressing.
+        written: u64,
     },
     DownloadComplete {
         name: String,
@@ -238,11 +247,12 @@ impl CatalogManager {
         F: Fn(DownloadEvent) + Send + Sync,
     {
         let manifest = self.load_manifest(&report).await?;
-        let plan = manifest.plan(set)?;
+        let plan = manifest.manifest.plan(set)?;
         let mut artifacts = BTreeMap::new();
 
         for file in plan {
-            let path = self.ensure_file(&file, &report).await?;
+            let transport = manifest.preferred_transport(&file.name);
+            let path = self.ensure_file(&file, transport, &report).await?;
             artifacts.insert(
                 file.name.clone(),
                 CatalogArtifact {
@@ -255,12 +265,12 @@ impl CatalogManager {
         }
 
         Ok(CatalogBundle {
-            version: manifest.version,
+            version: manifest.manifest.version,
             artifacts,
         })
     }
 
-    async fn load_manifest<F>(&self, report: &F) -> Result<BundleManifest>
+    async fn load_manifest<F>(&self, report: &F) -> Result<BundleManifestDocument>
     where
         F: Fn(DownloadEvent) + Send + Sync,
     {
@@ -272,7 +282,7 @@ impl CatalogManager {
                     .await?
                     .ok_or_else(|| Error::CachedManifestUnavailable(cached))?;
                 report(DownloadEvent::UsingCachedManifest {
-                    version: manifest.version.clone(),
+                    version: manifest.manifest.version.clone(),
                     stale: false,
                 });
                 Ok(manifest)
@@ -280,7 +290,7 @@ impl CatalogManager {
             CachePolicy::PreferCached => {
                 if let Ok(Some(manifest)) = self.read_cached_manifest().await {
                     report(DownloadEvent::UsingCachedManifest {
-                        version: manifest.version.clone(),
+                        version: manifest.manifest.version.clone(),
                         stale: false,
                     });
                     Ok(manifest)
@@ -294,7 +304,7 @@ impl CatalogManager {
                     && let Ok(Some(manifest)) = self.read_cached_manifest().await
                 {
                     report(DownloadEvent::UsingCachedManifest {
-                        version: manifest.version.clone(),
+                        version: manifest.manifest.version.clone(),
                         stale: false,
                     });
                     return Ok(manifest);
@@ -304,7 +314,7 @@ impl CatalogManager {
                     Err(fetch_error) => match self.read_cached_manifest().await {
                         Ok(Some(manifest)) => {
                             report(DownloadEvent::UsingCachedManifest {
-                                version: manifest.version.clone(),
+                                version: manifest.manifest.version.clone(),
                                 stale: true,
                             });
                             Ok(manifest)
@@ -331,17 +341,17 @@ impl CatalogManager {
             .map_or(true, |age| age <= max_age))
     }
 
-    async fn read_cached_manifest(&self) -> Result<Option<BundleManifest>> {
+    async fn read_cached_manifest(&self) -> Result<Option<BundleManifestDocument>> {
         let path = self.manifest_path();
         let bytes = match tokio::fs::read(&path).await {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(source) => return Err(io("read", path, source)),
         };
-        BundleManifest::parse(&bytes).map(Some)
+        BundleManifestDocument::parse(&bytes).map(Some)
     }
 
-    async fn fetch_manifest<F>(&self, report: &F) -> Result<BundleManifest>
+    async fn fetch_manifest<F>(&self, report: &F) -> Result<BundleManifestDocument>
     where
         F: Fn(DownloadEvent) + Send + Sync,
     {
@@ -366,7 +376,7 @@ impl CatalogManager {
             url: url.clone(),
             source,
         })?;
-        let manifest = BundleManifest::parse(&bytes)?;
+        let manifest = BundleManifestDocument::parse(&bytes)?;
         self.write_cached_manifest(&bytes).await?;
         Ok(manifest)
     }
@@ -407,7 +417,12 @@ impl CatalogManager {
         write
     }
 
-    async fn ensure_file<F>(&self, file: &ManifestFile, report: &F) -> Result<PathBuf>
+    async fn ensure_file<F>(
+        &self,
+        file: &ManifestFile,
+        transport: Option<&ManifestTransport>,
+        report: &F,
+    ) -> Result<PathBuf>
     where
         F: Fn(DownloadEvent) + Send + Sync,
     {
@@ -443,7 +458,7 @@ impl CatalogManager {
             file.name
         ));
         let install = async {
-            self.download_file(file, &temp, report).await?;
+            self.download_file(file, transport, &temp, report).await?;
 
             let parent = target.parent().expect("object path has a parent");
             tokio::fs::create_dir_all(parent)
@@ -470,7 +485,24 @@ impl CatalogManager {
         Ok(target)
     }
 
-    async fn download_file<F>(&self, file: &ManifestFile, temp: &Path, report: &F) -> Result<()>
+    async fn download_file<F>(
+        &self,
+        file: &ManifestFile,
+        transport: Option<&ManifestTransport>,
+        temp: &Path,
+        report: &F,
+    ) -> Result<()>
+    where
+        F: Fn(DownloadEvent) + Send + Sync,
+    {
+        if let Some(transport) = transport {
+            self.download_zstd(file, transport, temp, report).await
+        } else {
+            self.download_identity(file, temp, report).await
+        }
+    }
+
+    async fn download_identity<F>(&self, file: &ManifestFile, temp: &Path, report: &F) -> Result<()>
     where
         F: Fn(DownloadEvent) + Send + Sync,
     {
@@ -527,6 +559,7 @@ impl CatalogManager {
                     name: file.name.clone(),
                     downloaded,
                     total: file.bytes,
+                    written: downloaded,
                 });
                 reported = downloaded;
             }
@@ -550,6 +583,165 @@ impl CatalogManager {
                 name: file.name.clone(),
                 expected: file.sha256.clone(),
                 actual,
+            });
+        }
+        Ok(())
+    }
+
+    async fn download_zstd<F>(
+        &self,
+        file: &ManifestFile,
+        transport: &ManifestTransport,
+        temp: &Path,
+        report: &F,
+    ) -> Result<()>
+    where
+        F: Fn(DownloadEvent) + Send + Sync,
+    {
+        let url = format!("{}/{}", self.base_url, transport.key);
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|source| Error::Http {
+                url: url.clone(),
+                source,
+            })?;
+        if !response.status().is_success() {
+            return Err(Error::HttpStatus {
+                url,
+                status: response.status().as_u16(),
+            });
+        }
+        if let Some(bytes) = response.content_length()
+            && bytes != transport.bytes
+        {
+            return Err(Error::Size {
+                name: format!("{} (zstd transport)", file.name),
+                expected: transport.bytes,
+                actual: bytes,
+            });
+        }
+
+        report(DownloadEvent::DownloadStarted {
+            name: file.name.clone(),
+            bytes: transport.bytes,
+        });
+
+        let downloaded = Arc::new(AtomicU64::new(0));
+        let stream_downloaded = Arc::clone(&downloaded);
+        let encoded_hasher = Arc::new(Mutex::new(Sha256::new()));
+        let stream_hasher = Arc::clone(&encoded_hasher);
+        let stream = response.bytes_stream().map(move |chunk| match chunk {
+            Ok(chunk) => {
+                stream_hasher
+                    .lock()
+                    .expect("encoded hash mutex poisoned")
+                    .update(&chunk);
+                stream_downloaded.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+                Ok(chunk)
+            }
+            Err(source) => Err(std::io::Error::other(source)),
+        });
+        let reader = StreamReader::new(stream);
+        let mut decoder = ZstdDecoder::new(tokio::io::BufReader::new(reader));
+        let mut output = tokio::fs::File::create(temp)
+            .await
+            .map_err(|source| io("create", temp, source))?;
+        let mut decoded_hasher = Sha256::new();
+        let mut decoded = 0u64;
+        let mut reported = 0u64;
+        let mut buffer = vec![0u8; IO_BUFFER_BYTES];
+        loop {
+            let read = decoder
+                .read(&mut buffer)
+                .await
+                .map_err(|source| io("decompress into", temp, source))?;
+            if read == 0 {
+                break;
+            }
+            let next_decoded = decoded
+                .checked_add(read as u64)
+                .ok_or_else(|| Error::Size {
+                    name: file.name.clone(),
+                    expected: file.bytes,
+                    actual: u64::MAX,
+                })?;
+            // Reject the decoded chunk before writing it when it would exceed
+            // the canonical size. This bounds temporary disk usage as well as
+            // the amount of work performed on a wrong or malicious frame.
+            if next_decoded > file.bytes {
+                return Err(Error::Size {
+                    name: file.name.clone(),
+                    expected: file.bytes,
+                    actual: next_decoded,
+                });
+            }
+            output
+                .write_all(&buffer[..read])
+                .await
+                .map_err(|source| io("write", temp, source))?;
+            decoded_hasher.update(&buffer[..read]);
+            decoded = next_decoded;
+            if decoded.saturating_sub(reported) >= 4 * 1024 * 1024 {
+                report(DownloadEvent::DownloadProgress {
+                    name: file.name.clone(),
+                    downloaded: downloaded.load(Ordering::Relaxed),
+                    total: transport.bytes,
+                    written: decoded,
+                });
+                reported = decoded;
+            }
+        }
+        drop(decoder);
+        report(DownloadEvent::DownloadProgress {
+            name: file.name.clone(),
+            downloaded: downloaded.load(Ordering::Relaxed),
+            total: transport.bytes,
+            written: decoded,
+        });
+        output
+            .sync_all()
+            .await
+            .map_err(|source| io("sync", temp, source))?;
+        drop(output);
+
+        let downloaded = downloaded.load(Ordering::Relaxed);
+        if downloaded != transport.bytes {
+            return Err(Error::Size {
+                name: format!("{} (zstd transport)", file.name),
+                expected: transport.bytes,
+                actual: downloaded,
+            });
+        }
+        let encoded_actual = lowercase_hex(
+            &encoded_hasher
+                .lock()
+                .expect("encoded hash mutex poisoned")
+                .clone()
+                .finalize(),
+        );
+        if encoded_actual != transport.sha256 {
+            return Err(Error::Checksum {
+                name: format!("{} (zstd transport)", file.name),
+                expected: transport.sha256.clone(),
+                actual: encoded_actual,
+            });
+        }
+        if decoded != file.bytes {
+            return Err(Error::Size {
+                name: file.name.clone(),
+                expected: file.bytes,
+                actual: decoded,
+            });
+        }
+        let decoded_actual = lowercase_hex(&decoded_hasher.finalize());
+        if decoded_actual != file.sha256 {
+            return Err(Error::Checksum {
+                name: file.name.clone(),
+                expected: file.sha256.clone(),
+                actual: decoded_actual,
             });
         }
         Ok(())
@@ -616,7 +808,7 @@ async fn verify_artifact(path: &Path, artifact: &CatalogArtifact) -> Result<()> 
     }
 
     let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1024 * 1024];
+    let mut buffer = vec![0u8; IO_BUFFER_BYTES];
     loop {
         let read = input
             .read(&mut buffer)
@@ -681,27 +873,30 @@ mod tests {
         lowercase_hex(&Sha256::digest(bytes))
     }
 
-    fn cached_manifest(selected_bytes: &[u8]) -> BundleManifest {
-        BundleManifest {
-            version: "catalog-bundle-v4-test".into(),
-            files: REQUIRED_BUNDLE_FILES
-                .iter()
-                .enumerate()
-                .map(|(index, &name)| {
-                    let bytes = if name == "objects.bin" {
-                        selected_bytes.to_vec()
-                    } else {
-                        vec![index as u8 + 1]
-                    };
-                    let sha256 = sha256(&bytes);
-                    ManifestFile {
-                        name: name.into(),
-                        key: Some(format!("artifacts/{sha256}/{name}")),
-                        bytes: bytes.len() as u64,
-                        sha256,
-                    }
-                })
-                .collect(),
+    fn cached_manifest(selected_bytes: &[u8]) -> BundleManifestDocument {
+        BundleManifestDocument {
+            manifest: crate::BundleManifest {
+                version: "catalog-bundle-v4-test".into(),
+                files: REQUIRED_BUNDLE_FILES
+                    .iter()
+                    .enumerate()
+                    .map(|(index, &name)| {
+                        let bytes = if name == "objects.bin" {
+                            selected_bytes.to_vec()
+                        } else {
+                            vec![index as u8 + 1]
+                        };
+                        let sha256 = sha256(&bytes);
+                        ManifestFile {
+                            name: name.into(),
+                            key: Some(format!("artifacts/{sha256}/{name}")),
+                            bytes: bytes.len() as u64,
+                            sha256,
+                        }
+                    })
+                    .collect(),
+            },
+            transports: Vec::new(),
         }
     }
 
@@ -721,6 +916,7 @@ mod tests {
         std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
 
         let entry = manifest
+            .manifest
             .files
             .iter()
             .find(|file| file.name == "objects.bin")
@@ -763,6 +959,7 @@ mod tests {
         std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
         std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         let entry = manifest
+            .manifest
             .files
             .iter()
             .find(|file| file.name == "objects.bin")
@@ -832,6 +1029,7 @@ mod tests {
         let artifact_request = format!(
             "GET /{} ",
             manifest
+                .manifest
                 .files
                 .iter()
                 .find(|file| file.name == "objects.bin")
@@ -887,11 +1085,268 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn zstd_transport_is_streamed_into_the_uncompressed_cache() {
+        let content = b"hosted object catalog\n".repeat(4096);
+        let encoded = zstd::stream::encode_all(content.as_slice(), 22).unwrap();
+        let mut manifest = cached_manifest(&content);
+        let encoded_sha256 = sha256(&encoded);
+        manifest.transports.push(ManifestTransport {
+            name: "objects.bin".into(),
+            encoding: "zstd".into(),
+            key: format!("artifacts/{encoded_sha256}/objects.bin.zst"),
+            bytes: encoded.len() as u64,
+            sha256: encoded_sha256,
+        });
+        let artifact_request = format!(
+            "GET /{} ",
+            manifest.preferred_transport("objects.bin").unwrap().key
+        );
+        let manifest_json = serde_json::to_vec(&manifest).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 4096];
+                let read = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..read]);
+                let body = if request.starts_with("GET /manifest.json ") {
+                    manifest_json.as_slice()
+                } else if request.starts_with(&artifact_request) {
+                    encoded.as_slice()
+                } else {
+                    panic!("unexpected request: {request}");
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(body).unwrap();
+            }
+        });
+
+        let cache = tempfile::tempdir().unwrap();
+        let manager = CatalogManager::builder()
+            .cache_dir(cache.path())
+            .base_url(format!("http://{address}"))
+            .policy(CachePolicy::ForceRefresh)
+            .build()
+            .unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let reported = Arc::clone(&events);
+        let bundle = manager
+            .ensure_with(&CatalogSet::dataset(Dataset::Objects), move |event| {
+                reported.lock().unwrap().push(event);
+            })
+            .await
+            .unwrap();
+        bundle.verify().await.unwrap();
+        assert_eq!(
+            std::fs::read(bundle.path(Dataset::Objects).unwrap()).unwrap(),
+            content
+        );
+        let events = events.lock().unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            DownloadEvent::DownloadStarted { name, bytes }
+                if name == "objects.bin" && *bytes < content.len() as u64
+        )));
+        assert!(
+            std::fs::read_dir(cache.path().join("partial"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_zstd_transport_is_not_installed() {
+        let content = b"hosted object catalog\n".repeat(128);
+        let encoded = zstd::stream::encode_all(content.as_slice(), 22).unwrap();
+        let mut manifest = cached_manifest(&content);
+        let advertised_sha256 = sha256(b"not the encoded artifact");
+        manifest.transports.push(ManifestTransport {
+            name: "objects.bin".into(),
+            encoding: "zstd".into(),
+            key: format!("artifacts/{advertised_sha256}/objects.bin.zst"),
+            bytes: encoded.len() as u64,
+            sha256: advertised_sha256,
+        });
+        let logical_sha256 = manifest
+            .manifest
+            .files
+            .iter()
+            .find(|file| file.name == "objects.bin")
+            .unwrap()
+            .sha256
+            .clone();
+        let artifact_request = format!(
+            "GET /{} ",
+            manifest.preferred_transport("objects.bin").unwrap().key
+        );
+        let manifest_json = serde_json::to_vec(&manifest).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 4096];
+                let read = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..read]);
+                let body = if request.starts_with("GET /manifest.json ") {
+                    manifest_json.as_slice()
+                } else if request.starts_with(&artifact_request) {
+                    encoded.as_slice()
+                } else {
+                    panic!("unexpected request: {request}");
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(body).unwrap();
+            }
+        });
+
+        let cache = tempfile::tempdir().unwrap();
+        let manager = CatalogManager::builder()
+            .cache_dir(cache.path())
+            .base_url(format!("http://{address}"))
+            .policy(CachePolicy::ForceRefresh)
+            .build()
+            .unwrap();
+        let error = manager
+            .ensure(&CatalogSet::dataset(Dataset::Objects))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::Checksum { name, .. } if name.contains("zstd transport")));
+        assert!(
+            !cache
+                .path()
+                .join("objects")
+                .join(logical_sha256)
+                .join("objects.bin")
+                .exists()
+        );
+        assert!(
+            std::fs::read_dir(cache.path().join("partial"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn oversized_zstd_frame_aborts_before_decompressing_completely() {
+        let content = b"hosted object catalog\n".repeat(128);
+        // A ~64 MiB frame that transfers as a few kilobytes. The declared
+        // canonical size is only a few KiB, so decoding must stop within the
+        // first buffers instead of writing the complete expansion.
+        let bomb = vec![0u8; 64 * 1024 * 1024];
+        let encoded = zstd::stream::encode_all(bomb.as_slice(), 3).unwrap();
+        let mut manifest = cached_manifest(&content);
+        let encoded_sha256 = sha256(&encoded);
+        manifest.transports.push(ManifestTransport {
+            name: "objects.bin".into(),
+            encoding: "zstd".into(),
+            key: format!("artifacts/{encoded_sha256}/objects.bin.zst"),
+            bytes: encoded.len() as u64,
+            sha256: encoded_sha256,
+        });
+        let logical_sha256 = manifest
+            .manifest
+            .files
+            .iter()
+            .find(|file| file.name == "objects.bin")
+            .unwrap()
+            .sha256
+            .clone();
+        let artifact_request = format!(
+            "GET /{} ",
+            manifest.preferred_transport("objects.bin").unwrap().key
+        );
+        let manifest_json = serde_json::to_vec(&manifest).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 4096];
+                let read = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..read]);
+                let body = if request.starts_with("GET /manifest.json ") {
+                    manifest_json.as_slice()
+                } else if request.starts_with(&artifact_request) {
+                    encoded.as_slice()
+                } else {
+                    panic!("unexpected request: {request}");
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(body).unwrap();
+            }
+        });
+
+        let cache = tempfile::tempdir().unwrap();
+        let manager = CatalogManager::builder()
+            .cache_dir(cache.path())
+            .base_url(format!("http://{address}"))
+            .policy(CachePolicy::ForceRefresh)
+            .build()
+            .unwrap();
+        let error = manager
+            .ensure(&CatalogSet::dataset(Dataset::Objects))
+            .await
+            .unwrap_err();
+        match error {
+            Error::Size {
+                name,
+                expected,
+                actual,
+            } => {
+                assert_eq!(name, "objects.bin");
+                assert_eq!(expected, content.len() as u64);
+                assert!(actual > expected);
+                assert!(
+                    actual <= expected + IO_BUFFER_BYTES as u64,
+                    "decoding continued beyond the first oversized chunk: {actual} bytes"
+                );
+            }
+            other => panic!("expected a size error, got {other:?}"),
+        }
+        assert!(
+            !cache
+                .path()
+                .join("objects")
+                .join(logical_sha256)
+                .join("objects.bin")
+                .exists()
+        );
+        assert!(
+            std::fs::read_dir(cache.path().join("partial"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
     async fn explicitly_configured_v2_manifest_uses_the_legacy_flat_url() {
         let content = b"legacy object catalog".to_vec();
         let mut manifest = cached_manifest(&content);
-        manifest.version = "catalog-bundle-v2-test".into();
-        for file in &mut manifest.files {
+        manifest.manifest.version = "catalog-bundle-v2-test".into();
+        for file in &mut manifest.manifest.files {
             file.key = None;
         }
         let manifest_json = serde_json::to_vec(&manifest).unwrap();

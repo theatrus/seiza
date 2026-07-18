@@ -14,7 +14,8 @@ pub use manager::{
     DownloadEvent,
 };
 pub use manifest::{
-    BundleManifest, CatalogSet, Dataset, ManifestFile, REQUIRED_BUNDLE_FILES, REQUIRED_V2_FILES,
+    BundleManifest, BundleManifestDocument, CatalogSet, Dataset, ManifestFile, ManifestTransport,
+    REQUIRED_BUNDLE_FILES, REQUIRED_V2_FILES,
 };
 
 /// Current complete hosted catalog bundle.

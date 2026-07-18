@@ -166,7 +166,9 @@ pattern index, 1.63 GB), `stars-lite-tycho2.ids.bin` (2.7M numeric identifiers
 and 387k names, 100 MB), `objects.bin` (315k objects), `minor-bodies.bin`
 (comets and asteroids), and `transients.bin` (active supernovae/novae,
 refreshed nightly). `download-data prebuilt` combines the bundle into one
-local data directory.
+local data directory. Current manifests may offer zstd-compressed transports;
+new clients stream-decompress them into the normal uncompressed mmap cache,
+while older v4 clients continue to use the retained uncompressed artifacts.
 The deep catalog and maintained index
 enable blind solving of small, fine-scale fields whose brightest detections
 are fainter than the G≤15 catalog's small-field pattern tiers without

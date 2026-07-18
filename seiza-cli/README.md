@@ -198,12 +198,16 @@ seiza build-data manifest --dir next-dynamic \
   --version catalog-bundle-v2-YYYY-MM-DD --output next-v2.json
 seiza build-data manifest --dir next-dynamic \
   --base-manifest current-v4.json \
-  --version catalog-bundle-v4-YYYY-MM-DD --output next-v4.json
+  --version catalog-bundle-v4-YYYY-MM-DD --output next-v4.json \
+  --artifact-dir next-v4-artifacts
 ```
 
 The v2 output retains flat keys for released v3-object readers. The v4 output
-uses content-addressed artifact keys. Both commands require the resulting
-bundle to contain every required catalog.
+uses content-addressed artifact keys and stages both uncompressed and
+maximum-compression zstd artifacts in one upload-ready tree. The manifest
+retains the uncompressed artifact for old v4 readers; new readers
+stream-decompress into the normal uncompressed mmap cache. Both commands
+require the resulting bundle to contain every required catalog.
 
 Normal catalog opens do not perform exhaustive validation. Validate any seiza
 star tile, identifier sidecar, blind index, object catalog, or minor-body

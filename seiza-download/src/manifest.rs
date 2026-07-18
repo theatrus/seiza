@@ -127,6 +127,22 @@ impl Default for CatalogSet {
     }
 }
 
+/// One alternate transport for a hosted file.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ManifestTransport {
+    /// Logical filename from [`BundleManifest::files`].
+    pub name: String,
+    /// Transport encoding understood by a downloader, currently `zstd`.
+    /// Readers skip encodings they do not support.
+    pub encoding: String,
+    /// Immutable S3 key relative to the bundle base URL.
+    pub key: String,
+    /// Encoded transfer size in bytes.
+    pub bytes: u64,
+    /// SHA-256 of the encoded bytes.
+    pub sha256: String,
+}
+
 /// One file entry from the hosted manifest.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ManifestFile {
@@ -178,17 +194,7 @@ impl BundleManifest {
             if file.bytes == 0 {
                 return Err(Error::Manifest(format!("{} is empty", file.name)));
             }
-            if file.sha256.len() != 64
-                || !file
-                    .sha256
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            {
-                return Err(Error::Manifest(format!(
-                    "{} has an invalid lowercase SHA-256",
-                    file.name
-                )));
-            }
+            validate_sha256(&file.sha256, &file.name)?;
             match generation {
                 2 if file.key.is_some() => {
                     return Err(Error::Manifest(format!(
@@ -261,11 +267,127 @@ impl BundleManifest {
     }
 }
 
+/// The extensible hosted JSON document. `manifest` remains the stable logical
+/// bundle read by older clients; `transports` is an optional additive section.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BundleManifestDocument {
+    #[serde(flatten)]
+    pub manifest: BundleManifest,
+    /// Alternate transfer representations. The installed/cache file is always
+    /// the canonical uncompressed entry in `manifest.files`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transports: Vec<ManifestTransport>,
+}
+
+impl BundleManifestDocument {
+    pub fn parse(json: &[u8]) -> Result<Self> {
+        let document: Self = serde_json::from_slice(json)?;
+        document.validate()?;
+        Ok(document)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.manifest.validate()?;
+        if self.manifest.version.starts_with("catalog-bundle-v2-") && !self.transports.is_empty() {
+            return Err(Error::Manifest(
+                "legacy v2 manifests must not define alternate transports".into(),
+            ));
+        }
+
+        let offered = self
+            .manifest
+            .files
+            .iter()
+            .map(|file| file.name.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut transports = BTreeSet::new();
+        for transport in &self.transports {
+            validate_file_name(&transport.name)?;
+            if !offered.contains(transport.name.as_str()) {
+                return Err(Error::Manifest(format!(
+                    "alternate transport references unknown file {}",
+                    transport.name
+                )));
+            }
+            if transport.encoding.is_empty()
+                || !transport
+                    .encoding
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            {
+                return Err(Error::Manifest(format!(
+                    "{} has an invalid transport encoding {:?}",
+                    transport.name, transport.encoding
+                )));
+            }
+            if !transports.insert((transport.name.as_str(), transport.encoding.as_str())) {
+                return Err(Error::Manifest(format!(
+                    "{} has duplicate {} transports",
+                    transport.name, transport.encoding
+                )));
+            }
+            if transport.bytes == 0 {
+                return Err(Error::Manifest(format!(
+                    "{} {} transport is empty",
+                    transport.name, transport.encoding
+                )));
+            }
+            validate_sha256(
+                &transport.sha256,
+                &format!("{} {} transport", transport.name, transport.encoding),
+            )?;
+            validate_transport_key(transport)?;
+        }
+        Ok(())
+    }
+
+    /// Best transport this version of the downloader understands.
+    pub fn preferred_transport(&self, name: &str) -> Option<&ManifestTransport> {
+        self.transports
+            .iter()
+            .find(|transport| transport.name == name && transport.encoding == "zstd")
+    }
+}
+
 fn validate_file_name(name: &str) -> Result<()> {
     if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\\') {
         return Err(Error::Manifest(format!(
             "unsafe artifact filename: {name:?}"
         )));
+    }
+    Ok(())
+}
+
+fn validate_sha256(sha256: &str, label: &str) -> Result<()> {
+    if sha256.len() != 64
+        || !sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(Error::Manifest(format!(
+            "{label} has an invalid lowercase SHA-256"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_transport_key(transport: &ManifestTransport) -> Result<()> {
+    let prefix = format!("artifacts/{}/", transport.sha256);
+    let Some(leaf) = transport.key.strip_prefix(&prefix) else {
+        return Err(Error::Manifest(format!(
+            "{} {} transport must use an immutable key below {prefix}",
+            transport.name, transport.encoding
+        )));
+    };
+    validate_file_name(leaf)?;
+    if transport.encoding == "zstd" {
+        let expected = format!("{}.zst", transport.name);
+        if leaf != expected {
+            return Err(Error::Manifest(format!(
+                "{} zstd transport must use filename {expected}",
+                transport.name
+            )));
+        }
     }
     Ok(())
 }
@@ -304,6 +426,17 @@ mod tests {
             file.key = None;
         }
         manifest
+    }
+
+    fn transport(name: &str, kind: &str, suffix: &str) -> ManifestTransport {
+        let sha256 = hash('1');
+        ManifestTransport {
+            name: name.into(),
+            encoding: kind.into(),
+            key: format!("artifacts/{sha256}/{name}.{suffix}"),
+            bytes: 7,
+            sha256,
+        }
     }
 
     #[test]
@@ -347,6 +480,68 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("immutable key")
+        );
+    }
+
+    #[test]
+    fn v4_accepts_content_addressed_zstd_and_unknown_transports() {
+        let manifest = manifest();
+        let name = manifest.files[0].name.clone();
+        let mut document = BundleManifestDocument {
+            manifest,
+            transports: vec![
+                transport(&name, "zstd", "zst"),
+                transport(&name, "future-codec", "future"),
+            ],
+        };
+        document.validate().unwrap();
+        assert_eq!(
+            document.preferred_transport(&name).unwrap().encoding,
+            "zstd"
+        );
+
+        document.transports[0].key = "objects.bin.zst".into();
+        assert!(
+            document
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("immutable key")
+        );
+    }
+
+    #[test]
+    fn unknown_json_fields_are_ignored() {
+        let manifest = manifest();
+        let name = manifest.files[0].name.clone();
+        let document = BundleManifestDocument {
+            manifest,
+            transports: vec![transport(&name, "zstd", "zst")],
+        };
+        let mut value = serde_json::to_value(document).unwrap();
+        value["future_manifest_field"] = serde_json::json!({ "format": 5 });
+        value["files"][0]["future_file_field"] = serde_json::json!(true);
+        value["transports"][0]["future_transport_field"] = serde_json::json!("ignored");
+        let json = serde_json::to_vec(&value).unwrap();
+        BundleManifestDocument::parse(&json).unwrap();
+        // Models a released reader which knows only the stable logical fields.
+        BundleManifest::parse(&json).unwrap();
+    }
+
+    #[test]
+    fn legacy_v2_rejects_alternate_transports() {
+        let manifest = legacy_v2_manifest();
+        let name = manifest.files[0].name.clone();
+        let document = BundleManifestDocument {
+            manifest,
+            transports: vec![transport(&name, "zstd", "zst")],
+        };
+        assert!(
+            document
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("alternate transports")
         );
     }
 
