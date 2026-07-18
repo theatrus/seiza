@@ -97,7 +97,7 @@ Applications performing repeated solves can keep a catalog and blind index
 open behind a newline-delimited JSON-RPC 2.0 process:
 
 ```
-seiza worker --data stars-deep-gaia17.bin --index blind-gaia16.idx
+seiza worker --data data --index data
 ```
 
 The same protocol can adapt local image paths to a queued `seiza-server`
