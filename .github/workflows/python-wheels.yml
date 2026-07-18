@@ -37,7 +37,7 @@ jobs:
         run: |
           python -m venv .venv
           . .venv/bin/activate
-          pip install maturin numpy pytest
+          pip install maturin numpy pytest astropy
           maturin develop --release
           python -m pytest tests/ -q
       - name: Lint bindings
