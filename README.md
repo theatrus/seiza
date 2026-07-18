@@ -30,6 +30,10 @@ can submit to the same server with `seiza worker --server`.
 - **As N.I.N.A.'s plate solver** — seiza answers ASTAP's command line, so
   select ASTAP in N.I.N.A. and point it at `seiza.exe`. No plugin needed.
   [Steps below](#use-with-nina-astap-compatible-mode).
+- **As Siril's plate solver** — seiza also answers astrometry.net's
+  `solve-field` command line. Point Siril's astrometry.net path at a copy
+  of seiza named `solve-field` and solve as usual, SIP distortion
+  included. [Steps below](#use-with-siril-solve-field-compatible-mode).
 - **From your own application** — run `seiza worker` to keep the catalogs
   and blind index open between solves, and send it one JSON request per
   line. It can also forward solves to a seiza-server, local or hosted.
@@ -301,6 +305,32 @@ result file N.I.N.A. reads — including the full CD matrix, so pixel
 scale, rotation, and flip all come through. A copy of the binary
 renamed `astap.exe` behaves identically. Details:
 [docs/design/astap-mode.md](docs/design/astap-mode.md).
+
+## Use with Siril (solve-field compatible mode)
+
+seiza speaks astrometry.net's `solve-field` command line — and on Windows
+it also answers Siril's `bin/bash` launch wrapper itself, so no cygwin is
+needed. Siril's existing astrometry.net integration drives it with no
+plugin on every platform:
+
+1. Run `seiza install-solve-field --dir <dir>` — it installs the complete
+   layout (`solve-field`, `bin/bash`, `tmp/`) Siril expects.
+2. Give seiza a star catalog once: `seiza setup`, or set `SEIZA_STAR_DATA`,
+   or drop a `stars-*.bin` next to the installed binaries.
+3. In Siril: **Preferences → Astrometry → astrometry.net install dir**, set
+   it to that directory, and pick the astrometry.net solver when plate
+   solving.
+
+Siril hands seiza its own detected star list and reads the solution back
+from the standard `.wcs` file — no pixels are exchanged, and the SIP
+distortion order Siril requests is fitted by seiza's solver.
+
+Siril reports fitted PSF amplitudes rather than photometric flux, which
+would defeat the matcher's brightness ranking on stretched images — so
+when the source image is present next to the star table (the normal
+Siril case), seiza automatically re-measures star flux from the pixels
+and solves in the table's exact frame. Contract details:
+[docs/design/solve-field-mode.md](docs/design/solve-field-mode.md).
 
 ## Layout
 

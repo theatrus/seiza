@@ -12,6 +12,7 @@ use std::path::PathBuf;
 mod astap;
 mod build_data;
 mod setup;
+mod solve_field;
 mod worker;
 
 fn is_fits_path(path: &std::path::Path) -> bool {
@@ -435,6 +436,14 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         ignore_border: u32,
     },
+    /// Install the astrometry.net drop-in layout for Siril: copies of this
+    /// binary named solve-field and bin/bash(.exe), plus the tmp directory
+    /// Windows Siril writes its launch script into
+    InstallSolveField {
+        /// Directory to point Siril's astrometry.net preference at
+        #[arg(long)]
+        dir: PathBuf,
+    },
     /// Serve versioned JSON-RPC plate-solve requests over stdin/stdout
     Worker {
         /// Star tile file kept open for the lifetime of the worker
@@ -845,6 +854,16 @@ fn main() -> Result<()> {
     // A raw ASTAP-style command line (or a copy of the binary named
     // astap) routes to the ASTAP-compatible mode before clap sees it
     let raw: Vec<String> = std::env::args().skip(1).collect();
+    // A copy of the binary named solve-field (or a solve-field-shaped
+    // command line) routes to the astrometry.net-compatible mode used by
+    // Siril; ASTAP-style invocations route to the ASTAP-compatible mode.
+    let program = std::env::args().next().unwrap_or_default();
+    if solve_field::invoked_as_bash(&program) {
+        return solve_field::run_as_bash(&raw);
+    }
+    if solve_field::invoked_as_solve_field(&program) || solve_field::looks_like_solve_field(&raw) {
+        return solve_field::run(&raw);
+    }
     if astap::looks_like_astap(&raw) {
         return astap::run(&raw);
     }
@@ -855,6 +874,7 @@ fn main() -> Result<()> {
     let detection_fallback_hypotheses = cli.detection_fallback_hypotheses;
     match cli.command {
         Command::Setup(args) => setup::run(args),
+        Command::InstallSolveField { dir } => solve_field::install_layout(&dir),
         Command::Detect {
             image,
             sigma,

@@ -117,6 +117,18 @@ environment variable or a `stars-*.bin` next to the executable —
 `seiza download-data prebuilt` fetches one. Hinted and blind-slot
 solving both work; see the repository's `docs/design/astap-mode.md`.
 
+## Use with Siril
+
+seiza also speaks astrometry.net's `solve-field` CLI contract, and answers
+Siril's Windows `bin/bash` launch wrapper itself (no cygwin needed). Run
+`seiza install-solve-field --dir <dir>`, point Siril's astrometry.net
+directory preference at that directory, and Siril's normal astrometry.net
+solving works unchanged, including SIP distortion orders. Catalogs resolve
+the same way as ASTAP mode. Siril reports PSF amplitudes rather than photometric
+flux, so seiza automatically re-measures star flux from the source image
+next to the star table when present — see the repository's
+`docs/design/solve-field-mode.md` for details.
+
 ## Datasets
 
 The quickest route is the prebuilt, SHA-256-verified set hosted at
