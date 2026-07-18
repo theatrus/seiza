@@ -3,14 +3,14 @@ resolver = "3"
 members = ["seiza", "seiza-cli", "seiza-download", "seiza-fits", "seiza-sources"]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/theatrus/seiza"
 authors = ["Yann Ramin <github@theatr.us>"]
 
 [workspace.dependencies]
-seiza = { path = "seiza", version = "0.7.0" }
+seiza = { path = "seiza", version = "0.7.1" }
 seiza-download = { path = "seiza-download", version = "0.3.0" }
 seiza-fits = { path = "seiza-fits", version = "0.1.6" }
 seiza-sources = { path = "seiza-sources", version = "0.2.0" }

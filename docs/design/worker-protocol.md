@@ -52,7 +52,7 @@ The response reports server identity, supported solve modes and image inputs,
 and the loaded catalog/index metadata:
 
 ```json
-{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"server":{"name":"seiza","version":"0.7.0"},"client":{"name":"N.I.N.A.","version":"4.x"},"capabilities":{"solveModes":["hinted","blind"],"imageInputs":["image_path"],"maxConcurrentRequests":1},"catalog":{"starCount":154100000,"blindIndexLoaded":true,"blindIndexPatternCount":1234567,"blindIndexMagnitudeLimit":16.0}}}
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"server":{"name":"seiza","version":"0.7.1"},"client":{"name":"N.I.N.A.","version":"4.x"},"capabilities":{"solveModes":["hinted","blind"],"imageInputs":["image_path"],"maxConcurrentRequests":1},"catalog":{"starCount":154100000,"blindIndexLoaded":true,"blindIndexPatternCount":1234567,"blindIndexMagnitudeLimit":16.0}}}
 ```
 
 Protocol version 1 is currently the only supported version.

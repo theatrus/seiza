@@ -3,7 +3,7 @@ name = "seiza-py"
 # The Python package's major.minor tracks the embedded seiza crate's
 # major.minor so users can reason about solver behavior from the PyPI
 # version; the patch digit is free for binding-only fixes.
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/theatrus/seiza"
