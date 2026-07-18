@@ -57,14 +57,17 @@ Download the ready-made catalogs once, then solve:
 ```
 cargo install seiza-cli
 seiza download-data prebuilt --output data       # SHA-256-verified from downloads.seiza.fyi
-seiza solve-blind image.jpg --data data/stars-lite-tycho2.bin --min-scale 0.5 --max-scale 15
-seiza solve-blind fine-scale.jpg --data data/stars-deep-gaia17.bin --index data/blind-gaia16.idx --min-scale 0.1 --max-scale 5
-seiza solve image.fits --data data/stars-gaia.bin --scale 1.26 --objects data/objects.bin
-seiza catalog object --data data/objects.bin "Andromeda Galaxy"
-seiza catalog objects --data data/objects.bin --ra 10.6848 --dec 41.2691 --radius 3 --format json
-seiza catalog star --data data/stars-lite-tycho2.ids.bin "TYC 5949-2777-1" --format json
-seiza catalog star --data data/stars-lite-tycho2.ids.bin "RR Lyr"
+seiza solve-blind image.jpg --data data --min-scale 0.5 --max-scale 15
+seiza solve image.fits --data data --scale 1.26 --objects data
+seiza catalog object --data data "Andromeda Galaxy"
+seiza catalog objects --data data --ra 10.6848 --dec 41.2691 --radius 3 --format json
+seiza catalog star --data data "TYC 5949-2777-1" --format json
 ```
+
+`--data` takes a file or a directory: a directory picks the right catalog
+automatically (the deepest star catalog present, the blind pattern index
+when one is there). After `seiza setup`, every `--data` and `--index` can
+be omitted entirely — the standard catalog locations are searched.
 
 Not sure which catalogs you need? Run the guided setup — the same one the
 Windows installer offers, available on every platform:
@@ -86,7 +89,7 @@ Solving many images from your own application? Start a worker so the
 catalogs and blind index stay open instead of being reloaded for every solve:
 
 ```text
-seiza worker --data data/stars-deep-gaia17.bin --index data/blind-gaia16.idx
+seiza worker --data data --index data
 ```
 
 Send it one JSON request per line on stdin; it writes one response per line
@@ -221,7 +224,7 @@ Working today:
   with smoothing and non-max suppression, parallel verification through the
   hinted solver. The hosted G≤16 index is versioned, SHA-256 verified, and
   memory-mapped
-  (`seiza solve-blind image.jpg --data stars-deep-gaia17.bin --index blind-gaia16.idx --min-scale 0.1 --max-scale 15`).
+  (`seiza solve-blind image.jpg --data data --index data --min-scale 0.1 --max-scale 15`).
 - **Star catalogs** — memory-mappable tile formats with cone search.
   Use the prebuilt sets from `download-data prebuilt` unless you need a
   custom depth or epoch: building from primary sources stays fully
@@ -286,13 +289,13 @@ its plate solver with no plugin:
    [releases](https://github.com/theatrus/seiza/releases) (or use the portable
    ZIP or `cargo install seiza-cli`). The installer offers to run
    `seiza setup` after installation.
-2. Download a star catalog once and tell seiza where it lives — either
-   set the `SEIZA_STAR_DATA` environment variable, or simply drop the
-   `.bin` next to the executable:
+2. Download a star catalog once and tell seiza where it lives — point
+   `SEIZA_CATALOG_DIR` at the folder (or set `SEIZA_STAR_DATA` to a
+   specific file, or drop a `stars-*.bin` next to the executable):
 
    ```
    seiza download-data prebuilt --output C:\seiza-data --file stars-gaia.bin
-   setx SEIZA_STAR_DATA C:\seiza-data\stars-gaia.bin
+   setx SEIZA_CATALOG_DIR C:\seiza-data
    ```
 
 3. In N.I.N.A.: **Options → Plate Solving → Plate Solver: ASTAP**, and

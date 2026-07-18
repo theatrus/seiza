@@ -29,34 +29,40 @@ cargo install seiza-cli
 ## Solving
 
 ```
-# Hinted: approximate center (or FITS RA/DEC headers) plus pixel scale
-seiza solve image.jpg --data stars.bin --ra 324.8 --dec 57.5 --scale 2.8
-seiza solve light.fits --data stars.bin --scale 1.45
+# Hinted: approximate center (or FITS RA/DEC headers) plus pixel scale.
+# --data takes a catalog file or a directory of catalogs; after
+# `seiza setup` it can be omitted entirely.
+seiza solve image.jpg --data data --ra 324.8 --dec 57.5 --scale 2.8
+seiza solve light.fits --scale 1.45
 
-# Blind: no position, just a plausible scale range
-seiza solve-blind image.jpg --data stars.bin --min-scale 0.5 --max-scale 15
+# Blind: no position, just a plausible scale range. A directory supplies
+# the deepest catalog and the blind index automatically.
+seiza solve-blind image.jpg --data data --min-scale 0.5 --max-scale 15
 
 # Annotate detections or list objects in a solved field
 seiza detect image.jpg --annotate out.png
-seiza solve image.jpg --data stars.bin ... --objects objects.bin
+seiza solve image.jpg --data data ... --objects data
 
 # Query objects when sky bounds are already known; no image or solve needed
-seiza catalog objects --data objects.bin --ra 10.6848 --dec 41.2691 --radius 3
-seiza catalog objects --data objects.bin \
+seiza catalog objects --data data --ra 10.6848 --dec 41.2691 --radius 3
+seiza catalog objects --data data \
   --corner 8.91,42.14 --corner 12.47,42.02 \
   --corner 12.31,40.35 --corner 9.02,40.46 \
   --sort prominence --format json
 
 # Resolve exact IDs/names or complete names; no image, solve, or network needed
-seiza catalog object --data objects.bin "M 31"
-seiza catalog object --data objects.bin "openngc:NGC224"
-seiza catalog object --data objects.bin "andro" --prefix --limit 10
-seiza catalog star --data stars-lite-tycho2.ids.bin "TYC 5949-2777-1" --format json
-seiza catalog star --data stars-lite-tycho2.ids.bin "HIP 32349"
-seiza catalog star --data stars-lite-tycho2.ids.bin "RR Lyr"
-seiza catalog star --data stars-lite-tycho2.ids.bin "STF 2382 AB"
-seiza catalog star --data stars-lite-tycho2.ids.bin "RR L" --prefix --limit 10
+seiza catalog object --data data "M 31"
+seiza catalog object --data data "openngc:NGC224"
+seiza catalog object --data data "andro" --prefix --limit 10
+seiza catalog star --data data "TYC 5949-2777-1" --format json
+seiza catalog star --data data "HIP 32349"
+seiza catalog star --data data "RR Lyr"
+seiza catalog star --data data "STF 2382 AB"
+seiza catalog star --data data "RR L" --prefix --limit 10
 ```
+
+Explicit file paths still work everywhere a directory is shown, for
+custom-built catalogs or unusual layouts.
 
 Star detection defaults to `--detection-backend auto`: decoded 8-bit images
 (including color JPEGs) and MTF-compressed FITS use the compact u8 pipeline,
@@ -91,7 +97,7 @@ Applications performing repeated solves can keep a catalog and blind index
 open behind a newline-delimited JSON-RPC 2.0 process:
 
 ```
-seiza worker --data stars-deep-gaia17.bin --index blind-gaia16.idx
+seiza worker --data data --index data
 ```
 
 The same protocol can adapt local image paths to a queued `seiza-server`

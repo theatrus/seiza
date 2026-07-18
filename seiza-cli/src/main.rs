@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 mod astap;
 mod build_data;
+mod data_paths;
 mod setup;
 mod solve_field;
 mod worker;
@@ -323,9 +324,10 @@ enum Command {
     Solve {
         /// Image file (PNG, JPEG, TIFF)
         image: PathBuf,
-        /// Star tile file built by build-data
+        /// Star tile file or catalog directory (default: standard catalog
+        /// locations)
         #[arg(long)]
-        data: PathBuf,
+        data: Option<PathBuf>,
         /// Approximate field center RA, degrees (default: FITS RA header)
         #[arg(long, allow_negative_numbers = true)]
         ra: Option<f64>,
@@ -401,10 +403,12 @@ enum Command {
     SolveBlind {
         /// Image file (PNG, JPEG, TIFF, FITS)
         image: PathBuf,
-        /// Star tile file built by build-data
+        /// Star tile file or catalog directory (default: standard catalog
+        /// locations)
         #[arg(long)]
-        data: PathBuf,
-        /// Prebuilt blind pattern index; avoids rebuilding it for each run
+        data: Option<PathBuf>,
+        /// Prebuilt blind pattern index file or directory (default: found
+        /// in the standard locations; built in memory when absent)
         #[arg(long)]
         index: Option<PathBuf>,
         /// Minimum plausible pixel scale, arcseconds per pixel
@@ -446,11 +450,13 @@ enum Command {
     },
     /// Serve versioned JSON-RPC plate-solve requests over stdin/stdout
     Worker {
-        /// Star tile file kept open for the lifetime of the worker
-        #[arg(long, required_unless_present = "server", conflicts_with = "server")]
+        /// Star tile file or catalog directory kept open for the lifetime
+        /// of the worker (default: standard catalog locations)
+        #[arg(long, conflicts_with = "server")]
         data: Option<PathBuf>,
-        /// Optional prebuilt blind pattern index kept open by the worker
-        #[arg(long, requires = "data", conflicts_with = "server")]
+        /// Optional prebuilt blind pattern index file or directory kept
+        /// open by the worker
+        #[arg(long, conflicts_with = "server")]
         index: Option<PathBuf>,
         /// Remote seiza-server base URL; local images are converted according to --server-upload
         #[arg(long)]
@@ -527,9 +533,10 @@ enum CatalogCommand {
 
 #[derive(Args)]
 struct CatalogObjectArgs {
-    /// Object catalog file built by build-data objects
+    /// Object catalog file or catalog directory (default: standard
+    /// catalog locations)
     #[arg(long)]
-    data: PathBuf,
+    data: Option<PathBuf>,
     /// Object designation, common name, alias, or stable ID
     query: String,
     /// Return prefix completions instead of an exact lookup
@@ -547,9 +554,10 @@ struct CatalogObjectArgs {
 
 #[derive(Args)]
 struct CatalogStarArgs {
-    /// Star identifier sidecar built with build-data --identifier-index
+    /// Star identifier sidecar file or catalog directory (default:
+    /// standard catalog locations)
     #[arg(long)]
-    data: PathBuf,
+    data: Option<PathBuf>,
     /// Catalog designation or stellar name, for example HIP 32349 or RR Lyr
     query: String,
     /// Return textual-name prefix completions instead of an exact lookup
@@ -564,9 +572,10 @@ struct CatalogStarArgs {
 
 #[derive(Args)]
 struct CatalogObjectsArgs {
-    /// Object catalog file built by build-data objects
+    /// Object catalog file or catalog directory (default: standard
+    /// catalog locations)
     #[arg(long)]
-    data: PathBuf,
+    data: Option<PathBuf>,
     /// Cone center RA, ICRS degrees; use with --dec and --radius
     #[arg(long, allow_negative_numbers = true)]
     ra: Option<f64>,
@@ -910,6 +919,13 @@ fn main() -> Result<()> {
                 })?,
             };
             let acquisition_jd = resolve_acquisition_jd(&image, time.as_deref())?;
+            let data = data_paths::star_data(data.as_deref())?;
+            let objects = objects
+                .map(|path| data_paths::objects(Some(&path)))
+                .transpose()?;
+            let minor_bodies = minor_bodies
+                .map(|path| data_paths::minor_bodies(Some(&path)))
+                .transpose()?;
             solve_command(
                 &image,
                 &data,
@@ -1012,24 +1028,28 @@ fn main() -> Result<()> {
             sip_order,
             sigma,
             ignore_border,
-        } => solve_blind_command(
-            &image,
-            &data,
-            SolveBlindOptions {
-                index_path: index.as_deref(),
-                min_scale,
-                max_scale,
-                index_mag_limit,
-                max_hypotheses,
-                max_coarse_hypotheses,
-                sip_order,
-                sigma,
-                ignore_border,
-                detection_backend,
-                detection_fallback,
-                detection_fallback_hypotheses,
-            },
-        ),
+        } => {
+            let data = data_paths::star_data(data.as_deref())?;
+            let index = data_paths::blind_index(index.as_deref())?;
+            solve_blind_command(
+                &image,
+                &data,
+                SolveBlindOptions {
+                    index_path: index.as_deref(),
+                    min_scale,
+                    max_scale,
+                    index_mag_limit,
+                    max_hypotheses,
+                    max_coarse_hypotheses,
+                    sip_order,
+                    sigma,
+                    ignore_border,
+                    detection_backend,
+                    detection_fallback,
+                    detection_fallback_hypotheses,
+                },
+            )
+        }
         Command::Worker {
             data,
             index,
@@ -1039,6 +1059,14 @@ fn main() -> Result<()> {
             server_timeout,
         } => {
             let server_token = server_token.or_else(|| std::env::var("SEIZA_SERVER_TOKEN").ok());
+            let data = match &server {
+                Some(_) => None,
+                None => Some(data_paths::star_data(data.as_deref())?),
+            };
+            let index = index
+                .map(|path| data_paths::blind_index(Some(&path)))
+                .transpose()?
+                .flatten();
             worker::run(worker::WorkerOptions {
                 data_path: data.as_deref(),
                 index_path: index.as_deref(),
@@ -1266,8 +1294,9 @@ fn report_source_event(event: seiza_sources::SourceEvent) {
 }
 
 fn catalog_object(args: CatalogObjectArgs) -> Result<()> {
-    let catalog = ObjectCatalog::open(&args.data)
-        .with_context(|| format!("failed to open {}", args.data.display()))?;
+    let data = data_paths::objects(args.data.as_deref())?;
+    let catalog =
+        ObjectCatalog::open(&data).with_context(|| format!("failed to open {}", data.display()))?;
     let matches = if args.prefix {
         catalog.search_names(&args.query, args.limit)?
     } else {
@@ -1675,8 +1704,9 @@ fn catalog_objects(args: CatalogObjectsArgs) -> Result<()> {
         }
     };
 
-    let catalog = ObjectCatalog::open(&args.data)
-        .with_context(|| format!("failed to open {}", args.data.display()))?;
+    let data = data_paths::objects(args.data.as_deref())?;
+    let catalog =
+        ObjectCatalog::open(&data).with_context(|| format!("failed to open {}", data.display()))?;
     let query = ObjectQuery {
         kinds: args.kind,
         max_mag: args.max_mag,
@@ -1773,7 +1803,7 @@ fn catalog_objects(args: CatalogObjectsArgs) -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
-                    "catalog": args.data.display().to_string(),
+                    "catalog": data.display().to_string(),
                     "catalog_objects": catalog.len(),
                     "region": region_json,
                     "returned": objects.len(),
@@ -1815,8 +1845,9 @@ fn catalog_objects(args: CatalogObjectsArgs) -> Result<()> {
 }
 
 fn catalog_star(args: CatalogStarArgs) -> Result<()> {
-    let catalog = StarIdentifierCatalog::open(&args.data)
-        .with_context(|| format!("failed to open {}", args.data.display()))?;
+    let data = data_paths::star_identifiers(args.data.as_deref())?;
+    let catalog = StarIdentifierCatalog::open(&data)
+        .with_context(|| format!("failed to open {}", data.display()))?;
     let matches = if args.prefix {
         catalog
             .search_names(&args.query, args.limit)?

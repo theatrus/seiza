@@ -263,129 +263,15 @@ fn write_ini(path: &Path, lines: &[String]) -> Result<()> {
     std::fs::write(path, content).with_context(|| format!("cannot write {}", path.display()))
 }
 
-/// Star catalog resolution: env var, a config next to the executable,
-/// then well-known data directories.
+/// Star catalog resolution shared with every compatibility mode; see
+/// [`crate::data_paths`].
 pub(crate) fn resolve_star_data() -> Result<PathBuf> {
-    if let Ok(path) = std::env::var("SEIZA_STAR_DATA") {
-        let path = PathBuf::from(path);
-        if path.exists() {
-            return Ok(path);
-        }
-    }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let config = dir.join("seiza.toml");
-        if let Ok(content) = std::fs::read_to_string(&config) {
-            for line in content.lines() {
-                if let Some((key, value)) = line.split_once('=')
-                    && key.trim() == "star_data"
-                {
-                    let path = PathBuf::from(value.trim().trim_matches('"'));
-                    if path.exists() {
-                        return Ok(path);
-                    }
-                }
-            }
-        }
-        // A data file dropped next to the executable also works
-        for name in [
-            "stars-deep-gaia17.bin",
-            "stars-gaia.bin",
-            "stars-lite-tycho2.bin",
-            "stars.bin",
-        ] {
-            let path = dir.join(name);
-            if path.exists() {
-                return Ok(path);
-            }
-        }
-    }
-    for base in catalog_search_dirs() {
-        for name in [
-            "stars-deep-gaia17.bin",
-            "stars-gaia.bin",
-            "stars-lite-tycho2.bin",
-            "stars.bin",
-        ] {
-            let path = base.join(name);
-            if path.exists() {
-                return Ok(path);
-            }
-        }
-    }
-    anyhow::bail!(
-        "no star catalog found; set SEIZA_STAR_DATA or run: \
-         seiza download-data prebuilt --output <data dir> \
-         (https://downloads.seiza.fyi)"
-    )
+    crate::data_paths::star_data(None)
 }
 
-/// Optional prebuilt blind index resolution: environment, configuration next
-/// to the executable, then the same well-known data directories as catalogs.
+/// Optional prebuilt blind index resolution; see [`crate::data_paths`].
 pub(crate) fn resolve_blind_index() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("SEIZA_BLIND_INDEX") {
-        let path = PathBuf::from(path);
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let config = dir.join("seiza.toml");
-        if let Ok(content) = std::fs::read_to_string(&config) {
-            for line in content.lines() {
-                if let Some((key, value)) = line.split_once('=')
-                    && key.trim() == "blind_index"
-                {
-                    let path = PathBuf::from(value.trim().trim_matches('"'));
-                    if path.exists() {
-                        return Some(path);
-                    }
-                }
-            }
-        }
-        let path = dir.join("blind-gaia16.idx");
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    for base in catalog_search_dirs() {
-        let path = base.join("blind-gaia16.idx");
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    None
-}
-
-fn catalog_search_dirs() -> Vec<PathBuf> {
-    let mut dirs = vec![crate::setup::default_catalog_dir()];
-    for base in [
-        std::env::var("LOCALAPPDATA").ok().map(PathBuf::from),
-        dirs_data_dir(),
-    ]
-    .into_iter()
-    .flatten()
-    .map(|base| base.join("seiza"))
-    {
-        if !dirs.contains(&base) {
-            dirs.push(base);
-        }
-    }
-    dirs
-}
-
-fn dirs_data_dir() -> Option<PathBuf> {
-    std::env::var("XDG_DATA_HOME")
-        .ok()
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var("HOME")
-                .ok()
-                .map(|home| PathBuf::from(home).join(".local/share"))
-        })
+    crate::data_paths::blind_index(None).ok().flatten()
 }
 
 #[cfg(test)]
@@ -432,14 +318,6 @@ mod tests {
         let args = parse_args(&raw);
         assert!(args.ra_hours.is_none());
         assert!((args.radius_deg - 180.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn catalog_search_starts_with_setup_directory() {
-        assert_eq!(
-            catalog_search_dirs().first(),
-            Some(&crate::setup::default_catalog_dir())
-        );
     }
 
     #[test]
