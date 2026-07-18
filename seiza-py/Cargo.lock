@@ -1352,7 +1352,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-py"
-version = "0.1.0"
+version = "0.7.0"
 dependencies = [
  "image",
  "numpy",
