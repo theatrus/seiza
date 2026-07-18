@@ -10,7 +10,8 @@
 //!   identifier sidecar.
 //! - **Nothing** — the standard places are checked in order: the
 //!   kind's environment variable (`SEIZA_STAR_DATA`,
-//!   `SEIZA_BLIND_INDEX`; each takes a file or a directory), a
+//!   `SEIZA_BLIND_INDEX`; each takes a file or a directory, and a set
+//!   variable that resolves to nothing is an error, not a fallback), a
 //!   `seiza.toml` or data file next to the executable, then the shared
 //!   catalog directories `seiza setup` installs into ([`CATALOG_DIR_ENV`]
 //!   and the platform data dirs).
@@ -37,6 +38,7 @@ use std::path::{Path, PathBuf};
 pub const CATALOG_DIR_ENV: &str = "SEIZA_CATALOG_DIR";
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum DataPathError {
     #[error("no {kind} found in {} (expected one of: {expected})", path.display())]
     NotFoundInDirectory {
@@ -46,6 +48,12 @@ pub enum DataPathError {
     },
     #[error("{kind} {} does not exist", path.display())]
     Missing { kind: &'static str, path: PathBuf },
+    #[error("{var} is set to {} but no {kind} was found there", path.display())]
+    EnvVar {
+        kind: &'static str,
+        var: &'static str,
+        path: PathBuf,
+    },
     #[error(
         "no {kind} found; pass a file or a directory, run `seiza setup`, \
          or run: seiza download-data prebuilt --output <dir> (https://downloads.seiza.fyi)"
@@ -76,25 +84,22 @@ pub fn star_data(arg: Option<&Path>) -> Result<PathBuf, DataPathError> {
 /// build in memory"; an explicitly given path that resolves to nothing is
 /// an error.
 pub fn blind_index(arg: Option<&Path>) -> Result<Option<PathBuf>, DataPathError> {
+    let result = resolve(
+        arg,
+        "blind index",
+        Some("SEIZA_BLIND_INDEX"),
+        Some("blind_index"),
+        &["blind-gaia16.idx"],
+        Some("idx"),
+    );
     match arg {
-        Some(_) => resolve(
-            arg,
-            "blind index",
-            Some("SEIZA_BLIND_INDEX"),
-            Some("blind_index"),
-            &["blind-gaia16.idx"],
-            Some("idx"),
-        )
-        .map(Some),
-        None => Ok(resolve(
-            None,
-            "blind index",
-            Some("SEIZA_BLIND_INDEX"),
-            Some("blind_index"),
-            &["blind-gaia16.idx"],
-            Some("idx"),
-        )
-        .ok()),
+        Some(_) => result.map(Some),
+        // Omitted and absent means "build the index in memory" — but a set
+        // env var that resolves nothing is still an error, never a fallback.
+        None => match result {
+            Err(DataPathError::NoDefault { .. }) => Ok(None),
+            other => other.map(Some),
+        },
     }
 }
 
@@ -138,7 +143,7 @@ pub fn transients(arg: Option<&Path>) -> Result<PathBuf, DataPathError> {
 fn resolve(
     arg: Option<&Path>,
     kind: &'static str,
-    env: Option<&str>,
+    env: Option<&'static str>,
     toml_key: Option<&str>,
     names: &[&str],
     extension: Option<&str>,
@@ -162,17 +167,10 @@ fn resolve(
         });
     }
 
-    if let Some(env) = env
-        && let Ok(path) = std::env::var(env)
+    if let Some(var) = env
+        && let Some(value) = std::env::var_os(var).filter(|value| !value.is_empty())
     {
-        let path = PathBuf::from(path);
-        if path.is_dir() {
-            if let Some(found) = find_in_dir(&path, names, extension) {
-                return Ok(found);
-            }
-        } else if path.exists() {
-            return Ok(path);
-        }
+        return env_candidate(kind, var, &PathBuf::from(value), names, extension);
     }
 
     if let Ok(exe) = std::env::current_exe()
@@ -203,6 +201,29 @@ fn resolve(
         }
     }
     Err(DataPathError::NoDefault { kind })
+}
+
+/// A set environment variable is a pinned choice: when it resolves to
+/// nothing, that is an error — never a silent fallback to other catalogs.
+fn env_candidate(
+    kind: &'static str,
+    var: &'static str,
+    path: &Path,
+    names: &[&str],
+    extension: Option<&str>,
+) -> Result<PathBuf, DataPathError> {
+    if path.is_dir() {
+        if let Some(found) = find_in_dir(path, names, extension) {
+            return Ok(found);
+        }
+    } else if path.exists() {
+        return Ok(path.to_path_buf());
+    }
+    Err(DataPathError::EnvVar {
+        kind,
+        var,
+        path: path.to_path_buf(),
+    })
 }
 
 /// Search one directory: exact names in priority order, then any file
@@ -264,14 +285,7 @@ fn configured_catalog_dir(value: Option<OsString>) -> Option<PathBuf> {
 }
 
 fn dirs_data_dir() -> Option<PathBuf> {
-    std::env::var("XDG_DATA_HOME")
-        .ok()
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var("HOME")
-                .ok()
-                .map(|home| PathBuf::from(home).join(".local/share"))
-        })
+    directories::BaseDirs::new().map(|dirs| dirs.data_local_dir().to_path_buf())
 }
 
 #[cfg(test)]
@@ -338,6 +352,43 @@ mod tests {
                 .unwrap()
                 .ends_with("transients.bin")
         );
+    }
+
+    #[test]
+    fn set_env_var_that_resolves_nothing_is_an_error_not_a_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = env_candidate(
+            "star catalog",
+            "SEIZA_STAR_DATA",
+            &dir.path().join("typo.bin"),
+            STAR_DATA_NAMES,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(error, DataPathError::EnvVar { .. }));
+        assert!(error.to_string().contains("SEIZA_STAR_DATA"), "{error}");
+
+        // An empty directory behind the variable is just as much an error
+        let error = env_candidate(
+            "star catalog",
+            "SEIZA_STAR_DATA",
+            dir.path(),
+            STAR_DATA_NAMES,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(error, DataPathError::EnvVar { .. }));
+
+        std::fs::write(dir.path().join("stars-gaia.bin"), b"gaia").unwrap();
+        let found = env_candidate(
+            "star catalog",
+            "SEIZA_STAR_DATA",
+            dir.path(),
+            STAR_DATA_NAMES,
+            None,
+        )
+        .unwrap();
+        assert!(found.ends_with("stars-gaia.bin"));
     }
 
     #[test]

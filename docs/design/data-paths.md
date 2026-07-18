@@ -32,7 +32,9 @@ optional path and follows the same steps:
    right extension (`.idx`, `.ids.bin`).
 3. **Nothing was given** — check the standard places in order:
    - the kind's environment variable, when it has one (`SEIZA_STAR_DATA`,
-     `SEIZA_BLIND_INDEX`); the variable may name a file or a directory;
+     `SEIZA_BLIND_INDEX`); the variable may name a file or a directory. A
+     set variable is a pinned choice: when it points at nothing usable,
+     that is an error, never a silent fall-through to other catalogs;
    - a `seiza.toml` next to the executable naming the file, or a matching
      data file sitting next to the executable;
    - the shared catalog directories `seiza setup` installs into:
