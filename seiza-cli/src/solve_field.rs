@@ -88,26 +88,25 @@ pub fn run_as_bash(raw: &[String]) -> Result<()> {
 
 /// Resolve a cygwin-style absolute path such as `/tmp/asnet.sh` against
 /// the shell root: this binary is installed at `<root>/bin/bash`, so
-/// `/tmp/asnet.sh` maps to `<root>/tmp/asnet.sh`. A path that already
-/// exists as given is used directly.
+/// `/tmp/asnet.sh` maps to `<root>/tmp/asnet.sh`. A literal path is a
+/// fallback only, so host files cannot shadow the layout's script.
 fn resolve_shell_path(path: &str) -> Result<PathBuf> {
+    // The layout-root mapping comes first: in the shell Siril emulates,
+    // `/tmp/...` always means `<root>/tmp/...`, and a stray host file at
+    // the literal path must not shadow the layout's script.
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(root) = exe.parent().and_then(Path::parent)
+    {
+        let mapped = root.join(path.trim_start_matches(['/', '\\']));
+        if mapped.exists() {
+            return Ok(mapped);
+        }
+    }
     let direct = PathBuf::from(path);
     if direct.exists() {
         return Ok(direct);
     }
-    let exe = std::env::current_exe().context("cannot locate the running binary")?;
-    let root = exe
-        .parent()
-        .and_then(Path::parent)
-        .context("binary is not installed under a <root>/bin directory")?;
-    let mapped = root.join(path.trim_start_matches(['/', '\\']));
-    if mapped.exists() {
-        return Ok(mapped);
-    }
-    anyhow::bail!(
-        "cannot resolve shell path {path} (tried {})",
-        mapped.display()
-    )
+    anyhow::bail!("cannot resolve shell path {path}")
 }
 
 /// Parse the deterministic script Siril writes: shell variable assignments
@@ -303,6 +302,9 @@ fn solve(args: &SolveFieldArgs, table: &Path) -> Result<(seiza::solve::Solution,
     if table_stars.len() < 4 {
         anyhow::bail!("only {} stars in {}", table_stars.len(), table.display());
     }
+    if stop_requested(args) {
+        anyhow::bail!("cancelled before solving");
+    }
     // The table's flux column may not rank stars photometrically (Siril
     // writes PSF amplitudes, which drift far from photometric order on
     // stretched data — see docs/design/rank-robust-matching.md). When the
@@ -319,9 +321,6 @@ fn solve(args: &SolveFieldArgs, table: &Path) -> Result<(seiza::solve::Solution,
         }
         None => table_stars,
     };
-    if stop_requested(args) {
-        anyhow::bail!("cancelled before solving");
-    }
 
     let star_data = crate::astap::resolve_star_data()?;
     let catalog = seiza::catalog::TileCatalog::open(&star_data)
@@ -480,8 +479,10 @@ fn redetect_from_source_image(
     let (mapped, offsets) = candidates
         .into_iter()
         .max_by_key(|(_, offsets)| offsets.len())?;
-    let checked = detected.len().min(200);
-    if offsets.len() * 2 < checked {
+    // Majority of the *achievable* matches: the table may hold fewer stars
+    // than we checked, and detection depth differences are not disagreement.
+    let achievable = detected.len().min(200).min(table_stars.len());
+    if offsets.len() * 2 < achievable {
         return None; // frames disagree; wrong file or transformed image
     }
     let median = |mut values: Vec<f64>| {
@@ -886,6 +887,69 @@ solve-field -C \"$c\" -p -O -N none -R none -M none -B none -U none -S none --cr
         assert!(invoked_as_bash("C:\\solver\\bin\\bash.exe"));
         assert!(invoked_as_bash("/opt/solver/bin/bash"));
         assert!(!invoked_as_bash("seiza"));
+    }
+
+    #[test]
+    fn redetection_recovers_orientation_and_offset_from_a_flipped_table() {
+        // A synthetic image with gaussian stars; the "table" carries the
+        // same stars in Siril's bottom-up frame with a half-pixel offset
+        // and garbage flux ordering. Redetection must pick the flip, absorb
+        // the offset, and return photometrically ranked stars.
+        let dir = tempfile::tempdir().unwrap();
+        let (width, height) = (400u32, 300u32);
+        let mut image = image::GrayImage::from_pixel(width, height, image::Luma([20u8]));
+        // A jittered 6x4 grid of stars with strictly decreasing brightness,
+        // enough detections to clear the redetection floor.
+        let positions: Vec<(f64, f64, f64)> = (0..24)
+            .map(|index| {
+                let column = (index % 6) as f64;
+                let row = (index / 6) as f64;
+                (
+                    45.0 + column * 60.0 + (index % 5) as f64 * 3.0,
+                    40.0 + row * 70.0 + (index % 3) as f64 * 4.0,
+                    220.0 - index as f64 * 8.0,
+                )
+            })
+            .collect();
+        for pixel_y in 0..height {
+            for pixel_x in 0..width {
+                let mut value = 20.0f64;
+                for &(x, y, amplitude) in positions.iter() {
+                    let d2 = (pixel_x as f64 - x).powi(2) + (pixel_y as f64 - y).powi(2);
+                    value += amplitude * (-d2 / 3.0).exp();
+                }
+                image.put_pixel(pixel_x, pixel_y, image::Luma([value.min(255.0) as u8]));
+            }
+        }
+        let image_path = dir.path().join("field.png");
+        image.save(&image_path).unwrap();
+
+        // Bottom-up table with a constant +0.4 px offset and inverted flux.
+        let table_stars: Vec<seiza::DetectedStar> = positions
+            .iter()
+            .enumerate()
+            .map(|(index, &(x, y, _))| seiza::DetectedStar {
+                x: x + 0.4,
+                y: (height as f64 - 1.0 - y) + 0.4,
+                flux: index as f64 + 1.0, // garbage: faintest first
+                peak: 1.0,
+                area: 1,
+            })
+            .collect();
+
+        let table = dir.path().join("field.xyls");
+        let stars =
+            redetect_from_source_image(&table, &table_stars, (width, height)).expect("redetect");
+        assert!(stars.len() >= positions.len());
+        // Brightest-first by measured flux, mapped into the table's frame.
+        let (bx, by, _) = positions[0];
+        assert!((stars[0].x - (bx + 0.4)).abs() < 0.5, "{}", stars[0].x);
+        assert!(
+            (stars[0].y - (height as f64 - 1.0 - by + 0.4)).abs() < 0.5,
+            "{}",
+            stars[0].y
+        );
+        assert!(stars[0].flux > stars[1].flux);
     }
 
     #[test]
