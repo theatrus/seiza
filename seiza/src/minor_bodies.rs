@@ -14,6 +14,9 @@ use std::path::Path;
 const MAGIC: &[u8; 8] = b"SEIZAMB1";
 /// Obliquity of the ecliptic, J2000, degrees.
 const OBLIQUITY_DEG: f64 = 23.439_291_1;
+/// Half an hour in days: the centered-difference step for apparent motion.
+const HALF_HOUR_DAYS: f64 = 0.5 / 24.0;
+
 /// Gaussian gravitational constant: mean motion (rad/day) of a 1 AU orbit.
 const GAUSS_K: f64 = 0.017_202_098_95;
 /// Light travel time for 1 AU, days.
@@ -64,6 +67,13 @@ pub struct PlacedMinorBody {
     /// direction: anti-solar for comets (the tail), apparent motion for
     /// asteroids (the trail)
     pub direction_pa_deg: Option<f64>,
+    /// Apparent angular speed against the stars, arcseconds per hour,
+    /// from a centered difference ±30 minutes around the acquisition
+    /// time. Renderers scale motion arrows with this (clamping the
+    /// *displayed* length to taste — the value itself is unclamped:
+    /// ~1-3"/hr for TNOs, ~25-45"/hr for main-belt at opposition,
+    /// thousands for near-Earth flybys).
+    pub motion_arcsec_per_hour: Option<f64>,
 }
 
 pub struct MinorBodyCatalog {
@@ -129,6 +139,15 @@ impl MinorBodyCatalog {
                 if x < 0.0 || y < 0.0 || x >= width || y >= height {
                     return None;
                 }
+                // Apparent motion from a centered difference ±30 minutes:
+                // tangent to the sky track even near stationary points,
+                // where a one-sided sample visibly mis-points the arrow.
+                let motion = Self::position_at(body, jd - HALF_HOUR_DAYS)
+                    .zip(Self::position_at(body, jd + HALF_HOUR_DAYS));
+                let motion_arcsec_per_hour = motion.map(|(before, after)| {
+                    crate::catalog::angular_separation_deg(before.0, before.1, after.0, after.1)
+                        * 3600.0
+                });
                 let direction_pa_deg = match body.kind {
                     // Comet tails point anti-sunward (first order: both
                     // ion and dust tails)
@@ -136,8 +155,8 @@ impl MinorBodyCatalog {
                         Some((bearing_deg(ra, dec, sun.0, sun.1) + 180.0).rem_euclid(360.0))
                     }
                     // Asteroids trail along their apparent motion
-                    MinorBodyKind::Asteroid => Self::position_at(body, jd + 1.0 / 24.0)
-                        .map(|(ra2, dec2, _, _)| bearing_deg(ra, dec, ra2, dec2)),
+                    MinorBodyKind::Asteroid => motion
+                        .map(|(before, after)| bearing_deg(before.0, before.1, after.0, after.1)),
                 };
                 Some(PlacedMinorBody {
                     body: body.clone(),
@@ -148,6 +167,7 @@ impl MinorBodyCatalog {
                     mag,
                     delta_au,
                     direction_pa_deg,
+                    motion_arcsec_per_hour,
                 })
             })
             .collect();
@@ -575,6 +595,47 @@ mod tests {
                 "r = {r}"
             );
         }
+    }
+
+    #[test]
+    fn placed_asteroid_reports_apparent_motion() {
+        let body = MinorBody {
+            kind: MinorBodyKind::Asteroid,
+            name: "mover".into(),
+            epoch_jd: 2_460_000.5,
+            q_or_a: 2.5,
+            eccentricity: 0.2,
+            inclination_deg: 12.0,
+            node_deg: 45.0,
+            arg_perihelion_deg: 110.0,
+            mean_anomaly_deg: 30.0,
+            h_mag: 10.0,
+            slope: 0.15,
+        };
+        let jd = body.epoch_jd + 100.0;
+        let (ra, dec, _, _) = MinorBodyCatalog::position_at(&body, jd).unwrap();
+        let wcs =
+            crate::wcs::Wcs::from_center_scale_rotation((ra, dec), (500.0, 500.0), 2.0, 0.0, false);
+        let catalog = MinorBodyCatalog::new(vec![body.clone()]);
+        let placed = catalog.objects_in_footprint(&wcs, (1000, 1000), jd, 30.0);
+        assert_eq!(placed.len(), 1);
+        let placed = &placed[0];
+
+        // The reported rate must equal an independent centered difference.
+        let before = MinorBodyCatalog::position_at(&body, jd - HALF_HOUR_DAYS).unwrap();
+        let after = MinorBodyCatalog::position_at(&body, jd + HALF_HOUR_DAYS).unwrap();
+        let expected =
+            crate::catalog::angular_separation_deg(before.0, before.1, after.0, after.1) * 3600.0;
+        let rate = placed.motion_arcsec_per_hour.unwrap();
+        assert!((rate - expected).abs() < 1e-9, "rate {rate} vs {expected}");
+        // A main-belt orbit moves at a plausibly asteroidal rate: fast
+        // enough to trail, far below near-Earth flyby speeds.
+        assert!((1.0..300.0).contains(&rate), "rate {rate} arcsec/hr");
+
+        // The trail direction is the bearing along that same motion.
+        let pa = placed.direction_pa_deg.unwrap();
+        let expected_pa = bearing_deg(before.0, before.1, after.0, after.1);
+        assert!((pa - expected_pa).abs() < 1e-9, "pa {pa} vs {expected_pa}");
     }
 
     #[test]
