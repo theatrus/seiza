@@ -119,15 +119,21 @@ N.I.N.A. passes no catalog argument, so ASTAP mode resolves its star
 data on its own through the shared rules in
 [catalog path resolution](data-paths.md), in order:
 
-1. `SEIZA_STAR_DATA` environment variable;
-2. a `seiza.toml` next to the executable (`star_data = ...`);
-3. well-known per-OS data directories
-   (`%LOCALAPPDATA%/seiza`, `~/.local/share/seiza`);
+1. `SEIZA_STAR_DATA`, which may name a file or directory;
+2. a `seiza.toml` next to the executable (`star_data = ...`), or a matching
+   catalog next to the executable;
+3. the shared catalog directory populated by `seiza setup`:
+   `SEIZA_CATALOG_DIR` when configured, otherwise the platform data directory;
 4. if nothing is found: fail fast with
-   `ERROR=no star catalog; run: seiza download-data prebuilt --output <dir>`
-   in the `.ini` — pointing at the hosted datasets
-   (downloads.seiza.fyi) rather than attempting a surprise 400 MB
-   download inside an imaging loop.
+   setup guidance in the `.ini` rather than attempting a surprise download
+   inside an imaging loop.
+
+The Windows MSI can launch `seiza setup` after installation and installs a
+**Seiza Catalog Setup** Start-menu shortcut for later changes. A manual or
+portable installation can use `seiza download-data prebuilt --output <dir>`
+and set `SEIZA_CATALOG_DIR` to that directory. Directory resolution chooses the
+deepest available star catalog automatically, so normal ASTAP users do not need
+to nominate one `stars-*.bin` file.
 
 The Gaia G≤15 set (367 MB) is the recommended general-purpose default;
 the Gaia G≤17 set plus the maintained `blind-gaia16.idx` is recommended

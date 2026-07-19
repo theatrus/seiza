@@ -217,10 +217,12 @@ pub fn install_layout(dir: &Path) -> Result<()> {
     }
     println!(
         "\nPoint Siril's astrometry.net directory preference at:\n  {}\n\
-         Give seiza a star catalog (any one of):\n  \
-         - run: seiza setup\n  \
-         - set SEIZA_STAR_DATA to a stars-*.bin\n  \
-         - drop a stars-*.bin next to the installed solve-field",
+         Install catalogs with Seiza Catalog Setup on Windows or run:\n  \
+           seiza setup\n\
+         For a manual directory, run:\n  \
+           seiza download-data prebuilt --output <directory>\n  \
+         then point SEIZA_CATALOG_DIR at that directory. Solve-field mode\n  \
+         selects the star catalog and blind index automatically.",
         dir.display()
     );
     Ok(())
