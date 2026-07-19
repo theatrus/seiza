@@ -8,6 +8,22 @@ The output is a provenance-bearing prediction. It does not claim that a
 satellite was detected in the pixels. Stacked images are deliberately outside
 the API: callers must provide one `SingleExposure` interval.
 
+Reusable post-prediction analysis lives here as well, so applications do not
+need to reimplement it:
+
+- `SatelliteTrack::bright_trail_risk` summarizes generic illumination and
+  image-plane geometry. It intentionally stops short of deciding whether an
+  application should warn, reject, or grade an exposure.
+- `trail_alignment::PixelTrailAligner` searches monochrome image pixels in a
+  bounded corridor around the complete predicted polyline. The result keeps
+  aligned pixel evidence separate from the orbital prediction and distinguishes
+  a tested negative (`NotDetected`) from a path that could not be tested
+  (`NotEvaluated`).
+
+The alignment input is row-major `u16` luminance plus an ADU conversion factor,
+not an application-specific FITS type. Construct one aligner per frame and
+reuse it for every predicted track.
+
 For recent images, `CelesTrakSource` asynchronously downloads and caches the
 current active-satellite OMM set. CelesTrak rate-limits repeated downloads, so
 keep reusing one cache directory; a rate-limited refresh falls back to the

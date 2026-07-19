@@ -1,6 +1,6 @@
 # Single-exposure satellite track overlays
 
-Status: first prediction layer implemented; pixel-evidence matching proposed
+Status: prediction, replayable catalog history, and constrained pixel-evidence matching implemented
 
 ## Goal and boundary
 
@@ -19,10 +19,9 @@ that value.
 
 The first result is a **predicted crossing**, not a pixel detection. An object
 can be geometrically present while eclipsed, too faint, outside the camera's
-actual shutter interval, or hidden by clouds. A later matcher may associate a
-detected trail with one or more predictions and attach residuals and a
-confidence, but it must preserve the prediction and pixel evidence as distinct
-provenance layers.
+actual shutter interval, or hidden by clouds. The reusable constrained matcher
+may associate image evidence with a prediction, but it preserves the prediction
+and aligned pixel evidence as distinct provenance layers.
 
 ## Observation contract
 
@@ -136,6 +135,22 @@ Each `SatelliteTrack` contains identity, element epoch, source provenance,
 time-tagged topocentric samples, clipped pixel segments, elevation, range, and
 sunlight fraction. `association` is currently always `Predicted`.
 
+`SatelliteTrack::bright_trail_risk` converts illumination, range, elevation,
+and clipped image-plane length into a reusable heuristic score and
+`Low`/`Possible`/`High` level. This is intentionally not an apparent-magnitude
+model: instrument response, passband, attitude, and flares are unavailable.
+Applications retain ownership of warning, rejection, and grading policy.
+
+`trail_alignment::PixelTrailAligner` accepts row-major monochrome `u16` pixels
+and an ADU conversion factor. It downsamples once per frame, then searches a
+bounded normal-offset corridor around every typed `PixelSegment` in the
+predicted polyline. Fitting the complete polyline avoids replacing a curved
+track with an inaccurate endpoint chord. A detection returns aligned segments,
+offsets, contrast, significance, and continuity while leaving the prediction
+unchanged. `NotDetected` means the path was evaluated without sufficient pixel
+support; `NotEvaluated` records an empty or too-short path and is not negative
+evidence.
+
 `tracks_in_footprint` borrows the catalog immutably — SGP4 initialization is
 cached on a per-call scratch copy of each element — so one loaded catalog can
 serve concurrent solves. The optional `serde` crate feature derives
@@ -170,8 +185,8 @@ it never calls an unmatched prediction observed or detected.
 ## Follow-on work
 
 1. Add an authenticated, permanently cached Space-Track history provider.
-2. Detect trail candidates after masking stars and compare their geometry with
-   predicted paths.
+2. Add unconstrained full-frame trail candidate detection after masking stars;
+   the prediction-constrained matcher is already reusable.
 3. Report all plausible identities when timing or elements do not distinguish
    nearby tracks; never force a single match.
 4. Add optional timing-error and orbit-uncertainty envelopes.

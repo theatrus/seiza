@@ -6,6 +6,7 @@
 //! matcher.
 
 mod source;
+pub mod trail_alignment;
 
 pub use source::{
     CELESTRAK_ACTIVE_OMM_URL, CELESTRAK_MIN_REFRESH, CacheState, CachedCatalogSnapshot,
@@ -347,6 +348,57 @@ pub struct SatelliteTrack {
     pub clipped_segments: Vec<PixelSegment>,
 }
 
+/// Qualitative interpretation of the generic bright-trail heuristic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum BrightTrailRiskLevel {
+    Low,
+    Possible,
+    High,
+}
+
+/// Tunable geometry/illumination thresholds for the generic trail heuristic.
+///
+/// This is not an apparent-magnitude model. Instrument, passband, satellite
+/// attitude, and flares remain outside the available element data.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BrightTrailRiskOptions {
+    pub high_score: f64,
+    pub high_minimum_sunlight_fraction: f64,
+    pub high_maximum_range_km: f64,
+    pub high_minimum_path_px: f64,
+    pub possible_minimum_sunlight_fraction: f64,
+    pub possible_maximum_range_km: f64,
+    pub possible_minimum_path_px: f64,
+}
+
+impl Default for BrightTrailRiskOptions {
+    fn default() -> Self {
+        Self {
+            high_score: 0.55,
+            high_minimum_sunlight_fraction: 0.5,
+            high_maximum_range_km: 4_000.0,
+            high_minimum_path_px: 10.0,
+            possible_minimum_sunlight_fraction: 0.2,
+            possible_maximum_range_km: 10_000.0,
+            possible_minimum_path_px: 2.0,
+        }
+    }
+}
+
+/// Reusable geometry/illumination facts and heuristic score for one track.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BrightTrailRisk {
+    pub score: f64,
+    pub level: BrightTrailRiskLevel,
+    pub maximum_sunlight_fraction: f64,
+    pub minimum_range_km: f64,
+    pub maximum_elevation_deg: f64,
+    pub clipped_length_px: f64,
+}
+
 impl SatelliteTrack {
     pub fn maximum_elevation_deg(&self) -> f64 {
         self.samples
@@ -360,6 +412,13 @@ impl SatelliteTrack {
             .iter()
             .map(|sample| sample.sunlight_fraction)
             .fold(0.0, f64::max)
+    }
+
+    pub fn minimum_range_km(&self) -> f64 {
+        self.samples
+            .iter()
+            .map(|sample| sample.range_km)
+            .fold(f64::INFINITY, f64::min)
     }
 
     /// Peak apparent angular rate between consecutive samples, in arcseconds
@@ -408,6 +467,65 @@ impl SatelliteTrack {
             .map(|segment| (segment.end.x - segment.start.x).hypot(segment.end.y - segment.start.y))
             .sum()
     }
+
+    /// Assess generic trail visibility from illumination and projected
+    /// geometry. Callers decide how (or whether) this affects grading.
+    pub fn bright_trail_risk(&self, options: &BrightTrailRiskOptions) -> BrightTrailRisk {
+        let maximum_sunlight_fraction = self.maximum_sunlight_fraction();
+        let minimum_range_km = self.minimum_range_km();
+        let maximum_elevation_deg = self.maximum_elevation_deg();
+        let clipped_length_px = self.clipped_length_px();
+        let score = bright_trail_score(
+            maximum_sunlight_fraction,
+            minimum_range_km,
+            maximum_elevation_deg,
+            clipped_length_px,
+        );
+        let level = if score >= options.high_score
+            && maximum_sunlight_fraction >= options.high_minimum_sunlight_fraction
+            && minimum_range_km <= options.high_maximum_range_km
+            && clipped_length_px >= options.high_minimum_path_px
+        {
+            BrightTrailRiskLevel::High
+        } else if maximum_sunlight_fraction >= options.possible_minimum_sunlight_fraction
+            && minimum_range_km <= options.possible_maximum_range_km
+            && clipped_length_px >= options.possible_minimum_path_px
+        {
+            BrightTrailRiskLevel::Possible
+        } else {
+            BrightTrailRiskLevel::Low
+        };
+        BrightTrailRisk {
+            score,
+            level,
+            maximum_sunlight_fraction,
+            minimum_range_km,
+            maximum_elevation_deg,
+            clipped_length_px,
+        }
+    }
+}
+
+fn bright_trail_score(
+    sunlight_fraction: f64,
+    range_km: f64,
+    elevation_deg: f64,
+    clipped_length_px: f64,
+) -> f64 {
+    if !sunlight_fraction.is_finite()
+        || !range_km.is_finite()
+        || !elevation_deg.is_finite()
+        || !clipped_length_px.is_finite()
+        || sunlight_fraction <= 0.0
+    {
+        return 0.0;
+    }
+    let range_factor = (1.0 - ((range_km - 500.0) / 9_500.0)).clamp(0.0, 1.0);
+    let elevation_factor = (elevation_deg / 60.0).clamp(0.0, 1.0);
+    let path_factor = (clipped_length_px / 100.0).clamp(0.0, 1.0);
+    (sunlight_fraction.clamp(0.0, 1.0)
+        * (0.60 * range_factor + 0.20 * elevation_factor + 0.20 * path_factor))
+        .clamp(0.0, 1.0)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1201,6 +1319,38 @@ mod tests {
         let rate = track.maximum_apparent_rate_arcsec_per_second().unwrap();
         assert!((rate - 1800.0).abs() < 1.0, "one degree over two seconds");
         assert!((track.clipped_length_px() - 10.0).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn assesses_bright_trail_risk_without_deciding_application_policy() {
+        let mut track = SatelliteTrack {
+            identity: SatelliteIdentity {
+                norad_id: Some(1),
+                cospar_id: None,
+                name: "TEST".into(),
+            },
+            association: TrackAssociation::Predicted,
+            element_epoch_utc: UtcTimestamp(0.0),
+            element_age_seconds: 0.0,
+            source: "test".into(),
+            sample_interval_seconds: 2.0,
+            samples: vec![pixel_sample(0.0, 0.0, 0.0), pixel_sample(2.0, 100.0, 0.0)],
+            clipped_segments: vec![PixelSegment {
+                start: PixelPoint { x: 0.0, y: 0.0 },
+                end: PixelPoint { x: 100.0, y: 0.0 },
+            }],
+        };
+
+        let bright = track.bright_trail_risk(&BrightTrailRiskOptions::default());
+        assert_eq!(bright.level, BrightTrailRiskLevel::High);
+        assert!(bright.score > 0.9);
+
+        for sample in &mut track.samples {
+            sample.sunlight_fraction = 0.0;
+        }
+        let eclipsed = track.bright_trail_risk(&BrightTrailRiskOptions::default());
+        assert_eq!(eclipsed.level, BrightTrailRiskLevel::Low);
+        assert_eq!(eclipsed.score, 0.0);
     }
 
     #[test]
