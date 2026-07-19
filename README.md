@@ -47,8 +47,9 @@ can submit to the same server with `seiza worker --server`.
   (detection, WCS, solving, catalogs),
   [`seiza-fits`](seiza-fits/README.md) (FITS reading),
   [`seiza-download`](seiza-download/README.md) (catalog download and
-  caching), and [`seiza-sources`](seiza-sources/README.md) (raw upstream
-  data for custom catalog builds).
+  caching), [`seiza-satellites`](seiza-satellites/README.md) (single-exposure
+  satellite track prediction), and [`seiza-sources`](seiza-sources/README.md)
+  (raw upstream data for custom catalog builds).
 
 ## Quick start
 
@@ -59,6 +60,7 @@ cargo install seiza-cli
 seiza download-data prebuilt --output data       # SHA-256-verified from downloads.seiza.fyi
 seiza solve-blind image.jpg --data data --min-scale 0.5 --max-scale 15
 seiza solve image.fits --data data --scale 1.26 --objects data
+seiza solve image.fits --data data --scale 1.26 --satellites-celestrak --annotate tracks.png
 seiza catalog object --data data "Andromeda Galaxy"
 seiza catalog objects --data data --ra 10.6848 --dec 41.2691 --radius 3 --format json
 seiza catalog star --data data "TYC 5949-2777-1" --format json
@@ -68,6 +70,13 @@ seiza catalog star --data data "TYC 5949-2777-1" --format json
 automatically (the deepest star catalog present, the blind pattern index
 when one is there). After `seiza setup`, every `--data` and `--index` can
 be omitted entirely — the standard catalog locations are searched.
+
+Satellite overlays are opt-in and apply only to one shutter-open exposure,
+not a stack. The solver reads `DATE-BEG`/`DATE-END` (or `DATE-OBS` plus
+`EXPTIME`) and standard `OBSGEO-*` observer coordinates from FITS, or accepts
+explicit `--time`, `--exposure-seconds`, and `--observer-lat/--observer-lon`.
+The annotation is a predicted path, not a claim that a trail was detected.
+See the [satellite track design](docs/design/satellite-tracks.md).
 
 Not sure which catalogs you need? Run the guided setup — the same one the
 Windows installer offers, available on every platform:

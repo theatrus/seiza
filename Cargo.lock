@@ -697,6 +697,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "font8x8"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "875488b8711a968268c7cf5d139578713097ca4635a76044e8fe8eedf831d07e"
+
+[[package]]
 name = "form_urlencoded"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1561,6 +1567,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "numeris"
+version = "0.5.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ade2b2f9c2f4a689eb8c5d6d8280a955006b3e29056ae9cf88fe7d2450dd001"
+dependencies = [
+ "num-complex",
+ "num-traits",
+ "serde",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1683,6 +1700,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "process_path"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f676f11eb0b3e2ea0fbaee218fa6b806689e2297b8c8adc5bf73df465c4f6171"
+dependencies = [
+ "libc",
+ "winapi",
 ]
 
 [[package]]
@@ -2162,6 +2189,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "satkit"
+version = "0.20.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa616065c5c5aef04c37bf6da26e7efef2281e1593db03c9db191a5be9b81c2f"
+dependencies = [
+ "numeris",
+ "process_path",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2195,11 +2235,13 @@ dependencies = [
  "clap",
  "csv",
  "flate2",
+ "font8x8",
  "image",
  "imageproc",
  "seiza",
  "seiza-download",
  "seiza-fits",
+ "seiza-satellites",
  "seiza-sources",
  "serde",
  "serde_json",
@@ -2238,6 +2280,20 @@ version = "0.1.6"
 dependencies = [
  "memmap2",
  "multiversion",
+]
+
+[[package]]
+name = "seiza-satellites"
+version = "0.1.0"
+dependencies = [
+ "directories",
+ "fs2",
+ "reqwest",
+ "satkit",
+ "seiza",
+ "tempfile",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

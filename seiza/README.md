@@ -51,7 +51,12 @@ See the [`seiza-cli`](https://crates.io/crates/seiza-cli) crate for the
 command-line tool, and [`seiza-fits`](https://crates.io/crates/seiza-fits)
 for dependency-free FITS reading and autostretch. Raw catalog-building source
 acquisition is separately available from
-[`seiza-sources`](https://crates.io/crates/seiza-sources).
+[`seiza-sources`](https://crates.io/crates/seiza-sources). Time- and
+observer-aware satellite paths through a solved WCS are provided by the
+separate optional
+[`seiza-satellites`](https://crates.io/crates/seiza-satellites) crate so core
+solving and static catalog access do not inherit orbital-element or network
+dependencies.
 
 ## License
 
