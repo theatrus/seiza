@@ -131,6 +131,14 @@ serve concurrent solves. The optional `serde` crate feature derives
 `Serialize`/`Deserialize` on the exposure, option, and result types for
 embedding in application APIs and caches.
 
+The Python bindings expose the same surface as
+`seiza.SatelliteCatalog.tracks_in_footprint(wcs, width, height, start=...,
+duration_s=..., latitude=..., longitude=...)` with `SatelliteTrack`,
+`TrackSample`, and `TrackSearchResult` result classes, plus
+`SatelliteCatalog.fetch_celestrak()` for the cached download. The keyword
+construction keeps the single-exposure contract: Python callers supply one
+explicit shutter-open interval and observer, never a bare timestamp.
+
 The CLI enables the layer explicitly with either:
 
 ```shell
