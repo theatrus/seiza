@@ -287,14 +287,18 @@ its plate solver with no plugin:
 
 1. Grab the Windows MSI from the
    [releases](https://github.com/theatrus/seiza/releases) (or use the portable
-   ZIP or `cargo install seiza-cli`). The installer offers to run
-   `seiza setup` after installation.
-2. Download a star catalog once and tell seiza where it lives — point
-   `SEIZA_CATALOG_DIR` at the folder (or set `SEIZA_STAR_DATA` to a
-   specific file, or drop a `stars-*.bin` next to the executable):
+   ZIP or `cargo install seiza-cli`).
+2. Install the catalogs you want. On Windows, let the installer launch catalog
+   setup when it finishes or open **Seiza Catalog Setup** from the Start menu
+   later. On every platform, the equivalent command is `seiza setup`. It writes
+   a complete usable selection into Seiza's standard catalog directory, which
+   ASTAP-compatible mode discovers automatically.
+
+   For a manual or portable layout, download the prebuilt bundle into one
+   directory and configure that directory once:
 
    ```
-   seiza download-data prebuilt --output C:\seiza-data --file stars-gaia.bin
+   seiza download-data prebuilt --output C:\seiza-data
    setx SEIZA_CATALOG_DIR C:\seiza-data
    ```
 
@@ -305,8 +309,11 @@ its plate solver with no plugin:
 seiza auto-detects ASTAP-style invocations (`-f image.fits -fov … -ra …
 -spd …`), solves hinted or blind accordingly, and writes the `.ini`
 result file N.I.N.A. reads — including the full CD matrix, so pixel
-scale, rotation, and flip all come through. A copy of the binary
-renamed `astap.exe` behaves identically. Details:
+scale, rotation, and flip all come through. Catalog discovery selects the
+right star catalog and blind index from the configured directory; advanced
+single-file overrides remain available through `SEIZA_STAR_DATA` and
+`SEIZA_BLIND_INDEX`. A copy of the binary renamed `astap.exe` behaves
+identically. Details:
 [docs/design/astap-mode.md](docs/design/astap-mode.md).
 
 ## Use with Siril (solve-field compatible mode)

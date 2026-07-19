@@ -118,10 +118,14 @@ for request and response details.
 
 seiza speaks ASTAP's CLI contract: set N.I.N.A.'s plate solver to ASTAP
 and point the ASTAP path at the seiza binary (a copy named `astap.exe`
-also works). Provide a star catalog via the `SEIZA_STAR_DATA`
-environment variable or a `stars-*.bin` next to the executable —
-`seiza download-data prebuilt` fetches one. Hinted and blind-slot
-solving both work; see the repository's `docs/design/astap-mode.md`.
+also works). On Windows, use the **Seiza Catalog Setup** Start-menu shortcut
+installed by the MSI; on every platform, `seiza setup` installs a usable
+selection into a directory ASTAP mode discovers automatically. For a manual
+layout, run `seiza download-data prebuilt --output <directory>` and point
+`SEIZA_CATALOG_DIR` at that directory. Advanced `SEIZA_STAR_DATA` and
+`SEIZA_BLIND_INDEX` file-or-directory overrides remain available. Hinted and
+blind-slot solving both work; see the repository's
+`docs/design/astap-mode.md`.
 
 ## Use with Siril
 
