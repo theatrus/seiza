@@ -55,6 +55,8 @@ can submit to the same server with `seiza worker --server`.
 - **From Rust** — use the crates directly: [`seiza`](seiza/README.md)
   (detection, WCS, solving, catalogs),
   [`seiza-fits`](seiza-fits/README.md) (FITS reading),
+  [`seiza-stacking`](seiza-stacking/README.md) (linear calibration,
+  registration, and additive live stacking),
   [`seiza-download`](seiza-download/README.md) (catalog download and
   caching), [`seiza-satellites`](seiza-satellites/README.md) (single-exposure
   satellite track prediction), and [`seiza-sources`](seiza-sources/README.md)
@@ -73,6 +75,8 @@ seiza solve image.fits --data data --scale 1.26 --satellites-celestrak --annotat
 seiza catalog object --data data "Andromeda Galaxy"
 seiza catalog objects --data data --ra 10.6848 --dec 41.2691 --radius 3 --format json
 seiza catalog star --data data "TYC 5949-2777-1" --format json
+seiza stack light-001.fits light-002.fits light-003.fits --output stack.fits \
+  --preview stack.png
 ```
 
 `--data` takes a file or a directory: a directory picks the right catalog
@@ -368,6 +372,8 @@ and solves in the table's exact frame. Contract details:
 
 - `seiza/` — library crate: `detect`, `wcs`, `catalog`, `objects`, `solve`
 - `seiza-fits/` — dependency-free FITS reading, statistics, MTF autostretch
+- `seiza-stacking/` — linear FITS calibration, local registration,
+  normalization, additive integration, and rejection
 - `seiza-cli/` — the `seiza` command-line tool: solving, ASTAP mode, the
   JSON-RPC worker, guided `seiza setup`, and dataset building
 - `seiza-download/` — async, verified runtime catalog-bundle cache

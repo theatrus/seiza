@@ -20,6 +20,7 @@ seiza.workspace = true
 seiza-download.workspace = true
 seiza-fits.workspace = true
 seiza-satellites.workspace = true
+seiza-stacking.workspace = true
 seiza-sources.workspace = true
 anyhow.workspace = true
 clap.workspace = true

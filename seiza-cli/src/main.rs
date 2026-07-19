@@ -18,6 +18,7 @@ mod astap;
 mod build_data;
 mod setup;
 mod solve_field;
+mod stack;
 mod worker;
 
 fn is_fits_path(path: &std::path::Path) -> bool {
@@ -518,6 +519,8 @@ enum Command {
         #[arg(long)]
         stretch: Option<PathBuf>,
     },
+    /// Register and incrementally stack linear FITS light frames
+    Stack(stack::StackArgs),
     /// Query a star tile file: list stars around a sky position
     Cone {
         /// Star tile file built by build-data
@@ -1214,6 +1217,7 @@ fn main() -> Result<()> {
             })
         }
         Command::FitsInfo { image, stretch } => fits_info(&image, stretch.as_deref()),
+        Command::Stack(options) => stack::run(options),
         Command::Cone {
             data,
             ra,
@@ -3208,6 +3212,27 @@ fn build_blind_index_command(
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+
+    #[test]
+    fn stack_requires_multiple_lights_and_linear_output() {
+        assert!(
+            Cli::try_parse_from(["seiza", "stack", "one.fits", "--output", "stack.fits"]).is_err()
+        );
+        let cli = Cli::try_parse_from([
+            "seiza",
+            "stack",
+            "one.fits",
+            "two.fits",
+            "--output",
+            "stack.fits",
+            "--preview",
+            "stack.png",
+            "--normalization",
+            "local",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Command::Stack(_)));
+    }
 
     #[test]
     fn download_data_help_leads_with_the_ready_to_use_route() {

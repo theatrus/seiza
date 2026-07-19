@@ -2245,6 +2245,7 @@ dependencies = [
  "seiza-fits",
  "seiza-satellites",
  "seiza-sources",
+ "seiza-stacking",
  "serde",
  "serde_json",
  "sha2",
@@ -2314,6 +2315,17 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "seiza-stacking"
+version = "0.1.0"
+dependencies = [
+ "rayon",
+ "seiza",
+ "seiza-fits",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

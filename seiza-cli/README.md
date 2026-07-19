@@ -99,6 +99,29 @@ embedded in the memory-mapped `objects.bin`; normal open does not decode every
 record or touch every index page. Add `--all-sources` to audit every normalized
 upstream row, preferred facet selection, and source-qualified geometry.
 
+## Image stacking
+
+`seiza stack` calibrates, registers, and incrementally integrates FITS light
+frames. The first light is the fixed output/reference grid:
+
+```
+seiza stack light-001.fits light-002.fits light-003.fits \
+  --output stack.fits --preview stack.png
+
+seiza stack lights/*.fits --output stack.fits \
+  --bias master-bias.fits --dark master-dark.fits --flat master-flat.fits \
+  --normalization local --local-tile-size 256
+```
+
+Calibration, registration, normalization, online delta-sigma rejection, and
+integration all operate on linear `f32` samples. `--preview` is an optional
+display-only stretch and never feeds pixels back into the stack. Incoming
+frames are admitted atomically: incompatible images, weak registrations,
+excess transform drift, low overlap, or implausible normalization leave the
+existing additive stack unchanged. See the
+[stacking design](https://github.com/theatrus/seiza/blob/main/docs/design/image-stacking.md)
+for the live API, rejection semantics, and PSF Guard integration boundary.
+
 ## Persistent worker
 
 Applications performing repeated solves can keep a catalog and blind index
