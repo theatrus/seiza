@@ -1,6 +1,8 @@
 //! Python bindings for seiza: star detection, WCS fitting, and hinted/blind
 //! plate solving. The Python module is named `seiza`.
 
+mod satellites;
+
 use numpy::{PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::{PyFileNotFoundError, PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -195,8 +197,8 @@ impl PyBlindIndex {
 /// to the 1-indexed FITS convention.
 #[pyclass(frozen, name = "Wcs", module = "seiza")]
 #[derive(Clone)]
-struct PyWcs {
-    wcs: SeizaWcs,
+pub(crate) struct PyWcs {
+    pub(crate) wcs: SeizaWcs,
 }
 
 #[pymethods]
@@ -694,6 +696,10 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBlindIndex>()?;
     m.add_class::<PyWcs>()?;
     m.add_class::<PySolution>()?;
+    m.add_class::<satellites::PySatelliteCatalog>()?;
+    m.add_class::<satellites::PySatelliteTrack>()?;
+    m.add_class::<satellites::PyTrackSample>()?;
+    m.add_class::<satellites::PyTrackSearchResult>()?;
     m.add_function(wrap_pyfunction!(detect, m)?)?;
     m.add_function(wrap_pyfunction!(solve, m)?)?;
     m.add_function(wrap_pyfunction!(solve_blind, m)?)?;

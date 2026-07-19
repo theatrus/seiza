@@ -83,6 +83,33 @@ The header text form is suitable for header-injection APIs — for example
 Siril's `sirilpy` scripting interface (`set_image_header`), which makes a
 seiza solve usable from a Siril Python script.
 
+## Predicted satellite tracks
+
+After a solve, predict which satellites crossed the image while the shutter
+was open. Predictions come from orbital elements — they are never pixel
+detections. The exposure must be one continuous shutter-open interval (not a
+stack's total integration) and needs an observer location:
+
+```python
+sats = seiza.SatelliteCatalog.fetch_celestrak()   # cached; ~2h refresh floor
+# or offline / historical: seiza.SatelliteCatalog.open("elements.json")
+
+result = sats.tracks_in_footprint(
+    solution.wcs, width, height,
+    start="2026-07-19T06:12:00Z",     # Unix seconds, RFC 3339, or tz-aware datetime
+    duration_s=120.0,
+    latitude=42.466, longitude=-71.1516, altitude_m=150.0,
+)
+for track in result.tracks:           # highest elevation first
+    print(track.label, track.max_elevation_deg, track.clipped_segments)
+```
+
+Element records older than seven days are reported in
+`result.stale_elements` and skipped rather than silently extrapolated
+(`max_element_age_s=None` overrides). CelesTrak rate-limits repeated
+downloads: keep reusing one cache directory, and check `sats.cache_state`
+and `sats.warning` after `fetch_celestrak()`.
+
 ## Notes
 
 - Solving and detection release the GIL; other Python threads keep running.

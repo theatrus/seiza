@@ -1,6 +1,13 @@
 [workspace]
 resolver = "3"
-members = ["seiza", "seiza-cli", "seiza-download", "seiza-fits", "seiza-sources"]
+members = [
+    "seiza",
+    "seiza-cli",
+    "seiza-download",
+    "seiza-fits",
+    "seiza-satellites",
+    "seiza-sources",
+]
 
 [workspace.package]
 version = "0.8.1"
@@ -13,6 +20,7 @@ authors = ["Yann Ramin <github@theatr.us>"]
 seiza = { path = "seiza", version = "0.8.1" }
 seiza-download = { path = "seiza-download", version = "0.3.0" }
 seiza-fits = { path = "seiza-fits", version = "0.1.6" }
+seiza-satellites = { path = "seiza-satellites", version = "0.1.0" }
 seiza-sources = { path = "seiza-sources", version = "0.2.0" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 thiserror = "2"
@@ -25,7 +33,7 @@ tar = "0.4"
 fs2 = "0.4"
 futures-util = "0.3"
 directories = "6"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "gzip"] }
 serde = { version = "1", features = ["derive"] }
 ureq = { version = "3", features = ["json", "multipart"] }
 serde_json = "1"
@@ -41,3 +49,5 @@ rayon = "1"
 rustc-hash = { version = "2" }
 wide = "1.5"
 multiversion = "0.8"
+satkit = { version = "0.20.2", default-features = false }
+font8x8 = "0.3"

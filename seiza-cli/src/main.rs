@@ -8,6 +8,10 @@ use seiza::objects::{ObjectCatalog, ObjectKind, ObjectQuery, ObjectSort, SkyRegi
 use seiza::solve::{SolveHint, solve};
 use seiza::star_ids::{StarIdentifierCatalog, StarLookupMatch};
 use seiza::{DetectBackend, DetectConfig, DetectedStar};
+use seiza_satellites::{
+    CacheState, CelesTrakSource, ExposureProvenance, ObserverLocation, SatelliteCatalog,
+    SatelliteTrack, SingleExposure, TrackOptions, UtcTimestamp,
+};
 use std::path::PathBuf;
 
 mod astap;
@@ -366,10 +370,40 @@ enum Command {
         /// propagated to the acquisition time
         #[arg(long)]
         minor_bodies: Option<PathBuf>,
-        /// Acquisition time, ISO 8601 UTC (default: the FITS DATE-OBS
-        /// header). Required for accurate minor-body positions
+        /// Offline satellite OMM JSON or TLE file. Predicts tracks only for a
+        /// single exposure and does not claim the trail was detected
+        #[arg(long, conflicts_with = "satellites_celestrak")]
+        satellites: Option<PathBuf>,
+        /// Fetch and cache CelesTrak's current active-satellite OMM set
+        #[arg(long, conflicts_with = "satellites")]
+        satellites_celestrak: bool,
+        /// CelesTrak cache directory (default: platform Seiza cache)
+        #[arg(long, requires = "satellites_celestrak")]
+        satellite_cache: Option<PathBuf>,
+        /// UTC start of this single exposure (default: FITS DATE-BEG or
+        /// DATE-OBS). Also supplies the minor-body acquisition time
         #[arg(long)]
         time: Option<String>,
+        /// Shutter-open duration for this single exposure in seconds
+        /// (default: FITS DATE-END or XPOSURE/EXPTIME/EXPOSURE)
+        #[arg(long, value_parser = clap::value_parser!(f64))]
+        exposure_seconds: Option<f64>,
+        /// Observer geodetic latitude, degrees north
+        #[arg(long, allow_negative_numbers = true, requires = "observer_lon")]
+        observer_lat: Option<f64>,
+        /// Observer geodetic longitude, degrees east
+        #[arg(long, allow_negative_numbers = true, requires = "observer_lat")]
+        observer_lon: Option<f64>,
+        /// Observer height above the reference ellipsoid, meters
+        #[arg(long, allow_negative_numbers = true)]
+        observer_alt_m: Option<f64>,
+        /// Fine satellite track sampling interval in seconds
+        #[arg(long, default_value_t = 1.0, value_parser = clap::value_parser!(f64))]
+        satellite_sample_seconds: f64,
+        /// Maximum absolute age of orbital elements at exposure midpoint,
+        /// hours. Prevents current elements being applied to old images
+        #[arg(long, default_value_t = 168.0, value_parser = clap::value_parser!(f64))]
+        satellite_max_element_age_hours: f64,
     },
     /// Download ready-to-use catalogs (recommended) or advanced source data
     #[command(
@@ -922,7 +956,16 @@ fn main() -> Result<()> {
             annotate,
             objects,
             minor_bodies,
+            satellites,
+            satellites_celestrak,
+            satellite_cache,
             time,
+            exposure_seconds,
+            observer_lat,
+            observer_lon,
+            observer_alt_m,
+            satellite_sample_seconds,
+            satellite_max_element_age_hours,
         } => {
             let hint = match (ra, dec) {
                 (Some(ra), Some(dec)) => (ra, dec),
@@ -931,6 +974,42 @@ fn main() -> Result<()> {
                 })?,
             };
             let acquisition_jd = resolve_acquisition_jd(&image, time.as_deref())?;
+            let satellite_input = match (satellites, satellites_celestrak) {
+                (Some(path), false) => Some(SatelliteInput::File(path)),
+                (None, true) => Some(SatelliteInput::CelesTrak { satellite_cache }),
+                (None, false) => None,
+                (Some(_), true) => unreachable!("clap rejects conflicting satellite sources"),
+            };
+            let satellite_request = satellite_input
+                .map(|input| {
+                    if !satellite_sample_seconds.is_finite() || satellite_sample_seconds <= 0.0 {
+                        anyhow::bail!(
+                            "--satellite-sample-seconds must be a positive finite number"
+                        );
+                    }
+                    if !satellite_max_element_age_hours.is_finite()
+                        || satellite_max_element_age_hours <= 0.0
+                    {
+                        anyhow::bail!(
+                            "--satellite-max-element-age-hours must be a positive finite number"
+                        );
+                    }
+                    let exposure = resolve_single_exposure(
+                        &image,
+                        time.as_deref(),
+                        exposure_seconds,
+                        observer_lat,
+                        observer_lon,
+                        observer_alt_m,
+                    )?;
+                    Ok::<_, anyhow::Error>(SatelliteSolveRequest {
+                        input,
+                        exposure,
+                        sample_interval_seconds: satellite_sample_seconds,
+                        maximum_element_age_seconds: satellite_max_element_age_hours * 3600.0,
+                    })
+                })
+                .transpose()?;
             let data = with_data_flag_hint(data_paths::star_data(data.as_deref()))?;
             let objects = objects
                 .map(|path| data_paths::objects(Some(&path)))
@@ -954,6 +1033,7 @@ fn main() -> Result<()> {
                 objects.as_deref(),
                 minor_bodies.as_deref(),
                 acquisition_jd,
+                satellite_request,
             )
         }
         Command::DownloadData { source } => run_download_command(source),
@@ -2103,6 +2183,224 @@ fn parse_iso_jd(text: &str) -> Option<f64> {
     Some(seiza::minor_bodies::julian_date(year, month, day_fraction))
 }
 
+#[derive(Debug)]
+enum SatelliteInput {
+    File(PathBuf),
+    CelesTrak { satellite_cache: Option<PathBuf> },
+}
+
+#[derive(Debug)]
+struct SatelliteSolveRequest {
+    input: SatelliteInput,
+    exposure: SingleExposure,
+    sample_interval_seconds: f64,
+    maximum_element_age_seconds: f64,
+}
+
+fn resolve_single_exposure(
+    image: &std::path::Path,
+    explicit_start: Option<&str>,
+    explicit_duration: Option<f64>,
+    explicit_latitude: Option<f64>,
+    explicit_longitude: Option<f64>,
+    explicit_altitude: Option<f64>,
+) -> Result<SingleExposure> {
+    let headers = if is_fits_path(image) {
+        seiza_fits::read_header(image)
+            .with_context(|| format!("failed to read FITS metadata from {}", image.display()))?
+    } else {
+        Vec::new()
+    };
+    resolve_single_exposure_from_headers(
+        &headers,
+        explicit_start,
+        explicit_duration,
+        explicit_latitude,
+        explicit_longitude,
+        explicit_altitude,
+    )
+}
+
+fn resolve_single_exposure_from_headers(
+    headers: &[(String, seiza_fits::HeaderValue)],
+    explicit_start: Option<&str>,
+    explicit_duration: Option<f64>,
+    explicit_latitude: Option<f64>,
+    explicit_longitude: Option<f64>,
+    explicit_altitude: Option<f64>,
+) -> Result<SingleExposure> {
+    if explicit_start.is_none() {
+        if let Some(timesys) = header_text(headers, "TIMESYS")
+            && !timesys.eq_ignore_ascii_case("UTC")
+        {
+            anyhow::bail!(
+                "satellite tracks currently require UTC timestamps; FITS TIMESYS is {timesys:?}"
+            );
+        }
+        if let Some(reference) = header_text(headers, "TREFPOS")
+            && !reference.to_ascii_uppercase().starts_with("TOP")
+        {
+            anyhow::bail!(
+                "satellite tracks require topocentric acquisition times; FITS TREFPOS is {reference:?}"
+            );
+        }
+    }
+
+    let observer = match (explicit_latitude, explicit_longitude) {
+        (Some(latitude), Some(longitude)) => {
+            ObserverLocation::geodetic(latitude, longitude, explicit_altitude.unwrap_or(0.0))?
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            anyhow::bail!("--observer-lat and --observer-lon must be supplied together")
+        }
+        (None, None) if explicit_altitude.is_some() => {
+            anyhow::bail!("--observer-alt-m requires --observer-lat and --observer-lon")
+        }
+        (None, None) => {
+            let itrf = (
+                header_number(headers, "OBSGEO-X"),
+                header_number(headers, "OBSGEO-Y"),
+                header_number(headers, "OBSGEO-Z"),
+            );
+            let geodetic = (
+                header_number(headers, "OBSGEO-B"),
+                header_number(headers, "OBSGEO-L"),
+                header_number(headers, "OBSGEO-H"),
+            );
+            let site_alias = (
+                header_number(headers, "SITELAT"),
+                header_number(headers, "SITELONG"),
+                header_number(headers, "SITEALT").unwrap_or(0.0),
+            );
+            match (itrf, geodetic, site_alias) {
+                ((Some(x), Some(y), Some(z)), _, _) => ObserverLocation::itrf_meters(x, y, z)?,
+                (_, (Some(latitude), Some(longitude), Some(altitude)), _) => {
+                    ObserverLocation::geodetic(latitude, longitude, altitude)?
+                }
+                (_, _, (Some(latitude), Some(longitude), altitude)) => {
+                    ObserverLocation::geodetic(latitude, longitude, altitude)?
+                }
+                _ => anyhow::bail!(
+                    "satellite tracks require an observer location; pass --observer-lat/--observer-lon or provide FITS OBSGEO-X/Y/Z, OBSGEO-B/L/H, or SITELAT/SITELONG"
+                ),
+            }
+        }
+    };
+
+    let date_beg = header_text(headers, "DATE-BEG");
+    let date_end = header_text(headers, "DATE-END");
+    let date_obs = header_text(headers, "DATE-OBS");
+    let header_duration = ["XPOSURE", "EXPTIME", "EXPOSURE"]
+        .into_iter()
+        .find_map(|key| header_number(headers, key));
+
+    if let Some(start) = explicit_start {
+        let start = UtcTimestamp::parse(start)?;
+        let duration = explicit_duration.or(header_duration).or_else(|| {
+            let begin = UtcTimestamp::parse(date_beg?).ok()?;
+            let end = UtcTimestamp::parse(date_end?).ok()?;
+            Some(end.seconds_since(begin))
+        });
+        let duration = duration.ok_or_else(|| {
+            anyhow::anyhow!(
+                "satellite tracks require one shutter-open duration; pass --exposure-seconds or provide FITS DATE-BEG/DATE-END or XPOSURE/EXPTIME"
+            )
+        })?;
+        return Ok(SingleExposure::from_start_and_duration(
+            start,
+            duration,
+            observer,
+            ExposureProvenance::Explicit,
+        )?);
+    }
+
+    if let Some(duration) = explicit_duration {
+        let start = date_beg.or(date_obs).ok_or_else(|| {
+            anyhow::anyhow!(
+                "--exposure-seconds also requires --time or a FITS DATE-BEG/DATE-OBS start"
+            )
+        })?;
+        return Ok(SingleExposure::from_start_and_duration(
+            UtcTimestamp::parse(start)?,
+            duration,
+            observer,
+            ExposureProvenance::Explicit,
+        )?);
+    }
+
+    if let (Some(start), Some(end)) = (date_beg, date_end) {
+        return Ok(SingleExposure::new(
+            UtcTimestamp::parse(start)?,
+            UtcTimestamp::parse(end)?,
+            observer,
+            ExposureProvenance::FitsBounds,
+        )?);
+    }
+
+    let start = date_obs.or(date_beg).ok_or_else(|| {
+        anyhow::anyhow!(
+            "satellite tracks require one exposure start; pass --time or provide FITS DATE-BEG/DATE-OBS"
+        )
+    })?;
+    let duration = header_duration.ok_or_else(|| {
+        anyhow::anyhow!(
+            "satellite tracks require one shutter-open duration; pass --exposure-seconds or provide FITS DATE-END or XPOSURE/EXPTIME/EXPOSURE (stack integration totals are not accepted)"
+        )
+    })?;
+    Ok(SingleExposure::from_start_and_duration(
+        UtcTimestamp::parse(start)?,
+        duration,
+        observer,
+        ExposureProvenance::FitsDateObsAndExposure,
+    )?)
+}
+
+fn header_text<'a>(headers: &'a [(String, seiza_fits::HeaderValue)], key: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(name, _)| name == key)
+        .and_then(|(_, value)| value.as_str())
+}
+
+fn header_number(headers: &[(String, seiza_fits::HeaderValue)], key: &str) -> Option<f64> {
+    headers
+        .iter()
+        .find(|(name, _)| name == key)
+        .and_then(|(_, value)| value.as_f64())
+}
+
+fn load_satellite_catalog(input: SatelliteInput) -> Result<SatelliteCatalog> {
+    match input {
+        SatelliteInput::File(path) => SatelliteCatalog::open(&path)
+            .with_context(|| format!("failed to open satellite elements from {}", path.display())),
+        SatelliteInput::CelesTrak { satellite_cache } => {
+            let source = match satellite_cache {
+                Some(cache) => CelesTrakSource::new(cache)?,
+                None => CelesTrakSource::platform_default()?,
+            };
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("failed to initialize satellite download runtime")?;
+            let load = runtime.block_on(source.load_active())?;
+            let state = match load.state {
+                CacheState::Fresh => "fresh cache",
+                CacheState::Downloaded => "downloaded",
+                CacheState::StaleFallback => "stale cache fallback",
+            };
+            println!(
+                "satellite elements: {} records ({state}, {})",
+                load.catalog.len(),
+                load.cache_path.display()
+            );
+            if let Some(warning) = load.warning {
+                eprintln!("warning: {warning}");
+            }
+            Ok(load.catalog)
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn solve_command(
     path: &std::path::Path,
@@ -2120,6 +2418,7 @@ fn solve_command(
     objects: Option<&std::path::Path>,
     minor_bodies: Option<&std::path::Path>,
     acquisition_jd: Option<f64>,
+    satellite_request: Option<SatelliteSolveRequest>,
 ) -> Result<()> {
     let img = load_image(path, detection_backend)?;
     let dims = img.dimensions();
@@ -2262,6 +2561,96 @@ fn solve_command(
         Vec::new()
     };
 
+    let satellite_tracks = if let Some(request) = satellite_request {
+        let satellite_catalog = load_satellite_catalog(request.input)?;
+        if satellite_catalog.retrieved_at().is_none() {
+            println!(
+                "satellite elements: {} records ({})",
+                satellite_catalog.len(),
+                satellite_catalog.source()
+            );
+        }
+        println!(
+            "single exposure: {} to {} ({:.3}s, {:?})",
+            request.exposure.start_utc.to_rfc3339(),
+            request.exposure.end_utc.to_rfc3339(),
+            request.exposure.duration_seconds(),
+            request.exposure.provenance
+        );
+        let result = satellite_catalog.tracks_in_footprint(
+            wcs,
+            dims,
+            &request.exposure,
+            &TrackOptions {
+                sample_interval_seconds: request.sample_interval_seconds,
+                maximum_element_age_seconds: Some(request.maximum_element_age_seconds),
+                ..TrackOptions::default()
+            },
+        )?;
+        println!(
+            "{} predicted satellite tracks in the field ({} elements considered):",
+            result.tracks.len(),
+            result.elements_considered
+        );
+        let mut undersampled = 0usize;
+        for track in &result.tracks {
+            let minimum_range = track
+                .samples
+                .iter()
+                .map(|sample| sample.range_km)
+                .fold(f64::INFINITY, f64::min);
+            let illumination = match track.maximum_sunlight_fraction() {
+                value if value <= 0.01 => "eclipsed",
+                value if value >= 0.99 => "sunlit",
+                _ => "partly sunlit",
+            };
+            let rate = track
+                .maximum_apparent_rate_arcsec_per_second()
+                .map(|rate| format!("{:>6.0}\"/s", rate))
+                .unwrap_or_else(|| "      —".into());
+            println!(
+                "  {:<36} max el {:>5.1}°  {:>7.0} km  {rate}  {:<13} elements {:+.1}h",
+                track.identity.display_label(),
+                track.maximum_elevation_deg(),
+                minimum_range,
+                illumination,
+                track.element_age_seconds / 3600.0
+            );
+            if let Some(pixel_rate) = track.maximum_pixel_rate_px_per_second()
+                && pixel_rate > 0.0
+                && track.clipped_length_px() / pixel_rate < 2.0 * track.sample_interval_seconds
+            {
+                undersampled += 1;
+            }
+        }
+        if undersampled != 0 {
+            eprintln!(
+                "warning: {undersampled} track(s) cross the field in under two sample intervals; pass a smaller --satellite-sample-seconds for time-resolved samples"
+            );
+        }
+        if result.propagation_failures != 0 {
+            println!(
+                "  {} element records could not be propagated",
+                result.propagation_failures
+            );
+        }
+        if result.stale_elements != 0 {
+            eprintln!(
+                "warning: {} element records were outside the {:.1}h maximum age",
+                result.stale_elements,
+                request.maximum_element_age_seconds / 3600.0
+            );
+            if result.stale_elements == result.elements_considered {
+                eprintln!(
+                    "warning: no element set is close enough to this exposure; use historical OMM/TLE data rather than current CelesTrak elements"
+                );
+            }
+        }
+        result.tracks
+    } else {
+        Vec::new()
+    };
+
     if let Some(out) = annotate {
         let mut canvas = img.to_rgb8();
         for star in invocation.stars() {
@@ -2322,12 +2711,114 @@ fn solve_command(
                 draw_motion_arrow(&mut canvas, center, (m.ra, m.dec), wcs, pa, length);
             }
         }
+        for track in &satellite_tracks {
+            draw_satellite_track(&mut canvas, track);
+        }
         canvas
             .save(out)
             .with_context(|| format!("failed to write {}", out.display()))?;
         println!("annotated image written to {}", out.display());
     }
     Ok(())
+}
+
+fn draw_satellite_track(canvas: &mut image::RgbImage, track: &SatelliteTrack) {
+    let color = image::Rgb([255, 72, 220]);
+    for segment in &track.clipped_segments {
+        imageproc::drawing::draw_line_segment_mut(
+            canvas,
+            (segment.start.x as f32, segment.start.y as f32),
+            (segment.end.x as f32, segment.end.y as f32),
+            color,
+        );
+    }
+    let Some(first) = track.clipped_segments.first() else {
+        return;
+    };
+    let last = track
+        .clipped_segments
+        .last()
+        .expect("a first satellite segment implies a last segment");
+    imageproc::drawing::draw_hollow_circle_mut(
+        canvas,
+        (first.start.x.round() as i32, first.start.y.round() as i32),
+        4,
+        color,
+    );
+    draw_pixel_arrowhead(canvas, last.start, last.end, color);
+
+    let label = track.identity.display_label();
+    let label = label.chars().take(28).collect::<String>();
+    let width = (label.chars().count() * 8 * 2) as i32;
+    let x = (first.start.x.round() as i32 + 7).clamp(1, (canvas.width() as i32 - width - 1).max(1));
+    let y = (first.start.y.round() as i32 + 7).clamp(1, (canvas.height() as i32 - 17).max(1));
+    draw_bitmap_text(canvas, x + 1, y + 1, &label, image::Rgb([0, 0, 0]), 2);
+    draw_bitmap_text(canvas, x, y, &label, color, 2);
+}
+
+fn draw_pixel_arrowhead(
+    canvas: &mut image::RgbImage,
+    from: seiza_satellites::PixelPoint,
+    tip: seiza_satellites::PixelPoint,
+    color: image::Rgb<u8>,
+) {
+    let dx = tip.x - from.x;
+    let dy = tip.y - from.y;
+    if dx.hypot(dy) < 1.0e-6 {
+        return;
+    }
+    let angle = dy.atan2(dx);
+    for offset in [-150.0_f64, 150.0] {
+        let wing = angle + offset.to_radians();
+        imageproc::drawing::draw_line_segment_mut(
+            canvas,
+            (tip.x as f32, tip.y as f32),
+            (
+                (tip.x + wing.cos() * 7.0) as f32,
+                (tip.y + wing.sin() * 7.0) as f32,
+            ),
+            color,
+        );
+    }
+}
+
+fn draw_bitmap_text(
+    canvas: &mut image::RgbImage,
+    x: i32,
+    y: i32,
+    text: &str,
+    color: image::Rgb<u8>,
+    scale: i32,
+) {
+    use font8x8::UnicodeFonts;
+
+    for (character_index, character) in text.chars().enumerate() {
+        let character = if character.is_ascii() { character } else { '?' };
+        let Some(glyph) = font8x8::BASIC_FONTS.get(character) else {
+            continue;
+        };
+        let origin_x = x + character_index as i32 * 8 * scale;
+        for (row, bits) in glyph.into_iter().enumerate() {
+            for column in 0..8 {
+                if bits & (1 << column) == 0 {
+                    continue;
+                }
+                for offset_y in 0..scale {
+                    for offset_x in 0..scale {
+                        let pixel_x = origin_x + column * scale + offset_x;
+                        let pixel_y = y + row as i32 * scale + offset_y;
+                        if pixel_x >= 0
+                            && pixel_y >= 0
+                            && pixel_x < canvas.width() as i32
+                            && pixel_y < canvas.height() as i32
+                        {
+                            canvas.put_pixel(pixel_x as u32, pixel_y as u32, color);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Draw an arrow from a body's pixel position along a sky position angle
@@ -2818,6 +3309,123 @@ mod cli_tests {
                 "0",
             ])
             .is_err()
+        );
+    }
+
+    #[test]
+    fn satellite_cli_sources_are_explicit_and_mutually_exclusive() {
+        assert!(
+            Cli::try_parse_from([
+                "seiza",
+                "solve",
+                "image.fits",
+                "--scale",
+                "1.5",
+                "--satellites-celestrak",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "seiza",
+                "solve",
+                "image.fits",
+                "--scale",
+                "1.5",
+                "--satellites",
+                "elements.json",
+                "--satellites-celestrak",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn satellite_exposure_prefers_unambiguous_fits_bounds() {
+        use seiza_fits::HeaderValue::{Float, String as Text};
+
+        let headers = vec![
+            ("DATE-OBS".into(), Text("2024-05-02T11:59:00".into())),
+            ("DATE-BEG".into(), Text("2024-05-02T12:00:00".into())),
+            ("DATE-END".into(), Text("2024-05-02T12:00:30".into())),
+            ("EXPTIME".into(), Float(999.0)),
+            ("OBSGEO-B".into(), Float(37.3)),
+            ("OBSGEO-L".into(), Float(-122.0)),
+            ("OBSGEO-H".into(), Float(50.0)),
+        ];
+        let exposure =
+            resolve_single_exposure_from_headers(&headers, None, None, None, None, None).unwrap();
+        assert_eq!(exposure.provenance, ExposureProvenance::FitsBounds);
+        assert!((exposure.duration_seconds() - 30.0).abs() < 1.0e-6);
+        assert_eq!(
+            exposure.start_utc,
+            UtcTimestamp::parse("2024-05-02T12:00:00Z").unwrap()
+        );
+    }
+
+    #[test]
+    fn satellite_exposure_falls_back_to_date_obs_and_exptime() {
+        use seiza_fits::HeaderValue::{Float, String as Text};
+
+        let headers = vec![
+            ("DATE-OBS".into(), Text("2024-05-02T12:00:00".into())),
+            ("EXPTIME".into(), Float(45.5)),
+            ("OBSGEO-X".into(), Float(-2_700_000.0)),
+            ("OBSGEO-Y".into(), Float(-4_300_000.0)),
+            ("OBSGEO-Z".into(), Float(3_850_000.0)),
+        ];
+        let exposure =
+            resolve_single_exposure_from_headers(&headers, None, None, None, None, None).unwrap();
+        assert_eq!(
+            exposure.provenance,
+            ExposureProvenance::FitsDateObsAndExposure
+        );
+        assert!((exposure.duration_seconds() - 45.5).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn explicit_satellite_metadata_overrides_fits_time_frame() {
+        use seiza_fits::HeaderValue::String as Text;
+
+        let headers = vec![
+            ("TIMESYS".into(), Text("TDB".into())),
+            ("TREFPOS".into(), Text("BARYCENTER".into())),
+        ];
+        let exposure = resolve_single_exposure_from_headers(
+            &headers,
+            Some("2024-05-02T12:00:00Z"),
+            Some(10.0),
+            Some(37.3),
+            Some(-122.0),
+            Some(50.0),
+        )
+        .unwrap();
+        assert_eq!(exposure.provenance, ExposureProvenance::Explicit);
+        assert!((exposure.duration_seconds() - 10.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn satellite_exposure_requires_observer_and_one_interval() {
+        use seiza_fits::HeaderValue::{Float, String as Text};
+
+        let no_observer = vec![
+            ("DATE-OBS".into(), Text("2024-05-02T12:00:00".into())),
+            ("EXPTIME".into(), Float(30.0)),
+        ];
+        assert!(
+            resolve_single_exposure_from_headers(&no_observer, None, None, None, None, None)
+                .is_err()
+        );
+
+        let no_duration = vec![
+            ("DATE-OBS".into(), Text("2024-05-02T12:00:00".into())),
+            ("OBSGEO-B".into(), Float(37.3)),
+            ("OBSGEO-L".into(), Float(-122.0)),
+            ("OBSGEO-H".into(), Float(50.0)),
+        ];
+        assert!(
+            resolve_single_exposure_from_headers(&no_duration, None, None, None, None, None)
+                .is_err()
         );
     }
 }

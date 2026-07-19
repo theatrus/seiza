@@ -1,5 +1,6 @@
 """Type stubs for the seiza extension module."""
 
+from datetime import datetime
 from pathlib import Path
 from typing import Sequence, Union
 
@@ -95,6 +96,76 @@ class Solution:
     def flipped(self) -> bool: ...
     def fits_header_cards(self) -> dict[str, float | int | str]: ...
     def fits_header_text(self) -> str: ...
+
+class TrackSample:
+    time_unix: float
+    ra_deg: float
+    dec_deg: float
+    pixel: tuple[float, float] | None
+    elevation_deg: float
+    range_km: float
+    sunlight_fraction: float
+
+class SatelliteTrack:
+    norad_id: int | None
+    cospar_id: str | None
+    name: str
+    label: str
+    element_epoch_unix: float
+    element_age_s: float
+    source: str
+    sample_interval_s: float
+    samples: list[TrackSample]
+    clipped_segments: list[tuple[tuple[float, float], tuple[float, float]]]
+    max_elevation_deg: float
+    max_sunlight_fraction: float
+    max_apparent_rate_arcsec_per_s: float | None
+    max_pixel_rate_px_per_s: float | None
+    clipped_length_px: float
+
+class TrackSearchResult:
+    tracks: list[SatelliteTrack]
+    elements_considered: int
+    propagation_failures: int
+    stale_elements: int
+
+class SatelliteCatalog:
+    @staticmethod
+    def open(path: str | Path) -> SatelliteCatalog: ...
+    @staticmethod
+    def from_omm_json(text: str, source: str = "inline") -> SatelliteCatalog: ...
+    @staticmethod
+    def from_tle_text(text: str, source: str = "inline") -> SatelliteCatalog: ...
+    @staticmethod
+    def fetch_celestrak(cache_dir: str | Path | None = None) -> SatelliteCatalog: ...
+    def __len__(self) -> int: ...
+    @property
+    def source(self) -> str: ...
+    @property
+    def retrieved_at_unix(self) -> float | None: ...
+    @property
+    def cache_state(self) -> str | None: ...
+    @property
+    def cache_path(self) -> Path | None: ...
+    @property
+    def warning(self) -> str | None: ...
+    def tracks_in_footprint(
+        self,
+        wcs: Wcs,
+        width: int,
+        height: int,
+        *,
+        start: float | str | datetime,
+        duration_s: float,
+        latitude: float | None = None,
+        longitude: float | None = None,
+        altitude_m: float = 0.0,
+        observer_itrf: tuple[float, float, float] | None = None,
+        sample_interval_s: float = 1.0,
+        coarse_interval_s: float = 10.0,
+        min_elevation_deg: float = 0.0,
+        max_element_age_s: float | None = 604_800.0,
+    ) -> TrackSearchResult: ...
 
 def detect(
     image: npt.NDArray[np.float32] | npt.NDArray[np.uint8],

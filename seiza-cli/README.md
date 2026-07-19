@@ -43,6 +43,14 @@ seiza solve-blind image.jpg --data data --min-scale 0.5 --max-scale 15
 seiza detect image.jpg --annotate out.png
 seiza solve image.jpg --data data ... --objects data
 
+# Predict tracks for one exposure from a cached current OMM set, or from an
+# offline/historical OMM JSON or TLE file. FITS supplies time and OBSGEO when
+# present; explicit metadata is also accepted.
+seiza solve light.fits --scale 1.45 --satellites-celestrak --annotate tracks.png
+seiza solve light.fits --scale 1.45 --satellites elements.json \
+  --time 2026-07-18T08:30:00Z --exposure-seconds 30 \
+  --observer-lat 37.3 --observer-lon -122.0 --observer-alt-m 50
+
 # Query objects when sky bounds are already known; no image or solve needed
 seiza catalog objects --data data --ra 10.6848 --dec 41.2691 --radius 3
 seiza catalog objects --data data \
