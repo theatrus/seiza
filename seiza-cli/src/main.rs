@@ -2562,7 +2562,7 @@ fn solve_command(
     };
 
     let satellite_tracks = if let Some(request) = satellite_request {
-        let mut satellite_catalog = load_satellite_catalog(request.input)?;
+        let satellite_catalog = load_satellite_catalog(request.input)?;
         if satellite_catalog.retrieved_at().is_none() {
             println!(
                 "satellite elements: {} records ({})",
@@ -2592,6 +2592,7 @@ fn solve_command(
             result.tracks.len(),
             result.elements_considered
         );
+        let mut undersampled = 0usize;
         for track in &result.tracks {
             let minimum_range = track
                 .samples
@@ -2603,13 +2604,28 @@ fn solve_command(
                 value if value >= 0.99 => "sunlit",
                 _ => "partly sunlit",
             };
+            let rate = track
+                .maximum_apparent_rate_arcsec_per_second()
+                .map(|rate| format!("{:>6.0}\"/s", rate))
+                .unwrap_or_else(|| "      —".into());
             println!(
-                "  {:<36} max el {:>5.1}°  {:>7.0} km  {:<13} elements {:+.1}h",
+                "  {:<36} max el {:>5.1}°  {:>7.0} km  {rate}  {:<13} elements {:+.1}h",
                 track.identity.display_label(),
                 track.maximum_elevation_deg(),
                 minimum_range,
                 illumination,
                 track.element_age_seconds / 3600.0
+            );
+            if let Some(pixel_rate) = track.maximum_pixel_rate_px_per_second()
+                && pixel_rate > 0.0
+                && track.clipped_length_px() / pixel_rate < 2.0 * track.sample_interval_seconds
+            {
+                undersampled += 1;
+            }
+        }
+        if undersampled != 0 {
+            eprintln!(
+                "warning: {undersampled} track(s) cross the field in under two sample intervals; pass a smaller --satellite-sample-seconds for time-resolved samples"
             );
         }
         if result.propagation_failures != 0 {

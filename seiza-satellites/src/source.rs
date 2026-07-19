@@ -13,11 +13,23 @@ const CACHE_PREFIX: &str = "celestrak-active-";
 const CACHE_SUFFIX: &str = ".json";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum CacheState {
     Fresh,
     Downloaded,
     StaleFallback,
 }
+
+#[derive(Clone, Copy, Debug)]
+enum LockMode {
+    Shared,
+    Exclusive,
+}
+
+/// Snapshot mtimes slightly in the future are tolerated as clock jitter;
+/// anything further ahead is treated as maximally stale so a bad clock can
+/// never pin an old snapshot as fresh forever.
+const FUTURE_MTIME_TOLERANCE: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug)]
 pub struct CelesTrakLoad {
@@ -75,7 +87,21 @@ impl CelesTrakSource {
                 path: self.cache_dir.clone(),
                 source,
             })?;
-        let _lock = self.acquire_lock().await?;
+
+        // Concurrent readers of a fresh snapshot only need a shared lock;
+        // refreshes take the exclusive lock below.
+        {
+            let _shared = self.acquire_lock(LockMode::Shared).await?;
+            if let Some(snapshot) = self.freshest_cache().await?
+                && snapshot.age <= CELESTRAK_MIN_REFRESH
+                && let Ok(load) = self.load_cache(&snapshot, CacheState::Fresh, None).await
+            {
+                return Ok(load);
+            }
+        }
+
+        let _exclusive = self.acquire_lock(LockMode::Exclusive).await?;
+        // Another process may have refreshed while this one waited.
         let cached = self.freshest_cache().await?;
         if let Some(snapshot) = cached.as_ref()
             && snapshot.age <= CELESTRAK_MIN_REFRESH
@@ -103,7 +129,7 @@ impl CelesTrakSource {
         }
     }
 
-    async fn acquire_lock(&self) -> Result<File> {
+    async fn acquire_lock(&self, mode: LockMode) -> Result<File> {
         let path = self.cache_dir.join(".celestrak-active.lock");
         let error_path = path.clone();
         tokio::task::spawn_blocking(move || {
@@ -113,11 +139,14 @@ impl CelesTrakSource {
                 .write(true)
                 .truncate(false)
                 .open(&path)?;
-            file.lock_exclusive()?;
+            match mode {
+                LockMode::Shared => file.lock_shared()?,
+                LockMode::Exclusive => file.lock_exclusive()?,
+            }
             Ok::<_, std::io::Error>(file)
         })
         .await
-        .map_err(|error| Error::Propagation(format!("CelesTrak cache lock task failed: {error}")))?
+        .map_err(|error| Error::CacheLock(error.to_string()))?
         .map_err(|source| Error::Io {
             path: error_path,
             source,
@@ -136,6 +165,20 @@ impl CelesTrakSource {
             })?;
         let status = response.status();
         if !status.is_success() {
+            // CelesTrak answers 403 when it has rate-limited or blocked a
+            // client that re-downloads within its two-hour update window.
+            if status.as_u16() == 403 || status.as_u16() == 429 {
+                let retry_after_seconds = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.trim().parse::<u64>().ok());
+                return Err(Error::RateLimited {
+                    url: self.endpoint.clone(),
+                    status: status.as_u16(),
+                    retry_after_seconds,
+                });
+            }
             return Err(Error::HttpStatus {
                 url: self.endpoint.clone(),
                 status: status.as_u16(),
@@ -243,12 +286,15 @@ impl CelesTrakSource {
                 .as_ref()
                 .is_none_or(|snapshot| modified > snapshot.modified)
             {
+                let age = match SystemTime::now().duration_since(modified) {
+                    Ok(age) => age,
+                    Err(future) if future.duration() <= FUTURE_MTIME_TOLERANCE => Duration::ZERO,
+                    Err(_) => Duration::MAX,
+                };
                 newest = Some(CacheSnapshot {
                     path: entry.path(),
                     modified,
-                    age: SystemTime::now()
-                        .duration_since(modified)
-                        .unwrap_or_default(),
+                    age,
                 });
             }
         }
@@ -316,5 +362,83 @@ mod tests {
         assert_eq!(load.state, CacheState::Fresh);
         assert_eq!(load.catalog.len(), 1);
         assert_eq!(load.cache_path, path);
+    }
+
+    /// Serve a canned HTTP status for every connection on a background thread.
+    fn serve_status(status_line: &'static str, extra_headers: &'static str) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request);
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 {status_line}\r\n{extra_headers}content-length: 0\r\nconnection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        format!("http://{address}/gp")
+    }
+
+    fn set_mtime(path: &Path, time: SystemTime) {
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(time)
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn rate_limited_download_reports_retry_after() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = CelesTrakSource::new(dir.path())
+            .unwrap()
+            .with_endpoint(serve_status("403 Forbidden", "retry-after: 7200\r\n"));
+        match source.load_active().await.unwrap_err() {
+            Error::RateLimited {
+                status,
+                retry_after_seconds,
+                ..
+            } => {
+                assert_eq!(status, 403);
+                assert_eq!(retry_after_seconds, Some(7200));
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_snapshot_survives_rate_limited_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("celestrak-active-1.json");
+        tokio::fs::write(&path, OMM).await.unwrap();
+        set_mtime(&path, SystemTime::now() - Duration::from_secs(3 * 60 * 60));
+        let source = CelesTrakSource::new(dir.path())
+            .unwrap()
+            .with_endpoint(serve_status("403 Forbidden", ""));
+        let load = source.load_active().await.unwrap();
+        assert_eq!(load.state, CacheState::StaleFallback);
+        assert!(load.warning.unwrap().contains("rate-limits"));
+    }
+
+    #[tokio::test]
+    async fn future_mtime_is_stale_rather_than_fresh_forever() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("celestrak-active-1.json");
+        tokio::fs::write(&path, OMM).await.unwrap();
+        set_mtime(&path, SystemTime::now() + Duration::from_secs(24 * 60 * 60));
+        let source = CelesTrakSource::new(dir.path())
+            .unwrap()
+            .with_endpoint(serve_status("403 Forbidden", ""));
+        // A snapshot stamped far in the future must trigger a refresh attempt
+        // (leaving it usable only as a stale fallback), not read as fresh.
+        let load = source.load_active().await.unwrap();
+        assert_eq!(load.state, CacheState::StaleFallback);
     }
 }

@@ -16,8 +16,14 @@ fs2.workspace = true
 reqwest.workspace = true
 satkit.workspace = true
 seiza.workspace = true
+serde = { workspace = true, optional = true }
 thiserror.workspace = true
 tokio.workspace = true
 
+[features]
+## Serialize/Deserialize on the prediction result types for API embedding.
+serde = ["dep:serde"]
+
 [dev-dependencies]
+serde_json.workspace = true
 tempfile = "3"

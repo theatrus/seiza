@@ -57,6 +57,19 @@ pub enum Error {
     },
     #[error("{url} returned HTTP {status}")]
     HttpStatus { url: String, status: u16 },
+    #[error(
+        "{url} returned HTTP {status}; CelesTrak rate-limits repeated element downloads, so keep reusing one cache directory{}",
+        .retry_after_seconds
+            .map(|seconds| format!(" (the server asks to retry after {seconds}s)"))
+            .unwrap_or_default()
+    )]
+    RateLimited {
+        url: String,
+        status: u16,
+        retry_after_seconds: Option<u64>,
+    },
+    #[error("satellite cache lock failed: {0}")]
+    CacheLock(String),
     #[error("no platform cache directory is available")]
     NoCacheDirectory,
 }
@@ -65,6 +78,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// A UTC timestamp represented as Unix seconds, including a fractional part.
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct UtcTimestamp(f64);
 
 impl UtcTimestamp {
@@ -110,6 +124,7 @@ impl UtcTimestamp {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ExposureProvenance {
     Explicit,
     FitsBounds,
@@ -117,6 +132,7 @@ pub enum ExposureProvenance {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ObserverLocation {
     /// Geodetic latitude, east-positive longitude, and height above ellipsoid.
     Geodetic {
@@ -172,6 +188,7 @@ impl ObserverLocation {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SingleExposure {
     pub start_utc: UtcTimestamp,
     pub end_utc: UtcTimestamp,
@@ -228,6 +245,7 @@ impl SingleExposure {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SatelliteIdentity {
     pub norad_id: Option<u32>,
     pub cospar_id: Option<String>,
@@ -249,23 +267,27 @@ impl SatelliteIdentity {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TrackAssociation {
     Predicted,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PixelPoint {
     pub x: f64,
     pub y: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PixelSegment {
     pub start: PixelPoint,
     pub end: PixelPoint,
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TrackSample {
     pub time_utc: UtcTimestamp,
     pub ra_deg: f64,
@@ -278,6 +300,7 @@ pub struct TrackSample {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SatelliteTrack {
     pub identity: SatelliteIdentity,
     pub association: TrackAssociation,
@@ -305,9 +328,57 @@ impl SatelliteTrack {
             .map(|sample| sample.sunlight_fraction)
             .fold(0.0, f64::max)
     }
+
+    /// Peak apparent angular rate between consecutive samples, in arcseconds
+    /// per second, or `None` for a single-sample track.
+    pub fn maximum_apparent_rate_arcsec_per_second(&self) -> Option<f64> {
+        self.samples
+            .windows(2)
+            .filter_map(|pair| {
+                let dt = pair[1].time_utc.seconds_since(pair[0].time_utc);
+                (dt > 0.0).then(|| {
+                    angular_separation_deg(
+                        pair[0].ra_deg,
+                        pair[0].dec_deg,
+                        pair[1].ra_deg,
+                        pair[1].dec_deg,
+                    ) * 3600.0
+                        / dt
+                })
+            })
+            .fold(None, |maximum: Option<f64>, rate| {
+                Some(maximum.map_or(rate, |value| value.max(rate)))
+            })
+    }
+
+    /// Peak image-plane rate between consecutive projected samples, in pixels
+    /// per second, or `None` when fewer than two samples project.
+    pub fn maximum_pixel_rate_px_per_second(&self) -> Option<f64> {
+        self.samples
+            .windows(2)
+            .filter_map(|pair| {
+                let (Some(start), Some(end)) = (pair[0].pixel, pair[1].pixel) else {
+                    return None;
+                };
+                let dt = pair[1].time_utc.seconds_since(pair[0].time_utc);
+                (dt > 0.0).then(|| (end.x - start.x).hypot(end.y - start.y) / dt)
+            })
+            .fold(None, |maximum: Option<f64>, rate| {
+                Some(maximum.map_or(rate, |value| value.max(rate)))
+            })
+    }
+
+    /// Total clipped in-image path length in pixels.
+    pub fn clipped_length_px(&self) -> f64 {
+        self.clipped_segments
+            .iter()
+            .map(|segment| (segment.end.x - segment.start.x).hypot(segment.end.y - segment.start.y))
+            .sum()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TrackOptions {
     /// Final sampling interval for tracks intersecting the image.
     pub sample_interval_seconds: f64,
@@ -332,6 +403,7 @@ impl Default for TrackOptions {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TrackSearchResult {
     pub tracks: Vec<SatelliteTrack>,
     pub elements_considered: usize,
@@ -339,6 +411,7 @@ pub struct TrackSearchResult {
     pub stale_elements: usize,
 }
 
+#[derive(Clone)]
 enum ElementRecord {
     Omm(Box<OMM>),
     Tle(Box<TLE>),
@@ -486,7 +559,7 @@ impl SatelliteCatalog {
     }
 
     pub fn tracks_in_footprint(
-        &mut self,
+        &self,
         wcs: &Wcs,
         dimensions: (u32, u32),
         exposure: &SingleExposure,
@@ -505,13 +578,16 @@ impl SatelliteCatalog {
         let mut stale_elements = 0usize;
         let mut tracks = Vec::new();
 
-        for element in &mut self.elements {
+        for element in &self.elements {
             if options.maximum_element_age_seconds.is_some_and(|maximum| {
                 exposure.midpoint().seconds_since(element.epoch()).abs() > maximum
             }) {
                 stale_elements += 1;
                 continue;
             }
+            // SGP4 caches its initialization inside the element, so propagate a
+            // per-call scratch copy; the catalog itself stays shareable.
+            let mut element = element.clone();
             let coarse_state = match element.propagate(&coarse_times) {
                 Ok(state) => state,
                 Err(_) => {
@@ -519,14 +595,16 @@ impl SatelliteCatalog {
                     continue;
                 }
             };
+            // The coarse pass must only rule tracks out, so it projects without
+            // the elevation gate and tests against a padded image rectangle.
             let coarse_samples = project_samples(
                 &coarse_state,
                 &coarse_times,
                 &observer,
                 wcs,
-                options.minimum_elevation_deg,
+                f64::NEG_INFINITY,
             );
-            if !path_intersects_image(&coarse_samples, dimensions) {
+            if !coarse_path_may_intersect_image(&coarse_samples, dimensions) {
                 continue;
             }
 
@@ -684,7 +762,14 @@ fn project_samples(
         .collect()
 }
 
-fn path_intersects_image(samples: &[TrackSample], dimensions: (u32, u32)) -> bool {
+/// Fraction of a coarse chord's length used to pad the image rectangle. The
+/// true apparent path between two coarse samples is curved; its sagitta is
+/// bounded by roughly arc/8 of the chord length (~2.5% for a 20-degree arc),
+/// so a 10% pad keeps the coarse pass free of false negatives while the fine
+/// pass stays authoritative.
+const COARSE_PAD_FRACTION: f64 = 0.1;
+
+fn coarse_path_may_intersect_image(samples: &[TrackSample], dimensions: (u32, u32)) -> bool {
     samples.iter().any(|sample| {
         sample
             .pixel
@@ -692,7 +777,10 @@ fn path_intersects_image(samples: &[TrackSample], dimensions: (u32, u32)) -> boo
     }) || samples
         .windows(2)
         .any(|pair| match (pair[0].pixel, pair[1].pixel) {
-            (Some(start), Some(end)) => clip_segment(start, end, dimensions).is_some(),
+            (Some(start), Some(end)) => {
+                let margin = (end.x - start.x).hypot(end.y - start.y) * COARSE_PAD_FRACTION;
+                clip_segment_with_margin(start, end, dimensions, margin).is_some()
+            }
             _ => false,
         })
 }
@@ -720,19 +808,32 @@ fn clip_segment(
     end: PixelPoint,
     dimensions: (u32, u32),
 ) -> Option<PixelSegment> {
+    clip_segment_with_margin(start, end, dimensions, 0.0)
+}
+
+/// Liang-Barsky clipping against the image rectangle expanded by `margin`
+/// pixels on every side.
+fn clip_segment_with_margin(
+    start: PixelPoint,
+    end: PixelPoint,
+    dimensions: (u32, u32),
+    margin: f64,
+) -> Option<PixelSegment> {
     if !start.x.is_finite() || !start.y.is_finite() || !end.x.is_finite() || !end.y.is_finite() {
         return None;
     }
-    let max_x = f64::from(dimensions.0.saturating_sub(1));
-    let max_y = f64::from(dimensions.1.saturating_sub(1));
+    let min_x = -margin;
+    let min_y = -margin;
+    let max_x = f64::from(dimensions.0.saturating_sub(1)) + margin;
+    let max_y = f64::from(dimensions.1.saturating_sub(1)) + margin;
     let dx = end.x - start.x;
     let dy = end.y - start.y;
     let mut low: f64 = 0.0;
     let mut high: f64 = 1.0;
     for (p, q) in [
-        (-dx, start.x),
+        (-dx, start.x - min_x),
         (dx, max_x - start.x),
-        (-dy, start.y),
+        (-dy, start.y - min_y),
         (dy, max_y - start.y),
     ] {
         if p == 0.0 {
@@ -765,6 +866,16 @@ fn clip_segment(
 
 fn normalize_longitude(longitude: f64) -> f64 {
     (longitude + 180.0).rem_euclid(360.0) - 180.0
+}
+
+/// Great-circle separation via the haversine formula, in degrees.
+fn angular_separation_deg(ra1_deg: f64, dec1_deg: f64, ra2_deg: f64, dec2_deg: f64) -> f64 {
+    let dec1 = dec1_deg.to_radians();
+    let dec2 = dec2_deg.to_radians();
+    let half_ddec = (dec2 - dec1) / 2.0;
+    let half_dra = (ra2_deg - ra1_deg).to_radians() / 2.0;
+    let h = half_ddec.sin().powi(2) + dec1.cos() * dec2.cos() * half_dra.sin().powi(2);
+    2.0 * h.sqrt().clamp(-1.0, 1.0).asin().to_degrees()
 }
 
 fn nonempty(value: &str) -> Option<String> {
@@ -884,7 +995,7 @@ mod tests {
 
     #[test]
     fn refuses_to_extrapolate_stale_elements_by_default() {
-        let mut catalog = SatelliteCatalog::from_tle_text(ISS_TLE, "test").unwrap();
+        let catalog = SatelliteCatalog::from_tle_text(ISS_TLE, "test").unwrap();
         let observer = ObserverLocation::geodetic(42.466, -71.1516, 150.0).unwrap();
         let start = catalog.elements[0]
             .epoch()
@@ -908,7 +1019,7 @@ mod tests {
 
     #[test]
     fn rejects_sampling_requests_that_would_allocate_unbounded_vectors() {
-        let mut catalog = SatelliteCatalog::from_tle_text(ISS_TLE, "test").unwrap();
+        let catalog = SatelliteCatalog::from_tle_text(ISS_TLE, "test").unwrap();
         let observer = ObserverLocation::geodetic(42.466, -71.1516, 150.0).unwrap();
         let exposure = SingleExposure::from_start_and_duration(
             catalog.elements[0].epoch(),
@@ -928,5 +1039,123 @@ mod tests {
             },
         );
         assert!(matches!(result, Err(Error::InvalidOptions(_))));
+    }
+
+    fn pixel_sample(seconds: f64, x: f64, y: f64) -> TrackSample {
+        TrackSample {
+            time_utc: UtcTimestamp(seconds),
+            ra_deg: 0.0,
+            dec_deg: 0.0,
+            pixel: Some(PixelPoint { x, y }),
+            elevation_deg: 45.0,
+            range_km: 500.0,
+            sunlight_fraction: 1.0,
+        }
+    }
+
+    #[test]
+    fn coarse_pass_pads_the_image_for_curved_paths() {
+        // A chord whose closest approach misses the 100x100 image by less
+        // than 10% of the chord length: the exact clip rejects it, but the
+        // padded coarse test must keep it as a candidate.
+        let samples = [
+            pixel_sample(0.0, -500.0, 160.0),
+            pixel_sample(10.0, 599.0, 160.0),
+        ];
+        assert!(
+            clip_segment(
+                samples[0].pixel.unwrap(),
+                samples[1].pixel.unwrap(),
+                (100, 100)
+            )
+            .is_none()
+        );
+        assert!(coarse_path_may_intersect_image(&samples, (100, 100)));
+
+        // A chord far away stays rejected.
+        let distant = [
+            pixel_sample(0.0, -500.0, 5000.0),
+            pixel_sample(10.0, 599.0, 5000.0),
+        ];
+        assert!(!coarse_path_may_intersect_image(&distant, (100, 100)));
+    }
+
+    #[test]
+    fn reports_apparent_and_pixel_rates() {
+        let mut track = SatelliteTrack {
+            identity: SatelliteIdentity {
+                norad_id: Some(1),
+                cospar_id: None,
+                name: "TEST".into(),
+            },
+            association: TrackAssociation::Predicted,
+            element_epoch_utc: UtcTimestamp(0.0),
+            element_age_seconds: 0.0,
+            source: "test".into(),
+            sample_interval_seconds: 2.0,
+            samples: vec![pixel_sample(0.0, 0.0, 0.0), pixel_sample(2.0, 6.0, 8.0)],
+            clipped_segments: vec![PixelSegment {
+                start: PixelPoint { x: 0.0, y: 0.0 },
+                end: PixelPoint { x: 6.0, y: 8.0 },
+            }],
+        };
+        track.samples[1].ra_deg = 1.0;
+        assert!((track.maximum_pixel_rate_px_per_second().unwrap() - 5.0).abs() < 1.0e-12);
+        let rate = track.maximum_apparent_rate_arcsec_per_second().unwrap();
+        assert!((rate - 1800.0).abs() < 1.0, "one degree over two seconds");
+        assert!((track.clipped_length_px() - 10.0).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn angular_separation_handles_pole_and_wraparound() {
+        assert!((angular_separation_deg(359.5, 0.0, 0.5, 0.0) - 1.0).abs() < 1.0e-9);
+        assert!((angular_separation_deg(0.0, 89.0, 180.0, 89.0) - 2.0).abs() < 1.0e-9);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn satellite_tracks_round_trip_through_serde() {
+        let catalog = SatelliteCatalog::from_tle_text(ISS_TLE, "test").unwrap();
+        let observer = ObserverLocation::geodetic(42.466, -71.1516, 150.0).unwrap();
+        let start = catalog.elements[0].epoch();
+        let exposure = SingleExposure::from_start_and_duration(
+            start,
+            2.0,
+            observer,
+            ExposureProvenance::Explicit,
+        )
+        .unwrap();
+        let midpoint = exposure.midpoint().instant();
+        let mut probe = catalog.elements[0].clone();
+        let state = probe.propagate(&[midpoint]).unwrap();
+        let sample = project_samples(
+            &state,
+            &[midpoint],
+            &exposure.observer.itrf(),
+            &Wcs::from_center_scale_rotation((0.0, 0.0), (1.0, 1.0), 3600.0, 0.0, false),
+            f64::NEG_INFINITY,
+        )
+        .remove(0);
+        let wcs = Wcs::from_center_scale_rotation(
+            (sample.ra_deg, sample.dec_deg),
+            (512.0, 512.0),
+            10.0,
+            0.0,
+            false,
+        );
+        let result = catalog
+            .tracks_in_footprint(
+                &wcs,
+                (1024, 1024),
+                &exposure,
+                &TrackOptions {
+                    minimum_elevation_deg: -90.0,
+                    ..TrackOptions::default()
+                },
+            )
+            .unwrap();
+        let json = serde_json::to_string(&result).unwrap();
+        let restored: TrackSearchResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, result);
     }
 }

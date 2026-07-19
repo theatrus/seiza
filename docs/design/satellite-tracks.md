@@ -62,7 +62,15 @@ often than CelesTrak's two-hour update interval, writes replacements
 atomically, coordinates refreshes across processes, and may use a previously
 validated stale snapshot if refresh fails.
 The result records whether the snapshot was fresh, downloaded, or a stale
-fallback. A non-success HTTP status is returned immediately without retrying.
+fallback. A non-success HTTP status is returned immediately without retrying;
+403 and 429 map to a dedicated rate-limit error carrying any `Retry-After`
+value, because CelesTrak blocks clients that re-download inside its update
+window. Responses are requested gzip-compressed. Readers of a fresh snapshot
+hold only a shared file lock so concurrent processes do not serialize; the
+exclusive lock is taken for refresh, and the freshness check repeats after
+acquiring it in case another process refreshed first. A snapshot whose
+modification time is more than a few minutes in the future is treated as
+maximally stale rather than permanently fresh.
 
 Historical images require elements close to their acquisition epoch. A future
 authenticated Space-Track `GP_HISTORY` provider can implement the same source
@@ -91,9 +99,16 @@ download. Element uncertainty and camera timestamp error will often dominate,
 but the approximation and element epoch are retained in the result provenance.
 
 A coarse pass samples every ten seconds to discard tracks that do not intersect
-the image. Candidate tracks are then sampled at the configured fine step
-(one second by default). The sample interval remains visible in the result so
-callers can choose a tighter value for narrow, high-resolution fields.
+the image. Because the true apparent path between two coarse samples is curved
+while the test uses straight chords, the coarse pass clips against an image
+rectangle padded by a tenth of each chord's length — a bound comfortably above
+the worst-case sagitta for low-orbit rates — and skips the elevation gate, so
+it can only over-admit; the fine pass remains authoritative. Candidate tracks
+are then sampled at the configured fine step (one second by default). The
+sample interval remains visible in the result so callers can choose a tighter
+value for narrow, high-resolution fields, and each track reports its peak
+apparent and image-plane rates so callers can detect when a crossing outruns
+the sampling.
 The default maximum absolute element age is seven days. Older records are
 reported and skipped instead of silently extrapolating today's orbit back onto
 an archival image; callers doing controlled research may override the policy.
@@ -109,6 +124,12 @@ catalog.tracks_in_footprint(&wcs, dimensions, &exposure, &TrackOptions::default(
 Each `SatelliteTrack` contains identity, element epoch, source provenance,
 time-tagged topocentric samples, clipped pixel segments, elevation, range, and
 sunlight fraction. `association` is currently always `Predicted`.
+
+`tracks_in_footprint` borrows the catalog immutably — SGP4 initialization is
+cached on a per-call scratch copy of each element — so one loaded catalog can
+serve concurrent solves. The optional `serde` crate feature derives
+`Serialize`/`Deserialize` on the exposure, option, and result types for
+embedding in application APIs and caches.
 
 The CLI enables the layer explicitly with either:
 
