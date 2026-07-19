@@ -10,14 +10,14 @@ members = [
 ]
 
 [workspace.package]
-version = "0.8.1"
+version = "0.9.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/theatrus/seiza"
 authors = ["Yann Ramin <github@theatr.us>"]
 
 [workspace.dependencies]
-seiza = { path = "seiza", version = "0.8.1" }
+seiza = { path = "seiza", version = "0.9.0" }
 seiza-download = { path = "seiza-download", version = "0.3.0" }
 seiza-fits = { path = "seiza-fits", version = "0.1.6" }
 seiza-satellites = { path = "seiza-satellites", version = "0.1.0" }
