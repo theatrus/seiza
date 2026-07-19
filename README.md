@@ -325,8 +325,11 @@ plugin on every platform:
 
 1. Run `seiza install-solve-field --dir <dir>` — it installs the complete
    layout (`solve-field`, `bin/bash`, `tmp/`) Siril expects.
-2. Give seiza a star catalog once: `seiza setup`, or set `SEIZA_STAR_DATA`,
-   or drop a `stars-*.bin` next to the installed binaries.
+2. Install catalogs with **Seiza Catalog Setup** on Windows or `seiza setup`
+   on any platform. For a manual or portable layout, populate one directory
+   with `seiza download-data prebuilt --output <directory>` and point
+   `SEIZA_CATALOG_DIR` at it. Solve-field mode selects the star catalog and
+   blind index from that directory automatically.
 3. In Siril: **Preferences → Astrometry → astrometry.net install dir**, set
    it to that directory, and pick the astrometry.net solver when plate
    solving.

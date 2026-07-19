@@ -124,8 +124,8 @@ selection into a directory ASTAP mode discovers automatically. For a manual
 layout, run `seiza download-data prebuilt --output <directory>` and point
 `SEIZA_CATALOG_DIR` at that directory. Advanced `SEIZA_STAR_DATA` and
 `SEIZA_BLIND_INDEX` file-or-directory overrides remain available. Hinted and
-blind-slot solving both work; see the repository's
-`docs/design/astap-mode.md`.
+blind-slot solving both work; see the
+[ASTAP-compatible mode design](https://github.com/theatrus/seiza/blob/main/docs/design/astap-mode.md).
 
 ## Use with Siril
 
@@ -136,8 +136,9 @@ directory preference at that directory, and Siril's normal astrometry.net
 solving works unchanged, including SIP distortion orders. Catalogs resolve
 the same way as ASTAP mode. Siril reports PSF amplitudes rather than photometric
 flux, so seiza automatically re-measures star flux from the source image
-next to the star table when present — see the repository's
-`docs/design/solve-field-mode.md` for details.
+next to the star table when present — see the
+[solve-field mode design](https://github.com/theatrus/seiza/blob/main/docs/design/solve-field-mode.md)
+for details.
 
 ## Datasets
 
