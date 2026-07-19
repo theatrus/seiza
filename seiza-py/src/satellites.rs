@@ -272,6 +272,7 @@ impl PySatelliteCatalog {
                 sat::CacheState::Fresh => "fresh",
                 sat::CacheState::Downloaded => "downloaded",
                 sat::CacheState::StaleFallback => "stale-fallback",
+                sat::CacheState::Cached => "cache-only",
             };
             Ok(Self {
                 catalog: load.catalog,

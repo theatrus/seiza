@@ -8,7 +8,8 @@
 mod source;
 
 pub use source::{
-    CELESTRAK_ACTIVE_OMM_URL, CELESTRAK_MIN_REFRESH, CacheState, CelesTrakLoad, CelesTrakSource,
+    CELESTRAK_ACTIVE_OMM_URL, CELESTRAK_MIN_REFRESH, CacheState, CachedCatalogSnapshot,
+    CelesTrakLoad, CelesTrakSource, DEFAULT_CELESTRAK_CACHE_SIZE_LIMIT_BYTES,
 };
 
 use satkit::frametransform::{qitrf2gcrf_approx, qteme2gcrf, qteme2itrf};
@@ -17,9 +18,20 @@ use satkit::omm::OMM;
 use satkit::sgp4::{SGP4Error, SGP4State, sgp4};
 use satkit::{ITRFCoord, Instant, TLE, Vector3};
 use seiza::wcs::Wcs;
+use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 const MAX_SAMPLE_SEGMENTS: usize = 1_000_000;
+
+fn payload_sha256(payload: &[u8]) -> String {
+    let digest = Sha256::digest(payload);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    hex
+}
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -230,6 +242,27 @@ impl SingleExposure {
         Self::new(
             start_utc,
             start_utc.add_seconds(duration_seconds)?,
+            observer,
+            provenance,
+        )
+    }
+
+    /// Build an exposure whose supplied timestamp is the shutter midpoint.
+    pub fn from_midpoint_and_duration(
+        midpoint_utc: UtcTimestamp,
+        duration_seconds: f64,
+        observer: ObserverLocation,
+        provenance: ExposureProvenance,
+    ) -> Result<Self> {
+        if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
+            return Err(Error::InvalidExposure(
+                "duration must be a positive finite number of seconds",
+            ));
+        }
+        let half_duration = duration_seconds / 2.0;
+        Self::new(
+            midpoint_utc.add_seconds(-half_duration)?,
+            midpoint_utc.add_seconds(half_duration)?,
             observer,
             provenance,
         )
@@ -451,11 +484,22 @@ impl ElementRecord {
     }
 }
 
+/// Stable identity for the exact orbital-element payload used by a catalog.
+///
+/// `retrieved_at` deliberately is not part of the fingerprint: copying the
+/// same bytes into a durable cache must not make persisted predictions stale.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct CatalogFingerprint {
+    pub content_sha256: String,
+}
+
 /// Parsed OMM or TLE records plus their source provenance.
 pub struct SatelliteCatalog {
     elements: Vec<ElementRecord>,
     source: String,
     retrieved_at: Option<UtcTimestamp>,
+    content_sha256: String,
 }
 
 impl std::fmt::Debug for SatelliteCatalog {
@@ -465,6 +509,7 @@ impl std::fmt::Debug for SatelliteCatalog {
             .field("elements", &self.elements.len())
             .field("source", &self.source)
             .field("retrieved_at", &self.retrieved_at)
+            .field("content_sha256", &self.content_sha256)
             .finish()
     }
 }
@@ -472,6 +517,7 @@ impl std::fmt::Debug for SatelliteCatalog {
 impl SatelliteCatalog {
     pub fn from_omm_json(payload: &str, source: impl Into<String>) -> Result<Self> {
         let source = source.into();
+        let content_sha256 = payload_sha256(payload.as_bytes());
         let trimmed = payload.trim();
         let wrapped;
         let payload = if trimmed.starts_with('{') {
@@ -495,11 +541,13 @@ impl SatelliteCatalog {
                 .map(|omm| ElementRecord::Omm(Box::new(omm)))
                 .collect(),
             source,
+            content_sha256,
         )
     }
 
     pub fn from_tle_text(payload: &str, source: impl Into<String>) -> Result<Self> {
         let source = source.into();
+        let content_sha256 = payload_sha256(payload.as_bytes());
         let lines = payload.lines().map(str::to_string).collect::<Vec<_>>();
         let tles = TLE::from_lines(&lines).map_err(|error| Error::Elements {
             source_name: source.clone(),
@@ -510,6 +558,7 @@ impl SatelliteCatalog {
                 .map(|tle| ElementRecord::Tle(Box::new(tle)))
                 .collect(),
             source,
+            content_sha256,
         )
     }
 
@@ -526,7 +575,11 @@ impl SatelliteCatalog {
         }
     }
 
-    fn from_records(elements: Vec<ElementRecord>, source: String) -> Result<Self> {
+    fn from_records(
+        elements: Vec<ElementRecord>,
+        source: String,
+        content_sha256: String,
+    ) -> Result<Self> {
         if elements.is_empty() {
             return Err(Error::EmptyElements(source));
         }
@@ -534,6 +587,7 @@ impl SatelliteCatalog {
             elements,
             source,
             retrieved_at: None,
+            content_sha256,
         })
     }
 
@@ -556,6 +610,13 @@ impl SatelliteCatalog {
 
     pub fn retrieved_at(&self) -> Option<UtcTimestamp> {
         self.retrieved_at
+    }
+
+    /// Exact content identity suitable for invalidating persisted predictions.
+    pub fn fingerprint(&self) -> CatalogFingerprint {
+        CatalogFingerprint {
+            content_sha256: self.content_sha256.clone(),
+        }
     }
 
     pub fn tracks_in_footprint(
@@ -919,6 +980,27 @@ mod tests {
     }
 
     #[test]
+    fn builds_exposure_around_a_supplied_midpoint() {
+        let midpoint = UtcTimestamp::parse("2024-05-02T12:00:30Z").unwrap();
+        let observer = ObserverLocation::geodetic(37.0, -122.0, 10.0).unwrap();
+        let exposure = SingleExposure::from_midpoint_and_duration(
+            midpoint,
+            60.0,
+            observer,
+            ExposureProvenance::FitsDateObsAndExposure,
+        )
+        .unwrap();
+        assert_eq!(
+            exposure.start_utc.unix_seconds(),
+            midpoint.unix_seconds() - 30.0
+        );
+        assert_eq!(
+            exposure.end_utc.unix_seconds(),
+            midpoint.unix_seconds() + 30.0
+        );
+    }
+
+    #[test]
     fn parses_fits_style_utc_without_z() {
         let fits = UtcTimestamp::parse("2024-05-02T12:00:00.125").unwrap();
         let rfc = UtcTimestamp::parse("2024-05-02T12:00:00.125Z").unwrap();
@@ -933,6 +1015,21 @@ mod tests {
         assert_eq!(identity.norad_id, Some(25544));
         assert_eq!(identity.cospar_id.as_deref(), Some("1998-067A"));
         assert_eq!(identity.name, "ISS (ZARYA)");
+    }
+
+    #[test]
+    fn catalog_fingerprint_tracks_content_not_retrieval_time() {
+        let first = SatelliteCatalog::from_tle_text(ISS_TLE, "test")
+            .unwrap()
+            .with_retrieved_at(UtcTimestamp(1.0));
+        let second = SatelliteCatalog::from_tle_text(ISS_TLE, "test")
+            .unwrap()
+            .with_retrieved_at(UtcTimestamp(2.0));
+        assert_eq!(first.fingerprint(), second.fingerprint());
+        assert_eq!(first.fingerprint().content_sha256.len(), 64);
+
+        let changed = SatelliteCatalog::from_tle_text(&format!("{ISS_TLE}\n"), "test").unwrap();
+        assert_ne!(first.fingerprint(), changed.fingerprint());
     }
 
     #[test]

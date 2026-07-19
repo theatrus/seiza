@@ -2387,6 +2387,7 @@ fn load_satellite_catalog(input: SatelliteInput) -> Result<SatelliteCatalog> {
                 CacheState::Fresh => "fresh cache",
                 CacheState::Downloaded => "downloaded",
                 CacheState::StaleFallback => "stale cache fallback",
+                CacheState::Cached => "cache-only",
             };
             println!(
                 "satellite elements: {} records ({state}, {})",

@@ -56,11 +56,13 @@ CCSDS OMM JSON and legacy two-/three-line element files for offline and
 historical use.
 
 `CelesTrakSource` supplies recent active-satellite OMM JSON. This first source
-does not include the complete debris and rocket-body population. It stores one
-validated response in the platform cache directory, never refreshes it more
-often than CelesTrak's two-hour update interval, writes replacements
-atomically, coordinates refreshes across processes, and may use a previously
-validated stale snapshot if refresh fails.
+does not include the complete debris and rocket-body population. It stores a
+durable history of validated responses in the platform cache directory, never
+refreshes more often than CelesTrak's two-hour update interval, writes new
+snapshots atomically, coordinates refreshes across processes, and may use a
+previously validated stale snapshot if refresh fails. History is retained
+until its configurable size ceiling is reached (5 GiB by default), then the
+oldest snapshots are evicted while the newest is always preserved.
 The result records whether the snapshot was fresh, downloaded, or a stale
 fallback. A non-success HTTP status is returned immediately without retrying;
 403 and 429 map to a dedicated rate-limit error carrying any `Retry-After`
@@ -69,8 +71,17 @@ window. Responses are requested gzip-compressed. Readers of a fresh snapshot
 hold only a shared file lock so concurrent processes do not serialize; the
 exclusive lock is taken for refresh, and the freshness check repeats after
 acquiring it in case another process refreshed first. A snapshot whose
-modification time is more than a few minutes in the future is treated as
+retrieval timestamp (encoded in downloaded filenames, with mtime fallback for
+manually seeded caches) is more than a few minutes in the future is treated as
 maximally stale rather than permanently fresh.
+
+Applications do not inspect private cache filenames. `cached_snapshots` lists
+the durable inventory, `load_cached` opens the newest valid snapshot without
+network access, and `load_cached_for` opens the valid snapshot retrieved
+closest to an exposure time. Every parsed catalog supplies a SHA-256
+`CatalogFingerprint`; applications persist that content identity with derived
+predictions and invalidate them when the element payload changes. Retrieval
+time and source remain separate provenance and do not change content identity.
 
 Historical images require elements close to their acquisition epoch. A future
 authenticated Space-Track `GP_HISTORY` provider can implement the same source
