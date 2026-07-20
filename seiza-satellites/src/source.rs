@@ -17,6 +17,8 @@ const CACHE_PREFIX: &str = "celestrak-active-";
 const CACHE_SUFFIX: &str = ".json";
 pub(crate) const SATCHECKER_CACHE_PREFIX: &str = "satchecker-epoch-";
 pub(crate) const SATCHECKER_CACHE_SUFFIX: &str = ".tle";
+pub(crate) const SEIZA_MIRROR_CACHE_PREFIX: &str = "seiza-mirror-epoch-";
+pub(crate) const SEIZA_MIRROR_CACHE_SUFFIX: &str = ".tle";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -635,6 +637,14 @@ fn managed_cache_inventory_in(cache_dir: &Path) -> Result<Vec<ManagedCacheSnapsh
             .and_then(|value| value.parse::<f64>().ok())
         {
             value
+        } else if let Some(value) = name
+            .strip_prefix(SEIZA_MIRROR_CACHE_PREFIX)
+            .and_then(|value| value.strip_suffix(SEIZA_MIRROR_CACHE_SUFFIX))
+            .and_then(|value| value.split("-cached-").nth(1))
+            .and_then(|value| value.split('-').next())
+            .and_then(|value| value.parse::<f64>().ok())
+        {
+            value
         } else {
             continue;
         };
@@ -663,6 +673,7 @@ fn remove_abandoned_partial_files(cache_dir: &Path) -> Result<()> {
     })?;
     let partial_prefix = format!(".{CACHE_PREFIX}");
     let satchecker_partial_prefix = format!(".{SATCHECKER_CACHE_PREFIX}");
+    let mirror_partial_prefix = format!(".{SEIZA_MIRROR_CACHE_PREFIX}");
     for entry in entries {
         let entry = entry.map_err(|source| Error::Io {
             path: cache_dir.to_path_buf(),
@@ -672,7 +683,9 @@ fn remove_abandoned_partial_files(cache_dir: &Path) -> Result<()> {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        if (name.starts_with(&partial_prefix) || name.starts_with(&satchecker_partial_prefix))
+        if (name.starts_with(&partial_prefix)
+            || name.starts_with(&satchecker_partial_prefix)
+            || name.starts_with(&mirror_partial_prefix))
             && name.ends_with(".partial")
         {
             std::fs::remove_file(&path).map_err(|source| Error::Io {

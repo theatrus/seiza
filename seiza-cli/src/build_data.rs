@@ -7,7 +7,7 @@ use seiza::star_ids::{
     normalize_star_name,
 };
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Build a star tile file from the Tycho-2 catalogue (CDS I/259).
 ///
@@ -3727,6 +3727,135 @@ fn file_digest(path: &Path) -> Result<(u64, String)> {
     Ok((bytes, sha256))
 }
 
+/// Roll validated historical TLE cache entries into the Seiza satellite
+/// mirror schema and stage immutable content-addressed files for S3.
+pub fn build_satellite_manifest(
+    cache_dir: &Path,
+    base_manifest: Option<&Path>,
+    output: &Path,
+    artifact_dir: &Path,
+) -> Result<()> {
+    use seiza_satellites::{
+        SATCHECKER_TLES_AT_EPOCH_URL, SatCheckerSource, SatelliteMirrorEntry,
+        SatelliteMirrorManifest, UtcTimestamp,
+    };
+    use std::collections::{BTreeMap, HashSet};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let mut entries = BTreeMap::<i64, SatelliteMirrorEntry>::new();
+    let mut published_hashes = HashSet::new();
+    if let Some(base_manifest) = base_manifest {
+        let bytes = std::fs::read(base_manifest)
+            .with_context(|| format!("cannot read {}", base_manifest.display()))?;
+        let base = SatelliteMirrorManifest::parse(&bytes, base_manifest.display().to_string())?;
+        for entry in base.snapshots {
+            let millis = (entry.query_time()?.unix_seconds() * 1_000.0).round() as i64;
+            published_hashes.insert(entry.sha256.clone());
+            entries.insert(millis, entry);
+        }
+    }
+
+    let mut replacements = Vec::<(i64, SatelliteMirrorEntry, PathBuf)>::new();
+    let satchecker = SatCheckerSource::new(cache_dir)?;
+    for snapshot in satchecker.cached_snapshots()? {
+        let (size_bytes, sha256) = validated_tle_digest(&snapshot.cache_path)?;
+        let source_url = if snapshot.source_url.is_empty() {
+            SATCHECKER_TLES_AT_EPOCH_URL.to_string()
+        } else {
+            snapshot.source_url
+        };
+        let entry = SatelliteMirrorEntry {
+            query_time_utc: snapshot.query_time.to_rfc3339(),
+            source_url,
+            key: format!("artifacts/{sha256}/satellites.tle"),
+            sha256,
+            size_bytes,
+        };
+        replacements.push((
+            (snapshot.query_time.unix_seconds() * 1_000.0).round() as i64,
+            entry,
+            snapshot.cache_path,
+        ));
+    }
+    if replacements.is_empty() && entries.is_empty() {
+        bail!(
+            "no historical satellite snapshots found in {}; prewarm with `seiza download-data satellite-history --epoch ... --cache {}`",
+            cache_dir.display(),
+            cache_dir.display()
+        );
+    }
+    let mut replacement_count = 0;
+    for (millis, entry, path) in replacements {
+        let changed = entries.get(&millis) != Some(&entry);
+        if changed {
+            replacement_count += 1;
+            if published_hashes.insert(entry.sha256.clone()) {
+                stage_uncompressed_artifact(
+                    &path,
+                    "satellites.tle",
+                    artifact_dir,
+                    entry.size_bytes,
+                    &entry.sha256,
+                )?;
+            }
+        }
+        entries.insert(millis, entry);
+    }
+
+    let generated_at = UtcTimestamp::from_unix_seconds(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64(),
+    )?;
+    let manifest = SatelliteMirrorManifest {
+        schema_version: SatelliteMirrorManifest::SCHEMA_VERSION,
+        generated_at_utc: generated_at.to_rfc3339(),
+        snapshots: entries.into_values().collect(),
+    };
+    manifest.validate("generated satellite mirror manifest")?;
+    let mut encoded = serde_json::to_vec_pretty(&manifest)?;
+    encoded.push(b'\n');
+    let temporary = output.with_extension(format!("json.{}.partial", std::process::id()));
+    let publication = (|| {
+        std::fs::write(&temporary, encoded)
+            .with_context(|| format!("cannot write {}", temporary.display()))?;
+        std::fs::File::options()
+            .write(true)
+            .open(&temporary)?
+            .sync_all()?;
+        std::fs::rename(&temporary, output).with_context(|| {
+            format!(
+                "cannot install {} as {}",
+                temporary.display(),
+                output.display()
+            )
+        })?;
+        Ok::<(), anyhow::Error>(())
+    })();
+    if publication.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    publication?;
+    println!(
+        "satellite mirror manifest written to {} ({} new/replaced, {} total)",
+        output.display(),
+        replacement_count,
+        manifest.snapshots.len()
+    );
+    println!(
+        "publish {} below /satellites/v1/, archive this manifest, then upload it as manifest.json last",
+        artifact_dir.display()
+    );
+    Ok(())
+}
+
+fn validated_tle_digest(path: &Path) -> Result<(u64, String)> {
+    seiza_satellites::SatelliteCatalog::open(path)
+        .with_context(|| format!("invalid historical TLE snapshot {}", path.display()))?;
+    file_digest(path)
+}
+
 /// Build star tiles from Gaia DR3 TAP CSV chunks (download-data gaia).
 /// Positions are epoch J2016.0; proper motions are applied to `epoch`.
 pub fn build_gaia(input: &Path, output: &Path, epoch: f64, max_mag: f32, bands: u32) -> Result<()> {
@@ -4321,6 +4450,54 @@ fn unpack_epoch(packed: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SATELLITE_TLE: &str = include_str!("../../seiza-satellites/tests/data/iss-2024.tle");
+
+    #[test]
+    fn satellite_manifest_rolls_cache_into_an_upload_ready_tree() {
+        let cache = tempfile::tempdir().unwrap();
+        let artifacts = tempfile::tempdir().unwrap();
+        let first = cache
+            .path()
+            .join("satchecker-epoch-1760791932790-cached-1760900000.tle");
+        std::fs::write(&first, SATELLITE_TLE).unwrap();
+        let manifest_path = cache.path().join("manifest.json");
+
+        build_satellite_manifest(cache.path(), None, &manifest_path, artifacts.path()).unwrap();
+
+        let manifest = seiza_satellites::SatelliteMirrorManifest::parse(
+            &std::fs::read(&manifest_path).unwrap(),
+            "test",
+        )
+        .unwrap();
+        assert_eq!(manifest.snapshots.len(), 1);
+        let entry = &manifest.snapshots[0];
+        assert!(artifacts.path().join(&entry.key).is_file());
+        assert_eq!(
+            std::fs::read(artifacts.path().join(&entry.key)).unwrap(),
+            SATELLITE_TLE.as_bytes()
+        );
+
+        let second = cache
+            .path()
+            .join("satchecker-epoch-1760878332790-cached-1760900001.tle");
+        std::fs::write(&second, SATELLITE_TLE).unwrap();
+        let next_manifest = cache.path().join("next-manifest.json");
+        build_satellite_manifest(
+            cache.path(),
+            Some(&manifest_path),
+            &next_manifest,
+            artifacts.path(),
+        )
+        .unwrap();
+        let next = seiza_satellites::SatelliteMirrorManifest::parse(
+            &std::fs::read(next_manifest).unwrap(),
+            "test",
+        )
+        .unwrap();
+        assert_eq!(next.snapshots.len(), 2);
+        assert_eq!(next.snapshots[0].key, next.snapshots[1].key);
+    }
 
     fn write_complete_bundle_inputs(dir: &Path, marker: &str) {
         for name in seiza_download::REQUIRED_BUNDLE_FILES {

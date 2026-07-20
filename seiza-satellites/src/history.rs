@@ -27,6 +27,7 @@ pub struct HistoricalCatalogSnapshot {
     pub query_time: UtcTimestamp,
     /// Time at which this response was downloaded and validated.
     pub downloaded_at: UtcTimestamp,
+    pub source_url: String,
     pub size_bytes: u64,
 }
 
@@ -115,7 +116,7 @@ impl SatCheckerSource {
     pub fn cached_snapshots(&self) -> Result<Vec<HistoricalCatalogSnapshot>> {
         self.prune_cache()?;
         let _shared = acquire_lock_in(&self.cache_dir, LockMode::Shared)?;
-        history_inventory_in(&self.cache_dir)
+        history_inventory_in(&self.cache_dir, &self.endpoint)
     }
 
     /// Load the valid cached historical response nearest an exposure without
@@ -203,9 +204,11 @@ impl SatCheckerSource {
         maximum_distance: Option<Duration>,
     ) -> Result<Option<SatCheckerLoad>> {
         let cache_dir = self.cache_dir.clone();
-        let mut snapshots = tokio::task::spawn_blocking(move || history_inventory_in(&cache_dir))
-            .await
-            .map_err(|error| Error::CacheLock(error.to_string()))??;
+        let endpoint = self.endpoint.clone();
+        let mut snapshots =
+            tokio::task::spawn_blocking(move || history_inventory_in(&cache_dir, &endpoint))
+                .await
+                .map_err(|error| Error::CacheLock(error.to_string()))??;
         sort_by_distance(&mut snapshots, time_utc);
         for snapshot in snapshots {
             if !within_distance(&snapshot, time_utc, maximum_distance) {
@@ -223,7 +226,7 @@ impl SatCheckerSource {
         time_utc: UtcTimestamp,
         maximum_distance: Option<Duration>,
     ) -> Result<Option<SatCheckerLoad>> {
-        let mut snapshots = history_inventory_in(&self.cache_dir)?;
+        let mut snapshots = history_inventory_in(&self.cache_dir, &self.endpoint)?;
         sort_by_distance(&mut snapshots, time_utc);
         let mut last_error = None;
         for snapshot in snapshots {
@@ -266,7 +269,7 @@ impl SatCheckerSource {
             source,
         })?;
         let downloaded_at = now_timestamp()?;
-        let catalog = SatelliteCatalog::from_tle_text(&payload, request_url)?
+        let catalog = SatelliteCatalog::from_tle_text(&payload, request_url.clone())?
             .with_retrieved_at(downloaded_at);
 
         let query_millis = (query_time.unix_seconds() * 1_000.0).round() as i64;
@@ -323,6 +326,7 @@ impl SatCheckerSource {
             cache_path: final_path.clone(),
             query_time,
             downloaded_at,
+            source_url: request_url,
             size_bytes: payload.len() as u64,
         };
         Ok(SatCheckerLoad {
@@ -363,8 +367,7 @@ impl SatCheckerSource {
         payload: String,
         snapshot: HistoricalCatalogSnapshot,
     ) -> Result<SatCheckerLoad> {
-        let source = self.request_url(snapshot.query_time);
-        let catalog = SatelliteCatalog::from_tle_text(&payload, source)?
+        let catalog = SatelliteCatalog::from_tle_text(&payload, snapshot.source_url.clone())?
             .with_retrieved_at(snapshot.downloaded_at);
         Ok(SatCheckerLoad {
             catalog,
@@ -372,19 +375,6 @@ impl SatCheckerSource {
             cache_path: snapshot.cache_path.clone(),
             snapshot,
         })
-    }
-
-    fn request_url(&self, query_time: UtcTimestamp) -> String {
-        let separator = if self.endpoint.contains('?') {
-            '&'
-        } else {
-            '?'
-        };
-        format!(
-            "{}{separator}epoch={:.8}&format=txt",
-            self.endpoint,
-            julian_date(query_time)
-        )
     }
 }
 
@@ -419,7 +409,10 @@ fn sort_by_distance(snapshots: &mut [HistoricalCatalogSnapshot], time_utc: UtcTi
     });
 }
 
-fn history_inventory_in(cache_dir: &Path) -> Result<Vec<HistoricalCatalogSnapshot>> {
+fn history_inventory_in(
+    cache_dir: &Path,
+    endpoint: &str,
+) -> Result<Vec<HistoricalCatalogSnapshot>> {
     let entries = match std::fs::read_dir(cache_dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -457,10 +450,16 @@ fn history_inventory_in(cache_dir: &Path) -> Result<Vec<HistoricalCatalogSnapsho
         if !metadata.is_file() {
             continue;
         }
+        let query_time = UtcTimestamp::from_unix_seconds(query_millis as f64 / 1_000.0)?;
+        let separator = if endpoint.contains('?') { '&' } else { '?' };
         snapshots.push(HistoricalCatalogSnapshot {
             cache_path: path,
-            query_time: UtcTimestamp::from_unix_seconds(query_millis as f64 / 1_000.0)?,
+            query_time,
             downloaded_at: UtcTimestamp::from_unix_seconds(downloaded_seconds as f64)?,
+            source_url: format!(
+                "{endpoint}{separator}epoch={:.8}&format=txt",
+                julian_date(query_time)
+            ),
             size_bytes: metadata.len(),
         });
     }

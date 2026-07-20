@@ -89,13 +89,29 @@ predictions and invalidate them when the element payload changes. Retrieval
 time and source remain separate provenance and do not change content identity.
 
 Historical images require elements close to their acquisition epoch.
-`SatCheckerSource` queries the public IAU SatChecker `tles-at-epoch` service
-only when a caller explicitly requests elements for an exposure. It stores
-each validated TLE response in the same durable cache as CelesTrak, preserving
-the query epoch separately from download time. A nearby cached query is reused
-within a configurable 12-hour window; cache-only replay never performs network
-I/O. Historical responses otherwise remain indefinitely and share the same 5
-GiB default upper bound with current snapshots.
+`OrbitalCatalogSource` owns source selection so applications do not reproduce
+policy. Recent exposures select CelesTrak active OMM. Historical exposures try
+the nearest durable cache entry, the Seiza content-addressed rolling mirror,
+and finally the public IAU SatChecker `tles-at-epoch` service. Each validated
+TLE response is stored in the same durable cache as CelesTrak, preserving the
+provider and query epoch separately from download time. A nearby historical
+query is reused within a configurable 12-hour window; cache-only replay never
+performs network I/O. Historical responses otherwise remain until the shared
+5 GiB default upper bound evicts the oldest snapshots.
+
+Operational prewarming is exposed as `seiza download-data satellite-history
+--epoch ...`. The CLI delegates to `OrbitalCatalogSource`, so it populates the
+same locked, validated cache rather than inventing another implementation. It
+intentionally accepts selected observing epochs, not an unbounded copy of
+SatChecker's historical backend. The mirror publisher adds `--origin`, which
+requests the exact epoch from SatChecker with a zero-width reuse window; this
+prevents a twice-daily cron from satisfying a new bucket from its own previous
+12-hour mirror entry.
+
+The Seiza-hosted rolling mirror uses a strict content-addressed manifest and
+the same publish-last transaction as dynamic catalog data. The complete cron,
+S3, backfill, and verification runbook is in
+[`docs/SATELLITE_MIRROR.md`](../SATELLITE_MIRROR.md).
 
 Stable identity uses the numeric NORAD catalog ID and, when available, the
 COSPAR international designator. Display names are not keys. OMM is preferred

@@ -6,12 +6,22 @@
 //! matcher.
 
 mod history;
+mod mirror;
+mod resolver;
 mod source;
 pub mod trail_alignment;
 
 pub use history::{
     HistoricalCatalogSnapshot, SATCHECKER_CACHE_REUSE_WINDOW, SATCHECKER_TLES_AT_EPOCH_URL,
     SatCheckerLoad, SatCheckerSource,
+};
+pub use mirror::{
+    DEFAULT_SEIZA_SATELLITE_MIRROR_URL, MirrorCatalogSnapshot, SatelliteMirrorEntry,
+    SatelliteMirrorManifest, SeizaMirrorLoad, SeizaMirrorSource,
+};
+pub use resolver::{
+    CURRENT_CATALOG_MAX_AGE, OrbitalCatalogLoad, OrbitalCatalogProvider, OrbitalCatalogSnapshot,
+    OrbitalCatalogSource,
 };
 pub use source::{
     CELESTRAK_ACTIVE_OMM_URL, CELESTRAK_MIN_REFRESH, CacheState, CachedCatalogSnapshot,
@@ -31,7 +41,7 @@ use std::path::{Path, PathBuf};
 
 const MAX_SAMPLE_SEGMENTS: usize = 1_000_000;
 
-fn payload_sha256(payload: &[u8]) -> String {
+pub(crate) fn payload_sha256(payload: &[u8]) -> String {
     let digest = Sha256::digest(payload);
     let mut hex = String::with_capacity(digest.len() * 2);
     for byte in digest {
@@ -76,6 +86,19 @@ pub enum Error {
     },
     #[error("{url} returned HTTP {status}")]
     HttpStatus { url: String, status: u16 },
+    #[error("invalid satellite mirror manifest from {source_name}: {message}")]
+    MirrorManifest {
+        source_name: String,
+        message: String,
+    },
+    #[error(
+        "satellite mirror artifact {source_name} failed SHA-256 verification: expected {expected}, got {actual}"
+    )]
+    Integrity {
+        source_name: String,
+        expected: String,
+        actual: String,
+    },
     #[error(
         "{url} returned HTTP {status}; CelesTrak rate-limits repeated element downloads, so keep reusing one cache directory{}",
         .retry_after_seconds

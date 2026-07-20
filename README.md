@@ -83,11 +83,13 @@ not a stack. The solver reads `DATE-BEG`/`DATE-END`, `DATE-AVG` plus
 standard `OBSGEO-*` observer coordinates from FITS. Explicit `--time`,
 `--exposure-seconds`, and `--observer-lat/--observer-lon` remain available.
 The annotation is a predicted path, not a claim that a trail was detected.
-For historical images, the `seiza-satellites` library can retrieve
-epoch-appropriate TLEs on demand from the public IAU SatChecker service.
-Current CelesTrak and historical SatChecker responses share a permanent,
-cache-only-replayable history with a configurable 5 GiB default cap.
+For historical images, the `seiza-satellites` library resolves epoch-
+appropriate TLEs from its durable cache, the Seiza rolling mirror, or the
+public IAU SatChecker fallback. Current CelesTrak and historical responses
+share a cache-only-replayable history with a configurable 5 GiB default cap.
 See the [satellite track design](docs/design/satellite-tracks.md).
+Mirror operators should follow the
+[satellite publication runbook](docs/SATELLITE_MIRROR.md).
 
 Not sure which catalogs you need? Run the guided setup — the same one the
 Windows installer offers, available on every platform:

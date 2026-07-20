@@ -48,27 +48,49 @@ for track in result.tracks {
 ```
 
 For reproducible offline work, use `SatelliteCatalog::open` for a local OMM
-JSON or TLE file. For a historical exposure, ask the public IAU SatChecker
-service for epoch-appropriate elements on demand:
+JSON or TLE file. Applications that may see both current and historical
+exposures should use the provider resolver:
 
 ```rust,no_run
-use seiza_satellites::SatCheckerSource;
+use seiza_satellites::OrbitalCatalogSource;
 
 # async fn historical(exposure: &seiza_satellites::SingleExposure) -> seiza_satellites::Result<()> {
-let history = SatCheckerSource::platform_default()?;
-let elements = history.load_for_exposure(exposure).await?;
-println!("using {} historical elements", elements.catalog.len());
+let source = OrbitalCatalogSource::platform_default()?;
+let elements = source.load_for_exposure(exposure).await?;
+println!(
+    "using {} elements from {:?}",
+    elements.catalog.len(),
+    elements.snapshot.provider,
+);
 # Ok(())
 # }
 ```
 
-`load_for_exposure` performs no download until the application explicitly
-requests tracks. A validated response is cached permanently, subject only to
-the shared size ceiling, and reused for exposures within 12 hours by default.
-Use `with_cache_reuse_window` to change that policy. Cache-only reprocessing
-uses `load_cached_for_exposure` and never touches the network. Record the
-returned `HistoricalCatalogSnapshot` and `CatalogFingerprint` alongside
-derived results.
+`load_for_exposure` owns provider selection: recent exposures use CelesTrak;
+historical exposures use a nearby durable cache entry, then the Seiza rolling
+mirror, then public IAU SatChecker. It performs no download until the
+application explicitly requests tracks. A validated response is cached,
+subject only to the shared size ceiling, and reused for exposures within 12
+hours by default. `load_cached_for_exposure` never touches the network. Record
+the returned `OrbitalCatalogSnapshot` and `CatalogFingerprint` alongside
+derived results. The lower-level `CelesTrakSource`, `SeizaMirrorSource`, and
+`SatCheckerSource` remain available for explicit provider integrations.
+
+To prewarm the same cache for known observing nights, the Seiza CLI is a thin
+consumer of this API:
+
+```text
+seiza download-data satellite-history \
+  --epoch 2025-10-17T12:50:21Z 2025-10-18T12:51:42Z
+```
+
+This does not create a second cache. It calls the same resolver used by
+applications. A mirror publisher adds `--origin` so each scheduled bucket is
+fetched exactly from IAU SatChecker instead of being satisfied by its own
+previous mirror entry. Operators roll those origin snapshots into the public
+content-addressed schema with `seiza build-data satellite-manifest`; see the
+[satellite mirror runbook](../docs/SATELLITE_MIRROR.md) for the cron and S3
+publication transaction.
 
 Reusable post-prediction analysis lives here as well, so applications do not
 need to reimplement it:
@@ -98,7 +120,7 @@ current active-satellite OMM set. CelesTrak rate-limits repeated downloads, so
 keep reusing one cache directory; a rate-limited refresh falls back to the
 newest previously validated snapshot when one exists.
 
-Downloaded CelesTrak and SatChecker snapshots form a shared durable history
+Downloaded CelesTrak, Seiza mirror, and SatChecker snapshots form a shared durable history
 instead of being deleted after the next refresh. The history is bounded by 5
 GiB by default; once the ceiling is exceeded, the oldest downloads are removed
 until the cache fits, while the newest snapshot is always retained.
