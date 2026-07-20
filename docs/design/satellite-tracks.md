@@ -1,6 +1,6 @@
 # Single-exposure satellite track overlays
 
-Status: first prediction layer implemented; pixel-evidence matching proposed
+Status: prediction, replayable catalog history, and constrained pixel-evidence matching implemented
 
 ## Goal and boundary
 
@@ -19,10 +19,9 @@ that value.
 
 The first result is a **predicted crossing**, not a pixel detection. An object
 can be geometrically present while eclipsed, too faint, outside the camera's
-actual shutter interval, or hidden by clouds. A later matcher may associate a
-detected trail with one or more predictions and attach residuals and a
-confidence, but it must preserve the prediction and pixel evidence as distinct
-provenance layers.
+actual shutter interval, or hidden by clouds. The reusable constrained matcher
+may associate image evidence with a prediction, but it preserves the prediction
+and aligned pixel evidence as distinct provenance layers.
 
 ## Observation contract
 
@@ -30,14 +29,17 @@ provenance layers.
 
 - UTC start and end timestamps;
 - an ITRF Cartesian or geodetic observer location;
-- metadata provenance (`Explicit`, `FitsBounds`, or
+- metadata provenance (`Explicit`, `FitsBounds`,
+  `FitsDateAvgAndExposure`, `FitsEndAndExposure`, or
   `FitsDateObsAndExposure`).
 
 The CLI resolves those values in this order:
 
 1. explicit `--time`, `--exposure-seconds`, and observer arguments;
 2. FITS `DATE-BEG` and `DATE-END`;
-3. FITS `DATE-OBS` plus `XPOSURE`, `EXPTIME`, or `EXPOSURE`.
+3. FITS `DATE-AVG` plus `XPOSURE`, `EXPTIME`, or `EXPOSURE`;
+4. FITS `DATE-OBS` plus a duration;
+5. a lone FITS `DATE-END` plus a duration, interpreted as shutter close.
 
 The FITS standard gives `DATE-BEG` and `DATE-END` unambiguous acquisition-bound
 semantics. `DATE-OBS` is only a fallback because historical files have also
@@ -56,11 +58,16 @@ CCSDS OMM JSON and legacy two-/three-line element files for offline and
 historical use.
 
 `CelesTrakSource` supplies recent active-satellite OMM JSON. This first source
-does not include the complete debris and rocket-body population. It stores one
-validated response in the platform cache directory, never refreshes it more
-often than CelesTrak's two-hour update interval, writes replacements
-atomically, coordinates refreshes across processes, and may use a previously
-validated stale snapshot if refresh fails.
+does not include the complete debris and rocket-body population. It stores a
+durable history of validated responses in the platform cache directory, never
+refreshes more often than CelesTrak's two-hour update interval, writes new
+snapshots atomically, coordinates refreshes across processes, and may use a
+previously validated stale snapshot if refresh fails. History is retained
+until its configurable size ceiling is reached (5 GiB by default), then the
+oldest snapshots are evicted while the newest is always preserved.
+Both active and cache-only loads enforce the ceiling without requiring a
+successful refresh, and `prune_cache` exposes the same locked maintenance step
+for callers that want to run it explicitly.
 The result records whether the snapshot was fresh, downloaded, or a stale
 fallback. A non-success HTTP status is returned immediately without retrying;
 403 and 429 map to a dedicated rate-limit error carrying any `Retry-After`
@@ -69,8 +76,17 @@ window. Responses are requested gzip-compressed. Readers of a fresh snapshot
 hold only a shared file lock so concurrent processes do not serialize; the
 exclusive lock is taken for refresh, and the freshness check repeats after
 acquiring it in case another process refreshed first. A snapshot whose
-modification time is more than a few minutes in the future is treated as
+retrieval timestamp (encoded in downloaded filenames, with mtime fallback for
+manually seeded caches) is more than a few minutes in the future is treated as
 maximally stale rather than permanently fresh.
+
+Applications do not inspect private cache filenames. `cached_snapshots` lists
+the durable inventory, `load_cached` opens the newest valid snapshot without
+network access, and `load_cached_for` opens the valid snapshot retrieved
+closest to an exposure time. Every parsed catalog supplies a SHA-256
+`CatalogFingerprint`; applications persist that content identity with derived
+predictions and invalidate them when the element payload changes. Retrieval
+time and source remain separate provenance and do not change content identity.
 
 Historical images require elements close to their acquisition epoch. A future
 authenticated Space-Track `GP_HISTORY` provider can implement the same source
@@ -125,6 +141,25 @@ Each `SatelliteTrack` contains identity, element epoch, source provenance,
 time-tagged topocentric samples, clipped pixel segments, elevation, range, and
 sunlight fraction. `association` is currently always `Predicted`.
 
+`SatelliteTrack::bright_trail_risk` converts illumination, range, elevation,
+and clipped image-plane length into a reusable heuristic score and
+`Low`/`Possible`/`High` level. This is intentionally not an apparent-magnitude
+model: instrument response, passband, attitude, and flares are unavailable.
+Applications retain ownership of warning, rejection, and grading policy.
+
+`trail_alignment::PixelTrailAligner` accepts row-major monochrome `u16` pixels
+and an ADU conversion factor. It downsamples once per frame, then searches a
+bounded normal-offset corridor around every typed `PixelSegment` in the
+predicted polyline. Fitting the complete polyline avoids replacing a curved
+track with an inaccurate endpoint chord. A detection returns aligned segments,
+offsets, contrast, significance, and continuity while leaving the prediction
+unchanged. `NotDetected` means the path was evaluated without sufficient pixel
+support; `NotEvaluated` records an empty, too-short, or insufficiently covered
+path and is not negative evidence. The default fit requires complete center and
+sideband samples across at least half the predicted path and reports the actual
+coverage with the evidence, preventing a small edge fragment from standing in
+for a complete trail.
+
 `tracks_in_footprint` borrows the catalog immutably — SGP4 initialization is
 cached on a per-call scratch copy of each element — so one loaded catalog can
 serve concurrent solves. The optional `serde` crate feature derives
@@ -159,8 +194,8 @@ it never calls an unmatched prediction observed or detected.
 ## Follow-on work
 
 1. Add an authenticated, permanently cached Space-Track history provider.
-2. Detect trail candidates after masking stars and compare their geometry with
-   predicted paths.
+2. Add unconstrained full-frame trail candidate detection after masking stars;
+   the prediction-constrained matcher is already reusable.
 3. Report all plausible identities when timing or elements do not distinguish
    nearby tracks; never force a single match.
 4. Add optional timing-error and orbit-uncertainty envelopes.

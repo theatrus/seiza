@@ -6,9 +6,11 @@
 //! matcher.
 
 mod source;
+pub mod trail_alignment;
 
 pub use source::{
-    CELESTRAK_ACTIVE_OMM_URL, CELESTRAK_MIN_REFRESH, CacheState, CelesTrakLoad, CelesTrakSource,
+    CELESTRAK_ACTIVE_OMM_URL, CELESTRAK_MIN_REFRESH, CacheState, CachedCatalogSnapshot,
+    CelesTrakLoad, CelesTrakSource, DEFAULT_CELESTRAK_CACHE_SIZE_LIMIT_BYTES,
 };
 
 use satkit::frametransform::{qitrf2gcrf_approx, qteme2gcrf, qteme2itrf};
@@ -17,9 +19,20 @@ use satkit::omm::OMM;
 use satkit::sgp4::{SGP4Error, SGP4State, sgp4};
 use satkit::{ITRFCoord, Instant, TLE, Vector3};
 use seiza::wcs::Wcs;
+use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 const MAX_SAMPLE_SEGMENTS: usize = 1_000_000;
+
+fn payload_sha256(payload: &[u8]) -> String {
+    let digest = Sha256::digest(payload);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    hex
+}
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -128,6 +141,11 @@ impl UtcTimestamp {
 pub enum ExposureProvenance {
     Explicit,
     FitsBounds,
+    /// FITS `DATE-AVG` plus an exposure duration.
+    FitsDateAvgAndExposure,
+    /// A FITS timestamp interpreted as shutter close plus a duration.
+    FitsEndAndExposure,
+    /// FITS `DATE-OBS` interpreted as shutter open plus a duration.
     FitsDateObsAndExposure,
 }
 
@@ -235,6 +253,47 @@ impl SingleExposure {
         )
     }
 
+    /// Build an exposure whose supplied timestamp is the shutter midpoint.
+    pub fn from_midpoint_and_duration(
+        midpoint_utc: UtcTimestamp,
+        duration_seconds: f64,
+        observer: ObserverLocation,
+        provenance: ExposureProvenance,
+    ) -> Result<Self> {
+        if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
+            return Err(Error::InvalidExposure(
+                "duration must be a positive finite number of seconds",
+            ));
+        }
+        let half_duration = duration_seconds / 2.0;
+        Self::new(
+            midpoint_utc.add_seconds(-half_duration)?,
+            midpoint_utc.add_seconds(half_duration)?,
+            observer,
+            provenance,
+        )
+    }
+
+    /// Build an exposure whose supplied timestamp is shutter close.
+    pub fn from_end_and_duration(
+        end_utc: UtcTimestamp,
+        duration_seconds: f64,
+        observer: ObserverLocation,
+        provenance: ExposureProvenance,
+    ) -> Result<Self> {
+        if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
+            return Err(Error::InvalidExposure(
+                "duration must be a positive finite number of seconds",
+            ));
+        }
+        Self::new(
+            end_utc.add_seconds(-duration_seconds)?,
+            end_utc,
+            observer,
+            provenance,
+        )
+    }
+
     pub fn duration_seconds(self) -> f64 {
         self.end_utc.seconds_since(self.start_utc)
     }
@@ -314,6 +373,58 @@ pub struct SatelliteTrack {
     pub clipped_segments: Vec<PixelSegment>,
 }
 
+/// Qualitative interpretation of the generic bright-trail heuristic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum BrightTrailRiskLevel {
+    Low,
+    Possible,
+    High,
+}
+
+/// Tunable geometry/illumination thresholds for the generic trail heuristic.
+///
+/// This is not an apparent-magnitude model. Instrument, passband, satellite
+/// attitude, and flares remain outside the available element data.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BrightTrailRiskOptions {
+    pub high_score: f64,
+    pub high_minimum_sunlight_fraction: f64,
+    pub high_maximum_range_km: f64,
+    pub high_minimum_path_px: f64,
+    pub possible_minimum_sunlight_fraction: f64,
+    pub possible_maximum_range_km: f64,
+    pub possible_minimum_path_px: f64,
+}
+
+impl Default for BrightTrailRiskOptions {
+    fn default() -> Self {
+        Self {
+            high_score: 0.55,
+            high_minimum_sunlight_fraction: 0.5,
+            high_maximum_range_km: 4_000.0,
+            high_minimum_path_px: 10.0,
+            possible_minimum_sunlight_fraction: 0.2,
+            possible_maximum_range_km: 10_000.0,
+            possible_minimum_path_px: 2.0,
+        }
+    }
+}
+
+/// Reusable geometry/illumination facts and heuristic score for one track.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BrightTrailRisk {
+    pub score: f64,
+    pub level: BrightTrailRiskLevel,
+    pub maximum_sunlight_fraction: f64,
+    pub minimum_range_km: f64,
+    pub maximum_elevation_deg: f64,
+    pub clipped_length_px: f64,
+}
+
 impl SatelliteTrack {
     pub fn maximum_elevation_deg(&self) -> f64 {
         self.samples
@@ -327,6 +438,13 @@ impl SatelliteTrack {
             .iter()
             .map(|sample| sample.sunlight_fraction)
             .fold(0.0, f64::max)
+    }
+
+    pub fn minimum_range_km(&self) -> f64 {
+        self.samples
+            .iter()
+            .map(|sample| sample.range_km)
+            .fold(f64::INFINITY, f64::min)
     }
 
     /// Peak apparent angular rate between consecutive samples, in arcseconds
@@ -375,6 +493,65 @@ impl SatelliteTrack {
             .map(|segment| (segment.end.x - segment.start.x).hypot(segment.end.y - segment.start.y))
             .sum()
     }
+
+    /// Assess generic trail visibility from illumination and projected
+    /// geometry. Callers decide how (or whether) this affects grading.
+    pub fn bright_trail_risk(&self, options: &BrightTrailRiskOptions) -> BrightTrailRisk {
+        let maximum_sunlight_fraction = self.maximum_sunlight_fraction();
+        let minimum_range_km = self.minimum_range_km();
+        let maximum_elevation_deg = self.maximum_elevation_deg();
+        let clipped_length_px = self.clipped_length_px();
+        let score = bright_trail_score(
+            maximum_sunlight_fraction,
+            minimum_range_km,
+            maximum_elevation_deg,
+            clipped_length_px,
+        );
+        let level = if score >= options.high_score
+            && maximum_sunlight_fraction >= options.high_minimum_sunlight_fraction
+            && minimum_range_km <= options.high_maximum_range_km
+            && clipped_length_px >= options.high_minimum_path_px
+        {
+            BrightTrailRiskLevel::High
+        } else if maximum_sunlight_fraction >= options.possible_minimum_sunlight_fraction
+            && minimum_range_km <= options.possible_maximum_range_km
+            && clipped_length_px >= options.possible_minimum_path_px
+        {
+            BrightTrailRiskLevel::Possible
+        } else {
+            BrightTrailRiskLevel::Low
+        };
+        BrightTrailRisk {
+            score,
+            level,
+            maximum_sunlight_fraction,
+            minimum_range_km,
+            maximum_elevation_deg,
+            clipped_length_px,
+        }
+    }
+}
+
+fn bright_trail_score(
+    sunlight_fraction: f64,
+    range_km: f64,
+    elevation_deg: f64,
+    clipped_length_px: f64,
+) -> f64 {
+    if !sunlight_fraction.is_finite()
+        || !range_km.is_finite()
+        || !elevation_deg.is_finite()
+        || !clipped_length_px.is_finite()
+        || sunlight_fraction <= 0.0
+    {
+        return 0.0;
+    }
+    let range_factor = (1.0 - ((range_km - 500.0) / 9_500.0)).clamp(0.0, 1.0);
+    let elevation_factor = (elevation_deg / 60.0).clamp(0.0, 1.0);
+    let path_factor = (clipped_length_px / 100.0).clamp(0.0, 1.0);
+    (sunlight_fraction.clamp(0.0, 1.0)
+        * (0.60 * range_factor + 0.20 * elevation_factor + 0.20 * path_factor))
+        .clamp(0.0, 1.0)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -451,11 +628,22 @@ impl ElementRecord {
     }
 }
 
+/// Stable identity for the exact orbital-element payload used by a catalog.
+///
+/// `retrieved_at` deliberately is not part of the fingerprint: copying the
+/// same bytes into a durable cache must not make persisted predictions stale.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct CatalogFingerprint {
+    pub content_sha256: String,
+}
+
 /// Parsed OMM or TLE records plus their source provenance.
 pub struct SatelliteCatalog {
     elements: Vec<ElementRecord>,
     source: String,
     retrieved_at: Option<UtcTimestamp>,
+    content_sha256: String,
 }
 
 impl std::fmt::Debug for SatelliteCatalog {
@@ -465,6 +653,7 @@ impl std::fmt::Debug for SatelliteCatalog {
             .field("elements", &self.elements.len())
             .field("source", &self.source)
             .field("retrieved_at", &self.retrieved_at)
+            .field("content_sha256", &self.content_sha256)
             .finish()
     }
 }
@@ -472,6 +661,7 @@ impl std::fmt::Debug for SatelliteCatalog {
 impl SatelliteCatalog {
     pub fn from_omm_json(payload: &str, source: impl Into<String>) -> Result<Self> {
         let source = source.into();
+        let content_sha256 = payload_sha256(payload.as_bytes());
         let trimmed = payload.trim();
         let wrapped;
         let payload = if trimmed.starts_with('{') {
@@ -495,11 +685,13 @@ impl SatelliteCatalog {
                 .map(|omm| ElementRecord::Omm(Box::new(omm)))
                 .collect(),
             source,
+            content_sha256,
         )
     }
 
     pub fn from_tle_text(payload: &str, source: impl Into<String>) -> Result<Self> {
         let source = source.into();
+        let content_sha256 = payload_sha256(payload.as_bytes());
         let lines = payload.lines().map(str::to_string).collect::<Vec<_>>();
         let tles = TLE::from_lines(&lines).map_err(|error| Error::Elements {
             source_name: source.clone(),
@@ -510,6 +702,7 @@ impl SatelliteCatalog {
                 .map(|tle| ElementRecord::Tle(Box::new(tle)))
                 .collect(),
             source,
+            content_sha256,
         )
     }
 
@@ -526,7 +719,11 @@ impl SatelliteCatalog {
         }
     }
 
-    fn from_records(elements: Vec<ElementRecord>, source: String) -> Result<Self> {
+    fn from_records(
+        elements: Vec<ElementRecord>,
+        source: String,
+        content_sha256: String,
+    ) -> Result<Self> {
         if elements.is_empty() {
             return Err(Error::EmptyElements(source));
         }
@@ -534,6 +731,7 @@ impl SatelliteCatalog {
             elements,
             source,
             retrieved_at: None,
+            content_sha256,
         })
     }
 
@@ -556,6 +754,13 @@ impl SatelliteCatalog {
 
     pub fn retrieved_at(&self) -> Option<UtcTimestamp> {
         self.retrieved_at
+    }
+
+    /// Exact content identity suitable for invalidating persisted predictions.
+    pub fn fingerprint(&self) -> CatalogFingerprint {
+        CatalogFingerprint {
+            content_sha256: self.content_sha256.clone(),
+        }
     }
 
     pub fn tracks_in_footprint(
@@ -916,6 +1121,56 @@ mod tests {
             )
             .is_err()
         );
+        assert!(
+            SingleExposure::from_end_and_duration(
+                time,
+                -1.0,
+                observer,
+                ExposureProvenance::Explicit
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn builds_exposure_around_a_supplied_midpoint() {
+        let midpoint = UtcTimestamp::parse("2024-05-02T12:00:30Z").unwrap();
+        let observer = ObserverLocation::geodetic(37.0, -122.0, 10.0).unwrap();
+        let exposure = SingleExposure::from_midpoint_and_duration(
+            midpoint,
+            60.0,
+            observer,
+            ExposureProvenance::FitsDateAvgAndExposure,
+        )
+        .unwrap();
+        assert_eq!(
+            exposure.start_utc.unix_seconds(),
+            midpoint.unix_seconds() - 30.0
+        );
+        assert_eq!(
+            exposure.end_utc.unix_seconds(),
+            midpoint.unix_seconds() + 30.0
+        );
+        assert_eq!(
+            exposure.provenance,
+            ExposureProvenance::FitsDateAvgAndExposure
+        );
+    }
+
+    #[test]
+    fn builds_exposure_ending_at_a_supplied_timestamp() {
+        let end = UtcTimestamp::parse("2024-05-02T12:01:00Z").unwrap();
+        let observer = ObserverLocation::geodetic(37.0, -122.0, 10.0).unwrap();
+        let exposure = SingleExposure::from_end_and_duration(
+            end,
+            60.0,
+            observer,
+            ExposureProvenance::FitsEndAndExposure,
+        )
+        .unwrap();
+        assert_eq!(exposure.start_utc.unix_seconds(), end.unix_seconds() - 60.0);
+        assert_eq!(exposure.end_utc, end);
+        assert_eq!(exposure.provenance, ExposureProvenance::FitsEndAndExposure);
     }
 
     #[test]
@@ -933,6 +1188,21 @@ mod tests {
         assert_eq!(identity.norad_id, Some(25544));
         assert_eq!(identity.cospar_id.as_deref(), Some("1998-067A"));
         assert_eq!(identity.name, "ISS (ZARYA)");
+    }
+
+    #[test]
+    fn catalog_fingerprint_tracks_content_not_retrieval_time() {
+        let first = SatelliteCatalog::from_tle_text(ISS_TLE, "test")
+            .unwrap()
+            .with_retrieved_at(UtcTimestamp(1.0));
+        let second = SatelliteCatalog::from_tle_text(ISS_TLE, "test")
+            .unwrap()
+            .with_retrieved_at(UtcTimestamp(2.0));
+        assert_eq!(first.fingerprint(), second.fingerprint());
+        assert_eq!(first.fingerprint().content_sha256.len(), 64);
+
+        let changed = SatelliteCatalog::from_tle_text(&format!("{ISS_TLE}\n"), "test").unwrap();
+        assert_ne!(first.fingerprint(), changed.fingerprint());
     }
 
     #[test]
@@ -1104,6 +1374,51 @@ mod tests {
         let rate = track.maximum_apparent_rate_arcsec_per_second().unwrap();
         assert!((rate - 1800.0).abs() < 1.0, "one degree over two seconds");
         assert!((track.clipped_length_px() - 10.0).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn assesses_bright_trail_risk_without_deciding_application_policy() {
+        let mut track = SatelliteTrack {
+            identity: SatelliteIdentity {
+                norad_id: Some(1),
+                cospar_id: None,
+                name: "TEST".into(),
+            },
+            association: TrackAssociation::Predicted,
+            element_epoch_utc: UtcTimestamp(0.0),
+            element_age_seconds: 0.0,
+            source: "test".into(),
+            sample_interval_seconds: 2.0,
+            samples: vec![pixel_sample(0.0, 0.0, 0.0), pixel_sample(2.0, 100.0, 0.0)],
+            clipped_segments: vec![PixelSegment {
+                start: PixelPoint { x: 0.0, y: 0.0 },
+                end: PixelPoint { x: 100.0, y: 0.0 },
+            }],
+        };
+
+        let bright = track.bright_trail_risk(&BrightTrailRiskOptions::default());
+        assert_eq!(bright.level, BrightTrailRiskLevel::High);
+        assert!(bright.score > 0.9);
+
+        for sample in &mut track.samples {
+            sample.sunlight_fraction = 0.0;
+        }
+        let eclipsed = track.bright_trail_risk(&BrightTrailRiskOptions::default());
+        assert_eq!(eclipsed.level, BrightTrailRiskLevel::Low);
+        assert_eq!(eclipsed.score, 0.0);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn bright_trail_risk_level_uses_api_friendly_json_names() {
+        assert_eq!(
+            serde_json::to_string(&BrightTrailRiskLevel::High).unwrap(),
+            r#""high""#
+        );
+        assert_eq!(
+            serde_json::from_str::<BrightTrailRiskLevel>(r#""possible""#).unwrap(),
+            BrightTrailRiskLevel::Possible
+        );
     }
 
     #[test]

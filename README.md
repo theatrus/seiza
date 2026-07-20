@@ -72,10 +72,13 @@ when one is there). After `seiza setup`, every `--data` and `--index` can
 be omitted entirely — the standard catalog locations are searched.
 
 Satellite overlays are opt-in and apply only to one shutter-open exposure,
-not a stack. The solver reads `DATE-BEG`/`DATE-END` (or `DATE-OBS` plus
-`EXPTIME`) and standard `OBSGEO-*` observer coordinates from FITS, or accepts
-explicit `--time`, `--exposure-seconds`, and `--observer-lat/--observer-lon`.
+not a stack. The solver reads `DATE-BEG`/`DATE-END`, `DATE-AVG` plus
+`EXPTIME`, `DATE-OBS` plus `EXPTIME`, or a lone `DATE-END` plus `EXPTIME`, and
+standard `OBSGEO-*` observer coordinates from FITS. Explicit `--time`,
+`--exposure-seconds`, and `--observer-lat/--observer-lon` remain available.
 The annotation is a predicted path, not a claim that a trail was detected.
+Downloaded CelesTrak snapshots remain available for cache-only historical
+replay until the durable history reaches its configurable 5 GiB default cap.
 See the [satellite track design](docs/design/satellite-tracks.md).
 
 Not sure which catalogs you need? Run the guided setup — the same one the
