@@ -264,9 +264,15 @@ impl SatCheckerSource {
                 status: status.as_u16(),
             });
         }
-        let payload = response.text().await.map_err(|source| Error::Http {
-            url: request_url.clone(),
-            source,
+        let body = crate::source::read_body_capped(
+            response,
+            crate::source::MAX_SATELLITE_RESPONSE_BYTES,
+            &request_url,
+        )
+        .await?;
+        let payload = String::from_utf8(body).map_err(|error| Error::Elements {
+            source_name: request_url.clone(),
+            message: error.to_string(),
         })?;
         let downloaded_at = now_timestamp()?;
         let catalog = SatelliteCatalog::from_tle_text(&payload, request_url.clone())?

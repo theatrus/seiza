@@ -156,7 +156,17 @@ impl OrbitalCatalogSource {
             Ok(load) => Ok(load.into()),
             Err(mirror_error) => {
                 let mut load = OrbitalCatalogLoad::from(self.historical.load_at(time_utc).await?);
-                if !matches!(mirror_error, crate::Error::HttpStatus { status: 404, .. }) {
+                // A mirror that is simply missing this epoch — a 404, or a
+                // healthy manifest with no snapshot in the reuse window — is the
+                // normal, documented fall-through to SatChecker, not a failure
+                // worth alarming the user about. Only genuine transport, parse,
+                // or integrity errors produce a warning.
+                let expected_gap = matches!(
+                    mirror_error,
+                    crate::Error::HttpStatus { status: 404, .. }
+                        | crate::Error::MirrorNoCoverage { .. }
+                );
+                if !expected_gap {
                     load.warning = Some(format!(
                         "Seiza satellite mirror unavailable; used IAU SatChecker: {mirror_error}"
                     ));
@@ -348,5 +358,88 @@ mod tests {
             OrbitalCatalogProvider::IauSatChecker
         );
         assert_eq!(load.catalog.len(), 1);
+    }
+
+    /// Serve `body` (ignoring the request path) on a throwaway local port.
+    fn serve_body(content_type: &'static str, body: Vec<u8>) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(4) {
+                let Ok(mut stream) = stream else { continue };
+                let mut request = [0_u8; 4096];
+                let _ = stream.read(&mut request);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(&body);
+            }
+        });
+        format!("http://{address}")
+    }
+
+    fn far_coverage_manifest() -> Vec<u8> {
+        // A healthy manifest whose only snapshot is decades from any request,
+        // so `nearest` finds nothing and the mirror reports MirrorNoCoverage.
+        let sha256 = crate::payload_sha256(TLE.as_bytes());
+        let manifest = crate::SatelliteMirrorManifest {
+            schema_version: crate::SatelliteMirrorManifest::SCHEMA_VERSION,
+            generated_at_utc: "2026-07-19T12:00:00Z".into(),
+            snapshots: vec![crate::SatelliteMirrorEntry {
+                query_time_utc: "2000-01-01T00:00:00Z".into(),
+                source_url: "https://satchecker.example/".into(),
+                key: format!("artifacts/{sha256}/satellites.tle"),
+                sha256,
+                size_bytes: TLE.len() as u64,
+            }],
+        };
+        serde_json::to_vec(&manifest).unwrap()
+    }
+
+    #[tokio::test]
+    async fn mirror_without_coverage_falls_through_to_satchecker_silently() {
+        let dir = tempfile::tempdir().unwrap();
+        let epoch = UtcTimestamp::parse("2025-10-18T12:00:00Z").unwrap();
+        let source = OrbitalCatalogSource::new(dir.path())
+            .unwrap()
+            .with_mirror_base_url(serve_body("application/json", far_coverage_manifest()))
+            .with_satchecker_endpoint(serve_body("text/plain", TLE.as_bytes().to_vec()));
+
+        let load = source.prewarm_historical(epoch).await.unwrap();
+        // Falls through to SatChecker, reports it truthfully, and — because the
+        // mirror is simply not covering this epoch yet — issues NO warning.
+        assert_eq!(
+            load.snapshot.provider,
+            OrbitalCatalogProvider::IauSatChecker
+        );
+        assert!(
+            load.warning.is_none(),
+            "an uncovered epoch is the documented normal path, not a failure: {:?}",
+            load.warning
+        );
+    }
+
+    #[tokio::test]
+    async fn genuinely_broken_mirror_falls_through_but_does_warn() {
+        let dir = tempfile::tempdir().unwrap();
+        let epoch = UtcTimestamp::parse("2025-10-18T12:00:00Z").unwrap();
+        let source = OrbitalCatalogSource::new(dir.path())
+            .unwrap()
+            // Refused connection — a real transport failure, distinct from "no coverage".
+            .with_mirror_base_url("http://127.0.0.1:1/unreachable")
+            .with_satchecker_endpoint(serve_body("text/plain", TLE.as_bytes().to_vec()));
+
+        let load = source.prewarm_historical(epoch).await.unwrap();
+        assert_eq!(
+            load.snapshot.provider,
+            OrbitalCatalogProvider::IauSatChecker
+        );
+        assert!(
+            load.warning.is_some(),
+            "a real mirror failure should surface a warning"
+        );
     }
 }

@@ -110,6 +110,10 @@ pub enum Error {
         status: u16,
         retry_after_seconds: Option<u64>,
     },
+    #[error("{url} response exceeds the {limit}-byte limit")]
+    ResponseTooLarge { url: String, limit: u64 },
+    #[error("the Seiza satellite mirror has no snapshot near {time}")]
+    MirrorNoCoverage { time: String },
     #[error("satellite cache lock failed: {0}")]
     CacheLock(String),
     #[error("no platform cache directory is available")]

@@ -293,41 +293,17 @@ impl SeizaMirrorSource {
                 status: response.status().as_u16(),
             });
         }
-        if response
-            .content_length()
-            .is_some_and(|size| size > MAX_MIRROR_MANIFEST_BYTES)
-        {
-            return Err(Error::MirrorManifest {
-                source_name: manifest_url,
-                message: format!(
-                    "manifest exceeds the {} byte limit",
-                    MAX_MIRROR_MANIFEST_BYTES
-                ),
-            });
-        }
-        let manifest_bytes = response.bytes().await.map_err(|source| Error::Http {
-            url: manifest_url.clone(),
-            source,
-        })?;
-        if manifest_bytes.len() as u64 > MAX_MIRROR_MANIFEST_BYTES {
-            return Err(Error::MirrorManifest {
-                source_name: manifest_url,
-                message: format!(
-                    "manifest exceeds the {} byte limit",
-                    MAX_MIRROR_MANIFEST_BYTES
-                ),
-            });
-        }
+        let manifest_bytes =
+            crate::source::read_body_capped(response, MAX_MIRROR_MANIFEST_BYTES, &manifest_url)
+                .await?;
         let manifest = SatelliteMirrorManifest::parse(&manifest_bytes, &manifest_url)?;
+        // A healthy manifest that simply does not cover this epoch is a normal,
+        // expected outcome — a distinct signal from a broken/unreachable mirror,
+        // so the resolver can fall through to SatChecker silently.
         let entry = manifest
             .nearest(time_utc, self.cache_reuse_window)?
-            .ok_or_else(|| Error::MirrorManifest {
-                source_name: manifest_url.clone(),
-                message: format!(
-                    "no snapshot is within {} seconds of {}",
-                    self.cache_reuse_window.as_secs(),
-                    time_utc.to_rfc3339()
-                ),
+            .ok_or_else(|| Error::MirrorNoCoverage {
+                time: time_utc.to_rfc3339(),
             })?;
         let query_time = entry.query_time()?;
         let artifact_url = format!("{}/{}", self.base_url, entry.key);
@@ -359,10 +335,8 @@ impl SeizaMirrorSource {
                 ),
             });
         }
-        let payload = response.bytes().await.map_err(|source| Error::Http {
-            url: artifact_url.clone(),
-            source,
-        })?;
+        let payload =
+            crate::source::read_body_capped(response, entry.size_bytes, &artifact_url).await?;
         if payload.len() as u64 != entry.size_bytes {
             return Err(Error::MirrorManifest {
                 source_name: artifact_url,

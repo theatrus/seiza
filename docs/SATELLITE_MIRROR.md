@@ -83,6 +83,13 @@ available after it has been published. Do not attach an S3 expiration rule to
 `artifacts/` unless the same entries are deliberately removed from a future
 manifest first. Content addressing deduplicates identical upstream payloads.
 
+For storage cost, transition aged `artifacts/` objects to **Standard-IA** (for
+example after 30 days). The snapshots are served on historical lookups, so keep
+them in an instant-retrieval class — Standard-IA cuts storage roughly threefold
+without the per-retrieval premium of a Glacier tier. Do not use a Glacier class
+here; that is appropriate only for never-served archives. Leave `manifest.json`
+and `manifests/` in Standard.
+
 The publisher's local cache is different. It uses the shared Seiza satellite
 cache ceiling (5 GiB by default), so old local snapshots are pruned while the
 downloaded base manifest retains the complete public inventory. At the current
@@ -177,7 +184,7 @@ aws s3 sync "$STAGE/artifacts/" \
   --cache-control 'public,max-age=31536000,immutable' \
   --no-progress
 
-GENERATION=$(jq -r '.generated_at_utc' "$NEXT" | tr ':.' '--')
+GENERATION=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["generated_at_utc"].translate(str.maketrans(":.","--")))' "$NEXT")
 aws s3 cp "$NEXT" \
   "$S3_BASE/satellites/v1/manifests/$GENERATION.json" \
   --content-type application/json \
@@ -190,6 +197,16 @@ aws s3 cp "$NEXT" \
   --cache-control 'public,max-age=300,must-revalidate' \
   --no-progress
 
+# When the bucket is fronted by CloudFront, invalidate the pointer so the new
+# manifest is visible immediately rather than after its 300 s edge TTL. The
+# immutable artifacts and archived manifests are never invalidated. Mirrors the
+# data/v4 publisher. Set SEIZA_SATELLITE_CF_DIST_ID to enable it.
+if [[ -n "${SEIZA_SATELLITE_CF_DIST_ID:-}" ]]; then
+  aws cloudfront create-invalidation \
+    --distribution-id "$SEIZA_SATELLITE_CF_DIST_ID" \
+    --paths '/satellites/v1/manifest.json' >/dev/null
+fi
+
 mv "$NEXT" "$CURRENT"
 ```
 
@@ -200,9 +217,12 @@ For a twice-daily cron, percent signs must be escaped in crontab:
 ```
 
 Running at 20 minutes past the bucket gives the upstream service time to
-publish nearby elements. The job is idempotent: cache hits do not redownload,
-content hashes deduplicate identical TLE payloads, S3 sync skips existing
-objects, and the manifest can safely be regenerated and republished.
+publish nearby elements. When the bucket is served through CloudFront, also set
+`SEIZA_SATELLITE_CF_DIST_ID=<distribution-id>` in the cron environment so each
+publish invalidates the pointer immediately instead of waiting out its 300 s
+edge TTL. The job is idempotent: cache hits do not redownload, content hashes
+deduplicate identical TLE payloads, S3 sync skips existing objects, and the
+manifest can safely be regenerated and republished.
 
 For the very first publication, set `SEIZA_SATELLITE_INITIAL_PUBLISH=1` for
 that run. Later runs deliberately fail if neither the local nor S3 base
@@ -232,8 +252,8 @@ After publishing, validate the public pointer and newest object:
 ```bash
 BASE=https://downloads.seiza.fyi/satellites/v1
 curl -fsS "$BASE/manifest.json" -o /tmp/seiza-satellite-manifest.json
-KEY=$(jq -r '.snapshots[-1].key' /tmp/seiza-satellite-manifest.json)
-EXPECTED=$(jq -r '.snapshots[-1].sha256' /tmp/seiza-satellite-manifest.json)
+KEY=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["snapshots"][-1]["key"])' /tmp/seiza-satellite-manifest.json)
+EXPECTED=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["snapshots"][-1]["sha256"])' /tmp/seiza-satellite-manifest.json)
 curl -fsS "$BASE/$KEY" -o /tmp/seiza-satellites.tle
 printf '%s  %s\n' "$EXPECTED" /tmp/seiza-satellites.tle | sha256sum -c -
 ```

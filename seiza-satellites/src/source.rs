@@ -19,6 +19,42 @@ pub(crate) const SATCHECKER_CACHE_PREFIX: &str = "satchecker-epoch-";
 pub(crate) const SATCHECKER_CACHE_SUFFIX: &str = ".tle";
 pub(crate) const SEIZA_MIRROR_CACHE_PREFIX: &str = "seiza-mirror-epoch-";
 pub(crate) const SEIZA_MIRROR_CACHE_SUFFIX: &str = ".tle";
+/// Upper bound on any single satellite provider response body (256 MiB).
+pub(crate) const MAX_SATELLITE_RESPONSE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Read a response body, refusing to buffer more than `limit` bytes.
+///
+/// The `Content-Length` header is only advisory — it is absent on chunked and
+/// HTTP/2 responses (both of which CloudFront can produce), so a check on it
+/// alone can be bypassed. This enforces the cap while streaming, so a
+/// compromised or misconfigured origin can never make the client allocate an
+/// unbounded body before the size/hash checks run.
+pub(crate) async fn read_body_capped(
+    mut response: reqwest::Response,
+    limit: u64,
+    url: &str,
+) -> Result<Vec<u8>> {
+    if response.content_length().is_some_and(|len| len > limit) {
+        return Err(Error::ResponseTooLarge {
+            url: url.to_string(),
+            limit,
+        });
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|source| Error::Http {
+        url: url.to_string(),
+        source,
+    })? {
+        if body.len() as u64 + chunk.len() as u64 > limit {
+            return Err(Error::ResponseTooLarge {
+                url: url.to_string(),
+                limit,
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
