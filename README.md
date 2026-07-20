@@ -28,6 +28,10 @@ can submit to the same server with `seiza worker --server`.
 - **Anywhere with Rust** — `cargo install seiza-cli` (requires Rust 1.89 or
   newer; see [MSRV](#minimum-supported-rust-version)).
 
+Building from source requires Rust 1.89 or newer. Repository checkouts pin
+Rust 1.97.1 through `rust-toolchain.toml` so local builds and CI use the same
+compiler, formatter, and linter.
+
 ## Ways to use it
 
 - **As N.I.N.A.'s plate solver** — seiza answers ASTAP's command line, so
