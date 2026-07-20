@@ -1,81 +1,16 @@
+use crate::cache::{
+    self, CELESTRAK_CACHE_PREFIX as CACHE_PREFIX, CELESTRAK_CACHE_SUFFIX as CACHE_SUFFIX, CacheState,
+    DEFAULT_CELESTRAK_CACHE_SIZE_LIMIT_BYTES, LockMode, acquire_lock_in, now_timestamp,
+    snapshot_age_at, snapshot_retrieved_at,
+};
 use crate::{Error, Result, SatelliteCatalog, UtcTimestamp};
-use directories::ProjectDirs;
-use fs2::FileExt;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::io::AsyncWriteExt;
 
 pub const CELESTRAK_ACTIVE_OMM_URL: &str =
     "https://celestrak.org/NORAD/elements/gp.php?GROUP=ACTIVE&FORMAT=JSON";
 pub const CELESTRAK_MIN_REFRESH: Duration = Duration::from_secs(2 * 60 * 60);
-/// Default upper bound shared by all durable orbital-element snapshots (5 GiB).
-pub const DEFAULT_SATELLITE_CACHE_SIZE_LIMIT_BYTES: u64 = 5 * 1024 * 1024 * 1024;
-/// Backward-compatible name for the shared orbital-element cache ceiling.
-pub const DEFAULT_CELESTRAK_CACHE_SIZE_LIMIT_BYTES: u64 = DEFAULT_SATELLITE_CACHE_SIZE_LIMIT_BYTES;
-const CACHE_PREFIX: &str = "celestrak-active-";
-const CACHE_SUFFIX: &str = ".json";
-pub(crate) const SATCHECKER_CACHE_PREFIX: &str = "satchecker-epoch-";
-pub(crate) const SATCHECKER_CACHE_SUFFIX: &str = ".tle";
-pub(crate) const SEIZA_MIRROR_CACHE_PREFIX: &str = "seiza-mirror-epoch-";
-pub(crate) const SEIZA_MIRROR_CACHE_SUFFIX: &str = ".tle";
-/// Upper bound on any single satellite provider response body (256 MiB).
-pub(crate) const MAX_SATELLITE_RESPONSE_BYTES: u64 = 256 * 1024 * 1024;
-
-/// Read a response body, refusing to buffer more than `limit` bytes.
-///
-/// The `Content-Length` header is only advisory — it is absent on chunked and
-/// HTTP/2 responses (both of which CloudFront can produce), so a check on it
-/// alone can be bypassed. This enforces the cap while streaming, so a
-/// compromised or misconfigured origin can never make the client allocate an
-/// unbounded body before the size/hash checks run.
-pub(crate) async fn read_body_capped(
-    mut response: reqwest::Response,
-    limit: u64,
-    url: &str,
-) -> Result<Vec<u8>> {
-    if response.content_length().is_some_and(|len| len > limit) {
-        return Err(Error::ResponseTooLarge {
-            url: url.to_string(),
-            limit,
-        });
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|source| Error::Http {
-        url: url.to_string(),
-        source,
-    })? {
-        if body.len() as u64 + chunk.len() as u64 > limit {
-            return Err(Error::ResponseTooLarge {
-                url: url.to_string(),
-                limit,
-            });
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum CacheState {
-    Fresh,
-    Downloaded,
-    StaleFallback,
-    /// Loaded without any network access through a cache-only API.
-    Cached,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum LockMode {
-    Shared,
-    Exclusive,
-}
-
-/// Snapshot mtimes slightly in the future are tolerated as clock jitter;
-/// anything further ahead is treated as maximally stale so a bad clock can
-/// never pin an old snapshot as fresh forever.
-const FUTURE_MTIME_TOLERANCE: Duration = Duration::from_secs(5 * 60);
 
 /// Public inventory record for one durable orbital-element snapshot.
 #[derive(Clone, Debug, PartialEq)]
@@ -121,10 +56,7 @@ impl CelesTrakSource {
     }
 
     pub fn platform_default() -> Result<Self> {
-        let cache_dir = ProjectDirs::from("fyi", "Seiza", "seiza")
-            .map(|dirs| dirs.cache_dir().join("satellites"))
-            .ok_or(Error::NoCacheDirectory)?;
-        Self::new(cache_dir)
+        Self::new(cache::platform_cache_dir()?)
     }
 
     /// Override the endpoint for an organization-local caching proxy or test
@@ -256,10 +188,7 @@ impl CelesTrakSource {
     }
 
     async fn acquire_lock(&self, mode: LockMode) -> Result<File> {
-        let cache_dir = self.cache_dir.clone();
-        tokio::task::spawn_blocking(move || acquire_lock_in(&cache_dir, mode))
-            .await
-            .map_err(|error| Error::CacheLock(error.to_string()))?
+        cache::acquire_lock(&self.cache_dir, mode).await
     }
 
     fn acquire_lock_blocking(&self, mode: LockMode) -> Result<File> {
@@ -313,37 +242,7 @@ impl CelesTrakSource {
             ".{CACHE_PREFIX}{timestamp}-{}.partial",
             std::process::id()
         ));
-        let publication = async {
-            let mut file = tokio::fs::File::create(&temporary_path)
-                .await
-                .map_err(|source| Error::Io {
-                    path: temporary_path.clone(),
-                    source,
-                })?;
-            file.write_all(payload.as_bytes())
-                .await
-                .map_err(|source| Error::Io {
-                    path: temporary_path.clone(),
-                    source,
-                })?;
-            file.sync_all().await.map_err(|source| Error::Io {
-                path: temporary_path.clone(),
-                source,
-            })?;
-            drop(file);
-            tokio::fs::rename(&temporary_path, &final_path)
-                .await
-                .map_err(|source| Error::Io {
-                    path: final_path.clone(),
-                    source,
-                })?;
-            Ok::<(), Error>(())
-        }
-        .await;
-        if publication.is_err() {
-            let _ = tokio::fs::remove_file(&temporary_path).await;
-        }
-        publication?;
+        cache::publish_atomically(&temporary_path, &final_path, payload.as_bytes()).await?;
         self.enforce_cache_size_limit(Some(&final_path)).await?;
         let snapshot = CacheSnapshot {
             path: final_path.clone(),
@@ -433,8 +332,7 @@ impl CelesTrakSource {
     /// Enforce the configured history ceiling without performing network I/O.
     /// The newest snapshot is always retained.
     pub fn prune_cache(&self) -> Result<()> {
-        let _exclusive = self.acquire_lock_blocking(LockMode::Exclusive)?;
-        enforce_cache_size_limit_in(&self.cache_dir, None, self.cache_size_limit_bytes)
+        cache::prune_cache_blocking(&self.cache_dir, self.cache_size_limit_bytes)
     }
 
     fn prune_cache_if_needed(&self) -> Result<()> {
@@ -461,35 +359,20 @@ impl CelesTrakSource {
     }
 
     fn cache_exceeds_limit(&self) -> Result<bool> {
-        Ok(managed_cache_inventory_in(&self.cache_dir)?
-            .iter()
-            .map(|snapshot| u128::from(snapshot.size_bytes))
-            .sum::<u128>()
+        Ok(cache::managed_cache_total_bytes(&self.cache_dir)?
             > u128::from(self.cache_size_limit_bytes))
     }
 
     async fn cache_exceeds_limit_async(&self) -> Result<bool> {
         let cache_dir = self.cache_dir.clone();
-        Ok(
-            tokio::task::spawn_blocking(move || managed_cache_inventory_in(&cache_dir))
-                .await
-                .map_err(|error| Error::CacheLock(error.to_string()))??
-                .iter()
-                .map(|snapshot| u128::from(snapshot.size_bytes))
-                .sum::<u128>()
-                > u128::from(self.cache_size_limit_bytes),
-        )
+        let total = tokio::task::spawn_blocking(move || cache::managed_cache_total_bytes(&cache_dir))
+            .await
+            .map_err(|error| Error::CacheLock(error.to_string()))??;
+        Ok(total > u128::from(self.cache_size_limit_bytes))
     }
 
     async fn enforce_cache_size_limit(&self, retained: Option<&Path>) -> Result<()> {
-        let cache_dir = self.cache_dir.clone();
-        let retained = retained.map(Path::to_path_buf);
-        let limit = self.cache_size_limit_bytes;
-        tokio::task::spawn_blocking(move || {
-            enforce_cache_size_limit_in(&cache_dir, retained.as_deref(), limit)
-        })
-        .await
-        .map_err(|error| Error::CacheLock(error.to_string()))?
+        cache::enforce_size_limit_async(&self.cache_dir, retained, self.cache_size_limit_bytes).await
     }
 
     fn cache_inventory(&self) -> Result<Vec<CacheSnapshot>> {
@@ -513,30 +396,6 @@ impl CacheSnapshot {
             size_bytes: self.size_bytes,
         }
     }
-}
-
-pub(crate) fn acquire_lock_in(cache_dir: &Path, mode: LockMode) -> Result<File> {
-    std::fs::create_dir_all(cache_dir).map_err(|source| Error::Io {
-        path: cache_dir.to_path_buf(),
-        source,
-    })?;
-    let path = cache_dir.join(".celestrak-active.lock");
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&path)
-        .map_err(|source| Error::Io {
-            path: path.clone(),
-            source,
-        })?;
-    match mode {
-        LockMode::Shared => file.lock_shared(),
-        LockMode::Exclusive => file.lock_exclusive(),
-    }
-    .map_err(|error| Error::CacheLock(error.to_string()))?;
-    Ok(file)
 }
 
 fn cache_inventory_in(cache_dir: &Path) -> Result<Vec<CacheSnapshot>> {
@@ -588,189 +447,6 @@ fn cache_inventory_in(cache_dir: &Path) -> Result<Vec<CacheSnapshot>> {
             .then_with(|| left.path.cmp(&right.path))
     });
     Ok(snapshots)
-}
-
-pub(crate) fn enforce_cache_size_limit_in(
-    cache_dir: &Path,
-    retained: Option<&Path>,
-    limit: u64,
-) -> Result<()> {
-    remove_abandoned_partial_files(cache_dir)?;
-    let mut snapshots = managed_cache_inventory_in(cache_dir)?;
-    let newest = snapshots.last().map(|snapshot| snapshot.path.clone());
-    let mut total = snapshots
-        .iter()
-        .map(|snapshot| snapshot.size_bytes)
-        .sum::<u64>();
-    for snapshot in snapshots.drain(..) {
-        if total <= limit {
-            break;
-        }
-        if retained.is_some_and(|retained| snapshot.path == retained)
-            || newest
-                .as_deref()
-                .is_some_and(|newest| snapshot.path == newest)
-        {
-            continue;
-        }
-        std::fs::remove_file(&snapshot.path).map_err(|source| Error::Io {
-            path: snapshot.path.clone(),
-            source,
-        })?;
-        total = total.saturating_sub(snapshot.size_bytes);
-    }
-    Ok(())
-}
-
-#[derive(Clone, Debug)]
-struct ManagedCacheSnapshot {
-    path: PathBuf,
-    retained_at: f64,
-    size_bytes: u64,
-}
-
-/// Inventory every cache artifact owned by this crate so current and
-/// historical element sources share one configured size ceiling.
-fn managed_cache_inventory_in(cache_dir: &Path) -> Result<Vec<ManagedCacheSnapshot>> {
-    let entries = match std::fs::read_dir(cache_dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(source) => {
-            return Err(Error::Io {
-                path: cache_dir.to_path_buf(),
-                source,
-            });
-        }
-    };
-    let mut snapshots = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|source| Error::Io {
-            path: cache_dir.to_path_buf(),
-            source,
-        })?;
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        let metadata = entry.metadata().map_err(|source| Error::Io {
-            path: path.clone(),
-            source,
-        })?;
-        if !metadata.is_file() {
-            continue;
-        }
-        let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
-        let modified_seconds = modified
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs_f64();
-        let retained_at = if name.starts_with(CACHE_PREFIX) && name.ends_with(CACHE_SUFFIX) {
-            snapshot_retrieved_at(&path, modified)?.unix_seconds()
-        } else if let Some(value) = name
-            .strip_prefix(SATCHECKER_CACHE_PREFIX)
-            .and_then(|value| value.strip_suffix(SATCHECKER_CACHE_SUFFIX))
-            .and_then(|value| value.rsplit_once("-cached-").map(|(_, cached)| cached))
-            .and_then(|value| value.parse::<f64>().ok())
-        {
-            value
-        } else if let Some(value) = name
-            .strip_prefix(SEIZA_MIRROR_CACHE_PREFIX)
-            .and_then(|value| value.strip_suffix(SEIZA_MIRROR_CACHE_SUFFIX))
-            .and_then(|value| value.split("-cached-").nth(1))
-            .and_then(|value| value.split('-').next())
-            .and_then(|value| value.parse::<f64>().ok())
-        {
-            value
-        } else {
-            continue;
-        };
-        snapshots.push(ManagedCacheSnapshot {
-            path,
-            retained_at: if retained_at.is_finite() {
-                retained_at
-            } else {
-                modified_seconds
-            },
-            size_bytes: metadata.len(),
-        });
-    }
-    snapshots.sort_by(|left, right| {
-        left.retained_at
-            .total_cmp(&right.retained_at)
-            .then_with(|| left.path.cmp(&right.path))
-    });
-    Ok(snapshots)
-}
-
-fn remove_abandoned_partial_files(cache_dir: &Path) -> Result<()> {
-    let entries = std::fs::read_dir(cache_dir).map_err(|source| Error::Io {
-        path: cache_dir.to_path_buf(),
-        source,
-    })?;
-    let partial_prefix = format!(".{CACHE_PREFIX}");
-    let satchecker_partial_prefix = format!(".{SATCHECKER_CACHE_PREFIX}");
-    let mirror_partial_prefix = format!(".{SEIZA_MIRROR_CACHE_PREFIX}");
-    for entry in entries {
-        let entry = entry.map_err(|source| Error::Io {
-            path: cache_dir.to_path_buf(),
-            source,
-        })?;
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if (name.starts_with(&partial_prefix)
-            || name.starts_with(&satchecker_partial_prefix)
-            || name.starts_with(&mirror_partial_prefix))
-            && name.ends_with(".partial")
-        {
-            std::fs::remove_file(&path).map_err(|source| Error::Io {
-                path: path.clone(),
-                source,
-            })?;
-        }
-    }
-    Ok(())
-}
-
-fn snapshot_retrieved_at(path: &Path, modified: SystemTime) -> Result<UtcTimestamp> {
-    let filename_timestamp = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .and_then(|name| name.strip_prefix(CACHE_PREFIX))
-        .and_then(|name| name.strip_suffix(CACHE_SUFFIX))
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(|seconds| seconds as f64);
-    let seconds = filename_timestamp.unwrap_or_else(|| {
-        modified
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs_f64()
-    });
-    UtcTimestamp::from_unix_seconds(seconds)
-}
-
-fn snapshot_age_at(timestamp: UtcTimestamp, now: SystemTime) -> Duration {
-    let Ok(elapsed) = Duration::try_from_secs_f64(timestamp.unix_seconds()) else {
-        return Duration::MAX;
-    };
-    let Some(retrieved) = UNIX_EPOCH.checked_add(elapsed) else {
-        return Duration::MAX;
-    };
-    match now.duration_since(retrieved) {
-        Ok(age) => age,
-        Err(future) if future.duration() <= FUTURE_MTIME_TOLERANCE => Duration::ZERO,
-        Err(_) => Duration::MAX,
-    }
-}
-
-pub(crate) fn now_timestamp() -> Result<UtcTimestamp> {
-    UtcTimestamp::from_unix_seconds(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs_f64(),
-    )
 }
 
 #[cfg(test)]
@@ -961,11 +637,11 @@ mod tests {
         let partial = dir.path().join(".celestrak-active-300-123.partial");
         std::fs::write(&partial, OMM).unwrap();
 
-        enforce_cache_size_limit_in(dir.path(), Some(&paths[2]), size * 3).unwrap();
+        cache::enforce_cache_size_limit_in(dir.path(), Some(&paths[2]), size * 3).unwrap();
         assert!(paths.iter().all(|path| path.exists()));
         assert!(!partial.exists());
 
-        enforce_cache_size_limit_in(dir.path(), Some(&paths[2]), size * 2).unwrap();
+        cache::enforce_cache_size_limit_in(dir.path(), Some(&paths[2]), size * 2).unwrap();
 
         assert!(!paths[0].exists());
         assert!(paths[1].exists());

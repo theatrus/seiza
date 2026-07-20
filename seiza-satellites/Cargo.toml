@@ -16,12 +16,12 @@ fs2.workspace = true
 reqwest.workspace = true
 satkit.workspace = true
 seiza.workspace = true
+seiza-download.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-zstd.workspace = true
 
 [features]
 ## Serialize/Deserialize on the prediction result types for API embedding.
@@ -30,3 +30,4 @@ serde = []
 [dev-dependencies]
 serde_json.workspace = true
 tempfile = "3"
+zstd.workspace = true

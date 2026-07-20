@@ -1,13 +1,12 @@
-use crate::source::{
-    DEFAULT_SATELLITE_CACHE_SIZE_LIMIT_BYTES, LockMode, SEIZA_MIRROR_CACHE_PREFIX,
-    SEIZA_MIRROR_CACHE_SUFFIX, acquire_lock_in, enforce_cache_size_limit_in, now_timestamp,
+use crate::cache::{
+    self, DEFAULT_SATELLITE_CACHE_SIZE_LIMIT_BYTES, LockMode, SEIZA_MIRROR_CACHE_PREFIX,
+    SEIZA_MIRROR_CACHE_SUFFIX, acquire_lock_in, now_timestamp,
 };
 use crate::{CacheState, Error, Result, SatelliteCatalog, UtcTimestamp, payload_sha256};
-use directories::ProjectDirs;
+use seiza_download::bundle::{self, ArtifactSpec, EncodedSpec, Encoding};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
 
 pub const DEFAULT_SEIZA_SATELLITE_MIRROR_URL: &str = "https://downloads.seiza.fyi/satellites/v1";
 
@@ -268,12 +267,7 @@ pub struct SeizaMirrorSource {
 
 impl SeizaMirrorSource {
     pub fn new(cache_dir: impl Into<PathBuf>) -> Result<Self> {
-        let client = reqwest::Client::builder()
-            .user_agent(format!("seiza-satellites/{}", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(Duration::from_secs(30))
-            .read_timeout(Duration::from_secs(120))
-            .build()
-            .map_err(Error::HttpClient)?;
+        let client = bundle::http_client(format!("seiza-satellites/{}", env!("CARGO_PKG_VERSION")))?;
         Ok(Self {
             client,
             cache_dir: cache_dir.into(),
@@ -284,10 +278,7 @@ impl SeizaMirrorSource {
     }
 
     pub fn platform_default() -> Result<Self> {
-        let cache_dir = ProjectDirs::from("fyi", "Seiza", "seiza")
-            .map(|dirs| dirs.cache_dir().join("satellites"))
-            .ok_or(Error::NoCacheDirectory)?;
-        Self::new(cache_dir)
+        Self::new(cache::platform_cache_dir()?)
     }
 
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
@@ -349,26 +340,15 @@ impl SeizaMirrorSource {
     }
 
     pub fn prune_cache(&self) -> Result<()> {
-        let _exclusive = acquire_lock_in(&self.cache_dir, LockMode::Exclusive)?;
-        enforce_cache_size_limit_in(&self.cache_dir, None, self.cache_size_limit_bytes)
+        cache::prune_cache_blocking(&self.cache_dir, self.cache_size_limit_bytes)
     }
 
     async fn prune_cache_async(&self) -> Result<()> {
-        let cache_dir = self.cache_dir.clone();
-        let limit = self.cache_size_limit_bytes;
-        tokio::task::spawn_blocking(move || {
-            let _exclusive = acquire_lock_in(&cache_dir, LockMode::Exclusive)?;
-            enforce_cache_size_limit_in(&cache_dir, None, limit)
-        })
-        .await
-        .map_err(|error| Error::CacheLock(error.to_string()))?
+        cache::prune_cache_async(&self.cache_dir, self.cache_size_limit_bytes).await
     }
 
     async fn acquire_lock(&self, mode: LockMode) -> Result<File> {
-        let cache_dir = self.cache_dir.clone();
-        tokio::task::spawn_blocking(move || acquire_lock_in(&cache_dir, mode))
-            .await
-            .map_err(|error| Error::CacheLock(error.to_string()))?
+        cache::acquire_lock(&self.cache_dir, mode).await
     }
 
     async fn download_nearest(&self, time_utc: UtcTimestamp) -> Result<SeizaMirrorLoad> {
@@ -389,8 +369,7 @@ impl SeizaMirrorSource {
             });
         }
         let manifest_bytes =
-            crate::source::read_body_capped(response, MAX_MIRROR_MANIFEST_BYTES, &manifest_url)
-                .await?;
+            cache::read_body_capped(response, MAX_MIRROR_MANIFEST_BYTES, &manifest_url).await?;
         let manifest = SatelliteMirrorManifest::parse(&manifest_bytes, &manifest_url)?;
         // A healthy manifest that simply does not cover this epoch is a normal,
         // expected outcome — a distinct signal from a broken/unreachable mirror,
@@ -402,70 +381,26 @@ impl SeizaMirrorSource {
             })?;
         let query_time = entry.query_time()?;
         let artifact_url = format!("{}/{}", self.base_url, entry.key);
-        let response = self
-            .client
-            .get(&artifact_url)
-            .send()
-            .await
-            .map_err(|source| Error::Http {
-                url: artifact_url.clone(),
-                source,
-            })?;
-        if !response.status().is_success() {
-            return Err(Error::HttpStatus {
-                url: artifact_url,
-                status: response.status().as_u16(),
-            });
-        }
-        // The bytes on the wire are the STORED (possibly zstd-compressed) form.
-        let stored_size = entry.stored_size_bytes();
-        if response
-            .content_length()
-            .is_some_and(|size| size != stored_size)
-        {
-            return Err(Error::MirrorManifest {
-                source_name: artifact_url,
-                message: format!(
-                    "manifest stored size is {stored_size}, response Content-Length is {}",
-                    response.content_length().unwrap_or_default()
-                ),
-            });
-        }
-        let stored = crate::source::read_body_capped(response, stored_size, &artifact_url).await?;
-        if stored.len() as u64 != stored_size {
-            return Err(Error::MirrorManifest {
-                source_name: artifact_url,
-                message: format!(
-                    "manifest stored size is {stored_size}, response size is {}",
-                    stored.len()
-                ),
-            });
-        }
-        let stored_sha256 = payload_sha256(&stored);
-        if stored_sha256 != entry.stored_sha256() {
-            return Err(Error::Integrity {
-                source_name: artifact_url.clone(),
-                expected: entry.stored_sha256().to_string(),
-                actual: stored_sha256,
-            });
-        }
-        // Decode to the canonical uncompressed TLE, then verify its identity.
-        let payload = decode_mirror_artifact(entry, stored, &artifact_url)?;
-        let actual_sha256 = payload_sha256(&payload);
-        if actual_sha256 != entry.sha256 {
-            return Err(Error::Integrity {
-                source_name: artifact_url,
-                expected: entry.sha256.clone(),
-                actual: actual_sha256,
-            });
-        }
-        let payload_text = std::str::from_utf8(&payload).map_err(|error| Error::Elements {
-            source_name: artifact_url.clone(),
-            message: error.to_string(),
-        })?;
+        // Identity entries carry the canonical TLE directly; zstd entries carry
+        // a compressed body verified on the wire, then decoded to the canonical
+        // form and re-verified. Both contracts are enforced by `stream_to_temp`.
+        let encoded = match entry.encoding {
+            MirrorEncoding::Identity => None,
+            MirrorEncoding::Zstd => Some(EncodedSpec {
+                encoding: Encoding::Zstd,
+                bytes: entry.stored_size_bytes(),
+                sha256: entry.stored_sha256(),
+            }),
+        };
+        let spec = ArtifactSpec {
+            label: &artifact_url,
+            url: &artifact_url,
+            decoded_bytes: entry.size_bytes,
+            decoded_sha256: &entry.sha256,
+            encoded,
+        };
+
         let downloaded_at = now_timestamp()?;
-        let catalog = SatelliteCatalog::from_tle_text(payload_text, artifact_url.clone())?
-            .with_retrieved_at(downloaded_at);
         let final_path =
             mirror_cache_path(&self.cache_dir, query_time, downloaded_at, &entry.sha256);
         let temporary_path = self.cache_dir.join(format!(
@@ -473,50 +408,48 @@ impl SeizaMirrorSource {
             (query_time.unix_seconds() * 1_000.0).round() as i64,
             std::process::id()
         ));
+
+        // Stream, verify, and decompress straight to disk via the shared
+        // catalog-bundle transfer, then read the canonical TLE back to parse it.
         let publication = async {
-            let mut file = tokio::fs::File::create(&temporary_path)
+            bundle::stream_to_temp(&self.client, &spec, &temporary_path, |_| {}).await?;
+            let payload = tokio::fs::read(&temporary_path)
                 .await
                 .map_err(|source| Error::Io {
                     path: temporary_path.clone(),
                     source,
                 })?;
-            file.write_all(&payload).await.map_err(|source| Error::Io {
-                path: temporary_path.clone(),
-                source,
+            let payload_text = std::str::from_utf8(&payload).map_err(|error| Error::Elements {
+                source_name: artifact_url.clone(),
+                message: error.to_string(),
             })?;
-            file.sync_all().await.map_err(|source| Error::Io {
-                path: temporary_path.clone(),
-                source,
-            })?;
-            drop(file);
-            tokio::fs::rename(&temporary_path, &final_path)
-                .await
-                .map_err(|source| Error::Io {
-                    path: final_path.clone(),
-                    source,
-                })?;
-            Ok::<(), Error>(())
+            let catalog = SatelliteCatalog::from_tle_text(payload_text, artifact_url.clone())?
+                .with_retrieved_at(downloaded_at);
+            bundle::replace_file(&temporary_path, &final_path).await?;
+            Ok::<_, Error>((catalog, payload.len() as u64))
         }
         .await;
-        if publication.is_err() {
-            let _ = tokio::fs::remove_file(&temporary_path).await;
-        }
-        publication?;
-        let cache_dir = self.cache_dir.clone();
-        let retained = final_path.clone();
-        let limit = self.cache_size_limit_bytes;
-        tokio::task::spawn_blocking(move || {
-            enforce_cache_size_limit_in(&cache_dir, Some(&retained), limit)
-        })
-        .await
-        .map_err(|error| Error::CacheLock(error.to_string()))??;
+        let (catalog, size_bytes) = match publication {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = tokio::fs::remove_file(&temporary_path).await;
+                return Err(error);
+            }
+        };
+
+        cache::enforce_size_limit_async(
+            &self.cache_dir,
+            Some(&final_path),
+            self.cache_size_limit_bytes,
+        )
+        .await?;
         let snapshot = MirrorCatalogSnapshot {
             cache_path: final_path.clone(),
             query_time,
             downloaded_at,
             source_url: artifact_url,
             sha256: entry.sha256.clone(),
-            size_bytes: payload.len() as u64,
+            size_bytes,
         };
         Ok(SeizaMirrorLoad {
             catalog,
@@ -618,41 +551,6 @@ impl SeizaMirrorSource {
             cache_path: snapshot.cache_path.clone(),
             snapshot,
         })
-    }
-}
-
-/// Decode a stored mirror artifact into the canonical uncompressed TLE. For
-/// `zstd`, the declared uncompressed `size_bytes` caps the output, so a
-/// decompression bomb or a wrong frame fails instead of exhausting memory.
-fn decode_mirror_artifact(
-    entry: &SatelliteMirrorEntry,
-    stored: Vec<u8>,
-    source_name: &str,
-) -> Result<Vec<u8>> {
-    match entry.encoding {
-        MirrorEncoding::Identity => Ok(stored),
-        MirrorEncoding::Zstd => {
-            let capacity = usize::try_from(entry.size_bytes).map_err(|_| Error::Elements {
-                source_name: source_name.to_string(),
-                message: "declared uncompressed size exceeds the address space".into(),
-            })?;
-            let decoded =
-                zstd::bulk::decompress(&stored, capacity).map_err(|error| Error::Elements {
-                    source_name: source_name.to_string(),
-                    message: format!("cannot zstd-decompress artifact: {error}"),
-                })?;
-            if decoded.len() as u64 != entry.size_bytes {
-                return Err(Error::MirrorManifest {
-                    source_name: source_name.to_string(),
-                    message: format!(
-                        "decoded size is {}, manifest declares {}",
-                        decoded.len(),
-                        entry.size_bytes
-                    ),
-                });
-            }
-            Ok(decoded)
-        }
     }
 }
 

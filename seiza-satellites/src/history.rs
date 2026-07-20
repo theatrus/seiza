@@ -1,13 +1,11 @@
-use crate::source::{
-    DEFAULT_SATELLITE_CACHE_SIZE_LIMIT_BYTES, LockMode, SATCHECKER_CACHE_PREFIX,
-    SATCHECKER_CACHE_SUFFIX, acquire_lock_in, enforce_cache_size_limit_in, now_timestamp,
+use crate::cache::{
+    self, DEFAULT_SATELLITE_CACHE_SIZE_LIMIT_BYTES, LockMode, SATCHECKER_CACHE_PREFIX,
+    SATCHECKER_CACHE_SUFFIX, acquire_lock_in, now_timestamp,
 };
 use crate::{CacheState, Error, Result, SatelliteCatalog, SingleExposure, UtcTimestamp};
-use directories::ProjectDirs;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
 
 /// Public IAU Centre for the Protection of the Dark and Quiet Sky historical
 /// TLE service.
@@ -71,10 +69,7 @@ impl SatCheckerSource {
     }
 
     pub fn platform_default() -> Result<Self> {
-        let cache_dir = ProjectDirs::from("fyi", "Seiza", "seiza")
-            .map(|dirs| dirs.cache_dir().join("satellites"))
-            .ok_or(Error::NoCacheDirectory)?;
-        Self::new(cache_dir)
+        Self::new(cache::platform_cache_dir()?)
     }
 
     /// Override the endpoint for an organization-local proxy or test fixture.
@@ -176,26 +171,15 @@ impl SatCheckerSource {
 
     /// Enforce the shared history ceiling without network I/O.
     pub fn prune_cache(&self) -> Result<()> {
-        let _exclusive = acquire_lock_in(&self.cache_dir, LockMode::Exclusive)?;
-        enforce_cache_size_limit_in(&self.cache_dir, None, self.cache_size_limit_bytes)
+        cache::prune_cache_blocking(&self.cache_dir, self.cache_size_limit_bytes)
     }
 
     async fn prune_cache_async(&self) -> Result<()> {
-        let cache_dir = self.cache_dir.clone();
-        let limit = self.cache_size_limit_bytes;
-        tokio::task::spawn_blocking(move || {
-            let _exclusive = acquire_lock_in(&cache_dir, LockMode::Exclusive)?;
-            enforce_cache_size_limit_in(&cache_dir, None, limit)
-        })
-        .await
-        .map_err(|error| Error::CacheLock(error.to_string()))?
+        cache::prune_cache_async(&self.cache_dir, self.cache_size_limit_bytes).await
     }
 
     async fn acquire_lock(&self, mode: LockMode) -> Result<File> {
-        let cache_dir = self.cache_dir.clone();
-        tokio::task::spawn_blocking(move || acquire_lock_in(&cache_dir, mode))
-            .await
-            .map_err(|error| Error::CacheLock(error.to_string()))?
+        cache::acquire_lock(&self.cache_dir, mode).await
     }
 
     async fn load_nearest_async(
@@ -264,12 +248,9 @@ impl SatCheckerSource {
                 status: status.as_u16(),
             });
         }
-        let body = crate::source::read_body_capped(
-            response,
-            crate::source::MAX_SATELLITE_RESPONSE_BYTES,
-            &request_url,
-        )
-        .await?;
+        let body =
+            cache::read_body_capped(response, cache::MAX_SATELLITE_RESPONSE_BYTES, &request_url)
+                .await?;
         let payload = String::from_utf8(body).map_err(|error| Error::Elements {
             source_name: request_url.clone(),
             message: error.to_string(),
@@ -288,45 +269,13 @@ impl SatCheckerSource {
             downloaded_seconds,
             std::process::id()
         ));
-        let publication = async {
-            let mut file = tokio::fs::File::create(&temporary_path)
-                .await
-                .map_err(|source| Error::Io {
-                    path: temporary_path.clone(),
-                    source,
-                })?;
-            file.write_all(payload.as_bytes())
-                .await
-                .map_err(|source| Error::Io {
-                    path: temporary_path.clone(),
-                    source,
-                })?;
-            file.sync_all().await.map_err(|source| Error::Io {
-                path: temporary_path.clone(),
-                source,
-            })?;
-            drop(file);
-            tokio::fs::rename(&temporary_path, &final_path)
-                .await
-                .map_err(|source| Error::Io {
-                    path: final_path.clone(),
-                    source,
-                })?;
-            Ok::<(), Error>(())
-        }
-        .await;
-        if publication.is_err() {
-            let _ = tokio::fs::remove_file(&temporary_path).await;
-        }
-        publication?;
-        let cache_dir = self.cache_dir.clone();
-        let retained = final_path.clone();
-        let limit = self.cache_size_limit_bytes;
-        tokio::task::spawn_blocking(move || {
-            enforce_cache_size_limit_in(&cache_dir, Some(&retained), limit)
-        })
-        .await
-        .map_err(|error| Error::CacheLock(error.to_string()))??;
+        cache::publish_atomically(&temporary_path, &final_path, payload.as_bytes()).await?;
+        cache::enforce_size_limit_async(
+            &self.cache_dir,
+            Some(&final_path),
+            self.cache_size_limit_bytes,
+        )
+        .await?;
 
         let snapshot = HistoricalCatalogSnapshot {
             cache_path: final_path.clone(),

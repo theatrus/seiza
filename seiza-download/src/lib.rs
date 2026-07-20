@@ -4,12 +4,13 @@
 //! catalog and does not depend on `seiza`; applications can await downloads
 //! here and pass the returned paths to the memory-mapped readers in `seiza`.
 
+pub mod bundle;
+mod catalog;
 mod error;
-mod manager;
 mod manifest;
 
 pub use error::{Error, Result};
-pub use manager::{
+pub use catalog::{
     CachePolicy, CatalogArtifact, CatalogBundle, CatalogManager, CatalogManagerBuilder,
     DownloadEvent,
 };
