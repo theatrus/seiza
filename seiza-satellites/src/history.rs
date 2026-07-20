@@ -192,14 +192,23 @@ impl SatCheckerSource {
     ) -> Result<Option<SatCheckerLoad>> {
         let cache_dir = self.cache_dir.clone();
         let endpoint = self.endpoint.clone();
-        let snapshots =
+        let mut snapshots =
             tokio::task::spawn_blocking(move || history_inventory_in(&cache_dir, &endpoint))
                 .await
                 .map_err(|error| Error::CacheLock(error.to_string()))??;
-        cache::select_nearest_async(snapshots, time_utc, maximum_distance, async |snapshot| {
-            self.load_snapshot_async(snapshot).await
-        })
-        .await
+        // Inlined nearest-first load (rather than an async-closure helper) to
+        // keep this future `Send`; a load failure is a cache miss and falls
+        // through to the network fetch in `load_at`.
+        cache::sort_by_distance(&mut snapshots, time_utc);
+        for snapshot in snapshots {
+            if !cache::within_distance(&snapshot, time_utc, maximum_distance) {
+                continue;
+            }
+            if let Ok(load) = self.load_snapshot_async(snapshot).await {
+                return Ok(Some(load));
+            }
+        }
+        Ok(None)
     }
 
     fn load_nearest_blocking(

@@ -456,29 +456,13 @@ where
     }
 }
 
-/// Async counterpart used by the download path: a load failure is treated as a
-/// cache miss and skipped, so resolution falls through to a network fetch. An
-/// empty or entirely-unloadable set yields `Ok(None)`.
-pub(crate) async fn select_nearest_async<S, T>(
-    mut snapshots: Vec<S>,
-    time: UtcTimestamp,
-    maximum_distance: Option<Duration>,
-    mut load: impl AsyncFnMut(S) -> Result<T>,
-) -> Result<Option<T>>
-where
-    S: TimeSnapshot,
-{
-    sort_by_distance(&mut snapshots, time);
-    for snapshot in snapshots {
-        if !within_distance(&snapshot, time, maximum_distance) {
-            continue;
-        }
-        if let Ok(loaded) = load(snapshot).await {
-            return Ok(Some(loaded));
-        }
-    }
-    Ok(None)
-}
+// NOTE: there is deliberately no async `select_nearest_*` helper. An earlier
+// version took an `AsyncFnMut` load closure, but an async closure that borrows
+// `&self` makes the enclosing provider future fail the higher-ranked `Send`
+// check ("implementation of Send is not general enough"), which breaks callers
+// that hold the future across `.await` in a Send context (e.g. Axum handlers).
+// The async callers inline the nearest-first loop and call their own async
+// load method directly; they still share `sort_by_distance` / `within_distance`.
 
 pub(crate) fn now_timestamp() -> Result<UtcTimestamp> {
     UtcTimestamp::from_unix_seconds(
