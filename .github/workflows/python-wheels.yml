@@ -8,12 +8,14 @@ on:
       - "seiza-py/**"
       - "seiza/**"
       - "seiza-download/**"
+      - "seiza-satellites/**"
       - ".github/workflows/python-wheels.yml"
   pull_request:
     paths:
       - "seiza-py/**"
       - "seiza/**"
       - "seiza-download/**"
+      - "seiza-satellites/**"
       - ".github/workflows/python-wheels.yml"
   workflow_dispatch:
 
@@ -39,6 +41,7 @@ jobs:
           . .venv/bin/activate
           pip install maturin numpy pytest astropy
           maturin develop --release
+          cargo test
           python -m pytest tests/ -q
       - name: Lint bindings
         working-directory: seiza-py

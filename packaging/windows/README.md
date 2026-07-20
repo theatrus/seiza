@@ -29,7 +29,8 @@ uses the same behavior and can be used to retry setup later.
 Every setup-wizard choice includes the object catalog, Solar System objects,
 active transients, and at least one usable plate-solving catalog. The menu
 describes choices by use case: lightweight hinted solving, denser Gaia solving,
-deep blind solving, or the complete bundle.
+deep blind solving, the optional G≤20 deep catalog (about 9 GB), or every
+published catalog.
 
 The welcome, completion, and banner artwork in `assets/` uses Seiza-specific
 constellation and astrometry imagery instead of the stock WiX graphics.
