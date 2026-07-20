@@ -14,6 +14,25 @@ pub const DEFAULT_SEIZA_SATELLITE_MIRROR_URL: &str = "https://downloads.seiza.fy
 const MAX_MIRROR_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_MIRROR_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
 
+/// How a mirror artifact is stored at rest. `identity` is the raw TLE text;
+/// `zstd` stores it zstd-compressed. The mirror compresses its own copy (the
+/// upstream IAU endpoint does not compress, and the mirror is the fast path
+/// consulted first), so the object at `key` is a `.zst` and the client
+/// decompresses it back to the canonical TLE on download.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MirrorEncoding {
+    #[default]
+    Identity,
+    Zstd,
+}
+
+impl MirrorEncoding {
+    fn is_identity(&self) -> bool {
+        matches!(self, MirrorEncoding::Identity)
+    }
+}
+
 /// One immutable historical orbital catalog offered by the Seiza mirror.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -21,8 +40,21 @@ pub struct SatelliteMirrorEntry {
     pub query_time_utc: String,
     pub source_url: String,
     pub key: String,
+    /// SHA-256 and byte count of the DECOMPRESSED TLE — the artifact's logical
+    /// identity, verified after any decode.
     pub sha256: String,
     pub size_bytes: u64,
+    /// Encoding of the object stored at `key`. Absent in JSON = `identity`.
+    #[serde(default, skip_serializing_if = "MirrorEncoding::is_identity")]
+    pub encoding: MirrorEncoding,
+    /// SHA-256 of the stored (encoded) bytes, verified on download before
+    /// decoding. Present iff `encoding` is not `identity`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoded_sha256: Option<String>,
+    /// Byte count of the stored (encoded) object. Present iff `encoding` is not
+    /// `identity`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoded_size_bytes: Option<u64>,
 }
 
 impl SatelliteMirrorEntry {
@@ -34,7 +66,20 @@ impl SatelliteMirrorEntry {
     }
 
     pub fn expected_key(&self) -> String {
-        format!("artifacts/{}/satellites.tle", self.sha256)
+        match self.encoding {
+            MirrorEncoding::Identity => format!("artifacts/{}/satellites.tle", self.sha256),
+            MirrorEncoding::Zstd => format!("artifacts/{}/satellites.tle.zst", self.sha256),
+        }
+    }
+
+    /// SHA-256 of the bytes actually stored at `key` (encoded form).
+    fn stored_sha256(&self) -> &str {
+        self.encoded_sha256.as_deref().unwrap_or(&self.sha256)
+    }
+
+    /// Byte count of the bytes actually stored at `key`.
+    fn stored_size_bytes(&self) -> u64 {
+        self.encoded_size_bytes.unwrap_or(self.size_bytes)
     }
 }
 
@@ -119,6 +164,56 @@ impl SatelliteMirrorManifest {
                         entry.query_time_utc, entry.size_bytes, MAX_MIRROR_ARTIFACT_BYTES
                     ),
                 });
+            }
+            match entry.encoding {
+                MirrorEncoding::Identity => {
+                    if entry.encoded_sha256.is_some() || entry.encoded_size_bytes.is_some() {
+                        return Err(Error::MirrorManifest {
+                            source_name: source_name.into(),
+                            message: format!(
+                                "{} is identity-encoded but declares encoded_* fields",
+                                entry.query_time_utc
+                            ),
+                        });
+                    }
+                }
+                MirrorEncoding::Zstd => {
+                    let sha =
+                        entry
+                            .encoded_sha256
+                            .as_deref()
+                            .ok_or_else(|| Error::MirrorManifest {
+                                source_name: source_name.into(),
+                                message: format!(
+                                    "{} is zstd-encoded but has no encoded_sha256",
+                                    entry.query_time_utc
+                                ),
+                            })?;
+                    if sha.len() != 64
+                        || !sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        || sha.bytes().any(|byte| byte.is_ascii_uppercase())
+                    {
+                        return Err(Error::MirrorManifest {
+                            source_name: source_name.into(),
+                            message: format!(
+                                "{} has an invalid lowercase encoded SHA-256",
+                                entry.query_time_utc
+                            ),
+                        });
+                    }
+                    match entry.encoded_size_bytes {
+                        Some(size) if size > 0 && size <= MAX_MIRROR_ARTIFACT_BYTES => {}
+                        _ => {
+                            return Err(Error::MirrorManifest {
+                                source_name: source_name.into(),
+                                message: format!(
+                                    "{} has an invalid encoded_size_bytes (maximum {})",
+                                    entry.query_time_utc, MAX_MIRROR_ARTIFACT_BYTES
+                                ),
+                            });
+                        }
+                    }
+                }
             }
         }
         Ok(())
@@ -322,31 +417,40 @@ impl SeizaMirrorSource {
                 status: response.status().as_u16(),
             });
         }
+        // The bytes on the wire are the STORED (possibly zstd-compressed) form.
+        let stored_size = entry.stored_size_bytes();
         if response
             .content_length()
-            .is_some_and(|size| size != entry.size_bytes)
+            .is_some_and(|size| size != stored_size)
         {
             return Err(Error::MirrorManifest {
                 source_name: artifact_url,
                 message: format!(
-                    "manifest size is {}, response Content-Length is {}",
-                    entry.size_bytes,
+                    "manifest stored size is {stored_size}, response Content-Length is {}",
                     response.content_length().unwrap_or_default()
                 ),
             });
         }
-        let payload =
-            crate::source::read_body_capped(response, entry.size_bytes, &artifact_url).await?;
-        if payload.len() as u64 != entry.size_bytes {
+        let stored = crate::source::read_body_capped(response, stored_size, &artifact_url).await?;
+        if stored.len() as u64 != stored_size {
             return Err(Error::MirrorManifest {
                 source_name: artifact_url,
                 message: format!(
-                    "manifest size is {}, response size is {}",
-                    entry.size_bytes,
-                    payload.len()
+                    "manifest stored size is {stored_size}, response size is {}",
+                    stored.len()
                 ),
             });
         }
+        let stored_sha256 = payload_sha256(&stored);
+        if stored_sha256 != entry.stored_sha256() {
+            return Err(Error::Integrity {
+                source_name: artifact_url.clone(),
+                expected: entry.stored_sha256().to_string(),
+                actual: stored_sha256,
+            });
+        }
+        // Decode to the canonical uncompressed TLE, then verify its identity.
+        let payload = decode_mirror_artifact(entry, stored, &artifact_url)?;
         let actual_sha256 = payload_sha256(&payload);
         if actual_sha256 != entry.sha256 {
             return Err(Error::Integrity {
@@ -517,6 +621,41 @@ impl SeizaMirrorSource {
     }
 }
 
+/// Decode a stored mirror artifact into the canonical uncompressed TLE. For
+/// `zstd`, the declared uncompressed `size_bytes` caps the output, so a
+/// decompression bomb or a wrong frame fails instead of exhausting memory.
+fn decode_mirror_artifact(
+    entry: &SatelliteMirrorEntry,
+    stored: Vec<u8>,
+    source_name: &str,
+) -> Result<Vec<u8>> {
+    match entry.encoding {
+        MirrorEncoding::Identity => Ok(stored),
+        MirrorEncoding::Zstd => {
+            let capacity = usize::try_from(entry.size_bytes).map_err(|_| Error::Elements {
+                source_name: source_name.to_string(),
+                message: "declared uncompressed size exceeds the address space".into(),
+            })?;
+            let decoded =
+                zstd::bulk::decompress(&stored, capacity).map_err(|error| Error::Elements {
+                    source_name: source_name.to_string(),
+                    message: format!("cannot zstd-decompress artifact: {error}"),
+                })?;
+            if decoded.len() as u64 != entry.size_bytes {
+                return Err(Error::MirrorManifest {
+                    source_name: source_name.to_string(),
+                    message: format!(
+                        "decoded size is {}, manifest declares {}",
+                        decoded.len(),
+                        entry.size_bytes
+                    ),
+                });
+            }
+            Ok(decoded)
+        }
+    }
+}
+
 fn mirror_cache_path(
     cache_dir: &Path,
     query_time: UtcTimestamp,
@@ -638,6 +777,9 @@ mod tests {
                 key: format!("artifacts/{sha256}/satellites.tle"),
                 sha256,
                 size_bytes: artifact.len() as u64,
+                encoding: MirrorEncoding::Identity,
+                encoded_sha256: None,
+                encoded_size_bytes: None,
             }],
         })
         .unwrap();
@@ -679,6 +821,9 @@ mod tests {
                 key: format!("artifacts/{sha256}/satellites.tle"),
                 sha256,
                 size_bytes: 4_274_736,
+                encoding: MirrorEncoding::Identity,
+                encoded_sha256: None,
+                encoded_size_bytes: None,
             }],
         };
         manifest.validate("test").unwrap();
@@ -701,6 +846,9 @@ mod tests {
                 key: "latest.tle".into(),
                 sha256,
                 size_bytes: 10,
+                encoding: MirrorEncoding::Identity,
+                encoded_sha256: None,
+                encoded_size_bytes: None,
             }],
         };
         assert!(manifest.validate("test").is_err());
@@ -754,5 +902,104 @@ mod tests {
                 .unwrap_err(),
             Error::Integrity { .. }
         ));
+    }
+
+    /// Serve a zstd-encoded mirror: manifest (json) then the compressed artifact.
+    fn serve_zstd_mirror(query_time: &str) -> String {
+        let uncompressed = TLE.as_bytes();
+        let sha256 = payload_sha256(uncompressed);
+        let compressed = zstd::bulk::compress(uncompressed, 19).unwrap();
+        let encoded_sha256 = payload_sha256(&compressed);
+        let manifest = serde_json::to_vec(&SatelliteMirrorManifest {
+            schema_version: SatelliteMirrorManifest::SCHEMA_VERSION,
+            generated_at_utc: "2026-07-19T12:00:00Z".into(),
+            snapshots: vec![SatelliteMirrorEntry {
+                query_time_utc: query_time.into(),
+                source_url: "https://satchecker.cps.iau.org/tools/tles-at-epoch/".into(),
+                key: format!("artifacts/{sha256}/satellites.tle.zst"),
+                sha256,
+                size_bytes: uncompressed.len() as u64,
+                encoding: MirrorEncoding::Zstd,
+                encoded_sha256: Some(encoded_sha256),
+                encoded_size_bytes: Some(compressed.len() as u64),
+            }],
+        })
+        .unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for (request_number, stream) in listener.incoming().take(2).enumerate() {
+                let mut stream = stream.unwrap();
+                let mut request = [0_u8; 4096];
+                let _ = stream.read(&mut request);
+                let (content_type, body): (&str, &[u8]) = if request_number == 0 {
+                    ("application/json", &manifest)
+                } else {
+                    ("application/zstd", &compressed)
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(body).unwrap();
+            }
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn downloads_and_decompresses_zstd_mirror_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        let query_time = "2025-10-18T12:52:12Z";
+        let base_url = serve_zstd_mirror(query_time);
+        let source = SeizaMirrorSource::new(dir.path())
+            .unwrap()
+            .with_base_url(base_url);
+        let time = UtcTimestamp::parse(query_time).unwrap();
+
+        let load = source.load_at(time).await.unwrap();
+        assert_eq!(load.state, CacheState::Downloaded);
+        assert_eq!(load.catalog.len(), 1);
+        // The on-disk cache holds the DECOMPRESSED TLE, keyed + verified by the
+        // uncompressed sha — the "download-decompress on disk" contract.
+        assert_eq!(load.snapshot.sha256, payload_sha256(TLE.as_bytes()));
+        let cached = std::fs::read(&load.cache_path).unwrap();
+        assert_eq!(cached, TLE.as_bytes());
+
+        // The reuse path reads the uncompressed cache without a second fetch.
+        let second = source.load_at(time).await.unwrap();
+        assert_eq!(second.state, CacheState::Cached);
+    }
+
+    #[test]
+    fn zstd_entry_validates_and_rejects_inconsistent_encoded_fields() {
+        let sha256 = "a".repeat(64);
+        let mut manifest = SatelliteMirrorManifest {
+            schema_version: SatelliteMirrorManifest::SCHEMA_VERSION,
+            generated_at_utc: "2026-07-19T12:00:00Z".into(),
+            snapshots: vec![SatelliteMirrorEntry {
+                query_time_utc: "2025-10-18T12:52:12Z".into(),
+                source_url: "upstream".into(),
+                key: format!("artifacts/{sha256}/satellites.tle.zst"),
+                sha256: sha256.clone(),
+                size_bytes: 4_274_736,
+                encoding: MirrorEncoding::Zstd,
+                encoded_sha256: Some("b".repeat(64)),
+                encoded_size_bytes: Some(1_000_000),
+            }],
+        };
+        manifest.validate("test").unwrap();
+
+        // A zstd entry missing its encoded digest is rejected.
+        manifest.snapshots[0].encoded_sha256 = None;
+        assert!(manifest.validate("test").is_err());
+
+        // An identity entry that still carries encoded_* fields is rejected.
+        manifest.snapshots[0].encoding = MirrorEncoding::Identity;
+        manifest.snapshots[0].key = format!("artifacts/{sha256}/satellites.tle");
+        manifest.snapshots[0].encoded_sha256 = Some("b".repeat(64));
+        assert!(manifest.validate("test").is_err());
     }
 }

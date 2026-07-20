@@ -16,8 +16,8 @@ pub use history::{
     SatCheckerLoad, SatCheckerSource,
 };
 pub use mirror::{
-    DEFAULT_SEIZA_SATELLITE_MIRROR_URL, MirrorCatalogSnapshot, SatelliteMirrorEntry,
-    SatelliteMirrorManifest, SeizaMirrorLoad, SeizaMirrorSource,
+    DEFAULT_SEIZA_SATELLITE_MIRROR_URL, MirrorCatalogSnapshot, MirrorEncoding,
+    SatelliteMirrorEntry, SatelliteMirrorManifest, SeizaMirrorLoad, SeizaMirrorSource,
 };
 pub use resolver::{
     CURRENT_CATALOG_MAX_AGE, OrbitalCatalogLoad, OrbitalCatalogProvider, OrbitalCatalogSnapshot,
