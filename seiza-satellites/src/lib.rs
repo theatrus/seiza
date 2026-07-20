@@ -5,12 +5,18 @@
 //! must not present them as pixel detections without a separate evidence
 //! matcher.
 
+mod history;
 mod source;
 pub mod trail_alignment;
 
+pub use history::{
+    HistoricalCatalogSnapshot, SATCHECKER_CACHE_REUSE_WINDOW, SATCHECKER_TLES_AT_EPOCH_URL,
+    SatCheckerLoad, SatCheckerSource,
+};
 pub use source::{
     CELESTRAK_ACTIVE_OMM_URL, CELESTRAK_MIN_REFRESH, CacheState, CachedCatalogSnapshot,
     CelesTrakLoad, CelesTrakSource, DEFAULT_CELESTRAK_CACHE_SIZE_LIMIT_BYTES,
+    DEFAULT_SATELLITE_CACHE_SIZE_LIMIT_BYTES,
 };
 
 use satkit::frametransform::{qitrf2gcrf_approx, qteme2gcrf, qteme2itrf};

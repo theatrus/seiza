@@ -9,10 +9,14 @@ use tokio::io::AsyncWriteExt;
 pub const CELESTRAK_ACTIVE_OMM_URL: &str =
     "https://celestrak.org/NORAD/elements/gp.php?GROUP=ACTIVE&FORMAT=JSON";
 pub const CELESTRAK_MIN_REFRESH: Duration = Duration::from_secs(2 * 60 * 60);
-/// Default upper bound for the durable CelesTrak snapshot history (5 GiB).
-pub const DEFAULT_CELESTRAK_CACHE_SIZE_LIMIT_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+/// Default upper bound shared by all durable orbital-element snapshots (5 GiB).
+pub const DEFAULT_SATELLITE_CACHE_SIZE_LIMIT_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+/// Backward-compatible name for the shared orbital-element cache ceiling.
+pub const DEFAULT_CELESTRAK_CACHE_SIZE_LIMIT_BYTES: u64 = DEFAULT_SATELLITE_CACHE_SIZE_LIMIT_BYTES;
 const CACHE_PREFIX: &str = "celestrak-active-";
 const CACHE_SUFFIX: &str = ".json";
+pub(crate) const SATCHECKER_CACHE_PREFIX: &str = "satchecker-epoch-";
+pub(crate) const SATCHECKER_CACHE_SUFFIX: &str = ".tle";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -25,7 +29,7 @@ pub enum CacheState {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum LockMode {
+pub(crate) enum LockMode {
     Shared,
     Exclusive,
 }
@@ -419,8 +423,7 @@ impl CelesTrakSource {
     }
 
     fn cache_exceeds_limit(&self) -> Result<bool> {
-        Ok(self
-            .cache_inventory()?
+        Ok(managed_cache_inventory_in(&self.cache_dir)?
             .iter()
             .map(|snapshot| u128::from(snapshot.size_bytes))
             .sum::<u128>()
@@ -428,13 +431,16 @@ impl CelesTrakSource {
     }
 
     async fn cache_exceeds_limit_async(&self) -> Result<bool> {
-        Ok(self
-            .cache_inventory_async()
-            .await?
-            .iter()
-            .map(|snapshot| u128::from(snapshot.size_bytes))
-            .sum::<u128>()
-            > u128::from(self.cache_size_limit_bytes))
+        let cache_dir = self.cache_dir.clone();
+        Ok(
+            tokio::task::spawn_blocking(move || managed_cache_inventory_in(&cache_dir))
+                .await
+                .map_err(|error| Error::CacheLock(error.to_string()))??
+                .iter()
+                .map(|snapshot| u128::from(snapshot.size_bytes))
+                .sum::<u128>()
+                > u128::from(self.cache_size_limit_bytes),
+        )
     }
 
     async fn enforce_cache_size_limit(&self, retained: Option<&Path>) -> Result<()> {
@@ -471,7 +477,7 @@ impl CacheSnapshot {
     }
 }
 
-fn acquire_lock_in(cache_dir: &Path, mode: LockMode) -> Result<File> {
+pub(crate) fn acquire_lock_in(cache_dir: &Path, mode: LockMode) -> Result<File> {
     std::fs::create_dir_all(cache_dir).map_err(|source| Error::Io {
         path: cache_dir.to_path_buf(),
         source,
@@ -546,13 +552,13 @@ fn cache_inventory_in(cache_dir: &Path) -> Result<Vec<CacheSnapshot>> {
     Ok(snapshots)
 }
 
-fn enforce_cache_size_limit_in(
+pub(crate) fn enforce_cache_size_limit_in(
     cache_dir: &Path,
     retained: Option<&Path>,
     limit: u64,
 ) -> Result<()> {
     remove_abandoned_partial_files(cache_dir)?;
-    let mut snapshots = cache_inventory_in(cache_dir)?;
+    let mut snapshots = managed_cache_inventory_in(cache_dir)?;
     let newest = snapshots.last().map(|snapshot| snapshot.path.clone());
     let mut total = snapshots
         .iter()
@@ -578,12 +584,27 @@ fn enforce_cache_size_limit_in(
     Ok(())
 }
 
-fn remove_abandoned_partial_files(cache_dir: &Path) -> Result<()> {
-    let entries = std::fs::read_dir(cache_dir).map_err(|source| Error::Io {
-        path: cache_dir.to_path_buf(),
-        source,
-    })?;
-    let partial_prefix = format!(".{CACHE_PREFIX}");
+#[derive(Clone, Debug)]
+struct ManagedCacheSnapshot {
+    path: PathBuf,
+    retained_at: f64,
+    size_bytes: u64,
+}
+
+/// Inventory every cache artifact owned by this crate so current and
+/// historical element sources share one configured size ceiling.
+fn managed_cache_inventory_in(cache_dir: &Path) -> Result<Vec<ManagedCacheSnapshot>> {
+    let entries = match std::fs::read_dir(cache_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(Error::Io {
+                path: cache_dir.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let mut snapshots = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|source| Error::Io {
             path: cache_dir.to_path_buf(),
@@ -593,7 +614,67 @@ fn remove_abandoned_partial_files(cache_dir: &Path) -> Result<()> {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        if name.starts_with(&partial_prefix) && name.ends_with(".partial") {
+        let metadata = entry.metadata().map_err(|source| Error::Io {
+            path: path.clone(),
+            source,
+        })?;
+        if !metadata.is_file() {
+            continue;
+        }
+        let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
+        let modified_seconds = modified
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        let retained_at = if name.starts_with(CACHE_PREFIX) && name.ends_with(CACHE_SUFFIX) {
+            snapshot_retrieved_at(&path, modified)?.unix_seconds()
+        } else if let Some(value) = name
+            .strip_prefix(SATCHECKER_CACHE_PREFIX)
+            .and_then(|value| value.strip_suffix(SATCHECKER_CACHE_SUFFIX))
+            .and_then(|value| value.rsplit_once("-cached-").map(|(_, cached)| cached))
+            .and_then(|value| value.parse::<f64>().ok())
+        {
+            value
+        } else {
+            continue;
+        };
+        snapshots.push(ManagedCacheSnapshot {
+            path,
+            retained_at: if retained_at.is_finite() {
+                retained_at
+            } else {
+                modified_seconds
+            },
+            size_bytes: metadata.len(),
+        });
+    }
+    snapshots.sort_by(|left, right| {
+        left.retained_at
+            .total_cmp(&right.retained_at)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    Ok(snapshots)
+}
+
+fn remove_abandoned_partial_files(cache_dir: &Path) -> Result<()> {
+    let entries = std::fs::read_dir(cache_dir).map_err(|source| Error::Io {
+        path: cache_dir.to_path_buf(),
+        source,
+    })?;
+    let partial_prefix = format!(".{CACHE_PREFIX}");
+    let satchecker_partial_prefix = format!(".{SATCHECKER_CACHE_PREFIX}");
+    for entry in entries {
+        let entry = entry.map_err(|source| Error::Io {
+            path: cache_dir.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if (name.starts_with(&partial_prefix) || name.starts_with(&satchecker_partial_prefix))
+            && name.ends_with(".partial")
+        {
             std::fs::remove_file(&path).map_err(|source| Error::Io {
                 path: path.clone(),
                 source,
@@ -634,7 +715,7 @@ fn snapshot_age_at(timestamp: UtcTimestamp, now: SystemTime) -> Duration {
     }
 }
 
-fn now_timestamp() -> Result<UtcTimestamp> {
+pub(crate) fn now_timestamp() -> Result<UtcTimestamp> {
     UtcTimestamp::from_unix_seconds(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)

@@ -48,9 +48,27 @@ for track in result.tracks {
 ```
 
 For reproducible offline work, use `SatelliteCatalog::open` for a local OMM
-JSON or TLE file. To replay a historical exposure from the durable CelesTrak
-cache, call `load_cached_for(exposure.midpoint())`; record the returned
-`CatalogFingerprint` alongside derived results.
+JSON or TLE file. For a historical exposure, ask the public IAU SatChecker
+service for epoch-appropriate elements on demand:
+
+```rust,no_run
+use seiza_satellites::SatCheckerSource;
+
+# async fn historical(exposure: &seiza_satellites::SingleExposure) -> seiza_satellites::Result<()> {
+let history = SatCheckerSource::platform_default()?;
+let elements = history.load_for_exposure(exposure).await?;
+println!("using {} historical elements", elements.catalog.len());
+# Ok(())
+# }
+```
+
+`load_for_exposure` performs no download until the application explicitly
+requests tracks. A validated response is cached permanently, subject only to
+the shared size ceiling, and reused for exposures within 12 hours by default.
+Use `with_cache_reuse_window` to change that policy. Cache-only reprocessing
+uses `load_cached_for_exposure` and never touches the network. Record the
+returned `HistoricalCatalogSnapshot` and `CatalogFingerprint` alongside
+derived results.
 
 Reusable post-prediction analysis lives here as well, so applications do not
 need to reimplement it:
@@ -80,11 +98,11 @@ current active-satellite OMM set. CelesTrak rate-limits repeated downloads, so
 keep reusing one cache directory; a rate-limited refresh falls back to the
 newest previously validated snapshot when one exists.
 
-Downloaded snapshots form a durable history instead of being deleted after
-the next refresh. The history is bounded by 5 GiB by default; once the ceiling
-is exceeded, the oldest snapshots are removed until the cache fits, while the
-newest snapshot is always retained. Applications can choose another ceiling
-with `with_cache_size_limit_bytes`.
+Downloaded CelesTrak and SatChecker snapshots form a shared durable history
+instead of being deleted after the next refresh. The history is bounded by 5
+GiB by default; once the ceiling is exceeded, the oldest downloads are removed
+until the cache fits, while the newest snapshot is always retained.
+Applications can choose another ceiling with `with_cache_size_limit_bytes`.
 The ceiling is enforced by active and cache-only loads, without requiring a
 successful download; `prune_cache` is also available for explicit maintenance.
 
@@ -95,6 +113,10 @@ locking rules:
 - `load_cached` loads the newest valid snapshot without network access;
 - `load_cached_for` loads the valid snapshot retrieved closest to a historical
   exposure, also without network access.
+
+`SatCheckerSource` provides the corresponding `cached_snapshots`,
+`load_cached_for`, and `load_cached_for_exposure` APIs for epoch-query history.
+Its snapshot provenance distinguishes the requested epoch from download time.
 
 Every `SatelliteCatalog` exposes a SHA-256 `CatalogFingerprint`. Persist it
 beside derived predictions and compare it with the active snapshot before
