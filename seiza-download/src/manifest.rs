@@ -22,12 +22,17 @@ pub const REQUIRED_BUNDLE_FILES: &[&str] = &[
 pub const REQUIRED_V2_FILES: &[&str] = REQUIRED_BUNDLE_FILES;
 
 /// A known artifact in the current hosted bundle.
+///
+/// Not every variant is part of the coherent [`REQUIRED_BUNDLE_FILES`] set:
+/// [`Dataset::StarsDeepGaia20`] is an optional, very large deep catalog that
+/// hosts alongside the bundle but is fetched only on explicit request.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Dataset {
     BlindGaia16,
     MinorBodies,
     Objects,
     StarsDeepGaia17,
+    StarsDeepGaia20,
     StarsGaia,
     StarsLiteTycho2,
     StarsLiteTycho2Identifiers,
@@ -41,6 +46,7 @@ impl Dataset {
             Self::MinorBodies => "minor-bodies.bin",
             Self::Objects => "objects.bin",
             Self::StarsDeepGaia17 => "stars-deep-gaia17.bin",
+            Self::StarsDeepGaia20 => "stars-deep-gaia20.bin",
             Self::StarsGaia => "stars-gaia.bin",
             Self::StarsLiteTycho2 => "stars-lite-tycho2.bin",
             Self::StarsLiteTycho2Identifiers => "stars-lite-tycho2.ids.bin",
@@ -56,8 +62,11 @@ pub struct CatalogSet {
 }
 
 impl CatalogSet {
-    /// Every artifact in the coherent bundle. Large; applications should
-    /// normally request only the datasets they use.
+    /// The complete standard bundle ([`REQUIRED_BUNDLE_FILES`]). Large;
+    /// applications should normally request only the datasets they use. Optional
+    /// extras hosted outside the required bundle (e.g. the G≤20 catalog) are NOT
+    /// included here — name them explicitly via [`CatalogSet::from_names`] or a
+    /// dataset selector.
     pub fn all() -> Self {
         Self { names: None }
     }
@@ -82,6 +91,15 @@ impl CatalogSet {
 
     pub fn blind_deep() -> Self {
         Self::dataset(Dataset::StarsDeepGaia17).with(Dataset::BlindGaia16)
+    }
+
+    /// The deepest solver package: the optional G≤20 star catalog paired with
+    /// the shared bright-star blind index. The G20 catalog is not part of the
+    /// required bundle (it is many gigabytes), so this is an explicit opt-in.
+    /// The G16 blind index supplies field-finding hypotheses; the deep catalog
+    /// verifies them, so no separate deep blind index is needed.
+    pub fn blind_deep_gaia20() -> Self {
+        Self::dataset(Dataset::StarsDeepGaia20).with(Dataset::BlindGaia16)
     }
 
     /// Build a selection from hosted filenames. An empty iterator retains the
@@ -257,7 +275,17 @@ impl BundleManifest {
         let plan = self
             .files
             .iter()
-            .filter(|file| set.contains(&file.name))
+            .filter(|file| match set.requested_names() {
+                // An explicit selection may include optional extras that are
+                // hosted alongside the bundle but outside it (e.g. the very
+                // large G≤20 catalog).
+                Some(_) => set.contains(&file.name),
+                // The default (`all`) set is the complete *standard* bundle.
+                // Optional extras beyond REQUIRED_BUNDLE_FILES must be requested
+                // by name, so a plain `download-data prebuilt` never pulls a
+                // multi-gigabyte specialist catalog onto an unsuspecting host.
+                None => REQUIRED_BUNDLE_FILES.contains(&file.name.as_str()),
+            })
             .cloned()
             .collect::<Vec<_>>();
         if plan.is_empty() {
@@ -588,5 +616,45 @@ mod tests {
         assert!(!set.is_all());
         assert!(set.contains(Dataset::StarsLiteTycho2.file_name()));
         assert!(!set.contains(Dataset::Objects.file_name()));
+    }
+
+    #[test]
+    fn optional_deep_gaia20_is_hostable_but_not_required() {
+        // The G20 catalog is an opt-in extra: never in the required set, but a
+        // manifest that offers it (with a valid v4 key) still validates, and an
+        // explicit selection plans exactly that one file.
+        assert!(!REQUIRED_BUNDLE_FILES.contains(&Dataset::StarsDeepGaia20.file_name()));
+
+        let mut manifest = manifest();
+        let sha256 = hash('f');
+        let name = Dataset::StarsDeepGaia20.file_name().to_string();
+        manifest.files.push(ManifestFile {
+            key: Some(format!("artifacts/{sha256}/{name}")),
+            bytes: 99,
+            sha256,
+            name: name.clone(),
+        });
+        manifest.validate().unwrap();
+
+        // Explicit selection pulls the optional catalog...
+        let plan = manifest
+            .plan(&CatalogSet::blind_deep_gaia20())
+            .unwrap()
+            .into_iter()
+            .map(|file| file.name)
+            .collect::<Vec<_>>();
+        assert!(plan.contains(&name));
+        assert!(plan.contains(&Dataset::BlindGaia16.file_name().to_string()));
+
+        // ...but the default (`all`) bundle never does, so a plain
+        // `download-data prebuilt` will not fetch the multi-gigabyte extra.
+        let default_plan = manifest
+            .plan(&CatalogSet::all())
+            .unwrap()
+            .into_iter()
+            .map(|file| file.name)
+            .collect::<Vec<_>>();
+        assert!(!default_plan.contains(&name));
+        assert_eq!(default_plan.len(), REQUIRED_BUNDLE_FILES.len());
     }
 }
