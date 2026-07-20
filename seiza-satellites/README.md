@@ -109,10 +109,10 @@ need to reimplement it:
   a tested negative (`NotDetected`) from a path that could not be tested
   (`NotEvaluated`). At least half of the sampled path must have complete
   center-line and sideband coverage by default; the measured coverage is
-  included in the result. The default search first sweeps the wider corridor
-  with parallel translations, then refines endpoint offsets in a small local
-  window. This accommodates orbital position error without making the fit cost
-  grow quadratically with corridor width.
+  included in the result. The default search sweeps the wider corridor across
+  a fixed range of endpoint tilts, then refines the best endpoint offsets in a
+  small local window. This accommodates orbital position error without making
+  the fit cost grow quadratically with corridor width.
 
 The alignment input is row-major `u16` luminance plus an ADU conversion factor,
 not an application-specific FITS type. Construct one aligner per frame and
