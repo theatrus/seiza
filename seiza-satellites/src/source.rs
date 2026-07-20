@@ -109,6 +109,7 @@ impl CelesTrakSource {
 
     /// List recognized snapshots from oldest to newest without network I/O.
     pub fn cached_snapshots(&self) -> Result<Vec<CachedCatalogSnapshot>> {
+        self.prune_cache_if_needed()?;
         let _shared = self.acquire_lock_blocking(LockMode::Shared)?;
         Ok(self
             .cache_inventory()?
@@ -129,6 +130,7 @@ impl CelesTrakSource {
     }
 
     fn load_cached_near(&self, time_utc: Option<UtcTimestamp>) -> Result<Option<CelesTrakLoad>> {
+        self.prune_cache_if_needed()?;
         let _shared = self.acquire_lock_blocking(LockMode::Shared)?;
         let mut snapshots = self.cache_inventory()?;
         if let Some(time_utc) = time_utc {
@@ -167,6 +169,10 @@ impl CelesTrakSource {
                 path: self.cache_dir.clone(),
                 source,
             })?;
+
+        // Enforce the configured bound even when the newest snapshot is fresh
+        // or the network is unavailable. Download is not a maintenance gate.
+        self.prune_cache_if_needed_async().await?;
 
         // Concurrent readers of a fresh snapshot only need a shared lock;
         // refreshes take the exclusive lock below.
@@ -296,7 +302,7 @@ impl CelesTrakSource {
             let _ = tokio::fs::remove_file(&temporary_path).await;
         }
         publication?;
-        self.enforce_cache_size_limit(&final_path).await?;
+        self.enforce_cache_size_limit(Some(&final_path)).await?;
         let snapshot = CacheSnapshot {
             path: final_path.clone(),
             retrieved_at,
@@ -382,12 +388,61 @@ impl CelesTrakSource {
         Ok(None)
     }
 
-    async fn enforce_cache_size_limit(&self, retained: &Path) -> Result<()> {
+    /// Enforce the configured history ceiling without performing network I/O.
+    /// The newest snapshot is always retained.
+    pub fn prune_cache(&self) -> Result<()> {
+        let _exclusive = self.acquire_lock_blocking(LockMode::Exclusive)?;
+        enforce_cache_size_limit_in(&self.cache_dir, None, self.cache_size_limit_bytes)
+    }
+
+    fn prune_cache_if_needed(&self) -> Result<()> {
+        let exceeds_limit = {
+            let _shared = self.acquire_lock_blocking(LockMode::Shared)?;
+            self.cache_exceeds_limit()?
+        };
+        if exceeds_limit {
+            self.prune_cache()?;
+        }
+        Ok(())
+    }
+
+    async fn prune_cache_if_needed_async(&self) -> Result<()> {
+        let exceeds_limit = {
+            let _shared = self.acquire_lock(LockMode::Shared).await?;
+            self.cache_exceeds_limit_async().await?
+        };
+        if !exceeds_limit {
+            return Ok(());
+        }
+        let _exclusive = self.acquire_lock(LockMode::Exclusive).await?;
+        self.enforce_cache_size_limit(None).await
+    }
+
+    fn cache_exceeds_limit(&self) -> Result<bool> {
+        Ok(self
+            .cache_inventory()?
+            .iter()
+            .map(|snapshot| u128::from(snapshot.size_bytes))
+            .sum::<u128>()
+            > u128::from(self.cache_size_limit_bytes))
+    }
+
+    async fn cache_exceeds_limit_async(&self) -> Result<bool> {
+        Ok(self
+            .cache_inventory_async()
+            .await?
+            .iter()
+            .map(|snapshot| u128::from(snapshot.size_bytes))
+            .sum::<u128>()
+            > u128::from(self.cache_size_limit_bytes))
+    }
+
+    async fn enforce_cache_size_limit(&self, retained: Option<&Path>) -> Result<()> {
         let cache_dir = self.cache_dir.clone();
-        let retained = retained.to_path_buf();
+        let retained = retained.map(Path::to_path_buf);
         let limit = self.cache_size_limit_bytes;
         tokio::task::spawn_blocking(move || {
-            enforce_cache_size_limit_in(&cache_dir, &retained, limit)
+            enforce_cache_size_limit_in(&cache_dir, retained.as_deref(), limit)
         })
         .await
         .map_err(|error| Error::CacheLock(error.to_string()))?
@@ -491,9 +546,14 @@ fn cache_inventory_in(cache_dir: &Path) -> Result<Vec<CacheSnapshot>> {
     Ok(snapshots)
 }
 
-fn enforce_cache_size_limit_in(cache_dir: &Path, retained: &Path, limit: u64) -> Result<()> {
+fn enforce_cache_size_limit_in(
+    cache_dir: &Path,
+    retained: Option<&Path>,
+    limit: u64,
+) -> Result<()> {
     remove_abandoned_partial_files(cache_dir)?;
     let mut snapshots = cache_inventory_in(cache_dir)?;
+    let newest = snapshots.last().map(|snapshot| snapshot.path.clone());
     let mut total = snapshots
         .iter()
         .map(|snapshot| snapshot.size_bytes)
@@ -502,7 +562,11 @@ fn enforce_cache_size_limit_in(cache_dir: &Path, retained: &Path, limit: u64) ->
         if total <= limit {
             break;
         }
-        if snapshot.path == retained {
+        if retained.is_some_and(|retained| snapshot.path == retained)
+            || newest
+                .as_deref()
+                .is_some_and(|newest| snapshot.path == newest)
+        {
             continue;
         }
         std::fs::remove_file(&snapshot.path).map_err(|source| Error::Io {
@@ -767,11 +831,11 @@ mod tests {
         let partial = dir.path().join(".celestrak-active-300-123.partial");
         std::fs::write(&partial, OMM).unwrap();
 
-        enforce_cache_size_limit_in(dir.path(), &paths[2], size * 3).unwrap();
+        enforce_cache_size_limit_in(dir.path(), Some(&paths[2]), size * 3).unwrap();
         assert!(paths.iter().all(|path| path.exists()));
         assert!(!partial.exists());
 
-        enforce_cache_size_limit_in(dir.path(), &paths[2], size * 2).unwrap();
+        enforce_cache_size_limit_in(dir.path(), Some(&paths[2]), size * 2).unwrap();
 
         assert!(!paths[0].exists());
         assert!(paths[1].exists());
@@ -783,5 +847,57 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let source = CelesTrakSource::new(dir.path()).unwrap();
         assert_eq!(source.cache_size_limit_bytes(), 5 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn cache_only_load_enforces_a_reduced_history_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let size = OMM.len() as u64;
+        let paths = [100_u64, 200, 300].map(|timestamp| {
+            let path = dir
+                .path()
+                .join(format!("{CACHE_PREFIX}{timestamp}{CACHE_SUFFIX}"));
+            std::fs::write(&path, OMM).unwrap();
+            path
+        });
+        let source = CelesTrakSource::new(dir.path())
+            .unwrap()
+            .with_cache_size_limit_bytes(size * 2);
+
+        let loaded = source.load_cached().unwrap().unwrap();
+
+        assert_eq!(loaded.cache_path, paths[2]);
+        assert!(!paths[0].exists());
+        assert!(paths[1].exists());
+        assert!(paths[2].exists());
+    }
+
+    #[tokio::test]
+    async fn fresh_cache_load_enforces_the_history_ceiling_without_downloading() {
+        let dir = tempfile::tempdir().unwrap();
+        let size = OMM.len() as u64;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let paths = [now - 2, now - 1, now].map(|timestamp| {
+            let path = dir
+                .path()
+                .join(format!("{CACHE_PREFIX}{timestamp}{CACHE_SUFFIX}"));
+            std::fs::write(&path, OMM).unwrap();
+            path
+        });
+        let source = CelesTrakSource::new(dir.path())
+            .unwrap()
+            .with_endpoint("http://127.0.0.1:1/never-called")
+            .with_cache_size_limit_bytes(size * 2);
+
+        let loaded = source.load_active().await.unwrap();
+
+        assert_eq!(loaded.state, CacheState::Fresh);
+        assert_eq!(loaded.cache_path, paths[2]);
+        assert!(!paths[0].exists());
+        assert!(paths[1].exists());
+        assert!(paths[2].exists());
     }
 }

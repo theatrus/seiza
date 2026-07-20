@@ -2289,6 +2289,7 @@ fn resolve_single_exposure_from_headers(
 
     let date_beg = header_text(headers, "DATE-BEG");
     let date_end = header_text(headers, "DATE-END");
+    let date_avg = header_text(headers, "DATE-AVG");
     let date_obs = header_text(headers, "DATE-OBS");
     let header_duration = ["XPOSURE", "EXPTIME", "EXPOSURE"]
         .into_iter()
@@ -2315,17 +2316,33 @@ fn resolve_single_exposure_from_headers(
     }
 
     if let Some(duration) = explicit_duration {
-        let start = date_beg.or(date_obs).ok_or_else(|| {
-            anyhow::anyhow!(
-                "--exposure-seconds also requires --time or a FITS DATE-BEG/DATE-OBS start"
-            )
-        })?;
-        return Ok(SingleExposure::from_start_and_duration(
-            UtcTimestamp::parse(start)?,
-            duration,
-            observer,
-            ExposureProvenance::Explicit,
-        )?);
+        if let Some(start) = date_beg.or(date_obs) {
+            return Ok(SingleExposure::from_start_and_duration(
+                UtcTimestamp::parse(start)?,
+                duration,
+                observer,
+                ExposureProvenance::Explicit,
+            )?);
+        }
+        if let Some(midpoint) = date_avg {
+            return Ok(SingleExposure::from_midpoint_and_duration(
+                UtcTimestamp::parse(midpoint)?,
+                duration,
+                observer,
+                ExposureProvenance::FitsDateAvgAndExposure,
+            )?);
+        }
+        if let Some(end) = date_end {
+            return Ok(SingleExposure::from_end_and_duration(
+                UtcTimestamp::parse(end)?,
+                duration,
+                observer,
+                ExposureProvenance::FitsEndAndExposure,
+            )?);
+        }
+        anyhow::bail!(
+            "--exposure-seconds also requires --time or a FITS DATE-BEG/DATE-OBS, DATE-AVG, or DATE-END timestamp"
+        );
     }
 
     if let (Some(start), Some(end)) = (date_beg, date_end) {
@@ -2337,22 +2354,39 @@ fn resolve_single_exposure_from_headers(
         )?);
     }
 
-    let start = date_obs.or(date_beg).ok_or_else(|| {
-        anyhow::anyhow!(
-            "satellite tracks require one exposure start; pass --time or provide FITS DATE-BEG/DATE-OBS"
-        )
-    })?;
+    if let (Some(midpoint), Some(duration)) = (date_avg, header_duration) {
+        return Ok(SingleExposure::from_midpoint_and_duration(
+            UtcTimestamp::parse(midpoint)?,
+            duration,
+            observer,
+            ExposureProvenance::FitsDateAvgAndExposure,
+        )?);
+    }
+
     let duration = header_duration.ok_or_else(|| {
         anyhow::anyhow!(
-            "satellite tracks require one shutter-open duration; pass --exposure-seconds or provide FITS DATE-END or XPOSURE/EXPTIME/EXPOSURE (stack integration totals are not accepted)"
+            "satellite tracks require one shutter-open duration; pass --exposure-seconds or provide FITS XPOSURE/EXPTIME/EXPOSURE (stack integration totals are not accepted)"
         )
     })?;
-    Ok(SingleExposure::from_start_and_duration(
-        UtcTimestamp::parse(start)?,
-        duration,
-        observer,
-        ExposureProvenance::FitsDateObsAndExposure,
-    )?)
+    if let Some(start) = date_obs.or(date_beg) {
+        return Ok(SingleExposure::from_start_and_duration(
+            UtcTimestamp::parse(start)?,
+            duration,
+            observer,
+            ExposureProvenance::FitsDateObsAndExposure,
+        )?);
+    }
+    if let Some(end) = date_end {
+        return Ok(SingleExposure::from_end_and_duration(
+            UtcTimestamp::parse(end)?,
+            duration,
+            observer,
+            ExposureProvenance::FitsEndAndExposure,
+        )?);
+    }
+    anyhow::bail!(
+        "satellite tracks require one exposure timestamp; pass --time or provide FITS DATE-BEG/DATE-OBS, DATE-AVG, or DATE-END"
+    )
 }
 
 fn header_text<'a>(headers: &'a [(String, seiza_fits::HeaderValue)], key: &str) -> Option<&'a str> {
@@ -3382,6 +3416,57 @@ mod cli_tests {
             ExposureProvenance::FitsDateObsAndExposure
         );
         assert!((exposure.duration_seconds() - 45.5).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn satellite_exposure_supports_date_avg_as_the_midpoint() {
+        use seiza_fits::HeaderValue::{Float, String as Text};
+
+        let headers = vec![
+            ("DATE-AVG".into(), Text("2024-05-02T12:00:30".into())),
+            ("EXPTIME".into(), Float(60.0)),
+            ("OBSGEO-B".into(), Float(37.3)),
+            ("OBSGEO-L".into(), Float(-122.0)),
+            ("OBSGEO-H".into(), Float(50.0)),
+        ];
+        let exposure =
+            resolve_single_exposure_from_headers(&headers, None, None, None, None, None).unwrap();
+        assert_eq!(
+            exposure.provenance,
+            ExposureProvenance::FitsDateAvgAndExposure
+        );
+        assert_eq!(
+            exposure.start_utc,
+            UtcTimestamp::parse("2024-05-02T12:00:00Z").unwrap()
+        );
+        assert_eq!(
+            exposure.end_utc,
+            UtcTimestamp::parse("2024-05-02T12:01:00Z").unwrap()
+        );
+    }
+
+    #[test]
+    fn satellite_exposure_supports_date_end_as_shutter_close() {
+        use seiza_fits::HeaderValue::{Float, String as Text};
+
+        let headers = vec![
+            ("DATE-END".into(), Text("2024-05-02T12:01:00".into())),
+            ("EXPTIME".into(), Float(60.0)),
+            ("OBSGEO-B".into(), Float(37.3)),
+            ("OBSGEO-L".into(), Float(-122.0)),
+            ("OBSGEO-H".into(), Float(50.0)),
+        ];
+        let exposure =
+            resolve_single_exposure_from_headers(&headers, None, None, None, None, None).unwrap();
+        assert_eq!(exposure.provenance, ExposureProvenance::FitsEndAndExposure);
+        assert_eq!(
+            exposure.start_utc,
+            UtcTimestamp::parse("2024-05-02T12:00:00Z").unwrap()
+        );
+        assert_eq!(
+            exposure.end_utc,
+            UtcTimestamp::parse("2024-05-02T12:01:00Z").unwrap()
+        );
     }
 
     #[test]

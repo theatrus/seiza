@@ -18,7 +18,9 @@ need to reimplement it:
   bounded corridor around the complete predicted polyline. The result keeps
   aligned pixel evidence separate from the orbital prediction and distinguishes
   a tested negative (`NotDetected`) from a path that could not be tested
-  (`NotEvaluated`).
+  (`NotEvaluated`). At least half of the sampled path must have complete
+  center-line and sideband coverage by default; the measured coverage is
+  included in the result.
 
 The alignment input is row-major `u16` luminance plus an ADU conversion factor,
 not an application-specific FITS type. Construct one aligner per frame and
@@ -34,6 +36,8 @@ the next refresh. The history is bounded by 5 GiB by default; once the ceiling
 is exceeded, the oldest snapshots are removed until the cache fits, while the
 newest snapshot is always retained. Applications can choose another ceiling
 with `with_cache_size_limit_bytes`.
+The ceiling is enforced by active and cache-only loads, without requiring a
+successful download; `prune_cache` is also available for explicit maintenance.
 
 Cache-only consumers never need to rediscover the crate's private filename or
 locking rules:
@@ -49,8 +53,10 @@ reusing them; retrieval time is kept as provenance but does not change the
 content identity. Offline workflows can still open a local OMM JSON or TLE
 file directly and receive the same fingerprint contract.
 
-`SingleExposure::from_midpoint_and_duration` is available for FITS writers
-whose reliable timestamp is `DATE-AVG` rather than shutter open.
+`SingleExposure::from_midpoint_and_duration` and
+`SingleExposure::from_end_and_duration` cover FITS writers whose reliable
+timestamp is `DATE-AVG` or shutter close rather than shutter open. Dedicated
+provenance variants preserve which interpretation was used.
 
 The optional `serde` feature derives `Serialize`/`Deserialize` on the
 prediction result types so applications can embed or persist them directly.

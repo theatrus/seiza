@@ -29,14 +29,17 @@ and aligned pixel evidence as distinct provenance layers.
 
 - UTC start and end timestamps;
 - an ITRF Cartesian or geodetic observer location;
-- metadata provenance (`Explicit`, `FitsBounds`, or
+- metadata provenance (`Explicit`, `FitsBounds`,
+  `FitsDateAvgAndExposure`, `FitsEndAndExposure`, or
   `FitsDateObsAndExposure`).
 
 The CLI resolves those values in this order:
 
 1. explicit `--time`, `--exposure-seconds`, and observer arguments;
 2. FITS `DATE-BEG` and `DATE-END`;
-3. FITS `DATE-OBS` plus `XPOSURE`, `EXPTIME`, or `EXPOSURE`.
+3. FITS `DATE-AVG` plus `XPOSURE`, `EXPTIME`, or `EXPOSURE`;
+4. FITS `DATE-OBS` plus a duration;
+5. a lone FITS `DATE-END` plus a duration, interpreted as shutter close.
 
 The FITS standard gives `DATE-BEG` and `DATE-END` unambiguous acquisition-bound
 semantics. `DATE-OBS` is only a fallback because historical files have also
@@ -62,6 +65,9 @@ snapshots atomically, coordinates refreshes across processes, and may use a
 previously validated stale snapshot if refresh fails. History is retained
 until its configurable size ceiling is reached (5 GiB by default), then the
 oldest snapshots are evicted while the newest is always preserved.
+Both active and cache-only loads enforce the ceiling without requiring a
+successful refresh, and `prune_cache` exposes the same locked maintenance step
+for callers that want to run it explicitly.
 The result records whether the snapshot was fresh, downloaded, or a stale
 fallback. A non-success HTTP status is returned immediately without retrying;
 403 and 429 map to a dedicated rate-limit error carrying any `Retry-After`
@@ -148,8 +154,11 @@ predicted polyline. Fitting the complete polyline avoids replacing a curved
 track with an inaccurate endpoint chord. A detection returns aligned segments,
 offsets, contrast, significance, and continuity while leaving the prediction
 unchanged. `NotDetected` means the path was evaluated without sufficient pixel
-support; `NotEvaluated` records an empty or too-short path and is not negative
-evidence.
+support; `NotEvaluated` records an empty, too-short, or insufficiently covered
+path and is not negative evidence. The default fit requires complete center and
+sideband samples across at least half the predicted path and reports the actual
+coverage with the evidence, preventing a small edge fragment from standing in
+for a complete trail.
 
 `tracks_in_footprint` borrows the catalog immutably — SGP4 initialization is
 cached on a per-call scratch copy of each element — so one loaded catalog can

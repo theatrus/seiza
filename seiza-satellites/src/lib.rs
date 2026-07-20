@@ -141,6 +141,11 @@ impl UtcTimestamp {
 pub enum ExposureProvenance {
     Explicit,
     FitsBounds,
+    /// FITS `DATE-AVG` plus an exposure duration.
+    FitsDateAvgAndExposure,
+    /// A FITS timestamp interpreted as shutter close plus a duration.
+    FitsEndAndExposure,
+    /// FITS `DATE-OBS` interpreted as shutter open plus a duration.
     FitsDateObsAndExposure,
 }
 
@@ -269,6 +274,26 @@ impl SingleExposure {
         )
     }
 
+    /// Build an exposure whose supplied timestamp is shutter close.
+    pub fn from_end_and_duration(
+        end_utc: UtcTimestamp,
+        duration_seconds: f64,
+        observer: ObserverLocation,
+        provenance: ExposureProvenance,
+    ) -> Result<Self> {
+        if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
+            return Err(Error::InvalidExposure(
+                "duration must be a positive finite number of seconds",
+            ));
+        }
+        Self::new(
+            end_utc.add_seconds(-duration_seconds)?,
+            end_utc,
+            observer,
+            provenance,
+        )
+    }
+
     pub fn duration_seconds(self) -> f64 {
         self.end_utc.seconds_since(self.start_utc)
     }
@@ -351,6 +376,7 @@ pub struct SatelliteTrack {
 /// Qualitative interpretation of the generic bright-trail heuristic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum BrightTrailRiskLevel {
     Low,
     Possible,
@@ -1095,6 +1121,15 @@ mod tests {
             )
             .is_err()
         );
+        assert!(
+            SingleExposure::from_end_and_duration(
+                time,
+                -1.0,
+                observer,
+                ExposureProvenance::Explicit
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1105,7 +1140,7 @@ mod tests {
             midpoint,
             60.0,
             observer,
-            ExposureProvenance::FitsDateObsAndExposure,
+            ExposureProvenance::FitsDateAvgAndExposure,
         )
         .unwrap();
         assert_eq!(
@@ -1116,6 +1151,26 @@ mod tests {
             exposure.end_utc.unix_seconds(),
             midpoint.unix_seconds() + 30.0
         );
+        assert_eq!(
+            exposure.provenance,
+            ExposureProvenance::FitsDateAvgAndExposure
+        );
+    }
+
+    #[test]
+    fn builds_exposure_ending_at_a_supplied_timestamp() {
+        let end = UtcTimestamp::parse("2024-05-02T12:01:00Z").unwrap();
+        let observer = ObserverLocation::geodetic(37.0, -122.0, 10.0).unwrap();
+        let exposure = SingleExposure::from_end_and_duration(
+            end,
+            60.0,
+            observer,
+            ExposureProvenance::FitsEndAndExposure,
+        )
+        .unwrap();
+        assert_eq!(exposure.start_utc.unix_seconds(), end.unix_seconds() - 60.0);
+        assert_eq!(exposure.end_utc, end);
+        assert_eq!(exposure.provenance, ExposureProvenance::FitsEndAndExposure);
     }
 
     #[test]
@@ -1351,6 +1406,19 @@ mod tests {
         let eclipsed = track.bright_trail_risk(&BrightTrailRiskOptions::default());
         assert_eq!(eclipsed.level, BrightTrailRiskLevel::Low);
         assert_eq!(eclipsed.score, 0.0);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn bright_trail_risk_level_uses_api_friendly_json_names() {
+        assert_eq!(
+            serde_json::to_string(&BrightTrailRiskLevel::High).unwrap(),
+            r#""high""#
+        );
+        assert_eq!(
+            serde_json::from_str::<BrightTrailRiskLevel>(r#""possible""#).unwrap(),
+            BrightTrailRiskLevel::Possible
+        );
     }
 
     #[test]

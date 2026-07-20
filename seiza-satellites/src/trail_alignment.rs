@@ -29,6 +29,7 @@ pub enum PixelTrailAlignmentStatus {
 pub enum PixelTrailNotEvaluatedReason {
     EmptyPath,
     TooShort,
+    InsufficientCoverage,
 }
 
 /// Tunables for prediction-constrained pixel alignment.
@@ -45,6 +46,9 @@ pub struct PixelTrailAlignmentConfig {
     pub minimum_working_length_px: f64,
     pub minimum_samples: usize,
     pub maximum_samples: usize,
+    /// Minimum fraction of sampled path positions that must have complete
+    /// center-line and sideband coverage.
+    pub minimum_coverage_fraction: f64,
     pub minimum_contrast_sigma: f64,
     pub minimum_continuity: f64,
 }
@@ -59,6 +63,7 @@ impl Default for PixelTrailAlignmentConfig {
             minimum_working_length_px: 30.0,
             minimum_samples: 80,
             maximum_samples: 1_200,
+            minimum_coverage_fraction: 0.5,
             minimum_contrast_sigma: 2.0,
             minimum_continuity: 0.65,
         }
@@ -91,6 +96,8 @@ pub struct PixelTrailAlignment {
     pub contrast_adu: f64,
     pub contrast_sigma: f64,
     pub continuity: f64,
+    /// Fraction of the sampled predicted path used by the fitted score.
+    pub coverage: f64,
     pub search_radius_px: f64,
 }
 
@@ -205,13 +212,16 @@ impl PixelTrailAligner {
             config.search_radius_working_px,
             config.coarse_step_px,
             |start_offset, end_offset| {
-                let score = working.path_score(
+                let Some(score) = working.path_score(
                     &path_samples,
                     start_offset,
                     end_offset,
                     noise,
                     config.minimum_samples,
-                );
+                    config.minimum_coverage_fraction,
+                ) else {
+                    return;
+                };
                 if best
                     .as_ref()
                     .is_none_or(|(_, _, current)| score.objective > current.objective)
@@ -222,7 +232,10 @@ impl PixelTrailAligner {
         );
 
         let Some((coarse_start, coarse_end, _)) = best else {
-            return not_detected(search_radius_px);
+            return not_evaluated(
+                search_radius_px,
+                PixelTrailNotEvaluatedReason::InsufficientCoverage,
+            );
         };
         search_offsets_2d(
             coarse_start - config.coarse_step_px,
@@ -236,13 +249,16 @@ impl PixelTrailAligner {
                 {
                     return;
                 }
-                let score = working.path_score(
+                let Some(score) = working.path_score(
                     &path_samples,
                     start_offset,
                     end_offset,
                     noise,
                     config.minimum_samples,
-                );
+                    config.minimum_coverage_fraction,
+                ) else {
+                    return;
+                };
                 if best
                     .as_ref()
                     .is_none_or(|(_, _, current)| score.objective > current.objective)
@@ -288,6 +304,7 @@ impl PixelTrailAligner {
             contrast_adu: score.contrast * working.adu_per_stored_unit,
             contrast_sigma: score.contrast_sigma,
             continuity: score.continuity,
+            coverage: score.coverage,
             search_radius_px,
         }
     }
@@ -305,6 +322,8 @@ fn config_is_valid(config: &PixelTrailAlignmentConfig) -> bool {
         && config.minimum_working_length_px > 0.0
         && config.minimum_samples >= 2
         && config.maximum_samples >= config.minimum_samples
+        && config.minimum_coverage_fraction.is_finite()
+        && (0.0..=1.0).contains(&config.minimum_coverage_fraction)
         && config.minimum_contrast_sigma.is_finite()
         && config.minimum_contrast_sigma >= 0.0
         && config.minimum_continuity.is_finite()
@@ -545,7 +564,8 @@ impl WorkingImage {
         end_offset: f64,
         noise: f64,
         minimum_samples: usize,
-    ) -> LineScore {
+        minimum_coverage_fraction: f64,
+    ) -> Option<LineScore> {
         let mut contrasts = Vec::with_capacity(path_samples.len());
         for sample in path_samples {
             let offset = (end_offset - start_offset).mul_add(sample.progress, start_offset);
@@ -580,8 +600,9 @@ impl WorkingImage {
             ];
             contrasts.push(center - quantile(&mut sides, 0.5));
         }
-        if contrasts.len() < minimum_samples / 2 {
-            return LineScore::invalid();
+        let coverage = contrasts.len() as f64 / path_samples.len() as f64;
+        if contrasts.len() < minimum_samples / 2 || coverage < minimum_coverage_fraction {
+            return None;
         }
         let continuity = contrasts
             .iter()
@@ -590,12 +611,13 @@ impl WorkingImage {
             / contrasts.len() as f64;
         let contrast = quantile(&mut contrasts, 0.60).max(0.0);
         let contrast_sigma = contrast / noise;
-        LineScore {
+        Some(LineScore {
             contrast,
             contrast_sigma,
             continuity,
+            coverage,
             objective: contrast_sigma * (0.5 + 0.5 * continuity),
-        }
+        })
     }
 
     fn sample_offset(&self, point: Point, normal: Point, offset: f64) -> Option<f64> {
@@ -608,18 +630,8 @@ struct LineScore {
     contrast: f64,
     contrast_sigma: f64,
     continuity: f64,
+    coverage: f64,
     objective: f64,
-}
-
-impl LineScore {
-    fn invalid() -> Self {
-        Self {
-            contrast: 0.0,
-            contrast_sigma: 0.0,
-            continuity: 0.0,
-            objective: f64::NEG_INFINITY,
-        }
-    }
 }
 
 fn not_detected(search_radius_px: f64) -> PixelTrailAlignment {
@@ -634,6 +646,7 @@ fn not_detected(search_radius_px: f64) -> PixelTrailAlignment {
         contrast_adu: 0.0,
         contrast_sigma: 0.0,
         continuity: 0.0,
+        coverage: 0.0,
         search_radius_px,
     }
 }
@@ -833,6 +846,9 @@ mod tests {
         assert!(alignment.detected(), "{alignment:?}");
         assert_eq!(alignment.aligned_segments.len(), 1);
         assert!(alignment.mean_normal_offset_px.abs() > 4.0);
+        assert!(
+            alignment.coverage >= PixelTrailAlignmentConfig::default().minimum_coverage_fraction
+        );
         assert_eq!(predicted, vec![segment((20.0, 110.0), (610.0, 245.0))]);
     }
 
@@ -882,5 +898,56 @@ mod tests {
             alignment.not_evaluated_reason,
             Some(PixelTrailNotEvaluatedReason::TooShort)
         );
+    }
+
+    #[test]
+    fn paths_without_enough_sideband_coverage_are_not_evaluated() {
+        let predicted = vec![segment((5.0, 4.0), (58.0, 4.0))];
+        let pixels = test_image(64, 8, &[]);
+
+        let alignment = aligner(64, 8, &pixels).align_track(&predicted);
+
+        assert!(!alignment.evaluated(), "{alignment:?}");
+        assert_eq!(
+            alignment.not_evaluated_reason,
+            Some(PixelTrailNotEvaluatedReason::InsufficientCoverage)
+        );
+        assert_eq!(alignment.coverage, 0.0);
+    }
+
+    #[test]
+    fn a_small_valid_fragment_cannot_stand_in_for_a_long_path() {
+        let trail = segment((10.0, 32.0), (49.0, 32.0));
+        let pixels = test_image(128, 64, &[trail]);
+        let working = WorkingImage::from_u16(128, 64, &pixels, 1.0, 2_048);
+        let mut samples = (0..1_160)
+            .map(|index| PathSample {
+                point: Point {
+                    x: -100.0,
+                    y: -100.0,
+                },
+                normal: Point { x: 0.0, y: 1.0 },
+                progress: index as f64 / 1_200.0,
+            })
+            .collect::<Vec<_>>();
+        samples.extend((0..40).map(|index| PathSample {
+            point: Point {
+                x: 10.0 + index as f64,
+                y: 32.0,
+            },
+            normal: Point { x: 0.0, y: 1.0 },
+            progress: (1_160 + index) as f64 / 1_200.0,
+        }));
+
+        let score = working.path_score(
+            &samples,
+            0.0,
+            0.0,
+            working.local_noise_sigma().max(1.0e-6),
+            80,
+            0.5,
+        );
+
+        assert!(score.is_none());
     }
 }
