@@ -23,8 +23,8 @@ fn map_error(error: sat::Error) -> PyErr {
     }
 }
 
-/// `start` accepts Unix seconds, an RFC 3339 string, or a timezone-aware
-/// `datetime.datetime`.
+/// Parse a time argument: Unix seconds, an RFC 3339 string, or a
+/// timezone-aware `datetime.datetime`.
 fn parse_start(start: &Bound<'_, PyAny>) -> PyResult<sat::UtcTimestamp> {
     if let Ok(seconds) = start.extract::<f64>() {
         return sat::UtcTimestamp::from_unix_seconds(seconds).map_err(map_error);
@@ -43,7 +43,7 @@ fn parse_start(start: &Bound<'_, PyAny>) -> PyResult<sat::UtcTimestamp> {
         return sat::UtcTimestamp::from_unix_seconds(seconds).map_err(map_error);
     }
     Err(PyValueError::new_err(
-        "start must be Unix seconds, an RFC 3339 string, or a timezone-aware datetime",
+        "expected Unix seconds, an RFC 3339 string, or a timezone-aware datetime",
     ))
 }
 
@@ -295,7 +295,9 @@ impl PySatelliteCatalog {
     /// CelesTrak's current active set; older times use the Seiza satellite
     /// mirror, falling back to IAU SatChecker. `time` is Unix seconds, an
     /// RFC 3339 string, or a timezone-aware datetime — pass the exposure
-    /// midpoint. Inspect `provider`, `cache_state`, and `warning` afterwards.
+    /// midpoint. For a recent time this may refresh CelesTrak, which
+    /// rate-limits repeated downloads, so reuse one cache directory. Inspect
+    /// `provider`, `cache_state`, and `warning` afterwards.
     #[staticmethod]
     #[pyo3(signature = (time, cache_dir=None))]
     fn resolve(
