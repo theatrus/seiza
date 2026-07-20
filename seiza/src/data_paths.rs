@@ -61,8 +61,11 @@ pub enum DataPathError {
     NoDefault { kind: &'static str },
 }
 
-/// Solver star tile catalogs, preferring the deepest available.
+/// Solver star tile catalogs, preferring the deepest available. The optional
+/// G≤20 catalog (hosted as an opt-in download, not part of the standard bundle)
+/// is deepest, so a host that has installed it prefers it automatically.
 const STAR_DATA_NAMES: &[&str] = &[
+    "stars-deep-gaia20.bin",
     "stars-deep-gaia17.bin",
     "stars-gaia.bin",
     "stars-lite-tycho2.bin",
@@ -317,6 +320,17 @@ mod tests {
         std::fs::write(dir.path().join("stars-gaia.bin"), b"gaia").unwrap();
         let picked = star_data(Some(dir.path())).unwrap();
         assert!(picked.ends_with("stars-gaia.bin"), "prefers deeper catalog");
+
+        std::fs::write(dir.path().join("stars-deep-gaia17.bin"), b"g17").unwrap();
+        let picked = star_data(Some(dir.path())).unwrap();
+        assert!(picked.ends_with("stars-deep-gaia17.bin"), "prefers deep G17");
+
+        std::fs::write(dir.path().join("stars-deep-gaia20.bin"), b"g20").unwrap();
+        let picked = star_data(Some(dir.path())).unwrap();
+        assert!(
+            picked.ends_with("stars-deep-gaia20.bin"),
+            "prefers the optional deepest G20 catalog when present"
+        );
     }
 
     #[test]

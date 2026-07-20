@@ -693,7 +693,9 @@ enum DownloadSource {
         /// Directory to download into
         #[arg(long)]
         output: PathBuf,
-        /// Specific files (default: everything in the bundle manifest)
+        /// Specific files (default: the complete standard bundle). Optional
+        /// extras hosted outside the bundle, such as stars-deep-gaia20.bin, are
+        /// fetched only when named here.
         #[arg(long)]
         file: Vec<String>,
     },

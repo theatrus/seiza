@@ -34,6 +34,7 @@ enum SetupPreset {
     SolverLite,
     SolverGaia,
     BlindDeep,
+    BlindDeepGaia20,
     All,
 }
 
@@ -50,6 +51,7 @@ impl SetupPreset {
             Self::SolverLite => "solver-lite",
             Self::SolverGaia => "solver-gaia",
             Self::BlindDeep => "blind-deep",
+            Self::BlindDeepGaia20 => "blind-deep-gaia20",
             Self::All => "all",
         }
     }
@@ -75,7 +77,28 @@ impl SetupPreset {
                 Dataset::StarsDeepGaia17,
                 Dataset::BlindGaia16,
             ],
-            Self::All => return Vec::new(),
+            Self::BlindDeepGaia20 => &[
+                Dataset::Objects,
+                Dataset::MinorBodies,
+                Dataset::Transients,
+                Dataset::StarsDeepGaia20,
+                Dataset::BlindGaia16,
+            ],
+            // Everything published, including the optional G≤20 catalog. This is
+            // enumerated explicitly (rather than the bare `all` bundle) so that
+            // the deep catalog IS pulled here, while a plain `download-data
+            // prebuilt` stays on the standard bundle.
+            Self::All => &[
+                Dataset::Objects,
+                Dataset::MinorBodies,
+                Dataset::Transients,
+                Dataset::StarsLiteTycho2,
+                Dataset::StarsLiteTycho2Identifiers,
+                Dataset::StarsGaia,
+                Dataset::StarsDeepGaia17,
+                Dataset::StarsDeepGaia20,
+                Dataset::BlindGaia16,
+            ],
         };
         datasets
             .iter()
@@ -94,7 +117,12 @@ impl SetupPreset {
             Self::BlindDeep => {
                 "Unknown sky position: objects + Solar System + transients + deep Gaia catalog + blind index"
             }
-            Self::All => "Development and offline use: every published catalog",
+            Self::BlindDeepGaia20 => {
+                "Faintest deep solving (large, ~9 GB): objects + Solar System + transients + G≤20 Gaia catalog + blind index"
+            }
+            Self::All => {
+                "Development and offline use: every published catalog, including the large G≤20 deep catalog (slower, ~9 GB extra)"
+            }
         }
     }
 }
@@ -321,7 +349,11 @@ fn prompt_preset<R: BufRead, W: Write>(input: &mut R, output: &mut W) -> Result<
     writeln!(output, "  3. Unknown sky position: deep blind solving")?;
     writeln!(
         output,
-        "  4. Development / offline use: complete catalog bundle"
+        "  4. Faintest deep solving (large, ~9 GB): G≤20 Gaia catalog"
+    )?;
+    writeln!(
+        output,
+        "  5. Development / offline use: everything, incl. G≤20 (slower, large)"
     )?;
     write!(output, "\nChoose a package [1]: ")?;
     output.flush()?;
@@ -334,8 +366,9 @@ fn prompt_preset<R: BufRead, W: Write>(input: &mut R, output: &mut W) -> Result<
         "" | "1" => Ok(SetupPreset::SolverLite),
         "2" => Ok(SetupPreset::SolverGaia),
         "3" => Ok(SetupPreset::BlindDeep),
-        "4" => Ok(SetupPreset::All),
-        other => anyhow::bail!("invalid selection {other:?}; expected a number from 1 to 4"),
+        "4" => Ok(SetupPreset::BlindDeepGaia20),
+        "5" => Ok(SetupPreset::All),
+        other => anyhow::bail!("invalid selection {other:?}; expected a number from 1 to 5"),
     }
 }
 
@@ -386,11 +419,44 @@ mod tests {
     }
 
     #[test]
+    fn preset_prompt_selects_deep_gaia20_package() {
+        let mut output = Vec::new();
+        let preset = prompt_preset(&mut Cursor::new("4\n"), &mut output).unwrap();
+        assert_eq!(preset, SetupPreset::BlindDeepGaia20);
+        assert_eq!(
+            preset.files(),
+            [
+                "objects.bin",
+                "minor-bodies.bin",
+                "transients.bin",
+                "stars-deep-gaia20.bin",
+                "blind-gaia16.idx",
+            ]
+        );
+    }
+
+    #[test]
+    fn full_bundle_is_option_five_and_includes_deep_gaia20() {
+        let mut output = Vec::new();
+        let preset = prompt_preset(&mut Cursor::new("5\n"), &mut output).unwrap();
+        assert_eq!(preset, SetupPreset::All);
+        // "All" enumerates the optional deep catalog explicitly so it IS fetched
+        // (unlike the bare default download bundle).
+        assert!(
+            preset
+                .files()
+                .iter()
+                .any(|file| file == "stars-deep-gaia20.bin")
+        );
+    }
+
+    #[test]
     fn every_selective_preset_includes_sky_objects_and_plate_solving() {
         for preset in [
             SetupPreset::SolverLite,
             SetupPreset::SolverGaia,
             SetupPreset::BlindDeep,
+            SetupPreset::BlindDeepGaia20,
         ] {
             let files = preset.files();
             assert!(files.iter().any(|file| file == "objects.bin"));
