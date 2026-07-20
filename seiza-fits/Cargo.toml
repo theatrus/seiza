@@ -3,6 +3,7 @@ name = "seiza-fits"
 description = "Fast, dependency-free FITS image reading, statistics, and MTF autostretch for astrophotography"
 version = "0.1.6"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true

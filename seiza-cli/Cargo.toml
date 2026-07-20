@@ -3,6 +3,7 @@ name = "seiza-cli"
 description = "Command-line interface for seiza: star detection, plate solving, and dataset management"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
