@@ -10,7 +10,13 @@ use std::{error::Error, fmt};
 use crate::{PixelPoint, PixelSegment};
 
 /// Version of the alignment algorithm and its reported evidence semantics.
-pub const PIXEL_TRAIL_ALIGNMENT_VERSION: u32 = 2;
+pub const PIXEL_TRAIL_ALIGNMENT_VERSION: u32 = 3;
+
+// Once a parallel translation has located the trail, endpoint refinement only
+// needs to cover modest angular error. Keeping this window independent of the
+// full corridor prevents a wider orbital-uncertainty search from becoming
+// quadratic.
+const LOCAL_TILT_SEARCH_RADIUS_WORKING_PX: f64 = 32.0;
 
 /// Whether the predicted path was tested and supported by image pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,7 +63,7 @@ impl Default for PixelTrailAlignmentConfig {
     fn default() -> Self {
         Self {
             maximum_working_dimension: 2_048,
-            search_radius_working_px: 32.0,
+            search_radius_working_px: 192.0,
             coarse_step_px: 2.0,
             refine_step_px: 0.5,
             minimum_working_length_px: 30.0,
@@ -207,9 +213,42 @@ impl PixelTrailAligner {
                 .clamp(config.minimum_samples, config.maximum_samples),
         );
         let mut best: Option<(f64, f64, LineScore)> = None;
-        search_offsets(
+        search_parallel_offsets(
             -config.search_radius_working_px,
             config.search_radius_working_px,
+            config.coarse_step_px,
+            |offset| {
+                let Some(score) = working.path_score(
+                    &path_samples,
+                    offset,
+                    offset,
+                    noise,
+                    config.minimum_samples,
+                    config.minimum_coverage_fraction,
+                ) else {
+                    return;
+                };
+                if best
+                    .as_ref()
+                    .is_none_or(|(_, _, current)| score.objective > current.objective)
+                {
+                    best = Some((offset, offset, score));
+                }
+            },
+        );
+
+        let Some((parallel_start, parallel_end, _)) = best else {
+            return not_evaluated(
+                search_radius_px,
+                PixelTrailNotEvaluatedReason::InsufficientCoverage,
+            );
+        };
+        let tilt_radius = LOCAL_TILT_SEARCH_RADIUS_WORKING_PX.min(config.search_radius_working_px);
+        search_offsets_2d(
+            (parallel_start - tilt_radius).max(-config.search_radius_working_px),
+            (parallel_start + tilt_radius).min(config.search_radius_working_px),
+            (parallel_end - tilt_radius).max(-config.search_radius_working_px),
+            (parallel_end + tilt_radius).min(config.search_radius_working_px),
             config.coarse_step_px,
             |start_offset, end_offset| {
                 let Some(score) = working.path_score(
@@ -231,12 +270,7 @@ impl PixelTrailAligner {
             },
         );
 
-        let Some((coarse_start, coarse_end, _)) = best else {
-            return not_evaluated(
-                search_radius_px,
-                PixelTrailNotEvaluatedReason::InsufficientCoverage,
-            );
-        };
+        let (coarse_start, coarse_end, _) = best.expect("parallel search produced a candidate");
         search_offsets_2d(
             coarse_start - config.coarse_step_px,
             coarse_start + config.coarse_step_px,
@@ -670,8 +704,12 @@ fn quantile(values: &mut [f64], fraction: f64) -> f64 {
     values[index]
 }
 
-fn search_offsets(minimum: f64, maximum: f64, step: f64, mut visit: impl FnMut(f64, f64)) {
-    search_offsets_2d(minimum, maximum, minimum, maximum, step, &mut visit);
+fn search_parallel_offsets(minimum: f64, maximum: f64, step: f64, mut visit: impl FnMut(f64)) {
+    let mut offset = minimum;
+    while offset <= maximum + step * 0.25 {
+        visit(offset);
+        offset += step;
+    }
 }
 
 fn search_offsets_2d(
@@ -884,6 +922,29 @@ mod tests {
         assert!(alignment.detected(), "{alignment:?}");
         assert_eq!(alignment.aligned_segments.len(), predicted.len());
         assert!(alignment.mean_normal_offset_px.abs() > 3.0);
+    }
+
+    #[test]
+    fn finds_a_large_orbital_offset_and_refines_its_tilt() {
+        let predicted = vec![segment((20.0, 80.0), (620.0, 80.0))];
+        let actual = vec![segment((20.0, 180.0), (620.0, 210.0))];
+        let pixels = test_image(640, 360, &actual);
+
+        let alignment = aligner(640, 360, &pixels).align_track(&predicted);
+
+        assert!(alignment.detected(), "{alignment:?}");
+        assert!(
+            (alignment.start_normal_offset_px - 100.0).abs() < 5.0,
+            "{alignment:?}"
+        );
+        assert!(
+            (alignment.end_normal_offset_px - 130.0).abs() < 5.0,
+            "{alignment:?}"
+        );
+        assert!(
+            (alignment.angle_delta_deg - 2.86).abs() < 0.25,
+            "{alignment:?}"
+        );
     }
 
     #[test]
