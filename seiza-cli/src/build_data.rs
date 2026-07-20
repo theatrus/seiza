@@ -7,7 +7,7 @@ use seiza::star_ids::{
     normalize_star_name,
 };
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Build a star tile file from the Tycho-2 catalogue (CDS I/259).
 ///
@@ -3727,6 +3727,11 @@ fn file_digest(path: &Path) -> Result<(u64, String)> {
     Ok((bytes, sha256))
 }
 
+/// zstd level for mirror artifacts. TLE is small, highly compressible ASCII
+/// compressed once and served many times, so a high level is worth the one-time
+/// cost while staying well short of the max's memory footprint.
+const SATELLITE_MIRROR_ZSTD_LEVEL: i32 = 19;
+
 /// Roll validated historical TLE cache entries into the Seiza satellite
 /// mirror schema and stage immutable content-addressed files for S3.
 pub fn build_satellite_manifest(
@@ -3736,29 +3741,61 @@ pub fn build_satellite_manifest(
     artifact_dir: &Path,
 ) -> Result<()> {
     use seiza_satellites::{
-        SATCHECKER_TLES_AT_EPOCH_URL, SatCheckerSource, SatelliteMirrorEntry,
+        MirrorEncoding, SATCHECKER_TLES_AT_EPOCH_URL, SatCheckerSource, SatelliteMirrorEntry,
         SatelliteMirrorManifest, UtcTimestamp,
     };
-    use std::collections::{BTreeMap, HashSet};
+    use std::collections::{BTreeMap, HashMap};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let mut entries = BTreeMap::<i64, SatelliteMirrorEntry>::new();
-    let mut published_hashes = HashSet::new();
+    // Uncompressed sha -> the encoded (size, sha256) of its staged .zst, so
+    // identical content — retained from the base manifest or repeated across
+    // epochs — is compressed and uploaded only once.
+    let mut encoded_by_sha = HashMap::<String, (u64, String)>::new();
     if let Some(base_manifest) = base_manifest {
         let bytes = std::fs::read(base_manifest)
             .with_context(|| format!("cannot read {}", base_manifest.display()))?;
         let base = SatelliteMirrorManifest::parse(&bytes, base_manifest.display().to_string())?;
         for entry in base.snapshots {
             let millis = (entry.query_time()?.unix_seconds() * 1_000.0).round() as i64;
-            published_hashes.insert(entry.sha256.clone());
+            if let (Some(size), Some(sha)) =
+                (entry.encoded_size_bytes, entry.encoded_sha256.clone())
+            {
+                encoded_by_sha.insert(entry.sha256.clone(), (size, sha));
+            }
             entries.insert(millis, entry);
         }
     }
 
-    let mut replacements = Vec::<(i64, SatelliteMirrorEntry, PathBuf)>::new();
     let satchecker = SatCheckerSource::new(cache_dir)?;
-    for snapshot in satchecker.cached_snapshots()? {
+    let cached = satchecker.cached_snapshots()?;
+    if cached.is_empty() && entries.is_empty() {
+        bail!(
+            "no historical satellite snapshots found in {}; prewarm with `seiza download-data satellite-history --epoch ... --cache {}`",
+            cache_dir.display(),
+            cache_dir.display()
+        );
+    }
+
+    let mut replacement_count = 0;
+    for snapshot in cached {
         let (size_bytes, sha256) = validated_tle_digest(&snapshot.cache_path)?;
+        let millis = (snapshot.query_time.unix_seconds() * 1_000.0).round() as i64;
+        // Compress this TLE once. Content already staged (this run or carried in
+        // the base) reuses its encoded digest rather than recompressing.
+        let (encoded_size_bytes, encoded_sha256) = match encoded_by_sha.get(&sha256) {
+            Some(existing) => existing.clone(),
+            None => {
+                let staged = stage_zstd_mirror_artifact(
+                    &snapshot.cache_path,
+                    &sha256,
+                    artifact_dir,
+                    SATELLITE_MIRROR_ZSTD_LEVEL,
+                )?;
+                encoded_by_sha.insert(sha256.clone(), staged.clone());
+                staged
+            }
+        };
         let source_url = if snapshot.source_url.is_empty() {
             SATCHECKER_TLES_AT_EPOCH_URL.to_string()
         } else {
@@ -3767,37 +3804,15 @@ pub fn build_satellite_manifest(
         let entry = SatelliteMirrorEntry {
             query_time_utc: snapshot.query_time.to_rfc3339(),
             source_url,
-            key: format!("artifacts/{sha256}/satellites.tle"),
+            key: format!("artifacts/{sha256}/satellites.tle.zst"),
             sha256,
             size_bytes,
+            encoding: MirrorEncoding::Zstd,
+            encoded_sha256: Some(encoded_sha256),
+            encoded_size_bytes: Some(encoded_size_bytes),
         };
-        replacements.push((
-            (snapshot.query_time.unix_seconds() * 1_000.0).round() as i64,
-            entry,
-            snapshot.cache_path,
-        ));
-    }
-    if replacements.is_empty() && entries.is_empty() {
-        bail!(
-            "no historical satellite snapshots found in {}; prewarm with `seiza download-data satellite-history --epoch ... --cache {}`",
-            cache_dir.display(),
-            cache_dir.display()
-        );
-    }
-    let mut replacement_count = 0;
-    for (millis, entry, path) in replacements {
-        let changed = entries.get(&millis) != Some(&entry);
-        if changed {
+        if entries.get(&millis) != Some(&entry) {
             replacement_count += 1;
-            if published_hashes.insert(entry.sha256.clone()) {
-                stage_uncompressed_artifact(
-                    &path,
-                    "satellites.tle",
-                    artifact_dir,
-                    entry.size_bytes,
-                    &entry.sha256,
-                )?;
-            }
         }
         entries.insert(millis, entry);
     }
@@ -4055,6 +4070,82 @@ pub fn build_manifest(
             .saturating_sub(replacement_count)
     );
     Ok(())
+}
+
+/// Compress a cached TLE and stage it as the mirror's content-addressed
+/// `artifacts/<uncompressed_sha256>/satellites.tle.zst`. Returns the encoded
+/// (size, sha256) for the manifest entry. Keyed by the *uncompressed* sha so the
+/// artifact's logical identity is its decompressed content (as with the
+/// identity form). Re-staging identical content is a verified no-op.
+fn stage_zstd_mirror_artifact(
+    input: &Path,
+    uncompressed_sha256: &str,
+    output_root: &Path,
+    level: i32,
+) -> Result<(u64, String)> {
+    use std::io::{Read, Write};
+
+    let key = format!("artifacts/{uncompressed_sha256}/satellites.tle.zst");
+    let target = output_root.join(&key);
+    let parent = target.parent().context("mirror artifact has no parent")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("cannot create {}", parent.display()))?;
+    let partial_dir = output_root.join(".partial");
+    std::fs::create_dir_all(&partial_dir)
+        .with_context(|| format!("cannot create {}", partial_dir.display()))?;
+    let temp = partial_dir.join(format!("satellites.tle.{}.zst.part", std::process::id()));
+    let result = (|| {
+        let mut source = std::fs::File::open(input)
+            .with_context(|| format!("cannot open {}", input.display()))?;
+        let output = std::fs::File::create(&temp)
+            .with_context(|| format!("cannot create {}", temp.display()))?;
+        let mut encoder = zstd::stream::Encoder::new(output, level)
+            .with_context(|| format!("cannot initialize zstd level {level}"))?;
+        encoder
+            .include_checksum(true)
+            .context("cannot enable zstd frame checksum")?;
+        let mut buffer = vec![0u8; 1024 * 1024];
+        loop {
+            let read = source
+                .read(&mut buffer)
+                .with_context(|| format!("cannot read {}", input.display()))?;
+            if read == 0 {
+                break;
+            }
+            encoder
+                .write_all(&buffer[..read])
+                .with_context(|| format!("cannot compress {}", input.display()))?;
+        }
+        let output = encoder
+            .finish()
+            .with_context(|| format!("cannot finish compressing {}", input.display()))?;
+        output
+            .sync_all()
+            .with_context(|| format!("cannot sync {}", temp.display()))?;
+        let (bytes, sha256) = file_digest(&temp)?;
+        if target.exists() {
+            let (existing_bytes, existing_sha256) = file_digest(&target)?;
+            if existing_bytes != bytes || existing_sha256 != sha256 {
+                bail!(
+                    "existing staged mirror artifact {} is corrupt",
+                    target.display()
+                );
+            }
+            std::fs::remove_file(&temp)
+                .with_context(|| format!("cannot remove {}", temp.display()))?;
+        } else {
+            std::fs::rename(&temp, &target).with_context(|| {
+                format!("cannot install {} as {}", temp.display(), target.display())
+            })?;
+        }
+        println!("    staged zstd: {key} ({bytes} bytes)");
+        Ok((bytes, sha256))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    let _ = std::fs::remove_dir(&partial_dir);
+    result
 }
 
 fn stage_uncompressed_artifact(
@@ -4472,9 +4563,14 @@ mod tests {
         .unwrap();
         assert_eq!(manifest.snapshots.len(), 1);
         let entry = &manifest.snapshots[0];
-        assert!(artifacts.path().join(&entry.key).is_file());
+        // The staged artifact is the zstd-compressed TLE, content-addressed by
+        // the uncompressed sha, and it decompresses back to the original.
+        assert_eq!(entry.encoding, seiza_satellites::MirrorEncoding::Zstd);
+        assert!(entry.key.ends_with("/satellites.tle.zst"));
+        let stored = std::fs::read(artifacts.path().join(&entry.key)).unwrap();
+        assert_eq!(stored.len() as u64, entry.encoded_size_bytes.unwrap());
         assert_eq!(
-            std::fs::read(artifacts.path().join(&entry.key)).unwrap(),
+            zstd::stream::decode_all(stored.as_slice()).unwrap(),
             SATELLITE_TLE.as_bytes()
         );
 

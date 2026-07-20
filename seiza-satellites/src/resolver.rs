@@ -394,6 +394,9 @@ mod tests {
                 key: format!("artifacts/{sha256}/satellites.tle"),
                 sha256,
                 size_bytes: TLE.len() as u64,
+                encoding: crate::MirrorEncoding::Identity,
+                encoded_sha256: None,
+                encoded_size_bytes: None,
             }],
         };
         serde_json::to_vec(&manifest).unwrap()
