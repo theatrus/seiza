@@ -58,6 +58,11 @@ need to reimplement it:
 - `SatelliteTrack::bright_trail_risk` summarizes generic illumination and
   image-plane geometry. It intentionally stops short of deciding whether an
   application should warn, reject, or grade an exposure.
+- `TrackSearchResult::into_analysis` produces compact
+  `SatelliteTrackAnalysis` records with identity, element provenance, clipped
+  geometry, rates, risk, and optional pixel alignment while preserving search
+  accounting. The large propagation sample vectors are deliberately omitted
+  from this API/cache-oriented contract.
 - `trail_alignment::PixelTrailAligner` searches monochrome image pixels in a
   bounded corridor around the complete predicted polyline. The result keeps
   aligned pixel evidence separate from the orbital prediction and distinguishes

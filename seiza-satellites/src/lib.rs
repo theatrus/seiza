@@ -425,6 +425,32 @@ pub struct BrightTrailRisk {
     pub clipped_length_px: f64,
 }
 
+/// Compact, presentation-neutral analysis for one predicted track.
+///
+/// This retains orbital identity and provenance, projected in-frame geometry,
+/// the generic bright-trail assessment, and optional pixel evidence without
+/// carrying the much larger propagation sample vector into API or cache
+/// records. Applications remain responsible for grading and rejection policy.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SatelliteTrackAnalysis {
+    pub identity: SatelliteIdentity,
+    pub association: TrackAssociation,
+    pub element_epoch_utc: UtcTimestamp,
+    pub element_age_seconds: f64,
+    pub source: String,
+    pub sample_interval_seconds: f64,
+    pub clipped_segments: Vec<PixelSegment>,
+    pub maximum_apparent_rate_arcsec_per_second: Option<f64>,
+    pub maximum_pixel_rate_px_per_second: Option<f64>,
+    pub bright_trail_risk: BrightTrailRisk,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub pixel_alignment: Option<trail_alignment::PixelTrailAlignment>,
+}
+
 impl SatelliteTrack {
     pub fn maximum_elevation_deg(&self) -> f64 {
         self.samples
@@ -530,6 +556,34 @@ impl SatelliteTrack {
             clipped_length_px,
         }
     }
+
+    /// Collapse propagation samples into the reusable API/cache analysis
+    /// contract and optionally test the predicted corridor against pixels.
+    pub fn into_analysis(
+        self,
+        risk_options: &BrightTrailRiskOptions,
+        pixel_aligner: Option<&trail_alignment::PixelTrailAligner>,
+    ) -> SatelliteTrackAnalysis {
+        let maximum_apparent_rate_arcsec_per_second =
+            self.maximum_apparent_rate_arcsec_per_second();
+        let maximum_pixel_rate_px_per_second = self.maximum_pixel_rate_px_per_second();
+        let bright_trail_risk = self.bright_trail_risk(risk_options);
+        let pixel_alignment =
+            pixel_aligner.map(|aligner| aligner.align_track(&self.clipped_segments));
+        SatelliteTrackAnalysis {
+            identity: self.identity,
+            association: self.association,
+            element_epoch_utc: self.element_epoch_utc,
+            element_age_seconds: self.element_age_seconds,
+            source: self.source,
+            sample_interval_seconds: self.sample_interval_seconds,
+            clipped_segments: self.clipped_segments,
+            maximum_apparent_rate_arcsec_per_second,
+            maximum_pixel_rate_px_per_second,
+            bright_trail_risk,
+            pixel_alignment,
+        }
+    }
 }
 
 fn bright_trail_score(
@@ -586,6 +640,37 @@ pub struct TrackSearchResult {
     pub elements_considered: usize,
     pub propagation_failures: usize,
     pub stale_elements: usize,
+}
+
+/// Compact analysis plus the accounting from the orbital-element search.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TrackAnalysisResult {
+    pub tracks: Vec<SatelliteTrackAnalysis>,
+    pub elements_considered: usize,
+    pub propagation_failures: usize,
+    pub stale_elements: usize,
+}
+
+impl TrackSearchResult {
+    /// Analyze every predicted track while preserving the search accounting.
+    /// Passing no pixel aligner performs geometry/risk analysis only.
+    pub fn into_analysis(
+        self,
+        risk_options: &BrightTrailRiskOptions,
+        pixel_aligner: Option<&trail_alignment::PixelTrailAligner>,
+    ) -> TrackAnalysisResult {
+        TrackAnalysisResult {
+            tracks: self
+                .tracks
+                .into_iter()
+                .map(|track| track.into_analysis(risk_options, pixel_aligner))
+                .collect(),
+            elements_considered: self.elements_considered,
+            propagation_failures: self.propagation_failures,
+            stale_elements: self.stale_elements,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1406,6 +1491,46 @@ mod tests {
         let eclipsed = track.bright_trail_risk(&BrightTrailRiskOptions::default());
         assert_eq!(eclipsed.level, BrightTrailRiskLevel::Low);
         assert_eq!(eclipsed.score, 0.0);
+    }
+
+    #[test]
+    fn compact_analysis_preserves_provenance_geometry_risk_and_accounting() {
+        let track = SatelliteTrack {
+            identity: SatelliteIdentity {
+                norad_id: Some(25544),
+                cospar_id: Some("1998-067A".into()),
+                name: "ISS (ZARYA)".into(),
+            },
+            association: TrackAssociation::Predicted,
+            element_epoch_utc: UtcTimestamp(0.0),
+            element_age_seconds: 1.0,
+            source: "test-elements".into(),
+            sample_interval_seconds: 2.0,
+            samples: vec![pixel_sample(0.0, 0.0, 0.0), pixel_sample(2.0, 100.0, 0.0)],
+            clipped_segments: vec![PixelSegment {
+                start: PixelPoint { x: 0.0, y: 0.0 },
+                end: PixelPoint { x: 100.0, y: 0.0 },
+            }],
+        };
+        let result = TrackSearchResult {
+            tracks: vec![track],
+            elements_considered: 12,
+            propagation_failures: 2,
+            stale_elements: 3,
+        }
+        .into_analysis(&BrightTrailRiskOptions::default(), None);
+
+        assert_eq!(result.elements_considered, 12);
+        assert_eq!(result.propagation_failures, 2);
+        assert_eq!(result.stale_elements, 3);
+        assert_eq!(result.tracks[0].identity.norad_id, Some(25544));
+        assert_eq!(result.tracks[0].source, "test-elements");
+        assert_eq!(result.tracks[0].clipped_segments.len(), 1);
+        assert_eq!(
+            result.tracks[0].bright_trail_risk.level,
+            BrightTrailRiskLevel::High
+        );
+        assert!(result.tracks[0].pixel_alignment.is_none());
     }
 
     #[cfg(feature = "serde")]
