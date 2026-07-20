@@ -32,8 +32,12 @@ Calibration masters are assumed to be integrated master frames. A dark is
 assumed to include its bias pedestal; when both bias and dark are supplied,
 dark scaling uses `light - bias - scale * (dark - bias)`. A flat has the bias
 removed when available and is divided by its robust positive median before it
-is applied. Without a master bias, the dark's inseparable bias pedestal is
-subtracted unscaled even when exposure metadata differs.
+is applied. Planar RGB flats are normalized independently per channel; CFA
+flats remain in their one-channel sensor sampling and are applied before
+debayering. Without a master bias, the dark's inseparable bias pedestal is
+subtracted unscaled even when exposure metadata differs. With a bias and a
+known master-dark duration, missing light exposure is a typed rejection rather
+than an unsafe 1:1 scaling assumption.
 
 ## Registration
 
@@ -55,6 +59,10 @@ dispersion to the reference. Local normalization computes the same affine
 mapping on a tile grid and interpolates gain and offset per pixel. Local mode
 is optional because it can suppress real large-scale gradients or nebulosity
 when the tile size is chosen too small.
+
+Admission evaluates the full, unclamped gain range. In local mode this prevents
+one pathological tile from hiding behind a reasonable mean gain. Estimation
+failures are typed frame rejections and do not abort the rest of a sequence.
 
 ## Rejection and live semantics
 
@@ -85,6 +93,10 @@ which can produce a sum or mean and supports later additions without retaining
 all source frames. It must also retain an ordered admission ledger at the host
 boundary: reference identity, source identity, calibration/configuration
 fingerprints, measured gates, and accepted/rejected disposition.
+The CLI materializes this ledger with `--report`; its JSON contains SHA-256
+input identities, calibration inputs, the complete configuration, and ordered
+diagnostics. FITS and report outputs are written to adjacent temporary files
+and atomically renamed only after the complete payload has been flushed.
 
 This is appropriate for live feedback and bounded-memory pre-stacks, but it is
 order-dependent and cannot revisit warm-up samples. A future exact batch mode
@@ -109,6 +121,26 @@ numeric safety gates. PSF Guard will store both layers of decisions, the stack
 configuration, accepted/skipped frame diagnostics, and source fingerprints
 beside the derived artifact. A stack must not erase the per-exposure evidence
 used to decide which frames entered it.
+
+## Release-mode validation examples
+
+These display-stretched JPEGs are derived only after the linear FITS stack is
+complete. They are checked-in review artifacts, not inputs to the stacking
+math.
+
+![Eight-frame Sadr H-alpha stack](../images/stacking/sadr-ha-8-frame.jpg)
+
+The 6248x4176 Sadr sequence admitted all eight 300-second H-alpha frames.
+Registration RMS ranged from 0.241 to 0.517 pixels. The end-to-end run,
+including the full FITS, preview, SHA-256 report, and atomic publication, took
+4.31 seconds and peaked at 948 MB resident memory.
+
+![Sh2-230 red stack](../images/stacking/sh2-230-r-11-of-31.jpg)
+
+The 9576x6388 Sh2-230 sequence offered 31 red 60-second frames to local
+normalization. Eleven were admitted with 0.224 to 0.715 pixel RMS; twenty weak
+registrations were rejected without changing the accumulator. The end-to-end
+run took 16.61 seconds and peaked at 2.24 GB resident memory.
 
 ## Follow-on work
 

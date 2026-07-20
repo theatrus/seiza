@@ -91,13 +91,11 @@ impl NormalizationMap {
                         let width = tile_size.min(source.width - x);
                         let height = tile_size.min(source.height - y);
                         for channel in 0..source.channels {
-                            if let Ok((gain, offset)) =
-                                affine_for_region(reference, source, channel, x, y, width, height)
-                            {
-                                let index = map.index(column, row, channel);
-                                map.gains[index] = gain;
-                                map.offsets[index] = offset;
-                            }
+                            let (gain, offset) =
+                                affine_for_region(reference, source, channel, x, y, width, height)?;
+                            let index = map.index(column, row, channel);
+                            map.gains[index] = gain;
+                            map.offsets[index] = offset;
                         }
                     }
                 }
@@ -136,6 +134,16 @@ impl NormalizationMap {
 
     pub fn mean_offset(&self) -> f32 {
         self.offsets.iter().sum::<f32>() / self.offsets.len() as f32
+    }
+
+    /// Smallest and largest gain in the map. Live admission checks the full
+    /// range so a pathological local tile cannot hide behind a reasonable
+    /// mean gain.
+    pub fn gain_range(&self) -> (f32, f32) {
+        self.gains.iter().copied().fold(
+            (f32::INFINITY, f32::NEG_INFINITY),
+            |(minimum, maximum), gain| (minimum.min(gain), maximum.max(gain)),
+        )
     }
 
     fn index(&self, column: usize, row: usize, channel: usize) -> usize {
@@ -211,11 +219,17 @@ fn affine_for_region(
     let source_median = median(&mut source_values);
     let reference_sigma = robust_sigma(&mut reference_values, reference_median);
     let source_sigma = robust_sigma(&mut source_values, source_median);
-    let gain = if source_sigma > 1.0e-8 && reference_sigma.is_finite() {
-        (reference_sigma / source_sigma).clamp(0.25, 4.0)
-    } else {
-        1.0
-    };
+    if !reference_sigma.is_finite() || !source_sigma.is_finite() || source_sigma <= 1.0e-8 {
+        return Err(Error::Normalization(
+            "normalization region has no usable dispersion".into(),
+        ));
+    }
+    let gain = reference_sigma / source_sigma;
+    if !gain.is_finite() {
+        return Err(Error::Normalization(
+            "normalization produced a non-finite gain".into(),
+        ));
+    }
     Ok((gain, reference_median - gain * source_median))
 }
 
@@ -266,5 +280,43 @@ mod tests {
         map.apply(&mut normalized).unwrap();
         assert!((map.mean_gain() - 0.5).abs() < 1.0e-5);
         assert!((normalized.data[100] - reference.data[100]).abs() < 1.0e-3);
+    }
+
+    #[test]
+    fn preserves_extreme_gain_for_admission_instead_of_clamping() {
+        let reference = LinearImage::new(
+            16,
+            16,
+            1,
+            (0..256).map(|value| value as f32 * 10.0).collect(),
+        )
+        .unwrap();
+        let source =
+            LinearImage::new(16, 16, 1, (0..256).map(|value| value as f32).collect()).unwrap();
+        let map =
+            NormalizationMap::estimate(&reference, &source, NormalizationMode::Global).unwrap();
+        let (minimum, maximum) = map.gain_range();
+        assert!((minimum - 10.0).abs() < 1.0e-5);
+        assert!((maximum - 10.0).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn local_normalization_rejects_an_unusable_tile() {
+        let reference =
+            LinearImage::new(32, 32, 1, (0..1024).map(|value| value as f32).collect()).unwrap();
+        let mut source = reference.clone();
+        for y in 16..32 {
+            for x in 16..32 {
+                source.data[y * 32 + x] = f32::NAN;
+            }
+        }
+        assert!(
+            NormalizationMap::estimate(
+                &reference,
+                &source,
+                NormalizationMode::Local { tile_size: 16 },
+            )
+            .is_err()
+        );
     }
 }

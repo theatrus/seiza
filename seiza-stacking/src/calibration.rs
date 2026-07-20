@@ -70,12 +70,7 @@ impl CalibrationMasters {
                         *value -= *bias_value;
                     }
                 }
-                let normal = robust_positive_median(&flat.data).ok_or_else(|| {
-                    Error::Calibration("flat master has no positive finite response".into())
-                })?;
-                for value in &mut flat.data {
-                    *value /= normal;
-                }
+                normalize_flat_response(&mut flat)?;
                 Ok(flat)
             })
             .transpose()?;
@@ -125,6 +120,11 @@ impl CalibrationMasters {
         if let Some(dark) = &self.dark_signal {
             let scale = match (exposure_seconds, self.dark_exposure_seconds) {
                 (Some(light), Some(master)) if master > 0.0 => (light / master) as f32,
+                (None, Some(_)) => {
+                    return Err(Error::Calibration(
+                        "light exposure is required when scaling a master dark".into(),
+                    ));
+                }
                 _ => 1.0,
             };
             for (value, dark_value) in image.data.iter_mut().zip(&dark.data) {
@@ -144,12 +144,31 @@ impl CalibrationMasters {
     }
 }
 
-fn robust_positive_median(data: &[f32]) -> Option<f32> {
+fn normalize_flat_response(flat: &mut LinearImage) -> Result<()> {
+    for channel in 0..flat.channels {
+        let normal = robust_positive_median(
+            flat.data
+                .iter()
+                .skip(channel)
+                .step_by(flat.channels)
+                .copied(),
+        )
+        .ok_or_else(|| {
+            Error::Calibration(format!(
+                "flat master channel {channel} has no positive finite response"
+            ))
+        })?;
+        for pixel in flat.data.chunks_exact_mut(flat.channels) {
+            pixel[channel] /= normal;
+        }
+    }
+    Ok(())
+}
+
+fn robust_positive_median(data: impl ExactSizeIterator<Item = f32>) -> Option<f32> {
     let stride = (data.len() / 200_000).max(1);
     let mut values = data
-        .iter()
         .step_by(stride)
-        .copied()
         .filter(|value| value.is_finite() && *value > 0.0)
         .collect::<Vec<_>>();
     if values.is_empty() {
@@ -224,5 +243,36 @@ mod tests {
                 .apply(&mut mono(&[1.0; 4]), Some(f64::NAN))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn requires_light_exposure_when_scaling_a_dark() {
+        let calibration = CalibrationMasters::new(
+            Some(mono(&[10.0; 4])),
+            Some(MasterDark {
+                image: mono(&[14.0; 4]),
+                exposure_seconds: Some(20.0),
+            }),
+            None,
+        )
+        .unwrap();
+        assert!(calibration.apply(&mut mono(&[110.0; 4]), None).is_err());
+    }
+
+    #[test]
+    fn normalizes_planar_rgb_flat_channels_independently() {
+        let rgb = |values| LinearImage::new(2, 2, 3, values).unwrap();
+        let calibration = CalibrationMasters::new(
+            None,
+            None,
+            Some(rgb(vec![
+                100.0, 200.0, 400.0, 100.0, 200.0, 400.0, 100.0, 200.0, 400.0, 200.0, 400.0, 800.0,
+            ])),
+        )
+        .unwrap();
+        let mut light = rgb(vec![1000.0; 12]);
+        calibration.apply(&mut light, None).unwrap();
+        assert_eq!(&light.data[..9], &[1000.0; 9]);
+        assert_eq!(&light.data[9..], &[500.0; 3]);
     }
 }

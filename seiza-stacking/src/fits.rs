@@ -3,6 +3,8 @@ use seiza_fits::{FitsImage, HeaderValue, Pixels};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
+const PIXEL_CHUNK_BYTES: usize = 1024 * 1024;
+
 /// A FITS frame decoded into linear, un-stretched `f32` samples.
 #[derive(Clone, Debug)]
 pub struct FitsFrame {
@@ -111,11 +113,29 @@ pub fn write_fits_f32(
     reference_headers: &[(String, HeaderValue)],
 ) -> Result<()> {
     let path = path.as_ref();
-    let file = std::fs::File::create(path).map_err(|source| Error::Io {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let prefix = format!(
+        ".{}.",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    );
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(&prefix);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = std::fs::metadata(path)
+            .map(|metadata| metadata.permissions())
+            .unwrap_or_else(|_| std::fs::Permissions::from_mode(0o666));
+        builder.permissions(permissions);
+    }
+    let mut temporary = builder.tempfile_in(parent).map_err(|source| Error::Io {
         path: path.to_path_buf(),
         source,
     })?;
-    let mut writer = BufWriter::new(file);
+    let mut writer = BufWriter::new(temporary.as_file_mut());
     let image = &snapshot.image;
     let mut cards = vec![
         logical_card("SIMPLE", true, "conforms to FITS standard"),
@@ -158,7 +178,7 @@ pub fn write_fits_f32(
         }
     })?;
 
-    let mut byte_buffer = Vec::with_capacity(1024 * 1024);
+    let mut byte_buffer = Vec::with_capacity(PIXEL_CHUNK_BYTES);
     if image.channels == 3 {
         for channel in 0..3 {
             write_float_values(
@@ -190,7 +210,17 @@ pub fn write_fits_f32(
     writer.flush().map_err(|source| Error::Io {
         path: path.to_path_buf(),
         source,
-    })
+    })?;
+    drop(writer);
+    temporary.as_file().sync_all().map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    temporary.persist(path).map_err(|error| Error::Io {
+        path: path.to_path_buf(),
+        source: error.error,
+    })?;
+    Ok(())
 }
 
 fn write_float_values(
@@ -201,7 +231,7 @@ fn write_float_values(
     buffer.clear();
     for value in values {
         buffer.extend_from_slice(&value.to_be_bytes());
-        if buffer.len() == buffer.capacity() {
+        if buffer.len() >= PIXEL_CHUNK_BYTES {
             writer.write_all(buffer)?;
             buffer.clear();
         }
@@ -372,6 +402,7 @@ mod tests {
     fn float_writer_round_trips_linear_samples_and_stack_counts() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("stack.fits");
+        std::fs::write(&path, b"previous complete output").unwrap();
         let image = LinearImage::new(2, 2, 1, vec![-2.5, 0.25, 100.0, f32::NAN]).unwrap();
         let snapshot = StackSnapshot {
             variance: LinearImage::new(2, 2, 1, vec![0.0; 4]).unwrap(),

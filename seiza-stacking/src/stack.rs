@@ -142,6 +142,8 @@ pub struct FrameDiagnostics {
 
 #[derive(Clone, Debug, PartialEq, thiserror::Error)]
 pub enum FrameRejectionReason {
+    #[error("calibration failed: {0}")]
+    Calibration(String),
     #[error("incompatible image: {0}")]
     IncompatibleImage(String),
     #[error("registration failed: {0}")]
@@ -157,9 +159,14 @@ pub enum FrameRejectionReason {
     },
     #[error("overlap fraction {measured:.3} is below {minimum:.3}")]
     InsufficientOverlap { measured: f32, minimum: f32 },
-    #[error("normalization gain {measured:.3} is outside {minimum:.3}..={maximum:.3}")]
+    #[error("normalization failed: {0}")]
+    Normalization(String),
+    #[error(
+        "normalization gain range {measured_minimum:.3}..={measured_maximum:.3} is outside {minimum:.3}..={maximum:.3}"
+    )]
     NormalizationGain {
-        measured: f32,
+        measured_minimum: f32,
+        measured_maximum: f32,
         minimum: f32,
         maximum: f32,
     },
@@ -255,9 +262,22 @@ impl LiveStacker {
     }
 
     pub fn push(&mut self, mut frame: FitsFrame) -> Result<FrameDisposition> {
-        self.calibration
-            .apply(&mut frame.image, frame.exposure_seconds)?;
-        let frame = frame.into_prepared()?;
+        if let Err(error) = self
+            .calibration
+            .apply(&mut frame.image, frame.exposure_seconds)
+        {
+            let message = match error {
+                Error::Calibration(message) => message,
+                other => other.to_string(),
+            };
+            return Ok(self.reject(FrameRejectionReason::Calibration(message)));
+        }
+        let frame = match frame.into_prepared() {
+            Ok(frame) => frame,
+            Err(error) => {
+                return Ok(self.reject(FrameRejectionReason::IncompatibleImage(error.to_string())));
+            }
+        };
         self.push_linear(frame.image)
     }
 
@@ -328,19 +348,38 @@ impl LiveStacker {
                 minimum: criteria.minimum_overlap_fraction,
             }));
         }
-        let normalization =
-            NormalizationMap::estimate(&self.reference, &registered, self.options.normalization)?;
-        let normalization_gain = normalization.mean_gain();
-        if normalization_gain < criteria.minimum_normalization_gain
-            || normalization_gain > criteria.maximum_normalization_gain
+        let normalization = match NormalizationMap::estimate(
+            &self.reference,
+            &registered,
+            self.options.normalization,
+        ) {
+            Ok(normalization) => normalization,
+            Err(error) => {
+                let message = match error {
+                    Error::Normalization(message) => message,
+                    other => other.to_string(),
+                };
+                return Ok(self.reject(FrameRejectionReason::Normalization(message)));
+            }
+        };
+        let (minimum_gain, maximum_gain) = normalization.gain_range();
+        if minimum_gain < criteria.minimum_normalization_gain
+            || maximum_gain > criteria.maximum_normalization_gain
         {
             return Ok(self.reject(FrameRejectionReason::NormalizationGain {
-                measured: normalization_gain,
+                measured_minimum: minimum_gain,
+                measured_maximum: maximum_gain,
                 minimum: criteria.minimum_normalization_gain,
                 maximum: criteria.maximum_normalization_gain,
             }));
         }
-        normalization.apply(&mut registered)?;
+        if let Err(error) = normalization.apply(&mut registered) {
+            let message = match error {
+                Error::Normalization(message) => message,
+                other => other.to_string(),
+            };
+            return Ok(self.reject(FrameRejectionReason::Normalization(message)));
+        }
         let (would_accept, _) = self
             .accumulator
             .classify(&registered.data, self.options.rejection);

@@ -106,7 +106,7 @@ frames. The first light is the fixed output/reference grid:
 
 ```
 seiza stack light-001.fits light-002.fits light-003.fits \
-  --output stack.fits --preview stack.png
+  --output stack.fits --preview stack.png --report stack-report.json
 
 seiza stack lights/*.fits --output stack.fits \
   --bias master-bias.fits --dark master-dark.fits --flat master-flat.fits \
@@ -118,7 +118,15 @@ integration all operate on linear `f32` samples. `--preview` is an optional
 display-only stretch and never feeds pixels back into the stack. Incoming
 frames are admitted atomically: incompatible images, weak registrations,
 excess transform drift, low overlap, or implausible normalization leave the
-existing additive stack unchanged. See the
+existing additive stack unchanged. The optional `--report` JSON records
+SHA-256 identities for every source and calibration master, the complete
+configuration, and the ordered accepted/rejected disposition ledger. FITS and
+report outputs are published atomically after they are complete.
+
+`--flat` accepts an integrated master flat in the light frame's raw sampling.
+When `--bias` is present its pedestal is removed before the flat is normalized;
+planar RGB flats are normalized independently per channel. CFA flats remain
+one-channel and are applied before debayering. See the
 [stacking design](https://github.com/theatrus/seiza/blob/main/docs/design/image-stacking.md)
 for the live API, rejection semantics, and PSF Guard integration boundary.
 

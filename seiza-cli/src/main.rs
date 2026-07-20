@@ -3227,6 +3227,8 @@ mod cli_tests {
             "stack.fits",
             "--preview",
             "stack.png",
+            "--report",
+            "stack-report.json",
             "--normalization",
             "local",
         ])

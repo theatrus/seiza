@@ -21,3 +21,10 @@ the crate's admission gates cover only compatibility and numeric/geometric
 safety. Live renderers can borrow `LiveStacker::view` without copying the
 full-resolution accumulator; any display stretch remains a caller-only visual
 operation.
+
+Integrated flats are applied in the raw light frame's sampling before CFA
+debayering. A supplied bias is removed first, and planar RGB flat channels are
+normalized independently so calibration does not introduce a color-scale
+shift. When bias subtraction makes a master dark exposure-scalable, every
+light must provide an exposure duration rather than silently assuming a 1:1
+scale.

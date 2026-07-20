@@ -76,7 +76,7 @@ seiza catalog object --data data "Andromeda Galaxy"
 seiza catalog objects --data data --ra 10.6848 --dec 41.2691 --radius 3 --format json
 seiza catalog star --data data "TYC 5949-2777-1" --format json
 seiza stack light-001.fits light-002.fits light-003.fits --output stack.fits \
-  --preview stack.png
+  --preview stack.png --report stack-report.json
 ```
 
 `--data` takes a file or a directory: a directory picks the right catalog
