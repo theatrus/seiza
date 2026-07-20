@@ -1360,7 +1360,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "seiza"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "directories",
  "image",
@@ -1379,7 +1379,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-download"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-compression",
  "directories",
@@ -1396,7 +1396,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-py"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "image",
  "numpy",
@@ -1408,13 +1408,14 @@ dependencies = [
 
 [[package]]
 name = "seiza-satellites"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "directories",
  "fs2",
  "reqwest",
  "satkit",
  "seiza",
+ "sha2",
  "thiserror",
  "tokio",
 ]

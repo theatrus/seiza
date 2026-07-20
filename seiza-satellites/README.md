@@ -8,6 +8,50 @@ The output is a provenance-bearing prediction. It does not claim that a
 satellite was detected in the pixels. Stacked images are deliberately outside
 the API: callers must provide one `SingleExposure` interval.
 
+## Predict tracks
+
+After solving an image with `seiza`, load the current CelesTrak active OMM set
+and search its tracks against that solution. The CelesTrak cache is persistent;
+reuse one `CelesTrakSource` rather than downloading for every exposure.
+
+```rust,no_run
+use seiza_satellites::{
+    CelesTrakSource, ExposureProvenance, ObserverLocation, SingleExposure,
+    TrackOptions, UtcTimestamp,
+};
+
+# async fn predict(wcs: &seiza::wcs::Wcs) -> seiza_satellites::Result<()> {
+let source = CelesTrakSource::platform_default()?;
+let elements = source.load_active().await?;
+let observer = ObserverLocation::geodetic(42.466, -71.1516, 150.0)?;
+let exposure = SingleExposure::from_start_and_duration(
+    UtcTimestamp::parse("2026-07-19T06:12:00Z")?,
+    120.0,
+    observer,
+    ExposureProvenance::Explicit,
+)?;
+let result = elements.catalog.tracks_in_footprint(
+    wcs,
+    (6000, 4000),
+    &exposure,
+    &TrackOptions::default(),
+)?;
+for track in result.tracks {
+    println!(
+        "{}: {:.1} deg max elevation",
+        track.identity.display_label(),
+        track.maximum_elevation_deg(),
+    );
+}
+# Ok(())
+# }
+```
+
+For reproducible offline work, use `SatelliteCatalog::open` for a local OMM
+JSON or TLE file. To replay a historical exposure from the durable CelesTrak
+cache, call `load_cached_for(exposure.midpoint())`; record the returned
+`CatalogFingerprint` alongside derived results.
+
 Reusable post-prediction analysis lives here as well, so applications do not
 need to reimplement it:
 

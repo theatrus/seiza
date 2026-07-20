@@ -607,11 +607,12 @@ fn solve_blind(
 
 fn dataset_by_file_name(name: &str) -> PyResult<seiza::downloads::Dataset> {
     use seiza::downloads::Dataset;
-    const ALL: [Dataset; 8] = [
+    const ALL: [Dataset; 9] = [
         Dataset::BlindGaia16,
         Dataset::MinorBodies,
         Dataset::Objects,
         Dataset::StarsDeepGaia17,
+        Dataset::StarsDeepGaia20,
         Dataset::StarsGaia,
         Dataset::StarsLiteTycho2,
         Dataset::StarsLiteTycho2Identifiers,
@@ -628,8 +629,9 @@ fn dataset_by_file_name(name: &str) -> PyResult<seiza::downloads::Dataset> {
 /// Download and cache published seiza catalogs, returning a dict of dataset
 /// file name to verified local path. `datasets` lists file names such as
 /// `"stars-lite-tycho2.bin"`; the default is the lightweight solver set.
-/// Pass `datasets="all"` for the complete bundle. Files are SHA-256 verified
-/// and cached; repeated calls are cheap.
+/// Pass `datasets="all"` for the complete standard bundle. The optional,
+/// much larger `"stars-deep-gaia20.bin"` catalog must be named explicitly.
+/// Files are SHA-256 verified and cached; repeated calls are cheap.
 #[pyfunction]
 #[pyo3(signature = (datasets=None, *, cache_dir=None))]
 fn fetch_catalogs(
@@ -686,6 +688,20 @@ fn fetch_catalogs(
             .map(|artifact| (artifact.name.clone(), artifact.path.clone()))
             .collect())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dataset_by_file_name;
+    use seiza::downloads::Dataset;
+
+    #[test]
+    fn deep_gaia20_is_selectable_by_python_filename() {
+        assert_eq!(
+            dataset_by_file_name("stars-deep-gaia20.bin").unwrap(),
+            Dataset::StarsDeepGaia20
+        );
+    }
 }
 
 #[pymodule]

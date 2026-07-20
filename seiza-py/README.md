@@ -68,6 +68,16 @@ solution = seiza.solve_blind(stars, catalog, index, width, height,
                              min_scale_arcsec_px=0.5, max_scale_arcsec_px=15.0)
 ```
 
+For faint fields, the optional `stars-deep-gaia20.bin` catalog reaches Gaia
+G≤20 (about 9 GB). It is intentionally not included in `fetch_catalogs("all")`,
+so request it explicitly with the same G≤16 blind index:
+
+```python
+paths = seiza.fetch_catalogs(["stars-deep-gaia20.bin", "blind-gaia16.idx"])
+catalog = seiza.StarCatalog.open(paths["stars-deep-gaia20.bin"])
+index = seiza.BlindIndex.open(paths["blind-gaia16.idx"])
+```
+
 ## FITS WCS output
 
 Solutions convert directly to FITS WCS keywords (1-indexed `CRPIX`, TAN or

@@ -35,8 +35,10 @@ uncompressed artifact.
 
 The default cache follows the platform cache directory and can be overridden
 with `SEIZA_CACHE_DIR` or `CatalogManagerBuilder::cache_dir`. The default
-selection is the small Tycho-2 solver catalog; downloading the complete bundle
-requires `CatalogSet::all()`.
+selection is the small Tycho-2 solver catalog; `CatalogSet::all()` downloads
+the complete standard bundle. The optional Gaia G≤20 deep catalog is about
+9 GB and remains opt-in: request `Dataset::StarsDeepGaia20` explicitly, or use
+`CatalogSet::blind_deep_gaia20()` to pair it with the G≤16 blind index.
 
 Raw Gaia, VizieR, MPC, and other builder inputs intentionally live in
 [`seiza-sources`](https://crates.io/crates/seiza-sources).

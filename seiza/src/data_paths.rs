@@ -323,7 +323,10 @@ mod tests {
 
         std::fs::write(dir.path().join("stars-deep-gaia17.bin"), b"g17").unwrap();
         let picked = star_data(Some(dir.path())).unwrap();
-        assert!(picked.ends_with("stars-deep-gaia17.bin"), "prefers deep G17");
+        assert!(
+            picked.ends_with("stars-deep-gaia17.bin"),
+            "prefers deep G17"
+        );
 
         std::fs::write(dir.path().join("stars-deep-gaia20.bin"), b"g20").unwrap();
         let picked = star_data(Some(dir.path())).unwrap();

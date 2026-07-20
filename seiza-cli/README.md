@@ -162,24 +162,32 @@ seiza download-data
 
 seiza download-data prebuilt --output data
 seiza download-data prebuilt --output data --file objects.bin --file transients.bin
+# The optional ~9 GB Gaia G≤20 catalog is explicit; pair it with the blind index
+# for deep blind solving.
+seiza download-data prebuilt --output data \
+  --file stars-deep-gaia20.bin --file blind-gaia16.idx
 ```
 
 The other `download-data` subcommands acquire upstream source material for
 custom catalog builds; they are not required for normal Seiza use.
 
 For an interactive selection, run `seiza setup`. This is also the command
-offered by the Windows installer. It presents solver, blind, and complete
-presets, then delegates to the same verified prebuilt downloader. Every preset
-includes object search, Solar System objects, and active transients.
+offered by the Windows installer. It presents lightweight, Gaia, deep-blind,
+optional G≤20, and every-catalog presets, then delegates to the same verified
+prebuilt downloader. Every preset includes object search, Solar System objects,
+and active transients.
 
-The downloader reads one complete bundle from `/data/v4/manifest.json` and
+The downloader reads one standard bundle from `/data/v4/manifest.json` and
 caches its immutable, content-addressed files by SHA-256 before copying the
 requested selection into the same flat local output directory. The shared
-platform cache can be overridden with `SEIZA_CACHE_DIR`. It never combines
-catalogs from different hosted bundle versions. Previously released `/data/`
-and `/data/v2/` paths remain frozen for classic v1 and v0.4.1/v0.5 readers.
-The historical `/data/v3/` probe used by v0.4.0 remains reserved and may be
-absent; those readers retain their existing fallback behavior.
+platform cache can be overridden with `SEIZA_CACHE_DIR`. The optional G≤20
+catalog is hosted alongside the bundle but is never included in a bare
+`download-data prebuilt`; name it with `--file` or choose the relevant setup
+preset. It never combines catalogs from different hosted bundle versions.
+Previously released `/data/` and `/data/v2/` paths remain frozen for classic
+v1 and v0.4.1/v0.5 readers. The historical `/data/v3/` probe used by v0.4.0
+remains reserved and may be absent; those readers retain their existing
+fallback behavior.
 
 Library integrations can use `seiza-download` directly for async, automatic
 cache management. The raw catalog commands below are implemented by the
