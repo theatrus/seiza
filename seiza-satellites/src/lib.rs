@@ -810,18 +810,40 @@ impl SatelliteCatalog {
     pub fn from_tle_text(payload: &str, source: impl Into<String>) -> Result<Self> {
         let source = source.into();
         let content_sha256 = payload_sha256(payload.as_bytes());
-        let lines = payload.lines().map(str::to_string).collect::<Vec<_>>();
-        let tles = TLE::from_lines(&lines).map_err(|error| Error::Elements {
-            source_name: source.clone(),
-            message: error.to_string(),
-        })?;
-        Self::from_records(
-            tles.into_iter()
-                .map(|tle| ElementRecord::Tle(Box::new(tle)))
-                .collect(),
-            source,
-            content_sha256,
-        )
+        // Parse per record and SKIP malformed ones rather than failing the whole
+        // batch. IAU SatChecker occasionally emits a single satellite with an
+        // unparseable field (e.g. an invalid mean-anomaly float); dropping that
+        // one record must not discard the entire epoch's ~27k satellites.
+        // (satkit's TLE::from_lines `?`-aborts on the first bad record, so we
+        // mirror its line grouping here and call the per-record parsers.)
+        let mut records = Vec::new();
+        let mut skipped = 0usize;
+        let mut line0 = "";
+        let mut line1 = "";
+        for raw in payload.lines() {
+            let line = raw.trim_end();
+            if line.len() >= 69 && line.starts_with("1 ") {
+                line1 = line;
+            } else if line.len() >= 69 && line.starts_with("2 ") {
+                let parsed = if line0.is_empty() {
+                    TLE::load_2line(line1, line)
+                } else {
+                    TLE::load_3line(line0, line1, line)
+                };
+                match parsed {
+                    Ok(tle) => records.push(ElementRecord::Tle(Box::new(tle))),
+                    Err(_) => skipped += 1,
+                }
+                line0 = "";
+                line1 = "";
+            } else if !line.is_empty() {
+                line0 = line;
+            }
+        }
+        if skipped > 0 {
+            eprintln!("seiza-satellites: skipped {skipped} malformed TLE record(s) from {source}");
+        }
+        Self::from_records(records, source, content_sha256)
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -1306,6 +1328,32 @@ mod tests {
         assert_eq!(identity.norad_id, Some(25544));
         assert_eq!(identity.cospar_id.as_deref(), Some("1998-067A"));
         assert_eq!(identity.name, "ISS (ZARYA)");
+    }
+
+    #[test]
+    fn skips_malformed_tle_record_and_keeps_the_rest() {
+        // The valid ISS record plus a second satellite whose mean-anomaly field
+        // is not a number — the shape IAU SatChecker occasionally emits and that
+        // used to fail the whole epoch. The bad record is dropped; the good one
+        // survives.
+        let payload = format!(
+            "{ISS_TLE}\nBADSAT\n\
+             1 25545U 98067B   24123.50000000  .00016717  00000-0  30126-3 0  9991\n\
+             2 25545  51.6400 160.0000 0005000  80.0000 XXX.XXXX 15.50000000450001\n"
+        );
+        let catalog = SatelliteCatalog::from_tle_text(&payload, "test").unwrap();
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog.elements[0].identity().norad_id, Some(25544));
+    }
+
+    #[test]
+    fn all_malformed_tle_records_still_error() {
+        let payload = "1 25545U 98067B   24123.50000000  .00016717  00000-0  30126-3 0  9991\n\
+                       2 25545  51.6400 160.0000 0005000  80.0000 XXX.XXXX 15.50000000450001\n";
+        assert!(matches!(
+            SatelliteCatalog::from_tle_text(payload, "test"),
+            Err(Error::EmptyElements(_))
+        ));
     }
 
     #[test]
