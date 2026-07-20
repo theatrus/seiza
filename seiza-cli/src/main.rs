@@ -3236,6 +3236,10 @@ mod cli_tests {
             "stack-report.json",
             "--normalization",
             "local",
+            "--max-registration-drift",
+            "512",
+            "--max-registration-drift-fraction",
+            "0.2",
         ])
         .unwrap();
         assert!(matches!(cli.command, Command::Stack(_)));

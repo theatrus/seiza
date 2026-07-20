@@ -110,7 +110,9 @@ seiza stack light-001.fits light-002.fits light-003.fits \
 
 seiza stack lights/*.fits --output stack.fits \
   --bias master-bias.fits --dark master-dark.fits --flat master-flat.fits \
-  --normalization local --local-tile-size 256
+  --normalization local --local-tile-size 256 \
+  --max-registration-drift 256 \
+  --max-registration-drift-fraction 0.15 --min-overlap 0.60
 ```
 
 Raw calibration sequences can be integrated into reusable masters first:
@@ -140,6 +142,17 @@ existing additive stack unchanged. The optional `--report` JSON records
 SHA-256 identities for every source and calibration master, the complete
 configuration, and the ordered accepted/rejected disposition ledger. FITS and
 report outputs are published atomically after they are complete.
+
+The registration search is explicitly bounded at the center of the reference
+frame. Its effective default is whichever is larger: 256 pixels or 15% of the
+reference frame's larger dimension. Configure those components with
+`--max-registration-drift` and `--max-registration-drift-fraction`. Increase
+either for a sequence with larger dithers or crop-origin offsets; lower values
+make the expected motion constraint tighter. Set the fractional component to
+zero when a strict pixel-only limit is desired. Light frames may have different
+dimensions: valid samples are mapped onto the first frame's fixed grid, pixels
+outside a source crop remain masked, and `--min-overlap` controls how much
+usable overlap is required for admission.
 
 `--flat` accepts an integrated master flat in the light frame's raw sampling.
 For legacy masters, `--bias` removes the flat's pedestal before normalization.

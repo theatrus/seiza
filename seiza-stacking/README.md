@@ -9,7 +9,7 @@ The first release supports:
 - mono, planar RGB, and Bayer FITS inputs in linear sensor units;
 - optional master bias, dark, and flat calibration;
 - bounded-memory, two-pass construction of bias, dark, and flat masters;
-- star-based translation/rotation/scale registration;
+- bounded-drift star registration with translation/rotation/scale refinement;
 - robust global or tiled local normalization;
 - online residual (delta-sigma) rejection with coverage and rejection maps;
 - non-mutating frame admission gates for additive live stacks;
@@ -43,3 +43,12 @@ prepared dark or flat twice.
 The format-level float writer lives in `seiza-fits`. This crate only selects
 stack- and master-specific typed header cards before passing its interleaved
 linear image to that generic atomic writer.
+
+Registration uses every retained detection for a bounded translation seed,
+complemented by bright-star triangles for rotation and scale. The expected
+center displacement is the larger of
+`StackOptions::registration.maximum_drift_pixels` and
+`maximum_drift_fraction` times the reference frame's larger dimension. The
+defaults are 256 pixels and 15%. Differently sized or cropped light frames are
+resampled onto the reference grid; samples outside their valid crop remain
+masked and are accounted for by the overlap admission gate.

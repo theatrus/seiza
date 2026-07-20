@@ -85,12 +85,31 @@ published atomically.
 
 ## Registration
 
-Registration uses bright-star triangles whose side-length ratios are invariant
-under translation, rotation, and uniform scale. Candidate correspondences
-propose a non-reflecting similarity transform. The winning transform is the one
-placing the most source stars near reference stars, then it is refined by a
-least-squares similarity fit over its inliers. Diagnostics retain matched-star
-count, RMS residual, translation, rotation, and scale.
+Registration first votes for bounded translations across every retained star.
+This low-drift seed is deliberately independent of brightness rank, so noisy,
+dithered, or cropped frames can register when their common stars fall outside
+one frame's brightest subset. Bright-star triangles complement the seed for
+rotation and scale; their side-length ratios are invariant under translation,
+rotation, and uniform scale. Candidate correspondences propose a non-reflecting
+similarity transform. The winning transform is the one placing the most source
+stars near reference stars, then it is refined by a least-squares similarity
+fit over its inliers. Detection input receives only a positive affine scaling
+to `[0, 1]`; it is not percentile-clipped, because clipping bright samples can
+merge components and destroy the flux ordering used to retain stars.
+
+The effective drift limit is the larger of
+`RegistrationOptions::maximum_drift_pixels` and the reference frame's larger
+dimension multiplied by `maximum_drift_fraction`. Defaults are 256 pixels and
+15%, respectively. This limit bounds both the translation search and the
+displacement of the fitted transform at the reference-frame center. The CLI
+exposes the two components as `--max-registration-drift` and
+`--max-registration-drift-fraction`, and records both plus the effective pixel
+limit in its report. Source frames may have different pixel dimensions:
+resampling maps their valid samples onto the fixed reference grid, masks pixels
+outside the source crop, and leaves the existing minimum-overlap admission gate
+to decide whether enough of the frame can be integrated. Diagnostics retain
+matched-star count, RMS residual, center drift, translation, rotation, scale,
+and usable overlap.
 
 The first slice deliberately rejects strong shear and reflection. Optical
 distortion and mosaic reprojection need a higher-order or WCS mapping and must
@@ -188,12 +207,14 @@ Registration RMS ranged from 0.241 to 0.517 pixels. The end-to-end run,
 including the full FITS, preview, SHA-256 report, and atomic publication, took
 4.31 seconds and peaked at 948 MB resident memory.
 
-![Sh2-230 red stack](../images/stacking/sh2-230-r-11-of-31.jpg)
+![Sh2-230 red stack](../images/stacking/sh2-230-r-31-of-31.jpg)
 
 The 9576x6388 Sh2-230 sequence offered 31 red 60-second frames to local
-normalization. Eleven were admitted with 0.224 to 0.715 pixel RMS; twenty weak
-registrations were rejected without changing the accumulator. The end-to-end
-run took 16.61 seconds and peaked at 2.24 GB resident memory.
+normalization. All 31 were admitted with 0.052 to 0.132 pixel RMS and measured
+center drift from 0.3 to 25.7 pixels. The optimized end-to-end run took 47.97
+seconds, including the full FITS, preview, SHA-256 report, and atomic
+publication. An earlier percentile-clipped detector admitted only eleven; this
+sequence is retained as a regression case for preserving star rank under drift.
 
 ## Follow-on work
 

@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use seiza_stacking::{
     CalibrationMasters, DeltaSigmaOptions, FitsFrame, FrameDisposition, MasterDark, MasterFlat,
-    NormalizationMode, RejectionMode, StackOptions,
+    NormalizationMode, RegistrationOptions, RejectionMode, StackOptions,
 };
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -68,6 +68,18 @@ pub(crate) struct StackArgs {
     /// Maximum registration residual for additive admission
     #[arg(long, default_value_t = 2.0)]
     max_registration_rms: f64,
+    /// Pixel floor for maximum frame-to-reference drift
+    #[arg(
+        long,
+        default_value_t = RegistrationOptions::DEFAULT_MAXIMUM_DRIFT_PIXELS
+    )]
+    max_registration_drift: f64,
+    /// Fraction of the larger image dimension allowed for registration drift
+    #[arg(
+        long,
+        default_value_t = RegistrationOptions::DEFAULT_MAXIMUM_DRIFT_FRACTION
+    )]
+    max_registration_drift_fraction: f64,
     /// Minimum fraction of samples overlapping the reference
     #[arg(long, default_value_t = 0.60)]
     min_overlap: f32,
@@ -89,6 +101,9 @@ struct ConfigurationReport {
     registration_descriptor_tolerance: f64,
     registration_scale_tolerance: f64,
     registration_match_tolerance_pixels: f64,
+    registration_maximum_drift_floor_pixels: f64,
+    registration_maximum_drift_fraction: f64,
+    registration_effective_maximum_drift_pixels: f64,
     registration_minimum_matches: usize,
     registration_maximum_candidates: usize,
     normalization: &'static str,
@@ -111,6 +126,7 @@ struct ConfigurationReport {
 struct DiagnosticReport {
     matched_stars: usize,
     registration_rms_pixels: f64,
+    registration_drift_pixels: f64,
     scale: f64,
     rotation_degrees: f64,
     translation_x: f64,
@@ -185,6 +201,14 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
     if !options.max_registration_rms.is_finite() || options.max_registration_rms <= 0.0 {
         anyhow::bail!("--max-registration-rms must be a positive finite number");
     }
+    if !options.max_registration_drift.is_finite() || options.max_registration_drift <= 0.0 {
+        anyhow::bail!("--max-registration-drift must be a positive finite number");
+    }
+    if !options.max_registration_drift_fraction.is_finite()
+        || !(0.0..=1.0).contains(&options.max_registration_drift_fraction)
+    {
+        anyhow::bail!("--max-registration-drift-fraction must be between zero and one");
+    }
     if !options.min_overlap.is_finite() || !(0.0..=1.0).contains(&options.min_overlap) {
         anyhow::bail!("--min-overlap must be between zero and one");
     }
@@ -253,6 +277,20 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
     };
     stack_options.acceptance.maximum_registration_rms_pixels = options.max_registration_rms;
     stack_options.acceptance.minimum_overlap_fraction = options.min_overlap;
+    stack_options.registration.maximum_drift_pixels = options.max_registration_drift;
+    stack_options.registration.maximum_drift_fraction = options.max_registration_drift_fraction;
+
+    let mut images = options.images.iter();
+    let reference_path = images.next().expect("clap requires at least two images");
+    let reference_identity = report_path
+        .as_ref()
+        .map(|_| file_identity(reference_path))
+        .transpose()?;
+    let reference = FitsFrame::open(reference_path)
+        .with_context(|| format!("failed to load reference {}", reference_path.display()))?;
+    let effective_maximum_drift_pixels = stack_options
+        .registration
+        .effective_maximum_drift_pixels(reference.image.width, reference.image.height);
 
     let configuration_report = ConfigurationReport {
         registration_detection_sigma: stack_options.registration.detection_sigma,
@@ -261,6 +299,9 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
         registration_descriptor_tolerance: stack_options.registration.descriptor_tolerance,
         registration_scale_tolerance: stack_options.registration.scale_tolerance,
         registration_match_tolerance_pixels: stack_options.registration.match_tolerance_pixels,
+        registration_maximum_drift_floor_pixels: stack_options.registration.maximum_drift_pixels,
+        registration_maximum_drift_fraction: stack_options.registration.maximum_drift_fraction,
+        registration_effective_maximum_drift_pixels: effective_maximum_drift_pixels,
         registration_minimum_matches: stack_options.registration.minimum_matches,
         registration_maximum_candidates: stack_options.registration.maximum_candidates,
         normalization: match options.normalization {
@@ -289,14 +330,6 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
         minimum_integrated_fraction: stack_options.acceptance.minimum_integrated_fraction,
     };
 
-    let mut images = options.images.iter();
-    let reference_path = images.next().expect("clap requires at least two images");
-    let reference_identity = report_path
-        .as_ref()
-        .map(|_| file_identity(reference_path))
-        .transpose()?;
-    let reference = FitsFrame::open(reference_path)
-        .with_context(|| format!("failed to load reference {}", reference_path.display()))?;
     let mut stacker = seiza_stacking::LiveStacker::new(reference, calibration, stack_options)
         .with_context(|| {
             format!(
@@ -304,7 +337,11 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
                 reference_path.display()
             )
         })?;
-    println!("reference  {}", reference_path.display());
+    println!(
+        "reference  {} ({:.1}px registration drift limit)",
+        reference_path.display(),
+        effective_maximum_drift_pixels,
+    );
 
     let mut unreadable_frames = 0_u32;
     let mut admission_records = Vec::new();
@@ -332,10 +369,11 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
         match stacker.push(frame)? {
             FrameDisposition::Accepted(diagnostics) => {
                 println!(
-                    "accepted   {}: {} stars, {:.3}px RMS, {:+.3}deg, {:.1}% samples",
+                    "accepted   {}: {} stars, {:.3}px RMS, {:.1}px drift, {:+.3}deg, {:.1}% samples",
                     path.display(),
                     diagnostics.matched_stars,
                     diagnostics.registration_rms_pixels,
+                    diagnostics.registration_drift_pixels,
                     diagnostics.transform.rotation_radians.to_degrees(),
                     diagnostics.integrated_fraction * 100.0,
                 );
@@ -347,6 +385,7 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
                         diagnostics: Some(DiagnosticReport {
                             matched_stars: diagnostics.matched_stars,
                             registration_rms_pixels: diagnostics.registration_rms_pixels,
+                            registration_drift_pixels: diagnostics.registration_drift_pixels,
                             scale: diagnostics.transform.scale,
                             rotation_degrees: diagnostics.transform.rotation_radians.to_degrees(),
                             translation_x: diagnostics.transform.translation_x,

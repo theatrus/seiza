@@ -46,22 +46,7 @@ pub struct StackOptions {
 
 impl StackOptions {
     fn validate(&self) -> Result<()> {
-        let registration = &self.registration;
-        if !registration.detection_sigma.is_finite()
-            || registration.detection_sigma <= 0.0
-            || registration.triangle_stars < 3
-            || registration.maximum_stars < registration.minimum_matches.max(3)
-            || registration.minimum_matches < 3
-            || registration.maximum_candidates == 0
-            || !registration.descriptor_tolerance.is_finite()
-            || registration.descriptor_tolerance <= 0.0
-            || !registration.scale_tolerance.is_finite()
-            || !(0.0..1.0).contains(&registration.scale_tolerance)
-            || !registration.match_tolerance_pixels.is_finite()
-            || registration.match_tolerance_pixels <= 0.0
-        {
-            return Err(Error::Stack("invalid registration options".into()));
-        }
+        self.registration.validate()?;
         if matches!(self.normalization, NormalizationMode::Local { tile_size } if tile_size < 16) {
             return Err(Error::Stack(
                 "local normalization tile size must be at least 16 pixels".into(),
@@ -132,6 +117,7 @@ pub struct FrameDiagnostics {
     pub transform: SimilarityTransform,
     pub matched_stars: usize,
     pub registration_rms_pixels: f64,
+    pub registration_drift_pixels: f64,
     pub normalization_mean_gain: f32,
     pub normalization_mean_offset: f32,
     pub overlap_fraction: f32,
@@ -286,17 +272,12 @@ impl LiveStacker {
     }
 
     pub fn push_linear(&mut self, frame: LinearImage) -> Result<FrameDisposition> {
-        if !self.reference.dimensions_match(&frame) {
+        if self.reference.channels != frame.channels {
             self.rejected_frames += 1;
             return Ok(FrameDisposition::Rejected(
                 FrameRejectionReason::IncompatibleImage(format!(
-                    "frame is {}x{}x{} but stack is {}x{}x{}",
-                    frame.width,
-                    frame.height,
-                    frame.channels,
-                    self.reference.width,
-                    self.reference.height,
-                    self.reference.channels
+                    "frame has {} channel(s) but stack has {}",
+                    frame.channels, self.reference.channels
                 )),
             ));
         }
@@ -404,6 +385,7 @@ impl LiveStacker {
             transform: registration.transform,
             matched_stars: registration.matched_stars,
             registration_rms_pixels: registration.rms_error_pixels,
+            registration_drift_pixels: registration.drift_pixels,
             normalization_mean_gain: normalization.mean_gain(),
             normalization_mean_offset: normalization.mean_offset(),
             overlap_fraction,
@@ -693,6 +675,38 @@ mod tests {
             LinearImage::new(4, 4, 1, (0..16).map(|value| value as f32).collect()).unwrap();
         let registered = resample(&source, 4, 4, SimilarityTransform::IDENTITY);
         assert_eq!(registered.data, source.data);
+    }
+
+    #[test]
+    fn resampling_places_a_cropped_source_on_the_reference_grid() {
+        let source = LinearImage::new(3, 2, 1, (0..6).map(|value| value as f32).collect()).unwrap();
+        let registered = resample(
+            &source,
+            5,
+            4,
+            SimilarityTransform {
+                translation_x: 1.0,
+                translation_y: 1.0,
+                ..SimilarityTransform::IDENTITY
+            },
+        );
+
+        for y in 0..source.height {
+            for x in 0..source.width {
+                assert_eq!(
+                    registered.data[(y + 1) * registered.width + x + 1],
+                    source.data[y * source.width + x]
+                );
+            }
+        }
+        assert_eq!(
+            registered
+                .data
+                .iter()
+                .filter(|sample| sample.is_finite())
+                .count(),
+            source.sample_count()
+        );
     }
 
     #[test]
