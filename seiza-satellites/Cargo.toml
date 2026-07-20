@@ -3,6 +3,7 @@ name = "seiza-satellites"
 description = "Time- and observer-aware satellite track prediction for Seiza WCS solutions"
 version = "0.3.1"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
@@ -16,12 +17,12 @@ fs2.workspace = true
 reqwest.workspace = true
 satkit.workspace = true
 seiza.workspace = true
+seiza-download.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-zstd.workspace = true
 
 [features]
 ## Serialize/Deserialize on the prediction result types for API embedding.
@@ -30,3 +31,4 @@ serde = []
 [dev-dependencies]
 serde_json.workspace = true
 tempfile = "3"
+zstd.workspace = true

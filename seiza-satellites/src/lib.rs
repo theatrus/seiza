@@ -5,12 +5,16 @@
 //! must not present them as pixel detections without a separate evidence
 //! matcher.
 
+mod cache;
 mod history;
 mod mirror;
 mod resolver;
 mod source;
 pub mod trail_alignment;
 
+pub use cache::{
+    CacheState, DEFAULT_CELESTRAK_CACHE_SIZE_LIMIT_BYTES, DEFAULT_SATELLITE_CACHE_SIZE_LIMIT_BYTES,
+};
 pub use history::{
     HistoricalCatalogSnapshot, SATCHECKER_CACHE_REUSE_WINDOW, SATCHECKER_TLES_AT_EPOCH_URL,
     SatCheckerLoad, SatCheckerSource,
@@ -24,9 +28,8 @@ pub use resolver::{
     OrbitalCatalogSource,
 };
 pub use source::{
-    CELESTRAK_ACTIVE_OMM_URL, CELESTRAK_MIN_REFRESH, CacheState, CachedCatalogSnapshot,
-    CelesTrakLoad, CelesTrakSource, DEFAULT_CELESTRAK_CACHE_SIZE_LIMIT_BYTES,
-    DEFAULT_SATELLITE_CACHE_SIZE_LIMIT_BYTES,
+    CELESTRAK_ACTIVE_OMM_URL, CELESTRAK_MIN_REFRESH, CachedCatalogSnapshot, CelesTrakLoad,
+    CelesTrakSource,
 };
 
 use satkit::frametransform::{qitrf2gcrf_approx, qteme2gcrf, qteme2itrf};
@@ -118,6 +121,41 @@ pub enum Error {
     CacheLock(String),
     #[error("no platform cache directory is available")]
     NoCacheDirectory,
+}
+
+/// Translate a `seiza-download` bundle-transfer error into the satellite error
+/// vocabulary. The Seiza mirror shares that crate's content-addressed transfer
+/// and verification path, so its failures arrive as [`seiza_download::Error`].
+impl From<seiza_download::Error> for Error {
+    fn from(error: seiza_download::Error) -> Self {
+        use seiza_download::Error as Download;
+        match error {
+            Download::Http { url, source } => Error::Http { url, source },
+            Download::HttpStatus { url, status } => Error::HttpStatus { url, status },
+            Download::Io { path, source, .. } => Error::Io { path, source },
+            Download::Size {
+                name,
+                expected,
+                actual,
+            } => Error::MirrorManifest {
+                source_name: name,
+                message: format!("size mismatch: expected {expected}, got {actual}"),
+            },
+            Download::Checksum {
+                name,
+                expected,
+                actual,
+            } => Error::Integrity {
+                source_name: name,
+                expected,
+                actual,
+            },
+            other => Error::MirrorManifest {
+                source_name: "seiza-download".into(),
+                message: other.to_string(),
+            },
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

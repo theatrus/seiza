@@ -1,13 +1,11 @@
-use crate::source::{
-    DEFAULT_SATELLITE_CACHE_SIZE_LIMIT_BYTES, LockMode, SATCHECKER_CACHE_PREFIX,
-    SATCHECKER_CACHE_SUFFIX, acquire_lock_in, enforce_cache_size_limit_in, now_timestamp,
+use crate::cache::{
+    self, DEFAULT_SATELLITE_CACHE_SIZE_LIMIT_BYTES, LockMode, SATCHECKER_CACHE_PREFIX,
+    SATCHECKER_CACHE_SUFFIX, TimeSnapshot, acquire_lock_in, now_timestamp,
 };
 use crate::{CacheState, Error, Result, SatelliteCatalog, SingleExposure, UtcTimestamp};
-use directories::ProjectDirs;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
 
 /// Public IAU Centre for the Protection of the Dark and Quiet Sky historical
 /// TLE service.
@@ -71,10 +69,7 @@ impl SatCheckerSource {
     }
 
     pub fn platform_default() -> Result<Self> {
-        let cache_dir = ProjectDirs::from("fyi", "Seiza", "seiza")
-            .map(|dirs| dirs.cache_dir().join("satellites"))
-            .ok_or(Error::NoCacheDirectory)?;
-        Self::new(cache_dir)
+        Self::new(cache::platform_cache_dir()?)
     }
 
     /// Override the endpoint for an organization-local proxy or test fixture.
@@ -154,6 +149,9 @@ impl SatCheckerSource {
             })?;
         self.prune_cache_async().await?;
 
+        // A nearby cached snapshot that fails to load (corrupt/unreadable) is
+        // treated as a miss and falls through to the network fetch below —
+        // `select_nearest_async` swallows per-snapshot load errors by design.
         {
             let _shared = self.acquire_lock(LockMode::Shared).await?;
             if let Some(load) = self
@@ -176,26 +174,15 @@ impl SatCheckerSource {
 
     /// Enforce the shared history ceiling without network I/O.
     pub fn prune_cache(&self) -> Result<()> {
-        let _exclusive = acquire_lock_in(&self.cache_dir, LockMode::Exclusive)?;
-        enforce_cache_size_limit_in(&self.cache_dir, None, self.cache_size_limit_bytes)
+        cache::prune_cache_blocking(&self.cache_dir, self.cache_size_limit_bytes)
     }
 
     async fn prune_cache_async(&self) -> Result<()> {
-        let cache_dir = self.cache_dir.clone();
-        let limit = self.cache_size_limit_bytes;
-        tokio::task::spawn_blocking(move || {
-            let _exclusive = acquire_lock_in(&cache_dir, LockMode::Exclusive)?;
-            enforce_cache_size_limit_in(&cache_dir, None, limit)
-        })
-        .await
-        .map_err(|error| Error::CacheLock(error.to_string()))?
+        cache::prune_cache_async(&self.cache_dir, self.cache_size_limit_bytes).await
     }
 
     async fn acquire_lock(&self, mode: LockMode) -> Result<File> {
-        let cache_dir = self.cache_dir.clone();
-        tokio::task::spawn_blocking(move || acquire_lock_in(&cache_dir, mode))
-            .await
-            .map_err(|error| Error::CacheLock(error.to_string()))?
+        cache::acquire_lock(&self.cache_dir, mode).await
     }
 
     async fn load_nearest_async(
@@ -205,20 +192,14 @@ impl SatCheckerSource {
     ) -> Result<Option<SatCheckerLoad>> {
         let cache_dir = self.cache_dir.clone();
         let endpoint = self.endpoint.clone();
-        let mut snapshots =
+        let snapshots =
             tokio::task::spawn_blocking(move || history_inventory_in(&cache_dir, &endpoint))
                 .await
                 .map_err(|error| Error::CacheLock(error.to_string()))??;
-        sort_by_distance(&mut snapshots, time_utc);
-        for snapshot in snapshots {
-            if !within_distance(&snapshot, time_utc, maximum_distance) {
-                continue;
-            }
-            if let Ok(load) = self.load_snapshot_async(snapshot).await {
-                return Ok(Some(load));
-            }
-        }
-        Ok(None)
+        cache::select_nearest_async(snapshots, time_utc, maximum_distance, async |snapshot| {
+            self.load_snapshot_async(snapshot).await
+        })
+        .await
     }
 
     fn load_nearest_blocking(
@@ -226,22 +207,10 @@ impl SatCheckerSource {
         time_utc: UtcTimestamp,
         maximum_distance: Option<Duration>,
     ) -> Result<Option<SatCheckerLoad>> {
-        let mut snapshots = history_inventory_in(&self.cache_dir, &self.endpoint)?;
-        sort_by_distance(&mut snapshots, time_utc);
-        let mut last_error = None;
-        for snapshot in snapshots {
-            if !within_distance(&snapshot, time_utc, maximum_distance) {
-                continue;
-            }
-            match self.load_snapshot_blocking(snapshot) {
-                Ok(load) => return Ok(Some(load)),
-                Err(error) => last_error = Some(error),
-            }
-        }
-        match last_error {
-            Some(error) => Err(error),
-            None => Ok(None),
-        }
+        let snapshots = history_inventory_in(&self.cache_dir, &self.endpoint)?;
+        cache::select_nearest_blocking(snapshots, time_utc, maximum_distance, |snapshot| {
+            self.load_snapshot_blocking(snapshot)
+        })
     }
 
     async fn download(&self, query_time: UtcTimestamp) -> Result<SatCheckerLoad> {
@@ -264,12 +233,9 @@ impl SatCheckerSource {
                 status: status.as_u16(),
             });
         }
-        let body = crate::source::read_body_capped(
-            response,
-            crate::source::MAX_SATELLITE_RESPONSE_BYTES,
-            &request_url,
-        )
-        .await?;
+        let body =
+            cache::read_body_capped(response, cache::MAX_SATELLITE_RESPONSE_BYTES, &request_url)
+                .await?;
         let payload = String::from_utf8(body).map_err(|error| Error::Elements {
             source_name: request_url.clone(),
             message: error.to_string(),
@@ -288,45 +254,13 @@ impl SatCheckerSource {
             downloaded_seconds,
             std::process::id()
         ));
-        let publication = async {
-            let mut file = tokio::fs::File::create(&temporary_path)
-                .await
-                .map_err(|source| Error::Io {
-                    path: temporary_path.clone(),
-                    source,
-                })?;
-            file.write_all(payload.as_bytes())
-                .await
-                .map_err(|source| Error::Io {
-                    path: temporary_path.clone(),
-                    source,
-                })?;
-            file.sync_all().await.map_err(|source| Error::Io {
-                path: temporary_path.clone(),
-                source,
-            })?;
-            drop(file);
-            tokio::fs::rename(&temporary_path, &final_path)
-                .await
-                .map_err(|source| Error::Io {
-                    path: final_path.clone(),
-                    source,
-                })?;
-            Ok::<(), Error>(())
-        }
-        .await;
-        if publication.is_err() {
-            let _ = tokio::fs::remove_file(&temporary_path).await;
-        }
-        publication?;
-        let cache_dir = self.cache_dir.clone();
-        let retained = final_path.clone();
-        let limit = self.cache_size_limit_bytes;
-        tokio::task::spawn_blocking(move || {
-            enforce_cache_size_limit_in(&cache_dir, Some(&retained), limit)
-        })
-        .await
-        .map_err(|error| Error::CacheLock(error.to_string()))??;
+        cache::publish_atomically(&temporary_path, &final_path, payload.as_bytes()).await?;
+        cache::enforce_size_limit_async(
+            &self.cache_dir,
+            Some(&final_path),
+            self.cache_size_limit_bytes,
+        )
+        .await?;
 
         let snapshot = HistoricalCatalogSnapshot {
             cache_path: final_path.clone(),
@@ -384,35 +318,14 @@ impl SatCheckerSource {
     }
 }
 
-fn within_distance(
-    snapshot: &HistoricalCatalogSnapshot,
-    time_utc: UtcTimestamp,
-    maximum_distance: Option<Duration>,
-) -> bool {
-    maximum_distance.is_none_or(|maximum| {
-        snapshot.query_time.seconds_since(time_utc).abs() <= maximum.as_secs_f64()
-    })
-}
+impl TimeSnapshot for HistoricalCatalogSnapshot {
+    fn query_time(&self) -> UtcTimestamp {
+        self.query_time
+    }
 
-fn sort_by_distance(snapshots: &mut [HistoricalCatalogSnapshot], time_utc: UtcTimestamp) {
-    snapshots.sort_by(|left, right| {
-        left.query_time
-            .seconds_since(time_utc)
-            .abs()
-            .total_cmp(&right.query_time.seconds_since(time_utc).abs())
-            .then_with(|| {
-                right
-                    .query_time
-                    .unix_seconds()
-                    .total_cmp(&left.query_time.unix_seconds())
-            })
-            .then_with(|| {
-                right
-                    .downloaded_at
-                    .unix_seconds()
-                    .total_cmp(&left.downloaded_at.unix_seconds())
-            })
-    });
+    fn downloaded_at(&self) -> UtcTimestamp {
+        self.downloaded_at
+    }
 }
 
 fn history_inventory_in(

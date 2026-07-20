@@ -1,8 +1,8 @@
+use crate::cache;
 use crate::{
     CacheState, CelesTrakLoad, CelesTrakSource, Result, SatCheckerLoad, SatCheckerSource,
     SatelliteCatalog, SeizaMirrorLoad, SeizaMirrorSource, SingleExposure, UtcTimestamp,
 };
-use directories::ProjectDirs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -61,10 +61,7 @@ impl OrbitalCatalogSource {
     }
 
     pub fn platform_default() -> Result<Self> {
-        let cache_dir = ProjectDirs::from("fyi", "Seiza", "seiza")
-            .map(|dirs| dirs.cache_dir().join("satellites"))
-            .ok_or(crate::Error::NoCacheDirectory)?;
-        Self::new(cache_dir)
+        Self::new(cache::platform_cache_dir()?)
     }
 
     pub fn cache_dir(&self) -> &Path {

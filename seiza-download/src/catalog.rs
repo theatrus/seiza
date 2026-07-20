@@ -1,25 +1,15 @@
+use crate::bundle::{self, ArtifactSpec, EncodedSpec, Encoding, TransferEvent};
 use crate::error::io;
 use crate::{
     BundleManifestDocument, CatalogSet, DEFAULT_BUNDLE_BASE_URL, Dataset, Error,
     LEGACY_V2_BUNDLE_BASE_URL, ManifestFile, ManifestTransport, Result,
 };
-use async_compression::tokio::bufread::ZstdDecoder;
 use directories::ProjectDirs;
 use fs2::FileExt;
-use futures_util::StreamExt;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio_util::io::StreamReader;
-
-static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-const READ_TIMEOUT: Duration = Duration::from_secs(300);
-const IO_BUFFER_BYTES: usize = 1024 * 1024;
+use tokio::io::AsyncWriteExt;
 
 /// Controls when the small hosted bundle manifest may use the cached copy.
 /// Catalog artifacts themselves are immutable and content-addressed.
@@ -114,7 +104,13 @@ impl CatalogBundle {
     /// calls intentionally use only manifest size metadata on cache hits.
     pub async fn verify(&self) -> Result<()> {
         for artifact in self.artifacts.values() {
-            verify_artifact(&artifact.path, artifact).await?;
+            bundle::verify_file(
+                &artifact.path,
+                artifact.bytes,
+                &artifact.sha256,
+                &artifact.name,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -130,7 +126,10 @@ impl CatalogBundle {
 
         for artifact in self.artifacts.values() {
             let target = output.join(&artifact.name);
-            if verify_artifact(&target, artifact).await.is_ok() {
+            if bundle::verify_file(&target, artifact.bytes, &artifact.sha256, &artifact.name)
+                .await
+                .is_ok()
+            {
                 paths.push(target);
                 continue;
             }
@@ -139,14 +138,15 @@ impl CatalogBundle {
                 ".{}.part-{}-{}",
                 artifact.name,
                 std::process::id(),
-                next_sequence()
+                bundle::next_sequence()
             ));
             let install = async {
                 tokio::fs::copy(&artifact.path, &temp)
                     .await
                     .map_err(|source| io("copy cached artifact to", &temp, source))?;
-                verify_artifact(&temp, artifact).await?;
-                replace_file(&temp, &target).await
+                bundle::verify_file(&temp, artifact.bytes, &artifact.sha256, &artifact.name)
+                    .await?;
+                bundle::replace_file(&temp, &target).await
             }
             .await;
             if let Err(error) = install {
@@ -202,15 +202,10 @@ impl CatalogManagerBuilder {
                     .map(|dirs| dirs.cache_dir().join("catalogs"))
             })
             .ok_or(Error::CacheDirectoryUnavailable)?;
-        let client = reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .read_timeout(READ_TIMEOUT)
-            .user_agent(format!("seiza-download/{}", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|source| Error::Http {
-                url: self.base_url.clone(),
-                source,
-            })?;
+        let client = bundle::http_client(
+            format!("seiza-download/{}", env!("CARGO_PKG_VERSION")),
+            Duration::from_secs(300),
+        )?;
         Ok(CatalogManager {
             cache_dir,
             base_url: self.base_url,
@@ -393,7 +388,7 @@ impl CatalogManager {
                 .and_then(|name| name.to_str())
                 .unwrap_or("catalog-manifest.json"),
             std::process::id(),
-            next_sequence()
+            bundle::next_sequence()
         ));
         let write = async {
             let mut output = tokio::fs::File::create(&temp)
@@ -408,7 +403,7 @@ impl CatalogManager {
                 .await
                 .map_err(|source| io("sync", &temp, source))?;
             drop(output);
-            replace_file(&temp, &path).await
+            bundle::replace_file(&temp, &path).await
         }
         .await;
         if write.is_err() {
@@ -427,7 +422,7 @@ impl CatalogManager {
         F: Fn(DownloadEvent) + Send + Sync,
     {
         let target = self.object_path(file);
-        if metadata_matches(&target, file.bytes).await? {
+        if bundle::size_matches(&target, file.bytes).await? {
             report(DownloadEvent::CacheHit {
                 name: file.name.clone(),
                 path: target.clone(),
@@ -438,7 +433,7 @@ impl CatalogManager {
         // Lock only cache misses, then re-check after waiting. This avoids
         // duplicate multi-gigabyte transfers across application processes.
         let _lock = self.acquire_artifact_lock(file).await?;
-        if metadata_matches(&target, file.bytes).await? {
+        if bundle::size_matches(&target, file.bytes).await? {
             report(DownloadEvent::CacheHit {
                 name: file.name.clone(),
                 path: target.clone(),
@@ -454,7 +449,7 @@ impl CatalogManager {
             "{}-{}-{}-{}.part",
             file.sha256,
             std::process::id(),
-            next_sequence(),
+            bundle::next_sequence(),
             file.name
         ));
         let install = async {
@@ -464,12 +459,12 @@ impl CatalogManager {
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(|source| io("create directory", parent, source))?;
-            if metadata_matches(&target, file.bytes).await? {
+            if bundle::size_matches(&target, file.bytes).await? {
                 tokio::fs::remove_file(&temp)
                     .await
                     .map_err(|source| io("remove", &temp, source))?;
             } else {
-                replace_file(&temp, &target).await?;
+                bundle::replace_file(&temp, &target).await?;
             }
             Ok(())
         }
@@ -495,256 +490,35 @@ impl CatalogManager {
     where
         F: Fn(DownloadEvent) + Send + Sync,
     {
-        if let Some(transport) = transport {
-            self.download_zstd(file, transport, temp, report).await
-        } else {
-            self.download_identity(file, temp, report).await
-        }
-    }
-
-    async fn download_identity<F>(&self, file: &ManifestFile, temp: &Path, report: &F) -> Result<()>
-    where
-        F: Fn(DownloadEvent) + Send + Sync,
-    {
-        let url = format!("{}/{}", self.base_url, file.artifact_key());
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|source| Error::Http {
-                url: url.clone(),
-                source,
-            })?;
-        if !response.status().is_success() {
-            return Err(Error::HttpStatus {
-                url,
-                status: response.status().as_u16(),
-            });
-        }
-        if let Some(bytes) = response.content_length()
-            && bytes != file.bytes
-        {
-            return Err(Error::Size {
-                name: file.name.clone(),
-                expected: file.bytes,
-                actual: bytes,
-            });
-        }
-
-        report(DownloadEvent::DownloadStarted {
-            name: file.name.clone(),
-            bytes: file.bytes,
-        });
-        let mut output = tokio::fs::File::create(temp)
-            .await
-            .map_err(|source| io("create", temp, source))?;
-        let mut stream = response.bytes_stream();
-        let mut hasher = Sha256::new();
-        let mut downloaded = 0u64;
-        let mut reported = 0u64;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|source| Error::Http {
-                url: url.clone(),
-                source,
-            })?;
-            output
-                .write_all(&chunk)
-                .await
-                .map_err(|source| io("write", temp, source))?;
-            hasher.update(&chunk);
-            downloaded += chunk.len() as u64;
-            if downloaded == file.bytes || downloaded.saturating_sub(reported) >= 4 * 1024 * 1024 {
-                report(DownloadEvent::DownloadProgress {
-                    name: file.name.clone(),
-                    downloaded,
-                    total: file.bytes,
-                    written: downloaded,
-                });
-                reported = downloaded;
-            }
-        }
-        output
-            .sync_all()
-            .await
-            .map_err(|source| io("sync", temp, source))?;
-        drop(output);
-
-        if downloaded != file.bytes {
-            return Err(Error::Size {
-                name: file.name.clone(),
-                expected: file.bytes,
-                actual: downloaded,
-            });
-        }
-        let actual = lowercase_hex(&hasher.finalize());
-        if actual != file.sha256 {
-            return Err(Error::Checksum {
-                name: file.name.clone(),
-                expected: file.sha256.clone(),
-                actual,
-            });
-        }
-        Ok(())
-    }
-
-    async fn download_zstd<F>(
-        &self,
-        file: &ManifestFile,
-        transport: &ManifestTransport,
-        temp: &Path,
-        report: &F,
-    ) -> Result<()>
-    where
-        F: Fn(DownloadEvent) + Send + Sync,
-    {
-        let url = format!("{}/{}", self.base_url, transport.key);
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|source| Error::Http {
-                url: url.clone(),
-                source,
-            })?;
-        if !response.status().is_success() {
-            return Err(Error::HttpStatus {
-                url,
-                status: response.status().as_u16(),
-            });
-        }
-        if let Some(bytes) = response.content_length()
-            && bytes != transport.bytes
-        {
-            return Err(Error::Size {
-                name: format!("{} (zstd transport)", file.name),
-                expected: transport.bytes,
-                actual: bytes,
-            });
-        }
-
-        report(DownloadEvent::DownloadStarted {
-            name: file.name.clone(),
+        let url = match transport {
+            Some(transport) => format!("{}/{}", self.base_url, transport.key),
+            None => format!("{}/{}", self.base_url, file.artifact_key()),
+        };
+        let encoded = transport.map(|transport| EncodedSpec {
+            encoding: Encoding::Zstd,
             bytes: transport.bytes,
+            sha256: &transport.sha256,
         });
-
-        let downloaded = Arc::new(AtomicU64::new(0));
-        let stream_downloaded = Arc::clone(&downloaded);
-        let encoded_hasher = Arc::new(Mutex::new(Sha256::new()));
-        let stream_hasher = Arc::clone(&encoded_hasher);
-        let stream = response.bytes_stream().map(move |chunk| match chunk {
-            Ok(chunk) => {
-                stream_hasher
-                    .lock()
-                    .expect("encoded hash mutex poisoned")
-                    .update(&chunk);
-                stream_downloaded.fetch_add(chunk.len() as u64, Ordering::Relaxed);
-                Ok(chunk)
-            }
-            Err(source) => Err(std::io::Error::other(source)),
-        });
-        let reader = StreamReader::new(stream);
-        let mut decoder = ZstdDecoder::new(tokio::io::BufReader::new(reader));
-        let mut output = tokio::fs::File::create(temp)
-            .await
-            .map_err(|source| io("create", temp, source))?;
-        let mut decoded_hasher = Sha256::new();
-        let mut decoded = 0u64;
-        let mut reported = 0u64;
-        let mut buffer = vec![0u8; IO_BUFFER_BYTES];
-        loop {
-            let read = decoder
-                .read(&mut buffer)
-                .await
-                .map_err(|source| io("decompress into", temp, source))?;
-            if read == 0 {
-                break;
-            }
-            let next_decoded = decoded
-                .checked_add(read as u64)
-                .ok_or_else(|| Error::Size {
-                    name: file.name.clone(),
-                    expected: file.bytes,
-                    actual: u64::MAX,
-                })?;
-            // Reject the decoded chunk before writing it when it would exceed
-            // the canonical size. This bounds temporary disk usage as well as
-            // the amount of work performed on a wrong or malicious frame.
-            if next_decoded > file.bytes {
-                return Err(Error::Size {
-                    name: file.name.clone(),
-                    expected: file.bytes,
-                    actual: next_decoded,
-                });
-            }
-            output
-                .write_all(&buffer[..read])
-                .await
-                .map_err(|source| io("write", temp, source))?;
-            decoded_hasher.update(&buffer[..read]);
-            decoded = next_decoded;
-            if decoded.saturating_sub(reported) >= 4 * 1024 * 1024 {
-                report(DownloadEvent::DownloadProgress {
-                    name: file.name.clone(),
-                    downloaded: downloaded.load(Ordering::Relaxed),
-                    total: transport.bytes,
-                    written: decoded,
-                });
-                reported = decoded;
-            }
-        }
-        drop(decoder);
-        report(DownloadEvent::DownloadProgress {
-            name: file.name.clone(),
-            downloaded: downloaded.load(Ordering::Relaxed),
-            total: transport.bytes,
-            written: decoded,
-        });
-        output
-            .sync_all()
-            .await
-            .map_err(|source| io("sync", temp, source))?;
-        drop(output);
-
-        let downloaded = downloaded.load(Ordering::Relaxed);
-        if downloaded != transport.bytes {
-            return Err(Error::Size {
-                name: format!("{} (zstd transport)", file.name),
-                expected: transport.bytes,
-                actual: downloaded,
-            });
-        }
-        let encoded_actual = lowercase_hex(
-            &encoded_hasher
-                .lock()
-                .expect("encoded hash mutex poisoned")
-                .clone()
-                .finalize(),
-        );
-        if encoded_actual != transport.sha256 {
-            return Err(Error::Checksum {
-                name: format!("{} (zstd transport)", file.name),
-                expected: transport.sha256.clone(),
-                actual: encoded_actual,
-            });
-        }
-        if decoded != file.bytes {
-            return Err(Error::Size {
+        let spec = ArtifactSpec {
+            label: &file.name,
+            url: &url,
+            decoded_bytes: file.bytes,
+            decoded_sha256: &file.sha256,
+            encoded,
+        };
+        bundle::stream_to_temp(&self.client, &spec, temp, |event| match event {
+            TransferEvent::Started { total } => report(DownloadEvent::DownloadStarted {
                 name: file.name.clone(),
-                expected: file.bytes,
-                actual: decoded,
-            });
-        }
-        let decoded_actual = lowercase_hex(&decoded_hasher.finalize());
-        if decoded_actual != file.sha256 {
-            return Err(Error::Checksum {
+                bytes: total,
+            }),
+            TransferEvent::Progress(progress) => report(DownloadEvent::DownloadProgress {
                 name: file.name.clone(),
-                expected: file.sha256.clone(),
-                actual: decoded_actual,
-            });
-        }
-        Ok(())
+                downloaded: progress.downloaded,
+                total: progress.total,
+                written: progress.written,
+            }),
+        })
+        .await
     }
 
     fn manifest_path(&self) -> PathBuf {
@@ -783,73 +557,6 @@ impl CatalogManager {
     }
 }
 
-async fn metadata_matches(path: &Path, expected_bytes: u64) -> Result<bool> {
-    match tokio::fs::metadata(path).await {
-        Ok(metadata) => Ok(metadata.is_file() && metadata.len() == expected_bytes),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(source) => Err(io("read metadata for", path, source)),
-    }
-}
-
-async fn verify_artifact(path: &Path, artifact: &CatalogArtifact) -> Result<()> {
-    let mut input = tokio::fs::File::open(path)
-        .await
-        .map_err(|source| io("open", path, source))?;
-    let metadata = input
-        .metadata()
-        .await
-        .map_err(|source| io("read metadata for", path, source))?;
-    if metadata.len() != artifact.bytes {
-        return Err(Error::Size {
-            name: artifact.name.clone(),
-            expected: artifact.bytes,
-            actual: metadata.len(),
-        });
-    }
-
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; IO_BUFFER_BYTES];
-    loop {
-        let read = input
-            .read(&mut buffer)
-            .await
-            .map_err(|source| io("read", path, source))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let actual = lowercase_hex(&hasher.finalize());
-    if actual != artifact.sha256 {
-        return Err(Error::Checksum {
-            name: artifact.name.clone(),
-            expected: artifact.sha256.clone(),
-            actual,
-        });
-    }
-    Ok(())
-}
-
-async fn replace_file(temp: &Path, target: &Path) -> Result<()> {
-    tokio::fs::rename(temp, target)
-        .await
-        .map_err(|source| io("rename", temp, source))
-}
-
-fn next_sequence() -> u64 {
-    TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-}
-
-fn lowercase_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for &byte in bytes {
-        encoded.push(HEX[(byte >> 4) as usize] as char);
-        encoded.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    encoded
-}
-
 fn manifest_cache_file_name(base_url: &str) -> String {
     if base_url == DEFAULT_BUNDLE_BASE_URL {
         return "catalog-bundle-v4.json".into();
@@ -858,7 +565,7 @@ fn manifest_cache_file_name(base_url: &str) -> String {
         // Preserve the v0.5 cache location for explicitly configured v2 use.
         return "catalog-bundle-v2.json".into();
     }
-    let digest = lowercase_hex(&Sha256::digest(base_url.as_bytes()));
+    let digest = bundle::sha256_hex(base_url.as_bytes());
     format!("catalog-bundle-{}.json", &digest[..16])
 }
 
@@ -868,9 +575,10 @@ mod tests {
     use crate::REQUIRED_BUNDLE_FILES;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
 
     fn sha256(bytes: &[u8]) -> String {
-        lowercase_hex(&Sha256::digest(bytes))
+        bundle::sha256_hex(bytes)
     }
 
     fn cached_manifest(selected_bytes: &[u8]) -> BundleManifestDocument {
@@ -1318,7 +1026,7 @@ mod tests {
                 assert_eq!(expected, content.len() as u64);
                 assert!(actual > expected);
                 assert!(
-                    actual <= expected + IO_BUFFER_BYTES as u64,
+                    actual <= expected + bundle::IO_BUFFER_BYTES as u64,
                     "decoding continued beyond the first oversized chunk: {actual} bytes"
                 );
             }
