@@ -9,11 +9,11 @@ mod catalog;
 mod error;
 mod manifest;
 
-pub use error::{Error, Result};
 pub use catalog::{
     CachePolicy, CatalogArtifact, CatalogBundle, CatalogManager, CatalogManagerBuilder,
     DownloadEvent,
 };
+pub use error::{Error, Result};
 pub use manifest::{
     BundleManifest, BundleManifestDocument, CatalogSet, Dataset, ManifestFile, ManifestTransport,
     REQUIRED_BUNDLE_FILES, REQUIRED_V2_FILES,

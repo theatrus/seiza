@@ -281,28 +281,27 @@ fn managed_cache_inventory_in(cache_dir: &Path) -> Result<Vec<ManagedCacheSnapsh
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs_f64();
-        let retained_at = if name.starts_with(CELESTRAK_CACHE_PREFIX)
-            && name.ends_with(CELESTRAK_CACHE_SUFFIX)
-        {
-            snapshot_retrieved_at(&path, modified)?.unix_seconds()
-        } else if let Some(value) = name
-            .strip_prefix(SATCHECKER_CACHE_PREFIX)
-            .and_then(|value| value.strip_suffix(SATCHECKER_CACHE_SUFFIX))
-            .and_then(|value| value.rsplit_once("-cached-").map(|(_, cached)| cached))
-            .and_then(|value| value.parse::<f64>().ok())
-        {
-            value
-        } else if let Some(value) = name
-            .strip_prefix(SEIZA_MIRROR_CACHE_PREFIX)
-            .and_then(|value| value.strip_suffix(SEIZA_MIRROR_CACHE_SUFFIX))
-            .and_then(|value| value.split("-cached-").nth(1))
-            .and_then(|value| value.split('-').next())
-            .and_then(|value| value.parse::<f64>().ok())
-        {
-            value
-        } else {
-            continue;
-        };
+        let retained_at =
+            if name.starts_with(CELESTRAK_CACHE_PREFIX) && name.ends_with(CELESTRAK_CACHE_SUFFIX) {
+                snapshot_retrieved_at(&path, modified)?.unix_seconds()
+            } else if let Some(value) = name
+                .strip_prefix(SATCHECKER_CACHE_PREFIX)
+                .and_then(|value| value.strip_suffix(SATCHECKER_CACHE_SUFFIX))
+                .and_then(|value| value.rsplit_once("-cached-").map(|(_, cached)| cached))
+                .and_then(|value| value.parse::<f64>().ok())
+            {
+                value
+            } else if let Some(value) = name
+                .strip_prefix(SEIZA_MIRROR_CACHE_PREFIX)
+                .and_then(|value| value.strip_suffix(SEIZA_MIRROR_CACHE_SUFFIX))
+                .and_then(|value| value.split("-cached-").nth(1))
+                .and_then(|value| value.split('-').next())
+                .and_then(|value| value.parse::<f64>().ok())
+            {
+                value
+            } else {
+                continue;
+            };
         snapshots.push(ManagedCacheSnapshot {
             path,
             retained_at: if retained_at.is_finite() {

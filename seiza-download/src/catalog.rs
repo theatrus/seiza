@@ -104,8 +104,13 @@ impl CatalogBundle {
     /// calls intentionally use only manifest size metadata on cache hits.
     pub async fn verify(&self) -> Result<()> {
         for artifact in self.artifacts.values() {
-            bundle::verify_file(&artifact.path, artifact.bytes, &artifact.sha256, &artifact.name)
-                .await?;
+            bundle::verify_file(
+                &artifact.path,
+                artifact.bytes,
+                &artifact.sha256,
+                &artifact.name,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -139,7 +144,8 @@ impl CatalogBundle {
                 tokio::fs::copy(&artifact.path, &temp)
                     .await
                     .map_err(|source| io("copy cached artifact to", &temp, source))?;
-                bundle::verify_file(&temp, artifact.bytes, &artifact.sha256, &artifact.name).await?;
+                bundle::verify_file(&temp, artifact.bytes, &artifact.sha256, &artifact.name)
+                    .await?;
                 bundle::replace_file(&temp, &target).await
             }
             .await;

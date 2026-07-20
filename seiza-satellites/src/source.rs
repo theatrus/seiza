@@ -1,6 +1,6 @@
 use crate::cache::{
-    self, CELESTRAK_CACHE_PREFIX as CACHE_PREFIX, CELESTRAK_CACHE_SUFFIX as CACHE_SUFFIX, CacheState,
-    DEFAULT_CELESTRAK_CACHE_SIZE_LIMIT_BYTES, LockMode, acquire_lock_in, now_timestamp,
+    self, CELESTRAK_CACHE_PREFIX as CACHE_PREFIX, CELESTRAK_CACHE_SUFFIX as CACHE_SUFFIX,
+    CacheState, DEFAULT_CELESTRAK_CACHE_SIZE_LIMIT_BYTES, LockMode, acquire_lock_in, now_timestamp,
     snapshot_age_at, snapshot_retrieved_at,
 };
 use crate::{Error, Result, SatelliteCatalog, UtcTimestamp};
@@ -365,14 +365,16 @@ impl CelesTrakSource {
 
     async fn cache_exceeds_limit_async(&self) -> Result<bool> {
         let cache_dir = self.cache_dir.clone();
-        let total = tokio::task::spawn_blocking(move || cache::managed_cache_total_bytes(&cache_dir))
-            .await
-            .map_err(|error| Error::CacheLock(error.to_string()))??;
+        let total =
+            tokio::task::spawn_blocking(move || cache::managed_cache_total_bytes(&cache_dir))
+                .await
+                .map_err(|error| Error::CacheLock(error.to_string()))??;
         Ok(total > u128::from(self.cache_size_limit_bytes))
     }
 
     async fn enforce_cache_size_limit(&self, retained: Option<&Path>) -> Result<()> {
-        cache::enforce_size_limit_async(&self.cache_dir, retained, self.cache_size_limit_bytes).await
+        cache::enforce_size_limit_async(&self.cache_dir, retained, self.cache_size_limit_bytes)
+            .await
     }
 
     fn cache_inventory(&self) -> Result<Vec<CacheSnapshot>> {

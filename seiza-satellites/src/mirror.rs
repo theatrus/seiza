@@ -267,7 +267,8 @@ pub struct SeizaMirrorSource {
 
 impl SeizaMirrorSource {
     pub fn new(cache_dir: impl Into<PathBuf>) -> Result<Self> {
-        let client = bundle::http_client(format!("seiza-satellites/{}", env!("CARGO_PKG_VERSION")))?;
+        let client =
+            bundle::http_client(format!("seiza-satellites/{}", env!("CARGO_PKG_VERSION")))?;
         Ok(Self {
             client,
             cache_dir: cache_dir.into(),
