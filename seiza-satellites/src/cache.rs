@@ -385,6 +385,102 @@ pub(crate) fn snapshot_age_at(timestamp: UtcTimestamp, now: SystemTime) -> Durat
     }
 }
 
+/// A cached snapshot addressable by the epoch it answers for and when it was
+/// fetched. Nearest-time selection orders candidates by these two.
+pub(crate) trait TimeSnapshot {
+    fn query_time(&self) -> UtcTimestamp;
+    fn downloaded_at(&self) -> UtcTimestamp;
+}
+
+/// True when the snapshot's query epoch is within `maximum_distance` of `time`.
+/// `None` imposes no bound — used by cache-only lookups that let the caller
+/// judge suitability from the returned query epoch.
+pub(crate) fn within_distance<S: TimeSnapshot>(
+    snapshot: &S,
+    time: UtcTimestamp,
+    maximum_distance: Option<Duration>,
+) -> bool {
+    maximum_distance.is_none_or(|maximum| {
+        snapshot.query_time().seconds_since(time).abs() <= maximum.as_secs_f64()
+    })
+}
+
+/// Order snapshots nearest-first: by absolute distance from `time`, then the
+/// newer query epoch, then the more recent download as a final tiebreak.
+pub(crate) fn sort_by_distance<S: TimeSnapshot>(snapshots: &mut [S], time: UtcTimestamp) {
+    snapshots.sort_by(|left, right| {
+        left.query_time()
+            .seconds_since(time)
+            .abs()
+            .total_cmp(&right.query_time().seconds_since(time).abs())
+            .then_with(|| {
+                right
+                    .query_time()
+                    .unix_seconds()
+                    .total_cmp(&left.query_time().unix_seconds())
+            })
+            .then_with(|| {
+                right
+                    .downloaded_at()
+                    .unix_seconds()
+                    .total_cmp(&left.downloaded_at().unix_seconds())
+            })
+    });
+}
+
+/// Try cached snapshots nearest-first, returning the first that loads. This is
+/// the cache-only path: if every in-window candidate fails to load, the last
+/// error is surfaced; an empty set yields `Ok(None)`.
+pub(crate) fn select_nearest_blocking<S, T>(
+    mut snapshots: Vec<S>,
+    time: UtcTimestamp,
+    maximum_distance: Option<Duration>,
+    mut load: impl FnMut(S) -> Result<T>,
+) -> Result<Option<T>>
+where
+    S: TimeSnapshot,
+{
+    sort_by_distance(&mut snapshots, time);
+    let mut last_error = None;
+    for snapshot in snapshots {
+        if !within_distance(&snapshot, time, maximum_distance) {
+            continue;
+        }
+        match load(snapshot) {
+            Ok(loaded) => return Ok(Some(loaded)),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    match last_error {
+        Some(error) => Err(error),
+        None => Ok(None),
+    }
+}
+
+/// Async counterpart used by the download path: a load failure is treated as a
+/// cache miss and skipped, so resolution falls through to a network fetch. An
+/// empty or entirely-unloadable set yields `Ok(None)`.
+pub(crate) async fn select_nearest_async<S, T>(
+    mut snapshots: Vec<S>,
+    time: UtcTimestamp,
+    maximum_distance: Option<Duration>,
+    mut load: impl AsyncFnMut(S) -> Result<T>,
+) -> Result<Option<T>>
+where
+    S: TimeSnapshot,
+{
+    sort_by_distance(&mut snapshots, time);
+    for snapshot in snapshots {
+        if !within_distance(&snapshot, time, maximum_distance) {
+            continue;
+        }
+        if let Ok(loaded) = load(snapshot).await {
+            return Ok(Some(loaded));
+        }
+    }
+    Ok(None)
+}
+
 pub(crate) fn now_timestamp() -> Result<UtcTimestamp> {
     UtcTimestamp::from_unix_seconds(
         SystemTime::now()

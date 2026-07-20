@@ -1,6 +1,6 @@
 use crate::cache::{
     self, DEFAULT_SATELLITE_CACHE_SIZE_LIMIT_BYTES, LockMode, SEIZA_MIRROR_CACHE_PREFIX,
-    SEIZA_MIRROR_CACHE_SUFFIX, acquire_lock_in, now_timestamp,
+    SEIZA_MIRROR_CACHE_SUFFIX, TimeSnapshot, acquire_lock_in, now_timestamp,
 };
 use crate::{CacheState, Error, Result, SatelliteCatalog, UtcTimestamp, payload_sha256};
 use seiza_download::bundle::{self, ArtifactSpec, EncodedSpec, Encoding};
@@ -466,20 +466,14 @@ impl SeizaMirrorSource {
     ) -> Result<Option<SeizaMirrorLoad>> {
         let cache_dir = self.cache_dir.clone();
         let base_url = self.base_url.clone();
-        let mut snapshots =
+        let snapshots =
             tokio::task::spawn_blocking(move || mirror_inventory_in(&cache_dir, &base_url))
                 .await
                 .map_err(|error| Error::CacheLock(error.to_string()))??;
-        sort_by_distance(&mut snapshots, time_utc);
-        for snapshot in snapshots {
-            if !within_distance(&snapshot, time_utc, maximum_distance) {
-                continue;
-            }
-            if let Ok(load) = self.load_snapshot_async(snapshot).await {
-                return Ok(Some(load));
-            }
-        }
-        Ok(None)
+        cache::select_nearest_async(snapshots, time_utc, maximum_distance, async |snapshot| {
+            self.load_snapshot_async(snapshot).await
+        })
+        .await
     }
 
     fn load_nearest_blocking(
@@ -487,22 +481,10 @@ impl SeizaMirrorSource {
         time_utc: UtcTimestamp,
         maximum_distance: Option<Duration>,
     ) -> Result<Option<SeizaMirrorLoad>> {
-        let mut snapshots = mirror_inventory_in(&self.cache_dir, &self.base_url)?;
-        sort_by_distance(&mut snapshots, time_utc);
-        let mut last_error = None;
-        for snapshot in snapshots {
-            if !within_distance(&snapshot, time_utc, maximum_distance) {
-                continue;
-            }
-            match self.load_snapshot_blocking(snapshot) {
-                Ok(load) => return Ok(Some(load)),
-                Err(error) => last_error = Some(error),
-            }
-        }
-        match last_error {
-            Some(error) => Err(error),
-            None => Ok(None),
-        }
+        let snapshots = mirror_inventory_in(&self.cache_dir, &self.base_url)?;
+        cache::select_nearest_blocking(snapshots, time_utc, maximum_distance, |snapshot| {
+            self.load_snapshot_blocking(snapshot)
+        })
     }
 
     async fn load_snapshot_async(
@@ -631,29 +613,14 @@ fn mirror_inventory_in(cache_dir: &Path, base_url: &str) -> Result<Vec<MirrorCat
     Ok(snapshots)
 }
 
-fn within_distance(
-    snapshot: &MirrorCatalogSnapshot,
-    time_utc: UtcTimestamp,
-    maximum_distance: Option<Duration>,
-) -> bool {
-    maximum_distance.is_none_or(|maximum| {
-        snapshot.query_time.seconds_since(time_utc).abs() <= maximum.as_secs_f64()
-    })
-}
+impl TimeSnapshot for MirrorCatalogSnapshot {
+    fn query_time(&self) -> UtcTimestamp {
+        self.query_time
+    }
 
-fn sort_by_distance(snapshots: &mut [MirrorCatalogSnapshot], time_utc: UtcTimestamp) {
-    snapshots.sort_by(|left, right| {
-        left.query_time
-            .seconds_since(time_utc)
-            .abs()
-            .total_cmp(&right.query_time.seconds_since(time_utc).abs())
-            .then_with(|| {
-                right
-                    .query_time
-                    .unix_seconds()
-                    .total_cmp(&left.query_time.unix_seconds())
-            })
-    });
+    fn downloaded_at(&self) -> UtcTimestamp {
+        self.downloaded_at
+    }
 }
 
 #[cfg(test)]

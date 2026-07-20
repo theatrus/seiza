@@ -1,6 +1,6 @@
 use crate::cache::{
     self, DEFAULT_SATELLITE_CACHE_SIZE_LIMIT_BYTES, LockMode, SATCHECKER_CACHE_PREFIX,
-    SATCHECKER_CACHE_SUFFIX, acquire_lock_in, now_timestamp,
+    SATCHECKER_CACHE_SUFFIX, TimeSnapshot, acquire_lock_in, now_timestamp,
 };
 use crate::{CacheState, Error, Result, SatelliteCatalog, SingleExposure, UtcTimestamp};
 use std::fs::File;
@@ -189,20 +189,14 @@ impl SatCheckerSource {
     ) -> Result<Option<SatCheckerLoad>> {
         let cache_dir = self.cache_dir.clone();
         let endpoint = self.endpoint.clone();
-        let mut snapshots =
+        let snapshots =
             tokio::task::spawn_blocking(move || history_inventory_in(&cache_dir, &endpoint))
                 .await
                 .map_err(|error| Error::CacheLock(error.to_string()))??;
-        sort_by_distance(&mut snapshots, time_utc);
-        for snapshot in snapshots {
-            if !within_distance(&snapshot, time_utc, maximum_distance) {
-                continue;
-            }
-            if let Ok(load) = self.load_snapshot_async(snapshot).await {
-                return Ok(Some(load));
-            }
-        }
-        Ok(None)
+        cache::select_nearest_async(snapshots, time_utc, maximum_distance, async |snapshot| {
+            self.load_snapshot_async(snapshot).await
+        })
+        .await
     }
 
     fn load_nearest_blocking(
@@ -210,22 +204,10 @@ impl SatCheckerSource {
         time_utc: UtcTimestamp,
         maximum_distance: Option<Duration>,
     ) -> Result<Option<SatCheckerLoad>> {
-        let mut snapshots = history_inventory_in(&self.cache_dir, &self.endpoint)?;
-        sort_by_distance(&mut snapshots, time_utc);
-        let mut last_error = None;
-        for snapshot in snapshots {
-            if !within_distance(&snapshot, time_utc, maximum_distance) {
-                continue;
-            }
-            match self.load_snapshot_blocking(snapshot) {
-                Ok(load) => return Ok(Some(load)),
-                Err(error) => last_error = Some(error),
-            }
-        }
-        match last_error {
-            Some(error) => Err(error),
-            None => Ok(None),
-        }
+        let snapshots = history_inventory_in(&self.cache_dir, &self.endpoint)?;
+        cache::select_nearest_blocking(snapshots, time_utc, maximum_distance, |snapshot| {
+            self.load_snapshot_blocking(snapshot)
+        })
     }
 
     async fn download(&self, query_time: UtcTimestamp) -> Result<SatCheckerLoad> {
@@ -333,35 +315,14 @@ impl SatCheckerSource {
     }
 }
 
-fn within_distance(
-    snapshot: &HistoricalCatalogSnapshot,
-    time_utc: UtcTimestamp,
-    maximum_distance: Option<Duration>,
-) -> bool {
-    maximum_distance.is_none_or(|maximum| {
-        snapshot.query_time.seconds_since(time_utc).abs() <= maximum.as_secs_f64()
-    })
-}
+impl TimeSnapshot for HistoricalCatalogSnapshot {
+    fn query_time(&self) -> UtcTimestamp {
+        self.query_time
+    }
 
-fn sort_by_distance(snapshots: &mut [HistoricalCatalogSnapshot], time_utc: UtcTimestamp) {
-    snapshots.sort_by(|left, right| {
-        left.query_time
-            .seconds_since(time_utc)
-            .abs()
-            .total_cmp(&right.query_time.seconds_since(time_utc).abs())
-            .then_with(|| {
-                right
-                    .query_time
-                    .unix_seconds()
-                    .total_cmp(&left.query_time.unix_seconds())
-            })
-            .then_with(|| {
-                right
-                    .downloaded_at
-                    .unix_seconds()
-                    .total_cmp(&left.downloaded_at.unix_seconds())
-            })
-    });
+    fn downloaded_at(&self) -> UtcTimestamp {
+        self.downloaded_at
+    }
 }
 
 fn history_inventory_in(
