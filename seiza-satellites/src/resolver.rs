@@ -120,8 +120,17 @@ impl OrbitalCatalogSource {
 
     /// Resolve the appropriate catalog on demand for normal application use.
     pub async fn load_for_exposure(&self, exposure: &SingleExposure) -> Result<OrbitalCatalogLoad> {
-        if should_use_historical(exposure.midpoint(), now_unix_seconds()) {
-            self.load_historical_at(exposure.midpoint()).await
+        self.load_at(exposure.midpoint()).await
+    }
+
+    /// Resolve the appropriate catalog for a bare instant — the same
+    /// current-vs-historical selection and provider cascade as
+    /// [`Self::load_for_exposure`], without requiring an observer. Intended for
+    /// callers that only need epoch-appropriate elements (e.g. language
+    /// bindings) and supply the observer separately at prediction time.
+    pub async fn load_at(&self, time_utc: UtcTimestamp) -> Result<OrbitalCatalogLoad> {
+        if should_use_historical(time_utc, now_unix_seconds()) {
+            self.load_historical_at(time_utc).await
         } else {
             self.active
                 .load_active()

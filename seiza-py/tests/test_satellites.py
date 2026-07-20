@@ -53,6 +53,14 @@ def test_parses_tle_and_reports_identity():
     assert catalog.source == "test"
     assert catalog.retrieved_at_unix is None
     assert catalog.cache_state is None
+    assert catalog.provider is None
+
+
+def test_resolve_rejects_naive_datetime():
+    # `resolve` parses its time before touching the network, so a naive
+    # datetime is rejected offline without contacting any provider.
+    with pytest.raises(ValueError):
+        seiza.SatelliteCatalog.resolve(datetime(2024, 5, 2, 12, 0, 0))
 
 
 def test_predicts_a_crossing_through_a_matching_wcs():
