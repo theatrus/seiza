@@ -1,7 +1,7 @@
 [package]
 name = "seiza-satellites"
 description = "Time- and observer-aware satellite track prediction for Seiza WCS solutions"
-version = "0.3.0"
+version = "0.3.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
