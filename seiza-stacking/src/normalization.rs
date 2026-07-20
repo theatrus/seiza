@@ -1,4 +1,5 @@
 use crate::{Error, LinearImage, Result};
+use rayon::prelude::*;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NormalizationMode {
@@ -74,32 +75,31 @@ impl NormalizationMap {
                 let columns = source.width.div_ceil(tile_size);
                 let rows = source.height.div_ceil(tile_size);
                 let cell_count = columns * rows * source.channels;
-                let mut map = Self {
+                let coefficients = (0..cell_count)
+                    .into_par_iter()
+                    .map(|index| {
+                        let channel = index % source.channels;
+                        let cell = index / source.channels;
+                        let column = cell % columns;
+                        let row = cell / columns;
+                        let x = column * tile_size;
+                        let y = row * tile_size;
+                        let width = tile_size.min(source.width - x);
+                        let height = tile_size.min(source.height - y);
+                        affine_for_region(reference, source, channel, x, y, width, height)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let (gains, offsets) = coefficients.into_iter().unzip();
+                Ok(Self {
                     width: source.width,
                     height: source.height,
                     channels: source.channels,
                     tile_size,
                     columns,
                     rows,
-                    gains: vec![1.0; cell_count],
-                    offsets: vec![0.0; cell_count],
-                };
-                for row in 0..rows {
-                    for column in 0..columns {
-                        let x = column * tile_size;
-                        let y = row * tile_size;
-                        let width = tile_size.min(source.width - x);
-                        let height = tile_size.min(source.height - y);
-                        for channel in 0..source.channels {
-                            let (gain, offset) =
-                                affine_for_region(reference, source, channel, x, y, width, height)?;
-                            let index = map.index(column, row, channel);
-                            map.gains[index] = gain;
-                            map.offsets[index] = offset;
-                        }
-                    }
-                }
-                Ok(map)
+                    gains,
+                    offsets,
+                })
             }
         }
     }
@@ -113,18 +113,59 @@ impl NormalizationMap {
                 "normalization map and image dimensions do not match".into(),
             ));
         }
-        for y in 0..image.height {
-            for x in 0..image.width {
-                for channel in 0..image.channels {
-                    let (gain, offset) = self.sample(x, y, channel);
-                    let index = (y * image.width + x) * image.channels + channel;
-                    let value = image.data[index];
+        if self.columns == 1 && self.rows == 1 {
+            image.data.par_chunks_mut(image.channels).for_each(|pixel| {
+                for (channel, value) in pixel.iter_mut().enumerate() {
                     if value.is_finite() {
-                        image.data[index] = value.mul_add(gain, offset);
+                        *value = value.mul_add(self.gains[channel], self.offsets[channel]);
                     }
                 }
-            }
+            });
+            return Ok(());
         }
+
+        let x_weights = (0..image.width)
+            .map(|x| axis_weights(x, self.columns, self.tile_size))
+            .collect::<Vec<_>>();
+        let row_samples = image.width * image.channels;
+        image
+            .data
+            .par_chunks_mut(row_samples)
+            .enumerate()
+            .for_each(|(y, row)| {
+                let y_weights = axis_weights(y, self.rows, self.tile_size);
+                for (x, pixel) in row.chunks_exact_mut(self.channels).enumerate() {
+                    let x_weights = x_weights[x];
+                    let top_left = (y_weights.low * self.columns + x_weights.low) * self.channels;
+                    let top_right = (y_weights.low * self.columns + x_weights.high) * self.channels;
+                    let bottom_left =
+                        (y_weights.high * self.columns + x_weights.low) * self.channels;
+                    let bottom_right =
+                        (y_weights.high * self.columns + x_weights.high) * self.channels;
+                    for (channel, value) in pixel.iter_mut().enumerate() {
+                        if !value.is_finite() {
+                            continue;
+                        }
+                        let gain = bilinear(
+                            self.gains[top_left + channel],
+                            self.gains[top_right + channel],
+                            self.gains[bottom_left + channel],
+                            self.gains[bottom_right + channel],
+                            x_weights.fraction,
+                            y_weights.fraction,
+                        );
+                        let offset = bilinear(
+                            self.offsets[top_left + channel],
+                            self.offsets[top_right + channel],
+                            self.offsets[bottom_left + channel],
+                            self.offsets[bottom_right + channel],
+                            x_weights.fraction,
+                            y_weights.fraction,
+                        );
+                        *value = value.mul_add(gain, offset);
+                    }
+                }
+            });
         Ok(())
     }
 
@@ -145,42 +186,37 @@ impl NormalizationMap {
             |(minimum, maximum), gain| (minimum.min(gain), maximum.max(gain)),
         )
     }
+}
 
-    fn index(&self, column: usize, row: usize, channel: usize) -> usize {
-        (row * self.columns + column) * self.channels + channel
-    }
+#[derive(Clone, Copy)]
+struct AxisWeights {
+    low: usize,
+    high: usize,
+    fraction: f32,
+}
 
-    fn sample(&self, x: usize, y: usize, channel: usize) -> (f32, f32) {
-        if self.columns == 1 && self.rows == 1 {
-            return (self.gains[channel], self.offsets[channel]);
-        }
-        let grid_x =
-            ((x as f32 + 0.5) / self.tile_size as f32 - 0.5).clamp(0.0, (self.columns - 1) as f32);
-        let grid_y =
-            ((y as f32 + 0.5) / self.tile_size as f32 - 0.5).clamp(0.0, (self.rows - 1) as f32);
-        let x0 = grid_x.floor() as usize;
-        let y0 = grid_y.floor() as usize;
-        let x1 = (x0 + 1).min(self.columns - 1);
-        let y1 = (y0 + 1).min(self.rows - 1);
-        let tx = if x0 == x1 {
-            0.0
-        } else {
-            grid_x - grid_x.floor()
-        };
-        let ty = if y0 == y1 {
-            0.0
-        } else {
-            grid_y - grid_y.floor()
-        };
-        let interpolate = |values: &[f32]| {
-            let top = values[self.index(x0, y0, channel)] * (1.0 - tx)
-                + values[self.index(x1, y0, channel)] * tx;
-            let bottom = values[self.index(x0, y1, channel)] * (1.0 - tx)
-                + values[self.index(x1, y1, channel)] * tx;
-            top * (1.0 - ty) + bottom * ty
-        };
-        (interpolate(&self.gains), interpolate(&self.offsets))
+fn axis_weights(coordinate: usize, cells: usize, tile_size: usize) -> AxisWeights {
+    let grid = ((coordinate as f32 + 0.5) / tile_size as f32 - 0.5).clamp(0.0, (cells - 1) as f32);
+    let low = grid.floor() as usize;
+    let high = (low + 1).min(cells - 1);
+    AxisWeights {
+        low,
+        high,
+        fraction: if low == high { 0.0 } else { grid - low as f32 },
     }
+}
+
+fn bilinear(
+    top_left: f32,
+    top_right: f32,
+    bottom_left: f32,
+    bottom_right: f32,
+    x: f32,
+    y: f32,
+) -> f32 {
+    let top = top_left * (1.0 - x) + top_right * x;
+    let bottom = bottom_left * (1.0 - x) + bottom_right * x;
+    top * (1.0 - y) + bottom * y
 }
 
 fn affine_for_region(
@@ -234,12 +270,18 @@ fn affine_for_region(
 }
 
 fn median(values: &mut [f32]) -> f32 {
-    values.sort_unstable_by(f32::total_cmp);
     let middle = values.len() / 2;
-    if values.len().is_multiple_of(2) {
-        (values[middle - 1] + values[middle]) * 0.5
+    let even = values.len().is_multiple_of(2);
+    let (lower, median, _) =
+        values.select_nth_unstable_by(middle, |left, right| left.total_cmp(right));
+    if even {
+        let lower_median = lower
+            .iter()
+            .max_by(|left, right| left.total_cmp(right))
+            .expect("an even non-empty sample has a lower partition");
+        (*lower_median + *median) * 0.5
     } else {
-        values[middle]
+        *median
     }
 }
 
@@ -253,6 +295,12 @@ fn robust_sigma(values: &mut [f32], center: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn median_selection_matches_sorted_even_and_odd_samples() {
+        assert_eq!(median(&mut [4.0, 1.0, 3.0, 2.0]), 2.5);
+        assert_eq!(median(&mut [4.0, 1.0, 3.0, 2.0, 5.0]), 3.0);
+    }
 
     #[test]
     fn global_normalization_recovers_affine_background() {

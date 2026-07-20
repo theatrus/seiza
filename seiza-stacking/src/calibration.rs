@@ -1,4 +1,5 @@
 use crate::{BayerLayout, Error, FitsFrame, LinearImage, Result};
+use rayon::prelude::*;
 
 #[derive(Clone, Debug)]
 pub struct MasterDark {
@@ -121,9 +122,13 @@ impl CalibrationMasters {
             if !dark.bias_subtracted
                 && let Some(bias) = &bias
             {
-                for (value, bias_value) in dark.image.data.iter_mut().zip(&bias.data) {
-                    *value -= *bias_value;
-                }
+                dark.image
+                    .data
+                    .par_iter_mut()
+                    .zip(bias.data.par_iter())
+                    .for_each(|(value, bias_value)| {
+                        *value -= *bias_value;
+                    });
             }
             dark.image
         });
@@ -141,9 +146,11 @@ impl CalibrationMasters {
                 if !flat.calibrated
                     && let Some(bias) = &bias
                 {
-                    for (value, bias_value) in flat.image.data.iter_mut().zip(&bias.data) {
-                        *value -= *bias_value;
-                    }
+                    flat.image
+                        .data
+                        .par_iter_mut()
+                        .zip(bias.data.par_iter())
+                        .for_each(|(value, bias_value)| *value -= *bias_value);
                 }
                 normalize_flat_response(&mut flat.image)?;
                 Ok(flat.image)
@@ -212,9 +219,11 @@ impl CalibrationMasters {
         }
 
         if let Some(bias) = &self.bias {
-            for (value, bias_value) in image.data.iter_mut().zip(&bias.data) {
-                *value -= *bias_value;
-            }
+            image
+                .data
+                .par_iter_mut()
+                .zip(bias.data.par_iter())
+                .for_each(|(value, bias_value)| *value -= *bias_value);
         }
         if let Some(dark) = &self.dark_signal {
             let scale = match (exposure_seconds, self.dark_exposure_seconds) {
@@ -226,18 +235,24 @@ impl CalibrationMasters {
                 }
                 _ => 1.0,
             };
-            for (value, dark_value) in image.data.iter_mut().zip(&dark.data) {
-                *value -= scale * *dark_value;
-            }
+            image
+                .data
+                .par_iter_mut()
+                .zip(dark.data.par_iter())
+                .for_each(|(value, dark_value)| *value -= scale * *dark_value);
         }
         if let Some(flat) = &self.flat_response {
-            for (value, response) in image.data.iter_mut().zip(&flat.data) {
-                *value = if response.is_finite() && *response > 1.0e-6 {
-                    *value / *response
-                } else {
-                    f32::NAN
-                };
-            }
+            image
+                .data
+                .par_iter_mut()
+                .zip(flat.data.par_iter())
+                .for_each(|(value, response)| {
+                    *value = if response.is_finite() && *response > 1.0e-6 {
+                        *value / *response
+                    } else {
+                        f32::NAN
+                    };
+                });
         }
         Ok(())
     }

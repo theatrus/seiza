@@ -323,7 +323,7 @@ impl LiveStacker {
         );
         let finite_samples = registered
             .data
-            .iter()
+            .par_iter()
             .filter(|value| value.is_finite())
             .count();
         let overlap_fraction = finite_samples as f32 / registered.sample_count() as f32;
@@ -358,7 +358,9 @@ impl LiveStacker {
                 maximum: criteria.maximum_normalization_gain,
             }));
         }
-        if let Err(error) = normalization.apply(&mut registered) {
+        if !matches!(self.options.normalization, NormalizationMode::None)
+            && let Err(error) = normalization.apply(&mut registered)
+        {
             let message = match error {
                 Error::Normalization(message) => message,
                 other => other.to_string(),
@@ -484,59 +486,53 @@ impl Accumulator {
     }
 
     fn integrate(&mut self, samples: &[f32], rejection: RejectionMode) -> (usize, usize) {
-        let mut accepted = 0;
-        let mut rejected = 0;
-        for (index, &sample) in samples.iter().enumerate() {
-            if !sample.is_finite() {
-                continue;
-            }
-            let should_reject = self.should_reject(index, sample, rejection);
-            if should_reject {
-                self.rejected[index] = self.rejected[index].saturating_add(1);
-                rejected += 1;
-                continue;
-            }
-            let count = self.count[index].saturating_add(1);
-            let delta = sample - self.mean[index];
-            self.mean[index] += delta / count as f32;
-            let delta_after = sample - self.mean[index];
-            self.m2[index] += delta * delta_after;
-            self.count[index] = count;
-            accepted += 1;
-        }
-        (accepted, rejected)
+        self.mean
+            .par_iter_mut()
+            .zip(self.m2.par_iter_mut())
+            .zip(self.count.par_iter_mut())
+            .zip(self.rejected.par_iter_mut())
+            .zip(samples.par_iter())
+            .map(|((((mean, m2), count), rejected), &sample)| {
+                if !sample.is_finite() {
+                    return (0, 0);
+                }
+                if should_reject_sample(*mean, *m2, *count, sample, rejection) {
+                    *rejected = rejected.saturating_add(1);
+                    return (0, 1);
+                }
+                let next_count = count.saturating_add(1);
+                let delta = sample - *mean;
+                *mean += delta / next_count as f32;
+                let delta_after = sample - *mean;
+                *m2 += delta * delta_after;
+                *count = next_count;
+                (1, 0)
+            })
+            .reduce(
+                || (0, 0),
+                |left, right| (left.0 + right.0, left.1 + right.1),
+            )
     }
 
     fn classify(&self, samples: &[f32], rejection: RejectionMode) -> (usize, usize) {
-        let mut accepted = 0;
-        let mut rejected = 0;
-        for (index, &sample) in samples.iter().enumerate() {
-            if !sample.is_finite() {
-                continue;
-            }
-            if self.should_reject(index, sample, rejection) {
-                rejected += 1;
-            } else {
-                accepted += 1;
-            }
-        }
-        (accepted, rejected)
-    }
-
-    fn should_reject(&self, index: usize, sample: f32, rejection: RejectionMode) -> bool {
-        match rejection {
-            RejectionMode::None => false,
-            RejectionMode::DeltaSigma(options)
-                if self.count[index] >= options.warmup_samples && self.count[index] > 1 =>
-            {
-                let sigma = (self.m2[index] / (self.count[index] - 1) as f32)
-                    .sqrt()
-                    .max(options.minimum_sigma);
-                let delta = sample - self.mean[index];
-                delta < -options.low_sigma * sigma || delta > options.high_sigma * sigma
-            }
-            RejectionMode::DeltaSigma(_) => false,
-        }
+        self.mean
+            .par_iter()
+            .zip(self.m2.par_iter())
+            .zip(self.count.par_iter())
+            .zip(samples.par_iter())
+            .map(|(((mean, m2), count), &sample)| {
+                if !sample.is_finite() {
+                    (0, 0)
+                } else if should_reject_sample(*mean, *m2, *count, sample, rejection) {
+                    (0, 1)
+                } else {
+                    (1, 0)
+                }
+            })
+            .reduce(
+                || (0, 0),
+                |left, right| (left.0 + right.0, left.1 + right.1),
+            )
     }
 
     fn snapshot(&self) -> (Vec<f32>, Vec<f32>) {
@@ -578,6 +574,24 @@ impl Accumulator {
     }
 }
 
+fn should_reject_sample(
+    mean: f32,
+    m2: f32,
+    count: u32,
+    sample: f32,
+    rejection: RejectionMode,
+) -> bool {
+    match rejection {
+        RejectionMode::None => false,
+        RejectionMode::DeltaSigma(options) if count >= options.warmup_samples && count > 1 => {
+            let sigma = (m2 / (count - 1) as f32).sqrt().max(options.minimum_sigma);
+            let delta = sample - mean;
+            delta < -options.low_sigma * sigma || delta > options.high_sigma * sigma
+        }
+        RejectionMode::DeltaSigma(_) => false,
+    }
+}
+
 fn resample(
     source: &LinearImage,
     width: usize,
@@ -586,38 +600,44 @@ fn resample(
 ) -> LinearImage {
     let channels = source.channels;
     let mut data = vec![f32::NAN; width * height * channels];
-    data.par_chunks_mut(channels)
+    let inverse_cosine = transform.rotation_radians.cos() / transform.scale;
+    let inverse_sine = transform.rotation_radians.sin() / transform.scale;
+    data.par_chunks_mut(width * channels)
         .enumerate()
-        .for_each(|(pixel, output)| {
-            let x = pixel % width;
-            let y = pixel / width;
-            let (source_x, source_y) = transform.inverse_apply(x as f64, y as f64);
-            if source_x < 0.0
-                || source_y < 0.0
-                || source_x > (source.width - 1) as f64
-                || source_y > (source.height - 1) as f64
-            {
-                return;
-            }
-            let x0 = source_x.floor() as usize;
-            let y0 = source_y.floor() as usize;
-            let x1 = (x0 + 1).min(source.width - 1);
-            let y1 = (y0 + 1).min(source.height - 1);
-            let tx = (source_x - x0 as f64) as f32;
-            let ty = (source_y - y0 as f64) as f32;
-            for (channel, output_sample) in output.iter_mut().enumerate() {
-                let sample =
-                    |x: usize, y: usize| source.data[(y * source.width + x) * channels + channel];
-                let values = [
-                    sample(x0, y0),
-                    sample(x1, y0),
-                    sample(x0, y1),
-                    sample(x1, y1),
-                ];
-                if values.iter().all(|value| value.is_finite()) {
-                    let top = values[0] * (1.0 - tx) + values[1] * tx;
-                    let bottom = values[2] * (1.0 - tx) + values[3] * tx;
-                    *output_sample = top * (1.0 - ty) + bottom * ty;
+        .for_each(|(y, output_row)| {
+            let target_y = y as f64 - transform.translation_y;
+            for (x, output) in output_row.chunks_exact_mut(channels).enumerate() {
+                let target_x = x as f64 - transform.translation_x;
+                let source_x = inverse_cosine * target_x + inverse_sine * target_y;
+                let source_y = -inverse_sine * target_x + inverse_cosine * target_y;
+                if source_x < 0.0
+                    || source_y < 0.0
+                    || source_x > (source.width - 1) as f64
+                    || source_y > (source.height - 1) as f64
+                {
+                    continue;
+                }
+                let x0 = source_x.floor() as usize;
+                let y0 = source_y.floor() as usize;
+                let x1 = (x0 + 1).min(source.width - 1);
+                let y1 = (y0 + 1).min(source.height - 1);
+                let tx = (source_x - x0 as f64) as f32;
+                let ty = (source_y - y0 as f64) as f32;
+                for (channel, output_sample) in output.iter_mut().enumerate() {
+                    let sample = |x: usize, y: usize| {
+                        source.data[(y * source.width + x) * channels + channel]
+                    };
+                    let values = [
+                        sample(x0, y0),
+                        sample(x1, y0),
+                        sample(x0, y1),
+                        sample(x1, y1),
+                    ];
+                    if values.iter().all(|value| value.is_finite()) {
+                        let top = values[0] * (1.0 - tx) + values[1] * tx;
+                        let bottom = values[2] * (1.0 - tx) + values[3] * tx;
+                        *output_sample = top * (1.0 - ty) + bottom * ty;
+                    }
                 }
             }
         });

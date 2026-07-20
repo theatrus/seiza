@@ -1,4 +1,5 @@
 use crate::{Error, LinearImage, Result};
+use rayon::prelude::*;
 use seiza::{DetectBackend, DetectConfig, DetectedStar};
 use std::collections::HashMap;
 
@@ -370,22 +371,26 @@ fn detect(image: &LinearImage, options: &RegistrationOptions) -> Vec<DetectedSta
 }
 
 fn normalize_for_detection(values: &mut [f32]) {
-    let (minimum, maximum) = values.iter().filter(|value| value.is_finite()).fold(
-        (f64::INFINITY, f64::NEG_INFINITY),
-        |(minimum, maximum), value| (minimum.min(*value as f64), maximum.max(*value as f64)),
-    );
+    let (minimum, maximum) = values
+        .par_iter()
+        .filter(|value| value.is_finite())
+        .map(|value| (*value as f64, *value as f64))
+        .reduce(
+            || (f64::INFINITY, f64::NEG_INFINITY),
+            |left, right| (left.0.min(right.0), left.1.max(right.1)),
+        );
     if !minimum.is_finite() || maximum <= minimum {
-        values.fill(0.0);
+        values.par_iter_mut().for_each(|value| *value = 0.0);
         return;
     }
     let range = maximum - minimum;
-    for value in values {
+    values.par_iter_mut().for_each(|value| {
         *value = if value.is_finite() {
             ((*value as f64 - minimum) / range) as f32
         } else {
             0.0
         };
-    }
+    });
 }
 
 #[derive(Clone, Debug)]

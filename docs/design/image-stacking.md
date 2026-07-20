@@ -194,6 +194,35 @@ configuration, accepted/skipped frame diagnostics, and source fingerprints
 beside the derived artifact. A stack must not erase the per-exposure evidence
 used to decide which frames entered it.
 
+## Performance model
+
+Frames remain ordered because the online delta-sigma estimator is intentionally
+history-dependent. Work within one frame is data-parallel instead: calibration,
+star-detector normalization and thresholding, resampling, local-normalization
+tiles and interpolation, admission classification, and accumulator updates are
+split across independent rows, tiles, or samples. `RAYON_NUM_THREADS` may cap
+the shared worker pool when an embedding application needs to reserve CPU.
+
+The real-data performance regression is the 31-frame, 9576x6388 Sh2-230 red
+sequence below. With its 3.8 GB of inputs copied to local storage, release-mode
+local normalization and delta-sigma rejection scale as follows on an 18-core
+Apple Silicon host using Rust 1.97.1. Timings include FITS decode and the 233 MB
+linear FITS output, but omit the optional preview and provenance report.
+
+| Worker threads | Wall time |
+| ---: | ---: |
+| 1 | 25.73 s |
+| 4 | 9.58 s |
+| 8 | 6.83 s |
+| 18 | 5.57 s |
+
+The same 18-thread workload took 39.59 seconds before the full-frame loops and
+local tile estimates were parallelized. The pre- and post-optimization FITS
+files are byte-for-byte identical. CI does not impose a noisy wall-clock gate;
+this checked-in workload and output-equivalence check are the performance
+regression procedure. Scaling beyond eight workers is useful but diminishing,
+so full-frame star detection and memory bandwidth are now the practical gate.
+
 ## Release-mode validation examples
 
 These display-stretched JPEGs are derived only after the linear FITS stack is
@@ -211,10 +240,11 @@ including the full FITS, preview, SHA-256 report, and atomic publication, took
 
 The 9576x6388 Sh2-230 sequence offered 31 red 60-second frames to local
 normalization. All 31 were admitted with 0.052 to 0.132 pixel RMS and measured
-center drift from 0.3 to 25.7 pixels. The optimized end-to-end run took 47.97
+center drift from 0.3 to 25.7 pixels. The original end-to-end run took 47.97
 seconds, including the full FITS, preview, SHA-256 report, and atomic
-publication. An earlier percentile-clipped detector admitted only eleven; this
-sequence is retained as a regression case for preserving star rank under drift.
+publication from the original source volume before the performance work above.
+An earlier percentile-clipped detector admitted only eleven; this sequence is
+retained as a regression case for preserving star rank under drift.
 
 ## Follow-on work
 

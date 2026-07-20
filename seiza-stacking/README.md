@@ -23,6 +23,13 @@ safety. Live renderers can borrow `LiveStacker::view` without copying the
 full-resolution accumulator; any display stretch remains a caller-only visual
 operation.
 
+Frame admission remains ordered because online rejection depends on prior
+observations. Independent work within each frame—calibration, registration
+detection, resampling, normalization, classification, and integration—uses the
+shared Rayon worker pool. Applications may set `RAYON_NUM_THREADS` or install
+stacking work in a configured Rayon pool when they need to reserve CPU for
+acquisition and display work.
+
 Integrated flats are applied in the raw light frame's sampling before CFA
 debayering. Master darks and flats retain their Bayer pattern and origin
 offsets, and a known layout must match the light before calibration. A supplied
