@@ -53,9 +53,10 @@ compiler, formatter, and linter.
   [Wire protocol](docs/design/worker-protocol.md).
 - **From Python** — `pip install seiza`: detection, hinted and blind
   solving with optional SIP distortion, WCS transforms, FITS WCS keyword
-  output, and verified catalog downloads. One binary wheel per platform
-  (Linux x86_64 and aarch64, macOS, Windows) covers every CPython from
-  3.9 up, with type stubs included ([seiza-py](seiza-py/README.md)).
+  output, verified catalog downloads, and native batch/live image stacking
+  with calibration-master construction and NumPy support. One binary wheel
+  per platform (Linux x86_64 and aarch64, macOS, Windows) covers every CPython
+  from 3.9 up, with type stubs included ([seiza-py](seiza-py/README.md)).
 - **From Rust** — use the crates directly: [`seiza`](seiza/README.md)
   (detection, WCS, solving, catalogs),
   [`seiza-fits`](seiza-fits/README.md) (FITS reading and linear `f32` writing),

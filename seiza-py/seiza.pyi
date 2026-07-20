@@ -14,6 +14,9 @@ StarInput = Union["Star", tuple[float, float, float]]
 class SolveError(RuntimeError):
     """The field could not be solved."""
 
+class StackError(RuntimeError):
+    """Calibration, registration, or stacking failed."""
+
 class Star:
     x: float
     y: float
@@ -173,6 +176,120 @@ class SatelliteCatalog:
         max_element_age_s: float | None = 604_800.0,
     ) -> TrackSearchResult: ...
 
+class StackOptions:
+    normalization: str
+    local_tile_size: int | None
+    rejection: str
+    maximum_drift_pixels: float
+    maximum_drift_fraction: float
+    def __init__(
+        self,
+        *,
+        normalization: str = "global",
+        local_tile_size: int = 256,
+        rejection: str = "delta-sigma",
+        sigma_low: float = 3.0,
+        sigma_high: float = 3.0,
+        rejection_warmup: int = 5,
+        rejection_minimum_sigma: float = 1.0e-6,
+        detection_sigma: float = 4.0,
+        maximum_stars: int = 200,
+        triangle_stars: int = 24,
+        descriptor_tolerance: float = 0.015,
+        scale_tolerance: float = 0.08,
+        match_tolerance_pixels: float = 2.5,
+        maximum_drift_pixels: float = 256.0,
+        maximum_drift_fraction: float = 0.15,
+        minimum_matches: int = 6,
+        maximum_candidates: int = 384,
+        maximum_registration_rms: float = 2.0,
+        maximum_scale_deviation: float = 0.04,
+        maximum_rotation_degrees: float = 10.0,
+        minimum_overlap: float = 0.60,
+        minimum_normalization_gain: float = 0.25,
+        maximum_normalization_gain: float = 4.0,
+        minimum_integrated_fraction: float = 0.50,
+    ) -> None: ...
+
+class FrameDisposition:
+    source: Path | None
+    accepted: bool
+    reason: str | None
+    matched_stars: int | None
+    registration_rms_pixels: float | None
+    registration_drift_pixels: float | None
+    scale: float | None
+    rotation_degrees: float | None
+    translation_x: float | None
+    translation_y: float | None
+    normalization_mean_gain: float | None
+    normalization_mean_offset: float | None
+    overlap_fraction: float | None
+    integrated_fraction: float | None
+    accepted_samples: int | None
+    rejected_samples: int | None
+
+class StackResult:
+    output: Path
+    accepted_frames: int
+    rejected_frames: int
+    width: int
+    height: int
+    channels: int
+    frames: list[FrameDisposition]
+
+class StackSnapshot:
+    width: int
+    height: int
+    channels: int
+    accepted_frames: int
+    rejected_frames: int
+    image: npt.NDArray[np.float32]
+    variance: npt.NDArray[np.float32]
+    coverage: npt.NDArray[np.uint32]
+    rejected_samples: npt.NDArray[np.uint32]
+
+class LiveStacker:
+    def __init__(
+        self,
+        reference: str | Path,
+        *,
+        options: StackOptions | None = None,
+        bias: str | Path | None = None,
+        dark: str | Path | None = None,
+        flat: str | Path | None = None,
+        dark_exposure_seconds: float | None = None,
+    ) -> None: ...
+    @staticmethod
+    def from_array(
+        reference: npt.NDArray[np.float32],
+        *,
+        options: StackOptions | None = None,
+    ) -> LiveStacker: ...
+    @property
+    def accepted_frames(self) -> int: ...
+    @property
+    def rejected_frames(self) -> int: ...
+    def push_fits(self, path: str | Path) -> FrameDisposition: ...
+    def push(self, image: npt.NDArray[np.float32]) -> FrameDisposition: ...
+    def snapshot(self) -> StackSnapshot: ...
+    def finish(self, output: str | Path | None = None) -> StackSnapshot: ...
+
+class MasterResult:
+    output: Path
+    kind: str
+    width: int
+    height: int
+    channels: int
+    input_frames: int
+    accepted_samples: int
+    rejected_samples: int
+    bias_subtracted: bool
+    dark_subtracted: bool
+    normalized: bool
+    exposure_seconds: float | None
+    input_statistics: list[tuple[int, int]]
+
 def detect(
     image: npt.NDArray[np.float32] | npt.NDArray[np.uint8],
     *,
@@ -213,3 +330,40 @@ def fetch_catalogs(
     *,
     cache_dir: str | Path | None = None,
 ) -> dict[str, Path]: ...
+def stack_fits(
+    images: Sequence[str | Path],
+    output: str | Path,
+    *,
+    options: StackOptions | None = None,
+    bias: str | Path | None = None,
+    dark: str | Path | None = None,
+    flat: str | Path | None = None,
+    dark_exposure_seconds: float | None = None,
+) -> StackResult: ...
+def build_bias(
+    images: Sequence[str | Path],
+    output: str | Path,
+    *,
+    sigma_low: float = 3.0,
+    sigma_high: float = 3.0,
+) -> MasterResult: ...
+def build_dark(
+    images: Sequence[str | Path],
+    output: str | Path,
+    *,
+    bias: str | Path | None = None,
+    exposure_seconds: float | None = None,
+    sigma_low: float = 3.0,
+    sigma_high: float = 3.0,
+) -> MasterResult: ...
+def build_flat(
+    images: Sequence[str | Path],
+    output: str | Path,
+    *,
+    bias: str | Path | None = None,
+    dark_flat: str | Path | None = None,
+    dark_flat_exposure_seconds: float | None = None,
+    exposure_seconds: float | None = None,
+    sigma_low: float = 3.0,
+    sigma_high: float = 3.0,
+) -> MasterResult: ...

@@ -45,7 +45,8 @@ pub struct StackOptions {
 }
 
 impl StackOptions {
-    fn validate(&self) -> Result<()> {
+    /// Validate registration, normalization, rejection, and admission bounds.
+    pub fn validate(&self) -> Result<()> {
         self.registration.validate()?;
         if matches!(self.normalization, NormalizationMode::Local { tile_size } if tile_size < 16) {
             return Err(Error::Stack(
