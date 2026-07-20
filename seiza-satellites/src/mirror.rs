@@ -267,8 +267,12 @@ pub struct SeizaMirrorSource {
 
 impl SeizaMirrorSource {
     pub fn new(cache_dir: impl Into<PathBuf>) -> Result<Self> {
-        let client =
-            bundle::http_client(format!("seiza-satellites/{}", env!("CARGO_PKG_VERSION")))?;
+        // 120s read timeout to match the sibling upstream providers
+        // (CelesTrak, SatChecker); mirror artifacts are bounded at 256 MiB.
+        let client = bundle::http_client(
+            format!("seiza-satellites/{}", env!("CARGO_PKG_VERSION")),
+            Duration::from_secs(120),
+        )?;
         Ok(Self {
             client,
             cache_dir: cache_dir.into(),
@@ -321,6 +325,9 @@ impl SeizaMirrorSource {
                 source,
             })?;
         self.prune_cache_async().await?;
+        // A nearby cached snapshot that fails to load (corrupt/unreadable) is
+        // treated as a miss and falls through to the network fetch below —
+        // `select_nearest_async` swallows per-snapshot load errors by design.
         {
             let _shared = self.acquire_lock(LockMode::Shared).await?;
             if let Some(load) = self
@@ -633,6 +640,14 @@ mod tests {
     const TLE: &str = include_str!("../tests/data/iss-2024.tle");
 
     fn serve_mirror(query_time: &str, artifact: &'static [u8]) -> (String, mpsc::Receiver<String>) {
+        serve_mirror_declaring(query_time, artifact, artifact.len() as u64)
+    }
+
+    fn serve_mirror_declaring(
+        query_time: &str,
+        artifact: &'static [u8],
+        declared_size: u64,
+    ) -> (String, mpsc::Receiver<String>) {
         let sha256 = payload_sha256(TLE.as_bytes());
         let manifest = serde_json::to_vec(&SatelliteMirrorManifest {
             schema_version: SatelliteMirrorManifest::SCHEMA_VERSION,
@@ -642,7 +657,7 @@ mod tests {
                 source_url: "https://satchecker.cps.iau.org/tools/tles-at-epoch/".into(),
                 key: format!("artifacts/{sha256}/satellites.tle"),
                 sha256,
-                size_bytes: artifact.len() as u64,
+                size_bytes: declared_size,
                 encoding: MirrorEncoding::Identity,
                 encoded_sha256: None,
                 encoded_size_bytes: None,
@@ -767,6 +782,28 @@ mod tests {
                 .await
                 .unwrap_err(),
             Error::Integrity { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_mirror_artifact_whose_size_disagrees_with_the_manifest() {
+        // Correct hash, but the manifest declares one more byte than the origin
+        // serves. The shared bundle transfer rejects on size, and the mirror
+        // maps that seiza-download error into its own MirrorManifest vocabulary.
+        let dir = tempfile::tempdir().unwrap();
+        let query_time = "2025-10-18T12:52:12Z";
+        let (base_url, _) =
+            serve_mirror_declaring(query_time, TLE.as_bytes(), TLE.len() as u64 + 1);
+        let source = SeizaMirrorSource::new(dir.path())
+            .unwrap()
+            .with_base_url(base_url);
+
+        assert!(matches!(
+            source
+                .load_at(UtcTimestamp::parse(query_time).unwrap())
+                .await
+                .unwrap_err(),
+            Error::MirrorManifest { .. }
         ));
     }
 

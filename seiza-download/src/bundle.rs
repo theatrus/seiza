@@ -23,15 +23,19 @@ use crate::Result;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 pub(crate) const IO_BUFFER_BYTES: usize = 1024 * 1024;
 
-/// Build the shared HTTP client used for every bundle transfer. `user_agent`
-/// identifies the calling crate and version, e.g. `seiza-download/0.4.0`.
-pub fn http_client(user_agent: impl Into<String>) -> Result<reqwest::Client> {
+/// Build an HTTP client for bundle transfers. `user_agent` identifies the
+/// calling crate and version (e.g. `seiza-download/0.4.0`). `read_timeout`
+/// bounds inactivity while reading the response body — callers pick a value
+/// matched to their artifact sizes rather than inheriting a hidden default.
+pub fn http_client(
+    user_agent: impl Into<String>,
+    read_timeout: std::time::Duration,
+) -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
-        .read_timeout(READ_TIMEOUT)
+        .read_timeout(read_timeout)
         .user_agent(user_agent.into())
         .build()
         .map_err(|source| Error::Http {
@@ -95,6 +99,19 @@ pub struct TransferProgress {
     pub written: u64,
 }
 
+/// Observable events from a single transfer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransferEvent {
+    /// Emitted once, after the response status and any `Content-Length` are
+    /// validated and before the body is streamed. `total` is the on-wire
+    /// transfer size (encoded bytes for a compressed transport). A transfer
+    /// that fails at the request or validation stage emits no `Started`.
+    Started {
+        total: u64,
+    },
+    Progress(TransferProgress),
+}
+
 /// Stream `spec` into `temp`, verifying the encoded body then the decoded
 /// artifact by size and SHA-256, bounding decoded output to `decoded_bytes`. On
 /// success the verified canonical bytes are left at `temp`; the caller installs
@@ -103,7 +120,7 @@ pub async fn stream_to_temp(
     client: &reqwest::Client,
     spec: &ArtifactSpec<'_>,
     temp: &Path,
-    report: impl Fn(TransferProgress),
+    report: impl Fn(TransferEvent),
 ) -> Result<()> {
     match spec.encoded {
         None => stream_identity(client, spec, temp, &report).await,
@@ -115,7 +132,7 @@ async fn stream_identity(
     client: &reqwest::Client,
     spec: &ArtifactSpec<'_>,
     temp: &Path,
-    report: &impl Fn(TransferProgress),
+    report: &impl Fn(TransferEvent),
 ) -> Result<()> {
     let response = get(client, spec.url).await?;
     if let Some(bytes) = response.content_length()
@@ -128,6 +145,9 @@ async fn stream_identity(
         });
     }
 
+    report(TransferEvent::Started {
+        total: spec.decoded_bytes,
+    });
     let mut output = tokio::fs::File::create(temp)
         .await
         .map_err(|source| io("create", temp, source))?;
@@ -140,20 +160,31 @@ async fn stream_identity(
             url: spec.url.into(),
             source,
         })?;
+        // Reject before writing when the body overruns the declared size, so a
+        // lying or absent Content-Length (chunked/HTTP-2) cannot make us write
+        // an unbounded temp file. Mirrors the decoded bound in the zstd path.
+        let next = downloaded + chunk.len() as u64;
+        if next > spec.decoded_bytes {
+            return Err(Error::Size {
+                name: spec.label.into(),
+                expected: spec.decoded_bytes,
+                actual: next,
+            });
+        }
         output
             .write_all(&chunk)
             .await
             .map_err(|source| io("write", temp, source))?;
         hasher.update(&chunk);
-        downloaded += chunk.len() as u64;
+        downloaded = next;
         if downloaded == spec.decoded_bytes
             || downloaded.saturating_sub(reported) >= 4 * 1024 * 1024
         {
-            report(TransferProgress {
+            report(TransferEvent::Progress(TransferProgress {
                 downloaded,
                 total: spec.decoded_bytes,
                 written: downloaded,
-            });
+            }));
             reported = downloaded;
         }
     }
@@ -186,7 +217,7 @@ async fn stream_encoded(
     spec: &ArtifactSpec<'_>,
     encoded: &EncodedSpec<'_>,
     temp: &Path,
-    report: &impl Fn(TransferProgress),
+    report: &impl Fn(TransferEvent),
 ) -> Result<()> {
     let encoded_label = || format!("{} ({} transport)", spec.label, encoded.encoding.label());
     let response = get(client, spec.url).await?;
@@ -200,6 +231,9 @@ async fn stream_encoded(
         });
     }
 
+    report(TransferEvent::Started {
+        total: encoded.bytes,
+    });
     let downloaded = Arc::new(AtomicU64::new(0));
     let stream_downloaded = Arc::clone(&downloaded);
     let encoded_hasher = Arc::new(Mutex::new(Sha256::new()));
@@ -258,20 +292,20 @@ async fn stream_encoded(
         decoded_hasher.update(&buffer[..read]);
         decoded = next_decoded;
         if decoded.saturating_sub(reported) >= 4 * 1024 * 1024 {
-            report(TransferProgress {
+            report(TransferEvent::Progress(TransferProgress {
                 downloaded: downloaded.load(Ordering::Relaxed),
                 total: encoded.bytes,
                 written: decoded,
-            });
+            }));
             reported = decoded;
         }
     }
     drop(decoder);
-    report(TransferProgress {
+    report(TransferEvent::Progress(TransferProgress {
         downloaded: downloaded.load(Ordering::Relaxed),
         total: encoded.bytes,
         written: decoded,
-    });
+    }));
     output
         .sync_all()
         .await

@@ -1,4 +1,4 @@
-use crate::bundle::{self, ArtifactSpec, EncodedSpec, Encoding, TransferProgress};
+use crate::bundle::{self, ArtifactSpec, EncodedSpec, Encoding, TransferEvent};
 use crate::error::io;
 use crate::{
     BundleManifestDocument, CatalogSet, DEFAULT_BUNDLE_BASE_URL, Dataset, Error,
@@ -202,7 +202,10 @@ impl CatalogManagerBuilder {
                     .map(|dirs| dirs.cache_dir().join("catalogs"))
             })
             .ok_or(Error::CacheDirectoryUnavailable)?;
-        let client = bundle::http_client(format!("seiza-download/{}", env!("CARGO_PKG_VERSION")))?;
+        let client = bundle::http_client(
+            format!("seiza-download/{}", env!("CARGO_PKG_VERSION")),
+            Duration::from_secs(300),
+        )?;
         Ok(CatalogManager {
             cache_dir,
             base_url: self.base_url,
@@ -503,17 +506,17 @@ impl CatalogManager {
             decoded_sha256: &file.sha256,
             encoded,
         };
-        report(DownloadEvent::DownloadStarted {
-            name: file.name.clone(),
-            bytes: transport.map_or(file.bytes, |transport| transport.bytes),
-        });
-        bundle::stream_to_temp(&self.client, &spec, temp, |progress: TransferProgress| {
-            report(DownloadEvent::DownloadProgress {
+        bundle::stream_to_temp(&self.client, &spec, temp, |event| match event {
+            TransferEvent::Started { total } => report(DownloadEvent::DownloadStarted {
+                name: file.name.clone(),
+                bytes: total,
+            }),
+            TransferEvent::Progress(progress) => report(DownloadEvent::DownloadProgress {
                 name: file.name.clone(),
                 downloaded: progress.downloaded,
                 total: progress.total,
                 written: progress.written,
-            });
+            }),
         })
         .await
     }

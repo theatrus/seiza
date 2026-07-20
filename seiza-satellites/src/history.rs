@@ -149,6 +149,9 @@ impl SatCheckerSource {
             })?;
         self.prune_cache_async().await?;
 
+        // A nearby cached snapshot that fails to load (corrupt/unreadable) is
+        // treated as a miss and falls through to the network fetch below —
+        // `select_nearest_async` swallows per-snapshot load errors by design.
         {
             let _shared = self.acquire_lock(LockMode::Shared).await?;
             if let Some(load) = self
