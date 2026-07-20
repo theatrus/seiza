@@ -1415,12 +1415,12 @@ dependencies = [
  "reqwest",
  "satkit",
  "seiza",
+ "seiza-download",
  "serde",
  "serde_json",
  "sha2",
  "thiserror",
  "tokio",
- "zstd",
 ]
 
 [[package]]

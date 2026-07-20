@@ -17,6 +17,15 @@ ISS_TLE = """ISS (ZARYA)
 2 25544  51.6400 160.0000 0005000  80.0000 280.0000 15.50000000450000
 """
 
+# A minimal CelesTrak-style OMM record for offline current-set resolution.
+OMM_JSON = """[{
+    "OBJECT_NAME":"ISS (ZARYA)", "OBJECT_ID":"1998-067A",
+    "EPOCH":"2024-05-02T12:00:00.000000", "MEAN_MOTION":15.5,
+    "ECCENTRICITY":0.0005, "INCLINATION":51.64, "RA_OF_ASC_NODE":160.0,
+    "ARG_OF_PERICENTER":80.0, "MEAN_ANOMALY":280.0, "NORAD_CAT_ID":25544,
+    "BSTAR":0.0001
+}]"""
+
 # The TLE epoch: 2024 day 123.5 = 2024-05-02T12:00:00Z.
 EPOCH_UNIX = datetime(2024, 5, 2, 12, 0, 0, tzinfo=timezone.utc).timestamp()
 OBSERVER = dict(latitude=42.466, longitude=-71.1516, altitude_m=150.0)
@@ -53,6 +62,26 @@ def test_parses_tle_and_reports_identity():
     assert catalog.source == "test"
     assert catalog.retrieved_at_unix is None
     assert catalog.cache_state is None
+    assert catalog.provider is None
+
+
+def test_resolve_rejects_naive_datetime():
+    # `resolve` parses its time before touching the network, so a naive
+    # datetime is rejected offline without contacting any provider.
+    with pytest.raises(ValueError):
+        seiza.SatelliteCatalog.resolve(datetime(2024, 5, 2, 12, 0, 0))
+
+
+def test_resolve_uses_cached_current_set_offline(tmp_path):
+    # A freshly written CelesTrak snapshot lets resolve() return the current
+    # active set for a recent time with no network access — exercising the
+    # current-path branch of the cascade and the provider mapping offline.
+    (tmp_path / "celestrak-active-manual.json").write_text(OMM_JSON)
+    now = datetime.now(timezone.utc).timestamp()
+    catalog = seiza.SatelliteCatalog.resolve(now, cache_dir=tmp_path)
+    assert len(catalog) == 1
+    assert catalog.provider == "celestrak-active"
+    assert catalog.cache_state == "fresh"
 
 
 def test_predicts_a_crossing_through_a_matching_wcs():

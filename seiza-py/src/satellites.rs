@@ -23,8 +23,8 @@ fn map_error(error: sat::Error) -> PyErr {
     }
 }
 
-/// `start` accepts Unix seconds, an RFC 3339 string, or a timezone-aware
-/// `datetime.datetime`.
+/// Parse a time argument: Unix seconds, an RFC 3339 string, or a
+/// timezone-aware `datetime.datetime`.
 fn parse_start(start: &Bound<'_, PyAny>) -> PyResult<sat::UtcTimestamp> {
     if let Ok(seconds) = start.extract::<f64>() {
         return sat::UtcTimestamp::from_unix_seconds(seconds).map_err(map_error);
@@ -43,7 +43,7 @@ fn parse_start(start: &Bound<'_, PyAny>) -> PyResult<sat::UtcTimestamp> {
         return sat::UtcTimestamp::from_unix_seconds(seconds).map_err(map_error);
     }
     Err(PyValueError::new_err(
-        "start must be Unix seconds, an RFC 3339 string, or a timezone-aware datetime",
+        "expected Unix seconds, an RFC 3339 string, or a timezone-aware datetime",
     ))
 }
 
@@ -203,17 +203,27 @@ impl PyTrackSearchResult {
     }
 }
 
-struct CelesTrakMeta {
+struct CatalogMeta {
+    provider: &'static str,
     state: &'static str,
     cache_path: PathBuf,
     warning: Option<String>,
+}
+
+fn cache_state_label(state: sat::CacheState) -> &'static str {
+    match state {
+        sat::CacheState::Fresh => "fresh",
+        sat::CacheState::Downloaded => "downloaded",
+        sat::CacheState::StaleFallback => "stale-fallback",
+        sat::CacheState::Cached => "cache-only",
+    }
 }
 
 /// Parsed OMM or TLE satellite orbital elements with source provenance.
 #[pyclass(frozen, name = "SatelliteCatalog", module = "seiza")]
 pub struct PySatelliteCatalog {
     catalog: sat::SatelliteCatalog,
-    meta: Option<CelesTrakMeta>,
+    meta: Option<CatalogMeta>,
 }
 
 #[pymethods]
@@ -268,16 +278,55 @@ impl PySatelliteCatalog {
                 .build()
                 .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
             let load = runtime.block_on(source.load_active()).map_err(map_error)?;
-            let state = match load.state {
-                sat::CacheState::Fresh => "fresh",
-                sat::CacheState::Downloaded => "downloaded",
-                sat::CacheState::StaleFallback => "stale-fallback",
-                sat::CacheState::Cached => "cache-only",
+            Ok(Self {
+                catalog: load.catalog,
+                meta: Some(CatalogMeta {
+                    provider: "celestrak-active",
+                    state: cache_state_label(load.state),
+                    cache_path: load.cache_path,
+                    warning: load.warning,
+                }),
+            })
+        })
+    }
+
+    /// Resolve the epoch-appropriate catalog for an image time, cascading
+    /// across providers so callers do not orchestrate them: recent times use
+    /// CelesTrak's current active set; older times use the Seiza satellite
+    /// mirror, falling back to IAU SatChecker. `time` is Unix seconds, an
+    /// RFC 3339 string, or a timezone-aware datetime — pass the exposure
+    /// midpoint. For a recent time this may refresh CelesTrak, which
+    /// rate-limits repeated downloads, so reuse one cache directory. Inspect
+    /// `provider`, `cache_state`, and `warning` afterwards.
+    #[staticmethod]
+    #[pyo3(signature = (time, cache_dir=None))]
+    fn resolve(
+        py: Python<'_>,
+        time: &Bound<'_, PyAny>,
+        cache_dir: Option<PathBuf>,
+    ) -> PyResult<Self> {
+        let time = parse_start(time)?;
+        py.allow_threads(|| {
+            let source = match cache_dir {
+                Some(directory) => sat::OrbitalCatalogSource::new(directory),
+                None => sat::OrbitalCatalogSource::platform_default(),
+            }
+            .map_err(map_error)?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            let load = runtime.block_on(source.load_at(time)).map_err(map_error)?;
+            let provider = match load.snapshot.provider {
+                sat::OrbitalCatalogProvider::CelesTrakActive => "celestrak-active",
+                sat::OrbitalCatalogProvider::SeizaMirror => "seiza-mirror",
+                sat::OrbitalCatalogProvider::IauSatChecker => "iau-satchecker",
             };
             Ok(Self {
                 catalog: load.catalog,
-                meta: Some(CelesTrakMeta {
-                    state,
+                meta: Some(CatalogMeta {
+                    provider,
+                    state: cache_state_label(load.state),
                     cache_path: load.cache_path,
                     warning: load.warning,
                 }),
@@ -303,8 +352,16 @@ impl PySatelliteCatalog {
             .map(sat::UtcTimestamp::unix_seconds)
     }
 
-    /// `"fresh"`, `"downloaded"`, or `"stale-fallback"` after
-    /// `fetch_celestrak`; `None` for file- or text-backed catalogs.
+    /// Provider that served the elements after `resolve` or `fetch_celestrak`:
+    /// `"celestrak-active"`, `"seiza-mirror"`, or `"iau-satchecker"`; `None`
+    /// for file- or text-backed catalogs.
+    #[getter]
+    fn provider(&self) -> Option<&'static str> {
+        self.meta.as_ref().map(|meta| meta.provider)
+    }
+
+    /// `"fresh"`, `"downloaded"`, `"stale-fallback"`, or `"cache-only"` after
+    /// `resolve`/`fetch_celestrak`; `None` for file- or text-backed catalogs.
     #[getter]
     fn cache_state(&self) -> Option<&'static str> {
         self.meta.as_ref().map(|meta| meta.state)
