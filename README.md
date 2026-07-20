@@ -1,5 +1,7 @@
 # seiza (星座)
 
+[![MSRV](https://img.shields.io/badge/MSRV-1.89-blue.svg)](Cargo.toml)
+
 Star detection, WCS fitting, and plate solving — hinted and blind — for
 astrophotography, in Rust. Built to power object overlays and astrometric
 features in [tenrankai](https://github.com/theatrus/tenrankai) and
@@ -23,7 +25,8 @@ can submit to the same server with `seiza worker --server`.
   your `PATH` and offers to download catalogs for you when it finishes.
 - **Fedora / Ubuntu** — install the RPM or deb from the same releases page.
 - **Python** — `pip install seiza` for the library with binary wheels.
-- **Anywhere with Rust** — `cargo install seiza-cli`.
+- **Anywhere with Rust** — `cargo install seiza-cli` (requires Rust 1.89 or
+  newer; see [MSRV](#minimum-supported-rust-version)).
 
 ## Ways to use it
 
@@ -373,6 +376,14 @@ and solves in the table's exact frame. Contract details:
   workspace so workspace builds never need libpython
 - `packaging/windows/` — the WiX MSI installer
 - `docs/` — design notes and benchmark reports
+
+## Minimum supported Rust version
+
+seiza builds on Rust **1.89** or newer. This is a real floor set by the
+dependency tree (currently `nalgebra`), not just the 2024 edition's own 1.85
+requirement, and it is declared as `rust-version` in `Cargo.toml` and checked
+in CI against a pinned 1.89 toolchain. A bump here is treated as a routine
+change, not a breaking one.
 
 ## License
 
