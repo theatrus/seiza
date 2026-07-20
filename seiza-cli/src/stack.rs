@@ -1,12 +1,11 @@
+use crate::provenance::{FileIdentity, file_identity, paths_refer_to_same_file, write_json_atomic};
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use seiza_stacking::{
-    CalibrationMasters, DeltaSigmaOptions, FitsFrame, FrameDisposition, MasterDark,
+    CalibrationMasters, DeltaSigmaOptions, FitsFrame, FrameDisposition, MasterDark, MasterFlat,
     NormalizationMode, RejectionMode, StackOptions,
 };
 use serde::Serialize;
-use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -72,13 +71,6 @@ pub(crate) struct StackArgs {
     /// Minimum fraction of samples overlapping the reference
     #[arg(long, default_value_t = 0.60)]
     min_overlap: f32,
-}
-
-#[derive(Serialize)]
-struct FileIdentity {
-    path: String,
-    bytes: u64,
-    sha256: String,
 }
 
 #[derive(Serialize)]
@@ -245,18 +237,24 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
             })
         })
         .transpose()?;
-    let bias = load_master(options.bias.as_ref())?.map(|frame| frame.image);
-    let dark = load_master(options.dark.as_ref())?.map(|frame| {
-        let exposure_seconds = options.dark_exposure_seconds.or(frame.exposure_seconds);
-        if let Some(report) = &mut calibration_report {
-            report.dark_exposure_seconds = exposure_seconds;
-        }
-        MasterDark {
-            exposure_seconds,
-            image: frame.image,
-        }
-    });
-    let flat = load_master(options.flat.as_ref())?.map(|frame| frame.image);
+    let bias = load_master(options.bias.as_ref())?
+        .map(|frame| {
+            frame.validate_master_kind("BIAS")?;
+            Ok::<_, seiza_stacking::Error>(frame.image)
+        })
+        .transpose()?;
+    let dark = load_master(options.dark.as_ref())?
+        .map(|frame| {
+            let exposure_seconds = options.dark_exposure_seconds.or(frame.exposure_seconds);
+            if let Some(report) = &mut calibration_report {
+                report.dark_exposure_seconds = exposure_seconds;
+            }
+            MasterDark::from_fits_frame(frame, exposure_seconds)
+        })
+        .transpose()?;
+    let flat = load_master(options.flat.as_ref())?
+        .map(MasterFlat::from_fits_frame)
+        .transpose()?;
     let calibration = CalibrationMasters::new(bias, dark, flat)?;
 
     let normalization = match options.normalization {
@@ -442,82 +440,6 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
     Ok(())
 }
 
-fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
-    if left == right {
-        return true;
-    }
-    match (comparable_path(left), comparable_path(right)) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => false,
-    }
-}
-
-fn comparable_path(path: &Path) -> std::io::Result<PathBuf> {
-    if let Ok(path) = std::fs::canonicalize(path) {
-        return Ok(path);
-    }
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let parent = std::fs::canonicalize(parent)?;
-    Ok(parent.join(path.file_name().unwrap_or_default()))
-}
-
-fn file_identity(path: &Path) -> Result<FileIdentity> {
-    let mut file = std::fs::File::open(path)
-        .with_context(|| format!("failed to fingerprint {}", path.display()))?;
-    let bytes = file.metadata()?.len();
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 1024 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let digest = hasher.finalize();
-    Ok(FileIdentity {
-        path: path.display().to_string(),
-        bytes,
-        sha256: digest.iter().map(|byte| format!("{byte:02x}")).collect(),
-    })
-}
-
-fn write_json_atomic(path: &Path, report: &StackReport) -> Result<()> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let prefix = format!(
-        ".{}.",
-        path.file_name().unwrap_or_default().to_string_lossy()
-    );
-    let mut builder = tempfile::Builder::new();
-    builder.prefix(&prefix);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let permissions = std::fs::metadata(path)
-            .map(|metadata| metadata.permissions())
-            .unwrap_or_else(|_| std::fs::Permissions::from_mode(0o666));
-        builder.permissions(permissions);
-    }
-    let mut temporary = builder
-        .tempfile_in(parent)
-        .with_context(|| format!("failed to create report beside {}", path.display()))?;
-    serde_json::to_writer_pretty(temporary.as_file_mut(), report)?;
-    temporary.as_file_mut().write_all(b"\n")?;
-    temporary.as_file_mut().flush()?;
-    temporary.as_file().sync_all()?;
-    temporary
-        .persist(path)
-        .map_err(|error| error.error)
-        .with_context(|| format!("failed to publish report {}", path.display()))?;
-    Ok(())
-}
-
 fn write_preview(image: &seiza_stacking::LinearImage, path: &Path) -> Result<()> {
     let stride = (image.data.len() / 200_000).max(1);
     let mut sample = image
@@ -553,18 +475,4 @@ fn write_preview(image: &seiza_stacking::LinearImage, path: &Path) -> Result<()>
             .save(path)?;
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn output_collision_detection_resolves_parent_components() {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::create_dir(directory.path().join("child")).unwrap();
-        let direct = directory.path().join("stack.fits");
-        let aliased = directory.path().join("child/../stack.fits");
-        assert!(paths_refer_to_same_file(&direct, &aliased));
-    }
 }

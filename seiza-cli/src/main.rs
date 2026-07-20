@@ -16,6 +16,8 @@ use std::path::PathBuf;
 
 mod astap;
 mod build_data;
+mod master;
+mod provenance;
 mod setup;
 mod solve_field;
 mod stack;
@@ -521,6 +523,8 @@ enum Command {
     },
     /// Register and incrementally stack linear FITS light frames
     Stack(stack::StackArgs),
+    /// Build sigma-clipped bias, dark, and flat masters from raw FITS frames
+    Master(master::MasterArgs),
     /// Query a star tile file: list stars around a sky position
     Cone {
         /// Star tile file built by build-data
@@ -1218,6 +1222,7 @@ fn main() -> Result<()> {
         }
         Command::FitsInfo { image, stretch } => fits_info(&image, stretch.as_deref()),
         Command::Stack(options) => stack::run(options),
+        Command::Master(options) => master::run(options),
         Command::Cone {
             data,
             ra,
@@ -3234,6 +3239,38 @@ mod cli_tests {
         ])
         .unwrap();
         assert!(matches!(cli.command, Command::Stack(_)));
+    }
+
+    #[test]
+    fn master_commands_require_multiple_calibration_frames() {
+        assert!(
+            Cli::try_parse_from([
+                "seiza",
+                "master",
+                "bias",
+                "one.fits",
+                "--output",
+                "master-bias.fits",
+            ])
+            .is_err()
+        );
+        let cli = Cli::try_parse_from([
+            "seiza",
+            "master",
+            "flat",
+            "flat-1.fits",
+            "flat-2.fits",
+            "--output",
+            "master-flat.fits",
+            "--bias",
+            "master-bias.fits",
+            "--dark-flat",
+            "master-dark-flat.fits",
+            "--report",
+            "master-flat.json",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Command::Master(_)));
     }
 
     #[test]

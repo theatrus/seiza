@@ -28,16 +28,58 @@ Each light frame follows this order:
 8. update the stack mean, variance, coverage, and rejection counts only when
    the complete frame is admitted.
 
-Calibration masters are assumed to be integrated master frames. A dark is
-assumed to include its bias pedestal; when both bias and dark are supplied,
-dark scaling uses `light - bias - scale * (dark - bias)`. A flat has the bias
-removed when available and is divided by its robust positive median before it
-is applied. Planar RGB flats are normalized independently per channel; CFA
-flats remain in their one-channel sensor sampling and are applied before
-debayering. Without a master bias, the dark's inseparable bias pedestal is
-subtracted unscaled even when exposure metadata differs. With a bias and a
-known master-dark duration, missing light exposure is a typed rejection rather
-than an unsafe 1:1 scaling assumption.
+Calibration inputs are integrated master frames. For legacy masters without
+Seiza metadata, a dark is assumed to include its bias pedestal; when both bias
+and dark are supplied, dark scaling uses
+`light - bias - scale * (dark - bias)`. A flat has the bias removed when
+available and is divided by its robust positive median before it is applied.
+Planar RGB flats are normalized independently per channel; CFA flats remain in
+their one-channel sensor sampling and are applied before debayering. Without a
+master bias, the dark's inseparable bias pedestal is subtracted unscaled even
+when exposure metadata differs. With a bias and a known master-dark duration,
+missing light exposure is a typed rejection rather than an unsafe 1:1 scaling
+assumption.
+
+Masters produced by Seiza carry `SEIZAMST`, `SEIZAVR`, `NCOMBINE`, `BIASSUB`,
+`DARKSUB`, and `FLATNORM` FITS cards. A bias-calibrated master dark is therefore
+recognized as pure dark signal and is not bias-subtracted again. A calibrated,
+normalized master flat likewise skips master-level calibration while the light
+itself still receives its configured bias and dark correction.
+
+## Master construction
+
+`build_master_from_fits` and `seiza master bias|dark|flat` construct the
+masters consumed above. The estimator makes two passes over the source paths:
+
+1. calibrate each input as appropriate and estimate a per-sample mean and
+   second central moment;
+2. reread each input and compute the final mean after leave-one-out low/high
+   sigma rejection.
+
+Leave-one-out statistics let a single cosmic-ray outlier be rejected even in
+a small calibration set. Rereading keeps memory proportional to a handful of
+image-sized buffers rather than the number of source frames. It intentionally
+trades additional sequential I/O for bounded memory; master generation is an
+occasional batch operation rather than a live capture path.
+
+A bias master integrates raw bias exposures. A dark master optionally removes
+a supplied master bias from every raw dark before integration and records the
+resulting state. A flat master optionally applies bias plus dark-flat
+calibration, normalizes every calibrated exposure per channel, then integrates
+the normalized responses. A bias-subtracted dark-flat requires the bias master
+as well, because dark current alone cannot remove the flat's bias pedestal.
+An uncalibrated normalized flat remains usable but cannot be safely
+bias-corrected after normalization, so the CLI warns when neither calibration
+input is provided. A dark-flat which still contains its bias pedestal must
+match the flat exposure unless a master bias makes its dark signal scalable.
+
+Before samples are mixed, the builder requires identical dimensions, channel
+count, and CFA layout. When headers provide them, it also checks camera,
+binning, pixel size, gain, offset, readout mode, temperature, and filter; dark
+exposures must agree or be explicitly asserted. The CLI's optional JSON report
+adds SHA-256 identities, configuration, calibration inputs, and accepted and
+rejected sample counts for every source frame. Both FITS and JSON outputs are
+published atomically.
 
 ## Registration
 
@@ -113,6 +155,12 @@ memory-mapped accumulators are follow-on backends behind the same API.
 `LiveStacker::view` borrows the current mean and masks for a zero-copy live
 renderer. `snapshot` copies owned maps when they are needed, while
 `into_snapshot` consumes the accumulator for copy-free batch finalization.
+
+Calibration master construction is also bounded by image size rather than
+input count. Its two-pass estimator retains per-sample moments and output
+counts plus one decoded source frame, then rereads the sequence for clipped
+integration. It is deliberately separate from the order-dependent live-stack
+estimator.
 
 PSF Guard owns sequence scoring, selection, and provenance. Its pre-stack
 adapter will apply its existing sequence-quality policy and then offer eligible

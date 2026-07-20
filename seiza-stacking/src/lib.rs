@@ -4,13 +4,18 @@
 mod calibration;
 mod fits;
 mod image;
+mod master;
 mod normalization;
 mod registration;
 mod stack;
 
-pub use calibration::{CalibrationMasters, MasterDark};
-pub use fits::{FitsFrame, write_fits_f32};
+pub use calibration::{CalibrationMasters, MasterDark, MasterFlat};
+pub use fits::{FitsFrame, write_fits_f32, write_master_fits_f32};
 pub use image::{BayerLayout, LinearImage};
+pub use master::{
+    MasterBuildOptions, MasterFrame, MasterFrameKind, MasterInputStatistics,
+    MasterRejectionOptions, build_master_from_fits,
+};
 pub use normalization::{NormalizationMap, NormalizationMode};
 pub use registration::{Registrar, RegistrationOptions, RegistrationResult, SimilarityTransform};
 pub use stack::{

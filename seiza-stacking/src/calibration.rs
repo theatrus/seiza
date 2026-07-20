@@ -1,9 +1,51 @@
-use crate::{Error, LinearImage, Result};
+use crate::{Error, FitsFrame, LinearImage, Result};
 
 #[derive(Clone, Debug)]
 pub struct MasterDark {
     pub image: LinearImage,
     pub exposure_seconds: Option<f64>,
+    /// Whether the bias pedestal has already been removed from this master.
+    pub bias_subtracted: bool,
+}
+
+impl MasterDark {
+    /// Decode a master dark, including Seiza's calibration-state headers when present.
+    pub fn from_fits_frame(frame: FitsFrame, exposure_seconds: Option<f64>) -> Result<Self> {
+        frame.validate_master_kind("DARK")?;
+        Ok(Self {
+            exposure_seconds: exposure_seconds.or(frame.exposure_seconds),
+            bias_subtracted: header_bool(&frame, "BIASSUB").unwrap_or(false),
+            image: frame.image,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct MasterFlat {
+    pub image: LinearImage,
+    /// True when the flat has already been calibrated and/or normalized.
+    pub calibrated: bool,
+}
+
+impl MasterFlat {
+    pub fn raw(image: LinearImage) -> Self {
+        Self {
+            image,
+            calibrated: false,
+        }
+    }
+
+    /// Decode a master flat, including Seiza's calibration-state headers when present.
+    pub fn from_fits_frame(frame: FitsFrame) -> Result<Self> {
+        frame.validate_master_kind("FLAT")?;
+        let calibrated = ["BIASSUB", "DARKSUB", "FLATNORM"]
+            .into_iter()
+            .any(|key| header_bool(&frame, key).unwrap_or(false));
+        Ok(Self {
+            image: frame.image,
+            calibrated,
+        })
+    }
 }
 
 /// Precomputed master calibration data in the raw light frame's sampling.
@@ -19,7 +61,7 @@ impl CalibrationMasters {
     pub fn new(
         bias: Option<LinearImage>,
         dark: Option<MasterDark>,
-        flat: Option<LinearImage>,
+        flat: Option<MasterFlat>,
     ) -> Result<Self> {
         if dark.as_ref().is_some_and(|dark| {
             dark.exposure_seconds
@@ -32,12 +74,12 @@ impl CalibrationMasters {
         let reference = bias
             .as_ref()
             .or_else(|| dark.as_ref().map(|value| &value.image))
-            .or(flat.as_ref());
+            .or_else(|| flat.as_ref().map(|value| &value.image));
         if let Some(reference) = reference {
             for image in bias
                 .iter()
                 .chain(dark.iter().map(|value| &value.image))
-                .chain(flat.iter())
+                .chain(flat.iter().map(|value| &value.image))
             {
                 if !reference.dimensions_match(image) {
                     return Err(Error::Calibration(
@@ -51,11 +93,15 @@ impl CalibrationMasters {
         // An ordinary master dark includes a bias pedestal. Exposure scaling
         // is valid only when a supplied master bias lets us isolate the dark
         // current signal first.
-        let dark_exposure_seconds = bias
-            .as_ref()
-            .and_then(|_| dark.as_ref().and_then(|value| value.exposure_seconds));
+        let dark_exposure_seconds = dark.as_ref().and_then(|dark| {
+            (dark.bias_subtracted || bias.is_some())
+                .then_some(dark.exposure_seconds)
+                .flatten()
+        });
         let dark_signal = dark.map(|mut dark| {
-            if let Some(bias) = &bias {
+            if !dark.bias_subtracted
+                && let Some(bias) = &bias
+            {
                 for (value, bias_value) in dark.image.data.iter_mut().zip(&bias.data) {
                     *value -= *bias_value;
                 }
@@ -65,13 +111,15 @@ impl CalibrationMasters {
 
         let flat_response = flat
             .map(|mut flat| {
-                if let Some(bias) = &bias {
-                    for (value, bias_value) in flat.data.iter_mut().zip(&bias.data) {
+                if !flat.calibrated
+                    && let Some(bias) = &bias
+                {
+                    for (value, bias_value) in flat.image.data.iter_mut().zip(&bias.data) {
                         *value -= *bias_value;
                     }
                 }
-                normalize_flat_response(&mut flat)?;
-                Ok(flat)
+                normalize_flat_response(&mut flat.image)?;
+                Ok(flat.image)
             })
             .transpose()?;
 
@@ -144,7 +192,7 @@ impl CalibrationMasters {
     }
 }
 
-fn normalize_flat_response(flat: &mut LinearImage) -> Result<()> {
+pub(crate) fn normalize_flat_response(flat: &mut LinearImage) -> Result<()> {
     for channel in 0..flat.channels {
         let normal = robust_positive_median(
             flat.data
@@ -163,6 +211,14 @@ fn normalize_flat_response(flat: &mut LinearImage) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn header_bool(frame: &FitsFrame, key: &str) -> Option<bool> {
+    frame
+        .headers
+        .iter()
+        .find(|(candidate, _)| candidate == key)
+        .and_then(|(_, value)| value.as_bool())
 }
 
 fn robust_positive_median(data: impl ExactSizeIterator<Item = f32>) -> Option<f32> {
@@ -198,8 +254,9 @@ mod tests {
             Some(MasterDark {
                 image: mono(&[14.0; 4]),
                 exposure_seconds: Some(20.0),
+                bias_subtracted: false,
             }),
-            Some(mono(&[12.0, 12.0, 14.0, 14.0])),
+            Some(MasterFlat::raw(mono(&[12.0, 12.0, 14.0, 14.0]))),
         )
         .unwrap();
         let mut light = mono(&[110.0; 4]);
@@ -215,6 +272,7 @@ mod tests {
             Some(MasterDark {
                 image: mono(&[14.0; 4]),
                 exposure_seconds: Some(20.0),
+                bias_subtracted: false,
             }),
             None,
         )
@@ -232,6 +290,7 @@ mod tests {
                 Some(MasterDark {
                     image: mono(&[14.0; 4]),
                     exposure_seconds: Some(0.0),
+                    bias_subtracted: false,
                 }),
                 None,
             )
@@ -252,6 +311,7 @@ mod tests {
             Some(MasterDark {
                 image: mono(&[14.0; 4]),
                 exposure_seconds: Some(20.0),
+                bias_subtracted: false,
             }),
             None,
         )
@@ -265,14 +325,34 @@ mod tests {
         let calibration = CalibrationMasters::new(
             None,
             None,
-            Some(rgb(vec![
+            Some(MasterFlat::raw(rgb(vec![
                 100.0, 200.0, 400.0, 100.0, 200.0, 400.0, 100.0, 200.0, 400.0, 200.0, 400.0, 800.0,
-            ])),
+            ]))),
         )
         .unwrap();
         let mut light = rgb(vec![1000.0; 12]);
         calibration.apply(&mut light, None).unwrap();
         assert_eq!(&light.data[..9], &[1000.0; 9]);
         assert_eq!(&light.data[9..], &[500.0; 3]);
+    }
+
+    #[test]
+    fn does_not_subtract_bias_twice_from_prepared_masters() {
+        let calibration = CalibrationMasters::new(
+            Some(mono(&[10.0; 4])),
+            Some(MasterDark {
+                image: mono(&[4.0; 4]),
+                exposure_seconds: Some(20.0),
+                bias_subtracted: true,
+            }),
+            Some(MasterFlat {
+                image: mono(&[1.0, 1.0, 2.0, 2.0]),
+                calibrated: true,
+            }),
+        )
+        .unwrap();
+        let mut light = mono(&[110.0; 4]);
+        calibration.apply(&mut light, Some(10.0)).unwrap();
+        assert_eq!(light.data, [147.0, 147.0, 73.5, 73.5]);
     }
 }

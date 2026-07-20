@@ -1,4 +1,4 @@
-use crate::{BayerLayout, Error, LinearImage, Result, StackSnapshot};
+use crate::{BayerLayout, Error, LinearImage, MasterFrame, Result, StackSnapshot};
 use seiza_fits::{FitsImage, HeaderValue, Pixels};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -88,6 +88,23 @@ impl FitsFrame {
         })
     }
 
+    /// Reject a Seiza master whose declared kind does not match its use.
+    /// External masters without `SEIZAMST` retain the legacy inferred behavior.
+    pub fn validate_master_kind(&self, expected: &str) -> Result<()> {
+        if let Some(actual) = self
+            .headers
+            .iter()
+            .find(|(key, _)| key == "SEIZAMST")
+            .and_then(|(_, value)| value.as_str())
+            && !actual.eq_ignore_ascii_case(expected)
+        {
+            return Err(Error::Calibration(format!(
+                "expected a {expected} master but FITS declares {actual}"
+            )));
+        }
+        Ok(())
+    }
+
     pub(crate) fn into_prepared(mut self) -> Result<Self> {
         if let Some(layout) = self.bayer.take() {
             self.image = self.image.debayer(layout)?;
@@ -112,7 +129,101 @@ pub fn write_fits_f32(
     snapshot: &StackSnapshot,
     reference_headers: &[(String, HeaderValue)],
 ) -> Result<()> {
-    let path = path.as_ref();
+    let mut cards = vec![integer_card(
+        "STACKCNT",
+        snapshot.accepted_frames as i64,
+        "accepted input frames",
+    )];
+    cards.push(integer_card(
+        "STACKREJ",
+        snapshot.rejected_frames as i64,
+        "rejected input frames",
+    ));
+    if has_reference_wcs(reference_headers) {
+        for (key, value) in reference_headers {
+            if preserve_wcs_key(key)
+                && !cards
+                    .iter()
+                    .any(|card| card.starts_with(&format!("{key:<8}")))
+                && let Some(card) = value_card(key, value)
+            {
+                cards.push(card);
+            }
+        }
+    }
+    write_linear_fits_f32(path.as_ref(), &snapshot.image, cards)
+}
+
+/// Write an integrated calibration master with explicit calibration-state headers.
+pub fn write_master_fits_f32(path: impl AsRef<Path>, master: &MasterFrame) -> Result<()> {
+    let mut cards = vec![
+        string_card(
+            "SEIZAMST",
+            master.kind.fits_name(),
+            "Seiza master frame kind",
+        ),
+        integer_card("SEIZAVR", 1, "Seiza master header schema"),
+        integer_card(
+            "NCOMBINE",
+            master.input_frames as i64,
+            "integrated calibration frames",
+        ),
+        logical_card(
+            "BIASSUB",
+            master.bias_subtracted,
+            "bias pedestal already removed",
+        ),
+        logical_card(
+            "DARKSUB",
+            master.dark_subtracted,
+            "dark or dark-flat already removed",
+        ),
+        logical_card(
+            "FLATNORM",
+            master.normalized,
+            "flat response normalized before combine",
+        ),
+        float_card(
+            "CLIPLOW",
+            f64::from(master.rejection.low_sigma),
+            "low leave-one-out sigma threshold",
+        ),
+        float_card(
+            "CLIPHIGH",
+            f64::from(master.rejection.high_sigma),
+            "high leave-one-out sigma threshold",
+        ),
+        integer_card(
+            "CLIPREJ",
+            i64::try_from(master.rejected_samples).unwrap_or(i64::MAX),
+            "rejected input samples",
+        ),
+    ];
+    if let Some(exposure_seconds) = master.exposure_seconds {
+        cards.push(float_card(
+            "EXPTIME",
+            exposure_seconds,
+            "master dark exposure seconds",
+        ));
+    }
+    for (key, value) in &master.reference_headers {
+        if preserve_master_key(key)
+            && !cards
+                .iter()
+                .any(|card| card.starts_with(&format!("{key:<8}")))
+            && let Some(card) = value_card(key, value)
+        {
+            cards.push(card);
+        }
+    }
+    write_linear_fits_f32(path.as_ref(), &master.image, cards)
+}
+
+fn write_linear_fits_f32(
+    path: &Path,
+    image: &LinearImage,
+    mut extra_cards: Vec<String>,
+) -> Result<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -136,7 +247,6 @@ pub fn write_fits_f32(
         source,
     })?;
     let mut writer = BufWriter::new(temporary.as_file_mut());
-    let image = &snapshot.image;
     let mut cards = vec![
         logical_card("SIMPLE", true, "conforms to FITS standard"),
         integer_card("BITPIX", -32, "32-bit IEEE floating point"),
@@ -148,28 +258,7 @@ pub fn write_fits_f32(
         cards.push(integer_card("NAXIS3", 3, "RGB planes"));
     }
     cards.push(logical_card("EXTEND", true, "extensions may be present"));
-    cards.push(integer_card(
-        "STACKCNT",
-        snapshot.accepted_frames as i64,
-        "accepted input frames",
-    ));
-    cards.push(integer_card(
-        "STACKREJ",
-        snapshot.rejected_frames as i64,
-        "rejected input frames",
-    ));
-    if has_reference_wcs(reference_headers) {
-        for (key, value) in reference_headers {
-            if preserve_wcs_key(key)
-                && !cards
-                    .iter()
-                    .any(|card| card.starts_with(&format!("{key:<8}")))
-                && let Some(card) = value_card(key, value)
-            {
-                cards.push(card);
-            }
-        }
-    }
+    cards.append(&mut extra_cards);
     cards.push(format!("{:<80}", "END"));
     write_block_padded(&mut writer, cards.concat().as_bytes(), b' ').map_err(|source| {
         Error::Io {
@@ -264,6 +353,14 @@ fn integer_card(key: &str, value: i64, comment: &str) -> String {
     card(key, &value.to_string(), comment)
 }
 
+fn float_card(key: &str, value: f64, comment: &str) -> String {
+    card(key, &format!("{value:.12E}"), comment)
+}
+
+fn string_card(key: &str, value: &str, comment: &str) -> String {
+    card(key, &format!("'{}'", value.replace('\'', "''")), comment)
+}
+
 fn value_card(key: &str, value: &HeaderValue) -> Option<String> {
     let value = match value {
         HeaderValue::Logical(value) => {
@@ -318,6 +415,30 @@ fn has_reference_wcs(headers: &[(String, HeaderValue)]) -> bool {
     ["CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2", "CTYPE1", "CTYPE2"]
         .iter()
         .all(|required| headers.iter().any(|(key, _)| key == required))
+}
+
+fn preserve_master_key(key: &str) -> bool {
+    matches!(
+        key,
+        "INSTRUME"
+            | "CAMERA"
+            | "XBINNING"
+            | "YBINNING"
+            | "CCDXBIN"
+            | "CCDYBIN"
+            | "XPIXSZ"
+            | "YPIXSZ"
+            | "GAIN"
+            | "EGAIN"
+            | "OFFSET"
+            | "CCD-TEMP"
+            | "SET-TEMP"
+            | "READOUTM"
+            | "FILTER"
+            | "BAYERPAT"
+            | "XBAYROFF"
+            | "YBAYROFF"
+    )
 }
 
 #[cfg(test)]
@@ -421,5 +542,39 @@ mod tests {
         assert!(values[3].is_nan());
         assert_eq!(decoded.header_f64("STACKCNT"), Some(3.0));
         assert_eq!(decoded.header_f64("STACKREJ"), Some(1.0));
+    }
+
+    #[test]
+    fn master_writer_round_trips_calibration_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("master-dark.fits");
+        let master = MasterFrame {
+            kind: crate::MasterFrameKind::Dark,
+            image: LinearImage::new(2, 2, 1, vec![4.0; 4]).unwrap(),
+            exposure_seconds: Some(30.0),
+            bayer: None,
+            input_frames: 12,
+            accepted_samples: 47,
+            rejected_samples: 1,
+            input_statistics: Vec::new(),
+            bias_subtracted: true,
+            dark_subtracted: false,
+            normalized: false,
+            rejection: crate::MasterRejectionOptions::default(),
+            reference_headers: vec![("INSTRUME".into(), HeaderValue::String("Test Camera".into()))],
+        };
+        write_master_fits_f32(&path, &master).unwrap();
+        let decoded = FitsImage::open(&path).unwrap();
+        assert_eq!(decoded.header_str("SEIZAMST"), Some("DARK"));
+        assert_eq!(decoded.header_f64("NCOMBINE"), Some(12.0));
+        assert_eq!(decoded.header_f64("EXPTIME"), Some(30.0));
+        assert_eq!(
+            decoded.header("BIASSUB").and_then(HeaderValue::as_bool),
+            Some(true)
+        );
+        assert_eq!(decoded.header_str("INSTRUME"), Some("Test Camera"));
+        let frame = FitsFrame::open(&path).unwrap();
+        frame.validate_master_kind("DARK").unwrap();
+        assert!(frame.validate_master_kind("BIAS").is_err());
     }
 }

@@ -113,6 +113,24 @@ seiza stack lights/*.fits --output stack.fits \
   --normalization local --local-tile-size 256
 ```
 
+Raw calibration sequences can be integrated into reusable masters first:
+
+```
+seiza master bias bias/*.fits --output master-bias.fits --report master-bias.json
+seiza master dark dark/*.fits --bias master-bias.fits \
+  --output master-dark.fits --report master-dark.json
+seiza master flat flats/*.fits --bias master-bias.fits \
+  --dark-flat master-dark-flat.fits --output master-flat.fits \
+  --report master-flat.json
+```
+
+Master construction uses a two-pass, leave-one-out sigma-clipped mean. It
+rereads inputs for the second pass, so memory is proportional to image size,
+not frame count. Dimensions, channels, CFA layout, and available camera,
+binning, gain, offset, temperature, filter, and dark-exposure metadata are
+checked before incompatible frames can be mixed. Flat frames are calibrated
+and normalized individually before integration.
+
 Calibration, registration, normalization, online delta-sigma rejection, and
 integration all operate on linear `f32` samples. `--preview` is an optional
 display-only stretch and never feeds pixels back into the stack. Incoming
@@ -124,9 +142,11 @@ configuration, and the ordered accepted/rejected disposition ledger. FITS and
 report outputs are published atomically after they are complete.
 
 `--flat` accepts an integrated master flat in the light frame's raw sampling.
-When `--bias` is present its pedestal is removed before the flat is normalized;
-planar RGB flats are normalized independently per channel. CFA flats remain
-one-channel and are applied before debayering. See the
+For legacy masters, `--bias` removes the flat's pedestal before normalization.
+Masters built by `seiza master` carry FITS calibration-state headers, so a
+bias-subtracted dark or calibrated flat is not subtracted twice. Planar RGB
+flats are normalized independently per channel. CFA flats remain one-channel
+and are applied before debayering. See the
 [stacking design](https://github.com/theatrus/seiza/blob/main/docs/design/image-stacking.md)
 for the live API, rejection semantics, and PSF Guard integration boundary.
 
