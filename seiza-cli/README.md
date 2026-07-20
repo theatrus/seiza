@@ -171,6 +171,24 @@ seiza download-data prebuilt --output data \
 The other `download-data` subcommands acquire upstream source material for
 custom catalog builds; they are not required for normal Seiza use.
 
+Historical satellite elements use the same resolver as applications: a nearby
+entry in the durable cache first, then the rolling Seiza mirror, with IAU
+SatChecker as the on-demand fallback. Operators can prewarm one or more epochs
+without teaching an application which provider to call:
+
+```
+seiza download-data satellite-history \
+  --epoch 2025-10-17T12:00:00Z 2025-10-18T12:00:00Z \
+  --cache /var/lib/seiza/satellite-mirror/cache
+```
+
+`seiza build-data satellite-manifest` converts that cache into a validated,
+content-addressed publication tree. The complete cron, S3 publication order,
+backfill, retention, and public verification procedure is in the
+[satellite mirror runbook](https://github.com/theatrus/seiza/blob/main/docs/SATELLITE_MIRROR.md).
+The mirror publisher uses `--origin` so its scheduled bucket is fetched from
+IAU SatChecker rather than resolved from the mirror it is updating.
+
 For an interactive selection, run `seiza setup`. This is also the command
 offered by the Windows installer. It presents lightweight, Gaia, deep-blind,
 optional G≤20, and every-catalog presets, then delegates to the same verified

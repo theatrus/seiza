@@ -88,10 +88,30 @@ closest to an exposure time. Every parsed catalog supplies a SHA-256
 predictions and invalidate them when the element payload changes. Retrieval
 time and source remain separate provenance and do not change content identity.
 
-Historical images require elements close to their acquisition epoch. A future
-authenticated Space-Track `GP_HISTORY` provider can implement the same source
-boundary. It should cache each historical response indefinitely rather than
-repeat large history queries.
+Historical images require elements close to their acquisition epoch.
+`OrbitalCatalogSource` owns source selection so applications do not reproduce
+policy. Recent exposures select CelesTrak active OMM. Historical exposures try
+the nearest durable cache entry, the Seiza content-addressed rolling mirror,
+and finally the public IAU SatChecker `tles-at-epoch` service. Each validated
+TLE response is stored in the same durable cache as CelesTrak, preserving the
+provider and query epoch separately from download time. A nearby historical
+query is reused within a configurable 12-hour window; cache-only replay never
+performs network I/O. Historical responses otherwise remain until the shared
+5 GiB default upper bound evicts the oldest snapshots.
+
+Operational prewarming is exposed as `seiza download-data satellite-history
+--epoch ...`. The CLI delegates to `OrbitalCatalogSource`, so it populates the
+same locked, validated cache rather than inventing another implementation. It
+intentionally accepts selected observing epochs, not an unbounded copy of
+SatChecker's historical backend. The mirror publisher adds `--origin`, which
+requests the exact epoch from SatChecker with a zero-width reuse window; this
+prevents a twice-daily cron from satisfying a new bucket from its own previous
+12-hour mirror entry.
+
+The Seiza-hosted rolling mirror uses a strict content-addressed manifest and
+the same publish-last transaction as dynamic catalog data. The complete cron,
+S3, backfill, and verification runbook is in
+[`docs/SATELLITE_MIRROR.md`](../SATELLITE_MIRROR.md).
 
 Stable identity uses the numeric NORAD catalog ID and, when available, the
 COSPAR international designator. Display names are not keys. OMM is preferred
@@ -193,11 +213,10 @@ it never calls an unmatched prediction observed or detected.
 
 ## Follow-on work
 
-1. Add an authenticated, permanently cached Space-Track history provider.
-2. Add unconstrained full-frame trail candidate detection after masking stars;
+1. Add unconstrained full-frame trail candidate detection after masking stars;
    the prediction-constrained matcher is already reusable.
-3. Report all plausible identities when timing or elements do not distinguish
+2. Report all plausible identities when timing or elements do not distinguish
    nearby tracks; never force a single match.
-4. Add optional timing-error and orbit-uncertainty envelopes.
-5. Benchmark full active-catalog propagation and introduce observer/time-bucket
+3. Add optional timing-error and orbit-uncertainty envelopes.
+4. Benchmark full active-catalog propagation and introduce observer/time-bucket
    indices only if measured workloads require them.

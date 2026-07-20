@@ -9,8 +9,8 @@ use seiza::solve::{SolveHint, solve};
 use seiza::star_ids::{StarIdentifierCatalog, StarLookupMatch};
 use seiza::{DetectBackend, DetectConfig, DetectedStar};
 use seiza_satellites::{
-    CacheState, CelesTrakSource, ExposureProvenance, ObserverLocation, SatelliteCatalog,
-    SatelliteTrack, SingleExposure, TrackOptions, UtcTimestamp,
+    CacheState, CelesTrakSource, ExposureProvenance, ObserverLocation, OrbitalCatalogSource,
+    SatelliteCatalog, SatelliteTrack, SingleExposure, TrackOptions, UtcTimestamp,
 };
 use std::path::PathBuf;
 
@@ -699,6 +699,20 @@ enum DownloadSource {
         #[arg(long)]
         file: Vec<String>,
     },
+    /// Historical satellite TLE snapshots from the Seiza mirror or IAU fallback
+    SatelliteHistory {
+        /// UTC epoch(s) to prewarm, normally exposure midpoints. Nearby epochs
+        /// reuse one validated observing-night snapshot.
+        #[arg(long, required = true, num_args = 1.., value_name = "RFC3339")]
+        epoch: Vec<String>,
+        /// Shared satellite cache directory (default: platform Seiza cache)
+        #[arg(long)]
+        cache: Option<PathBuf>,
+        /// Fetch each exact epoch from the public origin, bypassing the Seiza
+        /// mirror and nearby-cache reuse. Required when publishing the mirror.
+        #[arg(long)]
+        origin: bool,
+    },
     /// Advanced source: Tycho-2 distribution files from CDS (~150 MB)
     Tycho2 {
         /// Directory to download into
@@ -892,6 +906,21 @@ enum BuildDataSource {
             value_parser = clap::value_parser!(i32).range(1..=22)
         )]
         zstd_level: Option<i32>,
+    },
+    /// Rolling satellite mirror manifest and upload-ready immutable TLEs
+    SatelliteManifest {
+        /// Shared orbital cache populated by download-data satellite-history
+        #[arg(long)]
+        cache: PathBuf,
+        /// Previously published manifest to roll forward
+        #[arg(long)]
+        base_manifest: Option<PathBuf>,
+        /// New manifest pointer; upload this to manifest.json last
+        #[arg(long)]
+        output: PathBuf,
+        /// Stage content-addressed artifacts for S3 sync
+        #[arg(long)]
+        artifact_dir: PathBuf,
     },
 }
 
@@ -1103,6 +1132,17 @@ fn main() -> Result<()> {
                 artifact_dir.as_deref(),
                 zstd_level.unwrap_or(22),
             ),
+            BuildDataSource::SatelliteManifest {
+                cache,
+                base_manifest,
+                output,
+                artifact_dir,
+            } => build_data::build_satellite_manifest(
+                &cache,
+                base_manifest.as_deref(),
+                &output,
+                &artifact_dir,
+            ),
         },
         Command::BuildBlindIndex {
             data,
@@ -1229,7 +1269,63 @@ async fn download_command(source: DownloadSource) -> Result<()> {
         DownloadSource::Prebuilt { output, file } => {
             download_prebuilt(output, file).await?;
         }
+        DownloadSource::SatelliteHistory {
+            epoch,
+            cache,
+            origin,
+        } => {
+            download_satellite_history(epoch, cache, origin).await?;
+        }
         source => download_source(source).await?,
+    }
+    Ok(())
+}
+
+async fn download_satellite_history(
+    epoch: Vec<String>,
+    cache: Option<PathBuf>,
+    origin: bool,
+) -> Result<()> {
+    let mut epochs = epoch
+        .into_iter()
+        .map(|value| {
+            UtcTimestamp::parse(&value)
+                .with_context(|| format!("invalid satellite history epoch {value:?}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    epochs.sort_by(|left, right| left.unix_seconds().total_cmp(&right.unix_seconds()));
+    epochs.dedup_by(|left, right| left.unix_seconds() == right.unix_seconds());
+
+    let source = match cache {
+        Some(cache) => OrbitalCatalogSource::new(cache)?,
+        None => OrbitalCatalogSource::platform_default()?,
+    };
+    for epoch in epochs {
+        let load = if origin {
+            source.fetch_historical_origin(epoch).await?
+        } else {
+            source.prewarm_historical(epoch).await?
+        };
+        let state = match load.state {
+            CacheState::Downloaded => "downloaded",
+            CacheState::Cached => "cached",
+            CacheState::Fresh => "fresh cache",
+            CacheState::StaleFallback => "stale cache fallback",
+        };
+        println!(
+            "satellite history for {}: {} records ({}, {state}, {})",
+            load.snapshot
+                .query_time
+                .expect("historical prewarming always records its query epoch")
+                .to_rfc3339(),
+            load.catalog.len(),
+            match load.snapshot.provider {
+                seiza_satellites::OrbitalCatalogProvider::CelesTrakActive => "CelesTrak active",
+                seiza_satellites::OrbitalCatalogProvider::SeizaMirror => "Seiza mirror",
+                seiza_satellites::OrbitalCatalogProvider::IauSatChecker => "IAU SatChecker",
+            },
+            load.cache_path.display()
+        );
     }
     Ok(())
 }
@@ -1259,7 +1355,9 @@ async fn download_source(source: DownloadSource) -> Result<()> {
         } => downloader.download_gaia(output, max_mag, chunks).await,
         DownloadSource::Transients { output } => downloader.download_transients(output).await,
         DownloadSource::Mpc { output } => downloader.download_mpc(output).await,
-        DownloadSource::Prebuilt { .. } => unreachable!("handled by download_command"),
+        DownloadSource::Prebuilt { .. } | DownloadSource::SatelliteHistory { .. } => {
+            unreachable!("handled by download_command")
+        }
     }?;
     Ok(())
 }
@@ -3331,6 +3429,37 @@ mod cli_tests {
         };
         assert_eq!(max_mag, -1.5);
         assert_eq!(chunks, 1);
+    }
+
+    #[test]
+    fn satellite_history_accepts_multiple_explicit_epochs_and_cache() {
+        let cli = Cli::try_parse_from([
+            "seiza",
+            "download-data",
+            "satellite-history",
+            "--epoch",
+            "2025-10-17T12:50:21Z",
+            "2025-10-18T12:51:42Z",
+            "--cache",
+            "satellite-cache",
+            "--origin",
+        ])
+        .unwrap();
+
+        let Command::DownloadData {
+            source:
+                DownloadSource::SatelliteHistory {
+                    epoch,
+                    cache,
+                    origin,
+                },
+        } = cli.command
+        else {
+            panic!("expected satellite history download command");
+        };
+        assert_eq!(epoch.len(), 2);
+        assert_eq!(cache, Some(PathBuf::from("satellite-cache")));
+        assert!(origin);
     }
 
     #[test]
