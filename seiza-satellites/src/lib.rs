@@ -810,12 +810,16 @@ impl SatelliteCatalog {
     pub fn from_tle_text(payload: &str, source: impl Into<String>) -> Result<Self> {
         let source = source.into();
         let content_sha256 = payload_sha256(payload.as_bytes());
-        // Parse per record and SKIP malformed ones rather than failing the whole
-        // batch. IAU SatChecker occasionally emits a single satellite with an
-        // unparseable field (e.g. an invalid mean-anomaly float); dropping that
-        // one record must not discard the entire epoch's ~27k satellites.
-        // (satkit's TLE::from_lines `?`-aborts on the first bad record, so we
-        // mirror its line grouping here and call the per-record parsers.)
+        // Parse per record and SKIP records satkit can't read rather than
+        // failing the whole batch. IAU SatChecker occasionally emits a
+        // non-conformant fixed-width record — e.g. a 70-char line 2 with an
+        // 8-digit eccentricity that shifts every later column right by one, so
+        // satkit's fixed-column mean-anomaly slice (`line2[42..51]`) reads
+        // garbage and reports "Could not parse mean anomaly: invalid float
+        // literal". Dropping that one satellite must not discard the entire
+        // epoch's ~27k records. (satkit's TLE::from_lines `?`-aborts on the
+        // first bad record, so we mirror its line grouping and call the
+        // per-record load_2line/load_3line.)
         let mut records = Vec::new();
         let mut skipped = 0usize;
         let mut line0 = "";
@@ -1330,17 +1334,21 @@ mod tests {
         assert_eq!(identity.name, "ISS (ZARYA)");
     }
 
+    // A real non-conformant record from IAU SatChecker (tles-at-epoch, JD
+    // 2460893): NORAD 45254's line 2 is 70 chars — an 8-digit eccentricity
+    // (69342136) shifts later columns, so satkit's fixed-column mean-anomaly
+    // parse fails. This is exactly what dropped whole epochs from the mirror.
+    const IAU_MALFORMED_RECORD: &str = "\
+1 45254U 20015A   25217.42685005 -.00000112  00000+0  00000+0 0  9998
+2 45254  65.3313 353.3251 69342136 282.9989  13.3386  2.00604744 39953
+";
+
     #[test]
     fn skips_malformed_tle_record_and_keeps_the_rest() {
-        // The valid ISS record plus a second satellite whose mean-anomaly field
-        // is not a number — the shape IAU SatChecker occasionally emits and that
-        // used to fail the whole epoch. The bad record is dropped; the good one
-        // survives.
-        let payload = format!(
-            "{ISS_TLE}\nBADSAT\n\
-             1 25545U 98067B   24123.50000000  .00016717  00000-0  30126-3 0  9991\n\
-             2 25545  51.6400 160.0000 0005000  80.0000 XXX.XXXX 15.50000000450001\n"
-        );
+        // The valid ISS record plus the real malformed SatChecker record. The
+        // unreadable one is dropped; the good one survives (rather than losing
+        // the whole epoch).
+        let payload = format!("{ISS_TLE}\n{IAU_MALFORMED_RECORD}");
         let catalog = SatelliteCatalog::from_tle_text(&payload, "test").unwrap();
         assert_eq!(catalog.len(), 1);
         assert_eq!(catalog.elements[0].identity().norad_id, Some(25544));
@@ -1348,10 +1356,8 @@ mod tests {
 
     #[test]
     fn all_malformed_tle_records_still_error() {
-        let payload = "1 25545U 98067B   24123.50000000  .00016717  00000-0  30126-3 0  9991\n\
-                       2 25545  51.6400 160.0000 0005000  80.0000 XXX.XXXX 15.50000000450001\n";
         assert!(matches!(
-            SatelliteCatalog::from_tle_text(payload, "test"),
+            SatelliteCatalog::from_tle_text(IAU_MALFORMED_RECORD, "test"),
             Err(Error::EmptyElements(_))
         ));
     }
