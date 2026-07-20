@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.11.1"
+version = "0.11.2"
 edition = "2024"
 rust-version = "1.89"
 license = "Apache-2.0"
@@ -18,10 +18,10 @@ repository = "https://github.com/theatrus/seiza"
 authors = ["Yann Ramin <github@theatr.us>"]
 
 [workspace.dependencies]
-seiza = { path = "seiza", version = "0.11.1" }
-seiza-download = { path = "seiza-download", version = "0.4.0" }
+seiza = { path = "seiza", version = "0.11.2" }
+seiza-download = { path = "seiza-download", version = "0.5.0" }
 seiza-fits = { path = "seiza-fits", version = "0.1.6" }
-seiza-satellites = { path = "seiza-satellites", version = "0.3.1" }
+seiza-satellites = { path = "seiza-satellites", version = "0.4.0" }
 seiza-sources = { path = "seiza-sources", version = "0.2.0" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 thiserror = "2"
