@@ -170,15 +170,18 @@ Applications retain ownership of warning, rejection, and grading policy.
 `trail_alignment::PixelTrailAligner` accepts row-major monochrome `u16` pixels
 and an ADU conversion factor. It downsamples once per frame, then searches a
 bounded normal-offset corridor around every typed `PixelSegment` in the
-predicted polyline. Fitting the complete polyline avoids replacing a curved
-track with an inaccurate endpoint chord. A detection returns aligned segments,
-offsets, contrast, significance, and continuity while leaving the prediction
-unchanged. `NotDetected` means the path was evaluated without sufficient pixel
-support; `NotEvaluated` records an empty, too-short, or insufficiently covered
-path and is not negative evidence. The default fit requires complete center and
-sideband samples across at least half the predicted path and reports the actual
-coverage with the evidence, preventing a small edge fragment from standing in
-for a complete trail.
+predicted polyline. It sweeps the full corridor across a fixed range of endpoint
+tilts and only then refines the two endpoint offsets in a smaller local window,
+so the cost remains bounded as the corridor grows to accommodate orbital
+position error without sacrificing angular coverage. Fitting the complete
+polyline avoids replacing a curved track with an inaccurate endpoint chord. A
+detection returns aligned segments, offsets, contrast, significance, and
+continuity while leaving the prediction unchanged. `NotDetected` means the path
+was evaluated without sufficient pixel support; `NotEvaluated` records an
+empty, too-short, or insufficiently covered path and is not negative evidence.
+The default fit requires complete center and sideband samples across at least
+half the predicted path and reports the actual coverage with the evidence,
+preventing a small edge fragment from standing in for a complete trail.
 
 `tracks_in_footprint` borrows the catalog immutably — SGP4 initialization is
 cached on a per-call scratch copy of each element — so one loaded catalog can
