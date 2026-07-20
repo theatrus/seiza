@@ -848,18 +848,44 @@ impl SatelliteCatalog {
     pub fn from_tle_text(payload: &str, source: impl Into<String>) -> Result<Self> {
         let source = source.into();
         let content_sha256 = payload_sha256(payload.as_bytes());
-        let lines = payload.lines().map(str::to_string).collect::<Vec<_>>();
-        let tles = TLE::from_lines(&lines).map_err(|error| Error::Elements {
-            source_name: source.clone(),
-            message: error.to_string(),
-        })?;
-        Self::from_records(
-            tles.into_iter()
-                .map(|tle| ElementRecord::Tle(Box::new(tle)))
-                .collect(),
-            source,
-            content_sha256,
-        )
+        // Parse per record and SKIP records satkit can't read rather than
+        // failing the whole batch. IAU SatChecker occasionally emits a
+        // non-conformant fixed-width record — e.g. a 70-char line 2 with an
+        // 8-digit eccentricity that shifts every later column right by one, so
+        // satkit's fixed-column mean-anomaly slice (`line2[42..51]`) reads
+        // garbage and reports "Could not parse mean anomaly: invalid float
+        // literal". Dropping that one satellite must not discard the entire
+        // epoch's ~27k records. (satkit's TLE::from_lines `?`-aborts on the
+        // first bad record, so we mirror its line grouping and call the
+        // per-record load_2line/load_3line.)
+        let mut records = Vec::new();
+        let mut skipped = 0usize;
+        let mut line0 = "";
+        let mut line1 = "";
+        for raw in payload.lines() {
+            let line = raw.trim_end();
+            if line.len() >= 69 && line.starts_with("1 ") {
+                line1 = line;
+            } else if line.len() >= 69 && line.starts_with("2 ") {
+                let parsed = if line0.is_empty() {
+                    TLE::load_2line(line1, line)
+                } else {
+                    TLE::load_3line(line0, line1, line)
+                };
+                match parsed {
+                    Ok(tle) => records.push(ElementRecord::Tle(Box::new(tle))),
+                    Err(_) => skipped += 1,
+                }
+                line0 = "";
+                line1 = "";
+            } else if !line.is_empty() {
+                line0 = line;
+            }
+        }
+        if skipped > 0 {
+            eprintln!("seiza-satellites: skipped {skipped} malformed TLE record(s) from {source}");
+        }
+        Self::from_records(records, source, content_sha256)
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -1344,6 +1370,34 @@ mod tests {
         assert_eq!(identity.norad_id, Some(25544));
         assert_eq!(identity.cospar_id.as_deref(), Some("1998-067A"));
         assert_eq!(identity.name, "ISS (ZARYA)");
+    }
+
+    // A real non-conformant record from IAU SatChecker (tles-at-epoch, JD
+    // 2460893): NORAD 45254's line 2 is 70 chars — an 8-digit eccentricity
+    // (69342136) shifts later columns, so satkit's fixed-column mean-anomaly
+    // parse fails. This is exactly what dropped whole epochs from the mirror.
+    const IAU_MALFORMED_RECORD: &str = "\
+1 45254U 20015A   25217.42685005 -.00000112  00000+0  00000+0 0  9998
+2 45254  65.3313 353.3251 69342136 282.9989  13.3386  2.00604744 39953
+";
+
+    #[test]
+    fn skips_malformed_tle_record_and_keeps_the_rest() {
+        // The valid ISS record plus the real malformed SatChecker record. The
+        // unreadable one is dropped; the good one survives (rather than losing
+        // the whole epoch).
+        let payload = format!("{ISS_TLE}\n{IAU_MALFORMED_RECORD}");
+        let catalog = SatelliteCatalog::from_tle_text(&payload, "test").unwrap();
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog.elements[0].identity().norad_id, Some(25544));
+    }
+
+    #[test]
+    fn all_malformed_tle_records_still_error() {
+        assert!(matches!(
+            SatelliteCatalog::from_tle_text(IAU_MALFORMED_RECORD, "test"),
+            Err(Error::EmptyElements(_))
+        ));
     }
 
     #[test]
