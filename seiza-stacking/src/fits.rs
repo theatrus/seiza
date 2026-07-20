@@ -201,6 +201,23 @@ pub fn write_master_fits_f32(path: impl AsRef<Path>, master: &MasterFrame) -> Re
             "master dark exposure seconds",
         ));
     }
+    if let Some(bayer) = master.bayer {
+        cards.push(string_card(
+            "BAYERPAT",
+            bayer.pattern.as_str(),
+            "raw color-filter-array layout",
+        ));
+        cards.push(integer_card(
+            "XBAYROFF",
+            bayer.x_offset as i64,
+            "CFA horizontal origin offset",
+        ));
+        cards.push(integer_card(
+            "YBAYROFF",
+            bayer.y_offset as i64,
+            "CFA vertical origin offset",
+        ));
+    }
     for (key, value) in &master.reference_headers {
         if preserve_master_key(key)
             && !cards.iter().any(|card| card.keyword() == key)
@@ -430,7 +447,11 @@ mod tests {
             kind: crate::MasterFrameKind::Dark,
             image: LinearImage::new(2, 2, 1, vec![4.0; 4]).unwrap(),
             exposure_seconds: Some(30.0),
-            bayer: None,
+            bayer: Some(BayerLayout {
+                pattern: seiza_fits::BayerPattern::Rggb,
+                x_offset: 1,
+                y_offset: 0,
+            }),
             input_frames: 12,
             accepted_samples: 47,
             rejected_samples: 1,
@@ -452,6 +473,7 @@ mod tests {
         );
         assert_eq!(decoded.header_str("INSTRUME"), Some("Test Camera"));
         let frame = FitsFrame::open(&path).unwrap();
+        assert_eq!(frame.bayer, master.bayer);
         frame.validate_master_kind("DARK").unwrap();
         assert!(frame.validate_master_kind("BIAS").is_err());
     }

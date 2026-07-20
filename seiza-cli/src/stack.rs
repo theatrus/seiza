@@ -1,4 +1,4 @@
-use crate::provenance::{FileIdentity, file_identity, paths_refer_to_same_file, write_json_atomic};
+use crate::provenance::{FileIdentity, file_identity, validate_path_roles, write_json_atomic};
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use seiza_stacking::{
@@ -147,52 +147,25 @@ struct StackReport {
 pub(crate) fn run(options: StackArgs) -> Result<()> {
     let report_path = options.report.clone();
     let preview_path = options.preview.clone();
-    let calibration_paths = [
-        options.bias.as_ref(),
-        options.dark.as_ref(),
-        options.flat.as_ref(),
-    ];
-    if options
+    let mut path_roles = options
         .images
         .iter()
-        .any(|path| paths_refer_to_same_file(path, &options.output))
-        || calibration_paths
-            .iter()
-            .flatten()
-            .any(|path| paths_refer_to_same_file(path, &options.output))
-    {
-        anyhow::bail!("--output must not overwrite an input or calibration frame");
+        .enumerate()
+        .map(|(index, path)| (format!("light frame {}", index + 1), path.as_path()))
+        .collect::<Vec<_>>();
+    for (role, path) in [
+        ("master bias", options.bias.as_deref()),
+        ("master dark", options.dark.as_deref()),
+        ("master flat", options.flat.as_deref()),
+        ("stack output", Some(options.output.as_path())),
+        ("preview output", options.preview.as_deref()),
+        ("report output", options.report.as_deref()),
+    ] {
+        if let Some(path) = path {
+            path_roles.push((role.into(), path));
+        }
     }
-    if options.preview.as_ref().is_some_and(|preview| {
-        paths_refer_to_same_file(preview, &options.output)
-            || options
-                .images
-                .iter()
-                .any(|path| paths_refer_to_same_file(path, preview))
-            || calibration_paths
-                .iter()
-                .flatten()
-                .any(|path| paths_refer_to_same_file(path, preview))
-    }) {
-        anyhow::bail!("--preview must not overwrite the stack or an input frame");
-    }
-    if options.report.as_ref().is_some_and(|report| {
-        paths_refer_to_same_file(report, &options.output)
-            || options
-                .preview
-                .as_ref()
-                .is_some_and(|preview| paths_refer_to_same_file(report, preview))
-            || options
-                .images
-                .iter()
-                .any(|path| paths_refer_to_same_file(path, report))
-            || calibration_paths
-                .iter()
-                .flatten()
-                .any(|path| paths_refer_to_same_file(path, report))
-    }) {
-        anyhow::bail!("--report must not overwrite the stack, preview, or an input frame");
-    }
+    validate_path_roles(path_roles)?;
     if !options.sigma_low.is_finite()
         || options.sigma_low <= 0.0
         || !options.sigma_high.is_finite()

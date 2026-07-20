@@ -44,7 +44,9 @@ Masters produced by Seiza carry `SEIZAMST`, `SEIZAVR`, `NCOMBINE`, `BIASSUB`,
 `DARKSUB`, and `FLATNORM` FITS cards. A bias-calibrated master dark is therefore
 recognized as pure dark signal and is not bias-subtracted again. A calibrated,
 normalized master flat likewise skips master-level calibration while the light
-itself still receives its configured bias and dark correction.
+itself still receives its configured bias and dark correction. Master dark and
+flat loaders also retain `BAYERPAT`, `XBAYROFF`, and `YBAYROFF`; when present,
+that sampling must match the raw light rather than relying on dimensions alone.
 
 ## Master construction
 

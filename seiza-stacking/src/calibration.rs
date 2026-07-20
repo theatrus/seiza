@@ -1,4 +1,4 @@
-use crate::{Error, FitsFrame, LinearImage, Result};
+use crate::{BayerLayout, Error, FitsFrame, LinearImage, Result};
 
 #[derive(Clone, Debug)]
 pub struct MasterDark {
@@ -6,6 +6,8 @@ pub struct MasterDark {
     pub exposure_seconds: Option<f64>,
     /// Whether the bias pedestal has already been removed from this master.
     pub bias_subtracted: bool,
+    /// Raw CFA sampling retained from the master FITS, when present.
+    pub bayer: Option<BayerLayout>,
 }
 
 impl MasterDark {
@@ -15,6 +17,7 @@ impl MasterDark {
         Ok(Self {
             exposure_seconds: exposure_seconds.or(frame.exposure_seconds),
             bias_subtracted: header_bool(&frame, "BIASSUB").unwrap_or(false),
+            bayer: frame.bayer,
             image: frame.image,
         })
     }
@@ -25,6 +28,8 @@ pub struct MasterFlat {
     pub image: LinearImage,
     /// True when the flat has already been calibrated and/or normalized.
     pub calibrated: bool,
+    /// Raw CFA sampling retained from the master FITS, when present.
+    pub bayer: Option<BayerLayout>,
 }
 
 impl MasterFlat {
@@ -32,6 +37,16 @@ impl MasterFlat {
         Self {
             image,
             calibrated: false,
+            bayer: None,
+        }
+    }
+
+    /// Construct a raw flat while retaining its CFA sampling.
+    pub fn raw_with_bayer(image: LinearImage, bayer: BayerLayout) -> Self {
+        Self {
+            image,
+            calibrated: false,
+            bayer: Some(bayer),
         }
     }
 
@@ -44,6 +59,7 @@ impl MasterFlat {
         Ok(Self {
             image: frame.image,
             calibrated,
+            bayer: frame.bayer,
         })
     }
 }
@@ -54,7 +70,9 @@ pub struct CalibrationMasters {
     bias: Option<LinearImage>,
     dark_signal: Option<LinearImage>,
     dark_exposure_seconds: Option<f64>,
+    dark_bayer: Option<BayerLayout>,
     flat_response: Option<LinearImage>,
+    flat_bayer: Option<BayerLayout>,
 }
 
 impl CalibrationMasters {
@@ -98,6 +116,7 @@ impl CalibrationMasters {
                 .then_some(dark.exposure_seconds)
                 .flatten()
         });
+        let dark_bayer = dark.as_ref().and_then(|dark| dark.bayer);
         let dark_signal = dark.map(|mut dark| {
             if !dark.bias_subtracted
                 && let Some(bias) = &bias
@@ -109,6 +128,14 @@ impl CalibrationMasters {
             dark.image
         });
 
+        let flat_bayer = flat.as_ref().and_then(|flat| flat.bayer);
+        if let (Some(dark_bayer), Some(flat_bayer)) = (dark_bayer, flat_bayer)
+            && dark_bayer != flat_bayer
+        {
+            return Err(Error::Calibration(
+                "master dark and flat have different Bayer layouts".into(),
+            ));
+        }
         let flat_response = flat
             .map(|mut flat| {
                 if !flat.calibrated
@@ -127,7 +154,9 @@ impl CalibrationMasters {
             bias,
             dark_signal,
             dark_exposure_seconds,
+            dark_bayer,
             flat_response,
+            flat_bayer,
         })
     }
 
@@ -135,7 +164,16 @@ impl CalibrationMasters {
         self.bias.is_none() && self.dark_signal.is_none() && self.flat_response.is_none()
     }
 
-    pub fn apply(&self, image: &mut LinearImage, exposure_seconds: Option<f64>) -> Result<()> {
+    /// Calibrate one linear frame in its current sampling.
+    ///
+    /// `bayer` describes the image's raw CFA layout. A known master layout must
+    /// match it before any pixels are mutated.
+    pub fn apply(
+        &self,
+        image: &mut LinearImage,
+        exposure_seconds: Option<f64>,
+        bayer: Option<BayerLayout>,
+    ) -> Result<()> {
         if exposure_seconds.is_some_and(|seconds| !seconds.is_finite() || seconds <= 0.0) {
             return Err(Error::Calibration(
                 "light exposure must be a positive finite number".into(),
@@ -156,6 +194,19 @@ impl CalibrationMasters {
                     master.width,
                     master.height,
                     master.channels
+                )));
+            }
+        }
+        for (kind, master, master_bayer) in [
+            ("dark", self.dark_signal.as_ref(), self.dark_bayer),
+            ("flat", self.flat_response.as_ref(), self.flat_bayer),
+        ] {
+            if master.is_some()
+                && let Some(master_bayer) = master_bayer
+                && Some(master_bayer) != bayer
+            {
+                return Err(Error::Calibration(format!(
+                    "master {kind} Bayer layout does not match the light frame"
                 )));
             }
         }
@@ -255,12 +306,13 @@ mod tests {
                 image: mono(&[14.0; 4]),
                 exposure_seconds: Some(20.0),
                 bias_subtracted: false,
+                bayer: None,
             }),
             Some(MasterFlat::raw(mono(&[12.0, 12.0, 14.0, 14.0]))),
         )
         .unwrap();
         let mut light = mono(&[110.0; 4]);
-        calibration.apply(&mut light, Some(10.0)).unwrap();
+        calibration.apply(&mut light, Some(10.0), None).unwrap();
         assert!((light.data[0] - 147.0).abs() < 1.0e-4);
         assert!((light.data[2] - 73.5).abs() < 1.0e-4);
     }
@@ -273,12 +325,13 @@ mod tests {
                 image: mono(&[14.0; 4]),
                 exposure_seconds: Some(20.0),
                 bias_subtracted: false,
+                bayer: None,
             }),
             None,
         )
         .unwrap();
         let mut light = mono(&[110.0; 4]);
-        calibration.apply(&mut light, Some(10.0)).unwrap();
+        calibration.apply(&mut light, Some(10.0), None).unwrap();
         assert_eq!(light.data, [96.0; 4]);
     }
 
@@ -291,6 +344,7 @@ mod tests {
                     image: mono(&[14.0; 4]),
                     exposure_seconds: Some(0.0),
                     bias_subtracted: false,
+                    bayer: None,
                 }),
                 None,
             )
@@ -299,7 +353,7 @@ mod tests {
         let calibration = CalibrationMasters::default();
         assert!(
             calibration
-                .apply(&mut mono(&[1.0; 4]), Some(f64::NAN))
+                .apply(&mut mono(&[1.0; 4]), Some(f64::NAN), None)
                 .is_err()
         );
     }
@@ -312,11 +366,16 @@ mod tests {
                 image: mono(&[14.0; 4]),
                 exposure_seconds: Some(20.0),
                 bias_subtracted: false,
+                bayer: None,
             }),
             None,
         )
         .unwrap();
-        assert!(calibration.apply(&mut mono(&[110.0; 4]), None).is_err());
+        assert!(
+            calibration
+                .apply(&mut mono(&[110.0; 4]), None, None)
+                .is_err()
+        );
     }
 
     #[test]
@@ -331,7 +390,7 @@ mod tests {
         )
         .unwrap();
         let mut light = rgb(vec![1000.0; 12]);
-        calibration.apply(&mut light, None).unwrap();
+        calibration.apply(&mut light, None, None).unwrap();
         assert_eq!(&light.data[..9], &[1000.0; 9]);
         assert_eq!(&light.data[9..], &[500.0; 3]);
     }
@@ -344,15 +403,42 @@ mod tests {
                 image: mono(&[4.0; 4]),
                 exposure_seconds: Some(20.0),
                 bias_subtracted: true,
+                bayer: None,
             }),
             Some(MasterFlat {
                 image: mono(&[1.0, 1.0, 2.0, 2.0]),
                 calibrated: true,
+                bayer: None,
             }),
         )
         .unwrap();
         let mut light = mono(&[110.0; 4]);
-        calibration.apply(&mut light, Some(10.0)).unwrap();
+        calibration.apply(&mut light, Some(10.0), None).unwrap();
         assert_eq!(light.data, [147.0, 147.0, 73.5, 73.5]);
+    }
+
+    #[test]
+    fn rejects_a_flat_with_a_different_bayer_layout() {
+        let rggb = BayerLayout {
+            pattern: seiza_fits::BayerPattern::Rggb,
+            x_offset: 0,
+            y_offset: 0,
+        };
+        let bggr = BayerLayout {
+            pattern: seiza_fits::BayerPattern::Bggr,
+            x_offset: 0,
+            y_offset: 0,
+        };
+        let calibration = CalibrationMasters::new(
+            None,
+            None,
+            Some(MasterFlat::raw_with_bayer(mono(&[1.0; 4]), rggb)),
+        )
+        .unwrap();
+        assert!(
+            calibration
+                .apply(&mut mono(&[100.0; 4]), None, Some(bggr))
+                .is_err()
+        );
     }
 }

@@ -1,5 +1,5 @@
 use crate::{Error, Result};
-use seiza_fits::BayerPattern;
+use seiza_fits::{BayerPattern, debayer_rgb_f32};
 
 /// A row-major, interleaved linear image with one or three channels.
 #[derive(Clone, Debug, PartialEq)]
@@ -65,35 +65,15 @@ impl LinearImage {
                 "only a one-channel CFA image can be debayered".into(),
             ));
         }
-        let mut output = vec![0.0_f32; self.pixel_count() * 3];
-        for y in 0..self.height {
-            for x in 0..self.width {
-                for channel in 0..3 {
-                    let mut sum = 0.0_f32;
-                    let mut count = 0_u32;
-                    for dy in -1_i32..=1 {
-                        for dx in -1_i32..=1 {
-                            let sx = x as i32 + dx;
-                            let sy = y as i32 + dy;
-                            if sx < 0
-                                || sy < 0
-                                || sx >= self.width as i32
-                                || sy >= self.height as i32
-                            {
-                                continue;
-                            }
-                            if layout.channel_at(sx as usize, sy as usize) == channel {
-                                sum += self.data[sy as usize * self.width + sx as usize];
-                                count += 1;
-                            }
-                        }
-                    }
-                    output[(y * self.width + x) * 3 + channel] =
-                        if count == 0 { 0.0 } else { sum / count as f32 };
-                }
-            }
-        }
-        Self::new(self.width, self.height, 3, output)
+        let rgb = debayer_rgb_f32(
+            &self.data,
+            self.width,
+            self.height,
+            layout.pattern,
+            layout.x_offset,
+            layout.y_offset,
+        );
+        Self::new(rgb.width, rgb.height, 3, rgb.data)
     }
 }
 
@@ -102,35 +82,6 @@ pub struct BayerLayout {
     pub pattern: BayerPattern,
     pub x_offset: usize,
     pub y_offset: usize,
-}
-
-impl BayerLayout {
-    pub(crate) fn channel_at(self, x: usize, y: usize) -> usize {
-        let x = (x + self.x_offset) & 1;
-        let y = (y + self.y_offset) & 1;
-        match self.pattern {
-            BayerPattern::Rggb => match (x, y) {
-                (0, 0) => 0,
-                (1, 1) => 2,
-                _ => 1,
-            },
-            BayerPattern::Bggr => match (x, y) {
-                (0, 0) => 2,
-                (1, 1) => 0,
-                _ => 1,
-            },
-            BayerPattern::Grbg => match (x, y) {
-                (1, 0) => 0,
-                (0, 1) => 2,
-                _ => 1,
-            },
-            BayerPattern::Gbrg => match (x, y) {
-                (0, 1) => 0,
-                (1, 0) => 2,
-                _ => 1,
-            },
-        }
-    }
 }
 
 #[cfg(test)]
@@ -149,6 +100,7 @@ mod tests {
             .unwrap();
         assert_eq!(rgb.channels, 3);
         assert_eq!(rgb.data[0], 0.0);
+        assert_eq!(rgb.data[4], 1.0);
         assert_eq!(rgb.data[(3 * 4 + 3) * 3 + 2], 15.0);
     }
 }

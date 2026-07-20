@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
+use seiza_stacking::paths_refer_to_same_file;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Serialize)]
 pub(crate) struct FileIdentity {
@@ -11,26 +12,23 @@ pub(crate) struct FileIdentity {
     pub(crate) sha256: String,
 }
 
-pub(crate) fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
-    if left == right {
-        return true;
+pub(crate) fn validate_path_roles<'a>(
+    entries: impl IntoIterator<Item = (String, &'a Path)>,
+) -> Result<()> {
+    let entries = entries.into_iter().collect::<Vec<_>>();
+    for (index, (role, path)) in entries.iter().enumerate() {
+        if let Some((other_role, other_path)) = entries[..index]
+            .iter()
+            .find(|(_, other_path)| paths_refer_to_same_file(path, other_path))
+        {
+            anyhow::bail!(
+                "{role} {} refers to the same file as {other_role} {}",
+                path.display(),
+                other_path.display()
+            );
+        }
     }
-    match (comparable_path(left), comparable_path(right)) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => false,
-    }
-}
-
-fn comparable_path(path: &Path) -> std::io::Result<PathBuf> {
-    if let Ok(path) = std::fs::canonicalize(path) {
-        return Ok(path);
-    }
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let parent = std::fs::canonicalize(parent)?;
-    Ok(parent.join(path.file_name().unwrap_or_default()))
+    Ok(())
 }
 
 pub(crate) fn file_identity(path: &Path) -> Result<FileIdentity> {
@@ -98,5 +96,18 @@ mod tests {
         let direct = directory.path().join("output.fits");
         let aliased = directory.path().join("child/../output.fits");
         assert!(paths_refer_to_same_file(&direct, &aliased));
+    }
+
+    #[test]
+    fn path_roles_reject_aliases() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("light.fits");
+        std::fs::write(&path, b"pixels").unwrap();
+        let error = validate_path_roles([
+            ("light frame 1".into(), path.as_path()),
+            ("light frame 2".into(), path.as_path()),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("light frame 2"));
     }
 }

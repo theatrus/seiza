@@ -225,7 +225,11 @@ impl LiveStacker {
         calibration: CalibrationMasters,
         options: StackOptions,
     ) -> Result<Self> {
-        calibration.apply(&mut reference.image, reference.exposure_seconds)?;
+        calibration.apply(
+            &mut reference.image,
+            reference.exposure_seconds,
+            reference.bayer,
+        )?;
         let reference = reference.into_prepared()?;
         Self::from_prepared(reference.image, reference.headers, calibration, options)
     }
@@ -262,9 +266,9 @@ impl LiveStacker {
     }
 
     pub fn push(&mut self, mut frame: FitsFrame) -> Result<FrameDisposition> {
-        if let Err(error) = self
-            .calibration
-            .apply(&mut frame.image, frame.exposure_seconds)
+        if let Err(error) =
+            self.calibration
+                .apply(&mut frame.image, frame.exposure_seconds, frame.bayer)
         {
             let message = match error {
                 Error::Calibration(message) => message,
@@ -608,13 +612,15 @@ fn resample(
             let (source_x, source_y) = transform.inverse_apply(x as f64, y as f64);
             if source_x < 0.0
                 || source_y < 0.0
-                || source_x >= (source.width - 1) as f64
-                || source_y >= (source.height - 1) as f64
+                || source_x > (source.width - 1) as f64
+                || source_y > (source.height - 1) as f64
             {
                 return;
             }
             let x0 = source_x.floor() as usize;
             let y0 = source_y.floor() as usize;
+            let x1 = (x0 + 1).min(source.width - 1);
+            let y1 = (y0 + 1).min(source.height - 1);
             let tx = (source_x - x0 as f64) as f32;
             let ty = (source_y - y0 as f64) as f32;
             for (channel, output_sample) in output.iter_mut().enumerate() {
@@ -622,9 +628,9 @@ fn resample(
                     |x: usize, y: usize| source.data[(y * source.width + x) * channels + channel];
                 let values = [
                     sample(x0, y0),
-                    sample(x0 + 1, y0),
-                    sample(x0, y0 + 1),
-                    sample(x0 + 1, y0 + 1),
+                    sample(x1, y0),
+                    sample(x0, y1),
+                    sample(x1, y1),
                 ];
                 if values.iter().all(|value| value.is_finite()) {
                     let top = values[0] * (1.0 - tx) + values[1] * tx;
@@ -679,6 +685,14 @@ mod tests {
         );
         assert_eq!(registered.data[1], source.data[0]);
         assert!(registered.data[0].is_nan());
+    }
+
+    #[test]
+    fn identity_resampling_preserves_the_final_row_and_column() {
+        let source =
+            LinearImage::new(4, 4, 1, (0..16).map(|value| value as f32).collect()).unwrap();
+        let registered = resample(&source, 4, 4, SimilarityTransform::IDENTITY);
+        assert_eq!(registered.data, source.data);
     }
 
     #[test]

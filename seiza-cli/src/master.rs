@@ -1,4 +1,4 @@
-use crate::provenance::{FileIdentity, file_identity, paths_refer_to_same_file, write_json_atomic};
+use crate::provenance::{FileIdentity, file_identity, validate_path_roles, write_json_atomic};
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use seiza_stacking::{
@@ -143,8 +143,7 @@ fn build(
     dark_exposure_seconds: Option<f64>,
     exposure_seconds: Option<f64>,
 ) -> Result<()> {
-    let calibration_paths = [bias_path.as_ref(), dark_path.as_ref()];
-    validate_output_paths(&common, &calibration_paths)?;
+    validate_input_paths(&common, bias_path.as_deref(), dark_path.as_deref())?;
     let input_identities = common
         .report
         .as_ref()
@@ -203,7 +202,7 @@ fn build(
     }
     println!(
         "building {} master from {} frame(s): two-pass sigma-clipped mean",
-        kind_name(kind),
+        kind.as_str(),
         common.images.len()
     );
     let master = build_master_from_fits(&common.images, kind, &options)?;
@@ -212,7 +211,7 @@ fn build(
         "wrote {}: {} {} frame(s), {} rejected sample(s), linear f32",
         common.output.display(),
         master.input_frames,
-        kind_name(kind),
+        kind.as_str(),
         master.rejected_samples
     );
 
@@ -229,7 +228,7 @@ fn build(
             .collect();
         let report = MasterReport {
             schema_version: 1,
-            kind: kind_name(kind),
+            kind: kind.as_str(),
             output: file_identity(&common.output)?,
             calibration: calibration_report.expect("calibration report was prepared"),
             configuration: MasterConfigurationReport {
@@ -254,35 +253,28 @@ fn build(
     Ok(())
 }
 
-fn validate_output_paths(
+fn validate_input_paths(
     common: &CommonArgs,
-    calibration_paths: &[Option<&PathBuf>],
+    bias: Option<&Path>,
+    dark: Option<&Path>,
 ) -> Result<()> {
-    if common
+    let mut path_roles = common
         .images
         .iter()
-        .any(|path| paths_refer_to_same_file(path, &common.output))
-        || calibration_paths
-            .iter()
-            .flatten()
-            .any(|path| paths_refer_to_same_file(path, &common.output))
-    {
-        anyhow::bail!("--output must not overwrite an input or calibration frame");
+        .enumerate()
+        .map(|(index, path)| (format!("calibration frame {}", index + 1), path.as_path()))
+        .collect::<Vec<_>>();
+    for (role, path) in [
+        ("master bias", bias),
+        ("master dark-flat", dark),
+        ("master output", Some(common.output.as_path())),
+        ("report output", common.report.as_deref()),
+    ] {
+        if let Some(path) = path {
+            path_roles.push((role.into(), path));
+        }
     }
-    if common.report.as_ref().is_some_and(|report| {
-        paths_refer_to_same_file(report, &common.output)
-            || common
-                .images
-                .iter()
-                .any(|path| paths_refer_to_same_file(path, report))
-            || calibration_paths
-                .iter()
-                .flatten()
-                .any(|path| paths_refer_to_same_file(path, report))
-    }) {
-        anyhow::bail!("--report must not overwrite the master or an input frame");
-    }
-    Ok(())
+    validate_path_roles(path_roles)
 }
 
 fn load_bias(path: &Path) -> Result<FitsFrame> {
@@ -290,12 +282,4 @@ fn load_bias(path: &Path) -> Result<FitsFrame> {
         .with_context(|| format!("failed to load master bias {}", path.display()))?;
     frame.validate_master_kind("BIAS")?;
     Ok(frame)
-}
-
-fn kind_name(kind: MasterFrameKind) -> &'static str {
-    match kind {
-        MasterFrameKind::Bias => "bias",
-        MasterFrameKind::Dark => "dark",
-        MasterFrameKind::Flat => "flat",
-    }
 }

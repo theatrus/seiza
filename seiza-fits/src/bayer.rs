@@ -28,6 +28,16 @@ impl BayerPattern {
         }
     }
 
+    /// Canonical FITS `BAYERPAT` spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rggb => "RGGB",
+            Self::Bggr => "BGGR",
+            Self::Grbg => "GRBG",
+            Self::Gbrg => "GBRG",
+        }
+    }
+
     /// Channel (0 = R, 1 = G, 2 = B) captured at pixel `(x, y)`, after
     /// applying the pattern origin offsets.
     fn channel_at(self, x: usize, y: usize, x_off: usize, y_off: usize) -> usize {
@@ -50,6 +60,46 @@ pub struct RgbImage16 {
     pub data: Vec<u16>,
 }
 
+/// Interleaved linear floating-point RGB image produced by [`debayer_rgb_f32`].
+#[derive(Debug, Clone)]
+pub struct RgbImageF32 {
+    pub width: usize,
+    pub height: usize,
+    /// `width * height * 3` samples, RGB interleaved, row-major
+    pub data: Vec<f32>,
+}
+
+trait DebayerSample: Copy + Default {
+    type Sum: Default;
+
+    fn add(sum: &mut Self::Sum, value: Self);
+    fn average(sum: Self::Sum, count: u32) -> Self;
+}
+
+impl DebayerSample for u16 {
+    type Sum = u32;
+
+    fn add(sum: &mut Self::Sum, value: Self) {
+        *sum += u32::from(value);
+    }
+
+    fn average(sum: Self::Sum, count: u32) -> Self {
+        (sum / count.max(1)) as u16
+    }
+}
+
+impl DebayerSample for f32 {
+    type Sum = f64;
+
+    fn add(sum: &mut Self::Sum, value: Self) {
+        *sum += f64::from(value);
+    }
+
+    fn average(sum: Self::Sum, count: u32) -> Self {
+        (sum / f64::from(count.max(1))) as f32
+    }
+}
+
 impl RgbImage16 {
     /// Collapse to luminance as `(R + 2G + B) / 4`.
     pub fn to_luma_u16(&self) -> Vec<u16> {
@@ -69,37 +119,67 @@ pub fn debayer_rgb16(
     x_offset: usize,
     y_offset: usize,
 ) -> RgbImage16 {
+    RgbImage16 {
+        width,
+        height,
+        data: debayer_interleaved(mosaic, width, height, pattern, x_offset, y_offset),
+    }
+}
+
+/// Bilinear-debayer a linear floating-point CFA frame into interleaved RGB.
+///
+/// This uses the same kernel and native-sample preservation as [`debayer_rgb16`]
+/// without quantizing calibrated sensor values.
+pub fn debayer_rgb_f32(
+    mosaic: &[f32],
+    width: usize,
+    height: usize,
+    pattern: BayerPattern,
+    x_offset: usize,
+    y_offset: usize,
+) -> RgbImageF32 {
+    RgbImageF32 {
+        width,
+        height,
+        data: debayer_interleaved(mosaic, width, height, pattern, x_offset, y_offset),
+    }
+}
+
+fn debayer_interleaved<T: DebayerSample>(
+    mosaic: &[T],
+    width: usize,
+    height: usize,
+    pattern: BayerPattern,
+    x_offset: usize,
+    y_offset: usize,
+) -> Vec<T> {
     assert_eq!(mosaic.len(), width * height);
-    let mut data = vec![0u16; width * height * 3];
+    let mut data = vec![T::default(); width * height * 3];
 
     for y in 0..height {
         for x in 0..width {
-            let mut sums = [0u32; 3];
+            let mut sums: [T::Sum; 3] = std::array::from_fn(|_| T::Sum::default());
             let mut counts = [0u32; 3];
             for ny in y.saturating_sub(1)..(y + 2).min(height) {
                 for nx in x.saturating_sub(1)..(x + 2).min(width) {
                     let channel = pattern.channel_at(nx, ny, x_offset, y_offset);
-                    sums[channel] += mosaic[ny * width + nx] as u32;
+                    T::add(&mut sums[channel], mosaic[ny * width + nx]);
                     counts[channel] += 1;
                 }
             }
             let own = pattern.channel_at(x, y, x_offset, y_offset);
             let out = &mut data[(y * width + x) * 3..(y * width + x) * 3 + 3];
-            for channel in 0..3 {
+            for (channel, (sum, count)) in sums.into_iter().zip(counts).enumerate() {
                 out[channel] = if channel == own {
                     mosaic[y * width + x]
                 } else {
-                    (sums[channel] / counts[channel].max(1)) as u16
+                    T::average(sum, count)
                 };
             }
         }
     }
 
-    RgbImage16 {
-        width,
-        height,
-        data,
-    }
+    data
 }
 
 #[cfg(test)]
@@ -142,5 +222,26 @@ mod tests {
         // With a (1, 1) offset, RGGB behaves like BGGR at the origin
         assert_eq!(BayerPattern::Rggb.channel_at(0, 0, 1, 1), 2);
         assert_eq!(BayerPattern::Bggr.channel_at(0, 0, 0, 0), 2);
+    }
+
+    #[test]
+    fn integer_and_float_kernels_preserve_all_native_color_sites() {
+        let integers = (0_u16..16).collect::<Vec<_>>();
+        let floats = integers
+            .iter()
+            .map(|&value| f32::from(value))
+            .collect::<Vec<_>>();
+        let integer_rgb = debayer_rgb16(&integers, 4, 4, BayerPattern::Rggb, 0, 0);
+        let float_rgb = debayer_rgb_f32(&floats, 4, 4, BayerPattern::Rggb, 0, 0);
+
+        for y in 0..4 {
+            for x in 0..4 {
+                let channel = BayerPattern::Rggb.channel_at(x, y, 0, 0);
+                let output = (y * 4 + x) * 3 + channel;
+                let input = y * 4 + x;
+                assert_eq!(integer_rgb.data[output], integers[input]);
+                assert_eq!(float_rgb.data[output], floats[input]);
+            }
+        }
     }
 }

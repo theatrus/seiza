@@ -14,7 +14,7 @@ mod stats;
 mod stretch;
 mod writer;
 
-pub use bayer::{BayerPattern, RgbImage16, debayer_rgb16};
+pub use bayer::{BayerPattern, RgbImage16, RgbImageF32, debayer_rgb_f32, debayer_rgb16};
 pub use header::{HeaderValue, parse_header_value};
 pub use stats::{Statistics, statistics_u16};
 pub use stretch::{StretchParams, midtones_transfer_function, stretch_u16_to_u8};

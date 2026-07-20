@@ -1,5 +1,8 @@
 use crate::calibration::normalize_flat_response;
-use crate::{BayerLayout, CalibrationMasters, Error, FitsFrame, LinearImage, MasterDark, Result};
+use crate::{
+    BayerLayout, CalibrationMasters, Error, FitsFrame, LinearImage, MasterDark, Result,
+    paths_refer_to_same_file,
+};
 use seiza_fits::HeaderValue;
 use std::path::{Path, PathBuf};
 
@@ -16,6 +19,15 @@ impl MasterFrameKind {
             Self::Bias => "BIAS",
             Self::Dark => "DARK",
             Self::Flat => "FLAT",
+        }
+    }
+
+    /// Stable lowercase name used by user-facing APIs and reports.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bias => "bias",
+            Self::Dark => "dark",
+            Self::Flat => "flat",
         }
     }
 }
@@ -80,6 +92,7 @@ impl MasterFrame {
             image: self.image,
             exposure_seconds: self.exposure_seconds,
             bias_subtracted: self.bias_subtracted,
+            bayer: self.bayer,
         })
     }
 }
@@ -284,13 +297,6 @@ fn validate_options(
     Ok(())
 }
 
-fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
-    left == right
-        || std::fs::canonicalize(left)
-            .and_then(|left| std::fs::canonicalize(right).map(|right| left == right))
-            .unwrap_or(false)
-}
-
 struct PreparedInput {
     image: LinearImage,
     headers: Vec<(String, HeaderValue)>,
@@ -342,7 +348,7 @@ fn prepare_input(
             path.display()
         )));
     }
-    calibration.apply(&mut frame.image, effective_exposure)?;
+    calibration.apply(&mut frame.image, effective_exposure, frame.bayer)?;
     if kind == MasterFrameKind::Flat {
         normalize_flat_response(&mut frame.image)?;
     }

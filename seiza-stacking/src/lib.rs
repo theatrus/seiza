@@ -6,6 +6,7 @@ mod fits;
 mod image;
 mod master;
 mod normalization;
+mod paths;
 mod registration;
 mod stack;
 
@@ -17,6 +18,7 @@ pub use master::{
     MasterRejectionOptions, build_master_from_fits,
 };
 pub use normalization::{NormalizationMap, NormalizationMode};
+pub use paths::paths_refer_to_same_file;
 pub use registration::{Registrar, RegistrationOptions, RegistrationResult, SimilarityTransform};
 pub use stack::{
     DeltaSigmaOptions, FrameAcceptanceCriteria, FrameDiagnostics, FrameDisposition,

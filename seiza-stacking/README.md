@@ -24,11 +24,12 @@ full-resolution accumulator; any display stretch remains a caller-only visual
 operation.
 
 Integrated flats are applied in the raw light frame's sampling before CFA
-debayering. A supplied bias is removed first, and planar RGB flat channels are
-normalized independently so calibration does not introduce a color-scale
-shift. When bias subtraction makes a master dark exposure-scalable, every
-light must provide an exposure duration rather than silently assuming a 1:1
-scale.
+debayering. Master darks and flats retain their Bayer pattern and origin
+offsets, and a known layout must match the light before calibration. A supplied
+bias is removed first, and planar RGB flat channels are normalized independently
+so calibration does not introduce a color-scale shift. When bias subtraction
+makes a master dark exposure-scalable, every light must provide an exposure
+duration rather than silently assuming a 1:1 scale.
 
 `build_master_from_fits` builds reusable calibration masters without retaining
 the input sequence in memory. It rereads each file for a leave-one-out
