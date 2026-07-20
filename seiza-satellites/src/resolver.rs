@@ -320,6 +320,23 @@ fn should_use_historical(exposure_midpoint: UtcTimestamp, now_unix_seconds: f64)
     now_unix_seconds - exposure_midpoint.unix_seconds() > CURRENT_CATALOG_MAX_AGE.as_secs_f64()
 }
 
+/// Compile-time guard: the resolver's network-capable futures must stay `Send`.
+/// A downstream server (Axum) has to hold these across `.await`, and a non-Send
+/// regression once forced a `spawn_blocking` workaround there. An async closure
+/// borrowing `&self` reintroduces it ("implementation of Send is not general
+/// enough"), so this assertion stays to catch that at compile time.
+#[allow(dead_code)]
+fn _resolver_futures_are_send(
+    source: &OrbitalCatalogSource,
+    exposure: &SingleExposure,
+    time: UtcTimestamp,
+) {
+    fn require_send<T: Send>(_: &T) {}
+    require_send(&source.load_for_exposure(exposure));
+    require_send(&source.load_at(time));
+    require_send(&source.prewarm_historical(time));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
