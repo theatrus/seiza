@@ -139,6 +139,9 @@ The CLI materializes this ledger with `--report`; its JSON contains SHA-256
 input identities, calibration inputs, the complete configuration, and ordered
 diagnostics. FITS and report outputs are written to adjacent temporary files
 and atomically renamed only after the complete payload has been flushed.
+The generic mono/RGB float serialization and atomic FITS publication live in
+`seiza-fits`; `seiza-stacking` supplies only the stack and calibration-master
+header semantics.
 
 This is appropriate for live feedback and bounded-memory pre-stacks, but it is
 order-dependent and cannot revisit warm-up samples. A future exact batch mode

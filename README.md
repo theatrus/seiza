@@ -54,7 +54,7 @@ can submit to the same server with `seiza worker --server`.
   3.9 up, with type stubs included ([seiza-py](seiza-py/README.md)).
 - **From Rust** — use the crates directly: [`seiza`](seiza/README.md)
   (detection, WCS, solving, catalogs),
-  [`seiza-fits`](seiza-fits/README.md) (FITS reading),
+  [`seiza-fits`](seiza-fits/README.md) (FITS reading and linear `f32` writing),
   [`seiza-stacking`](seiza-stacking/README.md) (linear calibration,
   registration, and additive live stacking),
   [`seiza-download`](seiza-download/README.md) (catalog download and
@@ -286,10 +286,10 @@ seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-
   outlines), pinned build provenance, and externally curated corrections;
   `seiza catalog object --all-sources` audits all of it. Earlier `SEIZAOB1`
   and `SEIZAOB3` files remain readable.
-- **FITS** — dependency-free reading with typed headers, exact
+- **FITS** — streaming reading with typed headers, exact
   histogram statistics, N.I.N.A.-style MTF autostretch, planar RGB
   (NAXIS3) support, OSC debayering (`BAYERPAT`), and bounded-memory
-  streaming into native pixel storage, in the
+  streaming into native pixel storage, plus atomic linear `f32` output, in the
   [`seiza-fits`](https://crates.io/crates/seiza-fits) crate. FITS files
   plate-solve directly, with RA/DEC hints read from headers.
 - **Packages & CI** — crates.io releases, a guided
@@ -372,7 +372,7 @@ and solves in the table's exact frame. Contract details:
 ## Layout
 
 - `seiza/` — library crate: `detect`, `wcs`, `catalog`, `objects`, `solve`
-- `seiza-fits/` — dependency-free FITS reading, statistics, MTF autostretch
+- `seiza-fits/` — FITS reading, atomic linear `f32` writing, statistics, and MTF autostretch
 - `seiza-stacking/` — linear FITS calibration, local registration,
   normalization, additive integration, and rejection
 - `seiza-cli/` — the `seiza` command-line tool: solving, ASTAP mode, the

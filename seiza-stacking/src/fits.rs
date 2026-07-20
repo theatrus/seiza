@@ -1,9 +1,6 @@
 use crate::{BayerLayout, Error, LinearImage, MasterFrame, Result, StackSnapshot};
-use seiza_fits::{FitsImage, HeaderValue, Pixels};
-use std::io::{BufWriter, Write};
+use seiza_fits::{F32ImageData, FitsImage, HeaderValue, Pixels, WriteHeaderCard};
 use std::path::{Path, PathBuf};
-
-const PIXEL_CHUNK_BYTES: usize = 1024 * 1024;
 
 /// A FITS frame decoded into linear, un-stretched `f32` samples.
 #[derive(Clone, Debug)]
@@ -142,9 +139,7 @@ pub fn write_fits_f32(
     if has_reference_wcs(reference_headers) {
         for (key, value) in reference_headers {
             if preserve_wcs_key(key)
-                && !cards
-                    .iter()
-                    .any(|card| card.starts_with(&format!("{key:<8}")))
+                && !cards.iter().any(|card| card.keyword() == key)
                 && let Some(card) = value_card(key, value)
             {
                 cards.push(card);
@@ -208,9 +203,7 @@ pub fn write_master_fits_f32(path: impl AsRef<Path>, master: &MasterFrame) -> Re
     }
     for (key, value) in &master.reference_headers {
         if preserve_master_key(key)
-            && !cards
-                .iter()
-                .any(|card| card.starts_with(&format!("{key:<8}")))
+            && !cards.iter().any(|card| card.keyword() == key)
             && let Some(card) = value_card(key, value)
         {
             cards.push(card);
@@ -222,161 +215,46 @@ pub fn write_master_fits_f32(path: impl AsRef<Path>, master: &MasterFrame) -> Re
 fn write_linear_fits_f32(
     path: &Path,
     image: &LinearImage,
-    mut extra_cards: Vec<String>,
+    extra_cards: Vec<WriteHeaderCard>,
 ) -> Result<()> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let prefix = format!(
-        ".{}.",
-        path.file_name().unwrap_or_default().to_string_lossy()
-    );
-    let mut builder = tempfile::Builder::new();
-    builder.prefix(&prefix);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let permissions = std::fs::metadata(path)
-            .map(|metadata| metadata.permissions())
-            .unwrap_or_else(|_| std::fs::Permissions::from_mode(0o666));
-        builder.permissions(permissions);
-    }
-    let mut temporary = builder.tempfile_in(parent).map_err(|source| Error::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let mut writer = BufWriter::new(temporary.as_file_mut());
-    let mut cards = vec![
-        logical_card("SIMPLE", true, "conforms to FITS standard"),
-        integer_card("BITPIX", -32, "32-bit IEEE floating point"),
-        integer_card("NAXIS", if image.channels == 3 { 3 } else { 2 }, ""),
-        integer_card("NAXIS1", image.width as i64, ""),
-        integer_card("NAXIS2", image.height as i64, ""),
-    ];
-    if image.channels == 3 {
-        cards.push(integer_card("NAXIS3", 3, "RGB planes"));
-    }
-    cards.push(logical_card("EXTEND", true, "extensions may be present"));
-    cards.append(&mut extra_cards);
-    cards.push(format!("{:<80}", "END"));
-    write_block_padded(&mut writer, cards.concat().as_bytes(), b' ').map_err(|source| {
-        Error::Io {
-            path: path.to_path_buf(),
-            source,
-        }
-    })?;
-
-    let mut byte_buffer = Vec::with_capacity(PIXEL_CHUNK_BYTES);
-    if image.channels == 3 {
-        for channel in 0..3 {
-            write_float_values(
-                &mut writer,
-                (0..image.pixel_count()).map(|index| image.data[index * 3 + channel]),
-                &mut byte_buffer,
-            )
-            .map_err(|source| Error::Io {
-                path: path.to_path_buf(),
-                source,
-            })?;
-        }
+    let pixels = if image.channels == 3 {
+        F32ImageData::RgbInterleaved(&image.data)
     } else {
-        write_float_values(&mut writer, image.data.iter().copied(), &mut byte_buffer).map_err(
-            |source| Error::Io {
-                path: path.to_path_buf(),
-                source,
-            },
-        )?;
-    }
-    let byte_len = image.sample_count() * 4;
-    let padding = (2880 - byte_len % 2880) % 2880;
-    writer
-        .write_all(&vec![0; padding])
-        .map_err(|source| Error::Io {
+        F32ImageData::Mono(&image.data)
+    };
+    seiza_fits::write_f32_image(path, image.width, image.height, pixels, &extra_cards).map_err(
+        |source| Error::FitsWrite {
             path: path.to_path_buf(),
             source,
-        })?;
-    writer.flush().map_err(|source| Error::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    drop(writer);
-    temporary.as_file().sync_all().map_err(|source| Error::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    temporary.persist(path).map_err(|error| Error::Io {
-        path: path.to_path_buf(),
-        source: error.error,
-    })?;
+        },
+    )?;
     Ok(())
 }
 
-fn write_float_values(
-    writer: &mut impl Write,
-    values: impl Iterator<Item = f32>,
-    buffer: &mut Vec<u8>,
-) -> std::io::Result<()> {
-    buffer.clear();
-    for value in values {
-        buffer.extend_from_slice(&value.to_be_bytes());
-        if buffer.len() >= PIXEL_CHUNK_BYTES {
-            writer.write_all(buffer)?;
-            buffer.clear();
-        }
+fn logical_card(key: &str, value: bool, comment: &str) -> WriteHeaderCard {
+    WriteHeaderCard::new(key, HeaderValue::Logical(value)).with_comment(comment)
+}
+
+fn integer_card(key: &str, value: i64, comment: &str) -> WriteHeaderCard {
+    WriteHeaderCard::new(key, HeaderValue::Integer(value)).with_comment(comment)
+}
+
+fn float_card(key: &str, value: f64, comment: &str) -> WriteHeaderCard {
+    WriteHeaderCard::new(key, HeaderValue::Float(value)).with_comment(comment)
+}
+
+fn string_card(key: &str, value: &str, comment: &str) -> WriteHeaderCard {
+    WriteHeaderCard::new(key, HeaderValue::String(value.into())).with_comment(comment)
+}
+
+fn value_card(key: &str, value: &HeaderValue) -> Option<WriteHeaderCard> {
+    match value {
+        HeaderValue::Float(value) if !value.is_finite() => None,
+        HeaderValue::Raw(value) if value.is_empty() => None,
+        _ => Some(
+            WriteHeaderCard::new(key, value.clone()).with_comment("copied from reference frame"),
+        ),
     }
-    writer.write_all(buffer)?;
-    buffer.clear();
-    Ok(())
-}
-
-fn write_block_padded(writer: &mut impl Write, bytes: &[u8], padding: u8) -> std::io::Result<()> {
-    writer.write_all(bytes)?;
-    let count = (2880 - bytes.len() % 2880) % 2880;
-    writer.write_all(&vec![padding; count])
-}
-
-fn card(key: &str, value: &str, comment: &str) -> String {
-    let text = if comment.is_empty() {
-        format!("{key:<8}= {value:>20}")
-    } else {
-        format!("{key:<8}= {value:>20} / {comment}")
-    };
-    format!("{:<80}", text.chars().take(80).collect::<String>())
-}
-
-fn logical_card(key: &str, value: bool, comment: &str) -> String {
-    card(key, if value { "T" } else { "F" }, comment)
-}
-
-fn integer_card(key: &str, value: i64, comment: &str) -> String {
-    card(key, &value.to_string(), comment)
-}
-
-fn float_card(key: &str, value: f64, comment: &str) -> String {
-    card(key, &format!("{value:.12E}"), comment)
-}
-
-fn string_card(key: &str, value: &str, comment: &str) -> String {
-    card(key, &format!("'{}'", value.replace('\'', "''")), comment)
-}
-
-fn value_card(key: &str, value: &HeaderValue) -> Option<String> {
-    let value = match value {
-        HeaderValue::Logical(value) => {
-            if *value {
-                "T".into()
-            } else {
-                "F".into()
-            }
-        }
-        HeaderValue::Integer(value) => value.to_string(),
-        HeaderValue::Float(value) if value.is_finite() => format!("{value:.12E}"),
-        HeaderValue::String(value) => format!("'{}'", value.replace('\'', "''")),
-        HeaderValue::Raw(value) if !value.is_empty() => value.clone(),
-        _ => return None,
-    };
-    Some(card(key, &value, "copied from reference frame"))
 }
 
 fn preserve_wcs_key(key: &str) -> bool {

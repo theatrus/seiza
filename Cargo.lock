@@ -2283,6 +2283,7 @@ version = "0.1.6"
 dependencies = [
  "memmap2",
  "multiversion",
+ "tempfile",
 ]
 
 [[package]]

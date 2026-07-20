@@ -38,3 +38,7 @@ statistics. `write_master_fits_f32` records the master kind, input count,
 rejection settings, and bias/dark/normalization state in the FITS header. Those
 state fields prevent a later `CalibrationMasters` consumer from calibrating a
 prepared dark or flat twice.
+
+The format-level float writer lives in `seiza-fits`. This crate only selects
+stack- and master-specific typed header cards before passing its interleaved
+linear image to that generic atomic writer.

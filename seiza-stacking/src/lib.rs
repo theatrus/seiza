@@ -44,11 +44,11 @@ pub enum Error {
         #[source]
         source: seiza_fits::FitsError,
     },
-    #[error("I/O error for {}: {source}", path.display())]
-    Io {
+    #[error("failed to write FITS frame {}: {source}", path.display())]
+    FitsWrite {
         path: PathBuf,
         #[source]
-        source: std::io::Error,
+        source: seiza_fits::FitsError,
     },
 }
 

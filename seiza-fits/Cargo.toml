@@ -1,6 +1,6 @@
 [package]
 name = "seiza-fits"
-description = "Fast, dependency-free FITS image reading, statistics, and MTF autostretch for astrophotography"
+description = "Fast FITS image I/O, statistics, and MTF autostretch for astrophotography"
 version = "0.1.6"
 edition.workspace = true
 rust-version.workspace = true
@@ -13,6 +13,7 @@ categories = ["science", "multimedia::images", "parser-implementations"]
 
 [dependencies]
 multiversion = "0.8"
+tempfile = "3"
 
 [dev-dependencies]
 memmap2.workspace = true
