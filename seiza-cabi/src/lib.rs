@@ -9,6 +9,7 @@ use seiza::objects::{
 };
 use seiza::wcs::Wcs;
 use seiza::{DetectBackend, DetectConfig, detect_stars, detect_stars_luma_f32};
+use seiza_background::{BackgroundConfig, BackgroundFit, CorrectionMode, fit_background_masked};
 use seiza_fits::{FitsImage, HeaderValue, RgbImage16, Statistics, StretchParams};
 use seiza_stretch::StretchConfig;
 use serde::{Deserialize, Serialize};
@@ -311,6 +312,29 @@ pub struct SeizaRenderedImage {
     metadata_json: CString,
 }
 
+/// An opaque fitted background model. Release it with
+/// [`seiza_background_model_free`]. Its diagnostics string is borrowed and
+/// remains valid until the model is freed.
+pub struct SeizaBackgroundModel {
+    fit: BackgroundFit,
+    diagnostics_json: CString,
+}
+
+/// Additive background subtraction mode for
+/// [`seiza_background_model_correct_in_place`].
+pub const SEIZA_BACKGROUND_CORRECTION_SUBTRACT: u32 = 0;
+/// Multiplicative background division mode for
+/// [`seiza_background_model_correct_in_place`].
+pub const SEIZA_BACKGROUND_CORRECTION_DIVIDE: u32 = 1;
+
+fn background_correction_mode(value: u32) -> Result<CorrectionMode, String> {
+    match value {
+        SEIZA_BACKGROUND_CORRECTION_SUBTRACT => Ok(CorrectionMode::Subtract),
+        SEIZA_BACKGROUND_CORRECTION_DIVIDE => Ok(CorrectionMode::Divide),
+        _ => Err(format!("unsupported background correction mode: {value}")),
+    }
+}
+
 impl SeizaRenderedImage {
     /// The BGRA8 view, derived from the canonical RGBA on first use.
     fn bgra(&self) -> &[u8] {
@@ -423,6 +447,194 @@ struct SipResponse {
 #[unsafe(no_mangle)]
 pub extern "C" fn seiza_core_version() -> *const c_char {
     VERSION.as_ptr().cast()
+}
+
+#[unsafe(no_mangle)]
+/// Fits a compact background model to interleaved linear `float` samples.
+///
+/// `channels` must be one or three and `data_length` must equal
+/// `width * height * channels`. RGB samples are pixel-interleaved. Pass null
+/// `mask` with zero `mask_length` for automatic fitting, or `width * height`
+/// bytes where `1` excludes a pixel. The fitted model owns its compact data and
+/// does not borrow either input buffer after this call returns.
+/// Pass null or empty `config_json` for `BackgroundConfig::default()`; otherwise
+/// provide a serialized `seiza-background` `BackgroundConfig`.
+///
+/// # Safety
+/// `data` must point to `data_length` readable floats. A non-null `mask` must
+/// point to `mask_length` readable bytes containing only zero or one. A
+/// non-null `config_json` must be NUL-terminated. When non-null, `error_out`
+/// must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_background_fit(
+    data: *const f32,
+    data_length: usize,
+    width: usize,
+    height: usize,
+    channels: usize,
+    mask: *const u8,
+    mask_length: usize,
+    config_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaBackgroundModel {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        if !matches!(channels, 1 | 3) {
+            return Err("background fitting requires one or three channels".into());
+        }
+        let pixels = width
+            .checked_mul(height)
+            .ok_or_else(|| "background image dimensions overflow".to_string())?;
+        let expected = pixels
+            .checked_mul(channels)
+            .ok_or_else(|| "background image dimensions overflow".to_string())?;
+        if data_length != expected {
+            return Err(format!(
+                "background input has {data_length} floats; expected {expected}"
+            ));
+        }
+        if mask.is_null() {
+            if mask_length != 0 {
+                return Err("background mask is null but mask_length is non-zero".into());
+            }
+        } else if mask_length != pixels {
+            return Err(format!(
+                "background mask has {mask_length} bytes; expected {pixels}"
+            ));
+        }
+        let data = unsafe { required_f32_slice(data, data_length, "background input")? };
+        let mask = unsafe { optional_mask(mask, mask_length)? };
+        let config = background_config(config_json)?;
+        let fit = fit_background_masked(data, width, height, channels, mask.as_deref(), &config)
+            .map_err(|error| error.to_string())?;
+        let diagnostics_json =
+            CString::new(serde_json::to_string(&fit).map_err(|error| error.to_string())?)
+                .map_err(|_| "background diagnostics contain a NUL byte".to_string())?;
+        Ok(SeizaBackgroundModel {
+            fit,
+            diagnostics_json,
+        })
+    })
+    .map_or(ptr::null_mut(), |model| Box::into_raw(Box::new(model)))
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `model` must be null or a live pointer returned by [`seiza_background_fit`].
+pub unsafe extern "C" fn seiza_background_model_width(model: *const SeizaBackgroundModel) -> usize {
+    unsafe { model.as_ref().map_or(0, |model| model.fit.width) }
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `model` must be null or a live pointer returned by [`seiza_background_fit`].
+pub unsafe extern "C" fn seiza_background_model_height(
+    model: *const SeizaBackgroundModel,
+) -> usize {
+    unsafe { model.as_ref().map_or(0, |model| model.fit.height) }
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `model` must be null or a live pointer returned by [`seiza_background_fit`].
+pub unsafe extern "C" fn seiza_background_model_channels(
+    model: *const SeizaBackgroundModel,
+) -> usize {
+    unsafe { model.as_ref().map_or(0, |model| model.fit.channels) }
+}
+
+#[unsafe(no_mangle)]
+/// Returns the number of floats required by render and correction buffers.
+///
+/// # Safety
+/// `model` must be null or a live pointer returned by [`seiza_background_fit`].
+pub unsafe extern "C" fn seiza_background_model_data_length(
+    model: *const SeizaBackgroundModel,
+) -> usize {
+    unsafe {
+        model.as_ref().map_or(0, |model| {
+            model.fit.width * model.fit.height * model.fit.channels
+        })
+    }
+}
+
+#[unsafe(no_mangle)]
+/// Returns borrowed fitted coefficients, references, samples, and diagnostics
+/// as JSON. The string remains valid until the model is freed.
+///
+/// # Safety
+/// `model` must be null or a live pointer returned by [`seiza_background_fit`].
+pub unsafe extern "C" fn seiza_background_model_diagnostics_json(
+    model: *const SeizaBackgroundModel,
+) -> *const c_char {
+    unsafe {
+        model
+            .as_ref()
+            .map_or(ptr::null(), |model| model.diagnostics_json.as_ptr())
+    }
+}
+
+#[unsafe(no_mangle)]
+/// Renders a fitted background into a caller-owned interleaved float buffer.
+///
+/// # Safety
+/// `model` must be a live pointer returned by [`seiza_background_fit`].
+/// `output` must point to `output_length` writable floats. When non-null,
+/// `error_out` must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_background_model_render(
+    model: *const SeizaBackgroundModel,
+    output: *mut f32,
+    output_length: usize,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let model = unsafe { required_background_model(model)? };
+        let output = unsafe { required_f32_slice_mut(output, output_length, "background output")? };
+        model
+            .fit
+            .render_model_into(output)
+            .map_err(|error| error.to_string())
+    })
+    .is_some()
+}
+
+#[unsafe(no_mangle)]
+/// Corrects an interleaved linear float buffer in place. Use
+/// `SEIZA_BACKGROUND_CORRECTION_SUBTRACT` for additive subtraction or
+/// `SEIZA_BACKGROUND_CORRECTION_DIVIDE` for multiplicative division.
+///
+/// # Safety
+/// `model` must be a live pointer returned by [`seiza_background_fit`]. `data`
+/// must point to `data_length` writable floats. When non-null, `error_out` must
+/// point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_background_model_correct_in_place(
+    model: *const SeizaBackgroundModel,
+    data: *mut f32,
+    data_length: usize,
+    mode: u32,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let model = unsafe { required_background_model(model)? };
+        let data = unsafe { required_f32_slice_mut(data, data_length, "background input")? };
+        let mode = background_correction_mode(mode)?;
+        model
+            .fit
+            .correct_in_place(data, mode)
+            .map_err(|error| error.to_string())
+    })
+    .is_some()
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `model` must be null or a pointer returned by [`seiza_background_fit`] that
+/// has not already been freed.
+pub unsafe extern "C" fn seiza_background_model_free(model: *mut SeizaBackgroundModel) {
+    if !model.is_null() {
+        unsafe { drop(Box::from_raw(model)) };
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -1881,6 +2093,67 @@ fn run_catalog_setup(
     Ok(())
 }
 
+fn background_config(config_json: *const c_char) -> Result<BackgroundConfig, String> {
+    if config_json.is_null() {
+        return Ok(BackgroundConfig::default());
+    }
+    let config_json = required_str(config_json, "background config JSON")?;
+    if config_json.trim().is_empty() {
+        return Ok(BackgroundConfig::default());
+    }
+    serde_json::from_str(&config_json)
+        .map_err(|error| format!("invalid background config JSON: {error}"))
+}
+
+unsafe fn required_f32_slice<'a>(
+    data: *const f32,
+    length: usize,
+    name: &str,
+) -> Result<&'a [f32], String> {
+    if data.is_null() {
+        return Err(format!("{name} is required"));
+    }
+    if !(data as usize).is_multiple_of(std::mem::align_of::<f32>()) {
+        return Err(format!("{name} is not aligned for float samples"));
+    }
+    Ok(unsafe { std::slice::from_raw_parts(data, length) })
+}
+
+unsafe fn required_f32_slice_mut<'a>(
+    data: *mut f32,
+    length: usize,
+    name: &str,
+) -> Result<&'a mut [f32], String> {
+    if data.is_null() {
+        return Err(format!("{name} is required"));
+    }
+    if !(data as usize).is_multiple_of(std::mem::align_of::<f32>()) {
+        return Err(format!("{name} is not aligned for float samples"));
+    }
+    Ok(unsafe { std::slice::from_raw_parts_mut(data, length) })
+}
+
+unsafe fn optional_mask(mask: *const u8, length: usize) -> Result<Option<Vec<bool>>, String> {
+    if mask.is_null() {
+        return if length == 0 {
+            Ok(None)
+        } else {
+            Err("background mask is null but mask_length is non-zero".into())
+        };
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(mask, length) };
+    if bytes.iter().any(|value| *value > 1) {
+        return Err("background mask entries must be zero or one".into());
+    }
+    Ok(Some(bytes.iter().map(|value| *value != 0).collect()))
+}
+
+unsafe fn required_background_model<'a>(
+    model: *const SeizaBackgroundModel,
+) -> Result<&'a SeizaBackgroundModel, String> {
+    unsafe { model.as_ref() }.ok_or_else(|| "background model is required".into())
+}
+
 fn required_path(value: *const c_char, name: &str) -> Result<PathBuf, String> {
     optional_path(value)?.ok_or_else(|| format!("{name} is required"))
 }
@@ -1974,6 +2247,116 @@ mod tests {
         }
         bytes.resize(5760, 0);
         bytes
+    }
+
+    fn background_plane(width: usize, height: usize) -> Vec<f32> {
+        let mut image = Vec::with_capacity(width * height);
+        for y in 0..height {
+            let y = 2.0 * y as f32 / (height - 1) as f32 - 1.0;
+            for x in 0..width {
+                let x = 2.0 * x as f32 / (width - 1) as f32 - 1.0;
+                image.push(0.2 + 0.08 * x - 0.04 * y);
+            }
+        }
+        image
+    }
+
+    #[test]
+    fn background_cabi_fits_renders_and_corrects_a_model() {
+        let (width, height) = (96, 72);
+        let image = background_plane(width, height);
+        let config = CString::new(
+            r#"{"model":{"kind":"polynomial","degree":1,"ridge":0.0},"sample_radius":2}"#,
+        )
+        .unwrap();
+        let mut error = ptr::null_mut();
+        let model = unsafe {
+            seiza_background_fit(
+                image.as_ptr(),
+                image.len(),
+                width,
+                height,
+                1,
+                ptr::null(),
+                0,
+                config.as_ptr(),
+                &mut error,
+            )
+        };
+        assert!(!model.is_null());
+        assert!(error.is_null());
+        assert_eq!(unsafe { seiza_background_model_width(model) }, width);
+        assert_eq!(unsafe { seiza_background_model_height(model) }, height);
+        assert_eq!(unsafe { seiza_background_model_channels(model) }, 1);
+        assert_eq!(
+            unsafe { seiza_background_model_data_length(model) },
+            image.len()
+        );
+
+        let diagnostics = unsafe { seiza_background_model_diagnostics_json(model) };
+        let diagnostics: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(diagnostics) }.to_str().unwrap()).unwrap();
+        assert!(
+            diagnostics["diagnostics"]["accepted_samples"]
+                .as_u64()
+                .unwrap()
+                > 10
+        );
+
+        let mut rendered = vec![0.0; image.len()];
+        assert!(unsafe {
+            seiza_background_model_render(model, rendered.as_mut_ptr(), rendered.len(), &mut error)
+        });
+        let mse = rendered
+            .iter()
+            .zip(&image)
+            .map(|(actual, expected)| f64::from(*actual - *expected).powi(2))
+            .sum::<f64>()
+            / rendered.len() as f64;
+        let rmse = mse.sqrt();
+        assert!(rmse < 0.003, "background RMSE was {rmse}");
+
+        let mut corrected = image.clone();
+        assert!(unsafe {
+            seiza_background_model_correct_in_place(
+                model,
+                corrected.as_mut_ptr(),
+                corrected.len(),
+                SEIZA_BACKGROUND_CORRECTION_SUBTRACT,
+                &mut error,
+            )
+        });
+        let left = corrected[height / 2 * width + 3];
+        let right = corrected[height / 2 * width + width - 4];
+        assert!((left - right).abs() < 0.003);
+        unsafe { seiza_background_model_free(model) };
+    }
+
+    #[test]
+    fn background_cabi_rejects_invalid_mask_bytes() {
+        let (width, height) = (32, 32);
+        let image = background_plane(width, height);
+        let mut mask = vec![0_u8; width * height];
+        mask[10] = 2;
+        let mut error = ptr::null_mut();
+        let model = unsafe {
+            seiza_background_fit(
+                image.as_ptr(),
+                image.len(),
+                width,
+                height,
+                1,
+                mask.as_ptr(),
+                mask.len(),
+                ptr::null(),
+                &mut error,
+            )
+        };
+        assert!(model.is_null());
+        assert!(!error.is_null());
+        let message = unsafe { CStr::from_ptr(error) }.to_str().unwrap();
+        assert!(message.contains("zero or one"));
+        unsafe { seiza_string_free(error) };
     }
 
     #[test]
@@ -2168,6 +2551,19 @@ mod tests {
         assert_eq!(RgbStretchMode::from_raw(1), Ok(RgbStretchMode::LinkedAuto));
         assert_eq!(RgbStretchMode::from_raw(2), Ok(RgbStretchMode::Linear));
         assert!(RgbStretchMode::from_raw(3).is_err());
+    }
+
+    #[test]
+    fn background_correction_mode_rejects_unknown_abi_values() {
+        assert_eq!(
+            background_correction_mode(SEIZA_BACKGROUND_CORRECTION_SUBTRACT),
+            Ok(CorrectionMode::Subtract)
+        );
+        assert_eq!(
+            background_correction_mode(SEIZA_BACKGROUND_CORRECTION_DIVIDE),
+            Ok(CorrectionMode::Divide)
+        );
+        assert!(background_correction_mode(2).is_err());
     }
 
     #[test]

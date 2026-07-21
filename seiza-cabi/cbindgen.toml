@@ -22,6 +22,8 @@ after_includes = """
  * OWNED by the caller (you must release it):
  *   - SeizaRenderedImage* returned by the seiza_rendered_image_open* functions
  *       -> release with seiza_rendered_image_free().
+ *   - SeizaBackgroundModel* returned by seiza_background_fit
+ *       -> release with seiza_background_model_free().
  *   - char* returned by seiza_catalog_status_json and seiza_solve_image_json,
  *     and any char* stored into an `error_out` argument on failure
  *       -> release with seiza_string_free().
@@ -31,6 +33,8 @@ after_includes = """
  *     from seiza_rendered_image_metadata_json point INTO the SeizaRenderedImage
  *     and dangle the moment it is freed. Copy them out before freeing the image
  *     if you need them to outlive it.
+ *   - const char* from seiza_background_model_diagnostics_json points INTO the
+ *     SeizaBackgroundModel and dangles when the model is freed.
  *   - const char* from seiza_core_version is static and is never freed.
  *   - the `json` argument to a SeizaCatalogSetupProgressCallback is valid only
  *     for the duration of that one callback; copy it if you need it afterward.
@@ -42,9 +46,9 @@ after_includes = """
  * and to an OWNED message on failure (and return NULL / false). Free that
  * message with seiza_string_free().
  *
- * Threading: do not free a SeizaRenderedImage while another thread is still
- * reading its borrowed pointers. Do not free the same pointer twice, and do not
- * use a pointer after freeing its owner.
+ * Threading: do not free a SeizaRenderedImage or SeizaBackgroundModel while
+ * another thread is using it or reading its borrowed pointers. Do not free the
+ * same pointer twice, and do not use a pointer after freeing its owner.
  */"""
 
 [parse]

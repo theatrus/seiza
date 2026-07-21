@@ -94,6 +94,13 @@ This fit/apply split is also exposed to Python as `BackgroundModel`. It makes
 interactive parameter changes cheap to reason about and lets callers inspect
 sample diagnostics before choosing to apply the correction.
 
+The C ABI exposes the same lifecycle as an opaque `SeizaBackgroundModel`.
+Callers provide interleaved linear floats, an optional byte mask, and optional
+configuration JSON; model rendering and correction write into caller-owned
+buffers, while diagnostics JSON remains borrowed from the model. This avoids
+cross-allocator image ownership and keeps the ABI stable as model variants are
+added.
+
 ## Intended use and limits
 
 - Crop black registration borders or exclude them before fitting. The default

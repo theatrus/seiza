@@ -60,6 +60,10 @@ compiler, formatter, and linter.
   parameterized display stretching, and NumPy support. Binary wheels for Linux
   x86_64 and aarch64, macOS, and Windows cover every CPython from 3.9 up, with
   type stubs included ([seiza-py](seiza-py/README.md)).
+- **From native applications** — [`seiza-cabi`](seiza-cabi/README.md) exposes
+  FITS/raster rendering, robust background fitting and correction, solving,
+  overlays, and catalog setup through one generated C header for Swift, .NET,
+  C, and C++ consumers.
 - **From Rust** — use the crates directly: [`seiza`](seiza/README.md)
   (detection, WCS, solving, catalogs),
   [`seiza-fits`](seiza-fits/README.md) (FITS reading and linear `f32` writing),
@@ -493,6 +497,8 @@ and solves in the table's exact frame. Contract details:
   transfer plans, and mono/RGB application
 - `seiza-stacking/` — linear FITS calibration, local registration,
   normalization, additive integration, and rejection
+- `seiza-cabi/` — shared native C ABI for rendering, background extraction,
+  solving, overlays, and catalog setup
 - `seiza-cli/` — the `seiza` command-line tool: solving, ASTAP mode, the
   JSON-RPC worker, guided `seiza setup`, and dataset building
 - `seiza-download/` — async, verified runtime catalog-bundle cache

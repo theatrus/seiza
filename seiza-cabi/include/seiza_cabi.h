@@ -19,6 +19,8 @@
  * OWNED by the caller (you must release it):
  *   - SeizaRenderedImage* returned by the seiza_rendered_image_open* functions
  *       -> release with seiza_rendered_image_free().
+ *   - SeizaBackgroundModel* returned by seiza_background_fit
+ *       -> release with seiza_background_model_free().
  *   - char* returned by seiza_catalog_status_json and seiza_solve_image_json,
  *     and any char* stored into an `error_out` argument on failure
  *       -> release with seiza_string_free().
@@ -28,6 +30,8 @@
  *     from seiza_rendered_image_metadata_json point INTO the SeizaRenderedImage
  *     and dangle the moment it is freed. Copy them out before freeing the image
  *     if you need them to outlive it.
+ *   - const char* from seiza_background_model_diagnostics_json points INTO the
+ *     SeizaBackgroundModel and dangles when the model is freed.
  *   - const char* from seiza_core_version is static and is never freed.
  *   - the `json` argument to a SeizaCatalogSetupProgressCallback is valid only
  *     for the duration of that one callback; copy it if you need it afterward.
@@ -39,10 +43,29 @@
  * and to an OWNED message on failure (and return NULL / false). Free that
  * message with seiza_string_free().
  *
- * Threading: do not free a SeizaRenderedImage while another thread is still
- * reading its borrowed pointers. Do not free the same pointer twice, and do not
- * use a pointer after freeing its owner.
+ * Threading: do not free a SeizaRenderedImage or SeizaBackgroundModel while
+ * another thread is using it or reading its borrowed pointers. Do not free the
+ * same pointer twice, and do not use a pointer after freeing its owner.
  */
+
+/*
+ Additive background subtraction mode for
+ [`seiza_background_model_correct_in_place`].
+ */
+#define SEIZA_BACKGROUND_CORRECTION_SUBTRACT 0
+
+/*
+ Multiplicative background division mode for
+ [`seiza_background_model_correct_in_place`].
+ */
+#define SEIZA_BACKGROUND_CORRECTION_DIVIDE 1
+
+/*
+ An opaque fitted background model. Release it with
+ [`seiza_background_model_free`]. Its diagnostics string is borrowed and
+ remains valid until the model is freed.
+ */
+typedef struct SeizaBackgroundModel SeizaBackgroundModel;
 
 /*
  An opaque, owned rendered image. C sees only a pointer; release it with
@@ -59,6 +82,104 @@ extern "C" {
 #endif // __cplusplus
 
 const char *seiza_core_version(void);
+
+/*
+ Fits a compact background model to interleaved linear `float` samples.
+
+ `channels` must be one or three and `data_length` must equal
+ `width * height * channels`. RGB samples are pixel-interleaved. Pass null
+ `mask` with zero `mask_length` for automatic fitting, or `width * height`
+ bytes where `1` excludes a pixel. The fitted model owns its compact data and
+ does not borrow either input buffer after this call returns.
+ Pass null or empty `config_json` for `BackgroundConfig::default()`; otherwise
+ provide a serialized `seiza-background` `BackgroundConfig`.
+
+ # Safety
+ `data` must point to `data_length` readable floats. A non-null `mask` must
+ point to `mask_length` readable bytes containing only zero or one. A
+ non-null `config_json` must be NUL-terminated. When non-null, `error_out`
+ must point to writable storage for one pointer.
+ */
+SeizaBackgroundModel *seiza_background_fit(const float *data,
+                                           size_t data_length,
+                                           size_t width,
+                                           size_t height,
+                                           size_t channels,
+                                           const uint8_t *mask,
+                                           size_t mask_length,
+                                           const char *config_json,
+                                           char **error_out);
+
+/*
+ # Safety
+ `model` must be null or a live pointer returned by [`seiza_background_fit`].
+ */
+size_t seiza_background_model_width(const SeizaBackgroundModel *model);
+
+/*
+ # Safety
+ `model` must be null or a live pointer returned by [`seiza_background_fit`].
+ */
+size_t seiza_background_model_height(const SeizaBackgroundModel *model);
+
+/*
+ # Safety
+ `model` must be null or a live pointer returned by [`seiza_background_fit`].
+ */
+size_t seiza_background_model_channels(const SeizaBackgroundModel *model);
+
+/*
+ Returns the number of floats required by render and correction buffers.
+
+ # Safety
+ `model` must be null or a live pointer returned by [`seiza_background_fit`].
+ */
+size_t seiza_background_model_data_length(const SeizaBackgroundModel *model);
+
+/*
+ Returns borrowed fitted coefficients, references, samples, and diagnostics
+ as JSON. The string remains valid until the model is freed.
+
+ # Safety
+ `model` must be null or a live pointer returned by [`seiza_background_fit`].
+ */
+const char *seiza_background_model_diagnostics_json(const SeizaBackgroundModel *model);
+
+/*
+ Renders a fitted background into a caller-owned interleaved float buffer.
+
+ # Safety
+ `model` must be a live pointer returned by [`seiza_background_fit`].
+ `output` must point to `output_length` writable floats. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+bool seiza_background_model_render(const SeizaBackgroundModel *model,
+                                   float *output,
+                                   size_t output_length,
+                                   char **error_out);
+
+/*
+ Corrects an interleaved linear float buffer in place. Use
+ `SEIZA_BACKGROUND_CORRECTION_SUBTRACT` for additive subtraction or
+ `SEIZA_BACKGROUND_CORRECTION_DIVIDE` for multiplicative division.
+
+ # Safety
+ `model` must be a live pointer returned by [`seiza_background_fit`]. `data`
+ must point to `data_length` writable floats. When non-null, `error_out` must
+ point to writable storage for one pointer.
+ */
+bool seiza_background_model_correct_in_place(const SeizaBackgroundModel *model,
+                                             float *data,
+                                             size_t data_length,
+                                             uint32_t mode,
+                                             char **error_out);
+
+/*
+ # Safety
+ `model` must be null or a pointer returned by [`seiza_background_fit`] that
+ has not already been freed.
+ */
+void seiza_background_model_free(SeizaBackgroundModel *model);
 
 /*
  Returns catalog readiness and resolved component paths as JSON.
