@@ -132,6 +132,16 @@ impl StretchConfig {
         StretchAnalysis::analyze(data, channel_count, self.max_analysis_samples)
     }
 
+    /// Resolve this request for an image, analyzing only data-driven models.
+    pub fn resolve_for(&self, data: &[f32], channel_count: usize) -> Result<StretchPlan> {
+        if self.model.requires_analysis() {
+            let analysis = self.analyze(data, channel_count)?;
+            self.resolve(&analysis)
+        } else {
+            self.resolve_explicit(channel_count)
+        }
+    }
+
     /// Resolve this request against reusable image analysis.
     pub fn resolve(&self, analysis: &StretchAnalysis) -> Result<StretchPlan> {
         if !self.model.requires_analysis() {
@@ -144,7 +154,17 @@ impl StretchConfig {
         }
         let distributions = match self.color_strategy {
             ColorStrategy::Linked => vec![&analysis.linked],
-            ColorStrategy::Unlinked => analysis.channels.iter().collect(),
+            ColorStrategy::Unlinked if analysis.channel_count == 1 => vec![&analysis.linked],
+            ColorStrategy::Unlinked => analysis
+                .channels
+                .iter()
+                .enumerate()
+                .map(|(index, channel)| {
+                    channel.as_ref().ok_or_else(|| {
+                        StretchError::Invalid(format!("channel {index} contains no finite samples"))
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?,
             ColorStrategy::LuminancePreserving => {
                 vec![analysis.luminance.as_ref().ok_or_else(|| {
                     StretchError::Invalid(
@@ -217,17 +237,17 @@ impl Distribution {
             )));
         }
         values.sort_unstable_by(f32::total_cmp);
-        let median = f64::from(values[values.len() / 2]);
+        let median = values[values.len() / 2];
         let mut deviations = values
             .iter()
-            .map(|value| (f64::from(*value) - median).abs())
+            .map(|value| (*value - median).abs())
             .collect::<Vec<_>>();
-        deviations.sort_unstable_by(f64::total_cmp);
+        deviations.sort_unstable_by(f32::total_cmp);
         let statistics = RobustStatistics {
             min: f64::from(values[0]),
             max: f64::from(*values.last().expect("non-empty sample")),
-            median,
-            mad: deviations[deviations.len() / 2],
+            median: f64::from(median),
+            mad: f64::from(deviations[deviations.len() / 2]),
             count: values.len(),
         };
         Ok(Self {
@@ -236,10 +256,10 @@ impl Distribution {
         })
     }
 
-    fn percentile(&self, percentile: f64) -> f64 {
+    fn percentile(&self, percentile: f64) -> f32 {
         let index =
             ((self.sorted.len() as f64 * percentile).floor() as usize).min(self.sorted.len() - 1);
-        f64::from(self.sorted[index])
+        self.sorted[index]
     }
 }
 
@@ -248,7 +268,7 @@ impl Distribution {
 pub struct StretchAnalysis {
     channel_count: usize,
     linked: Distribution,
-    channels: Vec<Distribution>,
+    channels: Vec<Option<Distribution>>,
     luminance: Option<Distribution>,
 }
 
@@ -270,9 +290,13 @@ impl StretchAnalysis {
         let maximum_pixels = (max_samples / channel_count).max(1);
         let pixel_stride = pixel_count.div_ceil(maximum_pixels).max(1);
         let mut linked = Vec::with_capacity(max_samples.min(data.len()));
-        let mut channels = (0..channel_count)
-            .map(|_| Vec::with_capacity(maximum_pixels.min(pixel_count)))
-            .collect::<Vec<_>>();
+        let mut channels = if channel_count == 1 {
+            Vec::new()
+        } else {
+            (0..channel_count)
+                .map(|_| Vec::with_capacity(maximum_pixels.min(pixel_count)))
+                .collect::<Vec<_>>()
+        };
         let mut luminance =
             (channel_count == 3).then(|| Vec::with_capacity(maximum_pixels.min(pixel_count)));
 
@@ -280,7 +304,9 @@ impl StretchAnalysis {
             for (channel, value) in pixel.iter().copied().enumerate() {
                 if value.is_finite() {
                     linked.push(value);
-                    channels[channel].push(value);
+                    if let Some(samples) = channels.get_mut(channel) {
+                        samples.push(value);
+                    }
                 }
             }
             if let Some(luminance) = &mut luminance
@@ -300,10 +326,16 @@ impl StretchAnalysis {
             channels: channels
                 .into_iter()
                 .enumerate()
-                .map(|(index, values)| Distribution::new(values, &format!("channel {index}")))
+                .map(|(index, values)| {
+                    (!values.is_empty())
+                        .then(|| Distribution::new(values, &format!("channel {index}")))
+                        .transpose()
+                })
                 .collect::<Result<Vec<_>>>()?,
             luminance: luminance
-                .map(|values| Distribution::new(values, "luminance"))
+                .and_then(|values| {
+                    (!values.is_empty()).then(|| Distribution::new(values, "luminance"))
+                })
                 .transpose()?,
         })
     }
@@ -316,10 +348,13 @@ impl StretchAnalysis {
         self.linked.statistics
     }
 
-    pub fn channel_statistics(&self) -> Vec<RobustStatistics> {
+    pub fn channel_statistics(&self) -> Vec<Option<RobustStatistics>> {
+        if self.channel_count == 1 {
+            return vec![Some(self.linked.statistics)];
+        }
         self.channels
             .iter()
-            .map(|channel| channel.statistics)
+            .map(|channel| channel.as_ref().map(|channel| channel.statistics))
             .collect()
     }
 
@@ -338,14 +373,14 @@ pub enum ResolvedCurve {
         white: f64,
     },
     Asinh {
-        black: f64,
-        white: f64,
-        strength: f64,
+        black: f32,
+        white: f32,
+        strength: f32,
     },
     Mtf {
-        shadows: f64,
+        shadows: f32,
         midtone: f64,
-        highlights: f64,
+        highlights: f32,
     },
     Ghs(ResolvedGhs),
 }
@@ -354,12 +389,19 @@ pub enum ResolvedCurve {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct ResolvedGhs {
     params: GhsParams,
+    #[serde(skip)]
     d: f64,
+    #[serde(skip)]
     low_value: f64,
+    #[serde(skip)]
     low_slope: f64,
+    #[serde(skip)]
     high_value: f64,
+    #[serde(skip)]
     high_slope: f64,
+    #[serde(skip)]
     normalization_min: f64,
+    #[serde(skip)]
     normalization_span: f64,
 }
 
@@ -427,27 +469,26 @@ impl ResolvedCurve {
         if !value.is_finite() {
             return 0.0;
         }
-        let value = f64::from(value);
         let mapped = match self {
-            Self::Identity => value,
-            Self::Linear { black, white } => (value - black) / (white - black),
+            Self::Identity => f64::from(value),
+            Self::Linear { black, white } => (f64::from(value) - black) / (white - black),
             Self::Asinh {
                 black,
                 white,
                 strength,
             } => {
                 let linear = ((value - black) / (white - black)).max(0.0);
-                (strength * linear).asinh() / strength.asinh()
+                f64::from((strength * linear).asinh() / strength.asinh())
             }
             Self::Mtf {
                 shadows,
                 midtone,
                 highlights,
             } => {
-                let input = 1.0 - highlights + value - shadows;
+                let input = 1.0 - f64::from(highlights) + f64::from(value - shadows);
                 midtones_transfer_function(midtone, input)
             }
-            Self::Ghs(ghs) => ghs.map(value),
+            Self::Ghs(ghs) => ghs.map(f64::from(value)),
         };
         mapped.clamp(0.0, 1.0) as f32
     }
@@ -498,40 +539,32 @@ impl StretchPlan {
     }
 
     pub fn apply_f32(&self, data: &[f32], channel_count: usize) -> Result<Vec<f32>> {
-        self.validate_input(data, channel_count)?;
-        let output = match self.color_strategy {
-            ColorStrategy::Linked => data
-                .par_iter()
-                .map(|value| self.curves[0].map(*value))
-                .collect(),
-            ColorStrategy::Unlinked => data
-                .par_iter()
-                .enumerate()
-                .map(|(index, value)| self.curves[index % channel_count].map(*value))
-                .collect(),
-            ColorStrategy::LuminancePreserving => data
-                .par_chunks_exact(3)
-                .flat_map_iter(|pixel| self.map_luminance_pixel(pixel))
-                .collect(),
-        };
-        Ok(output)
+        self.apply_mapped(data, channel_count, std::convert::identity)
     }
 
     pub fn apply_u8(&self, data: &[f32], channel_count: usize) -> Result<Vec<u8>> {
+        self.apply_mapped(data, channel_count, to_u8)
+    }
+
+    fn apply_mapped<T, F>(&self, data: &[f32], channel_count: usize, convert: F) -> Result<Vec<T>>
+    where
+        T: Send,
+        F: Fn(f32) -> T + Copy + Send + Sync,
+    {
         self.validate_input(data, channel_count)?;
         let output = match self.color_strategy {
             ColorStrategy::Linked => data
                 .par_iter()
-                .map(|value| to_u8(self.curves[0].map(*value)))
+                .map(|value| convert(self.curves[0].map(*value)))
                 .collect(),
             ColorStrategy::Unlinked => data
                 .par_iter()
                 .enumerate()
-                .map(|(index, value)| to_u8(self.curves[index % channel_count].map(*value)))
+                .map(|(index, value)| convert(self.curves[index % channel_count].map(*value)))
                 .collect(),
             ColorStrategy::LuminancePreserving => data
                 .par_chunks_exact(3)
-                .flat_map_iter(|pixel| self.map_luminance_pixel(pixel).map(to_u8))
+                .flat_map_iter(|pixel| self.map_luminance_pixel(pixel).map(convert))
                 .collect(),
         };
         Ok(output)
@@ -590,12 +623,13 @@ impl StretchModel {
                 validate_percentiles(black_percentile, white_percentile)?;
                 validate_strength(strength)?;
                 let black = distribution.percentile(black_percentile);
-                let white = distribution.percentile(white_percentile);
-                validate_range(black, white)?;
+                let white = distribution
+                    .percentile(white_percentile)
+                    .max(black + f32::EPSILON);
                 ResolvedCurve::Asinh {
                     black,
                     white,
-                    strength,
+                    strength: strength as f32,
                 }
             }
             Self::AutoMtf(params) => auto_mtf_curve(distribution.statistics, params)?,
@@ -616,12 +650,12 @@ impl StretchModel {
                 white,
                 strength,
             } => {
-                validate_range(black, white)?;
+                validate_f32_range(black, white)?;
                 validate_strength(strength)?;
                 ResolvedCurve::Asinh {
-                    black,
-                    white,
-                    strength,
+                    black: black as f32,
+                    white: white as f32,
+                    strength: strength as f32,
                 }
             }
             Self::Mtf {
@@ -631,14 +665,14 @@ impl StretchModel {
             } => {
                 validate_mtf(shadows, midtone, highlights)?;
                 ResolvedCurve::Mtf {
-                    shadows,
+                    shadows: shadows as f32,
                     midtone,
-                    highlights,
+                    highlights: highlights as f32,
                 }
             }
             Self::Ghs(params) => {
-                validate_ghs(params)?;
                 if params.stretch_factor == 0.0 {
+                    validate_ghs(params)?;
                     ResolvedCurve::Linear {
                         black: params.black,
                         white: params.white,
@@ -716,28 +750,32 @@ fn auto_mtf_curve(statistics: RobustStatistics, params: StretchParams) -> Result
             "target median must be finite and between zero and one".into(),
         ));
     }
-    if !params.shadows_clip.is_finite() || params.shadows_clip > 0.0 {
+    if !params.shadows_clip.is_finite()
+        || !(params.shadows_clip as f32).is_finite()
+        || params.shadows_clip > 0.0
+    {
         return Err(StretchError::Invalid(
             "shadows clip must be finite and non-positive".into(),
         ));
     }
-    let normal_mad = statistics.mad * NORMAL_MAD_SCALE;
-    if normal_mad <= f64::from(f32::EPSILON) {
+    let median = statistics.median as f32;
+    let normal_mad = statistics.mad as f32 * NORMAL_MAD_SCALE as f32;
+    let shadows_clip = params.shadows_clip as f32;
+    if normal_mad <= f32::EPSILON {
         return Ok(ResolvedCurve::Identity);
     }
-    let (shadows, midtone, highlights) = if statistics.median > 0.5 {
-        let highlights = statistics.median - params.shadows_clip * normal_mad;
+    let (shadows, midtone, highlights) = if median > 0.5 {
+        let highlights = median - shadows_clip * normal_mad;
         let midtone = midtones_transfer_function(
             params.target_median,
-            1.0 - (highlights - statistics.median),
+            f64::from(1.0 - (highlights - median)),
         );
         (0.0, midtone, highlights)
     } else {
-        let shadows = (statistics.median + params.shadows_clip * normal_mad).max(0.0);
-        let midtone = midtones_transfer_function(params.target_median, statistics.median - shadows);
+        let shadows = (median + shadows_clip * normal_mad).max(0.0);
+        let midtone = midtones_transfer_function(params.target_median, f64::from(median - shadows));
         (shadows, midtone, 1.0)
     };
-    validate_mtf(shadows, midtone, highlights)?;
     Ok(ResolvedCurve::Mtf {
         shadows,
         midtone,
@@ -754,8 +792,22 @@ fn validate_range(black: f64, white: f64) -> Result<()> {
     Ok(())
 }
 
+fn validate_f32_range(black: f64, white: f64) -> Result<()> {
+    validate_range(black, white)?;
+    let black = black as f32;
+    let white = white as f32;
+    if !black.is_finite() || !white.is_finite() || white <= black {
+        return Err(StretchError::Invalid(
+            "stretch black and white points must remain finite and increasing at f32 precision"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_strength(strength: f64) -> Result<()> {
-    if !strength.is_finite() || strength <= 0.0 {
+    let strength_f32 = strength as f32;
+    if !strength.is_finite() || !strength_f32.is_finite() || strength_f32 <= 0.0 {
         return Err(StretchError::Invalid(
             "asinh strength must be finite and greater than zero".into(),
         ));
@@ -778,9 +830,14 @@ fn validate_percentiles(black: f64, white: f64) -> Result<()> {
 }
 
 fn validate_mtf(shadows: f64, midtone: f64, highlights: f64) -> Result<()> {
+    let shadows_f32 = shadows as f32;
+    let highlights_f32 = highlights as f32;
     if !shadows.is_finite()
         || !highlights.is_finite()
         || highlights <= shadows
+        || !shadows_f32.is_finite()
+        || !highlights_f32.is_finite()
+        || highlights_f32 <= shadows_f32
         || !midtone.is_finite()
         || !(0.0..1.0).contains(&midtone)
     {
@@ -907,7 +964,8 @@ fn stretch_u16_map(stats: &Statistics, params: &StretchParams) -> Vec<u8> {
     (0..65_536)
         .map(|value| {
             let input = 1.0 - highlights + value as f64 / 65_535.0 - shadows;
-            to_u8(midtones_transfer_function(midtone, input) as f32)
+            let stretched = midtones_transfer_function(midtone, input);
+            (stretched.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
         })
         .collect()
 }
@@ -915,6 +973,32 @@ fn stretch_u16_map(stats: &Statistics, params: &StretchParams) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn previous_u16_stretch(data: &[u16], stats: &Statistics, params: &StretchParams) -> Vec<u8> {
+        let normalized_median = f64::from(stats.median) / 65_535.0;
+        let normalized_mad = stats.mad / 65_535.0 * 1.4826;
+        let (shadows, midtone, highlights) = if normalized_median > 0.5 {
+            let highlights = normalized_median - params.shadows_clip * normalized_mad;
+            let midtone = midtones_transfer_function(
+                params.target_median,
+                1.0 - (highlights - normalized_median),
+            );
+            (0.0, midtone, highlights)
+        } else {
+            let shadows = (normalized_median + params.shadows_clip * normalized_mad).max(0.0);
+            let midtone =
+                midtones_transfer_function(params.target_median, normalized_median - shadows);
+            (shadows, midtone, 1.0)
+        };
+        let map = (0..65_536)
+            .map(|value| {
+                let input = 1.0 - highlights + value as f64 / 65_535.0 - shadows;
+                let stretched = midtones_transfer_function(midtone, input);
+                (stretched.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+            })
+            .collect::<Vec<_>>();
+        data.iter().map(|value| map[usize::from(*value)]).collect()
+    }
 
     #[test]
     fn percentile_asinh_matches_the_existing_preview_map() {
@@ -931,9 +1015,17 @@ mod tests {
         else {
             panic!("expected an asinh curve");
         };
-        assert_eq!(black, f64::from(analysis.linked.sorted[10]));
-        assert_eq!(white, f64::from(analysis.linked.sorted[995]));
+        assert_eq!(black, analysis.linked.sorted[10]);
+        assert_eq!(white, analysis.linked.sorted[995]);
         assert_eq!(strength, 10.0);
+    }
+
+    #[test]
+    fn midtones_transfer_retains_previous_boundaries() {
+        assert_eq!(midtones_transfer_function(0.5, 0.0), 0.0);
+        assert_eq!(midtones_transfer_function(0.5, 1.0), 1.0);
+        assert!((midtones_transfer_function(0.5, 0.5) - 0.5).abs() < 1.0e-12);
+        assert!(midtones_transfer_function(0.25, 0.25) > 0.45);
     }
 
     #[test]
@@ -941,8 +1033,27 @@ mod tests {
         let data = [0.1, 0.2, 0.3].repeat(100_000);
         let analysis = StretchAnalysis::analyze(&data, 3, 3_000).unwrap();
         assert!(analysis.linked_statistics().count <= 3_000);
-        assert_eq!(analysis.channel_statistics().len(), 3);
+        assert!(analysis.channel_statistics().iter().all(Option::is_some));
         assert!(analysis.luminance_statistics().is_some());
+    }
+
+    #[test]
+    fn linked_analysis_does_not_require_every_color_channel() {
+        let data = [0.1, f32::NAN, 0.3].repeat(10);
+        let analysis = StretchAnalysis::analyze(&data, 3, 30).unwrap();
+        let statistics = analysis.channel_statistics();
+        assert!(statistics[0].is_some());
+        assert!(statistics[1].is_none());
+        assert!(statistics[2].is_some());
+        assert!(analysis.luminance_statistics().is_none());
+
+        let linked = StretchConfig::percentile_asinh(0.01, 0.995, 10.0, 30);
+        assert!(linked.resolve(&analysis).is_ok());
+        let unlinked = StretchConfig {
+            color_strategy: ColorStrategy::Unlinked,
+            ..linked.clone()
+        };
+        assert!(unlinked.resolve(&analysis).is_err());
     }
 
     #[test]
@@ -1121,6 +1232,28 @@ mod tests {
         let plan = config.resolve(&analysis).unwrap();
         let json = serde_json::to_value(plan).unwrap();
         assert_eq!(json["curves"][0]["type"], "ghs");
+        assert_eq!(json["curves"][0]["params"]["stretch_factor"], 2.0);
+        assert!(json["curves"][0].get("normalization_span").is_none());
+    }
+
+    #[test]
+    fn parameterized_config_round_trips_for_pipeline_storage() {
+        let config = StretchConfig {
+            model: StretchModel::Ghs(GhsParams {
+                stretch_factor: 3.0,
+                local_intensity: -0.5,
+                symmetry_point: 0.35,
+                protect_shadows: 0.1,
+                protect_highlights: 0.85,
+                black: 0.01,
+                white: 0.95,
+            }),
+            color_strategy: ColorStrategy::LuminancePreserving,
+            max_analysis_samples: 123_456,
+        };
+        let encoded = serde_json::to_string(&config).unwrap();
+        let decoded = serde_json::from_str::<StretchConfig>(&encoded).unwrap();
+        assert_eq!(decoded, config);
     }
 
     #[test]
@@ -1150,6 +1283,63 @@ mod tests {
         assert!((f64::from(sorted[sorted.len() / 2]) - 0.2 * 255.0).abs() < 16.0);
         assert!(output[0] > 200);
         assert!(sorted[100] < 60);
+    }
+
+    #[test]
+    fn u16_statistics_match_the_previous_sorted_reference() {
+        let mut state = 0xABCDEF12345_u64;
+        let data = (0..100_000)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                ((state >> 40) as u16) / 3 + 500
+            })
+            .collect::<Vec<_>>();
+        let stats = statistics_u16(&data);
+        let mut sorted = data.clone();
+        sorted.sort_unstable();
+        let expected_median = sorted[sorted.len().div_ceil(2) - 1];
+        let mut deviations = data
+            .iter()
+            .map(|value| (i32::from(*value) - i32::from(expected_median)).unsigned_abs() as u16)
+            .collect::<Vec<_>>();
+        deviations.sort_unstable();
+        let expected_mad = deviations[deviations.len().div_ceil(2) - 1];
+        assert_eq!(stats.min, sorted[0]);
+        assert_eq!(stats.max, *sorted.last().unwrap());
+        assert_eq!(stats.median, expected_median);
+        assert!((stats.mad - f64::from(expected_mad)).abs() <= 1.0);
+        assert_eq!(stats.count, data.len());
+    }
+
+    #[test]
+    fn u16_stretch_is_byte_identical_to_the_previous_lut() {
+        let data = (0..=u16::MAX).collect::<Vec<_>>();
+        for statistics in [
+            Statistics {
+                min: 0,
+                max: u16::MAX,
+                mean: 8_000.0,
+                std_dev: 1_000.0,
+                median: 6_000,
+                mad: 400.0,
+                count: data.len(),
+            },
+            Statistics {
+                min: 0,
+                max: u16::MAX,
+                mean: 50_000.0,
+                std_dev: 1_000.0,
+                median: 52_000,
+                mad: 600.0,
+                count: data.len(),
+            },
+        ] {
+            let expected = previous_u16_stretch(&data, &statistics, &StretchParams::default());
+            let actual = stretch_u16_to_u8(&data, &statistics, &StretchParams::default());
+            assert_eq!(actual, expected);
+        }
     }
 
     #[test]

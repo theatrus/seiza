@@ -1,6 +1,6 @@
 use crate::{Error, LinearImage, Result};
 use rayon::prelude::*;
-use seiza_stretch::{ResolvedCurve, StretchAnalysis, StretchConfig, StretchParams};
+use seiza_stretch::{ResolvedCurve, StretchConfig, StretchParams};
 use std::str::FromStr;
 
 /// How mono input channels are mapped into a common working range.
@@ -532,11 +532,6 @@ fn display_transform(
             "channel contains no samples to stretch".into(),
         ));
     }
-    let analysis = StretchAnalysis::analyze(&sample, 1, sample.len())
-        .map_err(|error| Error::Color(error.to_string()))?;
-    if analysis.linked_statistics().mad * 1.4826 <= f64::from(f32::EPSILON) {
-        return Ok(ResolvedCurve::Identity);
-    }
     let plan = StretchConfig::auto_mtf(
         StretchParams {
             target_median: f64::from(options.target_median),
@@ -544,7 +539,7 @@ fn display_transform(
         },
         sample.len(),
     )
-    .resolve(&analysis)
+    .resolve_for(&sample, 1)
     .map_err(|error| Error::Color(error.to_string()))?;
     Ok(plan.curves()[0])
 }
@@ -642,6 +637,75 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum PreviousDisplayTransform {
+        Identity,
+        Mtf {
+            shadows: f32,
+            midtone: f64,
+            highlights: f32,
+        },
+    }
+
+    impl PreviousDisplayTransform {
+        fn map(self, value: f32) -> f32 {
+            match self {
+                Self::Identity => value.clamp(0.0, 1.0),
+                Self::Mtf {
+                    shadows,
+                    midtone,
+                    highlights,
+                } => {
+                    let input = 1.0 - f64::from(highlights) + f64::from(value - shadows);
+                    seiza_fits::midtones_transfer_function(midtone, input) as f32
+                }
+            }
+        }
+    }
+
+    fn previous_display_transform(
+        channel: PreparedChannel<'_>,
+        options: &ForaxxOptions,
+        max_samples: usize,
+    ) -> PreviousDisplayTransform {
+        let stride = channel.values.len().div_ceil(max_samples.max(1)).max(1);
+        let mut sample = (0..channel.values.len())
+            .step_by(stride)
+            .filter(|index| channel.values[*index].is_finite())
+            .map(|index| channel.sample(index))
+            .collect::<Vec<_>>();
+        sample.sort_unstable_by(f32::total_cmp);
+        let median = sample[sample.len() / 2];
+        for value in &mut sample {
+            *value = (*value - median).abs();
+        }
+        sample.sort_unstable_by(f32::total_cmp);
+        let normal_mad = sample[sample.len() / 2] * 1.4826;
+        if normal_mad <= f32::EPSILON {
+            return PreviousDisplayTransform::Identity;
+        }
+        let (shadows, midtone, highlights) = if median > 0.5 {
+            let highlights = median - options.shadows_clip * normal_mad;
+            let midtone = seiza_fits::midtones_transfer_function(
+                f64::from(options.target_median),
+                f64::from(1.0 - (highlights - median)),
+            );
+            (0.0, midtone, highlights)
+        } else {
+            let shadows = (median + options.shadows_clip * normal_mad).max(0.0);
+            let midtone = seiza_fits::midtones_transfer_function(
+                f64::from(options.target_median),
+                f64::from(median - shadows),
+            );
+            (shadows, midtone, 1.0)
+        };
+        PreviousDisplayTransform::Mtf {
+            shadows,
+            midtone,
+            highlights,
+        }
+    }
+
     #[test]
     fn rgb_interleaves_linear_channels() {
         let result = combine_rgb(
@@ -730,6 +794,23 @@ mod tests {
         let options = ForaxxOptions::default();
         let transform = display_transform(channel, &options, 100).unwrap();
         assert!((transform.map(0.30) - options.target_median).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn foraxx_working_stretch_is_bit_identical_to_the_previous_path() {
+        let options = ForaxxOptions::default();
+        for (offset, scale) in [(0.02_f32, 0.45_f32), (0.55, 0.40)] {
+            let values = (0..4_097)
+                .map(|index| offset + scale * ((index * 7_919 % 4_099) as f32 / 4_098.0))
+                .collect::<Vec<_>>();
+            let image = mono(&values);
+            let channel = prepare_channel(&image, ColorNormalization::None).unwrap();
+            let previous = previous_display_transform(channel, &options, 2_000);
+            let current = display_transform(channel, &options, 2_000).unwrap();
+            for value in values {
+                assert_eq!(current.map(value).to_bits(), previous.map(value).to_bits());
+            }
+        }
     }
 
     #[test]

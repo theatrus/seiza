@@ -56,12 +56,14 @@ compiler, formatter, and linter.
 - **From Python** — `pip install seiza`: detection, hinted and blind
   solving with optional SIP distortion, WCS transforms, FITS WCS keyword
   output, verified catalog downloads, and native batch/live image stacking
-  with calibration-master construction and NumPy support. One binary wheel
-  per platform (Linux x86_64 and aarch64, macOS, Windows) covers every CPython
-  from 3.9 up, with type stubs included ([seiza-py](seiza-py/README.md)).
+  with calibration-master construction, parameterized display stretching, and
+  NumPy support. One binary wheel per platform (Linux x86_64 and aarch64,
+  macOS, Windows) covers every CPython from 3.9 up, with type stubs included
+  ([seiza-py](seiza-py/README.md)).
 - **From Rust** — use the crates directly: [`seiza`](seiza/README.md)
   (detection, WCS, solving, catalogs),
   [`seiza-fits`](seiza-fits/README.md) (FITS reading and linear `f32` writing),
+  [`seiza-stretch`](seiza-stretch/README.md) (parameterized display curves),
   [`seiza-stacking`](seiza-stacking/README.md) (linear calibration,
   registration, and additive live stacking),
   [`seiza-download`](seiza-download/README.md) (catalog download and

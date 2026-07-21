@@ -5,10 +5,6 @@ use pyo3::prelude::*;
 use seiza_stacking::LinearImage;
 use seiza_stretch::{ColorStrategy, GhsParams, StretchConfig, StretchModel, StretchParams};
 
-fn value_error(error: impl ToString) -> PyErr {
-    PyValueError::new_err(error.to_string())
-}
-
 #[pyfunction]
 #[pyo3(signature = (image, *, model="percentile-asinh", color_strategy="linked", max_analysis_samples=200_000, black=0.0, white=1.0, strength=10.0, black_percentile=0.01, white_percentile=0.995, shadows=0.0, midtone=0.5, highlights=1.0, stretch_factor=1.0, local_intensity=0.0, symmetry_point=0.0, protect_shadows=0.0, protect_highlights=1.0, target_median=0.2, shadows_clip=-2.8))]
 #[allow(clippy::too_many_arguments)]
@@ -90,16 +86,12 @@ fn stretch<'py>(
     };
     let data = py
         .allow_threads(move || {
-            let plan = if config.model.requires_analysis() {
-                let analysis = config.analyze(&image.data, channels)?;
-                config.resolve(&analysis)?
-            } else {
-                config.resolve_explicit(channels)?
-            };
+            let plan = config.resolve_for(&image.data, channels)?;
             plan.apply_f32(&image.data, channels)
         })
-        .map_err(value_error)?;
-    let output = LinearImage::new(width, height, channels, data).map_err(value_error)?;
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let output = LinearImage::new(width, height, channels, data)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
     into_image_array(py, output)
 }
 

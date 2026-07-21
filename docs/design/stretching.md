@@ -22,6 +22,10 @@ phase with `config.resolve_explicit(channels)`. Percentile-asinh and Auto-MTF
 require analysis. This keeps later informed auto modes separate from their
 deterministic application curves.
 
+One-shot consumers can use `config.resolve_for(samples, channels)`, which
+performs analysis only for models that require it. Interactive consumers keep
+the explicit phases so they can reuse one analysis across parameter changes.
+
 `StretchAnalysis` retains bounded, sorted samples and robust statistics so an
 interactive caller can resolve several parameter choices without rescanning
 the source image. `StretchPlan` contains only explicit curves. It is
@@ -51,6 +55,15 @@ The exact-histogram `statistics_u16` and 65,536-entry `stretch_u16_to_u8` LUT
 also live in this crate. `seiza-fits` re-exports them and keeps
 `FitsImage::stretch_to_u8`, so existing Rust callers retain their API and
 bit-depth-specific fast path.
+
+## Compatibility precision
+
+The shared implementation preserves the arithmetic of the paths it replaces:
+stack/color preview asinh and Foraxx statistics/application remain `f32`, while
+the established `u16` FITS LUT retains its `f64` transfer and quantization.
+Regression tests compare preview and FITS bytes and Foraxx `f32` bit patterns
+against the previous implementations. Changing those precisions is therefore
+an explicit output-format decision, not an incidental refactor.
 
 ## Color strategies
 

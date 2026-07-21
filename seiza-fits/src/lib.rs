@@ -10,14 +10,13 @@
 
 mod bayer;
 mod header;
-mod stats;
-mod stretch;
 mod writer;
 
 pub use bayer::{BayerPattern, RgbImage16, RgbImageF32, debayer_rgb_f32, debayer_rgb16};
 pub use header::{HeaderValue, parse_header_value};
-pub use stats::{Statistics, statistics_u16};
-pub use stretch::{StretchParams, midtones_transfer_function, stretch_u16_to_u8};
+pub use seiza_stretch::{
+    Statistics, StretchParams, midtones_transfer_function, statistics_u16, stretch_u16_to_u8,
+};
 pub use writer::{F32ImageData, WriteHeaderCard, write_f32_image, write_f32_image_to};
 
 use std::io::Read;
@@ -462,7 +461,7 @@ impl FitsImage {
 
     /// Histogram-based image statistics on the u16 representation.
     pub fn statistics(&self) -> Statistics {
-        stats::statistics_u16(&self.to_u16())
+        statistics_u16(&self.to_u16())
     }
 
     /// N.I.N.A.-compatible MTF autostretch straight to 8-bit grayscale.
@@ -472,8 +471,8 @@ impl FitsImage {
             Some(rgb) => std::borrow::Cow::Owned(rgb.to_luma_u16()),
             None => self.to_u16(),
         };
-        let stats = stats::statistics_u16(&data);
-        stretch::stretch_u16_to_u8(&data, &stats, params)
+        let stats = statistics_u16(&data);
+        stretch_u16_to_u8(&data, &stats, params)
     }
 
     /// Linear grayscale samples normalized to `[0, 1]` for numeric processing.

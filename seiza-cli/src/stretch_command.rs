@@ -184,27 +184,19 @@ pub(crate) fn run(args: StretchArgs) -> Result<()> {
         color_strategy: args.color_strategy.into(),
         max_analysis_samples: args.max_analysis_samples,
     };
-    let plan = if config.model.requires_analysis() {
-        let analysis = config
-            .analyze(&frame.image.data, frame.image.channels)
-            .context("could not analyze stretch input")?;
-        config.resolve(&analysis)
-    } else {
-        config.resolve_explicit(frame.image.channels)
-    }
-    .context("could not resolve stretch model")?;
+    let plan = config
+        .resolve_for(&frame.image.data, frame.image.channels)
+        .context("could not resolve stretch model")?;
     let pixels = plan
         .apply_u8(&frame.image.data, frame.image.channels)
         .context("could not apply stretch model")?;
-    if frame.image.channels == 1 {
-        image::GrayImage::from_raw(frame.image.width as u32, frame.image.height as u32, pixels)
-            .ok_or_else(|| anyhow::anyhow!("stretch output dimensions do not match"))?
-            .save(&args.output)?;
-    } else {
-        image::RgbImage::from_raw(frame.image.width as u32, frame.image.height as u32, pixels)
-            .ok_or_else(|| anyhow::anyhow!("stretch output dimensions do not match"))?
-            .save(&args.output)?;
-    }
+    crate::preview::write_display_image(
+        &args.output,
+        frame.image.width,
+        frame.image.height,
+        frame.image.channels,
+        pixels,
+    )?;
     println!(
         "wrote {}: {:?}, {:?}, display-referred",
         args.output.display(),
