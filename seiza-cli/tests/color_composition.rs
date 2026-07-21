@@ -287,7 +287,7 @@ fn narrowband_cli_validates_and_uses_only_palette_inputs() {
     let oiii = directory.path().join("oiii.fits");
     write_mono(&ha, &[0.1, 0.2, 0.3, 0.4]);
     write_mono(&oiii, &[0.2, 0.3, 0.4, 0.5]);
-    let ignores_unused = Command::new(env!("CARGO_BIN_EXE_seiza"))
+    let rejects_unused = Command::new(env!("CARGO_BIN_EXE_seiza"))
         .args([
             "color",
             "narrowband",
@@ -305,9 +305,6 @@ fn narrowband_cli_validates_and_uses_only_palette_inputs() {
         ])
         .output()
         .unwrap();
-    assert!(
-        ignores_unused.status.success(),
-        "{}",
-        String::from_utf8_lossy(&ignores_unused.stderr)
-    );
+    assert!(!rejects_unused.status.success());
+    assert!(String::from_utf8_lossy(&rejects_unused.stderr).contains("HOO does not use --sii"));
 }

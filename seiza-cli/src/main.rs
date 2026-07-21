@@ -18,6 +18,7 @@ mod astap;
 mod background;
 mod build_data;
 mod color;
+mod common;
 mod deconvolution;
 mod master;
 mod preview;

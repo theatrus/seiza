@@ -183,15 +183,17 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
         }
     }
     validate_path_roles(path_roles)?;
-    if !options.sigma_low.is_finite()
-        || options.sigma_low <= 0.0
-        || !options.sigma_high.is_finite()
-        || options.sigma_high <= 0.0
-    {
-        anyhow::bail!("--sigma-low and --sigma-high must be positive finite numbers");
-    }
-    if options.rejection_warmup < 2 {
-        anyhow::bail!("--rejection-warmup must be at least 2");
+    if matches!(options.rejection, RejectionArg::DeltaSigma) {
+        if !options.sigma_low.is_finite()
+            || options.sigma_low <= 0.0
+            || !options.sigma_high.is_finite()
+            || options.sigma_high <= 0.0
+        {
+            anyhow::bail!("--sigma-low and --sigma-high must be positive finite numbers");
+        }
+        if options.rejection_warmup < 2 {
+            anyhow::bail!("--rejection-warmup must be at least 2");
+        }
     }
     if options
         .dark_exposure_seconds
@@ -199,17 +201,11 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
     {
         anyhow::bail!("--dark-exposure-seconds must be a positive finite number");
     }
-    if !options.max_registration_rms.is_finite() || options.max_registration_rms <= 0.0 {
-        anyhow::bail!("--max-registration-rms must be a positive finite number");
-    }
-    if !options.max_registration_drift.is_finite() || options.max_registration_drift <= 0.0 {
-        anyhow::bail!("--max-registration-drift must be a positive finite number");
-    }
-    if !options.max_registration_drift_fraction.is_finite()
-        || !(0.0..=1.0).contains(&options.max_registration_drift_fraction)
-    {
-        anyhow::bail!("--max-registration-drift-fraction must be between zero and one");
-    }
+    crate::common::validate_registration_flags(
+        options.max_registration_rms,
+        options.max_registration_drift,
+        options.max_registration_drift_fraction,
+    )?;
     if !options.min_overlap.is_finite() || !(0.0..=1.0).contains(&options.min_overlap) {
         anyhow::bail!("--min-overlap must be between zero and one");
     }
@@ -218,11 +214,8 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
     }
 
     let load_master = |path: Option<&PathBuf>| -> Result<Option<FitsFrame>> {
-        path.map(|path| {
-            FitsFrame::open(path)
-                .with_context(|| format!("failed to load calibration master {}", path.display()))
-        })
-        .transpose()
+        path.map(|path| crate::common::open_frame(path, "calibration master"))
+            .transpose()
     };
     let mut calibration_report = report_path
         .as_ref()
@@ -287,8 +280,7 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
         .as_ref()
         .map(|_| file_identity(reference_path))
         .transpose()?;
-    let reference = FitsFrame::open(reference_path)
-        .with_context(|| format!("failed to load reference {}", reference_path.display()))?;
+    let reference = crate::common::open_frame(reference_path, "reference frame")?;
     let effective_maximum_drift_pixels = stack_options
         .registration
         .effective_maximum_drift_pixels(reference.image.width, reference.image.height);
@@ -402,7 +394,7 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
                 }
             }
             FrameDisposition::Rejected(reason) => {
-                println!("rejected   {}: {reason}", path.display());
+                eprintln!("rejected   {}: {reason}", path.display());
                 if let Some(source) = source_identity {
                     admission_records.push(AdmissionRecord {
                         source,
@@ -419,17 +411,18 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
     let mut snapshot = stacker.into_snapshot()?;
     snapshot.rejected_frames = snapshot.rejected_frames.saturating_add(unreadable_frames);
     seiza_stacking::write_fits_f32(&options.output, &snapshot, &reference_headers)?;
-    println!(
-        "wrote {}: {} accepted frame(s), {} rejected frame(s), linear f32",
-        options.output.display(),
-        snapshot.accepted_frames,
-        snapshot.rejected_frames,
+    crate::common::wrote(
+        &options.output,
+        format_args!(
+            "{} accepted frame(s), {} rejected frame(s), linear f32",
+            snapshot.accepted_frames, snapshot.rejected_frames,
+        ),
     );
     if let Some(preview) = preview_path.as_ref() {
         write_preview(&snapshot.image, preview, PreviewTransfer::LinearLight)?;
-        println!(
-            "wrote {}: display stretch only (not used by the stack)",
-            preview.display()
+        crate::common::wrote(
+            preview,
+            format_args!("display stretch only (not used by the stack)"),
         );
     }
     if let Some(report_path) = report_path {
@@ -445,9 +438,9 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
             rejected_frames: snapshot.rejected_frames,
         };
         write_json_atomic(&report_path, &report)?;
-        println!(
-            "wrote {}: admission and provenance report",
-            report_path.display()
+        crate::common::wrote(
+            &report_path,
+            format_args!("admission and provenance report"),
         );
     }
     Ok(())

@@ -3,7 +3,7 @@ use seiza_stacking::LinearImage;
 use seiza_stretch::{ColorStrategy, ResolvedCurve, StretchConfig, StretchPlan};
 use std::path::Path;
 
-const MAXIMUM_SAMPLES: usize = 200_000;
+pub(crate) const MAXIMUM_SAMPLES: usize = 200_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PreviewTransfer {

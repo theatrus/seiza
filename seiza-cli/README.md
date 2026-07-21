@@ -190,8 +190,11 @@ frames are admitted atomically: incompatible images, weak registrations,
 excess transform drift, low overlap, or implausible normalization leave the
 existing additive stack unchanged. The optional `--report` JSON records
 SHA-256 identities for every source and calibration master, the complete
-configuration, and the ordered accepted/rejected disposition ledger. FITS and
-report outputs are published atomically after they are complete.
+configuration, and the ordered accepted/rejected disposition ledger. The
+reference is the first light and is always integrated, so it counts toward
+`accepted_frames` but has no entry in the per-frame `frames` ledger; that
+ledger lists only the frames pushed after it. FITS and report outputs are
+published atomically after they are complete.
 
 Mono inputs produce a one-plane linear FITS stack. Three-plane FITS/XISF inputs
 remain RGB, while raw one-shot-color frames with `BAYERPAT` are calibrated in

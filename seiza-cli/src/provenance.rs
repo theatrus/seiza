@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use seiza_stacking::paths_refer_to_same_file;
+use seiza_stacking::path_identity;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
@@ -15,16 +15,15 @@ pub(crate) struct FileIdentity {
 pub(crate) fn validate_path_roles<'a>(
     entries: impl IntoIterator<Item = (String, &'a Path)>,
 ) -> Result<()> {
-    let entries = entries.into_iter().collect::<Vec<_>>();
-    for (index, (role, path)) in entries.iter().enumerate() {
-        if let Some((other_role, other_path)) = entries[..index]
-            .iter()
-            .find(|(_, other_path)| paths_refer_to_same_file(path, other_path))
+    let mut seen = std::collections::HashMap::new();
+    for (role, path) in entries {
+        if let Some((other_role, other_path)) =
+            seen.insert(path_identity(path), (role.clone(), path))
         {
             anyhow::bail!(
-                "{role} {} refers to the same file as {other_role} {}",
-                path.display(),
-                other_path.display()
+                "{other_role} {} refers to the same file as {role} {}",
+                other_path.display(),
+                path.display()
             );
         }
     }
@@ -95,7 +94,7 @@ mod tests {
         std::fs::create_dir(directory.path().join("child")).unwrap();
         let direct = directory.path().join("output.fits");
         let aliased = directory.path().join("child/../output.fits");
-        assert!(paths_refer_to_same_file(&direct, &aliased));
+        assert_eq!(path_identity(&direct), path_identity(&aliased));
     }
 
     #[test]
