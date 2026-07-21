@@ -35,13 +35,7 @@ fn deconvolve<'py>(
             )
         })
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
-    float_array(
-        py,
-        image.width,
-        image.height,
-        image.channels,
-        restored.data,
-    )
+    float_array(py, image.width, image.height, image.channels, restored.data)
 }
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {

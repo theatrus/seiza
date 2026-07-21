@@ -109,13 +109,7 @@ impl PyBackgroundModel {
         let corrected = py
             .allow_threads(|| self.fit.correct(image.data, mode))
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        float_array(
-            py,
-            image.width,
-            image.height,
-            image.channels,
-            corrected,
-        )
+        float_array(py, image.width, image.height, image.channels, corrected)
     }
 
     fn __repr__(&self) -> String {

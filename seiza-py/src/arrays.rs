@@ -43,7 +43,7 @@ pub(crate) fn linear_image(array: PyReadonlyArrayDyn<'_, f32>) -> PyResult<Linea
         image.channels,
         image.data.to_vec(),
     )
-        .map_err(|error| PyValueError::new_err(error.to_string()))
+    .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
 fn array_shape(width: usize, height: usize, channels: usize) -> Vec<usize> {
