@@ -5,6 +5,7 @@ mod arrays;
 mod color;
 mod satellites;
 mod stacking;
+mod stretch;
 
 use numpy::{PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::{PyFileNotFoundError, PyIOError, PyRuntimeError, PyValueError};
@@ -725,6 +726,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fetch_catalogs, m)?)?;
     color::register(m)?;
     stacking::register(m)?;
+    stretch::register(m)?;
     m.add("SolveError", m.py().get_type::<SolveError>())?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())

@@ -169,6 +169,28 @@ linear-light. Foraxx-SHO/HOO use a stretched working copy as required by the
 published dynamic formula, so those returned arrays are display-referred.
 Composition releases the GIL.
 
+### Parameterized display stretching
+
+`seiza.stretch` applies the shared `seiza-stretch` model to mono `(H, W)` or
+RGB `(H, W, 3)` `float32` arrays and returns display-referred `float32` without
+eight-bit quantization:
+
+```python
+preview = seiza.stretch(linear, model="percentile-asinh",
+                        black_percentile=0.01,
+                        white_percentile=0.995, strength=10)
+preview = seiza.stretch(linear_rgb, model="auto-mtf",
+                        target_median=0.2, shadows_clip=-2.8,
+                        color_strategy="luminance-preserving")
+preview = seiza.stretch(linear, model="ghs", stretch_factor=4,
+                        local_intensity=-1, symmetry_point=0.35,
+                        protect_shadows=0.1, protect_highlights=0.8)
+```
+
+Available models are `identity`, `linear`, `asinh`, `percentile-asinh`, `mtf`,
+manual `ghs`, and `auto-mtf`; color strategies are `linked`, `unlinked`, and
+`luminance-preserving`. Analysis and application release the GIL.
+
 Calibration masters use the same bounded-memory two-pass builder:
 
 ```python

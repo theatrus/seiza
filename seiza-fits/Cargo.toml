@@ -13,6 +13,7 @@ categories = ["science", "multimedia::images", "parser-implementations"]
 
 [dependencies]
 multiversion = "0.8"
+seiza-stretch.workspace = true
 tempfile = "3"
 
 [dev-dependencies]

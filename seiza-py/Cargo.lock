@@ -1434,6 +1434,7 @@ name = "seiza-fits"
 version = "0.1.6"
 dependencies = [
  "multiversion",
+ "seiza-stretch",
  "tempfile",
 ]
 
@@ -1447,6 +1448,7 @@ dependencies = [
  "seiza",
  "seiza-satellites",
  "seiza-stacking",
+ "seiza-stretch",
  "tokio",
 ]
 
@@ -1474,6 +1476,16 @@ dependencies = [
  "rayon",
  "seiza",
  "seiza-fits",
+ "seiza-stretch",
+ "thiserror",
+]
+
+[[package]]
+name = "seiza-stretch"
+version = "0.1.0"
+dependencies = [
+ "rayon",
+ "serde",
  "thiserror",
 ]
 
