@@ -170,7 +170,9 @@ impl CatalogBundle {
     /// An existing output file is left untouched only when it is a hard link to
     /// the current cache object (proven by inode identity, not by size alone).
     /// A same-size but independent file — a stale or corrupt copy — is not that
-    /// inode, so it is reinstalled rather than trusted.
+    /// inode, so it is reinstalled rather than trusted. Identity is only checked
+    /// on Unix (see `bundle::is_same_file`); elsewhere every call reinstalls,
+    /// which re-links without re-hashing and is therefore still cheap.
     pub async fn materialize_with<F>(
         &self,
         output: impl AsRef<Path>,
@@ -818,18 +820,27 @@ mod tests {
 
         let target = output.path().join(&name);
         bundle.materialize(output.path()).await.unwrap();
-        // Same filesystem (both under the system temp dir): the output is a hard
-        // link to the cache object, so they share one inode.
-        assert!(bundle::is_same_file(&source, &target).await.unwrap());
         assert_eq!(std::fs::read(&target).unwrap(), content);
 
-        // A second run recognises the shared inode and installs nothing new.
+        // A second run must remain correct on every platform.
         let events = std::sync::Mutex::new(Vec::new());
         bundle
             .materialize_with(output.path(), |event| events.lock().unwrap().push(event))
             .await
             .unwrap();
-        assert!(events.lock().unwrap().is_empty());
+        assert_eq!(std::fs::read(&target).unwrap(), content);
+
+        // On Unix the output is a hard link to the cache object (shared inode),
+        // so the rerun recognises it and installs nothing. Elsewhere identity is
+        // unobservable (see `is_same_file`), so the rerun cheaply re-links and
+        // reports install events instead of skipping.
+        #[cfg(unix)]
+        {
+            assert!(bundle::is_same_file(&source, &target).await.unwrap());
+            assert!(events.lock().unwrap().is_empty());
+        }
+        #[cfg(not(unix))]
+        assert!(!events.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

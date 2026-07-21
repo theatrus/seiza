@@ -441,8 +441,12 @@ pub async fn replace_file(temp: &Path, target: &Path) -> Result<()> {
 /// Whether `a` and `b` resolve to the same underlying file (one inode reached
 /// through two names). For an immutable, previously verified cache object this
 /// proves the other name holds identical bytes without reading either file.
-/// Conservatively returns `false` on platforms that expose no comparable file
-/// identity, so callers fall back to reinstalling.
+///
+/// Only implemented on Unix, where `dev`+`ino` are available on stable. On other
+/// platforms (notably Windows, whose file-identity metadata is still unstable —
+/// `windows_by_handle`, rust-lang/rust#63010) it conservatively returns `false`,
+/// so callers reinstall rather than skip. That reinstall re-links the verified
+/// cache object without re-hashing, so the cost is a cheap unlink + hard link.
 pub async fn is_same_file(a: &Path, b: &Path) -> Result<bool> {
     let a_meta = tokio::fs::metadata(a)
         .await
@@ -528,9 +532,11 @@ mod tests {
             hardlink_or_copy(&source, &target).await.unwrap(),
             Installed::Linked
         );
-        // The link shares the source inode and therefore its bytes.
-        assert!(is_same_file(&source, &target).await.unwrap());
         assert_eq!(std::fs::read(&target).unwrap(), b"payload");
+        // The link shares the source inode and therefore its bytes. Identity is
+        // only observable on Unix; see `is_same_file`.
+        #[cfg(unix)]
+        assert!(is_same_file(&source, &target).await.unwrap());
     }
 
     #[tokio::test]
