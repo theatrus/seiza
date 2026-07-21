@@ -1263,7 +1263,9 @@ async fn download_prebuilt(output: PathBuf, file: Vec<String>) -> Result<()> {
     let bundle = manager
         .ensure_with(&selection, report_download_event)
         .await?;
-    let paths = bundle.materialize(&output).await?;
+    let paths = bundle
+        .materialize_with(&output, report_download_event)
+        .await?;
     println!(
         "{} dataset(s) from {} ready in {}",
         paths.len(),
@@ -1464,6 +1466,9 @@ fn report_download_event(event: seiza_download::DownloadEvent) {
                 None => println!("\r  cached {name}                         "),
             }
         }
+        DownloadEvent::Verifying { name } => println!("  verifying {name}"),
+        DownloadEvent::Installing { name, .. } => println!("  installing {name}"),
+        DownloadEvent::InstallComplete { .. } => {}
     }
 }
 

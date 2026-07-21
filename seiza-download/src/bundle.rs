@@ -368,12 +368,14 @@ async fn get(client: &reqwest::Client, url: &str) -> Result<reqwest::Response> {
 
 /// Verify that the file at `path` has exactly `bytes` length and hashes to
 /// `sha256`. `label` names the artifact in any resulting error.
+///
+/// SHA-256 over a multi-gigabyte artifact is CPU-bound, so the read-and-hash
+/// loop runs on the blocking pool rather than the async runtime thread. This
+/// keeps the caller's runtime free to report progress and to hash other
+/// artifacts concurrently.
 pub async fn verify_file(path: &Path, bytes: u64, sha256: &str, label: &str) -> Result<()> {
-    let mut input = tokio::fs::File::open(path)
-        .await
-        .map_err(|source| io("open", path, source))?;
-    let metadata = input
-        .metadata()
+    // Fail fast on a size mismatch without reading a whole wrong-sized file.
+    let metadata = tokio::fs::metadata(path)
         .await
         .map_err(|source| io("read metadata for", path, source))?;
     if metadata.len() != bytes {
@@ -384,19 +386,11 @@ pub async fn verify_file(path: &Path, bytes: u64, sha256: &str, label: &str) -> 
         });
     }
 
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; IO_BUFFER_BYTES];
-    loop {
-        let read = input
-            .read(&mut buffer)
-            .await
-            .map_err(|source| io("read", path, source))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let actual = lowercase_hex(&hasher.finalize());
+    let owned = path.to_path_buf();
+    let digest = tokio::task::spawn_blocking(move || hash_file_blocking(&owned))
+        .await
+        .map_err(|error| Error::BackgroundTask(error.to_string()))??;
+    let actual = lowercase_hex(&digest);
     if actual != sha256 {
         return Err(Error::Checksum {
             name: label.into(),
@@ -405,6 +399,26 @@ pub async fn verify_file(path: &Path, bytes: u64, sha256: &str, label: &str) -> 
         });
     }
     Ok(())
+}
+
+/// Synchronously read `path` in `IO_BUFFER_BYTES` chunks and return its raw
+/// SHA-256 digest. Runs inside `spawn_blocking`; uses `std::fs` so the blocking
+/// pool thread — not an async worker — bears the file I/O and hashing.
+fn hash_file_blocking(path: &Path) -> Result<[u8; 32]> {
+    use std::io::Read;
+    let mut input = std::fs::File::open(path).map_err(|source| io("open", path, source))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; IO_BUFFER_BYTES];
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .map_err(|source| io("read", path, source))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().into())
 }
 
 /// Cheap cache-hit probe: is `path` a regular file of exactly `bytes` length?
@@ -422,6 +436,47 @@ pub async fn replace_file(temp: &Path, target: &Path) -> Result<()> {
     tokio::fs::rename(temp, target)
         .await
         .map_err(|source| io("rename", temp, source))
+}
+
+/// Whether `a` and `b` resolve to the same underlying file (one inode reached
+/// through two names). For an immutable, previously verified cache object this
+/// proves the other name holds identical bytes without reading either file.
+/// Conservatively returns `false` on platforms that expose no comparable file
+/// identity, so callers fall back to reinstalling.
+pub async fn is_same_file(a: &Path, b: &Path) -> Result<bool> {
+    let a_meta = tokio::fs::metadata(a)
+        .await
+        .map_err(|source| io("read metadata for", a, source))?;
+    let b_meta = tokio::fs::metadata(b)
+        .await
+        .map_err(|source| io("read metadata for", b, source))?;
+    Ok(same_identity(&a_meta, &b_meta))
+}
+
+#[cfg(unix)]
+fn same_identity(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+
+#[cfg(not(unix))]
+fn same_identity(_a: &std::fs::Metadata, _b: &std::fs::Metadata) -> bool {
+    false
+}
+
+/// Install an already-verified cache object at `target`. Prefers a hard link —
+/// no bytes copied and no re-hash — and falls back to a byte copy when linking
+/// fails (a different filesystem, or one that does not support hard links).
+/// `target` must not already exist. Because the source is a content-addressed,
+/// previously verified artifact, the installed file inherits its integrity.
+pub async fn hardlink_or_copy(source: &Path, target: &Path) -> Result<()> {
+    if tokio::fs::hard_link(source, target).await.is_ok() {
+        return Ok(());
+    }
+    tokio::fs::copy(source, target)
+        .await
+        .map(|_| ())
+        .map_err(|error| io("copy cached artifact to", target, error))
 }
 
 /// Monotonic per-process counter for unique temporary filenames.
