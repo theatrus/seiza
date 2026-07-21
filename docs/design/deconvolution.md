@@ -70,6 +70,6 @@ artifacts.
   with model identity and uncertainty, rather than another Richardson-Lucy mode.
 
 See the [real-corpus examples](../benchmarks/2026-07-deconvolution-corpus.md)
-for the first measured before/after trial and the
+for the first measured classical/learned comparison and the
 [model-based restoration plan](ml-restoration-training.md) for a training-data,
 evaluation, and deployment proposal.

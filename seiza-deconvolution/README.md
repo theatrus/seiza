@@ -31,6 +31,6 @@ motion, saturated stars, or complex optical wings. See the
 [design note](https://github.com/theatrus/seiza/blob/main/docs/design/deconvolution.md)
 for limits and next steps.
 The repository also includes
-[real-corpus before/after examples](https://github.com/theatrus/seiza/blob/main/docs/benchmarks/2026-07-deconvolution-corpus.md)
+[real-corpus Seiza/BlurXTerminator comparisons](https://github.com/theatrus/seiza/blob/main/docs/benchmarks/2026-07-deconvolution-corpus.md)
 and a
 [model-based restoration training plan](https://github.com/theatrus/seiza/blob/main/docs/design/ml-restoration-training.md).
