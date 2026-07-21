@@ -1,8 +1,7 @@
-use crate::arrays::{into_image_array, linear_image};
+use crate::arrays::{float_array, float_image_view};
 use numpy::{PyArrayDyn, PyReadonlyArrayDyn};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use seiza_stacking::LinearImage;
 use seiza_stretch::{ColorStrategy, GhsParams, StretchConfig, StretchModel, StretchParams};
 
 #[pyfunction]
@@ -77,8 +76,7 @@ fn stretch<'py>(
             ));
         }
     };
-    let image = linear_image(image)?;
-    let (width, height, channels) = (image.width, image.height, image.channels);
+    let image = float_image_view(&image)?;
     let config = StretchConfig {
         model,
         color_strategy,
@@ -86,13 +84,11 @@ fn stretch<'py>(
     };
     let data = py
         .allow_threads(move || {
-            let plan = config.resolve_for(&image.data, channels)?;
-            plan.apply_f32(&image.data, channels)
+            let plan = config.resolve_for(image.data, image.channels)?;
+            plan.apply_f32(image.data, image.channels)
         })
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
-    let output = LinearImage::new(width, height, channels, data)
-        .map_err(|error| PyValueError::new_err(error.to_string()))?;
-    into_image_array(py, output)
+    float_array(py, image.width, image.height, image.channels, data)
 }
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {

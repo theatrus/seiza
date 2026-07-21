@@ -4,9 +4,18 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use seiza_stacking::LinearImage;
 
-pub(crate) fn linear_image(array: PyReadonlyArrayDyn<'_, f32>) -> PyResult<LinearImage> {
-    let shape = array.shape();
-    let (height, width, channels) = match shape {
+#[derive(Clone, Copy)]
+pub(crate) struct FloatImageView<'a> {
+    pub(crate) data: &'a [f32],
+    pub(crate) width: usize,
+    pub(crate) height: usize,
+    pub(crate) channels: usize,
+}
+
+pub(crate) fn float_image_view<'a>(
+    array: &'a PyReadonlyArrayDyn<'_, f32>,
+) -> PyResult<FloatImageView<'a>> {
+    let (height, width, channels) = match array.shape() {
         [height, width] => (*height, *width, 1),
         [height, width, 3] => (*height, *width, 3),
         _ => {
@@ -17,9 +26,23 @@ pub(crate) fn linear_image(array: PyReadonlyArrayDyn<'_, f32>) -> PyResult<Linea
     };
     let data = array
         .as_slice()
-        .map_err(|_| PyValueError::new_err("image arrays must be C-contiguous"))?
-        .to_vec();
-    LinearImage::new(width, height, channels, data)
+        .map_err(|_| PyValueError::new_err("image arrays must be C-contiguous"))?;
+    Ok(FloatImageView {
+        data,
+        width,
+        height,
+        channels,
+    })
+}
+
+pub(crate) fn linear_image(array: PyReadonlyArrayDyn<'_, f32>) -> PyResult<LinearImage> {
+    let image = float_image_view(&array)?;
+    LinearImage::new(
+        image.width,
+        image.height,
+        image.channels,
+        image.data.to_vec(),
+    )
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 

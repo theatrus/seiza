@@ -209,6 +209,10 @@ seiza deconvolve stack-bg.fits --output stack-light-dc.fits \
   --psf-fwhm 3.1 --iterations 4 --amount 0.35
 ```
 
+The Python wheel exposes the same operation as
+`seiza.deconvolve(image, psf_fwhm=3.1)`. Native consumers can call
+`seiza_deconvolve_in_place` from the generated C ABI header.
+
 This is an explicit symmetric-Gaussian PSF model, not blind sharpening or a
 learned reconstruction. Use it before display stretching and inspect for noise,
 rings, and field-dependent failures. Raw Bayer mosaics are rejected. See the

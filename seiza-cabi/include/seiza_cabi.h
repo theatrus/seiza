@@ -108,6 +108,29 @@ extern "C" {
 const char *seiza_core_version(void);
 
 /*
+ Applies damped Richardson-Lucy deconvolution to interleaved linear `float`
+ samples in place. `channels` must be one or three and `data_length` must
+ equal `width * height * channels`. RGB samples are pixel-interleaved.
+ The operation is synchronous, retains no pointer after returning, and leaves
+ the input unchanged when validation or restoration fails.
+
+ # Safety
+ `data` must point to `data_length` writable floats. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+bool seiza_deconvolve_in_place(float *data,
+                               size_t data_length,
+                               size_t width,
+                               size_t height,
+                               size_t channels,
+                               float psf_fwhm_pixels,
+                               size_t iterations,
+                               float amount,
+                               float noise_fraction,
+                               float max_correction,
+                               char **error_out);
+
+/*
  Fits a compact background model to interleaved linear `float` samples.
 
  `channels` must be one or three and `data_length` must equal

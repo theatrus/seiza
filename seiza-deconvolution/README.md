@@ -20,6 +20,10 @@ defaults use four iterations, blend only 35% of the estimate into the original,
 damp corrections near the configured channel-relative noise floor, limit each
 iteration's correction, and renormalize flux per channel.
 
+The Python wheel exposes `seiza.deconvolve(image, psf_fwhm=3.1)` for
+C-contiguous NumPy arrays. Native applications can use
+`seiza_deconvolve_in_place` from the generated `seiza-cabi` header.
+
 Use it after calibration, stacking, and background correction, but before any
 display stretch. Raw Bayer mosaics should be debayered first. The algorithm
 supports finite mono and interleaved RGB `f32` samples in arbitrary linear

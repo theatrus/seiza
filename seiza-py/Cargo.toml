@@ -9,7 +9,7 @@ rust-version = "1.89"
 license = "Apache-2.0"
 repository = "https://github.com/theatrus/seiza"
 authors = ["Yann Ramin <github@theatr.us>"]
-description = "Python bindings for Seiza astrometry, satellite prediction, and image stacking"
+description = "Python bindings for Seiza astrometry and astrophotography image processing"
 readme = "README.md"
 publish = false
 
@@ -31,6 +31,7 @@ extension-module = ["pyo3/extension-module"]
 [dependencies]
 seiza = { path = "../seiza", features = ["downloads"] }
 seiza-background = { path = "../seiza-background" }
+seiza-deconvolution = { path = "../seiza-deconvolution" }
 seiza-satellites = { path = "../seiza-satellites" }
 seiza-stacking = { path = "../seiza-stacking" }
 seiza-stretch = { path = "../seiza-stretch" }

@@ -4,12 +4,12 @@ build-backend = "maturin"
 
 [project]
 name = "seiza"
-description = "Astrometry, satellite prediction, and image stacking for astrophotography"
+description = "Astrometry and image processing for astrophotography"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Yann Ramin", email = "github@theatr.us" }]
 requires-python = ">=3.9"
-keywords = ["astronomy", "astrophotography", "plate-solving", "wcs", "astrometry", "image-stacking"]
+keywords = ["astronomy", "astrophotography", "plate-solving", "wcs", "astrometry", "image-stacking", "deconvolution"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
