@@ -271,7 +271,10 @@ impl CommonArgs {
                 max_samples: self.normalization_samples,
             },
         };
-        ColorOptions { normalization }
+        ColorOptions {
+            normalization,
+            ..ColorOptions::default()
+        }
     }
 
     fn registrar(&self, reference: &LinearImage) -> Result<Option<Registrar>> {

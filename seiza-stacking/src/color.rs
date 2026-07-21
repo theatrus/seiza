@@ -32,6 +32,12 @@ impl Default for ColorNormalization {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ColorOptions {
     pub normalization: ColorNormalization,
+    /// Transfer already applied to the input channels.
+    ///
+    /// Display-referred inputs must use [`ColorNormalization::None`]. This is
+    /// intended for callers that independently stretch each registered mono
+    /// channel before composition.
+    pub input_transfer: ColorTransfer,
 }
 
 /// Display preparation applied before a dynamic Foraxx composition.
@@ -53,8 +59,9 @@ impl Default for ForaxxOptions {
 }
 
 /// Whether output samples remain linear-light or have a display transfer applied.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ColorTransfer {
+    #[default]
     LinearLight,
     DisplayReferred,
 }
@@ -190,7 +197,7 @@ pub fn combine_rgb(
     blue: &LinearImage,
     options: &ColorOptions,
 ) -> Result<ColorComposition> {
-    validate_normalization(options.normalization)?;
+    validate_options(options)?;
     validate_mono_set(&[("red", red), ("green", green), ("blue", blue)])?;
     let channels = [
         prepare_channel(red, options.normalization)?,
@@ -213,7 +220,7 @@ pub fn combine_rgb(
         });
     Ok(ColorComposition {
         image: LinearImage::new(red.width, red.height, 3, data)?,
-        transfer: ColorTransfer::LinearLight,
+        transfer: options.input_transfer,
     })
 }
 
@@ -235,7 +242,7 @@ pub fn combine_lrgb(
             "luminance weight must be finite and between 0 and 1".into(),
         ));
     }
-    validate_normalization(options.normalization)?;
+    validate_options(options)?;
     validate_mono_set(&[
         ("luminance", luminance),
         ("red", red),
@@ -274,7 +281,7 @@ pub fn combine_lrgb(
         });
     Ok(ColorComposition {
         image: LinearImage::new(luminance.width, luminance.height, 3, data)?,
-        transfer: ColorTransfer::LinearLight,
+        transfer: options.input_transfer,
     })
 }
 
@@ -287,7 +294,7 @@ pub fn combine_narrowband(
     options: &ColorOptions,
     foraxx: &ForaxxOptions,
 ) -> Result<ColorComposition> {
-    validate_normalization(options.normalization)?;
+    validate_options(options)?;
     let sii = if palette.requires_sii() {
         Some(
             sii.ok_or_else(|| Error::Color(format!("{} requires an SII channel", palette.name())))?,
@@ -307,16 +314,34 @@ pub fn combine_narrowband(
         .transpose()?;
 
     if let Some(matrix) = palette.matrix() {
-        return combine_prepared_matrix(ha.width, ha.height, h, o, s, matrix);
+        return combine_prepared_matrix(
+            ha.width,
+            ha.height,
+            h,
+            o,
+            s,
+            matrix,
+            options.input_transfer,
+        );
     }
 
-    validate_foraxx_options(foraxx)?;
-    let maximum_samples = normalization_sample_limit(options.normalization);
-    let h_display = display_transform(h, foraxx, maximum_samples)?;
-    let o_display = display_transform(o, foraxx, maximum_samples)?;
-    let s_display = s
-        .map(|channel| display_transform(channel, foraxx, maximum_samples))
-        .transpose()?;
+    let (h_display, o_display, s_display) = match options.input_transfer {
+        ColorTransfer::LinearLight => {
+            validate_foraxx_options(foraxx)?;
+            let maximum_samples = normalization_sample_limit(options.normalization);
+            (
+                display_transform(h, foraxx, maximum_samples)?,
+                display_transform(o, foraxx, maximum_samples)?,
+                s.map(|channel| display_transform(channel, foraxx, maximum_samples))
+                    .transpose()?,
+            )
+        }
+        ColorTransfer::DisplayReferred => (
+            ResolvedCurve::Identity,
+            ResolvedCurve::Identity,
+            s.map(|_| ResolvedCurve::Identity),
+        ),
+    };
     let mut data = vec![0.0; ha.pixel_count() * 3];
     data.par_chunks_mut(3)
         .enumerate()
@@ -360,7 +385,7 @@ pub fn combine_narrowband_matrix(
     matrix: NarrowbandMatrix,
     options: &ColorOptions,
 ) -> Result<ColorComposition> {
-    validate_normalization(options.normalization)?;
+    validate_options(options)?;
     validate_matrix(matrix)?;
     let uses_sii = matrix_uses_sii(matrix);
     let sii = if uses_sii {
@@ -380,7 +405,7 @@ pub fn combine_narrowband_matrix(
     let s = sii
         .map(|image| prepare_channel(image, options.normalization))
         .transpose()?;
-    combine_prepared_matrix(ha.width, ha.height, h, o, s, matrix)
+    combine_prepared_matrix(ha.width, ha.height, h, o, s, matrix, options.input_transfer)
 }
 
 fn combine_prepared_matrix(
@@ -390,6 +415,7 @@ fn combine_prepared_matrix(
     oiii: PreparedChannel<'_>,
     sii: Option<PreparedChannel<'_>>,
     matrix: NarrowbandMatrix,
+    transfer: ColorTransfer,
 ) -> Result<ColorComposition> {
     let mut data = vec![0.0; width * height * 3];
     data.par_chunks_mut(3)
@@ -414,7 +440,7 @@ fn combine_prepared_matrix(
         });
     Ok(ColorComposition {
         image: LinearImage::new(width, height, 3, data)?,
-        transfer: ColorTransfer::LinearLight,
+        transfer,
     })
 }
 
@@ -586,6 +612,18 @@ fn validate_normalization(normalization: ColorNormalization) -> Result<()> {
     Ok(())
 }
 
+fn validate_options(options: &ColorOptions) -> Result<()> {
+    validate_normalization(options.normalization)?;
+    if options.input_transfer == ColorTransfer::DisplayReferred
+        && options.normalization != ColorNormalization::None
+    {
+        return Err(Error::Color(
+            "display-referred inputs must disable color normalization".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_matrix(matrix: NarrowbandMatrix) -> Result<()> {
     if [matrix.red, matrix.green, matrix.blue]
         .into_iter()
@@ -634,6 +672,14 @@ mod tests {
     fn raw_options() -> ColorOptions {
         ColorOptions {
             normalization: ColorNormalization::None,
+            input_transfer: ColorTransfer::LinearLight,
+        }
+    }
+
+    fn display_options() -> ColorOptions {
+        ColorOptions {
+            normalization: ColorNormalization::None,
+            input_transfer: ColorTransfer::DisplayReferred,
         }
     }
 
@@ -720,6 +766,19 @@ mod tests {
     }
 
     #[test]
+    fn rgb_preserves_display_prepared_channels_and_transfer() {
+        let result = combine_rgb(
+            &mono(&[0.1, 0.2]),
+            &mono(&[0.3, 0.4]),
+            &mono(&[0.5, 0.6]),
+            &display_options(),
+        )
+        .unwrap();
+        assert_eq!(result.transfer, ColorTransfer::DisplayReferred);
+        assert_eq!(result.image.data, [0.1, 0.3, 0.5, 0.2, 0.4, 0.6]);
+    }
+
+    #[test]
     fn lrgb_replaces_luminance_without_changing_rgb_ratios() {
         let result = combine_lrgb(
             &mono(&[0.8]),
@@ -788,6 +847,31 @@ mod tests {
     }
 
     #[test]
+    fn foraxx_uses_display_prepared_inputs_without_a_second_stretch() {
+        let h = 0.6_f32;
+        let o = 0.4_f32;
+        let result = combine_narrowband(
+            &mono(&[h]),
+            &mono(&[o]),
+            None,
+            NarrowbandPalette::ForaxxHoo,
+            &display_options(),
+            &ForaxxOptions {
+                target_median: f32::NAN,
+                shadows_clip: 1.0,
+            },
+        )
+        .unwrap();
+        let product = h * o;
+        let factor = product.powf(1.0 - product);
+        let expected_green = factor.mul_add(h, (1.0 - factor) * o);
+        assert_eq!(result.image.data[0], h);
+        assert!((result.image.data[1] - expected_green).abs() < 1.0e-6);
+        assert_eq!(result.image.data[2], o);
+        assert_eq!(result.transfer, ColorTransfer::DisplayReferred);
+    }
+
+    #[test]
     fn foraxx_working_stretch_places_the_median_at_its_target() {
         let image = mono(&[0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.90]);
         let channel = prepare_channel(&image, ColorNormalization::None).unwrap();
@@ -821,6 +905,7 @@ mod tests {
                 white_percentile: 1.0,
                 max_samples: 100,
             },
+            input_transfer: ColorTransfer::LinearLight,
         };
         let result = combine_rgb(
             &mono(&[10.0, 20.0]),
@@ -830,6 +915,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.image.data, [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn display_prepared_inputs_reject_percentile_normalization() {
+        let options = ColorOptions {
+            input_transfer: ColorTransfer::DisplayReferred,
+            ..ColorOptions::default()
+        };
+        let error = combine_rgb(
+            &mono(&[0.1, 0.2]),
+            &mono(&[0.3, 0.4]),
+            &mono(&[0.5, 0.6]),
+            &options,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("display-referred inputs must disable color normalization")
+        );
     }
 
     #[test]

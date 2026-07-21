@@ -101,6 +101,161 @@ pub struct StretchConfig {
     pub max_analysis_samples: usize,
 }
 
+/// One or more display-stretch configurations applied in order.
+///
+/// Every stage resolves against the output of the previous stage. Intermediate
+/// samples remain `f32`; conversion to an integer display format happens only
+/// after the final stage. A stack is never empty.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<StretchConfig>", into = "Vec<StretchConfig>")]
+pub struct StretchStack {
+    stages: Vec<StretchConfig>,
+}
+
+/// Fine-grained lifecycle emitted while one stretch-stack stage is processed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StretchStageState {
+    Resolving,
+    Applying,
+    Completed,
+}
+
+/// Progress for one stage in an ordered stretch stack.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StretchStageProgress {
+    /// Zero-based index of the active stage.
+    pub stage_index: usize,
+    pub stage_count: usize,
+    pub state: StretchStageState,
+}
+
+/// Output pixels and the resolved plan retained for every applied stage.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StretchStackOutput<T> {
+    pub data: Vec<T>,
+    pub plans: Vec<StretchPlan>,
+}
+
+impl StretchStack {
+    pub fn new(stages: Vec<StretchConfig>) -> Result<Self> {
+        if stages.is_empty() {
+            return Err(StretchError::Invalid(
+                "stretch stack must contain at least one stage".into(),
+            ));
+        }
+        Ok(Self { stages })
+    }
+
+    pub fn single(config: StretchConfig) -> Self {
+        Self {
+            stages: vec![config],
+        }
+    }
+
+    pub fn stages(&self) -> &[StretchConfig] {
+        &self.stages
+    }
+
+    pub fn len(&self) -> usize {
+        self.stages.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+
+    /// Apply every stage and retain a display-referred `f32` result.
+    pub fn apply_f32(&self, data: &[f32], channel_count: usize) -> Result<StretchStackOutput<f32>> {
+        self.apply_f32_with_progress(data, channel_count, |_| {})
+    }
+
+    /// Apply every stage, reporting resolve/apply/completion boundaries.
+    pub fn apply_f32_with_progress(
+        &self,
+        data: &[f32],
+        channel_count: usize,
+        progress: impl FnMut(StretchStageProgress),
+    ) -> Result<StretchStackOutput<f32>> {
+        apply_stack_f32(&self.stages, data, channel_count, progress)
+    }
+
+    /// Apply every stage and convert the final display result to `u8`.
+    pub fn apply_u8(&self, data: &[f32], channel_count: usize) -> Result<StretchStackOutput<u8>> {
+        self.apply_u8_with_progress(data, channel_count, |_| {})
+    }
+
+    /// Apply every stage, reporting resolve/apply/completion boundaries, and
+    /// convert to `u8` only after the final stage.
+    pub fn apply_u8_with_progress(
+        &self,
+        data: &[f32],
+        channel_count: usize,
+        mut progress: impl FnMut(StretchStageProgress),
+    ) -> Result<StretchStackOutput<u8>> {
+        let output = apply_stack_f32(&self.stages, data, channel_count, &mut progress)?;
+        let data = output.data.into_par_iter().map(to_u8).collect::<Vec<_>>();
+        Ok(StretchStackOutput {
+            data,
+            plans: output.plans,
+        })
+    }
+}
+
+impl TryFrom<Vec<StretchConfig>> for StretchStack {
+    type Error = StretchError;
+
+    fn try_from(stages: Vec<StretchConfig>) -> Result<Self> {
+        Self::new(stages)
+    }
+}
+
+impl From<StretchStack> for Vec<StretchConfig> {
+    fn from(stack: StretchStack) -> Self {
+        stack.stages
+    }
+}
+
+fn apply_stack_f32(
+    stages: &[StretchConfig],
+    data: &[f32],
+    channel_count: usize,
+    mut progress: impl FnMut(StretchStageProgress),
+) -> Result<StretchStackOutput<f32>> {
+    let mut current = data.to_vec();
+    let mut plans = Vec::with_capacity(stages.len());
+    for (stage_index, config) in stages.iter().enumerate() {
+        let event = |state| StretchStageProgress {
+            stage_index,
+            stage_count: stages.len(),
+            state,
+        };
+        progress(event(StretchStageState::Resolving));
+        let plan = config
+            .resolve_for(&current, channel_count)
+            .map_err(|error| {
+                StretchError::Invalid(format!(
+                    "failed to resolve stretch stage {}/{}: {error}",
+                    stage_index + 1,
+                    stages.len()
+                ))
+            })?;
+        progress(event(StretchStageState::Applying));
+        current = plan.apply_f32(&current, channel_count).map_err(|error| {
+            StretchError::Invalid(format!(
+                "failed to apply stretch stage {}/{}: {error}",
+                stage_index + 1,
+                stages.len()
+            ))
+        })?;
+        plans.push(plan);
+        progress(event(StretchStageState::Completed));
+    }
+    Ok(StretchStackOutput {
+        data: current,
+        plans,
+    })
+}
+
 impl StretchConfig {
     pub fn percentile_asinh(
         black_percentile: f64,
@@ -1254,6 +1409,72 @@ mod tests {
         let encoded = serde_json::to_string(&config).unwrap();
         let decoded = serde_json::from_str::<StretchConfig>(&encoded).unwrap();
         assert_eq!(decoded, config);
+    }
+
+    #[test]
+    fn ordered_stack_resolves_each_stage_against_the_previous_output() {
+        let stack = StretchStack::new(vec![
+            StretchConfig {
+                model: StretchModel::Linear {
+                    black: 0.0,
+                    white: 0.8,
+                },
+                color_strategy: ColorStrategy::Linked,
+                max_analysis_samples: 16,
+            },
+            StretchConfig {
+                model: StretchModel::Linear {
+                    black: 0.25,
+                    white: 0.75,
+                },
+                color_strategy: ColorStrategy::Linked,
+                max_analysis_samples: 16,
+            },
+        ])
+        .unwrap();
+        let mut events = Vec::new();
+        let output = stack
+            .apply_f32_with_progress(&[0.0, 0.2, 0.4, 0.8], 1, |event| events.push(event))
+            .unwrap();
+        assert_eq!(output.data, [0.0, 0.0, 0.5, 1.0]);
+        assert_eq!(output.plans.len(), 2);
+        assert_eq!(events.len(), 6);
+        assert_eq!(events[0].state, StretchStageState::Resolving);
+        assert_eq!(events[2].state, StretchStageState::Completed);
+        assert_eq!(events[3].stage_index, 1);
+        assert_eq!(events[5].state, StretchStageState::Completed);
+    }
+
+    #[test]
+    fn ordered_stack_converts_to_u8_only_after_the_final_stage() {
+        let stack = StretchStack::new(vec![
+            StretchConfig {
+                model: StretchModel::Linear {
+                    black: 0.0,
+                    white: 0.75,
+                },
+                color_strategy: ColorStrategy::Linked,
+                max_analysis_samples: 4,
+            },
+            StretchConfig {
+                model: StretchModel::Linear {
+                    black: 0.0,
+                    white: 0.5,
+                },
+                color_strategy: ColorStrategy::Linked,
+                max_analysis_samples: 4,
+            },
+        ])
+        .unwrap();
+        let output = stack.apply_u8(&[0.1875], 1).unwrap();
+        assert_eq!(output.data, [128]);
+        assert_eq!(output.plans.len(), 2);
+    }
+
+    #[test]
+    fn ordered_stack_rejects_empty_construction_and_deserialization() {
+        assert!(StretchStack::new(Vec::new()).is_err());
+        assert!(serde_json::from_str::<StretchStack>("[]").is_err());
     }
 
     #[test]

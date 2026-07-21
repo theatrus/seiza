@@ -31,7 +31,10 @@ fn options(
             ));
         }
     };
-    Ok(ColorOptions { normalization })
+    Ok(ColorOptions {
+        normalization,
+        ..ColorOptions::default()
+    })
 }
 
 #[pyfunction]
