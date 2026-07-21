@@ -275,7 +275,10 @@ impl RgbStretchMode {
     }
 }
 
-#[repr(C)]
+/// An opaque, owned rendered image. C sees only a pointer; release it with
+/// [`seiza_rendered_image_free`]. Not `repr(C)`: it is only ever handed to C as
+/// an opaque pointer, so its layout is private (and cbindgen forward-declares
+/// it).
 pub struct SeizaRenderedImage {
     width: u32,
     height: u32,

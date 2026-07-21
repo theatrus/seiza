@@ -27,7 +27,18 @@ exposes the **superset** of what both apps need.
 
 Rendered-image metadata includes input and display histograms.
 
-The full C declarations live in [`include/seiza_cabi.h`](include/seiza_cabi.h).
+The full C declarations, plus the memory-ownership contract (which returns are
+owned vs. borrowed, and which `seiza_*_free` to call), live in
+[`include/seiza_cabi.h`](include/seiza_cabi.h).
+
+## The C header is generated
+
+`include/seiza_cabi.h` is generated from the Rust source by
+[cbindgen](https://github.com/mozilla/cbindgen) via `build.rs`, using
+[`cbindgen.toml`](cbindgen.toml). Do not edit it by hand — change the Rust FFI
+signatures/docs (or `cbindgen.toml`) and run `cargo build -p seiza-cabi`, which
+rewrites the header only when it changes. CI (the `lint` job) fails if a source
+change lands without a regenerated header.
 
 ## Building
 
