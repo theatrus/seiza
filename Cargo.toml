@@ -10,6 +10,7 @@ members = [
     "seiza-fits",
     "seiza-satellites",
     "seiza-stacking",
+    "seiza-stats",
     "seiza-stretch",
     "seiza-sources",
     "seiza-xisf",
@@ -31,6 +32,7 @@ seiza-download = { path = "seiza-download", version = "0.5.0" }
 seiza-fits = { path = "seiza-fits", version = "0.1.6" }
 seiza-satellites = { path = "seiza-satellites", version = "0.4.1" }
 seiza-stacking = { path = "seiza-stacking", version = "0.1.0" }
+seiza-stats = { path = "seiza-stats", version = "0.1.0" }
 seiza-stretch = { path = "seiza-stretch", version = "0.1.0" }
 seiza-sources = { path = "seiza-sources", version = "0.2.0" }
 seiza-xisf = { path = "seiza-xisf", version = "0.1.0" }

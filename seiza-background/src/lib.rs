@@ -1,6 +1,7 @@
 //! Robust background and gradient modelling for linear astrophotography images.
 
 use rayon::prelude::*;
+use seiza_stats::{median_f64 as median, median_in_place, robust_sigma_in_place};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -217,7 +218,8 @@ pub fn fit_background_masked(
 
     let dispersions: Vec<f64> = samples.iter().map(|sample| sample.dispersion).collect();
     let dispersion_median = median(&dispersions).unwrap_or(0.0);
-    let dispersion_sigma = robust_sigma(&dispersions, dispersion_median);
+    let dispersion_sigma =
+        seiza_stats::robust_sigma_f64(&dispersions, dispersion_median).unwrap_or(0.0);
     let noise_limit = dispersion_median + config.sample_rejection_sigma * dispersion_sigma;
     for sample in &mut samples {
         if dispersion_sigma > 0.0 && sample.dispersion > noise_limit {
@@ -273,7 +275,10 @@ pub fn fit_background_masked(
                     .map(|(_, residuals)| residuals[channel])
                     .collect();
                 let center = median(&values).unwrap_or(0.0);
-                (center, robust_sigma(&values, center))
+                (
+                    center,
+                    seiza_stats::robust_sigma_f64(&values, center).unwrap_or(0.0),
+                )
             })
             .collect();
         if channel_limits.iter().all(|(_, sigma)| *sigma <= 1.0e-12) {
@@ -310,9 +315,12 @@ pub fn fit_background_masked(
                 .filter(|sample| sample.status == SampleStatus::Accepted)
                 .map(|sample| sample.values[channel])
                 .collect();
-            median(&values).expect("a fitted model always has accepted samples")
+            median(&values).ok_or(Error::NotEnoughSamples {
+                found: 0,
+                required: 1,
+            })
         })
-        .collect();
+        .collect::<Result<_>>()?;
     let rejected_noise = samples
         .iter()
         .filter(|sample| sample.status == SampleStatus::RejectedNoise)
@@ -840,15 +848,10 @@ fn window_statistics(
     let mut medians = Vec::with_capacity(channels);
     let mut dispersions = Vec::with_capacity(channels);
     for channel_values in &mut values {
-        channel_values.sort_unstable_by(f32::total_cmp);
-        let channel_median = median_sorted_f32(channel_values);
-        let mut deviations: Vec<f32> = channel_values
-            .iter()
-            .map(|value| (*value - channel_median).abs())
-            .collect();
-        deviations.sort_unstable_by(f32::total_cmp);
+        let channel_median = median_in_place(channel_values)?;
+        let dispersion = robust_sigma_in_place(channel_values, channel_median)?;
         medians.push(f64::from(channel_median));
-        dispersions.push(f64::from(median_sorted_f32(&deviations)) * 1.4826);
+        dispersions.push(f64::from(dispersion));
     }
     Some(RawSample {
         x,
@@ -858,15 +861,6 @@ fn window_statistics(
         weight: 1.0,
         status: SampleStatus::Accepted,
     })
-}
-
-fn median_sorted_f32(values: &[f32]) -> f32 {
-    let middle = values.len() / 2;
-    if values.len() & 1 == 0 {
-        (values[middle - 1] + values[middle]) * 0.5
-    } else {
-        values[middle]
-    }
 }
 
 fn accepted_count(samples: &[RawSample]) -> usize {
@@ -992,25 +986,6 @@ fn normalized_coordinate(value: usize, extent: usize) -> f64 {
     } else {
         2.0 * value as f64 / (extent - 1) as f64 - 1.0
     }
-}
-
-fn median(values: &[f64]) -> Option<f64> {
-    if values.is_empty() {
-        return None;
-    }
-    let mut sorted = values.to_vec();
-    sorted.sort_unstable_by(f64::total_cmp);
-    let middle = sorted.len() / 2;
-    Some(if sorted.len() & 1 == 0 {
-        (sorted[middle - 1] + sorted[middle]) * 0.5
-    } else {
-        sorted[middle]
-    })
-}
-
-fn robust_sigma(values: &[f64], center: f64) -> f64 {
-    let deviations: Vec<f64> = values.iter().map(|value| (*value - center).abs()).collect();
-    median(&deviations).unwrap_or(0.0) * 1.4826
 }
 
 #[cfg(test)]

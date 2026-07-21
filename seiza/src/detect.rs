@@ -2,6 +2,7 @@
 //! connected components, and flux-weighted centroids.
 
 use image::GenericImageView;
+use seiza_stats::{median_in_place, robust_sigma_in_place};
 
 /// A detected star in pixel coordinates (0-indexed, sub-pixel centroid).
 #[derive(Debug, Clone, PartialEq)]
@@ -362,14 +363,10 @@ fn estimate_background(
                 let row = (y * width) as usize;
                 tile.extend_from_slice(&pixels[row + (tx * tile_size) as usize..row + x1 as usize]);
             }
-            let median = median_in_place(&mut tile);
-            for v in &mut tile {
-                *v = (*v - median).abs();
-            }
-            let mad = median_in_place(&mut tile);
-            // 1.4826 * MAD estimates sigma for a normal distribution; floor
-            // avoids a zero threshold on perfectly flat synthetic tiles
-            (median, (1.4826 * mad).max(1e-6))
+            let median = median_in_place(&mut tile).unwrap_or(0.0);
+            let sigma = robust_sigma_in_place(&mut tile, median).unwrap_or(0.0);
+            // floor avoids a zero threshold on perfectly flat synthetic tiles
+            (median, sigma.max(1e-6))
         })
         .unzip()
 }
@@ -525,15 +522,6 @@ fn elongation(mxx: f64, myy: f64, mxy: f64) -> f64 {
     let l1 = ((trace + root) / 2.0).max(0.0);
     let l2 = ((trace - root) / 2.0).max(1e-12);
     (l1 / l2).sqrt()
-}
-
-fn median_in_place(values: &mut [f32]) -> f32 {
-    if values.is_empty() {
-        return 0.0;
-    }
-    let mid = values.len() / 2;
-    let (_, median, _) = values.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
-    *median
 }
 
 #[cfg(test)]

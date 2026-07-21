@@ -21,6 +21,7 @@ thiserror.workspace = true
 seiza-download = { workspace = true, optional = true }
 memmap2.workspace = true
 rayon.workspace = true
+seiza-stats.workspace = true
 rustc-hash.workspace = true
 wide.workspace = true
 multiversion.workspace = true
