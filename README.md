@@ -20,8 +20,26 @@ upload an image, and get a solution and object overlay in your browser. The
 site runs [seiza-server](https://github.com/theatrus/seiza-server); the CLI
 can submit to the same server with `seiza worker --server`.
 
+## Native apps
+
+The same Rust engine drives two real desktop apps through
+[`seiza-cabi`](seiza-cabi/README.md):
+
+- 🍎 **[Seiza for Mac](https://github.com/theatrus/seiza-mac)** — a fast,
+  native FITS viewer and plate solver. Browse whole folders with thumbnails,
+  stretch live with a reorderable stack editor, subtract gradients, blind
+  solve on your machine with no uploads, and export images with overlays.
+  Quick Look previews included. macOS 15+, Apple silicon and Intel.
+- 🪟 **[Seiza for Windows](https://github.com/theatrus/seiza-win)** — a
+  first-class native WinUI 3 viewer and solver. GPU-accelerated pan and
+  zoom, per-channel color rendering, background plate solving with star,
+  deep-sky, and motion overlays, and built-in catalog install, verify, and
+  repair. Windows 11.
+
 ## Install
 
+- **🍎 macOS app** — download the DMG from the
+  [Seiza for Mac releases](https://github.com/theatrus/seiza-mac/releases).
 - **Windows** — download the MSI installer from the
   [releases](https://github.com/theatrus/seiza/releases). It puts `seiza` on
   your `PATH` and offers to download catalogs for you when it finishes.
@@ -36,6 +54,8 @@ compiler, formatter, and linter.
 
 ## Ways to use it
 
+- 🍎🪟 **On your desktop** — the [native Mac and Windows apps](#native-apps)
+  above: browse, stretch, solve, and export without touching a terminal.
 - **As N.I.N.A.'s plate solver** — seiza answers ASTAP's command line, so
   select ASTAP in N.I.N.A. and point it at `seiza.exe`. No plugin needed.
   [Steps below](#use-with-nina-astap-compatible-mode).
@@ -79,6 +99,27 @@ compiler, formatter, and linter.
   caching), [`seiza-satellites`](seiza-satellites/README.md) (single-exposure
   satellite track prediction), and [`seiza-sources`](seiza-sources/README.md)
   (raw upstream data for custom catalog builds).
+
+## Feature matrix
+
+Every surface runs the same engine; pick the one that fits.
+
+| Feature | CLI | Python | C ABI | 🍎 Mac app | 🪟 Windows app |
+|---|:-:|:-:|:-:|:-:|:-:|
+| Plate solving — hinted and blind | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Star, deep-sky, and motion overlays | ✓ | — | ✓ | ✓ | ✓ |
+| Image browsing and native rendering | — | — | ✓ | ✓ | ✓ |
+| Display stretching | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Batch and live stacking | ✓ | ✓ | ✓ | — | — |
+| Calibration masters | ✓ | ✓ | — | — | — |
+| Background extraction | ✓ | ✓ | ✓ | ✓ | — |
+| Deconvolution (experimental) | ✓ | ✓ | ✓ | ◐ | — |
+| RGB, LRGB, and narrowband color | ✓ | ✓ | — | — | — |
+| Satellite track prediction | ✓ | ✓ | — | — | — |
+| Catalog install and verify | ✓ | ✓ | ✓ | — | ✓ |
+| Export with overlays | ✓ | — | — | ✓ | ✓ |
+
+◐ in development. The C ABI renders; its host app does the browsing.
 
 ## Quick start
 
