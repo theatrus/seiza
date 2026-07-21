@@ -61,12 +61,14 @@ compiler, formatter, and linter.
   x86_64 and aarch64, macOS, and Windows cover every CPython from 3.9 up, with
   type stubs included ([seiza-py](seiza-py/README.md)).
 - **From native applications** — [`seiza-cabi`](seiza-cabi/README.md) exposes
-  FITS/raster rendering, robust background fitting and correction, incremental
-  image stacking, solving, overlays, and catalog setup through one generated C
-  header for Swift, .NET, C, and C++ consumers.
+  FITS/XISF/raster rendering, robust background fitting and correction,
+  incremental image stacking, solving, overlays, and catalog setup through one
+  generated C header for Swift, .NET, C, and C++ consumers.
 - **From Rust** — use the crates directly: [`seiza`](seiza/README.md)
   (detection, WCS, solving, catalogs),
   [`seiza-fits`](seiza-fits/README.md) (FITS reading and linear `f32` writing),
+  [`seiza-xisf`](seiza-xisf/README.md) (XISF reading into the same astronomy
+  image representation),
   [`seiza-background`](seiza-background/README.md) (robust gradient models),
   [`seiza-deconvolution`](seiza-deconvolution/README.md) (experimental,
   conservative linear-image restoration),
@@ -87,6 +89,7 @@ cargo install seiza-cli
 seiza download-data prebuilt --output data       # SHA-256-verified from downloads.seiza.fyi
 seiza solve-blind image.jpg --data data --min-scale 0.5 --max-scale 15
 seiza solve image.fits --data data --scale 1.26 --objects data
+seiza solve integration.xisf --data data --scale 1.26 --objects data
 seiza solve image.fits --data data --scale 1.26 --satellites-celestrak --annotate tracks.png
 seiza catalog object --data data "Andromeda Galaxy"
 seiza catalog objects --data data --ra 10.6848 --dec 41.2691 --radius 3 --format json
@@ -166,7 +169,7 @@ protocol, so your application code does not change.
 
 ## Image stacking
 
-`seiza stack` calibrates and registers linear FITS light frames, optionally
+`seiza stack` calibrates and registers linear FITS or XISF light frames, optionally
 applies global or tiled local normalization, and integrates them with online
 delta-sigma rejection. Differently sized or cropped frames are mapped onto the
 first frame's fixed output grid. Frames acquired after a German-equatorial-mount
@@ -174,7 +177,7 @@ meridian flip are handled automatically: a transform near 180 degrees is
 accepted under the normal rotation tolerance and the pixels are rotated back
 onto the reference orientation before integration.
 
-Color remains color. Three-plane FITS inputs are stacked as linear RGB; raw
+Color remains color. Three-plane FITS/XISF inputs are stacked as linear RGB; raw
 one-shot-color frames carrying `BAYERPAT` are calibrated in their native CFA
 sampling and then debayered. Registration detects stars from a luminance view,
 but the resulting transform, per-channel normalization, rejection, and
@@ -200,7 +203,7 @@ engine. See the [CLI stacking guide](seiza-cli/README.md#image-stacking),
 ### Light deconvolution (experimental)
 
 `seiza deconvolve` provides a deliberately restrained classical restoration
-experiment for calibrated/stacked linear FITS images. Supply a stellar FWHM in
+experiment for calibrated/stacked linear FITS/XISF images. Supply a stellar FWHM in
 pixels; Seiza applies four damped Richardson-Lucy iterations by default and
 blends 35% of the result back into the input while preserving per-channel flux.
 
@@ -229,7 +232,7 @@ operation without treating attractive edits as ground truth.
 ### Automatic background extraction
 
 `seiza background` estimates a smooth gradient from robust sample windows in
-a linear mono or RGB FITS image. The default quadratic model is fit per channel
+a linear mono or RGB FITS/XISF image. The default quadratic model is fit per channel
 at shared, deterministically selected positions; locally noisy samples and
 samples inconsistent with the fitted surface are rejected. Output remains
 linear `float32` and retains a valid input WCS.
@@ -435,6 +438,11 @@ seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-
   streaming into native pixel storage, plus atomic linear `f32` output, in the
   [`seiza-fits`](https://crates.io/crates/seiza-fits) crate. FITS files
   plate-solve directly, with RA/DEC hints read from headers.
+- **XISF** — monolithic grayscale, planar RGB, and Bayer image reading with
+  typed integer/float samples, attached image blocks, FITS-compatible metadata,
+  and zlib, LZ4/LZ4HC, or zstd compression with optional byte shuffling in
+  [`seiza-xisf`](seiza-xisf/README.md). XISF uses the same linear image path as
+  FITS for solving, rendering, background work, deconvolution, and stacking.
 - **Parameterized stretching** — reusable identity, linear, asinh,
   percentile-asinh, MTF, manual GHS, and existing median/MAD Auto-MTF models in
   `seiza-stretch`. Analysis, curve resolution, and application are separate so
@@ -524,11 +532,12 @@ and solves in the table's exact frame. Contract details:
 
 - `seiza/` — library crate: `detect`, `wcs`, `catalog`, `objects`, `solve`
 - `seiza-fits/` — FITS reading, atomic linear `f32` writing, statistics, and MTF autostretch
+- `seiza-xisf/` — XISF metadata and attached-pixel reading into `FitsImage`
 - `seiza-background/` — format-independent robust background sampling,
   polynomial fitting, diagnostics, and linear correction
 - `seiza-stretch/` — parameterized, format-independent display analysis,
   transfer plans, and mono/RGB application
-- `seiza-stacking/` — linear FITS calibration, local registration,
+- `seiza-stacking/` — linear FITS/XISF calibration, local registration,
   normalization, additive integration, and rejection
 - `seiza-cabi/` — shared native C ABI for rendering, background extraction,
   live stacking, solving, overlays, and catalog setup

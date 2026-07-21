@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 #[derive(Args)]
 pub(crate) struct StretchArgs {
-    /// Linear mono or RGB FITS input
+    /// Linear mono or RGB FITS or XISF input
     input: PathBuf,
     /// Display-referred PNG, JPEG, or TIFF output
     #[arg(short, long)]

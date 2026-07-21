@@ -101,7 +101,7 @@ upstream row, preferred facet selection, and source-qualified geometry.
 
 ## Background extraction
 
-Fit and remove a smooth background from a calibrated linear FITS image:
+Fit and remove a smooth background from a calibrated linear FITS or XISF image:
 
 ```
 seiza background stack.fits --output corrected.fits \
@@ -124,7 +124,7 @@ a false surface; debayer or stack them first.
 ## Light deconvolution (experimental)
 
 `seiza deconvolve` applies a conservative damped Richardson-Lucy pass to a
-calibrated or stacked linear mono/RGB FITS image. Measure the FWHM of several
+calibrated or stacked linear mono/RGB FITS/XISF image. Measure the FWHM of several
 unsaturated stars in pixels and use their median as the explicit Gaussian PSF:
 
 ```text
@@ -151,7 +151,7 @@ to a provenance-bearing learned operation.
 
 ## Image stacking
 
-`seiza stack` calibrates, registers, and incrementally integrates FITS light
+`seiza stack` calibrates, registers, and incrementally integrates FITS or XISF light
 frames. The first light is the fixed output/reference grid:
 
 ```
@@ -193,7 +193,7 @@ SHA-256 identities for every source and calibration master, the complete
 configuration, and the ordered accepted/rejected disposition ledger. FITS and
 report outputs are published atomically after they are complete.
 
-Mono inputs produce a one-plane linear FITS stack. Three-plane FITS inputs
+Mono inputs produce a one-plane linear FITS stack. Three-plane FITS/XISF inputs
 remain RGB, while raw one-shot-color frames with `BAYERPAT` are calibrated in
 their native CFA sampling before debayering. Star detection uses a temporary
 luminance view, but registration is applied to all three channels and global or
@@ -454,16 +454,17 @@ seiza catalog validate --data stars-lite.bin
 seiza catalog validate --data objects.bin
 ```
 
-FITS files are read natively (see
-[seiza-fits](https://crates.io/crates/seiza-fits)) with bounded-memory
-streaming into the final typed pixel buffer, an automatic MTF stretch for u8
-detection and previews, a linear normalized representation for f32 detection,
-and RA/DEC hints taken from headers.
+FITS and XISF files are read natively through
+[seiza-fits](https://crates.io/crates/seiza-fits) and
+[`seiza-xisf`](../seiza-xisf/README.md). Both provide typed linear pixels, an
+automatic MTF stretch for u8 detection and previews, a linear normalized
+representation for f32 detection, and RA/DEC hints from FITS-compatible
+metadata. PNG, JPEG, and TIFF continue to use the Rust `image` decoders.
 
 ### Parameterized display stretching
 
 `seiza stretch` applies an explicit reusable `seiza-stretch` model to a linear
-mono or RGB FITS image and writes a display-referred PNG, JPEG, or TIFF:
+mono or RGB FITS/XISF image and writes a display-referred PNG, JPEG, or TIFF:
 
 ```text
 seiza stretch stack.fits --output preview.png percentile-asinh \

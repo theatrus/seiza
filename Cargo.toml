@@ -12,6 +12,7 @@ members = [
     "seiza-stacking",
     "seiza-stretch",
     "seiza-sources",
+    "seiza-xisf",
 ]
 
 [workspace.package]
@@ -32,6 +33,7 @@ seiza-satellites = { path = "seiza-satellites", version = "0.4.1" }
 seiza-stacking = { path = "seiza-stacking", version = "0.1.0" }
 seiza-stretch = { path = "seiza-stretch", version = "0.1.0" }
 seiza-sources = { path = "seiza-sources", version = "0.2.0" }
+seiza-xisf = { path = "seiza-xisf", version = "0.1.0" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 thiserror = "2"
 anyhow = "1"
@@ -59,5 +61,8 @@ rayon = "1"
 rustc-hash = { version = "2" }
 wide = "1.5"
 multiversion = "0.8"
+quick-xml = "0.38"
+lz4_flex = "0.11"
+sha1 = "0.10"
 satkit = { version = "0.20.2", default-features = false }
 font8x8 = "0.3"

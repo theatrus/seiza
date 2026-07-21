@@ -59,6 +59,12 @@ pub enum Error {
         #[source]
         source: seiza_fits::FitsError,
     },
+    #[error("failed to read XISF frame {}: {source}", path.display())]
+    XisfRead {
+        path: PathBuf,
+        #[source]
+        source: seiza_xisf::XisfError,
+    },
     #[error("failed to write FITS frame {}: {source}", path.display())]
     FitsWrite {
         path: PathBuf,

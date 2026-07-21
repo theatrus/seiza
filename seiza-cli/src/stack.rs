@@ -24,7 +24,7 @@ enum RejectionArg {
 
 #[derive(Args)]
 pub(crate) struct StackArgs {
-    /// Light frames, in acquisition order; the first is the reference
+    /// FITS or XISF light frames, in acquisition order; first is the reference
     #[arg(required = true, num_args = 2..)]
     images: Vec<PathBuf>,
     /// Linear 32-bit floating-point FITS stack
@@ -36,13 +36,13 @@ pub(crate) struct StackArgs {
     /// JSON admission/provenance report with SHA-256 input identities
     #[arg(long)]
     report: Option<PathBuf>,
-    /// Integrated master bias FITS
+    /// Integrated master bias FITS or XISF
     #[arg(long)]
     bias: Option<PathBuf>,
-    /// Integrated master dark FITS
+    /// Integrated master dark FITS or XISF
     #[arg(long)]
     dark: Option<PathBuf>,
-    /// Integrated master flat FITS in the light frame's raw sampling
+    /// Integrated master flat FITS or XISF in the light frame's raw sampling
     #[arg(long)]
     flat: Option<PathBuf>,
     /// Override master-dark exposure time in seconds

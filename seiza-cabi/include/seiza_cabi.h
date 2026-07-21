@@ -259,8 +259,8 @@ SeizaLiveStacker *seiza_live_stacker_create(const float *reference,
                                             char **error_out);
 
 /*
- Opens a FITS reference and optional integrated bias, dark, and flat masters.
- A positive `dark_exposure_seconds` overrides the dark FITS metadata; zero
+ Opens a FITS or XISF reference and optional integrated bias, dark, and flat
+ masters. A positive `dark_exposure_seconds` overrides the dark metadata; zero
  uses the metadata. Pass null or empty `options_json` for defaults. All files
  are fully read during this call and are not kept open afterward.
 
@@ -297,7 +297,7 @@ char *seiza_live_stacker_push_linear_json(SeizaLiveStacker *stacker,
                                           char **error_out);
 
 /*
- Opens, calibrates, registers, and offers one FITS frame to the stack. The
+ Opens, calibrates, registers, and offers one FITS or XISF frame to the stack. The
  returned disposition JSON is owned and must be freed with
  [`seiza_string_free`]. Each source path may be offered only once.
 
@@ -543,7 +543,7 @@ SeizaRenderedImage *seiza_rendered_image_open(const char *path,
  Opens and renders an image with an explicit RGB stretch mode.
 
  Mode `0` is per-channel auto, `1` is linked auto, and `2` is linear.
- Non-RGB FITS and standard raster images ignore this setting.
+ Non-RGB FITS/XISF and standard raster images ignore this setting.
 
  # Safety
  `path` must be a valid NUL-terminated string. When non-null, `error_out`
@@ -557,7 +557,7 @@ SeizaRenderedImage *seiza_rendered_image_open_with_rgb_stretch(const char *path,
                                                                char **error_out);
 
 /*
- Opens a FITS image and renders it with parameterized processing described by
+ Opens a FITS or XISF image and renders it with parameterized processing described by
  `config_json`. The value may be one serialized `seiza-stretch`
  `StretchConfig` (the original schema), a non-empty array of configs, or an
  object with `stretch`, optional `background`, optional `deconvolution`, and
@@ -596,7 +596,7 @@ SeizaRenderedImage16 *seiza_rendered_image16_open(const char *path,
 /*
  Opens and renders an image to native-endian RGBA16 with an explicit RGB
  stretch mode. Mode `0` is per-channel auto, `1` is linked auto, and `2` is
- linear. Non-RGB FITS and standard raster images ignore this setting.
+ linear. Non-RGB FITS/XISF and standard raster images ignore this setting.
 
  # Safety
  `path` must be a valid NUL-terminated string. When non-null, `error_out`
@@ -610,7 +610,7 @@ SeizaRenderedImage16 *seiza_rendered_image16_open_with_rgb_stretch(const char *p
                                                                    char **error_out);
 
 /*
- Opens a FITS image and renders its parameterized processing stack to
+ Opens a FITS or XISF image and renders its parameterized processing stack to
  native-endian RGBA16. The JSON schema and processing order are identical to
  [`seiza_rendered_image_open_with_stretch_config`], but the final stretch is
  quantized directly from `f32` to `u16` instead of passing through RGBA8.

@@ -3,6 +3,10 @@
 Fast FITS image reading and linear `f32` writing for astrophotography, part of the
 [seiza](https://crates.io/crates/seiza) family.
 
+The companion [`seiza-xisf`](../seiza-xisf/README.md) reader returns this
+crate's decoded `FitsImage` representation, so downstream processing can share
+one linear-image API without coupling operations to the source container.
+
 - Reads 8/16/32-bit integer and 32/64-bit float FITS images, applying
   BZERO/BSCALE (the common `BITPIX 16` + `BZERO 32768` unsigned camera
   layout is folded directly into the big-endian decode).

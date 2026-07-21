@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 #[derive(Args)]
 pub(crate) struct DeconvolutionArgs {
-    /// Calibrated/stacked linear mono or RGB FITS input
+    /// Calibrated/stacked linear mono or RGB FITS or XISF input
     input: PathBuf,
     /// Restored linear 32-bit floating-point FITS output
     #[arg(short, long)]

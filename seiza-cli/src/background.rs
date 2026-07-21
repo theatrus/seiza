@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 #[derive(Args)]
 pub(crate) struct BackgroundArgs {
-    /// Linear mono or RGB FITS input
+    /// Linear mono or RGB FITS or XISF input
     input: PathBuf,
     /// Corrected linear 32-bit floating-point FITS output
     #[arg(short, long)]

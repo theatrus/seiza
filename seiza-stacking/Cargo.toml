@@ -16,6 +16,7 @@ rayon.workspace = true
 serde.workspace = true
 seiza.workspace = true
 seiza-fits.workspace = true
+seiza-xisf.workspace = true
 seiza-stretch.workspace = true
 thiserror.workspace = true
 

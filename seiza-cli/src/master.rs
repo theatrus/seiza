@@ -26,7 +26,7 @@ enum MasterCommand {
 
 #[derive(Args)]
 struct CommonArgs {
-    /// Raw calibration FITS frames
+    /// Raw calibration FITS or XISF frames
     #[arg(required = true, num_args = 2..)]
     images: Vec<PathBuf>,
     /// Linear 32-bit floating-point master FITS
