@@ -53,6 +53,8 @@ struct ProcessedRenderRequest {
     stretch: StretchConfigRequest,
     #[serde(default)]
     background: Option<BackgroundRenderRequest>,
+    #[serde(default)]
+    interactive_preview: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,10 +65,14 @@ enum ImageRenderConfigRequest {
 }
 
 impl ImageRenderConfigRequest {
-    fn into_parts(self) -> (StretchStack, Option<BackgroundRenderRequest>) {
+    fn into_parts(self) -> (StretchStack, Option<BackgroundRenderRequest>, bool) {
         match self {
-            Self::Processed(request) => (request.stretch.into_stack(), request.background),
-            Self::Stretch(request) => (request.into_stack(), None),
+            Self::Processed(request) => (
+                request.stretch.into_stack(),
+                request.background,
+                request.interactive_preview,
+            ),
+            Self::Stretch(request) => (request.into_stack(), None, false),
         }
     }
 }
@@ -773,10 +779,12 @@ pub unsafe extern "C" fn seiza_rendered_image_open_with_rgb_stretch(
 /// Opens a FITS image and renders it with parameterized processing described by
 /// `config_json`. The value may be one serialized `seiza-stretch`
 /// `StretchConfig` (the original schema), a non-empty array of configs, or an
-/// object with `stretch` and optional `background` fields. Array stages are
-/// applied in order using `f32` intermediates and converted to RGBA only after
-/// the final stage. Background correction, when requested, is fitted and
-/// applied to linear samples before the first stretch stage.
+/// object with `stretch`, optional `background`, and optional
+/// `interactive_preview` fields. Array stages are applied in order using `f32`
+/// intermediates and converted to RGBA only after the final stage. Background
+/// correction, when requested, is fitted and applied to linear samples before
+/// the first stretch stage. Interactive preview mode bounds the linear samples
+/// to `max_dimension` before processing; full renders should leave it false.
 ///
 /// # Safety
 /// `path` and `config_json` must be valid NUL-terminated strings. When non-null,
@@ -793,10 +801,16 @@ pub unsafe extern "C" fn seiza_rendered_image_open_with_stretch_config(
         let config_json = required_str(config_json, "stretch config JSON")?;
         let request: ImageRenderConfigRequest = serde_json::from_str(&config_json)
             .map_err(|error| format!("invalid image processing config JSON: {error}"))?;
-        let (stack, background) = request.into_parts();
+        let (stack, background, interactive_preview) = request.into_parts();
         let fits = FitsImage::open(&path)
             .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
-        render_fits_with_pipeline(fits, &stack, background.as_ref(), max_dimension)
+        render_fits_with_pipeline(
+            fits,
+            &stack,
+            background.as_ref(),
+            max_dimension,
+            interactive_preview,
+        )
     })
     .map_or(ptr::null_mut(), |image| Box::into_raw(Box::new(image)))
 }
@@ -1593,7 +1607,7 @@ fn render_fits_with_stack(
     stack: &StretchStack,
     max_dimension: u32,
 ) -> Result<SeizaRenderedImage, String> {
-    render_fits_with_pipeline(fits, stack, None, max_dimension)
+    render_fits_with_pipeline(fits, stack, None, max_dimension, false)
 }
 
 fn render_fits_with_pipeline(
@@ -1601,6 +1615,7 @@ fn render_fits_with_pipeline(
     stack: &StretchStack,
     background: Option<&BackgroundRenderRequest>,
     max_dimension: u32,
+    interactive_preview: bool,
 ) -> Result<SeizaRenderedImage, String> {
     let source_width = fits.width;
     let source_height = fits.height;
@@ -1622,7 +1637,7 @@ fn render_fits_with_pipeline(
 
     // The pipeline consumes interleaved f32 samples normalized to [0, 1], the
     // same convention as `FitsImage::to_luma_f32`.
-    let (mut data, channels): (Vec<f32>, usize) = match &rgb {
+    let (data, channels): (Vec<f32>, usize) = match &rgb {
         Some(rgb) => (
             rgb.data
                 .iter()
@@ -1632,11 +1647,22 @@ fn render_fits_with_pipeline(
         ),
         None => (fits.to_luma_f32(), 1),
     };
+    let (render_width, render_height, mut data) = if interactive_preview {
+        downsample_interleaved_f32(
+            source_width,
+            source_height,
+            data,
+            channels,
+            usize::try_from(max_dimension).unwrap_or(usize::MAX),
+        )
+    } else {
+        (source_width, source_height, data)
+    };
     let (input_histogram, background_metadata) = if let Some(background) = background {
         let fit = fit_background_masked(
             &data,
-            source_width,
-            source_height,
+            render_width,
+            render_height,
             channels,
             None,
             &background.config,
@@ -1671,8 +1697,8 @@ fn render_fits_with_pipeline(
 
     let display_histogram = display_histogram_json(&rgba);
     let (width, height, rgba) = downsample_rgba(
-        source_width,
-        source_height,
+        render_width,
+        render_height,
         rgba,
         usize::try_from(max_dimension).unwrap_or(usize::MAX),
     );
@@ -1688,6 +1714,7 @@ fn render_fits_with_pipeline(
         "format": "FITS",
         "colorKind": color_kind,
         "stretchStages": stack.len(),
+        "interactivePreview": interactive_preview,
         "backgroundProcessing": background_metadata,
         "statistics": statistics_json(&statistics),
         "inputHistogram": input_histogram,
@@ -2019,6 +2046,58 @@ fn downsample_rgba(
             output.extend_from_slice(&rgba[offset..offset + 4]);
         }
     }
+    (output_width, output_height, output)
+}
+
+/// Bounds an interactive render before expensive processing. Bilinear sampling
+/// keeps the preview representative without spending time on source-resolution
+/// background fitting and stretch stages. Full and non-interactive renders do
+/// not use this path.
+fn downsample_interleaved_f32(
+    width: usize,
+    height: usize,
+    pixels: Vec<f32>,
+    channels: usize,
+    max_dimension: usize,
+) -> (usize, usize, Vec<f32>) {
+    if max_dimension == 0 || width.max(height) <= max_dimension {
+        return (width, height, pixels);
+    }
+
+    let scale = max_dimension as f64 / width.max(height) as f64;
+    let output_width = ((width as f64 * scale).round() as usize).max(1);
+    let output_height = ((height as f64 * scale).round() as usize).max(1);
+    let mut output = vec![0.0; output_width * output_height * channels];
+    let scale_x = width as f64 / output_width as f64;
+    let scale_y = height as f64 / output_height as f64;
+
+    for output_y in 0..output_height {
+        let source_y =
+            ((output_y as f64 + 0.5) * scale_y - 0.5).clamp(0.0, height.saturating_sub(1) as f64);
+        let y0 = source_y.floor() as usize;
+        let y1 = (y0 + 1).min(height - 1);
+        let y_weight = (source_y - y0 as f64) as f32;
+
+        for output_x in 0..output_width {
+            let source_x = ((output_x as f64 + 0.5) * scale_x - 0.5)
+                .clamp(0.0, width.saturating_sub(1) as f64);
+            let x0 = source_x.floor() as usize;
+            let x1 = (x0 + 1).min(width - 1);
+            let x_weight = (source_x - x0 as f64) as f32;
+            let output_start = (output_y * output_width + output_x) * channels;
+
+            for channel in 0..channels {
+                let top_left = pixels[(y0 * width + x0) * channels + channel];
+                let top_right = pixels[(y0 * width + x1) * channels + channel];
+                let bottom_left = pixels[(y1 * width + x0) * channels + channel];
+                let bottom_right = pixels[(y1 * width + x1) * channels + channel];
+                let top = top_left + (top_right - top_left) * x_weight;
+                let bottom = bottom_left + (bottom_right - bottom_left) * x_weight;
+                output[output_start + channel] = top + (bottom - top) * y_weight;
+            }
+        }
+    }
+
     (output_width, output_height, output)
 }
 
@@ -2521,8 +2600,9 @@ mod tests {
             }
         }))
         .unwrap();
-        let (stack, background) = request.into_parts();
+        let (stack, background, interactive_preview) = request.into_parts();
         assert_eq!(stack.len(), 1);
+        assert!(!interactive_preview);
         let background = background.unwrap();
         assert_eq!(background.mode, CorrectionMode::Subtract);
         assert_eq!(background.config.sample_radius, Some(2));
@@ -2555,7 +2635,8 @@ mod tests {
         };
 
         let uncorrected = render_fits_with_stack(fits.clone(), &stack, 0).unwrap();
-        let corrected = render_fits_with_pipeline(fits, &stack, Some(&background), 0).unwrap();
+        let corrected =
+            render_fits_with_pipeline(fits, &stack, Some(&background), 0, false).unwrap();
         assert_ne!(corrected.rgba, uncorrected.rgba);
 
         let metadata: Value =
@@ -2572,6 +2653,38 @@ mod tests {
             metadata["inputHistogram"]["red"],
             metadata["inputHistogram"]["blue"]
         );
+    }
+
+    #[test]
+    fn interactive_preview_bounds_linear_samples_before_processing() {
+        let request: ImageRenderConfigRequest = serde_json::from_value(json!({
+            "stretch": [{
+                "model": { "type": "identity" },
+                "color_strategy": "linked",
+                "max_analysis_samples": 4096
+            }],
+            "interactive_preview": true
+        }))
+        .unwrap();
+        let (stack, background, interactive_preview) = request.into_parts();
+        assert!(background.is_none());
+        assert!(interactive_preview);
+
+        let fits = FitsImage {
+            width: 400,
+            height: 200,
+            planes: 1,
+            pixels: seiza_fits::Pixels::F32(background_plane(400, 200)),
+            headers: Vec::new(),
+        };
+        let preview =
+            render_fits_with_pipeline(fits, &stack, None, 100, interactive_preview).unwrap();
+        assert_eq!((preview.width, preview.height), (100, 50));
+        let metadata: Value =
+            serde_json::from_str(preview.metadata_json.to_str().unwrap()).unwrap();
+        assert_eq!(metadata["width"], 400);
+        assert_eq!(metadata["height"], 200);
+        assert_eq!(metadata["interactivePreview"], true);
     }
 
     #[test]
