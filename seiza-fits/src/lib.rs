@@ -409,6 +409,41 @@ impl FitsImage {
         self.header(key).and_then(|v| v.as_str())
     }
 
+    /// Consume the image and return its pixels in physical units
+    /// (`BZERO + BSCALE * stored`) as f32, still in plane order.
+    ///
+    /// Two cases skip the header scaling because decoding already applied
+    /// it: U16 pixels carry the standard unsigned-camera BZERO, and a
+    /// BITPIX=16 image with unusual scaling decodes straight to F32.
+    pub fn into_physical_f32(self) -> Vec<f32> {
+        let bitpix = self
+            .header("BITPIX")
+            .and_then(HeaderValue::as_i64)
+            .unwrap_or(0);
+        let bzero = self.header_f64("BZERO").unwrap_or(0.0);
+        let bscale = self.header_f64("BSCALE").unwrap_or(1.0);
+        match self.pixels {
+            Pixels::U8(values) => values
+                .into_iter()
+                .map(|value| (bzero + bscale * f64::from(value)) as f32)
+                .collect(),
+            Pixels::U16(values) => values.into_iter().map(f32::from).collect(),
+            Pixels::I32(values) => values
+                .into_iter()
+                .map(|value| (bzero + bscale * f64::from(value)) as f32)
+                .collect(),
+            Pixels::F32(values) if bitpix == 16 => values,
+            Pixels::F32(values) => values
+                .into_iter()
+                .map(|value| (bzero + bscale * f64::from(value)) as f32)
+                .collect(),
+            Pixels::F64(values) => values
+                .into_iter()
+                .map(|value| (bzero + bscale * value) as f32)
+                .collect(),
+        }
+    }
+
     /// Pixels as u16, converting float/i32 data by min-max scaling.
     /// Planar RGB collapses to luminance; the mono u16 case is a borrow —
     /// no copy, no conversion.
