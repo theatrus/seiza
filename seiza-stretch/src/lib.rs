@@ -199,6 +199,27 @@ impl StretchStack {
             plans: output.plans,
         })
     }
+
+    /// Apply every stage and convert the final display result to `u16`.
+    pub fn apply_u16(&self, data: &[f32], channel_count: usize) -> Result<StretchStackOutput<u16>> {
+        self.apply_u16_with_progress(data, channel_count, |_| {})
+    }
+
+    /// Apply every stage, reporting resolve/apply/completion boundaries, and
+    /// convert to `u16` only after the final stage.
+    pub fn apply_u16_with_progress(
+        &self,
+        data: &[f32],
+        channel_count: usize,
+        mut progress: impl FnMut(StretchStageProgress),
+    ) -> Result<StretchStackOutput<u16>> {
+        let output = apply_stack_f32(&self.stages, data, channel_count, &mut progress)?;
+        let data = output.data.into_par_iter().map(to_u16).collect::<Vec<_>>();
+        Ok(StretchStackOutput {
+            data,
+            plans: output.plans,
+        })
+    }
 }
 
 impl TryFrom<Vec<StretchConfig>> for StretchStack {
@@ -701,6 +722,10 @@ impl StretchPlan {
         self.apply_mapped(data, channel_count, to_u8)
     }
 
+    pub fn apply_u16(&self, data: &[f32], channel_count: usize) -> Result<Vec<u16>> {
+        self.apply_mapped(data, channel_count, to_u16)
+    }
+
     fn apply_mapped<T, F>(&self, data: &[f32], channel_count: usize, convert: F) -> Result<Vec<T>>
     where
         T: Send,
@@ -1007,6 +1032,10 @@ fn to_u8(value: f32) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
+fn to_u16(value: f32) -> u16 {
+    (value.clamp(0.0, 1.0) * f32::from(u16::MAX)).round() as u16
+}
+
 /// The PixInsight/N.I.N.A. midtones transfer function.
 pub fn midtones_transfer_function(midtone: f64, x: f64) -> f64 {
     if x <= 0.0 {
@@ -1100,10 +1129,35 @@ pub fn stretch_u16_to_u8(data: &[u16], stats: &Statistics, params: &StretchParam
     data.iter().map(|value| map[usize::from(*value)]).collect()
 }
 
+/// Stretch `u16` data directly to `u16` through a 65,536-entry LUT, retaining
+/// the full display precision of the resolved curve.
+pub fn stretch_u16_to_u16(data: &[u16], stats: &Statistics, params: &StretchParams) -> Vec<u16> {
+    let (shadows, midtone, highlights) = stretch_u16_curve(stats, params);
+    let map = (0..65_536)
+        .map(|value| {
+            let input = 1.0 - highlights + value as f64 / 65_535.0 - shadows;
+            let stretched = midtones_transfer_function(midtone, input);
+            (stretched.clamp(0.0, 1.0) * f64::from(u16::MAX) + 0.5) as u16
+        })
+        .collect::<Vec<_>>();
+    data.iter().map(|value| map[usize::from(*value)]).collect()
+}
+
 fn stretch_u16_map(stats: &Statistics, params: &StretchParams) -> Vec<u8> {
+    let (shadows, midtone, highlights) = stretch_u16_curve(stats, params);
+    (0..65_536)
+        .map(|value| {
+            let input = 1.0 - highlights + value as f64 / 65_535.0 - shadows;
+            let stretched = midtones_transfer_function(midtone, input);
+            (stretched.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+        })
+        .collect()
+}
+
+fn stretch_u16_curve(stats: &Statistics, params: &StretchParams) -> (f64, f64, f64) {
     let normalized_median = f64::from(stats.median) / 65_535.0;
     let normalized_mad = stats.mad / 65_535.0 * NORMAL_MAD_SCALE;
-    let (shadows, midtone, highlights) = if normalized_median > 0.5 {
+    if normalized_median > 0.5 {
         let highlights = normalized_median - params.shadows_clip * normalized_mad;
         let midtone = midtones_transfer_function(
             params.target_median,
@@ -1114,15 +1168,7 @@ fn stretch_u16_map(stats: &Statistics, params: &StretchParams) -> Vec<u8> {
         let shadows = (normalized_median + params.shadows_clip * normalized_mad).max(0.0);
         let midtone = midtones_transfer_function(params.target_median, normalized_median - shadows);
         (shadows, midtone, 1.0)
-    };
-
-    (0..65_536)
-        .map(|value| {
-            let input = 1.0 - highlights + value as f64 / 65_535.0 - shadows;
-            let stretched = midtones_transfer_function(midtone, input);
-            (stretched.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
-        })
-        .collect()
+    }
 }
 
 #[cfg(test)]
@@ -1469,6 +1515,32 @@ mod tests {
         let output = stack.apply_u8(&[0.1875], 1).unwrap();
         assert_eq!(output.data, [128]);
         assert_eq!(output.plans.len(), 2);
+    }
+
+    #[test]
+    fn ordered_stack_u16_output_retains_sub_u8_distinctions() {
+        let stack = StretchStack::single(StretchConfig {
+            model: StretchModel::Identity,
+            color_strategy: ColorStrategy::Linked,
+            max_analysis_samples: 2,
+        });
+        let input = [0.5, 0.5001];
+        let output_u8 = stack.apply_u8(&input, 1).unwrap();
+        let output_u16 = stack.apply_u16(&input, 1).unwrap();
+
+        assert_eq!(output_u8.data[0], output_u8.data[1]);
+        assert_ne!(output_u16.data[0], output_u16.data[1]);
+        assert_eq!(output_u16.data, [32_768, 32_774]);
+        assert_eq!(output_u16.plans.len(), 1);
+    }
+
+    #[test]
+    fn u16_autostretch_is_not_an_upscaled_u8_lut() {
+        let input = (0..=u16::MAX).step_by(17).collect::<Vec<_>>();
+        let statistics = statistics_u16(&input);
+        let output = stretch_u16_to_u16(&input, &statistics, &StretchParams::default());
+
+        assert!(output.iter().any(|value| value % 257 != 0));
     }
 
     #[test]

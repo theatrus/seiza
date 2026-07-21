@@ -19,6 +19,7 @@ use seiza_stacking::{
 use seiza_stretch::{StretchConfig, StretchStack};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -105,6 +106,12 @@ struct PreparedFitsRender {
     background_metadata: Option<Value>,
     headers: Map<String, Value>,
     interactive_preview: bool,
+}
+
+struct PreparedStretchInput<'a> {
+    data: Cow<'a, [f32]>,
+    input_histogram: Value,
+    deconvolution_metadata: Option<Value>,
 }
 
 type InteractivePreviewCache =
@@ -416,6 +423,16 @@ pub struct SeizaRenderedImage {
     /// request and cached. Only one byte order is used per consumer, so the
     /// copy is paid lazily and at most once.
     bgra: OnceLock<Vec<u8>>,
+    metadata_json: CString,
+}
+
+/// An opaque, owned 16-bit rendered image. Its RGBA samples are native-endian
+/// `u16` values suitable for a high-bit-depth image encoder. C sees only a
+/// pointer; release it with [`seiza_rendered_image16_free`].
+pub struct SeizaRenderedImage16 {
+    width: u32,
+    height: u32,
+    rgba: Vec<u16>,
     metadata_json: CString,
 }
 
@@ -1544,6 +1561,101 @@ pub unsafe extern "C" fn seiza_rendered_image_open_with_stretch_config(
     .map_or(ptr::null_mut(), |image| Box::into_raw(Box::new(image)))
 }
 
+#[unsafe(no_mangle)]
+/// Opens and renders an image to native-endian RGBA16 for high-bit-depth
+/// export. This is a separate allocation from the RGBA8 preview API, so normal
+/// preview renders do not pay the memory cost of both pixel formats.
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated string. When non-null, `error_out`
+/// must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_rendered_image16_open(
+    path: *const c_char,
+    target_median: f64,
+    shadows_clip: f64,
+    max_dimension: u32,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaRenderedImage16 {
+    open_rendered_image16(
+        path,
+        target_median,
+        shadows_clip,
+        max_dimension,
+        RgbStretchMode::Auto,
+        error_out,
+    )
+}
+
+#[unsafe(no_mangle)]
+/// Opens and renders an image to native-endian RGBA16 with an explicit RGB
+/// stretch mode. Mode `0` is per-channel auto, `1` is linked auto, and `2` is
+/// linear. Non-RGB FITS and standard raster images ignore this setting.
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated string. When non-null, `error_out`
+/// must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_rendered_image16_open_with_rgb_stretch(
+    path: *const c_char,
+    target_median: f64,
+    shadows_clip: f64,
+    max_dimension: u32,
+    rgb_stretch_mode: u32,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaRenderedImage16 {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let mode = RgbStretchMode::from_raw(rgb_stretch_mode)?;
+        render_image16(path, target_median, shadows_clip, max_dimension, mode)
+    })
+    .map_or(ptr::null_mut(), |image| Box::into_raw(Box::new(image)))
+}
+
+#[unsafe(no_mangle)]
+/// Opens a FITS image and renders its parameterized processing stack to
+/// native-endian RGBA16. The JSON schema and processing order are identical to
+/// [`seiza_rendered_image_open_with_stretch_config`], but the final stretch is
+/// quantized directly from `f32` to `u16` instead of passing through RGBA8.
+///
+/// # Safety
+/// `path` and `config_json` must be valid NUL-terminated strings. When non-null,
+/// `error_out` must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_rendered_image16_open_with_stretch_config(
+    path: *const c_char,
+    config_json: *const c_char,
+    max_dimension: u32,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaRenderedImage16 {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let path = required_path(path, "image path")?;
+        let config_json = required_str(config_json, "stretch config JSON")?;
+        let request: ImageRenderConfigRequest = serde_json::from_str(&config_json)
+            .map_err(|error| format!("invalid image processing config JSON: {error}"))?;
+        let (stack, background, deconvolution, interactive_preview) = request.into_parts();
+        if interactive_preview {
+            render_cached_interactive_preview16(
+                &path,
+                &stack,
+                background.as_ref(),
+                deconvolution.as_ref(),
+                max_dimension,
+            )
+        } else {
+            let fits = FitsImage::open(&path)
+                .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
+            render_fits_with_pipeline16(
+                fits,
+                &stack,
+                background.as_ref(),
+                deconvolution.as_ref(),
+                max_dimension,
+                false,
+            )
+        }
+    })
+    .map_or(ptr::null_mut(), |image| Box::into_raw(Box::new(image)))
+}
+
 fn open_rendered_image(
     path: *const c_char,
     target_median: f64,
@@ -1555,6 +1667,27 @@ fn open_rendered_image(
     clear_error(error_out);
     ffi_result(error_out, || {
         render_image(
+            path,
+            target_median,
+            shadows_clip,
+            max_dimension,
+            rgb_stretch_mode,
+        )
+    })
+    .map_or(ptr::null_mut(), |image| Box::into_raw(Box::new(image)))
+}
+
+fn open_rendered_image16(
+    path: *const c_char,
+    target_median: f64,
+    shadows_clip: f64,
+    max_dimension: u32,
+    rgb_stretch_mode: RgbStretchMode,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaRenderedImage16 {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        render_image16(
             path,
             target_median,
             shadows_clip,
@@ -1578,6 +1711,21 @@ fn render_image(
         shadows_clip: shadows_clip.clamp(-10.0, 0.0),
     };
     render_path(&path, &params, max_dimension, rgb_stretch_mode)
+}
+
+fn render_image16(
+    path: *const c_char,
+    target_median: f64,
+    shadows_clip: f64,
+    max_dimension: u32,
+    rgb_stretch_mode: RgbStretchMode,
+) -> Result<SeizaRenderedImage16, String> {
+    let path = required_path(path, "image path")?;
+    let params = StretchParams {
+        target_median: target_median.clamp(0.01, 0.95),
+        shadows_clip: shadows_clip.clamp(-10.0, 0.0),
+    };
+    render_path16(&path, &params, max_dimension, rgb_stretch_mode)
 }
 
 #[unsafe(no_mangle)]
@@ -1665,6 +1813,78 @@ pub unsafe extern "C" fn seiza_rendered_image_metadata_json(
 /// `image` must be null or a pointer returned by [`seiza_rendered_image_open`]
 /// that has not already been freed.
 pub unsafe extern "C" fn seiza_rendered_image_free(image: *mut SeizaRenderedImage) {
+    if !image.is_null() {
+        unsafe { drop(Box::from_raw(image)) };
+    }
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `image` must be null or a live pointer returned by a
+/// `seiza_rendered_image16_open*` function.
+pub unsafe extern "C" fn seiza_rendered_image16_width(image: *const SeizaRenderedImage16) -> u32 {
+    unsafe { image.as_ref().map_or(0, |image| image.width) }
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `image` must be null or a live pointer returned by a
+/// `seiza_rendered_image16_open*` function.
+pub unsafe extern "C" fn seiza_rendered_image16_height(image: *const SeizaRenderedImage16) -> u32 {
+    unsafe { image.as_ref().map_or(0, |image| image.height) }
+}
+
+#[unsafe(no_mangle)]
+/// Returns borrowed native-endian RGBA16 samples. The returned buffer remains
+/// valid until the image is freed.
+///
+/// # Safety
+/// `image` must be null or a live pointer returned by a
+/// `seiza_rendered_image16_open*` function.
+pub unsafe extern "C" fn seiza_rendered_image16_rgba(
+    image: *const SeizaRenderedImage16,
+) -> *const u16 {
+    unsafe {
+        image
+            .as_ref()
+            .map_or(ptr::null(), |image| image.rgba.as_ptr())
+    }
+}
+
+#[unsafe(no_mangle)]
+/// Returns the RGBA16 buffer length in `uint16_t` elements, not bytes.
+///
+/// # Safety
+/// `image` must be null or a live pointer returned by a
+/// `seiza_rendered_image16_open*` function.
+pub unsafe extern "C" fn seiza_rendered_image16_rgba_length(
+    image: *const SeizaRenderedImage16,
+) -> usize {
+    unsafe { image.as_ref().map_or(0, |image| image.rgba.len()) }
+}
+
+#[unsafe(no_mangle)]
+/// Returns borrowed render metadata JSON. The string remains valid until the
+/// image is freed.
+///
+/// # Safety
+/// `image` must be null or a live pointer returned by a
+/// `seiza_rendered_image16_open*` function.
+pub unsafe extern "C" fn seiza_rendered_image16_metadata_json(
+    image: *const SeizaRenderedImage16,
+) -> *const c_char {
+    unsafe {
+        image
+            .as_ref()
+            .map_or(ptr::null(), |image| image.metadata_json.as_ptr())
+    }
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `image` must be null or a pointer returned by a
+/// `seiza_rendered_image16_open*` function that has not already been freed.
+pub unsafe extern "C" fn seiza_rendered_image16_free(image: *mut SeizaRenderedImage16) {
     if !image.is_null() {
         unsafe { drop(Box::from_raw(image)) };
     }
@@ -2250,6 +2470,22 @@ fn render_path(
     }
 }
 
+fn render_path16(
+    path: &Path,
+    params: &StretchParams,
+    max_dimension: u32,
+    rgb_stretch_mode: RgbStretchMode,
+) -> Result<SeizaRenderedImage16, String> {
+    if is_fits_path(path) {
+        let fits = FitsImage::open(path).map_err(|error| error.to_string())?;
+        render_fits16(fits, params, max_dimension, rgb_stretch_mode)
+    } else {
+        let image = image::open(path)
+            .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
+        render_raster16(image, raster_format(path), max_dimension)
+    }
+}
+
 fn render_fits(
     fits: FitsImage,
     params: &StretchParams,
@@ -2317,6 +2553,73 @@ fn render_fits(
     })
 }
 
+fn render_fits16(
+    fits: FitsImage,
+    params: &StretchParams,
+    max_dimension: u32,
+    rgb_stretch_mode: RgbStretchMode,
+) -> Result<SeizaRenderedImage16, String> {
+    let source_width = fits.width;
+    let source_height = fits.height;
+    let statistics = fits.statistics();
+    let color_kind = if fits.planes == 3 {
+        "planar-rgb"
+    } else if fits.bayer_pattern().is_some() {
+        "bayer"
+    } else {
+        "mono"
+    };
+
+    let rgb = fits.debayer().or_else(|| fits.rgb_planes());
+    let input_histogram = if let Some(rgb) = &rgb {
+        input_histogram_u16_json(&rgb.data, 3, false)
+    } else {
+        input_histogram_u16_json(&fits.to_u16(), 1, true)
+    };
+    let rgba = if let Some(rgb) = rgb {
+        stretch_rgb16(&rgb, params, rgb_stretch_mode)
+    } else {
+        fits.stretch_to_u16(params)
+            .into_iter()
+            .flat_map(|value| [value, value, value, u16::MAX])
+            .collect()
+    };
+    let display_histogram = display_histogram_u16_json(&rgba);
+    let (width, height, rgba) = downsample_rgba(
+        source_width,
+        source_height,
+        rgba,
+        usize::try_from(max_dimension).unwrap_or(usize::MAX),
+    );
+
+    let mut headers = Map::new();
+    for (key, value) in &fits.headers {
+        headers.insert(key.clone(), header_json(value));
+    }
+    let metadata = json!({
+        "width": source_width,
+        "height": source_height,
+        "planes": fits.planes,
+        "format": "FITS",
+        "colorKind": color_kind,
+        "bitsPerComponent": 16,
+        "rgbStretchMode": matches!(color_kind, "planar-rgb" | "bayer")
+            .then(|| rgb_stretch_mode.name()),
+        "statistics": statistics_json(&statistics),
+        "inputHistogram": input_histogram,
+        "displayHistogram": display_histogram,
+        "headers": headers,
+    });
+    let metadata_json = CString::new(metadata.to_string())
+        .map_err(|_| "metadata JSON contains a null byte".to_string())?;
+    Ok(SeizaRenderedImage16 {
+        width: u32::try_from(width).map_err(|_| "rendered width is too large")?,
+        height: u32::try_from(height).map_err(|_| "rendered height is too large")?,
+        rgba,
+        metadata_json,
+    })
+}
+
 /// Render a FITS image with a parameterized `seiza-stretch` config. The stretch
 /// math lives entirely in `seiza-stretch`; this only marshals FITS pixels into
 /// the interleaved `f32` the pipeline expects and assembles the RGBA result and
@@ -2349,6 +2652,18 @@ fn render_fits_with_pipeline(
 ) -> Result<SeizaRenderedImage, String> {
     let prepared = prepare_fits_render(fits, background, max_dimension, interactive_preview)?;
     render_prepared_fits(&prepared, stack, deconvolution, max_dimension, false)
+}
+
+fn render_fits_with_pipeline16(
+    fits: FitsImage,
+    stack: &StretchStack,
+    background: Option<&BackgroundRenderRequest>,
+    deconvolution: Option<&DeconvolutionRenderRequest>,
+    max_dimension: u32,
+    interactive_preview: bool,
+) -> Result<SeizaRenderedImage16, String> {
+    let prepared = prepare_fits_render(fits, background, max_dimension, interactive_preview)?;
+    render_prepared_fits16(&prepared, stack, deconvolution, max_dimension, false)
 }
 
 fn prepare_fits_render(
@@ -2441,6 +2756,64 @@ fn prepare_fits_render(
     })
 }
 
+fn prepare_stretch_input<'a>(
+    prepared: &'a PreparedFitsRender,
+    deconvolution: Option<&DeconvolutionRenderRequest>,
+) -> Result<PreparedStretchInput<'a>, String> {
+    let Some(request) = deconvolution else {
+        return Ok(PreparedStretchInput {
+            data: Cow::Borrowed(&prepared.data),
+            input_histogram: prepared.input_histogram.clone(),
+            deconvolution_metadata: None,
+        });
+    };
+
+    let scale = (prepared.render_width as f32 / prepared.source_width as f32)
+        .min(prepared.render_height as f32 / prepared.source_height as f32);
+    let effective_psf_fwhm_pixels = (request.psf_fwhm_pixels * scale).max(0.25);
+    let config = DeconvolutionConfig {
+        psf_fwhm_pixels: effective_psf_fwhm_pixels,
+        iterations: request.iterations,
+        amount: request.amount,
+        noise_fraction: request.noise_fraction,
+        max_correction: request.max_correction,
+    };
+    let restored = deconvolve(
+        &prepared.data,
+        prepared.render_width,
+        prepared.render_height,
+        prepared.channels,
+        &config,
+    )
+    .map_err(|error| format!("failed to deconvolve image: {error}"))?;
+    let channels = restored
+        .channels
+        .iter()
+        .map(|channel| {
+            json!({
+                "inputFlux": channel.input_flux,
+                "outputFlux": channel.output_flux,
+                "inputPeak": channel.input_peak,
+                "outputPeak": channel.output_peak,
+            })
+        })
+        .collect::<Vec<_>>();
+    let input_histogram = input_histogram_f32_json(&restored.data, prepared.channels);
+    Ok(PreparedStretchInput {
+        data: Cow::Owned(restored.data),
+        input_histogram,
+        deconvolution_metadata: Some(json!({
+            "psfFwhmPixels": request.psf_fwhm_pixels,
+            "effectivePsfFwhmPixels": effective_psf_fwhm_pixels,
+            "iterations": request.iterations,
+            "amount": request.amount,
+            "noiseFraction": request.noise_fraction,
+            "maxCorrection": request.max_correction,
+            "channels": channels,
+        })),
+    })
+}
+
 fn render_prepared_fits(
     prepared: &PreparedFitsRender,
     stack: &StretchStack,
@@ -2448,63 +2821,13 @@ fn render_prepared_fits(
     max_dimension: u32,
     interactive_preview_cache_hit: bool,
 ) -> Result<SeizaRenderedImage, String> {
-    let deconvolution_result = if let Some(request) = deconvolution {
-        let scale = (prepared.render_width as f32 / prepared.source_width as f32)
-            .min(prepared.render_height as f32 / prepared.source_height as f32);
-        let effective_psf_fwhm_pixels = (request.psf_fwhm_pixels * scale).max(0.25);
-        let config = DeconvolutionConfig {
-            psf_fwhm_pixels: effective_psf_fwhm_pixels,
-            iterations: request.iterations,
-            amount: request.amount,
-            noise_fraction: request.noise_fraction,
-            max_correction: request.max_correction,
-        };
-        let restored = deconvolve(
-            &prepared.data,
-            prepared.render_width,
-            prepared.render_height,
-            prepared.channels,
-            &config,
-        )
-        .map_err(|error| format!("failed to deconvolve image: {error}"))?;
-        let channels = restored
-            .channels
-            .iter()
-            .map(|channel| {
-                json!({
-                    "inputFlux": channel.input_flux,
-                    "outputFlux": channel.output_flux,
-                    "inputPeak": channel.input_peak,
-                    "outputPeak": channel.output_peak,
-                })
-            })
-            .collect::<Vec<_>>();
-        Some((
-            restored.data,
-            json!({
-                "psfFwhmPixels": request.psf_fwhm_pixels,
-                "effectivePsfFwhmPixels": effective_psf_fwhm_pixels,
-                "iterations": request.iterations,
-                "amount": request.amount,
-                "noiseFraction": request.noise_fraction,
-                "maxCorrection": request.max_correction,
-                "channels": channels,
-            }),
-        ))
-    } else {
-        None
-    };
-    let data = deconvolution_result
-        .as_ref()
-        .map_or(prepared.data.as_slice(), |(data, _)| data.as_slice());
-    let input_histogram = if deconvolution_result.is_some() {
-        input_histogram_f32_json(data, prepared.channels)
-    } else {
-        prepared.input_histogram.clone()
-    };
-    let deconvolution_metadata = deconvolution_result.as_ref().map(|(_, metadata)| metadata);
+    let PreparedStretchInput {
+        data,
+        input_histogram,
+        deconvolution_metadata,
+    } = prepare_stretch_input(prepared, deconvolution)?;
     let stretched = stack
-        .apply_u8(data, prepared.channels)
+        .apply_u8(&data, prepared.channels)
         .map_err(|error| error.to_string())?
         .data;
     let rgba: Vec<u8> = if prepared.channels == 3 {
@@ -2553,6 +2876,68 @@ fn render_prepared_fits(
     })
 }
 
+fn render_prepared_fits16(
+    prepared: &PreparedFitsRender,
+    stack: &StretchStack,
+    deconvolution: Option<&DeconvolutionRenderRequest>,
+    max_dimension: u32,
+    interactive_preview_cache_hit: bool,
+) -> Result<SeizaRenderedImage16, String> {
+    let PreparedStretchInput {
+        data,
+        input_histogram,
+        deconvolution_metadata,
+    } = prepare_stretch_input(prepared, deconvolution)?;
+    let stretched = stack
+        .apply_u16(&data, prepared.channels)
+        .map_err(|error| error.to_string())?
+        .data;
+    let rgba: Vec<u16> = if prepared.channels == 3 {
+        stretched
+            .chunks_exact(3)
+            .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], u16::MAX])
+            .collect()
+    } else {
+        stretched
+            .into_iter()
+            .flat_map(|value| [value, value, value, u16::MAX])
+            .collect()
+    };
+
+    let display_histogram = display_histogram_u16_json(&rgba);
+    let (width, height, rgba) = downsample_rgba(
+        prepared.render_width,
+        prepared.render_height,
+        rgba,
+        usize::try_from(max_dimension).unwrap_or(usize::MAX),
+    );
+    let metadata = json!({
+        "width": prepared.source_width,
+        "height": prepared.source_height,
+        "planes": prepared.planes,
+        "format": "FITS",
+        "colorKind": prepared.color_kind,
+        "bitsPerComponent": 16,
+        "stretchStages": stack.len(),
+        "interactivePreview": prepared.interactive_preview,
+        "interactivePreviewCacheHit": interactive_preview_cache_hit,
+        "backgroundProcessing": prepared.background_metadata,
+        "deconvolutionProcessing": deconvolution_metadata,
+        "statistics": prepared.statistics,
+        "inputHistogram": input_histogram,
+        "displayHistogram": display_histogram,
+        "headers": prepared.headers,
+    });
+    let metadata_json = CString::new(metadata.to_string())
+        .map_err(|_| "metadata JSON contains a null byte".to_string())?;
+    Ok(SeizaRenderedImage16 {
+        width: u32::try_from(width).map_err(|_| "rendered width is too large")?,
+        height: u32::try_from(height).map_err(|_| "rendered height is too large")?,
+        rgba,
+        metadata_json,
+    })
+}
+
 fn render_cached_interactive_preview(
     path: &Path,
     stack: &StretchStack,
@@ -2573,6 +2958,28 @@ fn render_cached_interactive_preview(
     let prepared = Arc::new(prepare_fits_render(fits, background, max_dimension, true)?);
     let prepared = store_interactive_preview(cache, key, prepared)?;
     render_prepared_fits(&prepared, stack, deconvolution, max_dimension, false)
+}
+
+fn render_cached_interactive_preview16(
+    path: &Path,
+    stack: &StretchStack,
+    background: Option<&BackgroundRenderRequest>,
+    deconvolution: Option<&DeconvolutionRenderRequest>,
+    max_dimension: u32,
+) -> Result<SeizaRenderedImage16, String> {
+    let key = interactive_preview_cache_key(path, background, max_dimension)?;
+    let cache = INTERACTIVE_PREVIEW_CACHE
+        .get_or_init(|| Mutex::new(VecDeque::with_capacity(INTERACTIVE_PREVIEW_CACHE_CAPACITY)));
+
+    if let Some(prepared) = cached_interactive_preview(cache, &key)? {
+        return render_prepared_fits16(&prepared, stack, deconvolution, max_dimension, true);
+    }
+
+    let fits = FitsImage::open(path)
+        .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
+    let prepared = Arc::new(prepare_fits_render(fits, background, max_dimension, true)?);
+    let prepared = store_interactive_preview(cache, key, prepared)?;
+    render_prepared_fits16(&prepared, stack, deconvolution, max_dimension, false)
 }
 
 fn interactive_preview_cache_key(
@@ -2673,6 +3080,47 @@ fn render_raster(
     })
 }
 
+fn render_raster16(
+    image: DynamicImage,
+    format: &'static str,
+    max_dimension: u32,
+) -> Result<SeizaRenderedImage16, String> {
+    let source_width = image.width();
+    let source_height = image.height();
+    let (planes, color_kind) = raster_encoding(&image);
+    let input_histogram = raster_input_histogram_json(&image);
+    let luma = image.to_luma16();
+    let statistics = statistics_json(&seiza_fits::statistics_u16(luma.as_raw()));
+    let rgba = image.to_rgba16().into_raw();
+    let display_histogram = display_histogram_u16_json(&rgba);
+    let (width, height, rgba) = downsample_rgba(
+        usize::try_from(source_width).map_err(|_| "image width is too large")?,
+        usize::try_from(source_height).map_err(|_| "image height is too large")?,
+        rgba,
+        usize::try_from(max_dimension).unwrap_or(usize::MAX),
+    );
+    let metadata = json!({
+        "width": source_width,
+        "height": source_height,
+        "planes": planes,
+        "format": format,
+        "colorKind": color_kind,
+        "bitsPerComponent": 16,
+        "statistics": statistics,
+        "inputHistogram": input_histogram,
+        "displayHistogram": display_histogram,
+        "headers": Map::<String, Value>::new(),
+    });
+    let metadata_json = CString::new(metadata.to_string())
+        .map_err(|_| "metadata JSON contains a null byte".to_string())?;
+    Ok(SeizaRenderedImage16 {
+        width: u32::try_from(width).map_err(|_| "rendered width is too large")?,
+        height: u32::try_from(height).map_err(|_| "rendered height is too large")?,
+        rgba,
+        metadata_json,
+    })
+}
+
 fn raster_format(path: &Path) -> &'static str {
     match path
         .extension()
@@ -2767,6 +3215,18 @@ fn display_histogram_json(rgba: &[u8]) -> Value {
         "lowerBound": 0.0,
         "upperBound": 255.0,
     })
+}
+
+fn display_histogram_u16_json(rgba: &[u16]) -> Value {
+    let mut red = [0_u64; 256];
+    let mut green = [0_u64; 256];
+    let mut blue = [0_u64; 256];
+    for pixel in rgba.chunks_exact(4) {
+        red[usize::from(pixel[0] >> 8)] += 1;
+        green[usize::from(pixel[1] >> 8)] += 1;
+        blue[usize::from(pixel[2] >> 8)] += 1;
+    }
+    histogram_json(&red, &green, &blue, 0.0, f64::from(u16::MAX))
 }
 
 fn raster_input_histogram_json(image: &DynamicImage) -> Value {
@@ -2894,6 +3354,30 @@ fn stretch_rgb(rgb: &RgbImage16, params: &StretchParams, mode: RgbStretchMode) -
         .collect()
 }
 
+fn stretch_rgb16(rgb: &RgbImage16, params: &StretchParams, mode: RgbStretchMode) -> Vec<u16> {
+    let stretched = match mode {
+        RgbStretchMode::Auto => {
+            let channels = rgb_channels(rgb);
+            let channels = channels.map(|channel| {
+                let statistics = seiza_fits::statistics_u16(&channel);
+                seiza_fits::stretch_u16_to_u16(&channel, &statistics, params)
+            });
+            (0..rgb.width * rgb.height)
+                .flat_map(|index| [channels[0][index], channels[1][index], channels[2][index]])
+                .collect()
+        }
+        RgbStretchMode::LinkedAuto => {
+            let statistics = linked_rgb_statistics(rgb);
+            seiza_fits::stretch_u16_to_u16(&rgb.data, &statistics, params)
+        }
+        RgbStretchMode::Linear => rgb.data.clone(),
+    };
+    stretched
+        .chunks_exact(3)
+        .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], u16::MAX])
+        .collect()
+}
+
 fn rgb_channels(rgb: &RgbImage16) -> [Vec<u16>; 3] {
     let mut channels = [Vec::new(), Vec::new(), Vec::new()];
     for pixel in rgb.data.chunks_exact(3) {
@@ -2926,12 +3410,12 @@ fn linear_u16_to_u8(value: u16) -> u8 {
     ((u32::from(value) * 255 + 32_767) / 65_535) as u8
 }
 
-fn downsample_rgba(
+fn downsample_rgba<T: Copy>(
     width: usize,
     height: usize,
-    rgba: Vec<u8>,
+    rgba: Vec<T>,
     max_dimension: usize,
-) -> (usize, usize, Vec<u8>) {
+) -> (usize, usize, Vec<T>) {
     if max_dimension == 0 || width.max(height) <= max_dimension {
         return (width, height, rgba);
     }
@@ -3931,6 +4415,83 @@ mod tests {
     }
 
     #[test]
+    fn parameterized_rgba16_render_retains_sub_u8_distinctions() {
+        let fits = FitsImage {
+            width: 4,
+            height: 1,
+            planes: 1,
+            pixels: seiza_fits::Pixels::F32(vec![0.0, 0.5, 0.5001, 1.0]),
+            headers: Vec::new(),
+        };
+        let config: StretchConfig = serde_json::from_value(json!({
+            "model": { "type": "identity" },
+            "color_strategy": "linked",
+            "max_analysis_samples": 4096
+        }))
+        .unwrap();
+        let stack = StretchStack::single(config);
+        let image8 = render_fits_with_pipeline(fits.clone(), &stack, None, None, 0, false).unwrap();
+        let image16 = render_fits_with_pipeline16(fits, &stack, None, None, 0, false).unwrap();
+
+        assert_eq!(image8.rgba[4], image8.rgba[8]);
+        assert_ne!(image16.rgba[4], image16.rgba[8]);
+        assert_eq!(image16.rgba[4], 32_768);
+        assert_eq!(image16.rgba[8], 32_774);
+        assert!(
+            image16
+                .rgba
+                .chunks_exact(4)
+                .all(|pixel| pixel[3] == u16::MAX)
+        );
+        let metadata: Value =
+            serde_json::from_str(image16.metadata_json.to_str().unwrap()).unwrap();
+        assert_eq!(metadata["bitsPerComponent"], 16);
+        assert_eq!(metadata["displayHistogram"]["upperBound"], 65_535.0);
+    }
+
+    #[test]
+    fn rgba16_cabi_exposes_element_count_and_borrowed_pixels() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("test.fits");
+        std::fs::write(&path, synthetic_fits()).unwrap();
+        let path = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        let config = CString::new(
+            r#"{"model":{"type":"identity"},"color_strategy":"linked","max_analysis_samples":4096}"#,
+        )
+        .unwrap();
+        let mut error = ptr::null_mut();
+
+        let image = unsafe {
+            seiza_rendered_image16_open_with_stretch_config(
+                path.as_ptr(),
+                config.as_ptr(),
+                0,
+                &mut error,
+            )
+        };
+        assert!(!image.is_null());
+        assert!(error.is_null());
+        assert_eq!(unsafe { seiza_rendered_image16_width(image) }, 2);
+        assert_eq!(unsafe { seiza_rendered_image16_height(image) }, 2);
+        let length = unsafe { seiza_rendered_image16_rgba_length(image) };
+        assert_eq!(length, 16);
+        let pixels =
+            unsafe { std::slice::from_raw_parts(seiza_rendered_image16_rgba(image), length) };
+        assert!(pixels.chunks_exact(4).all(|pixel| pixel[3] == u16::MAX));
+        let metadata = unsafe { CStr::from_ptr(seiza_rendered_image16_metadata_json(image)) };
+        let metadata: Value = serde_json::from_slice(metadata.to_bytes()).unwrap();
+        assert_eq!(metadata["bitsPerComponent"], 16);
+        unsafe { seiza_rendered_image16_free(image) };
+
+        assert_eq!(unsafe { seiza_rendered_image16_width(ptr::null()) }, 0);
+        assert_eq!(
+            unsafe { seiza_rendered_image16_rgba_length(ptr::null()) },
+            0
+        );
+        assert!(unsafe { seiza_rendered_image16_rgba(ptr::null()) }.is_null());
+    }
+
+    #[test]
     fn renders_an_ordered_f32_stretch_stack_and_accepts_single_config_json() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("test.fits");
@@ -4248,6 +4809,87 @@ mod tests {
                 assert_eq!(bins.len(), 256);
                 assert_eq!(bins.iter().map(|bin| bin.as_u64().unwrap()).sum::<u64>(), 6);
             }
+        }
+    }
+
+    #[test]
+    fn rgba16_raster_render_preserves_sixteen_bit_png_samples() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("test16.png");
+        let source = image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_raw(
+            2,
+            1,
+            vec![
+                1_000,
+                1_001,
+                32_768,
+                u16::MAX,
+                4_000,
+                8_000,
+                16_000,
+                u16::MAX,
+            ],
+        )
+        .unwrap();
+        source.save(&path).unwrap();
+
+        let image =
+            render_path16(&path, &StretchParams::default(), 0, RgbStretchMode::Auto).unwrap();
+        assert_eq!((image.width, image.height), (2, 1));
+        assert_eq!(
+            image.rgba,
+            [
+                1_000,
+                1_001,
+                32_768,
+                u16::MAX,
+                4_000,
+                8_000,
+                16_000,
+                u16::MAX
+            ]
+        );
+        let metadata: Value = serde_json::from_str(image.metadata_json.to_str().unwrap()).unwrap();
+        assert_eq!(metadata["format"], "PNG");
+        assert_eq!(metadata["colorKind"], "rgba-16");
+        assert_eq!(metadata["bitsPerComponent"], 16);
+    }
+
+    #[test]
+    fn rgba16_render_buffer_round_trips_through_png_and_tiff_encoders() {
+        let fits = FitsImage {
+            width: 2,
+            height: 1,
+            planes: 1,
+            pixels: seiza_fits::Pixels::U16(vec![1_000, 1_001]),
+            headers: Vec::new(),
+        };
+        let config: StretchConfig = serde_json::from_value(json!({
+            "model": { "type": "identity" },
+            "color_strategy": "linked",
+            "max_analysis_samples": 4096
+        }))
+        .unwrap();
+        let image =
+            render_fits_with_pipeline16(fits, &StretchStack::single(config), None, None, 0, false)
+                .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+
+        for (name, format) in [
+            ("export.png", image::ImageFormat::Png),
+            ("export.tiff", image::ImageFormat::Tiff),
+        ] {
+            let path = directory.path().join(name);
+            let buffer = image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_raw(
+                image.width,
+                image.height,
+                image.rgba.clone(),
+            )
+            .unwrap();
+            buffer.save_with_format(&path, format).unwrap();
+            let decoded = image::open(&path).unwrap();
+            assert_eq!(decoded.color(), image::ColorType::Rgba16);
+            assert_eq!(decoded.to_rgba16().into_raw(), image.rgba);
         }
     }
 

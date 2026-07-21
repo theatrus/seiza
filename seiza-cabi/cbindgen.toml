@@ -22,6 +22,8 @@ after_includes = """
  * OWNED by the caller (you must release it):
  *   - SeizaRenderedImage* returned by the seiza_rendered_image_open* functions
  *       -> release with seiza_rendered_image_free().
+ *   - SeizaRenderedImage16* returned by the seiza_rendered_image16_open*
+ *     functions -> release with seiza_rendered_image16_free().
  *   - SeizaBackgroundModel* returned by seiza_background_fit
  *       -> release with seiza_background_model_free().
  *   - SeizaLiveStacker* returned by seiza_live_stacker_create / _open_fits
@@ -39,6 +41,9 @@ after_includes = """
  *     from seiza_rendered_image_metadata_json point INTO the SeizaRenderedImage
  *     and dangle the moment it is freed. Copy them out before freeing the image
  *     if you need them to outlive it.
+ *   - const uint16_t* from seiza_rendered_image16_rgba and const char* from
+ *     seiza_rendered_image16_metadata_json point INTO the SeizaRenderedImage16
+ *     and dangle the moment it is freed.
  *   - const char* from seiza_background_model_diagnostics_json points INTO the
  *     SeizaBackgroundModel and dangles when the model is freed.
  *   - const float* / uint32_t* from seiza_live_stacker_* point INTO live stack

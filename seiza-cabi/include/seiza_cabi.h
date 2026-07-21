@@ -19,6 +19,8 @@
  * OWNED by the caller (you must release it):
  *   - SeizaRenderedImage* returned by the seiza_rendered_image_open* functions
  *       -> release with seiza_rendered_image_free().
+ *   - SeizaRenderedImage16* returned by the seiza_rendered_image16_open*
+ *     functions -> release with seiza_rendered_image16_free().
  *   - SeizaBackgroundModel* returned by seiza_background_fit
  *       -> release with seiza_background_model_free().
  *   - SeizaLiveStacker* returned by seiza_live_stacker_create / _open_fits
@@ -36,6 +38,9 @@
  *     from seiza_rendered_image_metadata_json point INTO the SeizaRenderedImage
  *     and dangle the moment it is freed. Copy them out before freeing the image
  *     if you need them to outlive it.
+ *   - const uint16_t* from seiza_rendered_image16_rgba and const char* from
+ *     seiza_rendered_image16_metadata_json point INTO the SeizaRenderedImage16
+ *     and dangle the moment it is freed.
  *   - const char* from seiza_background_model_diagnostics_json points INTO the
  *     SeizaBackgroundModel and dangles when the model is freed.
  *   - const float* / uint32_t* from seiza_live_stacker_* point INTO live stack
@@ -92,6 +97,13 @@ typedef struct SeizaLiveStacker SeizaLiveStacker;
  it).
  */
 typedef struct SeizaRenderedImage SeizaRenderedImage;
+
+/*
+ An opaque, owned 16-bit rendered image. Its RGBA samples are native-endian
+ `u16` values suitable for a high-bit-depth image encoder. C sees only a
+ pointer; release it with [`seiza_rendered_image16_free`].
+ */
+typedef struct SeizaRenderedImage16 SeizaRenderedImage16;
 
 /*
  An immutable owned stack result. Its image and count pointers are borrowed
@@ -567,6 +579,52 @@ SeizaRenderedImage *seiza_rendered_image_open_with_stretch_config(const char *pa
                                                                   char **error_out);
 
 /*
+ Opens and renders an image to native-endian RGBA16 for high-bit-depth
+ export. This is a separate allocation from the RGBA8 preview API, so normal
+ preview renders do not pay the memory cost of both pixel formats.
+
+ # Safety
+ `path` must be a valid NUL-terminated string. When non-null, `error_out`
+ must point to writable storage for one pointer.
+ */
+SeizaRenderedImage16 *seiza_rendered_image16_open(const char *path,
+                                                  double target_median,
+                                                  double shadows_clip,
+                                                  uint32_t max_dimension,
+                                                  char **error_out);
+
+/*
+ Opens and renders an image to native-endian RGBA16 with an explicit RGB
+ stretch mode. Mode `0` is per-channel auto, `1` is linked auto, and `2` is
+ linear. Non-RGB FITS and standard raster images ignore this setting.
+
+ # Safety
+ `path` must be a valid NUL-terminated string. When non-null, `error_out`
+ must point to writable storage for one pointer.
+ */
+SeizaRenderedImage16 *seiza_rendered_image16_open_with_rgb_stretch(const char *path,
+                                                                   double target_median,
+                                                                   double shadows_clip,
+                                                                   uint32_t max_dimension,
+                                                                   uint32_t rgb_stretch_mode,
+                                                                   char **error_out);
+
+/*
+ Opens a FITS image and renders its parameterized processing stack to
+ native-endian RGBA16. The JSON schema and processing order are identical to
+ [`seiza_rendered_image_open_with_stretch_config`], but the final stretch is
+ quantized directly from `f32` to `u16` instead of passing through RGBA8.
+
+ # Safety
+ `path` and `config_json` must be valid NUL-terminated strings. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+SeizaRenderedImage16 *seiza_rendered_image16_open_with_stretch_config(const char *path,
+                                                                      const char *config_json,
+                                                                      uint32_t max_dimension,
+                                                                      char **error_out);
+
+/*
  # Safety
  `image` must be null or a live pointer returned by
  [`seiza_rendered_image_open`].
@@ -627,6 +685,56 @@ const char *seiza_rendered_image_metadata_json(const SeizaRenderedImage *image);
  that has not already been freed.
  */
 void seiza_rendered_image_free(SeizaRenderedImage *image);
+
+/*
+ # Safety
+ `image` must be null or a live pointer returned by a
+ `seiza_rendered_image16_open*` function.
+ */
+uint32_t seiza_rendered_image16_width(const SeizaRenderedImage16 *image);
+
+/*
+ # Safety
+ `image` must be null or a live pointer returned by a
+ `seiza_rendered_image16_open*` function.
+ */
+uint32_t seiza_rendered_image16_height(const SeizaRenderedImage16 *image);
+
+/*
+ Returns borrowed native-endian RGBA16 samples. The returned buffer remains
+ valid until the image is freed.
+
+ # Safety
+ `image` must be null or a live pointer returned by a
+ `seiza_rendered_image16_open*` function.
+ */
+const uint16_t *seiza_rendered_image16_rgba(const SeizaRenderedImage16 *image);
+
+/*
+ Returns the RGBA16 buffer length in `uint16_t` elements, not bytes.
+
+ # Safety
+ `image` must be null or a live pointer returned by a
+ `seiza_rendered_image16_open*` function.
+ */
+size_t seiza_rendered_image16_rgba_length(const SeizaRenderedImage16 *image);
+
+/*
+ Returns borrowed render metadata JSON. The string remains valid until the
+ image is freed.
+
+ # Safety
+ `image` must be null or a live pointer returned by a
+ `seiza_rendered_image16_open*` function.
+ */
+const char *seiza_rendered_image16_metadata_json(const SeizaRenderedImage16 *image);
+
+/*
+ # Safety
+ `image` must be null or a pointer returned by a
+ `seiza_rendered_image16_open*` function that has not already been freed.
+ */
+void seiza_rendered_image16_free(SeizaRenderedImage16 *image);
 
 /*
  Solves an image and returns a JSON string for the C ABI.
