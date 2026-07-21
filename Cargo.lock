@@ -2230,6 +2230,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "seiza-cabi"
+version = "0.11.2"
+dependencies = [
+ "image",
+ "seiza",
+ "seiza-fits",
+ "seiza-stretch",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "seiza-cli"
 version = "0.11.2"
 dependencies = [

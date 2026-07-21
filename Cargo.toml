@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "seiza",
+    "seiza-cabi",
     "seiza-cli",
     "seiza-download",
     "seiza-fits",
