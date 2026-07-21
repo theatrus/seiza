@@ -121,6 +121,34 @@ output, model, and diagnostics must be distinct paths. Raw Bayer mosaics are
 rejected because fitting the interleaved CFA colors as one channel would create
 a false surface; debayer or stack them first.
 
+## Light deconvolution (experimental)
+
+`seiza deconvolve` applies a conservative damped Richardson-Lucy pass to a
+calibrated or stacked linear mono/RGB FITS image. Measure the FWHM of several
+unsaturated stars in pixels and use their median as the explicit Gaussian PSF:
+
+```text
+seiza deconvolve stack-bg.fits --output stack-light-dc.fits \
+  --psf-fwhm 3.1 --iterations 4 --amount 0.35 --noise-fraction 0.001
+```
+
+Run this after calibration, stacking, and background correction and before a
+display stretch. Start with 3-5 iterations and a 0.25-0.4 blend. Compare input
+and output with the same stretch, paying particular attention to bright-star
+rings, background noise, and image borders. Raw Bayer mosaics are rejected;
+debayer or stack them first.
+
+This prototype uses one circular Gaussian PSF across the whole field. It does
+not infer detail, estimate a spatially varying PSF, or replace a model-based
+restoration workflow. See the
+[deconvolution design note](../docs/design/deconvolution.md) for the algorithm,
+guardrails, and next experiments. Four
+[real-corpus comparisons](../docs/benchmarks/2026-07-deconvolution-corpus.md)
+record the first measured trial, and the
+[model-based restoration plan](../docs/design/ml-restoration-training.md)
+defines a safer path from synthetic degradations and expert before/after pairs
+to a provenance-bearing learned operation.
+
 ## Image stacking
 
 `seiza stack` calibrates, registers, and incrementally integrates FITS light

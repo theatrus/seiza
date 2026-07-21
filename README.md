@@ -68,6 +68,8 @@ compiler, formatter, and linter.
   (detection, WCS, solving, catalogs),
   [`seiza-fits`](seiza-fits/README.md) (FITS reading and linear `f32` writing),
   [`seiza-background`](seiza-background/README.md) (robust gradient models),
+  [`seiza-deconvolution`](seiza-deconvolution/README.md) (experimental,
+  conservative linear-image restoration),
   [`seiza-stretch`](seiza-stretch/README.md) (parameterized display curves),
   [`seiza-stacking`](seiza-stacking/README.md) (linear calibration,
   registration, and additive live stacking),
@@ -94,6 +96,8 @@ seiza stack light-001.fits light-002.fits light-003.fits --output stack.fits \
   --preview stack.png --report stack-report.json
 seiza background stack.fits --output stack-bg.fits \
   --model-output background.fits --diagnostics background.json
+seiza deconvolve stack-bg.fits --output stack-light-dc.fits \
+  --psf-fwhm 3.1 --iterations 4 --amount 0.35
 ```
 
 `--data` takes a file or a directory: a directory picks the right catalog
@@ -192,6 +196,29 @@ The Rust crate and Python wheel expose the same incremental `LiveStacker`
 engine. See the [CLI stacking guide](seiza-cli/README.md#image-stacking),
 [Python API](seiza-py/README.md#image-stacking), and
 [stacking design](docs/design/image-stacking.md).
+
+### Light deconvolution (experimental)
+
+`seiza deconvolve` provides a deliberately restrained classical restoration
+experiment for calibrated/stacked linear FITS images. Supply a stellar FWHM in
+pixels; Seiza applies four damped Richardson-Lucy iterations by default and
+blends 35% of the result back into the input while preserving per-channel flux.
+
+```text
+seiza deconvolve stack-bg.fits --output stack-light-dc.fits \
+  --psf-fwhm 3.1 --iterations 4 --amount 0.35
+```
+
+This is an explicit symmetric-Gaussian PSF model, not blind sharpening or a
+learned reconstruction. Use it before display stretching and inspect for noise,
+rings, and field-dependent failures. Raw Bayer mosaics are rejected. See the
+[`seiza-deconvolution` crate](seiza-deconvolution/README.md) and
+[design note](docs/design/deconvolution.md) for the guardrails and limitations.
+The [AstroBin corpus trial](docs/benchmarks/2026-07-deconvolution-corpus.md)
+shows four before/after examples with measured PSF and background changes; the
+[model-based restoration plan](docs/design/ml-restoration-training.md) explains
+how synthetic degradations and registered expert pairs could train a later ML
+operation without treating attractive edits as ground truth.
 
 ### Automatic background extraction
 

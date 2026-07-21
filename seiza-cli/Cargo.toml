@@ -18,6 +18,7 @@ path = "src/main.rs"
 [dependencies]
 seiza.workspace = true
 seiza-background.workspace = true
+seiza-deconvolution.workspace = true
 seiza-download.workspace = true
 seiza-fits.workspace = true
 seiza-satellites.workspace = true

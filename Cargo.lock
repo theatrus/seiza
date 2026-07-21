@@ -2288,6 +2288,7 @@ dependencies = [
  "imageproc",
  "seiza",
  "seiza-background",
+ "seiza-deconvolution",
  "seiza-download",
  "seiza-fits",
  "seiza-satellites",
@@ -2304,6 +2305,14 @@ dependencies = [
  "windows-sys 0.61.2",
  "winresource",
  "zstd",
+]
+
+[[package]]
+name = "seiza-deconvolution"
+version = "0.1.0"
+dependencies = [
+ "rayon",
+ "thiserror",
 ]
 
 [[package]]
