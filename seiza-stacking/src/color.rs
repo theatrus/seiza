@@ -1,5 +1,6 @@
 use crate::{Error, LinearImage, Result};
 use rayon::prelude::*;
+use seiza_stretch::{ResolvedCurve, StretchAnalysis, StretchConfig, StretchParams};
 use std::str::FromStr;
 
 /// How mono input channels are mapped into a common working range.
@@ -502,37 +503,11 @@ fn percentile_levels(
     Ok((black, white))
 }
 
-#[derive(Clone, Copy)]
-enum DisplayTransform {
-    Identity,
-    Mtf {
-        shadows: f32,
-        midtone: f64,
-        highlights: f32,
-    },
-}
-
-impl DisplayTransform {
-    fn map(self, value: f32) -> f32 {
-        match self {
-            Self::Identity => value.clamp(0.0, 1.0),
-            Self::Mtf {
-                shadows,
-                midtone,
-                highlights,
-            } => {
-                let input = 1.0 - f64::from(highlights) + f64::from(value - shadows);
-                seiza_fits::midtones_transfer_function(midtone, input) as f32
-            }
-        }
-    }
-}
-
 fn display_transform(
     channel: PreparedChannel<'_>,
     options: &ForaxxOptions,
     max_samples: usize,
-) -> Result<DisplayTransform> {
+) -> Result<ResolvedCurve> {
     if matches!(channel.transform, ChannelTransform::Identity)
         && channel
             .values
@@ -547,7 +522,7 @@ fn display_transform(
         ));
     }
     let stride = channel.values.len().div_ceil(max_samples.max(1)).max(1);
-    let mut sample = (0..channel.values.len())
+    let sample = (0..channel.values.len())
         .step_by(stride)
         .filter(|index| channel.values[*index].is_finite())
         .map(|index| channel.sample(index))
@@ -557,36 +532,21 @@ fn display_transform(
             "channel contains no samples to stretch".into(),
         ));
     }
-    sample.sort_unstable_by(f32::total_cmp);
-    let median = sample[sample.len() / 2];
-    for value in &mut sample {
-        *value = (*value - median).abs();
+    let analysis = StretchAnalysis::analyze(&sample, 1, sample.len())
+        .map_err(|error| Error::Color(error.to_string()))?;
+    if analysis.linked_statistics().mad * 1.4826 <= f64::from(f32::EPSILON) {
+        return Ok(ResolvedCurve::Identity);
     }
-    sample.sort_unstable_by(f32::total_cmp);
-    let normal_mad = sample[sample.len() / 2] * 1.4826;
-    if normal_mad <= f32::EPSILON {
-        return Ok(DisplayTransform::Identity);
-    }
-    let (shadows, midtone, highlights) = if median > 0.5 {
-        let highlights = median - options.shadows_clip * normal_mad;
-        let midtone = seiza_fits::midtones_transfer_function(
-            f64::from(options.target_median),
-            f64::from(1.0 - (highlights - median)),
-        );
-        (0.0, midtone, highlights)
-    } else {
-        let shadows = (median + options.shadows_clip * normal_mad).max(0.0);
-        let midtone = seiza_fits::midtones_transfer_function(
-            f64::from(options.target_median),
-            f64::from(median - shadows),
-        );
-        (shadows, midtone, 1.0)
-    };
-    Ok(DisplayTransform::Mtf {
-        shadows,
-        midtone,
-        highlights,
-    })
+    let plan = StretchConfig::auto_mtf(
+        StretchParams {
+            target_median: f64::from(options.target_median),
+            shadows_clip: f64::from(options.shadows_clip),
+        },
+        sample.len(),
+    )
+    .resolve(&analysis)
+    .map_err(|error| Error::Color(error.to_string()))?;
+    Ok(plan.curves()[0])
 }
 
 fn normalization_sample_limit(normalization: ColorNormalization) -> usize {

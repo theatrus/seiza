@@ -2246,6 +2246,7 @@ dependencies = [
  "seiza-satellites",
  "seiza-sources",
  "seiza-stacking",
+ "seiza-stretch",
  "serde",
  "serde_json",
  "sha2",
@@ -2283,6 +2284,7 @@ version = "0.1.6"
 dependencies = [
  "memmap2",
  "multiversion",
+ "seiza-stretch",
  "tempfile",
 ]
 
@@ -2325,7 +2327,18 @@ dependencies = [
  "rayon",
  "seiza",
  "seiza-fits",
+ "seiza-stretch",
  "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "seiza-stretch"
+version = "0.1.0"
+dependencies = [
+ "rayon",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 

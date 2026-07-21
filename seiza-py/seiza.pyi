@@ -365,6 +365,28 @@ def combine_narrowband(
     foraxx_target_median: float = 0.2,
     foraxx_shadows_clip: float = -2.8,
 ) -> npt.NDArray[np.float32]: ...
+def stretch(
+    image: npt.NDArray[np.float32],
+    *,
+    model: str = "percentile-asinh",
+    color_strategy: str = "linked",
+    max_analysis_samples: int = 200_000,
+    black: float = 0.0,
+    white: float = 1.0,
+    strength: float = 10.0,
+    black_percentile: float = 0.01,
+    white_percentile: float = 0.995,
+    shadows: float = 0.0,
+    midtone: float = 0.5,
+    highlights: float = 1.0,
+    stretch_factor: float = 1.0,
+    local_intensity: float = 0.0,
+    symmetry_point: float = 0.0,
+    protect_shadows: float = 0.0,
+    protect_highlights: float = 1.0,
+    target_median: float = 0.2,
+    shadows_clip: float = -2.8,
+) -> npt.NDArray[np.float32]: ...
 def stack_fits(
     images: Sequence[str | Path],
     output: str | Path,

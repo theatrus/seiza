@@ -410,6 +410,35 @@ streaming into the final typed pixel buffer, an automatic MTF stretch for u8
 detection and previews, a linear normalized representation for f32 detection,
 and RA/DEC hints taken from headers.
 
+### Parameterized display stretching
+
+`seiza stretch` applies an explicit reusable `seiza-stretch` model to a linear
+mono or RGB FITS image and writes a display-referred PNG, JPEG, or TIFF:
+
+```text
+seiza stretch stack.fits --output preview.png percentile-asinh \
+  --black-percentile 0.01 --white-percentile 0.995 --strength 10
+
+seiza stretch stack.fits --output preview.png auto-mtf \
+  --target-median 0.2 --shadows-clip -2.8
+
+seiza stretch color.fits --output preview.png \
+  --color-strategy luminance-preserving asinh \
+  --black 0 --white 1 --strength 8
+
+seiza stretch stack.fits --output preview.png ghs \
+  --stretch-factor 4 --local-intensity -1 --symmetry-point 0.35 \
+  --protect-shadows 0.1 --protect-highlights 0.8
+```
+
+Other model subcommands are `identity`, `linear`, and explicit `mtf`. The `ghs`
+subcommand exposes the deterministic GHS parameters; informed automatic
+selection can be layered over it later. RGB may use `linked`, `unlinked`, or
+`luminance-preserving` analysis/application.
+Stretching is never applied to linear stack output unless this command or a
+library caller explicitly requests it. See the
+[stretching design](../docs/design/stretching.md).
+
 ## License
 
 Apache-2.0

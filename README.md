@@ -362,11 +362,15 @@ seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-
   `seiza catalog object --all-sources` audits all of it. Earlier `SEIZAOB1`
   and `SEIZAOB3` files remain readable.
 - **FITS** — streaming reading with typed headers, exact
-  histogram statistics, N.I.N.A.-style MTF autostretch, planar RGB
+  histogram statistics, planar RGB
   (NAXIS3) support, OSC debayering (`BAYERPAT`), and bounded-memory
   streaming into native pixel storage, plus atomic linear `f32` output, in the
   [`seiza-fits`](https://crates.io/crates/seiza-fits) crate. FITS files
   plate-solve directly, with RA/DEC hints read from headers.
+- **Parameterized stretching** — reusable identity, linear, asinh,
+  percentile-asinh, MTF, manual GHS, and existing median/MAD Auto-MTF models in
+  `seiza-stretch`. Analysis, curve resolution, and application are separate so
+  interactive and full-resolution pipeline stages can share an exact plan.
 - **Packages & CI** — crates.io releases, a guided
   [Windows MSI installer](packaging/windows/README.md), Fedora RPMs and
   Ubuntu debs on GitHub releases, and an integration suite that solves real
@@ -448,6 +452,8 @@ and solves in the table's exact frame. Contract details:
 
 - `seiza/` — library crate: `detect`, `wcs`, `catalog`, `objects`, `solve`
 - `seiza-fits/` — FITS reading, atomic linear `f32` writing, statistics, and MTF autostretch
+- `seiza-stretch/` — parameterized, format-independent display analysis,
+  transfer plans, and mono/RGB application
 - `seiza-stacking/` — linear FITS calibration, local registration,
   normalization, additive integration, and rejection
 - `seiza-cli/` — the `seiza` command-line tool: solving, ASTAP mode, the

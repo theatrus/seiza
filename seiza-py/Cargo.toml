@@ -32,6 +32,7 @@ extension-module = ["pyo3/extension-module"]
 seiza = { path = "../seiza", features = ["downloads"] }
 seiza-satellites = { path = "../seiza-satellites" }
 seiza-stacking = { path = "../seiza-stacking" }
+seiza-stretch = { path = "../seiza-stretch" }
 pyo3 = { version = "0.25", features = ["abi3-py39"] }
 numpy = "0.25"
 image = { version = "0.25", default-features = false }

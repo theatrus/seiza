@@ -1,6 +1,6 @@
 [package]
-name = "seiza-stacking"
-description = "Linear calibration, registration, normalization, and live image stacking for Seiza"
+name = "seiza-stretch"
+description = "Reusable parameterized display stretching for astrophotography pipelines"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -8,15 +8,13 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 readme = "README.md"
-keywords = ["astronomy", "astrophotography", "stacking", "fits"]
+keywords = ["astronomy", "astrophotography", "image", "stretch"]
 categories = ["science", "multimedia::images"]
 
 [dependencies]
 rayon.workspace = true
-seiza.workspace = true
-seiza-fits.workspace = true
-seiza-stretch.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+serde_json.workspace = true

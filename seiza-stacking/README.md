@@ -21,9 +21,10 @@ The direct SHO permutations and HOO remain linear-light; LRGB replaces or
 blends CIE luminance while preserving RGB chromaticity. `NarrowbandMatrix`
 supports arbitrary static SII/H-alpha/OIII mixes. Foraxx-SHO and Foraxx-HOO
 are intentionally marked display-referred because their published dynamic
-factors operate on stretched channels. `write_color_fits_f32` records the
-palette and transfer semantics alongside preserved reference WCS cards. See
-the [color-composition design](../docs/design/color-composition.md).
+factors operate on stretched channels. That preparation resolves the shared
+parameterized Auto-MTF model from `seiza-stretch`. `write_color_fits_f32`
+records the palette and transfer semantics alongside preserved reference WCS
+cards. See the [color-composition design](../docs/design/color-composition.md).
 The composition functions themselves require aligned inputs. File-oriented
 callers can use `Registrar` plus `resample_to_reference`; the CLI does this
 automatically for every non-reference filter stack. `ColorOptions` controls

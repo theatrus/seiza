@@ -23,6 +23,7 @@ mod provenance;
 mod setup;
 mod solve_field;
 mod stack;
+mod stretch_command;
 mod worker;
 
 fn is_fits_path(path: &std::path::Path) -> bool {
@@ -523,6 +524,8 @@ enum Command {
         #[arg(long)]
         stretch: Option<PathBuf>,
     },
+    /// Apply an explicit display-stretch model to a linear FITS image
+    Stretch(stretch_command::StretchArgs),
     /// Register and incrementally stack linear FITS light frames
     Stack(stack::StackArgs),
     /// Register and compose mono stacks into RGB, LRGB, or narrowband color
@@ -1225,6 +1228,7 @@ fn main() -> Result<()> {
             })
         }
         Command::FitsInfo { image, stretch } => fits_info(&image, stretch.as_deref()),
+        Command::Stretch(options) => stretch_command::run(options),
         Command::Stack(options) => stack::run(options),
         Command::Color(options) => color::run(options),
         Command::Master(options) => master::run(options),
