@@ -2265,6 +2265,7 @@ dependencies = [
  "cbindgen",
  "image",
  "seiza",
+ "seiza-background",
  "seiza-fits",
  "seiza-stretch",
  "serde",

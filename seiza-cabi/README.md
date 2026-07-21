@@ -19,6 +19,12 @@ exposes the **superset** of what both apps need.
   takes a serialized `seiza-stretch` `StretchConfig` (JSON) and renders a FITS
   through the full GHS/MTF/percentile pipeline. New stretch capabilities are
   added in `seiza-stretch`; this shim only marshals JSON in and pixels out.
+- **Background extraction** — `seiza_background_fit` creates a compact opaque
+  model from interleaved linear mono or RGB `float` samples. Callers can inspect
+  its borrowed diagnostics JSON, render it into a caller-owned buffer, or apply
+  subtractive/divisive correction in place before freeing the model. Optional
+  settings use serialized `seiza-background` `BackgroundConfig` JSON, keeping
+  the ABI stable as model options grow.
 - **Plate solving** — `seiza_solve_image_json`.
 - **Catalog setup** — `seiza_catalog_status_json` and `seiza_catalog_setup`
   (with a progress callback). The install path delegates to
@@ -26,6 +32,13 @@ exposes the **superset** of what both apps need.
 - **Memory** — `seiza_core_version`, `seiza_string_free`.
 
 Rendered-image metadata includes input and display histograms.
+
+Background input and output buffers are row-major, pixel-interleaved `float`
+samples with one or three channels. The model copies only compact samples and
+coefficients, so the input buffer may be released after `seiza_background_fit`
+returns. Pass null for both mask/configuration pointers to use automatic
+defaults. Correction mode constants and the precise pointer/length contracts
+are declared in the generated header.
 
 The full C declarations, plus the memory-ownership contract (which returns are
 owned vs. borrowed, and which `seiza_*_free` to call), live in

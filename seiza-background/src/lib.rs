@@ -445,6 +445,19 @@ impl BackgroundFit {
     pub fn render_model(&self) -> Result<Vec<f32>> {
         self.validate()?;
         let mut output = vec![0.0; self.validated_sample_count()?];
+        self.render_model_into_validated(&mut output);
+        Ok(output)
+    }
+
+    /// Render the fitted background into a caller-provided interleaved buffer.
+    pub fn render_model_into(&self, output: &mut [f32]) -> Result<()> {
+        self.validate()?;
+        self.validate_buffer_len(output.len())?;
+        self.render_model_into_validated(output);
+        Ok(())
+    }
+
+    fn render_model_into_validated(&self, output: &mut [f32]) {
         output
             .par_chunks_mut(self.width * self.channels)
             .enumerate()
@@ -456,7 +469,6 @@ impl BackgroundFit {
                     }
                 }
             });
-        Ok(output)
     }
 
     /// Return a corrected copy of an interleaved image.
@@ -1162,6 +1174,17 @@ mod tests {
         let fit = fit_background(&image, 64, 48, 1, &BackgroundConfig::default()).unwrap();
         assert!(matches!(
             fit.correct(&image[..image.len() - 1], CorrectionMode::Subtract),
+            Err(Error::InvalidImage(message)) if message.contains("expected 3072")
+        ));
+    }
+
+    #[test]
+    fn rendering_rejects_a_mismatched_buffer() {
+        let image = plane(64, 48, 1);
+        let fit = fit_background(&image, 64, 48, 1, &BackgroundConfig::default()).unwrap();
+        let mut output = vec![0.0; image.len() - 1];
+        assert!(matches!(
+            fit.render_model_into(&mut output),
             Err(Error::InvalidImage(message)) if message.contains("expected 3072")
         ));
     }
