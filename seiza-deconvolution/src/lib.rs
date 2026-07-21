@@ -121,13 +121,16 @@ pub fn deconvolve(
             data.len()
         )));
     }
-    if data.iter().any(|sample| !sample.is_finite()) {
-        return Err(DeconvolutionError::Invalid(
-            "all input samples must be finite".into(),
-        ));
+    let kernel = gaussian_kernel(config.psf_fwhm_pixels);
+    let convolver = SeparableConvolver::new(width, height, &kernel);
+    if channel_count == 1 {
+        let restored = restore_channel(data, &convolver, config)?;
+        return Ok(DeconvolutionResult {
+            data: restored.data,
+            channels: vec![restored.diagnostics],
+        });
     }
 
-    let kernel = gaussian_kernel(config.psf_fwhm_pixels);
     let restored = (0..channel_count)
         .into_par_iter()
         .map(|channel| {
@@ -137,9 +140,9 @@ pub fn deconvolve(
                 .step_by(channel_count)
                 .copied()
                 .collect::<Vec<_>>();
-            restore_channel(&input, width, height, &kernel, config)
+            restore_channel(&input, &convolver, config)
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
 
     let mut output = vec![0.0; data.len()];
     let mut diagnostics = Vec::with_capacity(channel_count);
@@ -162,20 +165,26 @@ struct RestoredChannel {
 
 fn restore_channel(
     input: &[f32],
-    width: usize,
-    height: usize,
-    kernel: &[f32],
+    convolver: &SeparableConvolver<'_>,
     config: &DeconvolutionConfig,
-) -> RestoredChannel {
-    let (minimum, maximum) = input.iter().fold(
-        (f32::INFINITY, f32::NEG_INFINITY),
-        |(minimum, maximum), &sample| (minimum.min(sample), maximum.max(sample)),
-    );
-    let input_flux = input.iter().map(|&sample| f64::from(sample)).sum::<f64>();
+) -> Result<RestoredChannel> {
+    let mut minimum = f32::INFINITY;
+    let mut maximum = f32::NEG_INFINITY;
+    let mut input_flux = 0.0_f64;
+    for &sample in input {
+        if !sample.is_finite() {
+            return Err(DeconvolutionError::Invalid(
+                "all input samples must be finite".into(),
+            ));
+        }
+        minimum = minimum.min(sample);
+        maximum = maximum.max(sample);
+        input_flux += f64::from(sample);
+    }
     let input_peak = maximum;
     let range = maximum - minimum;
     if range <= f32::EPSILON || config.amount == 0.0 {
-        return RestoredChannel {
+        return Ok(RestoredChannel {
             data: input.to_vec(),
             diagnostics: ChannelDiagnostics {
                 input_flux,
@@ -183,7 +192,7 @@ fn restore_channel(
                 input_peak,
                 output_peak: input_peak,
             },
-        };
+        });
     }
 
     let offset = (-minimum).max(0.0);
@@ -199,17 +208,22 @@ fn restore_channel(
     let noise_floor = range * config.noise_fraction;
     let minimum_correction = config.max_correction.recip();
     let mut estimate = observed.clone();
+    let mut predicted = vec![0.0; input.len()];
+    let mut ratio = vec![0.0; input.len()];
+    let mut correction = vec![0.0; input.len()];
+    let mut convolution_scratch = vec![0.0; input.len()];
 
     for _ in 0..config.iterations {
-        let predicted = convolve_separable(&estimate, width, height, kernel);
-        let ratio = observed
-            .iter()
+        convolver.convolve_into(&estimate, &mut predicted, &mut convolution_scratch);
+        ratio
+            .par_iter_mut()
+            .zip(&observed)
             .zip(&predicted)
-            .map(|(&actual, &model)| {
-                (actual / model.max(epsilon)).clamp(minimum_correction, config.max_correction)
-            })
-            .collect::<Vec<_>>();
-        let correction = convolve_separable(&ratio, width, height, kernel);
+            .for_each(|((ratio, &actual), &model)| {
+                *ratio =
+                    (actual / model.max(epsilon)).clamp(minimum_correction, config.max_correction);
+            });
+        convolver.convolve_into(&ratio, &mut correction, &mut convolution_scratch);
         estimate
             .par_iter_mut()
             .zip(&predicted)
@@ -236,18 +250,23 @@ fn restore_channel(
     } else {
         1.0
     };
+    drop(observed);
+    drop(ratio);
+    drop(correction);
+    drop(convolution_scratch);
+
     let amount = config.amount;
-    let data = input
-        .iter()
-        .zip(estimate)
-        .map(|(&original, estimate)| {
+    let mut data = predicted;
+    data.par_iter_mut()
+        .zip(input)
+        .zip(&estimate)
+        .for_each(|((output, &original), &estimate)| {
             let restored = estimate.mul_add(flux_scale, -offset);
-            amount.mul_add(restored - original, original)
-        })
-        .collect::<Vec<_>>();
+            *output = amount.mul_add(restored - original, original);
+        });
     let output_flux = data.iter().map(|&sample| f64::from(sample)).sum::<f64>();
     let output_peak = data.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    RestoredChannel {
+    Ok(RestoredChannel {
         data,
         diagnostics: ChannelDiagnostics {
             input_flux,
@@ -255,7 +274,7 @@ fn restore_channel(
             input_peak,
             output_peak,
         },
-    }
+    })
 }
 
 fn gaussian_kernel(fwhm_pixels: f32) -> Vec<f32> {
@@ -269,41 +288,80 @@ fn gaussian_kernel(fwhm_pixels: f32) -> Vec<f32> {
     kernel
 }
 
-fn convolve_separable(input: &[f32], width: usize, height: usize, kernel: &[f32]) -> Vec<f32> {
-    let radius = (kernel.len() / 2) as isize;
-    let mut horizontal = vec![0.0; input.len()];
-    horizontal
-        .par_chunks_mut(width)
-        .enumerate()
-        .for_each(|(y, row)| {
-            for (x, output) in row.iter_mut().enumerate() {
-                *output = kernel
-                    .iter()
-                    .enumerate()
-                    .map(|(tap, &weight)| {
-                        let source_x = reflect(x as isize + tap as isize - radius, width);
-                        weight * input[y * width + source_x]
-                    })
-                    .sum();
-            }
-        });
+struct SeparableConvolver<'a> {
+    width: usize,
+    height: usize,
+    kernel: &'a [f32],
+    horizontal_indices: Vec<usize>,
+    vertical_indices: Vec<usize>,
+}
 
+impl<'a> SeparableConvolver<'a> {
+    fn new(width: usize, height: usize, kernel: &'a [f32]) -> Self {
+        Self {
+            width,
+            height,
+            kernel,
+            horizontal_indices: reflected_indices(width, kernel.len()),
+            vertical_indices: reflected_indices(height, kernel.len()),
+        }
+    }
+
+    fn convolve_into(&self, input: &[f32], output: &mut [f32], scratch: &mut [f32]) {
+        debug_assert_eq!(input.len(), self.width * self.height);
+        debug_assert_eq!(output.len(), input.len());
+        debug_assert_eq!(scratch.len(), input.len());
+        let kernel_length = self.kernel.len();
+
+        scratch
+            .par_chunks_mut(self.width)
+            .enumerate()
+            .for_each(|(y, row)| {
+                for (x, output) in row.iter_mut().enumerate() {
+                    let indices =
+                        &self.horizontal_indices[x * kernel_length..(x + 1) * kernel_length];
+                    *output = self
+                        .kernel
+                        .iter()
+                        .zip(indices)
+                        .map(|(&weight, &source_x)| weight * input[y * self.width + source_x])
+                        .sum();
+                }
+            });
+
+        output
+            .par_chunks_mut(self.width)
+            .enumerate()
+            .for_each(|(y, row)| {
+                let y_indices = &self.vertical_indices[y * kernel_length..(y + 1) * kernel_length];
+                for (x, output) in row.iter_mut().enumerate() {
+                    *output = self
+                        .kernel
+                        .iter()
+                        .zip(y_indices)
+                        .map(|(&weight, &source_y)| weight * scratch[source_y * self.width + x])
+                        .sum();
+                }
+            });
+    }
+}
+
+fn reflected_indices(length: usize, kernel_length: usize) -> Vec<usize> {
+    let radius = (kernel_length / 2) as isize;
+    (0..length)
+        .flat_map(|index| {
+            (0..kernel_length)
+                .map(move |tap| reflect(index as isize + tap as isize - radius, length))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn convolve_separable(input: &[f32], width: usize, height: usize, kernel: &[f32]) -> Vec<f32> {
+    let convolver = SeparableConvolver::new(width, height, kernel);
     let mut output = vec![0.0; input.len()];
-    output
-        .par_chunks_mut(width)
-        .enumerate()
-        .for_each(|(y, row)| {
-            for (x, output) in row.iter_mut().enumerate() {
-                *output = kernel
-                    .iter()
-                    .enumerate()
-                    .map(|(tap, &weight)| {
-                        let source_y = reflect(y as isize + tap as isize - radius, height);
-                        weight * horizontal[source_y * width + x]
-                    })
-                    .sum();
-            }
-        });
+    let mut scratch = vec![0.0; input.len()];
+    convolver.convolve_into(input, &mut output, &mut scratch);
     output
 }
 
