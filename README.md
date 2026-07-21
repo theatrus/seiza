@@ -56,13 +56,14 @@ compiler, formatter, and linter.
 - **From Python** — `pip install seiza`: detection, hinted and blind
   solving with optional SIP distortion, WCS transforms, FITS WCS keyword
   output, verified catalog downloads, and native batch/live image stacking
-  with calibration-master construction, parameterized display stretching, and
-  NumPy support. One binary wheel per platform (Linux x86_64 and aarch64,
-  macOS, Windows) covers every CPython from 3.9 up, with type stubs included
-  ([seiza-py](seiza-py/README.md)).
+  with calibration-master construction, robust background extraction,
+  parameterized display stretching, and NumPy support. Binary wheels for Linux
+  x86_64 and aarch64, macOS, and Windows cover every CPython from 3.9 up, with
+  type stubs included ([seiza-py](seiza-py/README.md)).
 - **From Rust** — use the crates directly: [`seiza`](seiza/README.md)
   (detection, WCS, solving, catalogs),
   [`seiza-fits`](seiza-fits/README.md) (FITS reading and linear `f32` writing),
+  [`seiza-background`](seiza-background/README.md) (robust gradient models),
   [`seiza-stretch`](seiza-stretch/README.md) (parameterized display curves),
   [`seiza-stacking`](seiza-stacking/README.md) (linear calibration,
   registration, and additive live stacking),
@@ -87,6 +88,8 @@ seiza catalog star --data data "TYC 5949-2777-1" --format json
 seiza master bias bias/*.fits --output master-bias.fits
 seiza stack light-001.fits light-002.fits light-003.fits --output stack.fits \
   --preview stack.png --report stack-report.json
+seiza background stack.fits --output stack-bg.fits \
+  --model-output background.fits --diagnostics background.json
 ```
 
 `--data` takes a file or a directory: a directory picks the right catalog
@@ -185,6 +188,32 @@ The Rust crate and Python wheel expose the same incremental `LiveStacker`
 engine. See the [CLI stacking guide](seiza-cli/README.md#image-stacking),
 [Python API](seiza-py/README.md#image-stacking), and
 [stacking design](docs/design/image-stacking.md).
+
+### Automatic background extraction
+
+`seiza background` estimates a smooth gradient from robust sample windows in
+a linear mono or RGB FITS image. The default quadratic model is fit per channel
+at shared, deterministically selected positions; locally noisy samples and
+samples inconsistent with the fitted surface are rejected. Output remains
+linear `float32` and retains a valid input WCS.
+
+```text
+seiza background stack.fits --output corrected.fits \
+  --model-output background.fits --diagnostics background.json
+
+# A conservative plane for a simple additive gradient
+seiza background stack.fits --output corrected.fits --degree 1
+
+# Multiplicative illumination correction
+seiza background stack.fits --output corrected.fits --mode divide
+```
+
+Fitting itself retains only compact samples and coefficients. Correction can
+run in place; a full-resolution model is allocated only when requested. Rust
+and Python expose the same fit/apply split and accept an exclusion mask for
+extended structures. See the
+[background-extraction design](docs/design/background-extraction.md) for the
+ADBE-inspired sampling strategy, correction math, memory behavior, and limits.
 
 ### Color from mono stacks
 
@@ -373,6 +402,10 @@ seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-
   percentile-asinh, MTF, manual GHS, and existing median/MAD Auto-MTF models in
   `seiza-stretch`. Analysis, curve resolution, and application are separate so
   interactive and full-resolution pipeline stages can share an exact plan.
+- **Background extraction** — deterministic low-noise sample selection,
+  robust rejection, weighted polynomial surfaces, additive subtraction, and
+  multiplicative correction in `seiza-background`. Model fitting is compact;
+  rendering a full model image is explicit.
 - **Packages & CI** — crates.io releases, a guided
   [Windows MSI installer](packaging/windows/README.md), Fedora RPMs and
   Ubuntu debs on GitHub releases, and an integration suite that solves real
@@ -454,6 +487,8 @@ and solves in the table's exact frame. Contract details:
 
 - `seiza/` — library crate: `detect`, `wcs`, `catalog`, `objects`, `solve`
 - `seiza-fits/` — FITS reading, atomic linear `f32` writing, statistics, and MTF autostretch
+- `seiza-background/` — format-independent robust background sampling,
+  polynomial fitting, diagnostics, and linear correction
 - `seiza-stretch/` — parameterized, format-independent display analysis,
   transfer plans, and mono/RGB application
 - `seiza-stacking/` — linear FITS calibration, local registration,

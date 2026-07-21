@@ -2,6 +2,7 @@
 //! and image stacking. The Python module is named `seiza`.
 
 mod arrays;
+mod background;
 mod color;
 mod satellites;
 mod stacking;
@@ -716,6 +717,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBlindIndex>()?;
     m.add_class::<PyWcs>()?;
     m.add_class::<PySolution>()?;
+    background::register(m)?;
     m.add_class::<satellites::PySatelliteCatalog>()?;
     m.add_class::<satellites::PySatelliteTrack>()?;
     m.add_class::<satellites::PyTrackSample>()?;

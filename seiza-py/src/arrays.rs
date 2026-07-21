@@ -51,7 +51,7 @@ pub(crate) fn into_image_array(
     float_array(py, image.width, image.height, image.channels, image.data)
 }
 
-fn float_array<'py>(
+pub(crate) fn float_array<'py>(
     py: Python<'py>,
     width: usize,
     height: usize,

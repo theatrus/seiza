@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "seiza",
+    "seiza-background",
     "seiza-cabi",
     "seiza-cli",
     "seiza-download",
@@ -22,6 +23,7 @@ authors = ["Yann Ramin <github@theatr.us>"]
 
 [workspace.dependencies]
 seiza = { path = "seiza", version = "0.11.2" }
+seiza-background = { path = "seiza-background", version = "0.1.0" }
 seiza-download = { path = "seiza-download", version = "0.5.0" }
 seiza-fits = { path = "seiza-fits", version = "0.1.6" }
 seiza-satellites = { path = "seiza-satellites", version = "0.4.1" }
