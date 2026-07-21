@@ -5,6 +5,14 @@ for astrophotography pipelines. It analyzes mono or interleaved RGB `f32`
 samples, resolves image-dependent requests into deterministic transfer plans,
 and applies those plans to either `f32` or `u8` output.
 
+`StretchStack` is the reusable ordered-pipeline API. It guarantees at least one
+stage, resolves each `StretchConfig` against the preceding stage's output,
+keeps every intermediate in `f32`, and retains each resolved `StretchPlan` for
+provenance. Its progress callback reports resolving, applying, and completion
+for every stage, allowing UI hosts to expose the entire pipeline instead of a
+single indeterminate render spinner. The C ABI's JSON array form delegates to
+this same implementation.
+
 The crate consolidates Seiza's existing behavior:
 
 - identity and explicit linear range mapping;

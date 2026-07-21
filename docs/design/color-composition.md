@@ -21,6 +21,15 @@ already lie in `[0, 1]` when normalization is disabled; Seiza rejects
 sensor-unit Foraxx inputs instead of silently clipping them. The default
 percentile normalization handles those inputs directly.
 
+Embedding applications may instead apply an independent ordered stretch stack
+to each aligned mono channel, then set `ColorOptions::input_transfer` to
+`ColorTransfer::DisplayReferred` with normalization disabled. RGB, LRGB, and
+static narrowband compositions preserve that transfer in their result. Foraxx
+uses the prepared values directly and skips its shared internal Auto-MTF pass,
+so different H-alpha, OIII, and SII parameters are neither collapsed nor
+applied twice. The caller remains responsible for ensuring finite input samples
+are display-scaled consistently.
+
 Composition reads prepared values directly from caller-owned input planes and
 allocates one three-plane output; it does not materialize normalized copies of
 every channel. Percentile estimation temporarily holds at most `max_samples`
@@ -95,11 +104,12 @@ Foraxx-HOO:
   B = OIII
 ```
 
-The FITS writer records `SEIZATRF='DISPLAY'` for these results and
-`SEIZATRF='LINEAR'` for RGB, LRGB, direct palettes, and custom matrices. It
-also records `SEIZACLR` with the palette name. A Foraxx preview is written
-directly; a linear-light preview receives the normal display-only asinh
-stretch. The original equations and the stretched-input requirement come from
+The FITS writer records `SEIZATRF='DISPLAY'` for Foraxx and for any composition
+whose inputs were explicitly marked display-referred. Linear inputs remain
+`SEIZATRF='LINEAR'` for RGB, LRGB, direct palettes, and custom matrices. It also
+records `SEIZACLR` with the palette name. A display-referred preview is written
+directly; a linear-light preview receives the normal display-only asinh stretch.
+The original equations and the stretched-input requirement come from
 Ludo/ForaxX's [Dynamic narrowband combinations with
 PixelMath](https://thecoldestnights.com/2020/06/pixinsight-dynamic-narrowband-combinations-with-pixelmath/).
 

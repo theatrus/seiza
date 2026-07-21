@@ -28,8 +28,12 @@ cards. See the [color-composition design](../docs/design/color-composition.md).
 The composition functions themselves require aligned inputs. File-oriented
 callers can use `Registrar` plus `resample_to_reference`; the CLI does this
 automatically for every non-reference filter stack. `ColorOptions` controls
-normalization for every composition, while the separate `ForaxxOptions`
-controls the display preparation used only by dynamic Foraxx palettes.
+normalization and declares whether inputs are linear or already display-
+referred. This lets an embedding application independently stretch each mono
+input before composition; Foraxx then skips its shared preparation pass rather
+than stretching those inputs twice. The separate `ForaxxOptions` controls the
+default display preparation used only when dynamic Foraxx palettes receive
+linear inputs.
 
 `LiveStacker::push` is the embedding API intended for acquisition tools and
 PSF Guard. The CLI's `seiza stack` command feeds files through the same state

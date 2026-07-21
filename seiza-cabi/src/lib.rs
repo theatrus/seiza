@@ -11,7 +11,7 @@ use seiza::wcs::Wcs;
 use seiza::{DetectBackend, DetectConfig, detect_stars, detect_stars_luma_f32};
 use seiza_background::{BackgroundConfig, BackgroundFit, CorrectionMode, fit_background_masked};
 use seiza_fits::{FitsImage, HeaderValue, RgbImage16, Statistics, StretchParams};
-use seiza_stretch::StretchConfig;
+use seiza_stretch::{StretchConfig, StretchStack};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashMap};
@@ -25,23 +25,19 @@ use std::time::Instant;
 
 static VERSION: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum StretchConfigRequest {
     Single(StretchConfig),
-    Stack(Vec<StretchConfig>),
+    Stack(StretchStack),
 }
 
 impl StretchConfigRequest {
-    fn into_stack(self) -> Result<Vec<StretchConfig>, String> {
-        let stack = match self {
-            Self::Single(config) => vec![config],
+    fn into_stack(self) -> StretchStack {
+        match self {
+            Self::Single(config) => StretchStack::single(config),
             Self::Stack(stack) => stack,
-        };
-        if stack.is_empty() {
-            return Err("stretch config stack must contain at least one stage".into());
         }
-        Ok(stack)
     }
 }
 
@@ -765,10 +761,10 @@ pub unsafe extern "C" fn seiza_rendered_image_open_with_stretch_config(
         let config_json = required_str(config_json, "stretch config JSON")?;
         let request: StretchConfigRequest = serde_json::from_str(&config_json)
             .map_err(|error| format!("invalid stretch config JSON: {error}"))?;
-        let stack = request.into_stack()?;
+        let stack = request.into_stack();
         let fits = FitsImage::open(&path)
             .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
-        render_fits_with_configs(fits, &stack, max_dimension)
+        render_fits_with_stack(fits, &stack, max_dimension)
     })
     .map_or(ptr::null_mut(), |image| Box::into_raw(Box::new(image)))
 }
@@ -1556,17 +1552,14 @@ fn render_fits_with_config(
     config: &StretchConfig,
     max_dimension: u32,
 ) -> Result<SeizaRenderedImage, String> {
-    render_fits_with_configs(fits, std::slice::from_ref(config), max_dimension)
+    render_fits_with_stack(fits, &StretchStack::single(config.clone()), max_dimension)
 }
 
-fn render_fits_with_configs(
+fn render_fits_with_stack(
     fits: FitsImage,
-    configs: &[StretchConfig],
+    stack: &StretchStack,
     max_dimension: u32,
 ) -> Result<SeizaRenderedImage, String> {
-    let (last_config, leading_configs) = configs
-        .split_last()
-        .ok_or_else(|| "stretch config stack must contain at least one stage".to_string())?;
     let source_width = fits.width;
     let source_height = fits.height;
     let statistics = fits.statistics();
@@ -1587,7 +1580,7 @@ fn render_fits_with_configs(
 
     // The pipeline consumes interleaved f32 samples normalized to [0, 1], the
     // same convention as `FitsImage::to_luma_f32`.
-    let (mut data, channels): (Vec<f32>, usize) = match &rgb {
+    let (data, channels): (Vec<f32>, usize) = match &rgb {
         Some(rgb) => (
             rgb.data
                 .iter()
@@ -1597,19 +1590,10 @@ fn render_fits_with_configs(
         ),
         None => (fits.to_luma_f32(), 1),
     };
-    for (index, config) in leading_configs.iter().enumerate() {
-        let plan = config
-            .resolve_for(&data, channels)
-            .map_err(|error| format!("failed to resolve stretch stage {}: {error}", index + 1))?;
-        data = plan
-            .apply_f32(&data, channels)
-            .map_err(|error| format!("failed to apply stretch stage {}: {error}", index + 1))?;
-    }
-    let final_stage = configs.len();
-    let stretched = last_config
-        .resolve_for(&data, channels)
-        .and_then(|plan| plan.apply_u8(&data, channels))
-        .map_err(|error| format!("failed to apply stretch stage {final_stage}: {error}"))?;
+    let stretched = stack
+        .apply_u8(&data, channels)
+        .map_err(|error| error.to_string())?
+        .data;
     let rgba: Vec<u8> = if channels == 3 {
         stretched
             .chunks_exact(3)
@@ -1640,7 +1624,7 @@ fn render_fits_with_configs(
         "planes": fits.planes,
         "format": "FITS",
         "colorKind": color_kind,
-        "stretchStages": configs.len(),
+        "stretchStages": stack.len(),
         "statistics": statistics_json(&statistics),
         "inputHistogram": input_histogram,
         "displayHistogram": display_histogram,
@@ -2425,20 +2409,17 @@ mod tests {
 
         let single_request: StretchConfigRequest =
             serde_json::from_str(&serde_json::to_string(&first).unwrap()).unwrap();
-        assert_eq!(single_request.into_stack().unwrap(), vec![first.clone()]);
+        assert_eq!(
+            single_request.into_stack().stages(),
+            std::slice::from_ref(&first)
+        );
 
         let stack_json = serde_json::to_string(&[first.clone(), second.clone()]).unwrap();
         let stack = serde_json::from_str::<StretchConfigRequest>(&stack_json)
             .unwrap()
-            .into_stack()
-            .unwrap();
-        let single = render_fits_with_configs(
-            FitsImage::open(&path).unwrap(),
-            std::slice::from_ref(&first),
-            0,
-        )
-        .unwrap();
-        let stacked = render_fits_with_configs(FitsImage::open(&path).unwrap(), &stack, 0).unwrap();
+            .into_stack();
+        let single = render_fits_with_config(FitsImage::open(&path).unwrap(), &first, 0).unwrap();
+        let stacked = render_fits_with_stack(FitsImage::open(&path).unwrap(), &stack, 0).unwrap();
 
         assert_ne!(stacked.rgba, single.rgba);
         let metadata: Value =
@@ -2448,11 +2429,7 @@ mod tests {
 
     #[test]
     fn rejects_an_empty_stretch_stack() {
-        let request: StretchConfigRequest = serde_json::from_str("[]").unwrap();
-        assert_eq!(
-            request.into_stack().unwrap_err(),
-            "stretch config stack must contain at least one stage"
-        );
+        assert!(serde_json::from_str::<StretchConfigRequest>("[]").is_err());
     }
 
     #[test]
