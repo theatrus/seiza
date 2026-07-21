@@ -182,6 +182,41 @@ engine. See the [CLI stacking guide](seiza-cli/README.md#image-stacking),
 [Python API](seiza-py/README.md#image-stacking), and
 [stacking design](docs/design/image-stacking.md).
 
+### Color from mono stacks
+
+Mono stacks can be turned into RGB/LRGB or narrowband quick looks
+without changing the linear stack accumulator:
+
+```text
+seiza color lrgb --luminance l.fits --red r.fits --green g.fits --blue b.fits \
+  --output lrgb.fits --preview lrgb.png
+
+seiza color narrowband --ha ha.fits --oiii oiii.fits --sii sii.fits \
+  --palette sho --output sho.fits --preview sho.png
+
+seiza color narrowband --ha ha.fits --oiii oiii.fits --sii sii.fits \
+  --palette foraxx-sho --preview foraxx.png
+```
+
+RGB, LRGB, SHO/HOO, every direct three-filter permutation, and custom Rust
+mixing matrices retain linear-light samples. Foraxx-SHO and Foraxx-HOO use the
+published dynamic formula on internally stretched working channels and are
+explicitly marked display-referred in FITS metadata. See the [color-composition
+design](docs/design/color-composition.md) for normalization, equations, and
+the distinction between linear CIE-luminance replacement and display palettes.
+The CLI automatically registers filter stacks onto L, R, or H-alpha before
+composition; pass `--no-register` only for masters already sharing one grid.
+
+| Direct linear SHO | Foraxx-SHO quick look |
+| --- | --- |
+| ![Sh2-132 rendered with the direct SHO palette](docs/images/color/sh2-132-sho.jpg) | ![Sh2-132 rendered with the Foraxx-SHO palette](docs/images/color/sh2-132-foraxx-sho.jpg) |
+
+*Sh2-132 from twelve 300-second Askar107PHQ frames per H-alpha, OIII, and SII
+channel. Seiza calibrated and stacked all 36 frames, handled the meridian-flip
+orientation automatically, registered the three filter masters, and rendered
+both previews from the same data. These README images are cropped, downscaled
+quick-look JPEGs; the composition outputs remain full-resolution `f32` FITS.*
+
 ## Performance
 
 Seiza is built to solve inside an imaging loop. On our Windows 11 test machine

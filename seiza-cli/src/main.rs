@@ -16,7 +16,9 @@ use std::path::PathBuf;
 
 mod astap;
 mod build_data;
+mod color;
 mod master;
+mod preview;
 mod provenance;
 mod setup;
 mod solve_field;
@@ -523,6 +525,8 @@ enum Command {
     },
     /// Register and incrementally stack linear FITS light frames
     Stack(stack::StackArgs),
+    /// Register and compose mono stacks into RGB, LRGB, or narrowband color
+    Color(color::ColorArgs),
     /// Build sigma-clipped bias, dark, and flat masters from raw FITS frames
     Master(master::MasterArgs),
     /// Query a star tile file: list stars around a sky position
@@ -1222,6 +1226,7 @@ fn main() -> Result<()> {
         }
         Command::FitsInfo { image, stretch } => fits_info(&image, stretch.as_deref()),
         Command::Stack(options) => stack::run(options),
+        Command::Color(options) => color::run(options),
         Command::Master(options) => master::run(options),
         Command::Cone {
             data,
@@ -3243,6 +3248,45 @@ mod cli_tests {
         ])
         .unwrap();
         assert!(matches!(cli.command, Command::Stack(_)));
+    }
+
+    #[test]
+    fn color_commands_make_the_composition_mode_explicit() {
+        let lrgb = Cli::try_parse_from([
+            "seiza",
+            "color",
+            "lrgb",
+            "--luminance",
+            "l.fits",
+            "--red",
+            "r.fits",
+            "--green",
+            "g.fits",
+            "--blue",
+            "b.fits",
+            "--output",
+            "lrgb.fits",
+            "--preview",
+            "lrgb.png",
+        ])
+        .unwrap();
+        assert!(matches!(lrgb.command, Command::Color(_)));
+
+        let narrowband = Cli::try_parse_from([
+            "seiza",
+            "color",
+            "narrowband",
+            "--ha",
+            "ha.fits",
+            "--oiii",
+            "oiii.fits",
+            "--palette",
+            "foraxx-hoo",
+            "--preview",
+            "hoo.png",
+        ])
+        .unwrap();
+        assert!(matches!(narrowband.command, Command::Color(_)));
     }
 
     #[test]

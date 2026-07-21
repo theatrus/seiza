@@ -1,3 +1,4 @@
+use crate::preview::{PreviewTransfer, write_preview};
 use crate::provenance::{FileIdentity, file_identity, validate_path_roles, write_json_atomic};
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
@@ -6,7 +7,7 @@ use seiza_stacking::{
     NormalizationMode, RegistrationOptions, RejectionMode, StackOptions,
 };
 use serde::Serialize;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum NormalizationArg {
@@ -425,7 +426,7 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
         snapshot.rejected_frames,
     );
     if let Some(preview) = preview_path.as_ref() {
-        write_preview(&snapshot.image, preview)?;
+        write_preview(&snapshot.image, preview, PreviewTransfer::LinearLight)?;
         println!(
             "wrote {}: display stretch only (not used by the stack)",
             preview.display()
@@ -448,43 +449,6 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
             "wrote {}: admission and provenance report",
             report_path.display()
         );
-    }
-    Ok(())
-}
-
-fn write_preview(image: &seiza_stacking::LinearImage, path: &Path) -> Result<()> {
-    let stride = (image.data.len() / 200_000).max(1);
-    let mut sample = image
-        .data
-        .iter()
-        .step_by(stride)
-        .copied()
-        .filter(|value| value.is_finite())
-        .collect::<Vec<_>>();
-    if sample.is_empty() {
-        anyhow::bail!("stack has no finite samples to preview");
-    }
-    sample.sort_unstable_by(f32::total_cmp);
-    let black = sample[sample.len() / 100];
-    let white = sample[sample.len() * 995 / 1000].max(black + f32::EPSILON);
-    let stretch = |value: f32| {
-        if !value.is_finite() {
-            return 0;
-        }
-        let linear = ((value - black) / (white - black)).max(0.0);
-        let display = (10.0 * linear).asinh() / 10.0_f32.asinh();
-        (display.clamp(0.0, 1.0) * 255.0).round() as u8
-    };
-    if image.channels == 1 {
-        let pixels = image.data.iter().copied().map(stretch).collect();
-        image::GrayImage::from_raw(image.width as u32, image.height as u32, pixels)
-            .ok_or_else(|| anyhow::anyhow!("preview dimension mismatch"))?
-            .save(path)?;
-    } else {
-        let pixels = image.data.iter().copied().map(stretch).collect();
-        image::RgbImage::from_raw(image.width as u32, image.height as u32, pixels)
-            .ok_or_else(|| anyhow::anyhow!("preview dimension mismatch"))?
-            .save(path)?;
     }
     Ok(())
 }

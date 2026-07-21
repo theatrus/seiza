@@ -1,6 +1,6 @@
 use crate::{
     CalibrationMasters, Error, FitsFrame, LinearImage, NormalizationMap, NormalizationMode,
-    Registrar, RegistrationOptions, Result, SimilarityTransform,
+    Registrar, RegistrationOptions, Result, SimilarityTransform, resample_to_reference,
 };
 use rayon::prelude::*;
 use seiza_fits::HeaderValue;
@@ -321,12 +321,12 @@ impl LiveStacker {
                 maximum_degrees: criteria.maximum_rotation_degrees,
             }));
         }
-        let mut registered = resample(
+        let mut registered = resample_to_reference(
             &frame,
             self.reference.width,
             self.reference.height,
             registration.transform,
-        );
+        )?;
         let finite_samples = registered
             .data
             .par_iter()
@@ -606,72 +606,6 @@ fn rotation_deviation_degrees(rotation_radians: f64) -> f64 {
     modulo_half_turn.min(180.0 - modulo_half_turn)
 }
 
-fn resample(
-    source: &LinearImage,
-    width: usize,
-    height: usize,
-    transform: SimilarityTransform,
-) -> LinearImage {
-    const COORDINATE_EPSILON: f64 = 1.0e-9;
-
-    let channels = source.channels;
-    let mut data = vec![f32::NAN; width * height * channels];
-    let maximum_source_x = (source.width - 1) as f64;
-    let maximum_source_y = (source.height - 1) as f64;
-    let inverse_cosine = transform.rotation_radians.cos() / transform.scale;
-    let inverse_sine = transform.rotation_radians.sin() / transform.scale;
-    data.par_chunks_mut(width * channels)
-        .enumerate()
-        .for_each(|(y, output_row)| {
-            let target_y = y as f64 - transform.translation_y;
-            for (x, output) in output_row.chunks_exact_mut(channels).enumerate() {
-                let target_x = x as f64 - transform.translation_x;
-                let source_x = inverse_cosine * target_x + inverse_sine * target_y;
-                let source_y = -inverse_sine * target_x + inverse_cosine * target_y;
-                if source_x < -COORDINATE_EPSILON
-                    || source_y < -COORDINATE_EPSILON
-                    || source_x > maximum_source_x + COORDINATE_EPSILON
-                    || source_y > maximum_source_y + COORDINATE_EPSILON
-                {
-                    continue;
-                }
-                // Exact quarter- and half-turns accumulate tiny trigonometric
-                // error at the boundary. Clamp only coordinates already proven
-                // to lie within the epsilon-expanded source grid.
-                let source_x = source_x.clamp(0.0, maximum_source_x);
-                let source_y = source_y.clamp(0.0, maximum_source_y);
-                let x0 = source_x.floor() as usize;
-                let y0 = source_y.floor() as usize;
-                let x1 = (x0 + 1).min(source.width - 1);
-                let y1 = (y0 + 1).min(source.height - 1);
-                let tx = (source_x - x0 as f64) as f32;
-                let ty = (source_y - y0 as f64) as f32;
-                for (channel, output_sample) in output.iter_mut().enumerate() {
-                    let sample = |x: usize, y: usize| {
-                        source.data[(y * source.width + x) * channels + channel]
-                    };
-                    let values = [
-                        sample(x0, y0),
-                        sample(x1, y0),
-                        sample(x0, y1),
-                        sample(x1, y1),
-                    ];
-                    if values.iter().all(|value| value.is_finite()) {
-                        let top = values[0] * (1.0 - tx) + values[1] * tx;
-                        let bottom = values[2] * (1.0 - tx) + values[3] * tx;
-                        *output_sample = top * (1.0 - ty) + bottom * ty;
-                    }
-                }
-            }
-        });
-    LinearImage {
-        width,
-        height,
-        channels,
-        data,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -696,87 +630,11 @@ mod tests {
     }
 
     #[test]
-    fn bilinear_resampling_uses_inverse_transform() {
-        let source =
-            LinearImage::new(4, 4, 1, (0..16).map(|value| value as f32).collect()).unwrap();
-        let registered = resample(
-            &source,
-            4,
-            4,
-            SimilarityTransform {
-                translation_x: 1.0,
-                ..SimilarityTransform::IDENTITY
-            },
-        );
-        assert_eq!(registered.data[1], source.data[0]);
-        assert!(registered.data[0].is_nan());
-    }
-
-    #[test]
     fn meridian_flip_rotation_is_measured_from_half_a_turn() {
         assert!(rotation_deviation_degrees(179.307_f64.to_radians()) < 0.7);
         assert!(rotation_deviation_degrees((-179.307_f64).to_radians()) < 0.7);
         assert!((rotation_deviation_degrees(12.0_f64.to_radians()) - 12.0).abs() < 1.0e-10);
         assert!((rotation_deviation_degrees(90.0_f64.to_radians()) - 90.0).abs() < 1.0e-10);
-    }
-
-    #[test]
-    fn resampling_undoes_a_meridian_flip_about_the_image_center() {
-        let source =
-            LinearImage::new(4, 3, 1, (0..12).rev().map(|value| value as f32).collect()).unwrap();
-        let registered = resample(
-            &source,
-            4,
-            3,
-            SimilarityTransform {
-                scale: 1.0,
-                rotation_radians: std::f64::consts::PI,
-                translation_x: 3.0,
-                translation_y: 2.0,
-            },
-        );
-        let expected = (0..12).map(|value| value as f32).collect::<Vec<_>>();
-        assert_eq!(registered.data, expected);
-    }
-
-    #[test]
-    fn identity_resampling_preserves_the_final_row_and_column() {
-        let source =
-            LinearImage::new(4, 4, 1, (0..16).map(|value| value as f32).collect()).unwrap();
-        let registered = resample(&source, 4, 4, SimilarityTransform::IDENTITY);
-        assert_eq!(registered.data, source.data);
-    }
-
-    #[test]
-    fn resampling_places_a_cropped_source_on_the_reference_grid() {
-        let source = LinearImage::new(3, 2, 1, (0..6).map(|value| value as f32).collect()).unwrap();
-        let registered = resample(
-            &source,
-            5,
-            4,
-            SimilarityTransform {
-                translation_x: 1.0,
-                translation_y: 1.0,
-                ..SimilarityTransform::IDENTITY
-            },
-        );
-
-        for y in 0..source.height {
-            for x in 0..source.width {
-                assert_eq!(
-                    registered.data[(y + 1) * registered.width + x + 1],
-                    source.data[y * source.width + x]
-                );
-            }
-        }
-        assert_eq!(
-            registered
-                .data
-                .iter()
-                .filter(|sample| sample.is_finite())
-                .count(),
-            source.sample_count()
-        );
     }
 
     #[test]

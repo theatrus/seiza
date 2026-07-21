@@ -274,6 +274,92 @@ impl Registrar {
     }
 }
 
+/// Resample a source image through a fitted source-to-reference transform.
+/// Samples outside the source grid, or whose interpolation neighborhood is
+/// not finite, are written as `NaN`.
+pub fn resample_to_reference(
+    source: &LinearImage,
+    width: usize,
+    height: usize,
+    transform: SimilarityTransform,
+) -> Result<LinearImage> {
+    const COORDINATE_EPSILON: f64 = 1.0e-9;
+
+    if width == 0 || height == 0 {
+        return Err(Error::Registration(
+            "resampling output dimensions must be non-zero".into(),
+        ));
+    }
+    if !transform.scale.is_finite()
+        || transform.scale <= 0.0
+        || !transform.rotation_radians.is_finite()
+        || !transform.translation_x.is_finite()
+        || !transform.translation_y.is_finite()
+    {
+        return Err(Error::Registration(
+            "resampling transform must be finite with a positive scale".into(),
+        ));
+    }
+    let channels = source.channels;
+    let sample_count = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(channels))
+        .ok_or_else(|| Error::Registration("resampling output dimensions overflow".into()))?;
+    let row_samples = width
+        .checked_mul(channels)
+        .ok_or_else(|| Error::Registration("resampling row dimensions overflow".into()))?;
+    let mut data = vec![f32::NAN; sample_count];
+    let maximum_source_x = (source.width - 1) as f64;
+    let maximum_source_y = (source.height - 1) as f64;
+    let inverse_cosine = transform.rotation_radians.cos() / transform.scale;
+    let inverse_sine = transform.rotation_radians.sin() / transform.scale;
+    data.par_chunks_mut(row_samples)
+        .enumerate()
+        .for_each(|(y, output_row)| {
+            let target_y = y as f64 - transform.translation_y;
+            for (x, output) in output_row.chunks_exact_mut(channels).enumerate() {
+                let target_x = x as f64 - transform.translation_x;
+                let source_x = inverse_cosine * target_x + inverse_sine * target_y;
+                let source_y = -inverse_sine * target_x + inverse_cosine * target_y;
+                if source_x < -COORDINATE_EPSILON
+                    || source_y < -COORDINATE_EPSILON
+                    || source_x > maximum_source_x + COORDINATE_EPSILON
+                    || source_y > maximum_source_y + COORDINATE_EPSILON
+                {
+                    continue;
+                }
+                // Exact quarter- and half-turns accumulate tiny trigonometric
+                // error at the boundary. Clamp only coordinates already proven
+                // to lie within the epsilon-expanded source grid.
+                let source_x = source_x.clamp(0.0, maximum_source_x);
+                let source_y = source_y.clamp(0.0, maximum_source_y);
+                let x0 = source_x.floor() as usize;
+                let y0 = source_y.floor() as usize;
+                let x1 = (x0 + 1).min(source.width - 1);
+                let y1 = (y0 + 1).min(source.height - 1);
+                let tx = (source_x - x0 as f64) as f32;
+                let ty = (source_y - y0 as f64) as f32;
+                for (channel, output_sample) in output.iter_mut().enumerate() {
+                    let sample = |x: usize, y: usize| {
+                        source.data[(y * source.width + x) * channels + channel]
+                    };
+                    let values = [
+                        sample(x0, y0),
+                        sample(x1, y0),
+                        sample(x0, y1),
+                        sample(x1, y1),
+                    ];
+                    if values.iter().all(|value| value.is_finite()) {
+                        let top = values[0] * (1.0 - tx) + values[1] * tx;
+                        let bottom = values[2] * (1.0 - tx) + values[3] * tx;
+                        *output_sample = top * (1.0 - ty) + bottom * ty;
+                    }
+                }
+            }
+        });
+    LinearImage::new(width, height, channels, data)
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct TranslationVote {
     count: usize,
@@ -602,6 +688,117 @@ mod tests {
             peak: 1.0,
             area: 3,
         }
+    }
+
+    #[test]
+    fn bilinear_resampling_uses_inverse_transform() {
+        let source =
+            LinearImage::new(4, 4, 1, (0..16).map(|value| value as f32).collect()).unwrap();
+        let registered = resample_to_reference(
+            &source,
+            4,
+            4,
+            SimilarityTransform {
+                translation_x: 1.0,
+                ..SimilarityTransform::IDENTITY
+            },
+        )
+        .unwrap();
+        assert_eq!(registered.data[1], source.data[0]);
+        assert!(registered.data[0].is_nan());
+    }
+
+    #[test]
+    fn resampling_undoes_a_meridian_flip_about_the_image_center() {
+        let source =
+            LinearImage::new(4, 3, 1, (0..12).rev().map(|value| value as f32).collect()).unwrap();
+        let registered = resample_to_reference(
+            &source,
+            4,
+            3,
+            SimilarityTransform {
+                scale: 1.0,
+                rotation_radians: std::f64::consts::PI,
+                translation_x: 3.0,
+                translation_y: 2.0,
+            },
+        )
+        .unwrap();
+        let expected = (0..12).map(|value| value as f32).collect::<Vec<_>>();
+        assert_eq!(registered.data, expected);
+    }
+
+    #[test]
+    fn identity_resampling_preserves_the_final_row_and_column() {
+        let source =
+            LinearImage::new(4, 4, 1, (0..16).map(|value| value as f32).collect()).unwrap();
+        let registered =
+            resample_to_reference(&source, 4, 4, SimilarityTransform::IDENTITY).unwrap();
+        assert_eq!(registered.data, source.data);
+    }
+
+    #[test]
+    fn resampling_places_a_cropped_source_on_the_reference_grid() {
+        let source = LinearImage::new(3, 2, 1, (0..6).map(|value| value as f32).collect()).unwrap();
+        let registered = resample_to_reference(
+            &source,
+            5,
+            4,
+            SimilarityTransform {
+                translation_x: 1.0,
+                translation_y: 1.0,
+                ..SimilarityTransform::IDENTITY
+            },
+        )
+        .unwrap();
+
+        for y in 0..source.height {
+            for x in 0..source.width {
+                assert_eq!(
+                    registered.data[(y + 1) * registered.width + x + 1],
+                    source.data[y * source.width + x]
+                );
+            }
+        }
+        assert_eq!(
+            registered
+                .data
+                .iter()
+                .filter(|sample| sample.is_finite())
+                .count(),
+            source.sample_count()
+        );
+    }
+
+    #[test]
+    fn resampling_rejects_invalid_output_and_transform() {
+        let source = LinearImage::new(1, 1, 1, vec![1.0]).unwrap();
+        assert!(resample_to_reference(&source, 0, 1, SimilarityTransform::IDENTITY).is_err());
+        assert!(resample_to_reference(&source, 1, 0, SimilarityTransform::IDENTITY).is_err());
+        assert!(
+            resample_to_reference(
+                &source,
+                1,
+                1,
+                SimilarityTransform {
+                    scale: 0.0,
+                    ..SimilarityTransform::IDENTITY
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            resample_to_reference(
+                &source,
+                1,
+                1,
+                SimilarityTransform {
+                    translation_x: f64::NAN,
+                    ..SimilarityTransform::IDENTITY
+                }
+            )
+            .is_err()
+        );
     }
 
     #[test]

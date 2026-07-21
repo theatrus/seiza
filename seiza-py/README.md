@@ -146,6 +146,27 @@ Snapshot array properties are copies, so Python cannot mutate live Rust state.
 All expensive FITS, calibration, registration, and integration work releases
 the GIL.
 
+### Color from mono stacks
+
+Aligned mono `float32` arrays can be combined without writing intermediate
+files. Outputs have shape `(height, width, 3)`:
+
+```python
+rgb = seiza.combine_rgb(red, green, blue)
+lrgb = seiza.combine_lrgb(luminance, red, green, blue,
+                          luminance_weight=1.0)
+
+sho = seiza.combine_narrowband(ha, oiii, sii, palette="sho")
+hoo = seiza.combine_narrowband(ha, oiii, palette="hoo")
+foraxx = seiza.combine_narrowband(ha, oiii, sii, palette="foraxx-sho")
+```
+
+The default percentile normalization is a quick-look channel match. Pass
+`normalization="none"` for already matched inputs. RGB, LRGB, the six direct
+S/H/O permutations, and HOO are linear-light. Foraxx-SHO/HOO use a stretched
+working copy as required by the published dynamic formula, so those returned
+arrays are display-referred. Composition releases the GIL.
+
 Calibration masters use the same bounded-memory two-pass builder:
 
 ```python
