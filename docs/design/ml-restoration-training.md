@@ -114,11 +114,11 @@ No single sharpness score is sufficient. Promotion should require all of:
 - blind human review at identical display stretches.
 
 Compare the model with the conservative Richardson-Lucy prototype, a no-op,
-simple sharpening, and licensed BlurXTerminator runs as an external learned
-reference. BlurXTerminator output is not ground truth and must not become a
-training target without an explicit distillation decision. The model only earns
-inclusion when it improves the known-truth tests and real-image measurements
-without increasing artifact or hallucination failures.
+simple sharpening, and an external learned reference. External output is not
+ground truth and must not become a training target without an explicit
+distillation decision. The model only earns inclusion when it improves the
+known-truth tests and real-image measurements without increasing artifact or
+hallucination failures.
 
 ## Product and provenance contract
 

@@ -31,7 +31,7 @@ motion, saturated stars, or complex optical wings. See the
 [design note](https://github.com/theatrus/seiza/blob/main/docs/design/deconvolution.md)
 for limits and next steps.
 The repository also includes
-[real-corpus Seiza/BlurXTerminator comparisons](https://github.com/theatrus/seiza/blob/main/docs/benchmarks/2026-07-deconvolution-corpus.md)
+[real-corpus classical/external-reference comparisons](https://github.com/theatrus/seiza/blob/main/docs/benchmarks/2026-07-deconvolution-corpus.md)
 that contrast the conservative defaults with a stronger classical sweep and
 retain its ringing failure rather than presenting FWHM alone,
 and a
