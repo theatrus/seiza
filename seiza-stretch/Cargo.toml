@@ -13,6 +13,7 @@ categories = ["science", "multimedia::images"]
 
 [dependencies]
 rayon.workspace = true
+seiza-stats.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 

@@ -1,20 +1,26 @@
 use crate::{
     BayerLayout, ColorComposition, Error, LinearImage, MasterFrame, Result, StackSnapshot,
 };
-use seiza_fits::{F32ImageData, FitsImage, HeaderValue, Pixels, WriteHeaderCard};
+use seiza_fits::{F32ImageData, FitsImage, HeaderValue, WriteHeaderCard};
 use std::path::{Path, PathBuf};
 
 /// A FITS or XISF frame decoded into linear, un-stretched `f32` samples.
 #[derive(Clone, Debug)]
 pub struct FitsFrame {
+    /// Decoded linear image samples.
     pub image: LinearImage,
+    /// Raw FITS header cards, preserved for metadata and WCS copying.
     pub headers: Vec<(String, HeaderValue)>,
+    /// Exposure time in seconds, when the headers report a positive value.
     pub exposure_seconds: Option<f64>,
+    /// Raw CFA sampling of a one-channel frame, when present.
     pub bayer: Option<BayerLayout>,
+    /// Path the frame was read from, when opened from disk.
     pub source: Option<PathBuf>,
 }
 
 impl FitsFrame {
+    /// Read and decode a FITS file into a linear frame.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let image = if seiza_xisf::is_xisf_path(path) {
@@ -31,13 +37,9 @@ impl FitsFrame {
         Self::from_fits(image, Some(path.to_path_buf()))
     }
 
+    /// Convert an already-decoded [`FitsImage`] into a linear frame,
+    /// interleaving color planes and reading exposure and CFA metadata.
     pub fn from_fits(fits: FitsImage, source: Option<PathBuf>) -> Result<Self> {
-        let bitpix = fits
-            .header("BITPIX")
-            .and_then(HeaderValue::as_i64)
-            .unwrap_or(0);
-        let bzero = fits.header_f64("BZERO").unwrap_or(0.0);
-        let bscale = fits.header_f64("BSCALE").unwrap_or(1.0);
         let bayer_pattern = fits.bayer_pattern();
         let x_offset = fits.header_f64("XBAYROFF").unwrap_or(0.0).max(0.0) as usize;
         let y_offset = fits.header_f64("YBAYROFF").unwrap_or(0.0).max(0.0) as usize;
@@ -45,33 +47,13 @@ impl FitsFrame {
             .iter()
             .find_map(|key| fits.header_f64(key))
             .filter(|value| value.is_finite() && *value > 0.0);
-        let physical = match fits.pixels {
-            Pixels::U8(values) => values
-                .into_iter()
-                .map(|value| (bzero + bscale * f64::from(value)) as f32)
-                .collect(),
-            // seiza-fits has already applied the standard unsigned-camera BZERO.
-            Pixels::U16(values) => values.into_iter().map(f32::from).collect(),
-            Pixels::I32(values) => values
-                .into_iter()
-                .map(|value| (bzero + bscale * f64::from(value)) as f32)
-                .collect(),
-            // A BITPIX=16 image with unusual scaling is decoded to F32 by
-            // seiza-fits and is already in physical units.
-            Pixels::F32(values) if bitpix == 16 => values,
-            Pixels::F32(values) => values
-                .into_iter()
-                .map(|value| (bzero + bscale * f64::from(value)) as f32)
-                .collect(),
-            Pixels::F64(values) => values
-                .into_iter()
-                .map(|value| (bzero + bscale * value) as f32)
-                .collect(),
-        };
+        let (width, height, planes) = (fits.width, fits.height, fits.planes);
+        let headers = fits.headers.clone();
+        let physical = fits.into_physical_f32();
 
-        let channels = if fits.planes == 3 { 3 } else { 1 };
+        let channels = if planes == 3 { 3 } else { 1 };
         let data = if channels == 3 {
-            planar_to_interleaved(&physical, fits.width * fits.height)
+            planar_to_interleaved(&physical, width * height)
         } else {
             physical
         };
@@ -86,8 +68,8 @@ impl FitsFrame {
         };
 
         Ok(Self {
-            image: LinearImage::new(fits.width, fits.height, channels, data)?,
-            headers: fits.headers,
+            image: LinearImage::new(width, height, channels, data)?,
+            headers,
             exposure_seconds,
             bayer,
             source,
@@ -218,6 +200,16 @@ pub fn write_master_fits_f32(path: impl AsRef<Path>, master: &MasterFrame) -> Re
             "CLIPREJ",
             i64::try_from(master.rejected_samples).unwrap_or(i64::MAX),
             "rejected input samples",
+        ),
+        integer_card(
+            "CLIPACC",
+            i64::try_from(master.accepted_samples).unwrap_or(i64::MAX),
+            "accepted input samples",
+        ),
+        integer_card(
+            "CLIPFBK",
+            i64::try_from(master.fallback_pixels).unwrap_or(i64::MAX),
+            "pixels written as the unclipped mean",
         ),
     ];
     if let Some(exposure_seconds) = master.exposure_seconds {
@@ -455,6 +447,7 @@ fn preserve_processed_key(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seiza_fits::Pixels;
 
     fn headers(bitpix: i64) -> Vec<(String, HeaderValue)> {
         vec![("BITPIX".into(), HeaderValue::Integer(bitpix))]
@@ -643,6 +636,7 @@ mod tests {
             input_frames: 12,
             accepted_samples: 47,
             rejected_samples: 1,
+            fallback_pixels: 0,
             input_statistics: Vec::new(),
             bias_subtracted: true,
             dark_subtracted: false,

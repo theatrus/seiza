@@ -6,15 +6,22 @@ use std::collections::HashMap;
 
 type ScoredTransform = (usize, f64, SimilarityTransform, Vec<(usize, usize)>);
 
+/// A source-to-reference mapping combining uniform scale, rotation, and
+/// translation.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SimilarityTransform {
+    /// Uniform scale factor.
     pub scale: f64,
+    /// Rotation angle in radians.
     pub rotation_radians: f64,
+    /// Horizontal translation in pixels.
     pub translation_x: f64,
+    /// Vertical translation in pixels.
     pub translation_y: f64,
 }
 
 impl SimilarityTransform {
+    /// The transform that leaves every coordinate unchanged.
     pub const IDENTITY: Self = Self {
         scale: 1.0,
         rotation_radians: 0.0,
@@ -22,6 +29,7 @@ impl SimilarityTransform {
         translation_y: 0.0,
     };
 
+    /// Map a source coordinate forward to reference space.
     pub fn apply(self, x: f64, y: f64) -> (f64, f64) {
         let cosine = self.rotation_radians.cos() * self.scale;
         let sine = self.rotation_radians.sin() * self.scale;
@@ -31,12 +39,22 @@ impl SimilarityTransform {
         )
     }
 
+    /// Map a reference coordinate back to source space.
     pub fn inverse_apply(self, x: f64, y: f64) -> (f64, f64) {
-        let x = x - self.translation_x;
-        let y = y - self.translation_y;
+        self.inverse_map()(x, y)
+    }
+
+    /// The inverse mapping with its trigonometry evaluated once, for
+    /// per-pixel loops.
+    pub(crate) fn inverse_map(self) -> impl Fn(f64, f64) -> (f64, f64) {
         let cosine = self.rotation_radians.cos() / self.scale;
         let sine = self.rotation_radians.sin() / self.scale;
-        (cosine * x + sine * y, -sine * x + cosine * y)
+        let (translation_x, translation_y) = (self.translation_x, self.translation_y);
+        move |x, y| {
+            let x = x - translation_x;
+            let y = y - translation_y;
+            (cosine * x + sine * y, -sine * x + cosine * y)
+        }
     }
 
     /// Pixel displacement produced by this transform at one source position.
@@ -46,14 +64,21 @@ impl SimilarityTransform {
     }
 }
 
+/// Tuning for star detection, triangle matching, and drift limits.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RegistrationOptions {
+    /// Detection threshold above the background, in noise sigma.
     pub detection_sigma: f32,
+    /// Cap on the number of detected stars retained per frame.
     pub maximum_stars: usize,
+    /// Number of brightest stars used to build matching triangles.
     pub triangle_stars: usize,
+    /// Allowed difference between triangle shape descriptors for a match.
     pub descriptor_tolerance: f64,
+    /// Allowed departure of a candidate transform's scale from unity.
     pub scale_tolerance: f64,
+    /// Radius, in pixels, within which a mapped star counts as a match.
     pub match_tolerance_pixels: f64,
     /// Absolute floor for the maximum frame-to-reference displacement.
     pub maximum_drift_pixels: f64,
@@ -61,7 +86,9 @@ pub struct RegistrationOptions {
     /// displacement. The effective bound is the larger of this and the pixel
     /// floor.
     pub maximum_drift_fraction: f64,
+    /// Fewest matched stars a transform must reach to be accepted.
     pub minimum_matches: usize,
+    /// Cap on candidate transforms scored before choosing the best.
     pub maximum_candidates: usize,
 }
 
@@ -83,14 +110,19 @@ impl Default for RegistrationOptions {
 }
 
 impl RegistrationOptions {
+    /// Default pixel floor for the maximum frame-to-reference displacement.
     pub const DEFAULT_MAXIMUM_DRIFT_PIXELS: f64 = 256.0;
+    /// Default fraction of the larger frame dimension used for maximum drift.
     pub const DEFAULT_MAXIMUM_DRIFT_FRACTION: f64 = 0.15;
 
+    /// Maximum drift for a frame of the given size: the larger of the pixel
+    /// floor and the fractional bound.
     pub fn effective_maximum_drift_pixels(&self, width: usize, height: usize) -> f64 {
         self.maximum_drift_pixels
             .max(width.max(height) as f64 * self.maximum_drift_fraction)
     }
 
+    /// Check that every option lies in its valid range.
     pub fn validate(&self) -> Result<()> {
         if !self.detection_sigma.is_finite()
             || self.detection_sigma <= 0.0
@@ -115,14 +147,21 @@ impl RegistrationOptions {
     }
 }
 
+/// The transform found for one frame, with its match quality.
 #[derive(Clone, Debug)]
 pub struct RegistrationResult {
+    /// Fitted source-to-reference transform.
     pub transform: SimilarityTransform,
+    /// Number of star pairs supporting the fit.
     pub matched_stars: usize,
+    /// Root-mean-square residual of the matched pairs, in pixels.
     pub rms_error_pixels: f64,
+    /// Displacement of the frame center under the transform, in pixels.
     pub drift_pixels: f64,
 }
 
+/// A reference frame's stars and triangles, reused to register many frames
+/// against it.
 #[derive(Clone, Debug)]
 pub struct Registrar {
     width: usize,
@@ -135,6 +174,7 @@ pub struct Registrar {
 }
 
 impl Registrar {
+    /// Detect stars in the reference frame and prepare the matching index.
     pub fn new(reference: &LinearImage, options: RegistrationOptions) -> Result<Self> {
         options.validate()?;
         let reference_stars = detect(reference, &options);
@@ -166,6 +206,7 @@ impl Registrar {
         })
     }
 
+    /// Find the best transform aligning `source` to the reference frame.
     pub fn register(&self, source: &LinearImage) -> Result<RegistrationResult> {
         let source_stars = detect(source, &self.options);
         if source_stars.len() < self.options.minimum_matches.max(3) {
@@ -313,16 +354,12 @@ pub fn resample_to_reference(
     let mut data = vec![f32::NAN; sample_count];
     let maximum_source_x = (source.width - 1) as f64;
     let maximum_source_y = (source.height - 1) as f64;
-    let inverse_cosine = transform.rotation_radians.cos() / transform.scale;
-    let inverse_sine = transform.rotation_radians.sin() / transform.scale;
+    let inverse = transform.inverse_map();
     data.par_chunks_mut(row_samples)
         .enumerate()
         .for_each(|(y, output_row)| {
-            let target_y = y as f64 - transform.translation_y;
             for (x, output) in output_row.chunks_exact_mut(channels).enumerate() {
-                let target_x = x as f64 - transform.translation_x;
-                let source_x = inverse_cosine * target_x + inverse_sine * target_y;
-                let source_y = -inverse_sine * target_x + inverse_cosine * target_y;
+                let (source_x, source_y) = inverse(x as f64, y as f64);
                 if source_x < -COORDINATE_EPSILON
                     || source_y < -COORDINATE_EPSILON
                     || source_x > maximum_source_x + COORDINATE_EPSILON

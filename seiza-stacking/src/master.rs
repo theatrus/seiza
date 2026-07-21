@@ -6,10 +6,14 @@ use crate::{
 use seiza_fits::HeaderValue;
 use std::path::{Path, PathBuf};
 
+/// Which kind of calibration master a frame represents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MasterFrameKind {
+    /// Master bias.
     Bias,
+    /// Master dark.
     Dark,
+    /// Master flat.
     Flat,
 }
 
@@ -32,9 +36,13 @@ impl MasterFrameKind {
     }
 }
 
+/// Sigma thresholds for the leave-one-out clipping used when integrating a
+/// master.
 #[derive(Clone, Copy, Debug)]
 pub struct MasterRejectionOptions {
+    /// Reject a sample this many sigma below the leave-one-out mean.
     pub low_sigma: f32,
+    /// Reject a sample this many sigma above the leave-one-out mean.
     pub high_sigma: f32,
 }
 
@@ -47,8 +55,10 @@ impl Default for MasterRejectionOptions {
     }
 }
 
+/// Inputs and thresholds for building one calibration master.
 #[derive(Clone, Debug, Default)]
 pub struct MasterBuildOptions {
+    /// Sigma-clipping thresholds for the integration.
     pub rejection: MasterRejectionOptions,
     /// Assert an exposure when input headers omit or misreport it.
     pub exposure_seconds: Option<f64>,
@@ -58,30 +68,51 @@ pub struct MasterBuildOptions {
     pub dark: Option<MasterDark>,
 }
 
+/// Per-input tally of samples kept and clipped during integration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MasterInputStatistics {
+    /// Samples from this input that survived clipping.
     pub accepted_samples: u64,
+    /// Samples from this input that were clipped.
     pub rejected_samples: u64,
 }
 
+/// An integrated calibration master with its provenance and clipping stats.
 #[derive(Clone, Debug)]
 pub struct MasterFrame {
+    /// Which kind of master this is.
     pub kind: MasterFrameKind,
+    /// Integrated image.
     pub image: LinearImage,
+    /// Exposure carried on a dark master, when known.
     pub exposure_seconds: Option<f64>,
+    /// Raw CFA sampling retained from the inputs, when present.
     pub bayer: Option<BayerLayout>,
+    /// Number of frames combined.
     pub input_frames: usize,
+    /// Total samples kept across all inputs.
     pub accepted_samples: u64,
+    /// Total samples clipped across all inputs.
     pub rejected_samples: u64,
+    /// Pixels where rejection removed every sample, integrated as the
+    /// unclipped mean instead so the master stays finite.
+    pub fallback_pixels: u64,
+    /// Per-input accepted and rejected counts.
     pub input_statistics: Vec<MasterInputStatistics>,
+    /// True once the bias pedestal has been removed.
     pub bias_subtracted: bool,
+    /// True once a dark or dark-flat has been removed (flats only).
     pub dark_subtracted: bool,
+    /// True once the flat response has been normalized (flats only).
     pub normalized: bool,
+    /// Clipping thresholds used for the integration.
     pub rejection: MasterRejectionOptions,
+    /// Header cards from the first input, copied onto the written master.
     pub reference_headers: Vec<(String, HeaderValue)>,
 }
 
 impl MasterFrame {
+    /// Convert a dark master into a [`MasterDark`]; errors on other kinds.
     pub fn into_dark(self) -> Result<MasterDark> {
         if self.kind != MasterFrameKind::Dark {
             return Err(Error::Calibration(
@@ -188,9 +219,15 @@ pub fn build_master_from_fits(
         });
     }
 
-    for (value, count) in integrated.iter_mut().zip(accepted_counts) {
+    // Rejection can strike out every sample of a pixel (e.g. a hot pixel
+    // flickering across all frames). Fall back to the unclipped running mean
+    // so the master stays finite instead of seeding NaN into every
+    // calibrated light; the count is surfaced for diagnostics.
+    let mut fallback_pixels = 0_u64;
+    for (index, (value, count)) in integrated.iter_mut().zip(accepted_counts).enumerate() {
         if count == 0 {
-            *value = f32::NAN;
+            *value = mean[index];
+            fallback_pixels += 1;
         }
     }
     let signature = reference_signature.expect("at least two paths were validated");
@@ -222,6 +259,7 @@ pub fn build_master_from_fits(
         bayer: reference_bayer,
         input_frames: paths.len(),
         accepted_samples,
+        fallback_pixels,
         rejected_samples,
         input_statistics,
         bias_subtracted,

@@ -79,7 +79,7 @@ impl PyBackgroundModel {
     fn render<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
         let values = py
             .allow_threads(|| self.fit.render_model())
-            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            .map_err(|error| crate::EngineError::new_err(error.to_string()))?;
         float_array(
             py,
             self.fit.width,
@@ -90,6 +90,9 @@ impl PyBackgroundModel {
     }
 
     /// Correct an image with the fitted model while preserving NaNs.
+    ///
+    /// The input array is read in place while the GIL is released; do not
+    /// mutate it from another thread until the call returns.
     #[pyo3(signature = (image, *, mode="subtract"))]
     fn correct<'py>(
         &self,
@@ -108,7 +111,7 @@ impl PyBackgroundModel {
         let mode = correction_mode(mode)?;
         let corrected = py
             .allow_threads(|| self.fit.correct(image.data, mode))
-            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            .map_err(|error| crate::EngineError::new_err(error.to_string()))?;
         float_array(py, image.width, image.height, image.channels, corrected)
     }
 
@@ -124,6 +127,9 @@ impl PyBackgroundModel {
 }
 
 /// Fit a deterministic robust polynomial background to a linear image.
+///
+/// The input arrays are read in place while the GIL is released; do not
+/// mutate them from another thread until the call returns.
 #[pyfunction]
 #[pyo3(signature = (image, *, mask=None, degree=2, ridge=1.0e-8, samples_per_axis=12, sample_radius=None, search_steps=4, sample_rejection_sigma=3.5, fit_rejection_sigma=3.0, fit_rejection_iterations=3, border_fraction=0.03))]
 #[allow(clippy::too_many_arguments)]
@@ -177,7 +183,7 @@ fn fit_background(
                 &config,
             )
         })
-        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        .map_err(|error| crate::EngineError::new_err(error.to_string()))?;
     Ok(PyBackgroundModel { fit })
 }
 

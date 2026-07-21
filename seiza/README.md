@@ -49,7 +49,9 @@ astrophotography, in Rust.
 
 See the [`seiza-cli`](https://crates.io/crates/seiza-cli) crate for the
 command-line tool, and [`seiza-fits`](https://crates.io/crates/seiza-fits)
-for dependency-free FITS reading and autostretch. Raw catalog-building source
+for FITS reading and linear `f32` writing; its statistics and autostretch now
+live in [`seiza-stretch`](https://crates.io/crates/seiza-stretch) and are
+re-exported for existing callers. Raw catalog-building source
 acquisition is separately available from
 [`seiza-sources`](https://crates.io/crates/seiza-sources). Time- and
 observer-aware satellite paths through a solved WCS are provided by the

@@ -1,18 +1,26 @@
 use crate::{Error, LinearImage, Result};
 use rayon::prelude::*;
+use seiza_stats::{median_in_place, robust_sigma_in_place};
 use serde::{Deserialize, Serialize};
 
+/// How a frame's background is matched to the reference before stacking.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(tag = "mode", content = "options", rename_all = "kebab-case")]
 pub enum NormalizationMode {
+    /// Leave samples untouched.
     None,
+    /// One gain and offset for the whole frame per channel.
     #[default]
     Global,
+    /// A grid of per-tile gains and offsets, interpolated across the frame.
     Local {
+        /// Tile edge length in pixels; must be at least 16.
         tile_size: usize,
     },
 }
 
+/// Per-channel gain and offset that map a source frame onto the reference
+/// background, either globally or over a tile grid.
 #[derive(Clone, Debug)]
 pub struct NormalizationMap {
     width: usize,
@@ -26,6 +34,7 @@ pub struct NormalizationMap {
 }
 
 impl NormalizationMap {
+    /// A map that leaves an image of the given shape unchanged.
     pub fn identity(image: &LinearImage) -> Self {
         Self {
             width: image.width,
@@ -39,6 +48,8 @@ impl NormalizationMap {
         }
     }
 
+    /// Fit gains and offsets that match `source`'s background to `reference`
+    /// using robust median and dispersion statistics.
     pub fn estimate(
         reference: &LinearImage,
         source: &LinearImage,
@@ -106,6 +117,8 @@ impl NormalizationMap {
         }
     }
 
+    /// Rescale an image in place with the fitted map. Non-finite samples are
+    /// left untouched; local maps interpolate gains and offsets between tiles.
     pub fn apply(&self, image: &mut LinearImage) -> Result<()> {
         if image.width != self.width
             || image.height != self.height
@@ -171,10 +184,12 @@ impl NormalizationMap {
         Ok(())
     }
 
+    /// Mean gain across all channels and tiles.
     pub fn mean_gain(&self) -> f32 {
         self.gains.iter().sum::<f32>() / self.gains.len() as f32
     }
 
+    /// Mean offset across all channels and tiles.
     pub fn mean_offset(&self) -> f32 {
         self.offsets.iter().sum::<f32>() / self.offsets.len() as f32
     }
@@ -253,15 +268,27 @@ fn affine_for_region(
             "too few overlapping finite pixels for normalization".into(),
         ));
     }
-    let reference_median = median(&mut reference_values);
-    let source_median = median(&mut source_values);
-    let reference_sigma = robust_sigma(&mut reference_values, reference_median);
-    let source_sigma = robust_sigma(&mut source_values, source_median);
+    let (Some(reference_median), Some(source_median)) = (
+        median_in_place(&mut reference_values),
+        median_in_place(&mut source_values),
+    ) else {
+        return Err(Error::Normalization(
+            "too few overlapping finite pixels for normalization".into(),
+        ));
+    };
+    let reference_sigma =
+        robust_sigma_in_place(&mut reference_values, reference_median).unwrap_or(f32::NAN);
+    let source_sigma = robust_sigma_in_place(&mut source_values, source_median).unwrap_or(f32::NAN);
     if !reference_sigma.is_finite() || !source_sigma.is_finite() || source_sigma <= 1.0e-8 {
         return Err(Error::Normalization(
             "normalization region has no usable dispersion".into(),
         ));
     }
+    // Dispersion matching: the gain equalizes robust contrast against the
+    // reference, which corrects transparency and exposure differences. It
+    // assumes dispersion changes come from those global factors; a frame
+    // whose extra dispersion has another cause (e.g. seeing) is still scaled
+    // toward the reference.
     let gain = reference_sigma / source_sigma;
     if !gain.is_finite() {
         return Err(Error::Normalization(
@@ -271,38 +298,9 @@ fn affine_for_region(
     Ok((gain, reference_median - gain * source_median))
 }
 
-fn median(values: &mut [f32]) -> f32 {
-    let middle = values.len() / 2;
-    let even = values.len().is_multiple_of(2);
-    let (lower, median, _) =
-        values.select_nth_unstable_by(middle, |left, right| left.total_cmp(right));
-    if even {
-        let lower_median = lower
-            .iter()
-            .max_by(|left, right| left.total_cmp(right))
-            .expect("an even non-empty sample has a lower partition");
-        (*lower_median + *median) * 0.5
-    } else {
-        *median
-    }
-}
-
-fn robust_sigma(values: &mut [f32], center: f32) -> f32 {
-    for value in values.iter_mut() {
-        *value = (*value - center).abs();
-    }
-    median(values) * 1.4826
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn median_selection_matches_sorted_even_and_odd_samples() {
-        assert_eq!(median(&mut [4.0, 1.0, 3.0, 2.0]), 2.5);
-        assert_eq!(median(&mut [4.0, 1.0, 3.0, 2.0, 5.0]), 3.0);
-    }
 
     #[test]
     fn global_normalization_recovers_affine_background() {

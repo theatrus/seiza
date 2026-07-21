@@ -26,6 +26,14 @@ pyo3::create_exception!(
      verified hypothesis)."
 );
 
+pyo3::create_exception!(
+    seiza,
+    EngineError,
+    PyRuntimeError,
+    "Stretching, color composition, background fitting, or deconvolution \
+     failed during computation."
+);
+
 /// A detected or externally supplied star in 0-indexed pixel coordinates.
 #[pyclass(frozen, name = "Star", module = "seiza")]
 #[derive(Clone)]
@@ -150,17 +158,20 @@ impl PyStarCatalog {
     #[pyo3(signature = (ra, dec, radius_deg, limit=100))]
     fn cone_search(
         &self,
+        py: Python<'_>,
         ra: f64,
         dec: f64,
         radius_deg: f64,
         limit: usize,
     ) -> Vec<(f64, f64, f32)> {
-        self.backend
-            .as_trait()
-            .cone_search(ra, dec, radius_deg, limit)
-            .into_iter()
-            .map(|star| (star.ra, star.dec, star.mag))
-            .collect()
+        py.allow_threads(|| {
+            self.backend
+                .as_trait()
+                .cone_search(ra, dec, radius_deg, limit)
+                .into_iter()
+                .map(|star| (star.ra, star.dec, star.mag))
+                .collect()
+        })
     }
 }
 
@@ -506,18 +517,16 @@ fn detect(
     let stars = if let Ok(array) = image.extract::<PyReadonlyArray2<'_, f32>>() {
         let dims = array.shape();
         let (height, width) = (dims[0] as u32, dims[1] as u32);
-        let pixels = array.as_array().to_owned();
-        let pixels = pixels
+        let pixels = array
             .as_slice()
-            .ok_or_else(|| PyValueError::new_err("image array is not contiguous"))?;
+            .map_err(|_| PyValueError::new_err("image array is not contiguous"))?;
         py.allow_threads(|| detect_stars_luma_f32(pixels, width, height, &config))
     } else if let Ok(array) = image.extract::<PyReadonlyArray2<'_, u8>>() {
         let dims = array.shape();
         let (height, width) = (dims[0] as u32, dims[1] as u32);
-        let pixels = array.as_array().to_owned();
-        let pixels = pixels
+        let pixels = array
             .as_slice()
-            .ok_or_else(|| PyValueError::new_err("image array is not contiguous"))?
+            .map_err(|_| PyValueError::new_err("image array is not contiguous"))?
             .to_vec();
         let buffer = image::GrayImage::from_raw(width, height, pixels)
             .ok_or_else(|| PyValueError::new_err("image dimensions are inconsistent"))?;
@@ -732,6 +741,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     stacking::register(m)?;
     stretch::register(m)?;
     m.add("SolveError", m.py().get_type::<SolveError>())?;
+    m.add("EngineError", m.py().get_type::<EngineError>())?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

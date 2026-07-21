@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use seiza_background::{BackgroundConfig, CorrectionMode, ModelConfig, fit_background};
 use seiza_fits::{HeaderValue, WriteHeaderCard};
-use seiza_stacking::{FitsFrame, LinearImage, write_processed_image_fits_f32};
+use seiza_stacking::{LinearImage, write_processed_image_fits_f32};
 use std::path::PathBuf;
 
 #[derive(Args)]
@@ -87,8 +87,7 @@ pub(crate) fn run(args: BackgroundArgs) -> Result<()> {
     }
     crate::provenance::validate_path_roles(roles)?;
 
-    let mut frame = FitsFrame::open(&args.input)
-        .with_context(|| format!("could not read {}", args.input.display()))?;
+    let mut frame = crate::common::open_frame(&args.input, "background input")?;
     if frame.bayer.is_some() {
         anyhow::bail!(
             "background extraction does not mix raw Bayer subchannels; debayer or stack {} first",
@@ -139,13 +138,15 @@ pub(crate) fn run(args: BackgroundArgs) -> Result<()> {
             .with_context(|| format!("could not write {}", path.display()))?;
     }
 
-    println!(
-        "wrote {}: polynomial degree {}, {} of {} samples accepted, {} correction",
-        args.output.display(),
-        args.degree,
-        fit.diagnostics.accepted_samples,
-        fit.diagnostics.candidate_samples,
-        args.mode.fits_name().to_ascii_lowercase(),
+    crate::common::wrote(
+        &args.output,
+        format_args!(
+            "polynomial degree {}, {} of {} samples accepted, {} correction",
+            args.degree,
+            fit.diagnostics.accepted_samples,
+            fit.diagnostics.candidate_samples,
+            args.mode.fits_name().to_ascii_lowercase(),
+        ),
     );
     Ok(())
 }

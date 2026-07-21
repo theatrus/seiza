@@ -4,6 +4,11 @@
 //! produced by PixInsight for normal astrophotography workflows. Decoded
 //! images use [`seiza_fits::FitsImage`] so downstream statistics, stretching,
 //! Bayer handling, stacking, and solving do not depend on the source format.
+//!
+//! Sample values pass through unchanged: the XISF `bounds` attribute is
+//! intentionally ignored, keeping linear data linear, and preserved FITS
+//! scaling keywords (`BZERO`/`BSCALE`) are dropped because XISF samples are
+//! already physical.
 
 use flate2::read::ZlibDecoder;
 use quick_xml::Reader;
@@ -420,11 +425,18 @@ fn handle_element(
                 && depth == image_depth + 1
             {
                 let keyword = required(&attributes, "name", "FITSKeyword")?.to_string();
-                let raw = required(&attributes, "value", "FITSKeyword")?;
-                images[image_index]
-                    .info
-                    .headers
-                    .push((keyword, parse_header_value(raw)));
+                // XISF samples are already physical and the XML geometry is
+                // authoritative, so preserved FITS scaling and structure
+                // keywords must not be re-applied by FITS-side consumers
+                // such as into_physical_f32. COMMENT/HISTORY-style keywords
+                // legitimately carry no value.
+                if !structural_fits_keyword(&keyword) {
+                    let raw = attributes.get("value").map(String::as_str).unwrap_or("");
+                    images[image_index]
+                        .info
+                        .headers
+                        .push((keyword, parse_header_value(raw)));
+                }
             }
         }
         b"Property" => {
@@ -602,6 +614,20 @@ fn parse_image(
         checksum: attributes.get("checksum").cloned(),
         expected_bytes,
     })
+}
+
+/// Whether a preserved FITS keyword describes storage scaling or geometry
+/// that the XISF XML already resolved. Passing these through would make
+/// FITS-side consumers re-apply scaling to already-physical samples.
+fn structural_fits_keyword(keyword: &str) -> bool {
+    keyword.eq_ignore_ascii_case("BZERO")
+        || keyword.eq_ignore_ascii_case("BSCALE")
+        || keyword.eq_ignore_ascii_case("BITPIX")
+        || keyword.eq_ignore_ascii_case("SIMPLE")
+        || keyword.eq_ignore_ascii_case("END")
+        || keyword
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("NAXIS"))
 }
 
 fn required<'a>(
@@ -1153,6 +1179,60 @@ mod tests {
         let image = from_bytes(&bytes).unwrap();
         assert_eq!(image.planes, 3);
         assert!(matches!(image.pixels, Pixels::U16(ref actual) if actual == &values));
+    }
+
+    #[test]
+    fn decodes_big_endian_byte_shuffled_samples() {
+        let values = [1_u16, 2, 3, 1000, 2000, 3000];
+        let raw = values
+            .iter()
+            .flat_map(|value| value.to_be_bytes())
+            .collect::<Vec<_>>();
+        let compressed = zstd::bulk::compress(&shuffled(&raw, 2), 3).unwrap();
+        let xml = image_element(
+            0,
+            "2:1:3",
+            "UInt16",
+            compressed.len(),
+            &format!(
+                "colorSpace=\"RGB\" byteOrder=\"big\" compression=\"zstd+sh:{}:2\"",
+                raw.len()
+            ),
+            "",
+        );
+        let image = from_bytes(&monolithic(xml, &[&compressed])).unwrap();
+        assert!(matches!(image.pixels, Pixels::U16(ref actual) if actual == &values));
+    }
+
+    #[test]
+    fn drops_structural_fits_keywords_and_accepts_valueless_ones() {
+        let values = [0.25_f32, 0.5, 1.0, -0.5];
+        let raw = values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        let xml = image_element(
+            0,
+            "2:2:1",
+            "Float32",
+            raw.len(),
+            "colorSpace=\"Gray\"",
+            "<FITSKeyword name=\"BZERO\" value=\"32768\"/>\
+             <FITSKeyword name=\"BSCALE\" value=\"2\"/>\
+             <FITSKeyword name=\"NAXIS1\" value=\"999\"/>\
+             <FITSKeyword name=\"COMMENT\"/>\
+             <FITSKeyword name=\"EXPTIME\" value=\"300\"/>",
+        );
+        let image = from_bytes(&monolithic(xml, &[&raw])).unwrap();
+        assert!(image.header("BZERO").is_none());
+        assert!(image.header("BSCALE").is_none());
+        // The synthesized geometry card wins over the preserved keyword.
+        assert_eq!(image.header("NAXIS1"), Some(&HeaderValue::Integer(2)));
+        assert!(image.header("COMMENT").is_some());
+        assert_eq!(image.header_f64("EXPTIME"), Some(300.0));
+        // The poisonous case: preserved FITS scaling must not shift
+        // already-physical XISF samples on the FITS-side decode path.
+        assert_eq!(image.into_physical_f32(), values);
     }
 
     #[test]

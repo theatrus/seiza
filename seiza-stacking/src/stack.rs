@@ -6,12 +6,17 @@ use rayon::prelude::*;
 use seiza_fits::HeaderValue;
 use serde::{Deserialize, Serialize};
 
+/// Thresholds for per-sample delta-sigma rejection during live stacking.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DeltaSigmaOptions {
+    /// Reject a sample this many sigma below the running mean.
     pub low_sigma: f32,
+    /// Reject a sample this many sigma above the running mean.
     pub high_sigma: f32,
+    /// Observations a sample needs before rejection starts.
     pub warmup_samples: u32,
+    /// Floor on the running sigma, so a near-constant sample stays inclusive.
     pub minimum_sigma: f32,
 }
 
@@ -26,10 +31,13 @@ impl Default for DeltaSigmaOptions {
     }
 }
 
+/// Which per-sample rejection rule the stack applies.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(tag = "mode", content = "options", rename_all = "kebab-case")]
 pub enum RejectionMode {
+    /// Keep every finite sample.
     None,
+    /// Reject samples that stray too far from the running mean.
     DeltaSigma(DeltaSigmaOptions),
 }
 
@@ -39,12 +47,18 @@ impl Default for RejectionMode {
     }
 }
 
+/// Everything that governs how frames are aligned, matched, rejected, and
+/// admitted into a stack.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct StackOptions {
+    /// Star-matching and transform-fitting options.
     pub registration: RegistrationOptions,
+    /// Background-matching mode.
     pub normalization: NormalizationMode,
+    /// Per-sample rejection rule.
     pub rejection: RejectionMode,
+    /// Whole-frame admission gates.
     pub acceptance: FrameAcceptanceCriteria,
 }
 
@@ -95,14 +109,21 @@ impl StackOptions {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FrameAcceptanceCriteria {
+    /// Largest registration RMS residual, in pixels, still accepted.
     pub maximum_registration_rms_pixels: f64,
+    /// Largest departure of the transform's scale from unity still accepted.
     pub maximum_scale_deviation: f64,
     /// Maximum rotation away from either the reference orientation or its
     /// 180-degree meridian-flipped orientation.
     pub maximum_rotation_degrees: f64,
+    /// Smallest fraction of the frame that must overlap the reference.
     pub minimum_overlap_fraction: f32,
+    /// Smallest normalization gain, anywhere in the map, still accepted.
     pub minimum_normalization_gain: f32,
+    /// Largest normalization gain, anywhere in the map, still accepted.
     pub maximum_normalization_gain: f32,
+    /// Smallest fraction of samples that must survive rejection to admit the
+    /// frame.
     pub minimum_integrated_fraction: f32,
 }
 
@@ -120,71 +141,128 @@ impl Default for FrameAcceptanceCriteria {
     }
 }
 
+/// Measurements recorded for a frame that passed every admission gate.
 #[derive(Clone, Debug)]
 pub struct FrameDiagnostics {
+    /// Transform used to align the frame.
     pub transform: SimilarityTransform,
+    /// Star pairs supporting the registration.
     pub matched_stars: usize,
+    /// Registration RMS residual, in pixels.
     pub registration_rms_pixels: f64,
+    /// Frame-center displacement under the transform, in pixels.
     pub registration_drift_pixels: f64,
+    /// Mean normalization gain applied.
     pub normalization_mean_gain: f32,
+    /// Mean normalization offset applied.
     pub normalization_mean_offset: f32,
+    /// Fraction of the frame that overlapped the reference.
     pub overlap_fraction: f32,
+    /// Fraction of samples that survived rejection.
     pub integrated_fraction: f32,
+    /// Samples integrated from this frame.
     pub accepted_samples: usize,
+    /// Samples rejected from this frame.
     pub rejected_samples: usize,
 }
 
+/// Why a frame was turned away from the stack.
 #[derive(Clone, Debug, PartialEq, thiserror::Error)]
 pub enum FrameRejectionReason {
+    /// Calibration masters could not be applied.
     #[error("calibration failed: {0}")]
     Calibration(String),
+    /// The frame's shape or channel count did not match the stack.
     #[error("incompatible image: {0}")]
     IncompatibleImage(String),
+    /// No transform reached the match threshold.
     #[error("registration failed: {0}")]
     Registration(String),
+    /// Registration succeeded but its residual was too large.
     #[error("registration RMS {measured:.3}px exceeds {maximum:.3}px")]
-    RegistrationRms { measured: f64, maximum: f64 },
+    RegistrationRms {
+        /// Measured RMS residual, in pixels.
+        measured: f64,
+        /// Allowed RMS residual, in pixels.
+        maximum: f64,
+    },
+    /// The transform's scale departed too far from unity.
     #[error("scale deviation {measured:.5} exceeds {maximum:.5}")]
-    ScaleDeviation { measured: f64, maximum: f64 },
+    ScaleDeviation {
+        /// Measured scale deviation.
+        measured: f64,
+        /// Allowed scale deviation.
+        maximum: f64,
+    },
+    /// The transform's rotation was too far from a valid pier orientation.
     #[error(
         "rotation deviation {measured_degrees:.3}deg from the nearest normal or meridian-flipped orientation exceeds {maximum_degrees:.3}deg"
     )]
     Rotation {
+        /// Measured rotation deviation, in degrees.
         measured_degrees: f64,
+        /// Allowed rotation deviation, in degrees.
         maximum_degrees: f64,
     },
+    /// Too little of the frame overlapped the reference.
     #[error("overlap fraction {measured:.3} is below {minimum:.3}")]
-    InsufficientOverlap { measured: f32, minimum: f32 },
+    InsufficientOverlap {
+        /// Measured overlap fraction.
+        measured: f32,
+        /// Required overlap fraction.
+        minimum: f32,
+    },
+    /// Background matching failed.
     #[error("normalization failed: {0}")]
     Normalization(String),
+    /// A normalization gain fell outside the accepted range.
     #[error(
         "normalization gain range {measured_minimum:.3}..={measured_maximum:.3} is outside {minimum:.3}..={maximum:.3}"
     )]
     NormalizationGain {
+        /// Smallest gain in the map.
         measured_minimum: f32,
+        /// Largest gain in the map.
         measured_maximum: f32,
+        /// Smallest accepted gain.
         minimum: f32,
+        /// Largest accepted gain.
         maximum: f32,
     },
+    /// Too few samples would survive rejection to be worth integrating.
     #[error("integrated sample fraction {measured:.3} is below {minimum:.3}")]
-    InsufficientIntegratedSamples { measured: f32, minimum: f32 },
+    InsufficientIntegratedSamples {
+        /// Measured surviving fraction.
+        measured: f32,
+        /// Required surviving fraction.
+        minimum: f32,
+    },
 }
 
+/// The outcome of pushing one frame: admitted with diagnostics, or turned away
+/// with a reason.
 #[derive(Clone, Debug)]
 pub enum FrameDisposition {
+    /// The frame was integrated; carries its measurements.
     Accepted(FrameDiagnostics),
+    /// The frame was turned away; carries why.
     Rejected(FrameRejectionReason),
 }
 
+/// A full copy of the current stack estimate and its coverage masks.
 #[derive(Clone, Debug)]
 pub struct StackSnapshot {
+    /// Current mean image; zero-coverage samples are masked with `NaN`.
     pub image: LinearImage,
+    /// Per-sample variance of the integrated observations.
     pub variance: LinearImage,
     /// Accepted observation count for every image sample.
     pub coverage: Vec<u32>,
     /// Rejected observation count for every image sample.
     pub rejected_samples: Vec<u32>,
+    /// Number of frames admitted so far.
     pub accepted_frames: u32,
+    /// Number of frames turned away so far.
     pub rejected_frames: u32,
 }
 
@@ -192,13 +270,21 @@ pub struct StackSnapshot {
 /// coverage have an undefined mean and must be masked by `coverage`.
 #[derive(Clone, Copy, Debug)]
 pub struct StackView<'a> {
+    /// Image width in pixels.
     pub width: usize,
+    /// Image height in pixels.
     pub height: usize,
+    /// Channel count.
     pub channels: usize,
+    /// Current running mean; mask by `coverage`.
     pub mean: &'a [f32],
+    /// Accepted observation count for every sample.
     pub coverage: &'a [u32],
+    /// Rejected observation count for every sample.
     pub rejected_samples: &'a [u32],
+    /// Number of frames admitted so far.
     pub accepted_frames: u32,
+    /// Number of frames turned away so far.
     pub rejected_frames: u32,
 }
 
@@ -216,6 +302,8 @@ pub struct LiveStacker {
 }
 
 impl LiveStacker {
+    /// Start a stack from a reference FITS frame, calibrating and preparing it
+    /// as the immutable alignment target.
     pub fn new(
         mut reference: FitsFrame,
         calibration: CalibrationMasters,
@@ -230,6 +318,8 @@ impl LiveStacker {
         Self::from_prepared(reference.image, reference.headers, calibration, options)
     }
 
+    /// Start a stack from an already-prepared linear reference, with no
+    /// calibration and no header metadata.
     pub fn from_linear(reference: LinearImage, options: StackOptions) -> Result<Self> {
         Self::from_prepared(
             reference,
@@ -261,6 +351,8 @@ impl LiveStacker {
         })
     }
 
+    /// Calibrate, prepare, and try to integrate a FITS frame, reporting whether
+    /// it was admitted or turned away.
     pub fn push(&mut self, mut frame: FitsFrame) -> Result<FrameDisposition> {
         if let Err(error) =
             self.calibration
@@ -281,27 +373,23 @@ impl LiveStacker {
         self.push_linear(frame.image)
     }
 
+    /// Register, normalize, and try to integrate an already-prepared linear
+    /// frame, applying every admission gate.
     pub fn push_linear(&mut self, frame: LinearImage) -> Result<FrameDisposition> {
         if self.reference.channels != frame.channels {
-            self.rejected_frames += 1;
-            return Ok(FrameDisposition::Rejected(
-                FrameRejectionReason::IncompatibleImage(format!(
-                    "frame has {} channel(s) but stack has {}",
-                    frame.channels, self.reference.channels
-                )),
-            ));
+            return Ok(self.reject(FrameRejectionReason::IncompatibleImage(format!(
+                "frame has {} channel(s) but stack has {}",
+                frame.channels, self.reference.channels
+            ))));
         }
         let registration = match self.registrar.register(&frame) {
             Ok(registration) => registration,
             Err(error) => {
-                self.rejected_frames += 1;
                 let message = match error {
                     Error::Registration(message) => message,
                     other => other.to_string(),
                 };
-                return Ok(FrameDisposition::Rejected(
-                    FrameRejectionReason::Registration(message),
-                ));
+                return Ok(self.reject(FrameRejectionReason::Registration(message)));
             }
         };
         let criteria = self.options.acceptance;
@@ -408,6 +496,7 @@ impl LiveStacker {
         }))
     }
 
+    /// Copy the current estimate and coverage masks into an owned snapshot.
     pub fn snapshot(&self) -> Result<StackSnapshot> {
         let (mean, variance) = self.accumulator.snapshot();
         Ok(StackSnapshot {
@@ -469,6 +558,7 @@ impl LiveStacker {
         })
     }
 
+    /// Header cards carried from the reference frame, for writing outputs.
     pub fn reference_headers(&self) -> &[(String, HeaderValue)] {
         &self.reference_headers
     }
@@ -551,37 +641,41 @@ impl Accumulator {
             .mean
             .iter()
             .zip(&self.count)
-            .map(|(mean, count)| if *count == 0 { f32::NAN } else { *mean })
+            .map(|(&mean, &count)| finalized_mean(mean, count))
             .collect();
         let variance = self
             .m2
             .iter()
             .zip(&self.count)
-            .map(|(m2, count)| {
-                if *count > 1 {
-                    *m2 / (*count - 1) as f32
-                } else {
-                    0.0
-                }
-            })
+            .map(|(&m2, &count)| finalized_variance(m2, count))
             .collect();
         (mean, variance)
     }
 
     fn into_snapshot(mut self) -> (Vec<f32>, Vec<f32>, Vec<u32>, Vec<u32>) {
-        for (mean, count) in self.mean.iter_mut().zip(&self.count) {
-            if *count == 0 {
-                *mean = f32::NAN;
-            }
+        for (mean, &count) in self.mean.iter_mut().zip(&self.count) {
+            *mean = finalized_mean(*mean, count);
         }
-        for (m2, count) in self.m2.iter_mut().zip(&self.count) {
-            *m2 = if *count > 1 {
-                *m2 / (*count - 1) as f32
-            } else {
-                0.0
-            };
+        for (m2, &count) in self.m2.iter_mut().zip(&self.count) {
+            *m2 = finalized_variance(*m2, count);
         }
         (self.mean, self.m2, self.count, self.rejected)
+    }
+}
+
+/// A sample never observed has an undefined mean; mask it so downstream
+/// renderers can drop it by coverage.
+fn finalized_mean(mean: f32, count: u32) -> f32 {
+    if count == 0 { f32::NAN } else { mean }
+}
+
+/// Convert Welford's running sum of squares into the sample variance, which
+/// needs at least two observations.
+fn finalized_variance(m2: f32, count: u32) -> f32 {
+    if count > 1 {
+        m2 / (count - 1) as f32
+    } else {
+        0.0
     }
 }
 

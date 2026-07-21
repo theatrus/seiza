@@ -286,6 +286,12 @@ publication from the original source volume before the performance work above.
 An earlier percentile-clipped detector admitted only eleven; this sequence is
 retained as a regression case for preserving star rank under drift.
 
+![Sh2-230 red stack from the earlier eleven-frame detector](../images/stacking/sh2-230-r-11-of-31.jpg)
+
+The same field from only the eleven frames that earlier detector admitted.
+Integrating a third of the sequence leaves a grainier background than the
+31-frame stack above, which is the outcome this regression case guards.
+
 ## Follow-on work
 
 1. Exact two-pass sigma/MAD/Winsorized rejection for final batch integration.

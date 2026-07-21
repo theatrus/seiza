@@ -35,6 +35,26 @@ image, or another image that must share exactly the same display transform.
 The crate has no FITS, stacking, image-codec, or Python dependency. Inputs are
 mono or interleaved RGB `f32` slices. Callers own decoding and output encoding.
 
+## Ordered stretch stacks
+
+`StretchStack` is the reusable ordered pipeline in the core API. It holds a
+list of `StretchConfig` stages and applies them in order: each stage resolves
+and applies against the previous stage's output, so a data-driven model such as
+Percentile-asinh or Auto-MTF re-analyzes what the earlier stages produced
+rather than the original image. Samples stay `f32` between stages; a `u8`
+display result is quantized only after the last stage.
+
+A stack always holds at least one stage. `StretchStack::new(stages)` rejects an
+empty list and `StretchStack::single(config)` wraps one config. A stack
+serializes as a plain array of its stages, so a saved stack and a saved single
+config share one JSON shape; the C ABI's JSON array form runs this same code.
+
+`apply_f32` and `apply_u8` return a `StretchStackOutput` holding the final
+pixels and every stage's resolved `StretchPlan`, kept for provenance and reuse.
+The `*_with_progress` variants report a resolving, applying, or completion
+boundary for each stage, so a UI host can show progress across the whole
+pipeline instead of one indeterminate spinner.
+
 ## Included models
 
 - `Identity` clamps already display-referred data only when an output encoder

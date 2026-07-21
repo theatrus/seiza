@@ -9,7 +9,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const NORMAL_MAD_SCALE: f64 = 1.4826;
+use seiza_stats::NORMAL_MAD_SCALE;
 const LUMA_RED: f64 = 0.2126;
 const LUMA_GREEN: f64 = 0.7152;
 const LUMA_BLUE: f64 = 0.0722;
@@ -1028,6 +1028,9 @@ fn validate_mtf(shadows: f64, midtone: f64, highlights: f64) -> Result<()> {
     Ok(())
 }
 
+// Quantizes like the legacy u16 LUT's `* 255.0 + 0.5` (identical for the
+// clamped non-negative domain); the LUT keeps its own form because it is
+// frozen for byte-for-byte preview compatibility.
 fn to_u8(value: f32) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }

@@ -221,6 +221,9 @@ fn run_narrowband(args: NarrowbandArgs) -> Result<()> {
     if palette.requires_sii() && args.sii.is_none() {
         anyhow::bail!("{} requires --sii", palette.name());
     }
+    if !palette.requires_sii() && args.sii.is_some() {
+        anyhow::bail!("{} does not use --sii", palette.name());
+    }
     let sii_path = if palette.requires_sii() {
         args.sii.as_ref()
     } else {
@@ -281,9 +284,11 @@ impl CommonArgs {
         if self.no_register {
             return Ok(None);
         }
-        if !self.max_registration_rms.is_finite() || self.max_registration_rms <= 0.0 {
-            anyhow::bail!("--max-registration-rms must be a positive finite number");
-        }
+        crate::common::validate_registration_flags(
+            self.max_registration_rms,
+            self.max_registration_drift,
+            self.max_registration_drift_fraction,
+        )?;
         let options = RegistrationOptions {
             maximum_drift_pixels: self.max_registration_drift,
             maximum_drift_fraction: self.max_registration_drift_fraction,
@@ -329,7 +334,7 @@ impl CommonArgs {
 }
 
 fn open(path: &Path, role: &str) -> Result<FitsFrame> {
-    FitsFrame::open(path).with_context(|| format!("failed to read {role} stack {}", path.display()))
+    crate::common::open_frame(path, &format!("{role} stack"))
 }
 
 fn validate_paths(common: &CommonArgs, inputs: &[(&str, &PathBuf)]) -> Result<()> {
@@ -357,10 +362,12 @@ fn write_outputs(
 ) -> Result<()> {
     if let Some(output) = common.output.as_deref() {
         write_color_fits_f32(output, composition, reference_headers, label)?;
-        println!(
-            "wrote {}: {label} RGB f32 ({})",
-            output.display(),
-            composition.transfer.fits_name().to_ascii_lowercase()
+        crate::common::wrote(
+            output,
+            format_args!(
+                "{label} RGB f32 ({})",
+                composition.transfer.fits_name().to_ascii_lowercase()
+            ),
         );
     }
     if let Some(preview) = common.preview.as_deref() {
@@ -369,7 +376,7 @@ fn write_outputs(
             ColorTransfer::DisplayReferred => PreviewTransfer::DisplayReferred,
         };
         write_preview(&composition.image, preview, transfer)?;
-        println!("wrote {}: {label} quick-look PNG", preview.display());
+        crate::common::wrote(preview, format_args!("{label} quick-look PNG"));
     }
     Ok(())
 }

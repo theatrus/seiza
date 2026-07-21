@@ -15,6 +15,14 @@ pub fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
     }
 }
 
+/// Return a key under which paths naming the same filesystem entry compare
+/// equal. Falls back to the literal path when canonicalization fails, so
+/// callers can dedup many paths with one canonicalization each instead of
+/// one per pair.
+pub fn path_identity(path: &Path) -> PathBuf {
+    comparable_path(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn comparable_path(path: &Path) -> std::io::Result<PathBuf> {
     if let Ok(path) = std::fs::canonicalize(path) {
         return Ok(path);

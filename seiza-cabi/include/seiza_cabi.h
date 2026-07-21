@@ -208,9 +208,10 @@ const char *seiza_background_model_diagnostics_json(const SeizaBackgroundModel *
  Renders a fitted background into a caller-owned interleaved float buffer.
 
  # Safety
- `model` must be a live pointer returned by [`seiza_background_fit`].
- `output` must point to `output_length` writable floats. When non-null,
- `error_out` must point to writable storage for one pointer.
+ `model` must be null or a live pointer returned by [`seiza_background_fit`];
+ a null model returns an error. `output` must point to `output_length`
+ writable floats. When non-null, `error_out` must point to writable storage
+ for one pointer.
  */
 bool seiza_background_model_render(const SeizaBackgroundModel *model,
                                    float *output,
@@ -514,6 +515,10 @@ char *seiza_catalog_status_json(const char *catalog_directory, char **error_out)
  G≤20 package, and `2` installs every published catalog. The call is
  synchronous and must run off the UI thread. Progress JSON is valid only for
  the duration of each callback.
+
+ This builds its own blocking Tokio runtime for the download, so it must not
+ be called from a thread already inside an async runtime; doing so panics,
+ which this call catches and returns through `error_out`.
 
  # Safety
  `catalog_directory` may be null or a valid NUL-terminated string. `context`

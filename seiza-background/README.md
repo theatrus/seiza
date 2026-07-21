@@ -6,7 +6,8 @@ astronomical images. It is format-independent: callers provide interleaved
 place or render the estimated background on demand.
 
 The first model is a robust weighted polynomial surface. Candidate windows are
-distributed across the frame, moved toward nearby low-noise locations, and
+distributed across the frame, moved toward nearby locations with the lowest
+background level (a window's mean plus a quarter of its dispersion), and
 filtered with local-dispersion and iterative residual rejection. Mono and RGB
 images share sample positions while fitting each channel independently.
 

@@ -9,7 +9,7 @@ use seiza_stacking::{
 };
 
 fn color_error(error: seiza_stacking::Error) -> PyErr {
-    PyValueError::new_err(error.to_string())
+    crate::EngineError::new_err(error.to_string())
 }
 
 fn options(
@@ -37,6 +37,7 @@ fn options(
     })
 }
 
+/// Combine mono red, green, and blue stacks into one RGB image.
 #[pyfunction]
 #[pyo3(signature = (red, green, blue, *, normalization="percentile", black_percentile=0.001, white_percentile=0.995, normalization_samples=1_000_000))]
 #[allow(clippy::too_many_arguments)]
@@ -65,6 +66,7 @@ fn combine_rgb<'py>(
     into_image_array(py, result.image)
 }
 
+/// Combine a luminance stack with RGB channels into an LRGB image.
 #[pyfunction]
 #[pyo3(signature = (luminance, red, green, blue, *, luminance_weight=1.0, normalization="percentile", black_percentile=0.001, white_percentile=0.995, normalization_samples=1_000_000))]
 #[allow(clippy::too_many_arguments)]
@@ -98,6 +100,7 @@ fn combine_lrgb<'py>(
     into_image_array(py, result.image)
 }
 
+/// Map narrowband stacks (Ha/OIII, optionally SII) onto an RGB palette.
 #[pyfunction]
 #[pyo3(signature = (ha, oiii, sii=None, *, palette="sho", normalization="percentile", black_percentile=0.001, white_percentile=0.995, normalization_samples=1_000_000, foraxx_target_median=0.2, foraxx_shadows_clip=-2.8))]
 #[allow(clippy::too_many_arguments)]
@@ -121,6 +124,12 @@ fn combine_narrowband<'py>(
             palette.name()
         )));
     }
+    if !palette.requires_sii() && sii.is_some() {
+        return Err(PyValueError::new_err(format!(
+            "{} does not use an SII channel",
+            palette.name()
+        )));
+    }
     let options = options(
         normalization,
         black_percentile,
@@ -133,11 +142,7 @@ fn combine_narrowband<'py>(
     };
     let ha = linear_image(ha)?;
     let oiii = linear_image(oiii)?;
-    let sii = if palette.requires_sii() {
-        sii.map(linear_image).transpose()?
-    } else {
-        None
-    };
+    let sii = sii.map(linear_image).transpose()?;
     let result = py
         .allow_threads(move || {
             compose_narrowband(&ha, &oiii, sii.as_ref(), palette, &options, &foraxx)

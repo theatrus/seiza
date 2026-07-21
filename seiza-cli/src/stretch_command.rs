@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand, ValueEnum};
-use seiza_stacking::FitsFrame;
 use seiza_stretch::{ColorStrategy, GhsParams, StretchConfig, StretchModel, StretchParams};
 use std::path::PathBuf;
 
@@ -15,7 +14,7 @@ pub(crate) struct StretchArgs {
     #[arg(long, value_enum, default_value = "linked")]
     color_strategy: ColorStrategyArg,
     /// Maximum pooled scalar samples retained by data-driven models
-    #[arg(long, default_value_t = 200_000)]
+    #[arg(long, default_value_t = crate::preview::MAXIMUM_SAMPLES)]
     max_analysis_samples: usize,
     #[command(subcommand)]
     model: StretchModelArgs,
@@ -37,6 +36,16 @@ impl From<ColorStrategyArg> for ColorStrategy {
             ColorStrategyArg::Linked => Self::Linked,
             ColorStrategyArg::Unlinked => Self::Unlinked,
             ColorStrategyArg::LuminancePreserving => Self::LuminancePreserving,
+        }
+    }
+}
+
+impl ColorStrategyArg {
+    fn summary(self) -> &'static str {
+        match self {
+            Self::Linked => "linked channels",
+            Self::Unlinked => "unlinked channels",
+            Self::LuminancePreserving => "luminance-preserving",
         }
     }
 }
@@ -170,6 +179,45 @@ impl StretchModelArgs {
             }),
         }
     }
+
+    fn summary(&self) -> String {
+        match *self {
+            Self::Identity => "identity clamp to [0, 1]".to_string(),
+            Self::Linear { black, white } => format!("linear black {black}, white {white}"),
+            Self::Asinh {
+                black,
+                white,
+                strength,
+            } => format!("asinh black {black}, white {white}, strength {strength}"),
+            Self::PercentileAsinh {
+                black_percentile,
+                white_percentile,
+                strength,
+            } => format!(
+                "percentile asinh black {black_percentile}, white {white_percentile}, strength {strength}"
+            ),
+            Self::Mtf {
+                shadows,
+                midtone,
+                highlights,
+            } => format!("MTF shadows {shadows}, midtone {midtone}, highlights {highlights}"),
+            Self::Ghs {
+                stretch_factor,
+                local_intensity,
+                symmetry_point,
+                protect_shadows,
+                protect_highlights,
+                black,
+                white,
+            } => format!(
+                "generalized hyperbolic stretch factor {stretch_factor}, local intensity {local_intensity}, symmetry {symmetry_point}, shadow protection {protect_shadows}, highlight protection {protect_highlights}, black {black}, white {white}"
+            ),
+            Self::AutoMtf {
+                target_median,
+                shadows_clip,
+            } => format!("auto MTF target median {target_median}, shadows clip {shadows_clip}"),
+        }
+    }
 }
 
 pub(crate) fn run(args: StretchArgs) -> Result<()> {
@@ -177,8 +225,7 @@ pub(crate) fn run(args: StretchArgs) -> Result<()> {
         ("stretch input".into(), args.input.as_path()),
         ("stretch output".into(), args.output.as_path()),
     ])?;
-    let frame = FitsFrame::open(&args.input)
-        .with_context(|| format!("could not read {}", args.input.display()))?;
+    let frame = crate::common::open_frame(&args.input, "stretch input")?;
     let config = StretchConfig {
         model: args.model.model(),
         color_strategy: args.color_strategy.into(),
@@ -197,11 +244,13 @@ pub(crate) fn run(args: StretchArgs) -> Result<()> {
         frame.image.channels,
         pixels,
     )?;
-    println!(
-        "wrote {}: {:?}, {:?}, display-referred",
-        args.output.display(),
-        config.model,
-        config.color_strategy
+    crate::common::wrote(
+        &args.output,
+        format_args!(
+            "{}, {}, display-referred",
+            args.model.summary(),
+            args.color_strategy.summary(),
+        ),
     );
     Ok(())
 }

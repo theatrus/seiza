@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use seiza_deconvolution::{DeconvolutionConfig, deconvolve};
 use seiza_fits::{HeaderValue, WriteHeaderCard};
-use seiza_stacking::{FitsFrame, write_processed_image_fits_f32};
+use seiza_stacking::write_processed_image_fits_f32;
 use std::path::PathBuf;
 
 #[derive(Args)]
@@ -34,8 +34,7 @@ pub(crate) fn run(args: DeconvolutionArgs) -> Result<()> {
         ("deconvolution input".into(), args.input.as_path()),
         ("deconvolution output".into(), args.output.as_path()),
     ])?;
-    let mut frame = FitsFrame::open(&args.input)
-        .with_context(|| format!("could not read {}", args.input.display()))?;
+    let mut frame = crate::common::open_frame(&args.input, "deconvolution input")?;
     if frame.bayer.is_some() {
         anyhow::bail!(
             "deconvolution cannot operate on the raw Bayer mosaic in {}; debayer or stack it first",
@@ -62,12 +61,14 @@ pub(crate) fn run(args: DeconvolutionArgs) -> Result<()> {
     let cards = operation_cards(&config);
     write_processed_image_fits_f32(&args.output, &frame.image, &frame.headers, &cards)
         .with_context(|| format!("could not write {}", args.output.display()))?;
-    println!(
-        "wrote {}: damped Richardson-Lucy, {:.3}px FWHM, {} iterations, {:.0}% blend",
-        args.output.display(),
-        config.psf_fwhm_pixels,
-        config.iterations,
-        config.amount * 100.0,
+    crate::common::wrote(
+        &args.output,
+        format_args!(
+            "damped Richardson-Lucy, {:.3}px FWHM, {} iterations, {:.0}% blend",
+            config.psf_fwhm_pixels,
+            config.iterations,
+            config.amount * 100.0,
+        ),
     );
     for (channel, diagnostics) in result.channels.iter().enumerate() {
         println!(

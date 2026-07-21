@@ -1,5 +1,5 @@
 use crate::provenance::{FileIdentity, file_identity, validate_path_roles, write_json_atomic};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Args, Subcommand};
 use seiza_stacking::{
     FitsFrame, MasterBuildOptions, MasterDark, MasterFrameKind, MasterRejectionOptions,
@@ -107,6 +107,7 @@ struct MasterReport {
     input_frames: usize,
     accepted_samples: u64,
     rejected_samples: u64,
+    fallback_pixels: u64,
     bias_subtracted: bool,
     dark_subtracted: bool,
     normalized: bool,
@@ -175,8 +176,7 @@ fn build(
     let dark = dark_path
         .as_deref()
         .map(|path| {
-            let frame = FitsFrame::open(path)
-                .with_context(|| format!("failed to load master dark-flat {}", path.display()))?;
+            let frame = crate::common::open_frame(path, "master dark-flat")?;
             MasterDark::from_fits_frame(frame, dark_exposure_seconds).map_err(anyhow::Error::from)
         })
         .transpose()?;
@@ -207,12 +207,20 @@ fn build(
     );
     let master = build_master_from_fits(&common.images, kind, &options)?;
     write_master_fits_f32(&common.output, &master)?;
-    println!(
-        "wrote {}: {} {} frame(s), {} rejected sample(s), linear f32",
-        common.output.display(),
-        master.input_frames,
-        kind.as_str(),
-        master.rejected_samples
+    if master.fallback_pixels > 0 {
+        eprintln!(
+            "warning: rejection removed every sample at {} pixel(s); wrote their unclipped mean",
+            master.fallback_pixels
+        );
+    }
+    crate::common::wrote(
+        &common.output,
+        format_args!(
+            "{} {} frame(s), {} rejected sample(s), linear f32",
+            master.input_frames,
+            kind.as_str(),
+            master.rejected_samples
+        ),
     );
 
     if let Some(report_path) = common.report {
@@ -242,13 +250,14 @@ fn build(
             input_frames: master.input_frames,
             accepted_samples: master.accepted_samples,
             rejected_samples: master.rejected_samples,
+            fallback_pixels: master.fallback_pixels,
             bias_subtracted: master.bias_subtracted,
             dark_subtracted: master.dark_subtracted,
             normalized: master.normalized,
             output_exposure_seconds: master.exposure_seconds,
         };
         write_json_atomic(&report_path, &report)?;
-        println!("wrote {}: master provenance report", report_path.display());
+        crate::common::wrote(&report_path, format_args!("master provenance report"));
     }
     Ok(())
 }
@@ -278,8 +287,7 @@ fn validate_input_paths(
 }
 
 fn load_bias(path: &Path) -> Result<FitsFrame> {
-    let frame = FitsFrame::open(path)
-        .with_context(|| format!("failed to load master bias {}", path.display()))?;
+    let frame = crate::common::open_frame(path, "master bias")?;
     frame.validate_master_kind("BIAS")?;
     Ok(frame)
 }

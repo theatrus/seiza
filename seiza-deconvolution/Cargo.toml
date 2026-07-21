@@ -13,4 +13,5 @@ categories = ["science", "multimedia::images"]
 
 [dependencies]
 rayon.workspace = true
+serde.workspace = true
 thiserror.workspace = true

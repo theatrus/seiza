@@ -4,6 +4,10 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use seiza_stretch::{ColorStrategy, GhsParams, StretchConfig, StretchModel, StretchParams};
 
+/// Stretch a linear image with the selected model and color strategy.
+///
+/// The input array is read in place while the GIL is released; do not mutate
+/// it from another thread until the call returns.
 #[pyfunction]
 #[pyo3(signature = (image, *, model="percentile-asinh", color_strategy="linked", max_analysis_samples=200_000, black=0.0, white=1.0, strength=10.0, black_percentile=0.01, white_percentile=0.995, shadows=0.0, midtone=0.5, highlights=1.0, stretch_factor=1.0, local_intensity=0.0, symmetry_point=0.0, protect_shadows=0.0, protect_highlights=1.0, target_median=0.2, shadows_clip=-2.8))]
 #[allow(clippy::too_many_arguments)]
@@ -87,7 +91,7 @@ fn stretch<'py>(
             let plan = config.resolve_for(image.data, image.channels)?;
             plan.apply_f32(image.data, image.channels)
         })
-        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        .map_err(|error| crate::EngineError::new_err(error.to_string()))?;
     float_array(py, image.width, image.height, image.channels, data)
 }
 
