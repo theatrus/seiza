@@ -531,7 +531,8 @@ and solves in the table's exact frame. Contract details:
 ## Layout
 
 - `seiza/` — library crate: `detect`, `wcs`, `catalog`, `objects`, `solve`
-- `seiza-fits/` — FITS reading, atomic linear `f32` writing, statistics, and MTF autostretch
+- `seiza-fits/` — FITS reading and atomic linear `f32` writing; re-exports the
+  statistics and MTF autostretch that now live in `seiza-stretch`
 - `seiza-xisf/` — XISF metadata and attached-pixel reading into `FitsImage`
 - `seiza-background/` — format-independent robust background sampling,
   polynomial fitting, diagnostics, and linear correction
