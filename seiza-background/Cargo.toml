@@ -1,0 +1,20 @@
+[package]
+name = "seiza-background"
+description = "Robust background and gradient modelling for linear astrophotography images"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "README.md"
+keywords = ["astronomy", "astrophotography", "image", "background"]
+categories = ["science", "multimedia::images"]
+
+[dependencies]
+rayon.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

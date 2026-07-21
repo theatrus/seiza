@@ -17,7 +17,10 @@ pub use color::{
     NarrowbandMatrix, NarrowbandMix, NarrowbandPalette, combine_lrgb, combine_narrowband,
     combine_narrowband_matrix, combine_rgb,
 };
-pub use fits::{FitsFrame, write_color_fits_f32, write_fits_f32, write_master_fits_f32};
+pub use fits::{
+    FitsFrame, write_color_fits_f32, write_fits_f32, write_linear_image_fits_f32,
+    write_master_fits_f32, write_processed_image_fits_f32,
+};
 pub use image::{BayerLayout, LinearImage};
 pub use master::{
     MasterBuildOptions, MasterFrame, MasterFrameKind, MasterInputStatistics,

@@ -15,6 +15,7 @@ use seiza_satellites::{
 use std::path::PathBuf;
 
 mod astap;
+mod background;
 mod build_data;
 mod color;
 mod master;
@@ -526,6 +527,8 @@ enum Command {
     },
     /// Apply an explicit display-stretch model to a linear FITS image
     Stretch(stretch_command::StretchArgs),
+    /// Estimate and remove a smooth background gradient from linear FITS
+    Background(background::BackgroundArgs),
     /// Register and incrementally stack linear FITS light frames
     Stack(stack::StackArgs),
     /// Register and compose mono stacks into RGB, LRGB, or narrowband color
@@ -1229,6 +1232,7 @@ fn main() -> Result<()> {
         }
         Command::FitsInfo { image, stretch } => fits_info(&image, stretch.as_deref()),
         Command::Stretch(options) => stretch_command::run(options),
+        Command::Background(options) => background::run(options),
         Command::Stack(options) => stack::run(options),
         Command::Color(options) => color::run(options),
         Command::Master(options) => master::run(options),

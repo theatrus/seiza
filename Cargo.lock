@@ -2249,6 +2249,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "seiza-background"
+version = "0.1.0"
+dependencies = [
+ "rayon",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "seiza-cabi"
 version = "0.11.2"
 dependencies = [
@@ -2275,6 +2285,7 @@ dependencies = [
  "image",
  "imageproc",
  "seiza",
+ "seiza-background",
  "seiza-download",
  "seiza-fits",
  "seiza-satellites",

@@ -290,6 +290,23 @@ class MasterResult:
     exposure_seconds: float | None
     input_statistics: list[tuple[int, int]]
 
+class BackgroundModel:
+    width: int
+    height: int
+    channels: int
+    reference: list[float]
+    diagnostics: dict[str, int]
+    def samples(
+        self,
+    ) -> list[tuple[int, int, list[float], float, float, str]]: ...
+    def render(self) -> npt.NDArray[np.float32]: ...
+    def correct(
+        self,
+        image: npt.NDArray[np.float32],
+        *,
+        mode: str = "subtract",
+    ) -> npt.NDArray[np.float32]: ...
+
 def detect(
     image: npt.NDArray[np.float32] | npt.NDArray[np.uint8],
     *,
@@ -330,6 +347,20 @@ def fetch_catalogs(
     *,
     cache_dir: str | Path | None = None,
 ) -> dict[str, Path]: ...
+def fit_background(
+    image: npt.NDArray[np.float32],
+    *,
+    mask: npt.NDArray[np.bool_] | None = None,
+    degree: int = 2,
+    ridge: float = 1.0e-8,
+    samples_per_axis: int = 12,
+    sample_radius: int | None = None,
+    search_steps: int = 4,
+    sample_rejection_sigma: float = 3.5,
+    fit_rejection_sigma: float = 3.0,
+    fit_rejection_iterations: int = 3,
+    border_fraction: float = 0.03,
+) -> BackgroundModel: ...
 def combine_rgb(
     red: npt.NDArray[np.float32],
     green: npt.NDArray[np.float32],

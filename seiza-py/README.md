@@ -11,7 +11,7 @@ pip install seiza
 
 Binary wheels cover Linux (x86_64, aarch64), macOS (universal2), and
 Windows (x64); each is a single abi3 wheel for every CPython from 3.9 up.
-Type stubs are included, and solving releases the GIL.
+Type stubs are included, and computational image operations release the GIL.
 
 ## Solve an image
 
@@ -93,6 +93,37 @@ text = solution.fits_header_text()     # 80-column cards ending with END
 The header text form is suitable for header-injection APIs — for example
 Siril's `sirilpy` scripting interface (`set_image_header`), which makes a
 seiza solve usable from a Siril Python script.
+
+## Background extraction
+
+Fit a compact background model to a C-contiguous mono `(H, W)` or RGB
+`(H, W, 3)` linear `float32` array, inspect it, and then correct the image:
+
+```python
+model = seiza.fit_background(stack, degree=2)
+print(model.diagnostics)
+
+corrected = model.correct(stack)                 # additive subtraction
+illumination_corrected = model.correct(stack, mode="divide")
+background = model.render()                      # explicit full-size model
+```
+
+Fitting uses deterministic low-noise sample windows, robust sample rejection,
+and independent per-channel polynomial coefficients. `model.correct()`
+allocates only the corrected array; a full-size background exists only after
+`render()`. Pass a boolean `(H, W)` `mask` to exclude extended objects, dark
+clouds, registration borders, or source masks:
+
+```python
+model = seiza.fit_background(stack, mask=structure_mask,
+                             degree=1, samples_per_axis=12,
+                             sample_radius=20)
+for x, y, values, dispersion, weight, status in model.samples():
+    print(x, y, values, status)
+```
+
+The output remains linear and may retain negative or greater-than-one values.
+Background extraction is not display stretching or color calibration.
 
 ## Image stacking
 

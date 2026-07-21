@@ -99,6 +99,28 @@ embedded in the memory-mapped `objects.bin`; normal open does not decode every
 record or touch every index page. Add `--all-sources` to audit every normalized
 upstream row, preferred facet selection, and source-qualified geometry.
 
+## Background extraction
+
+Fit and remove a smooth background from a calibrated linear FITS image:
+
+```
+seiza background stack.fits --output corrected.fits \
+  --model-output background.fits --diagnostics background.json
+```
+
+The default is a robust, per-channel quadratic surface with shared sample
+positions. Use `--degree 1` for a conservative plane, `--mode divide` for a
+multiplicative field, and `--border-fraction` to keep sample windows away from
+registration edges. `--sample-radius`, `--samples-per-axis`, rejection sigmas,
+and refit count are available for controlled tuning.
+
+Corrected and model outputs are linear 32-bit floating-point FITS and preserve
+a valid input WCS. The JSON diagnostics include coefficients, reference
+levels, sample positions, weights, and rejection reasons. The input, corrected
+output, model, and diagnostics must be distinct paths. Raw Bayer mosaics are
+rejected because fitting the interleaved CFA colors as one channel would create
+a false surface; debayer or stack them first.
+
 ## Image stacking
 
 `seiza stack` calibrates, registers, and incrementally integrates FITS light
