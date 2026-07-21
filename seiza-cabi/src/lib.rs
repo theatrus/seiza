@@ -3266,12 +3266,26 @@ fn raster_statistics_json(values: &[u8]) -> Value {
         deviation_histogram[value.abs_diff(usize::from(median))] += frequency;
     }
     let mad = quantile(&deviation_histogram, count.saturating_sub(1) / 2);
+    let mean = if count == 0 {
+        0.0
+    } else {
+        sum as f64 / count as f64
+    };
     json!({
         "minimum": minimum,
         "maximum": maximum,
-        "mean": if count == 0 { 0.0 } else { sum as f64 / count as f64 },
+        "mean": mean,
         "median": median,
         "mad": mad,
+        "scale": 255,
+        "normalized": normalized_statistics_json(
+            f64::from(minimum),
+            f64::from(maximum),
+            mean,
+            f64::from(median),
+            f64::from(mad),
+            255.0,
+        ),
     })
 }
 
@@ -3573,6 +3587,25 @@ fn header_json(value: &HeaderValue) -> Value {
     }
 }
 
+/// The five summary values on a 0-1 scale, so consumers can compare
+/// statistics across render depths and native sample scales.
+fn normalized_statistics_json(
+    minimum: f64,
+    maximum: f64,
+    mean: f64,
+    median: f64,
+    mad: f64,
+    scale: f64,
+) -> Value {
+    json!({
+        "minimum": minimum / scale,
+        "maximum": maximum / scale,
+        "mean": mean / scale,
+        "median": median / scale,
+        "mad": mad / scale,
+    })
+}
+
 fn statistics_json(statistics: &Statistics) -> Value {
     json!({
         "minimum": statistics.min,
@@ -3580,6 +3613,15 @@ fn statistics_json(statistics: &Statistics) -> Value {
         "mean": statistics.mean,
         "median": statistics.median,
         "mad": statistics.mad,
+        "scale": 65_535,
+        "normalized": normalized_statistics_json(
+            f64::from(statistics.min),
+            f64::from(statistics.max),
+            statistics.mean,
+            f64::from(statistics.median),
+            statistics.mad,
+            65_535.0,
+        ),
     })
 }
 
@@ -5208,6 +5250,27 @@ mod tests {
         for (actual, expected) in outlines[0].contours[0].points.iter().zip(expected) {
             assert!((actual[0] - expected.0).abs() < 1e-6);
             assert!((actual[1] - expected.1).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn normalized_statistics_agree_across_render_depths() {
+        let luma_u8: Vec<u8> = vec![0, 64, 128, 255];
+        let luma_u16: Vec<u16> = luma_u8
+            .iter()
+            .map(|&value| u16::from(value) * 257)
+            .collect();
+        let raster = raster_statistics_json(&luma_u8);
+        let fits = statistics_json(&seiza_fits::statistics_u16(&luma_u16));
+        assert_eq!(raster["scale"], 255);
+        assert_eq!(fits["scale"], 65_535);
+        for field in ["minimum", "maximum", "median", "mean"] {
+            let raster = raster["normalized"][field].as_f64().unwrap();
+            let fits = fits["normalized"][field].as_f64().unwrap();
+            assert!(
+                (raster - fits).abs() < 1.0e-9,
+                "{field}: {raster} vs {fits}"
+            );
         }
     }
 
