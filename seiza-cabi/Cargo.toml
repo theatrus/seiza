@@ -18,6 +18,7 @@ seiza = { workspace = true, features = ["downloads"] }
 seiza-background.workspace = true
 seiza-deconvolution.workspace = true
 seiza-fits = { workspace = true }
+seiza-xisf = { workspace = true }
 seiza-stacking = { workspace = true }
 seiza-stretch = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }

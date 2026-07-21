@@ -21,6 +21,7 @@ seiza-background.workspace = true
 seiza-deconvolution.workspace = true
 seiza-download.workspace = true
 seiza-fits.workspace = true
+seiza-xisf.workspace = true
 seiza-satellites.workspace = true
 seiza-stacking.workspace = true
 seiza-stretch.workspace = true

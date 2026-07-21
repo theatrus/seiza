@@ -6,7 +6,7 @@ the stacking path while reusing Seiza's star detector for local registration.
 
 The first release supports:
 
-- mono, planar RGB, and Bayer FITS inputs in linear sensor units;
+- mono, planar RGB, and Bayer FITS or XISF inputs in linear sensor units;
 - optional master bias, dark, and flat calibration;
 - bounded-memory, two-pass construction of bias, dark, and flat masters;
 - bounded-drift star registration with translation/rotation/scale refinement;
@@ -65,8 +65,9 @@ so calibration does not introduce a color-scale shift. When bias subtraction
 makes a master dark exposure-scalable, every light must provide an exposure
 duration rather than silently assuming a 1:1 scale.
 
-`build_master_from_fits` builds reusable calibration masters without retaining
-the input sequence in memory. It rereads each file for a leave-one-out
+`build_master_from_fits` retains its compatibility name but accepts FITS and
+XISF inputs. It builds reusable calibration masters without retaining the
+input sequence in memory and rereads each file for a leave-one-out
 sigma-clipped second pass, validates available acquisition metadata, calibrates
 and normalizes each flat before integration, and returns per-input rejection
 statistics. `write_master_fits_f32` records the master kind, input count,

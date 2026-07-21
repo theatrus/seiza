@@ -28,15 +28,60 @@ mod stack;
 mod stretch_command;
 mod worker;
 
-fn is_fits_path(path: &std::path::Path) -> bool {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AstronomyImageFormat {
+    Fits,
+    Xisf,
+}
+
+fn astronomy_image_format(path: &std::path::Path) -> Option<AstronomyImageFormat> {
+    if seiza_xisf::is_xisf_path(path) {
+        return Some(AstronomyImageFormat::Xisf);
+    }
     path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("fits") || e.eq_ignore_ascii_case("fit"))
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("fits")
+                || extension.eq_ignore_ascii_case("fit")
+                || extension.eq_ignore_ascii_case("fts")
+        })
+        .then_some(AstronomyImageFormat::Fits)
+}
+
+fn is_fits_path(path: &std::path::Path) -> bool {
+    astronomy_image_format(path) == Some(AstronomyImageFormat::Fits)
+}
+
+fn is_astronomy_image_path(path: &std::path::Path) -> bool {
+    astronomy_image_format(path).is_some()
+}
+
+fn open_astronomy_image(path: &std::path::Path) -> Result<seiza_fits::FitsImage> {
+    match astronomy_image_format(path) {
+        Some(AstronomyImageFormat::Fits) => seiza_fits::FitsImage::open(path)
+            .map_err(|error| anyhow::anyhow!("{}: {error}", path.display())),
+        Some(AstronomyImageFormat::Xisf) => {
+            seiza_xisf::open(path).map_err(|error| anyhow::anyhow!("{}: {error}", path.display()))
+        }
+        None => anyhow::bail!("{} is not a FITS or XISF path", path.display()),
+    }
+}
+
+fn read_astronomy_headers(
+    path: &std::path::Path,
+) -> Result<Vec<(String, seiza_fits::HeaderValue)>> {
+    match astronomy_image_format(path) {
+        Some(AstronomyImageFormat::Fits) => seiza_fits::read_header(path)
+            .map_err(|error| anyhow::anyhow!("{}: {error}", path.display())),
+        Some(AstronomyImageFormat::Xisf) => seiza_xisf::read_header(path)
+            .map_err(|error| anyhow::anyhow!("{}: {error}", path.display())),
+        None => anyhow::bail!("{} is not a FITS or XISF path", path.display()),
+    }
 }
 
 pub(crate) enum LoadedImage {
     Dynamic(image::DynamicImage),
-    FitsF32 {
+    LinearF32 {
         luma: Vec<f32>,
         width: u32,
         height: u32,
@@ -47,14 +92,14 @@ impl LoadedImage {
     pub(crate) fn dimensions(&self) -> (u32, u32) {
         match self {
             Self::Dynamic(image) => (image.width(), image.height()),
-            Self::FitsF32 { width, height, .. } => (*width, *height),
+            Self::LinearF32 { width, height, .. } => (*width, *height),
         }
     }
 
     pub(crate) fn detect_stars(&self, config: &DetectConfig) -> Vec<DetectedStar> {
         match self {
             Self::Dynamic(image) => seiza::detect_stars(image, config),
-            Self::FitsF32 {
+            Self::LinearF32 {
                 luma,
                 width,
                 height,
@@ -76,7 +121,7 @@ impl LoadedImage {
     fn to_rgb8(&self) -> image::RgbImage {
         match self {
             Self::Dynamic(image) => image.to_rgb8(),
-            Self::FitsF32 {
+            Self::LinearF32 {
                 luma,
                 width,
                 height,
@@ -87,7 +132,7 @@ impl LoadedImage {
                     rgb.extend_from_slice(&[value; 3]);
                 }
                 image::RgbImage::from_raw(*width, *height, rgb)
-                    .expect("FITS luma dimensions were validated when loaded")
+                    .expect("linear luma dimensions were validated when loaded")
             }
         }
     }
@@ -95,7 +140,7 @@ impl LoadedImage {
     fn to_luma8(&self) -> image::GrayImage {
         match self {
             Self::Dynamic(image) => image.to_luma8(),
-            Self::FitsF32 {
+            Self::LinearF32 {
                 luma,
                 width,
                 height,
@@ -105,33 +150,32 @@ impl LoadedImage {
                     .map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u8)
                     .collect();
                 image::GrayImage::from_raw(*width, *height, luma)
-                    .expect("FITS luma dimensions were validated when loaded")
+                    .expect("linear luma dimensions were validated when loaded")
             }
         }
     }
 }
 
-/// Open an image in the representation selected for detection. FITS uses an
-/// MTF-compressed u8 buffer for Auto/U8 and native-precision linear f32 for
-/// F32, which also lets a compatibility retry genuinely reload the source.
+/// Open an image in the representation selected for detection. FITS and XISF
+/// use an MTF-compressed u8 buffer for Auto/U8 and native-precision linear f32
+/// for F32, which also lets a compatibility retry genuinely reload the source.
 pub(crate) fn load_image(path: &std::path::Path, backend: DetectBackend) -> Result<LoadedImage> {
-    if is_fits_path(path) {
-        let fits = seiza_fits::FitsImage::open(path)
-            .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
-        let width = u32::try_from(fits.width)
-            .map_err(|_| anyhow::anyhow!("FITS width exceeds supported image dimensions"))?;
-        let height = u32::try_from(fits.height)
-            .map_err(|_| anyhow::anyhow!("FITS height exceeds supported image dimensions"))?;
+    if is_astronomy_image_path(path) {
+        let image = open_astronomy_image(path)?;
+        let width = u32::try_from(image.width)
+            .map_err(|_| anyhow::anyhow!("image width exceeds supported dimensions"))?;
+        let height = u32::try_from(image.height)
+            .map_err(|_| anyhow::anyhow!("image height exceeds supported dimensions"))?;
         if backend == DetectBackend::F32 {
-            return Ok(LoadedImage::FitsF32 {
-                luma: fits.to_luma_f32(),
+            return Ok(LoadedImage::LinearF32 {
+                luma: image.to_luma_f32(),
                 width,
                 height,
             });
         }
-        let stretched = fits.stretch_to_u8(&seiza_fits::StretchParams::default());
+        let stretched = image.stretch_to_u8(&seiza_fits::StretchParams::default());
         let buffer = image::GrayImage::from_raw(width, height, stretched)
-            .ok_or_else(|| anyhow::anyhow!("FITS dimensions mismatch"))?;
+            .ok_or_else(|| anyhow::anyhow!("image dimensions mismatch"))?;
         return Ok(LoadedImage::Dynamic(image::DynamicImage::ImageLuma8(
             buffer,
         )));
@@ -141,11 +185,12 @@ pub(crate) fn load_image(path: &std::path::Path, backend: DetectBackend) -> Resu
         .with_context(|| format!("failed to open {}", path.display()))
 }
 
-/// Auto FITS begins with its compact MTF/u8 representation, while converted
-/// 8-bit color can change sub-level ordering relative to f32 luma. Either may
-/// benefit from a compatibility retry after a solve miss.
+/// Auto FITS/XISF begins with its compact MTF/u8 representation, while
+/// converted 8-bit color can change sub-level ordering relative to f32 luma.
+/// Either may benefit from a compatibility retry after a solve miss.
 fn auto_can_retry_f32(path: &std::path::Path, image: &LoadedImage, backend: DetectBackend) -> bool {
-    backend == DetectBackend::Auto && (is_fits_path(path) || image.is_converted_8bit_color())
+    backend == DetectBackend::Auto
+        && (is_astronomy_image_path(path) || image.is_converted_8bit_color())
 }
 
 fn redetect_f32(
@@ -157,7 +202,7 @@ fn redetect_f32(
         backend: DetectBackend::F32,
         ..config.clone()
     };
-    if is_fits_path(path) {
+    if is_astronomy_image_path(path) {
         return Ok(load_image(path, DetectBackend::F32)?.detect_stars(&config));
     }
     Ok(image.detect_stars(&config))
@@ -266,15 +311,15 @@ fn blind_params_for_detection_pass(
     attempt
 }
 
-/// RA/Dec hint from FITS headers (N.I.N.A. writes RA/DEC in degrees).
+/// RA/Dec hint from FITS-compatible headers (N.I.N.A. writes RA/DEC in degrees).
 fn fits_hint(path: &std::path::Path) -> Option<(f64, f64)> {
-    let fits = seiza_fits::FitsImage::open(path).ok()?;
-    let ra = fits
+    let image = open_astronomy_image(path).ok()?;
+    let ra = image
         .header_f64("RA")
-        .or_else(|| fits.header_f64("OBJCTRA"))?;
-    let dec = fits
+        .or_else(|| image.header_f64("OBJCTRA"))?;
+    let dec = image
         .header_f64("DEC")
-        .or_else(|| fits.header_f64("OBJCTDEC"))?;
+        .or_else(|| image.header_f64("OBJCTDEC"))?;
     Some((ra, dec))
 }
 
@@ -443,7 +488,7 @@ enum Command {
     },
     /// Plate-solve with no position hint (wide fields, pixel-scale range)
     SolveBlind {
-        /// Image file (PNG, JPEG, TIFF, FITS)
+        /// Image file (PNG, JPEG, TIFF, FITS, XISF)
         image: PathBuf,
         /// Star tile file or catalog directory (default: standard catalog
         /// locations)
@@ -518,9 +563,9 @@ enum Command {
         )]
         server_timeout: Option<u64>,
     },
-    /// Inspect a FITS file: headers, statistics, optional stretched PNG
+    /// Inspect a FITS or XISF file: headers, statistics, optional stretched PNG
     FitsInfo {
-        /// FITS file
+        /// FITS or XISF file
         image: PathBuf,
         /// Write an autostretched 8-bit preview
         #[arg(long)]
@@ -1736,15 +1781,14 @@ fn display_optional(value: Option<f32>) -> String {
 
 fn fits_info(path: &std::path::Path, stretch: Option<&std::path::Path>) -> Result<()> {
     let started = std::time::Instant::now();
-    let fits = seiza_fits::FitsImage::open(path)
-        .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+    let image = open_astronomy_image(path)?;
     let load_time = started.elapsed();
     println!(
         "{}: {}x{} ({:?}-type pixels), loaded in {:.0}ms",
         path.display(),
-        fits.width,
-        fits.height,
-        match fits.pixels {
+        image.width,
+        image.height,
+        match image.pixels {
             seiza_fits::Pixels::U8(_) => "u8",
             seiza_fits::Pixels::U16(_) => "u16",
             seiza_fits::Pixels::I32(_) => "i32",
@@ -1757,12 +1801,12 @@ fn fits_info(path: &std::path::Path, stretch: Option<&std::path::Path>) -> Resul
         "OBJECT", "FILTER", "EXPOSURE", "EXPTIME", "GAIN", "CCD-TEMP", "RA", "DEC", "INSTRUME",
         "TELESCOP", "DATE-OBS", "BAYERPAT",
     ] {
-        if let Some(value) = fits.header(key) {
+        if let Some(value) = image.header(key) {
             println!("  {key:<10} {value:?}");
         }
     }
     let started = std::time::Instant::now();
-    let stats = fits.statistics();
+    let stats = image.statistics();
     println!(
         "  stats: median {} mad {:.0} mean {:.0} range {}..{} ({:.0}ms)",
         stats.median,
@@ -1774,9 +1818,9 @@ fn fits_info(path: &std::path::Path, stretch: Option<&std::path::Path>) -> Resul
     );
     if let Some(out) = stretch {
         let started = std::time::Instant::now();
-        let data = fits.stretch_to_u8(&seiza_fits::StretchParams::default());
+        let data = image.stretch_to_u8(&seiza_fits::StretchParams::default());
         let elapsed = started.elapsed();
-        image::GrayImage::from_raw(fits.width as u32, fits.height as u32, data)
+        image::GrayImage::from_raw(image.width as u32, image.height as u32, data)
             .ok_or_else(|| anyhow::anyhow!("dimension mismatch"))?
             .save(out)?;
         println!(
@@ -2267,18 +2311,14 @@ fn csv_optional(value: Option<f32>) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
-/// Acquisition time as a JD: an explicit ISO 8601 argument wins, else the
-/// FITS DATE-OBS header. `None` when neither is available.
+/// Acquisition time as a JD: an explicit ISO 8601 argument wins, else a
+/// FITS-compatible DATE-OBS header. `None` when neither is available.
 fn resolve_acquisition_jd(image: &std::path::Path, time: Option<&str>) -> Result<Option<f64>> {
     let text = match time {
         Some(text) => Some(text.to_string()),
         None => {
-            let is_fits = image
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| e.eq_ignore_ascii_case("fits") || e.eq_ignore_ascii_case("fit"));
-            if is_fits {
-                seiza_fits::read_header(image).ok().and_then(|headers| {
+            if is_astronomy_image_path(image) {
+                read_astronomy_headers(image).ok().and_then(|headers| {
                     headers
                         .iter()
                         .find(|(k, _)| k == "DATE-OBS")
@@ -2336,9 +2376,10 @@ fn resolve_single_exposure(
     explicit_longitude: Option<f64>,
     explicit_altitude: Option<f64>,
 ) -> Result<SingleExposure> {
-    let headers = if is_fits_path(image) {
-        seiza_fits::read_header(image)
-            .with_context(|| format!("failed to read FITS metadata from {}", image.display()))?
+    let headers = if is_astronomy_image_path(image) {
+        read_astronomy_headers(image).with_context(|| {
+            format!("failed to read FITS/XISF metadata from {}", image.display())
+        })?
     } else {
         Vec::new()
     };
@@ -3407,17 +3448,24 @@ mod cli_tests {
     }
 
     #[test]
-    fn auto_retries_fits_and_converted_color_inputs() {
+    fn auto_retries_astronomy_and_converted_color_inputs() {
         let rgb = LoadedImage::Dynamic(image::DynamicImage::ImageRgb8(image::RgbImage::new(1, 1)));
         let luma =
             LoadedImage::Dynamic(image::DynamicImage::ImageLuma8(image::GrayImage::new(1, 1)));
         let jpeg = std::path::Path::new("image.jpg");
         let fits = std::path::Path::new("image.fits");
+        let xisf = std::path::Path::new("image.XISF");
         assert!(auto_can_retry_f32(jpeg, &rgb, DetectBackend::Auto));
         assert!(!auto_can_retry_f32(jpeg, &rgb, DetectBackend::U8));
         assert!(!auto_can_retry_f32(jpeg, &luma, DetectBackend::Auto));
         assert!(auto_can_retry_f32(fits, &luma, DetectBackend::Auto));
         assert!(!auto_can_retry_f32(fits, &luma, DetectBackend::U8));
+        assert!(auto_can_retry_f32(xisf, &luma, DetectBackend::Auto));
+        assert_eq!(
+            astronomy_image_format(xisf),
+            Some(AstronomyImageFormat::Xisf)
+        );
+        assert!(!is_fits_path(xisf));
     }
 
     #[test]
@@ -3467,8 +3515,8 @@ mod cli_tests {
             compact,
             LoadedImage::Dynamic(image::DynamicImage::ImageLuma8(_))
         ));
-        let LoadedImage::FitsF32 { luma, .. } = precise else {
-            panic!("forced f32 FITS must retain a linear f32 buffer");
+        let LoadedImage::LinearF32 { luma, .. } = precise else {
+            panic!("forced f32 astronomy image must retain a linear f32 buffer");
         };
         assert_eq!(luma[0], 1000.0 / u16::MAX as f32);
         assert_eq!(luma[1], 1001.0 / u16::MAX as f32);

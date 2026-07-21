@@ -8,7 +8,7 @@ exposes the **superset** of what both apps need.
 
 ## What it exposes
 
-- **FITS / raster rendering** — `seiza_rendered_image_open`,
+- **FITS / XISF / raster rendering** — `seiza_rendered_image_open`,
   `..._open_with_rgb_stretch`, `..._width`, `..._height`,
   `..._metadata_json`, `..._free`.
 - **Both pixel byte orders** — `seiza_rendered_image_rgba` (macOS / CoreGraphics)
@@ -24,6 +24,7 @@ exposes the **superset** of what both apps need.
   keeps routine RGBA8 previews from allocating both formats.
 - **Parameterized stretch** — `seiza_rendered_image_open_with_stretch_config`
   takes a serialized `seiza-stretch` `StretchConfig` (JSON) and renders a FITS
+  or XISF image
   through the full GHS/MTF/percentile pipeline. It also accepts a non-empty
   config array for an ordered `f32` stack, or an object with `stretch`, optional
   `background` correction, optional `deconvolution`, and optional
@@ -47,8 +48,9 @@ exposes the **superset** of what both apps need.
   call retains no pointers and reports validation failures through `error_out`.
 - **Live stacking** — `seiza_live_stacker_create` starts from caller-provided
   calibrated linear mono/RGB samples, while `seiza_live_stacker_open_fits`
-  decodes raw linear FITS and optionally applies integrated bias, dark, and
-  flat masters. Array and FITS pushes return owned admission JSON. Borrowed
+  retains its ABI name but decodes raw linear FITS or XISF and optionally
+  applies integrated bias, dark, and flat masters. Array and path-based pushes
+  return owned admission JSON. Borrowed
   mean/coverage/rejection views support copy-free live display, snapshots add
   variance, and `seiza_live_stacker_finish` moves the final accumulator into an
   immutable result without cloning its full-frame buffers.
@@ -82,8 +84,8 @@ correction of `2.0`. The output remains linear and may contain samples outside
 
 Stacking uses the same row-major, pixel-interleaved mono/RGB layout. Array
 frames are copied during each synchronous call and may be released when it
-returns; they must already be calibrated, debayered, and linear. FITS pushes
-retain and apply the calibration masters loaded by the FITS constructor; a
+returns; they must already be calibrated, debayered, and linear. FITS/XISF
+pushes retain and apply the calibration masters loaded by the path constructor; a
 non-zero dark exposure override requires a dark master path. A
 rejected frame is represented by `accepted: false` disposition JSON and is not
 an ABI error. The zero-copy live pointers are invalidated by the next push,

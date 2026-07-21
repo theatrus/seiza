@@ -4,7 +4,7 @@ use crate::{
 use seiza_fits::{F32ImageData, FitsImage, HeaderValue, Pixels, WriteHeaderCard};
 use std::path::{Path, PathBuf};
 
-/// A FITS frame decoded into linear, un-stretched `f32` samples.
+/// A FITS or XISF frame decoded into linear, un-stretched `f32` samples.
 #[derive(Clone, Debug)]
 pub struct FitsFrame {
     pub image: LinearImage,
@@ -17,11 +17,18 @@ pub struct FitsFrame {
 impl FitsFrame {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let fits = FitsImage::open(path).map_err(|source| Error::FitsRead {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        Self::from_fits(fits, Some(path.to_path_buf()))
+        let image = if seiza_xisf::is_xisf_path(path) {
+            seiza_xisf::open(path).map_err(|source| Error::XisfRead {
+                path: path.to_path_buf(),
+                source,
+            })?
+        } else {
+            FitsImage::open(path).map_err(|source| Error::FitsRead {
+                path: path.to_path_buf(),
+                source,
+            })?
+        };
+        Self::from_fits(image, Some(path.to_path_buf()))
     }
 
     pub fn from_fits(fits: FitsImage, source: Option<PathBuf>) -> Result<Self> {
@@ -453,6 +460,26 @@ mod tests {
         vec![("BITPIX".into(), HeaderValue::Integer(bitpix))]
     }
 
+    fn tiny_xisf(values: &[f32]) -> Vec<u8> {
+        let raw = values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        let template = format!(
+            "<?xml version=\"1.0\"?><xisf version=\"1.0\"><Image geometry=\"2:2:1\" sampleFormat=\"Float32\" colorSpace=\"Gray\" location=\"attachment:0000000000:{}\"><FITSKeyword name=\"EXPTIME\" value=\"30\"/></Image></xisf>",
+            raw.len()
+        );
+        let offset = 16 + template.len();
+        let header = template.replacen("0000000000", &format!("{offset:010}"), 1);
+        let mut bytes = Vec::with_capacity(offset + raw.len());
+        bytes.extend_from_slice(b"XISF0100");
+        bytes.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&[0; 4]);
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.extend_from_slice(&raw);
+        bytes
+    }
+
     #[test]
     fn planar_color_becomes_interleaved() {
         assert_eq!(
@@ -484,6 +511,18 @@ mod tests {
             .unwrap();
             assert_eq!(frame.image.data, [expected]);
         }
+    }
+
+    #[test]
+    fn path_loader_accepts_xisf_as_linear_input() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("light.xisf");
+        std::fs::write(&path, tiny_xisf(&[0.0, 0.25, 0.5, 1.0])).unwrap();
+
+        let frame = FitsFrame::open(&path).unwrap();
+        assert_eq!((frame.image.width, frame.image.height), (2, 2));
+        assert_eq!(frame.image.data, [0.0, 0.25, 0.5, 1.0]);
+        assert_eq!(frame.exposure_seconds, Some(30.0));
     }
 
     #[test]

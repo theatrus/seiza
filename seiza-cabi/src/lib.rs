@@ -93,6 +93,7 @@ struct InteractivePreviewCacheKey {
 }
 
 struct PreparedFitsRender {
+    source_format: &'static str,
     source_width: usize,
     source_height: usize,
     planes: usize,
@@ -888,8 +889,8 @@ pub unsafe extern "C" fn seiza_live_stacker_create(
 }
 
 #[unsafe(no_mangle)]
-/// Opens a FITS reference and optional integrated bias, dark, and flat masters.
-/// A positive `dark_exposure_seconds` overrides the dark FITS metadata; zero
+/// Opens a FITS or XISF reference and optional integrated bias, dark, and flat
+/// masters. A positive `dark_exposure_seconds` overrides the dark metadata; zero
 /// uses the metadata. Pass null or empty `options_json` for defaults. All files
 /// are fully read during this call and are not kept open afterward.
 ///
@@ -982,7 +983,7 @@ pub unsafe extern "C" fn seiza_live_stacker_push_linear_json(
 }
 
 #[unsafe(no_mangle)]
-/// Opens, calibrates, registers, and offers one FITS frame to the stack. The
+/// Opens, calibrates, registers, and offers one FITS or XISF frame to the stack. The
 /// returned disposition JSON is owned and must be freed with
 /// [`seiza_string_free`]. Each source path may be offered only once.
 ///
@@ -1487,7 +1488,7 @@ pub unsafe extern "C" fn seiza_rendered_image_open(
 /// Opens and renders an image with an explicit RGB stretch mode.
 ///
 /// Mode `0` is per-channel auto, `1` is linked auto, and `2` is linear.
-/// Non-RGB FITS and standard raster images ignore this setting.
+/// Non-RGB FITS/XISF and standard raster images ignore this setting.
 ///
 /// # Safety
 /// `path` must be a valid NUL-terminated string. When non-null, `error_out`
@@ -1509,7 +1510,7 @@ pub unsafe extern "C" fn seiza_rendered_image_open_with_rgb_stretch(
 }
 
 #[unsafe(no_mangle)]
-/// Opens a FITS image and renders it with parameterized processing described by
+/// Opens a FITS or XISF image and renders it with parameterized processing described by
 /// `config_json`. The value may be one serialized `seiza-stretch`
 /// `StretchConfig` (the original schema), a non-empty array of configs, or an
 /// object with `stretch`, optional `background`, optional `deconvolution`, and
@@ -1546,10 +1547,10 @@ pub unsafe extern "C" fn seiza_rendered_image_open_with_stretch_config(
                 max_dimension,
             )
         } else {
-            let fits = FitsImage::open(&path)
-                .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
-            render_fits_with_pipeline(
-                fits,
+            let (image, format) = open_astronomy_image(&path)?;
+            render_astronomy_with_pipeline(
+                image,
+                format,
                 &stack,
                 background.as_ref(),
                 deconvolution.as_ref(),
@@ -1589,7 +1590,7 @@ pub unsafe extern "C" fn seiza_rendered_image16_open(
 #[unsafe(no_mangle)]
 /// Opens and renders an image to native-endian RGBA16 with an explicit RGB
 /// stretch mode. Mode `0` is per-channel auto, `1` is linked auto, and `2` is
-/// linear. Non-RGB FITS and standard raster images ignore this setting.
+/// linear. Non-RGB FITS/XISF and standard raster images ignore this setting.
 ///
 /// # Safety
 /// `path` must be a valid NUL-terminated string. When non-null, `error_out`
@@ -1611,7 +1612,7 @@ pub unsafe extern "C" fn seiza_rendered_image16_open_with_rgb_stretch(
 }
 
 #[unsafe(no_mangle)]
-/// Opens a FITS image and renders its parameterized processing stack to
+/// Opens a FITS or XISF image and renders its parameterized processing stack to
 /// native-endian RGBA16. The JSON schema and processing order are identical to
 /// [`seiza_rendered_image_open_with_stretch_config`], but the final stretch is
 /// quantized directly from `f32` to `u16` instead of passing through RGBA8.
@@ -1641,10 +1642,10 @@ pub unsafe extern "C" fn seiza_rendered_image16_open_with_stretch_config(
                 max_dimension,
             )
         } else {
-            let fits = FitsImage::open(&path)
-                .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
-            render_fits_with_pipeline16(
-                fits,
+            let (image, format) = open_astronomy_image(&path)?;
+            render_astronomy_with_pipeline16(
+                image,
+                format,
                 &stack,
                 background.as_ref(),
                 deconvolution.as_ref(),
@@ -1914,23 +1915,25 @@ pub unsafe extern "C" fn seiza_solve_image_json(
             max_stars: 600,
             ..Default::default()
         };
-        let (width, height, mut stars, raster_fallback, capture_time) = if is_fits_path(&path) {
-            let fits = FitsImage::open(&path).map_err(|error| error.to_string())?;
-            let width = u32::try_from(fits.width).map_err(|_| "image width is too large")?;
-            let height = u32::try_from(fits.height).map_err(|_| "image height is too large")?;
-            let capture_time = fits_capture_time(&fits);
-            let luma = fits.to_luma_f32();
-            let stars = detect_stars_luma_f32(&luma, width, height, &detection_config);
-            (width, height, stars, None, capture_time)
-        } else {
-            let image = image::open(&path)
-                .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
-            let width = image.width();
-            let height = image.height();
-            let stars = detect_stars(&image, &detection_config);
-            let fallback = is_converted_8bit_color(&image).then_some(image);
-            (width, height, stars, fallback, None)
-        };
+        let (width, height, mut stars, raster_fallback, capture_time) =
+            if is_astronomy_image_path(&path) {
+                let (image, _) = open_astronomy_image(&path)?;
+                let width = u32::try_from(image.width).map_err(|_| "image width is too large")?;
+                let height =
+                    u32::try_from(image.height).map_err(|_| "image height is too large")?;
+                let capture_time = fits_capture_time(&image);
+                let luma = image.to_luma_f32();
+                let stars = detect_stars_luma_f32(&luma, width, height, &detection_config);
+                (width, height, stars, None, capture_time)
+            } else {
+                let image = image::open(&path)
+                    .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
+                let width = image.width();
+                let height = image.height();
+                let stars = detect_stars(&image, &detection_config);
+                let fallback = is_converted_8bit_color(&image).then_some(image);
+                (width, height, stars, fallback, None)
+            };
         let acquisition_jd = capture_time.as_deref().and_then(parse_iso_jd);
 
         let star_path = seiza::data_paths::star_data(catalog_directory.as_deref())
@@ -2444,7 +2447,25 @@ pub unsafe extern "C" fn seiza_string_free(value: *mut c_char) {
     }
 }
 
-fn is_fits_path(path: &Path) -> bool {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AstronomyImageFormat {
+    Fits,
+    Xisf,
+}
+
+impl AstronomyImageFormat {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Fits => "FITS",
+            Self::Xisf => "XISF",
+        }
+    }
+}
+
+fn astronomy_image_format(path: &Path) -> Option<AstronomyImageFormat> {
+    if seiza_xisf::is_xisf_path(path) {
+        return Some(AstronomyImageFormat::Xisf);
+    }
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {
@@ -2452,6 +2473,23 @@ fn is_fits_path(path: &Path) -> bool {
                 || extension.eq_ignore_ascii_case("fit")
                 || extension.eq_ignore_ascii_case("fts")
         })
+        .then_some(AstronomyImageFormat::Fits)
+}
+
+fn is_astronomy_image_path(path: &Path) -> bool {
+    astronomy_image_format(path).is_some()
+}
+
+fn open_astronomy_image(path: &Path) -> Result<(FitsImage, AstronomyImageFormat), String> {
+    let format = astronomy_image_format(path)
+        .ok_or_else(|| format!("{} is not a FITS or XISF path", path.display()))?;
+    let image = match format {
+        AstronomyImageFormat::Fits => FitsImage::open(path)
+            .map_err(|error| format!("failed to open {}: {error}", path.display()))?,
+        AstronomyImageFormat::Xisf => seiza_xisf::open(path)
+            .map_err(|error| format!("failed to open {}: {error}", path.display()))?,
+    };
+    Ok((image, format))
 }
 
 fn render_path(
@@ -2460,9 +2498,9 @@ fn render_path(
     max_dimension: u32,
     rgb_stretch_mode: RgbStretchMode,
 ) -> Result<SeizaRenderedImage, String> {
-    if is_fits_path(path) {
-        let fits = FitsImage::open(path).map_err(|error| error.to_string())?;
-        render_fits(fits, params, max_dimension, rgb_stretch_mode)
+    if is_astronomy_image_path(path) {
+        let (image, format) = open_astronomy_image(path)?;
+        render_astronomy_image(image, format, params, max_dimension, rgb_stretch_mode)
     } else {
         let image = image::open(path)
             .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
@@ -2476,9 +2514,9 @@ fn render_path16(
     max_dimension: u32,
     rgb_stretch_mode: RgbStretchMode,
 ) -> Result<SeizaRenderedImage16, String> {
-    if is_fits_path(path) {
-        let fits = FitsImage::open(path).map_err(|error| error.to_string())?;
-        render_fits16(fits, params, max_dimension, rgb_stretch_mode)
+    if is_astronomy_image_path(path) {
+        let (image, format) = open_astronomy_image(path)?;
+        render_astronomy_image16(image, format, params, max_dimension, rgb_stretch_mode)
     } else {
         let image = image::open(path)
             .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
@@ -2486,8 +2524,9 @@ fn render_path16(
     }
 }
 
-fn render_fits(
+fn render_astronomy_image(
     fits: FitsImage,
+    source_format: AstronomyImageFormat,
     params: &StretchParams,
     max_dimension: u32,
     rgb_stretch_mode: RgbStretchMode,
@@ -2533,7 +2572,7 @@ fn render_fits(
         "width": source_width,
         "height": source_height,
         "planes": fits.planes,
-        "format": "FITS",
+        "format": source_format.name(),
         "colorKind": color_kind,
         "rgbStretchMode": matches!(color_kind, "planar-rgb" | "bayer")
             .then(|| rgb_stretch_mode.name()),
@@ -2553,8 +2592,9 @@ fn render_fits(
     })
 }
 
-fn render_fits16(
+fn render_astronomy_image16(
     fits: FitsImage,
+    source_format: AstronomyImageFormat,
     params: &StretchParams,
     max_dimension: u32,
     rgb_stretch_mode: RgbStretchMode,
@@ -2600,7 +2640,7 @@ fn render_fits16(
         "width": source_width,
         "height": source_height,
         "planes": fits.planes,
-        "format": "FITS",
+        "format": source_format.name(),
         "colorKind": color_kind,
         "bitsPerComponent": 16,
         "rgbStretchMode": matches!(color_kind, "planar-rgb" | "bayer")
@@ -2620,10 +2660,10 @@ fn render_fits16(
     })
 }
 
-/// Render a FITS image with a parameterized `seiza-stretch` config. The stretch
-/// math lives entirely in `seiza-stretch`; this only marshals FITS pixels into
-/// the interleaved `f32` the pipeline expects and assembles the RGBA result and
-/// metadata, matching [`render_fits`]'s output shape.
+/// Render an astronomy image with a parameterized `seiza-stretch` config. The
+/// stretch math lives entirely in `seiza-stretch`; this only marshals linear
+/// pixels into the interleaved `f32` the pipeline expects and assembles the
+/// RGBA result and metadata for the requested component depth.
 #[cfg(test)]
 fn render_fits_with_config(
     fits: FitsImage,
@@ -2639,35 +2679,58 @@ fn render_fits_with_stack(
     stack: &StretchStack,
     max_dimension: u32,
 ) -> Result<SeizaRenderedImage, String> {
-    render_fits_with_pipeline(fits, stack, None, None, max_dimension, false)
+    render_astronomy_with_pipeline(
+        fits,
+        AstronomyImageFormat::Fits,
+        stack,
+        None,
+        None,
+        max_dimension,
+        false,
+    )
 }
 
-fn render_fits_with_pipeline(
-    fits: FitsImage,
+fn render_astronomy_with_pipeline(
+    image: FitsImage,
+    source_format: AstronomyImageFormat,
     stack: &StretchStack,
     background: Option<&BackgroundRenderRequest>,
     deconvolution: Option<&DeconvolutionRenderRequest>,
     max_dimension: u32,
     interactive_preview: bool,
 ) -> Result<SeizaRenderedImage, String> {
-    let prepared = prepare_fits_render(fits, background, max_dimension, interactive_preview)?;
+    let prepared = prepare_fits_render(
+        image,
+        source_format,
+        background,
+        max_dimension,
+        interactive_preview,
+    )?;
     render_prepared_fits(&prepared, stack, deconvolution, max_dimension, false)
 }
 
-fn render_fits_with_pipeline16(
-    fits: FitsImage,
+fn render_astronomy_with_pipeline16(
+    image: FitsImage,
+    source_format: AstronomyImageFormat,
     stack: &StretchStack,
     background: Option<&BackgroundRenderRequest>,
     deconvolution: Option<&DeconvolutionRenderRequest>,
     max_dimension: u32,
     interactive_preview: bool,
 ) -> Result<SeizaRenderedImage16, String> {
-    let prepared = prepare_fits_render(fits, background, max_dimension, interactive_preview)?;
+    let prepared = prepare_fits_render(
+        image,
+        source_format,
+        background,
+        max_dimension,
+        interactive_preview,
+    )?;
     render_prepared_fits16(&prepared, stack, deconvolution, max_dimension, false)
 }
 
 fn prepare_fits_render(
     fits: FitsImage,
+    source_format: AstronomyImageFormat,
     background: Option<&BackgroundRenderRequest>,
     max_dimension: u32,
     interactive_preview: bool,
@@ -2740,6 +2803,7 @@ fn prepare_fits_render(
     }
 
     Ok(PreparedFitsRender {
+        source_format: source_format.name(),
         source_width,
         source_height,
         planes: fits.planes,
@@ -2853,7 +2917,7 @@ fn render_prepared_fits(
         "width": prepared.source_width,
         "height": prepared.source_height,
         "planes": prepared.planes,
-        "format": "FITS",
+        "format": prepared.source_format,
         "colorKind": prepared.color_kind,
         "stretchStages": stack.len(),
         "interactivePreview": prepared.interactive_preview,
@@ -2915,7 +2979,7 @@ fn render_prepared_fits16(
         "width": prepared.source_width,
         "height": prepared.source_height,
         "planes": prepared.planes,
-        "format": "FITS",
+        "format": prepared.source_format,
         "colorKind": prepared.color_kind,
         "bitsPerComponent": 16,
         "stretchStages": stack.len(),
@@ -2953,9 +3017,14 @@ fn render_cached_interactive_preview(
         return render_prepared_fits(&prepared, stack, deconvolution, max_dimension, true);
     }
 
-    let fits = FitsImage::open(path)
-        .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
-    let prepared = Arc::new(prepare_fits_render(fits, background, max_dimension, true)?);
+    let (image, format) = open_astronomy_image(path)?;
+    let prepared = Arc::new(prepare_fits_render(
+        image,
+        format,
+        background,
+        max_dimension,
+        true,
+    )?);
     let prepared = store_interactive_preview(cache, key, prepared)?;
     render_prepared_fits(&prepared, stack, deconvolution, max_dimension, false)
 }
@@ -2975,9 +3044,14 @@ fn render_cached_interactive_preview16(
         return render_prepared_fits16(&prepared, stack, deconvolution, max_dimension, true);
     }
 
-    let fits = FitsImage::open(path)
-        .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
-    let prepared = Arc::new(prepare_fits_render(fits, background, max_dimension, true)?);
+    let (image, format) = open_astronomy_image(path)?;
+    let prepared = Arc::new(prepare_fits_render(
+        image,
+        format,
+        background,
+        max_dimension,
+        true,
+    )?);
     let prepared = store_interactive_preview(cache, key, prepared)?;
     render_prepared_fits16(&prepared, stack, deconvolution, max_dimension, false)
 }
@@ -4430,8 +4504,26 @@ mod tests {
         }))
         .unwrap();
         let stack = StretchStack::single(config);
-        let image8 = render_fits_with_pipeline(fits.clone(), &stack, None, None, 0, false).unwrap();
-        let image16 = render_fits_with_pipeline16(fits, &stack, None, None, 0, false).unwrap();
+        let image8 = render_astronomy_with_pipeline(
+            fits.clone(),
+            AstronomyImageFormat::Fits,
+            &stack,
+            None,
+            None,
+            0,
+            false,
+        )
+        .unwrap();
+        let image16 = render_astronomy_with_pipeline16(
+            fits,
+            AstronomyImageFormat::Fits,
+            &stack,
+            None,
+            None,
+            0,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(image8.rgba[4], image8.rgba[8]);
         assert_ne!(image16.rgba[4], image16.rgba[8]);
@@ -4585,8 +4677,16 @@ mod tests {
         };
 
         let uncorrected = render_fits_with_stack(fits.clone(), &stack, 0).unwrap();
-        let corrected =
-            render_fits_with_pipeline(fits, &stack, Some(&background), None, 0, false).unwrap();
+        let corrected = render_astronomy_with_pipeline(
+            fits,
+            AstronomyImageFormat::Fits,
+            &stack,
+            Some(&background),
+            None,
+            0,
+            false,
+        )
+        .unwrap();
         assert_ne!(corrected.rgba, uncorrected.rgba);
 
         let metadata: Value =
@@ -4638,8 +4738,16 @@ mod tests {
         };
 
         let plain = render_fits_with_stack(fits.clone(), &stack, 0).unwrap();
-        let restored =
-            render_fits_with_pipeline(fits, &stack, None, Some(&deconvolution), 0, false).unwrap();
+        let restored = render_astronomy_with_pipeline(
+            fits,
+            AstronomyImageFormat::Fits,
+            &stack,
+            None,
+            Some(&deconvolution),
+            0,
+            false,
+        )
+        .unwrap();
         assert_ne!(restored.rgba, plain.rgba);
 
         let metadata: Value =
@@ -4690,8 +4798,9 @@ mod tests {
             pixels: seiza_fits::Pixels::F32(background_plane(400, 200)),
             headers: Vec::new(),
         };
-        let preview = render_fits_with_pipeline(
+        let preview = render_astronomy_with_pipeline(
             fits,
+            AstronomyImageFormat::Fits,
             &stack,
             None,
             Some(&deconvolution),
@@ -4761,8 +4870,9 @@ mod tests {
         let path = directory.path().join("test.fits");
         std::fs::write(&path, synthetic_fits()).unwrap();
 
-        let image = render_fits(
+        let image = render_astronomy_image(
             FitsImage::open(&path).unwrap(),
+            AstronomyImageFormat::Fits,
             &StretchParams::default(),
             0,
             RgbStretchMode::Auto,
@@ -4782,6 +4892,37 @@ mod tests {
                 assert_eq!(bins.len(), 256);
                 assert_eq!(bins.iter().map(|bin| bin.as_u64().unwrap()).sum::<u64>(), 4);
             }
+        }
+    }
+
+    #[test]
+    fn astronomy_render_metadata_identifies_xisf_sources_at_both_depths() {
+        let source = FitsImage {
+            width: 2,
+            height: 2,
+            planes: 1,
+            pixels: seiza_fits::Pixels::F32(vec![0.0, 0.25, 0.5, 1.0]),
+            headers: Vec::new(),
+        };
+        let image8 = render_astronomy_image(
+            source.clone(),
+            AstronomyImageFormat::Xisf,
+            &StretchParams::default(),
+            0,
+            RgbStretchMode::Auto,
+        )
+        .unwrap();
+        let image16 = render_astronomy_image16(
+            source,
+            AstronomyImageFormat::Xisf,
+            &StretchParams::default(),
+            0,
+            RgbStretchMode::Auto,
+        )
+        .unwrap();
+        for metadata_json in [&image8.metadata_json, &image16.metadata_json] {
+            let metadata: Value = serde_json::from_str(metadata_json.to_str().unwrap()).unwrap();
+            assert_eq!(metadata["format"], "XISF");
         }
     }
 
@@ -4870,9 +5011,16 @@ mod tests {
             "max_analysis_samples": 4096
         }))
         .unwrap();
-        let image =
-            render_fits_with_pipeline16(fits, &StretchStack::single(config), None, None, 0, false)
-                .unwrap();
+        let image = render_astronomy_with_pipeline16(
+            fits,
+            AstronomyImageFormat::Fits,
+            &StretchStack::single(config),
+            None,
+            None,
+            0,
+            false,
+        )
+        .unwrap();
         let directory = tempfile::tempdir().unwrap();
 
         for (name, format) in [
