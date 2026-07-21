@@ -2592,6 +2592,7 @@ fn render_astronomy_image(
         "planes": fits.planes,
         "format": source_format.name(),
         "colorKind": color_kind,
+        "bitsPerComponent": 8,
         "rgbStretchMode": matches!(color_kind, "planar-rgb" | "bayer")
             .then(|| rgb_stretch_mode.name()),
         "statistics": statistics_json(&statistics),
@@ -2620,13 +2621,7 @@ fn render_astronomy_image16(
     let source_width = fits.width;
     let source_height = fits.height;
     let statistics = fits.statistics();
-    let color_kind = if fits.planes == 3 {
-        "planar-rgb"
-    } else if fits.bayer_pattern().is_some() {
-        "bayer"
-    } else {
-        "mono"
-    };
+    let color_kind = fits_color_kind(&fits);
 
     let rgb = fits.debayer().or_else(|| fits.rgb_planes());
     let input_histogram = if let Some(rgb) = &rgb {
@@ -2650,10 +2645,7 @@ fn render_astronomy_image16(
         usize::try_from(max_dimension).unwrap_or(usize::MAX),
     );
 
-    let mut headers = Map::new();
-    for (key, value) in &fits.headers {
-        headers.insert(key.clone(), header_json(value));
-    }
+    let headers = fits_headers_json(&fits);
     let metadata = json!({
         "width": source_width,
         "height": source_height,
@@ -3147,6 +3139,7 @@ fn render_raster(
         "planes": planes,
         "format": format,
         "colorKind": color_kind,
+        "bitsPerComponent": 8,
         "statistics": statistics,
         "inputHistogram": input_histogram,
         "displayHistogram": display_histogram,
