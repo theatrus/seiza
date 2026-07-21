@@ -11,7 +11,7 @@ use seiza::wcs::Wcs;
 use seiza::{DetectBackend, DetectConfig, detect_stars, detect_stars_luma_f32};
 use seiza_fits::{FitsImage, HeaderValue, RgbImage16, Statistics, StretchParams};
 use seiza_stretch::StretchConfig;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CStr, CString, c_char, c_void};
@@ -23,6 +23,26 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 static VERSION: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StretchConfigRequest {
+    Single(StretchConfig),
+    Stack(Vec<StretchConfig>),
+}
+
+impl StretchConfigRequest {
+    fn into_stack(self) -> Result<Vec<StretchConfig>, String> {
+        let stack = match self {
+            Self::Single(config) => vec![config],
+            Self::Stack(stack) => stack,
+        };
+        if stack.is_empty() {
+            return Err("stretch config stack must contain at least one stage".into());
+        }
+        Ok(stack)
+    }
+}
 
 pub type SeizaCatalogSetupProgressCallback =
     Option<unsafe extern "C" fn(*const c_char, *mut c_void)>;
@@ -512,10 +532,11 @@ pub unsafe extern "C" fn seiza_rendered_image_open_with_rgb_stretch(
 }
 
 #[unsafe(no_mangle)]
-/// Opens a FITS image and renders it with a parameterized stretch described by
-/// `config_json` — a serialized `seiza-stretch` `StretchConfig` (the same schema
-/// the `seiza stretch` tooling uses), giving access to the full GHS/MTF/params
-/// pipeline without further ABI additions.
+/// Opens a FITS image and renders it with parameterized stretches described by
+/// `config_json`. The value may be one serialized `seiza-stretch`
+/// `StretchConfig` (the original schema) or a non-empty array of configs. Array
+/// stages are applied in order using `f32` intermediates and converted to RGBA
+/// only after the final stage.
 ///
 /// # Safety
 /// `path` and `config_json` must be valid NUL-terminated strings. When non-null,
@@ -530,11 +551,12 @@ pub unsafe extern "C" fn seiza_rendered_image_open_with_stretch_config(
     ffi_result(error_out, || {
         let path = required_path(path, "image path")?;
         let config_json = required_str(config_json, "stretch config JSON")?;
-        let config: StretchConfig = serde_json::from_str(&config_json)
+        let request: StretchConfigRequest = serde_json::from_str(&config_json)
             .map_err(|error| format!("invalid stretch config JSON: {error}"))?;
+        let stack = request.into_stack()?;
         let fits = FitsImage::open(&path)
             .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
-        render_fits_with_config(fits, &config, max_dimension)
+        render_fits_with_configs(fits, &stack, max_dimension)
     })
     .map_or(ptr::null_mut(), |image| Box::into_raw(Box::new(image)))
 }
@@ -1316,11 +1338,23 @@ fn render_fits(
 /// math lives entirely in `seiza-stretch`; this only marshals FITS pixels into
 /// the interleaved `f32` the pipeline expects and assembles the RGBA result and
 /// metadata, matching [`render_fits`]'s output shape.
+#[cfg(test)]
 fn render_fits_with_config(
     fits: FitsImage,
     config: &StretchConfig,
     max_dimension: u32,
 ) -> Result<SeizaRenderedImage, String> {
+    render_fits_with_configs(fits, std::slice::from_ref(config), max_dimension)
+}
+
+fn render_fits_with_configs(
+    fits: FitsImage,
+    configs: &[StretchConfig],
+    max_dimension: u32,
+) -> Result<SeizaRenderedImage, String> {
+    let (last_config, leading_configs) = configs
+        .split_last()
+        .ok_or_else(|| "stretch config stack must contain at least one stage".to_string())?;
     let source_width = fits.width;
     let source_height = fits.height;
     let statistics = fits.statistics();
@@ -1341,7 +1375,7 @@ fn render_fits_with_config(
 
     // The pipeline consumes interleaved f32 samples normalized to [0, 1], the
     // same convention as `FitsImage::to_luma_f32`.
-    let (data, channels): (Vec<f32>, usize) = match &rgb {
+    let (mut data, channels): (Vec<f32>, usize) = match &rgb {
         Some(rgb) => (
             rgb.data
                 .iter()
@@ -1351,10 +1385,19 @@ fn render_fits_with_config(
         ),
         None => (fits.to_luma_f32(), 1),
     };
-    let stretched = config
+    for (index, config) in leading_configs.iter().enumerate() {
+        let plan = config
+            .resolve_for(&data, channels)
+            .map_err(|error| format!("failed to resolve stretch stage {}: {error}", index + 1))?;
+        data = plan
+            .apply_f32(&data, channels)
+            .map_err(|error| format!("failed to apply stretch stage {}: {error}", index + 1))?;
+    }
+    let final_stage = configs.len();
+    let stretched = last_config
         .resolve_for(&data, channels)
         .and_then(|plan| plan.apply_u8(&data, channels))
-        .map_err(|error| format!("failed to apply stretch config: {error}"))?;
+        .map_err(|error| format!("failed to apply stretch stage {final_stage}: {error}"))?;
     let rgba: Vec<u8> = if channels == 3 {
         stretched
             .chunks_exact(3)
@@ -1385,6 +1428,7 @@ fn render_fits_with_config(
         "planes": fits.planes,
         "format": "FITS",
         "colorKind": color_kind,
+        "stretchStages": configs.len(),
         "statistics": statistics_json(&statistics),
         "inputHistogram": input_histogram,
         "displayHistogram": display_histogram,
@@ -1975,6 +2019,57 @@ mod tests {
         let metadata: Value = serde_json::from_str(image.metadata_json.to_str().unwrap()).unwrap();
         assert_eq!(metadata["format"], "FITS");
         assert!(metadata["displayHistogram"].is_object());
+    }
+
+    #[test]
+    fn renders_an_ordered_f32_stretch_stack_and_accepts_single_config_json() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("test.fits");
+        std::fs::write(&path, synthetic_fits()).unwrap();
+
+        let first: StretchConfig = serde_json::from_value(json!({
+            "model": { "type": "linear", "black": 0.0, "white": 0.75 },
+            "color_strategy": "linked",
+            "max_analysis_samples": 4096
+        }))
+        .unwrap();
+        let second: StretchConfig = serde_json::from_value(json!({
+            "model": { "type": "linear", "black": 0.0, "white": 0.5 },
+            "color_strategy": "linked",
+            "max_analysis_samples": 4096
+        }))
+        .unwrap();
+
+        let single_request: StretchConfigRequest =
+            serde_json::from_str(&serde_json::to_string(&first).unwrap()).unwrap();
+        assert_eq!(single_request.into_stack().unwrap(), vec![first.clone()]);
+
+        let stack_json = serde_json::to_string(&[first.clone(), second.clone()]).unwrap();
+        let stack = serde_json::from_str::<StretchConfigRequest>(&stack_json)
+            .unwrap()
+            .into_stack()
+            .unwrap();
+        let single = render_fits_with_configs(
+            FitsImage::open(&path).unwrap(),
+            std::slice::from_ref(&first),
+            0,
+        )
+        .unwrap();
+        let stacked = render_fits_with_configs(FitsImage::open(&path).unwrap(), &stack, 0).unwrap();
+
+        assert_ne!(stacked.rgba, single.rgba);
+        let metadata: Value =
+            serde_json::from_str(stacked.metadata_json.to_str().unwrap()).unwrap();
+        assert_eq!(metadata["stretchStages"], 2);
+    }
+
+    #[test]
+    fn rejects_an_empty_stretch_stack() {
+        let request: StretchConfigRequest = serde_json::from_str("[]").unwrap();
+        assert_eq!(
+            request.into_stack().unwrap_err(),
+            "stretch config stack must contain at least one stage"
+        );
     }
 
     #[test]
