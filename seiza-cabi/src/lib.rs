@@ -41,6 +41,36 @@ impl StretchConfigRequest {
     }
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct BackgroundRenderRequest {
+    mode: CorrectionMode,
+    config: BackgroundConfig,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProcessedRenderRequest {
+    stretch: StretchConfigRequest,
+    #[serde(default)]
+    background: Option<BackgroundRenderRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ImageRenderConfigRequest {
+    Processed(ProcessedRenderRequest),
+    Stretch(StretchConfigRequest),
+}
+
+impl ImageRenderConfigRequest {
+    fn into_parts(self) -> (StretchStack, Option<BackgroundRenderRequest>) {
+        match self {
+            Self::Processed(request) => (request.stretch.into_stack(), request.background),
+            Self::Stretch(request) => (request.into_stack(), None),
+        }
+    }
+}
+
 pub type SeizaCatalogSetupProgressCallback =
     Option<unsafe extern "C" fn(*const c_char, *mut c_void)>;
 
@@ -740,11 +770,13 @@ pub unsafe extern "C" fn seiza_rendered_image_open_with_rgb_stretch(
 }
 
 #[unsafe(no_mangle)]
-/// Opens a FITS image and renders it with parameterized stretches described by
+/// Opens a FITS image and renders it with parameterized processing described by
 /// `config_json`. The value may be one serialized `seiza-stretch`
-/// `StretchConfig` (the original schema) or a non-empty array of configs. Array
-/// stages are applied in order using `f32` intermediates and converted to RGBA
-/// only after the final stage.
+/// `StretchConfig` (the original schema), a non-empty array of configs, or an
+/// object with `stretch` and optional `background` fields. Array stages are
+/// applied in order using `f32` intermediates and converted to RGBA only after
+/// the final stage. Background correction, when requested, is fitted and
+/// applied to linear samples before the first stretch stage.
 ///
 /// # Safety
 /// `path` and `config_json` must be valid NUL-terminated strings. When non-null,
@@ -759,12 +791,12 @@ pub unsafe extern "C" fn seiza_rendered_image_open_with_stretch_config(
     ffi_result(error_out, || {
         let path = required_path(path, "image path")?;
         let config_json = required_str(config_json, "stretch config JSON")?;
-        let request: StretchConfigRequest = serde_json::from_str(&config_json)
-            .map_err(|error| format!("invalid stretch config JSON: {error}"))?;
-        let stack = request.into_stack();
+        let request: ImageRenderConfigRequest = serde_json::from_str(&config_json)
+            .map_err(|error| format!("invalid image processing config JSON: {error}"))?;
+        let (stack, background) = request.into_parts();
         let fits = FitsImage::open(&path)
             .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
-        render_fits_with_stack(fits, &stack, max_dimension)
+        render_fits_with_pipeline(fits, &stack, background.as_ref(), max_dimension)
     })
     .map_or(ptr::null_mut(), |image| Box::into_raw(Box::new(image)))
 }
@@ -1555,9 +1587,19 @@ fn render_fits_with_config(
     render_fits_with_stack(fits, &StretchStack::single(config.clone()), max_dimension)
 }
 
+#[cfg(test)]
 fn render_fits_with_stack(
     fits: FitsImage,
     stack: &StretchStack,
+    max_dimension: u32,
+) -> Result<SeizaRenderedImage, String> {
+    render_fits_with_pipeline(fits, stack, None, max_dimension)
+}
+
+fn render_fits_with_pipeline(
+    fits: FitsImage,
+    stack: &StretchStack,
+    background: Option<&BackgroundRenderRequest>,
     max_dimension: u32,
 ) -> Result<SeizaRenderedImage, String> {
     let source_width = fits.width;
@@ -1572,7 +1614,7 @@ fn render_fits_with_stack(
     };
 
     let rgb = fits.debayer().or_else(|| fits.rgb_planes());
-    let input_histogram = if let Some(rgb) = &rgb {
+    let original_input_histogram = if let Some(rgb) = &rgb {
         input_histogram_u16_json(&rgb.data, 3, false)
     } else {
         input_histogram_u16_json(&fits.to_u16(), 1, true)
@@ -1580,7 +1622,7 @@ fn render_fits_with_stack(
 
     // The pipeline consumes interleaved f32 samples normalized to [0, 1], the
     // same convention as `FitsImage::to_luma_f32`.
-    let (data, channels): (Vec<f32>, usize) = match &rgb {
+    let (mut data, channels): (Vec<f32>, usize) = match &rgb {
         Some(rgb) => (
             rgb.data
                 .iter()
@@ -1589,6 +1631,27 @@ fn render_fits_with_stack(
             3,
         ),
         None => (fits.to_luma_f32(), 1),
+    };
+    let (input_histogram, background_metadata) = if let Some(background) = background {
+        let fit = fit_background_masked(
+            &data,
+            source_width,
+            source_height,
+            channels,
+            None,
+            &background.config,
+        )
+        .map_err(|error| format!("failed to fit image background: {error}"))?;
+        fit.correct_in_place(&mut data, background.mode)
+            .map_err(|error| format!("failed to correct image background: {error}"))?;
+        let metadata = json!({
+            "mode": background.mode,
+            "diagnostics": &fit.diagnostics,
+            "reference": &fit.reference,
+        });
+        (input_histogram_f32_json(&data, channels), Some(metadata))
+    } else {
+        (original_input_histogram, None)
     };
     let stretched = stack
         .apply_u8(&data, channels)
@@ -1625,6 +1688,7 @@ fn render_fits_with_stack(
         "format": "FITS",
         "colorKind": color_kind,
         "stretchStages": stack.len(),
+        "backgroundProcessing": background_metadata,
         "statistics": statistics_json(&statistics),
         "inputHistogram": input_histogram,
         "displayHistogram": display_histogram,
@@ -1844,9 +1908,20 @@ fn input_histogram_f32_json(samples: &[f32], stride: usize) -> Value {
         }
     };
     for pixel in samples.chunks_exact(stride) {
-        red[bin(pixel[0])] += 1;
-        green[bin(pixel[1])] += 1;
-        blue[bin(pixel[2])] += 1;
+        let red_value = bin(pixel[0]);
+        let green_value = if stride == 1 {
+            red_value
+        } else {
+            bin(pixel[1])
+        };
+        let blue_value = if stride == 1 {
+            red_value
+        } else {
+            bin(pixel[2])
+        };
+        red[red_value] += 1;
+        green[green_value] += 1;
+        blue[blue_value] += 1;
     }
     histogram_json(&red, &green, &blue, 0.0, 1.0)
 }
@@ -2425,6 +2500,78 @@ mod tests {
         let metadata: Value =
             serde_json::from_str(stacked.metadata_json.to_str().unwrap()).unwrap();
         assert_eq!(metadata["stretchStages"], 2);
+    }
+
+    #[test]
+    fn render_config_composes_background_correction_before_the_stretch_stack() {
+        let first: StretchConfig = serde_json::from_value(json!({
+            "model": { "type": "identity" },
+            "color_strategy": "linked",
+            "max_analysis_samples": 4096
+        }))
+        .unwrap();
+        let request: ImageRenderConfigRequest = serde_json::from_value(json!({
+            "stretch": [first],
+            "background": {
+                "mode": "subtract",
+                "config": {
+                    "model": { "kind": "polynomial", "degree": 1, "ridge": 0.0 },
+                    "sample_radius": 2
+                }
+            }
+        }))
+        .unwrap();
+        let (stack, background) = request.into_parts();
+        assert_eq!(stack.len(), 1);
+        let background = background.unwrap();
+        assert_eq!(background.mode, CorrectionMode::Subtract);
+        assert_eq!(background.config.sample_radius, Some(2));
+    }
+
+    #[test]
+    fn fits_render_pipeline_reports_and_applies_background_correction() {
+        let (width, height) = (96, 72);
+        let fits = FitsImage {
+            width,
+            height,
+            planes: 1,
+            pixels: seiza_fits::Pixels::F32(background_plane(width, height)),
+            headers: Vec::new(),
+        };
+        let stretch: StretchConfig = serde_json::from_value(json!({
+            "model": { "type": "identity" },
+            "color_strategy": "linked",
+            "max_analysis_samples": 4096
+        }))
+        .unwrap();
+        let stack = StretchStack::single(stretch);
+        let background = BackgroundRenderRequest {
+            mode: CorrectionMode::Subtract,
+            config: serde_json::from_value(json!({
+                "model": { "kind": "polynomial", "degree": 1, "ridge": 0.0 },
+                "sample_radius": 2
+            }))
+            .unwrap(),
+        };
+
+        let uncorrected = render_fits_with_stack(fits.clone(), &stack, 0).unwrap();
+        let corrected = render_fits_with_pipeline(fits, &stack, Some(&background), 0).unwrap();
+        assert_ne!(corrected.rgba, uncorrected.rgba);
+
+        let metadata: Value =
+            serde_json::from_str(corrected.metadata_json.to_str().unwrap()).unwrap();
+        assert_eq!(metadata["backgroundProcessing"]["mode"], "subtract");
+        assert!(metadata["backgroundProcessing"]["diagnostics"].is_object());
+        assert_eq!(metadata["inputHistogram"]["lowerBound"], 0.0);
+        assert_eq!(metadata["inputHistogram"]["upperBound"], 1.0);
+        assert_eq!(
+            metadata["inputHistogram"]["red"],
+            metadata["inputHistogram"]["green"]
+        );
+        assert_eq!(
+            metadata["inputHistogram"]["red"],
+            metadata["inputHistogram"]["blue"]
+        );
     }
 
     #[test]
