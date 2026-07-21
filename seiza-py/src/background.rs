@@ -1,4 +1,4 @@
-use crate::arrays::float_array;
+use crate::arrays::{float_array, float_image_view};
 use numpy::{PyArrayDyn, PyReadonlyArrayDyn, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -97,17 +97,19 @@ impl PyBackgroundModel {
         image: PyReadonlyArrayDyn<'_, f32>,
         mode: &str,
     ) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
-        let (data, width, height, channels) = image_data(&image)?;
-        if (width, height, channels) != (self.fit.width, self.fit.height, self.fit.channels) {
+        let image = float_image_view(&image)?;
+        if (image.width, image.height, image.channels)
+            != (self.fit.width, self.fit.height, self.fit.channels)
+        {
             return Err(PyValueError::new_err(
                 "image shape differs from the fitted background model",
             ));
         }
         let mode = correction_mode(mode)?;
         let corrected = py
-            .allow_threads(|| self.fit.correct(data, mode))
+            .allow_threads(|| self.fit.correct(image.data, mode))
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        float_array(py, width, height, channels, corrected)
+        float_array(py, image.width, image.height, image.channels, corrected)
     }
 
     fn __repr__(&self) -> String {
@@ -139,10 +141,10 @@ fn fit_background(
     fit_rejection_iterations: usize,
     border_fraction: f64,
 ) -> PyResult<PyBackgroundModel> {
-    let (data, width, height, channels) = image_data(&image)?;
+    let image = float_image_view(&image)?;
     let mask = match &mask {
         Some(mask) => {
-            if mask.shape() != [height, width] {
+            if mask.shape() != [image.height, image.width] {
                 return Err(PyValueError::new_err(
                     "background mask must have shape (height, width)",
                 ));
@@ -165,27 +167,18 @@ fn fit_background(
         border_fraction,
     };
     let fit = py
-        .allow_threads(|| fit_background_masked(data, width, height, channels, mask, &config))
+        .allow_threads(|| {
+            fit_background_masked(
+                image.data,
+                image.width,
+                image.height,
+                image.channels,
+                mask,
+                &config,
+            )
+        })
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     Ok(PyBackgroundModel { fit })
-}
-
-fn image_data<'a>(
-    image: &'a PyReadonlyArrayDyn<'_, f32>,
-) -> PyResult<(&'a [f32], usize, usize, usize)> {
-    let (height, width, channels) = match image.shape() {
-        [height, width] => (*height, *width, 1),
-        [height, width, 3] => (*height, *width, 3),
-        _ => {
-            return Err(PyValueError::new_err(
-                "image arrays must have shape (height, width) or (height, width, 3)",
-            ));
-        }
-    };
-    let data = image
-        .as_slice()
-        .map_err(|_| PyValueError::new_err("image arrays must be C-contiguous"))?;
-    Ok((data, width, height, channels))
 }
 
 fn correction_mode(mode: &str) -> PyResult<CorrectionMode> {

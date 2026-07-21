@@ -10,6 +10,7 @@ use seiza::objects::{
 use seiza::wcs::Wcs;
 use seiza::{DetectBackend, DetectConfig, detect_stars, detect_stars_luma_f32};
 use seiza_background::{BackgroundConfig, BackgroundFit, CorrectionMode, fit_background_masked};
+use seiza_deconvolution::{DeconvolutionConfig, deconvolve};
 use seiza_fits::{FitsImage, HeaderValue, RgbImage16, Statistics, StretchParams};
 use seiza_stacking::{
     CalibrationMasters, FitsFrame, FrameDiagnostics, FrameDisposition, LinearImage, LiveStacker,
@@ -557,6 +558,48 @@ struct SipResponse {
 #[unsafe(no_mangle)]
 pub extern "C" fn seiza_core_version() -> *const c_char {
     VERSION.as_ptr().cast()
+}
+
+#[unsafe(no_mangle)]
+/// Applies damped Richardson-Lucy deconvolution to interleaved linear `float`
+/// samples in place. `channels` must be one or three and `data_length` must
+/// equal `width * height * channels`. RGB samples are pixel-interleaved.
+/// The operation is synchronous, retains no pointer after returning, and leaves
+/// the input unchanged when validation or restoration fails.
+///
+/// # Safety
+/// `data` must point to `data_length` writable floats. When non-null,
+/// `error_out` must point to writable storage for one pointer.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn seiza_deconvolve_in_place(
+    data: *mut f32,
+    data_length: usize,
+    width: usize,
+    height: usize,
+    channels: usize,
+    psf_fwhm_pixels: f32,
+    iterations: usize,
+    amount: f32,
+    noise_fraction: f32,
+    max_correction: f32,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let data = unsafe { required_f32_slice_mut(data, data_length, "deconvolution input")? };
+        let config = DeconvolutionConfig {
+            psf_fwhm_pixels,
+            iterations,
+            amount,
+            noise_fraction,
+            max_correction,
+        };
+        let restored = deconvolve(data, width, height, channels, &config)
+            .map_err(|error| error.to_string())?;
+        data.copy_from_slice(&restored.data);
+        Ok(())
+    })
+    .is_some()
 }
 
 #[unsafe(no_mangle)]
@@ -3270,6 +3313,23 @@ mod tests {
         image
     }
 
+    fn gaussian_star(size: usize, fwhm: f32) -> Vec<f32> {
+        let center = size / 2;
+        let sigma = fwhm / 2.354_82;
+        let mut image = Vec::with_capacity(size * size);
+        for y in 0..size {
+            for x in 0..size {
+                let radius_squared = ((x as isize - center as isize).pow(2)
+                    + (y as isize - center as isize).pow(2))
+                    as f32;
+                image.push((-0.5 * radius_squared / sigma.powi(2)).exp());
+            }
+        }
+        let flux = image.iter().sum::<f32>();
+        image.iter_mut().for_each(|sample| *sample /= flux);
+        image
+    }
+
     fn stacking_star_field(width: usize, height: usize) -> Vec<f32> {
         let positions = [
             (19.7_f32, 16.4_f32),
@@ -3310,6 +3370,54 @@ mod tests {
             }"#,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn deconvolution_cabi_restores_in_place_and_reports_errors() {
+        let size = 41;
+        let center = size / 2;
+        let mut image = gaussian_star(size, 2.8);
+        let input_peak = image[center * size + center];
+        let input_flux = image.iter().sum::<f32>();
+        let mut error = ptr::null_mut();
+
+        assert!(unsafe {
+            seiza_deconvolve_in_place(
+                image.as_mut_ptr(),
+                image.len(),
+                size,
+                size,
+                1,
+                2.8,
+                4,
+                0.35,
+                0.001,
+                2.0,
+                &mut error,
+            )
+        });
+        assert!(error.is_null());
+        assert!(image[center * size + center] > input_peak);
+        assert!((image.iter().sum::<f32>() - input_flux).abs() < 1.0e-5);
+
+        assert!(!unsafe {
+            seiza_deconvolve_in_place(
+                image.as_mut_ptr(),
+                image.len() - 1,
+                size,
+                size,
+                1,
+                2.8,
+                4,
+                0.35,
+                0.001,
+                2.0,
+                &mut error,
+            )
+        });
+        let message = unsafe { CStr::from_ptr(error) }.to_str().unwrap();
+        assert!(message.contains("expected"));
+        unsafe { seiza_string_free(error) };
     }
 
     #[test]

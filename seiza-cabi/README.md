@@ -33,6 +33,10 @@ exposes the **superset** of what both apps need.
   subtractive/divisive correction in place before freeing the model. Optional
   settings use serialized `seiza-background` `BackgroundConfig` JSON, keeping
   the ABI stable as model options grow.
+- **Light deconvolution** — `seiza_deconvolve_in_place` applies the same
+  conservative damped Richardson-Lucy operation as the Rust and Python APIs to
+  caller-owned linear mono or interleaved RGB `float` samples. The synchronous
+  call retains no pointers and reports validation failures through `error_out`.
 - **Live stacking** — `seiza_live_stacker_create` starts from caller-provided
   calibrated linear mono/RGB samples, while `seiza_live_stacker_open_fits`
   decodes raw linear FITS and optionally applies integrated bias, dark, and
@@ -54,6 +58,12 @@ coefficients, so the input buffer may be released after `seiza_background_fit`
 returns. Pass null for both mask/configuration pointers to use automatic
 defaults. Correction mode constants and the precise pointer/length contracts
 are declared in the generated header.
+
+Deconvolution uses the same buffer layout and modifies the caller-owned input
+in place. Supply a measured stellar PSF FWHM in pixels; the conservative values
+are four iterations, a `0.35` blend, a `0.001` noise fraction, and a maximum
+correction of `2.0`. The output remains linear and may contain samples outside
+`[0, 1]`.
 
 Stacking uses the same row-major, pixel-interleaved mono/RGB layout. Array
 frames are copied during each synchronous call and may be released when it

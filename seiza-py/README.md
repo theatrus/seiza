@@ -1,8 +1,8 @@
 # seiza (Python)
 
-Python bindings for [seiza](https://github.com/theatrus/seiza): star
-detection, WCS fitting, hinted/blind plate solving, satellite prediction,
-calibration, and batch/live image stacking for astrophotography, implemented
+Python bindings for [seiza](https://github.com/theatrus/seiza): star detection,
+WCS fitting, hinted/blind plate solving, satellite prediction, calibration,
+deconvolution, and batch/live image stacking for astrophotography, implemented
 in Rust.
 
 ```
@@ -124,6 +124,22 @@ for x, y, values, dispersion, weight, status in model.samples():
 
 The output remains linear and may retain negative or greater-than-one values.
 Background extraction is not display stretching or color calibration.
+
+## Light deconvolution
+
+Apply the same conservative linear-image restoration as the Rust crate and
+CLI to a C-contiguous mono `(H, W)` or RGB `(H, W, 3)` `float32` array:
+
+```python
+restored = seiza.deconvolve(stack, psf_fwhm=3.1)
+```
+
+`psf_fwhm` is a measured unsaturated-star FWHM in pixels. The defaults use four
+damped Richardson-Lucy iterations and blend 35% of the estimate into the input.
+The returned array remains linear `float32`; no clipping or display stretch is
+applied. The operation releases the GIL. Inspect identical stretches for noise,
+rings, saturated-star failures, and field-dependent PSF mismatch before using a
+stronger `iterations` or `amount`.
 
 ## Image stacking
 

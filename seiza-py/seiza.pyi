@@ -361,6 +361,15 @@ def fit_background(
     fit_rejection_iterations: int = 3,
     border_fraction: float = 0.03,
 ) -> BackgroundModel: ...
+def deconvolve(
+    image: npt.NDArray[np.float32],
+    *,
+    psf_fwhm: float,
+    iterations: int = 4,
+    amount: float = 0.35,
+    noise_fraction: float = 0.001,
+    max_correction: float = 2.0,
+) -> npt.NDArray[np.float32]: ...
 def combine_rgb(
     red: npt.NDArray[np.float32],
     green: npt.NDArray[np.float32],

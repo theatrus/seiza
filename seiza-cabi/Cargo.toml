@@ -16,6 +16,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 [dependencies]
 seiza = { workspace = true, features = ["downloads"] }
 seiza-background.workspace = true
+seiza-deconvolution.workspace = true
 seiza-fits = { workspace = true }
 seiza-stacking = { workspace = true }
 seiza-stretch = { workspace = true }

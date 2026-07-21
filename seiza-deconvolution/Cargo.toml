@@ -1,0 +1,16 @@
+[package]
+name = "seiza-deconvolution"
+description = "Conservative linear-image deconvolution experiments for astrophotography"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "README.md"
+keywords = ["astronomy", "astrophotography", "deconvolution", "image-processing"]
+categories = ["science", "multimedia::images"]
+
+[dependencies]
+rayon.workspace = true
+thiserror.workspace = true

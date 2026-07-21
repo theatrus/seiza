@@ -18,6 +18,7 @@ mod astap;
 mod background;
 mod build_data;
 mod color;
+mod deconvolution;
 mod master;
 mod preview;
 mod provenance;
@@ -529,6 +530,8 @@ enum Command {
     Stretch(stretch_command::StretchArgs),
     /// Estimate and remove a smooth background gradient from linear FITS
     Background(background::BackgroundArgs),
+    /// Experimentally restore mild blur in a linear FITS using a measured PSF
+    Deconvolve(deconvolution::DeconvolutionArgs),
     /// Register and incrementally stack linear FITS light frames
     Stack(stack::StackArgs),
     /// Register and compose mono stacks into RGB, LRGB, or narrowband color
@@ -1233,6 +1236,7 @@ fn main() -> Result<()> {
         Command::FitsInfo { image, stretch } => fits_info(&image, stretch.as_deref()),
         Command::Stretch(options) => stretch_command::run(options),
         Command::Background(options) => background::run(options),
+        Command::Deconvolve(options) => deconvolution::run(options),
         Command::Stack(options) => stack::run(options),
         Command::Color(options) => color::run(options),
         Command::Master(options) => master::run(options),
