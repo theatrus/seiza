@@ -548,13 +548,14 @@ SeizaRenderedImage *seiza_rendered_image_open_with_rgb_stretch(const char *path,
  Opens a FITS image and renders it with parameterized processing described by
  `config_json`. The value may be one serialized `seiza-stretch`
  `StretchConfig` (the original schema), a non-empty array of configs, or an
- object with `stretch`, optional `background`, and optional
- `interactive_preview` fields. Array stages are applied in order using `f32`
- intermediates and converted to RGBA only after the final stage. Background
- correction, when requested, is fitted and applied to linear samples before
- the first stretch stage. Interactive preview mode bounds the linear samples
- to `max_dimension` before processing and reuses the prepared pixels across
- stretch-only edits; full renders should leave it false.
+ object with `stretch`, optional `background`, optional `deconvolution`, and
+ optional `interactive_preview` fields. Array stages are applied in order
+ using `f32` intermediates and converted to RGBA only after the final stage.
+ Background correction and deconvolution, when requested, are applied to
+ linear samples in that order before the first stretch stage. Interactive
+ preview mode bounds the linear samples to `max_dimension` before processing
+ and reuses the source/background-prepared pixels across stretch and
+ deconvolution edits; full renders should leave it false.
 
  # Safety
  `path` and `config_json` must be valid NUL-terminated strings. When non-null,
