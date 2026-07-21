@@ -380,6 +380,7 @@ def combine_rgb(
     green: npt.NDArray[np.float32],
     blue: npt.NDArray[np.float32],
     *,
+    luminance_mode: str = "native",
     normalization: str = "percentile",
     black_percentile: float = 0.001,
     white_percentile: float = 0.995,

@@ -64,6 +64,19 @@ result can exceed one. This is a quick-visualization and stack-depth option,
 not a photometric calibration. Rust callers select it with
 `combine_super_lrgb`; the CLI and Python APIs use luminance mode `super`.
 
+The same target works without a luminance stack. Synthetic super-luminance
+composes RGB alone and scales the triplet to `R + G + B`, as if one luminance
+exposure had collected every channel's light:
+
+```text
+Ysuper = R + G + B
+RGBout = RGB * Ysuper / Yrgb
+```
+
+Rust callers select it with `combine_super_rgb`; the CLI (`color rgb`) and
+Python (`combine_rgb`) use luminance mode `super`, and the FITS output is
+marked `SEIZACLR='SUPER-RGB'`.
+
 This follows PixInsight's documented model rather than reproducing every
 `LRGBCombination` control. PixInsight staff describe CIE XYZ separation for
 linear images, on-demand luminance/chrominance rather than a stored L channel,
@@ -120,9 +133,9 @@ Foraxx-HOO:
 
 The FITS writer records `SEIZATRF='DISPLAY'` for Foraxx and for any composition
 whose inputs were explicitly marked display-referred. Linear inputs remain
-`SEIZATRF='LINEAR'` for RGB, LRGB, super-LRGB, direct palettes, and custom
-matrices. It records `SEIZACLR='SUPER-LRGB'` for super-luminance output and
-the composition or palette name otherwise. A display-referred preview is written
+`SEIZATRF='LINEAR'` for RGB, LRGB, super-LRGB, super-RGB, direct palettes, and
+custom matrices. It records `SEIZACLR='SUPER-LRGB'` or `SEIZACLR='SUPER-RGB'`
+for super-luminance output and the composition or palette name otherwise. A display-referred preview is written
 directly; a linear-light preview receives the normal display-only asinh stretch.
 The original equations and the stretched-input requirement come from
 Ludo/ForaxX's [Dynamic narrowband combinations with

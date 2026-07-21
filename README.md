@@ -315,9 +315,9 @@ seiza color narrowband --ha ha.fits --oiii oiii.fits --sii sii.fits \
   --palette foraxx-sho --preview foraxx.png
 ```
 
-RGB, LRGB, additive super-LRGB (`L + R + G + B`), SHO/HOO, every direct
-three-filter permutation, and custom Rust mixing matrices retain linear-light
-samples. Foraxx-SHO and Foraxx-HOO use the
+RGB, LRGB, additive super-LRGB (`L + R + G + B`), synthetic super-RGB
+(`R + G + B`, no luminance stack), SHO/HOO, every direct three-filter
+permutation, and custom Rust mixing matrices retain linear-light samples. Foraxx-SHO and Foraxx-HOO use the
 published dynamic formula on internally stretched working channels and are
 explicitly marked display-referred in FITS metadata. See the [color-composition
 design](docs/design/color-composition.md) for normalization, equations, and

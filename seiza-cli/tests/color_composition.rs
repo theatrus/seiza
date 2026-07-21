@@ -7,6 +7,62 @@ fn write_mono(path: &Path, values: &[f32]) {
 }
 
 #[test]
+fn super_rgb_cli_targets_channel_sum_and_marks_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let red = directory.path().join("r.fits");
+    let green = directory.path().join("g.fits");
+    let blue = directory.path().join("b.fits");
+    let output = directory.path().join("super-rgb.fits");
+    write_mono(&red, &[0.2; 4]);
+    write_mono(&green, &[0.4; 4]);
+    write_mono(&blue, &[0.1; 4]);
+
+    let result = Command::new(env!("CARGO_BIN_EXE_seiza"))
+        .args([
+            "color",
+            "rgb",
+            "--red",
+            red.to_str().unwrap(),
+            "--green",
+            green.to_str().unwrap(),
+            "--blue",
+            blue.to_str().unwrap(),
+            "--luminance-mode",
+            "super",
+            "--normalization",
+            "none",
+            "--no-register",
+            "--output",
+            output.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+
+    let fits = FitsImage::open(&output).unwrap();
+    assert_eq!(
+        fits.header("SEIZACLR").and_then(HeaderValue::as_str),
+        Some("SUPER-RGB")
+    );
+    assert_eq!(
+        fits.header("SEIZATRF").and_then(HeaderValue::as_str),
+        Some("LINEAR")
+    );
+    let Pixels::F32(values) = fits.pixels else {
+        panic!("expected f32 output");
+    };
+    let output_luminance =
+        0.2126_f32.mul_add(values[0], 0.7152_f32.mul_add(values[4], 0.0722 * values[8]));
+    assert!((output_luminance - 0.7).abs() < 1.0e-6);
+    assert!((values[0] / values[4] - 0.5).abs() < 1.0e-6);
+    assert!((values[8] / values[4] - 0.25).abs() < 1.0e-6);
+}
+
+#[test]
 fn super_lrgb_cli_adds_all_channels_and_marks_output() {
     let directory = tempfile::tempdir().unwrap();
     let luminance = directory.path().join("l.fits");

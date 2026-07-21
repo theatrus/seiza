@@ -15,7 +15,7 @@ pub use calibration::{CalibrationMasters, MasterDark, MasterFlat};
 pub use color::{
     ColorComposition, ColorNormalization, ColorOptions, ColorTransfer, ForaxxOptions,
     NarrowbandMatrix, NarrowbandMix, NarrowbandPalette, combine_lrgb, combine_narrowband,
-    combine_narrowband_matrix, combine_rgb, combine_super_lrgb,
+    combine_narrowband_matrix, combine_rgb, combine_super_lrgb, combine_super_rgb,
 };
 pub use fits::{
     FitsFrame, write_color_fits_f32, write_fits_f32, write_linear_image_fits_f32,

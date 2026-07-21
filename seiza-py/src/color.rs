@@ -6,6 +6,7 @@ use seiza_stacking::{
     ColorNormalization, ColorOptions, ForaxxOptions, NarrowbandPalette,
     combine_lrgb as compose_lrgb, combine_narrowband as compose_narrowband,
     combine_rgb as compose_rgb, combine_super_lrgb as compose_super_lrgb,
+    combine_super_rgb as compose_super_rgb,
 };
 
 fn color_error(error: seiza_stacking::Error) -> PyErr {
@@ -38,19 +39,33 @@ fn options(
 }
 
 /// Combine mono red, green, and blue stacks into one RGB image.
+///
+/// `luminance_mode="native"` keeps the composed channels as they are;
+/// `"super"` scales the triplet to a synthetic luminance of `R + G + B`,
+/// which may exceed one.
 #[pyfunction]
-#[pyo3(signature = (red, green, blue, *, normalization="percentile", black_percentile=0.001, white_percentile=0.995, normalization_samples=1_000_000))]
+#[pyo3(signature = (red, green, blue, *, luminance_mode="native", normalization="percentile", black_percentile=0.001, white_percentile=0.995, normalization_samples=1_000_000))]
 #[allow(clippy::too_many_arguments)]
 fn combine_rgb<'py>(
     py: Python<'py>,
     red: PyReadonlyArrayDyn<'_, f32>,
     green: PyReadonlyArrayDyn<'_, f32>,
     blue: PyReadonlyArrayDyn<'_, f32>,
+    luminance_mode: &str,
     normalization: &str,
     black_percentile: f32,
     white_percentile: f32,
     normalization_samples: usize,
 ) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
+    let super_luminance = match luminance_mode.to_ascii_lowercase().as_str() {
+        "native" => false,
+        "super" => true,
+        _ => {
+            return Err(PyValueError::new_err(
+                "luminance_mode must be 'native' or 'super'",
+            ));
+        }
+    };
     let red = linear_image(red)?;
     let green = linear_image(green)?;
     let blue = linear_image(blue)?;
@@ -61,12 +76,21 @@ fn combine_rgb<'py>(
         normalization_samples,
     )?;
     let result = py
-        .allow_threads(move || compose_rgb(&red, &green, &blue, &options))
+        .allow_threads(move || {
+            if super_luminance {
+                compose_super_rgb(&red, &green, &blue, &options)
+            } else {
+                compose_rgb(&red, &green, &blue, &options)
+            }
+        })
         .map_err(color_error)?;
     into_image_array(py, result.image)
 }
 
 /// Combine a luminance stack with RGB channels into an LRGB image.
+///
+/// `luminance_mode="replace"` swaps in a weighted L as the output luminance;
+/// `"super"` targets the additive `L + R + G + B`, which may exceed one.
 #[pyfunction]
 #[pyo3(signature = (luminance, red, green, blue, *, luminance_weight=1.0, luminance_mode="replace", normalization="percentile", black_percentile=0.001, white_percentile=0.995, normalization_samples=1_000_000))]
 #[allow(clippy::too_many_arguments)]
@@ -114,14 +138,7 @@ fn combine_lrgb<'py>(
             if super_luminance {
                 compose_super_lrgb(&luminance, &red, &green, &blue, &options)
             } else {
-                compose_lrgb(
-                    &luminance,
-                    &red,
-                    &green,
-                    &blue,
-                    luminance_weight,
-                    &options,
-                )
+                compose_lrgb(&luminance, &red, &green, &blue, luminance_weight, &options)
             }
         })
         .map_err(color_error)?;

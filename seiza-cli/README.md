@@ -265,9 +265,11 @@ working channels use a median/MAD midtones transfer; tune it with
 LRGB defaults to linear luminance replacement. `--luminance-mode super`
 instead sets the target luminance to `L + R + G + B` after normalization while
 preserving RGB chromaticity. Its linear output may exceed one.
-`--luminance-weight` applies only to replacement mode.
+`--luminance-weight` applies only to replacement mode. `color rgb` accepts the
+same flag: `--luminance-mode super` scales the triplet to a synthetic
+`R + G + B` luminance with no luminance stack, marked `SEIZACLR='SUPER-RGB'`.
 
-Linear RGB/LRGB, super-LRGB, and direct-palette FITS files carry
+Linear RGB/LRGB, super-LRGB, super-RGB, and direct-palette FITS files carry
 `SEIZATRF='LINEAR'`.
 Foraxx follows its published stretched-channel formula and carries
 `SEIZATRF='DISPLAY'`; previews therefore do not pretend it is a linear stack.

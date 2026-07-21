@@ -5,7 +5,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use seiza_stacking::{
     ColorComposition, ColorNormalization, ColorOptions, ColorTransfer, FitsFrame, ForaxxOptions,
     LinearImage, NarrowbandPalette, Registrar, RegistrationOptions, combine_lrgb,
-    combine_narrowband, combine_rgb, combine_super_lrgb, resample_to_reference,
+    combine_narrowband, combine_rgb, combine_super_lrgb, combine_super_rgb, resample_to_reference,
     write_color_fits_f32,
 };
 use std::path::{Path, PathBuf};
@@ -36,6 +36,17 @@ struct RgbArgs {
     green: PathBuf,
     #[arg(long)]
     blue: PathBuf,
+    /// How the target luminance is formed
+    #[arg(long, value_enum, default_value = "native")]
+    luminance_mode: RgbLuminanceModeArg,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum RgbLuminanceModeArg {
+    /// Keep the composed channels as they are
+    Native,
+    /// Scale the triplet to a synthetic luminance of R + G + B
+    Super,
 }
 
 #[derive(Args)]
@@ -189,8 +200,15 @@ fn run_rgb(args: RgbArgs) -> Result<()> {
     let blue = args
         .common
         .align(registrar.as_ref(), blue.image, &red.image, "blue")?;
-    let composition = combine_rgb(&red.image, &green, &blue, &args.common.options())?;
-    write_outputs(&args.common, &composition, &red.headers, "RGB")
+    let options = args.common.options();
+    let (composition, label) = match args.luminance_mode {
+        RgbLuminanceModeArg::Native => (combine_rgb(&red.image, &green, &blue, &options)?, "RGB"),
+        RgbLuminanceModeArg::Super => (
+            combine_super_rgb(&red.image, &green, &blue, &options)?,
+            "SUPER-RGB",
+        ),
+    };
+    write_outputs(&args.common, &composition, &red.headers, label)
 }
 
 fn run_lrgb(args: LrgbArgs) -> Result<()> {
