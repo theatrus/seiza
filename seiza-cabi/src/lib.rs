@@ -18,14 +18,14 @@ use seiza_stacking::{
 use seiza_stretch::{StretchConfig, StretchStack};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::ptr;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Instant, SystemTime};
 
 static VERSION: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
 
@@ -41,6 +41,73 @@ impl StretchConfigRequest {
         match self {
             Self::Single(config) => StretchStack::single(config),
             Self::Stack(stack) => stack,
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+struct BackgroundRenderRequest {
+    mode: CorrectionMode,
+    config: BackgroundConfig,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InteractivePreviewCacheKey {
+    path: PathBuf,
+    file_size: u64,
+    modified: Option<SystemTime>,
+    max_dimension: u32,
+    background: Option<String>,
+}
+
+struct PreparedFitsRender {
+    source_width: usize,
+    source_height: usize,
+    planes: usize,
+    color_kind: &'static str,
+    render_width: usize,
+    render_height: usize,
+    channels: usize,
+    data: Vec<f32>,
+    statistics: Value,
+    input_histogram: Value,
+    background_metadata: Option<Value>,
+    headers: Map<String, Value>,
+    interactive_preview: bool,
+}
+
+type InteractivePreviewCache =
+    Mutex<VecDeque<(InteractivePreviewCacheKey, Arc<PreparedFitsRender>)>>;
+
+static INTERACTIVE_PREVIEW_CACHE: OnceLock<InteractivePreviewCache> = OnceLock::new();
+const INTERACTIVE_PREVIEW_CACHE_CAPACITY: usize = 2;
+
+#[derive(Debug, Deserialize)]
+struct ProcessedRenderRequest {
+    stretch: StretchConfigRequest,
+    #[serde(default)]
+    background: Option<BackgroundRenderRequest>,
+    #[serde(default)]
+    interactive_preview: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ImageRenderConfigRequest {
+    Processed(ProcessedRenderRequest),
+    Stretch(StretchConfigRequest),
+}
+
+impl ImageRenderConfigRequest {
+    fn into_parts(self) -> (StretchStack, Option<BackgroundRenderRequest>, bool) {
+        match self {
+            Self::Processed(request) => (
+                request.stretch.into_stack(),
+                request.background,
+                request.interactive_preview,
+            ),
+            Self::Stretch(request) => (request.into_stack(), None, false),
         }
     }
 }
@@ -1343,11 +1410,16 @@ pub unsafe extern "C" fn seiza_rendered_image_open_with_rgb_stretch(
 }
 
 #[unsafe(no_mangle)]
-/// Opens a FITS image and renders it with parameterized stretches described by
+/// Opens a FITS image and renders it with parameterized processing described by
 /// `config_json`. The value may be one serialized `seiza-stretch`
-/// `StretchConfig` (the original schema) or a non-empty array of configs. Array
-/// stages are applied in order using `f32` intermediates and converted to RGBA
-/// only after the final stage.
+/// `StretchConfig` (the original schema), a non-empty array of configs, or an
+/// object with `stretch`, optional `background`, and optional
+/// `interactive_preview` fields. Array stages are applied in order using `f32`
+/// intermediates and converted to RGBA only after the final stage. Background
+/// correction, when requested, is fitted and applied to linear samples before
+/// the first stretch stage. Interactive preview mode bounds the linear samples
+/// to `max_dimension` before processing and reuses the prepared pixels across
+/// stretch-only edits; full renders should leave it false.
 ///
 /// # Safety
 /// `path` and `config_json` must be valid NUL-terminated strings. When non-null,
@@ -1362,12 +1434,16 @@ pub unsafe extern "C" fn seiza_rendered_image_open_with_stretch_config(
     ffi_result(error_out, || {
         let path = required_path(path, "image path")?;
         let config_json = required_str(config_json, "stretch config JSON")?;
-        let request: StretchConfigRequest = serde_json::from_str(&config_json)
-            .map_err(|error| format!("invalid stretch config JSON: {error}"))?;
-        let stack = request.into_stack();
-        let fits = FitsImage::open(&path)
-            .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
-        render_fits_with_stack(fits, &stack, max_dimension)
+        let request: ImageRenderConfigRequest = serde_json::from_str(&config_json)
+            .map_err(|error| format!("invalid image processing config JSON: {error}"))?;
+        let (stack, background, interactive_preview) = request.into_parts();
+        if interactive_preview {
+            render_cached_interactive_preview(&path, &stack, background.as_ref(), max_dimension)
+        } else {
+            let fits = FitsImage::open(&path)
+                .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
+            render_fits_with_pipeline(fits, &stack, background.as_ref(), max_dimension, false)
+        }
     })
     .map_or(ptr::null_mut(), |image| Box::into_raw(Box::new(image)))
 }
@@ -2158,11 +2234,32 @@ fn render_fits_with_config(
     render_fits_with_stack(fits, &StretchStack::single(config.clone()), max_dimension)
 }
 
+#[cfg(test)]
 fn render_fits_with_stack(
     fits: FitsImage,
     stack: &StretchStack,
     max_dimension: u32,
 ) -> Result<SeizaRenderedImage, String> {
+    render_fits_with_pipeline(fits, stack, None, max_dimension, false)
+}
+
+fn render_fits_with_pipeline(
+    fits: FitsImage,
+    stack: &StretchStack,
+    background: Option<&BackgroundRenderRequest>,
+    max_dimension: u32,
+    interactive_preview: bool,
+) -> Result<SeizaRenderedImage, String> {
+    let prepared = prepare_fits_render(fits, background, max_dimension, interactive_preview)?;
+    render_prepared_fits(&prepared, stack, max_dimension, false)
+}
+
+fn prepare_fits_render(
+    fits: FitsImage,
+    background: Option<&BackgroundRenderRequest>,
+    max_dimension: u32,
+    interactive_preview: bool,
+) -> Result<PreparedFitsRender, String> {
     let source_width = fits.width;
     let source_height = fits.height;
     let statistics = fits.statistics();
@@ -2175,7 +2272,7 @@ fn render_fits_with_stack(
     };
 
     let rgb = fits.debayer().or_else(|| fits.rgb_planes());
-    let input_histogram = if let Some(rgb) = &rgb {
+    let original_input_histogram = if let Some(rgb) = &rgb {
         input_histogram_u16_json(&rgb.data, 3, false)
     } else {
         input_histogram_u16_json(&fits.to_u16(), 1, true)
@@ -2193,11 +2290,71 @@ fn render_fits_with_stack(
         ),
         None => (fits.to_luma_f32(), 1),
     };
+    let (render_width, render_height, mut data) = if interactive_preview {
+        downsample_interleaved_f32(
+            source_width,
+            source_height,
+            data,
+            channels,
+            usize::try_from(max_dimension).unwrap_or(usize::MAX),
+        )
+    } else {
+        (source_width, source_height, data)
+    };
+    let (input_histogram, background_metadata) = if let Some(background) = background {
+        let fit = fit_background_masked(
+            &data,
+            render_width,
+            render_height,
+            channels,
+            None,
+            &background.config,
+        )
+        .map_err(|error| format!("failed to fit image background: {error}"))?;
+        fit.correct_in_place(&mut data, background.mode)
+            .map_err(|error| format!("failed to correct image background: {error}"))?;
+        let metadata = json!({
+            "mode": background.mode,
+            "diagnostics": &fit.diagnostics,
+            "reference": &fit.reference,
+        });
+        (input_histogram_f32_json(&data, channels), Some(metadata))
+    } else {
+        (original_input_histogram, None)
+    };
+    let mut headers = Map::new();
+    for (key, value) in &fits.headers {
+        headers.insert(key.clone(), header_json(value));
+    }
+
+    Ok(PreparedFitsRender {
+        source_width,
+        source_height,
+        planes: fits.planes,
+        color_kind,
+        render_width,
+        render_height,
+        channels,
+        data,
+        statistics: statistics_json(&statistics),
+        input_histogram,
+        background_metadata,
+        headers,
+        interactive_preview,
+    })
+}
+
+fn render_prepared_fits(
+    prepared: &PreparedFitsRender,
+    stack: &StretchStack,
+    max_dimension: u32,
+    interactive_preview_cache_hit: bool,
+) -> Result<SeizaRenderedImage, String> {
     let stretched = stack
-        .apply_u8(&data, channels)
+        .apply_u8(&prepared.data, prepared.channels)
         .map_err(|error| error.to_string())?
         .data;
-    let rgba: Vec<u8> = if channels == 3 {
+    let rgba: Vec<u8> = if prepared.channels == 3 {
         stretched
             .chunks_exact(3)
             .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255])
@@ -2211,27 +2368,25 @@ fn render_fits_with_stack(
 
     let display_histogram = display_histogram_json(&rgba);
     let (width, height, rgba) = downsample_rgba(
-        source_width,
-        source_height,
+        prepared.render_width,
+        prepared.render_height,
         rgba,
         usize::try_from(max_dimension).unwrap_or(usize::MAX),
     );
-
-    let mut headers = Map::new();
-    for (key, value) in &fits.headers {
-        headers.insert(key.clone(), header_json(value));
-    }
     let metadata = json!({
-        "width": source_width,
-        "height": source_height,
-        "planes": fits.planes,
+        "width": prepared.source_width,
+        "height": prepared.source_height,
+        "planes": prepared.planes,
         "format": "FITS",
-        "colorKind": color_kind,
+        "colorKind": prepared.color_kind,
         "stretchStages": stack.len(),
-        "statistics": statistics_json(&statistics),
-        "inputHistogram": input_histogram,
+        "interactivePreview": prepared.interactive_preview,
+        "interactivePreviewCacheHit": interactive_preview_cache_hit,
+        "backgroundProcessing": prepared.background_metadata,
+        "statistics": prepared.statistics,
+        "inputHistogram": prepared.input_histogram,
         "displayHistogram": display_histogram,
-        "headers": headers,
+        "headers": prepared.headers,
     });
     let metadata_json = CString::new(metadata.to_string())
         .map_err(|_| "metadata JSON contains a null byte".to_string())?;
@@ -2242,6 +2397,85 @@ fn render_fits_with_stack(
         bgra: OnceLock::new(),
         metadata_json,
     })
+}
+
+fn render_cached_interactive_preview(
+    path: &Path,
+    stack: &StretchStack,
+    background: Option<&BackgroundRenderRequest>,
+    max_dimension: u32,
+) -> Result<SeizaRenderedImage, String> {
+    let key = interactive_preview_cache_key(path, background, max_dimension)?;
+    let cache = INTERACTIVE_PREVIEW_CACHE
+        .get_or_init(|| Mutex::new(VecDeque::with_capacity(INTERACTIVE_PREVIEW_CACHE_CAPACITY)));
+
+    if let Some(prepared) = cached_interactive_preview(cache, &key)? {
+        return render_prepared_fits(&prepared, stack, max_dimension, true);
+    }
+
+    let fits = FitsImage::open(path)
+        .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
+    let prepared = Arc::new(prepare_fits_render(fits, background, max_dimension, true)?);
+    let prepared = store_interactive_preview(cache, key, prepared)?;
+    render_prepared_fits(&prepared, stack, max_dimension, false)
+}
+
+fn interactive_preview_cache_key(
+    path: &Path,
+    background: Option<&BackgroundRenderRequest>,
+    max_dimension: u32,
+) -> Result<InteractivePreviewCacheKey, String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("failed to inspect {}: {error}", path.display()))?;
+    Ok(InteractivePreviewCacheKey {
+        path: path.canonicalize().unwrap_or_else(|_| path.to_path_buf()),
+        file_size: metadata.len(),
+        modified: metadata.modified().ok(),
+        max_dimension,
+        background: background
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| format!("failed to identify background processing: {error}"))?,
+    })
+}
+
+fn cached_interactive_preview(
+    cache: &InteractivePreviewCache,
+    key: &InteractivePreviewCacheKey,
+) -> Result<Option<Arc<PreparedFitsRender>>, String> {
+    let mut entries = cache
+        .lock()
+        .map_err(|_| "interactive preview cache lock is poisoned".to_string())?;
+    let Some(index) = entries.iter().position(|(candidate, _)| candidate == key) else {
+        return Ok(None);
+    };
+    let entry = entries
+        .remove(index)
+        .ok_or_else(|| "interactive preview cache entry disappeared".to_string())?;
+    let prepared = Arc::clone(&entry.1);
+    entries.push_front(entry);
+    Ok(Some(prepared))
+}
+
+fn store_interactive_preview(
+    cache: &InteractivePreviewCache,
+    key: InteractivePreviewCacheKey,
+    prepared: Arc<PreparedFitsRender>,
+) -> Result<Arc<PreparedFitsRender>, String> {
+    let mut entries = cache
+        .lock()
+        .map_err(|_| "interactive preview cache lock is poisoned".to_string())?;
+    if let Some(index) = entries.iter().position(|(candidate, _)| candidate == &key) {
+        let existing = entries
+            .remove(index)
+            .ok_or_else(|| "interactive preview cache entry disappeared".to_string())?;
+        let prepared = Arc::clone(&existing.1);
+        entries.push_front(existing);
+        return Ok(prepared);
+    }
+    entries.push_front((key, Arc::clone(&prepared)));
+    entries.truncate(INTERACTIVE_PREVIEW_CACHE_CAPACITY);
+    Ok(prepared)
 }
 
 fn render_raster(
@@ -2447,9 +2681,20 @@ fn input_histogram_f32_json(samples: &[f32], stride: usize) -> Value {
         }
     };
     for pixel in samples.chunks_exact(stride) {
-        red[bin(pixel[0])] += 1;
-        green[bin(pixel[1])] += 1;
-        blue[bin(pixel[2])] += 1;
+        let red_value = bin(pixel[0]);
+        let green_value = if stride == 1 {
+            red_value
+        } else {
+            bin(pixel[1])
+        };
+        let blue_value = if stride == 1 {
+            red_value
+        } else {
+            bin(pixel[2])
+        };
+        red[red_value] += 1;
+        green[green_value] += 1;
+        blue[blue_value] += 1;
     }
     histogram_json(&red, &green, &blue, 0.0, 1.0)
 }
@@ -2547,6 +2792,58 @@ fn downsample_rgba(
             output.extend_from_slice(&rgba[offset..offset + 4]);
         }
     }
+    (output_width, output_height, output)
+}
+
+/// Bounds an interactive render before expensive processing. Bilinear sampling
+/// keeps the preview representative without spending time on source-resolution
+/// background fitting and stretch stages. Full and non-interactive renders do
+/// not use this path.
+fn downsample_interleaved_f32(
+    width: usize,
+    height: usize,
+    pixels: Vec<f32>,
+    channels: usize,
+    max_dimension: usize,
+) -> (usize, usize, Vec<f32>) {
+    if max_dimension == 0 || width.max(height) <= max_dimension {
+        return (width, height, pixels);
+    }
+
+    let scale = max_dimension as f64 / width.max(height) as f64;
+    let output_width = ((width as f64 * scale).round() as usize).max(1);
+    let output_height = ((height as f64 * scale).round() as usize).max(1);
+    let mut output = vec![0.0; output_width * output_height * channels];
+    let scale_x = width as f64 / output_width as f64;
+    let scale_y = height as f64 / output_height as f64;
+
+    for output_y in 0..output_height {
+        let source_y =
+            ((output_y as f64 + 0.5) * scale_y - 0.5).clamp(0.0, height.saturating_sub(1) as f64);
+        let y0 = source_y.floor() as usize;
+        let y1 = (y0 + 1).min(height - 1);
+        let y_weight = (source_y - y0 as f64) as f32;
+
+        for output_x in 0..output_width {
+            let source_x = ((output_x as f64 + 0.5) * scale_x - 0.5)
+                .clamp(0.0, width.saturating_sub(1) as f64);
+            let x0 = source_x.floor() as usize;
+            let x1 = (x0 + 1).min(width - 1);
+            let x_weight = (source_x - x0 as f64) as f32;
+            let output_start = (output_y * output_width + output_x) * channels;
+
+            for channel in 0..channels {
+                let top_left = pixels[(y0 * width + x0) * channels + channel];
+                let top_right = pixels[(y0 * width + x1) * channels + channel];
+                let bottom_left = pixels[(y1 * width + x0) * channels + channel];
+                let bottom_right = pixels[(y1 * width + x1) * channels + channel];
+                let top = top_left + (top_right - top_left) * x_weight;
+                let bottom = bottom_left + (bottom_right - bottom_left) * x_weight;
+                output[output_start + channel] = top + (bottom - top) * y_weight;
+            }
+        }
+    }
+
     (output_width, output_height, output)
 }
 
@@ -3450,6 +3747,141 @@ mod tests {
         let metadata: Value =
             serde_json::from_str(stacked.metadata_json.to_str().unwrap()).unwrap();
         assert_eq!(metadata["stretchStages"], 2);
+    }
+
+    #[test]
+    fn render_config_composes_background_correction_before_the_stretch_stack() {
+        let first: StretchConfig = serde_json::from_value(json!({
+            "model": { "type": "identity" },
+            "color_strategy": "linked",
+            "max_analysis_samples": 4096
+        }))
+        .unwrap();
+        let request: ImageRenderConfigRequest = serde_json::from_value(json!({
+            "stretch": [first],
+            "background": {
+                "mode": "subtract",
+                "config": {
+                    "model": { "kind": "polynomial", "degree": 1, "ridge": 0.0 },
+                    "sample_radius": 2
+                }
+            }
+        }))
+        .unwrap();
+        let (stack, background, interactive_preview) = request.into_parts();
+        assert_eq!(stack.len(), 1);
+        assert!(!interactive_preview);
+        let background = background.unwrap();
+        assert_eq!(background.mode, CorrectionMode::Subtract);
+        assert_eq!(background.config.sample_radius, Some(2));
+    }
+
+    #[test]
+    fn fits_render_pipeline_reports_and_applies_background_correction() {
+        let (width, height) = (96, 72);
+        let fits = FitsImage {
+            width,
+            height,
+            planes: 1,
+            pixels: seiza_fits::Pixels::F32(background_plane(width, height)),
+            headers: Vec::new(),
+        };
+        let stretch: StretchConfig = serde_json::from_value(json!({
+            "model": { "type": "identity" },
+            "color_strategy": "linked",
+            "max_analysis_samples": 4096
+        }))
+        .unwrap();
+        let stack = StretchStack::single(stretch);
+        let background = BackgroundRenderRequest {
+            mode: CorrectionMode::Subtract,
+            config: serde_json::from_value(json!({
+                "model": { "kind": "polynomial", "degree": 1, "ridge": 0.0 },
+                "sample_radius": 2
+            }))
+            .unwrap(),
+        };
+
+        let uncorrected = render_fits_with_stack(fits.clone(), &stack, 0).unwrap();
+        let corrected =
+            render_fits_with_pipeline(fits, &stack, Some(&background), 0, false).unwrap();
+        assert_ne!(corrected.rgba, uncorrected.rgba);
+
+        let metadata: Value =
+            serde_json::from_str(corrected.metadata_json.to_str().unwrap()).unwrap();
+        assert_eq!(metadata["backgroundProcessing"]["mode"], "subtract");
+        assert!(metadata["backgroundProcessing"]["diagnostics"].is_object());
+        assert_eq!(metadata["inputHistogram"]["lowerBound"], 0.0);
+        assert_eq!(metadata["inputHistogram"]["upperBound"], 1.0);
+        assert_eq!(
+            metadata["inputHistogram"]["red"],
+            metadata["inputHistogram"]["green"]
+        );
+        assert_eq!(
+            metadata["inputHistogram"]["red"],
+            metadata["inputHistogram"]["blue"]
+        );
+    }
+
+    #[test]
+    fn interactive_preview_bounds_linear_samples_before_processing() {
+        let request: ImageRenderConfigRequest = serde_json::from_value(json!({
+            "stretch": [{
+                "model": { "type": "identity" },
+                "color_strategy": "linked",
+                "max_analysis_samples": 4096
+            }],
+            "interactive_preview": true
+        }))
+        .unwrap();
+        let (stack, background, interactive_preview) = request.into_parts();
+        assert!(background.is_none());
+        assert!(interactive_preview);
+
+        let fits = FitsImage {
+            width: 400,
+            height: 200,
+            planes: 1,
+            pixels: seiza_fits::Pixels::F32(background_plane(400, 200)),
+            headers: Vec::new(),
+        };
+        let preview =
+            render_fits_with_pipeline(fits, &stack, None, 100, interactive_preview).unwrap();
+        assert_eq!((preview.width, preview.height), (100, 50));
+        let metadata: Value =
+            serde_json::from_str(preview.metadata_json.to_str().unwrap()).unwrap();
+        assert_eq!(metadata["width"], 400);
+        assert_eq!(metadata["height"], 200);
+        assert_eq!(metadata["interactivePreview"], true);
+    }
+
+    #[test]
+    fn interactive_preview_reuses_prepared_pixels_across_stretch_edits() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cached-preview.fits");
+        std::fs::write(&path, synthetic_fits()).unwrap();
+        let stretch: StretchConfig = serde_json::from_value(json!({
+            "model": { "type": "identity" },
+            "color_strategy": "linked",
+            "max_analysis_samples": 4096
+        }))
+        .unwrap();
+        let stack = StretchStack::single(stretch);
+
+        let first = render_cached_interactive_preview(&path, &stack, None, 100).unwrap();
+        let second = render_cached_interactive_preview(&path, &stack, None, 100).unwrap();
+        let first_metadata: Value =
+            serde_json::from_str(first.metadata_json.to_str().unwrap()).unwrap();
+        let second_metadata: Value =
+            serde_json::from_str(second.metadata_json.to_str().unwrap()).unwrap();
+        assert_eq!(first_metadata["interactivePreviewCacheHit"], false);
+        assert_eq!(second_metadata["interactivePreviewCacheHit"], true);
+
+        let background = BackgroundRenderRequest::default();
+        assert_ne!(
+            interactive_preview_cache_key(&path, None, 100).unwrap(),
+            interactive_preview_cache_key(&path, Some(&background), 100).unwrap()
+        );
     }
 
     #[test]

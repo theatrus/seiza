@@ -17,8 +17,16 @@ exposes the **superset** of what both apps need.
   cached, so a consumer only ever pays for the order it uses.
 - **Parameterized stretch** — `seiza_rendered_image_open_with_stretch_config`
   takes a serialized `seiza-stretch` `StretchConfig` (JSON) and renders a FITS
-  through the full GHS/MTF/percentile pipeline. New stretch capabilities are
-  added in `seiza-stretch`; this shim only marshals JSON in and pixels out.
+  through the full GHS/MTF/percentile pipeline. It also accepts a non-empty
+  config array for an ordered `f32` stack, or an object with `stretch`, an
+  optional `background` correction, and optional `interactive_preview` mode.
+  Background fitting and subtraction/division then run on linear FITS samples
+  before the first stretch. Interactive previews bound those samples before
+  expensive processing while committed renders remain full resolution. The two
+  most recent prepared preview buffers are cached by file identity, maximum
+  dimension, and background configuration; stretch-only edits reuse the same
+  corrected linear pixels. New processing capabilities remain in their core
+  crates; this shim only marshals JSON in and pixels out.
 - **Background extraction** — `seiza_background_fit` creates a compact opaque
   model from interleaved linear mono or RGB `float` samples. Callers can inspect
   its borrowed diagnostics JSON, render it into a caller-owned buffer, or apply
