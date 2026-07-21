@@ -1,7 +1,8 @@
-//! Python bindings for seiza: star detection, WCS fitting, and hinted/blind
-//! plate solving. The Python module is named `seiza`.
+//! Python bindings for Seiza astrometry, satellite prediction, calibration,
+//! and image stacking. The Python module is named `seiza`.
 
 mod satellites;
+mod stacking;
 
 use numpy::{PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::{PyFileNotFoundError, PyIOError, PyRuntimeError, PyValueError};
@@ -720,6 +721,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solve, m)?)?;
     m.add_function(wrap_pyfunction!(solve_blind, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_catalogs, m)?)?;
+    stacking::register(m)?;
     m.add("SolveError", m.py().get_type::<SolveError>())?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())

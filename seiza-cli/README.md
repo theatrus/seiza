@@ -99,6 +99,85 @@ embedded in the memory-mapped `objects.bin`; normal open does not decode every
 record or touch every index page. Add `--all-sources` to audit every normalized
 upstream row, preferred facet selection, and source-qualified geometry.
 
+## Image stacking
+
+`seiza stack` calibrates, registers, and incrementally integrates FITS light
+frames. The first light is the fixed output/reference grid:
+
+```
+seiza stack light-001.fits light-002.fits light-003.fits \
+  --output stack.fits --preview stack.png --report stack-report.json
+
+seiza stack lights/*.fits --output stack.fits \
+  --bias master-bias.fits --dark master-dark.fits --flat master-flat.fits \
+  --normalization local --local-tile-size 256 \
+  --max-registration-drift 256 \
+  --max-registration-drift-fraction 0.15 --min-overlap 0.60
+```
+
+Raw calibration sequences can be integrated into reusable masters first:
+
+```
+seiza master bias bias/*.fits --output master-bias.fits --report master-bias.json
+seiza master dark dark/*.fits --bias master-bias.fits \
+  --output master-dark.fits --report master-dark.json
+seiza master flat flats/*.fits --bias master-bias.fits \
+  --dark-flat master-dark-flat.fits --output master-flat.fits \
+  --report master-flat.json
+```
+
+Master construction uses a two-pass, leave-one-out sigma-clipped mean. It
+rereads inputs for the second pass, so memory is proportional to image size,
+not frame count. Dimensions, channels, CFA layout, and available camera,
+binning, gain, offset, temperature, filter, and dark-exposure metadata are
+checked before incompatible frames can be mixed. Flat frames are calibrated
+and normalized individually before integration.
+
+Calibration, registration, normalization, online delta-sigma rejection, and
+integration all operate on linear `f32` samples. `--preview` is an optional
+display-only stretch and never feeds pixels back into the stack. Incoming
+frames are admitted atomically: incompatible images, weak registrations,
+excess transform drift, low overlap, or implausible normalization leave the
+existing additive stack unchanged. The optional `--report` JSON records
+SHA-256 identities for every source and calibration master, the complete
+configuration, and the ordered accepted/rejected disposition ledger. FITS and
+report outputs are published atomically after they are complete.
+
+Mono inputs produce a one-plane linear FITS stack. Three-plane FITS inputs
+remain RGB, while raw one-shot-color frames with `BAYERPAT` are calibrated in
+their native CFA sampling before debayering. Star detection uses a temporary
+luminance view, but registration is applied to all three channels and global or
+local normalization is estimated per channel. The output is an unstretched
+three-plane `float32` RGB FITS; `--preview` writes an RGB display stretch.
+
+The registration search is explicitly bounded at the center of the reference
+frame. Its effective default is whichever is larger: 256 pixels or 15% of the
+reference frame's larger dimension. Configure those components with
+`--max-registration-drift` and `--max-registration-drift-fraction`. Increase
+either for a sequence with larger dithers or crop-origin offsets; lower values
+make the expected motion constraint tighter. Set the fractional component to
+zero when a strict pixel-only limit is desired. Light frames may have different
+dimensions: valid samples are mapped onto the first frame's fixed grid, pixels
+outside a source crop remain masked, and `--min-overlap` controls how much
+usable overlap is required for admission.
+
+Meridian-flipped frames are handled automatically. The default 10-degree
+rotation gate measures deviation from the nearer of the reference orientation
+and its 180-degree counterpart, so a measured transform of 179.3 degrees has a
+0.7-degree admission deviation. The complete measured transform—not a header
+flag—is then used to rotate and resample the incoming pixels onto the reference
+grid before normalization and integration. Accepted-frame diagnostics and the
+JSON report retain the full measured rotation.
+
+`--flat` accepts an integrated master flat in the light frame's raw sampling.
+For legacy masters, `--bias` removes the flat's pedestal before normalization.
+Masters built by `seiza master` carry FITS calibration-state headers, so a
+bias-subtracted dark or calibrated flat is not subtracted twice. Planar RGB
+flats are normalized independently per channel. CFA flats remain one-channel
+and are applied before debayering. See the
+[stacking design](https://github.com/theatrus/seiza/blob/main/docs/design/image-stacking.md)
+for the live API, rejection semantics, and PSF Guard integration boundary.
+
 ## Persistent worker
 
 Applications performing repeated solves can keep a catalog and blind index

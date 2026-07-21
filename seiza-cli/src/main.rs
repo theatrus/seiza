@@ -16,8 +16,11 @@ use std::path::PathBuf;
 
 mod astap;
 mod build_data;
+mod master;
+mod provenance;
 mod setup;
 mod solve_field;
+mod stack;
 mod worker;
 
 fn is_fits_path(path: &std::path::Path) -> bool {
@@ -518,6 +521,10 @@ enum Command {
         #[arg(long)]
         stretch: Option<PathBuf>,
     },
+    /// Register and incrementally stack linear FITS light frames
+    Stack(stack::StackArgs),
+    /// Build sigma-clipped bias, dark, and flat masters from raw FITS frames
+    Master(master::MasterArgs),
     /// Query a star tile file: list stars around a sky position
     Cone {
         /// Star tile file built by build-data
@@ -1214,6 +1221,8 @@ fn main() -> Result<()> {
             })
         }
         Command::FitsInfo { image, stretch } => fits_info(&image, stretch.as_deref()),
+        Command::Stack(options) => stack::run(options),
+        Command::Master(options) => master::run(options),
         Command::Cone {
             data,
             ra,
@@ -3208,6 +3217,65 @@ fn build_blind_index_command(
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+
+    #[test]
+    fn stack_requires_multiple_lights_and_linear_output() {
+        assert!(
+            Cli::try_parse_from(["seiza", "stack", "one.fits", "--output", "stack.fits"]).is_err()
+        );
+        let cli = Cli::try_parse_from([
+            "seiza",
+            "stack",
+            "one.fits",
+            "two.fits",
+            "--output",
+            "stack.fits",
+            "--preview",
+            "stack.png",
+            "--report",
+            "stack-report.json",
+            "--normalization",
+            "local",
+            "--max-registration-drift",
+            "512",
+            "--max-registration-drift-fraction",
+            "0.2",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Command::Stack(_)));
+    }
+
+    #[test]
+    fn master_commands_require_multiple_calibration_frames() {
+        assert!(
+            Cli::try_parse_from([
+                "seiza",
+                "master",
+                "bias",
+                "one.fits",
+                "--output",
+                "master-bias.fits",
+            ])
+            .is_err()
+        );
+        let cli = Cli::try_parse_from([
+            "seiza",
+            "master",
+            "flat",
+            "flat-1.fits",
+            "flat-2.fits",
+            "--output",
+            "master-flat.fits",
+            "--bias",
+            "master-bias.fits",
+            "--dark-flat",
+            "master-dark-flat.fits",
+            "--report",
+            "master-flat.json",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Command::Master(_)));
+    }
 
     #[test]
     fn download_data_help_leads_with_the_ready_to_use_route() {

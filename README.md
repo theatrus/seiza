@@ -28,6 +28,10 @@ can submit to the same server with `seiza worker --server`.
 - **Anywhere with Rust** — `cargo install seiza-cli` (requires Rust 1.89 or
   newer; see [MSRV](#minimum-supported-rust-version)).
 
+Building from source requires Rust 1.89 or newer. Repository checkouts pin
+Rust 1.97.1 through `rust-toolchain.toml` so local builds and CI use the same
+compiler, formatter, and linter.
+
 ## Ways to use it
 
 - **As N.I.N.A.'s plate solver** — seiza answers ASTAP's command line, so
@@ -49,12 +53,15 @@ can submit to the same server with `seiza worker --server`.
   [Wire protocol](docs/design/worker-protocol.md).
 - **From Python** — `pip install seiza`: detection, hinted and blind
   solving with optional SIP distortion, WCS transforms, FITS WCS keyword
-  output, and verified catalog downloads. One binary wheel per platform
-  (Linux x86_64 and aarch64, macOS, Windows) covers every CPython from
-  3.9 up, with type stubs included ([seiza-py](seiza-py/README.md)).
+  output, verified catalog downloads, and native batch/live image stacking
+  with calibration-master construction and NumPy support. One binary wheel
+  per platform (Linux x86_64 and aarch64, macOS, Windows) covers every CPython
+  from 3.9 up, with type stubs included ([seiza-py](seiza-py/README.md)).
 - **From Rust** — use the crates directly: [`seiza`](seiza/README.md)
   (detection, WCS, solving, catalogs),
-  [`seiza-fits`](seiza-fits/README.md) (FITS reading),
+  [`seiza-fits`](seiza-fits/README.md) (FITS reading and linear `f32` writing),
+  [`seiza-stacking`](seiza-stacking/README.md) (linear calibration,
+  registration, and additive live stacking),
   [`seiza-download`](seiza-download/README.md) (catalog download and
   caching), [`seiza-satellites`](seiza-satellites/README.md) (single-exposure
   satellite track prediction), and [`seiza-sources`](seiza-sources/README.md)
@@ -73,6 +80,9 @@ seiza solve image.fits --data data --scale 1.26 --satellites-celestrak --annotat
 seiza catalog object --data data "Andromeda Galaxy"
 seiza catalog objects --data data --ra 10.6848 --dec 41.2691 --radius 3 --format json
 seiza catalog star --data data "TYC 5949-2777-1" --format json
+seiza master bias bias/*.fits --output master-bias.fits
+seiza stack light-001.fits light-002.fits light-003.fits --output stack.fits \
+  --preview stack.png --report stack-report.json
 ```
 
 `--data` takes a file or a directory: a directory picks the right catalog
@@ -138,6 +148,39 @@ example, to preserve headers or full bit depth), pass `--server-upload fits`.
 Remote solves give up after five minutes; change that with
 `--server-timeout SECONDS`. Local and remote workers speak the same JSON
 protocol, so your application code does not change.
+
+## Image stacking
+
+`seiza stack` calibrates and registers linear FITS light frames, optionally
+applies global or tiled local normalization, and integrates them with online
+delta-sigma rejection. Differently sized or cropped frames are mapped onto the
+first frame's fixed output grid. Frames acquired after a German-equatorial-mount
+meridian flip are handled automatically: a transform near 180 degrees is
+accepted under the normal rotation tolerance and the pixels are rotated back
+onto the reference orientation before integration.
+
+Color remains color. Three-plane FITS inputs are stacked as linear RGB; raw
+one-shot-color frames carrying `BAYERPAT` are calibrated in their native CFA
+sampling and then debayered. Registration detects stars from a luminance view,
+but the resulting transform, per-channel normalization, rejection, and
+accumulation retain all three channels. The result is an unstretched
+three-plane `float32` RGB FITS, and `--preview` produces an RGB display image.
+
+```text
+seiza stack lights/*.fits --output stack.fits \
+  --bias master-bias.fits --dark master-dark.fits --flat master-flat.fits \
+  --normalization local --preview stack.png --report stack-report.json
+```
+
+![Eight-frame Sadr and Crescent Nebula H-alpha stack](docs/images/stacking/sadr-ha-8-frame.jpg)
+
+*Eight 300-second H-alpha frames stacked on the first frame's pixel grid. The
+JPEG uses a display-only stretch; the stack itself remains linear `f32` FITS.*
+
+The Rust crate and Python wheel expose the same incremental `LiveStacker`
+engine. See the [CLI stacking guide](seiza-cli/README.md#image-stacking),
+[Python API](seiza-py/README.md#image-stacking), and
+[stacking design](docs/design/image-stacking.md).
 
 ## Performance
 
@@ -281,10 +324,10 @@ seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-
   outlines), pinned build provenance, and externally curated corrections;
   `seiza catalog object --all-sources` audits all of it. Earlier `SEIZAOB1`
   and `SEIZAOB3` files remain readable.
-- **FITS** — dependency-free reading with typed headers, exact
+- **FITS** — streaming reading with typed headers, exact
   histogram statistics, N.I.N.A.-style MTF autostretch, planar RGB
   (NAXIS3) support, OSC debayering (`BAYERPAT`), and bounded-memory
-  streaming into native pixel storage, in the
+  streaming into native pixel storage, plus atomic linear `f32` output, in the
   [`seiza-fits`](https://crates.io/crates/seiza-fits) crate. FITS files
   plate-solve directly, with RA/DEC hints read from headers.
 - **Packages & CI** — crates.io releases, a guided
@@ -367,7 +410,9 @@ and solves in the table's exact frame. Contract details:
 ## Layout
 
 - `seiza/` — library crate: `detect`, `wcs`, `catalog`, `objects`, `solve`
-- `seiza-fits/` — dependency-free FITS reading, statistics, MTF autostretch
+- `seiza-fits/` — FITS reading, atomic linear `f32` writing, statistics, and MTF autostretch
+- `seiza-stacking/` — linear FITS calibration, local registration,
+  normalization, additive integration, and rejection
 - `seiza-cli/` — the `seiza` command-line tool: solving, ASTAP mode, the
   JSON-RPC worker, guided `seiza setup`, and dataset building
 - `seiza-download/` — async, verified runtime catalog-bundle cache

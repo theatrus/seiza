@@ -1,8 +1,9 @@
 # seiza (Python)
 
 Python bindings for [seiza](https://github.com/theatrus/seiza): star
-detection, WCS fitting, and hinted/blind plate solving for astrophotography,
-implemented in Rust. Solves typical frames in a fraction of a second.
+detection, WCS fitting, hinted/blind plate solving, satellite prediction,
+calibration, and batch/live image stacking for astrophotography, implemented
+in Rust.
 
 ```
 pip install seiza
@@ -92,6 +93,69 @@ text = solution.fits_header_text()     # 80-column cards ending with END
 The header text form is suitable for header-injection APIs — for example
 Siril's `sirilpy` scripting interface (`set_image_header`), which makes a
 seiza solve usable from a Siril Python script.
+
+## Image stacking
+
+The wheel includes the same linear calibration, registration, normalization,
+and online rejection engine as the Rust crate and CLI. Batch stacking accepts
+FITS paths and writes an unstretched linear `float32` FITS result:
+
+```python
+options = seiza.StackOptions(
+    normalization="local",
+    local_tile_size=256,
+    maximum_drift_pixels=256.0,
+    maximum_drift_fraction=0.15,
+)
+result = seiza.stack_fits(
+    sorted(light_paths),
+    "stack.fits",
+    options=options,
+    bias="master-bias.fits",
+    dark="master-dark.fits",
+    flat="master-flat.fits",
+)
+for frame in result.frames:
+    print(frame.source, frame.accepted, frame.reason, frame.registration_rms_pixels)
+```
+
+For live integration, construct from a FITS path or a C-contiguous mono/HWC
+RGB NumPy `float32` array. `push()` accepts already-linear, calibrated arrays;
+`push_fits()` performs the configured FITS calibration path. Both return a
+typed admission decision, and a rejected frame never mutates the accumulator:
+
+```python
+stacker = seiza.LiveStacker.from_array(reference, options=options)
+for frame in incoming_arrays:
+    disposition = stacker.push(frame)
+    if not disposition.accepted:
+        print(disposition.reason)
+
+preview_state = stacker.snapshot()  # immutable copy
+linear_mean = preview_state.image
+coverage = preview_state.coverage
+final = stacker.finish("stack.fits")  # consumes the live accumulator
+```
+
+Frames taken after a German-equatorial-mount meridian flip are handled by
+default. `maximum_rotation_degrees` limits deviation from either the reference
+orientation or its 180-degree counterpart; frame diagnostics still report the
+full fitted rotation.
+
+Snapshot array properties are copies, so Python cannot mutate live Rust state.
+All expensive FITS, calibration, registration, and integration work releases
+the GIL.
+
+Calibration masters use the same bounded-memory two-pass builder:
+
+```python
+bias = seiza.build_bias(bias_paths, "master-bias.fits")
+dark = seiza.build_dark(dark_paths, "master-dark.fits",
+                        bias="master-bias.fits")
+flat = seiza.build_flat(flat_paths, "master-flat.fits",
+                        bias="master-bias.fits",
+                        dark_flat="master-dark-flat.fits")
+```
 
 ## Predicted satellite tracks
 

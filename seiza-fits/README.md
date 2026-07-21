@@ -1,6 +1,6 @@
 # seiza-fits
 
-Fast, dependency-free FITS image reading for astrophotography, part of the
+Fast FITS image reading and linear `f32` writing for astrophotography, part of the
 [seiza](https://crates.io/crates/seiza) family.
 
 - Reads 8/16/32-bit integer and 32/64-bit float FITS images, applying
@@ -12,6 +12,10 @@ Fast, dependency-free FITS image reading for astrophotography, part of the
   header.
 - Typed header access (logicals, integers, floats, strings, FORTRAN `D`
   exponents, quote escapes).
+- Writes primary-HDU mono, interleaved RGB, or planar RGB linear `f32` images,
+  with typed non-structural headers and FITS block padding.
+- Publishes complete files atomically so a failed write cannot replace the
+  previous output; stream-oriented callers can use `write_f32_image_to`.
 - Exact median and MAD statistics via a single histogram pass
   (O(n + 65536), no sort).
 - Midtone-transfer-function autostretch matching N.I.N.A. / PixInsight STF
@@ -30,6 +34,18 @@ let fits = seiza_fits::FitsImage::open(Path::new("light.fits"))?;
 let ra = fits.header_f64("RA");
 let stats = fits.statistics();
 let display = fits.stretch_to_u8(&Default::default());
+
+let cards = [seiza_fits::WriteHeaderCard::new(
+    "EXPTIME",
+    seiza_fits::HeaderValue::Float(30.0),
+)];
+seiza_fits::write_f32_image(
+    Path::new("linear-output.fits"),
+    width,
+    height,
+    seiza_fits::F32ImageData::Mono(&samples),
+    &cards,
+)?;
 ```
 
 ## License

@@ -8,14 +8,24 @@ on:
       - "seiza-py/**"
       - "seiza/**"
       - "seiza-download/**"
+      - "seiza-fits/**"
       - "seiza-satellites/**"
+      - "seiza-stacking/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
       - ".github/workflows/python-wheels.yml"
   pull_request:
     paths:
       - "seiza-py/**"
       - "seiza/**"
       - "seiza-download/**"
+      - "seiza-fits/**"
       - "seiza-satellites/**"
+      - "seiza-stacking/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
       - ".github/workflows/python-wheels.yml"
   workflow_dispatch:
 
@@ -27,7 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2.9.1
         with:
           workspaces: seiza-py
@@ -77,6 +87,7 @@ jobs:
       - uses: PyO3/maturin-action@v1
         with:
           working-directory: seiza-py
+          rust-toolchain: 1.97.1
           target: ${{ matrix.target }}
           args: --release --out ../dist
           manylinux: ${{ matrix.manylinux || 'auto' }}
@@ -93,6 +104,7 @@ jobs:
       - uses: PyO3/maturin-action@v1
         with:
           working-directory: seiza-py
+          rust-toolchain: 1.97.1
           command: sdist
           args: --out ../dist
       - uses: actions/upload-artifact@v6

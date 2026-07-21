@@ -478,38 +478,43 @@ fn threshold_excess(
     noise: &[f32],
     sigma: f32,
 ) -> Vec<f32> {
+    use rayon::prelude::*;
     use wide::f32x8;
 
     let tiles_x = width.div_ceil(tile_size);
     let mut excess = vec![0.0f32; pixels.len()];
-    for y in 0..height {
-        let ty = y / tile_size;
-        let row = (y * width) as usize;
-        for tx in 0..tiles_x {
-            let x0 = (tx * tile_size) as usize;
-            let x1 = (((tx + 1) * tile_size).min(width)) as usize;
-            let tile = (ty * tiles_x + tx) as usize;
-            let bg = f32x8::splat(background[tile]);
-            let threshold = f32x8::splat(sigma * noise[tile]);
+    excess
+        .par_chunks_mut(width as usize)
+        .enumerate()
+        .for_each(|(y, output)| {
+            let ty = y as u32 / tile_size;
+            let input = &pixels[y * width as usize..(y + 1) * width as usize];
+            for tx in 0..tiles_x {
+                let x0 = (tx * tile_size) as usize;
+                let x1 = (((tx + 1) * tile_size).min(width)) as usize;
+                let tile = (ty * tiles_x + tx) as usize;
+                let bg = f32x8::splat(background[tile]);
+                let threshold = f32x8::splat(sigma * noise[tile]);
 
-            let seg = &pixels[row + x0..row + x1];
-            let out = &mut excess[row + x0..row + x1];
-            let mut chunks = seg.chunks_exact(8);
-            let mut out_chunks = out.chunks_exact_mut(8);
-            for (chunk, out_chunk) in (&mut chunks).zip(&mut out_chunks) {
-                let value = f32x8::from(<[f32; 8]>::try_from(chunk).unwrap()) - bg;
-                let keep = value.simd_gt(threshold);
-                out_chunk.copy_from_slice(&keep.blend(value, f32x8::ZERO).to_array());
-            }
-            let done = seg.len() - chunks.remainder().len();
-            for (value, out_value) in chunks.remainder().iter().zip(&mut out[done..]) {
-                let v = value - background[tile];
-                if v > sigma * noise[tile] {
-                    *out_value = v;
+                let seg = &input[x0..x1];
+                let out = &mut output[x0..x1];
+                let mut chunks = seg.chunks_exact(8);
+                let mut out_chunks = out.chunks_exact_mut(8);
+                for (chunk, out_chunk) in (&mut chunks).zip(&mut out_chunks) {
+                    let value = f32x8::from(<[f32; 8]>::try_from(chunk).unwrap()) - bg;
+                    let keep = value.simd_gt(threshold);
+                    out_chunk.copy_from_slice(&keep.blend(value, f32x8::ZERO).to_array());
+                }
+                let done = seg.len() - chunks.remainder().len();
+                for (value, out_value) in chunks.remainder().iter().zip(&mut out[done..]) {
+                    let v = value - background[tile];
+                    if v > sigma * noise[tile] {
+                        *out_value = v;
+                    }
                 }
             }
-        }
-    }
+        });
+    debug_assert_eq!(excess.len(), width as usize * height as usize);
     excess
 }
 

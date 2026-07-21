@@ -1,20 +1,24 @@
-//! Fast, dependency-free FITS image reading for astrophotography.
+//! Fast FITS image reading and linear `f32` writing for astrophotography.
 //!
 //! Scope: single-image FITS files as written by capture software
 //! (N.I.N.A., SGP, ASIAIR, ...) — the primary HDU with a 2D image in
 //! BITPIX 8/16/32/-32/-64. 16-bit data stays `u16` end to end (no float
 //! inflation), statistics come from histograms rather than sorts, and the
-//! midtone-transfer-function autostretch matches N.I.N.A.'s.
+//! midtone-transfer-function autostretch matches N.I.N.A.'s. The writer emits
+//! primary-HDU mono or RGB float images with validated typed headers and
+//! atomic on-disk publication.
 
 mod bayer;
 mod header;
 mod stats;
 mod stretch;
+mod writer;
 
-pub use bayer::{BayerPattern, RgbImage16, debayer_rgb16};
+pub use bayer::{BayerPattern, RgbImage16, RgbImageF32, debayer_rgb_f32, debayer_rgb16};
 pub use header::{HeaderValue, parse_header_value};
 pub use stats::{Statistics, statistics_u16};
 pub use stretch::{StretchParams, midtones_transfer_function, stretch_u16_to_u8};
+pub use writer::{F32ImageData, WriteHeaderCard, write_f32_image, write_f32_image_to};
 
 use std::io::Read;
 use std::path::Path;

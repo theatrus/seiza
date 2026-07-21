@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2.9.1
       - run: cargo install cargo-deb --locked
       - run: cargo deb -p seiza-cli
@@ -40,8 +40,9 @@ jobs:
     container: fedora:${{ matrix.fedora }}
     steps:
       - name: Install build dependencies
-        run: dnf install -y rust cargo rpm-build git
+        run: dnf install -y curl gcc rpm-build git
       - uses: actions/checkout@v7.0.0
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2.9.1
       - run: cargo install cargo-generate-rpm --locked
       - run: cargo build --release -p seiza-cli
@@ -66,7 +67,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7.0.0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2.9.1
       - run: cargo build --release -p seiza-cli
       - name: Verify Windows CRT is statically linked
