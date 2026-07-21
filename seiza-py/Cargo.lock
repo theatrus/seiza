@@ -1487,6 +1487,7 @@ dependencies = [
  "seiza",
  "seiza-fits",
  "seiza-stretch",
+ "serde",
  "thiserror",
 ]
 

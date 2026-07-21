@@ -1,7 +1,9 @@
 use crate::{Error, LinearImage, Result};
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(tag = "mode", content = "options", rename_all = "kebab-case")]
 pub enum NormalizationMode {
     None,
     #[default]

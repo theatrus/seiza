@@ -209,6 +209,17 @@ memory-mapped accumulators are follow-on backends behind the same API.
 renderer. `snapshot` copies owned maps when they are needed, while
 `into_snapshot` consumes the accumulator for copy-free batch finalization.
 
+The C ABI preserves those same performance boundaries. `SeizaLiveStacker`
+accepts either copied, pre-calibrated interleaved float arrays or FITS paths
+with optional master calibration files. Frame disposition is returned as owned
+JSON so admission diagnostics can grow without changing the ABI. Live mean,
+coverage, and rejection pointers borrow accumulator storage; an immutable
+`SeizaStackSnapshot` additionally owns variance and can write a linear FITS.
+Snapshotting a running stack copies full-frame state, while finalization takes
+a pointer-to-handle, nulls it, and moves the state into the snapshot. This makes
+ownership loss explicit to Swift/.NET/C callers and retains the Rust
+`view`/`snapshot`/`into_snapshot` distinction.
+
 Calibration master construction is also bounded by image size rather than
 input count. Its two-pass estimator retains per-sample moments and output
 counts plus one decoded source frame, then rereads the sequence for clipped

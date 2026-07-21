@@ -43,6 +43,13 @@ safety. Live renderers can borrow `LiveStacker::view` without copying the
 full-resolution accumulator; any display stretch remains a caller-only visual
 operation.
 
+`StackOptions` and its nested registration, normalization, rejection, and
+acceptance types serialize through Serde. Omitted object fields use the same
+Rust defaults, while unknown fields are rejected. This is the configuration
+contract used by `seiza-cabi`; normalization and rejection enums use adjacent
+`mode` / `options` objects so additional algorithms do not change the native
+function signatures.
+
 Frame admission remains ordered because online rejection depends on prior
 observations. Independent work within each frame—calibration, registration
 detection, resampling, normalization, classification, and integration—uses the

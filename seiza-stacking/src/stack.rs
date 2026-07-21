@@ -4,8 +4,10 @@ use crate::{
 };
 use rayon::prelude::*;
 use seiza_fits::HeaderValue;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct DeltaSigmaOptions {
     pub low_sigma: f32,
     pub high_sigma: f32,
@@ -24,7 +26,8 @@ impl Default for DeltaSigmaOptions {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(tag = "mode", content = "options", rename_all = "kebab-case")]
 pub enum RejectionMode {
     None,
     DeltaSigma(DeltaSigmaOptions),
@@ -36,7 +39,8 @@ impl Default for RejectionMode {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct StackOptions {
     pub registration: RegistrationOptions,
     pub normalization: NormalizationMode,
@@ -88,7 +92,8 @@ impl StackOptions {
 
 /// Admission gates applied before an additive live-stack update becomes
 /// permanent.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct FrameAcceptanceCriteria {
     pub maximum_registration_rms_pixels: f64,
     pub maximum_scale_deviation: f64,
@@ -647,5 +652,32 @@ mod tests {
             ..StackOptions::default()
         };
         assert!(options.validate().is_err());
+    }
+
+    #[test]
+    fn stack_options_support_partial_json_and_reject_unknown_fields() {
+        let options: StackOptions = serde_json::from_str(
+            r#"{
+                "registration": {"maximum_drift_pixels": 512.0},
+                "normalization": {"mode": "local", "options": {"tile_size": 128}},
+                "rejection": {"mode": "none"},
+                "acceptance": {"minimum_overlap_fraction": 0.75}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(options.registration.maximum_drift_pixels, 512.0);
+        assert_eq!(
+            options.normalization,
+            NormalizationMode::Local { tile_size: 128 }
+        );
+        assert!(matches!(options.rejection, RejectionMode::None));
+        assert_eq!(options.acceptance.minimum_overlap_fraction, 0.75);
+        assert_eq!(options.registration.maximum_stars, 200);
+        options.validate().unwrap();
+
+        let json = serde_json::to_string(&options).unwrap();
+        let round_trip: StackOptions = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_trip.registration.maximum_drift_pixels, 512.0);
+        assert!(serde_json::from_str::<StackOptions>(r#"{"mystery": true}"#).is_err());
     }
 }

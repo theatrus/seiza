@@ -21,8 +21,14 @@
  *       -> release with seiza_rendered_image_free().
  *   - SeizaBackgroundModel* returned by seiza_background_fit
  *       -> release with seiza_background_model_free().
- *   - char* returned by seiza_catalog_status_json and seiza_solve_image_json,
- *     and any char* stored into an `error_out` argument on failure
+ *   - SeizaLiveStacker* returned by seiza_live_stacker_create / _open_fits
+ *       -> release with seiza_live_stacker_free(), or consume with
+ *          seiza_live_stacker_finish().
+ *   - SeizaStackSnapshot* returned by seiza_live_stacker_snapshot / _finish
+ *       -> release with seiza_stack_snapshot_free().
+ *   - char* returned by seiza_catalog_status_json, seiza_solve_image_json, and
+ *     seiza_live_stacker_push_*_json, plus any char* stored into an `error_out`
+ *     argument on failure
  *       -> release with seiza_string_free().
  *
  * BORROWED by the caller (do NOT free; valid only while the owner is alive):
@@ -32,6 +38,10 @@
  *     if you need them to outlive it.
  *   - const char* from seiza_background_model_diagnostics_json points INTO the
  *     SeizaBackgroundModel and dangles when the model is freed.
+ *   - const float* / uint32_t* from seiza_live_stacker_* point INTO live stack
+ *     state and remain valid only until its next mutable call, finish, or free.
+ *   - const float* / uint32_t* from seiza_stack_snapshot_* point INTO the
+ *     immutable SeizaStackSnapshot and dangle when the snapshot is freed.
  *   - const char* from seiza_core_version is static and is never freed.
  *   - the `json` argument to a SeizaCatalogSetupProgressCallback is valid only
  *     for the duration of that one callback; copy it if you need it afterward.
@@ -43,9 +53,10 @@
  * and to an OWNED message on failure (and return NULL / false). Free that
  * message with seiza_string_free().
  *
- * Threading: do not free a SeizaRenderedImage or SeizaBackgroundModel while
- * another thread is using it or reading its borrowed pointers. Do not free the
- * same pointer twice, and do not use a pointer after freeing its owner.
+ * Threading: externally synchronize each live stacker and do not mutate,
+ * finish, or free it while another thread reads a borrowed live view. Do not
+ * free any opaque owner while another thread uses it or its borrowed pointers.
+ * Do not free the same pointer twice or use a pointer after its owner is freed.
  */
 
 /*
@@ -68,12 +79,25 @@
 typedef struct SeizaBackgroundModel SeizaBackgroundModel;
 
 /*
+ An opaque incremental stacker. Release it with
+ [`seiza_live_stacker_free`], or consume it with
+ [`seiza_live_stacker_finish`].
+ */
+typedef struct SeizaLiveStacker SeizaLiveStacker;
+
+/*
  An opaque, owned rendered image. C sees only a pointer; release it with
  [`seiza_rendered_image_free`]. Not `repr(C)`: it is only ever handed to C as
  an opaque pointer, so its layout is private (and cbindgen forward-declares
  it).
  */
 typedef struct SeizaRenderedImage SeizaRenderedImage;
+
+/*
+ An immutable owned stack result. Its image and count pointers are borrowed
+ until [`seiza_stack_snapshot_free`] is called.
+ */
+typedef struct SeizaStackSnapshot SeizaStackSnapshot;
 
 typedef void (*SeizaCatalogSetupProgressCallback)(const char*, void*);
 
@@ -180,6 +204,264 @@ bool seiza_background_model_correct_in_place(const SeizaBackgroundModel *model,
  has not already been freed.
  */
 void seiza_background_model_free(SeizaBackgroundModel *model);
+
+/*
+ Creates an incremental stack from a copied linear mono or interleaved RGB
+ reference frame. Array frames are assumed to be calibrated and debayered.
+ Pass null or empty `options_json` for `StackOptions::default()`.
+
+ # Safety
+ `reference` must point to `reference_length` readable floats. A non-null
+ `options_json` must be NUL-terminated. When non-null, `error_out` must point
+ to writable storage for one pointer.
+ */
+SeizaLiveStacker *seiza_live_stacker_create(const float *reference,
+                                            size_t reference_length,
+                                            size_t width,
+                                            size_t height,
+                                            size_t channels,
+                                            const char *options_json,
+                                            char **error_out);
+
+/*
+ Opens a FITS reference and optional integrated bias, dark, and flat masters.
+ A positive `dark_exposure_seconds` overrides the dark FITS metadata; zero
+ uses the metadata. Pass null or empty `options_json` for defaults. All files
+ are fully read during this call and are not kept open afterward.
+
+ # Safety
+ `reference_path` must be a valid NUL-terminated string. Optional paths and
+ `options_json` may be null; when non-null they must be NUL-terminated. When
+ non-null, `error_out` must point to writable storage for one pointer.
+ */
+SeizaLiveStacker *seiza_live_stacker_open_fits(const char *reference_path,
+                                               const char *bias_path,
+                                               const char *dark_path,
+                                               const char *flat_path,
+                                               double dark_exposure_seconds,
+                                               const char *options_json,
+                                               char **error_out);
+
+/*
+ Registers and offers one copied, calibrated linear frame to the stack.
+ Returns owned disposition JSON for both accepted and rejected frames; free
+ it with [`seiza_string_free`]. A rejected frame is a successful call and is
+ represented by `accepted: false` rather than `error_out`.
+
+ # Safety
+ `stacker` must be a live pointer returned by a `seiza_live_stacker_*`
+ constructor. `frame` must point to `frame_length` readable floats. When
+ non-null, `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_live_stacker_push_linear_json(SeizaLiveStacker *stacker,
+                                          const float *frame,
+                                          size_t frame_length,
+                                          size_t width,
+                                          size_t height,
+                                          size_t channels,
+                                          char **error_out);
+
+/*
+ Opens, calibrates, registers, and offers one FITS frame to the stack. The
+ returned disposition JSON is owned and must be freed with
+ [`seiza_string_free`]. Each source path may be offered only once.
+
+ # Safety
+ `stacker` must be a live pointer returned by a `seiza_live_stacker_*`
+ constructor. `path` must be a valid NUL-terminated string. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_live_stacker_push_fits_json(SeizaLiveStacker *stacker,
+                                        const char *path,
+                                        char **error_out);
+
+/*
+ # Safety
+ `stacker` must be null or a live `SeizaLiveStacker` pointer.
+ */
+size_t seiza_live_stacker_width(const SeizaLiveStacker *stacker);
+
+/*
+ # Safety
+ `stacker` must be null or a live `SeizaLiveStacker` pointer.
+ */
+size_t seiza_live_stacker_height(const SeizaLiveStacker *stacker);
+
+/*
+ # Safety
+ `stacker` must be null or a live `SeizaLiveStacker` pointer.
+ */
+size_t seiza_live_stacker_channels(const SeizaLiveStacker *stacker);
+
+/*
+ Returns the sample count for every live-view and snapshot buffer.
+
+ # Safety
+ `stacker` must be null or a live `SeizaLiveStacker` pointer.
+ */
+size_t seiza_live_stacker_data_length(const SeizaLiveStacker *stacker);
+
+/*
+ # Safety
+ `stacker` must be null or a live `SeizaLiveStacker` pointer.
+ */
+uint32_t seiza_live_stacker_accepted_frames(const SeizaLiveStacker *stacker);
+
+/*
+ # Safety
+ `stacker` must be null or a live `SeizaLiveStacker` pointer.
+ */
+uint32_t seiza_live_stacker_rejected_frames(const SeizaLiveStacker *stacker);
+
+/*
+ Borrows the current interleaved linear mean without copying it. Zero-
+ coverage samples are undefined. The pointer remains valid only until the
+ next mutable stacker operation or the stacker is freed/finished.
+
+ # Safety
+ `stacker` must be null or a live `SeizaLiveStacker` pointer.
+ */
+const float *seiza_live_stacker_mean(const SeizaLiveStacker *stacker);
+
+/*
+ Borrows the accepted-observation count for each image sample. The pointer
+ has the same lifetime as [`seiza_live_stacker_mean`].
+
+ # Safety
+ `stacker` must be null or a live `SeizaLiveStacker` pointer.
+ */
+const uint32_t *seiza_live_stacker_coverage(const SeizaLiveStacker *stacker);
+
+/*
+ Borrows the rejected-observation count for each image sample. The pointer
+ has the same lifetime as [`seiza_live_stacker_mean`].
+
+ # Safety
+ `stacker` must be null or a live `SeizaLiveStacker` pointer.
+ */
+const uint32_t *seiza_live_stacker_rejected_samples(const SeizaLiveStacker *stacker);
+
+/*
+ Copies the current mean, variance, coverage, and rejection maps into an
+ immutable owned snapshot. Prefer the borrowed live view for display-only
+ updates and [`seiza_live_stacker_finish`] for copy-free finalization.
+
+ # Safety
+ `stacker` must be a live `SeizaLiveStacker` pointer. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+SeizaStackSnapshot *seiza_live_stacker_snapshot(const SeizaLiveStacker *stacker, char **error_out);
+
+/*
+ Consumes a live stacker and moves its full-frame state into an immutable
+ snapshot without cloning it. Once a non-null live handle is accepted,
+ `*stacker` is set to null and consumed even if finalization reports an
+ error.
+
+ # Safety
+ `stacker` must point to writable storage containing null or a live pointer
+ returned by a `seiza_live_stacker_*` constructor. When non-null, `error_out`
+ must point to writable storage for one pointer.
+ */
+SeizaStackSnapshot *seiza_live_stacker_finish(SeizaLiveStacker **stacker, char **error_out);
+
+/*
+ # Safety
+ `stacker` must be null or a live pointer returned by a
+ `seiza_live_stacker_*` constructor and must not already be finished/freed.
+ */
+void seiza_live_stacker_free(SeizaLiveStacker *stacker);
+
+/*
+ # Safety
+ `snapshot` must be null or a live `SeizaStackSnapshot` pointer.
+ */
+size_t seiza_stack_snapshot_width(const SeizaStackSnapshot *snapshot);
+
+/*
+ # Safety
+ `snapshot` must be null or a live `SeizaStackSnapshot` pointer.
+ */
+size_t seiza_stack_snapshot_height(const SeizaStackSnapshot *snapshot);
+
+/*
+ # Safety
+ `snapshot` must be null or a live `SeizaStackSnapshot` pointer.
+ */
+size_t seiza_stack_snapshot_channels(const SeizaStackSnapshot *snapshot);
+
+/*
+ Returns the sample count for every snapshot buffer.
+
+ # Safety
+ `snapshot` must be null or a live `SeizaStackSnapshot` pointer.
+ */
+size_t seiza_stack_snapshot_data_length(const SeizaStackSnapshot *snapshot);
+
+/*
+ # Safety
+ `snapshot` must be null or a live `SeizaStackSnapshot` pointer.
+ */
+uint32_t seiza_stack_snapshot_accepted_frames(const SeizaStackSnapshot *snapshot);
+
+/*
+ # Safety
+ `snapshot` must be null or a live `SeizaStackSnapshot` pointer.
+ */
+uint32_t seiza_stack_snapshot_rejected_frames(const SeizaStackSnapshot *snapshot);
+
+/*
+ Borrows the immutable interleaved linear mean until the snapshot is freed.
+
+ # Safety
+ `snapshot` must be null or a live `SeizaStackSnapshot` pointer.
+ */
+const float *seiza_stack_snapshot_image(const SeizaStackSnapshot *snapshot);
+
+/*
+ Borrows the immutable per-sample variance until the snapshot is freed.
+
+ # Safety
+ `snapshot` must be null or a live `SeizaStackSnapshot` pointer.
+ */
+const float *seiza_stack_snapshot_variance(const SeizaStackSnapshot *snapshot);
+
+/*
+ Borrows the immutable per-sample accepted count until the snapshot is freed.
+
+ # Safety
+ `snapshot` must be null or a live `SeizaStackSnapshot` pointer.
+ */
+const uint32_t *seiza_stack_snapshot_coverage(const SeizaStackSnapshot *snapshot);
+
+/*
+ Borrows the immutable per-sample rejection count until the snapshot is
+ freed.
+
+ # Safety
+ `snapshot` must be null or a live `SeizaStackSnapshot` pointer.
+ */
+const uint32_t *seiza_stack_snapshot_rejected_samples(const SeizaStackSnapshot *snapshot);
+
+/*
+ Writes the immutable stack as an unstretched 32-bit floating-point FITS,
+ preserving compatible reference headers.
+
+ # Safety
+ `snapshot` must be a live `SeizaStackSnapshot` pointer. `path` must be a
+ valid NUL-terminated string. When non-null, `error_out` must point to
+ writable storage for one pointer.
+ */
+bool seiza_stack_snapshot_write_fits(const SeizaStackSnapshot *snapshot,
+                                     const char *path,
+                                     char **error_out);
+
+/*
+ # Safety
+ `snapshot` must be null or a live pointer returned by a snapshot/finalize
+ function and must not already be freed.
+ */
+void seiza_stack_snapshot_free(SeizaStackSnapshot *snapshot);
 
 /*
  Returns catalog readiness and resolved component paths as JSON.

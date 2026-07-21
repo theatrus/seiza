@@ -13,10 +13,12 @@ categories = ["science", "multimedia::images"]
 
 [dependencies]
 rayon.workspace = true
+serde.workspace = true
 seiza.workspace = true
 seiza-fits.workspace = true
 seiza-stretch.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile = "3"

@@ -25,6 +25,13 @@ exposes the **superset** of what both apps need.
   subtractive/divisive correction in place before freeing the model. Optional
   settings use serialized `seiza-background` `BackgroundConfig` JSON, keeping
   the ABI stable as model options grow.
+- **Live stacking** — `seiza_live_stacker_create` starts from caller-provided
+  calibrated linear mono/RGB samples, while `seiza_live_stacker_open_fits`
+  decodes raw linear FITS and optionally applies integrated bias, dark, and
+  flat masters. Array and FITS pushes return owned admission JSON. Borrowed
+  mean/coverage/rejection views support copy-free live display, snapshots add
+  variance, and `seiza_live_stacker_finish` moves the final accumulator into an
+  immutable result without cloning its full-frame buffers.
 - **Plate solving** — `seiza_solve_image_json`.
 - **Catalog setup** — `seiza_catalog_status_json` and `seiza_catalog_setup`
   (with a progress callback). The install path delegates to
@@ -39,6 +46,34 @@ coefficients, so the input buffer may be released after `seiza_background_fit`
 returns. Pass null for both mask/configuration pointers to use automatic
 defaults. Correction mode constants and the precise pointer/length contracts
 are declared in the generated header.
+
+Stacking uses the same row-major, pixel-interleaved mono/RGB layout. Array
+frames are copied during each synchronous call and may be released when it
+returns; they must already be calibrated, debayered, and linear. FITS pushes
+retain and apply the calibration masters loaded by the FITS constructor; a
+non-zero dark exposure override requires a dark master path. A
+rejected frame is represented by `accepted: false` disposition JSON and is not
+an ABI error. The zero-copy live pointers are invalidated by the next push,
+finish, or free; immutable snapshot pointers remain valid until snapshot free.
+Snapshot FITS output refuses to overwrite any tracked light or calibration
+input.
+
+Stack options are serialized `seiza-stacking` `StackOptions`. Every nested
+object accepts omitted fields from its defaults. For example, this disables
+normalization/rejection while increasing the registration drift floor:
+
+```json
+{
+  "registration": { "maximum_drift_pixels": 512.0 },
+  "normalization": { "mode": "none" },
+  "rejection": { "mode": "none" }
+}
+```
+
+Local normalization is `{"mode":"local","options":{"tile_size":256}}`;
+delta-sigma rejection is
+`{"mode":"delta-sigma","options":{"low_sigma":3.0,"high_sigma":3.0}}`.
+Unknown fields and invalid bounds are rejected rather than silently ignored.
 
 The full C declarations, plus the memory-ownership contract (which returns are
 owned vs. borrowed, and which `seiza_*_free` to call), live in
