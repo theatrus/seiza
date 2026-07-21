@@ -24,8 +24,14 @@ after_includes = """
  *       -> release with seiza_rendered_image_free().
  *   - SeizaBackgroundModel* returned by seiza_background_fit
  *       -> release with seiza_background_model_free().
- *   - char* returned by seiza_catalog_status_json and seiza_solve_image_json,
- *     and any char* stored into an `error_out` argument on failure
+ *   - SeizaLiveStacker* returned by seiza_live_stacker_create / _open_fits
+ *       -> release with seiza_live_stacker_free(), or consume with
+ *          seiza_live_stacker_finish().
+ *   - SeizaStackSnapshot* returned by seiza_live_stacker_snapshot / _finish
+ *       -> release with seiza_stack_snapshot_free().
+ *   - char* returned by seiza_catalog_status_json, seiza_solve_image_json, and
+ *     seiza_live_stacker_push_*_json, plus any char* stored into an `error_out`
+ *     argument on failure
  *       -> release with seiza_string_free().
  *
  * BORROWED by the caller (do NOT free; valid only while the owner is alive):
@@ -35,6 +41,10 @@ after_includes = """
  *     if you need them to outlive it.
  *   - const char* from seiza_background_model_diagnostics_json points INTO the
  *     SeizaBackgroundModel and dangles when the model is freed.
+ *   - const float* / uint32_t* from seiza_live_stacker_* point INTO live stack
+ *     state and remain valid only until its next mutable call, finish, or free.
+ *   - const float* / uint32_t* from seiza_stack_snapshot_* point INTO the
+ *     immutable SeizaStackSnapshot and dangle when the snapshot is freed.
  *   - const char* from seiza_core_version is static and is never freed.
  *   - the `json` argument to a SeizaCatalogSetupProgressCallback is valid only
  *     for the duration of that one callback; copy it if you need it afterward.
@@ -46,9 +56,10 @@ after_includes = """
  * and to an OWNED message on failure (and return NULL / false). Free that
  * message with seiza_string_free().
  *
- * Threading: do not free a SeizaRenderedImage or SeizaBackgroundModel while
- * another thread is using it or reading its borrowed pointers. Do not free the
- * same pointer twice, and do not use a pointer after freeing its owner.
+ * Threading: externally synchronize each live stacker and do not mutate,
+ * finish, or free it while another thread reads a borrowed live view. Do not
+ * free any opaque owner while another thread uses it or its borrowed pointers.
+ * Do not free the same pointer twice or use a pointer after its owner is freed.
  */"""
 
 [parse]

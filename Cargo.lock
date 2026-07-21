@@ -2267,6 +2267,7 @@ dependencies = [
  "seiza",
  "seiza-background",
  "seiza-fits",
+ "seiza-stacking",
  "seiza-stretch",
  "serde",
  "serde_json",
@@ -2374,6 +2375,8 @@ dependencies = [
  "seiza",
  "seiza-fits",
  "seiza-stretch",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]

@@ -11,6 +11,10 @@ use seiza::wcs::Wcs;
 use seiza::{DetectBackend, DetectConfig, detect_stars, detect_stars_luma_f32};
 use seiza_background::{BackgroundConfig, BackgroundFit, CorrectionMode, fit_background_masked};
 use seiza_fits::{FitsImage, HeaderValue, RgbImage16, Statistics, StretchParams};
+use seiza_stacking::{
+    CalibrationMasters, FitsFrame, FrameDiagnostics, FrameDisposition, LinearImage, LiveStacker,
+    StackOptions, StackSnapshot as RustStackSnapshot, paths_refer_to_same_file, write_fits_f32,
+};
 use seiza_stretch::{StretchConfig, StretchStack};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -314,6 +318,49 @@ pub struct SeizaRenderedImage {
 pub struct SeizaBackgroundModel {
     fit: BackgroundFit,
     diagnostics_json: CString,
+}
+
+/// An opaque incremental stacker. Release it with
+/// [`seiza_live_stacker_free`], or consume it with
+/// [`seiza_live_stacker_finish`].
+pub struct SeizaLiveStacker {
+    stacker: LiveStacker,
+    input_paths: Vec<PathBuf>,
+}
+
+/// An immutable owned stack result. Its image and count pointers are borrowed
+/// until [`seiza_stack_snapshot_free`] is called.
+pub struct SeizaStackSnapshot {
+    snapshot: RustStackSnapshot,
+    reference_headers: Vec<(String, HeaderValue)>,
+    input_paths: Vec<PathBuf>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StackDispositionResponse {
+    source: Option<String>,
+    accepted: bool,
+    reason: Option<String>,
+    diagnostics: Option<StackDiagnosticsResponse>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StackDiagnosticsResponse {
+    matched_stars: usize,
+    registration_rms_pixels: f64,
+    registration_drift_pixels: f64,
+    scale: f64,
+    rotation_degrees: f64,
+    translation_x: f64,
+    translation_y: f64,
+    normalization_mean_gain: f32,
+    normalization_mean_offset: f32,
+    overlap_fraction: f32,
+    integrated_fraction: f32,
+    accepted_samples: usize,
+    rejected_samples: usize,
 }
 
 /// Additive background subtraction mode for
@@ -630,6 +677,562 @@ pub unsafe extern "C" fn seiza_background_model_correct_in_place(
 pub unsafe extern "C" fn seiza_background_model_free(model: *mut SeizaBackgroundModel) {
     if !model.is_null() {
         unsafe { drop(Box::from_raw(model)) };
+    }
+}
+
+#[unsafe(no_mangle)]
+/// Creates an incremental stack from a copied linear mono or interleaved RGB
+/// reference frame. Array frames are assumed to be calibrated and debayered.
+/// Pass null or empty `options_json` for `StackOptions::default()`.
+///
+/// # Safety
+/// `reference` must point to `reference_length` readable floats. A non-null
+/// `options_json` must be NUL-terminated. When non-null, `error_out` must point
+/// to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_live_stacker_create(
+    reference: *const f32,
+    reference_length: usize,
+    width: usize,
+    height: usize,
+    channels: usize,
+    options_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaLiveStacker {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let reference = unsafe {
+            linear_image_from_ffi(
+                reference,
+                reference_length,
+                width,
+                height,
+                channels,
+                "stack reference",
+            )?
+        };
+        let options = stack_options(options_json)?;
+        let stacker =
+            LiveStacker::from_linear(reference, options).map_err(|error| error.to_string())?;
+        Ok(SeizaLiveStacker {
+            stacker,
+            input_paths: Vec::new(),
+        })
+    })
+    .map_or(ptr::null_mut(), |stacker| Box::into_raw(Box::new(stacker)))
+}
+
+#[unsafe(no_mangle)]
+/// Opens a FITS reference and optional integrated bias, dark, and flat masters.
+/// A positive `dark_exposure_seconds` overrides the dark FITS metadata; zero
+/// uses the metadata. Pass null or empty `options_json` for defaults. All files
+/// are fully read during this call and are not kept open afterward.
+///
+/// # Safety
+/// `reference_path` must be a valid NUL-terminated string. Optional paths and
+/// `options_json` may be null; when non-null they must be NUL-terminated. When
+/// non-null, `error_out` must point to writable storage for one pointer.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn seiza_live_stacker_open_fits(
+    reference_path: *const c_char,
+    bias_path: *const c_char,
+    dark_path: *const c_char,
+    flat_path: *const c_char,
+    dark_exposure_seconds: f64,
+    options_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaLiveStacker {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let reference_path = required_path(reference_path, "stack reference path")?;
+        let bias_path = optional_path(bias_path)?;
+        let dark_path = optional_path(dark_path)?;
+        let flat_path = optional_path(flat_path)?;
+        let input_paths = [
+            Some(reference_path.clone()),
+            bias_path.clone(),
+            dark_path.clone(),
+            flat_path.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        validate_distinct_stack_paths(&input_paths)?;
+        if dark_path.is_none() && dark_exposure_seconds != 0.0 {
+            return Err("a master-dark exposure override requires a dark path".into());
+        }
+        let dark_exposure_seconds =
+            optional_positive_seconds(dark_exposure_seconds, "master-dark exposure override")?;
+        let options = stack_options(options_json)?;
+        let calibration = CalibrationMasters::from_fits_paths(
+            bias_path.as_deref(),
+            dark_path.as_deref(),
+            flat_path.as_deref(),
+            dark_exposure_seconds,
+        )
+        .map_err(|error| error.to_string())?;
+        let reference = FitsFrame::open(&reference_path).map_err(|error| error.to_string())?;
+        let stacker =
+            LiveStacker::new(reference, calibration, options).map_err(|error| error.to_string())?;
+        Ok(SeizaLiveStacker {
+            stacker,
+            input_paths,
+        })
+    })
+    .map_or(ptr::null_mut(), |stacker| Box::into_raw(Box::new(stacker)))
+}
+
+#[unsafe(no_mangle)]
+/// Registers and offers one copied, calibrated linear frame to the stack.
+/// Returns owned disposition JSON for both accepted and rejected frames; free
+/// it with [`seiza_string_free`]. A rejected frame is a successful call and is
+/// represented by `accepted: false` rather than `error_out`.
+///
+/// # Safety
+/// `stacker` must be a live pointer returned by a `seiza_live_stacker_*`
+/// constructor. `frame` must point to `frame_length` readable floats. When
+/// non-null, `error_out` must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_live_stacker_push_linear_json(
+    stacker: *mut SeizaLiveStacker,
+    frame: *const f32,
+    frame_length: usize,
+    width: usize,
+    height: usize,
+    channels: usize,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let frame = unsafe {
+            linear_image_from_ffi(frame, frame_length, width, height, channels, "stack frame")?
+        };
+        let stacker = unsafe { required_live_stacker_mut(stacker)? };
+        let disposition = stacker
+            .stacker
+            .push_linear(frame)
+            .map_err(|error| error.to_string())?;
+        owned_json(&stack_disposition_response(None, disposition))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// Opens, calibrates, registers, and offers one FITS frame to the stack. The
+/// returned disposition JSON is owned and must be freed with
+/// [`seiza_string_free`]. Each source path may be offered only once.
+///
+/// # Safety
+/// `stacker` must be a live pointer returned by a `seiza_live_stacker_*`
+/// constructor. `path` must be a valid NUL-terminated string. When non-null,
+/// `error_out` must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_live_stacker_push_fits_json(
+    stacker: *mut SeizaLiveStacker,
+    path: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let path = required_path(path, "stack frame path")?;
+        let stacker = unsafe { required_live_stacker_mut(stacker)? };
+        if stacker
+            .input_paths
+            .iter()
+            .any(|input| paths_refer_to_same_file(input, &path))
+        {
+            return Err(format!(
+                "FITS frame {} has already been used by this stack",
+                path.display()
+            ));
+        }
+        let frame = FitsFrame::open(&path).map_err(|error| error.to_string())?;
+        let disposition = stacker
+            .stacker
+            .push(frame)
+            .map_err(|error| error.to_string())?;
+        stacker.input_paths.push(path.clone());
+        owned_json(&stack_disposition_response(Some(&path), disposition))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `stacker` must be null or a live `SeizaLiveStacker` pointer.
+pub unsafe extern "C" fn seiza_live_stacker_width(stacker: *const SeizaLiveStacker) -> usize {
+    unsafe {
+        stacker
+            .as_ref()
+            .map_or(0, |stacker| stacker.stacker.view().width)
+    }
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `stacker` must be null or a live `SeizaLiveStacker` pointer.
+pub unsafe extern "C" fn seiza_live_stacker_height(stacker: *const SeizaLiveStacker) -> usize {
+    unsafe {
+        stacker
+            .as_ref()
+            .map_or(0, |stacker| stacker.stacker.view().height)
+    }
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `stacker` must be null or a live `SeizaLiveStacker` pointer.
+pub unsafe extern "C" fn seiza_live_stacker_channels(stacker: *const SeizaLiveStacker) -> usize {
+    unsafe {
+        stacker
+            .as_ref()
+            .map_or(0, |stacker| stacker.stacker.view().channels)
+    }
+}
+
+#[unsafe(no_mangle)]
+/// Returns the sample count for every live-view and snapshot buffer.
+///
+/// # Safety
+/// `stacker` must be null or a live `SeizaLiveStacker` pointer.
+pub unsafe extern "C" fn seiza_live_stacker_data_length(stacker: *const SeizaLiveStacker) -> usize {
+    unsafe {
+        stacker.as_ref().map_or(0, |stacker| {
+            let view = stacker.stacker.view();
+            view.width * view.height * view.channels
+        })
+    }
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `stacker` must be null or a live `SeizaLiveStacker` pointer.
+pub unsafe extern "C" fn seiza_live_stacker_accepted_frames(
+    stacker: *const SeizaLiveStacker,
+) -> u32 {
+    unsafe {
+        stacker
+            .as_ref()
+            .map_or(0, |stacker| stacker.stacker.view().accepted_frames)
+    }
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `stacker` must be null or a live `SeizaLiveStacker` pointer.
+pub unsafe extern "C" fn seiza_live_stacker_rejected_frames(
+    stacker: *const SeizaLiveStacker,
+) -> u32 {
+    unsafe {
+        stacker
+            .as_ref()
+            .map_or(0, |stacker| stacker.stacker.view().rejected_frames)
+    }
+}
+
+#[unsafe(no_mangle)]
+/// Borrows the current interleaved linear mean without copying it. Zero-
+/// coverage samples are undefined. The pointer remains valid only until the
+/// next mutable stacker operation or the stacker is freed/finished.
+///
+/// # Safety
+/// `stacker` must be null or a live `SeizaLiveStacker` pointer.
+pub unsafe extern "C" fn seiza_live_stacker_mean(stacker: *const SeizaLiveStacker) -> *const f32 {
+    unsafe {
+        stacker
+            .as_ref()
+            .map_or(ptr::null(), |stacker| stacker.stacker.view().mean.as_ptr())
+    }
+}
+
+#[unsafe(no_mangle)]
+/// Borrows the accepted-observation count for each image sample. The pointer
+/// has the same lifetime as [`seiza_live_stacker_mean`].
+///
+/// # Safety
+/// `stacker` must be null or a live `SeizaLiveStacker` pointer.
+pub unsafe extern "C" fn seiza_live_stacker_coverage(
+    stacker: *const SeizaLiveStacker,
+) -> *const u32 {
+    unsafe {
+        stacker.as_ref().map_or(ptr::null(), |stacker| {
+            stacker.stacker.view().coverage.as_ptr()
+        })
+    }
+}
+
+#[unsafe(no_mangle)]
+/// Borrows the rejected-observation count for each image sample. The pointer
+/// has the same lifetime as [`seiza_live_stacker_mean`].
+///
+/// # Safety
+/// `stacker` must be null or a live `SeizaLiveStacker` pointer.
+pub unsafe extern "C" fn seiza_live_stacker_rejected_samples(
+    stacker: *const SeizaLiveStacker,
+) -> *const u32 {
+    unsafe {
+        stacker.as_ref().map_or(ptr::null(), |stacker| {
+            stacker.stacker.view().rejected_samples.as_ptr()
+        })
+    }
+}
+
+#[unsafe(no_mangle)]
+/// Copies the current mean, variance, coverage, and rejection maps into an
+/// immutable owned snapshot. Prefer the borrowed live view for display-only
+/// updates and [`seiza_live_stacker_finish`] for copy-free finalization.
+///
+/// # Safety
+/// `stacker` must be a live `SeizaLiveStacker` pointer. When non-null,
+/// `error_out` must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_live_stacker_snapshot(
+    stacker: *const SeizaLiveStacker,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaStackSnapshot {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let stacker = unsafe { required_live_stacker(stacker)? };
+        let reference_headers = stacker.stacker.reference_headers().to_vec();
+        let snapshot = stacker
+            .stacker
+            .snapshot()
+            .map_err(|error| error.to_string())?;
+        Ok(SeizaStackSnapshot {
+            snapshot,
+            reference_headers,
+            input_paths: stacker.input_paths.clone(),
+        })
+    })
+    .map_or(ptr::null_mut(), |snapshot| {
+        Box::into_raw(Box::new(snapshot))
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Consumes a live stacker and moves its full-frame state into an immutable
+/// snapshot without cloning it. Once a non-null live handle is accepted,
+/// `*stacker` is set to null and consumed even if finalization reports an
+/// error.
+///
+/// # Safety
+/// `stacker` must point to writable storage containing null or a live pointer
+/// returned by a `seiza_live_stacker_*` constructor. When non-null, `error_out`
+/// must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_live_stacker_finish(
+    stacker: *mut *mut SeizaLiveStacker,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaStackSnapshot {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        if stacker.is_null() {
+            return Err("live stacker pointer storage is required".into());
+        }
+        let live = unsafe { *stacker };
+        if live.is_null() {
+            return Err("live stacker is required".into());
+        }
+        unsafe { *stacker = ptr::null_mut() };
+        let live = unsafe { Box::from_raw(live) };
+        let SeizaLiveStacker {
+            stacker,
+            input_paths,
+        } = *live;
+        let reference_headers = stacker.reference_headers().to_vec();
+        let snapshot = stacker.into_snapshot().map_err(|error| error.to_string())?;
+        Ok(SeizaStackSnapshot {
+            snapshot,
+            reference_headers,
+            input_paths,
+        })
+    })
+    .map_or(ptr::null_mut(), |snapshot| {
+        Box::into_raw(Box::new(snapshot))
+    })
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `stacker` must be null or a live pointer returned by a
+/// `seiza_live_stacker_*` constructor and must not already be finished/freed.
+pub unsafe extern "C" fn seiza_live_stacker_free(stacker: *mut SeizaLiveStacker) {
+    if !stacker.is_null() {
+        unsafe { drop(Box::from_raw(stacker)) };
+    }
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `snapshot` must be null or a live `SeizaStackSnapshot` pointer.
+pub unsafe extern "C" fn seiza_stack_snapshot_width(snapshot: *const SeizaStackSnapshot) -> usize {
+    unsafe {
+        snapshot
+            .as_ref()
+            .map_or(0, |value| value.snapshot.image.width)
+    }
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `snapshot` must be null or a live `SeizaStackSnapshot` pointer.
+pub unsafe extern "C" fn seiza_stack_snapshot_height(snapshot: *const SeizaStackSnapshot) -> usize {
+    unsafe {
+        snapshot
+            .as_ref()
+            .map_or(0, |value| value.snapshot.image.height)
+    }
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `snapshot` must be null or a live `SeizaStackSnapshot` pointer.
+pub unsafe extern "C" fn seiza_stack_snapshot_channels(
+    snapshot: *const SeizaStackSnapshot,
+) -> usize {
+    unsafe {
+        snapshot
+            .as_ref()
+            .map_or(0, |value| value.snapshot.image.channels)
+    }
+}
+
+#[unsafe(no_mangle)]
+/// Returns the sample count for every snapshot buffer.
+///
+/// # Safety
+/// `snapshot` must be null or a live `SeizaStackSnapshot` pointer.
+pub unsafe extern "C" fn seiza_stack_snapshot_data_length(
+    snapshot: *const SeizaStackSnapshot,
+) -> usize {
+    unsafe {
+        snapshot
+            .as_ref()
+            .map_or(0, |value| value.snapshot.image.sample_count())
+    }
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `snapshot` must be null or a live `SeizaStackSnapshot` pointer.
+pub unsafe extern "C" fn seiza_stack_snapshot_accepted_frames(
+    snapshot: *const SeizaStackSnapshot,
+) -> u32 {
+    unsafe {
+        snapshot
+            .as_ref()
+            .map_or(0, |value| value.snapshot.accepted_frames)
+    }
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `snapshot` must be null or a live `SeizaStackSnapshot` pointer.
+pub unsafe extern "C" fn seiza_stack_snapshot_rejected_frames(
+    snapshot: *const SeizaStackSnapshot,
+) -> u32 {
+    unsafe {
+        snapshot
+            .as_ref()
+            .map_or(0, |value| value.snapshot.rejected_frames)
+    }
+}
+
+#[unsafe(no_mangle)]
+/// Borrows the immutable interleaved linear mean until the snapshot is freed.
+///
+/// # Safety
+/// `snapshot` must be null or a live `SeizaStackSnapshot` pointer.
+pub unsafe extern "C" fn seiza_stack_snapshot_image(
+    snapshot: *const SeizaStackSnapshot,
+) -> *const f32 {
+    unsafe {
+        snapshot
+            .as_ref()
+            .map_or(ptr::null(), |value| value.snapshot.image.data.as_ptr())
+    }
+}
+
+#[unsafe(no_mangle)]
+/// Borrows the immutable per-sample variance until the snapshot is freed.
+///
+/// # Safety
+/// `snapshot` must be null or a live `SeizaStackSnapshot` pointer.
+pub unsafe extern "C" fn seiza_stack_snapshot_variance(
+    snapshot: *const SeizaStackSnapshot,
+) -> *const f32 {
+    unsafe {
+        snapshot
+            .as_ref()
+            .map_or(ptr::null(), |value| value.snapshot.variance.data.as_ptr())
+    }
+}
+
+#[unsafe(no_mangle)]
+/// Borrows the immutable per-sample accepted count until the snapshot is freed.
+///
+/// # Safety
+/// `snapshot` must be null or a live `SeizaStackSnapshot` pointer.
+pub unsafe extern "C" fn seiza_stack_snapshot_coverage(
+    snapshot: *const SeizaStackSnapshot,
+) -> *const u32 {
+    unsafe {
+        snapshot
+            .as_ref()
+            .map_or(ptr::null(), |value| value.snapshot.coverage.as_ptr())
+    }
+}
+
+#[unsafe(no_mangle)]
+/// Borrows the immutable per-sample rejection count until the snapshot is
+/// freed.
+///
+/// # Safety
+/// `snapshot` must be null or a live `SeizaStackSnapshot` pointer.
+pub unsafe extern "C" fn seiza_stack_snapshot_rejected_samples(
+    snapshot: *const SeizaStackSnapshot,
+) -> *const u32 {
+    unsafe {
+        snapshot.as_ref().map_or(ptr::null(), |value| {
+            value.snapshot.rejected_samples.as_ptr()
+        })
+    }
+}
+
+#[unsafe(no_mangle)]
+/// Writes the immutable stack as an unstretched 32-bit floating-point FITS,
+/// preserving compatible reference headers.
+///
+/// # Safety
+/// `snapshot` must be a live `SeizaStackSnapshot` pointer. `path` must be a
+/// valid NUL-terminated string. When non-null, `error_out` must point to
+/// writable storage for one pointer.
+pub unsafe extern "C" fn seiza_stack_snapshot_write_fits(
+    snapshot: *const SeizaStackSnapshot,
+    path: *const c_char,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let snapshot = unsafe { required_stack_snapshot(snapshot)? };
+        let path = required_path(path, "stack output path")?;
+        if snapshot
+            .input_paths
+            .iter()
+            .any(|input| paths_refer_to_same_file(input, &path))
+        {
+            return Err(
+                "stack output path must not refer to an input frame or calibration master".into(),
+            );
+        }
+        write_fits_f32(path, &snapshot.snapshot, &snapshot.reference_headers)
+            .map_err(|error| error.to_string())
+    })
+    .is_some()
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `snapshot` must be null or a live pointer returned by a snapshot/finalize
+/// function and must not already be freed.
+pub unsafe extern "C" fn seiza_stack_snapshot_free(snapshot: *mut SeizaStackSnapshot) {
+    if !snapshot.is_null() {
+        unsafe { drop(Box::from_raw(snapshot)) };
     }
 }
 
@@ -2089,6 +2692,113 @@ fn background_config(config_json: *const c_char) -> Result<BackgroundConfig, Str
         .map_err(|error| format!("invalid background config JSON: {error}"))
 }
 
+fn stack_options(options_json: *const c_char) -> Result<StackOptions, String> {
+    let options = if options_json.is_null() {
+        StackOptions::default()
+    } else {
+        let options_json = required_str(options_json, "stack options JSON")?;
+        if options_json.trim().is_empty() {
+            StackOptions::default()
+        } else {
+            serde_json::from_str(&options_json)
+                .map_err(|error| format!("invalid stack options JSON: {error}"))?
+        }
+    };
+    options.validate().map_err(|error| error.to_string())?;
+    Ok(options)
+}
+
+unsafe fn linear_image_from_ffi(
+    data: *const f32,
+    length: usize,
+    width: usize,
+    height: usize,
+    channels: usize,
+    name: &str,
+) -> Result<LinearImage, String> {
+    if width == 0 || height == 0 || !matches!(channels, 1 | 3) {
+        return Err(format!(
+            "{name} dimensions must be non-zero and channels must be one or three"
+        ));
+    }
+    let expected = width
+        .checked_mul(height)
+        .and_then(|value| value.checked_mul(channels))
+        .ok_or_else(|| format!("{name} dimensions overflow"))?;
+    if length != expected {
+        return Err(format!("{name} has {length} floats; expected {expected}"));
+    }
+    let data = unsafe { required_f32_slice(data, length, name)? };
+    LinearImage::new(width, height, channels, data.to_vec()).map_err(|error| error.to_string())
+}
+
+fn optional_positive_seconds(value: f64, name: &str) -> Result<Option<f64>, String> {
+    if value == 0.0 {
+        return Ok(None);
+    }
+    if !value.is_finite() || value <= 0.0 {
+        return Err(format!("{name} must be zero or a positive finite number"));
+    }
+    Ok(Some(value))
+}
+
+fn validate_distinct_stack_paths(paths: &[PathBuf]) -> Result<(), String> {
+    for (index, path) in paths.iter().enumerate() {
+        if paths[..index]
+            .iter()
+            .any(|previous| paths_refer_to_same_file(path, previous))
+        {
+            return Err(format!("duplicate stack input path {}", path.display()));
+        }
+    }
+    Ok(())
+}
+
+fn stack_disposition_response(
+    source: Option<&Path>,
+    disposition: FrameDisposition,
+) -> StackDispositionResponse {
+    match disposition {
+        FrameDisposition::Accepted(diagnostics) => StackDispositionResponse {
+            source: source.map(|path| path.to_string_lossy().into_owned()),
+            accepted: true,
+            reason: None,
+            diagnostics: Some(stack_diagnostics_response(diagnostics)),
+        },
+        FrameDisposition::Rejected(reason) => StackDispositionResponse {
+            source: source.map(|path| path.to_string_lossy().into_owned()),
+            accepted: false,
+            reason: Some(reason.to_string()),
+            diagnostics: None,
+        },
+    }
+}
+
+fn stack_diagnostics_response(diagnostics: FrameDiagnostics) -> StackDiagnosticsResponse {
+    StackDiagnosticsResponse {
+        matched_stars: diagnostics.matched_stars,
+        registration_rms_pixels: diagnostics.registration_rms_pixels,
+        registration_drift_pixels: diagnostics.registration_drift_pixels,
+        scale: diagnostics.transform.scale,
+        rotation_degrees: diagnostics.transform.rotation_radians.to_degrees(),
+        translation_x: diagnostics.transform.translation_x,
+        translation_y: diagnostics.transform.translation_y,
+        normalization_mean_gain: diagnostics.normalization_mean_gain,
+        normalization_mean_offset: diagnostics.normalization_mean_offset,
+        overlap_fraction: diagnostics.overlap_fraction,
+        integrated_fraction: diagnostics.integrated_fraction,
+        accepted_samples: diagnostics.accepted_samples,
+        rejected_samples: diagnostics.rejected_samples,
+    }
+}
+
+fn owned_json(value: &impl Serialize) -> Result<*mut c_char, String> {
+    let json = serde_json::to_string(value).map_err(|error| error.to_string())?;
+    CString::new(json)
+        .map(CString::into_raw)
+        .map_err(|_| "serialized JSON contains a NUL byte".into())
+}
+
 unsafe fn required_f32_slice<'a>(
     data: *const f32,
     length: usize,
@@ -2136,6 +2846,24 @@ unsafe fn required_background_model<'a>(
     model: *const SeizaBackgroundModel,
 ) -> Result<&'a SeizaBackgroundModel, String> {
     unsafe { model.as_ref() }.ok_or_else(|| "background model is required".into())
+}
+
+unsafe fn required_live_stacker<'a>(
+    stacker: *const SeizaLiveStacker,
+) -> Result<&'a SeizaLiveStacker, String> {
+    unsafe { stacker.as_ref() }.ok_or_else(|| "live stacker is required".into())
+}
+
+unsafe fn required_live_stacker_mut<'a>(
+    stacker: *mut SeizaLiveStacker,
+) -> Result<&'a mut SeizaLiveStacker, String> {
+    unsafe { stacker.as_mut() }.ok_or_else(|| "live stacker is required".into())
+}
+
+unsafe fn required_stack_snapshot<'a>(
+    snapshot: *const SeizaStackSnapshot,
+) -> Result<&'a SeizaStackSnapshot, String> {
+    unsafe { snapshot.as_ref() }.ok_or_else(|| "stack snapshot is required".into())
 }
 
 fn required_path(value: *const c_char, name: &str) -> Result<PathBuf, String> {
@@ -2245,6 +2973,48 @@ mod tests {
         image
     }
 
+    fn stacking_star_field(width: usize, height: usize) -> Vec<f32> {
+        let positions = [
+            (19.7_f32, 16.4_f32),
+            (71.3, 28.1),
+            (132.2, 34.8),
+            (43.1, 49.7),
+            (103.4, 58.3),
+            (22.8, 70.2),
+            (82.7, 76.5),
+            (143.1, 87.8),
+            (54.4, 96.2),
+            (116.8, 104.1),
+            (31.2, 113.0),
+            (91.5, 118.4),
+        ];
+        let mut image = Vec::with_capacity(width * height);
+        for y in 0..height {
+            for x in 0..width {
+                let noise = ((x * 17 + y * 31) % 23) as f32 * 0.12 - 1.32;
+                let mut value = 100.0 + noise;
+                for (index, (star_x, star_y)) in positions.iter().enumerate() {
+                    let dx = x as f32 - star_x;
+                    let dy = y as f32 - star_y;
+                    value +=
+                        (900.0 + index as f32 * 130.0) * (-(dx.mul_add(dx, dy * dy)) / 3.2).exp();
+                }
+                image.push(value);
+            }
+        }
+        image
+    }
+
+    fn no_adjustment_stack_options() -> CString {
+        CString::new(
+            r#"{
+                "normalization": {"mode": "none"},
+                "rejection": {"mode": "none"}
+            }"#,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn background_cabi_fits_renders_and_corrects_a_model() {
         let (width, height) = (96, 72);
@@ -2341,6 +3111,261 @@ mod tests {
         let message = unsafe { CStr::from_ptr(error) }.to_str().unwrap();
         assert!(message.contains("zero or one"));
         unsafe { seiza_string_free(error) };
+    }
+
+    #[test]
+    fn stacking_cabi_pushes_views_snapshots_and_finishes_without_copying() {
+        let (width, height) = (160, 128);
+        let image = stacking_star_field(width, height);
+        let config = no_adjustment_stack_options();
+        let mut error = ptr::null_mut();
+        let mut stacker = unsafe {
+            seiza_live_stacker_create(
+                image.as_ptr(),
+                image.len(),
+                width,
+                height,
+                1,
+                config.as_ptr(),
+                &mut error,
+            )
+        };
+        assert!(!stacker.is_null());
+        assert!(error.is_null());
+        assert_eq!(unsafe { seiza_live_stacker_width(stacker) }, width);
+        assert_eq!(unsafe { seiza_live_stacker_height(stacker) }, height);
+        assert_eq!(unsafe { seiza_live_stacker_channels(stacker) }, 1);
+        assert_eq!(
+            unsafe { seiza_live_stacker_data_length(stacker) },
+            image.len()
+        );
+
+        let initial_mean =
+            unsafe { std::slice::from_raw_parts(seiza_live_stacker_mean(stacker), image.len()) };
+        assert_eq!(initial_mean, image);
+        let initial_coverage = unsafe {
+            std::slice::from_raw_parts(seiza_live_stacker_coverage(stacker), image.len())
+        };
+        assert!(initial_coverage.iter().all(|count| *count == 1));
+
+        let disposition_json = unsafe {
+            seiza_live_stacker_push_linear_json(
+                stacker,
+                image.as_ptr(),
+                image.len(),
+                width,
+                height,
+                1,
+                &mut error,
+            )
+        };
+        assert!(!disposition_json.is_null());
+        assert!(error.is_null());
+        let disposition: Value = serde_json::from_str(
+            unsafe { CStr::from_ptr(disposition_json) }
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(disposition["accepted"], true);
+        assert!(disposition["diagnostics"]["matchedStars"].as_u64().unwrap() >= 6);
+        unsafe { seiza_string_free(disposition_json) };
+        assert_eq!(unsafe { seiza_live_stacker_accepted_frames(stacker) }, 2);
+        assert_eq!(unsafe { seiza_live_stacker_rejected_frames(stacker) }, 0);
+
+        let snapshot = unsafe { seiza_live_stacker_snapshot(stacker, &mut error) };
+        assert!(!snapshot.is_null());
+        let coverage = unsafe {
+            std::slice::from_raw_parts(seiza_stack_snapshot_coverage(snapshot), image.len())
+        };
+        assert!(coverage.iter().all(|count| *count == 2));
+        let variance = unsafe {
+            std::slice::from_raw_parts(seiza_stack_snapshot_variance(snapshot), image.len())
+        };
+        assert!(variance.iter().all(|value| value.abs() < f32::EPSILON));
+        unsafe { seiza_stack_snapshot_free(snapshot) };
+
+        let snapshot = unsafe { seiza_live_stacker_finish(&mut stacker, &mut error) };
+        assert!(!snapshot.is_null());
+        assert!(stacker.is_null());
+        assert_eq!(unsafe { seiza_stack_snapshot_accepted_frames(snapshot) }, 2);
+        assert_eq!(
+            unsafe { seiza_stack_snapshot_data_length(snapshot) },
+            image.len()
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("stack.fits");
+        let output_c = CString::new(output.to_str().unwrap()).unwrap();
+        assert!(unsafe {
+            seiza_stack_snapshot_write_fits(snapshot, output_c.as_ptr(), &mut error)
+        });
+        assert_eq!(
+            FitsImage::open(&output)
+                .unwrap()
+                .header_f64("STACKCNT")
+                .unwrap(),
+            2.0
+        );
+        unsafe { seiza_stack_snapshot_free(snapshot) };
+    }
+
+    #[test]
+    fn stacking_cabi_opens_fits_and_rejects_duplicate_paths() {
+        let (width, height) = (160, 128);
+        let data = stacking_star_field(width, height);
+        let image = LinearImage::new(width, height, 1, data).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("light-001.fits");
+        let second = directory.path().join("light-002.fits");
+        seiza_stacking::write_processed_image_fits_f32(&first, &image, &[], &[]).unwrap();
+        seiza_stacking::write_processed_image_fits_f32(&second, &image, &[], &[]).unwrap();
+        let first_c = CString::new(first.to_str().unwrap()).unwrap();
+        let second_c = CString::new(second.to_str().unwrap()).unwrap();
+        let config = no_adjustment_stack_options();
+        let mut error = ptr::null_mut();
+        let stacker = unsafe {
+            seiza_live_stacker_open_fits(
+                first_c.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                0.0,
+                config.as_ptr(),
+                &mut error,
+            )
+        };
+        assert!(!stacker.is_null());
+        let disposition =
+            unsafe { seiza_live_stacker_push_fits_json(stacker, second_c.as_ptr(), &mut error) };
+        assert!(!disposition.is_null());
+        unsafe { seiza_string_free(disposition) };
+
+        let duplicate =
+            unsafe { seiza_live_stacker_push_fits_json(stacker, second_c.as_ptr(), &mut error) };
+        assert!(duplicate.is_null());
+        assert!(!error.is_null());
+        assert!(
+            unsafe { CStr::from_ptr(error) }
+                .to_str()
+                .unwrap()
+                .contains("already been used")
+        );
+        unsafe { seiza_string_free(error) };
+        error = ptr::null_mut();
+        let snapshot = unsafe { seiza_live_stacker_snapshot(stacker, &mut error) };
+        assert!(!snapshot.is_null());
+        assert!(!unsafe {
+            seiza_stack_snapshot_write_fits(snapshot, first_c.as_ptr(), &mut error)
+        });
+        assert!(
+            unsafe { CStr::from_ptr(error) }
+                .to_str()
+                .unwrap()
+                .contains("must not refer")
+        );
+        unsafe {
+            seiza_string_free(error);
+            seiza_stack_snapshot_free(snapshot);
+            seiza_live_stacker_free(stacker);
+        }
+    }
+
+    #[test]
+    fn stacking_cabi_rejects_unknown_configuration_fields() {
+        let image = stacking_star_field(160, 128);
+        let config = CString::new(r#"{"mystery":true}"#).unwrap();
+        let mut error = ptr::null_mut();
+        let stacker = unsafe {
+            seiza_live_stacker_create(
+                image.as_ptr(),
+                image.len(),
+                160,
+                128,
+                1,
+                config.as_ptr(),
+                &mut error,
+            )
+        };
+        assert!(stacker.is_null());
+        assert!(!error.is_null());
+        assert!(
+            unsafe { CStr::from_ptr(error) }
+                .to_str()
+                .unwrap()
+                .contains("unknown field")
+        );
+        unsafe { seiza_string_free(error) };
+
+        let reference = CString::new("reference.fits").unwrap();
+        error = ptr::null_mut();
+        let stacker = unsafe {
+            seiza_live_stacker_open_fits(
+                reference.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                60.0,
+                ptr::null(),
+                &mut error,
+            )
+        };
+        assert!(stacker.is_null());
+        assert!(
+            unsafe { CStr::from_ptr(error) }
+                .to_str()
+                .unwrap()
+                .contains("requires a dark path")
+        );
+        unsafe { seiza_string_free(error) };
+    }
+
+    #[test]
+    fn stacking_cabi_returns_frame_rejection_as_disposition_json() {
+        let (width, height) = (160, 128);
+        let image = stacking_star_field(width, height);
+        let config = no_adjustment_stack_options();
+        let mut error = ptr::null_mut();
+        let stacker = unsafe {
+            seiza_live_stacker_create(
+                image.as_ptr(),
+                image.len(),
+                width,
+                height,
+                1,
+                config.as_ptr(),
+                &mut error,
+            )
+        };
+        let rgb = image
+            .iter()
+            .flat_map(|value| [*value; 3])
+            .collect::<Vec<_>>();
+        let disposition_json = unsafe {
+            seiza_live_stacker_push_linear_json(
+                stacker,
+                rgb.as_ptr(),
+                rgb.len(),
+                width,
+                height,
+                3,
+                &mut error,
+            )
+        };
+        assert!(!disposition_json.is_null());
+        assert!(error.is_null());
+        let disposition: Value = serde_json::from_str(
+            unsafe { CStr::from_ptr(disposition_json) }
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(disposition["accepted"], false);
+        assert!(disposition["reason"].as_str().unwrap().contains("channel"));
+        assert_eq!(unsafe { seiza_live_stacker_rejected_frames(stacker) }, 1);
+        unsafe {
+            seiza_string_free(disposition_json);
+            seiza_live_stacker_free(stacker);
+        }
     }
 
     #[test]

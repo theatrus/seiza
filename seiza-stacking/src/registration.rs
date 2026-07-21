@@ -1,6 +1,7 @@
 use crate::{Error, LinearImage, Result};
 use rayon::prelude::*;
 use seiza::{DetectBackend, DetectConfig, DetectedStar};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 type ScoredTransform = (usize, f64, SimilarityTransform, Vec<(usize, usize)>);
@@ -45,7 +46,8 @@ impl SimilarityTransform {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct RegistrationOptions {
     pub detection_sigma: f32,
     pub maximum_stars: usize,

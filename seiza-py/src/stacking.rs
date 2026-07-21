@@ -4,7 +4,7 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use seiza_stacking::{
     CalibrationMasters, DeltaSigmaOptions, FitsFrame, FrameDisposition, LinearImage, LiveStacker,
-    MasterBuildOptions, MasterDark, MasterFlat, MasterFrameKind, MasterRejectionOptions,
+    MasterBuildOptions, MasterDark, MasterFrameKind, MasterRejectionOptions,
     NormalizationMode, RejectionMode, StackOptions, StackSnapshot, build_master_from_fits,
     paths_refer_to_same_file, write_fits_f32, write_master_fits_f32,
 };
@@ -862,17 +862,12 @@ fn load_calibration(
     flat: Option<PathBuf>,
     dark_exposure_seconds: Option<f64>,
 ) -> seiza_stacking::Result<CalibrationMasters> {
-    let bias = bias.map(load_bias).transpose()?;
-    let dark = dark
-        .map(|path| {
-            let frame = FitsFrame::open(path)?;
-            MasterDark::from_fits_frame(frame, dark_exposure_seconds)
-        })
-        .transpose()?;
-    let flat = flat
-        .map(|path| FitsFrame::open(path).and_then(MasterFlat::from_fits_frame))
-        .transpose()?;
-    CalibrationMasters::new(bias, dark, flat)
+    CalibrationMasters::from_fits_paths(
+        bias.as_deref(),
+        dark.as_deref(),
+        flat.as_deref(),
+        dark_exposure_seconds,
+    )
 }
 
 fn load_bias(path: PathBuf) -> seiza_stacking::Result<LinearImage> {

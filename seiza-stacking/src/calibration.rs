@@ -1,5 +1,6 @@
 use crate::{BayerLayout, Error, FitsFrame, LinearImage, Result};
 use rayon::prelude::*;
+use std::path::Path;
 
 #[derive(Clone, Debug)]
 pub struct MasterDark {
@@ -77,6 +78,37 @@ pub struct CalibrationMasters {
 }
 
 impl CalibrationMasters {
+    /// Load optional integrated calibration masters from FITS paths.
+    ///
+    /// A supplied dark exposure overrides its FITS metadata. Paths are read
+    /// completely during this call and are not retained by the result.
+    pub fn from_fits_paths(
+        bias: Option<&Path>,
+        dark: Option<&Path>,
+        flat: Option<&Path>,
+        dark_exposure_seconds: Option<f64>,
+    ) -> Result<Self> {
+        let bias = bias
+            .map(FitsFrame::open)
+            .transpose()?
+            .map(|frame| {
+                frame.validate_master_kind("BIAS")?;
+                Ok::<_, Error>(frame.image)
+            })
+            .transpose()?;
+        let dark = dark
+            .map(FitsFrame::open)
+            .transpose()?
+            .map(|frame| MasterDark::from_fits_frame(frame, dark_exposure_seconds))
+            .transpose()?;
+        let flat = flat
+            .map(FitsFrame::open)
+            .transpose()?
+            .map(MasterFlat::from_fits_frame)
+            .transpose()?;
+        Self::new(bias, dark, flat)
+    }
+
     pub fn new(
         bias: Option<LinearImage>,
         dark: Option<MasterDark>,
