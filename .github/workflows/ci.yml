@@ -57,6 +57,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2.9.1
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # seiza-cabi's build script regenerates its C header with cbindgen. Fail
+      # if a source change was not committed alongside a regenerated header.
+      - name: Verify seiza-cabi C header is in sync
+        run: |
+          cargo build -p seiza-cabi
+          git diff --exit-code -- seiza-cabi/include/seiza_cabi.h \
+            || { echo "::error::seiza_cabi.h is stale; run 'cargo build -p seiza-cabi' and commit include/seiza_cabi.h"; exit 1; }
 
   # Verify the workspace still compiles on its declared MSRV
   # (`rust-version` in [workspace.package]). Keep this toolchain in sync
