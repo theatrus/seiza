@@ -204,6 +204,8 @@ files. Outputs have shape `(height, width, 3)`:
 rgb = seiza.combine_rgb(red, green, blue)
 lrgb = seiza.combine_lrgb(luminance, red, green, blue,
                           luminance_weight=1.0)
+super_lrgb = seiza.combine_lrgb(luminance, red, green, blue,
+                                luminance_mode="super")
 
 sho = seiza.combine_narrowband(ha, oiii, sii, palette="sho")
 hoo = seiza.combine_narrowband(ha, oiii, palette="hoo")
@@ -213,8 +215,9 @@ foraxx = seiza.combine_narrowband(ha, oiii, sii, palette="foraxx-sho")
 The default percentile normalization is a quick-look channel match. Pass
 `normalization="none"` for already matched inputs. Foraxx inputs must also
 already lie in `[0, 1]` in that mode; keep percentile normalization for
-sensor-unit arrays. RGB, LRGB, the six direct S/H/O permutations, and HOO are
-linear-light. Foraxx-SHO/HOO use a stretched working copy as required by the
+sensor-unit arrays. RGB, LRGB, additive super-LRGB (`L + R + G + B`), the six
+direct S/H/O permutations, and HOO are linear-light. Super-LRGB can exceed one.
+Foraxx-SHO/HOO use a stretched working copy as required by the
 published dynamic formula, so those returned arrays are display-referred.
 Composition releases the GIL.
 

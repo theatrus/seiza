@@ -50,6 +50,20 @@ Scaling the triplet retains its linear RGB chromaticity while replacing its
 luminance. A zero-chrominance pixel becomes neutral at `Yout`. A weight of one
 uses all source L; zero is an RGB no-op.
 
+Super-luminance mode instead adds every prepared channel into the target
+luminance:
+
+```text
+Ysuper = L + R + G + B
+RGBout = RGB * Ysuper / Yrgb
+```
+
+The selected normalization is applied before the sum. The RGB triplet is still
+scaled together, retaining its chromaticity, but the additive linear `f32`
+result can exceed one. This is a quick-visualization and stack-depth option,
+not a photometric calibration. Rust callers select it with
+`combine_super_lrgb`; the CLI and Python APIs use luminance mode `super`.
+
 This follows PixInsight's documented model rather than reproducing every
 `LRGBCombination` control. PixInsight staff describe CIE XYZ separation for
 linear images, on-demand luminance/chrominance rather than a stored L channel,
@@ -106,8 +120,9 @@ Foraxx-HOO:
 
 The FITS writer records `SEIZATRF='DISPLAY'` for Foraxx and for any composition
 whose inputs were explicitly marked display-referred. Linear inputs remain
-`SEIZATRF='LINEAR'` for RGB, LRGB, direct palettes, and custom matrices. It also
-records `SEIZACLR` with the palette name. A display-referred preview is written
+`SEIZATRF='LINEAR'` for RGB, LRGB, super-LRGB, direct palettes, and custom
+matrices. It records `SEIZACLR='SUPER-LRGB'` for super-luminance output and
+the composition or palette name otherwise. A display-referred preview is written
 directly; a linear-light preview receives the normal display-only asinh stretch.
 The original equations and the stretched-input requirement come from
 Ludo/ForaxX's [Dynamic narrowband combinations with

@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 use seiza_stacking::{
     ColorNormalization, ColorOptions, ForaxxOptions, NarrowbandPalette,
     combine_lrgb as compose_lrgb, combine_narrowband as compose_narrowband,
-    combine_rgb as compose_rgb,
+    combine_rgb as compose_rgb, combine_super_lrgb as compose_super_lrgb,
 };
 
 fn color_error(error: seiza_stacking::Error) -> PyErr {
@@ -68,7 +68,7 @@ fn combine_rgb<'py>(
 
 /// Combine a luminance stack with RGB channels into an LRGB image.
 #[pyfunction]
-#[pyo3(signature = (luminance, red, green, blue, *, luminance_weight=1.0, normalization="percentile", black_percentile=0.001, white_percentile=0.995, normalization_samples=1_000_000))]
+#[pyo3(signature = (luminance, red, green, blue, *, luminance_weight=1.0, luminance_mode="replace", normalization="percentile", black_percentile=0.001, white_percentile=0.995, normalization_samples=1_000_000))]
 #[allow(clippy::too_many_arguments)]
 fn combine_lrgb<'py>(
     py: Python<'py>,
@@ -77,11 +77,28 @@ fn combine_lrgb<'py>(
     green: PyReadonlyArrayDyn<'_, f32>,
     blue: PyReadonlyArrayDyn<'_, f32>,
     luminance_weight: f32,
+    luminance_mode: &str,
     normalization: &str,
     black_percentile: f32,
     white_percentile: f32,
     normalization_samples: usize,
 ) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
+    let super_luminance = match luminance_mode.to_ascii_lowercase().as_str() {
+        "replace" => false,
+        "super" => {
+            if luminance_weight != 1.0 {
+                return Err(PyValueError::new_err(
+                    "luminance_weight only applies when luminance_mode='replace'",
+                ));
+            }
+            true
+        }
+        _ => {
+            return Err(PyValueError::new_err(
+                "luminance_mode must be 'replace' or 'super'",
+            ));
+        }
+    };
     let luminance = linear_image(luminance)?;
     let red = linear_image(red)?;
     let green = linear_image(green)?;
@@ -94,7 +111,18 @@ fn combine_lrgb<'py>(
     )?;
     let result = py
         .allow_threads(move || {
-            compose_lrgb(&luminance, &red, &green, &blue, luminance_weight, &options)
+            if super_luminance {
+                compose_super_lrgb(&luminance, &red, &green, &blue, &options)
+            } else {
+                compose_lrgb(
+                    &luminance,
+                    &red,
+                    &green,
+                    &blue,
+                    luminance_weight,
+                    &options,
+                )
+            }
         })
         .map_err(color_error)?;
     into_image_array(py, result.image)

@@ -243,6 +243,9 @@ seiza color rgb --red r.fits --green g.fits --blue b.fits \
 seiza color lrgb --luminance l.fits --red r.fits --green g.fits --blue b.fits \
   --luminance-weight 1.0 --output lrgb.fits --preview lrgb.png
 
+seiza color lrgb --luminance l.fits --red r.fits --green g.fits --blue b.fits \
+  --luminance-mode super --output super-lrgb.fits --preview super-lrgb.png
+
 seiza color narrowband --ha ha.fits --oiii oiii.fits --sii sii.fits \
   --palette sho --output sho.fits --preview sho.png
 
@@ -259,7 +262,13 @@ matched. Foraxx additionally requires those unnormalized samples to lie in
 working channels use a median/MAD midtones transfer; tune it with
 `--foraxx-target-median` and `--foraxx-shadows-clip`.
 
-Linear RGB/LRGB and direct-palette FITS files carry `SEIZATRF='LINEAR'`.
+LRGB defaults to linear luminance replacement. `--luminance-mode super`
+instead sets the target luminance to `L + R + G + B` after normalization while
+preserving RGB chromaticity. Its linear output may exceed one.
+`--luminance-weight` applies only to replacement mode.
+
+Linear RGB/LRGB, super-LRGB, and direct-palette FITS files carry
+`SEIZATRF='LINEAR'`.
 Foraxx follows its published stretched-channel formula and carries
 `SEIZATRF='DISPLAY'`; previews therefore do not pretend it is a linear stack.
 Input dimensions and path roles are validated, and WCS comes from the command's

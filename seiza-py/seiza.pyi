@@ -392,6 +392,7 @@ def combine_lrgb(
     blue: npt.NDArray[np.float32],
     *,
     luminance_weight: float = 1.0,
+    luminance_mode: str = "replace",
     normalization: str = "percentile",
     black_percentile: float = 0.001,
     white_percentile: float = 0.995,

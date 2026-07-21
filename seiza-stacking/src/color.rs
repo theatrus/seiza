@@ -264,7 +264,48 @@ pub fn combine_lrgb(
     luminance_weight: f32,
     options: &ColorOptions,
 ) -> Result<ColorComposition> {
-    if !luminance_weight.is_finite() || !(0.0..=1.0).contains(&luminance_weight) {
+    combine_lrgb_with_target(
+        luminance,
+        red,
+        green,
+        blue,
+        LrgbTarget::Replace { luminance_weight },
+        options,
+    )
+}
+
+/// Combine aligned L, R, G, and B stacks using additive super-luminance.
+///
+/// After applying the selected channel normalization, the target luminance is
+/// `L + R + G + B`. The RGB triplet is scaled to that luminance so its linear
+/// chromaticity is retained. The linear `f32` result may exceed one.
+pub fn combine_super_lrgb(
+    luminance: &LinearImage,
+    red: &LinearImage,
+    green: &LinearImage,
+    blue: &LinearImage,
+    options: &ColorOptions,
+) -> Result<ColorComposition> {
+    combine_lrgb_with_target(luminance, red, green, blue, LrgbTarget::Super, options)
+}
+
+#[derive(Clone, Copy)]
+enum LrgbTarget {
+    Replace { luminance_weight: f32 },
+    Super,
+}
+
+fn combine_lrgb_with_target(
+    luminance: &LinearImage,
+    red: &LinearImage,
+    green: &LinearImage,
+    blue: &LinearImage,
+    target: LrgbTarget,
+    options: &ColorOptions,
+) -> Result<ColorComposition> {
+    if let LrgbTarget::Replace { luminance_weight } = target
+        && (!luminance_weight.is_finite() || !(0.0..=1.0).contains(&luminance_weight))
+    {
         return Err(Error::Color(
             "luminance weight must be finite and between 0 and 1".into(),
         ));
@@ -276,7 +317,12 @@ pub fn combine_lrgb(
         ("green", green),
         ("blue", blue),
     ])?;
-    if luminance_weight == 0.0 {
+    if matches!(
+        target,
+        LrgbTarget::Replace {
+            luminance_weight: 0.0
+        }
+    ) {
         return combine_rgb(red, green, blue, options);
     }
     let l = prepare_channel(luminance, options.normalization)?;
@@ -297,13 +343,16 @@ pub fn combine_lrgb(
             let g = rgb[1].sample(index);
             let b = rgb[2].sample(index);
             let rgb_luminance = crate::image::rec709_luma(r, g, b);
-            let target =
-                (1.0 - luminance_weight).mul_add(rgb_luminance, luminance_weight * l.sample(index));
-            if rgb_luminance > 1.0e-8 && target.is_finite() {
-                let scale = target / rgb_luminance;
+            let target_luminance = match target {
+                LrgbTarget::Replace { luminance_weight } => (1.0 - luminance_weight)
+                    .mul_add(rgb_luminance, luminance_weight * l.sample(index)),
+                LrgbTarget::Super => l.sample(index) + r + g + b,
+            };
+            if rgb_luminance > 1.0e-8 && target_luminance.is_finite() {
+                let scale = target_luminance / rgb_luminance;
                 output.copy_from_slice(&[r * scale, g * scale, b * scale]);
             } else {
-                output.copy_from_slice(&[target; 3]);
+                output.copy_from_slice(&[target_luminance; 3]);
             }
         });
     Ok(ColorComposition {
@@ -821,6 +870,29 @@ mod tests {
         assert!((y - 0.8).abs() < 1.0e-6);
         assert!((pixel[0] / pixel[1] - 0.5).abs() < 1.0e-6);
         assert!((pixel[2] / pixel[1] - 0.25).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn super_lrgb_adds_all_four_channels_and_preserves_chromaticity() {
+        let l = 0.8;
+        let r = 0.2;
+        let g = 0.4;
+        let b = 0.1;
+        let result = combine_super_lrgb(
+            &mono(&[l]),
+            &mono(&[r]),
+            &mono(&[g]),
+            &mono(&[b]),
+            &raw_options(),
+        )
+        .unwrap();
+        let pixel = &result.image.data;
+        let output_luminance =
+            0.2126_f32.mul_add(pixel[0], 0.7152_f32.mul_add(pixel[1], 0.0722 * pixel[2]));
+        assert!((output_luminance - (l + r + g + b)).abs() < 1.0e-6);
+        assert!((pixel[0] / pixel[1] - r / g).abs() < 1.0e-6);
+        assert!((pixel[2] / pixel[1] - b / g).abs() < 1.0e-6);
+        assert_eq!(result.transfer, ColorTransfer::LinearLight);
     }
 
     #[test]

@@ -305,6 +305,9 @@ without changing the linear stack accumulator:
 seiza color lrgb --luminance l.fits --red r.fits --green g.fits --blue b.fits \
   --output lrgb.fits --preview lrgb.png
 
+seiza color lrgb --luminance l.fits --red r.fits --green g.fits --blue b.fits \
+  --luminance-mode super --output super-lrgb.fits --preview super-lrgb.png
+
 seiza color narrowband --ha ha.fits --oiii oiii.fits --sii sii.fits \
   --palette sho --output sho.fits --preview sho.png
 
@@ -312,8 +315,9 @@ seiza color narrowband --ha ha.fits --oiii oiii.fits --sii sii.fits \
   --palette foraxx-sho --preview foraxx.png
 ```
 
-RGB, LRGB, SHO/HOO, every direct three-filter permutation, and custom Rust
-mixing matrices retain linear-light samples. Foraxx-SHO and Foraxx-HOO use the
+RGB, LRGB, additive super-LRGB (`L + R + G + B`), SHO/HOO, every direct
+three-filter permutation, and custom Rust mixing matrices retain linear-light
+samples. Foraxx-SHO and Foraxx-HOO use the
 published dynamic formula on internally stretched working channels and are
 explicitly marked display-referred in FITS metadata. See the [color-composition
 design](docs/design/color-composition.md) for normalization, equations, and
