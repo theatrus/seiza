@@ -215,8 +215,9 @@ rings, and field-dependent failures. Raw Bayer mosaics are rejected. See the
 [`seiza-deconvolution` crate](seiza-deconvolution/README.md) and
 [design note](docs/design/deconvolution.md) for the guardrails and limitations.
 The [AstroBin corpus trial](docs/benchmarks/2026-07-deconvolution-corpus.md)
-shows four input/Seiza/BlurXTerminator comparisons with measured PSF and
-background changes; the
+shows four input/conservative/strong/BlurXTerminator comparisons with measured
+PSF and background changes, including a ringing failure hidden by aggregate
+FWHM; the
 [model-based restoration plan](docs/design/ml-restoration-training.md) explains
 how synthetic degradations and registered expert pairs could train a later ML
 operation without treating attractive edits as ground truth.

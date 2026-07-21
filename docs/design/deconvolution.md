@@ -46,6 +46,13 @@ star halos, nebular edges, the background noise spectrum, and image borders.
 Increase the blend before increasing iterations. Values above roughly 8-10
 iterations should be considered stress tests, not normal processing.
 
+An eight-iteration, 65% blend sweep closed much of the FWHM gap on three corpus
+fields, and matched the installed learned reference on one. It also created
+obvious dark rings on a fourth field. That setting is preserved in the
+[corpus note](../benchmarks/2026-07-deconvolution-corpus.md) as a failure-bearing
+comparison, not a preset. Do not trade visual and photometric validity for a
+smaller aggregate FWHM.
+
 ## What this can and cannot show
 
 This can test recovery of contrast lost to a modest, approximately symmetric
@@ -63,7 +70,8 @@ artifacts.
 - Estimate local PSFs from unsaturated detected stars and report confidence.
 - Compare Gaussian and Moffat kernels on real star wings.
 - Partition the field into smoothly blended PSF regions for spatial variation.
-- Add star/support masks and stronger regularization for low-SNR backgrounds.
+- Add star/support masks, edge tapering, and total-variation or wavelet
+  regularization for low-SNR backgrounds and ringing control.
 - Establish objective tests: held-out synthetic forward models, FWHM/encircled
   energy, flux error, background power, and ringing around high-contrast stars.
 - Treat any learned restoration as a separate, provenance-bearing operation
