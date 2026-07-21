@@ -65,6 +65,21 @@ pub enum DownloadEvent {
         name: String,
         path: PathBuf,
     },
+    /// A cached artifact is being exhaustively re-hashed by `verify`.
+    Verifying {
+        name: String,
+    },
+    /// A verified cache object is being linked or copied into the output
+    /// directory by `materialize`.
+    Installing {
+        name: String,
+        path: PathBuf,
+    },
+    /// The artifact is in place in the output directory.
+    InstallComplete {
+        name: String,
+        path: PathBuf,
+    },
 }
 
 /// One verified immutable artifact in the local cache.
@@ -103,21 +118,67 @@ impl CatalogBundle {
     /// Exhaustively re-hash the selected cached artifacts. Normal `ensure`
     /// calls intentionally use only manifest size metadata on cache hits.
     pub async fn verify(&self) -> Result<()> {
-        for artifact in self.artifacts.values() {
-            bundle::verify_file(
-                &artifact.path,
-                artifact.bytes,
-                &artifact.sha256,
-                &artifact.name,
-            )
-            .await?;
+        self.verify_with(|_| {}).await
+    }
+
+    /// Like [`verify`](Self::verify), but reports a [`DownloadEvent::Verifying`]
+    /// per artifact and re-hashes all artifacts concurrently. Each artifact's
+    /// hash runs on the blocking pool, so distinct files hash in parallel.
+    pub async fn verify_with<F>(&self, report: F) -> Result<()>
+    where
+        F: Fn(DownloadEvent) + Send + Sync,
+    {
+        use futures_util::stream::{FuturesUnordered, StreamExt};
+
+        let report = &report;
+        let mut pending = self
+            .artifacts
+            .values()
+            .map(|artifact| async move {
+                report(DownloadEvent::Verifying {
+                    name: artifact.name.clone(),
+                });
+                bundle::verify_file(
+                    &artifact.path,
+                    artifact.bytes,
+                    &artifact.sha256,
+                    &artifact.name,
+                )
+                .await
+            })
+            .collect::<FuturesUnordered<_>>();
+        while let Some(result) = pending.next().await {
+            result?;
         }
         Ok(())
     }
 
-    /// Copy the selected artifacts into the CLI-compatible flat directory.
+    /// Place the selected artifacts into the CLI-compatible flat directory.
     /// Applications should normally consume the cache paths directly.
     pub async fn materialize(&self, output: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
+        self.materialize_with(output, |_| {}).await
+    }
+
+    /// Like [`materialize`](Self::materialize), but reports install progress.
+    ///
+    /// Cache objects are immutable and were SHA-256 verified when downloaded.
+    /// Installation hard-links them into the output directory — sharing the
+    /// verified inode, so no bytes are copied and nothing is re-hashed. Across
+    /// filesystems it falls back to a byte copy, which is then re-verified
+    /// because the copy does not share the source's proven integrity.
+    ///
+    /// An existing output file is left untouched only when it is a hard link to
+    /// the current cache object (proven by inode identity, not by size alone).
+    /// A same-size but independent file — a stale or corrupt copy — is not that
+    /// inode, so it is reinstalled rather than trusted.
+    pub async fn materialize_with<F>(
+        &self,
+        output: impl AsRef<Path>,
+        report: F,
+    ) -> Result<Vec<PathBuf>>
+    where
+        F: Fn(DownloadEvent) + Send + Sync,
+    {
         let output = output.as_ref();
         tokio::fs::create_dir_all(output)
             .await
@@ -126,33 +187,36 @@ impl CatalogBundle {
 
         for artifact in self.artifacts.values() {
             let target = output.join(&artifact.name);
-            if bundle::verify_file(&target, artifact.bytes, &artifact.sha256, &artifact.name)
-                .await
-                .is_ok()
+            // Trust an output file only when it is a hard link to the verified
+            // cache object — then it is provably byte-identical with no re-hash.
+            // A same-size-but-corrupt independent file is not the same inode, so
+            // it falls through and is reinstalled. `size_matches` must be checked
+            // first: it treats a missing target as a miss, whereas `is_same_file`
+            // would surface an I/O error on the fresh-install path.
+            if bundle::size_matches(&target, artifact.bytes).await?
+                && bundle::is_same_file(&artifact.path, &target).await?
             {
                 paths.push(target);
                 continue;
             }
 
-            let temp = output.join(format!(
-                ".{}.part-{}-{}",
-                artifact.name,
-                std::process::id(),
-                bundle::next_sequence()
-            ));
-            let install = async {
-                tokio::fs::copy(&artifact.path, &temp)
-                    .await
-                    .map_err(|source| io("copy cached artifact to", &temp, source))?;
-                bundle::verify_file(&temp, artifact.bytes, &artifact.sha256, &artifact.name)
+            report(DownloadEvent::Installing {
+                name: artifact.name.clone(),
+                path: target.clone(),
+            });
+            // Clear any stale or truncated file so the hard link can be created.
+            let _ = tokio::fs::remove_file(&target).await;
+            // A hard link shares the verified inode; a cross-filesystem copy is
+            // fresh, unverified bytes, so re-hash only that case.
+            if bundle::hardlink_or_copy(&artifact.path, &target).await? == bundle::Installed::Copied
+            {
+                bundle::verify_file(&target, artifact.bytes, &artifact.sha256, &artifact.name)
                     .await?;
-                bundle::replace_file(&temp, &target).await
             }
-            .await;
-            if let Err(error) = install {
-                let _ = tokio::fs::remove_file(&temp).await;
-                return Err(error);
-            }
+            report(DownloadEvent::InstallComplete {
+                name: artifact.name.clone(),
+                path: target.clone(),
+            });
             paths.push(target);
         }
         Ok(paths)
@@ -714,8 +778,8 @@ mod tests {
             )]),
         };
 
-        // A directory at the destination forces the final file replacement to
-        // fail after the artifact has been copied and verified.
+        // A directory at the destination cannot be linked or copied over, so
+        // installation fails and the error is surfaced to the caller.
         std::fs::create_dir(output.path().join(&name)).unwrap();
         assert!(bundle.materialize(output.path()).await.is_err());
 
@@ -728,6 +792,44 @@ mod tests {
                 .iter()
                 .any(|entry| { entry.to_string_lossy().starts_with(".objects.bin.part-") })
         );
+    }
+
+    #[tokio::test]
+    async fn materialize_hardlinks_and_reruns_without_rehashing() {
+        let cache = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let content = b"object catalog";
+        let source = cache.path().join("objects.bin");
+        std::fs::write(&source, content).unwrap();
+
+        let name = "objects.bin".to_string();
+        let bundle = CatalogBundle {
+            version: "catalog-bundle-v4-test".into(),
+            artifacts: BTreeMap::from([(
+                name.clone(),
+                CatalogArtifact {
+                    name: name.clone(),
+                    bytes: content.len() as u64,
+                    sha256: sha256(content),
+                    path: source.clone(),
+                },
+            )]),
+        };
+
+        let target = output.path().join(&name);
+        bundle.materialize(output.path()).await.unwrap();
+        // Same filesystem (both under the system temp dir): the output is a hard
+        // link to the cache object, so they share one inode.
+        assert!(bundle::is_same_file(&source, &target).await.unwrap());
+        assert_eq!(std::fs::read(&target).unwrap(), content);
+
+        // A second run recognises the shared inode and installs nothing new.
+        let events = std::sync::Mutex::new(Vec::new());
+        bundle
+            .materialize_with(output.path(), |event| events.lock().unwrap().push(event))
+            .await
+            .unwrap();
+        assert!(events.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

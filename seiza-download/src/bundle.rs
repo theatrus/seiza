@@ -368,12 +368,14 @@ async fn get(client: &reqwest::Client, url: &str) -> Result<reqwest::Response> {
 
 /// Verify that the file at `path` has exactly `bytes` length and hashes to
 /// `sha256`. `label` names the artifact in any resulting error.
+///
+/// SHA-256 over a multi-gigabyte artifact is CPU-bound, so the read-and-hash
+/// loop runs on the blocking pool rather than the async runtime thread. This
+/// keeps the caller's runtime free to report progress and to hash other
+/// artifacts concurrently.
 pub async fn verify_file(path: &Path, bytes: u64, sha256: &str, label: &str) -> Result<()> {
-    let mut input = tokio::fs::File::open(path)
-        .await
-        .map_err(|source| io("open", path, source))?;
-    let metadata = input
-        .metadata()
+    // Fail fast on a size mismatch without reading a whole wrong-sized file.
+    let metadata = tokio::fs::metadata(path)
         .await
         .map_err(|source| io("read metadata for", path, source))?;
     if metadata.len() != bytes {
@@ -384,19 +386,11 @@ pub async fn verify_file(path: &Path, bytes: u64, sha256: &str, label: &str) -> 
         });
     }
 
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; IO_BUFFER_BYTES];
-    loop {
-        let read = input
-            .read(&mut buffer)
-            .await
-            .map_err(|source| io("read", path, source))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let actual = lowercase_hex(&hasher.finalize());
+    let owned = path.to_path_buf();
+    let digest = tokio::task::spawn_blocking(move || hash_file_blocking(&owned))
+        .await
+        .map_err(|error| Error::BackgroundTask(error.to_string()))??;
+    let actual = lowercase_hex(&digest);
     if actual != sha256 {
         return Err(Error::Checksum {
             name: label.into(),
@@ -405,6 +399,26 @@ pub async fn verify_file(path: &Path, bytes: u64, sha256: &str, label: &str) -> 
         });
     }
     Ok(())
+}
+
+/// Synchronously read `path` in `IO_BUFFER_BYTES` chunks and return its raw
+/// SHA-256 digest. Runs inside `spawn_blocking`; uses `std::fs` so the blocking
+/// pool thread — not an async worker — bears the file I/O and hashing.
+fn hash_file_blocking(path: &Path) -> Result<[u8; 32]> {
+    use std::io::Read;
+    let mut input = std::fs::File::open(path).map_err(|source| io("open", path, source))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; IO_BUFFER_BYTES];
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .map_err(|source| io("read", path, source))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().into())
 }
 
 /// Cheap cache-hit probe: is `path` a regular file of exactly `bytes` length?
@@ -422,6 +436,60 @@ pub async fn replace_file(temp: &Path, target: &Path) -> Result<()> {
     tokio::fs::rename(temp, target)
         .await
         .map_err(|source| io("rename", temp, source))
+}
+
+/// Whether `a` and `b` resolve to the same underlying file (one inode reached
+/// through two names). For an immutable, previously verified cache object this
+/// proves the other name holds identical bytes without reading either file.
+/// Conservatively returns `false` on platforms that expose no comparable file
+/// identity, so callers fall back to reinstalling.
+pub async fn is_same_file(a: &Path, b: &Path) -> Result<bool> {
+    let a_meta = tokio::fs::metadata(a)
+        .await
+        .map_err(|source| io("read metadata for", a, source))?;
+    let b_meta = tokio::fs::metadata(b)
+        .await
+        .map_err(|source| io("read metadata for", b, source))?;
+    Ok(same_identity(&a_meta, &b_meta))
+}
+
+#[cfg(unix)]
+fn same_identity(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+
+#[cfg(not(unix))]
+fn same_identity(_a: &std::fs::Metadata, _b: &std::fs::Metadata) -> bool {
+    false
+}
+
+/// How [`hardlink_or_copy`] installed an artifact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Installed {
+    /// A hard link was created. The installed name shares the source's inode,
+    /// so it holds the source's already-verified bytes with nothing to re-check.
+    Linked,
+    /// The bytes were copied into an independent file. The copy is fresh and
+    /// unverified — the caller should re-hash it if integrity matters.
+    Copied,
+}
+
+/// Install an already-verified cache object at `target`, reporting whether it
+/// was linked or copied. Prefers a hard link — no bytes copied and no re-hash —
+/// and falls back to a byte copy when linking fails for any reason (a different
+/// filesystem, or one that does not support hard links). A hard link requires
+/// `target` to be absent; the copy fallback overwrites it. Because the source
+/// is a content-addressed, previously verified artifact, a [`Installed::Linked`]
+/// result inherits its integrity, while a [`Installed::Copied`] result does not.
+pub async fn hardlink_or_copy(source: &Path, target: &Path) -> Result<Installed> {
+    if tokio::fs::hard_link(source, target).await.is_ok() {
+        return Ok(Installed::Linked);
+    }
+    tokio::fs::copy(source, target)
+        .await
+        .map(|_| Installed::Copied)
+        .map_err(|error| io("copy cached artifact to", target, error))
 }
 
 /// Monotonic per-process counter for unique temporary filenames.
@@ -443,4 +511,43 @@ pub fn lowercase_hex(bytes: &[u8]) -> String {
 /// Lowercase hex SHA-256 of an in-memory payload.
 pub fn sha256_hex(bytes: &[u8]) -> String {
     lowercase_hex(&Sha256::digest(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn hardlink_or_copy_links_a_clean_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("src");
+        let target = dir.path().join("dst");
+        std::fs::write(&source, b"payload").unwrap();
+
+        assert_eq!(
+            hardlink_or_copy(&source, &target).await.unwrap(),
+            Installed::Linked
+        );
+        // The link shares the source inode and therefore its bytes.
+        assert!(is_same_file(&source, &target).await.unwrap());
+        assert_eq!(std::fs::read(&target).unwrap(), b"payload");
+    }
+
+    #[tokio::test]
+    async fn hardlink_or_copy_falls_back_to_copy_when_link_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("src");
+        let target = dir.path().join("dst");
+        std::fs::write(&source, b"payload").unwrap();
+        // A pre-existing target makes `hard_link` fail; the copy fallback
+        // overwrites it and reports an independent, unshared file.
+        std::fs::write(&target, b"stale contents").unwrap();
+
+        assert_eq!(
+            hardlink_or_copy(&source, &target).await.unwrap(),
+            Installed::Copied
+        );
+        assert!(!is_same_file(&source, &target).await.unwrap());
+        assert_eq!(std::fs::read(&target).unwrap(), b"payload");
+    }
 }
