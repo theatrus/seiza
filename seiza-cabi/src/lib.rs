@@ -527,7 +527,7 @@ pub unsafe extern "C" fn seiza_rendered_image_open_with_stretch_config(
     ffi_result(error_out, || {
         let path = required_path(path, "image path")?;
         let config_json = required_str(config_json, "stretch config JSON")?;
-        let config: StretchConfig = serde_json::from_str(config_json)
+        let config: StretchConfig = serde_json::from_str(&config_json)
             .map_err(|error| format!("invalid stretch config JSON: {error}"))?;
         let fits = FitsImage::open(&path)
             .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
@@ -1838,12 +1838,13 @@ fn required_path(value: *const c_char, name: &str) -> Result<PathBuf, String> {
     optional_path(value)?.ok_or_else(|| format!("{name} is required"))
 }
 
-fn required_str<'a>(value: *const c_char, name: &str) -> Result<&'a str, String> {
+fn required_str(value: *const c_char, name: &str) -> Result<String, String> {
     if value.is_null() {
         return Err(format!("{name} is required"));
     }
     unsafe { CStr::from_ptr(value) }
         .to_str()
+        .map(str::to_owned)
         .map_err(|_| format!("{name} is not valid UTF-8"))
 }
 
