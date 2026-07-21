@@ -161,10 +161,16 @@ impl CatalogBundle {
 
     /// Like [`materialize`](Self::materialize), but reports install progress.
     ///
-    /// Cache objects are immutable and were SHA-256 verified when downloaded, so
-    /// installation hard-links (or, across filesystems, copies) them into place
-    /// without re-hashing. An output file that already matches the expected size
-    /// is byte-identical to the verified cache object and is left untouched.
+    /// Cache objects are immutable and were SHA-256 verified when downloaded.
+    /// Installation hard-links them into the output directory — sharing the
+    /// verified inode, so no bytes are copied and nothing is re-hashed. Across
+    /// filesystems it falls back to a byte copy, which is then re-verified
+    /// because the copy does not share the source's proven integrity.
+    ///
+    /// An existing output file is left untouched only when it is a hard link to
+    /// the current cache object (proven by inode identity, not by size alone).
+    /// A same-size but independent file — a stale or corrupt copy — is not that
+    /// inode, so it is reinstalled rather than trusted.
     pub async fn materialize_with<F>(
         &self,
         output: impl AsRef<Path>,
@@ -184,7 +190,9 @@ impl CatalogBundle {
             // Trust an output file only when it is a hard link to the verified
             // cache object — then it is provably byte-identical with no re-hash.
             // A same-size-but-corrupt independent file is not the same inode, so
-            // it falls through and is reinstalled.
+            // it falls through and is reinstalled. `size_matches` must be checked
+            // first: it treats a missing target as a miss, whereas `is_same_file`
+            // would surface an I/O error on the fresh-install path.
             if bundle::size_matches(&target, artifact.bytes).await?
                 && bundle::is_same_file(&artifact.path, &target).await?
             {
@@ -198,7 +206,13 @@ impl CatalogBundle {
             });
             // Clear any stale or truncated file so the hard link can be created.
             let _ = tokio::fs::remove_file(&target).await;
-            bundle::hardlink_or_copy(&artifact.path, &target).await?;
+            // A hard link shares the verified inode; a cross-filesystem copy is
+            // fresh, unverified bytes, so re-hash only that case.
+            if bundle::hardlink_or_copy(&artifact.path, &target).await? == bundle::Installed::Copied
+            {
+                bundle::verify_file(&target, artifact.bytes, &artifact.sha256, &artifact.name)
+                    .await?;
+            }
             report(DownloadEvent::InstallComplete {
                 name: artifact.name.clone(),
                 path: target.clone(),
@@ -812,9 +826,7 @@ mod tests {
         // A second run recognises the shared inode and installs nothing new.
         let events = std::sync::Mutex::new(Vec::new());
         bundle
-            .materialize_with(output.path(), |event| {
-                events.lock().unwrap().push(event)
-            })
+            .materialize_with(output.path(), |event| events.lock().unwrap().push(event))
             .await
             .unwrap();
         assert!(events.lock().unwrap().is_empty());

@@ -464,18 +464,31 @@ fn same_identity(_a: &std::fs::Metadata, _b: &std::fs::Metadata) -> bool {
     false
 }
 
-/// Install an already-verified cache object at `target`. Prefers a hard link —
-/// no bytes copied and no re-hash — and falls back to a byte copy when linking
-/// fails (a different filesystem, or one that does not support hard links).
-/// `target` must not already exist. Because the source is a content-addressed,
-/// previously verified artifact, the installed file inherits its integrity.
-pub async fn hardlink_or_copy(source: &Path, target: &Path) -> Result<()> {
+/// How [`hardlink_or_copy`] installed an artifact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Installed {
+    /// A hard link was created. The installed name shares the source's inode,
+    /// so it holds the source's already-verified bytes with nothing to re-check.
+    Linked,
+    /// The bytes were copied into an independent file. The copy is fresh and
+    /// unverified — the caller should re-hash it if integrity matters.
+    Copied,
+}
+
+/// Install an already-verified cache object at `target`, reporting whether it
+/// was linked or copied. Prefers a hard link — no bytes copied and no re-hash —
+/// and falls back to a byte copy when linking fails for any reason (a different
+/// filesystem, or one that does not support hard links). A hard link requires
+/// `target` to be absent; the copy fallback overwrites it. Because the source
+/// is a content-addressed, previously verified artifact, a [`Installed::Linked`]
+/// result inherits its integrity, while a [`Installed::Copied`] result does not.
+pub async fn hardlink_or_copy(source: &Path, target: &Path) -> Result<Installed> {
     if tokio::fs::hard_link(source, target).await.is_ok() {
-        return Ok(());
+        return Ok(Installed::Linked);
     }
     tokio::fs::copy(source, target)
         .await
-        .map(|_| ())
+        .map(|_| Installed::Copied)
         .map_err(|error| io("copy cached artifact to", target, error))
 }
 
@@ -498,4 +511,43 @@ pub fn lowercase_hex(bytes: &[u8]) -> String {
 /// Lowercase hex SHA-256 of an in-memory payload.
 pub fn sha256_hex(bytes: &[u8]) -> String {
     lowercase_hex(&Sha256::digest(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn hardlink_or_copy_links_a_clean_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("src");
+        let target = dir.path().join("dst");
+        std::fs::write(&source, b"payload").unwrap();
+
+        assert_eq!(
+            hardlink_or_copy(&source, &target).await.unwrap(),
+            Installed::Linked
+        );
+        // The link shares the source inode and therefore its bytes.
+        assert!(is_same_file(&source, &target).await.unwrap());
+        assert_eq!(std::fs::read(&target).unwrap(), b"payload");
+    }
+
+    #[tokio::test]
+    async fn hardlink_or_copy_falls_back_to_copy_when_link_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("src");
+        let target = dir.path().join("dst");
+        std::fs::write(&source, b"payload").unwrap();
+        // A pre-existing target makes `hard_link` fail; the copy fallback
+        // overwrites it and reports an independent, unshared file.
+        std::fs::write(&target, b"stale contents").unwrap();
+
+        assert_eq!(
+            hardlink_or_copy(&source, &target).await.unwrap(),
+            Installed::Copied
+        );
+        assert!(!is_same_file(&source, &target).await.unwrap());
+        assert_eq!(std::fs::read(&target).unwrap(), b"payload");
+    }
 }
