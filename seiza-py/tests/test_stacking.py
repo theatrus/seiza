@@ -129,6 +129,38 @@ def test_batch_fits_stack_writes_linear_output_and_diagnostics(tmp_path):
         )
 
 
+def test_batch_fits_stack_registers_meridian_flip_without_large_fixtures(tmp_path):
+    image = synthetic_star_field()
+    first = tmp_path / "before-flip.fits"
+    second = tmp_path / "after-flip.fits"
+    output = tmp_path / "stack.fits"
+    fits.writeto(
+        first,
+        image,
+        header=fits.Header({"PIERSIDE": "EAST"}),
+        overwrite=True,
+    )
+    fits.writeto(
+        second,
+        np.ascontiguousarray(np.rot90(image, 2)),
+        header=fits.Header({"PIERSIDE": "WEST"}),
+        overwrite=True,
+    )
+
+    result = seiza.stack_fits(
+        [first, second], output, options=no_adjustment_options()
+    )
+
+    assert result.accepted_frames == 2
+    assert result.rejected_frames == 0
+    assert result.frames[0].accepted
+    assert abs(abs(result.frames[0].rotation_degrees) - 180.0) < 1.0
+    with fits.open(output) as hdus:
+        assert hdus[0].header["STACKCNT"] == 2
+        assert "PIERSIDE" not in hdus[0].header
+        np.testing.assert_allclose(hdus[0].data, image, rtol=0.0, atol=1.0)
+
+
 def test_fits_live_stacker_protects_inputs_from_duplicates_and_output(tmp_path):
     image = synthetic_star_field()
     first = tmp_path / "light-001.fits"

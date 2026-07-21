@@ -154,6 +154,14 @@ dimensions: valid samples are mapped onto the first frame's fixed grid, pixels
 outside a source crop remain masked, and `--min-overlap` controls how much
 usable overlap is required for admission.
 
+Meridian-flipped frames are handled automatically. The default 10-degree
+rotation gate measures deviation from the nearer of the reference orientation
+and its 180-degree counterpart, so a measured transform of 179.3 degrees has a
+0.7-degree admission deviation. The complete measured transform—not a header
+flag—is then used to rotate and resample the incoming pixels onto the reference
+grid before normalization and integration. Accepted-frame diagnostics and the
+JSON report retain the full measured rotation.
+
 `--flat` accepts an integrated master flat in the light frame's raw sampling.
 For legacy masters, `--bias` removes the flat's pedestal before normalization.
 Masters built by `seiza master` carry FITS calibration-state headers, so a

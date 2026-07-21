@@ -111,6 +111,26 @@ to decide whether enough of the frame can be integrated. Diagnostics retain
 matched-star count, RMS residual, center drift, translation, rotation, scale,
 and usable overlap.
 
+A German-equatorial-mount meridian flip is a valid second camera orientation,
+not 180 degrees of unexpected rotation. By default, the rotation admission gate
+therefore measures angular deviation from the nearer of 0 or 180 degrees. A
+179.3-degree fit is admitted as a 0.7-degree deviation under the default
+10-degree limit, while diagnostics retain the full 179.3-degree transform. The
+resampler applies that complete transform to turn the incoming pixels back onto
+the immutable reference grid before normalization or integration. An
+epsilon-bounded coordinate clamp prevents exact half-turn trigonometric
+roundoff from masking otherwise valid edge samples.
+
+`PIERSIDE` is useful acquisition provenance and may be used by a host as a
+registration hint, but [ASCOM defines it as mount pointing
+state](https://ascom-standards.org/newdocs/ptgstate-faq.html), not a pixel
+mapping. It cannot replace the measured transform because it supplies no
+residual angle, translation, scale, crop offset, or registration confidence.
+When a complete celestial [FITS
+WCS](https://fits.gsfc.nasa.gov/fits_wcs.html) is present, its linear matrix
+describes pixel orientation; otherwise the matched-star transform remains the
+stacking source of truth.
+
 The first slice deliberately rejects strong shear and reflection. Optical
 distortion and mosaic reprojection need a higher-order or WCS mapping and must
 be explicit future modes rather than silently entering a live stack.

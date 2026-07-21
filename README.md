@@ -149,6 +149,32 @@ Remote solves give up after five minutes; change that with
 `--server-timeout SECONDS`. Local and remote workers speak the same JSON
 protocol, so your application code does not change.
 
+## Image stacking
+
+`seiza stack` calibrates and registers linear FITS light frames, optionally
+applies global or tiled local normalization, and integrates them with online
+delta-sigma rejection. Differently sized or cropped frames are mapped onto the
+first frame's fixed output grid. Frames acquired after a German-equatorial-mount
+meridian flip are handled automatically: a transform near 180 degrees is
+accepted under the normal rotation tolerance and the pixels are rotated back
+onto the reference orientation before integration.
+
+```text
+seiza stack lights/*.fits --output stack.fits \
+  --bias master-bias.fits --dark master-dark.fits --flat master-flat.fits \
+  --normalization local --preview stack.png --report stack-report.json
+```
+
+![Eight-frame Sadr and Crescent Nebula H-alpha stack](docs/images/stacking/sadr-ha-8-frame.jpg)
+
+*Eight 300-second H-alpha frames stacked on the first frame's pixel grid. The
+JPEG uses a display-only stretch; the stack itself remains linear `f32` FITS.*
+
+The Rust crate and Python wheel expose the same incremental `LiveStacker`
+engine. See the [CLI stacking guide](seiza-cli/README.md#image-stacking),
+[Python API](seiza-py/README.md#image-stacking), and
+[stacking design](docs/design/image-stacking.md).
+
 ## Performance
 
 Seiza is built to solve inside an imaging loop. On our Windows 11 test machine
