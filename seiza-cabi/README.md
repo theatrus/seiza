@@ -9,7 +9,8 @@ exposes the **superset** of what both apps need.
 ## What it exposes
 
 - **FITS / XISF / raster rendering** — `seiza_rendered_image_open`,
-  `..._open_with_rgb_stretch`, `..._width`, `..._height`,
+  `..._open_with_rgb_stretch`, `..._open_with_stretch_config` (see the
+  **Parameterized stretch** entry below), `..._width`, `..._height`,
   `..._metadata_json`, `..._free`.
 - **Both pixel byte orders** — `seiza_rendered_image_rgba` (macOS / CoreGraphics)
   and `seiza_rendered_image_bgra` (Direct2D / WinUI), each with a `_length`

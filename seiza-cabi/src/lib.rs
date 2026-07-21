@@ -14,7 +14,8 @@ use seiza_deconvolution::{DeconvolutionConfig, deconvolve};
 use seiza_fits::{FitsImage, HeaderValue, RgbImage16, Statistics, StretchParams};
 use seiza_stacking::{
     CalibrationMasters, FitsFrame, FrameDiagnostics, FrameDisposition, LinearImage, LiveStacker,
-    StackOptions, StackSnapshot as RustStackSnapshot, paths_refer_to_same_file, write_fits_f32,
+    StackOptions, StackSnapshot as RustStackSnapshot, path_identity, paths_refer_to_same_file,
+    write_fits_f32,
 };
 use seiza_stretch::{StretchConfig, StretchStack};
 use serde::{Deserialize, Serialize};
@@ -273,17 +274,29 @@ impl CatalogSetupReporter {
         unsafe { callback(json.as_ptr(), self.context as *mut c_void) };
     }
 
-    fn simple(&self, phase: &'static str, message: impl Into<String>) {
+    /// Reports a phase update whose byte counters are unset. Download progress,
+    /// which carries byte counters, builds its own response.
+    fn report_phase(
+        &self,
+        phase: &'static str,
+        message: impl Into<String>,
+        file_name: Option<String>,
+        files_completed: usize,
+    ) {
         self.report(CatalogSetupProgressResponse {
             phase,
             message: message.into(),
-            file_name: None,
-            files_completed: 0,
+            file_name,
+            files_completed,
             files_total: self.files_total,
             bytes_completed: None,
             bytes_total: None,
             written_bytes: None,
         });
+    }
+
+    fn simple(&self, phase: &'static str, message: impl Into<String>) {
+        self.report_phase(phase, message, None, 0);
     }
 
     fn download_event(&self, event: DownloadEvent, files_completed: usize) {
@@ -299,16 +312,12 @@ impl CatalogSetupReporter {
                     format!("Using catalog manifest {version}")
                 },
             ),
-            DownloadEvent::CacheHit { name, .. } => self.report(CatalogSetupProgressResponse {
-                phase: "preparing",
-                message: format!("Found {name} in the download cache"),
-                file_name: Some(name),
+            DownloadEvent::CacheHit { name, .. } => self.report_phase(
+                "preparing",
+                format!("Found {name} in the download cache"),
+                Some(name),
                 files_completed,
-                files_total: self.files_total,
-                bytes_completed: None,
-                bytes_total: None,
-                written_bytes: None,
-            }),
+            ),
             DownloadEvent::DownloadStarted { name, bytes } => {
                 self.report(CatalogSetupProgressResponse {
                     phase: "downloading",
@@ -336,50 +345,30 @@ impl CatalogSetupReporter {
                 bytes_total: Some(total),
                 written_bytes: Some(written),
             }),
-            DownloadEvent::DownloadComplete { name, .. } => {
-                self.report(CatalogSetupProgressResponse {
-                    phase: "preparing",
-                    message: format!("Downloaded {name}"),
-                    file_name: Some(name),
-                    files_completed,
-                    files_total: self.files_total,
-                    bytes_completed: None,
-                    bytes_total: None,
-                    written_bytes: None,
-                })
-            }
-            DownloadEvent::Verifying { name } => self.report(CatalogSetupProgressResponse {
-                phase: "verifying",
-                message: format!("Verifying {name}"),
-                file_name: Some(name),
+            DownloadEvent::DownloadComplete { name, .. } => self.report_phase(
+                "preparing",
+                format!("Downloaded {name}"),
+                Some(name),
                 files_completed,
-                files_total: self.files_total,
-                bytes_completed: None,
-                bytes_total: None,
-                written_bytes: None,
-            }),
-            DownloadEvent::Installing { name, .. } => self.report(CatalogSetupProgressResponse {
-                phase: "installing",
-                message: format!("Installing {name}"),
-                file_name: Some(name),
+            ),
+            DownloadEvent::Verifying { name } => self.report_phase(
+                "verifying",
+                format!("Verifying {name}"),
+                Some(name),
                 files_completed,
-                files_total: self.files_total,
-                bytes_completed: None,
-                bytes_total: None,
-                written_bytes: None,
-            }),
-            DownloadEvent::InstallComplete { name, .. } => {
-                self.report(CatalogSetupProgressResponse {
-                    phase: "installing",
-                    message: format!("Installed {name}"),
-                    file_name: Some(name),
-                    files_completed,
-                    files_total: self.files_total,
-                    bytes_completed: None,
-                    bytes_total: None,
-                    written_bytes: None,
-                })
-            }
+            ),
+            DownloadEvent::Installing { name, .. } => self.report_phase(
+                "installing",
+                format!("Installing {name}"),
+                Some(name),
+                files_completed,
+            ),
+            DownloadEvent::InstallComplete { name, .. } => self.report_phase(
+                "installing",
+                format!("Installed {name}"),
+                Some(name),
+                files_completed,
+            ),
         }
     }
 }
@@ -643,6 +632,18 @@ pub unsafe extern "C" fn seiza_deconvolve_in_place(
 ) -> bool {
     clear_error(error_out);
     ffi_result(error_out, || {
+        if !matches!(channels, 1 | 3) {
+            return Err("deconvolution requires one or three channels".into());
+        }
+        let expected = width
+            .checked_mul(height)
+            .and_then(|pixels| pixels.checked_mul(channels))
+            .ok_or_else(|| "deconvolution image dimensions overflow".to_string())?;
+        if data_length != expected {
+            return Err(format!(
+                "deconvolution input has {data_length} floats; expected {expected}"
+            ));
+        }
         let data = unsafe { required_f32_slice_mut(data, data_length, "deconvolution input")? };
         let config = DeconvolutionConfig {
             psf_fwhm_pixels,
@@ -702,11 +703,7 @@ pub unsafe extern "C" fn seiza_background_fit(
                 "background input has {data_length} floats; expected {expected}"
             ));
         }
-        if mask.is_null() {
-            if mask_length != 0 {
-                return Err("background mask is null but mask_length is non-zero".into());
-            }
-        } else if mask_length != pixels {
+        if !mask.is_null() && mask_length != pixels {
             return Err(format!(
                 "background mask has {mask_length} bytes; expected {pixels}"
             ));
@@ -787,9 +784,10 @@ pub unsafe extern "C" fn seiza_background_model_diagnostics_json(
 /// Renders a fitted background into a caller-owned interleaved float buffer.
 ///
 /// # Safety
-/// `model` must be a live pointer returned by [`seiza_background_fit`].
-/// `output` must point to `output_length` writable floats. When non-null,
-/// `error_out` must point to writable storage for one pointer.
+/// `model` must be null or a live pointer returned by [`seiza_background_fit`];
+/// a null model returns an error. `output` must point to `output_length`
+/// writable floats. When non-null, `error_out` must point to writable storage
+/// for one pointer.
 pub unsafe extern "C" fn seiza_background_model_render(
     model: *const SeizaBackgroundModel,
     output: *mut f32,
@@ -1433,6 +1431,10 @@ pub unsafe extern "C" fn seiza_catalog_status_json(
 /// synchronous and must run off the UI thread. Progress JSON is valid only for
 /// the duration of each callback.
 ///
+/// This builds its own blocking Tokio runtime for the download, so it must not
+/// be called from a thread already inside an async runtime; doing so panics,
+/// which this call catches and returns through `error_out`.
+///
 /// # Safety
 /// `catalog_directory` may be null or a valid NUL-terminated string. `context`
 /// is passed through untouched to `progress`. When non-null, `error_out` must
@@ -1479,7 +1481,7 @@ pub unsafe extern "C" fn seiza_rendered_image_open(
         target_median,
         shadows_clip,
         max_dimension,
-        RgbStretchMode::Auto,
+        Ok(RgbStretchMode::Auto),
         error_out,
     )
 }
@@ -1501,12 +1503,14 @@ pub unsafe extern "C" fn seiza_rendered_image_open_with_rgb_stretch(
     rgb_stretch_mode: u32,
     error_out: *mut *mut c_char,
 ) -> *mut SeizaRenderedImage {
-    clear_error(error_out);
-    ffi_result(error_out, || {
-        let mode = RgbStretchMode::from_raw(rgb_stretch_mode)?;
-        render_image(path, target_median, shadows_clip, max_dimension, mode)
-    })
-    .map_or(ptr::null_mut(), |image| Box::into_raw(Box::new(image)))
+    open_rendered_image(
+        path,
+        target_median,
+        shadows_clip,
+        max_dimension,
+        RgbStretchMode::from_raw(rgb_stretch_mode),
+        error_out,
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -1662,7 +1666,7 @@ fn open_rendered_image(
     target_median: f64,
     shadows_clip: f64,
     max_dimension: u32,
-    rgb_stretch_mode: RgbStretchMode,
+    rgb_stretch_mode: Result<RgbStretchMode, String>,
     error_out: *mut *mut c_char,
 ) -> *mut SeizaRenderedImage {
     clear_error(error_out);
@@ -1672,7 +1676,7 @@ fn open_rendered_image(
             target_median,
             shadows_clip,
             max_dimension,
-            rgb_stretch_mode,
+            rgb_stretch_mode?,
         )
     })
     .map_or(ptr::null_mut(), |image| Box::into_raw(Box::new(image)))
@@ -2347,7 +2351,9 @@ fn transient_discovery_date(details: &str) -> Option<String> {
     let year: i32 = parts.next()?.trim().parse().ok()?;
     let month: u32 = parts.next()?.trim().parse().ok()?;
     let day: u32 = parts.next()?.trim().parse().ok()?;
-    parse_iso_jd(&format!("{year:04}-{month:02}-{day:02}"))?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
     Some(format!("{year:04}-{month:02}-{day:02}"))
 }
 
@@ -2524,6 +2530,27 @@ fn render_path16(
     }
 }
 
+/// Classifies a FITS image as planar RGB, Bayer-mosaicked, or mono for the
+/// `colorKind` metadata field.
+fn fits_color_kind(fits: &FitsImage) -> &'static str {
+    if fits.planes == 3 {
+        "planar-rgb"
+    } else if fits.bayer_pattern().is_some() {
+        "bayer"
+    } else {
+        "mono"
+    }
+}
+
+/// Copies the FITS header cards into the JSON map shape used in render metadata.
+fn fits_headers_json(fits: &FitsImage) -> Map<String, Value> {
+    let mut headers = Map::new();
+    for (key, value) in &fits.headers {
+        headers.insert(key.clone(), header_json(value));
+    }
+    headers
+}
+
 fn render_astronomy_image(
     fits: FitsImage,
     source_format: AstronomyImageFormat,
@@ -2534,13 +2561,7 @@ fn render_astronomy_image(
     let source_width = fits.width;
     let source_height = fits.height;
     let statistics = fits.statistics();
-    let color_kind = if fits.planes == 3 {
-        "planar-rgb"
-    } else if fits.bayer_pattern().is_some() {
-        "bayer"
-    } else {
-        "mono"
-    };
+    let color_kind = fits_color_kind(&fits);
 
     let rgb = fits.debayer().or_else(|| fits.rgb_planes());
     let input_histogram = if let Some(rgb) = &rgb {
@@ -2564,10 +2585,7 @@ fn render_astronomy_image(
         usize::try_from(max_dimension).unwrap_or(usize::MAX),
     );
 
-    let mut headers = Map::new();
-    for (key, value) in &fits.headers {
-        headers.insert(key.clone(), header_json(value));
-    }
+    let headers = fits_headers_json(&fits);
     let metadata = json!({
         "width": source_width,
         "height": source_height,
@@ -2738,13 +2756,7 @@ fn prepare_fits_render(
     let source_width = fits.width;
     let source_height = fits.height;
     let statistics = fits.statistics();
-    let color_kind = if fits.planes == 3 {
-        "planar-rgb"
-    } else if fits.bayer_pattern().is_some() {
-        "bayer"
-    } else {
-        "mono"
-    };
+    let color_kind = fits_color_kind(&fits);
 
     let rgb = fits.debayer().or_else(|| fits.rgb_planes());
     let original_input_histogram = if let Some(rgb) = &rgb {
@@ -2797,10 +2809,7 @@ fn prepare_fits_render(
     } else {
         (original_input_histogram, None)
     };
-    let mut headers = Map::new();
-    for (key, value) in &fits.headers {
-        headers.insert(key.clone(), header_json(value));
-    }
+    let headers = fits_headers_json(&fits);
 
     Ok(PreparedFitsRender {
         source_format: source_format.name(),
@@ -3603,16 +3612,7 @@ fn catalog_status(catalog_directory: Option<&Path>) -> CatalogStatusResponse {
 }
 
 fn component_status<E: std::fmt::Display>(result: Result<PathBuf, E>) -> CatalogComponentStatus {
-    match result {
-        Ok(path) => CatalogComponentStatus {
-            available: true,
-            path: Some(path.to_string_lossy().into_owned()),
-        },
-        Err(_) => CatalogComponentStatus {
-            available: false,
-            path: None,
-        },
-    }
+    optional_component_status(result.map(Some))
 }
 
 fn optional_component_status<E: std::fmt::Display>(
@@ -3677,16 +3677,12 @@ fn run_catalog_setup(
                 output.display()
             )
         })?;
-    reporter.report(CatalogSetupProgressResponse {
-        phase: "complete",
-        message: format!("Catalogs are ready in {}", output.display()),
-        file_name: None,
-        files_completed: reporter.files_total,
-        files_total: reporter.files_total,
-        bytes_completed: None,
-        bytes_total: None,
-        written_bytes: None,
-    });
+    reporter.report_phase(
+        "complete",
+        format!("Catalogs are ready in {}", output.display()),
+        None,
+        reporter.files_total,
+    );
     Ok(())
 }
 
@@ -3753,11 +3749,9 @@ fn optional_positive_seconds(value: f64, name: &str) -> Result<Option<f64>, Stri
 }
 
 fn validate_distinct_stack_paths(paths: &[PathBuf]) -> Result<(), String> {
-    for (index, path) in paths.iter().enumerate() {
-        if paths[..index]
-            .iter()
-            .any(|previous| paths_refer_to_same_file(path, previous))
-        {
+    let mut seen = std::collections::HashSet::new();
+    for path in paths {
+        if !seen.insert(path_identity(path)) {
             return Err(format!("duplicate stack input path {}", path.display()));
         }
     }

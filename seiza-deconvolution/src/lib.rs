@@ -8,11 +8,12 @@
 //! a learned image model and not a substitute for a spatially varying PSF.
 
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const FWHM_TO_SIGMA: f32 = 1.0 / 2.354_82;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DeconvolutionConfig {
     /// Measured stellar full width at half maximum, in pixels.
     pub psf_fwhm_pixels: f32,
