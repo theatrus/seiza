@@ -92,6 +92,8 @@ impl StackOptions {
 pub struct FrameAcceptanceCriteria {
     pub maximum_registration_rms_pixels: f64,
     pub maximum_scale_deviation: f64,
+    /// Maximum rotation away from either the reference orientation or its
+    /// 180-degree meridian-flipped orientation.
     pub maximum_rotation_degrees: f64,
     pub minimum_overlap_fraction: f32,
     pub minimum_normalization_gain: f32,
@@ -139,7 +141,9 @@ pub enum FrameRejectionReason {
     RegistrationRms { measured: f64, maximum: f64 },
     #[error("scale deviation {measured:.5} exceeds {maximum:.5}")]
     ScaleDeviation { measured: f64, maximum: f64 },
-    #[error("rotation {measured_degrees:.3}deg exceeds {maximum_degrees:.3}deg")]
+    #[error(
+        "rotation deviation {measured_degrees:.3}deg from the nearest normal or meridian-flipped orientation exceeds {maximum_degrees:.3}deg"
+    )]
     Rotation {
         measured_degrees: f64,
         maximum_degrees: f64,
@@ -309,10 +313,11 @@ impl LiveStacker {
                 maximum: criteria.maximum_scale_deviation,
             }));
         }
-        let rotation_degrees = registration.transform.rotation_radians.to_degrees().abs();
-        if rotation_degrees > criteria.maximum_rotation_degrees {
+        let rotation_deviation_degrees =
+            rotation_deviation_degrees(registration.transform.rotation_radians);
+        if rotation_deviation_degrees > criteria.maximum_rotation_degrees {
             return Ok(self.reject(FrameRejectionReason::Rotation {
-                measured_degrees: rotation_degrees,
+                measured_degrees: rotation_deviation_degrees,
                 maximum_degrees: criteria.maximum_rotation_degrees,
             }));
         }
@@ -593,14 +598,26 @@ fn should_reject_sample(
     }
 }
 
+/// Angular distance from the closest valid German-equatorial-mount pier
+/// orientation. A meridian flip rotates the camera by 180 degrees, so a
+/// transform near either zero or half a turn has the same admission error.
+fn rotation_deviation_degrees(rotation_radians: f64) -> f64 {
+    let modulo_half_turn = rotation_radians.to_degrees().rem_euclid(180.0);
+    modulo_half_turn.min(180.0 - modulo_half_turn)
+}
+
 fn resample(
     source: &LinearImage,
     width: usize,
     height: usize,
     transform: SimilarityTransform,
 ) -> LinearImage {
+    const COORDINATE_EPSILON: f64 = 1.0e-9;
+
     let channels = source.channels;
     let mut data = vec![f32::NAN; width * height * channels];
+    let maximum_source_x = (source.width - 1) as f64;
+    let maximum_source_y = (source.height - 1) as f64;
     let inverse_cosine = transform.rotation_radians.cos() / transform.scale;
     let inverse_sine = transform.rotation_radians.sin() / transform.scale;
     data.par_chunks_mut(width * channels)
@@ -611,13 +628,18 @@ fn resample(
                 let target_x = x as f64 - transform.translation_x;
                 let source_x = inverse_cosine * target_x + inverse_sine * target_y;
                 let source_y = -inverse_sine * target_x + inverse_cosine * target_y;
-                if source_x < 0.0
-                    || source_y < 0.0
-                    || source_x > (source.width - 1) as f64
-                    || source_y > (source.height - 1) as f64
+                if source_x < -COORDINATE_EPSILON
+                    || source_y < -COORDINATE_EPSILON
+                    || source_x > maximum_source_x + COORDINATE_EPSILON
+                    || source_y > maximum_source_y + COORDINATE_EPSILON
                 {
                     continue;
                 }
+                // Exact quarter- and half-turns accumulate tiny trigonometric
+                // error at the boundary. Clamp only coordinates already proven
+                // to lie within the epsilon-expanded source grid.
+                let source_x = source_x.clamp(0.0, maximum_source_x);
+                let source_y = source_y.clamp(0.0, maximum_source_y);
                 let x0 = source_x.floor() as usize;
                 let y0 = source_y.floor() as usize;
                 let x1 = (x0 + 1).min(source.width - 1);
@@ -688,6 +710,33 @@ mod tests {
         );
         assert_eq!(registered.data[1], source.data[0]);
         assert!(registered.data[0].is_nan());
+    }
+
+    #[test]
+    fn meridian_flip_rotation_is_measured_from_half_a_turn() {
+        assert!(rotation_deviation_degrees(179.307_f64.to_radians()) < 0.7);
+        assert!(rotation_deviation_degrees((-179.307_f64).to_radians()) < 0.7);
+        assert!((rotation_deviation_degrees(12.0_f64.to_radians()) - 12.0).abs() < 1.0e-10);
+        assert!((rotation_deviation_degrees(90.0_f64.to_radians()) - 90.0).abs() < 1.0e-10);
+    }
+
+    #[test]
+    fn resampling_undoes_a_meridian_flip_about_the_image_center() {
+        let source =
+            LinearImage::new(4, 3, 1, (0..12).rev().map(|value| value as f32).collect()).unwrap();
+        let registered = resample(
+            &source,
+            4,
+            3,
+            SimilarityTransform {
+                scale: 1.0,
+                rotation_radians: std::f64::consts::PI,
+                translation_x: 3.0,
+                translation_y: 2.0,
+            },
+        );
+        let expected = (0..12).map(|value| value as f32).collect::<Vec<_>>();
+        assert_eq!(registered.data, expected);
     }
 
     #[test]

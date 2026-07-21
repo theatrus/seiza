@@ -59,3 +59,9 @@ center displacement is the larger of
 defaults are 256 pixels and 15%. Differently sized or cropped light frames are
 resampled onto the reference grid; samples outside their valid crop remain
 masked and are accounted for by the overlap admission gate.
+
+Meridian-flipped frames are accepted by default. The rotation admission limit
+is measured from the nearer of the reference orientation and its 180-degree
+counterpart, while diagnostics retain the full fitted rotation (for example,
+179.3 degrees). The same similarity transform is then used to rotate the
+pixels back onto the reference grid before normalization and integration.

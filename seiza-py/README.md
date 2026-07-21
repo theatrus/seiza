@@ -137,6 +137,11 @@ coverage = preview_state.coverage
 final = stacker.finish("stack.fits")  # consumes the live accumulator
 ```
 
+Frames taken after a German-equatorial-mount meridian flip are handled by
+default. `maximum_rotation_degrees` limits deviation from either the reference
+orientation or its 180-degree counterpart; frame diagnostics still report the
+full fitted rotation.
+
 Snapshot array properties are copies, so Python cannot mutate live Rust state.
 All expensive FITS, calibration, registration, and integration work releases
 the GIL.
