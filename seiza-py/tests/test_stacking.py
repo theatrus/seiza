@@ -161,6 +161,29 @@ def test_batch_fits_stack_registers_meridian_flip_without_large_fixtures(tmp_pat
         np.testing.assert_allclose(hdus[0].data, image, rtol=0.0, atol=1.0)
 
 
+def test_batch_fits_stack_preserves_three_plane_color(tmp_path):
+    image = synthetic_star_field()
+    rgb = np.stack(
+        [image, image * 0.65 + 25.0, image * 0.35 + 50.0], axis=0
+    ).astype(np.float32)
+    first = tmp_path / "rgb-before-flip.fits"
+    second = tmp_path / "rgb-after-flip.fits"
+    output = tmp_path / "rgb-stack.fits"
+    fits.writeto(first, rgb, overwrite=True)
+    fits.writeto(second, np.ascontiguousarray(rgb[:, ::-1, ::-1]), overwrite=True)
+
+    result = seiza.stack_fits(
+        [first, second], output, options=no_adjustment_options()
+    )
+
+    assert result.channels == 3
+    assert result.accepted_frames == 2
+    assert result.frames[0].accepted
+    with fits.open(output) as hdus:
+        assert hdus[0].data.shape == rgb.shape
+        np.testing.assert_allclose(hdus[0].data, rgb, rtol=0.0, atol=1.0)
+
+
 def test_fits_live_stacker_protects_inputs_from_duplicates_and_output(tmp_path):
     image = synthetic_star_field()
     first = tmp_path / "light-001.fits"

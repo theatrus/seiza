@@ -28,6 +28,15 @@ Each light frame follows this order:
 8. update the stack mean, variance, coverage, and rejection counts only when
    the complete frame is admitted.
 
+`LinearImage` carries either one channel or interleaved RGB. A native
+three-plane FITS is converted from FITS planar storage to that interleaved
+representation on input. A one-channel CFA FITS is calibrated before step 3,
+then debayered to RGB. Registration star detection derives a temporary
+luminance image, but the fitted transform is resampled across every channel;
+normalization coefficients and accumulator samples remain channel-specific.
+The writer converts interleaved RGB back to a standard three-plane linear
+`float32` FITS, so using luminance for registration never discards output color.
+
 Calibration inputs are integrated master frames. For legacy masters without
 Seiza metadata, a dark is assumed to include its bias pedestal; when both bias
 and dark are supplied, dark scaling uses

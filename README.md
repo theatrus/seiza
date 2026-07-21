@@ -159,6 +159,13 @@ meridian flip are handled automatically: a transform near 180 degrees is
 accepted under the normal rotation tolerance and the pixels are rotated back
 onto the reference orientation before integration.
 
+Color remains color. Three-plane FITS inputs are stacked as linear RGB; raw
+one-shot-color frames carrying `BAYERPAT` are calibrated in their native CFA
+sampling and then debayered. Registration detects stars from a luminance view,
+but the resulting transform, per-channel normalization, rejection, and
+accumulation retain all three channels. The result is an unstretched
+three-plane `float32` RGB FITS, and `--preview` produces an RGB display image.
+
 ```text
 seiza stack lights/*.fits --output stack.fits \
   --bias master-bias.fits --dark master-dark.fits --flat master-flat.fits \

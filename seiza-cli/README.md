@@ -143,6 +143,13 @@ SHA-256 identities for every source and calibration master, the complete
 configuration, and the ordered accepted/rejected disposition ledger. FITS and
 report outputs are published atomically after they are complete.
 
+Mono inputs produce a one-plane linear FITS stack. Three-plane FITS inputs
+remain RGB, while raw one-shot-color frames with `BAYERPAT` are calibrated in
+their native CFA sampling before debayering. Star detection uses a temporary
+luminance view, but registration is applied to all three channels and global or
+local normalization is estimated per channel. The output is an unstretched
+three-plane `float32` RGB FITS; `--preview` writes an RGB display stretch.
+
 The registration search is explicitly bounded at the center of the reference
 frame. Its effective default is whichever is larger: 256 pixels or 15% of the
 reference frame's larger dimension. Configure those components with
