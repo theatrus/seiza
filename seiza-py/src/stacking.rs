@@ -4,9 +4,9 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use seiza_stacking::{
     CalibrationMasters, DeltaSigmaOptions, FitsFrame, FrameDisposition, LinearImage, LiveStacker,
-    MasterBuildOptions, MasterDark, MasterFrameKind, MasterRejectionOptions,
-    NormalizationMode, RejectionMode, StackOptions, StackSnapshot, build_master_from_fits,
-    paths_refer_to_same_file, write_fits_f32, write_master_fits_f32,
+    MasterBuildOptions, MasterDark, MasterFrameKind, MasterRejectionOptions, NormalizationMode,
+    RejectionMode, StackOptions, StackSnapshot, build_master_from_fits, paths_refer_to_same_file,
+    write_fits_f32, write_master_fits_f32,
 };
 use std::path::{Path, PathBuf};
 
