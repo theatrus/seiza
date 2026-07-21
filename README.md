@@ -2,9 +2,11 @@
 
 [![MSRV](https://img.shields.io/badge/MSRV-1.89-blue.svg)](Cargo.toml)
 
-Star detection, WCS fitting, and plate solving — hinted and blind — for
-astrophotography, in Rust. Built to power object overlays and astrometric
-features in [tenrankai](https://github.com/theatrus/tenrankai) and
+Star detection, WCS fitting, plate solving — hinted and blind — and calibrated
+batch/live image stacking for astrophotography, in Rust. Stacking includes
+linear FITS output and RGB, LRGB, and narrowband composition from mono stacks.
+Built to power object overlays and astrometric features in
+[tenrankai](https://github.com/theatrus/tenrankai) and
 [PSF Guard](https://github.com/theatrus/psf-guard).
 
 It is fast. A typical hinted solve of a real telescope frame finishes in
