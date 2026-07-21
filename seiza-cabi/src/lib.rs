@@ -53,6 +53,35 @@ struct BackgroundRenderRequest {
     config: BackgroundConfig,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+struct DeconvolutionRenderRequest {
+    psf_fwhm_pixels: f32,
+    #[serde(default = "default_deconvolution_iterations")]
+    iterations: usize,
+    #[serde(default = "default_deconvolution_amount")]
+    amount: f32,
+    #[serde(default = "default_deconvolution_noise_fraction")]
+    noise_fraction: f32,
+    #[serde(default = "default_deconvolution_max_correction")]
+    max_correction: f32,
+}
+
+const fn default_deconvolution_iterations() -> usize {
+    4
+}
+
+const fn default_deconvolution_amount() -> f32 {
+    0.35
+}
+
+const fn default_deconvolution_noise_fraction() -> f32 {
+    0.001
+}
+
+const fn default_deconvolution_max_correction() -> f32 {
+    2.0
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct InteractivePreviewCacheKey {
     path: PathBuf,
@@ -90,6 +119,8 @@ struct ProcessedRenderRequest {
     #[serde(default)]
     background: Option<BackgroundRenderRequest>,
     #[serde(default)]
+    deconvolution: Option<DeconvolutionRenderRequest>,
+    #[serde(default)]
     interactive_preview: bool,
 }
 
@@ -101,14 +132,22 @@ enum ImageRenderConfigRequest {
 }
 
 impl ImageRenderConfigRequest {
-    fn into_parts(self) -> (StretchStack, Option<BackgroundRenderRequest>, bool) {
+    fn into_parts(
+        self,
+    ) -> (
+        StretchStack,
+        Option<BackgroundRenderRequest>,
+        Option<DeconvolutionRenderRequest>,
+        bool,
+    ) {
         match self {
             Self::Processed(request) => (
                 request.stretch.into_stack(),
                 request.background,
+                request.deconvolution,
                 request.interactive_preview,
             ),
-            Self::Stretch(request) => (request.into_stack(), None, false),
+            Self::Stretch(request) => (request.into_stack(), None, None, false),
         }
     }
 }
@@ -1456,13 +1495,14 @@ pub unsafe extern "C" fn seiza_rendered_image_open_with_rgb_stretch(
 /// Opens a FITS image and renders it with parameterized processing described by
 /// `config_json`. The value may be one serialized `seiza-stretch`
 /// `StretchConfig` (the original schema), a non-empty array of configs, or an
-/// object with `stretch`, optional `background`, and optional
-/// `interactive_preview` fields. Array stages are applied in order using `f32`
-/// intermediates and converted to RGBA only after the final stage. Background
-/// correction, when requested, is fitted and applied to linear samples before
-/// the first stretch stage. Interactive preview mode bounds the linear samples
-/// to `max_dimension` before processing and reuses the prepared pixels across
-/// stretch-only edits; full renders should leave it false.
+/// object with `stretch`, optional `background`, optional `deconvolution`, and
+/// optional `interactive_preview` fields. Array stages are applied in order
+/// using `f32` intermediates and converted to RGBA only after the final stage.
+/// Background correction and deconvolution, when requested, are applied to
+/// linear samples in that order before the first stretch stage. Interactive
+/// preview mode bounds the linear samples to `max_dimension` before processing
+/// and reuses the source/background-prepared pixels across stretch and
+/// deconvolution edits; full renders should leave it false.
 ///
 /// # Safety
 /// `path` and `config_json` must be valid NUL-terminated strings. When non-null,
@@ -1479,13 +1519,26 @@ pub unsafe extern "C" fn seiza_rendered_image_open_with_stretch_config(
         let config_json = required_str(config_json, "stretch config JSON")?;
         let request: ImageRenderConfigRequest = serde_json::from_str(&config_json)
             .map_err(|error| format!("invalid image processing config JSON: {error}"))?;
-        let (stack, background, interactive_preview) = request.into_parts();
+        let (stack, background, deconvolution, interactive_preview) = request.into_parts();
         if interactive_preview {
-            render_cached_interactive_preview(&path, &stack, background.as_ref(), max_dimension)
+            render_cached_interactive_preview(
+                &path,
+                &stack,
+                background.as_ref(),
+                deconvolution.as_ref(),
+                max_dimension,
+            )
         } else {
             let fits = FitsImage::open(&path)
                 .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
-            render_fits_with_pipeline(fits, &stack, background.as_ref(), max_dimension, false)
+            render_fits_with_pipeline(
+                fits,
+                &stack,
+                background.as_ref(),
+                deconvolution.as_ref(),
+                max_dimension,
+                false,
+            )
         }
     })
     .map_or(ptr::null_mut(), |image| Box::into_raw(Box::new(image)))
@@ -2283,18 +2336,19 @@ fn render_fits_with_stack(
     stack: &StretchStack,
     max_dimension: u32,
 ) -> Result<SeizaRenderedImage, String> {
-    render_fits_with_pipeline(fits, stack, None, max_dimension, false)
+    render_fits_with_pipeline(fits, stack, None, None, max_dimension, false)
 }
 
 fn render_fits_with_pipeline(
     fits: FitsImage,
     stack: &StretchStack,
     background: Option<&BackgroundRenderRequest>,
+    deconvolution: Option<&DeconvolutionRenderRequest>,
     max_dimension: u32,
     interactive_preview: bool,
 ) -> Result<SeizaRenderedImage, String> {
     let prepared = prepare_fits_render(fits, background, max_dimension, interactive_preview)?;
-    render_prepared_fits(&prepared, stack, max_dimension, false)
+    render_prepared_fits(&prepared, stack, deconvolution, max_dimension, false)
 }
 
 fn prepare_fits_render(
@@ -2390,11 +2444,67 @@ fn prepare_fits_render(
 fn render_prepared_fits(
     prepared: &PreparedFitsRender,
     stack: &StretchStack,
+    deconvolution: Option<&DeconvolutionRenderRequest>,
     max_dimension: u32,
     interactive_preview_cache_hit: bool,
 ) -> Result<SeizaRenderedImage, String> {
+    let deconvolution_result = if let Some(request) = deconvolution {
+        let scale = (prepared.render_width as f32 / prepared.source_width as f32)
+            .min(prepared.render_height as f32 / prepared.source_height as f32);
+        let effective_psf_fwhm_pixels = (request.psf_fwhm_pixels * scale).max(0.25);
+        let config = DeconvolutionConfig {
+            psf_fwhm_pixels: effective_psf_fwhm_pixels,
+            iterations: request.iterations,
+            amount: request.amount,
+            noise_fraction: request.noise_fraction,
+            max_correction: request.max_correction,
+        };
+        let restored = deconvolve(
+            &prepared.data,
+            prepared.render_width,
+            prepared.render_height,
+            prepared.channels,
+            &config,
+        )
+        .map_err(|error| format!("failed to deconvolve image: {error}"))?;
+        let channels = restored
+            .channels
+            .iter()
+            .map(|channel| {
+                json!({
+                    "inputFlux": channel.input_flux,
+                    "outputFlux": channel.output_flux,
+                    "inputPeak": channel.input_peak,
+                    "outputPeak": channel.output_peak,
+                })
+            })
+            .collect::<Vec<_>>();
+        Some((
+            restored.data,
+            json!({
+                "psfFwhmPixels": request.psf_fwhm_pixels,
+                "effectivePsfFwhmPixels": effective_psf_fwhm_pixels,
+                "iterations": request.iterations,
+                "amount": request.amount,
+                "noiseFraction": request.noise_fraction,
+                "maxCorrection": request.max_correction,
+                "channels": channels,
+            }),
+        ))
+    } else {
+        None
+    };
+    let data = deconvolution_result
+        .as_ref()
+        .map_or(prepared.data.as_slice(), |(data, _)| data.as_slice());
+    let input_histogram = if deconvolution_result.is_some() {
+        input_histogram_f32_json(data, prepared.channels)
+    } else {
+        prepared.input_histogram.clone()
+    };
+    let deconvolution_metadata = deconvolution_result.as_ref().map(|(_, metadata)| metadata);
     let stretched = stack
-        .apply_u8(&prepared.data, prepared.channels)
+        .apply_u8(data, prepared.channels)
         .map_err(|error| error.to_string())?
         .data;
     let rgba: Vec<u8> = if prepared.channels == 3 {
@@ -2426,8 +2536,9 @@ fn render_prepared_fits(
         "interactivePreview": prepared.interactive_preview,
         "interactivePreviewCacheHit": interactive_preview_cache_hit,
         "backgroundProcessing": prepared.background_metadata,
+        "deconvolutionProcessing": deconvolution_metadata,
         "statistics": prepared.statistics,
-        "inputHistogram": prepared.input_histogram,
+        "inputHistogram": input_histogram,
         "displayHistogram": display_histogram,
         "headers": prepared.headers,
     });
@@ -2446,6 +2557,7 @@ fn render_cached_interactive_preview(
     path: &Path,
     stack: &StretchStack,
     background: Option<&BackgroundRenderRequest>,
+    deconvolution: Option<&DeconvolutionRenderRequest>,
     max_dimension: u32,
 ) -> Result<SeizaRenderedImage, String> {
     let key = interactive_preview_cache_key(path, background, max_dimension)?;
@@ -2453,14 +2565,14 @@ fn render_cached_interactive_preview(
         .get_or_init(|| Mutex::new(VecDeque::with_capacity(INTERACTIVE_PREVIEW_CACHE_CAPACITY)));
 
     if let Some(prepared) = cached_interactive_preview(cache, &key)? {
-        return render_prepared_fits(&prepared, stack, max_dimension, true);
+        return render_prepared_fits(&prepared, stack, deconvolution, max_dimension, true);
     }
 
     let fits = FitsImage::open(path)
         .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
     let prepared = Arc::new(prepare_fits_render(fits, background, max_dimension, true)?);
     let prepared = store_interactive_preview(cache, key, prepared)?;
-    render_prepared_fits(&prepared, stack, max_dimension, false)
+    render_prepared_fits(&prepared, stack, deconvolution, max_dimension, false)
 }
 
 fn interactive_preview_cache_key(
@@ -3876,9 +3988,10 @@ mod tests {
             }
         }))
         .unwrap();
-        let (stack, background, interactive_preview) = request.into_parts();
+        let (stack, background, deconvolution, interactive_preview) = request.into_parts();
         assert_eq!(stack.len(), 1);
         assert!(!interactive_preview);
+        assert!(deconvolution.is_none());
         let background = background.unwrap();
         assert_eq!(background.mode, CorrectionMode::Subtract);
         assert_eq!(background.config.sample_radius, Some(2));
@@ -3912,7 +4025,7 @@ mod tests {
 
         let uncorrected = render_fits_with_stack(fits.clone(), &stack, 0).unwrap();
         let corrected =
-            render_fits_with_pipeline(fits, &stack, Some(&background), 0, false).unwrap();
+            render_fits_with_pipeline(fits, &stack, Some(&background), None, 0, false).unwrap();
         assert_ne!(corrected.rgba, uncorrected.rgba);
 
         let metadata: Value =
@@ -3932,6 +4045,63 @@ mod tests {
     }
 
     #[test]
+    fn fits_render_pipeline_reports_and_applies_deconvolution_before_stretching() {
+        let size = 41;
+        let center = size / 2;
+        let mut pixels = vec![0.01; size * size];
+        pixels[center * size + center] = 0.7;
+        pixels[center * size + center - 1] = 0.35;
+        pixels[center * size + center + 1] = 0.35;
+        pixels[(center - 1) * size + center] = 0.35;
+        pixels[(center + 1) * size + center] = 0.35;
+        let fits = FitsImage {
+            width: size,
+            height: size,
+            planes: 1,
+            pixels: seiza_fits::Pixels::F32(pixels),
+            headers: Vec::new(),
+        };
+        let stretch: StretchConfig = serde_json::from_value(json!({
+            "model": { "type": "identity" },
+            "color_strategy": "linked",
+            "max_analysis_samples": 4096
+        }))
+        .unwrap();
+        let stack = StretchStack::single(stretch);
+        let deconvolution = DeconvolutionRenderRequest {
+            psf_fwhm_pixels: 2.8,
+            iterations: 4,
+            amount: 0.35,
+            noise_fraction: 0.001,
+            max_correction: 2.0,
+        };
+
+        let plain = render_fits_with_stack(fits.clone(), &stack, 0).unwrap();
+        let restored =
+            render_fits_with_pipeline(fits, &stack, None, Some(&deconvolution), 0, false).unwrap();
+        assert_ne!(restored.rgba, plain.rgba);
+
+        let metadata: Value =
+            serde_json::from_str(restored.metadata_json.to_str().unwrap()).unwrap();
+        let requested_fwhm = metadata["deconvolutionProcessing"]["psfFwhmPixels"]
+            .as_f64()
+            .unwrap();
+        let effective_fwhm = metadata["deconvolutionProcessing"]["effectivePsfFwhmPixels"]
+            .as_f64()
+            .unwrap();
+        assert!((requested_fwhm - 2.8).abs() < 1.0e-5);
+        assert!((effective_fwhm - 2.8).abs() < 1.0e-5);
+        assert_eq!(metadata["deconvolutionProcessing"]["iterations"], 4);
+        assert_eq!(
+            metadata["deconvolutionProcessing"]["channels"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn interactive_preview_bounds_linear_samples_before_processing() {
         let request: ImageRenderConfigRequest = serde_json::from_value(json!({
             "stretch": [{
@@ -3939,11 +4109,17 @@ mod tests {
                 "color_strategy": "linked",
                 "max_analysis_samples": 4096
             }],
+            "deconvolution": {
+                "psf_fwhm_pixels": 3.0
+            },
             "interactive_preview": true
         }))
         .unwrap();
-        let (stack, background, interactive_preview) = request.into_parts();
+        let (stack, background, deconvolution, interactive_preview) = request.into_parts();
         assert!(background.is_none());
+        let deconvolution = deconvolution.unwrap();
+        assert_eq!(deconvolution.iterations, 4);
+        assert_eq!(deconvolution.amount, 0.35);
         assert!(interactive_preview);
 
         let fits = FitsImage {
@@ -3953,14 +4129,25 @@ mod tests {
             pixels: seiza_fits::Pixels::F32(background_plane(400, 200)),
             headers: Vec::new(),
         };
-        let preview =
-            render_fits_with_pipeline(fits, &stack, None, 100, interactive_preview).unwrap();
+        let preview = render_fits_with_pipeline(
+            fits,
+            &stack,
+            None,
+            Some(&deconvolution),
+            100,
+            interactive_preview,
+        )
+        .unwrap();
         assert_eq!((preview.width, preview.height), (100, 50));
         let metadata: Value =
             serde_json::from_str(preview.metadata_json.to_str().unwrap()).unwrap();
         assert_eq!(metadata["width"], 400);
         assert_eq!(metadata["height"], 200);
         assert_eq!(metadata["interactivePreview"], true);
+        assert_eq!(
+            metadata["deconvolutionProcessing"]["effectivePsfFwhmPixels"],
+            0.75
+        );
     }
 
     #[test]
@@ -3976,14 +4163,24 @@ mod tests {
         .unwrap();
         let stack = StretchStack::single(stretch);
 
-        let first = render_cached_interactive_preview(&path, &stack, None, 100).unwrap();
-        let second = render_cached_interactive_preview(&path, &stack, None, 100).unwrap();
+        let deconvolution = DeconvolutionRenderRequest {
+            psf_fwhm_pixels: 3.0,
+            iterations: 4,
+            amount: 0.35,
+            noise_fraction: 0.001,
+            max_correction: 2.0,
+        };
+        let first = render_cached_interactive_preview(&path, &stack, None, None, 100).unwrap();
+        let second =
+            render_cached_interactive_preview(&path, &stack, None, Some(&deconvolution), 100)
+                .unwrap();
         let first_metadata: Value =
             serde_json::from_str(first.metadata_json.to_str().unwrap()).unwrap();
         let second_metadata: Value =
             serde_json::from_str(second.metadata_json.to_str().unwrap()).unwrap();
         assert_eq!(first_metadata["interactivePreviewCacheHit"], false);
         assert_eq!(second_metadata["interactivePreviewCacheHit"], true);
+        assert!(second_metadata["deconvolutionProcessing"].is_object());
 
         let background = BackgroundRenderRequest::default();
         assert_ne!(
