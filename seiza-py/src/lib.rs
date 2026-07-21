@@ -1,6 +1,8 @@
 //! Python bindings for Seiza astrometry, satellite prediction, calibration,
 //! and image stacking. The Python module is named `seiza`.
 
+mod arrays;
+mod color;
 mod satellites;
 mod stacking;
 
@@ -721,6 +723,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solve, m)?)?;
     m.add_function(wrap_pyfunction!(solve_blind, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_catalogs, m)?)?;
+    color::register(m)?;
     stacking::register(m)?;
     m.add("SolveError", m.py().get_type::<SolveError>())?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

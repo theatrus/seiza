@@ -1,4 +1,6 @@
-use crate::{BayerLayout, Error, LinearImage, MasterFrame, Result, StackSnapshot};
+use crate::{
+    BayerLayout, ColorComposition, Error, LinearImage, MasterFrame, Result, StackSnapshot,
+};
 use seiza_fits::{F32ImageData, FitsImage, HeaderValue, Pixels, WriteHeaderCard};
 use std::path::{Path, PathBuf};
 
@@ -136,17 +138,36 @@ pub fn write_fits_f32(
         snapshot.rejected_frames as i64,
         "rejected input frames",
     ));
-    if has_reference_wcs(reference_headers) {
-        for (key, value) in reference_headers {
-            if preserve_wcs_key(key)
-                && !cards.iter().any(|card| card.keyword() == key)
-                && let Some(card) = value_card(key, value)
-            {
-                cards.push(card);
-            }
-        }
-    }
+    append_reference_wcs(&mut cards, reference_headers);
     write_linear_fits_f32(path.as_ref(), &snapshot.image, cards)
+}
+
+/// Write a composed RGB image as primary-HDU 32-bit floating-point FITS.
+///
+/// `label` identifies the composition (for example `LRGB`, `SHO`, or
+/// `FORAXX-SHO`). WCS cards are copied from the chosen aligned reference.
+pub fn write_color_fits_f32(
+    path: impl AsRef<Path>,
+    composition: &ColorComposition,
+    reference_headers: &[(String, HeaderValue)],
+    label: &str,
+) -> Result<()> {
+    if composition.image.channels != 3 {
+        return Err(Error::Color(
+            "color FITS output must have three channels".into(),
+        ));
+    }
+    let mut cards = vec![
+        string_card("COLORSPC", "RGB", "RGB color planes"),
+        string_card("SEIZACLR", label, "Seiza color composition"),
+        string_card(
+            "SEIZATRF",
+            composition.transfer.fits_name(),
+            "sample transfer semantics",
+        ),
+    ];
+    append_reference_wcs(&mut cards, reference_headers);
+    write_linear_fits_f32(path.as_ref(), &composition.image, cards)
 }
 
 /// Write an integrated calibration master with explicit calibration-state headers.
@@ -271,6 +292,23 @@ fn value_card(key: &str, value: &HeaderValue) -> Option<WriteHeaderCard> {
         _ => Some(
             WriteHeaderCard::new(key, value.clone()).with_comment("copied from reference frame"),
         ),
+    }
+}
+
+fn append_reference_wcs(
+    cards: &mut Vec<WriteHeaderCard>,
+    reference_headers: &[(String, HeaderValue)],
+) {
+    if !has_reference_wcs(reference_headers) {
+        return;
+    }
+    for (key, value) in reference_headers {
+        if preserve_wcs_key(key)
+            && !cards.iter().any(|card| card.keyword() == key)
+            && let Some(card) = value_card(key, value)
+        {
+            cards.push(card);
+        }
     }
 }
 

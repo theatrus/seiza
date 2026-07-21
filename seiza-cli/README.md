@@ -178,6 +178,49 @@ and are applied before debayering. See the
 [stacking design](https://github.com/theatrus/seiza/blob/main/docs/design/image-stacking.md)
 for the live API, rejection semantics, and PSF Guard integration boundary.
 
+### Color composition
+
+`seiza color` consumes mono `float32` FITS stacks. It can emit an RGB
+FITS, a quick-look PNG, or both:
+
+```
+seiza color rgb --red r.fits --green g.fits --blue b.fits \
+  --output rgb.fits --preview rgb.png
+
+seiza color lrgb --luminance l.fits --red r.fits --green g.fits --blue b.fits \
+  --luminance-weight 1.0 --output lrgb.fits --preview lrgb.png
+
+seiza color narrowband --ha ha.fits --oiii oiii.fits --sii sii.fits \
+  --palette sho --output sho.fits --preview sho.png
+
+seiza color narrowband --ha ha.fits --oiii oiii.fits \
+  --palette foraxx-hoo --preview foraxx-hoo.png
+```
+
+Direct palettes are `sho`, `soh`, `hso`, `hos`, `osh`, `ohs`, and `hoo`.
+Dynamic palettes are `foraxx-sho` and `foraxx-hoo`. The default independent
+0.1%/99.5% percentile scaling is intended for fast visual matching; use
+`--normalization none` for masters whose backgrounds and scales are already
+matched. Foraxx additionally requires those unnormalized samples to lie in
+`[0, 1]`; keep the default percentile mode for sensor-unit masters. Foraxx
+working channels use a median/MAD midtones transfer; tune it with
+`--foraxx-target-median` and `--foraxx-shadows-clip`.
+
+Linear RGB/LRGB and direct-palette FITS files carry `SEIZATRF='LINEAR'`.
+Foraxx follows its published stretched-channel formula and carries
+`SEIZATRF='DISPLAY'`; previews therefore do not pretend it is a linear stack.
+Input dimensions and path roles are validated, and WCS comes from the command's
+reference channel. See the [color-composition
+design](https://github.com/theatrus/seiza/blob/main/docs/design/color-composition.md).
+
+By default, non-reference filter stacks are star-registered and resampled onto
+L for LRGB, R for RGB, or H-alpha for narrowband. The command reports matched
+stars, RMS, drift, and rotation, rejects RMS above 2 pixels, and uses the normal
+256-pixel-or-15% drift bound. Configure those gates with
+`--max-registration-rms`, `--max-registration-drift`, and
+`--max-registration-drift-fraction`; use `--no-register` for masters already
+registered to the same reference.
+
 ## Persistent worker
 
 Applications performing repeated solves can keep a catalog and blind index

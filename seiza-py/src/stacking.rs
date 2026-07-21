@@ -1,5 +1,5 @@
-use numpy::ndarray::{ArrayD, IxDyn};
-use numpy::{IntoPyArray, PyArrayDyn, PyReadonlyArrayDyn, PyUntypedArrayMethods};
+use crate::arrays::{image_array, linear_image, u32_array};
+use numpy::{PyArrayDyn, PyReadonlyArrayDyn};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use seiza_stacking::{
@@ -933,52 +933,6 @@ fn validate_exposure_override(
         )));
     }
     Ok(())
-}
-
-fn linear_image(array: PyReadonlyArrayDyn<'_, f32>) -> PyResult<LinearImage> {
-    let shape = array.shape();
-    let (height, width, channels) = match shape {
-        [height, width] => (*height, *width, 1),
-        [height, width, 3] => (*height, *width, 3),
-        _ => {
-            return Err(PyValueError::new_err(
-                "stacking arrays must have shape (height, width) or (height, width, 3)",
-            ));
-        }
-    };
-    let data = array
-        .as_slice()
-        .map_err(|_| PyValueError::new_err("stacking arrays must be C-contiguous"))?
-        .to_vec();
-    LinearImage::new(width, height, channels, data).map_err(stack_error)
-}
-
-fn array_shape(width: usize, height: usize, channels: usize) -> Vec<usize> {
-    if channels == 1 {
-        vec![height, width]
-    } else {
-        vec![height, width, channels]
-    }
-}
-
-fn image_array<'py>(py: Python<'py>, image: &LinearImage) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
-    let shape = array_shape(image.width, image.height, image.channels);
-    let array = ArrayD::from_shape_vec(IxDyn(&shape), image.data.clone())
-        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-    Ok(array.into_pyarray(py))
-}
-
-fn u32_array<'py>(
-    py: Python<'py>,
-    values: &[u32],
-    width: usize,
-    height: usize,
-    channels: usize,
-) -> PyResult<Bound<'py, PyArrayDyn<u32>>> {
-    let shape = array_shape(width, height, channels);
-    let array = ArrayD::from_shape_vec(IxDyn(&shape), values.to_vec())
-        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-    Ok(array.into_pyarray(py))
 }
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {

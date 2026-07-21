@@ -2,6 +2,7 @@
 //! image stacking for astrophotography.
 
 mod calibration;
+mod color;
 mod fits;
 mod image;
 mod master;
@@ -11,7 +12,12 @@ mod registration;
 mod stack;
 
 pub use calibration::{CalibrationMasters, MasterDark, MasterFlat};
-pub use fits::{FitsFrame, write_fits_f32, write_master_fits_f32};
+pub use color::{
+    ColorComposition, ColorNormalization, ColorOptions, ColorTransfer, ForaxxOptions,
+    NarrowbandMatrix, NarrowbandMix, NarrowbandPalette, combine_lrgb, combine_narrowband,
+    combine_narrowband_matrix, combine_rgb,
+};
+pub use fits::{FitsFrame, write_color_fits_f32, write_fits_f32, write_master_fits_f32};
 pub use image::{BayerLayout, LinearImage};
 pub use master::{
     MasterBuildOptions, MasterFrame, MasterFrameKind, MasterInputStatistics,
@@ -19,7 +25,9 @@ pub use master::{
 };
 pub use normalization::{NormalizationMap, NormalizationMode};
 pub use paths::paths_refer_to_same_file;
-pub use registration::{Registrar, RegistrationOptions, RegistrationResult, SimilarityTransform};
+pub use registration::{
+    Registrar, RegistrationOptions, RegistrationResult, SimilarityTransform, resample_to_reference,
+};
 pub use stack::{
     DeltaSigmaOptions, FrameAcceptanceCriteria, FrameDiagnostics, FrameDisposition,
     FrameRejectionReason, LiveStacker, RejectionMode, StackOptions, StackSnapshot, StackView,
@@ -40,6 +48,8 @@ pub enum Error {
     Normalization(String),
     #[error("stacking error: {0}")]
     Stack(String),
+    #[error("color composition error: {0}")]
+    Color(String),
     #[error("failed to read FITS frame {}: {source}", path.display())]
     FitsRead {
         path: PathBuf,

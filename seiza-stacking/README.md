@@ -15,6 +15,21 @@ The first release supports:
 - non-mutating frame admission gates for additive live stacks;
 - floating-point FITS output on the reference frame's pixel grid.
 
+After integration, `combine_rgb`, `combine_lrgb`, and `combine_narrowband`
+compose aligned mono stacks without coupling color into the live accumulator.
+The direct SHO permutations and HOO remain linear-light; LRGB replaces or
+blends CIE luminance while preserving RGB chromaticity. `NarrowbandMatrix`
+supports arbitrary static SII/H-alpha/OIII mixes. Foraxx-SHO and Foraxx-HOO
+are intentionally marked display-referred because their published dynamic
+factors operate on stretched channels. `write_color_fits_f32` records the
+palette and transfer semantics alongside preserved reference WCS cards. See
+the [color-composition design](../docs/design/color-composition.md).
+The composition functions themselves require aligned inputs. File-oriented
+callers can use `Registrar` plus `resample_to_reference`; the CLI does this
+automatically for every non-reference filter stack. `ColorOptions` controls
+normalization for every composition, while the separate `ForaxxOptions`
+controls the display preparation used only by dynamic Foraxx palettes.
+
 `LiveStacker::push` is the embedding API intended for acquisition tools and
 PSF Guard. The CLI's `seiza stack` command feeds files through the same state
 machine. Frame-quality scoring remains the host application's responsibility;

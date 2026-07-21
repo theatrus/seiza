@@ -330,6 +330,41 @@ def fetch_catalogs(
     *,
     cache_dir: str | Path | None = None,
 ) -> dict[str, Path]: ...
+def combine_rgb(
+    red: npt.NDArray[np.float32],
+    green: npt.NDArray[np.float32],
+    blue: npt.NDArray[np.float32],
+    *,
+    normalization: str = "percentile",
+    black_percentile: float = 0.001,
+    white_percentile: float = 0.995,
+    normalization_samples: int = 1_000_000,
+) -> npt.NDArray[np.float32]: ...
+def combine_lrgb(
+    luminance: npt.NDArray[np.float32],
+    red: npt.NDArray[np.float32],
+    green: npt.NDArray[np.float32],
+    blue: npt.NDArray[np.float32],
+    *,
+    luminance_weight: float = 1.0,
+    normalization: str = "percentile",
+    black_percentile: float = 0.001,
+    white_percentile: float = 0.995,
+    normalization_samples: int = 1_000_000,
+) -> npt.NDArray[np.float32]: ...
+def combine_narrowband(
+    ha: npt.NDArray[np.float32],
+    oiii: npt.NDArray[np.float32],
+    sii: npt.NDArray[np.float32] | None = None,
+    *,
+    palette: str = "sho",
+    normalization: str = "percentile",
+    black_percentile: float = 0.001,
+    white_percentile: float = 0.995,
+    normalization_samples: int = 1_000_000,
+    foraxx_target_median: float = 0.2,
+    foraxx_shadows_clip: float = -2.8,
+) -> npt.NDArray[np.float32]: ...
 def stack_fits(
     images: Sequence[str | Path],
     output: str | Path,
