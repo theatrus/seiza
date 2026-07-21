@@ -56,12 +56,15 @@ impl DisplayMap {
 }
 
 fn linear_preview_map(image: &LinearImage) -> Result<DisplayMap> {
-    let stride = (image.data.len() / 200_000).max(1);
+    const MAXIMUM_SAMPLES: usize = 200_000;
+
+    let maximum_pixels = (MAXIMUM_SAMPLES / image.channels).max(1);
+    let pixel_stride = image.pixel_count().div_ceil(maximum_pixels).max(1);
     let mut sample = image
         .data
-        .iter()
-        .step_by(stride)
-        .copied()
+        .chunks_exact(image.channels)
+        .step_by(pixel_stride)
+        .flat_map(|pixel| pixel.iter().copied())
         .filter(|value| value.is_finite())
         .collect::<Vec<_>>();
     if sample.is_empty() {
@@ -92,5 +95,16 @@ mod tests {
         assert_eq!(map.map(0.5), 128);
         assert_eq!(map.map(2.0), 255);
         assert_eq!(map.map(f32::NAN), 0);
+    }
+
+    #[test]
+    fn rgb_preview_sampling_cannot_alias_one_color_plane() {
+        // The old sample-wise stride was three for this image and therefore
+        // inspected only red in the interleaved RGB buffer.
+        let data = [0.0, 0.5, 1.0].repeat(448 * 448);
+        let image = LinearImage::new(448, 448, 3, data).unwrap();
+        let map = linear_preview_map(&image).unwrap();
+        assert_eq!(map.black, 0.0);
+        assert_eq!(map.white, 1.0);
     }
 }

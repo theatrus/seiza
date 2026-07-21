@@ -15,7 +15,11 @@ The default quick-look path independently maps each filter's robust 0.1% and
 samples per channel, bounding scratch memory for large frames. This is an
 affine black/scale match for visualization, not photometric color calibration.
 Use `ColorNormalization::None` or CLI `--normalization none` when the masters
-are already background-subtracted and intensity-matched.
+are already background-subtracted and intensity-matched. Because the published
+Foraxx expressions operate on normalized display values, its inputs must also
+already lie in `[0, 1]` when normalization is disabled; Seiza rejects
+sensor-unit Foraxx inputs instead of silently clipping them. The default
+percentile normalization handles those inputs directly.
 
 Composition reads prepared values directly from caller-owned input planes and
 allocates one three-plane output; it does not materialize normalized copies of

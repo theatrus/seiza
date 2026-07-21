@@ -162,10 +162,12 @@ foraxx = seiza.combine_narrowband(ha, oiii, sii, palette="foraxx-sho")
 ```
 
 The default percentile normalization is a quick-look channel match. Pass
-`normalization="none"` for already matched inputs. RGB, LRGB, the six direct
-S/H/O permutations, and HOO are linear-light. Foraxx-SHO/HOO use a stretched
-working copy as required by the published dynamic formula, so those returned
-arrays are display-referred. Composition releases the GIL.
+`normalization="none"` for already matched inputs. Foraxx inputs must also
+already lie in `[0, 1]` in that mode; keep percentile normalization for
+sensor-unit arrays. RGB, LRGB, the six direct S/H/O permutations, and HOO are
+linear-light. Foraxx-SHO/HOO use a stretched working copy as required by the
+published dynamic formula, so those returned arrays are display-referred.
+Composition releases the GIL.
 
 Calibration masters use the same bounded-memory two-pass builder:
 

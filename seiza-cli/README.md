@@ -201,8 +201,10 @@ Direct palettes are `sho`, `soh`, `hso`, `hos`, `osh`, `ohs`, and `hoo`.
 Dynamic palettes are `foraxx-sho` and `foraxx-hoo`. The default independent
 0.1%/99.5% percentile scaling is intended for fast visual matching; use
 `--normalization none` for masters whose backgrounds and scales are already
-matched. Foraxx working channels use a median/MAD midtones transfer; tune it
-with `--foraxx-target-median` and `--foraxx-shadows-clip`.
+matched. Foraxx additionally requires those unnormalized samples to lie in
+`[0, 1]`; keep the default percentile mode for sensor-unit masters. Foraxx
+working channels use a median/MAD midtones transfer; tune it with
+`--foraxx-target-median` and `--foraxx-shadows-clip`.
 
 Linear RGB/LRGB and direct-palette FITS files carry `SEIZATRF='LINEAR'`.
 Foraxx follows its published stretched-channel formula and carries

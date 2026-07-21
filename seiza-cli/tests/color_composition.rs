@@ -146,6 +146,42 @@ fn foraxx_cli_marks_display_referred_output() {
 }
 
 #[test]
+fn foraxx_cli_rejects_sensor_units_when_normalization_is_disabled() {
+    let directory = tempfile::tempdir().unwrap();
+    let ha = directory.path().join("ha.fits");
+    let oiii = directory.path().join("oiii.fits");
+    let preview = directory.path().join("foraxx-hoo.png");
+    write_mono(&ha, &[1_000.0, 1_100.0, 1_200.0, 1_300.0]);
+    write_mono(&oiii, &[900.0, 1_000.0, 1_100.0, 1_200.0]);
+
+    let result = Command::new(env!("CARGO_BIN_EXE_seiza"))
+        .args([
+            "color",
+            "narrowband",
+            "--ha",
+            ha.to_str().unwrap(),
+            "--oiii",
+            oiii.to_str().unwrap(),
+            "--palette",
+            "foraxx-hoo",
+            "--normalization",
+            "none",
+            "--no-register",
+            "--preview",
+            preview.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("finite samples in [0, 1]"),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!preview.exists());
+}
+
+#[test]
 fn rgb_cli_registers_shifted_filter_stacks_by_default() {
     let directory = tempfile::tempdir().unwrap();
     let red = directory.path().join("red.fits");

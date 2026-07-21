@@ -6,7 +6,8 @@ use std::str::FromStr;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ColorNormalization {
     /// Preserve finite input samples exactly; a non-finite required input masks
-    /// the complete output pixel.
+    /// the complete output pixel. Dynamic Foraxx palettes require finite
+    /// samples to already lie in `[0, 1]` when this mode is selected.
     None,
     /// Affinely map robust black and white percentiles to `[0, 1]`.
     Percentile {
@@ -286,12 +287,13 @@ pub fn combine_narrowband(
     foraxx: &ForaxxOptions,
 ) -> Result<ColorComposition> {
     validate_normalization(options.normalization)?;
-    if palette.requires_sii() && sii.is_none() {
-        return Err(Error::Color(format!(
-            "{} requires an SII channel",
-            palette.name()
-        )));
-    }
+    let sii = if palette.requires_sii() {
+        Some(
+            sii.ok_or_else(|| Error::Color(format!("{} requires an SII channel", palette.name())))?,
+        )
+    } else {
+        None
+    };
     let mut inputs = vec![("H-alpha", ha), ("OIII", oiii)];
     if let Some(sii) = sii {
         inputs.push(("SII", sii));
@@ -299,12 +301,9 @@ pub fn combine_narrowband(
     validate_mono_set(&inputs)?;
     let h = prepare_channel(ha, options.normalization)?;
     let o = prepare_channel(oiii, options.normalization)?;
-    let s = if palette.requires_sii() {
-        sii.map(|image| prepare_channel(image, options.normalization))
-            .transpose()?
-    } else {
-        None
-    };
+    let s = sii
+        .map(|image| prepare_channel(image, options.normalization))
+        .transpose()?;
 
     if let Some(matrix) = palette.matrix() {
         return combine_prepared_matrix(ha.width, ha.height, h, o, s, matrix);
@@ -362,20 +361,19 @@ pub fn combine_narrowband_matrix(
 ) -> Result<ColorComposition> {
     validate_normalization(options.normalization)?;
     validate_matrix(matrix)?;
+    let uses_sii = matrix_uses_sii(matrix);
+    let sii = if uses_sii {
+        Some(sii.ok_or_else(|| {
+            Error::Color("the custom matrix references SII but no SII channel was supplied".into())
+        })?)
+    } else {
+        None
+    };
     let mut inputs = vec![("H-alpha", ha), ("OIII", oiii)];
     if let Some(sii) = sii {
         inputs.push(("SII", sii));
     }
     validate_mono_set(&inputs)?;
-    if sii.is_none()
-        && [matrix.red, matrix.green, matrix.blue]
-            .iter()
-            .any(|mix| mix.sii != 0.0)
-    {
-        return Err(Error::Color(
-            "the custom matrix references SII but no SII channel was supplied".into(),
-        ));
-    }
     let h = prepare_channel(ha, options.normalization)?;
     let o = prepare_channel(oiii, options.normalization)?;
     let s = sii
@@ -535,6 +533,19 @@ fn display_transform(
     options: &ForaxxOptions,
     max_samples: usize,
 ) -> Result<DisplayTransform> {
+    if matches!(channel.transform, ChannelTransform::Identity)
+        && channel
+            .values
+            .par_iter()
+            .copied()
+            .filter(|value| value.is_finite())
+            .any(|value| !(0.0..=1.0).contains(&value))
+    {
+        return Err(Error::Color(
+            "Foraxx with normalization disabled requires finite samples in [0, 1]; use percentile normalization for sensor-unit inputs"
+                .into(),
+        ));
+    }
     let stride = channel.values.len().div_ceil(max_samples.max(1)).max(1);
     let mut sample = (0..channel.values.len())
         .step_by(stride)
@@ -631,6 +642,12 @@ fn validate_matrix(matrix: NarrowbandMatrix) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn matrix_uses_sii(matrix: NarrowbandMatrix) -> bool {
+    [matrix.red, matrix.green, matrix.blue]
+        .iter()
+        .any(|mix| mix.sii != 0.0)
 }
 
 fn validate_mono_set(images: &[(&str, &LinearImage)]) -> Result<()> {
@@ -827,5 +844,65 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("Foraxx target median"));
+    }
+
+    #[test]
+    fn foraxx_without_normalization_requires_unit_scaled_inputs() {
+        let h = mono(&[1_000.0, 1_100.0, 1_200.0]);
+        let o = mono(&[900.0, 1_000.0, 1_100.0]);
+        let error = combine_narrowband(
+            &h,
+            &o,
+            None,
+            NarrowbandPalette::ForaxxHoo,
+            &raw_options(),
+            &ForaxxOptions::default(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("finite samples in [0, 1]"));
+    }
+
+    #[test]
+    fn hoo_ignores_an_unused_sii_input() {
+        let unused_sii = mono(&[f32::NAN, f32::NAN]);
+        let result = combine_narrowband(
+            &mono(&[0.2]),
+            &mono(&[0.3]),
+            Some(&unused_sii),
+            NarrowbandPalette::Hoo,
+            &raw_options(),
+            &ForaxxOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(result.image.data, [0.2, 0.3, 0.3]);
+    }
+
+    #[test]
+    fn custom_matrix_ignores_zero_weight_sii_input() {
+        let matrix = NarrowbandMatrix {
+            red: NarrowbandMix {
+                ha: 1.0,
+                ..NarrowbandMix::default()
+            },
+            green: NarrowbandMix {
+                oiii: 1.0,
+                ..NarrowbandMix::default()
+            },
+            blue: NarrowbandMix {
+                ha: 0.5,
+                oiii: 0.5,
+                ..NarrowbandMix::default()
+            },
+        };
+        let unused_sii = mono(&[f32::NAN, f32::NAN]);
+        let result = combine_narrowband_matrix(
+            &mono(&[0.2]),
+            &mono(&[0.4]),
+            Some(&unused_sii),
+            matrix,
+            &raw_options(),
+        )
+        .unwrap();
+        assert_eq!(result.image.data, [0.2, 0.4, 0.3]);
     }
 }

@@ -54,3 +54,13 @@ def test_three_filter_palette_requires_sii() -> None:
         seiza.combine_narrowband(
             mono(0.2), mono(0.3), palette="foraxx-sho", normalization="none"
         )
+
+
+def test_foraxx_without_normalization_rejects_sensor_units() -> None:
+    with pytest.raises(ValueError, match=r"finite samples in \[0, 1\]"):
+        seiza.combine_narrowband(
+            mono(1_000.0),
+            mono(900.0),
+            palette="foraxx-hoo",
+            normalization="none",
+        )
