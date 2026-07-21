@@ -12,6 +12,8 @@ pip install seiza
 Binary wheels cover Linux (x86_64, aarch64), macOS (universal2), and
 Windows (x64); each is a single abi3 wheel for every CPython from 3.9 up.
 Type stubs are included, and computational image operations release the GIL.
+Input arrays are read in place, without a copy, while the GIL is released:
+do not mutate an array from another thread until the call returns.
 
 ## Solve an image
 

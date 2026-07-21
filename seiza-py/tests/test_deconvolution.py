@@ -40,5 +40,5 @@ def test_deconvolution_rejects_noncontiguous_and_invalid_inputs() -> None:
     image = gaussian_star()
     with pytest.raises(ValueError, match="C-contiguous"):
         seiza.deconvolve(image[:, ::2], psf_fwhm=2.8)
-    with pytest.raises(ValueError, match="amount"):
+    with pytest.raises(seiza.EngineError, match="amount"):
         seiza.deconvolve(image, psf_fwhm=2.8, amount=1.1)

@@ -11,6 +11,9 @@ __version__: str
 
 StarInput = Union["Star", tuple[float, float, float]]
 
+class EngineError(RuntimeError):
+    """Stretching, color composition, background fitting, or deconvolution failed."""
+
 class SolveError(RuntimeError):
     """The field could not be solved."""
 
@@ -228,6 +231,7 @@ class FrameDisposition:
     integrated_fraction: float | None
     accepted_samples: int | None
     rejected_samples: int | None
+    def __bool__(self) -> bool: ...
 
 class StackResult:
     output: Path
@@ -284,6 +288,7 @@ class MasterResult:
     input_frames: int
     accepted_samples: int
     rejected_samples: int
+    fallback_pixels: int
     bias_subtracted: bool
     dark_subtracted: bool
     normalized: bool

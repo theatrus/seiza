@@ -1,10 +1,12 @@
 use crate::arrays::{float_array, float_image_view};
 use numpy::{PyArrayDyn, PyReadonlyArrayDyn};
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use seiza_deconvolution::{DeconvolutionConfig, deconvolve as restore};
 
 /// Apply conservative damped Richardson-Lucy restoration to a linear image.
+///
+/// The input array is read in place while the GIL is released; do not mutate
+/// it from another thread until the call returns.
 #[pyfunction]
 #[pyo3(signature = (image, *, psf_fwhm, iterations=4, amount=0.35, noise_fraction=0.001, max_correction=2.0))]
 fn deconvolve<'py>(
@@ -34,7 +36,7 @@ fn deconvolve<'py>(
                 &config,
             )
         })
-        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        .map_err(|error| crate::EngineError::new_err(error.to_string()))?;
     float_array(py, image.width, image.height, image.channels, restored.data)
 }
 

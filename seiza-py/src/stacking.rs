@@ -5,7 +5,8 @@ use pyo3::prelude::*;
 use seiza_stacking::{
     CalibrationMasters, DeltaSigmaOptions, FitsFrame, FrameDisposition, LinearImage, LiveStacker,
     MasterBuildOptions, MasterDark, MasterFrameKind, MasterRejectionOptions, NormalizationMode,
-    RejectionMode, StackOptions, StackSnapshot, build_master_from_fits, paths_refer_to_same_file,
+    RejectionMode, StackOptions, StackSnapshot, build_master_from_fits, path_identity,
+    paths_refer_to_same_file,
     write_fits_f32, write_master_fits_f32,
 };
 use std::path::{Path, PathBuf};
@@ -614,6 +615,8 @@ pub(crate) struct PyMasterResult {
     #[pyo3(get)]
     rejected_samples: u64,
     #[pyo3(get)]
+    fallback_pixels: u64,
+    #[pyo3(get)]
     bias_subtracted: bool,
     #[pyo3(get)]
     dark_subtracted: bool,
@@ -842,6 +845,7 @@ fn build_master(
             input_frames: master.input_frames,
             accepted_samples: master.accepted_samples,
             rejected_samples: master.rejected_samples,
+            fallback_pixels: master.fallback_pixels,
             bias_subtracted: master.bias_subtracted,
             dark_subtracted: master.dark_subtracted,
             normalized: master.normalized,
@@ -883,31 +887,29 @@ fn validate_output_path<const N: usize>(
 ) -> PyResult<()> {
     let mut all_inputs = inputs.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     all_inputs.extend(other_inputs.into_iter().flatten().map(PathBuf::as_path));
-    for (index, input) in all_inputs.iter().enumerate() {
-        if all_inputs[..index]
-            .iter()
-            .any(|previous| paths_refer_to_same_file(input, previous))
-        {
+    let output_identity = path_identity(output);
+    let mut seen = std::collections::HashSet::new();
+    for input in all_inputs {
+        let identity = path_identity(input);
+        if identity == output_identity {
+            return Err(PyValueError::new_err(
+                "output path must not refer to an input frame",
+            ));
+        }
+        if !seen.insert(identity) {
             return Err(PyValueError::new_err(format!(
                 "duplicate input path {}",
                 input.display()
             )));
-        }
-        if paths_refer_to_same_file(input, output) {
-            return Err(PyValueError::new_err(
-                "output path must not refer to an input frame",
-            ));
         }
     }
     Ok(())
 }
 
 fn validate_distinct_paths(paths: &[PathBuf]) -> PyResult<()> {
-    for (index, path) in paths.iter().enumerate() {
-        if paths[..index]
-            .iter()
-            .any(|previous| paths_refer_to_same_file(path, previous))
-        {
+    let mut seen = std::collections::HashSet::new();
+    for path in paths {
+        if !seen.insert(path_identity(path)) {
             return Err(PyValueError::new_err(format!(
                 "duplicate input path {}",
                 path.display()

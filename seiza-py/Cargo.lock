@@ -1471,6 +1471,7 @@ dependencies = [
  "rayon",
  "rustc-hash",
  "seiza-download",
+ "seiza-stats",
  "serde",
  "serde_json",
  "sha2",
@@ -1483,6 +1484,7 @@ name = "seiza-background"
 version = "0.1.0"
 dependencies = [
  "rayon",
+ "seiza-stats",
  "serde",
  "thiserror",
 ]
@@ -1492,6 +1494,7 @@ name = "seiza-deconvolution"
 version = "0.1.0"
 dependencies = [
  "rayon",
+ "serde",
  "thiserror",
 ]
 
@@ -1561,6 +1564,7 @@ dependencies = [
  "rayon",
  "seiza",
  "seiza-fits",
+ "seiza-stats",
  "seiza-stretch",
  "seiza-xisf",
  "serde",
@@ -1568,10 +1572,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "seiza-stats"
+version = "0.1.0"
+
+[[package]]
 name = "seiza-stretch"
 version = "0.1.0"
 dependencies = [
  "rayon",
+ "seiza-stats",
  "serde",
  "thiserror",
 ]
