@@ -16,6 +16,7 @@ pub use bayer::{BayerPattern, RgbImage16, RgbImageF32, debayer_rgb_f32, debayer_
 pub use header::{HeaderValue, parse_header_value};
 pub use seiza_stretch::{
     Statistics, StretchParams, midtones_transfer_function, statistics_u16, stretch_u16_to_u8,
+    stretch_u16_to_u16,
 };
 pub use writer::{F32ImageData, WriteHeaderCard, write_f32_image, write_f32_image_to};
 
@@ -473,6 +474,17 @@ impl FitsImage {
         };
         let stats = statistics_u16(&data);
         stretch_u16_to_u8(&data, &stats, params)
+    }
+
+    /// N.I.N.A.-compatible MTF autostretch to full-range 16-bit grayscale.
+    /// Raw one-shot-color mosaics are debayered to luminance first.
+    pub fn stretch_to_u16(&self, params: &StretchParams) -> Vec<u16> {
+        let data = match self.debayer() {
+            Some(rgb) => std::borrow::Cow::Owned(rgb.to_luma_u16()),
+            None => self.to_u16(),
+        };
+        let stats = statistics_u16(&data);
+        stretch_u16_to_u16(&data, &stats, params)
     }
 
     /// Linear grayscale samples normalized to `[0, 1]` for numeric processing.

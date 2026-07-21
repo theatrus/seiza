@@ -15,6 +15,13 @@ exposes the **superset** of what both apps need.
   and `seiza_rendered_image_bgra` (Direct2D / WinUI), each with a `_length`
   companion. RGBA is canonical; the BGRA view is computed on first request and
   cached, so a consumer only ever pays for the order it uses.
+- **Native 16-bit export pixels** — the parallel
+  `seiza_rendered_image16_open*` API returns a separate
+  `SeizaRenderedImage16` with borrowed native-endian RGBA `uint16_t` samples.
+  FITS stretch stacks quantize directly from their final `f32` result to `u16`,
+  and 16-bit PNG/TIFF raster inputs retain their component precision. The
+  `_rgba_length` result counts `uint16_t` elements, not bytes. A separate owner
+  keeps routine RGBA8 previews from allocating both formats.
 - **Parameterized stretch** — `seiza_rendered_image_open_with_stretch_config`
   takes a serialized `seiza-stretch` `StretchConfig` (JSON) and renders a FITS
   through the full GHS/MTF/percentile pipeline. It also accepts a non-empty
@@ -52,6 +59,13 @@ exposes the **superset** of what both apps need.
 - **Memory** — `seiza_core_version`, `seiza_string_free`.
 
 Rendered-image metadata includes input and display histograms.
+
+Use `seiza_rendered_image16_open_with_stretch_config` for a processed FITS
+export, or `seiza_rendered_image16_open` for the default FITS/raster path. The
+16-bit handle has its own width, height, RGBA, metadata, and free functions; do
+not pass it to the RGBA8 accessors. Its RGBA pointer is aligned for `uint16_t`
+and uses host byte order. Image encoders or platform image APIs must be told
+that byte order when consuming the borrowed samples.
 
 Background input and output buffers are row-major, pixel-interleaved `float`
 samples with one or three channels. The model copies only compact samples and
