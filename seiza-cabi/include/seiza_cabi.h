@@ -248,7 +248,8 @@ SeizaRenderedImage *seiza_rendered_image_open_with_rgb_stretch(const char *path,
  intermediates and converted to RGBA only after the final stage. Background
  correction, when requested, is fitted and applied to linear samples before
  the first stretch stage. Interactive preview mode bounds the linear samples
- to `max_dimension` before processing; full renders should leave it false.
+ to `max_dimension` before processing and reuses the prepared pixels across
+ stretch-only edits; full renders should leave it false.
 
  # Safety
  `path` and `config_json` must be valid NUL-terminated strings. When non-null,
