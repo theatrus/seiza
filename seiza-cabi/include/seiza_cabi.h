@@ -119,10 +119,11 @@ SeizaRenderedImage *seiza_rendered_image_open_with_rgb_stretch(const char *path,
                                                                char **error_out);
 
 /*
- Opens a FITS image and renders it with a parameterized stretch described by
- `config_json` — a serialized `seiza-stretch` `StretchConfig` (the same schema
- the `seiza stretch` tooling uses), giving access to the full GHS/MTF/params
- pipeline without further ABI additions.
+ Opens a FITS image and renders it with parameterized stretches described by
+ `config_json`. The value may be one serialized `seiza-stretch`
+ `StretchConfig` (the original schema) or a non-empty array of configs. Array
+ stages are applied in order using `f32` intermediates and converted to RGBA
+ only after the final stage.
 
  # Safety
  `path` and `config_json` must be valid NUL-terminated strings. When non-null,
