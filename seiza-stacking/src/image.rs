@@ -4,13 +4,19 @@ use seiza_fits::{BayerPattern, debayer_rgb_f32};
 /// A row-major, interleaved linear image with one or three channels.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LinearImage {
+    /// Image width in pixels.
     pub width: usize,
+    /// Image height in pixels.
     pub height: usize,
+    /// Channel count: 1 for mono, 3 for interleaved RGB.
     pub channels: usize,
+    /// Row-major, channel-interleaved samples.
     pub data: Vec<f32>,
 }
 
 impl LinearImage {
+    /// Build an image, checking that the sample count matches the dimensions
+    /// and that the channel count is 1 or 3.
     pub fn new(width: usize, height: usize, channels: usize, data: Vec<f32>) -> Result<Self> {
         if width == 0 || height == 0 || !matches!(channels, 1 | 3) {
             return Err(Error::InvalidImage(
@@ -35,27 +41,30 @@ impl LinearImage {
         })
     }
 
+    /// Total number of samples, counting every channel.
     pub fn sample_count(&self) -> usize {
         self.data.len()
     }
 
+    /// Number of pixels, ignoring channels.
     pub fn pixel_count(&self) -> usize {
         self.width * self.height
     }
 
+    /// Whether another image has the same width, height, and channel count.
     pub fn dimensions_match(&self, other: &Self) -> bool {
         self.width == other.width && self.height == other.height && self.channels == other.channels
     }
 
+    /// One luminance value per pixel: the sample itself for mono, Rec.709 luma
+    /// for RGB.
     pub fn luminance(&self) -> Vec<f32> {
         if self.channels == 1 {
             return self.data.clone();
         }
         self.data
             .chunks_exact(3)
-            .map(|pixel| {
-                0.2126_f32.mul_add(pixel[0], 0.7152_f32.mul_add(pixel[1], 0.0722 * pixel[2]))
-            })
+            .map(|pixel| rec709_luma(pixel[0], pixel[1], pixel[2]))
             .collect()
     }
 
@@ -77,11 +86,20 @@ impl LinearImage {
     }
 }
 
+/// Raw color-filter-array sampling of a one-channel frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BayerLayout {
+    /// The CFA color order.
     pub pattern: BayerPattern,
+    /// Horizontal offset of the pattern origin, in pixels.
     pub x_offset: usize,
+    /// Vertical offset of the pattern origin, in pixels.
     pub y_offset: usize,
+}
+
+/// Rec.709 luma from linear RGB samples.
+pub(crate) fn rec709_luma(red: f32, green: f32, blue: f32) -> f32 {
+    0.2126_f32.mul_add(red, 0.7152_f32.mul_add(green, 0.0722 * blue))
 }
 
 #[cfg(test)]

@@ -12,8 +12,11 @@ pub enum ColorNormalization {
     None,
     /// Affinely map robust black and white percentiles to `[0, 1]`.
     Percentile {
+        /// Fraction of samples mapped to the black point.
         black_percentile: f32,
+        /// Fraction of samples mapped to the white point.
         white_percentile: f32,
+        /// Cap on samples drawn when estimating the percentiles.
         max_samples: usize,
     },
 }
@@ -31,6 +34,7 @@ impl Default for ColorNormalization {
 /// Shared preparation options for color composition from stacked mono frames.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ColorOptions {
+    /// How input channels are mapped into the working range.
     pub normalization: ColorNormalization,
     /// Transfer already applied to the input channels.
     ///
@@ -61,12 +65,15 @@ impl Default for ForaxxOptions {
 /// Whether output samples remain linear-light or have a display transfer applied.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ColorTransfer {
+    /// Samples are linear-light.
     #[default]
     LinearLight,
+    /// Samples carry a display transfer.
     DisplayReferred,
 }
 
 impl ColorTransfer {
+    /// Short label written to the `SEIZATRF` FITS card.
     pub fn fits_name(self) -> &'static str {
         match self {
             Self::LinearLight => "LINEAR",
@@ -78,23 +85,31 @@ impl ColorTransfer {
 /// Result of a color composition, including the transfer semantics of its samples.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ColorComposition {
+    /// The composed RGB image.
     pub image: LinearImage,
+    /// Transfer semantics of the composed samples.
     pub transfer: ColorTransfer,
 }
 
 /// Coefficients for one output channel, ordered by physical narrowband filter.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct NarrowbandMix {
+    /// Weight applied to the SII channel.
     pub sii: f32,
+    /// Weight applied to the H-alpha channel.
     pub ha: f32,
+    /// Weight applied to the OIII channel.
     pub oiii: f32,
 }
 
 /// A static linear mapping from SII, H-alpha, and OIII to RGB.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NarrowbandMatrix {
+    /// Filter weights for the red output channel.
     pub red: NarrowbandMix,
+    /// Filter weights for the green output channel.
     pub green: NarrowbandMix,
+    /// Filter weights for the blue output channel.
     pub blue: NarrowbandMix,
 }
 
@@ -102,18 +117,28 @@ pub struct NarrowbandMatrix {
 /// for red, green, and blue respectively.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NarrowbandPalette {
+    /// SII, H-alpha, OIII to red, green, blue (the classic Hubble palette).
     Sho,
+    /// SII, OIII, H-alpha to red, green, blue.
     Soh,
+    /// H-alpha, SII, OIII to red, green, blue.
     Hso,
+    /// H-alpha, OIII, SII to red, green, blue.
     Hos,
+    /// OIII, SII, H-alpha to red, green, blue.
     Osh,
+    /// OIII, H-alpha, SII to red, green, blue.
     Ohs,
+    /// H-alpha to red, OIII to both green and blue.
     Hoo,
+    /// Dynamic Foraxx SHO blend, display-referred.
     ForaxxSho,
+    /// Dynamic Foraxx HOO blend, display-referred.
     ForaxxHoo,
 }
 
 impl NarrowbandPalette {
+    /// Uppercase name, for example `SHO` or `FORAXX-HOO`.
     pub fn name(self) -> &'static str {
         match self {
             Self::Sho => "SHO",
@@ -128,10 +153,12 @@ impl NarrowbandPalette {
         }
     }
 
+    /// Whether the palette needs an SII channel supplied.
     pub fn requires_sii(self) -> bool {
         !matches!(self, Self::Hoo | Self::ForaxxHoo)
     }
 
+    /// Transfer semantics of the palette's output.
     pub fn transfer(self) -> ColorTransfer {
         if matches!(self, Self::ForaxxSho | Self::ForaxxHoo) {
             ColorTransfer::DisplayReferred
@@ -269,7 +296,7 @@ pub fn combine_lrgb(
             let r = rgb[0].sample(index);
             let g = rgb[1].sample(index);
             let b = rgb[2].sample(index);
-            let rgb_luminance = 0.2126_f32.mul_add(r, 0.7152_f32.mul_add(g, 0.0722 * b));
+            let rgb_luminance = crate::image::rec709_luma(r, g, b);
             let target =
                 (1.0 - luminance_weight).mul_add(rgb_luminance, luminance_weight * l.sample(index));
             if rgb_luminance > 1.0e-8 && target.is_finite() {

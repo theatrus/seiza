@@ -2,9 +2,12 @@ use crate::{BayerLayout, Error, FitsFrame, LinearImage, Result};
 use rayon::prelude::*;
 use std::path::Path;
 
+/// An integrated master dark, with the metadata needed to scale and apply it.
 #[derive(Clone, Debug)]
 pub struct MasterDark {
+    /// Integrated dark image.
     pub image: LinearImage,
+    /// Exposure of the dark, used when scaling it to a light frame.
     pub exposure_seconds: Option<f64>,
     /// Whether the bias pedestal has already been removed from this master.
     pub bias_subtracted: bool,
@@ -25,8 +28,10 @@ impl MasterDark {
     }
 }
 
+/// An integrated master flat used to correct the optical response.
 #[derive(Clone, Debug)]
 pub struct MasterFlat {
+    /// Integrated flat image.
     pub image: LinearImage,
     /// True when the flat has already been calibrated and/or normalized.
     pub calibrated: bool,
@@ -35,6 +40,7 @@ pub struct MasterFlat {
 }
 
 impl MasterFlat {
+    /// Wrap an uncalibrated flat with no CFA metadata.
     pub fn raw(image: LinearImage) -> Self {
         Self {
             image,
@@ -109,6 +115,8 @@ impl CalibrationMasters {
         Self::new(bias, dark, flat)
     }
 
+    /// Prepare masters for use: validate metadata, check matching dimensions,
+    /// isolate dark current, and normalize the flat response.
     pub fn new(
         bias: Option<LinearImage>,
         dark: Option<MasterDark>,
@@ -120,6 +128,14 @@ impl CalibrationMasters {
         }) {
             return Err(Error::Calibration(
                 "master-dark exposure must be a positive finite number".into(),
+            ));
+        }
+        // A bias-subtracted dark removes only dark current, so without a
+        // master bias the light frame would keep its bias pedestal and
+        // distort flat division.
+        if bias.is_none() && dark.as_ref().is_some_and(|dark| dark.bias_subtracted) {
+            return Err(Error::Calibration(
+                "a bias-subtracted master dark requires a master bias to remove the light frame's bias pedestal".into(),
             ));
         }
         let reference = bias
@@ -199,6 +215,7 @@ impl CalibrationMasters {
         })
     }
 
+    /// Whether no master is present, so calibration would be a no-op.
     pub fn is_empty(&self) -> bool {
         self.bias.is_none() && self.dark_signal.is_none() && self.flat_response.is_none()
     }
@@ -325,16 +342,8 @@ fn robust_positive_median(data: impl ExactSizeIterator<Item = f32>) -> Option<f3
         .step_by(stride)
         .filter(|value| value.is_finite() && *value > 0.0)
         .collect::<Vec<_>>();
-    if values.is_empty() {
-        return None;
-    }
     values.sort_unstable_by(f32::total_cmp);
-    let middle = values.len() / 2;
-    Some(if values.len().is_multiple_of(2) {
-        (values[middle - 1] + values[middle]) * 0.5
-    } else {
-        values[middle]
-    })
+    seiza_stats::median_of_sorted(&values)
 }
 
 #[cfg(test)]
