@@ -472,3 +472,48 @@ def build_flat(
     sigma_low: float = 3.0,
     sigma_high: float = 3.0,
 ) -> MasterResult: ...
+def gaussian_blur(
+    image: npt.NDArray[np.uint8] | npt.NDArray[np.float32],
+    sigma: float,
+    *,
+    ksize: int = 0,
+    border: str = "reflect101",
+) -> npt.NDArray[np.uint8] | npt.NDArray[np.float32]: ...
+def median_blur3(image: npt.NDArray[np.uint8]) -> npt.NDArray[np.uint8]: ...
+def canny(
+    image: npt.NDArray[np.uint8],
+    low: int,
+    high: int,
+) -> npt.NDArray[np.uint8]: ...
+def otsu_threshold(image: npt.NDArray[np.uint8]) -> int: ...
+def otsu_binary(image: npt.NDArray[np.uint8]) -> npt.NDArray[np.uint8]: ...
+def erode(
+    image: npt.NDArray[np.uint8],
+    *,
+    shape: str = "ellipse",
+    ksize: int = 3,
+    border: str = "ignore",
+) -> npt.NDArray[np.uint8]: ...
+def dilate(
+    image: npt.NDArray[np.uint8],
+    *,
+    shape: str = "ellipse",
+    ksize: int = 3,
+    border: str = "ignore",
+) -> npt.NDArray[np.uint8]: ...
+def find_contours(image: npt.NDArray[np.uint8]) -> list[npt.NDArray[np.int32]]: ...
+def contour_area(contour: npt.NDArray[np.int32]) -> float: ...
+def dt_filter(
+    guide: npt.NDArray[np.float32],
+    src: npt.NDArray[np.float32],
+    sigma_spatial: float,
+    sigma_color: float,
+    *,
+    num_iters: int = 3,
+) -> npt.NDArray[np.float32]: ...
+def remove_structures(
+    image: npt.NDArray[np.float64],
+    *,
+    layers: int = 4,
+    method: str = "filtered",
+) -> npt.NDArray[np.float64]: ...

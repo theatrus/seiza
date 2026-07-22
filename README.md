@@ -109,6 +109,8 @@ compiler, formatter, and linter.
   [`seiza-deconvolution`](seiza-deconvolution/README.md) (experimental,
   conservative linear-image restoration),
   [`seiza-stretch`](seiza-stretch/README.md) (parameterized display curves),
+  [`seiza-imgproc`](seiza-imgproc/README.md) (pure-Rust image processing
+  primitives with OpenCV-compatible semantics),
   [`seiza-stacking`](seiza-stacking/README.md) (linear calibration,
   registration, and additive live stacking),
   [`seiza-download`](seiza-download/README.md) (catalog download and
