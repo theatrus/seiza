@@ -1127,6 +1127,10 @@ pub fn statistics_u16(data: &[u16]) -> Statistics {
 }
 
 /// Stretch `u16` data directly to `u8` through the existing 65,536-entry LUT.
+///
+/// The 8-bit value is the stretched 16-bit value shifted right by 8 — the
+/// same conversion N.I.N.A. applies when it renders a stretched frame at 8
+/// bits, so `stretch_u16_to_u8` is always `stretch_u16_to_u16 >> 8`.
 pub fn stretch_u16_to_u8(data: &[u16], stats: &Statistics, params: &StretchParams) -> Vec<u8> {
     let map = stretch_u16_map(stats, params);
     data.iter().map(|value| map[usize::from(*value)]).collect()
@@ -1134,13 +1138,17 @@ pub fn stretch_u16_to_u8(data: &[u16], stats: &Statistics, params: &StretchParam
 
 /// Stretch `u16` data directly to `u16` through a 65,536-entry LUT, retaining
 /// the full display precision of the resolved curve.
+///
+/// Reproduces N.I.N.A.'s `AutoStretch` bit for bit, including its
+/// `DenormalizeUShort` rounding (round half up below mid-scale, truncate
+/// above).
 pub fn stretch_u16_to_u16(data: &[u16], stats: &Statistics, params: &StretchParams) -> Vec<u16> {
     let (shadows, midtone, highlights) = stretch_u16_curve(stats, params);
     let map = (0..65_536)
         .map(|value| {
             let input = 1.0 - highlights + value as f64 / 65_535.0 - shadows;
             let stretched = midtones_transfer_function(midtone, input);
-            (stretched.clamp(0.0, 1.0) * f64::from(u16::MAX) + 0.5) as u16
+            denormalize_u16(stretched)
         })
         .collect::<Vec<_>>();
     data.iter().map(|value| map[usize::from(*value)]).collect()
@@ -1152,44 +1160,118 @@ fn stretch_u16_map(stats: &Statistics, params: &StretchParams) -> Vec<u8> {
         .map(|value| {
             let input = 1.0 - highlights + value as f64 / 65_535.0 - shadows;
             let stretched = midtones_transfer_function(midtone, input);
-            (stretched.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+            (denormalize_u16(stretched) >> 8) as u8
         })
         .collect()
 }
 
+/// N.I.N.A.'s `DenormalizeUShort`: `(ushort)(val * 65535 + (val < 0.5 ? 0.5
+/// : 0.0))` — round half up below mid-scale, truncate above.
+fn denormalize_u16(value: f64) -> u16 {
+    let scaled = value.clamp(0.0, 1.0) * 65_535.0;
+    let rounded = if scaled < 32_767.5 {
+        scaled + 0.5
+    } else {
+        scaled
+    };
+    rounded as u16
+}
+
+/// The N.I.N.A. auto-stretch curve. Operation order matches N.I.N.A.'s
+/// `ImageStatistics`-driven stretch exactly, and shadows are deliberately
+/// NOT clamped at zero — on very dark frames N.I.N.A. lets the shadow point
+/// go negative, which brightens the background, and reproducing its output
+/// requires doing the same.
 fn stretch_u16_curve(stats: &Statistics, params: &StretchParams) -> (f64, f64, f64) {
     let normalized_median = f64::from(stats.median) / 65_535.0;
-    let normalized_mad = stats.mad / 65_535.0 * NORMAL_MAD_SCALE;
+    let normalized_mad = stats.mad / 65_535.0;
     if normalized_median > 0.5 {
-        let highlights = normalized_median - params.shadows_clip * normalized_mad;
+        let highlights =
+            normalized_median - params.shadows_clip * normalized_mad * NORMAL_MAD_SCALE;
         let midtone = midtones_transfer_function(
             params.target_median,
             1.0 - (highlights - normalized_median),
         );
         (0.0, midtone, highlights)
     } else {
-        let shadows = (normalized_median + params.shadows_clip * normalized_mad).max(0.0);
+        let shadows = normalized_median + params.shadows_clip * normalized_mad * NORMAL_MAD_SCALE;
         let midtone = midtones_transfer_function(params.target_median, normalized_median - shadows);
         (shadows, midtone, 1.0)
     }
+}
+
+/// Auto-stretch arbitrary linear floating-point samples to display `u8`
+/// with the same N.I.N.A.-style MTF mapping as [`stretch_u16_to_u8`].
+///
+/// Derived images such as stacks have no meaningful fixed integer bit
+/// depth. The median, MAD, and a robust highlight (99.9th percentile) are
+/// estimated from a bounded sample, the data is normalized to that range,
+/// and the MTF is applied. Returns `None` when the sample is empty or
+/// degenerate (no usable range). Non-finite input pixels map to 0.
+pub fn auto_stretch_f32_to_u8(data: &[f32], params: &StretchParams) -> Option<Vec<u8>> {
+    let mut sample = data
+        .iter()
+        .step_by((data.len() / 300_000).max(1))
+        .copied()
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    if sample.is_empty() {
+        return None;
+    }
+    sample.sort_unstable_by(f32::total_cmp);
+    let median = f64::from(sample[sample.len() / 2]);
+    let mut deviations = sample
+        .iter()
+        .map(|value| (f64::from(*value) - median).abs())
+        .collect::<Vec<_>>();
+    deviations.sort_unstable_by(f64::total_cmp);
+    let mad = deviations[deviations.len() / 2];
+    let shadows = median + params.shadows_clip * mad * NORMAL_MAD_SCALE;
+    let highlights = f64::from(sample[sample.len() * 999 / 1000]);
+    let range = highlights - shadows;
+    if !range.is_finite() || range <= f64::EPSILON {
+        return None;
+    }
+    let normalized_median = ((median - shadows) / range).clamp(0.0, 1.0);
+    let midtones = midtones_transfer_function(params.target_median, normalized_median);
+    Some(
+        data.iter()
+            .map(|value| {
+                if !value.is_finite() {
+                    return 0;
+                }
+                let normalized = ((f64::from(*value) - shadows) / range).clamp(0.0, 1.0);
+                (midtones_transfer_function(midtones, normalized) * 255.0).round() as u8
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn previous_u16_stretch(data: &[u16], stats: &Statistics, params: &StretchParams) -> Vec<u8> {
+    /// Independent transcription of N.I.N.A.'s AutoStretch (as ported and
+    /// validated in PSF Guard): operation order, no shadow clamp, and
+    /// DenormalizeUShort rounding.
+    fn nina_reference_stretch_u16(
+        data: &[u16],
+        stats: &Statistics,
+        params: &StretchParams,
+    ) -> Vec<u16> {
         let normalized_median = f64::from(stats.median) / 65_535.0;
-        let normalized_mad = stats.mad / 65_535.0 * 1.4826;
+        let normalized_mad = stats.mad / 65_535.0;
+        let scale_factor = 1.4826;
         let (shadows, midtone, highlights) = if normalized_median > 0.5 {
-            let highlights = normalized_median - params.shadows_clip * normalized_mad;
+            let highlights =
+                normalized_median - params.shadows_clip * normalized_mad * scale_factor;
             let midtone = midtones_transfer_function(
                 params.target_median,
                 1.0 - (highlights - normalized_median),
             );
             (0.0, midtone, highlights)
         } else {
-            let shadows = (normalized_median + params.shadows_clip * normalized_mad).max(0.0);
+            let shadows = normalized_median + params.shadows_clip * normalized_mad * scale_factor;
             let midtone =
                 midtones_transfer_function(params.target_median, normalized_median - shadows);
             (shadows, midtone, 1.0)
@@ -1198,7 +1280,12 @@ mod tests {
             .map(|value| {
                 let input = 1.0 - highlights + value as f64 / 65_535.0 - shadows;
                 let stretched = midtones_transfer_function(midtone, input);
-                (stretched.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+                let scaled = stretched.clamp(0.0, 1.0) * 65_535.0;
+                (if scaled < 32_767.5 {
+                    scaled + 0.5
+                } else {
+                    scaled
+                }) as u16
             })
             .collect::<Vec<_>>();
         data.iter().map(|value| map[usize::from(*value)]).collect()
@@ -1539,7 +1626,10 @@ mod tests {
 
     #[test]
     fn u16_autostretch_is_not_an_upscaled_u8_lut() {
-        let input = (0..=u16::MAX).step_by(17).collect::<Vec<_>>();
+        // Realistic dark-sky statistics (a full-range uniform ramp has MAD
+        // comparable to its median, which N.I.N.A.'s unclamped shadow point
+        // degenerates to a binary map — faithfully, but useless here).
+        let input = (0..=16_000).step_by(7).collect::<Vec<_>>();
         let statistics = statistics_u16(&input);
         let output = stretch_u16_to_u16(&input, &statistics, &StretchParams::default());
 
@@ -1610,7 +1700,7 @@ mod tests {
     }
 
     #[test]
-    fn u16_stretch_is_byte_identical_to_the_previous_lut() {
+    fn u16_stretch_is_byte_identical_to_nina() {
         let data = (0..=u16::MAX).collect::<Vec<_>>();
         for statistics in [
             Statistics {
@@ -1631,11 +1721,86 @@ mod tests {
                 mad: 600.0,
                 count: data.len(),
             },
+            // Dark narrowband frame whose shadow point goes negative: the
+            // clamp N.I.N.A. does NOT apply must not reappear.
+            Statistics {
+                min: 0,
+                max: 4_000,
+                mean: 320.0,
+                std_dev: 260.0,
+                median: 300,
+                mad: 250.0,
+                count: data.len(),
+            },
         ] {
-            let expected = previous_u16_stretch(&data, &statistics, &StretchParams::default());
-            let actual = stretch_u16_to_u8(&data, &statistics, &StretchParams::default());
+            let expected =
+                nina_reference_stretch_u16(&data, &statistics, &StretchParams::default());
+            let actual = stretch_u16_to_u16(&data, &statistics, &StretchParams::default());
             assert_eq!(actual, expected);
+
+            // The u8 path is exactly the u16 result rendered at 8 bits.
+            let expected_u8 = expected.iter().map(|v| (v >> 8) as u8).collect::<Vec<_>>();
+            let actual_u8 = stretch_u16_to_u8(&data, &statistics, &StretchParams::default());
+            assert_eq!(actual_u8, expected_u8);
         }
+    }
+
+    #[test]
+    fn dark_frame_shadows_go_negative_like_nina() {
+        // median + clip * mad * 1.4826 < 0 for these statistics; with the
+        // old clamp the zero pixel mapped to 0, without it the background
+        // lifts. Guard the semantic so the clamp cannot silently return.
+        let stats = Statistics {
+            min: 0,
+            max: 4_000,
+            mean: 320.0,
+            std_dev: 260.0,
+            median: 300,
+            mad: 250.0,
+            count: 1,
+        };
+        let params = StretchParams::default();
+        let stretched = stretch_u16_to_u16(&[0], &stats, &params);
+        assert!(
+            stretched[0] > 0,
+            "negative shadow point must lift the zero pixel, got {}",
+            stretched[0]
+        );
+    }
+
+    #[test]
+    fn denormalize_matches_nina_denormalize_ushort() {
+        assert_eq!(denormalize_u16(0.0), 0);
+        assert_eq!(denormalize_u16(1.0), 65_535);
+        // Below mid-scale: round half up. 0.25 * 65535 = 16383.75 -> 16384.
+        assert_eq!(denormalize_u16(0.25), 16_384);
+        // Above mid-scale: truncate. 0.75 * 65535 = 49151.25 -> 49151, and
+        // a value that would round up under half-up stays truncated:
+        // 0.9 * 65535 = 58981.5 -> 58981.
+        assert_eq!(denormalize_u16(0.75), 49_151);
+        assert_eq!(denormalize_u16(0.9), 58_981);
+        assert_eq!(denormalize_u16(-0.5), 0);
+        assert_eq!(denormalize_u16(1.5), 65_535);
+    }
+
+    #[test]
+    fn f32_auto_stretch_places_background_near_requested_median() {
+        let mut data = (0..10_000)
+            .map(|index| 1000.0 + (index % 19) as f32 - 9.0)
+            .collect::<Vec<_>>();
+        data.extend([0.0, 25_000.0, f32::NAN]);
+        let stretched = auto_stretch_f32_to_u8(&data, &StretchParams::default()).unwrap();
+        let mut background = stretched[..10_000].to_vec();
+        background.sort_unstable();
+        assert!((40..=65).contains(&background[background.len() / 2]));
+        assert_eq!(stretched.last(), Some(&0));
+    }
+
+    #[test]
+    fn f32_auto_stretch_rejects_degenerate_input() {
+        assert!(auto_stretch_f32_to_u8(&[], &StretchParams::default()).is_none());
+        assert!(auto_stretch_f32_to_u8(&[f32::NAN; 4], &StretchParams::default()).is_none());
+        assert!(auto_stretch_f32_to_u8(&[3.0; 100], &StretchParams::default()).is_none());
     }
 
     #[test]
