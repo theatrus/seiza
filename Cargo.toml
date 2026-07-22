@@ -31,7 +31,7 @@ seiza-background = { path = "seiza-background", version = "0.1.0" }
 seiza-deconvolution = { path = "seiza-deconvolution", version = "0.1.0" }
 seiza-download = { path = "seiza-download", version = "0.6.0" }
 seiza-fits = { path = "seiza-fits", version = "0.2.0" }
-seiza-imgproc = { path = "seiza-imgproc", version = "0.1.0" }
+seiza-imgproc = { path = "seiza-imgproc", version = "0.2.0" }
 seiza-satellites = { path = "seiza-satellites", version = "0.4.2" }
 seiza-stacking = { path = "seiza-stacking", version = "0.1.0" }
 seiza-stats = { path = "seiza-stats", version = "0.1.0" }

@@ -24,27 +24,17 @@ pub fn dt_filter_nc(
     assert_eq!(guide.len(), width * height);
     assert_eq!(src.len(), width * height);
     assert!(num_iters >= 1);
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
 
     let ratio = sigma_spatial / sigma_color;
 
-    // Cumulative domain-transform positions along rows and columns:
-    // ct[0] = 0, ct[k] = ct[k-1] + 1 + ratio * |g[k] - g[k-1]|.
-    let mut ct_h = vec![0f64; width * height];
-    for y in 0..height {
-        let row = y * width;
-        for x in 1..width {
-            let d = (guide[row + x] - guide[row + x - 1]).abs() as f64;
-            ct_h[row + x] = ct_h[row + x - 1] + 1.0 + ratio * d;
-        }
-    }
-    let mut ct_v = vec![0f64; width * height];
-    for x in 0..width {
-        for y in 1..height {
-            let d = (guide[y * width + x] - guide[(y - 1) * width + x]).abs() as f64;
-            ct_v[y * width + x] = ct_v[(y - 1) * width + x] + 1.0 + ratio * d;
-        }
-    }
-
+    // Domain-transform positions (ct[0] = 0, ct[k] = ct[k-1] + 1 + ratio *
+    // |g[k] - g[k-1]|) are computed per row/column on the fly: materializing
+    // them for the whole image costs two full-resolution f64 planes of
+    // allocation and memory traffic (about 1 GiB for a 61 MP frame) for
+    // values each pass reads exactly once, in order.
     let mut res: Vec<f32> = src.to_vec();
     let n = num_iters as i32;
     for iter in 1..=n {
@@ -53,21 +43,34 @@ pub fn dt_filter_nc(
             / ((4.0f64).powi(n) - 1.0).sqrt();
         let radius = sigma_h * (3.0f64).sqrt();
 
-        horizontal_pass(&mut res, &ct_h, width, height, radius);
-        vertical_pass(&mut res, &ct_v, width, height, radius);
+        horizontal_pass(&mut res, guide, ratio, width, height, radius);
+        vertical_pass(&mut res, guide, ratio, width, height, radius);
     }
     res
 }
 
-fn horizontal_pass(res: &mut [f32], ct: &[f64], width: usize, height: usize, radius: f64) {
+fn horizontal_pass(
+    res: &mut [f32],
+    guide: &[f32],
+    ratio: f64,
+    width: usize,
+    height: usize,
+    radius: f64,
+) {
     // f32 prefix sums, matching OpenCV's box accumulation precision.
     let mut prefix = vec![0f32; width + 1];
+    let mut ct_row = vec![0f64; width];
     for y in 0..height {
         let row = y * width;
         for x in 0..width {
             prefix[x + 1] = prefix[x] + res[row + x];
         }
-        let ct_row = &ct[row..row + width];
+        let grow = &guide[row..row + width];
+        ct_row[0] = 0.0;
+        for x in 1..width {
+            let d = (grow[x] - grow[x - 1]).abs() as f64;
+            ct_row[x] = ct_row[x - 1] + 1.0 + ratio * d;
+        }
         let mut lo = 0usize;
         let mut hi = 0usize;
         for x in 0..width {
@@ -88,12 +91,22 @@ fn horizontal_pass(res: &mut [f32], ct: &[f64], width: usize, height: usize, rad
     }
 }
 
-fn vertical_pass(res: &mut [f32], ct: &[f64], width: usize, height: usize, radius: f64) {
+fn vertical_pass(
+    res: &mut [f32],
+    guide: &[f32],
+    ratio: f64,
+    width: usize,
+    height: usize,
+    radius: f64,
+) {
     let mut ct_col = vec![0f64; height];
     let mut prefix = vec![0f32; height + 1];
     for x in 0..width {
-        for y in 0..height {
-            ct_col[y] = ct[y * width + x];
+        ct_col[0] = 0.0;
+        prefix[1] = prefix[0] + res[x];
+        for y in 1..height {
+            let d = (guide[y * width + x] - guide[(y - 1) * width + x]).abs() as f64;
+            ct_col[y] = ct_col[y - 1] + 1.0 + ratio * d;
             prefix[y + 1] = prefix[y] + res[y * width + x];
         }
         let mut lo = 0usize;
