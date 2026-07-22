@@ -27,7 +27,7 @@ can submit to the same server with `seiza worker --server`.
 [Status](#status) · [N.I.N.A.](#use-with-nina-astap-compatible-mode) ·
 [Siril](#use-with-siril-solve-field-compatible-mode) · [Layout](#layout)
 
-**Downstream:**
+**Built on seiza:**
 [Seiza for Mac](https://github.com/theatrus/seiza-mac) ·
 [Seiza for Windows](https://github.com/theatrus/seiza-win) ·
 [seiza-server / seiza.fyi](https://github.com/theatrus/seiza-server) ·
