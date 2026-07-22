@@ -13,6 +13,7 @@ use seiza_deconvolution::{DeconvolutionConfig, deconvolve as restore, deconvolve
 /// it from another thread until the call returns.
 #[pyfunction]
 #[pyo3(signature = (image, *, psf_fwhm, iterations=4, amount=0.35, noise_fraction=0.001, max_correction=2.0, masked=false))]
+#[allow(clippy::too_many_arguments)]
 fn deconvolve<'py>(
     py: Python<'py>,
     image: PyReadonlyArrayDyn<'_, f32>,
