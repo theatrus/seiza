@@ -1595,6 +1595,7 @@ dependencies = [
  "seiza-fits",
  "sha1",
  "sha2",
+ "tempfile",
  "thiserror",
  "zstd",
 ]

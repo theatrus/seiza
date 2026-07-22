@@ -490,6 +490,8 @@ seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-
   and zlib, LZ4/LZ4HC, or zstd compression with optional byte shuffling in
   [`seiza-xisf`](seiza-xisf/README.md). XISF uses the same linear image path as
   FITS for solving, rendering, background work, deconvolution, and stacking.
+  Atomic `Float32` XISF output mirrors the FITS writer; a `.xisf` output path
+  selects it in every CLI save command.
 - **Parameterized stretching** — reusable identity, linear, asinh,
   percentile-asinh, MTF, manual GHS, and existing median/MAD Auto-MTF models in
   `seiza-stretch`. Analysis, curve resolution, and application are separate so
@@ -580,7 +582,8 @@ and solves in the table's exact frame. Contract details:
 - `seiza/` — library crate: `detect`, `wcs`, `catalog`, `objects`, `solve`
 - `seiza-fits/` — FITS reading and atomic linear `f32` writing; re-exports the
   statistics and MTF autostretch that now live in `seiza-stretch`
-- `seiza-xisf/` — XISF metadata and attached-pixel reading into `FitsImage`
+- `seiza-xisf/` — XISF metadata and attached-pixel reading into `FitsImage`,
+  plus atomic linear `f32` writing
 - `seiza-background/` — format-independent robust background sampling,
   polynomial fitting, diagnostics, and linear correction
 - `seiza-stretch/` — parameterized, format-independent display analysis,
