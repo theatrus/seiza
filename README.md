@@ -20,6 +20,20 @@ upload an image, and get a solution and object overlay in your browser. The
 site runs [seiza-server](https://github.com/theatrus/seiza-server); the CLI
 can submit to the same server with `seiza worker --server`.
 
+**Contents:** [Native apps](#native-apps) · [Install](#install) ·
+[Ways to use it](#ways-to-use-it) · [Feature matrix](#feature-matrix) ·
+[Quick start](#quick-start) · [Image stacking](#image-stacking) ·
+[Performance](#performance) · [Catalogs and data](#catalogs-and-data) ·
+[Status](#status) · [N.I.N.A.](#use-with-nina-astap-compatible-mode) ·
+[Siril](#use-with-siril-solve-field-compatible-mode) · [Layout](#layout)
+
+**Built on seiza:**
+[Seiza for Mac](https://github.com/theatrus/seiza-mac) ·
+[Seiza for Windows](https://github.com/theatrus/seiza-win) ·
+[seiza-server / seiza.fyi](https://github.com/theatrus/seiza-server) ·
+[PSF Guard](https://github.com/theatrus/psf-guard) ·
+[tenrankai](https://github.com/theatrus/tenrankai)
+
 ## Native apps
 
 The same Rust engine drives two real desktop apps through
@@ -27,14 +41,15 @@ The same Rust engine drives two real desktop apps through
 
 - 🍎 **[Seiza for Mac](https://github.com/theatrus/seiza-mac)** — a fast,
   native FITS viewer and plate solver. Browse whole folders with thumbnails,
-  stretch live with a reorderable stack editor, subtract gradients, blind
-  solve on your machine with no uploads, and export images with overlays.
-  Quick Look previews included. macOS 15+, Apple silicon and Intel.
+  stretch live with a reorderable stack editor, subtract gradients,
+  deconvolve, blind solve on your machine with no uploads, install and verify
+  catalogs, and export images with overlays. Quick Look previews included.
+  macOS 15+, Apple silicon and Intel.
 - 🪟 **[Seiza for Windows](https://github.com/theatrus/seiza-win)** — a
   first-class native WinUI 3 viewer and solver. GPU-accelerated pan and
-  zoom, per-channel color rendering, background plate solving with star,
-  deep-sky, and motion overlays, and built-in catalog install, verify, and
-  repair. Windows 11.
+  zoom, per-channel color rendering, gradient subtraction, deconvolution,
+  background plate solving with star, deep-sky, and motion overlays, and
+  built-in catalog install, verify, and repair. Windows 11.
 
 ## Install
 
@@ -66,7 +81,8 @@ compiler, formatter, and linter.
 - **In [Tenrankai](https://github.com/theatrus/tenrankai)** — its gallery
   server uses seiza for astrometric solutions and object overlays.
 - **In [PSF Guard](https://github.com/theatrus/psf-guard)** — seiza provides
-  solved WCS and catalog context for image-quality and spatial analysis.
+  solved WCS and catalog context for image-quality and spatial analysis, plus
+  calibrated batch stacking of selected frames.
 - **In a browser** — [seiza.fyi](https://seiza.fyi) lets you upload an image
   for a hosted solution and object overlay, with nothing to install.
 - **From your own application** — run `seiza worker` to keep the catalogs
@@ -112,16 +128,23 @@ Every surface runs the same engine; pick the one that fits.
 | Display stretching | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Batch and live stacking | ✓ | ✓ | ✓ | — | — |
 | Calibration masters | ✓ | ✓ | — | — | — |
-| Background extraction | ✓ | ✓ | ✓ | ✓ | — |
-| Deconvolution (experimental) | ✓ | ✓ | ✓ | ◐ | — |
+| Background extraction | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Deconvolution (experimental) | ✓ | ✓ | ✓ | ✓ | ✓ |
 | RGB, LRGB, and narrowband color | ✓ | ✓ | — | — | — |
 | Satellite track prediction | ✓ | ✓ | — | — | — |
-| Catalog install and verify | ✓ | ✓ | ✓ | — | ✓ |
+| Catalog install and verify | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Export with overlays | ✓ | — | — | ✓ | ✓ |
 
-◐ in development. The C ABI renders; its host app does the browsing.
+The C ABI renders; its host app does the browsing. For stacking on the
+desktop, [PSF Guard](https://github.com/theatrus/psf-guard) stacks the frames
+it selects with this engine.
 
 ## Quick start
+
+These are CLI instructions for core use, scripting, and integration. If you
+just want to view, solve, and process images, install a
+[native Mac or Windows app](#native-apps) instead — nothing below is needed
+there.
 
 Download the ready-made catalogs once, then solve:
 
@@ -500,6 +523,21 @@ seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-
   robust rejection, weighted polynomial surfaces, additive subtraction, and
   multiplicative correction in `seiza-background`. Model fitting is compact;
   rendering a full model image is explicit.
+- **Image stacking** — master bias/dark/flat construction, CFA-aware OSC
+  calibration, registration onto the first frame's fixed grid with
+  meridian-flip handling, global or tiled local normalization, and online
+  delta-sigma rejection in `seiza-stacking`. The same incremental
+  `LiveStacker` engine serves batch and live use.
+- **Deconvolution (experimental)** — damped Richardson-Lucy restoration from
+  a measured Gaussian PSF FWHM with per-channel flux preservation in
+  `seiza-deconvolution`. `NaN` registration borders stay masked instead of
+  being treated as image data.
+- **Color from mono stacks** — RGB, LRGB with native or additive
+  super-luminance modes, SHO/HOO and every direct three-filter permutation,
+  Foraxx quick looks, and custom mixing matrices, all in linear light.
+- **Satellite track prediction** — single-exposure tracks from current or
+  historical OMM/TLE element sets, with annotated overlays, in
+  `seiza-satellites`.
 - **Packages & CI** — crates.io releases, a guided
   [Windows MSI installer](packaging/windows/README.md), Fedora RPMs and
   Ubuntu debs on GitHub releases, and an integration suite that solves real
