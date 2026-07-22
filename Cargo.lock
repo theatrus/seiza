@@ -2296,7 +2296,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "seiza"
-version = "0.11.2"
+version = "0.12.0"
 dependencies = [
  "directories",
  "image",
@@ -2328,7 +2328,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-cabi"
-version = "0.11.2"
+version = "0.12.0"
 dependencies = [
  "cbindgen",
  "image",
@@ -2347,7 +2347,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-cli"
-version = "0.11.2"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2389,7 +2389,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-download"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-compression",
  "directories",
@@ -2408,7 +2408,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-fits"
-version = "0.1.6"
+version = "0.2.0"
 dependencies = [
  "memmap2",
  "multiversion",
@@ -2418,7 +2418,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-satellites"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "directories",
  "fs2",
@@ -2437,7 +2437,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-sources"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "flate2",
  "futures-util",
