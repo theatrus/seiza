@@ -20,6 +20,20 @@ upload an image, and get a solution and object overlay in your browser. The
 site runs [seiza-server](https://github.com/theatrus/seiza-server); the CLI
 can submit to the same server with `seiza worker --server`.
 
+**Contents:** [Native apps](#native-apps) · [Install](#install) ·
+[Ways to use it](#ways-to-use-it) · [Feature matrix](#feature-matrix) ·
+[Quick start](#quick-start) · [Image stacking](#image-stacking) ·
+[Performance](#performance) · [Catalogs and data](#catalogs-and-data) ·
+[Status](#status) · [N.I.N.A.](#use-with-nina-astap-compatible-mode) ·
+[Siril](#use-with-siril-solve-field-compatible-mode) · [Layout](#layout)
+
+**Downstream:**
+[Seiza for Mac](https://github.com/theatrus/seiza-mac) ·
+[Seiza for Windows](https://github.com/theatrus/seiza-win) ·
+[seiza-server / seiza.fyi](https://github.com/theatrus/seiza-server) ·
+[PSF Guard](https://github.com/theatrus/psf-guard) ·
+[tenrankai](https://github.com/theatrus/tenrankai)
+
 ## Native apps
 
 The same Rust engine drives two real desktop apps through
@@ -509,6 +523,21 @@ seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-
   robust rejection, weighted polynomial surfaces, additive subtraction, and
   multiplicative correction in `seiza-background`. Model fitting is compact;
   rendering a full model image is explicit.
+- **Image stacking** — master bias/dark/flat construction, CFA-aware OSC
+  calibration, registration onto the first frame's fixed grid with
+  meridian-flip handling, global or tiled local normalization, and online
+  delta-sigma rejection in `seiza-stacking`. The same incremental
+  `LiveStacker` engine serves batch and live use.
+- **Deconvolution (experimental)** — damped Richardson-Lucy restoration from
+  a measured Gaussian PSF FWHM with per-channel flux preservation in
+  `seiza-deconvolution`. `NaN` registration borders stay masked instead of
+  being treated as image data.
+- **Color from mono stacks** — RGB, LRGB with native or additive
+  super-luminance modes, SHO/HOO and every direct three-filter permutation,
+  Foraxx quick looks, and custom mixing matrices, all in linear light.
+- **Satellite track prediction** — single-exposure tracks from current or
+  historical OMM/TLE element sets, with annotated overlays, in
+  `seiza-satellites`.
 - **Packages & CI** — crates.io releases, a guided
   [Windows MSI installer](packaging/windows/README.md), Fedora RPMs and
   Ubuntu debs on GitHub releases, and an integration suite that solves real
