@@ -136,7 +136,8 @@ Run this after calibration, stacking, and background correction and before a
 display stretch. Start with 3-5 iterations and a 0.25-0.4 blend. Compare input
 and output with the same stretch, paying particular attention to bright-star
 rings, background noise, and image borders. Raw Bayer mosaics are rejected;
-debayer or stack them first.
+debayer or stack them first. Missing registration borders marked with `NaN`
+stay masked in the output.
 
 This prototype uses one circular Gaussian PSF across the whole field. It does
 not infer detail, estimate a spatially varying PSF, or replace a model-based

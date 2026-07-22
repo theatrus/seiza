@@ -10,7 +10,7 @@ use seiza::objects::{
 use seiza::wcs::Wcs;
 use seiza::{DetectBackend, DetectConfig, detect_stars, detect_stars_luma_f32};
 use seiza_background::{BackgroundConfig, BackgroundFit, CorrectionMode, fit_background_masked};
-use seiza_deconvolution::{DeconvolutionConfig, deconvolve};
+use seiza_deconvolution::{DeconvolutionConfig, deconvolve, deconvolve_masked};
 use seiza_fits::{FitsImage, HeaderValue, RgbImage16, Statistics, StretchParams};
 use seiza_stacking::{
     CalibrationMasters, FitsFrame, FrameDiagnostics, FrameDisposition, LinearImage, LiveStacker,
@@ -2843,7 +2843,7 @@ fn prepare_stretch_input<'a>(
         noise_fraction: request.noise_fraction,
         max_correction: request.max_correction,
     };
-    let restored = deconvolve(
+    let restored = deconvolve_masked(
         &prepared.data,
         prepared.render_width,
         prepared.render_height,
@@ -4744,6 +4744,12 @@ mod tests {
         pixels[center * size + center + 1] = 0.35;
         pixels[(center - 1) * size + center] = 0.35;
         pixels[(center + 1) * size + center] = 0.35;
+        for sample in pixels.iter_mut().take(size) {
+            *sample = f32::NAN;
+        }
+        for row in pixels.chunks_exact_mut(size) {
+            row[0] = f32::NAN;
+        }
         let fits = FitsImage {
             width: size,
             height: size,

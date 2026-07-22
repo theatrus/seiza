@@ -20,14 +20,19 @@ defaults use four iterations, blend only 35% of the estimate into the original,
 damp corrections near the configured channel-relative noise floor, limit each
 iteration's correction, and renormalize flux per channel.
 
+Use `deconvolve_masked` for registered images whose missing border samples are
+`NaN`. It keeps the mask in the output and scales each convolution by its valid
+PSF support, so missing pixels do not darken nearby data. `deconvolve` keeps its
+strict finite-input check for callers that want to reject gaps.
+
 The Python wheel exposes `seiza.deconvolve(image, psf_fwhm=3.1)` for
 C-contiguous NumPy arrays. Native applications can use
 `seiza_deconvolve_in_place` from the generated `seiza-cabi` header.
 
 Use it after calibration, stacking, and background correction, but before any
 display stretch. Raw Bayer mosaics should be debayered first. The algorithm
-supports finite mono and interleaved RGB `f32` samples in arbitrary linear
-units, including negative background-corrected samples.
+supports mono and interleaved RGB `f32` samples in arbitrary linear units,
+including negative background-corrected samples.
 
 This is not blind sharpening and does not infer missing detail. A symmetric,
 spatially invariant Gaussian cannot model field-dependent aberrations, tracking

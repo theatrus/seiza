@@ -247,6 +247,8 @@ engine. See the [CLI stacking guide](seiza-cli/README.md#image-stacking),
 experiment for calibrated/stacked linear FITS/XISF images. Supply a stellar FWHM in
 pixels; Seiza applies four damped Richardson-Lucy iterations by default and
 blends 35% of the result back into the input while preserving per-channel flux.
+The CLI keeps `NaN` registration borders masked instead of treating them as
+image data.
 
 ```text
 seiza deconvolve stack-bg.fits --output stack-light-dc.fits \

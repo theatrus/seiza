@@ -13,6 +13,9 @@ use thiserror::Error;
 
 const FWHM_TO_SIGMA: f32 = 1.0 / 2.354_82;
 
+/// Bump this when the same inputs and settings may yield different pixels.
+pub const ALGORITHM_VERSION: u32 = 1;
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DeconvolutionConfig {
     /// Measured stellar full width at half maximum, in pixels.
@@ -28,6 +31,7 @@ pub struct DeconvolutionConfig {
 }
 
 impl DeconvolutionConfig {
+    /// Conservative settings for a measured stellar FWHM.
     pub fn conservative(psf_fwhm_pixels: f32) -> Self {
         Self {
             psf_fwhm_pixels,
@@ -38,7 +42,8 @@ impl DeconvolutionConfig {
         }
     }
 
-    fn validate(self) -> Result<()> {
+    /// Check that every setting lies in its supported range.
+    pub fn validate(self) -> Result<()> {
         if !self.psf_fwhm_pixels.is_finite() || !(0.25..=100.0).contains(&self.psf_fwhm_pixels) {
             return Err(DeconvolutionError::Invalid(
                 "PSF FWHM must be finite and in [0.25, 100] pixels".into(),
@@ -68,7 +73,7 @@ impl DeconvolutionConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChannelDiagnostics {
     pub input_flux: f64,
     pub output_flux: f64,
@@ -96,15 +101,42 @@ pub type Result<T> = std::result::Result<T, DeconvolutionError>;
 /// RGB image.
 ///
 /// Each channel is restored independently with the same circular Gaussian
-/// PSF. The operation requires finite samples. Negative linear values are
-/// handled by a reversible per-channel offset, and channel flux is normalized
-/// before the configured partial blend is applied.
+/// PSF. This function requires finite samples; use [`deconvolve_masked`] for
+/// registered images with missing border pixels. Negative linear values use a
+/// reversible per-channel offset, and each channel keeps its input flux.
 pub fn deconvolve(
     data: &[f32],
     width: usize,
     height: usize,
     channel_count: usize,
     config: &DeconvolutionConfig,
+) -> Result<DeconvolutionResult> {
+    deconvolve_impl(data, width, height, channel_count, config, false)
+}
+
+/// Apply damped Richardson-Lucy deconvolution while treating non-finite
+/// samples as a missing-data mask.
+///
+/// The output keeps each masked sample non-finite. Convolutions divide by the
+/// valid PSF support near mask edges, so missing registration borders do not
+/// darken or contaminate nearby pixels.
+pub fn deconvolve_masked(
+    data: &[f32],
+    width: usize,
+    height: usize,
+    channel_count: usize,
+    config: &DeconvolutionConfig,
+) -> Result<DeconvolutionResult> {
+    deconvolve_impl(data, width, height, channel_count, config, true)
+}
+
+fn deconvolve_impl(
+    data: &[f32],
+    width: usize,
+    height: usize,
+    channel_count: usize,
+    config: &DeconvolutionConfig,
+    allow_masked: bool,
 ) -> Result<DeconvolutionResult> {
     config.validate()?;
     if width == 0 || height == 0 || !matches!(channel_count, 1 | 3) {
@@ -125,7 +157,7 @@ pub fn deconvolve(
     let kernel = gaussian_kernel(config.psf_fwhm_pixels);
     let convolver = SeparableConvolver::new(width, height, &kernel);
     if channel_count == 1 {
-        let restored = restore_channel(data, &convolver, config)?;
+        let restored = restore_channel(data, &convolver, config, allow_masked)?;
         return Ok(DeconvolutionResult {
             data: restored.data,
             channels: vec![restored.diagnostics],
@@ -141,7 +173,7 @@ pub fn deconvolve(
                 .step_by(channel_count)
                 .copied()
                 .collect::<Vec<_>>();
-            restore_channel(&input, &convolver, config)
+            restore_channel(&input, &convolver, config, allow_masked)
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -168,19 +200,30 @@ fn restore_channel(
     input: &[f32],
     convolver: &SeparableConvolver<'_>,
     config: &DeconvolutionConfig,
+    allow_masked: bool,
 ) -> Result<RestoredChannel> {
     let mut minimum = f32::INFINITY;
     let mut maximum = f32::NEG_INFINITY;
     let mut input_flux = 0.0_f64;
+    let mut finite_samples = 0_usize;
     for &sample in input {
         if !sample.is_finite() {
+            if allow_masked {
+                continue;
+            }
             return Err(DeconvolutionError::Invalid(
                 "all input samples must be finite".into(),
             ));
         }
+        finite_samples += 1;
         minimum = minimum.min(sample);
         maximum = maximum.max(sample);
         input_flux += f64::from(sample);
+    }
+    if finite_samples == 0 {
+        return Err(DeconvolutionError::Invalid(
+            "at least one input sample must be finite".into(),
+        ));
     }
     let input_peak = maximum;
     let range = maximum - minimum;
@@ -199,7 +242,13 @@ fn restore_channel(
     let offset = (-minimum).max(0.0);
     let observed = input
         .iter()
-        .map(|&sample| (sample + offset).max(0.0))
+        .map(|&sample| {
+            if sample.is_finite() {
+                (sample + offset).max(0.0)
+            } else {
+                0.0
+            }
+        })
         .collect::<Vec<_>>();
     let observed_flux = observed
         .iter()
@@ -213,33 +262,71 @@ fn restore_channel(
     let mut ratio = vec![0.0; input.len()];
     let mut correction = vec![0.0; input.len()];
     let mut convolution_scratch = vec![0.0; input.len()];
+    let mask_support = if finite_samples == input.len() {
+        None
+    } else {
+        let mask = input
+            .iter()
+            .map(|sample| if sample.is_finite() { 1.0 } else { 0.0 })
+            .collect::<Vec<_>>();
+        let mut support = vec![0.0; input.len()];
+        convolver.convolve_into(&mask, &mut support, &mut convolution_scratch);
+        Some((mask, support))
+    };
 
     for _ in 0..config.iterations {
         convolver.convolve_into(&estimate, &mut predicted, &mut convolution_scratch);
-        ratio
-            .par_iter_mut()
-            .zip(&observed)
-            .zip(&predicted)
-            .for_each(|((ratio, &actual), &model)| {
-                *ratio =
-                    (actual / model.max(epsilon)).clamp(minimum_correction, config.max_correction);
-            });
+        normalize_masked_convolution(&mut predicted, mask_support.as_ref());
+        if let Some((mask, _)) = &mask_support {
+            ratio
+                .par_iter_mut()
+                .zip(&observed)
+                .zip(&predicted)
+                .zip(mask)
+                .for_each(|(((ratio, &actual), &model), &valid)| {
+                    *ratio = if valid == 0.0 {
+                        0.0
+                    } else {
+                        (actual / model.max(epsilon))
+                            .clamp(minimum_correction, config.max_correction)
+                    };
+                });
+        } else {
+            ratio
+                .par_iter_mut()
+                .zip(&observed)
+                .zip(&predicted)
+                .for_each(|((ratio, &actual), &model)| {
+                    *ratio = (actual / model.max(epsilon))
+                        .clamp(minimum_correction, config.max_correction);
+                });
+        }
         convolver.convolve_into(&ratio, &mut correction, &mut convolution_scratch);
-        estimate
-            .par_iter_mut()
-            .zip(&predicted)
-            .zip(&observed)
-            .zip(&correction)
-            .for_each(|(((estimate, &predicted), &observed), &correction)| {
-                let proposed = (*estimate * correction).max(0.0);
-                let residual = (observed - predicted).abs();
-                let activity = if noise_floor > 0.0 {
-                    residual / (residual + noise_floor)
-                } else {
-                    1.0
-                };
-                *estimate = activity.mul_add(proposed - *estimate, *estimate);
-            });
+        normalize_masked_convolution(&mut correction, mask_support.as_ref());
+        if let Some((mask, _)) = &mask_support {
+            estimate
+                .par_iter_mut()
+                .zip(&predicted)
+                .zip(&observed)
+                .zip(&correction)
+                .zip(mask)
+                .for_each(
+                    |((((estimate, &predicted), &observed), &correction), &valid)| {
+                        if valid != 0.0 {
+                            update_estimate(estimate, predicted, observed, correction, noise_floor);
+                        }
+                    },
+                );
+        } else {
+            estimate
+                .par_iter_mut()
+                .zip(&predicted)
+                .zip(&observed)
+                .zip(&correction)
+                .for_each(|(((estimate, &predicted), &observed), &correction)| {
+                    update_estimate(estimate, predicted, observed, correction, noise_floor);
+                });
+        }
     }
 
     let estimated_flux = estimate
@@ -257,16 +344,37 @@ fn restore_channel(
     drop(convolution_scratch);
 
     let amount = config.amount;
-    let mut data = predicted;
-    data.par_iter_mut()
-        .zip(input)
-        .zip(&estimate)
-        .for_each(|((output, &original), &estimate)| {
-            let restored = estimate.mul_add(flux_scale, -offset);
-            *output = amount.mul_add(restored - original, original);
-        });
-    let output_flux = data.iter().map(|&sample| f64::from(sample)).sum::<f64>();
-    let output_peak = data.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let masked = mask_support.is_some();
+    drop(mask_support);
+    let mut data = if masked { input.to_vec() } else { predicted };
+    if masked {
+        data.par_iter_mut()
+            .zip(&estimate)
+            .for_each(|(output, &estimate)| {
+                let original = *output;
+                if original.is_finite() {
+                    let restored = estimate.mul_add(flux_scale, -offset);
+                    *output = amount.mul_add(restored - original, original);
+                }
+            });
+    } else {
+        data.par_iter_mut().zip(input).zip(&estimate).for_each(
+            |((output, &original), &estimate)| {
+                let restored = estimate.mul_add(flux_scale, -offset);
+                *output = amount.mul_add(restored - original, original);
+            },
+        );
+    }
+    let output_flux = data
+        .iter()
+        .filter(|sample| sample.is_finite())
+        .map(|&sample| f64::from(sample))
+        .sum::<f64>();
+    let output_peak = data
+        .iter()
+        .copied()
+        .filter(|sample| sample.is_finite())
+        .fold(f32::NEG_INFINITY, f32::max);
     Ok(RestoredChannel {
         data,
         diagnostics: ChannelDiagnostics {
@@ -276,6 +384,41 @@ fn restore_channel(
             output_peak,
         },
     })
+}
+
+#[inline]
+fn update_estimate(
+    estimate: &mut f32,
+    predicted: f32,
+    observed: f32,
+    correction: f32,
+    noise_floor: f32,
+) {
+    let proposed = (*estimate * correction).max(0.0);
+    let residual = (observed - predicted).abs();
+    let activity = if noise_floor > 0.0 {
+        residual / (residual + noise_floor)
+    } else {
+        1.0
+    };
+    *estimate = activity.mul_add(proposed - *estimate, *estimate);
+}
+
+fn normalize_masked_convolution(output: &mut [f32], mask_support: Option<&(Vec<f32>, Vec<f32>)>) {
+    let Some((mask, support)) = mask_support else {
+        return;
+    };
+    output
+        .par_iter_mut()
+        .zip(mask)
+        .zip(support)
+        .for_each(|((output, &valid), &support)| {
+            *output = if valid == 0.0 {
+                0.0
+            } else {
+                *output / support.max(f32::MIN_POSITIVE)
+            };
+        });
 }
 
 fn gaussian_kernel(fwhm_pixels: f32) -> Vec<f32> {
@@ -474,11 +617,83 @@ mod tests {
     }
 
     #[test]
+    fn masked_entry_point_keeps_the_finite_fast_path_exact() {
+        let mut input = vec![-0.25; 13 * 13];
+        input[6 * 13 + 6] = 4.0;
+
+        let strict = deconvolve(&input, 13, 13, 1, &config()).unwrap();
+        let masked = deconvolve_masked(&input, 13, 13, 1, &config()).unwrap();
+
+        assert_eq!(masked, strict);
+    }
+
+    #[test]
     fn rejects_invalid_configuration_and_nonfinite_samples() {
         let mut invalid = config();
         invalid.amount = 1.1;
         assert!(deconvolve(&[1.0], 1, 1, 1, &invalid).is_err());
         assert!(deconvolve(&[f32::NAN], 1, 1, 1, &config()).is_err());
         assert!(deconvolve(&[1.0, 2.0], 1, 1, 1, &config()).is_err());
+    }
+
+    #[test]
+    fn masked_constant_field_keeps_its_values_and_mask() {
+        let width = 13;
+        let height = 11;
+        let mut input = vec![4.0; width * height];
+        for y in 0..height {
+            input[y * width] = f32::NAN;
+        }
+        for sample in input.iter_mut().take(width) {
+            *sample = f32::NAN;
+        }
+
+        let restored = deconvolve_masked(&input, width, height, 1, &config()).unwrap();
+
+        for (before, after) in input.iter().zip(&restored.data) {
+            if before.is_finite() {
+                assert_eq!(before, after);
+            } else {
+                assert!(after.is_nan());
+            }
+        }
+    }
+
+    #[test]
+    fn masked_star_restoration_keeps_registration_border_out_of_the_solution() {
+        let size = 41;
+        let center = size / 2;
+        let mut point = vec![0.0; size * size];
+        point[center * size + center] = 1.0;
+        let kernel = gaussian_kernel(config().psf_fwhm_pixels);
+        let mut input = convolve_separable(&point, size, size, &kernel);
+        for y in 0..size {
+            input[y * size] = f32::NAN;
+            input[y * size + 1] = f32::NAN;
+        }
+        for sample in input.iter_mut().take(size) {
+            *sample = f32::NAN;
+        }
+        let input_flux = input
+            .iter()
+            .filter(|sample| sample.is_finite())
+            .sum::<f32>();
+
+        let restored = deconvolve_masked(&input, size, size, 1, &config()).unwrap();
+
+        assert!(restored.data[center * size + center] > input[center * size + center]);
+        assert!(
+            restored
+                .data
+                .iter()
+                .zip(&input)
+                .all(|(after, before)| after.is_finite() == before.is_finite())
+        );
+        let output_flux = restored
+            .data
+            .iter()
+            .filter(|sample| sample.is_finite())
+            .sum::<f32>();
+        assert!((output_flux - input_flux).abs() < 1.0e-4);
     }
 }

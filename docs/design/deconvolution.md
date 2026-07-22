@@ -31,6 +31,12 @@ the non-negative Richardson-Lucy update runs. Mono and interleaved RGB are
 supported; RGB channels use one shared PSF but independent updates and flux
 normalization.
 
+Registered images may use `NaN` where no source pixel covers the reference
+grid. `deconvolve_masked` treats those samples as a fixed mask. Each forward
+and correction convolution divides by its valid PSF support, and the output
+keeps the same mask. The strict `deconvolve` call still rejects non-finite
+samples.
+
 ## Suggested first pass
 
 Measure the median FWHM of several unsaturated stars near the area of interest,
@@ -70,8 +76,8 @@ artifacts.
 - Estimate local PSFs from unsaturated detected stars and report confidence.
 - Compare Gaussian and Moffat kernels on real star wings.
 - Partition the field into smoothly blended PSF regions for spatial variation.
-- Add star/support masks, edge tapering, and total-variation or wavelet
-  regularization for low-SNR backgrounds and ringing control.
+- Add star masks, edge tapering, and total-variation or wavelet regularization
+  for low-SNR backgrounds and ringing control.
 - Establish objective tests: held-out synthetic forward models, FWHM/encircled
   energy, flux error, background power, and ringing around high-contrast stars.
 - Treat any learned restoration as a separate, provenance-bearing operation
