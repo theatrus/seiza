@@ -16,14 +16,16 @@ pub enum F32ImageData<'a> {
 }
 
 impl F32ImageData<'_> {
-    fn planes(self) -> usize {
+    /// Number of color planes this layout produces.
+    pub fn planes(self) -> usize {
         match self {
             Self::Mono(_) => 1,
             Self::RgbInterleaved(_) | Self::RgbPlanar(_) => 3,
         }
     }
 
-    fn samples(&self) -> &[f32] {
+    /// The borrowed samples regardless of layout.
+    pub fn samples(&self) -> &[f32] {
         match self {
             Self::Mono(samples) | Self::RgbInterleaved(samples) | Self::RgbPlanar(samples) => {
                 samples

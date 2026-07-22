@@ -88,6 +88,15 @@ pub enum Error {
         #[source]
         source: seiza_fits::FitsError,
     },
+    /// Writing an XISF frame to disk failed.
+    #[error("failed to write XISF frame {}: {source}", path.display())]
+    XisfWrite {
+        /// Path that could not be written.
+        path: PathBuf,
+        /// Underlying XISF encode error.
+        #[source]
+        source: seiza_xisf::XisfError,
+    },
 }
 
 /// Result specialized to this crate's [`Error`].

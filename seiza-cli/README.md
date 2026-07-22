@@ -474,6 +474,8 @@ FITS and XISF files are read natively through
 automatic MTF stretch for u8 detection and previews, a linear normalized
 representation for f32 detection, and RA/DEC hints from FITS-compatible
 metadata. PNG, JPEG, and TIFF continue to use the Rust `image` decoders.
+Commands that save linear images write FITS by default and monolithic
+`Float32` XISF when the output path ends in `.xisf`.
 
 ### Parameterized display stretching
 

@@ -1,7 +1,7 @@
 # seiza-xisf
 
-Practical XISF 1.0 image reading for astrophotography, built on Seiza's shared
-decoded astronomy-image representation.
+Practical XISF 1.0 image reading and writing for astrophotography, built on
+Seiza's shared decoded astronomy-image representation.
 
 The reader supports monolithic files with attached two-dimensional grayscale
 or RGB images, planar pixel storage, little- or big-endian UInt8, UInt16,
@@ -28,6 +28,13 @@ let display = image.stretch_to_u8(&Default::default());
 `open_image_by_id` for rejection maps, crop masks, and other auxiliary images.
 Distributed XISF units, inline or embedded image blocks, compression subblocks,
 complex samples, CIELab, and dimensions other than two are rejected explicitly.
+
+`write_f32_image` mirrors the `seiza-fits` writer: it atomically writes a
+one-image monolithic XISF file with uncompressed little-endian `Float32`
+planar samples and FITS-compatible keywords, sharing the `F32ImageData` and
+`WriteHeaderCard` types so callers can pick the output format by extension.
+Files written this way round-trip through this crate's reader and load in
+PixInsight.
 
 ## License
 

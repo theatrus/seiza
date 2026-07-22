@@ -1,9 +1,11 @@
-//! Practical XISF 1.0 image reading for Seiza.
+//! Practical XISF 1.0 image reading and writing for Seiza.
 //!
 //! This crate deliberately focuses on the monolithic, attached-image layout
 //! produced by PixInsight for normal astrophotography workflows. Decoded
 //! images use [`seiza_fits::FitsImage`] so downstream statistics, stretching,
 //! Bayer handling, stacking, and solving do not depend on the source format.
+//! [`write_f32_image`] writes the same layout back out with `Float32` samples,
+//! mirroring the `seiza_fits` writer API.
 //!
 //! Sample values pass through unchanged: the XISF `bounds` attribute is
 //! intentionally ignored, keeping linear data linear, and preserved FITS
@@ -19,6 +21,10 @@ use sha2::{Sha256, Sha512};
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+
+mod writer;
+
+pub use writer::{write_f32_image, write_f32_image_to};
 
 const SIGNATURE: &[u8; 8] = b"XISF0100";
 const PREAMBLE_BYTES: u64 = 16;
