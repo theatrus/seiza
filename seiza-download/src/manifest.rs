@@ -81,25 +81,47 @@ impl CatalogSet {
         Self::empty().with(dataset)
     }
 
+    /// Object search, Solar System, and active-transient data included in
+    /// every named solver package so annotation works without a separate
+    /// request. Callers that want a bare star catalog can use
+    /// [`CatalogSet::dataset`].
+    fn annotation() -> Self {
+        Self::empty()
+            .with(Dataset::Objects)
+            .with(Dataset::MinorBodies)
+            .with(Dataset::Transients)
+    }
+
+    /// The compact Tycho-2 solver catalog plus the standard object, Solar
+    /// System, and transient annotation data.
     pub fn solver_lite() -> Self {
-        Self::dataset(Dataset::StarsLiteTycho2)
+        Self::annotation().with(Dataset::StarsLiteTycho2)
     }
 
+    /// The denser Gaia solver catalog plus the standard object, Solar System,
+    /// and transient annotation data.
     pub fn solver_gaia() -> Self {
-        Self::dataset(Dataset::StarsGaia)
+        Self::annotation().with(Dataset::StarsGaia)
     }
 
+    /// The deep G≤17 catalog and blind index plus the standard object, Solar
+    /// System, and transient annotation data.
     pub fn blind_deep() -> Self {
-        Self::dataset(Dataset::StarsDeepGaia17).with(Dataset::BlindGaia16)
+        Self::annotation()
+            .with(Dataset::StarsDeepGaia17)
+            .with(Dataset::BlindGaia16)
     }
 
     /// The deepest solver package: the optional G≤20 star catalog paired with
-    /// the shared bright-star blind index. The G20 catalog is not part of the
-    /// required bundle (it is many gigabytes), so this is an explicit opt-in.
-    /// The G16 blind index supplies field-finding hypotheses; the deep catalog
-    /// verifies them, so no separate deep blind index is needed.
+    /// the shared bright-star blind index, plus the standard object, Solar
+    /// System, and transient annotation data. The G20 catalog is not part of
+    /// the required bundle (it is many gigabytes), so this is an explicit
+    /// opt-in. The G16 blind index supplies field-finding hypotheses; the deep
+    /// catalog verifies them, so no separate deep blind index is needed.
     pub fn blind_deep_gaia20() -> Self {
-        Self::dataset(Dataset::StarsDeepGaia20).with(Dataset::BlindGaia16)
+        Self::annotation()
+            .with(Dataset::StarsDeepGaia20)
+            .with(Dataset::BlindGaia16)
     }
 
     /// Build a selection from hosted filenames. An empty iterator retains the
@@ -468,6 +490,20 @@ mod tests {
     }
 
     #[test]
+    fn named_solver_sets_include_annotation_data() {
+        for set in [
+            CatalogSet::solver_lite(),
+            CatalogSet::solver_gaia(),
+            CatalogSet::blind_deep(),
+            CatalogSet::blind_deep_gaia20(),
+        ] {
+            for dataset in [Dataset::Objects, Dataset::MinorBodies, Dataset::Transients] {
+                assert!(set.contains(dataset.file_name()));
+            }
+        }
+    }
+
+    #[test]
     fn complete_manifest_and_explicit_selection_are_accepted() {
         let manifest = manifest();
         manifest.validate().unwrap();
@@ -615,7 +651,9 @@ mod tests {
         let set = CatalogSet::default();
         assert!(!set.is_all());
         assert!(set.contains(Dataset::StarsLiteTycho2.file_name()));
-        assert!(!set.contains(Dataset::Objects.file_name()));
+        assert!(set.contains(Dataset::Objects.file_name()));
+        assert!(!set.contains(Dataset::StarsDeepGaia17.file_name()));
+        assert!(!set.contains(Dataset::StarsDeepGaia20.file_name()));
     }
 
     #[test]
