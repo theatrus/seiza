@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Args;
-use seiza_deconvolution::{DeconvolutionConfig, deconvolve};
+use seiza_deconvolution::{DeconvolutionConfig, deconvolve_masked};
 use seiza_fits::{HeaderValue, WriteHeaderCard};
 use seiza_stacking::write_processed_image_fits_f32;
 use std::path::PathBuf;
@@ -48,7 +48,7 @@ pub(crate) fn run(args: DeconvolutionArgs) -> Result<()> {
         noise_fraction: args.noise_fraction,
         max_correction: args.max_correction,
     };
-    let result = deconvolve(
+    let result = deconvolve_masked(
         &frame.image.data,
         frame.image.width,
         frame.image.height,
@@ -135,6 +135,12 @@ mod tests {
                 pixels[y * size + x] = (-0.5 * radius_squared / sigma.powi(2)).exp();
             }
         }
+        for sample in pixels.iter_mut().take(size) {
+            *sample = f32::NAN;
+        }
+        for row in pixels.chunks_exact_mut(size) {
+            row[0] = f32::NAN;
+        }
         write_f32_image(&input, size, size, F32ImageData::Mono(&pixels), &[]).unwrap();
 
         run(DeconvolutionArgs {
@@ -154,6 +160,12 @@ mod tests {
             other => panic!("expected f32 output, got {other:?}"),
         };
         assert!(restored_pixels[center * size + center] > pixels[center * size + center]);
+        assert!(restored_pixels[..size].iter().all(|sample| sample.is_nan()));
+        assert!(
+            restored_pixels
+                .chunks_exact(size)
+                .all(|row| row[0].is_nan())
+        );
         assert_eq!(restored.header_str("SEIZADC"), Some("RL-GAUSS"));
         assert!((restored.header_f64("DCFWHM").unwrap() - 2.8).abs() < 1.0e-6);
         assert_eq!(restored.header_f64("DCITER"), Some(4.0));
