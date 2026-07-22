@@ -10,8 +10,9 @@ PyPI**. They are cut from a single "Release `<version>`" PR followed by two tags
   (`[workspace.package] version` in the root `Cargo.toml`) — they always move
   together, and the workspace version is *the* release version.
 - The other crates version **independently** by what actually changed:
-  `seiza-satellites`, `seiza-download`, `seiza-fits`, `seiza-xisf`,
-  `seiza-stacking`, and `seiza-sources` each have their own `version =` in
+  `seiza-satellites`, `seiza-download`, `seiza-fits`, `seiza-imgproc`,
+  `seiza-xisf`, `seiza-stacking`, and `seiza-sources` each have their own
+  `version =` in
   their `Cargo.toml`, mirrored by their pin in the root
   `[workspace.dependencies]`.
 - `seiza-py` is **`publish = false`** (it goes to PyPI, not crates.io) and its
@@ -68,9 +69,9 @@ in dependency order (a dependency must be indexed before its dependents; `cargo`
 waits for the index):
 
 ```
-seiza-stats  →  seiza-stretch  →  seiza-fits  →  seiza-xisf  →  seiza-background
-→  seiza-deconvolution  →  seiza-sources  →  seiza-download  →  seiza
-→  seiza-satellites  →  seiza-stacking  →  seiza-cli
+seiza-stats  →  seiza-stretch  →  seiza-imgproc  →  seiza-fits  →  seiza-xisf
+→  seiza-background  →  seiza-deconvolution  →  seiza-sources  →  seiza-download
+→  seiza  →  seiza-satellites  →  seiza-stacking  →  seiza-cli
 ```
 
 ```bash

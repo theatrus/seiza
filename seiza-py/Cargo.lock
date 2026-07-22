@@ -1525,6 +1525,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "seiza-imgproc"
+version = "0.1.0"
+
+[[package]]
 name = "seiza-py"
 version = "0.12.0"
 dependencies = [
@@ -1534,6 +1538,7 @@ dependencies = [
  "seiza",
  "seiza-background",
  "seiza-deconvolution",
+ "seiza-imgproc",
  "seiza-satellites",
  "seiza-stacking",
  "seiza-stretch",

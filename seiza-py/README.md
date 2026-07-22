@@ -259,6 +259,32 @@ flat = seiza.build_flat(flat_paths, "master-flat.fits",
                         dark_flat="master-dark-flat.fits")
 ```
 
+## Image processing primitives
+
+OpenCV-compatible building blocks from `seiza-imgproc`, for detection
+pipelines that need OpenCV's exact numerics without the dependency. All
+operate on 2D single-channel arrays:
+
+```python
+import numpy as np
+import seiza
+
+image = np.asarray(..., dtype=np.uint8)      # (height, width)
+
+blurred = seiza.gaussian_blur(image, sigma=1.4)      # uint8 or float32
+denoised = seiza.median_blur3(image)
+edges = seiza.canny(blurred, low=10, high=80)
+binary = seiza.otsu_binary(image)
+grown = seiza.dilate(binary, shape="rect", ksize=3)
+
+contours = seiza.find_contours(grown)        # list of (n, 2) int32 arrays
+areas = [seiza.contour_area(c) for c in contours]
+
+# Edge-aware smoothing and multi-scale structure removal (float inputs).
+flat = seiza.dt_filter(guide, src, sigma_spatial=10.0, sigma_color=30.0)
+stars_plus_noise = seiza.remove_structures(image.astype(np.float64), layers=4)
+```
+
 ## Predicted satellite tracks
 
 After a solve, predict which satellites crossed the image while the shutter
