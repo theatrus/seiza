@@ -3,7 +3,7 @@ name = "seiza-py"
 # The Python package version exactly matches the embedded seiza crate's
 # version so users can reason about solver behavior from the PyPI
 # version; every engine release ships a matching py-vX.Y.Z tag.
-version = "0.11.2"
+version = "0.12.0"
 edition = "2024"
 rust-version = "1.89"
 license = "Apache-2.0"

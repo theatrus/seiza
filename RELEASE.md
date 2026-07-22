@@ -68,7 +68,9 @@ in dependency order (a dependency must be indexed before its dependents; `cargo`
 waits for the index):
 
 ```
-seiza-fits  →  seiza-xisf  →  seiza-sources  →  seiza-download  →  seiza  →  seiza-satellites  →  seiza-stacking  →  seiza-cli
+seiza-stats  →  seiza-stretch  →  seiza-fits  →  seiza-xisf  →  seiza-background
+→  seiza-deconvolution  →  seiza-sources  →  seiza-download  →  seiza
+→  seiza-satellites  →  seiza-stacking  →  seiza-cli
 ```
 
 ```bash
