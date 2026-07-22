@@ -22,7 +22,7 @@ import numpy as np
 import seiza
 
 # One-time: download the verified solver catalogs into the shared cache.
-paths = seiza.fetch_catalogs()  # lightweight Tycho-2 set
+paths = seiza.fetch_catalogs()  # Tycho-2 solver + objects, Solar System, transients
 catalog = seiza.StarCatalog.open(paths["stars-lite-tycho2.bin"])
 
 # Detect stars in a 2D float32 (or uint8) luma array.

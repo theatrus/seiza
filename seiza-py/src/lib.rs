@@ -643,7 +643,8 @@ fn dataset_by_file_name(name: &str) -> PyResult<seiza::downloads::Dataset> {
 
 /// Download and cache published seiza catalogs, returning a dict of dataset
 /// file name to verified local path. `datasets` lists file names such as
-/// `"stars-lite-tycho2.bin"`; the default is the lightweight solver set.
+/// `"stars-lite-tycho2.bin"`; the default is the lightweight solver set plus
+/// the object, Solar System, and transient annotation data.
 /// Pass `datasets="all"` for the complete standard bundle. The optional,
 /// much larger `"stars-deep-gaia20.bin"` catalog must be named explicitly.
 /// Files are SHA-256 verified and cached; repeated calls are cheap.
