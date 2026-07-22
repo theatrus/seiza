@@ -33,6 +33,7 @@ pub fn http_client(
     user_agent: impl Into<String>,
     read_timeout: std::time::Duration,
 ) -> Result<reqwest::Client> {
+    crate::install_default_crypto_provider();
     reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .read_timeout(read_timeout)

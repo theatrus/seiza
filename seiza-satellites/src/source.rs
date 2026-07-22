@@ -41,6 +41,7 @@ pub struct CelesTrakSource {
 
 impl CelesTrakSource {
     pub fn new(cache_dir: impl Into<PathBuf>) -> Result<Self> {
+        seiza_download::install_default_crypto_provider();
         let client = reqwest::Client::builder()
             .user_agent(format!("seiza-satellites/{}", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(30))

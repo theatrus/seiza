@@ -29,3 +29,11 @@ pub const DEFAULT_BUNDLE_BASE_URL: &str = "https://downloads.seiza.fyi/data/v4";
 /// Frozen complete v2 bundle for applications that explicitly need the
 /// previous `SEIZAOB3` object artifact.
 pub const LEGACY_V2_BUNDLE_BASE_URL: &str = "https://downloads.seiza.fyi/data/v2";
+
+/// Select AWS-LC for Rustls unless the host process has already selected a
+/// provider. Seiza HTTP clients call this before they build a client.
+pub fn install_default_crypto_provider() {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    }
+}
