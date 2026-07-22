@@ -15,10 +15,13 @@ The first release supports:
 - non-mutating frame admission gates for additive live stacks;
 - floating-point FITS output on the reference frame's pixel grid.
 
-After integration, `combine_rgb`, `combine_lrgb`, and `combine_narrowband`
-compose aligned mono stacks without coupling color into the live accumulator.
-The direct SHO permutations and HOO remain linear-light; LRGB replaces or
-blends CIE luminance while preserving RGB chromaticity. `NarrowbandMatrix`
+After integration, `combine_rgb`, `combine_lrgb`, `combine_super_lrgb`,
+`combine_super_rgb`, and `combine_narrowband` compose aligned mono stacks
+without coupling color into the live accumulator. The direct SHO permutations
+and HOO remain linear-light; LRGB replaces or blends CIE luminance while
+preserving RGB chromaticity, super-LRGB uses the additive `L + R + G + B`
+target, and super-RGB synthesizes the same target as `R + G + B` with no
+luminance stack. `NarrowbandMatrix`
 supports arbitrary static SII/H-alpha/OIII mixes. Foraxx-SHO and Foraxx-HOO
 are intentionally marked display-referred because their published dynamic
 factors operate on stretched channels. That preparation resolves the shared

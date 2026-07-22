@@ -5,7 +5,8 @@ use clap::{Args, Subcommand, ValueEnum};
 use seiza_stacking::{
     ColorComposition, ColorNormalization, ColorOptions, ColorTransfer, FitsFrame, ForaxxOptions,
     LinearImage, NarrowbandPalette, Registrar, RegistrationOptions, combine_lrgb,
-    combine_narrowband, combine_rgb, resample_to_reference, write_color_fits_f32,
+    combine_narrowband, combine_rgb, combine_super_lrgb, combine_super_rgb, resample_to_reference,
+    write_color_fits_f32,
 };
 use std::path::{Path, PathBuf};
 
@@ -35,6 +36,17 @@ struct RgbArgs {
     green: PathBuf,
     #[arg(long)]
     blue: PathBuf,
+    /// How the target luminance is formed
+    #[arg(long, value_enum, default_value = "native")]
+    luminance_mode: RgbLuminanceModeArg,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum RgbLuminanceModeArg {
+    /// Keep the composed channels as they are
+    Native,
+    /// Scale the triplet to a synthetic luminance of R + G + B
+    Super,
 }
 
 #[derive(Args)]
@@ -49,9 +61,20 @@ struct LrgbArgs {
     green: PathBuf,
     #[arg(long)]
     blue: PathBuf,
-    /// Fraction of output luminance supplied by the L stack
+    /// How the target luminance is formed
+    #[arg(long, value_enum, default_value = "replace")]
+    luminance_mode: LuminanceModeArg,
+    /// Fraction of output luminance supplied by L in replace mode
     #[arg(long, default_value_t = 1.0)]
     luminance_weight: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum LuminanceModeArg {
+    /// Replace RGB luminance with a weighted L channel
+    Replace,
+    /// Set target luminance to L + R + G + B
+    Super,
 }
 
 #[derive(Args)]
@@ -177,11 +200,21 @@ fn run_rgb(args: RgbArgs) -> Result<()> {
     let blue = args
         .common
         .align(registrar.as_ref(), blue.image, &red.image, "blue")?;
-    let composition = combine_rgb(&red.image, &green, &blue, &args.common.options())?;
-    write_outputs(&args.common, &composition, &red.headers, "RGB")
+    let options = args.common.options();
+    let (composition, label) = match args.luminance_mode {
+        RgbLuminanceModeArg::Native => (combine_rgb(&red.image, &green, &blue, &options)?, "RGB"),
+        RgbLuminanceModeArg::Super => (
+            combine_super_rgb(&red.image, &green, &blue, &options)?,
+            "SUPER-RGB",
+        ),
+    };
+    write_outputs(&args.common, &composition, &red.headers, label)
 }
 
 fn run_lrgb(args: LrgbArgs) -> Result<()> {
+    if args.luminance_mode == LuminanceModeArg::Super && args.luminance_weight != 1.0 {
+        anyhow::bail!("--luminance-weight only applies to --luminance-mode replace");
+    }
     validate_paths(
         &args.common,
         &[
@@ -205,15 +238,25 @@ fn run_lrgb(args: LrgbArgs) -> Result<()> {
     let blue = args
         .common
         .align(registrar.as_ref(), blue.image, &luminance.image, "blue")?;
-    let composition = combine_lrgb(
-        &luminance.image,
-        &red,
-        &green,
-        &blue,
-        args.luminance_weight,
-        &args.common.options(),
-    )?;
-    write_outputs(&args.common, &composition, &luminance.headers, "LRGB")
+    let options = args.common.options();
+    let (composition, label) = match args.luminance_mode {
+        LuminanceModeArg::Replace => (
+            combine_lrgb(
+                &luminance.image,
+                &red,
+                &green,
+                &blue,
+                args.luminance_weight,
+                &options,
+            )?,
+            "LRGB",
+        ),
+        LuminanceModeArg::Super => (
+            combine_super_lrgb(&luminance.image, &red, &green, &blue, &options)?,
+            "SUPER-LRGB",
+        ),
+    };
+    write_outputs(&args.common, &composition, &luminance.headers, label)
 }
 
 fn run_narrowband(args: NarrowbandArgs) -> Result<()> {
