@@ -26,8 +26,9 @@ PSF support, so missing pixels do not darken nearby data. `deconvolve` keeps its
 strict finite-input check for callers that want to reject gaps.
 
 The Python wheel exposes `seiza.deconvolve(image, psf_fwhm=3.1)` for
-C-contiguous NumPy arrays. Native applications can use
-`seiza_deconvolve_in_place` from the generated `seiza-cabi` header.
+C-contiguous NumPy arrays; pass `masked=True` to keep `NaN` registration
+borders masked. Native applications can use `seiza_deconvolve_in_place` from
+the generated `seiza-cabi` header.
 
 Use it after calibration, stacking, and background correction, but before any
 display stretch. Raw Bayer mosaics should be debayered first. The algorithm

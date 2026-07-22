@@ -374,6 +374,7 @@ def deconvolve(
     amount: float = 0.35,
     noise_fraction: float = 0.001,
     max_correction: float = 2.0,
+    masked: bool = False,
 ) -> npt.NDArray[np.float32]: ...
 def combine_rgb(
     red: npt.NDArray[np.float32],

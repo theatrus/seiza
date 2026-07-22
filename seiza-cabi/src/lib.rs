@@ -2868,6 +2868,7 @@ fn prepare_stretch_input<'a>(
         data: Cow::Owned(restored.data),
         input_histogram,
         deconvolution_metadata: Some(json!({
+            "algorithmVersion": seiza_deconvolution::ALGORITHM_VERSION,
             "psfFwhmPixels": request.psf_fwhm_pixels,
             "effectivePsfFwhmPixels": effective_psf_fwhm_pixels,
             "iterations": request.iterations,
@@ -4796,6 +4797,10 @@ mod tests {
         assert!((requested_fwhm - 2.8).abs() < 1.0e-5);
         assert!((effective_fwhm - 2.8).abs() < 1.0e-5);
         assert_eq!(metadata["deconvolutionProcessing"]["iterations"], 4);
+        assert_eq!(
+            metadata["deconvolutionProcessing"]["algorithmVersion"],
+            u64::from(seiza_deconvolution::ALGORITHM_VERSION)
+        );
         assert_eq!(
             metadata["deconvolutionProcessing"]["channels"]
                 .as_array()

@@ -36,6 +36,24 @@ def test_deconvolution_preserves_rgb_layout() -> None:
     np.testing.assert_array_equal(restored[..., 2], image[..., 2])
 
 
+def test_deconvolution_masked_keeps_nan_borders_and_restores_star() -> None:
+    image = gaussian_star()
+    image[0, :] = np.nan
+    image[:, 0] = np.nan
+
+    with pytest.raises(seiza.EngineError, match="finite"):
+        seiza.deconvolve(image, psf_fwhm=2.8)
+
+    restored = seiza.deconvolve(image, psf_fwhm=2.8, masked=True)
+
+    assert restored.shape == image.shape
+    assert restored[20, 20] > image[20, 20]
+    np.testing.assert_array_equal(np.isnan(restored), np.isnan(image))
+    assert float(np.nansum(restored)) == pytest.approx(
+        float(np.nansum(image)), abs=1.0e-5
+    )
+
+
 def test_deconvolution_rejects_noncontiguous_and_invalid_inputs() -> None:
     image = gaussian_star()
     with pytest.raises(ValueError, match="C-contiguous"):

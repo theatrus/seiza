@@ -138,6 +138,9 @@ restored = seiza.deconvolve(stack, psf_fwhm=3.1)
 
 `psf_fwhm` is a measured unsaturated-star FWHM in pixels. The defaults use four
 damped Richardson-Lucy iterations and blend 35% of the estimate into the input.
+Pass `masked=True` for registered images whose missing border samples are
+`NaN`: the mask stays in the output and does not darken nearby data. Without
+it, non-finite samples raise `seiza.EngineError`.
 The returned array remains linear `float32`; no clipping or display stretch is
 applied. The operation releases the GIL. Inspect identical stretches for noise,
 rings, saturated-star failures, and field-dependent PSF mismatch before using a
