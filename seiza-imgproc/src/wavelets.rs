@@ -36,7 +36,27 @@ impl StructureRemover {
         height: usize,
     ) -> Vec<f64> {
         assert_eq!(data.len(), width * height);
-        let mut residual: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+        let residual = self.remove_structures_filtered_f32(
+            &data.iter().map(|&v| v as f32).collect::<Vec<_>>(),
+            width,
+            height,
+        );
+        residual.into_iter().map(|v| v as f64).collect()
+    }
+
+    /// [`Self::remove_structures_filtered`] without the f64 boundary: takes
+    /// and returns f32, which is the arithmetic the pipeline runs in anyway.
+    /// Callers whose source data is exactly representable in f32 (integer
+    /// camera data) get bit-identical results to the f64 entry point while
+    /// skipping two full-image conversions.
+    pub fn remove_structures_filtered_f32(
+        &self,
+        data: &[f32],
+        width: usize,
+        height: usize,
+    ) -> Vec<f32> {
+        assert_eq!(data.len(), width * height);
+        let mut residual: Vec<f32> = data.to_vec();
 
         for layer in 0..self.layers {
             let scale = 1usize << layer;
@@ -69,7 +89,7 @@ impl StructureRemover {
             }
         }
 
-        residual.into_iter().map(|v| v as f64).collect()
+        residual
     }
 
     /// À trous B3-spline wavelet residual, matching HocusFocus exactly:
@@ -161,6 +181,29 @@ mod tests {
         let bg = residual[8 * w + 8].abs();
         assert!(peak > 100.0, "peak should survive: {peak}");
         assert!(peak > 4.0 * bg, "peak {peak} vs background {bg}");
+    }
+
+    #[test]
+    fn f32_entry_is_bit_identical_for_integer_data() {
+        // Camera data (u16) is exactly representable in f32, so the f32
+        // entry point must agree with the f64 wrapper bit for bit.
+        let w = 41;
+        let h = 23;
+        let mut state = 7u64;
+        let data_u16: Vec<u16> = (0..w * h)
+            .map(|_| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                (state >> 48) as u16
+            })
+            .collect();
+        let as_f64: Vec<f64> = data_u16.iter().map(|&v| v as f64).collect();
+        let as_f32: Vec<f32> = data_u16.iter().map(|&v| v as f32).collect();
+        let remover = StructureRemover::new(4);
+        let via_f64 = remover.remove_structures_filtered(&as_f64, w, h);
+        let via_f32 = remover.remove_structures_filtered_f32(&as_f32, w, h);
+        for (a, b) in via_f64.iter().zip(via_f32.iter()) {
+            assert_eq!(*a as f32, *b);
+        }
     }
 
     #[test]
