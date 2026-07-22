@@ -27,14 +27,15 @@ The same Rust engine drives two real desktop apps through
 
 - 🍎 **[Seiza for Mac](https://github.com/theatrus/seiza-mac)** — a fast,
   native FITS viewer and plate solver. Browse whole folders with thumbnails,
-  stretch live with a reorderable stack editor, subtract gradients, blind
-  solve on your machine with no uploads, and export images with overlays.
-  Quick Look previews included. macOS 15+, Apple silicon and Intel.
+  stretch live with a reorderable stack editor, subtract gradients,
+  deconvolve, blind solve on your machine with no uploads, install and verify
+  catalogs, and export images with overlays. Quick Look previews included.
+  macOS 15+, Apple silicon and Intel.
 - 🪟 **[Seiza for Windows](https://github.com/theatrus/seiza-win)** — a
   first-class native WinUI 3 viewer and solver. GPU-accelerated pan and
-  zoom, per-channel color rendering, background plate solving with star,
-  deep-sky, and motion overlays, and built-in catalog install, verify, and
-  repair. Windows 11.
+  zoom, per-channel color rendering, gradient subtraction, deconvolution,
+  background plate solving with star, deep-sky, and motion overlays, and
+  built-in catalog install, verify, and repair. Windows 11.
 
 ## Install
 
@@ -66,7 +67,8 @@ compiler, formatter, and linter.
 - **In [Tenrankai](https://github.com/theatrus/tenrankai)** — its gallery
   server uses seiza for astrometric solutions and object overlays.
 - **In [PSF Guard](https://github.com/theatrus/psf-guard)** — seiza provides
-  solved WCS and catalog context for image-quality and spatial analysis.
+  solved WCS and catalog context for image-quality and spatial analysis, plus
+  calibrated batch stacking of selected frames.
 - **In a browser** — [seiza.fyi](https://seiza.fyi) lets you upload an image
   for a hosted solution and object overlay, with nothing to install.
 - **From your own application** — run `seiza worker` to keep the catalogs
@@ -112,16 +114,23 @@ Every surface runs the same engine; pick the one that fits.
 | Display stretching | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Batch and live stacking | ✓ | ✓ | ✓ | — | — |
 | Calibration masters | ✓ | ✓ | — | — | — |
-| Background extraction | ✓ | ✓ | ✓ | ✓ | — |
-| Deconvolution (experimental) | ✓ | ✓ | ✓ | ◐ | — |
+| Background extraction | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Deconvolution (experimental) | ✓ | ✓ | ✓ | ✓ | ✓ |
 | RGB, LRGB, and narrowband color | ✓ | ✓ | — | — | — |
 | Satellite track prediction | ✓ | ✓ | — | — | — |
-| Catalog install and verify | ✓ | ✓ | ✓ | — | ✓ |
+| Catalog install and verify | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Export with overlays | ✓ | — | — | ✓ | ✓ |
 
-◐ in development. The C ABI renders; its host app does the browsing.
+The C ABI renders; its host app does the browsing. For stacking on the
+desktop, [PSF Guard](https://github.com/theatrus/psf-guard) stacks the frames
+it selects with this engine.
 
 ## Quick start
+
+These are CLI instructions for core use, scripting, and integration. If you
+just want to view, solve, and process images, install a
+[native Mac or Windows app](#native-apps) instead — nothing below is needed
+there.
 
 Download the ready-made catalogs once, then solve:
 
