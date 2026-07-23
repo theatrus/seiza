@@ -164,6 +164,10 @@ pub fn gaussian_blur_f32(
 ) -> Vec<f32> {
     assert_eq!(src.len(), width * height);
     assert!(ksize % 2 == 1 && ksize > 0, "kernel size must be odd");
+    #[cfg(feature = "parallel")]
+    if width * height >= PAR_MIN_PIXELS {
+        return blur_f32_par(src, width, height, ksize, sigma, border);
+    }
     #[cfg(target_arch = "x86_64")]
     {
         if std::arch::is_x86_feature_detected!("fma") {
@@ -195,6 +199,251 @@ unsafe fn blur_f32_fma(
 /// scalar tail begins.
 const F32_LANES: usize = 8;
 
+/// Images at or above this many pixels use rayon when the `parallel`
+/// feature is enabled. Low enough that the golden tests exercise the
+/// parallel code paths.
+#[cfg(feature = "parallel")]
+pub(crate) const PAR_MIN_PIXELS: usize = 1 << 14;
+
+#[cfg(all(feature = "parallel", target_arch = "x86_64"))]
+#[target_feature(enable = "fma,avx2")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn h_row_fma(
+    row: &[f32],
+    ext: &mut [f32],
+    out: &mut [f32],
+    kernel: &[f32],
+    radius: usize,
+    width: usize,
+    body_end: usize,
+    border: BorderMode,
+    ksize: usize,
+) {
+    h_row::<true>(
+        row, ext, out, kernel, radius, width, body_end, border, ksize,
+    )
+}
+
+#[cfg(all(feature = "parallel", target_arch = "x86_64"))]
+#[target_feature(enable = "fma,avx2")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn v_row_fma(
+    tmp: &[f32],
+    drow: &mut [f32],
+    y: usize,
+    kernel: &[f32],
+    radius: usize,
+    width: usize,
+    height: usize,
+    body_end: usize,
+    border: BorderMode,
+    ksize: usize,
+) {
+    v_row::<true>(
+        tmp, drow, y, kernel, radius, width, height, body_end, border, ksize,
+    )
+}
+
+/// Row-parallel Gaussian blur. Each output row of each pass is computed by
+/// exactly the same per-row function as the serial path — rayon closures do
+/// not inherit `#[target_feature]`, so the FMA variant dispatches through
+/// per-row `#[target_feature]` wrappers instead of one whole-image wrapper.
+#[cfg(feature = "parallel")]
+fn blur_f32_par(
+    src: &[f32],
+    width: usize,
+    height: usize,
+    ksize: usize,
+    sigma: f64,
+    border: BorderMode,
+) -> Vec<f32> {
+    use rayon::prelude::*;
+
+    let kernel: Vec<f32> = gaussian_kernel(ksize, sigma)
+        .into_iter()
+        .map(|k| k as f32)
+        .collect();
+    let radius = ksize / 2;
+    let body_end = width - width % F32_LANES;
+
+    #[cfg(target_arch = "x86_64")]
+    let fma = std::arch::is_x86_feature_detected!("fma");
+
+    let mut tmp = vec![0f32; width * height];
+    tmp.par_chunks_exact_mut(width).enumerate().for_each_init(
+        || vec![0f32; width + 2 * radius],
+        |ext, (y, out)| {
+            let row = &src[y * width..(y + 1) * width];
+            #[cfg(target_arch = "x86_64")]
+            if fma {
+                // SAFETY: fma/avx2 support was verified above.
+                unsafe {
+                    h_row_fma(
+                        row, ext, out, &kernel, radius, width, body_end, border, ksize,
+                    )
+                }
+            } else {
+                h_row::<false>(
+                    row, ext, out, &kernel, radius, width, body_end, border, ksize,
+                )
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            h_row::<true>(
+                row, ext, out, &kernel, radius, width, body_end, border, ksize,
+            )
+        },
+    );
+
+    let mut dst = vec![0f32; width * height];
+    dst.par_chunks_exact_mut(width)
+        .enumerate()
+        .for_each(|(y, drow)| {
+            #[cfg(target_arch = "x86_64")]
+            if fma {
+                // SAFETY: fma/avx2 support was verified above.
+                unsafe {
+                    v_row_fma(
+                        &tmp, drow, y, &kernel, radius, width, height, body_end, border, ksize,
+                    )
+                }
+            } else {
+                v_row::<false>(
+                    &tmp, drow, y, &kernel, radius, width, height, body_end, border, ksize,
+                )
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            v_row::<true>(
+                &tmp, drow, y, &kernel, radius, width, height, body_end, border, ksize,
+            )
+        });
+    dst
+}
+
+#[inline(always)]
+fn fmadd<const FMA: bool>(a: f32, b: f32, c: f32) -> f32 {
+    if FMA { a.mul_add(b, c) } else { a * b + c }
+}
+
+/// Horizontal pass for one row: border-extend into `ext`, then convolve
+/// into `out`. Factored out so the serial loop, the FMA whole-image
+/// wrapper, and the per-row parallel dispatch all run the exact same code.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn h_row<const FMA: bool>(
+    row: &[f32],
+    ext: &mut [f32],
+    out: &mut [f32],
+    kernel: &[f32],
+    radius: usize,
+    width: usize,
+    body_end: usize,
+    border: BorderMode,
+    ksize: usize,
+) {
+    // Materialize the border-extended row, like FilterEngine does.
+    for (i, e) in ext.iter_mut().enumerate() {
+        *e = row[border.map(i as isize - radius as isize, width)];
+    }
+    // The small symmetric row filters' vector epilogue narrows down to
+    // pairs, so only one trailing column (odd widths) is scalar.
+    let small_body_end = width - (width & 1);
+    match ksize {
+        3 => {
+            let (k0, k1) = (kernel[1], kernel[2]);
+            for (x, o) in out.iter_mut().enumerate().take(small_body_end) {
+                let c = x + radius;
+                let acc = k1 * (ext[c - 1] + ext[c + 1]);
+                *o = fmadd::<FMA>(k0, ext[c], acc);
+            }
+            for (x, o) in out.iter_mut().enumerate().skip(small_body_end) {
+                let c = x + radius;
+                *o = k0 * ext[c] + k1 * (ext[c - 1] + ext[c + 1]);
+            }
+        }
+        5 => {
+            let (k0, k1, k2) = (kernel[2], kernel[3], kernel[4]);
+            for (x, o) in out.iter_mut().enumerate().take(small_body_end) {
+                let c = x + radius;
+                let acc = k1 * (ext[c - 1] + ext[c + 1]);
+                let acc = fmadd::<FMA>(k0, ext[c], acc);
+                *o = fmadd::<FMA>(k2, ext[c - 2] + ext[c + 2], acc);
+            }
+            for (x, o) in out.iter_mut().enumerate().skip(small_body_end) {
+                let c = x + radius;
+                let mut acc = k0 * ext[c];
+                acc += k1 * (ext[c - 1] + ext[c + 1]);
+                acc += k2 * (ext[c - 2] + ext[c + 2]);
+                *o = acc;
+            }
+        }
+        _ => {
+            for (x, o) in out.iter_mut().enumerate().take(body_end) {
+                let mut acc = kernel[0] * ext[x];
+                for (k, &kv) in kernel.iter().enumerate().skip(1) {
+                    acc = fmadd::<FMA>(kv, ext[x + k], acc);
+                }
+                *o = acc;
+            }
+            for (x, o) in out.iter_mut().enumerate().skip(body_end) {
+                let mut acc = 0f32;
+                for (k, &kv) in kernel.iter().enumerate() {
+                    acc += kv * ext[x + k];
+                }
+                *o = acc;
+            }
+        }
+    }
+}
+
+/// Vertical pass for one output row: center-first symmetric pairs, fused
+/// in the body, unfused in the tail columns (3-tap tails keep the body
+/// formula).
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn v_row<const FMA: bool>(
+    tmp: &[f32],
+    drow: &mut [f32],
+    y: usize,
+    kernel: &[f32],
+    radius: usize,
+    width: usize,
+    height: usize,
+    body_end: usize,
+    border: BorderMode,
+    ksize: usize,
+) {
+    let mut rows: Vec<&[f32]> = Vec::with_capacity(ksize);
+    for k in 0..ksize {
+        let sy = border.map(y as isize + k as isize - radius as isize, height);
+        rows.push(&tmp[sy * width..(sy + 1) * width]);
+    }
+    let kc = kernel[radius];
+    for (x, d) in drow.iter_mut().enumerate().take(body_end) {
+        let mut acc = kc * rows[radius][x];
+        for i in 1..=radius {
+            acc = fmadd::<FMA>(
+                kernel[radius + i],
+                rows[radius - i][x] + rows[radius + i][x],
+                acc,
+            );
+        }
+        *d = acc;
+    }
+    for (x, d) in drow.iter_mut().enumerate().skip(body_end) {
+        if ksize == 3 {
+            // The 3-tap column filter is fused across the whole row.
+            let acc = kc * rows[1][x];
+            *d = fmadd::<FMA>(kernel[2], rows[0][x] + rows[2][x], acc);
+        } else {
+            let mut acc = kc * rows[radius][x];
+            for i in 1..=radius {
+                acc += kernel[radius + i] * (rows[radius - i][x] + rows[radius + i][x]);
+            }
+            *d = acc;
+        }
+    }
+}
+
 #[inline(always)]
 fn blur_f32_impl<const FMA: bool>(
     src: &[f32],
@@ -211,107 +460,20 @@ fn blur_f32_impl<const FMA: bool>(
     let radius = ksize / 2;
     let body_end = width - width % F32_LANES;
 
-    #[inline(always)]
-    fn fmadd<const FMA: bool>(a: f32, b: f32, c: f32) -> f32 {
-        if FMA { a.mul_add(b, c) } else { a * b + c }
-    }
-
     let mut tmp = vec![0f32; width * height];
     let mut ext = vec![0f32; width + 2 * radius];
-    for y in 0..height {
+    for (y, out) in tmp.chunks_exact_mut(width).enumerate() {
         let row = &src[y * width..(y + 1) * width];
-        // Materialize the border-extended row, like FilterEngine does.
-        for (i, e) in ext.iter_mut().enumerate() {
-            *e = row[border.map(i as isize - radius as isize, width)];
-        }
-        let out = &mut tmp[y * width..(y + 1) * width];
-        // The small symmetric row filters' vector epilogue narrows down to
-        // pairs, so only one trailing column (odd widths) is scalar.
-        let small_body_end = width - (width & 1);
-        match ksize {
-            3 => {
-                let (k0, k1) = (kernel[1], kernel[2]);
-                for (x, o) in out.iter_mut().enumerate().take(small_body_end) {
-                    let c = x + radius;
-                    let acc = k1 * (ext[c - 1] + ext[c + 1]);
-                    *o = fmadd::<FMA>(k0, ext[c], acc);
-                }
-                for (x, o) in out.iter_mut().enumerate().skip(small_body_end) {
-                    let c = x + radius;
-                    *o = k0 * ext[c] + k1 * (ext[c - 1] + ext[c + 1]);
-                }
-            }
-            5 => {
-                let (k0, k1, k2) = (kernel[2], kernel[3], kernel[4]);
-                for (x, o) in out.iter_mut().enumerate().take(small_body_end) {
-                    let c = x + radius;
-                    let acc = k1 * (ext[c - 1] + ext[c + 1]);
-                    let acc = fmadd::<FMA>(k0, ext[c], acc);
-                    *o = fmadd::<FMA>(k2, ext[c - 2] + ext[c + 2], acc);
-                }
-                for (x, o) in out.iter_mut().enumerate().skip(small_body_end) {
-                    let c = x + radius;
-                    let mut acc = k0 * ext[c];
-                    acc += k1 * (ext[c - 1] + ext[c + 1]);
-                    acc += k2 * (ext[c - 2] + ext[c + 2]);
-                    *o = acc;
-                }
-            }
-            _ => {
-                for (x, o) in out.iter_mut().enumerate().take(body_end) {
-                    let mut acc = kernel[0] * ext[x];
-                    for (k, &kv) in kernel.iter().enumerate().skip(1) {
-                        acc = fmadd::<FMA>(kv, ext[x + k], acc);
-                    }
-                    *o = acc;
-                }
-                for (x, o) in out.iter_mut().enumerate().skip(body_end) {
-                    let mut acc = 0f32;
-                    for (k, &kv) in kernel.iter().enumerate() {
-                        acc += kv * ext[x + k];
-                    }
-                    *o = acc;
-                }
-            }
-        }
+        h_row::<FMA>(
+            row, &mut ext, out, &kernel, radius, width, body_end, border, ksize,
+        );
     }
 
-    // Vertical pass: center-first symmetric pairs, fused in the body,
-    // unfused in the tail columns (3-tap tails keep the body formula).
     let mut dst = vec![0f32; width * height];
-    let mut rows: Vec<&[f32]> = Vec::with_capacity(ksize);
-    for y in 0..height {
-        rows.clear();
-        for k in 0..ksize {
-            let sy = border.map(y as isize + k as isize - radius as isize, height);
-            rows.push(&tmp[sy * width..(sy + 1) * width]);
-        }
-        let drow = &mut dst[y * width..(y + 1) * width];
-        let kc = kernel[radius];
-        for (x, d) in drow.iter_mut().enumerate().take(body_end) {
-            let mut acc = kc * rows[radius][x];
-            for i in 1..=radius {
-                acc = fmadd::<FMA>(
-                    kernel[radius + i],
-                    rows[radius - i][x] + rows[radius + i][x],
-                    acc,
-                );
-            }
-            *d = acc;
-        }
-        for (x, d) in drow.iter_mut().enumerate().skip(body_end) {
-            if ksize == 3 {
-                // The 3-tap column filter is fused across the whole row.
-                let acc = kc * rows[1][x];
-                *d = fmadd::<FMA>(kernel[2], rows[0][x] + rows[2][x], acc);
-            } else {
-                let mut acc = kc * rows[radius][x];
-                for i in 1..=radius {
-                    acc += kernel[radius + i] * (rows[radius - i][x] + rows[radius + i][x]);
-                }
-                *d = acc;
-            }
-        }
+    for (y, drow) in dst.chunks_exact_mut(width).enumerate() {
+        v_row::<FMA>(
+            &tmp, drow, y, &kernel, radius, width, height, body_end, border, ksize,
+        );
     }
     dst
 }

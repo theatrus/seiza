@@ -43,13 +43,124 @@ pub fn dt_filter_nc(
             / ((4.0f64).powi(n) - 1.0).sqrt();
         let radius = sigma_h * (3.0f64).sqrt();
 
+        #[cfg(feature = "parallel")]
+        if width * height >= crate::blur::PAR_MIN_PIXELS {
+            horizontal_pass_par(&mut res, guide, ratio, width, height, radius);
+            vertical_pass_par(&mut res, guide, ratio, width, height, radius);
+            continue;
+        }
         horizontal_pass(&mut res, guide, ratio, width, height, radius);
         vertical_pass(&mut res, guide, ratio, width, height, radius);
     }
     res
 }
 
-fn horizontal_pass(
+/// One row of the horizontal pass; shared by the serial and parallel
+/// drivers so both run identical arithmetic.
+#[inline(always)]
+fn horizontal_row(
+    res_row: &mut [f32],
+    guide_row: &[f32],
+    ratio: f64,
+    width: usize,
+    radius: f64,
+    prefix: &mut [f32],
+    ct_row: &mut [f64],
+) {
+    for x in 0..width {
+        prefix[x + 1] = prefix[x] + res_row[x];
+    }
+    ct_row[0] = 0.0;
+    for x in 1..width {
+        let d = (guide_row[x] - guide_row[x - 1]).abs() as f64;
+        ct_row[x] = ct_row[x - 1] + 1.0 + ratio * d;
+    }
+    let mut lo = 0usize;
+    let mut hi = 0usize;
+    for (x, r) in res_row.iter_mut().enumerate() {
+        let left = ct_row[x] - radius;
+        let right = ct_row[x] + radius;
+        while ct_row[lo] < left {
+            lo += 1;
+        }
+        if hi < x {
+            hi = x;
+        }
+        while hi + 1 < width && ct_row[hi + 1] <= right {
+            hi += 1;
+        }
+        let count = (hi - lo + 1) as f32;
+        *r = (prefix[hi + 1] - prefix[lo]) / count;
+    }
+}
+
+/// One column of the vertical pass, reading the strided column and writing
+/// the filtered result into `ocol` (contiguous, transposed layout).
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn vertical_column(
+    res: &[f32],
+    guide: &[f32],
+    x: usize,
+    ratio: f64,
+    width: usize,
+    height: usize,
+    radius: f64,
+    prefix: &mut [f32],
+    ct_col: &mut [f64],
+    ocol: &mut [f32],
+) {
+    ct_col[0] = 0.0;
+    prefix[1] = prefix[0] + res[x];
+    for y in 1..height {
+        let d = (guide[y * width + x] - guide[(y - 1) * width + x]).abs() as f64;
+        ct_col[y] = ct_col[y - 1] + 1.0 + ratio * d;
+        prefix[y + 1] = prefix[y] + res[y * width + x];
+    }
+    let mut lo = 0usize;
+    let mut hi = 0usize;
+    for (y, o) in ocol.iter_mut().enumerate() {
+        let left = ct_col[y] - radius;
+        let right = ct_col[y] + radius;
+        while ct_col[lo] < left {
+            lo += 1;
+        }
+        if hi < y {
+            hi = y;
+        }
+        while hi + 1 < height && ct_col[hi + 1] <= right {
+            hi += 1;
+        }
+        let count = (hi - lo + 1) as f32;
+        *o = (prefix[hi + 1] - prefix[lo]) / count;
+    }
+}
+
+#[cfg(feature = "parallel")]
+fn horizontal_pass_par(
+    res: &mut [f32],
+    guide: &[f32],
+    ratio: f64,
+    width: usize,
+    _height: usize,
+    radius: f64,
+) {
+    use rayon::prelude::*;
+    res.par_chunks_exact_mut(width).enumerate().for_each_init(
+        || (vec![0f32; width + 1], vec![0f64; width]),
+        |(prefix, ct_row), (y, res_row)| {
+            let guide_row = &guide[y * width..(y + 1) * width];
+            horizontal_row(res_row, guide_row, ratio, width, radius, prefix, ct_row);
+        },
+    );
+}
+
+/// Column-parallel vertical pass: columns are computed independently into a
+/// transposed buffer (contiguous per column), then transposed back — same
+/// per-column arithmetic as the serial pass, without concurrent strided
+/// writes into `res`.
+#[cfg(feature = "parallel")]
+fn vertical_pass_par(
     res: &mut [f32],
     guide: &[f32],
     ratio: f64,
@@ -57,37 +168,53 @@ fn horizontal_pass(
     height: usize,
     radius: f64,
 ) {
+    use rayon::prelude::*;
+    let mut transposed = vec![0f32; width * height];
+    {
+        let res_ref: &[f32] = res;
+        transposed
+            .par_chunks_exact_mut(height)
+            .enumerate()
+            .for_each_init(
+                || (vec![0f32; height + 1], vec![0f64; height]),
+                |(prefix, ct_col), (x, ocol)| {
+                    vertical_column(
+                        res_ref, guide, x, ratio, width, height, radius, prefix, ct_col, ocol,
+                    );
+                },
+            );
+    }
+    res.par_chunks_exact_mut(width)
+        .enumerate()
+        .for_each(|(y, res_row)| {
+            for (x, r) in res_row.iter_mut().enumerate() {
+                *r = transposed[x * height + y];
+            }
+        });
+}
+
+fn horizontal_pass(
+    res: &mut [f32],
+    guide: &[f32],
+    ratio: f64,
+    width: usize,
+    _height: usize,
+    radius: f64,
+) {
     // f32 prefix sums, matching OpenCV's box accumulation precision.
     let mut prefix = vec![0f32; width + 1];
     let mut ct_row = vec![0f64; width];
-    for y in 0..height {
-        let row = y * width;
-        for x in 0..width {
-            prefix[x + 1] = prefix[x] + res[row + x];
-        }
-        let grow = &guide[row..row + width];
-        ct_row[0] = 0.0;
-        for x in 1..width {
-            let d = (grow[x] - grow[x - 1]).abs() as f64;
-            ct_row[x] = ct_row[x - 1] + 1.0 + ratio * d;
-        }
-        let mut lo = 0usize;
-        let mut hi = 0usize;
-        for x in 0..width {
-            let left = ct_row[x] - radius;
-            let right = ct_row[x] + radius;
-            while ct_row[lo] < left {
-                lo += 1;
-            }
-            if hi < x {
-                hi = x;
-            }
-            while hi + 1 < width && ct_row[hi + 1] <= right {
-                hi += 1;
-            }
-            let count = (hi - lo + 1) as f32;
-            res[row + x] = (prefix[hi + 1] - prefix[lo]) / count;
-        }
+    for (y, res_row) in res.chunks_exact_mut(width).enumerate() {
+        let guide_row = &guide[y * width..(y + 1) * width];
+        horizontal_row(
+            res_row,
+            guide_row,
+            ratio,
+            width,
+            radius,
+            &mut prefix,
+            &mut ct_row,
+        );
     }
 }
 
@@ -101,30 +228,22 @@ fn vertical_pass(
 ) {
     let mut ct_col = vec![0f64; height];
     let mut prefix = vec![0f32; height + 1];
+    let mut ocol = vec![0f32; height];
     for x in 0..width {
-        ct_col[0] = 0.0;
-        prefix[1] = prefix[0] + res[x];
-        for y in 1..height {
-            let d = (guide[y * width + x] - guide[(y - 1) * width + x]).abs() as f64;
-            ct_col[y] = ct_col[y - 1] + 1.0 + ratio * d;
-            prefix[y + 1] = prefix[y] + res[y * width + x];
-        }
-        let mut lo = 0usize;
-        let mut hi = 0usize;
-        for y in 0..height {
-            let left = ct_col[y] - radius;
-            let right = ct_col[y] + radius;
-            while ct_col[lo] < left {
-                lo += 1;
-            }
-            if hi < y {
-                hi = y;
-            }
-            while hi + 1 < height && ct_col[hi + 1] <= right {
-                hi += 1;
-            }
-            let count = (hi - lo + 1) as f32;
-            res[y * width + x] = (prefix[hi + 1] - prefix[lo]) / count;
+        vertical_column(
+            res,
+            guide,
+            x,
+            ratio,
+            width,
+            height,
+            radius,
+            &mut prefix,
+            &mut ct_col,
+            &mut ocol,
+        );
+        for (y, &o) in ocol.iter().enumerate() {
+            res[y * width + x] = o;
         }
     }
 }

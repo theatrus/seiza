@@ -2418,7 +2418,10 @@ dependencies = [
 
 [[package]]
 name = "seiza-imgproc"
-version = "0.2.0"
+version = "0.3.0"
+dependencies = [
+ "rayon",
+]
 
 [[package]]
 name = "seiza-satellites"

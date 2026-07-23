@@ -1,7 +1,7 @@
 [package]
 name = "seiza-imgproc"
 description = "Pure-Rust image processing primitives with OpenCV-compatible semantics: Gaussian/median blur, Canny, Otsu, binary morphology, Suzuki-Abe contours, domain transform filter, and à trous wavelets"
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -11,4 +11,11 @@ readme = "README.md"
 keywords = ["image-processing", "canny", "contours", "morphology"]
 categories = ["computer-vision", "science"]
 
+[features]
+# Opt-in intra-image parallelism via rayon. Bit-identical results: work
+# splits along rows/columns whose computations are independent, and every
+# per-pixel operation order is unchanged.
+parallel = ["dep:rayon"]
+
 [dependencies]
+rayon = { version = "1", optional = true }

@@ -84,9 +84,7 @@ impl StructureRemover {
                 )
             };
 
-            for (r, f) in residual.iter_mut().zip(filtered.iter()) {
-                *r -= *f;
-            }
+            subtract_in_place(&mut residual, &filtered);
         }
 
         residual
@@ -146,6 +144,28 @@ impl StructureRemover {
         }
 
         residual
+    }
+}
+
+/// Elementwise `residual -= filtered`; row-split under the `parallel`
+/// feature (element order within each subtraction is unchanged, and the
+/// operations are independent, so results are bit-identical).
+fn subtract_in_place(residual: &mut [f32], filtered: &[f32]) {
+    #[cfg(feature = "parallel")]
+    if residual.len() >= crate::blur::PAR_MIN_PIXELS {
+        use rayon::prelude::*;
+        residual
+            .par_chunks_mut(4096)
+            .zip(filtered.par_chunks(4096))
+            .for_each(|(r_chunk, f_chunk)| {
+                for (r, f) in r_chunk.iter_mut().zip(f_chunk.iter()) {
+                    *r -= *f;
+                }
+            });
+        return;
+    }
+    for (r, f) in residual.iter_mut().zip(filtered.iter()) {
+        *r -= *f;
     }
 }
 
