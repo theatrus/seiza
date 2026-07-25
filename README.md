@@ -53,8 +53,12 @@ The same Rust engine drives two real desktop apps through
 
 ## Install
 
-- **🍎 macOS app** — download the DMG from the
+- **🍎 macOS app** — `brew install --cask theatrus/seiza/seiza-mac`, or
+  download the DMG from the
   [Seiza for Mac releases](https://github.com/theatrus/seiza-mac/releases).
+- **Homebrew (macOS / Linux)** — `brew install theatrus/seiza/seiza` builds
+  the CLI from source via the
+  [theatrus/homebrew-seiza tap](https://github.com/theatrus/homebrew-seiza).
 - **Windows** — download the MSI installer from the
   [releases](https://github.com/theatrus/seiza/releases). It puts `seiza` on
   your `PATH` and offers to download catalogs for you when it finishes.
