@@ -14,18 +14,18 @@ $Msi = (Resolve-Path -LiteralPath $Msi).Path
 $tempDir = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }
 $log = Join-Path $tempDir "seiza-msi-$Scope-install.log"
 $installDirectory = if ($Scope -eq "perMachine") {
-    Join-Path $env:ProgramFiles "Seiza"
+    Join-Path $env:ProgramFiles "Seiza CLI"
 }
 else {
-    Join-Path $env:LOCALAPPDATA "Apps\Seiza"
+    Join-Path $env:LOCALAPPDATA "Apps\Seiza CLI"
 }
 $installedBinary = Join-Path $installDirectory "seiza.exe"
 $machineCatalogDirectory = Join-Path $env:ProgramData "Seiza\catalogs"
 $programMenuDirectory = if ($Scope -eq "perMachine") {
-    Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\Seiza"
+    Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\Seiza CLI"
 }
 else {
-    Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Seiza"
+    Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Seiza CLI"
 }
 $catalogSetupShortcut = Join-Path $programMenuDirectory "Seiza Catalog Setup.lnk"
 $pathRegistry = if ($Scope -eq "perMachine") {

@@ -1,11 +1,16 @@
 # Windows installer
 
-The WiX package presents the Apache 2.0 license and lets the user choose between
+The WiX package installs as **Seiza CLI** — the name shown in Apps & Features,
+the installer UI, and the Start menu. The name is distinct from the **Seiza for
+Windows** desktop app (the seiza-win repository) so both products can be
+installed side by side and told apart. The binary itself stays `seiza.exe`.
+
+The package presents the Apache 2.0 license and lets the user choose between
 an all-users install (the default) and a current-user install. The all-users
 choice installs under 64-bit Program Files and causes Windows Installer to
 request administrator approval through UAC.
 
-The feature-selection page includes **Add Seiza to PATH**, selected by default.
+The feature-selection page includes **Add Seiza CLI to PATH**, selected by default.
 For a current-user install it updates the user's `PATH`; for an all-users install
 it updates the system `PATH`. The final page can launch `seiza setup` to guide the
 user through catalog selection and downloading. That work remains entirely in
@@ -13,7 +18,9 @@ the CLI; the MSI contains no catalog URLs or download custom actions.
 
 For an all-users install, the MSI creates the shared
 `%ProgramData%\Seiza\catalogs` directory, grants local users write access, and
-sets the system `SEIZA_CATALOG_DIR` environment variable. The final-page setup
+sets the system `SEIZA_CATALOG_DIR` environment variable. This directory stays
+under the plain `Seiza` name on purpose: the Seiza for Windows app resolves the
+same variable, so both products share one catalog store. The final-page setup
 wizard downloads directly to that shared directory. A current-user install
 continues to use `%LOCALAPPDATA%\Seiza\seiza\data\catalogs`. Explicit
 `SEIZA_STAR_DATA` and `SEIZA_BLIND_INDEX` environment variables remain
