@@ -108,6 +108,17 @@ git push origin py-v<version>
 
 ## Invariants / gotchas
 
+- **Bumping a crate means bumping every published crate that depends on
+  it.** A dependent published with the old pin keeps resolving the old
+  version, so crates.io consumers get two copies of the bumped crate (and
+  the old behavior on the dependent's path), while workspace builds use one.
+  Worse, the dependent's packaged `Cargo.lock` freezes the split: its
+  bundled tests can stop compiling even though `cargo publish` passes,
+  because publish verification only builds the lib. Check with
+  `grep -rl <crate> */Cargo.toml` and bump the whole dependent chain in one
+  release (this bit seiza-stretch 0.2.0 → seiza-fits/seiza-stacking →
+  seiza-cabi in 0.12.1, fixed across 0.12.2).
+
 - **`seiza-py` version == `seiza`/workspace version, always.** The Python package
   and the Rust crates are one release; the `v<version>` and `py-v<version>` tags
   carry the same `<version>`.
