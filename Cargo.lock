@@ -2296,7 +2296,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "seiza"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "directories",
  "image",
@@ -2328,7 +2328,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-cabi"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "cbindgen",
  "image",
@@ -2347,7 +2347,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-cli"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2477,7 +2477,7 @@ version = "0.1.0"
 
 [[package]]
 name = "seiza-stretch"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rayon",
  "seiza-stats",
