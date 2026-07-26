@@ -13,6 +13,7 @@ The first release supports:
 - robust global or tiled local normalization;
 - online residual (delta-sigma) rejection with coverage and rejection maps;
 - non-mutating frame admission gates for additive live stacks;
+- versioned, checksummed, atomic live-stack checkpoints that can be reopened;
 - floating-point FITS output on the reference frame's pixel grid.
 
 After integration, `combine_rgb`, `combine_lrgb`, `combine_super_lrgb`,
@@ -45,6 +46,24 @@ the crate's admission gates cover only compatibility and numeric/geometric
 safety. Live renderers can borrow `LiveStacker::view` without copying the
 full-resolution accumulator; any display stretch remains a caller-only visual
 operation.
+
+Long-running acquisition tools can checkpoint without consuming the live
+handle and reopen the exact online estimator later:
+
+```rust
+stacker.save_context("m31.seiza-stack")?;
+
+let mut stacker = LiveStacker::open_context("m31.seiza-stack")?;
+stacker.push_fits("light-042.fits")?;
+```
+
+The context retains the original prepared registration reference, calibration
+masters, stack options, Welford mean and second moment, coverage and rejection
+maps, frame counters, compatible FITS headers, and the source-path ledger.
+Writes use an adjacent temporary file and publish by atomic rename only after a
+checksummed compressed payload is complete. A context is mutable processing
+state, not the final interoperable image product; use `write_fits_f32` for the
+finished FITS/XISF artifact.
 
 `StackOptions` and its nested registration, normalization, rejection, and
 acceptance types serialize through Serde. Omitted object fields use the same

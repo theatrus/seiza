@@ -75,12 +75,12 @@ impl MasterFlat {
 /// Precomputed master calibration data in the raw light frame's sampling.
 #[derive(Clone, Debug, Default)]
 pub struct CalibrationMasters {
-    bias: Option<LinearImage>,
-    dark_signal: Option<LinearImage>,
-    dark_exposure_seconds: Option<f64>,
-    dark_bayer: Option<BayerLayout>,
-    flat_response: Option<LinearImage>,
-    flat_bayer: Option<BayerLayout>,
+    pub(crate) bias: Option<LinearImage>,
+    pub(crate) dark_signal: Option<LinearImage>,
+    pub(crate) dark_exposure_seconds: Option<f64>,
+    pub(crate) dark_bayer: Option<BayerLayout>,
+    pub(crate) flat_response: Option<LinearImage>,
+    pub(crate) flat_bayer: Option<BayerLayout>,
 }
 
 impl CalibrationMasters {

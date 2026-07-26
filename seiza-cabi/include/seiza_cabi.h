@@ -23,7 +23,8 @@
  *     functions -> release with seiza_rendered_image16_free().
  *   - SeizaBackgroundModel* returned by seiza_background_fit
  *       -> release with seiza_background_model_free().
- *   - SeizaLiveStacker* returned by seiza_live_stacker_create / _open_fits
+ *   - SeizaLiveStacker* returned by seiza_live_stacker_create / _open_fits /
+ *     _open_context
  *       -> release with seiza_live_stacker_free(), or consume with
  *          seiza_live_stacker_finish().
  *   - SeizaStackSnapshot* returned by seiza_live_stacker_snapshot / _finish
@@ -277,6 +278,33 @@ SeizaLiveStacker *seiza_live_stacker_open_fits(const char *reference_path,
                                                double dark_exposure_seconds,
                                                const char *options_json,
                                                char **error_out);
+
+/*
+ Reopens a versioned live-stack context previously written by
+ [`seiza_live_stacker_save_context`]. The restored handle retains its
+ original registration reference, calibration, online rejection moments,
+ frame counters, and source-path ledger, and may immediately accept more
+ frames.
+
+ # Safety
+ `context_path` must be a valid NUL-terminated path. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+SeizaLiveStacker *seiza_live_stacker_open_context(const char *context_path, char **error_out);
+
+/*
+ Atomically checkpoints every piece of state required to reopen this live
+ stack and continue integrating with identical online rejection behavior.
+ The live handle remains usable after the checkpoint completes.
+
+ # Safety
+ `stacker` must be a live `SeizaLiveStacker` pointer. `context_path` must be
+ a valid NUL-terminated path. When non-null, `error_out` must point to
+ writable storage for one pointer.
+ */
+bool seiza_live_stacker_save_context(const SeizaLiveStacker *stacker,
+                                     const char *context_path,
+                                     char **error_out);
 
 /*
  Registers and offers one copied, calibrated linear frame to the stack.

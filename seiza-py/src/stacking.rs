@@ -410,7 +410,6 @@ impl PyStackSnapshot {
 #[pyclass(name = "LiveStacker", module = "seiza")]
 pub(crate) struct PyLiveStacker {
     inner: Option<LiveStacker>,
-    input_paths: Vec<PathBuf>,
 }
 
 #[pymethods]
@@ -450,15 +449,17 @@ impl PyLiveStacker {
             .map_or_else(StackOptions::default, |options| options.inner.clone());
         let inner = py
             .allow_threads(move || {
-                let calibration = load_calibration(bias, dark, flat, dark_exposure_seconds)?;
-                let reference = FitsFrame::open(reference)?;
-                LiveStacker::new(reference, calibration, options)
+                LiveStacker::open_fits(
+                    reference,
+                    bias.as_deref(),
+                    dark.as_deref(),
+                    flat.as_deref(),
+                    dark_exposure_seconds,
+                    options,
+                )
             })
             .map_err(stack_error)?;
-        Ok(Self {
-            inner: Some(inner),
-            input_paths,
-        })
+        Ok(Self { inner: Some(inner) })
     }
 
     #[staticmethod]
@@ -475,10 +476,23 @@ impl PyLiveStacker {
         let inner = py
             .allow_threads(move || LiveStacker::from_linear(reference, options))
             .map_err(stack_error)?;
-        Ok(Self {
-            inner: Some(inner),
-            input_paths: Vec::new(),
-        })
+        Ok(Self { inner: Some(inner) })
+    }
+
+    /// Reopen a versioned on-disk context and continue adding frames.
+    #[staticmethod]
+    fn open_context(py: Python<'_>, path: PathBuf) -> PyResult<Self> {
+        let inner = py
+            .allow_threads(|| LiveStacker::open_context(path))
+            .map_err(stack_error)?;
+        Ok(Self { inner: Some(inner) })
+    }
+
+    /// Atomically checkpoint this live stack without consuming it.
+    fn save_context(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {
+        let stacker = self.active()?;
+        py.allow_threads(|| stacker.save_context(path))
+            .map_err(stack_error)
     }
 
     #[getter]
@@ -493,7 +507,8 @@ impl PyLiveStacker {
 
     fn push_fits(&mut self, py: Python<'_>, path: PathBuf) -> PyResult<PyFrameDisposition> {
         if self
-            .input_paths
+            .active()?
+            .input_paths()
             .iter()
             .any(|input| paths_refer_to_same_file(input, &path))
         {
@@ -503,12 +518,8 @@ impl PyLiveStacker {
             )));
         }
         let disposition = py
-            .allow_threads(|| {
-                let frame = FitsFrame::open(&path)?;
-                self.active_mut()?.push(frame)
-            })
+            .allow_threads(|| self.active_mut()?.push_fits(&path))
             .map_err(stack_error)?;
-        self.input_paths.push(path.clone());
         Ok(PyFrameDisposition::from_rust(Some(path), disposition))
     }
 
@@ -539,7 +550,8 @@ impl PyLiveStacker {
     fn finish(&mut self, py: Python<'_>, output: Option<PathBuf>) -> PyResult<PyStackSnapshot> {
         if let Some(output) = &output
             && self
-                .input_paths
+                .active()?
+                .input_paths()
                 .iter()
                 .any(|input| paths_refer_to_same_file(input, output))
         {
