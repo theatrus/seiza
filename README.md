@@ -265,8 +265,11 @@ seiza stack lights/*.fits --output stack.fits \
 *Eight 300-second H-alpha frames stacked on the first frame's pixel grid. The
 JPEG uses a display-only stretch; the stack itself remains linear `f32` FITS.*
 
-The Rust crate and Python wheel expose the same incremental `LiveStacker`
-engine. See the [CLI stacking guide](seiza-cli/README.md#image-stacking),
+The Rust crate, Python wheel, and C ABI expose the same incremental
+`LiveStacker` engine. Live handles can be atomically checkpointed to a
+versioned `.seiza-stack` context, reopened in a later process, and continue
+accepting frames without resetting their registration or rejection history.
+See the [CLI stacking guide](seiza-cli/README.md#image-stacking),
 [Python API](seiza-py/README.md#image-stacking), and
 [stacking design](docs/design/image-stacking.md).
 
@@ -533,7 +536,8 @@ seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-
   calibration, registration onto the first frame's fixed grid with
   meridian-flip handling, global or tiled local normalization, and online
   delta-sigma rejection in `seiza-stacking`. The same incremental
-  `LiveStacker` engine serves batch and live use.
+  `LiveStacker` engine serves batch and live use, with atomic on-disk contexts
+  for exact process-to-process resumption.
 - **Deconvolution (experimental)** — damped Richardson-Lucy restoration from
   a measured Gaussian PSF FWHM with per-channel flux preservation in
   `seiza-deconvolution`. `NaN` registration borders stay masked instead of

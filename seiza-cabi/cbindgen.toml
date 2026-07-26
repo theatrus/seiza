@@ -26,7 +26,8 @@ after_includes = """
  *     functions -> release with seiza_rendered_image16_free().
  *   - SeizaBackgroundModel* returned by seiza_background_fit
  *       -> release with seiza_background_model_free().
- *   - SeizaLiveStacker* returned by seiza_live_stacker_create / _open_fits
+ *   - SeizaLiveStacker* returned by seiza_live_stacker_create / _open_fits /
+ *     _open_context
  *       -> release with seiza_live_stacker_free(), or consume with
  *          seiza_live_stacker_finish().
  *   - SeizaStackSnapshot* returned by seiza_live_stacker_snapshot / _finish

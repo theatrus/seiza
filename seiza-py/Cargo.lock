@@ -1573,7 +1573,10 @@ dependencies = [
  "seiza-stretch",
  "seiza-xisf",
  "serde",
+ "serde_json",
+ "tempfile",
  "thiserror",
+ "zstd",
 ]
 
 [[package]]

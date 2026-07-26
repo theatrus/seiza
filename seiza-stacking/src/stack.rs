@@ -1,10 +1,12 @@
 use crate::{
     CalibrationMasters, Error, FitsFrame, LinearImage, NormalizationMap, NormalizationMode,
-    Registrar, RegistrationOptions, Result, SimilarityTransform, resample_to_reference,
+    Registrar, RegistrationOptions, Result, SimilarityTransform, context, path_identity,
+    paths_refer_to_same_file, resample_to_reference,
 };
 use rayon::prelude::*;
 use seiza_fits::HeaderValue;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 /// Thresholds for per-sample delta-sigma rejection during live stacking.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -299,6 +301,7 @@ pub struct LiveStacker {
     reference_headers: Vec<(String, HeaderValue)>,
     accepted_frames: u32,
     rejected_frames: u32,
+    input_paths: Vec<PathBuf>,
 }
 
 impl LiveStacker {
@@ -348,7 +351,107 @@ impl LiveStacker {
             reference_headers,
             accepted_frames: 1,
             rejected_frames: 0,
+            input_paths: Vec::new(),
         })
+    }
+
+    /// Start a stack from FITS or XISF paths and retain every source and
+    /// calibration path for duplicate-input and output-path protection.
+    pub fn open_fits(
+        reference_path: impl AsRef<Path>,
+        bias_path: Option<&Path>,
+        dark_path: Option<&Path>,
+        flat_path: Option<&Path>,
+        dark_exposure_seconds: Option<f64>,
+        options: StackOptions,
+    ) -> Result<Self> {
+        let reference_path = reference_path.as_ref();
+        let input_paths = [Some(reference_path), bias_path, dark_path, flat_path]
+            .into_iter()
+            .flatten()
+            .map(path_identity)
+            .collect::<Vec<_>>();
+        for (index, path) in input_paths.iter().enumerate() {
+            if input_paths[..index]
+                .iter()
+                .any(|other| paths_refer_to_same_file(other, path))
+            {
+                return Err(Error::Stack(format!(
+                    "stack input path {} is used more than once",
+                    path.display()
+                )));
+            }
+        }
+        let calibration = CalibrationMasters::from_fits_paths(
+            bias_path,
+            dark_path,
+            flat_path,
+            dark_exposure_seconds,
+        )?;
+        let reference = FitsFrame::open(reference_path)?;
+        let mut stacker = Self::new(reference, calibration, options)?;
+        stacker.input_paths = input_paths;
+        Ok(stacker)
+    }
+
+    /// Restore an atomically checkpointed live stack, including its immutable
+    /// registration reference, calibration, online moments, and source ledger.
+    pub fn open_context(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let restored = context::read(path)?;
+        let registrar = Registrar::new(&restored.reference, restored.options.registration.clone())
+            .map_err(|error| Error::StackContextRead {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            })?;
+        Ok(Self {
+            options: restored.options,
+            calibration: restored.calibration,
+            reference: restored.reference,
+            registrar,
+            accumulator: Accumulator {
+                mean: restored.mean,
+                m2: restored.m2,
+                count: restored.count,
+                rejected: restored.rejected,
+            },
+            reference_headers: restored.reference_headers,
+            accepted_frames: restored.accepted_frames,
+            rejected_frames: restored.rejected_frames,
+            input_paths: restored.input_paths,
+        })
+    }
+
+    /// Atomically checkpoint all state required to reopen this stack and keep
+    /// integrating frames with identical online rejection behavior.
+    pub fn save_context(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        if self
+            .input_paths
+            .iter()
+            .any(|input| paths_refer_to_same_file(input, path))
+        {
+            return Err(Error::StackContextWrite {
+                path: path.to_path_buf(),
+                message: "context path must not replace a stack input or calibration master".into(),
+            });
+        }
+        context::write(
+            path,
+            context::ContextWriteState {
+                options: &self.options,
+                calibration: &self.calibration,
+                reference: &self.reference,
+                reference_headers: &self.reference_headers,
+                mean: &self.accumulator.mean,
+                m2: &self.accumulator.m2,
+                count: &self.accumulator.count,
+                rejected: &self.accumulator.rejected,
+                accepted_frames: self.accepted_frames,
+                rejected_frames: self.rejected_frames,
+                input_paths: &self.input_paths,
+            },
+        )
     }
 
     /// Calibrate, prepare, and try to integrate a FITS frame, reporting whether
@@ -371,6 +474,26 @@ impl LiveStacker {
             }
         };
         self.push_linear(frame.image)
+    }
+
+    /// Open and offer one FITS or XISF path, rejecting duplicate source or
+    /// calibration paths and retaining the path in resumable context state.
+    pub fn push_fits(&mut self, path: impl AsRef<Path>) -> Result<FrameDisposition> {
+        let path = path.as_ref();
+        if self
+            .input_paths
+            .iter()
+            .any(|input| paths_refer_to_same_file(input, path))
+        {
+            return Err(Error::Stack(format!(
+                "FITS frame {} has already been used by this stack",
+                path.display()
+            )));
+        }
+        let frame = FitsFrame::open(path)?;
+        let disposition = self.push(frame)?;
+        self.input_paths.push(path_identity(path));
+        Ok(disposition)
     }
 
     /// Register, normalize, and try to integrate an already-prepared linear
@@ -563,6 +686,11 @@ impl LiveStacker {
         &self.reference_headers
     }
 
+    /// Source and calibration paths already used by this stack.
+    pub fn input_paths(&self) -> &[PathBuf] {
+        &self.input_paths
+    }
+
     fn reject(&mut self, reason: FrameRejectionReason) -> FrameDisposition {
         self.rejected_frames += 1;
         FrameDisposition::Rejected(reason)
@@ -708,6 +836,49 @@ fn rotation_deviation_degrees(rotation_radians: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BayerLayout;
+
+    fn stacking_star_field(width: usize, height: usize) -> LinearImage {
+        let positions = [
+            (19.7_f32, 16.4_f32),
+            (71.3, 28.1),
+            (132.2, 34.8),
+            (43.1, 49.7),
+            (103.4, 58.3),
+            (22.8, 70.2),
+            (82.7, 76.5),
+            (143.1, 87.8),
+            (54.4, 96.2),
+            (116.8, 104.1),
+            (31.2, 113.0),
+            (91.5, 118.4),
+        ];
+        let mut data = Vec::with_capacity(width * height);
+        for y in 0..height {
+            for x in 0..width {
+                let noise = ((x * 17 + y * 31) % 23) as f32 * 0.12 - 1.32;
+                let mut value = 100.0 + noise;
+                for (index, (star_x, star_y)) in positions.iter().enumerate() {
+                    let dx = x as f32 - star_x;
+                    let dy = y as f32 - star_y;
+                    value +=
+                        (900.0 + index as f32 * 130.0) * (-(dx.mul_add(dx, dy * dy)) / 3.2).exp();
+                }
+                data.push(value);
+            }
+        }
+        LinearImage::new(width, height, 1, data).unwrap()
+    }
+
+    fn offset_image(reference: &LinearImage, offset: f32) -> LinearImage {
+        LinearImage::new(
+            reference.width,
+            reference.height,
+            reference.channels,
+            reference.data.iter().map(|value| value + offset).collect(),
+        )
+        .unwrap()
+    }
 
     #[test]
     fn delta_sigma_rejects_late_outlier_without_moving_mean() {
@@ -773,5 +944,124 @@ mod tests {
         let round_trip: StackOptions = serde_json::from_str(&json).unwrap();
         assert_eq!(round_trip.registration.maximum_drift_pixels, 512.0);
         assert!(serde_json::from_str::<StackOptions>(r#"{"mystery": true}"#).is_err());
+    }
+
+    #[test]
+    fn context_resume_is_identical_to_uninterrupted_online_integration() {
+        let reference = stacking_star_field(160, 128);
+        let options = StackOptions {
+            normalization: NormalizationMode::None,
+            rejection: RejectionMode::DeltaSigma(DeltaSigmaOptions {
+                warmup_samples: 4,
+                minimum_sigma: 0.01,
+                ..DeltaSigmaOptions::default()
+            }),
+            ..StackOptions::default()
+        };
+        let frames =
+            [0.10, -0.10, 0.05, -0.05, 75.0, 0.02].map(|offset| offset_image(&reference, offset));
+        let mut uninterrupted =
+            LiveStacker::from_linear(reference.clone(), options.clone()).unwrap();
+        for frame in frames.iter().cloned() {
+            uninterrupted.push_linear(frame).unwrap();
+        }
+
+        let mut checkpointed = LiveStacker::from_linear(reference, options).unwrap();
+        for frame in frames[..3].iter().cloned() {
+            checkpointed.push_linear(frame).unwrap();
+        }
+        checkpointed
+            .input_paths
+            .push(PathBuf::from("light-001.fits"));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.seiza-stack");
+        checkpointed.save_context(&path).unwrap();
+        let mut resumed = LiveStacker::open_context(&path).unwrap();
+        assert_eq!(resumed.input_paths(), [PathBuf::from("light-001.fits")]);
+        for frame in frames[3..].iter().cloned() {
+            resumed.push_linear(frame).unwrap();
+        }
+        resumed.save_context(&path).unwrap();
+        let resumed = LiveStacker::open_context(&path).unwrap();
+
+        let expected = uninterrupted.into_snapshot().unwrap();
+        let actual = resumed.into_snapshot().unwrap();
+        assert_eq!(actual.image.data, expected.image.data);
+        assert_eq!(actual.variance.data, expected.variance.data);
+        assert_eq!(actual.coverage, expected.coverage);
+        assert_eq!(actual.rejected_samples, expected.rejected_samples);
+        assert_eq!(actual.accepted_frames, expected.accepted_frames);
+        assert_eq!(actual.rejected_frames, expected.rejected_frames);
+    }
+
+    #[test]
+    fn truncated_context_is_rejected() {
+        let reference = stacking_star_field(160, 128);
+        let stacker = LiveStacker::from_linear(reference, StackOptions::default()).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.seiza-stack");
+        stacker.save_context(&path).unwrap();
+        let length = std::fs::metadata(&path).unwrap().len();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(length - 1)
+            .unwrap();
+        assert!(matches!(
+            LiveStacker::open_context(&path),
+            Err(Error::StackContextRead { .. })
+        ));
+    }
+
+    #[test]
+    fn context_preserves_calibration_headers_and_source_ledger() {
+        let reference = stacking_star_field(160, 128);
+        let calibration_image = LinearImage::new(160, 128, 1, vec![2.0; 160 * 128]).unwrap();
+        let mut stacker = LiveStacker::from_linear(reference, StackOptions::default()).unwrap();
+        stacker.calibration = CalibrationMasters {
+            bias: Some(calibration_image.clone()),
+            dark_signal: Some(calibration_image.clone()),
+            dark_exposure_seconds: Some(300.0),
+            dark_bayer: Some(BayerLayout {
+                pattern: seiza_fits::BayerPattern::Rggb,
+                x_offset: 1,
+                y_offset: 0,
+            }),
+            flat_response: Some(calibration_image),
+            flat_bayer: Some(BayerLayout {
+                pattern: seiza_fits::BayerPattern::Rggb,
+                x_offset: 1,
+                y_offset: 0,
+            }),
+        };
+        stacker.reference_headers = vec![
+            ("OBJECT".into(), HeaderValue::String("M 31".into())),
+            ("ODDVAL".into(), HeaderValue::Float(f64::NAN)),
+        ];
+        stacker.input_paths = vec![PathBuf::from("reference.fits"), PathBuf::from("dark.fits")];
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.seiza-stack");
+        stacker.save_context(&path).unwrap();
+
+        let restored = LiveStacker::open_context(&path).unwrap();
+        assert_eq!(
+            restored.calibration.bias.unwrap().data,
+            vec![2.0; 160 * 128]
+        );
+        assert_eq!(restored.calibration.dark_exposure_seconds, Some(300.0));
+        assert_eq!(
+            restored.calibration.dark_bayer.unwrap().pattern,
+            seiza_fits::BayerPattern::Rggb
+        );
+        assert_eq!(
+            restored.reference_headers[0],
+            ("OBJECT".into(), HeaderValue::String("M 31".into()))
+        );
+        assert!(matches!(
+            restored.reference_headers[1].1,
+            HeaderValue::Float(value) if value.is_nan()
+        ));
+        assert_eq!(stacker.input_paths, restored.input_paths);
     }
 }

@@ -76,6 +76,22 @@ def test_live_stacker_accepts_numpy_and_returns_owned_snapshot():
         stacker.snapshot()
 
 
+def test_live_stacker_context_reopens_and_continues(tmp_path):
+    image = synthetic_star_field()
+    stacker = seiza.LiveStacker.from_array(image, options=no_adjustment_options())
+    assert stacker.push(image).accepted
+    context = tmp_path / "live.seiza-stack"
+    stacker.save_context(context)
+
+    resumed = seiza.LiveStacker.open_context(context)
+    assert resumed.accepted_frames == 2
+    assert resumed.push(image).accepted
+    final = resumed.finish()
+    assert final.accepted_frames == 3
+    np.testing.assert_allclose(final.image, image, rtol=0.0, atol=1.0e-3)
+    assert np.all(final.coverage == 3)
+
+
 def test_live_stacker_accepts_and_registers_meridian_flipped_frame():
     image = synthetic_star_field()
     flipped = np.ascontiguousarray(np.rot90(image, 2))

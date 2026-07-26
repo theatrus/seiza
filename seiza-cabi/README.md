@@ -55,6 +55,9 @@ exposes the **superset** of what both apps need.
   mean/coverage/rejection views support copy-free live display, snapshots add
   variance, and `seiza_live_stacker_finish` moves the final accumulator into an
   immutable result without cloning its full-frame buffers.
+  `seiza_live_stacker_save_context` atomically checkpoints a still-live handle;
+  `seiza_live_stacker_open_context` restores it later with its original
+  reference, calibration, online moments, counters, and source ledger intact.
 - **Plate solving** — `seiza_solve_image_json`.
 - **Catalog setup** — `seiza_catalog_status_json` and `seiza_catalog_setup`
   (with a progress callback). The install path delegates to
@@ -110,6 +113,23 @@ Local normalization is `{"mode":"local","options":{"tile_size":256}}`;
 delta-sigma rejection is
 `{"mode":"delta-sigma","options":{"low_sigma":3.0,"high_sigma":3.0}}`.
 Unknown fields and invalid bounds are rejected rather than silently ignored.
+
+For resumable app sessions, save and reopen the opaque processing state rather
+than treating an integrated FITS result as a new reference:
+
+```c
+bool saved = seiza_live_stacker_save_context(stacker,
+                                             "m31.seiza-stack", &error);
+seiza_live_stacker_free(stacker);
+
+stacker = seiza_live_stacker_open_context("m31.seiza-stack", &error);
+char *decision = seiza_live_stacker_push_fits_json(stacker,
+                                                   "light-042.fits", &error);
+```
+
+Saving does not consume or otherwise mutate the handle. Context publication is
+atomic, and reopening validates the format version, dimensions, configuration,
+payload checksum, and accumulator invariants before returning a handle.
 
 The full C declarations, plus the memory-ownership contract (which returns are
 owned vs. borrowed, and which `seiza_*_free` to call), live in
