@@ -34,6 +34,11 @@ Bump the workspace version if `seiza` or `seiza-cli` changed (they almost always
 do). Bump each changed leaf crate by its own change. Fixes-only → patch;
 new features → minor.
 
+For a pre-1.0 workspace minor bump, also bump every published leaf crate that
+depends on `seiza`, even when its source did not change. Its existing caret
+requirement cannot resolve the new minor, and published dependents would
+otherwise build with two incompatible `seiza` versions.
+
 ## 2. Bump versions (the Release PR)
 
 Edit, on a `release/<version>` branch:
