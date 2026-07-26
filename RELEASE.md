@@ -6,7 +6,7 @@ PyPI**. They are cut from a single "Release `<version>`" PR followed by two tags
 
 ## Versioning scheme
 
-- `seiza` and `seiza-cli` inherit the **workspace version**
+- `seiza`, `seiza-cabi`, and `seiza-cli` inherit the **workspace version**
   (`[workspace.package] version` in the root `Cargo.toml`) — they always move
   together, and the workspace version is *the* release version.
 - The other crates version **independently** by what actually changed:
@@ -34,6 +34,11 @@ Bump the workspace version if `seiza` or `seiza-cli` changed (they almost always
 do). Bump each changed leaf crate by its own change. Fixes-only → patch;
 new features → minor.
 
+For a pre-1.0 workspace minor bump, also bump every published leaf crate that
+depends on `seiza`, even when its source did not change. Its existing caret
+requirement cannot resolve the new minor, and published dependents would
+otherwise build with two incompatible `seiza` versions.
+
 ## 2. Bump versions (the Release PR)
 
 Edit, on a `release/<version>` branch:
@@ -42,6 +47,19 @@ Edit, on a `release/<version>` branch:
   `[workspace.dependencies]` pin of **every crate whose version changed**.
 - each changed leaf crate's own `Cargo.toml` `version =`.
 - `seiza-py/Cargo.toml` `version =` — **set equal to the new workspace version**.
+
+Run the same dependency-chain guard used by CI against the release branch's
+base. It detects Cargo caret-compatibility boundaries and names every published
+dependent that also needs a version bump:
+
+```bash
+python3 .github/scripts/check_release_version_chain.py origin/main
+```
+
+Do not open or merge the release PR until this passes. A pre-1.0 minor bump of
+`seiza`, for example, requires new releases of `seiza-stacking`,
+`seiza-satellites`, `seiza-cabi`, and `seiza-cli` because their previously
+published requirements cannot resolve the new minor.
 
 Regenerate both lockfiles (path-crate version sync only — no registry churn):
 
@@ -71,7 +89,7 @@ waits for the index):
 ```
 seiza-stats  →  seiza-stretch  →  seiza-imgproc  →  seiza-fits  →  seiza-xisf
 →  seiza-background  →  seiza-deconvolution  →  seiza-sources  →  seiza-download
-→  seiza  →  seiza-satellites  →  seiza-stacking  →  seiza-cli
+→  seiza  →  seiza-satellites  →  seiza-stacking  →  seiza-cabi  →  seiza-cli
 ```
 
 ```bash

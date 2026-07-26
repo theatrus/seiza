@@ -1,6 +1,7 @@
 # Image and live stacking
 
-Status: initial online engine and CLI vertical slice in progress
+Status: online engine, native bindings, and resumable contexts implemented;
+exact two-pass batch estimator remains future work
 
 ## Boundary
 
@@ -209,6 +210,16 @@ memory-mapped accumulators are follow-on backends behind the same API.
 renderer. `snapshot` copies owned maps when they are needed, while
 `into_snapshot` consumes the accumulator for copy-free batch finalization.
 
+`save_context` is the durable counterpart to those in-memory views. It streams
+a versioned metadata envelope and the original prepared reference, calibration
+buffers, Welford mean and second moment, coverage/rejection maps, counters,
+headers, and source ledger through a checksummed Zstandard frame into an
+adjacent temporary file. Only a complete, flushed context is atomically renamed
+over the destination. `open_context` validates the container and accumulator,
+rebuilds the registrar from the original reference, and returns a mutable
+`LiveStacker`; it does not approximate resumption by weighting the finished
+mean as one new observation.
+
 The C ABI preserves those same performance boundaries. `SeizaLiveStacker`
 accepts either copied, pre-calibrated interleaved float arrays or FITS paths
 with optional master calibration files. Frame disposition is returned as owned
@@ -219,6 +230,10 @@ Snapshotting a running stack copies full-frame state, while finalization takes
 a pointer-to-handle, nulls it, and moves the state into the snapshot. This makes
 ownership loss explicit to Swift/.NET/C callers and retains the Rust
 `view`/`snapshot`/`into_snapshot` distinction.
+The ABI additionally exposes `seiza_live_stacker_save_context` and
+`seiza_live_stacker_open_context`, so Swift and .NET applications need retain
+only a context path between process lifetimes. Python exposes the same contract
+as `LiveStacker.save_context` and `LiveStacker.open_context`.
 
 Calibration master construction is also bounded by image size rather than
 input count. Its two-pass estimator retains per-sample moments and output

@@ -3,6 +3,7 @@
 
 mod calibration;
 mod color;
+mod context;
 mod fits;
 mod image;
 mod master;
@@ -58,6 +59,22 @@ pub enum Error {
     /// A frame could not be integrated into the stack.
     #[error("stacking error: {0}")]
     Stack(String),
+    /// Reading a resumable live-stack context failed.
+    #[error("failed to read stack context {}: {message}", path.display())]
+    StackContextRead {
+        /// Context path that could not be read.
+        path: PathBuf,
+        /// Decode, validation, or I/O failure.
+        message: String,
+    },
+    /// Writing a resumable live-stack context failed.
+    #[error("failed to write stack context {}: {message}", path.display())]
+    StackContextWrite {
+        /// Context path that could not be written.
+        path: PathBuf,
+        /// Serialization or I/O failure.
+        message: String,
+    },
     /// Color composition inputs or options were rejected.
     #[error("color composition error: {0}")]
     Color(String),

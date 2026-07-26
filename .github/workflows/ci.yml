@@ -51,10 +51,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2.9.1
+      - name: Test release dependency-chain guard
+        run: python3 .github/scripts/test_check_release_version_chain.py
+      - name: Verify release dependency version chain
+        if: github.event_name == 'pull_request'
+        run: python3 .github/scripts/check_release_version_chain.py "${{ github.event.pull_request.base.sha }}"
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       # seiza-cabi's build script regenerates its C header with cbindgen. Fail

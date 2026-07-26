@@ -189,6 +189,22 @@ coverage = preview_state.coverage
 final = stacker.finish("stack.fits")  # consumes the live accumulator
 ```
 
+Checkpointing is non-consuming. Reopening preserves the original registration
+reference, calibration and options, online rejection statistics, coverage, and
+the FITS/XISF source ledger:
+
+```python
+stacker.save_context("m31.seiza-stack")
+
+stacker = seiza.LiveStacker.open_context("m31.seiza-stack")
+decision = stacker.push_fits("light-042.fits")
+stacker.save_context("m31.seiza-stack")
+```
+
+The context file is versioned, compressed, checksummed, and atomically
+replaced. It is processing state for resumption; `finish("stack.fits")` remains
+the interoperable final image output.
+
 Frames taken after a German-equatorial-mount meridian flip are handled by
 default. `maximum_rotation_degrees` limits deviation from either the reference
 orientation or its 180-degree counterpart; frame diagnostics still report the
