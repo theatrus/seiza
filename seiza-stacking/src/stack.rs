@@ -958,8 +958,14 @@ mod tests {
             }),
             ..StackOptions::default()
         };
-        let frames =
-            [0.10, -0.10, 0.05, -0.05, 75.0, 0.02].map(|offset| offset_image(&reference, offset));
+        let mut frames = [0.10, -0.10, 0.05, -0.05]
+            .map(|offset| offset_image(&reference, offset))
+            .to_vec();
+        let mut partial_outlier = offset_image(&reference, 0.0);
+        let center = partial_outlier.height / 2 * partial_outlier.width + partial_outlier.width / 2;
+        partial_outlier.data[center] += 1_000.0;
+        frames.push(partial_outlier);
+        frames.push(offset_image(&reference, 0.02));
         let mut uninterrupted =
             LiveStacker::from_linear(reference.clone(), options.clone()).unwrap();
         for frame in frames.iter().cloned() {
@@ -990,6 +996,7 @@ mod tests {
         assert_eq!(actual.variance.data, expected.variance.data);
         assert_eq!(actual.coverage, expected.coverage);
         assert_eq!(actual.rejected_samples, expected.rejected_samples);
+        assert!(actual.rejected_samples.iter().sum::<u32>() > 0);
         assert_eq!(actual.accepted_frames, expected.accepted_frames);
         assert_eq!(actual.rejected_frames, expected.rejected_frames);
     }

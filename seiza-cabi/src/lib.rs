@@ -4410,13 +4410,15 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let first = directory.path().join("light-001.fits");
         let second = directory.path().join("light-002.fits");
+        let context = directory.path().join("live.seiza-stack");
         seiza_stacking::write_processed_image_fits_f32(&first, &image, &[], &[]).unwrap();
         seiza_stacking::write_processed_image_fits_f32(&second, &image, &[], &[]).unwrap();
         let first_c = CString::new(first.to_str().unwrap()).unwrap();
         let second_c = CString::new(second.to_str().unwrap()).unwrap();
+        let context_c = CString::new(context.to_str().unwrap()).unwrap();
         let config = no_adjustment_stack_options();
         let mut error = ptr::null_mut();
-        let stacker = unsafe {
+        let mut stacker = unsafe {
             seiza_live_stacker_open_fits(
                 first_c.as_ptr(),
                 ptr::null(),
@@ -4432,6 +4434,12 @@ mod tests {
             unsafe { seiza_live_stacker_push_fits_json(stacker, second_c.as_ptr(), &mut error) };
         assert!(!disposition.is_null());
         unsafe { seiza_string_free(disposition) };
+        assert!(unsafe {
+            seiza_live_stacker_save_context(stacker, context_c.as_ptr(), &mut error)
+        });
+        unsafe { seiza_live_stacker_free(stacker) };
+        stacker = unsafe { seiza_live_stacker_open_context(context_c.as_ptr(), &mut error) };
+        assert!(!stacker.is_null());
 
         let duplicate =
             unsafe { seiza_live_stacker_push_fits_json(stacker, second_c.as_ptr(), &mut error) };

@@ -210,6 +210,9 @@ def test_fits_live_stacker_protects_inputs_from_duplicates_and_output(tmp_path):
 
     stacker = seiza.LiveStacker(first, options=no_adjustment_options())
     assert stacker.push_fits(second).accepted
+    context = tmp_path / "live.seiza-stack"
+    stacker.save_context(context)
+    stacker = seiza.LiveStacker.open_context(context)
     with pytest.raises(ValueError, match="already been used"):
         stacker.push_fits(second)
     with pytest.raises(ValueError, match="must not refer"):
