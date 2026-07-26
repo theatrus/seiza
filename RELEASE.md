@@ -135,3 +135,7 @@ The GitHub Release's `.rpm`/`.deb` are what downstream infra mirrors (e.g.
 `pkg.stackworks.net`) and hosts consume via `dnf`/`apt`. Bumping a running host
 to a new Seiza is a separate step in that infrastructure, after this release is
 published.
+
+The Homebrew tap [`theatrus/homebrew-seiza`](https://github.com/theatrus/homebrew-seiza)
+pins the released tarball by sha256. After tagging, bump `Formula/seiza.rb`
+(new `url` version and `sha256` of the `v<version>.tar.gz`) in that repo.
