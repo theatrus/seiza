@@ -6,7 +6,7 @@ PyPI**. They are cut from a single "Release `<version>`" PR followed by two tags
 
 ## Versioning scheme
 
-- `seiza` and `seiza-cli` inherit the **workspace version**
+- `seiza`, `seiza-cabi`, and `seiza-cli` inherit the **workspace version**
   (`[workspace.package] version` in the root `Cargo.toml`) — they always move
   together, and the workspace version is *the* release version.
 - The other crates version **independently** by what actually changed:
@@ -71,7 +71,7 @@ waits for the index):
 ```
 seiza-stats  →  seiza-stretch  →  seiza-imgproc  →  seiza-fits  →  seiza-xisf
 →  seiza-background  →  seiza-deconvolution  →  seiza-sources  →  seiza-download
-→  seiza  →  seiza-satellites  →  seiza-stacking  →  seiza-cli
+→  seiza  →  seiza-satellites  →  seiza-stacking  →  seiza-cabi  →  seiza-cli
 ```
 
 ```bash
