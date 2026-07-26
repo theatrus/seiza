@@ -48,6 +48,19 @@ Edit, on a `release/<version>` branch:
 - each changed leaf crate's own `Cargo.toml` `version =`.
 - `seiza-py/Cargo.toml` `version =` — **set equal to the new workspace version**.
 
+Run the same dependency-chain guard used by CI against the release branch's
+base. It detects Cargo caret-compatibility boundaries and names every published
+dependent that also needs a version bump:
+
+```bash
+python3 .github/scripts/check_release_version_chain.py origin/main
+```
+
+Do not open or merge the release PR until this passes. A pre-1.0 minor bump of
+`seiza`, for example, requires new releases of `seiza-stacking`,
+`seiza-satellites`, `seiza-cabi`, and `seiza-cli` because their previously
+published requirements cannot resolve the new minor.
+
 Regenerate both lockfiles (path-crate version sync only — no registry churn):
 
 ```bash
