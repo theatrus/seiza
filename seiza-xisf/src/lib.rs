@@ -13,8 +13,8 @@
 //! already physical.
 
 use flate2::read::ZlibDecoder;
-use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
+use quick_xml::{Reader, XmlVersion};
 use seiza_fits::{FitsImage, HeaderValue, Pixels, parse_header_value};
 use sha1::Sha1;
 use sha2::{Sha256, Sha512};
@@ -492,7 +492,7 @@ fn attributes(
         let key = std::str::from_utf8(attribute.key.as_ref())
             .map_err(|_| XisfError::Malformed("non-UTF-8 XML attribute name".into()))?;
         let value = attribute
-            .decode_and_unescape_value(reader.decoder())
+            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
             .map_err(|error| XisfError::Malformed(format!("invalid XML attribute: {error}")))?;
         values.insert(key.to_string(), value.into_owned());
     }
