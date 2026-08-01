@@ -36,7 +36,7 @@ impl Default for ResidualFlatOptions {
     fn default() -> Self {
         Self {
             minimum_samples: 5,
-            minimum_depth: 0.015,
+            minimum_depth: 0.005,
             minimum_consensus: 0.7,
             maximum_gain: 1.2,
             background_edge_fraction: 0.2,
@@ -588,6 +588,34 @@ mod tests {
             .collect::<Vec<_>>();
         let result = build_residual_flat_patch(&samples, &ResidualFlatOptions::default());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn default_depth_keeps_a_one_percent_repeated_shadow() {
+        let samples = (0..7)
+            .map(|index| {
+                let offset = index as f32 * 3.0;
+                let data = (0..48)
+                    .flat_map(|y| {
+                        (0..48).map(move |x| {
+                            let background = 1_000.0 + x as f32 + 0.5 * y as f32 + offset;
+                            let radius = (x as f32 - 23.5).hypot(y as f32 - 23.5);
+                            let response = if (8.0..=15.0).contains(&radius) {
+                                0.99
+                            } else {
+                                1.0
+                            };
+                            background * response
+                        })
+                    })
+                    .collect();
+                LinearImage::new(48, 48, 1, data).unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        let built = build_residual_flat_patch(&samples, &ResidualFlatOptions::default()).unwrap();
+        assert!(built.diagnostics.corrected_samples > 100);
+        assert!(built.diagnostics.minimum_response < 0.995);
     }
 
     #[test]
