@@ -39,20 +39,54 @@ impl BinaryComponent {
 
 /// Find all connected non-zero regions in a row-major binary mask.
 ///
-/// Components and their pixels follow first-seen row-major order. This keeps
-/// output stable when two components have the same size.
+/// Components follow first-seen row-major order. This keeps output stable when
+/// two components have the same size.
 pub fn connected_components(
     mask: &[u8],
     width: usize,
     height: usize,
     connectivity: Connectivity,
 ) -> Vec<BinaryComponent> {
+    let mut output = Vec::new();
+    visit_components(mask, width, height, connectivity, |pixels| {
+        output.push(measure_component(pixels, width));
+    });
+    output
+}
+
+/// Find the largest connected non-zero region without retaining smaller ones.
+///
+/// Ties resolve to the first component in row-major discovery order.
+pub fn largest_connected_component(
+    mask: &[u8],
+    width: usize,
+    height: usize,
+    connectivity: Connectivity,
+) -> Option<BinaryComponent> {
+    let mut largest = None;
+    visit_components(mask, width, height, connectivity, |pixels| {
+        if largest
+            .as_ref()
+            .is_none_or(|component: &BinaryComponent| pixels.len() > component.pixels.len())
+        {
+            largest = Some(measure_component(pixels, width));
+        }
+    });
+    largest
+}
+
+fn visit_components(
+    mask: &[u8],
+    width: usize,
+    height: usize,
+    connectivity: Connectivity,
+    mut visit: impl FnMut(Vec<usize>),
+) {
     assert_eq!(mask.len(), width * height);
     if width == 0 || height == 0 {
-        return Vec::new();
+        return;
     }
     let mut visited = vec![false; mask.len()];
-    let mut output = Vec::new();
     for start in 0..mask.len() {
         if visited[start] || mask[start] == 0 {
             continue;
@@ -81,9 +115,8 @@ pub fn connected_components(
                 }
             }
         }
-        output.push(measure_component(pixels, width));
+        visit(pixels);
     }
-    output
 }
 
 fn measure_component(pixels: Vec<usize>, width: usize) -> BinaryComponent {
@@ -177,5 +210,13 @@ mod tests {
         assert_eq!((component.min_y, component.max_y), (1, 2));
         assert_eq!((component.centroid_x, component.centroid_y), (2.0, 1.5));
         assert_eq!(component.fill_fraction(), 1.0);
+    }
+
+    #[test]
+    fn largest_component_does_not_replace_an_equal_first_match() {
+        let mask = [1, 1, 0, 1, 1];
+        let component = largest_connected_component(&mask, 5, 1, Connectivity::Eight).unwrap();
+
+        assert_eq!(component.pixels, vec![0, 1]);
     }
 }
