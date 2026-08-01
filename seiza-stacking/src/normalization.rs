@@ -1,7 +1,9 @@
 use crate::{Error, LinearImage, Result};
 use rayon::prelude::*;
 use seiza_stats::{median_in_place, robust_sigma_in_place};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
+
+const NORMALIZATION_MAP_SCHEMA_VERSION: u32 = 1;
 
 /// How a frame's background is matched to the reference before stacking.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -21,8 +23,9 @@ pub enum NormalizationMode {
 
 /// Per-channel gain and offset that map a source frame onto the reference
 /// background, either globally or over a tile grid.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct NormalizationMap {
+    schema_version: u32,
     width: usize,
     height: usize,
     channels: usize,
@@ -33,10 +36,47 @@ pub struct NormalizationMap {
     offsets: Vec<f32>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NormalizationMapWire {
+    schema_version: u32,
+    width: usize,
+    height: usize,
+    channels: usize,
+    tile_size: usize,
+    columns: usize,
+    rows: usize,
+    gains: Vec<f32>,
+    offsets: Vec<f32>,
+}
+
+impl<'de> Deserialize<'de> for NormalizationMap {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = NormalizationMapWire::deserialize(deserializer)?;
+        let map = Self {
+            schema_version: wire.schema_version,
+            width: wire.width,
+            height: wire.height,
+            channels: wire.channels,
+            tile_size: wire.tile_size,
+            columns: wire.columns,
+            rows: wire.rows,
+            gains: wire.gains,
+            offsets: wire.offsets,
+        };
+        map.validate().map_err(D::Error::custom)?;
+        Ok(map)
+    }
+}
+
 impl NormalizationMap {
     /// A map that leaves an image of the given shape unchanged.
     pub fn identity(image: &LinearImage) -> Self {
         Self {
+            schema_version: NORMALIZATION_MAP_SCHEMA_VERSION,
             width: image.width,
             height: image.height,
             channels: image.channels,
@@ -104,6 +144,7 @@ impl NormalizationMap {
                     .collect::<Result<Vec<_>>>()?;
                 let (gains, offsets) = coefficients.into_iter().unzip();
                 Ok(Self {
+                    schema_version: NORMALIZATION_MAP_SCHEMA_VERSION,
                     width: source.width,
                     height: source.height,
                     channels: source.channels,
@@ -120,6 +161,7 @@ impl NormalizationMap {
     /// Rescale an image in place with the fitted map. Non-finite samples are
     /// left untouched; local maps interpolate gains and offsets between tiles.
     pub fn apply(&self, image: &mut LinearImage) -> Result<()> {
+        self.validate()?;
         if image.width != self.width
             || image.height != self.height
             || image.channels != self.channels
@@ -128,19 +170,35 @@ impl NormalizationMap {
                 "normalization map and image dimensions do not match".into(),
             ));
         }
+        self.apply_region(image, 0, 0)
+    }
+
+    /// Apply this map to a crop whose origin is expressed in the full
+    /// registered image grid used to estimate the map.
+    pub fn apply_region(
+        &self,
+        image: &mut LinearImage,
+        origin_x: usize,
+        origin_y: usize,
+    ) -> Result<()> {
+        self.validate()?;
+        let right = origin_x
+            .checked_add(image.width)
+            .ok_or_else(|| Error::Normalization("normalization region overflows".into()))?;
+        let bottom = origin_y
+            .checked_add(image.height)
+            .ok_or_else(|| Error::Normalization("normalization region overflows".into()))?;
+        if image.channels != self.channels || right > self.width || bottom > self.height {
+            return Err(Error::Normalization(
+                "normalization region exceeds the fitted image grid".into(),
+            ));
+        }
         if self.columns == 1 && self.rows == 1 {
-            image.data.par_chunks_mut(image.channels).for_each(|pixel| {
-                for (channel, value) in pixel.iter_mut().enumerate() {
-                    if value.is_finite() {
-                        *value = value.mul_add(self.gains[channel], self.offsets[channel]);
-                    }
-                }
-            });
-            return Ok(());
+            return self.apply_global(image);
         }
 
         let x_weights = (0..image.width)
-            .map(|x| axis_weights(x, self.columns, self.tile_size))
+            .map(|x| axis_weights(origin_x + x, self.columns, self.tile_size))
             .collect::<Vec<_>>();
         let row_samples = image.width * image.channels;
         image
@@ -148,7 +206,7 @@ impl NormalizationMap {
             .par_chunks_mut(row_samples)
             .enumerate()
             .for_each(|(y, row)| {
-                let y_weights = axis_weights(y, self.rows, self.tile_size);
+                let y_weights = axis_weights(origin_y + y, self.rows, self.tile_size);
                 for (x, pixel) in row.chunks_exact_mut(self.channels).enumerate() {
                     let x_weights = x_weights[x];
                     let top_left = (y_weights.low * self.columns + x_weights.low) * self.channels;
@@ -182,6 +240,99 @@ impl NormalizationMap {
                 }
             });
         Ok(())
+    }
+
+    /// Apply a one-tile global map to any image with the same channel count.
+    /// This is useful after another geometric resampling because a constant
+    /// per-channel affine transform does not depend on pixel coordinates.
+    pub fn apply_global(&self, image: &mut LinearImage) -> Result<()> {
+        self.validate()?;
+        if self.columns != 1 || self.rows != 1 {
+            return Err(Error::Normalization(
+                "normalization map is not global".into(),
+            ));
+        }
+        if image.channels != self.channels {
+            return Err(Error::Normalization(
+                "normalization channel count does not match".into(),
+            ));
+        }
+        image.data.par_chunks_mut(image.channels).for_each(|pixel| {
+            for (channel, value) in pixel.iter_mut().enumerate() {
+                if value.is_finite() {
+                    *value = value.mul_add(self.gains[channel], self.offsets[channel]);
+                }
+            }
+        });
+        Ok(())
+    }
+
+    /// Check the serialized map shape and every coefficient before use.
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != NORMALIZATION_MAP_SCHEMA_VERSION {
+            return Err(Error::Normalization(format!(
+                "unsupported normalization map schema version {}",
+                self.schema_version
+            )));
+        }
+        if self.width == 0 || self.height == 0 || self.channels == 0 || self.tile_size == 0 {
+            return Err(Error::Normalization(
+                "normalization map dimensions must be non-zero".into(),
+            ));
+        }
+        let expected_columns = self.width.div_ceil(self.tile_size);
+        let expected_rows = self.height.div_ceil(self.tile_size);
+        if self.columns != expected_columns || self.rows != expected_rows {
+            return Err(Error::Normalization(
+                "normalization tile grid does not match image dimensions".into(),
+            ));
+        }
+        if (self.columns > 1 || self.rows > 1) && self.tile_size < 16 {
+            return Err(Error::Normalization(
+                "local normalization tile size must be at least 16 pixels".into(),
+            ));
+        }
+        let coefficient_count = self
+            .columns
+            .checked_mul(self.rows)
+            .and_then(|cells| cells.checked_mul(self.channels))
+            .ok_or_else(|| Error::Normalization("normalization map dimensions overflow".into()))?;
+        if self.gains.len() != coefficient_count || self.offsets.len() != coefficient_count {
+            return Err(Error::Normalization(
+                "normalization coefficient count does not match the tile grid".into(),
+            ));
+        }
+        if !self
+            .gains
+            .iter()
+            .chain(&self.offsets)
+            .all(|coefficient| coefficient.is_finite())
+        {
+            return Err(Error::Normalization(
+                "normalization coefficients must be finite".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Width of the reference grid used to estimate this map.
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    /// Height of the reference grid used to estimate this map.
+    pub fn height(&self) -> usize {
+        self.height
+    }
+
+    /// Channel count expected by this map.
+    pub fn channels(&self) -> usize {
+        self.channels
+    }
+
+    /// Whether this map uses one constant affine transform per channel.
+    pub fn is_global(&self) -> bool {
+        self.columns == 1 && self.rows == 1
     }
 
     /// Mean gain across all channels and tiles.
@@ -328,6 +479,75 @@ mod tests {
         map.apply(&mut normalized).unwrap();
         assert!((map.mean_gain() - 0.5).abs() < 1.0e-5);
         assert!((normalized.data[100] - reference.data[100]).abs() < 1.0e-3);
+    }
+
+    #[test]
+    fn region_application_matches_the_same_part_of_the_full_image() {
+        let map = NormalizationMap {
+            schema_version: NORMALIZATION_MAP_SCHEMA_VERSION,
+            width: 32,
+            height: 32,
+            channels: 1,
+            tile_size: 16,
+            columns: 2,
+            rows: 2,
+            gains: vec![1.0, 2.0, 3.0, 4.0],
+            offsets: vec![0.0; 4],
+        };
+        let mut full = LinearImage::new(32, 32, 1, vec![1.0; 32 * 32]).unwrap();
+        map.apply(&mut full).unwrap();
+        let mut crop = LinearImage::new(2, 2, 1, vec![1.0; 4]).unwrap();
+        map.apply_region(&mut crop, 15, 15).unwrap();
+
+        assert_eq!(
+            crop.data,
+            vec![
+                full.data[15 * 32 + 15],
+                full.data[15 * 32 + 16],
+                full.data[16 * 32 + 15],
+                full.data[16 * 32 + 16],
+            ]
+        );
+        assert!(map.apply_global(&mut crop).is_err());
+    }
+
+    #[test]
+    fn normalization_maps_round_trip_for_cached_provenance() {
+        let map =
+            NormalizationMap::identity(&LinearImage::new(4, 3, 3, vec![0.0; 4 * 3 * 3]).unwrap());
+        let encoded = serde_json::to_vec(&map).unwrap();
+        let decoded = serde_json::from_slice::<NormalizationMap>(&encoded).unwrap();
+
+        assert_eq!(decoded, map);
+    }
+
+    #[test]
+    fn malformed_serialized_maps_are_rejected_before_pixel_work() {
+        let map = NormalizationMap::identity(&LinearImage::new(4, 3, 1, vec![0.0; 12]).unwrap());
+        let mut value = serde_json::to_value(map).unwrap();
+        value["gains"] = serde_json::json!([]);
+
+        assert!(serde_json::from_value::<NormalizationMap>(value).is_err());
+    }
+
+    #[test]
+    fn global_region_application_keeps_per_channel_coefficients() {
+        let map = NormalizationMap {
+            schema_version: NORMALIZATION_MAP_SCHEMA_VERSION,
+            width: 8,
+            height: 6,
+            channels: 3,
+            tile_size: 8,
+            columns: 1,
+            rows: 1,
+            gains: vec![1.0, 2.0, 3.0],
+            offsets: vec![10.0, 20.0, 30.0],
+        };
+        let mut crop = LinearImage::new(1, 1, 3, vec![2.0; 3]).unwrap();
+
+        map.apply_global(&mut crop).unwrap();
+
+        assert_eq!(crop.data, vec![12.0, 24.0, 36.0]);
     }
 
     #[test]

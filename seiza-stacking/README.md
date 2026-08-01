@@ -39,6 +39,20 @@ than stretching those inputs twice. The separate `ForaxxOptions` controls the
 default display preparation used only when dynamic Foraxx palettes receive
 linear inputs.
 
+Callers that inspect a small area can use `resample_region_to_reference` with
+a `ReferenceRegion`. It applies the same transform and interpolation as the
+full-frame path while allocating only the requested crop. The returned crop's
+origin is `(0, 0)`; its pixels still come from the region's absolute reference
+coordinates. `FitsFrame::into_prepared` exposes the same CFA-to-RGB preparation
+used by `LiveStacker` for callers that need to inspect those registered crops.
+Accepted-frame diagnostics retain the serializable `NormalizationMap` used by
+the stacker inside a versioned `RegisteredFrameMapping`. The mapping validates
+persisted coefficients and owns the order of registration and normalization.
+Its `extract_region` method reproduces a bounded part of the registered frame;
+`extract_region_after` also handles a second registration stage, such as a
+channel-to-color mapping. Global normalization keeps that path bounded, while
+local normalization preserves the exact two-stage processing order.
+
 `LiveStacker::push` is the embedding API intended for acquisition tools and
 PSF Guard. The CLI's `seiza stack` command feeds files through the same state
 machine. Frame-quality scoring remains the host application's responsibility;

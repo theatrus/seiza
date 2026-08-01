@@ -1,6 +1,6 @@
 [package]
 name = "seiza-imgproc"
-description = "Pure-Rust image processing primitives with OpenCV-compatible semantics: Gaussian/median blur, Canny, Otsu, binary morphology, Suzuki-Abe contours, domain transform filter, and à trous wavelets"
+description = "Pure-Rust image processing primitives with OpenCV-compatible semantics: blur, Canny, thresholding, morphology, components, contours, filtering, and wavelets"
 version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true

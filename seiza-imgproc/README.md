@@ -14,6 +14,9 @@ OpenCV dependency:
 - Otsu thresholding.
 - Binary erosion/dilation with rectangular, elliptical and cross
   structuring elements.
+- Four- or eight-connected binary components with pixel membership, bounds,
+  centroids, fill fraction and rotation-independent elongation. A bounded
+  largest-component path avoids retaining smaller regions.
 - External contour extraction (Suzuki-Abe border following, as in
   `findContours` with `RETR_EXTERNAL`) plus contour area, arc length,
   convex hull, moments and bounding rectangles computed the way OpenCV
@@ -22,8 +25,8 @@ OpenCV dependency:
   OpenCV's f32 prefix-sum box accumulation.
 - À trous B3-spline wavelet structure removal.
 
-Every operation was verified against OpenCV 4.13 — the Gaussian, Canny,
-Otsu, morphology, contour and domain-transform paths bit-for-bit — and the
-golden tests in `tests/golden.rs` lock that behavior with platform-stable
-fixtures. All functions operate on plain row-major slices; there is no
-image type to construct and no dependencies.
+The OpenCV-equivalent operations were verified against OpenCV 4.13. The
+Gaussian, Canny, Otsu, morphology, contour and domain-transform paths match
+bit-for-bit, and the golden tests in `tests/golden.rs` lock that behavior with
+platform-stable fixtures. All functions operate on plain row-major slices;
+there is no image type to construct and no required dependencies.
