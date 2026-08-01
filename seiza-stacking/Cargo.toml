@@ -17,6 +17,7 @@ serde.workspace = true
 serde_json.workspace = true
 seiza.workspace = true
 seiza-fits.workspace = true
+seiza-imgproc.workspace = true
 seiza-stats.workspace = true
 seiza-xisf.workspace = true
 seiza-stretch.workspace = true

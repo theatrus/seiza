@@ -11,6 +11,7 @@ mod master;
 mod normalization;
 mod paths;
 mod registration;
+mod residual_flat;
 mod stack;
 
 pub use calibration::{CalibrationMasters, MasterDark, MasterFlat};
@@ -34,6 +35,10 @@ pub use paths::{path_identity, paths_refer_to_same_file};
 pub use registration::{
     ReferenceRegion, Registrar, RegistrationOptions, RegistrationResult, SimilarityTransform,
     resample_region_to_reference, resample_to_reference,
+};
+pub use residual_flat::{
+    ResidualFlatBuild, ResidualFlatDiagnostics, ResidualFlatOptions, ResidualFlatPatch,
+    build_residual_flat_patch,
 };
 pub use stack::{
     DeltaSigmaOptions, FrameAcceptanceCriteria, FrameDiagnostics, FrameDisposition,

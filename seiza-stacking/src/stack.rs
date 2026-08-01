@@ -335,6 +335,26 @@ impl LiveStacker {
         )
     }
 
+    /// Start a stack from a frame that a caller has already calibrated and
+    /// prepared, while retaining its FITS headers for the output.
+    ///
+    /// This is the extension point for bounded corrections that must run
+    /// between ordinary calibration and registration. A raw CFA frame is
+    /// rejected so it cannot bypass preparation by mistake.
+    pub fn from_prepared_frame(reference: FitsFrame, options: StackOptions) -> Result<Self> {
+        if reference.bayer.is_some() {
+            return Err(Error::Stack(
+                "an already-prepared reference frame must not retain a Bayer layout".into(),
+            ));
+        }
+        Self::from_prepared(
+            reference.image,
+            reference.headers,
+            CalibrationMasters::default(),
+            options,
+        )
+    }
+
     fn from_prepared(
         reference: LinearImage,
         reference_headers: Vec<(String, HeaderValue)>,
@@ -963,6 +983,36 @@ mod tests {
         let round_trip: StackOptions = serde_json::from_str(&json).unwrap();
         assert_eq!(round_trip.registration.maximum_drift_pixels, 512.0);
         assert!(serde_json::from_str::<StackOptions>(r#"{"mystery": true}"#).is_err());
+    }
+
+    #[test]
+    fn prepared_frame_constructor_retains_headers_and_rejects_raw_cfa() {
+        let image = stacking_star_field(160, 128);
+        let frame = FitsFrame {
+            image: image.clone(),
+            headers: vec![("OBJECT".into(), HeaderValue::String("M 31".into()))],
+            exposure_seconds: Some(60.0),
+            bayer: None,
+            source: None,
+        };
+        let stacker = LiveStacker::from_prepared_frame(frame, StackOptions::default()).unwrap();
+        assert_eq!(
+            stacker.reference_headers(),
+            [("OBJECT".into(), HeaderValue::String("M 31".into()))]
+        );
+
+        let raw = FitsFrame {
+            image,
+            headers: Vec::new(),
+            exposure_seconds: None,
+            bayer: Some(BayerLayout {
+                pattern: seiza_fits::BayerPattern::Rggb,
+                x_offset: 0,
+                y_offset: 0,
+            }),
+            source: None,
+        };
+        assert!(LiveStacker::from_prepared_frame(raw, StackOptions::default()).is_err());
     }
 
     #[test]
