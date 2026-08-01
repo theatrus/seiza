@@ -37,8 +37,8 @@ pub use registration::{
     resample_region_to_reference, resample_to_reference,
 };
 pub use residual_flat::{
-    ResidualFlatBuild, ResidualFlatDiagnostics, ResidualFlatOptions, ResidualFlatPatch,
-    build_residual_flat_patch,
+    RESIDUAL_FLAT_ALGORITHM_VERSION, ResidualFlatBuild, ResidualFlatDiagnostics,
+    ResidualFlatOptions, ResidualFlatPatch, build_residual_flat_patch,
 };
 pub use stack::{
     DeltaSigmaOptions, FrameAcceptanceCriteria, FrameDiagnostics, FrameDisposition,

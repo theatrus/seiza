@@ -326,8 +326,9 @@ char *seiza_live_stacker_push_linear_json(SeizaLiveStacker *stacker,
                                           char **error_out);
 
 /*
- Opens, calibrates, registers, and offers one FITS or XISF frame to the stack. The
- returned disposition JSON is owned and must be freed with
+ Opens, calibrates, registers, and offers one FITS or XISF frame to the stack.
+ Stacks created from an array reject this path, including after a context
+ restore. The returned disposition JSON is owned and must be freed with
  [`seiza_string_free`]. Each source path may be offered only once.
 
  # Safety

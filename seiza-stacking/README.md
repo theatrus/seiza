@@ -57,18 +57,22 @@ local normalization preserves the exact two-stage processing order.
 from at least five calibrated light-frame crops taken at the same detector
 coordinates. It fits and removes each crop's local background plane, smooths
 pixel noise and moving stars, and keeps only repeated dark response. The patch
-must also contain one connected correction region, blends to a neutral edge,
-and caps its correction gain. This rejects scattered low-level noise even when
-many individual pixels cross the depth threshold. The function does not
-identify dust: the host must first show that the feature stays fixed on the
-detector while sky content moves, then ask the user before applying it.
+retains only its largest connected correction region, blends to a neutral
+edge, and caps its correction gain. This rejects scattered low-level noise
+even when many individual pixels cross the depth threshold. The function does
+not identify dust: the host must first show that the feature stays fixed on
+the detector while sky content moves, then ask the user before applying it.
+Diagnostics include `RESIDUAL_FLAT_ALGORITHM_VERSION` for cache keys and
+provenance.
 
 Residual patches run after ordinary bias, dark, and flat calibration but
 before registration. `LiveStacker::from_prepared_frame` lets a host retain the
 reference FITS headers after it performs that extra step. Later inputs use
 `push_linear` after the host applies the same calibration, patch, and CFA
-preparation order. A residual patch supplements a missing or stale flat; it is
-not a new master flat and does not change the saved source files.
+preparation order. The stacker rejects `push` and `push_fits` in this prepared
+input mode, and a saved context retains that rule. A residual patch supplements
+a missing or stale flat; it is not a new master flat and does not change the
+saved source files.
 
 `LiveStacker::push` is the embedding API intended for acquisition tools and
 PSF Guard. The CLI's `seiza stack` command feeds files through the same state

@@ -14,6 +14,13 @@ use serde::{Deserialize, Serialize};
 
 const MAX_PLANE_SAMPLES: usize = 30_000;
 
+/// Bump when equal inputs and options may yield different response pixels.
+pub const RESIDUAL_FLAT_ALGORITHM_VERSION: u32 = 1;
+
+const fn residual_flat_algorithm_version() -> u32 {
+    RESIDUAL_FLAT_ALGORITHM_VERSION
+}
+
 /// Controls robust response estimation and the maximum correction gain.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -110,6 +117,9 @@ impl ResidualFlatOptions {
 /// Measurements retained with a generated response patch.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ResidualFlatDiagnostics {
+    /// Numeric algorithm revision for cache keys and provenance.
+    #[serde(default = "residual_flat_algorithm_version")]
+    pub algorithm_version: u32,
     /// Number of source crops used.
     pub sample_count: usize,
     /// Pixel-channel samples with enough repeated evidence to correct.
@@ -238,8 +248,6 @@ pub fn build_residual_flat_patch(
     let threshold = 1.0 - options.minimum_depth;
     let response_floor = 1.0 / options.maximum_gain;
     let mut response = vec![1.0_f32; reference.sample_count()];
-    let mut corrected_samples = 0;
-    let mut minimum_response = 1.0_f32;
     let mut values = Vec::with_capacity(normalized.len());
 
     for sample_index in 0..response.len() {
@@ -267,34 +275,57 @@ pub fn build_residual_flat_patch(
             let value = 1.0 - feather * (1.0 - bounded);
             if value < 1.0 - f32::EPSILON {
                 response[sample_index] = value;
-                minimum_response = minimum_response.min(value);
-                corrected_samples += 1;
             }
         }
-    }
-
-    if corrected_samples < options.minimum_corrected_samples {
-        return Err(residual_error(format!(
-            "only {corrected_samples} pixel-channel samples had repeated attenuation; need at least {}",
-            options.minimum_corrected_samples
-        )));
     }
 
     let corrected_mask = response
         .chunks_exact(reference.channels)
         .map(|pixel| u8::from(pixel.iter().any(|value| *value < 1.0 - f32::EPSILON)))
         .collect::<Vec<_>>();
-    let largest_connected_pixels = largest_connected_component(
+    let largest_component = largest_connected_component(
         &corrected_mask,
         reference.width,
         reference.height,
         Connectivity::Eight,
-    )
-    .map_or(0, |component| component.pixels.len());
+    );
+    let largest_connected_pixels = largest_component
+        .as_ref()
+        .map_or(0, |component| component.pixels.len());
     if largest_connected_pixels < options.minimum_connected_pixels {
         return Err(residual_error(format!(
             "the largest repeated attenuation region has {largest_connected_pixels} connected pixels; need at least {}",
             options.minimum_connected_pixels
+        )));
+    }
+
+    let mut retained_pixels = vec![false; reference.pixel_count()];
+    for pixel in largest_component
+        .expect("the accepted component is present")
+        .pixels
+    {
+        retained_pixels[pixel] = true;
+    }
+    let mut corrected_samples = 0;
+    let mut minimum_response = 1.0_f32;
+    for (pixel, retained) in retained_pixels.into_iter().enumerate() {
+        let start = pixel * reference.channels;
+        let values = &mut response[start..start + reference.channels];
+        if !retained {
+            values.fill(1.0);
+            continue;
+        }
+        for value in values {
+            if *value < 1.0 - f32::EPSILON {
+                corrected_samples += 1;
+                minimum_response = minimum_response.min(*value);
+            }
+        }
+    }
+    if corrected_samples < options.minimum_corrected_samples {
+        return Err(residual_error(format!(
+            "only {corrected_samples} pixel-channel samples remained in the coherent attenuation region; need at least {}",
+            options.minimum_corrected_samples
         )));
     }
 
@@ -307,6 +338,7 @@ pub fn build_residual_flat_patch(
     let patch = ResidualFlatPatch::from_response(response)?;
     Ok(ResidualFlatBuild {
         diagnostics: ResidualFlatDiagnostics {
+            algorithm_version: RESIDUAL_FLAT_ALGORITHM_VERSION,
             sample_count: samples.len(),
             corrected_samples,
             total_samples: reference.sample_count(),
@@ -601,6 +633,10 @@ mod tests {
             ..ResidualFlatOptions::default()
         };
         let built = build_residual_flat_patch(&samples, &options).unwrap();
+        assert_eq!(
+            built.diagnostics.algorithm_version,
+            RESIDUAL_FLAT_ALGORITHM_VERSION
+        );
         assert_eq!(built.diagnostics.sample_count, 7);
         assert!(built.diagnostics.corrected_samples > 40);
         assert!(built.diagnostics.largest_connected_pixels > 20);
@@ -655,6 +691,52 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("connected pixels"), "{error}");
+    }
+
+    #[test]
+    fn removes_disconnected_corrections_from_an_accepted_patch() {
+        let sample = || {
+            let mut data = vec![1_000.0_f32; 64 * 64];
+            for y in 24..36 {
+                for x in 24..36 {
+                    data[y * 64 + x] = 800.0;
+                }
+            }
+            data[10 * 64 + 10] = 800.0;
+            LinearImage::new(64, 64, 1, data).unwrap()
+        };
+        let samples = (0..5).map(|_| sample()).collect::<Vec<_>>();
+        let options = ResidualFlatOptions {
+            smoothing_sigma: 0.0,
+            edge_feather_fraction: 0.0,
+            minimum_connected_pixels: 64,
+            ..ResidualFlatOptions::default()
+        };
+
+        let built = build_residual_flat_patch(&samples, &options).unwrap();
+
+        assert_eq!(built.diagnostics.largest_connected_pixels, 12 * 12);
+        assert_eq!(built.diagnostics.corrected_samples, 12 * 12);
+        assert_eq!(built.patch.response().data[10 * 64 + 10], 1.0);
+        assert!(built.patch.response().data[30 * 64 + 30] < 1.0);
+    }
+
+    #[test]
+    fn legacy_diagnostics_default_to_the_initial_algorithm_version() {
+        let diagnostics: ResidualFlatDiagnostics = serde_json::from_value(serde_json::json!({
+            "sample_count": 5,
+            "corrected_samples": 64,
+            "total_samples": 1024,
+            "largest_connected_pixels": 64,
+            "minimum_response": 0.95,
+            "maximum_applied_gain": 1.0526316
+        }))
+        .unwrap();
+
+        assert_eq!(
+            diagnostics.algorithm_version,
+            RESIDUAL_FLAT_ALGORITHM_VERSION
+        );
     }
 
     #[test]

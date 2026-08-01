@@ -293,6 +293,14 @@ pub struct StackView<'a> {
     pub rejected_frames: u32,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FrameInputMode {
+    #[default]
+    CalibrateAndPrepare,
+    PreparedOnly,
+}
+
 /// Incremental, bounded-memory image stack. Frames are registered to the
 /// immutable first accepted frame and integrated immediately.
 pub struct LiveStacker {
@@ -305,6 +313,7 @@ pub struct LiveStacker {
     accepted_frames: u32,
     rejected_frames: u32,
     input_paths: Vec<PathBuf>,
+    input_mode: FrameInputMode,
 }
 
 impl LiveStacker {
@@ -321,17 +330,25 @@ impl LiveStacker {
             reference.bayer,
         )?;
         let reference = reference.into_prepared()?;
-        Self::from_prepared(reference.image, reference.headers, calibration, options)
+        Self::from_prepared(
+            reference.image,
+            reference.headers,
+            calibration,
+            options,
+            FrameInputMode::CalibrateAndPrepare,
+        )
     }
 
     /// Start a stack from an already-prepared linear reference, with no
-    /// calibration and no header metadata.
+    /// calibration and no header metadata. Every later frame must use
+    /// [`Self::push_linear`].
     pub fn from_linear(reference: LinearImage, options: StackOptions) -> Result<Self> {
         Self::from_prepared(
             reference,
             Vec::new(),
             CalibrationMasters::default(),
             options,
+            FrameInputMode::PreparedOnly,
         )
     }
 
@@ -340,7 +357,8 @@ impl LiveStacker {
     ///
     /// This is the extension point for bounded corrections that must run
     /// between ordinary calibration and registration. A raw CFA frame is
-    /// rejected so it cannot bypass preparation by mistake.
+    /// rejected so it cannot bypass preparation by mistake. Every later frame
+    /// must use [`Self::push_linear`].
     pub fn from_prepared_frame(reference: FitsFrame, options: StackOptions) -> Result<Self> {
         if reference.bayer.is_some() {
             return Err(Error::Stack(
@@ -352,6 +370,7 @@ impl LiveStacker {
             reference.headers,
             CalibrationMasters::default(),
             options,
+            FrameInputMode::PreparedOnly,
         )
     }
 
@@ -360,6 +379,7 @@ impl LiveStacker {
         reference_headers: Vec<(String, HeaderValue)>,
         calibration: CalibrationMasters,
         options: StackOptions,
+        input_mode: FrameInputMode,
     ) -> Result<Self> {
         options.validate()?;
         let registrar = Registrar::new(&reference, options.registration.clone())?;
@@ -375,6 +395,7 @@ impl LiveStacker {
             accepted_frames: 1,
             rejected_frames: 0,
             input_paths: Vec::new(),
+            input_mode,
         })
     }
 
@@ -442,6 +463,7 @@ impl LiveStacker {
             accepted_frames: restored.accepted_frames,
             rejected_frames: restored.rejected_frames,
             input_paths: restored.input_paths,
+            input_mode: restored.input_mode,
         })
     }
 
@@ -473,13 +495,16 @@ impl LiveStacker {
                 accepted_frames: self.accepted_frames,
                 rejected_frames: self.rejected_frames,
                 input_paths: &self.input_paths,
+                input_mode: self.input_mode,
             },
         )
     }
 
     /// Calibrate, prepare, and try to integrate a FITS frame, reporting whether
-    /// it was admitted or turned away.
+    /// it was admitted or turned away. Stacks created from prepared pixels
+    /// reject this path so later inputs cannot skip the caller's preparation.
     pub fn push(&mut self, mut frame: FitsFrame) -> Result<FrameDisposition> {
+        self.require_fits_input_mode()?;
         if let Err(error) =
             self.calibration
                 .apply(&mut frame.image, frame.exposure_seconds, frame.bayer)
@@ -501,7 +526,9 @@ impl LiveStacker {
 
     /// Open and offer one FITS or XISF path, rejecting duplicate source or
     /// calibration paths and retaining the path in resumable context state.
+    /// Stacks created from prepared pixels reject this path.
     pub fn push_fits(&mut self, path: impl AsRef<Path>) -> Result<FrameDisposition> {
+        self.require_fits_input_mode()?;
         let path = path.as_ref();
         if self
             .input_paths
@@ -728,6 +755,16 @@ impl LiveStacker {
     /// Source and calibration paths already used by this stack.
     pub fn input_paths(&self) -> &[PathBuf] {
         &self.input_paths
+    }
+
+    fn require_fits_input_mode(&self) -> Result<()> {
+        if self.input_mode == FrameInputMode::PreparedOnly {
+            return Err(Error::Stack(
+                "this stack was started from prepared pixels; use push_linear for every later frame"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
 
     fn reject(&mut self, reason: FrameRejectionReason) -> FrameDisposition {
@@ -995,11 +1032,32 @@ mod tests {
             bayer: None,
             source: None,
         };
-        let stacker = LiveStacker::from_prepared_frame(frame, StackOptions::default()).unwrap();
+        let mut stacker = LiveStacker::from_prepared_frame(frame, StackOptions::default()).unwrap();
         assert_eq!(
             stacker.reference_headers(),
             [("OBJECT".into(), HeaderValue::String("M 31".into()))]
         );
+
+        let standard_push = FitsFrame {
+            image: image.clone(),
+            headers: Vec::new(),
+            exposure_seconds: None,
+            bayer: None,
+            source: None,
+        };
+        let error = stacker.push(standard_push).unwrap_err().to_string();
+        assert!(error.contains("use push_linear"), "{error}");
+        let error = stacker
+            .push_fits("does-not-need-to-exist.fits")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("use push_linear"), "{error}");
+        assert_eq!(stacker.view().accepted_frames, 1);
+        assert_eq!(stacker.view().rejected_frames, 0);
+        assert!(matches!(
+            stacker.push_linear(image.clone()).unwrap(),
+            FrameDisposition::Accepted(_)
+        ));
 
         let raw = FitsFrame {
             image,
@@ -1053,6 +1111,15 @@ mod tests {
         checkpointed.save_context(&path).unwrap();
         let mut resumed = LiveStacker::open_context(&path).unwrap();
         assert_eq!(resumed.input_paths(), [PathBuf::from("light-001.fits")]);
+        let standard_push = FitsFrame {
+            image: frames[0].clone(),
+            headers: Vec::new(),
+            exposure_seconds: None,
+            bayer: None,
+            source: None,
+        };
+        let error = resumed.push(standard_push).unwrap_err().to_string();
+        assert!(error.contains("use push_linear"), "{error}");
         for frame in frames[3..].iter().cloned() {
             resumed.push_linear(frame).unwrap();
         }
