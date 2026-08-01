@@ -6,6 +6,7 @@ mod color;
 mod context;
 mod fits;
 mod image;
+mod mapping;
 mod master;
 mod normalization;
 mod paths;
@@ -23,6 +24,7 @@ pub use fits::{
     write_master_fits_f32, write_processed_image_fits_f32,
 };
 pub use image::{BayerLayout, LinearImage};
+pub use mapping::RegisteredFrameMapping;
 pub use master::{
     MasterBuildOptions, MasterFrame, MasterFrameKind, MasterInputStatistics,
     MasterRejectionOptions, build_master_from_fits,

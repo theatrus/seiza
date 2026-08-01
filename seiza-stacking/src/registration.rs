@@ -42,6 +42,21 @@ impl SimilarityTransform {
         translation_y: 0.0,
     };
 
+    /// Check that this transform can be inverted for resampling.
+    pub fn validate(self) -> Result<()> {
+        if !self.scale.is_finite()
+            || self.scale <= 0.0
+            || !self.rotation_radians.is_finite()
+            || !self.translation_x.is_finite()
+            || !self.translation_y.is_finite()
+        {
+            return Err(Error::Registration(
+                "resampling transform must be finite with a positive scale".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Map a source coordinate forward to reference space.
     pub fn apply(self, x: f64, y: f64) -> (f64, f64) {
         let cosine = self.rotation_radians.cos() * self.scale;
@@ -407,16 +422,7 @@ pub fn resample_region_to_reference(
             "resampling region exceeds the reference grid".into(),
         ));
     }
-    if !transform.scale.is_finite()
-        || transform.scale <= 0.0
-        || !transform.rotation_radians.is_finite()
-        || !transform.translation_x.is_finite()
-        || !transform.translation_y.is_finite()
-    {
-        return Err(Error::Registration(
-            "resampling transform must be finite with a positive scale".into(),
-        ));
-    }
+    transform.validate()?;
     let channels = source.channels;
     let sample_count = region
         .width

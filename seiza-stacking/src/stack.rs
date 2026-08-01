@@ -1,7 +1,7 @@
 use crate::{
     CalibrationMasters, Error, FitsFrame, LinearImage, NormalizationMap, NormalizationMode,
-    Registrar, RegistrationOptions, Result, SimilarityTransform, context, path_identity,
-    paths_refer_to_same_file, resample_to_reference,
+    RegisteredFrameMapping, Registrar, RegistrationOptions, Result, SimilarityTransform, context,
+    path_identity, paths_refer_to_same_file, resample_to_reference,
 };
 use rayon::prelude::*;
 use seiza_fits::HeaderValue;
@@ -145,6 +145,7 @@ impl Default for FrameAcceptanceCriteria {
 
 /// Measurements recorded for a frame that passed every admission gate.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct FrameDiagnostics {
     /// Transform used to align the frame.
     pub transform: SimilarityTransform,
@@ -158,8 +159,8 @@ pub struct FrameDiagnostics {
     pub normalization_mean_gain: f32,
     /// Mean normalization offset applied.
     pub normalization_mean_offset: f32,
-    /// Full normalization map applied on the registered reference grid.
-    pub normalization: NormalizationMap,
+    /// Versioned transform and normalization provenance for this frame.
+    pub mapping: Box<crate::RegisteredFrameMapping>,
     /// Fraction of the frame that overlapped the reference.
     pub overlap_fraction: f32,
     /// Fraction of samples that survived rejection.
@@ -591,6 +592,14 @@ impl LiveStacker {
             };
             return Ok(self.reject(FrameRejectionReason::Normalization(message)));
         }
+        let normalization_mean_gain = normalization.mean_gain();
+        let normalization_mean_offset = normalization.mean_offset();
+        let mapping = crate::RegisteredFrameMapping::new(
+            self.reference.width,
+            self.reference.height,
+            registration.transform,
+            normalization,
+        )?;
         let (would_accept, _) = self
             .accumulator
             .classify(&registered.data, self.options.rejection);
@@ -612,9 +621,9 @@ impl LiveStacker {
             matched_stars: registration.matched_stars,
             registration_rms_pixels: registration.rms_error_pixels,
             registration_drift_pixels: registration.drift_pixels,
-            normalization_mean_gain: normalization.mean_gain(),
-            normalization_mean_offset: normalization.mean_offset(),
-            normalization,
+            normalization_mean_gain,
+            normalization_mean_offset,
+            mapping: Box::new(mapping),
             overlap_fraction,
             integrated_fraction,
             accepted_samples,
@@ -658,6 +667,13 @@ impl LiveStacker {
             accepted_frames: self.accepted_frames,
             rejected_frames: self.rejected_frames,
         }
+    }
+
+    /// Return the identity processing mapping for the prepared reference
+    /// frame. Callers can persist this beside mappings returned for later
+    /// frames and use one extraction path for the whole stack.
+    pub fn reference_mapping(&self) -> RegisteredFrameMapping {
+        RegisteredFrameMapping::identity(&self.reference)
     }
 
     /// Consume the live state and move its full-frame buffers into a final

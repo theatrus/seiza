@@ -46,9 +46,12 @@ origin is `(0, 0)`; its pixels still come from the region's absolute reference
 coordinates. `FitsFrame::into_prepared` exposes the same CFA-to-RGB preparation
 used by `LiveStacker` for callers that need to inspect those registered crops.
 Accepted-frame diagnostics retain the serializable `NormalizationMap` used by
-the stacker. `NormalizationMap::apply_region` applies it at the crop's absolute
-reference-grid origin, including per-channel and tiled coefficients.
-`apply_global` can apply a one-tile map after another geometric resampling.
+the stacker inside a versioned `RegisteredFrameMapping`. The mapping validates
+persisted coefficients and owns the order of registration and normalization.
+Its `extract_region` method reproduces a bounded part of the registered frame;
+`extract_region_after` also handles a second registration stage, such as a
+channel-to-color mapping. Global normalization keeps that path bounded, while
+local normalization preserves the exact two-stage processing order.
 
 `LiveStacker::push` is the embedding API intended for acquisition tools and
 PSF Guard. The CLI's `seiza stack` command feeds files through the same state
