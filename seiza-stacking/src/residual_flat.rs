@@ -4,7 +4,11 @@
 //! that the feature stays fixed on the detector while sky content moves.
 
 use crate::{Error, LinearImage, Result};
-use seiza_imgproc::{BorderMode, blur::gaussian_blur_f32};
+use seiza_imgproc::{
+    BorderMode,
+    blur::gaussian_blur_f32,
+    components::{Connectivity, largest_connected_component},
+};
 use seiza_stats::{median_in_place, robust_sigma_f64};
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +34,8 @@ pub struct ResidualFlatOptions {
     pub edge_feather_fraction: f32,
     /// Fewest corrected pixel-channel samples accepted as a useful patch.
     pub minimum_corrected_samples: usize,
+    /// Fewest adjacent corrected detector pixels accepted as a useful patch.
+    pub minimum_connected_pixels: usize,
 }
 
 impl Default for ResidualFlatOptions {
@@ -43,6 +49,7 @@ impl Default for ResidualFlatOptions {
             smoothing_sigma: 2.0,
             edge_feather_fraction: 0.12,
             minimum_corrected_samples: 16,
+            minimum_connected_pixels: 64,
         }
     }
 }
@@ -91,6 +98,11 @@ impl ResidualFlatOptions {
                 "minimum_corrected_samples must be greater than zero",
             ));
         }
+        if self.minimum_connected_pixels == 0 {
+            return Err(residual_error(
+                "minimum_connected_pixels must be greater than zero",
+            ));
+        }
         Ok(())
     }
 }
@@ -104,6 +116,8 @@ pub struct ResidualFlatDiagnostics {
     pub corrected_samples: usize,
     /// Total pixel-channel samples in the patch.
     pub total_samples: usize,
+    /// Corrected detector pixels in the largest connected region.
+    pub largest_connected_pixels: usize,
     /// Lowest response retained before division.
     pub minimum_response: f32,
     /// Largest gain the generated patch will apply.
@@ -266,6 +280,24 @@ pub fn build_residual_flat_patch(
         )));
     }
 
+    let corrected_mask = response
+        .chunks_exact(reference.channels)
+        .map(|pixel| u8::from(pixel.iter().any(|value| *value < 1.0 - f32::EPSILON)))
+        .collect::<Vec<_>>();
+    let largest_connected_pixels = largest_connected_component(
+        &corrected_mask,
+        reference.width,
+        reference.height,
+        Connectivity::Eight,
+    )
+    .map_or(0, |component| component.pixels.len());
+    if largest_connected_pixels < options.minimum_connected_pixels {
+        return Err(residual_error(format!(
+            "the largest repeated attenuation region has {largest_connected_pixels} connected pixels; need at least {}",
+            options.minimum_connected_pixels
+        )));
+    }
+
     let response = LinearImage::new(
         reference.width,
         reference.height,
@@ -278,6 +310,7 @@ pub fn build_residual_flat_patch(
             sample_count: samples.len(),
             corrected_samples,
             total_samples: reference.sample_count(),
+            largest_connected_pixels,
             minimum_response,
             maximum_applied_gain: 1.0 / minimum_response,
         },
@@ -570,6 +603,7 @@ mod tests {
         let built = build_residual_flat_patch(&samples, &options).unwrap();
         assert_eq!(built.diagnostics.sample_count, 7);
         assert!(built.diagnostics.corrected_samples > 40);
+        assert!(built.diagnostics.largest_connected_pixels > 20);
         assert!(built.diagnostics.minimum_response >= 1.0 / options.maximum_gain);
         assert!(built.diagnostics.maximum_applied_gain <= options.maximum_gain + 1.0e-5);
 
@@ -588,6 +622,39 @@ mod tests {
             .collect::<Vec<_>>();
         let result = build_residual_flat_patch(&samples, &ResidualFlatOptions::default());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_scattered_repeated_pixels_without_a_coherent_region() {
+        let sample = || {
+            let data = (0..32)
+                .flat_map(|y| {
+                    (0..32).map(move |x| {
+                        if (8..=24).contains(&x)
+                            && (8..=24).contains(&y)
+                            && x % 4 == 0
+                            && y % 4 == 0
+                        {
+                            800.0
+                        } else {
+                            1_000.0
+                        }
+                    })
+                })
+                .collect();
+            LinearImage::new(32, 32, 1, data).unwrap()
+        };
+        let samples = (0..7).map(|_| sample()).collect::<Vec<_>>();
+        let options = ResidualFlatOptions {
+            smoothing_sigma: 0.0,
+            edge_feather_fraction: 0.0,
+            minimum_connected_pixels: 2,
+            ..ResidualFlatOptions::default()
+        };
+        let error = build_residual_flat_patch(&samples, &options)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("connected pixels"), "{error}");
     }
 
     #[test]

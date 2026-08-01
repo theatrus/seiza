@@ -57,7 +57,9 @@ local normalization preserves the exact two-stage processing order.
 from at least five calibrated light-frame crops taken at the same detector
 coordinates. It fits and removes each crop's local background plane, smooths
 pixel noise and moving stars, and keeps only repeated dark response. The patch
-blends to a neutral edge and caps its correction gain. The function does not
+must also contain one connected correction region, blends to a neutral edge,
+and caps its correction gain. This rejects scattered low-level noise even when
+many individual pixels cross the depth threshold. The function does not
 identify dust: the host must first show that the feature stays fixed on the
 detector while sky content moves, then ask the user before applying it.
 
