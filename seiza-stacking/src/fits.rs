@@ -93,7 +93,9 @@ impl FitsFrame {
         Ok(())
     }
 
-    pub(crate) fn into_prepared(mut self) -> Result<Self> {
+    /// Convert raw CFA sampling to the prepared RGB grid used by registration
+    /// and stacking. Planar RGB and mono frames pass through unchanged.
+    pub fn into_prepared(mut self) -> Result<Self> {
         if let Some(layout) = self.bayer.take() {
             self.image = self.image.debayer(layout)?;
         }

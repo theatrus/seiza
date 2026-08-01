@@ -30,7 +30,8 @@ pub use master::{
 pub use normalization::{NormalizationMap, NormalizationMode};
 pub use paths::{path_identity, paths_refer_to_same_file};
 pub use registration::{
-    Registrar, RegistrationOptions, RegistrationResult, SimilarityTransform, resample_to_reference,
+    ReferenceRegion, Registrar, RegistrationOptions, RegistrationResult, SimilarityTransform,
+    resample_region_to_reference, resample_to_reference,
 };
 pub use stack::{
     DeltaSigmaOptions, FrameAcceptanceCriteria, FrameDiagnostics, FrameDisposition,

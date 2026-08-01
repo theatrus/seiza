@@ -8,7 +8,7 @@ type ScoredTransform = (usize, f64, SimilarityTransform, Vec<(usize, usize)>);
 
 /// A source-to-reference mapping combining uniform scale, rotation, and
 /// translation.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SimilarityTransform {
     /// Uniform scale factor.
     pub scale: f64,
@@ -18,6 +18,19 @@ pub struct SimilarityTransform {
     pub translation_x: f64,
     /// Vertical translation in pixels.
     pub translation_y: f64,
+}
+
+/// A rectangular region on the reference image's pixel grid.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ReferenceRegion {
+    /// Horizontal origin in reference pixels.
+    pub x: usize,
+    /// Vertical origin in reference pixels.
+    pub y: usize,
+    /// Region width in pixels.
+    pub width: usize,
+    /// Region height in pixels.
+    pub height: usize,
 }
 
 impl SimilarityTransform {
@@ -42,6 +55,23 @@ impl SimilarityTransform {
     /// Map a reference coordinate back to source space.
     pub fn inverse_apply(self, x: f64, y: f64) -> (f64, f64) {
         self.inverse_map()(x, y)
+    }
+
+    /// Compose this source-to-intermediate mapping with an
+    /// intermediate-to-reference mapping. The returned transform applies
+    /// `self` first and `next` second.
+    pub fn then(self, next: Self) -> Self {
+        let next_cosine = next.rotation_radians.cos() * next.scale;
+        let next_sine = next.rotation_radians.sin() * next.scale;
+        Self {
+            scale: self.scale * next.scale,
+            rotation_radians: self.rotation_radians + next.rotation_radians,
+            translation_x: next_cosine * self.translation_x - next_sine * self.translation_y
+                + next.translation_x,
+            translation_y: next_sine * self.translation_x
+                + next_cosine * self.translation_y
+                + next.translation_y,
+        }
     }
 
     /// The inverse mapping with its trigonometry evaluated once, for
@@ -326,11 +356,55 @@ pub fn resample_to_reference(
     height: usize,
     transform: SimilarityTransform,
 ) -> Result<LinearImage> {
+    resample_region_to_reference(
+        source,
+        width,
+        height,
+        ReferenceRegion {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        },
+        transform,
+    )
+}
+
+/// Resample one bounded region of the reference grid without allocating the
+/// full registered image. Output pixel `(0, 0)` corresponds to
+/// `(region.x, region.y)` in reference coordinates. Samples outside the source
+/// grid, or whose interpolation neighborhood is not finite, are written as
+/// `NaN`.
+pub fn resample_region_to_reference(
+    source: &LinearImage,
+    reference_width: usize,
+    reference_height: usize,
+    region: ReferenceRegion,
+    transform: SimilarityTransform,
+) -> Result<LinearImage> {
     const COORDINATE_EPSILON: f64 = 1.0e-9;
 
-    if width == 0 || height == 0 {
+    if reference_width == 0 || reference_height == 0 {
         return Err(Error::Registration(
-            "resampling output dimensions must be non-zero".into(),
+            "resampling reference dimensions must be non-zero".into(),
+        ));
+    }
+    if region.width == 0 || region.height == 0 {
+        return Err(Error::Registration(
+            "resampling region dimensions must be non-zero".into(),
+        ));
+    }
+    let region_right = region
+        .x
+        .checked_add(region.width)
+        .ok_or_else(|| Error::Registration("resampling region dimensions overflow".into()))?;
+    let region_bottom = region
+        .y
+        .checked_add(region.height)
+        .ok_or_else(|| Error::Registration("resampling region dimensions overflow".into()))?;
+    if region_right > reference_width || region_bottom > reference_height {
+        return Err(Error::Registration(
+            "resampling region exceeds the reference grid".into(),
         ));
     }
     if !transform.scale.is_finite()
@@ -344,11 +418,13 @@ pub fn resample_to_reference(
         ));
     }
     let channels = source.channels;
-    let sample_count = width
-        .checked_mul(height)
+    let sample_count = region
+        .width
+        .checked_mul(region.height)
         .and_then(|pixels| pixels.checked_mul(channels))
         .ok_or_else(|| Error::Registration("resampling output dimensions overflow".into()))?;
-    let row_samples = width
+    let row_samples = region
+        .width
         .checked_mul(channels)
         .ok_or_else(|| Error::Registration("resampling row dimensions overflow".into()))?;
     let mut data = vec![f32::NAN; sample_count];
@@ -359,7 +435,9 @@ pub fn resample_to_reference(
         .enumerate()
         .for_each(|(y, output_row)| {
             for (x, output) in output_row.chunks_exact_mut(channels).enumerate() {
-                let (source_x, source_y) = inverse(x as f64, y as f64);
+                let reference_x = region.x + x;
+                let reference_y = region.y + y;
+                let (source_x, source_y) = inverse(reference_x as f64, reference_y as f64);
                 if source_x < -COORDINATE_EPSILON
                     || source_y < -COORDINATE_EPSILON
                     || source_x > maximum_source_x + COORDINATE_EPSILON
@@ -396,7 +474,7 @@ pub fn resample_to_reference(
                 }
             }
         });
-    LinearImage::new(width, height, channels, data)
+    LinearImage::new(region.width, region.height, channels, data)
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -748,6 +826,28 @@ mod tests {
     }
 
     #[test]
+    fn similarity_transform_composition_matches_sequential_application() {
+        let first = SimilarityTransform {
+            scale: 0.98,
+            rotation_radians: 0.13,
+            translation_x: 12.0,
+            translation_y: -4.0,
+        };
+        let second = SimilarityTransform {
+            scale: 1.02,
+            rotation_radians: -0.07,
+            translation_x: -3.0,
+            translation_y: 9.0,
+        };
+        let intermediate = first.apply(42.0, 17.0);
+        let sequential = second.apply(intermediate.0, intermediate.1);
+        let composed = first.then(second).apply(42.0, 17.0);
+
+        assert!((sequential.0 - composed.0).abs() < 1.0e-10);
+        assert!((sequential.1 - composed.1).abs() < 1.0e-10);
+    }
+
+    #[test]
     fn resampling_undoes_a_meridian_flip_about_the_image_center() {
         let source =
             LinearImage::new(4, 3, 1, (0..12).rev().map(|value| value as f32).collect()).unwrap();
@@ -806,6 +906,85 @@ mod tests {
                 .filter(|sample| sample.is_finite())
                 .count(),
             source.sample_count()
+        );
+    }
+
+    #[test]
+    fn region_resampling_matches_the_same_full_reference_crop() {
+        let source =
+            LinearImage::new(6, 5, 3, (0..90).map(|value| value as f32).collect()).unwrap();
+        let transform = SimilarityTransform {
+            scale: 1.0,
+            rotation_radians: 0.0,
+            translation_x: 1.0,
+            translation_y: -1.0,
+        };
+        let full = resample_to_reference(&source, 8, 7, transform).unwrap();
+        let region = ReferenceRegion {
+            x: 2,
+            y: 1,
+            width: 4,
+            height: 3,
+        };
+        let cropped = resample_region_to_reference(&source, 8, 7, region, transform).unwrap();
+
+        for y in 0..region.height {
+            for x in 0..region.width {
+                for channel in 0..source.channels {
+                    let full_index =
+                        ((region.y + y) * full.width + region.x + x) * source.channels + channel;
+                    let crop_index = (y * region.width + x) * source.channels + channel;
+                    assert_eq!(cropped.data[crop_index], full.data[full_index]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn region_resampling_uses_absolute_reference_coordinates() {
+        let source =
+            LinearImage::new(5, 4, 1, (0..20).map(|value| value as f32).collect()).unwrap();
+        let region = ReferenceRegion {
+            x: 2,
+            y: 1,
+            width: 2,
+            height: 2,
+        };
+        let cropped = resample_region_to_reference(
+            &source,
+            source.width,
+            source.height,
+            region,
+            SimilarityTransform::IDENTITY,
+        )
+        .unwrap();
+
+        assert_eq!(cropped.data, vec![7.0, 8.0, 12.0, 13.0]);
+    }
+
+    #[test]
+    fn region_resampling_rejects_empty_or_out_of_bounds_regions() {
+        let source = LinearImage::new(4, 4, 1, vec![0.0; 16]).unwrap();
+        let empty = ReferenceRegion {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 1,
+        };
+        assert!(
+            resample_region_to_reference(&source, 4, 4, empty, SimilarityTransform::IDENTITY)
+                .is_err()
+        );
+
+        let outside = ReferenceRegion {
+            x: 3,
+            y: 3,
+            width: 2,
+            height: 2,
+        };
+        assert!(
+            resample_region_to_reference(&source, 4, 4, outside, SimilarityTransform::IDENTITY)
+                .is_err()
         );
     }
 

@@ -158,6 +158,8 @@ pub struct FrameDiagnostics {
     pub normalization_mean_gain: f32,
     /// Mean normalization offset applied.
     pub normalization_mean_offset: f32,
+    /// Full normalization map applied on the registered reference grid.
+    pub normalization: NormalizationMap,
     /// Fraction of the frame that overlapped the reference.
     pub overlap_fraction: f32,
     /// Fraction of samples that survived rejection.
@@ -612,6 +614,7 @@ impl LiveStacker {
             registration_drift_pixels: registration.drift_pixels,
             normalization_mean_gain: normalization.mean_gain(),
             normalization_mean_offset: normalization.mean_offset(),
+            normalization,
             overlap_fraction,
             integrated_fraction,
             accepted_samples,

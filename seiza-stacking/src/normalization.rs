@@ -21,7 +21,7 @@ pub enum NormalizationMode {
 
 /// Per-channel gain and offset that map a source frame onto the reference
 /// background, either globally or over a tile grid.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct NormalizationMap {
     width: usize,
     height: usize,
@@ -128,19 +128,34 @@ impl NormalizationMap {
                 "normalization map and image dimensions do not match".into(),
             ));
         }
+        self.apply_region(image, 0, 0)
+    }
+
+    /// Apply this map to a crop whose origin is expressed in the full
+    /// registered image grid used to estimate the map.
+    pub fn apply_region(
+        &self,
+        image: &mut LinearImage,
+        origin_x: usize,
+        origin_y: usize,
+    ) -> Result<()> {
+        let right = origin_x
+            .checked_add(image.width)
+            .ok_or_else(|| Error::Normalization("normalization region overflows".into()))?;
+        let bottom = origin_y
+            .checked_add(image.height)
+            .ok_or_else(|| Error::Normalization("normalization region overflows".into()))?;
+        if image.channels != self.channels || right > self.width || bottom > self.height {
+            return Err(Error::Normalization(
+                "normalization region exceeds the fitted image grid".into(),
+            ));
+        }
         if self.columns == 1 && self.rows == 1 {
-            image.data.par_chunks_mut(image.channels).for_each(|pixel| {
-                for (channel, value) in pixel.iter_mut().enumerate() {
-                    if value.is_finite() {
-                        *value = value.mul_add(self.gains[channel], self.offsets[channel]);
-                    }
-                }
-            });
-            return Ok(());
+            return self.apply_global(image);
         }
 
         let x_weights = (0..image.width)
-            .map(|x| axis_weights(x, self.columns, self.tile_size))
+            .map(|x| axis_weights(origin_x + x, self.columns, self.tile_size))
             .collect::<Vec<_>>();
         let row_samples = image.width * image.channels;
         image
@@ -148,7 +163,7 @@ impl NormalizationMap {
             .par_chunks_mut(row_samples)
             .enumerate()
             .for_each(|(y, row)| {
-                let y_weights = axis_weights(y, self.rows, self.tile_size);
+                let y_weights = axis_weights(origin_y + y, self.rows, self.tile_size);
                 for (x, pixel) in row.chunks_exact_mut(self.channels).enumerate() {
                     let x_weights = x_weights[x];
                     let top_left = (y_weights.low * self.columns + x_weights.low) * self.channels;
@@ -181,6 +196,30 @@ impl NormalizationMap {
                     }
                 }
             });
+        Ok(())
+    }
+
+    /// Apply a one-tile global map to any image with the same channel count.
+    /// This is useful after another geometric resampling because a constant
+    /// per-channel affine transform does not depend on pixel coordinates.
+    pub fn apply_global(&self, image: &mut LinearImage) -> Result<()> {
+        if self.columns != 1 || self.rows != 1 {
+            return Err(Error::Normalization(
+                "normalization map is not global".into(),
+            ));
+        }
+        if image.channels != self.channels {
+            return Err(Error::Normalization(
+                "normalization channel count does not match".into(),
+            ));
+        }
+        image.data.par_chunks_mut(image.channels).for_each(|pixel| {
+            for (channel, value) in pixel.iter_mut().enumerate() {
+                if value.is_finite() {
+                    *value = value.mul_add(self.gains[channel], self.offsets[channel]);
+                }
+            }
+        });
         Ok(())
     }
 
@@ -328,6 +367,59 @@ mod tests {
         map.apply(&mut normalized).unwrap();
         assert!((map.mean_gain() - 0.5).abs() < 1.0e-5);
         assert!((normalized.data[100] - reference.data[100]).abs() < 1.0e-3);
+    }
+
+    #[test]
+    fn region_application_matches_the_same_part_of_the_full_image() {
+        let map = NormalizationMap {
+            width: 4,
+            height: 4,
+            channels: 1,
+            tile_size: 2,
+            columns: 2,
+            rows: 2,
+            gains: vec![1.0, 2.0, 3.0, 4.0],
+            offsets: vec![0.0; 4],
+        };
+        let mut full = LinearImage::new(4, 4, 1, vec![1.0; 16]).unwrap();
+        map.apply(&mut full).unwrap();
+        let mut crop = LinearImage::new(2, 2, 1, vec![1.0; 4]).unwrap();
+        map.apply_region(&mut crop, 1, 1).unwrap();
+
+        assert_eq!(
+            crop.data,
+            vec![full.data[5], full.data[6], full.data[9], full.data[10]]
+        );
+        assert!(map.apply_global(&mut crop).is_err());
+    }
+
+    #[test]
+    fn normalization_maps_round_trip_for_cached_provenance() {
+        let map =
+            NormalizationMap::identity(&LinearImage::new(4, 3, 3, vec![0.0; 4 * 3 * 3]).unwrap());
+        let encoded = serde_json::to_vec(&map).unwrap();
+        let decoded = serde_json::from_slice::<NormalizationMap>(&encoded).unwrap();
+
+        assert_eq!(decoded, map);
+    }
+
+    #[test]
+    fn global_region_application_keeps_per_channel_coefficients() {
+        let map = NormalizationMap {
+            width: 8,
+            height: 6,
+            channels: 3,
+            tile_size: 8,
+            columns: 1,
+            rows: 1,
+            gains: vec![1.0, 2.0, 3.0],
+            offsets: vec![10.0, 20.0, 30.0],
+        };
+        let mut crop = LinearImage::new(1, 1, 3, vec![2.0; 3]).unwrap();
+
+        map.apply_global(&mut crop).unwrap();
+
+        assert_eq!(crop.data, vec![12.0, 24.0, 36.0]);
     }
 
     #[test]
