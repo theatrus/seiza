@@ -17,6 +17,8 @@
 //!   as in `findContours` with `RETR_EXTERNAL`), plus polygon area, arc
 //!   length, convex hull, moments and bounding rectangles computed the way
 //!   OpenCV computes them for contours.
+//! - [`components`]: connected binary regions with bounds, centroids, fill,
+//!   and rotation-independent elongation.
 //! - [`dtfilter`]: the Gastal-Oliveira domain transform filter (normalized
 //!   convolution variant), as in `cv::ximgproc::dtFilter` with `DTF_NC`.
 //! - [`wavelets`]: à trous B3-spline wavelet decomposition and the
@@ -28,6 +30,7 @@
 pub mod blur;
 pub mod border;
 pub mod canny;
+pub mod components;
 pub mod contours;
 pub mod dtfilter;
 pub mod morphology;
