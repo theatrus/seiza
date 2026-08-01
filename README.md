@@ -272,6 +272,9 @@ accepting frames without resetting their registration or rejection history.
 See the [CLI stacking guide](seiza-cli/README.md#image-stacking),
 [Python API](seiza-py/README.md#image-stacking), and
 [stacking design](docs/design/image-stacking.md).
+The [image-correction core plan](docs/design/image-correction-core.md) defines
+how calibration and residual-response kernels will move out of the stacker for
+use by native hosts.
 
 ### Light deconvolution (experimental)
 

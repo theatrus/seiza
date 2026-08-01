@@ -2414,6 +2414,7 @@ dependencies = [
  "rayon",
  "seiza",
  "seiza-fits",
+ "seiza-imgproc",
  "seiza-stats",
  "seiza-stretch",
  "seiza-xisf",

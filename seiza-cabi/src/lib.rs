@@ -1022,8 +1022,9 @@ pub unsafe extern "C" fn seiza_live_stacker_push_linear_json(
 }
 
 #[unsafe(no_mangle)]
-/// Opens, calibrates, registers, and offers one FITS or XISF frame to the stack. The
-/// returned disposition JSON is owned and must be freed with
+/// Opens, calibrates, registers, and offers one FITS or XISF frame to the stack.
+/// Stacks created from an array reject this path, including after a context
+/// restore. The returned disposition JSON is owned and must be freed with
 /// [`seiza_string_free`]. Each source path may be offered only once.
 ///
 /// # Safety
@@ -4385,6 +4386,20 @@ mod tests {
         assert!(!resumed.is_null());
         assert!(error.is_null());
         assert_eq!(unsafe { seiza_live_stacker_accepted_frames(resumed) }, 2);
+        let missing_path = CString::new("does-not-need-to-exist.fits").unwrap();
+        let disposition = unsafe {
+            seiza_live_stacker_push_fits_json(resumed, missing_path.as_ptr(), &mut error)
+        };
+        assert!(disposition.is_null());
+        assert!(!error.is_null());
+        assert!(
+            unsafe { CStr::from_ptr(error) }
+                .to_str()
+                .unwrap()
+                .contains("use push_linear")
+        );
+        unsafe { seiza_string_free(error) };
+        error = ptr::null_mut();
         let disposition = unsafe {
             seiza_live_stacker_push_linear_json(
                 resumed,

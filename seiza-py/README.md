@@ -172,9 +172,11 @@ for frame in result.frames:
 ```
 
 For live integration, construct from a FITS path or a C-contiguous mono/HWC
-RGB NumPy `float32` array. `push()` accepts already-linear, calibrated arrays;
-`push_fits()` performs the configured FITS calibration path. Both return a
-typed admission decision, and a rejected frame never mutates the accumulator:
+RGB NumPy `float32` array. An array-based stacker accepts only already-linear,
+calibrated arrays through `push()`. A path-based stacker can use `push_fits()`
+for its configured calibration path or `push()` for caller-prepared arrays. A
+stacker keeps that input mode after checkpointing. Both methods return a typed
+admission decision, and a rejected frame never mutates the accumulator:
 
 ```python
 stacker = seiza.LiveStacker.from_array(reference, options=options)
@@ -197,7 +199,7 @@ the FITS/XISF source ledger:
 stacker.save_context("m31.seiza-stack")
 
 stacker = seiza.LiveStacker.open_context("m31.seiza-stack")
-decision = stacker.push_fits("light-042.fits")
+decision = stacker.push(next_array)
 stacker.save_context("m31.seiza-stack")
 ```
 

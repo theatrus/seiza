@@ -1,4 +1,7 @@
-use crate::{BayerLayout, CalibrationMasters, Error, LinearImage, Result, StackOptions};
+use crate::{
+    BayerLayout, CalibrationMasters, Error, LinearImage, Result, StackOptions,
+    stack::FrameInputMode,
+};
 use seiza_fits::{BayerPattern, HeaderValue};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -22,6 +25,7 @@ pub(crate) struct ContextWriteState<'a> {
     pub accepted_frames: u32,
     pub rejected_frames: u32,
     pub input_paths: &'a [PathBuf],
+    pub input_mode: FrameInputMode,
 }
 
 pub(crate) struct RestoredContext {
@@ -36,6 +40,7 @@ pub(crate) struct RestoredContext {
     pub accepted_frames: u32,
     pub rejected_frames: u32,
     pub input_paths: Vec<PathBuf>,
+    pub input_mode: FrameInputMode,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -49,6 +54,8 @@ struct ContextMetadata {
     accepted_frames: u32,
     rejected_frames: u32,
     input_paths: Vec<String>,
+    #[serde(default)]
+    input_mode: FrameInputMode,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -308,6 +315,7 @@ pub(crate) fn read(path: &Path) -> Result<RestoredContext> {
         accepted_frames: metadata.accepted_frames,
         rejected_frames: metadata.rejected_frames,
         input_paths,
+        input_mode: metadata.input_mode,
     })
 }
 
@@ -338,6 +346,7 @@ impl ContextMetadata {
             accepted_frames: state.accepted_frames,
             rejected_frames: state.rejected_frames,
             input_paths,
+            input_mode: state.input_mode,
         })
     }
 

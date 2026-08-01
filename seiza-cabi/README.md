@@ -89,13 +89,15 @@ correction of `2.0`. The output remains linear and may contain samples outside
 Stacking uses the same row-major, pixel-interleaved mono/RGB layout. Array
 frames are copied during each synchronous call and may be released when it
 returns; they must already be calibrated, debayered, and linear. FITS/XISF
-pushes retain and apply the calibration masters loaded by the path constructor; a
-non-zero dark exposure override requires a dark master path. A
-rejected frame is represented by `accepted: false` disposition JSON and is not
-an ABI error. The zero-copy live pointers are invalidated by the next push,
-finish, or free; immutable snapshot pointers remain valid until snapshot free.
-Snapshot FITS output refuses to overwrite any tracked light or calibration
-input.
+pushes retain and apply the calibration masters loaded by the path
+constructor; a non-zero dark exposure override requires a dark master path. A
+handle created from an array accepts only linear-array pushes, and a handle
+created from a path accepts both the configured FITS path and prepared linear
+pushes. A saved context retains that input mode. A rejected frame is
+represented by `accepted: false` disposition JSON and is not an ABI error. The
+zero-copy live pointers are invalidated by the next push, finish, or free;
+immutable snapshot pointers remain valid until snapshot free. Snapshot FITS
+output refuses to overwrite any tracked light or calibration input.
 
 Stack options are serialized `seiza-stacking` `StackOptions`. Every nested
 object accepts omitted fields from its defaults. For example, this disables
