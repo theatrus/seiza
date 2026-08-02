@@ -74,7 +74,11 @@ Its `extract_region` method reproduces a bounded part of the registered frame;
 channel-to-color mapping. Global normalization keeps that path bounded, while
 local normalization preserves the exact two-stage processing order.
 
-`build_residual_flat_patch` estimates a small multiplicative response patch
+`build_residual_flat_patch` remains as a compatibility adapter for one release.
+The pixel kernel now lives in
+[`seiza-calibration`](https://crates.io/crates/seiza-calibration), whose borrowed-buffer API
+does not require `LinearImage` or the stacker. Both paths estimate a small
+multiplicative response patch
 from at least five calibrated light-frame crops taken at the same detector
 coordinates. It fits and removes each crop's local background plane, smooths
 pixel noise and moving stars, and keeps only repeated dark response. The patch

@@ -1422,6 +1422,7 @@ dependencies = [
  "postcard",
  "rayon",
  "rustc-hash",
+ "seiza-calibration",
  "seiza-download",
  "seiza-stats",
  "serde",
@@ -1436,6 +1437,16 @@ name = "seiza-background"
 version = "0.2.0"
 dependencies = [
  "rayon",
+ "seiza-stats",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "seiza-calibration"
+version = "0.1.0"
+dependencies = [
+ "seiza-imgproc",
  "seiza-stats",
  "serde",
  "thiserror",
@@ -1478,7 +1489,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-imgproc"
-version = "0.3.0"
+version = "0.3.1"
 
 [[package]]
 name = "seiza-py"
@@ -1520,6 +1531,7 @@ version = "0.2.2"
 dependencies = [
  "rayon",
  "seiza",
+ "seiza-calibration",
  "seiza-fits",
  "seiza-imgproc",
  "seiza-stats",

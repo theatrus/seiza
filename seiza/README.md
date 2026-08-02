@@ -46,6 +46,9 @@ astrophotography, in Rust.
 - **Optional catalog downloads** — enable the non-default `downloads` feature
   for `seiza::downloads`, an async, verified shared cache of published catalog
   bundles. Normal catalog opens never access the network.
+- **Calibration responses** — `seiza::calibration` re-exports the host-neutral
+  residual-response fit, validation, and bounded application API for linear
+  caller-owned buffers.
 
 See the [`seiza-cli`](https://crates.io/crates/seiza-cli) crate for the
 command-line tool, and [`seiza-fits`](https://crates.io/crates/seiza-fits)
@@ -59,6 +62,10 @@ separate optional
 [`seiza-satellites`](https://crates.io/crates/seiza-satellites) crate so core
 solving and static catalog access do not inherit orbital-element or network
 dependencies.
+
+The host-neutral calibration response API also lives in the focused
+[`seiza-calibration`](https://crates.io/crates/seiza-calibration) crate. Use the
+focused crate when a native host does not need plate solving.
 
 ## License
 

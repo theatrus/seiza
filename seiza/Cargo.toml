@@ -19,6 +19,7 @@ directories.workspace = true
 image.workspace = true
 thiserror.workspace = true
 seiza-download = { workspace = true, optional = true }
+seiza-calibration.workspace = true
 memmap2.workspace = true
 rayon.workspace = true
 seiza-stats.workspace = true
