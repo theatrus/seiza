@@ -81,17 +81,20 @@ impl ProtectedRegion {
                 "protected polygon normalization needs image dimensions of at least 2 by 2".into(),
             ));
         }
-        let region = Self::Polygon {
-            points: points
-                .iter()
-                .map(|point| {
-                    [
-                        point[0] / (width - 1) as f64,
-                        point[1] / (height - 1) as f64,
-                    ]
-                })
-                .collect(),
-        };
+        let mut points = points
+            .iter()
+            .map(|point| {
+                [
+                    point[0] / (width - 1) as f64,
+                    point[1] / (height - 1) as f64,
+                ]
+            })
+            .collect::<Vec<_>>();
+        points.dedup();
+        if points.len() > 1 && points.first() == points.last() {
+            points.pop();
+        }
+        let region = Self::Polygon { points };
         validate_protected_regions(std::slice::from_ref(&region))?;
         Ok(region)
     }
@@ -1349,13 +1352,19 @@ fn point_in_polygon(point: [f64; 2], polygon: &[[f64; 2]]) -> bool {
 fn point_on_segment(point: [f64; 2], start: [f64; 2], end: [f64; 2]) -> bool {
     let dx = end[0] - start[0];
     let dy = end[1] - start[1];
+    let length_squared = dx.mul_add(dx, dy * dy);
+    if length_squared <= 1.0e-24 {
+        let px = point[0] - start[0];
+        let py = point[1] - start[1];
+        return px.mul_add(px, py * py) <= 1.0e-24;
+    }
     let cross = (point[0] - start[0]).mul_add(dy, -(point[1] - start[1]) * dx);
     let scale = dx.abs().max(dy.abs()).max(1.0);
     if cross.abs() > 1.0e-12 * scale {
         return false;
     }
     let dot = (point[0] - start[0]).mul_add(dx, (point[1] - start[1]) * dy);
-    dot >= 0.0 && dot <= dx.mul_add(dx, dy * dy)
+    dot >= 0.0 && dot <= length_squared
 }
 
 fn accepted_count(samples: &[RawSample]) -> usize {
@@ -2059,6 +2068,47 @@ mod tests {
         )
         .unwrap();
         assert!(region_contains(&normalized, [0.5, 0.4]));
+    }
+
+    #[test]
+    fn pixel_polygon_normalization_removes_repeated_vertices() {
+        let normalized = ProtectedRegion::polygon_from_pixels(
+            &[
+                [20.0, 10.0],
+                [20.0, 10.0],
+                [80.0, 10.0],
+                [80.0, 40.0],
+                [20.0, 40.0],
+                [20.0, 10.0],
+            ],
+            101,
+            51,
+        )
+        .unwrap();
+
+        let ProtectedRegion::Polygon { points } = normalized else {
+            panic!("expected a polygon");
+        };
+        assert_eq!(points, vec![[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.8]]);
+    }
+
+    #[test]
+    fn zero_length_polygon_edges_do_not_contain_outside_points() {
+        let polygon = ProtectedRegion::Polygon {
+            points: vec![
+                [0.2, 0.2],
+                [0.2, 0.2],
+                [0.8, 0.2],
+                [0.8, 0.8],
+                [0.2, 0.8],
+                [0.2, 0.2],
+            ],
+        };
+
+        assert!(region_contains(&polygon, [0.5, 0.5]));
+        assert!(region_contains(&polygon, [0.2, 0.2]));
+        assert!(!region_contains(&polygon, [0.1, 0.1]));
+        assert!(!region_contains(&polygon, [0.9, 0.9]));
     }
 
     #[test]
