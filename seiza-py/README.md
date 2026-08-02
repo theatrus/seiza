@@ -102,19 +102,24 @@ Fit a compact background model to a C-contiguous mono `(H, W)` or RGB
 `(H, W, 3)` linear `float32` array, inspect it, and then correct the image:
 
 ```python
-model = seiza.fit_background(stack, degree=2)
+model = seiza.fit_background(stack, model="automatic", degree=2)
 print(model.diagnostics)
 
 corrected = model.correct(stack)                 # additive subtraction
 illumination_corrected = model.correct(stack, mode="divide")
+partial = model.correct(stack, strength=0.6)      # tune without refitting
 background = model.render()                      # explicit full-size model
 ```
 
 Fitting uses deterministic low-noise sample windows, robust sample rejection,
-and independent per-channel polynomial coefficients. `model.correct()`
-allocates only the corrected array; a full-size background exists only after
-`render()`. Pass a boolean `(H, W)` `mask` to exclude extended objects, dark
-clouds, registration borders, or source masks:
+and independent per-channel surfaces. Automatic mode chooses among polynomial
+degrees from held-out sample errors. Use `model="radial_basis"` with
+`rbf_smoothing`, or set `allow_radial_basis=True` in automatic mode, for an
+irregular thin-plate model. RBF is explicit because background samples can
+share real extended emission. `model.correct()` allocates only the corrected
+array; a full-size background exists only after `render()`. Pass a boolean
+`(H, W)` `mask` to exclude extended objects, dark clouds, registration borders,
+or source masks:
 
 ```python
 model = seiza.fit_background(stack, mask=structure_mask,

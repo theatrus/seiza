@@ -40,9 +40,13 @@ exposes the **superset** of what both apps need.
 - **Background extraction** — `seiza_background_fit` creates a compact opaque
   model from interleaved linear mono or RGB `float` samples. Callers can inspect
   its borrowed diagnostics JSON, render it into a caller-owned buffer, or apply
-  subtractive/divisive correction in place before freeing the model. Optional
-  settings use serialized `seiza-background` `BackgroundConfig` JSON, keeping
-  the ABI stable as model options grow.
+  subtractive/divisive correction in place before freeing the model. A second
+  correction entry point accepts a strength from zero to one. Optional settings
+  use serialized `seiza-background` `BackgroundConfig` JSON, including
+  polynomial, radial-basis, and automatic model selection, so the ABI stays
+  stable as model options grow. The JSON config can carry normalized ellipses
+  or polygons projected from solved catalog bounds, including stored OpenNGC
+  contours.
 - **Light deconvolution** — `seiza_deconvolve_in_place` applies the same
   conservative damped Richardson-Lucy operation as the Rust and Python APIs to
   caller-owned linear mono or interleaved RGB `float` samples. The synchronous

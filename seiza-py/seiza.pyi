@@ -303,7 +303,8 @@ class BackgroundModel:
     height: int
     channels: int
     reference: list[float]
-    diagnostics: dict[str, int]
+    model_kind: str
+    diagnostics: dict[str, object]
     def samples(
         self,
     ) -> list[tuple[int, int, list[float], float, float, str]]: ...
@@ -313,6 +314,7 @@ class BackgroundModel:
         image: npt.NDArray[np.float32],
         *,
         mode: str = "subtract",
+        strength: float = 1.0,
     ) -> npt.NDArray[np.float32]: ...
 
 def detect(
@@ -359,8 +361,13 @@ def fit_background(
     image: npt.NDArray[np.float32],
     *,
     mask: npt.NDArray[np.bool_] | None = None,
+    model: str = "polynomial",
     degree: int = 2,
     ridge: float = 1.0e-8,
+    rbf_smoothing: float = 0.01,
+    max_control_points: int = 192,
+    allow_radial_basis: bool = False,
+    minimum_improvement: float = 0.12,
     samples_per_axis: int = 12,
     sample_radius: int | None = None,
     search_steps: int = 4,

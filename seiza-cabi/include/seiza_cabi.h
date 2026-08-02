@@ -236,6 +236,22 @@ bool seiza_background_model_correct_in_place(const SeizaBackgroundModel *model,
                                              char **error_out);
 
 /*
+ Corrects an interleaved linear float buffer in place with a fractional
+ strength. Zero leaves the image unchanged; one applies the full correction.
+
+ # Safety
+ `model` must be a live pointer returned by [`seiza_background_fit`]. `data`
+ must point to `data_length` writable floats. When non-null, `error_out` must
+ point to writable storage for one pointer.
+ */
+bool seiza_background_model_correct_in_place_with_strength(const SeizaBackgroundModel *model,
+                                                           float *data,
+                                                           size_t data_length,
+                                                           uint32_t mode,
+                                                           double strength,
+                                                           char **error_out);
+
+/*
  # Safety
  `model` must be null or a pointer returned by [`seiza_background_fit`] that
  has not already been freed.
