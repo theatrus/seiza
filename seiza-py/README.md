@@ -358,6 +358,19 @@ Element records older than seven days are reported in
 downloads: keep reusing one cache directory, and check `sats.cache_state`
 and `sats.warning` after `fetch_celestrak()`.
 
+## Working on the bindings
+
+This directory is its own cargo workspace, so `cargo fmt --all` and
+`cargo clippy --workspace` at the repository root never reach it. Run its
+checks from here, which is what CI does:
+
+```bash
+cd seiza-py
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+maturin develop && python -m pytest tests/ -q
+```
+
 ## Notes
 
 - Solving and detection release the GIL; other Python threads keep running.

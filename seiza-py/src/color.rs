@@ -230,7 +230,9 @@ fn crop_report<'py>(
     let mut images = Vec::with_capacity(channels.len());
     for (name, array) in channels.iter() {
         names.push(name.extract::<String>()?);
-        images.push(linear_image(array.extract::<PyReadonlyArrayDyn<'_, f32>>()?)?);
+        images.push(linear_image(
+            array.extract::<PyReadonlyArrayDyn<'_, f32>>()?,
+        )?);
     }
     let named = names
         .iter()
