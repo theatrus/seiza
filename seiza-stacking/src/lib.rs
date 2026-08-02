@@ -2,6 +2,7 @@
 //! image stacking for astrophotography.
 
 mod calibration;
+mod cancel;
 mod color;
 mod context;
 mod fits;
@@ -16,6 +17,7 @@ mod residual_flat;
 mod stack;
 
 pub use calibration::{CalibrationMasters, MasterDark, MasterFlat};
+pub use cancel::CancelSignal;
 pub use color::{
     ColorComposition, ColorNormalization, ColorOptions, ColorTransfer, ForaxxOptions,
     NarrowbandMatrix, NarrowbandMix, NarrowbandPalette, combine_lrgb, combine_narrowband,
@@ -73,6 +75,9 @@ pub enum Error {
     /// A frame could not be integrated into the stack.
     #[error("stacking error: {0}")]
     Stack(String),
+    /// The caller asked for the work to stop through a [`CancelSignal`].
+    #[error("cancelled by the caller")]
+    Cancelled,
     /// Reading a resumable live-stack context failed.
     #[error("failed to read stack context {}: {message}", path.display())]
     StackContextRead {

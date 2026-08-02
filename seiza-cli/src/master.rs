@@ -194,6 +194,7 @@ fn build(
         exposure_seconds,
         bias,
         dark,
+        cancel: None,
     };
     if kind == MasterFrameKind::Flat && options.bias.is_none() && options.dark.is_none() {
         eprintln!(

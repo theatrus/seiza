@@ -3,12 +3,13 @@ use numpy::{PyArrayDyn, PyReadonlyArrayDyn};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use seiza_stacking::{
-    CalibrationMasters, DeltaSigmaOptions, FitsFrame, FrameDisposition, LinearImage, LiveStacker,
-    MasterBuildOptions, MasterDark, MasterFrameKind, MasterRejectionOptions, NormalizationMode,
-    RejectionMode, StackOptions, StackSnapshot, build_master_from_fits, path_identity,
-    paths_refer_to_same_file, write_fits_f32, write_master_fits_f32,
+    CalibrationMasters, CancelSignal, DeltaSigmaOptions, FitsFrame, FrameDisposition, LinearImage,
+    LiveStacker, MasterBuildOptions, MasterDark, MasterFrameKind, MasterRejectionOptions,
+    NormalizationMode, RejectionMode, StackOptions, StackSnapshot, build_master_from_fits,
+    path_identity, paths_refer_to_same_file, write_fits_f32, write_master_fits_f32,
 };
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 pyo3::create_exception!(
     seiza,
@@ -720,13 +721,14 @@ fn stack_fits(
 }
 
 #[pyfunction]
-#[pyo3(signature = (images, output, *, sigma_low=3.0, sigma_high=3.0))]
+#[pyo3(signature = (images, output, *, sigma_low=3.0, sigma_high=3.0, cancel=None))]
 fn build_bias(
     py: Python<'_>,
     images: Vec<PathBuf>,
     output: PathBuf,
     sigma_low: f32,
     sigma_high: f32,
+    cancel: Option<PyObject>,
 ) -> PyResult<PyMasterResult> {
     build_master(
         py,
@@ -739,6 +741,7 @@ fn build_bias(
         None,
         sigma_low,
         sigma_high,
+        cancel,
     )
 }
 
@@ -750,8 +753,10 @@ fn build_bias(
     bias=None,
     exposure_seconds=None,
     sigma_low=3.0,
-    sigma_high=3.0
+    sigma_high=3.0,
+    cancel=None
 ))]
+#[allow(clippy::too_many_arguments)]
 fn build_dark(
     py: Python<'_>,
     images: Vec<PathBuf>,
@@ -760,6 +765,7 @@ fn build_dark(
     exposure_seconds: Option<f64>,
     sigma_low: f32,
     sigma_high: f32,
+    cancel: Option<PyObject>,
 ) -> PyResult<PyMasterResult> {
     build_master(
         py,
@@ -772,6 +778,7 @@ fn build_dark(
         exposure_seconds,
         sigma_low,
         sigma_high,
+        cancel,
     )
 }
 
@@ -785,7 +792,8 @@ fn build_dark(
     dark_flat_exposure_seconds=None,
     exposure_seconds=None,
     sigma_low=3.0,
-    sigma_high=3.0
+    sigma_high=3.0,
+    cancel=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn build_flat(
@@ -798,6 +806,7 @@ fn build_flat(
     exposure_seconds: Option<f64>,
     sigma_low: f32,
     sigma_high: f32,
+    cancel: Option<PyObject>,
 ) -> PyResult<PyMasterResult> {
     validate_exposure_override(dark_flat.as_ref(), dark_flat_exposure_seconds, "dark_flat")?;
     build_master(
@@ -811,6 +820,7 @@ fn build_flat(
         exposure_seconds,
         sigma_low,
         sigma_high,
+        cancel,
     )
 }
 
@@ -826,9 +836,37 @@ fn build_master(
     exposure_seconds: Option<f64>,
     sigma_low: f32,
     sigma_high: f32,
+    cancel: Option<PyObject>,
 ) -> PyResult<PyMasterResult> {
     validate_output_path(&images, &output, [bias.as_ref(), dark.as_ref()])?;
-    py.allow_threads(move || {
+    // A master over dozens of frames runs for minutes with the GIL released,
+    // so the build takes the GIL back once per input to ask whether it should
+    // stop. That covers Ctrl-C as well as an explicit `cancel` predicate.
+    let raised: Arc<Mutex<Option<PyErr>>> = Arc::new(Mutex::new(None));
+    let signal = {
+        let raised = Arc::clone(&raised);
+        CancelSignal::new(move || {
+            Python::with_gil(|py| {
+                let asked = py.check_signals().and_then(|()| match &cancel {
+                    Some(cancel) => cancel
+                        .call0(py)
+                        .and_then(|value| value.bind(py).is_truthy()),
+                    None => Ok(false),
+                });
+                match asked {
+                    Ok(stop) => stop,
+                    Err(error) => {
+                        // Re-raised once the build unwinds, so the caller sees
+                        // KeyboardInterrupt or their own exception rather than
+                        // a generic StackError.
+                        *raised.lock().unwrap() = Some(error);
+                        true
+                    }
+                }
+            })
+        })
+    };
+    let built = py.allow_threads(move || {
         let bias = bias.map(load_bias).transpose()?;
         let dark = dark
             .map(|path| {
@@ -844,6 +882,7 @@ fn build_master(
             exposure_seconds,
             bias,
             dark,
+            cancel: Some(signal),
         };
         let master = build_master_from_fits(&images, kind, &options)?;
         write_master_fits_f32(&output, &master)?;
@@ -867,8 +906,11 @@ fn build_master(
                 .map(|stats| (stats.accepted_samples, stats.rejected_samples))
                 .collect(),
         })
-    })
-    .map_err(stack_error)
+    });
+    if let Some(error) = raised.lock().unwrap().take() {
+        return Err(error);
+    }
+    built.map_err(stack_error)
 }
 
 fn load_calibration(

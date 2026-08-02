@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from pathlib import Path
-from typing import Sequence, Union
+from typing import Callable, Sequence, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -461,6 +461,7 @@ def build_bias(
     *,
     sigma_low: float = 3.0,
     sigma_high: float = 3.0,
+    cancel: Callable[[], bool] | None = None,
 ) -> MasterResult: ...
 def build_dark(
     images: Sequence[str | Path],
@@ -470,6 +471,7 @@ def build_dark(
     exposure_seconds: float | None = None,
     sigma_low: float = 3.0,
     sigma_high: float = 3.0,
+    cancel: Callable[[], bool] | None = None,
 ) -> MasterResult: ...
 def build_flat(
     images: Sequence[str | Path],
@@ -481,6 +483,7 @@ def build_flat(
     exposure_seconds: float | None = None,
     sigma_low: float = 3.0,
     sigma_high: float = 3.0,
+    cancel: Callable[[], bool] | None = None,
 ) -> MasterResult: ...
 def gaussian_blur(
     image: npt.NDArray[np.uint8] | npt.NDArray[np.float32],
