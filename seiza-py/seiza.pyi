@@ -396,6 +396,7 @@ def combine_rgb(
     black_percentile: float = 0.001,
     white_percentile: float = 0.995,
     normalization_samples: int = 1_000_000,
+    crop: str = "none",
 ) -> npt.NDArray[np.float32]: ...
 def combine_lrgb(
     luminance: npt.NDArray[np.float32],
@@ -409,6 +410,7 @@ def combine_lrgb(
     black_percentile: float = 0.001,
     white_percentile: float = 0.995,
     normalization_samples: int = 1_000_000,
+    crop: str = "none",
 ) -> npt.NDArray[np.float32]: ...
 def combine_narrowband(
     ha: npt.NDArray[np.float32],
@@ -422,7 +424,13 @@ def combine_narrowband(
     normalization_samples: int = 1_000_000,
     foraxx_target_median: float = 0.2,
     foraxx_shadows_clip: float = -2.8,
+    crop: str = "none",
 ) -> npt.NDArray[np.float32]: ...
+def crop_report(
+    channels: dict[str, npt.NDArray[np.float32]],
+    *,
+    crop: str = "inscribed",
+) -> dict[str, object]: ...
 def stretch(
     image: npt.NDArray[np.float32],
     *,

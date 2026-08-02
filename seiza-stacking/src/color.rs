@@ -1,4 +1,5 @@
-use crate::{Error, LinearImage, Result};
+use crate::crop::{ColorCrop, CropReport, crop_report};
+use crate::{Error, LinearImage, ReferenceRegion, Result};
 use rayon::prelude::*;
 use seiza_stretch::{ResolvedCurve, StretchConfig, StretchParams};
 use std::str::FromStr;
@@ -42,6 +43,11 @@ pub struct ColorOptions {
     /// intended for callers that independently stretch each registered mono
     /// channel before composition.
     pub input_transfer: ColorTransfer,
+    /// How the output is trimmed to the area every channel covers.
+    ///
+    /// Cropping also restricts normalization statistics to the kept region, so
+    /// every channel is scaled from the same patch of sky.
+    pub crop: ColorCrop,
 }
 
 /// Display preparation applied before a dynamic Foraxx composition.
@@ -89,6 +95,16 @@ pub struct ColorComposition {
     pub image: LinearImage,
     /// Transfer semantics of the composed samples.
     pub transfer: ColorTransfer,
+    /// Where the composed image sits on the input channels' pixel grid.
+    ///
+    /// Without a crop this is the whole grid. A cropped composition needs its
+    /// reference `CRPIX` shifted by the region origin, which
+    /// [`write_color_fits_f32`](crate::write_color_fits_f32) does.
+    pub region: ReferenceRegion,
+    /// What each channel covered and how much the crop kept, when
+    /// [`ColorOptions::crop`] asked for one. `None` for an uncropped
+    /// composition, which measures no coverage.
+    pub crop: Option<CropReport>,
 }
 
 /// Coefficients for one output channel, ordered by physical narrowband filter.
@@ -225,13 +241,16 @@ pub fn combine_rgb(
     options: &ColorOptions,
 ) -> Result<ColorComposition> {
     validate_options(options)?;
-    validate_mono_set(&[("red", red), ("green", green), ("blue", blue)])?;
+    let inputs = [("red", red), ("green", green), ("blue", blue)];
+    validate_mono_set(&inputs)?;
+    let grid = CompositionGrid::of(&inputs, options.crop)?;
+    let window = grid.window();
     let channels = [
-        prepare_channel(red, options.normalization)?,
-        prepare_channel(green, options.normalization)?,
-        prepare_channel(blue, options.normalization)?,
+        prepare_channel(red, options.normalization, window)?,
+        prepare_channel(green, options.normalization, window)?,
+        prepare_channel(blue, options.normalization, window)?,
     ];
-    let mut data = vec![0.0; red.pixel_count() * 3];
+    let mut data = vec![0.0; grid.pixel_count() * 3];
     data.par_chunks_mut(3)
         .enumerate()
         .for_each(|(index, output)| {
@@ -245,10 +264,7 @@ pub fn combine_rgb(
                 channels[2].sample(index),
             ]);
         });
-    Ok(ColorComposition {
-        image: LinearImage::new(red.width, red.height, 3, data)?,
-        transfer: options.input_transfer,
-    })
+    grid.compose(data, options.input_transfer)
 }
 
 /// Combine aligned L, R, G, and B stacks in linear-light RGB.
@@ -348,15 +364,17 @@ fn combine_lrgb_with_target(
     ) {
         return combine_rgb(red, green, blue, options);
     }
+    let grid = CompositionGrid::of(&inputs, options.crop)?;
+    let window = grid.window();
     let l = luminance
-        .map(|luminance| prepare_channel(luminance, options.normalization))
+        .map(|luminance| prepare_channel(luminance, options.normalization, window))
         .transpose()?;
     let rgb = [
-        prepare_channel(red, options.normalization)?,
-        prepare_channel(green, options.normalization)?,
-        prepare_channel(blue, options.normalization)?,
+        prepare_channel(red, options.normalization, window)?,
+        prepare_channel(green, options.normalization, window)?,
+        prepare_channel(blue, options.normalization, window)?,
     ];
-    let mut data = vec![0.0; red.pixel_count() * 3];
+    let mut data = vec![0.0; grid.pixel_count() * 3];
     data.par_chunks_mut(3)
         .enumerate()
         .for_each(|(index, output)| {
@@ -386,10 +404,7 @@ fn combine_lrgb_with_target(
                 output.copy_from_slice(&[target_luminance; 3]);
             }
         });
-    Ok(ColorComposition {
-        image: LinearImage::new(red.width, red.height, 3, data)?,
-        transfer: options.input_transfer,
-    })
+    grid.compose(data, options.input_transfer)
 }
 
 /// Compose a common narrowband palette from aligned mono stacks.
@@ -414,22 +429,16 @@ pub fn combine_narrowband(
         inputs.push(("SII", sii));
     }
     validate_mono_set(&inputs)?;
-    let h = prepare_channel(ha, options.normalization)?;
-    let o = prepare_channel(oiii, options.normalization)?;
+    let grid = CompositionGrid::of(&inputs, options.crop)?;
+    let window = grid.window();
+    let h = prepare_channel(ha, options.normalization, window)?;
+    let o = prepare_channel(oiii, options.normalization, window)?;
     let s = sii
-        .map(|image| prepare_channel(image, options.normalization))
+        .map(|image| prepare_channel(image, options.normalization, window))
         .transpose()?;
 
     if let Some(matrix) = palette.matrix() {
-        return combine_prepared_matrix(
-            ha.width,
-            ha.height,
-            h,
-            o,
-            s,
-            matrix,
-            options.input_transfer,
-        );
+        return combine_prepared_matrix(grid, h, o, s, matrix, options.input_transfer);
     }
 
     let (h_display, o_display, s_display) = match options.input_transfer {
@@ -449,7 +458,7 @@ pub fn combine_narrowband(
             s.map(|_| ResolvedCurve::Identity),
         ),
     };
-    let mut data = vec![0.0; ha.pixel_count() * 3];
+    let mut data = vec![0.0; grid.pixel_count() * 3];
     data.par_chunks_mut(3)
         .enumerate()
         .for_each(|(index, output)| {
@@ -478,10 +487,7 @@ pub fn combine_narrowband(
             };
             output.copy_from_slice(&[red, green, o]);
         });
-    Ok(ColorComposition {
-        image: LinearImage::new(ha.width, ha.height, 3, data)?,
-        transfer: palette.transfer(),
-    })
+    grid.compose(data, palette.transfer())
 }
 
 /// Apply a custom linear narrowband mixing matrix.
@@ -507,24 +513,25 @@ pub fn combine_narrowband_matrix(
         inputs.push(("SII", sii));
     }
     validate_mono_set(&inputs)?;
-    let h = prepare_channel(ha, options.normalization)?;
-    let o = prepare_channel(oiii, options.normalization)?;
+    let grid = CompositionGrid::of(&inputs, options.crop)?;
+    let window = grid.window();
+    let h = prepare_channel(ha, options.normalization, window)?;
+    let o = prepare_channel(oiii, options.normalization, window)?;
     let s = sii
-        .map(|image| prepare_channel(image, options.normalization))
+        .map(|image| prepare_channel(image, options.normalization, window))
         .transpose()?;
-    combine_prepared_matrix(ha.width, ha.height, h, o, s, matrix, options.input_transfer)
+    combine_prepared_matrix(grid, h, o, s, matrix, options.input_transfer)
 }
 
 fn combine_prepared_matrix(
-    width: usize,
-    height: usize,
+    grid: CompositionGrid,
     ha: PreparedChannel<'_>,
     oiii: PreparedChannel<'_>,
     sii: Option<PreparedChannel<'_>>,
     matrix: NarrowbandMatrix,
     transfer: ColorTransfer,
 ) -> Result<ColorComposition> {
-    let mut data = vec![0.0; width * height * 3];
+    let mut data = vec![0.0; grid.pixel_count() * 3];
     data.par_chunks_mut(3)
         .enumerate()
         .for_each(|(index, output)| {
@@ -545,25 +552,104 @@ fn combine_prepared_matrix(
                 *target = mix.sii.mul_add(s, mix.ha.mul_add(h, mix.oiii * o));
             }
         });
-    Ok(ColorComposition {
-        image: LinearImage::new(width, height, 3, data)?,
-        transfer,
-    })
+    grid.compose(data, transfer)
+}
+
+/// The part of the shared input grid a composition reads and writes.
+///
+/// Composition indexes output pixels; this maps each of them back to its
+/// sample in the full-size input channels, so a crop needs no copy of the
+/// inputs.
+#[derive(Clone, Copy)]
+struct ChannelWindow {
+    source_width: usize,
+    region: ReferenceRegion,
+    whole_grid: bool,
+}
+
+impl ChannelWindow {
+    fn pixel_count(self) -> usize {
+        self.region.width * self.region.height
+    }
+
+    fn source_index(self, index: usize) -> usize {
+        if self.whole_grid {
+            return index;
+        }
+        let row = index / self.region.width;
+        let column = index - row * self.region.width;
+        (self.region.y + row) * self.source_width + self.region.x + column
+    }
+}
+
+/// The output grid of one composition, with the crop diagnostics that chose it.
+struct CompositionGrid {
+    window: ChannelWindow,
+    report: Option<CropReport>,
+}
+
+impl CompositionGrid {
+    fn of(inputs: &[(&str, &LinearImage)], crop: ColorCrop) -> Result<Self> {
+        let source = inputs
+            .first()
+            .ok_or_else(|| Error::Color("at least one input channel is required".into()))?
+            .1;
+        let report = match crop {
+            ColorCrop::None => None,
+            _ => Some(crop_report(inputs, crop)?),
+        };
+        let region = match &report {
+            Some(report) => report.region,
+            None => ReferenceRegion {
+                x: 0,
+                y: 0,
+                width: source.width,
+                height: source.height,
+            },
+        };
+        Ok(Self {
+            window: ChannelWindow {
+                source_width: source.width,
+                region,
+                whole_grid: region.width == source.width && region.height == source.height,
+            },
+            report,
+        })
+    }
+
+    fn window(&self) -> ChannelWindow {
+        self.window
+    }
+
+    fn pixel_count(&self) -> usize {
+        self.window.pixel_count()
+    }
+
+    fn compose(self, data: Vec<f32>, transfer: ColorTransfer) -> Result<ColorComposition> {
+        let region = self.window.region;
+        Ok(ColorComposition {
+            image: LinearImage::new(region.width, region.height, 3, data)?,
+            transfer,
+            region,
+            crop: self.report,
+        })
+    }
 }
 
 #[derive(Clone, Copy)]
 struct PreparedChannel<'a> {
     values: &'a [f32],
     transform: ChannelTransform,
+    window: ChannelWindow,
 }
 
 impl PreparedChannel<'_> {
     fn valid(self, index: usize) -> bool {
-        self.values[index].is_finite()
+        self.values[self.window.source_index(index)].is_finite()
     }
 
     fn sample(self, index: usize) -> f32 {
-        let value = self.values[index];
+        let value = self.values[self.window.source_index(index)];
         if !value.is_finite() {
             return 0.0;
         }
@@ -574,6 +660,18 @@ impl PreparedChannel<'_> {
                 reciprocal_range,
             } => ((value - black) * reciprocal_range).clamp(0.0, 1.0),
         }
+    }
+
+    /// Every `stride`-th sample of the window, transform applied, skipping
+    /// pixels this channel does not cover.
+    fn samples(self, max_samples: usize) -> Vec<f32> {
+        let count = self.window.pixel_count();
+        let stride = count.div_ceil(max_samples.max(1)).max(1);
+        (0..count)
+            .step_by(stride)
+            .filter(|index| self.valid(*index))
+            .map(|index| self.sample(index))
+            .collect()
     }
 }
 
@@ -586,7 +684,13 @@ enum ChannelTransform {
 fn prepare_channel(
     image: &LinearImage,
     normalization: ColorNormalization,
+    window: ChannelWindow,
 ) -> Result<PreparedChannel<'_>> {
+    let raw = PreparedChannel {
+        values: &image.data,
+        transform: ChannelTransform::Identity,
+        window,
+    };
     let transform = match normalization {
         ColorNormalization::None => ChannelTransform::Identity,
         ColorNormalization::Percentile {
@@ -595,32 +699,21 @@ fn prepare_channel(
             max_samples,
         } => {
             let (black, white) =
-                percentile_levels(&image.data, black_percentile, white_percentile, max_samples)?;
+                percentile_levels(raw.samples(max_samples), black_percentile, white_percentile)?;
             ChannelTransform::Percentile {
                 black,
                 reciprocal_range: 1.0 / (white - black),
             }
         }
     };
-    Ok(PreparedChannel {
-        values: &image.data,
-        transform,
-    })
+    Ok(PreparedChannel { transform, ..raw })
 }
 
 fn percentile_levels(
-    values: &[f32],
+    mut sample: Vec<f32>,
     black_percentile: f32,
     white_percentile: f32,
-    max_samples: usize,
 ) -> Result<(f32, f32)> {
-    let stride = values.len().div_ceil(max_samples.max(1)).max(1);
-    let mut sample = values
-        .iter()
-        .step_by(stride)
-        .copied()
-        .filter(|value| value.is_finite())
-        .collect::<Vec<_>>();
     if sample.is_empty() {
         return Err(Error::Color("channel contains no finite samples".into()));
     }
@@ -642,24 +735,17 @@ fn display_transform(
     max_samples: usize,
 ) -> Result<ResolvedCurve> {
     if matches!(channel.transform, ChannelTransform::Identity)
-        && channel
-            .values
-            .par_iter()
-            .copied()
-            .filter(|value| value.is_finite())
-            .any(|value| !(0.0..=1.0).contains(&value))
+        && (0..channel.window.pixel_count())
+            .into_par_iter()
+            .filter(|index| channel.valid(*index))
+            .any(|index| !(0.0..=1.0).contains(&channel.sample(index)))
     {
         return Err(Error::Color(
             "Foraxx with normalization disabled requires finite samples in [0, 1]; use percentile normalization for sensor-unit inputs"
                 .into(),
         ));
     }
-    let stride = channel.values.len().div_ceil(max_samples.max(1)).max(1);
-    let sample = (0..channel.values.len())
-        .step_by(stride)
-        .filter(|index| channel.values[*index].is_finite())
-        .map(|index| channel.sample(index))
-        .collect::<Vec<_>>();
+    let sample = channel.samples(max_samples);
     if sample.is_empty() {
         return Err(Error::Color(
             "channel contains no samples to stretch".into(),
@@ -776,10 +862,17 @@ mod tests {
         LinearImage::new(values.len(), 1, 1, values.to_vec()).unwrap()
     }
 
+    fn whole_grid(image: &LinearImage) -> ChannelWindow {
+        CompositionGrid::of(&[("channel", image)], ColorCrop::None)
+            .unwrap()
+            .window()
+    }
+
     fn raw_options() -> ColorOptions {
         ColorOptions {
             normalization: ColorNormalization::None,
             input_transfer: ColorTransfer::LinearLight,
+            crop: ColorCrop::None,
         }
     }
 
@@ -787,6 +880,7 @@ mod tests {
         ColorOptions {
             normalization: ColorNormalization::None,
             input_transfer: ColorTransfer::DisplayReferred,
+            crop: ColorCrop::None,
         }
     }
 
@@ -821,12 +915,7 @@ mod tests {
         options: &ForaxxOptions,
         max_samples: usize,
     ) -> PreviousDisplayTransform {
-        let stride = channel.values.len().div_ceil(max_samples.max(1)).max(1);
-        let mut sample = (0..channel.values.len())
-            .step_by(stride)
-            .filter(|index| channel.values[*index].is_finite())
-            .map(|index| channel.sample(index))
-            .collect::<Vec<_>>();
+        let mut sample = channel.samples(max_samples);
         sample.sort_unstable_by(f32::total_cmp);
         let median = sample[sample.len() / 2];
         for value in &mut sample {
@@ -1019,7 +1108,8 @@ mod tests {
     #[test]
     fn foraxx_working_stretch_places_the_median_at_its_target() {
         let image = mono(&[0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.90]);
-        let channel = prepare_channel(&image, ColorNormalization::None).unwrap();
+        let channel =
+            prepare_channel(&image, ColorNormalization::None, whole_grid(&image)).unwrap();
         let options = ForaxxOptions::default();
         let transform = display_transform(channel, &options, 100).unwrap();
         assert!((transform.map(0.30) - options.target_median).abs() < 1.0e-5);
@@ -1033,7 +1123,8 @@ mod tests {
                 .map(|index| offset + scale * ((index * 7_919 % 4_099) as f32 / 4_098.0))
                 .collect::<Vec<_>>();
             let image = mono(&values);
-            let channel = prepare_channel(&image, ColorNormalization::None).unwrap();
+            let channel =
+                prepare_channel(&image, ColorNormalization::None, whole_grid(&image)).unwrap();
             let previous = previous_display_transform(channel, &options, 2_000);
             let current = display_transform(channel, &options, 2_000).unwrap();
             for value in values {
@@ -1050,7 +1141,7 @@ mod tests {
                 white_percentile: 1.0,
                 max_samples: 100,
             },
-            input_transfer: ColorTransfer::LinearLight,
+            ..ColorOptions::default()
         };
         let result = combine_rgb(
             &mono(&[10.0, 20.0]),
@@ -1092,6 +1183,165 @@ mod tests {
         )
         .unwrap();
         assert!(result.image.data.iter().all(|sample| sample.is_nan()));
+    }
+
+    fn grid(width: usize, height: usize, values: &[f32]) -> LinearImage {
+        LinearImage::new(width, height, 1, values.to_vec()).unwrap()
+    }
+
+    #[test]
+    fn an_uncropped_composition_covers_the_whole_grid() {
+        let result = combine_rgb(
+            &mono(&[0.1, 0.2]),
+            &mono(&[0.3, 0.4]),
+            &mono(&[0.5, 0.6]),
+            &raw_options(),
+        )
+        .unwrap();
+        assert_eq!(
+            result.region,
+            ReferenceRegion {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 1
+            }
+        );
+    }
+
+    #[test]
+    fn cropping_trims_the_registration_border_from_every_channel() {
+        let nan = f32::NAN;
+        let red = grid(3, 3, &[0.1; 9]);
+        // Green is offset one pixel right, blue one pixel down.
+        let green = grid(3, 3, &[nan, 0.2, 0.2, nan, 0.2, 0.2, nan, 0.2, 0.2]);
+        let blue = grid(3, 3, &[nan, nan, nan, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3]);
+        let options = ColorOptions {
+            crop: ColorCrop::Inscribed,
+            ..raw_options()
+        };
+        let result = combine_rgb(&red, &green, &blue, &options).unwrap();
+        assert_eq!(
+            result.region,
+            ReferenceRegion {
+                x: 1,
+                y: 1,
+                width: 2,
+                height: 2
+            }
+        );
+        assert_eq!(result.image.width, 2);
+        assert_eq!(result.image.height, 2);
+        assert!(result.image.data.iter().all(|sample| sample.is_finite()));
+        assert_eq!(result.image.data[..3], [0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn cropping_normalizes_from_the_kept_region_only() {
+        let nan = f32::NAN;
+        // The bright pixel sits in the border that the crop removes, so it
+        // must not set the white point of the kept region.
+        let red = grid(3, 1, &[100.0, 0.0, 1.0]);
+        let green = grid(3, 1, &[nan, 0.0, 1.0]);
+        let blue = grid(3, 1, &[nan, 0.0, 1.0]);
+        let options = ColorOptions {
+            normalization: ColorNormalization::Percentile {
+                black_percentile: 0.0,
+                white_percentile: 1.0,
+                max_samples: 100,
+            },
+            crop: ColorCrop::Bounds,
+            ..ColorOptions::default()
+        };
+        let result = combine_rgb(&red, &green, &blue, &options).unwrap();
+        assert_eq!(
+            result.region,
+            ReferenceRegion {
+                x: 1,
+                y: 0,
+                width: 2,
+                height: 1
+            }
+        );
+        assert_eq!(result.image.data, [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn narrowband_cropping_ignores_a_channel_the_palette_does_not_use() {
+        let nan = f32::NAN;
+        let ha = grid(2, 1, &[0.2, 0.2]);
+        let oiii = grid(2, 1, &[0.3, 0.3]);
+        let unused_sii = grid(2, 1, &[nan, nan]);
+        let options = ColorOptions {
+            crop: ColorCrop::Inscribed,
+            ..raw_options()
+        };
+        let result = combine_narrowband(
+            &ha,
+            &oiii,
+            Some(&unused_sii),
+            NarrowbandPalette::Hoo,
+            &options,
+            &ForaxxOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(result.region.width, 2);
+        assert_eq!(result.image.data, [0.2, 0.3, 0.3, 0.2, 0.3, 0.3]);
+    }
+
+    #[test]
+    fn a_composition_carries_its_crop_diagnostics() {
+        let covered = |shift: usize| {
+            let mut values = vec![1.0_f32; 256 * 256];
+            for row in 0..shift {
+                for column in 0..256 {
+                    values[row * 256 + column] = f32::NAN;
+                }
+            }
+            LinearImage::new(256, 256, 1, values).unwrap()
+        };
+        let options = ColorOptions {
+            crop: ColorCrop::Inscribed,
+            ..raw_options()
+        };
+        let result = combine_rgb(&covered(0), &covered(1), &covered(90), &options).unwrap();
+        let report = result.crop.expect("a cropped composition reports coverage");
+        assert_eq!(report.region, result.region);
+        assert_eq!(report.region.y, 90);
+        assert!(report.retained_fraction() > 0.6);
+        let flagged = report.off_center().collect::<Vec<_>>();
+        assert_eq!(flagged.len(), 1);
+        assert_eq!(flagged[0].name, "blue");
+        assert!(flagged[0].center_offset_pixels() > 40.0);
+    }
+
+    #[test]
+    fn an_uncropped_composition_reports_no_coverage() {
+        let result = combine_rgb(
+            &mono(&[0.1, 0.2]),
+            &mono(&[0.3, 0.4]),
+            &mono(&[0.5, 0.6]),
+            &raw_options(),
+        )
+        .unwrap();
+        assert!(result.crop.is_none());
+    }
+
+    #[test]
+    fn cropping_rejects_channels_that_share_no_covered_pixel() {
+        let nan = f32::NAN;
+        let options = ColorOptions {
+            crop: ColorCrop::Inscribed,
+            ..raw_options()
+        };
+        let error = combine_rgb(
+            &grid(2, 1, &[0.1, nan]),
+            &grid(2, 1, &[nan, 0.2]),
+            &grid(2, 1, &[0.3, 0.3]),
+            &options,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("no pixel is covered"));
     }
 
     #[test]

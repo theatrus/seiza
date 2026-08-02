@@ -125,3 +125,50 @@ def test_foraxx_without_normalization_rejects_sensor_units() -> None:
             palette="foraxx-hoo",
             normalization="none",
         )
+
+
+def bordered(blank_rows: int) -> np.ndarray:
+    """A 128x128 frame blank across its top `blank_rows` rows."""
+    values = np.full((128, 128), 0.25, dtype=np.float32)
+    values[:blank_rows, :] = np.nan
+    return values
+
+
+def test_crop_trims_the_registration_border() -> None:
+    rgb = seiza.combine_rgb(
+        bordered(0),
+        bordered(3),
+        bordered(5),
+        normalization="none",
+        crop="inscribed",
+    )
+    assert rgb.shape == (123, 128, 3)
+    assert np.isfinite(rgb).all()
+
+
+def test_uncropped_composition_keeps_the_blank_border() -> None:
+    rgb = seiza.combine_rgb(
+        bordered(0), bordered(3), bordered(5), normalization="none"
+    )
+    assert rgb.shape == (128, 128, 3)
+    assert np.isnan(rgb[0, 0, 0])
+
+
+def test_crop_report_flags_a_channel_far_from_the_others() -> None:
+    report = seiza.crop_report(
+        {"red": bordered(0), "green": bordered(2), "blue": bordered(80)},
+        crop="inscribed",
+    )
+    assert report["region"] == (0, 80, 128, 48)
+    assert report["grid"] == (128, 128)
+    assert report["retained_fraction"] == pytest.approx(48 / 128)
+    flagged = [
+        channel for channel in report["channels"] if channel["off_center"]
+    ]
+    assert [channel["name"] for channel in flagged] == ["blue"]
+    assert flagged[0]["center_offset_pixels"] > 32.0
+
+
+def test_crop_report_rejects_an_unknown_mode() -> None:
+    with pytest.raises(ValueError, match="crop must be"):
+        seiza.crop_report({"red": bordered(0)}, crop="tightest")

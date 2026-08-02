@@ -370,6 +370,9 @@ seiza color narrowband --ha ha.fits --oiii oiii.fits --sii sii.fits \
 
 seiza color narrowband --ha ha.fits --oiii oiii.fits --sii sii.fits \
   --palette foraxx-sho --preview foraxx.png
+
+seiza color rgb --red r.fits --green g.fits --blue b.fits \
+  --crop inscribed --output rgb.fits
 ```
 
 RGB, LRGB, additive super-LRGB (`L + R + G + B`), synthetic super-RGB
@@ -381,6 +384,12 @@ design](docs/design/color-composition.md) for normalization, equations, and
 the distinction between linear CIE-luminance replacement and display palettes.
 The CLI automatically registers filter stacks onto L, R, or H-alpha before
 composition; pass `--no-register` only for masters already sharing one grid.
+Registration leaves blank edges where a channel did not reach. `--crop bounds`
+trims to the box every channel covers and `--crop inscribed` to the largest
+rectangle they all cover in full, which also removes the corners a rotated or
+meridian-flipped channel leaves behind. A crop moves the written `CRPIX` onto
+the new grid, scales every channel from the kept region alone, and names any
+channel whose coverage sits far from the others.
 
 | Direct linear SHO | Foraxx-SHO quick look |
 | --- | --- |
@@ -570,6 +579,8 @@ seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-
 - **Color from mono stacks** — RGB, LRGB with native or additive
   super-luminance modes, SHO/HOO and every direct three-filter permutation,
   Foraxx quick looks, and custom mixing matrices, all in linear light.
+  Optional cropping to the area every channel covers, with a warning for the
+  channel that sits away from the rest.
 - **Satellite track prediction** — single-exposure tracks from current or
   historical OMM/TLE element sets, with annotated overlays, in
   `seiza-satellites`.

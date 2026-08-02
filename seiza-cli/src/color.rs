@@ -3,8 +3,8 @@ use crate::provenance::validate_path_roles;
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand, ValueEnum};
 use seiza_stacking::{
-    ColorComposition, ColorNormalization, ColorOptions, ColorTransfer, FitsFrame, ForaxxOptions,
-    LinearImage, NarrowbandPalette, Registrar, RegistrationOptions, combine_lrgb,
+    ColorComposition, ColorCrop, ColorNormalization, ColorOptions, ColorTransfer, FitsFrame,
+    ForaxxOptions, LinearImage, NarrowbandPalette, Registrar, RegistrationOptions, combine_lrgb,
     combine_narrowband, combine_rgb, combine_super_lrgb, combine_super_rgb, resample_to_reference,
     write_color_fits_f32,
 };
@@ -118,6 +118,9 @@ struct CommonArgs {
     /// Maximum samples per channel used to estimate percentile levels
     #[arg(long, default_value_t = 1_000_000)]
     normalization_samples: usize,
+    /// Trim the output to the area every channel covers
+    #[arg(long, value_enum, default_value = "none")]
+    crop: CropArg,
     /// Trust that input channel stacks already share an identical pixel grid
     #[arg(long)]
     no_register: bool,
@@ -142,6 +145,26 @@ struct CommonArgs {
 enum ColorNormalizationArg {
     None,
     Percentile,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CropArg {
+    /// Keep the whole reference grid; uncovered pixels stay blank
+    None,
+    /// Keep the bounding box of the covered pixels
+    Bounds,
+    /// Keep the largest rectangle every channel covers in full
+    Inscribed,
+}
+
+impl From<CropArg> for ColorCrop {
+    fn from(value: CropArg) -> Self {
+        match value {
+            CropArg::None => Self::None,
+            CropArg::Bounds => Self::Bounds,
+            CropArg::Inscribed => Self::Inscribed,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -208,6 +231,7 @@ fn run_rgb(args: RgbArgs) -> Result<()> {
             "SUPER-RGB",
         ),
     };
+    report_crop(&composition);
     write_outputs(&args.common, &composition, &red.headers, label)
 }
 
@@ -256,6 +280,7 @@ fn run_lrgb(args: LrgbArgs) -> Result<()> {
             "SUPER-LRGB",
         ),
     };
+    report_crop(&composition);
     write_outputs(&args.common, &composition, &luminance.headers, label)
 }
 
@@ -304,6 +329,7 @@ fn run_narrowband(args: NarrowbandArgs) -> Result<()> {
             shadows_clip: args.foraxx_shadows_clip,
         },
     )?;
+    report_crop(&composition);
     write_outputs(&args.common, &composition, &ha.headers, palette.name())
 }
 
@@ -319,6 +345,7 @@ impl CommonArgs {
         };
         ColorOptions {
             normalization,
+            crop: self.crop.into(),
             ..ColorOptions::default()
         }
     }
@@ -373,6 +400,33 @@ impl CommonArgs {
             reference.height,
             registration.transform,
         )?)
+    }
+}
+
+fn report_crop(composition: &ColorComposition) {
+    let Some(report) = composition.crop.as_ref() else {
+        return;
+    };
+    let region = report.region;
+    println!(
+        "cropped to {}x{} at ({}, {}) of {}x{}: {:.1}% kept",
+        region.width,
+        region.height,
+        region.x,
+        region.y,
+        report.grid_width,
+        report.grid_height,
+        report.retained_fraction() * 100.0,
+    );
+    for channel in report.off_center() {
+        eprintln!(
+            "warning: {} covers a patch {:.0}px off center from the other channels \
+             ({:+.0}, {:+.0}); it is the likely cause of a small crop",
+            channel.name,
+            channel.center_offset_pixels(),
+            channel.center_offset_x,
+            channel.center_offset_y,
+        );
     }
 }
 

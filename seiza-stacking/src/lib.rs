@@ -4,6 +4,7 @@
 mod calibration;
 mod color;
 mod context;
+mod crop;
 mod fits;
 mod image;
 mod mapping;
@@ -21,6 +22,7 @@ pub use color::{
     NarrowbandMatrix, NarrowbandMix, NarrowbandPalette, combine_lrgb, combine_narrowband,
     combine_narrowband_matrix, combine_rgb, combine_super_lrgb, combine_super_rgb,
 };
+pub use crop::{ChannelCoverage, ColorCrop, CropReport, covered_region, crop_report};
 pub use fits::{
     FitsFrame, write_color_fits_f32, write_fits_f32, write_linear_image_fits_f32,
     write_master_fits_f32, write_processed_image_fits_f32,
