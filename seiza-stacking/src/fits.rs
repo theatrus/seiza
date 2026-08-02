@@ -393,6 +393,7 @@ fn preserve_wcs_key(key: &str) -> bool {
             | "EQUINOX"
             | "LONPOLE"
             | "LATPOLE"
+            | "SKYORIEN"
     ) || key.starts_with("CD1_")
         || key.starts_with("CD2_")
         || key.starts_with("PC1_")
@@ -635,6 +636,13 @@ mod tests {
             ),
             ("FILTER".into(), HeaderValue::String("H-alpha".into())),
             ("OBJECT".into(), HeaderValue::String("Sh2-132".into())),
+            ("CRPIX1".into(), HeaderValue::Float(1.5)),
+            ("CRPIX2".into(), HeaderValue::Float(1.5)),
+            ("CRVAL1".into(), HeaderValue::Float(120.0)),
+            ("CRVAL2".into(), HeaderValue::Float(30.0)),
+            ("CTYPE1".into(), HeaderValue::String("RA---TAN".into())),
+            ("CTYPE2".into(), HeaderValue::String("DEC--TAN".into())),
+            ("SKYORIEN".into(), HeaderValue::String("N-UP E-LEFT".into())),
         ];
         write_processed_image_fits_f32(&path, &image, &reference_headers, &[]).unwrap();
         let decoded = FitsImage::open(&path).unwrap();
@@ -642,6 +650,7 @@ mod tests {
         assert_eq!(decoded.header_str("DATE-OBS"), Some("2026-01-02T03:04:05Z"));
         assert_eq!(decoded.header_str("FILTER"), Some("H-alpha"));
         assert_eq!(decoded.header_str("OBJECT"), Some("Sh2-132"));
+        assert_eq!(decoded.header_str("SKYORIEN"), Some("N-UP E-LEFT"));
     }
 
     #[test]
