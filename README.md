@@ -314,27 +314,40 @@ operation without treating attractive edits as ground truth.
 
 ### Automatic background extraction
 
-`seiza background` estimates a smooth gradient from robust sample windows in
-a linear mono or RGB FITS/XISF image. The default quadratic model is fit per channel
-at shared, deterministically selected positions; locally noisy samples and
-samples inconsistent with the fitted surface are rejected. Output remains
-linear `float32` and retains a valid input WCS.
+`seiza background` estimates a smooth gradient from robust sample windows in a
+linear mono or RGB FITS/XISF image. It defaults to automatic held-out selection
+among conservative polynomial degrees. A smoothed thin-plate radial-basis model
+is available manually, or as an explicit `--auto-rbf` candidate when an image
+has suitable background regions. The selected model is fit per channel at
+shared positions; locally noisy samples and samples inconsistent with the
+surface are rejected. Output remains linear `float32` and retains a valid input
+WCS.
 
 ```text
 seiza background stack.fits --output corrected.fits \
   --model-output background.fits --diagnostics background.json
 
-# A conservative plane for a simple additive gradient
-seiza background stack.fits --output corrected.fits --degree 1
+# Force a conservative plane for a simple additive gradient
+seiza background stack.fits --output corrected.fits --model polynomial --degree 1
+
+# Tune an irregular model and apply only 70% of its correction
+seiza background stack.fits --output corrected.fits --model radial-basis \
+  --rbf-smoothing 0.03 --strength 0.7
+
+# Let held-out selection consider RBF after inspecting or masking the field
+seiza background stack.fits --output corrected.fits --auto-rbf
 
 # Multiplicative illumination correction
 seiza background stack.fits --output corrected.fits --mode divide
 ```
 
-Fitting itself retains only compact samples and coefficients. Correction can
-run in place; a full-resolution model is allocated only when requested. Rust
-and Python expose the same fit/apply split and accept an exclusion mask for
-extended structures. See the
+Automatic diagnostics include each candidate's normalized validation error and
+the selected surface. Fitting retains only compact samples and coefficients.
+Correction can run in place; a full-resolution model is allocated only when
+requested. Rust, Python, and the C ABI expose the same fit/apply split and
+accept an exclusion mask for extended structures. The Rust and JSON configs
+also accept normalized ellipse or polygon regions, so solved OpenNGC outlines
+can protect real targets at preview and full resolution. See the
 [background-extraction design](docs/design/background-extraction.md) for the
 ADBE-inspired sampling strategy, correction math, memory behavior, and limits.
 
@@ -537,7 +550,8 @@ seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-
   `seiza-stretch`. Analysis, curve resolution, and application are separate so
   interactive and full-resolution pipeline stages can share an exact plan.
 - **Background extraction** — deterministic low-noise sample selection,
-  robust rejection, weighted polynomial surfaces, additive subtraction, and
+  robust rejection, weighted polynomial and smoothed thin-plate radial-basis
+  surfaces, held-out automatic model selection, additive subtraction, and
   multiplicative correction in `seiza-background`. Model fitting is compact;
   rendering a full model image is explicit.
 - **Image stacking** — master bias/dark/flat construction, CFA-aware OSC

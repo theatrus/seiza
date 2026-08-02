@@ -67,11 +67,29 @@ fn background_cli_writes_corrected_model_and_diagnostics() {
             .and_then(HeaderValue::as_str),
         Some("SUBTRACT")
     );
+    assert_eq!(
+        output_headers
+            .header("BGMODEL")
+            .and_then(HeaderValue::as_str),
+        Some("POLYNOMIAL")
+    );
+    assert_eq!(output_headers.header_f64("BGSTR"), Some(1.0));
     assert_eq!(output_headers.header_f64("CRVAL1"), Some(180.0));
     assert!(model.is_file());
     let report: serde_json::Value =
         serde_json::from_slice(&std::fs::read(diagnostics).unwrap()).unwrap();
     assert!(report["diagnostics"]["accepted_samples"].as_u64().unwrap() > 10);
+    assert_eq!(
+        report["diagnostics"]["model_selection"]["selected"],
+        "polynomial_1"
+    );
+    assert_eq!(
+        report["diagnostics"]["model_selection"]["candidates"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
 }
 
 #[test]

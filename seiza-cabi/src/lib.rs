@@ -47,11 +47,23 @@ impl StretchConfigRequest {
     }
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 struct BackgroundRenderRequest {
     mode: CorrectionMode,
+    /// Fraction of the fitted correction to apply, in `[0, 1]`.
+    strength: f64,
     config: BackgroundConfig,
+}
+
+impl Default for BackgroundRenderRequest {
+    fn default() -> Self {
+        Self {
+            mode: CorrectionMode::default(),
+            strength: 1.0,
+            config: BackgroundConfig::default(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -828,6 +840,35 @@ pub unsafe extern "C" fn seiza_background_model_correct_in_place(
         model
             .fit
             .correct_in_place(data, mode)
+            .map_err(|error| error.to_string())
+    })
+    .is_some()
+}
+
+#[unsafe(no_mangle)]
+/// Corrects an interleaved linear float buffer in place with a fractional
+/// strength. Zero leaves the image unchanged; one applies the full correction.
+///
+/// # Safety
+/// `model` must be a live pointer returned by [`seiza_background_fit`]. `data`
+/// must point to `data_length` writable floats. When non-null, `error_out` must
+/// point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_background_model_correct_in_place_with_strength(
+    model: *const SeizaBackgroundModel,
+    data: *mut f32,
+    data_length: usize,
+    mode: u32,
+    strength: f64,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let model = unsafe { required_background_model(model)? };
+        let data = unsafe { required_f32_slice_mut(data, data_length, "background input")? };
+        let mode = background_correction_mode(mode)?;
+        model
+            .fit
+            .correct_in_place_with_strength(data, mode, strength)
             .map_err(|error| error.to_string())
     })
     .is_some()
@@ -2818,10 +2859,12 @@ fn prepare_fits_render(
             &background.config,
         )
         .map_err(|error| format!("failed to fit image background: {error}"))?;
-        fit.correct_in_place(&mut data, background.mode)
+        fit.correct_in_place_with_strength(&mut data, background.mode, background.strength)
             .map_err(|error| format!("failed to correct image background: {error}"))?;
         let metadata = json!({
             "mode": background.mode,
+            "strength": background.strength,
+            "model": fit.model.family_name(),
             "diagnostics": &fit.diagnostics,
             "reference": &fit.reference,
         });
@@ -4203,6 +4246,25 @@ mod tests {
         let rmse = mse.sqrt();
         assert!(rmse < 0.003, "background RMSE was {rmse}");
 
+        let mut half_corrected = image.clone();
+        assert!(unsafe {
+            seiza_background_model_correct_in_place_with_strength(
+                model,
+                half_corrected.as_mut_ptr(),
+                half_corrected.len(),
+                SEIZA_BACKGROUND_CORRECTION_SUBTRACT,
+                0.5,
+                &mut error,
+            )
+        });
+        let left = height / 2 * width + 3;
+        let right = height / 2 * width + width - 4;
+        assert!(
+            ((half_corrected[right] - half_corrected[left]) - (image[right] - image[left]) * 0.5)
+                .abs()
+                < 0.003
+        );
+
         let mut corrected = image.clone();
         assert!(unsafe {
             seiza_background_model_correct_in_place(
@@ -4213,9 +4275,7 @@ mod tests {
                 &mut error,
             )
         });
-        let left = corrected[height / 2 * width + 3];
-        let right = corrected[height / 2 * width + width - 4];
-        assert!((left - right).abs() < 0.003);
+        assert!((corrected[left] - corrected[right]).abs() < 0.003);
         unsafe { seiza_background_model_free(model) };
     }
 
@@ -4777,7 +4837,11 @@ mod tests {
                 "mode": "subtract",
                 "config": {
                     "model": { "kind": "polynomial", "degree": 1, "ridge": 0.0 },
-                    "sample_radius": 2
+                    "sample_radius": 2,
+                    "protected_regions": [{
+                        "kind": "polygon",
+                        "points": [[0.2, 0.2], [0.8, 0.2], [0.5, 0.8]]
+                    }]
                 }
             }
         }))
@@ -4788,7 +4852,9 @@ mod tests {
         assert!(deconvolution.is_none());
         let background = background.unwrap();
         assert_eq!(background.mode, CorrectionMode::Subtract);
+        assert_eq!(background.strength, 1.0);
         assert_eq!(background.config.sample_radius, Some(2));
+        assert_eq!(background.config.protected_regions.len(), 1);
     }
 
     #[test]
@@ -4810,6 +4876,7 @@ mod tests {
         let stack = StretchStack::single(stretch);
         let background = BackgroundRenderRequest {
             mode: CorrectionMode::Subtract,
+            strength: 0.5,
             config: serde_json::from_value(json!({
                 "model": { "kind": "polynomial", "degree": 1, "ridge": 0.0 },
                 "sample_radius": 2
@@ -4833,6 +4900,8 @@ mod tests {
         let metadata: Value =
             serde_json::from_str(corrected.metadata_json.to_str().unwrap()).unwrap();
         assert_eq!(metadata["backgroundProcessing"]["mode"], "subtract");
+        assert_eq!(metadata["backgroundProcessing"]["strength"], 0.5);
+        assert_eq!(metadata["backgroundProcessing"]["model"], "polynomial");
         assert!(metadata["backgroundProcessing"]["diagnostics"].is_object());
         assert_eq!(metadata["inputHistogram"]["lowerBound"], 0.0);
         assert_eq!(metadata["inputHistogram"]["upperBound"], 1.0);

@@ -56,3 +56,33 @@ def test_background_model_rejects_unknown_correction_modes() -> None:
     model = seiza.fit_background(image, degree=1, sample_radius=2)
     with pytest.raises(ValueError, match="subtract or divide"):
         model.correct(image, mode="future")
+
+
+def test_background_model_exposes_automatic_selection_and_strength() -> None:
+    height, width = 84, 112
+    y, x = np.mgrid[-1.0:1.0:complex(height), -1.0:1.0:complex(width)]
+    image = np.asarray(
+        0.3
+        + 0.04 * x
+        - 0.025 * y
+        + 0.055 * np.sin(np.pi * x) * np.cos(np.pi * y / 2.0),
+        dtype=np.float32,
+    )
+    model = seiza.fit_background(
+        image,
+        model="automatic",
+        degree=2,
+        rbf_smoothing=0.002,
+        allow_radial_basis=True,
+        minimum_improvement=0.08,
+        samples_per_axis=14,
+        sample_radius=1,
+        search_steps=0,
+    )
+    assert model.model_kind == "radial_basis"
+    assert model.diagnostics["model_selection"]["selected"] == "radial_basis"
+    assert model.diagnostics["model_selection"]["candidates"][-1]["model"] == "radial_basis"
+    unchanged = model.correct(image, strength=0.0)
+    assert np.array_equal(unchanged, image)
+    full = model.correct(image, strength=1.0)
+    assert np.std(full) < np.std(image) * 0.1

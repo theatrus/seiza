@@ -2,7 +2,7 @@ use crate::arrays::{float_array, float_image_view};
 use numpy::{PyArrayDyn, PyReadonlyArrayDyn, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 use seiza_background::{
     BackgroundConfig, BackgroundFit, CorrectionMode, ModelConfig, SampleStatus,
     fit_background_masked,
@@ -38,6 +38,11 @@ impl PyBackgroundModel {
     }
 
     #[getter]
+    fn model_kind(&self) -> &'static str {
+        self.fit.model.family_name()
+    }
+
+    #[getter]
     fn diagnostics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let diagnostics = PyDict::new(py);
         diagnostics.set_item("candidate_samples", self.fit.diagnostics.candidate_samples)?;
@@ -49,6 +54,20 @@ impl PyBackgroundModel {
             self.fit.diagnostics.rejection_iterations,
         )?;
         diagnostics.set_item("sample_radius", self.fit.diagnostics.sample_radius)?;
+        diagnostics.set_item("protected_regions", self.fit.diagnostics.protected_regions)?;
+        if let Some(selection) = &self.fit.diagnostics.model_selection {
+            let model_selection = PyDict::new(py);
+            model_selection.set_item("selected", &selection.selected)?;
+            let candidates = PyList::empty(py);
+            for candidate in &selection.candidates {
+                let item = PyDict::new(py);
+                item.set_item("model", &candidate.model)?;
+                item.set_item("validation_error", candidate.validation_error)?;
+                candidates.append(item)?;
+            }
+            model_selection.set_item("candidates", candidates)?;
+            diagnostics.set_item("model_selection", model_selection)?;
+        }
         Ok(diagnostics)
     }
 
@@ -93,12 +112,13 @@ impl PyBackgroundModel {
     ///
     /// The input array is read in place while the GIL is released; do not
     /// mutate it from another thread until the call returns.
-    #[pyo3(signature = (image, *, mode="subtract"))]
+    #[pyo3(signature = (image, *, mode="subtract", strength=1.0))]
     fn correct<'py>(
         &self,
         py: Python<'py>,
         image: PyReadonlyArrayDyn<'_, f32>,
         mode: &str,
+        strength: f64,
     ) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
         let image = float_image_view(&image)?;
         if (image.width, image.height, image.channels)
@@ -110,35 +130,41 @@ impl PyBackgroundModel {
         }
         let mode = correction_mode(mode)?;
         let corrected = py
-            .allow_threads(|| self.fit.correct(image.data, mode))
+            .allow_threads(|| self.fit.correct_with_strength(image.data, mode, strength))
             .map_err(|error| crate::EngineError::new_err(error.to_string()))?;
         float_array(py, image.width, image.height, image.channels, corrected)
     }
 
     fn __repr__(&self) -> String {
         format!(
-            "BackgroundModel(width={}, height={}, channels={}, accepted_samples={})",
+            "BackgroundModel(width={}, height={}, channels={}, model={}, accepted_samples={})",
             self.fit.width,
             self.fit.height,
             self.fit.channels,
+            self.fit.model.family_name(),
             self.fit.diagnostics.accepted_samples,
         )
     }
 }
 
-/// Fit a deterministic robust polynomial background to a linear image.
+/// Fit a deterministic robust background or gradient model to a linear image.
 ///
 /// The input arrays are read in place while the GIL is released; do not
 /// mutate them from another thread until the call returns.
 #[pyfunction]
-#[pyo3(signature = (image, *, mask=None, degree=2, ridge=1.0e-8, samples_per_axis=12, sample_radius=None, search_steps=4, sample_rejection_sigma=3.5, fit_rejection_sigma=3.0, fit_rejection_iterations=3, border_fraction=0.03))]
+#[pyo3(signature = (image, *, mask=None, model="polynomial", degree=2, ridge=1.0e-8, rbf_smoothing=0.01, max_control_points=192, allow_radial_basis=false, minimum_improvement=0.12, samples_per_axis=12, sample_radius=None, search_steps=4, sample_rejection_sigma=3.5, fit_rejection_sigma=3.0, fit_rejection_iterations=3, border_fraction=0.03))]
 #[allow(clippy::too_many_arguments)]
 fn fit_background(
     py: Python<'_>,
     image: PyReadonlyArrayDyn<'_, f32>,
     mask: Option<PyReadonlyArrayDyn<'_, bool>>,
+    model: &str,
     degree: u8,
     ridge: f64,
+    rbf_smoothing: f64,
+    max_control_points: usize,
+    allow_radial_basis: bool,
+    minimum_improvement: f64,
     samples_per_axis: usize,
     sample_radius: Option<usize>,
     search_steps: usize,
@@ -162,8 +188,17 @@ fn fit_background(
         }
         None => None,
     };
+    let model = background_model(
+        model,
+        degree,
+        ridge,
+        rbf_smoothing,
+        max_control_points,
+        allow_radial_basis,
+        minimum_improvement,
+    )?;
     let config = BackgroundConfig {
-        model: ModelConfig::Polynomial { degree, ridge },
+        model,
         samples_per_axis,
         sample_radius,
         search_steps,
@@ -171,6 +206,7 @@ fn fit_background(
         fit_rejection_sigma,
         fit_rejection_iterations,
         border_fraction,
+        protected_regions: Vec::new(),
     };
     let fit = py
         .allow_threads(|| {
@@ -185,6 +221,35 @@ fn fit_background(
         })
         .map_err(|error| crate::EngineError::new_err(error.to_string()))?;
     Ok(PyBackgroundModel { fit })
+}
+
+fn background_model(
+    model: &str,
+    degree: u8,
+    ridge: f64,
+    rbf_smoothing: f64,
+    max_control_points: usize,
+    allow_radial_basis: bool,
+    minimum_improvement: f64,
+) -> PyResult<ModelConfig> {
+    match model.to_ascii_lowercase().replace('-', "_").as_str() {
+        "automatic" | "auto" => Ok(ModelConfig::Automatic {
+            max_degree: degree,
+            ridge,
+            rbf_smoothing,
+            max_control_points,
+            allow_radial_basis,
+            minimum_improvement,
+        }),
+        "polynomial" | "poly" => Ok(ModelConfig::Polynomial { degree, ridge }),
+        "radial_basis" | "rbf" => Ok(ModelConfig::RadialBasis {
+            smoothing: rbf_smoothing,
+            max_control_points,
+        }),
+        _ => Err(PyValueError::new_err(
+            "background model must be automatic, polynomial, or radial_basis",
+        )),
+    }
 }
 
 fn correction_mode(mode: &str) -> PyResult<CorrectionMode> {
