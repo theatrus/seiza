@@ -46,6 +46,15 @@ impl Default for BackgroundConfig {
     }
 }
 
+impl BackgroundConfig {
+    /// Validate the configuration without fitting an image.
+    ///
+    /// API and UI callers can use this before they enqueue expensive work.
+    pub fn validate(&self) -> Result<()> {
+        validate_config(self)
+    }
+}
+
 /// Image-relative bounds that protect known targets or extended structures.
 /// Coordinates and radii are fractions of image width and height.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1737,6 +1746,16 @@ fn normalized_coordinate(value: usize, extent: usize) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configuration_can_be_validated_before_fitting() {
+        assert!(BackgroundConfig::default().validate().is_ok());
+        let invalid = BackgroundConfig {
+            samples_per_axis: 2,
+            ..BackgroundConfig::default()
+        };
+        assert!(matches!(invalid.validate(), Err(Error::InvalidConfig(_))));
+    }
 
     fn plane(width: usize, height: usize, channels: usize) -> Vec<f32> {
         let mut data = Vec::with_capacity(width * height * channels);
