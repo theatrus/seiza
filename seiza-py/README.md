@@ -282,6 +282,16 @@ flat = seiza.build_flat(flat_paths, "master-flat.fits",
                         dark_flat="master-dark-flat.fits")
 ```
 
+Each builder reads every input twice, so a master over dozens of frames runs
+for minutes. Pass `cancel=` a predicate to stop one early — it is called once
+per input and raises `StackError` when it returns true. Ctrl-C is honoured at
+the same points, without a predicate.
+
+```python
+stop = threading.Event()
+dark = seiza.build_dark(dark_paths, "master-dark.fits", cancel=stop.is_set)
+```
+
 ## Image processing primitives
 
 OpenCV-compatible building blocks from `seiza-imgproc`, for detection

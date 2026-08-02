@@ -222,6 +222,40 @@ def test_fits_live_stacker_protects_inputs_from_duplicates_and_output(tmp_path):
     assert output.exists()
 
 
+def test_build_bias_stops_when_the_cancel_predicate_says_so(tmp_path):
+    paths = []
+    for index in range(3):
+        path = tmp_path / f"bias-{index:03d}.fits"
+        fits.writeto(path, np.full((16, 20), 100.0, dtype=np.float32), overwrite=True)
+        paths.append(path)
+    output = tmp_path / "master-bias.fits"
+    checks = []
+
+    def cancel():
+        checks.append(len(checks))
+        return len(checks) > 1
+
+    with pytest.raises(seiza.StackError, match="cancelled"):
+        seiza.build_bias(paths, output, cancel=cancel)
+
+    assert not output.exists()
+
+
+def test_build_bias_reports_an_exception_raised_by_the_cancel_predicate(tmp_path):
+    paths = []
+    for index in range(2):
+        path = tmp_path / f"bias-{index:03d}.fits"
+        fits.writeto(path, np.full((16, 20), 100.0, dtype=np.float32), overwrite=True)
+        paths.append(path)
+    output = tmp_path / "master-bias.fits"
+
+    def cancel():
+        raise LookupError("no job registry")
+
+    with pytest.raises(LookupError, match="no job registry"):
+        seiza.build_bias(paths, output, cancel=cancel)
+
+
 def test_build_bias_writes_master_metadata_and_statistics(tmp_path):
     first = tmp_path / "bias-001.fits"
     second = tmp_path / "bias-002.fits"
