@@ -16,6 +16,27 @@ The first release supports:
 - versioned, checksummed, atomic live-stack checkpoints that can be reopened;
 - floating-point FITS output on the reference frame's pixel grid.
 
+## Canonical sky orientation
+
+`SkyOrientationPlan` reprojects an integrated mono or RGB image onto a
+north-up, east-left TAN grid. It keeps the solved field center and geometric-
+mean pixel scale, expands the output enough to retain the four source corners,
+and returns the exact source-to-output `AffineTransform`. The transform handles
+camera parity as well as rotation, so two stacks from different optical paths
+share one display convention.
+
+The affine path accepts an undistorted TAN solution. It rejects missing,
+singular, or SIP WCS rather than labeling an unknown view as sky-up. Its FITS
+cards replace the source matrix as one unit and record `SKYORIEN =
+'N-UP E-LEFT'`. Use the plan's `fits_header_cards` with
+`write_processed_image_fits_f32` when publishing the reprojected image.
+
+`RegisteredFrameMapping::extract_region_after_affine` maps a crop on that
+oriented output back through the original registration and normalization. This
+keeps source-frame inspection aligned with the displayed stack without
+building every full registered frame. The existing similarity-only method now
+uses the same affine path.
+
 After integration, `combine_rgb`, `combine_lrgb`, `combine_super_lrgb`,
 `combine_super_rgb`, and `combine_narrowband` compose aligned mono stacks
 without coupling color into the live accumulator. The direct SHO permutations

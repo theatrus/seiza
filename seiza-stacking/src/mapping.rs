@@ -1,6 +1,7 @@
 use crate::{
-    Error, LinearImage, NormalizationMap, ReferenceRegion, Result, SimilarityTransform,
-    resample_region_to_reference, resample_to_reference,
+    AffineTransform, Error, LinearImage, NormalizationMap, ReferenceRegion, Result,
+    SimilarityTransform, resample_region_to_reference, resample_region_to_reference_affine,
+    resample_to_reference,
 };
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
@@ -145,15 +146,35 @@ impl RegisteredFrameMapping {
         output_region: ReferenceRegion,
         reference_to_output: SimilarityTransform,
     ) -> Result<LinearImage> {
+        self.extract_region_after_affine(
+            source,
+            output_width,
+            output_height,
+            output_region,
+            reference_to_output.as_affine(),
+        )
+    }
+
+    /// Extract a region after a general affine output reprojection. This keeps
+    /// parity-changing sky orientation tied to the exact source registration
+    /// and normalization provenance.
+    pub fn extract_region_after_affine(
+        &self,
+        source: &LinearImage,
+        output_width: usize,
+        output_height: usize,
+        output_region: ReferenceRegion,
+        reference_to_output: AffineTransform,
+    ) -> Result<LinearImage> {
         self.validate()?;
         reference_to_output.validate()?;
         if self.normalization.is_global() {
-            let mut crop = resample_region_to_reference(
+            let mut crop = resample_region_to_reference_affine(
                 source,
                 output_width,
                 output_height,
                 output_region,
-                self.transform.then(reference_to_output),
+                self.transform.as_affine().then(reference_to_output),
             )?;
             self.normalization.apply_global(&mut crop)?;
             return Ok(crop);
@@ -166,7 +187,7 @@ impl RegisteredFrameMapping {
             self.transform,
         )?;
         self.normalization.apply(&mut intermediate)?;
-        resample_region_to_reference(
+        resample_region_to_reference_affine(
             &intermediate,
             output_width,
             output_height,
@@ -233,6 +254,38 @@ mod tests {
         value["schema_version"] = serde_json::json!(2);
 
         assert!(serde_json::from_value::<RegisteredFrameMapping>(value).is_err());
+    }
+
+    #[test]
+    fn affine_output_stage_keeps_source_mapping_and_normalization() {
+        let source = LinearImage::new(4, 2, 1, (0..8).map(|value| value as f32).collect()).unwrap();
+        let mapping = RegisteredFrameMapping::new(
+            4,
+            2,
+            SimilarityTransform::IDENTITY,
+            NormalizationMap::identity(&source),
+        )
+        .unwrap();
+        let crop = mapping
+            .extract_region_after_affine(
+                &source,
+                4,
+                2,
+                ReferenceRegion {
+                    x: 1,
+                    y: 0,
+                    width: 2,
+                    height: 2,
+                },
+                AffineTransform {
+                    matrix: [[-1.0, 0.0], [0.0, 1.0]],
+                    translation_x: 3.0,
+                    translation_y: 0.0,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(crop.data, vec![2.0, 1.0, 6.0, 5.0]);
     }
 
     #[test]
