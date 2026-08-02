@@ -60,6 +60,20 @@ than stretching those inputs twice. The separate `ForaxxOptions` controls the
 default display preparation used only when dynamic Foraxx palettes receive
 linear inputs.
 
+`ColorOptions::crop` trims a composition to the area every channel covers,
+which registration otherwise leaves ringed with `NaN`. `ColorCrop::Bounds`
+keeps the bounding box of the covered pixels; `ColorCrop::Inscribed` keeps the
+largest rectangle every channel covers in full, removing the corners a rotated
+or meridian-flipped channel leaves behind. Percentile levels are then estimated
+from the kept region alone, and composition indexes back into the caller's
+full-size planes rather than copying cropped channels. The result carries its
+`ReferenceRegion` on the input grid, and `write_color_fits_f32` moves `CRPIX`
+onto that grid. `ColorComposition::crop` reports each channel's own coverage
+and flags one that sits far from where the others agree — the channel that
+pulled the crop in. `crop_report` and `covered_region` expose the same search
+for callers cropping something other than a composition; `crop_report` takes
+borrowed `ChannelSamples`, so a host measuring its own buffers copies nothing.
+
 Callers that inspect a small area can use `resample_region_to_reference` with
 a `ReferenceRegion`. It applies the same transform and interpolation as the
 full-frame path while allocating only the requested crop. The returned crop's

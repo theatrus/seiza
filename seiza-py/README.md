@@ -239,6 +239,19 @@ hoo = seiza.combine_narrowband(ha, oiii, palette="hoo")
 foraxx = seiza.combine_narrowband(ha, oiii, sii, palette="foraxx-sho")
 ```
 
+Pass `crop="bounds"` or `crop="inscribed"` to trim the blank edges that
+registering one channel onto another leaves behind. `bounds` keeps the box
+every channel covers; `inscribed` keeps the largest rectangle they all cover in
+full, so nothing stays `NaN`. `seiza.crop_report` measures the same thing
+without composing, and names any channel whose coverage sits far from the
+others:
+
+```python
+report = seiza.crop_report({"red": red, "green": green, "blue": blue})
+x, y, width, height = report["region"]
+stray = [c["name"] for c in report["channels"] if c["off_center"]]
+```
+
 The default percentile normalization is a quick-look channel match. Pass
 `normalization="none"` for already matched inputs. Foraxx inputs must also
 already lie in `[0, 1]` in that mode; keep percentile normalization for

@@ -1,4 +1,4 @@
-use crate::{Error, Result};
+use crate::{Error, ReferenceRegion, Result};
 use seiza_fits::{BayerPattern, debayer_rgb_f32};
 
 /// A row-major, interleaved linear image with one or three channels.
@@ -56,6 +56,37 @@ impl LinearImage {
         self.width == other.width && self.height == other.height && self.channels == other.channels
     }
 
+    /// Copy a region of this image into a new image of that size.
+    ///
+    /// The region is in this image's pixel coordinates and must lie inside it.
+    pub fn crop(&self, region: ReferenceRegion) -> Result<Self> {
+        let past_right = region.x.checked_add(region.width);
+        let past_bottom = region.y.checked_add(region.height);
+        if region.width == 0
+            || region.height == 0
+            || past_right.is_none_or(|edge| edge > self.width)
+            || past_bottom.is_none_or(|edge| edge > self.height)
+        {
+            return Err(Error::InvalidImage(format!(
+                "crop region {}x{} at ({}, {}) does not fit a {}x{} image",
+                region.width, region.height, region.x, region.y, self.width, self.height
+            )));
+        }
+        if region.x == 0
+            && region.y == 0
+            && region.width == self.width
+            && region.height == self.height
+        {
+            return Ok(self.clone());
+        }
+        let mut data = Vec::with_capacity(region.width * region.height * self.channels);
+        for row in region.y..region.y + region.height {
+            let start = (row * self.width + region.x) * self.channels;
+            data.extend_from_slice(&self.data[start..start + region.width * self.channels]);
+        }
+        Self::new(region.width, region.height, self.channels, data)
+    }
+
     /// One luminance value per pixel: the sample itself for mono, Rec.709 luma
     /// for RGB.
     pub fn luminance(&self) -> Vec<f32> {
@@ -105,6 +136,63 @@ pub(crate) fn rec709_luma(red: f32, green: f32, blue: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crop_copies_the_requested_region() {
+        let image = LinearImage::new(4, 3, 1, (0..12).map(|v| v as f32).collect()).unwrap();
+        let region = ReferenceRegion {
+            x: 1,
+            y: 1,
+            width: 2,
+            height: 2,
+        };
+        let cropped = image.crop(region).unwrap();
+        assert_eq!(cropped.width, 2);
+        assert_eq!(cropped.height, 2);
+        assert_eq!(cropped.data, [5.0, 6.0, 9.0, 10.0]);
+    }
+
+    #[test]
+    fn crop_keeps_every_channel_of_an_rgb_pixel() {
+        let image = LinearImage::new(2, 1, 3, (0..6).map(|v| v as f32).collect()).unwrap();
+        let cropped = image
+            .crop(ReferenceRegion {
+                x: 1,
+                y: 0,
+                width: 1,
+                height: 1,
+            })
+            .unwrap();
+        assert_eq!(cropped.data, [3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn crop_rejects_a_region_outside_the_image() {
+        let image = LinearImage::new(2, 2, 1, vec![0.0; 4]).unwrap();
+        for region in [
+            ReferenceRegion {
+                x: 1,
+                y: 0,
+                width: 2,
+                height: 1,
+            },
+            ReferenceRegion {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 1,
+            },
+            ReferenceRegion {
+                x: usize::MAX,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+        ] {
+            let error = image.crop(region).unwrap_err();
+            assert!(error.to_string().contains("does not fit"), "{region:?}");
+        }
+    }
 
     #[test]
     fn debayer_preserves_samples_at_native_color_sites() {

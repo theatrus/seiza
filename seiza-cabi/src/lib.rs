@@ -13,8 +13,9 @@ use seiza_background::{BackgroundConfig, BackgroundFit, CorrectionMode, fit_back
 use seiza_deconvolution::{DeconvolutionConfig, deconvolve, deconvolve_masked};
 use seiza_fits::{FitsImage, HeaderValue, RgbImage16, Statistics, StretchParams};
 use seiza_stacking::{
-    FrameDiagnostics, FrameDisposition, LinearImage, LiveStacker, StackOptions,
-    StackSnapshot as RustStackSnapshot, path_identity, paths_refer_to_same_file, write_fits_f32,
+    ChannelCoverage, ChannelSamples, ColorCrop, CropReport, FrameDiagnostics, FrameDisposition,
+    LinearImage, LiveStacker, ReferenceRegion, StackOptions, StackSnapshot as RustStackSnapshot,
+    crop_report, path_identity, paths_refer_to_same_file, write_fits_f32,
 };
 use seiza_stretch::{StretchConfig, StretchStack};
 use serde::{Deserialize, Serialize};
@@ -603,6 +604,89 @@ struct WcsResponse {
 }
 
 #[derive(Serialize)]
+struct CropReportResponse<'a> {
+    mode: &'static str,
+    grid: SizeResponse,
+    region: RegionResponse,
+    retained_fraction: f64,
+    off_center_limit_pixels: f64,
+    channels: Vec<ChannelCoverageResponse<'a>>,
+}
+
+impl<'a> CropReportResponse<'a> {
+    fn new(crop: ColorCrop, report: &'a CropReport) -> Self {
+        Self {
+            mode: crop.name(),
+            grid: SizeResponse {
+                width: report.grid_width,
+                height: report.grid_height,
+            },
+            region: RegionResponse::new(report.region),
+            retained_fraction: report.retained_fraction(),
+            off_center_limit_pixels: CropReport::off_center_limit_pixels(
+                report.grid_width,
+                report.grid_height,
+            ),
+            channels: report
+                .channels
+                .iter()
+                .map(ChannelCoverageResponse::new)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ChannelCoverageResponse<'a> {
+    name: &'a str,
+    region: RegionResponse,
+    covered_pixels: usize,
+    center_offset_x: f64,
+    center_offset_y: f64,
+    center_offset_pixels: f64,
+    off_center: bool,
+}
+
+impl<'a> ChannelCoverageResponse<'a> {
+    fn new(coverage: &'a ChannelCoverage) -> Self {
+        Self {
+            name: &coverage.name,
+            region: RegionResponse::new(coverage.region),
+            covered_pixels: coverage.covered_pixels,
+            center_offset_x: coverage.center_offset_x,
+            center_offset_y: coverage.center_offset_y,
+            center_offset_pixels: coverage.center_offset_pixels(),
+            off_center: coverage.off_center,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct SizeResponse {
+    width: usize,
+    height: usize,
+}
+
+#[derive(Serialize)]
+struct RegionResponse {
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+}
+
+impl RegionResponse {
+    fn new(region: ReferenceRegion) -> Self {
+        Self {
+            x: region.x,
+            y: region.y,
+            width: region.width,
+            height: region.height,
+        }
+    }
+}
+
+#[derive(Serialize)]
 struct SipResponse {
     order: u8,
     a: Vec<f64>,
@@ -668,6 +752,97 @@ pub unsafe extern "C" fn seiza_deconvolve_in_place(
         Ok(())
     })
     .is_some()
+}
+
+#[unsafe(no_mangle)]
+/// Reports the region a color crop would keep across aligned channels, and
+/// what each channel covers of the shared grid.
+///
+/// A pixel counts as covered when every sample of every channel there is
+/// finite, so the reported region is the inner area common to all of them.
+/// `crop` selects `none`, `bounds`, or `inscribed`; `bounds` keeps the box the
+/// covered pixels span, and `inscribed` the largest rectangle every channel
+/// covers in full. The report also names any channel whose coverage sits far
+/// enough from the others to look like a pointing error rather than dither.
+///
+/// `names` and `channels` are parallel arrays of `channel_count` entries. Every
+/// channel holds `data_length` interleaved linear floats on the same
+/// `width` by `height` grid, with `samples_per_pixel` of one or three. The call
+/// is synchronous and retains no pointer. The returned JSON is owned by the
+/// caller and must be released with [`seiza_string_free`].
+///
+/// # Safety
+/// `names` must point to `channel_count` NUL-terminated strings and `channels`
+/// to `channel_count` arrays of `data_length` readable floats. `crop` must be
+/// NUL-terminated. When non-null, `error_out` must point to writable storage
+/// for one pointer.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn seiza_color_crop_report_json(
+    names: *const *const c_char,
+    channels: *const *const f32,
+    channel_count: usize,
+    data_length: usize,
+    width: usize,
+    height: usize,
+    samples_per_pixel: usize,
+    crop: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        if channel_count == 0 {
+            return Err("crop report requires at least one channel".into());
+        }
+        if width == 0 || height == 0 {
+            return Err("crop report requires a non-empty grid".into());
+        }
+        if !matches!(samples_per_pixel, 1 | 3) {
+            return Err("crop report requires one or three samples per pixel".into());
+        }
+        let expected = width
+            .checked_mul(height)
+            .and_then(|pixels| pixels.checked_mul(samples_per_pixel))
+            .ok_or_else(|| "crop report image dimensions overflow".to_string())?;
+        if data_length != expected {
+            return Err(format!(
+                "each crop report channel has {data_length} floats; expected {expected}"
+            ));
+        }
+        if names.is_null() || channels.is_null() {
+            return Err("crop report channel names and samples are required".into());
+        }
+        let crop = required_str(crop, "crop mode")?
+            .parse::<ColorCrop>()
+            .map_err(|error| error.to_string())?;
+        let names = unsafe { std::slice::from_raw_parts(names, channel_count) };
+        let channels = unsafe { std::slice::from_raw_parts(channels, channel_count) };
+        let mut labels = Vec::with_capacity(channel_count);
+        let mut samples = Vec::with_capacity(channel_count);
+        for (index, (name, data)) in names.iter().zip(channels).enumerate() {
+            labels.push(required_str(*name, &format!("channel {index} name"))?);
+            samples.push(unsafe {
+                required_f32_slice(*data, data_length, &format!("channel {index}"))?
+            });
+        }
+        let borrowed = labels
+            .iter()
+            .zip(&samples)
+            .map(|(name, data)| ChannelSamples {
+                name,
+                data,
+                width,
+                height,
+                channels: samples_per_pixel,
+            })
+            .collect::<Vec<_>>();
+        let report = crop_report(&borrowed, crop).map_err(|error| error.to_string())?;
+        let json = serde_json::to_string(&CropReportResponse::new(crop, &report))
+            .map_err(|error| error.to_string())?;
+        CString::new(json)
+            .map(CString::into_raw)
+            .map_err(|_| "crop report contains a NUL byte".to_string())
+    })
+    .unwrap_or(ptr::null_mut())
 }
 
 #[unsafe(no_mangle)]
@@ -4188,6 +4363,89 @@ mod tests {
         });
         let message = unsafe { CStr::from_ptr(error) }.to_str().unwrap();
         assert!(message.contains("expected"));
+        unsafe { seiza_string_free(error) };
+    }
+
+    /// A 128x128 channel blank across its top `blank_rows` rows.
+    fn blank_topped_channel(blank_rows: usize) -> Vec<f32> {
+        (0..128 * 128)
+            .map(|index| {
+                if index / 128 < blank_rows {
+                    f32::NAN
+                } else {
+                    0.25
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn crop_report_cabi_reports_the_region_and_names_a_stray_channel() {
+        let channels = [
+            blank_topped_channel(0),
+            blank_topped_channel(2),
+            blank_topped_channel(80),
+        ];
+        let names = ["H-alpha", "OIII", "SII"]
+            .map(|name| CString::new(name).unwrap())
+            .to_vec();
+        let name_pointers = names
+            .iter()
+            .map(|name| name.as_ptr())
+            .collect::<Vec<*const c_char>>();
+        let data_pointers = channels
+            .iter()
+            .map(|channel| channel.as_ptr())
+            .collect::<Vec<*const f32>>();
+        let crop = CString::new("inscribed").unwrap();
+        let mut error = ptr::null_mut();
+
+        let json = unsafe {
+            seiza_color_crop_report_json(
+                name_pointers.as_ptr(),
+                data_pointers.as_ptr(),
+                name_pointers.len(),
+                channels[0].len(),
+                128,
+                128,
+                1,
+                crop.as_ptr(),
+                &mut error,
+            )
+        };
+        assert!(error.is_null());
+        let report: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(json) }.to_str().unwrap()).unwrap();
+        unsafe { seiza_string_free(json) };
+
+        assert_eq!(report["mode"], "inscribed");
+        assert_eq!(report["region"]["y"], 80);
+        assert_eq!(report["region"]["height"], 48);
+        assert_eq!(report["grid"]["width"], 128);
+        let entries = report["channels"].as_array().unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0]["name"], "H-alpha");
+        assert_eq!(entries[0]["off_center"], false);
+        assert_eq!(entries[2]["name"], "SII");
+        assert_eq!(entries[2]["off_center"], true);
+        assert!(entries[2]["center_offset_pixels"].as_f64().unwrap() > 32.0);
+
+        let missing = unsafe {
+            seiza_color_crop_report_json(
+                name_pointers.as_ptr(),
+                data_pointers.as_ptr(),
+                name_pointers.len(),
+                channels[0].len() - 1,
+                128,
+                128,
+                1,
+                crop.as_ptr(),
+                &mut error,
+            )
+        };
+        assert!(missing.is_null());
+        let message = unsafe { CStr::from_ptr(error) }.to_str().unwrap();
+        assert!(message.contains("expected"), "{message}");
         unsafe { seiza_string_free(error) };
     }
 

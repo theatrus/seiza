@@ -1,4 +1,4 @@
-use seiza_fits::{F32ImageData, FitsImage, HeaderValue, Pixels, write_f32_image};
+use seiza_fits::{F32ImageData, FitsImage, HeaderValue, Pixels, WriteHeaderCard, write_f32_image};
 use std::path::Path;
 use std::process::Command;
 
@@ -371,6 +371,148 @@ fn rgb_cli_registers_shifted_filter_stacks_by_default() {
         }
         pixels => panic!("expected f32 output, got {pixels:?}"),
     }
+}
+
+#[test]
+fn rgb_cli_crops_registration_borders_and_moves_the_solution() {
+    let directory = tempfile::tempdir().unwrap();
+    let red = directory.path().join("red.fits");
+    let green = directory.path().join("green.fits");
+    let blue = directory.path().join("blue.fits");
+    let output = directory.path().join("rgb.fits");
+    let wcs = [
+        WriteHeaderCard::new("CRPIX1", HeaderValue::Float(64.5)),
+        WriteHeaderCard::new("CRPIX2", HeaderValue::Float(64.5)),
+        WriteHeaderCard::new("CRVAL1", HeaderValue::Float(120.0)),
+        WriteHeaderCard::new("CRVAL2", HeaderValue::Float(30.0)),
+        WriteHeaderCard::new("CTYPE1", HeaderValue::String("RA---TAN".into())),
+        WriteHeaderCard::new("CTYPE2", HeaderValue::String("DEC--TAN".into())),
+    ];
+    write_f32_image(
+        &red,
+        128,
+        128,
+        F32ImageData::Mono(&synthetic_star_field(0, 0, 1.0)),
+        &wcs,
+    )
+    .unwrap();
+    write_f32_image(
+        &green,
+        128,
+        128,
+        F32ImageData::Mono(&synthetic_star_field(4, -3, 1.5)),
+        &[],
+    )
+    .unwrap();
+    write_f32_image(
+        &blue,
+        128,
+        128,
+        F32ImageData::Mono(&synthetic_star_field(-5, 2, 2.0)),
+        &[],
+    )
+    .unwrap();
+
+    let result = Command::new(env!("CARGO_BIN_EXE_seiza"))
+        .args([
+            "color",
+            "rgb",
+            "--red",
+            red.to_str().unwrap(),
+            "--green",
+            green.to_str().unwrap(),
+            "--blue",
+            blue.to_str().unwrap(),
+            "--normalization",
+            "none",
+            "--crop",
+            "inscribed",
+            "--output",
+            output.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("cropped to"), "{stdout}");
+
+    let fits = FitsImage::open(&output).unwrap();
+    assert!(fits.width < 128 && fits.width > 100, "{}", fits.width);
+    assert!(fits.height < 128 && fits.height > 100, "{}", fits.height);
+    let origin_x = fits.header_f64("SEIZACRX").unwrap();
+    let origin_y = fits.header_f64("SEIZACRY").unwrap();
+    assert_eq!(fits.header_f64("CRPIX1"), Some(64.5 - origin_x));
+    assert_eq!(fits.header_f64("CRPIX2"), Some(64.5 - origin_y));
+    assert_eq!(fits.header_f64("CRVAL1"), Some(120.0));
+    match fits.pixels {
+        Pixels::F32(values) => assert!(values.iter().all(|value| value.is_finite())),
+        pixels => panic!("expected f32 output, got {pixels:?}"),
+    }
+}
+
+/// A frame covering everything but a blank border `blank_rows` deep on top.
+fn blank_topped_frame(path: &Path, blank_rows: usize) {
+    const SIZE: usize = 128;
+    let values = (0..SIZE * SIZE)
+        .map(|index| {
+            if index / SIZE < blank_rows {
+                f32::NAN
+            } else {
+                0.25
+            }
+        })
+        .collect::<Vec<_>>();
+    write_f32_image(path, SIZE, SIZE, F32ImageData::Mono(&values), &[]).unwrap();
+}
+
+#[test]
+fn rgb_cli_flags_a_channel_far_from_the_others() {
+    let directory = tempfile::tempdir().unwrap();
+    let red = directory.path().join("red.fits");
+    let green = directory.path().join("green.fits");
+    let blue = directory.path().join("blue.fits");
+    let output = directory.path().join("rgb.fits");
+    blank_topped_frame(&red, 0);
+    blank_topped_frame(&green, 2);
+    blank_topped_frame(&blue, 80);
+
+    let result = Command::new(env!("CARGO_BIN_EXE_seiza"))
+        .args([
+            "color",
+            "rgb",
+            "--red",
+            red.to_str().unwrap(),
+            "--green",
+            green.to_str().unwrap(),
+            "--blue",
+            blue.to_str().unwrap(),
+            "--normalization",
+            "none",
+            "--no-register",
+            "--crop",
+            "inscribed",
+            "--output",
+            output.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stdout.contains("cropped to 128x48 at (0, 80)"), "{stdout}");
+    assert!(stderr.contains("warning: blue sits"), "{stderr}");
+    assert!(!stderr.contains("warning: green"), "{stderr}");
+
+    let fits = FitsImage::open(&output).unwrap();
+    assert_eq!((fits.width, fits.height), (128, 48));
 }
 
 #[test]

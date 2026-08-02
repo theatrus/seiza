@@ -144,6 +144,39 @@ bool seiza_deconvolve_in_place(float *data,
                                char **error_out);
 
 /*
+ Reports the region a color crop would keep across aligned channels, and
+ what each channel covers of the shared grid.
+
+ A pixel counts as covered when every sample of every channel there is
+ finite, so the reported region is the inner area common to all of them.
+ `crop` selects `none`, `bounds`, or `inscribed`; `bounds` keeps the box the
+ covered pixels span, and `inscribed` the largest rectangle every channel
+ covers in full. The report also names any channel whose coverage sits far
+ enough from the others to look like a pointing error rather than dither.
+
+ `names` and `channels` are parallel arrays of `channel_count` entries. Every
+ channel holds `data_length` interleaved linear floats on the same
+ `width` by `height` grid, with `samples_per_pixel` of one or three. The call
+ is synchronous and retains no pointer. The returned JSON is owned by the
+ caller and must be released with [`seiza_string_free`].
+
+ # Safety
+ `names` must point to `channel_count` NUL-terminated strings and `channels`
+ to `channel_count` arrays of `data_length` readable floats. `crop` must be
+ NUL-terminated. When non-null, `error_out` must point to writable storage
+ for one pointer.
+ */
+char *seiza_color_crop_report_json(const char *const *names,
+                                   const float *const *channels,
+                                   size_t channel_count,
+                                   size_t data_length,
+                                   size_t width,
+                                   size_t height,
+                                   size_t samples_per_pixel,
+                                   const char *crop,
+                                   char **error_out);
+
+/*
  Fits a compact background model to interleaved linear `float` samples.
 
  `channels` must be one or three and `data_length` must equal

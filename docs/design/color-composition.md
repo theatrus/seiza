@@ -35,6 +35,56 @@ allocates one three-plane output; it does not materialize normalized copies of
 every channel. Percentile estimation temporarily holds at most `max_samples`
 finite values for one channel at a time.
 
+## Cropping to the shared area
+
+Registering one filter stack onto another leaves `NaN` where the source frame
+did not reach, so an uncropped composition keeps blank edges. `ColorOptions::crop`
+(CLI `--crop`, Python `crop=`) trims the result to the area every channel
+covers. A pixel counts as covered when every sample of every required channel
+there is finite, so the kept region is the inner area common to all of them:
+
+| Mode | Keeps |
+| --- | --- |
+| `none` (default) | the whole reference grid, blank edges included |
+| `bounds` | the bounding box of the covered pixels |
+| `inscribed` | the largest rectangle every channel covers in full |
+
+Dithered or drifting channels overlap in a rectangle, and `bounds` is enough
+for them. Rotated overlaps — a meridian flip, a rotator, two optical trains —
+leave uncovered corners inside that box, and only `inscribed` removes them.
+Use `inscribed` when a later step cannot handle `NaN`. Both modes read edges
+and interior gaps alike, so an uncovered pixel in the middle of the frame
+bounds `inscribed` just as an edge does.
+
+The crop is chosen before normalization, and percentile levels are then
+estimated from the kept region alone. Every channel is scaled from the same
+patch of sky, and a bright edge that the crop discards cannot set a white
+point. Composition maps output pixels back into the caller's full-size input
+planes, so cropping copies no channel.
+
+The written FITS moves `CRPIX` by the crop origin and records that origin in
+`SEIZACRX`/`SEIZACRY`. `CRPIX` is the only WCS card a translation changes: the
+rotation matrix, the reference world coordinate, and SIP distortion terms are
+all expressed relative to it, so the cropped image keeps the reference
+solution.
+
+A crop also reports what each channel covered: its own covered bounding box
+and pixel count, and how far its coverage center sits from the median center
+of every channel. A channel past the larger of 32 pixels and 2% of the frame
+is flagged `off_center` — the one that pulled the crop in. The consensus is a
+median rather than a mean because one badly placed channel cannot move it; a
+mean would follow the stray and carry the well-placed channels past the limit
+with it. With fewer than three channels there is no majority to disagree with,
+so nothing is flagged. The
+Rust result carries this as `ColorComposition::crop`, the CLI prints a warning
+per flagged channel, Python exposes the same measurements through
+`seiza.crop_report`, and native front-ends read them as JSON from
+`seiza_color_crop_report_json`.
+
+`crop_report` takes borrowed `ChannelSamples` rather than owned images, so a
+host asking about its own buffers copies nothing. The C ABI hands its channel
+pointers straight through.
+
 ## RGB and linear LRGB
 
 RGB directly interleaves the prepared red, green, and blue masters. LRGB uses
@@ -169,9 +219,13 @@ intermediate FITS files are intentionally not checked in.
 - It does not infer filter identity from filenames or FITS headers.
 - It does not perform gradient removal, spectrophotometric calibration, star
   removal, hue curves, or chrominance denoising.
-- FITS output preserves WCS cards from the selected reference input. CLI inputs
-  are resampled to that grid by default; library callers must align arrays.
+- FITS output preserves WCS cards from the selected reference input, with
+  `CRPIX` moved to a crop's own grid. CLI inputs are resampled to the reference
+  grid by default; library callers must align arrays.
 - Pixels outside any required registered channel are `NaN` in all three FITS
   planes and render black in the quick-look PNG, avoiding colored crop borders.
+  `--crop` removes those edges instead of masking them.
+- Cropping trims to a rectangle. It does not reproject, rescale, or pad a
+  channel to make one fit.
 - PNG output is for fast visual assessment; floating-point FITS remains the
   editable result for linear RGB/LRGB and direct palettes.
