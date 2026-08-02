@@ -68,6 +68,12 @@ masters consumed above. The estimator makes two passes over the source paths:
 2. reread each input and compute the final mean after leave-one-out low/high
    sigma rejection.
 
+Both passes read every input, so a master over dozens of frames is minutes of
+work. `MasterBuildOptions::cancel` takes a `CancelSignal`, checked once per
+input in each pass, and returns `Error::Cancelled` without writing anything.
+An interactive caller that builds masters inside a user-visible job needs that
+way out; batch callers leave it `None`.
+
 Leave-one-out statistics let a single cosmic-ray outlier be rejected even in
 a small calibration set. Rereading keeps memory proportional to a handful of
 image-sized buffers rather than the number of source frames. It intentionally

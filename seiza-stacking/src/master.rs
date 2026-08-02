@@ -1,7 +1,7 @@
 use crate::calibration::normalize_flat_response;
 use crate::{
-    BayerLayout, CalibrationMasters, Error, FitsFrame, LinearImage, MasterDark, Result,
-    paths_refer_to_same_file,
+    BayerLayout, CalibrationMasters, CancelSignal, Error, FitsFrame, LinearImage, MasterDark,
+    Result, paths_refer_to_same_file,
 };
 use seiza_fits::HeaderValue;
 use std::path::{Path, PathBuf};
@@ -66,6 +66,11 @@ pub struct MasterBuildOptions {
     pub bias: Option<LinearImage>,
     /// Dark or dark-flat used to calibrate flat inputs before integration.
     pub dark: Option<MasterDark>,
+    /// Optional cooperative cancellation. A master over dozens of frames is
+    /// minutes of work, so an interactive caller needs a way out of it. The
+    /// build checks this between input frames and returns
+    /// [`Error::Cancelled`] without writing anything.
+    pub cancel: Option<CancelSignal>,
 }
 
 /// Per-input tally of samples kept and clipped during integration.
@@ -154,6 +159,7 @@ pub fn build_master_from_fits(
     let mut m2 = Vec::<f32>::new();
 
     for (index, path) in paths.iter().enumerate() {
+        check_cancelled(options)?;
         let prepared = prepare_input(
             path,
             kind,
@@ -188,6 +194,7 @@ pub fn build_master_from_fits(
     let count = paths.len();
 
     for path in paths {
+        check_cancelled(options)?;
         let prepared = prepare_input(
             path,
             kind,
@@ -268,6 +275,16 @@ pub fn build_master_from_fits(
         rejection: options.rejection,
         reference_headers,
     })
+}
+
+/// Checked once per input frame in each pass. Reading and calibrating a frame
+/// is the unit of work here, so this is the finest granularity that costs
+/// nothing.
+fn check_cancelled(options: &MasterBuildOptions) -> Result<()> {
+    match &options.cancel {
+        Some(cancel) if cancel.is_cancelled() => Err(Error::Cancelled),
+        _ => Ok(()),
+    }
 }
 
 fn validate_options(
@@ -643,6 +660,53 @@ mod tests {
         assert_eq!(master.image.data, [10.0, 20.0, 30.0, 40.0]);
         assert_eq!(master.rejected_samples, 1);
         assert_eq!(master.input_statistics[2].rejected_samples, 1);
+    }
+
+    #[test]
+    fn a_cancelled_build_stops_instead_of_returning_a_master() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let directory = tempfile::tempdir().unwrap();
+        let paths = (0..3)
+            .map(|index| directory.path().join(format!("bias-{index}.fits")))
+            .collect::<Vec<_>>();
+        for path in &paths {
+            write_image(path, &[10.0, 20.0, 30.0, 40.0]);
+        }
+        // Let the first frame through, then cancel — where an interactive
+        // caller would raise the flag mid-build.
+        let checks = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&checks);
+        let options = MasterBuildOptions {
+            cancel: Some(CancelSignal::new(move || {
+                counter.fetch_add(1, Ordering::Relaxed) >= 1
+            })),
+            ..MasterBuildOptions::default()
+        };
+
+        let error = build_master_from_fits(&paths, MasterFrameKind::Bias, &options).unwrap_err();
+        assert!(matches!(error, Error::Cancelled));
+        // Stopped in the first pass instead of reading every input twice.
+        assert_eq!(checks.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn a_signal_that_never_fires_leaves_the_build_alone() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = (0..2)
+            .map(|index| directory.path().join(format!("bias-{index}.fits")))
+            .collect::<Vec<_>>();
+        for path in &paths {
+            write_image(path, &[10.0, 20.0, 30.0, 40.0]);
+        }
+        let options = MasterBuildOptions {
+            cancel: Some(CancelSignal::new(|| false)),
+            ..MasterBuildOptions::default()
+        };
+
+        let master = build_master_from_fits(&paths, MasterFrameKind::Bias, &options).unwrap();
+        assert_eq!(master.image.data, [10.0, 20.0, 30.0, 40.0]);
     }
 
     #[test]
