@@ -973,13 +973,18 @@ fn validate_protected_regions(regions: &[ProtectedRegion]) -> Result<()> {
                     ));
                 }
                 total_points = total_points.saturating_add(points.len());
-                if points
-                    .iter()
-                    .flatten()
-                    .any(|coordinate| !coordinate.is_finite())
-                {
+                let coordinate_limit = f64::MAX.sqrt() / 8.0;
+                if points.iter().flatten().any(|coordinate| {
+                    !coordinate.is_finite() || coordinate.abs() > coordinate_limit
+                }) {
                     return Err(Error::InvalidConfig(
-                        "protected polygon coordinates must be finite".into(),
+                        "protected polygon coordinates must be finite and within the safe geometry range"
+                            .into(),
+                    ));
+                }
+                if !polygon_has_enclosed_area(points) {
+                    return Err(Error::InvalidConfig(
+                        "protected polygon must enclose a non-zero area".into(),
                     ));
                 }
             }
@@ -991,6 +996,36 @@ fn validate_protected_regions(regions: &[ProtectedRegion]) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn polygon_has_enclosed_area(points: &[[f64; 2]]) -> bool {
+    let (mut min_x, mut max_x) = (f64::INFINITY, f64::NEG_INFINITY);
+    let (mut min_y, mut max_y) = (f64::INFINITY, f64::NEG_INFINITY);
+    for &[x, y] in points {
+        min_x = min_x.min(x);
+        max_x = max_x.max(x);
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
+    }
+    let scale = (max_x - min_x).max(max_y - min_y);
+    if !scale.is_finite() || scale <= 0.0 {
+        return false;
+    }
+
+    let mut area_twice = 0.0;
+    let mut magnitude = 0.0;
+    let mut previous = points[points.len() - 1];
+    for &current in points {
+        let normalized_previous = [(previous[0] - min_x) / scale, (previous[1] - min_y) / scale];
+        let normalized_current = [(current[0] - min_x) / scale, (current[1] - min_y) / scale];
+        let forward = normalized_previous[0] * normalized_current[1];
+        let reverse = normalized_current[0] * normalized_previous[1];
+        area_twice += forward - reverse;
+        magnitude += forward.abs() + reverse.abs();
+        previous = current;
+    }
+
+    area_twice.is_finite() && area_twice.abs() > 64.0 * f64::EPSILON * magnitude.max(1.0)
 }
 
 fn validate_polynomial(degree: u8, ridge: f64) -> Result<()> {
@@ -1316,6 +1351,9 @@ fn segment_distance_squared(point: [f64; 2], start: [f64; 2], end: [f64; 2]) -> 
     let dx = end[0] - start[0];
     let dy = end[1] - start[1];
     let length_squared = dx.mul_add(dx, dy * dy);
+    if !length_squared.is_finite() {
+        return f64::INFINITY;
+    }
     if length_squared <= 1.0e-24 {
         let px = point[0] - start[0];
         let py = point[1] - start[1];
@@ -1353,6 +1391,9 @@ fn point_on_segment(point: [f64; 2], start: [f64; 2], end: [f64; 2]) -> bool {
     let dx = end[0] - start[0];
     let dy = end[1] - start[1];
     let length_squared = dx.mul_add(dx, dy * dy);
+    if !length_squared.is_finite() {
+        return false;
+    }
     if length_squared <= 1.0e-24 {
         let px = point[0] - start[0];
         let py = point[1] - start[1];
@@ -1360,11 +1401,11 @@ fn point_on_segment(point: [f64; 2], start: [f64; 2], end: [f64; 2]) -> bool {
     }
     let cross = (point[0] - start[0]).mul_add(dy, -(point[1] - start[1]) * dx);
     let scale = dx.abs().max(dy.abs()).max(1.0);
-    if cross.abs() > 1.0e-12 * scale {
+    if !cross.is_finite() || cross.abs() > 1.0e-12 * scale {
         return false;
     }
     let dot = (point[0] - start[0]).mul_add(dx, (point[1] - start[1]) * dy);
-    dot >= 0.0 && dot <= length_squared
+    dot.is_finite() && dot >= 0.0 && dot <= length_squared
 }
 
 fn accepted_count(samples: &[RawSample]) -> usize {
@@ -1764,6 +1805,61 @@ mod tests {
             ..BackgroundConfig::default()
         };
         assert!(matches!(invalid.validate(), Err(Error::InvalidConfig(_))));
+    }
+
+    #[test]
+    fn configuration_rejects_polygons_without_an_enclosed_area() {
+        for points in [
+            vec![[0.2, 0.2], [0.5, 0.5], [0.8, 0.8]],
+            vec![[0.2, 0.2], [0.8, 0.8], [0.2, 0.2], [0.8, 0.8]],
+        ] {
+            let config = BackgroundConfig {
+                protected_regions: vec![ProtectedRegion::Polygon { points }],
+                ..BackgroundConfig::default()
+            };
+            assert_eq!(
+                config.validate(),
+                Err(Error::InvalidConfig(
+                    "protected polygon must enclose a non-zero area".into()
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn configuration_rejects_polygon_coordinates_that_can_overflow_geometry() {
+        let points = vec![
+            [-f64::MAX, -f64::MAX],
+            [f64::MAX, f64::MAX],
+            [f64::MAX, -f64::MAX],
+        ];
+        let config = BackgroundConfig {
+            protected_regions: vec![ProtectedRegion::Polygon {
+                points: points.clone(),
+            }],
+            ..BackgroundConfig::default()
+        };
+        let expected = Err(Error::InvalidConfig(
+            "protected polygon coordinates must be finite and within the safe geometry range"
+                .into(),
+        ));
+        assert_eq!(config.validate(), expected);
+        assert_eq!(
+            ProtectedRegion::polygon_from_pixels(&points, 64, 64),
+            Err(Error::InvalidConfig(
+                "protected polygon coordinates must be finite and within the safe geometry range"
+                    .into()
+            ))
+        );
+        assert!(!point_on_segment(
+            [0.5, 0.5],
+            [-f64::MAX, -f64::MAX],
+            [f64::MAX, f64::MAX]
+        ));
+        assert!(
+            segment_distance_squared([0.5, 0.5], [-f64::MAX, -f64::MAX], [f64::MAX, f64::MAX])
+                .is_infinite()
+        );
     }
 
     fn plane(width: usize, height: usize, channels: usize) -> Vec<f32> {
