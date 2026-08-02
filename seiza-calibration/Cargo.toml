@@ -1,0 +1,21 @@
+[package]
+name = "seiza-calibration"
+description = "Host-neutral calibration response kernels for Seiza"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "README.md"
+keywords = ["astronomy", "astrophotography", "calibration", "flat-field"]
+categories = ["science", "multimedia::images"]
+
+[dependencies]
+serde.workspace = true
+seiza-imgproc.workspace = true
+seiza-stats.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

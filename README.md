@@ -111,6 +111,8 @@ compiler, formatter, and linter.
   [`seiza-xisf`](seiza-xisf/README.md) (XISF reading into the same astronomy
   image representation),
   [`seiza-background`](seiza-background/README.md) (robust gradient models),
+  [`seiza-calibration`](seiza-calibration/README.md) (host-neutral calibration
+  response fitting and application),
   [`seiza-deconvolution`](seiza-deconvolution/README.md) (experimental,
   conservative linear-image restoration),
   [`seiza-stretch`](seiza-stretch/README.md) (parameterized display curves),
@@ -657,9 +659,11 @@ and solves in the table's exact frame. Contract details:
   plus atomic linear `f32` writing
 - `seiza-background/` — format-independent robust background sampling,
   polynomial fitting, diagnostics, and linear correction
+- `seiza-calibration/` — format-independent calibration response fitting,
+  validation, and bounded application on caller-owned linear buffers
 - `seiza-stretch/` — parameterized, format-independent display analysis,
   transfer plans, and mono/RGB application
-- `seiza-stacking/` — linear FITS/XISF calibration, local registration,
+- `seiza-stacking/` — FITS/XISF calibration adapters, local registration,
   normalization, additive integration, rejection, and solved sky orientation
 - `seiza-cabi/` — shared native C ABI for rendering, background extraction,
   live stacking, solving, overlays, and catalog setup

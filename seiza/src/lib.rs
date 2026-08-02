@@ -23,6 +23,9 @@ pub mod wcs;
 pub use detect::{DetectBackend, DetectConfig, DetectedStar, detect_stars, detect_stars_luma_f32};
 pub use wcs::{FitsCardValue, Sip, Wcs};
 
+/// Host-neutral calibration response kernels.
+pub use seiza_calibration as calibration;
+
 /// Async installation and caching of published catalog bundles.
 ///
 /// Available with the non-default `downloads` feature. Catalog opening itself

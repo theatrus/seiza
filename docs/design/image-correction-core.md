@@ -1,7 +1,9 @@
 # Host-neutral image correction core
 
-Status: plan. This records the ownership and API changes needed before Seiza
-image corrections become useful outside the CLI and PSF Guard.
+Status: in progress. The first extraction created `seiza-calibration` and
+moved residual-response fitting and application without changing its output.
+The remaining phases cover ordinary calibration kernels, image layouts, the C
+ABI, and native hosts.
 
 ## Goal
 
@@ -23,11 +25,10 @@ Several operations already have the right ownership:
 - `seiza-imgproc` owns low-level operations on row-major slices.
 - `seiza-cabi` adapts several of these operations for native callers.
 
-PR [#103](https://github.com/theatrus/seiza/pull/103) puts residual-response
-estimation and bounded application in `seiza-stacking`. That is a useful first
-shared implementation, but the code is not a stacking algorithm. It depends on
-`seiza-stacking::LinearImage`, which makes a native image editor or a
-calibration tool depend on the full stacker.
+PR [#103](https://github.com/theatrus/seiza/pull/103) first put
+residual-response estimation and bounded application in `seiza-stacking`.
+`seiza-calibration` now owns that kernel and accepts borrowed contiguous image
+views. `seiza-stacking` keeps a one-release adapter for its `LinearImage` API.
 
 PSF Guard should continue to own the parts that need catalog context:
 
@@ -42,15 +43,14 @@ region, and settings. A Seiza result must not claim that a dark ring is dust.
 
 ## Target crate ownership
 
-Create `seiza-calibration` as the host-neutral home for calibration response
-models. Move these items from `seiza-stacking` without changing their numeric
-behavior:
+`seiza-calibration` is the host-neutral home for calibration response models.
+Residual-response fitting and application have moved without changing their
+numeric output. The remaining moves are:
 
 - bias, dark, and flat application;
 - flat-response normalization;
 - calibration-master construction and diagnostics;
-- residual-response options, fitting, diagnostics, model rendering, and
-  bounded application.
+- explicit residual model rendering and serialized model round trips.
 
 Keep FITS loading, registration, stack normalization, rejection, accumulation,
 and stack checkpoints in `seiza-stacking`. The stacker should depend on
@@ -88,6 +88,10 @@ The API must:
   and rejected-sample counts;
 - use deterministic sampling and stable serialized settings;
 - include an algorithm version suitable for cache keys and provenance.
+
+The first extraction supplies validated contiguous `LinearImageRef` and
+`LinearImageMut` views. Row stride, channel layout, and masks remain Phase 2
+work; the simple contiguous API will stay available after those views arrive.
 
 The estimator should accept already chosen detector-aligned samples. Dither
 measurement and any claim that the samples show a stable detector defect stay
@@ -141,18 +145,21 @@ cause of a feature unless the user or host supplies that label.
 
 ### 1. Lock the contract and extract without changing pixels
 
-- Save regression fixtures for calibration and residual-response output before
-  moving code.
-- Add `seiza-calibration` to the workspace.
-- Give it contiguous slice-based APIs so it never depends on
-  `seiza-stacking::LinearImage`.
-- Move calibration and residual-response code from `seiza-stacking` and adapt
-  the stacker's image buffers at that boundary.
-- Keep the same defaults, bounds, diagnostics, and test vectors.
-- Re-export moved names from `seiza-stacking` for one release if downstream
-  code needs a migration window.
-- Add parity tests that compare the saved output fixtures with the new crate.
-- Make `seiza-stacking` consume the new crate.
+- Done: save an exact response-output fixture before moving the residual
+  kernel.
+- Done: add `seiza-calibration` with contiguous borrowed-buffer APIs.
+- Done: move residual-response options, fitting, diagnostics, validation, and
+  bounded application.
+- Done: keep the same defaults, bounds, diagnostics, and response bytes.
+- Done: retain the `seiza-stacking` names and `LinearImage` adapter for one
+  release.
+- Next: move bias, dark, flat, and master-construction kernels behind the same
+  host-neutral boundary.
+
+Publish `seiza-imgproc 0.3.1` before `seiza-calibration 0.1.0`; the calibration
+crate uses the connected-component API added after `seiza-imgproc 0.3.0`.
+Publish the next `seiza-stacking` and `seiza` releases after both focused
+crates.
 
 ### 2. Add native-host image layouts
 
