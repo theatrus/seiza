@@ -115,21 +115,94 @@ impl CropReport {
     }
 }
 
+/// One aligned channel's samples, borrowed from whoever owns them.
+///
+/// Coverage is read, never written, so a host with its own buffers needs no
+/// copy to ask for a report.
+#[derive(Clone, Copy, Debug)]
+pub struct ChannelSamples<'a> {
+    /// Name for this channel in the report, such as `green` or `OIII`.
+    pub name: &'a str,
+    /// Row-major, channel-interleaved samples.
+    pub data: &'a [f32],
+    /// Grid width in pixels.
+    pub width: usize,
+    /// Grid height in pixels.
+    pub height: usize,
+    /// Samples per pixel: 1 for mono, 3 for interleaved RGB.
+    pub channels: usize,
+}
+
+impl<'a> ChannelSamples<'a> {
+    /// Borrow a whole image as one named channel.
+    pub fn new(name: &'a str, image: &'a LinearImage) -> Self {
+        Self {
+            name,
+            data: &image.data,
+            width: image.width,
+            height: image.height,
+            channels: image.channels,
+        }
+    }
+
+    fn pixel_count(self) -> usize {
+        self.width * self.height
+    }
+
+    fn covers(self, pixel: usize) -> bool {
+        let start = pixel * self.channels;
+        self.data[start..start + self.channels]
+            .iter()
+            .all(|sample| sample.is_finite())
+    }
+
+    /// Bounding box and pixel count of this channel's own coverage.
+    fn coverage(self) -> Option<(ReferenceRegion, usize)> {
+        let mut left = self.width;
+        let mut right = 0;
+        let mut top = self.height;
+        let mut bottom = 0;
+        let mut covered_pixels = 0;
+        for row in 0..self.height {
+            for column in 0..self.width {
+                if self.covers(row * self.width + column) {
+                    covered_pixels += 1;
+                    left = left.min(column);
+                    right = right.max(column);
+                    top = top.min(row);
+                    bottom = bottom.max(row);
+                }
+            }
+        }
+        (covered_pixels > 0).then(|| {
+            (
+                ReferenceRegion {
+                    x: left,
+                    y: top,
+                    width: right - left + 1,
+                    height: bottom - top + 1,
+                },
+                covered_pixels,
+            )
+        })
+    }
+}
+
 /// The region of the shared pixel grid that `crop` keeps for these channels,
 /// with per-channel coverage diagnostics.
 ///
 /// A pixel is covered when every sample of every channel at that pixel is
 /// finite, so the kept region is the inner area common to all of them. All
 /// channels must already share one grid.
-pub fn crop_report(channels: &[(&str, &LinearImage)], crop: ColorCrop) -> Result<CropReport> {
-    let images = channels.iter().map(|(_, image)| *image).collect::<Vec<_>>();
-    let reference = validate_grid(&images)?;
+pub fn crop_report(channels: &[ChannelSamples<'_>], crop: ColorCrop) -> Result<CropReport> {
+    let grid = validate_grid(channels)?;
     let mut coverage = Vec::with_capacity(channels.len());
-    for (name, image) in channels {
-        let (region, covered_pixels) = channel_coverage(image)
-            .ok_or_else(|| Error::Color(format!("{name} covers no pixel of the grid")))?;
+    for channel in channels {
+        let (region, covered_pixels) = channel
+            .coverage()
+            .ok_or_else(|| Error::Color(format!("{} covers no pixel of the grid", channel.name)))?;
         coverage.push(ChannelCoverage {
-            name: (*name).to_owned(),
+            name: channel.name.to_owned(),
             region,
             covered_pixels,
             center_offset_x: 0.0,
@@ -137,11 +210,11 @@ pub fn crop_report(channels: &[(&str, &LinearImage)], crop: ColorCrop) -> Result
             off_center: false,
         });
     }
-    flag_off_center(&mut coverage, reference.width, reference.height);
+    flag_off_center(&mut coverage, grid.width, grid.height);
     Ok(CropReport {
-        grid_width: reference.width,
-        grid_height: reference.height,
-        region: region_of(&images, reference, crop)?,
+        grid_width: grid.width,
+        grid_height: grid.height,
+        region: region_of(channels, grid, crop)?,
         channels: coverage,
     })
 }
@@ -149,19 +222,37 @@ pub fn crop_report(channels: &[(&str, &LinearImage)], crop: ColorCrop) -> Result
 /// The region of the shared pixel grid that `crop` keeps, without the
 /// per-channel diagnostics of [`crop_report`].
 pub fn covered_region(channels: &[&LinearImage], crop: ColorCrop) -> Result<ReferenceRegion> {
-    let reference = validate_grid(channels)?;
-    region_of(channels, reference, crop)
+    let channels = channels
+        .iter()
+        .map(|image| ChannelSamples::new("channel", image))
+        .collect::<Vec<_>>();
+    let grid = validate_grid(&channels)?;
+    region_of(&channels, grid, crop)
 }
 
-fn validate_grid(channels: &[&LinearImage]) -> Result<ReferenceRegion> {
+fn validate_grid(channels: &[ChannelSamples<'_>]) -> Result<ReferenceRegion> {
     let reference = *channels
         .first()
         .ok_or_else(|| Error::Color("at least one channel is required".into()))?;
     for channel in channels {
         if channel.width != reference.width || channel.height != reference.height {
             return Err(Error::Color(format!(
-                "channel dimensions {}x{} do not match {}x{}",
-                channel.width, channel.height, reference.width, reference.height
+                "{} dimensions {}x{} do not match {}x{}",
+                channel.name, channel.width, channel.height, reference.width, reference.height
+            )));
+        }
+        if !matches!(channel.channels, 1 | 3) {
+            return Err(Error::Color(format!(
+                "{} must have one or three samples per pixel",
+                channel.name
+            )));
+        }
+        if channel.data.len() != channel.pixel_count() * channel.channels {
+            return Err(Error::Color(format!(
+                "{} has {} samples; expected {}",
+                channel.name,
+                channel.data.len(),
+                channel.pixel_count() * channel.channels
             )));
         }
     }
@@ -174,7 +265,7 @@ fn validate_grid(channels: &[&LinearImage]) -> Result<ReferenceRegion> {
 }
 
 fn region_of(
-    channels: &[&LinearImage],
+    channels: &[ChannelSamples<'_>],
     grid: ReferenceRegion,
     crop: ColorCrop,
 ) -> Result<ReferenceRegion> {
@@ -190,49 +281,11 @@ fn region_of(
     region.ok_or_else(|| Error::Color("no pixel is covered by every channel".into()))
 }
 
-fn coverage(channels: &[&LinearImage], pixel_count: usize) -> Vec<bool> {
+fn coverage(channels: &[ChannelSamples<'_>], pixel_count: usize) -> Vec<bool> {
     (0..pixel_count)
         .into_par_iter()
-        .map(|pixel| channels.iter().all(|channel| pixel_covered(channel, pixel)))
+        .map(|pixel| channels.iter().all(|channel| channel.covers(pixel)))
         .collect()
-}
-
-fn pixel_covered(image: &LinearImage, pixel: usize) -> bool {
-    let start = pixel * image.channels;
-    image.data[start..start + image.channels]
-        .iter()
-        .all(|sample| sample.is_finite())
-}
-
-/// Bounding box and pixel count of one channel's own coverage.
-fn channel_coverage(image: &LinearImage) -> Option<(ReferenceRegion, usize)> {
-    let mut left = image.width;
-    let mut right = 0;
-    let mut top = image.height;
-    let mut bottom = 0;
-    let mut covered_pixels = 0;
-    for row in 0..image.height {
-        for column in 0..image.width {
-            if pixel_covered(image, row * image.width + column) {
-                covered_pixels += 1;
-                left = left.min(column);
-                right = right.max(column);
-                top = top.min(row);
-                bottom = bottom.max(row);
-            }
-        }
-    }
-    (covered_pixels > 0).then(|| {
-        (
-            ReferenceRegion {
-                x: left,
-                y: top,
-                width: right - left + 1,
-                height: bottom - top + 1,
-            },
-            covered_pixels,
-        )
-    })
 }
 
 /// Offset each channel's coverage center from the median of the others, and
@@ -556,7 +609,11 @@ mod tests {
         let green = shifted(64, 3, -2);
         let blue = shifted(64, -4, 1);
         let report = crop_report(
-            &[("red", &reference), ("green", &green), ("blue", &blue)],
+            &[
+                ChannelSamples::new("red", &reference),
+                ChannelSamples::new("green", &green),
+                ChannelSamples::new("blue", &blue),
+            ],
             ColorCrop::Inscribed,
         )
         .unwrap();
@@ -582,7 +639,11 @@ mod tests {
         let green = shifted(256, 2, 0);
         let stray = shifted(256, 0, 90);
         let report = crop_report(
-            &[("red", &reference), ("green", &green), ("blue", &stray)],
+            &[
+                ChannelSamples::new("red", &reference),
+                ChannelSamples::new("green", &green),
+                ChannelSamples::new("blue", &stray),
+            ],
             ColorCrop::Inscribed,
         )
         .unwrap();
@@ -605,7 +666,7 @@ mod tests {
         let named = channels
             .iter()
             .zip(["luminance", "red", "green", "blue"])
-            .map(|(image, name)| (name, image))
+            .map(|(image, name)| ChannelSamples::new(name, image))
             .collect::<Vec<_>>();
         let report = crop_report(&named, ColorCrop::Inscribed).unwrap();
         assert!(report.off_center().next().is_none());
@@ -617,7 +678,10 @@ mod tests {
         let reference = shifted(256, 0, 0);
         let stray = shifted(256, 0, 90);
         let report = crop_report(
-            &[("H-alpha", &reference), ("OIII", &stray)],
+            &[
+                ChannelSamples::new("H-alpha", &reference),
+                ChannelSamples::new("OIII", &stray),
+            ],
             ColorCrop::Inscribed,
         )
         .unwrap();
@@ -629,7 +693,10 @@ mod tests {
         let reference = mask(2, 1, &["##"]);
         let empty = mask(2, 1, &[".."]);
         let error = crop_report(
-            &[("H-alpha", &reference), ("OIII", &empty)],
+            &[
+                ChannelSamples::new("H-alpha", &reference),
+                ChannelSamples::new("OIII", &empty),
+            ],
             ColorCrop::Bounds,
         )
         .unwrap_err();

@@ -4,7 +4,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use seiza_stacking::{
-    ColorCrop, ColorNormalization, ColorOptions, CropReport, ForaxxOptions, LinearImage,
+    ChannelSamples, ColorCrop, ColorNormalization, ColorOptions, CropReport, ForaxxOptions,
     NarrowbandPalette, ReferenceRegion, combine_lrgb as compose_lrgb,
     combine_narrowband as compose_narrowband, combine_rgb as compose_rgb,
     combine_super_lrgb as compose_super_lrgb, combine_super_rgb as compose_super_rgb,
@@ -234,9 +234,9 @@ fn crop_report<'py>(
     }
     let named = names
         .iter()
-        .map(String::as_str)
-        .zip(images.iter())
-        .collect::<Vec<(&str, &LinearImage)>>();
+        .zip(&images)
+        .map(|(name, image)| ChannelSamples::new(name, image))
+        .collect::<Vec<_>>();
     let report = py
         .allow_threads(|| report_crop(&named, crop))
         .map_err(color_error)?;

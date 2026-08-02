@@ -74,8 +74,13 @@ of the others. A channel past the larger of 32 pixels and 2% of the frame is
 flagged `off_center` — the one that pulled the crop in. With fewer than three
 channels there is no majority to disagree with, so nothing is flagged. The
 Rust result carries this as `ColorComposition::crop`, the CLI prints a warning
-per flagged channel, and Python exposes the same measurements through
-`seiza.crop_report`.
+per flagged channel, Python exposes the same measurements through
+`seiza.crop_report`, and native front-ends read them as JSON from
+`seiza_color_crop_report_json`.
+
+`crop_report` takes borrowed `ChannelSamples` rather than owned images, so a
+host asking about its own buffers copies nothing. The C ABI hands its channel
+pointers straight through.
 
 ## RGB and linear LRGB
 

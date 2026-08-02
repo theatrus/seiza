@@ -71,7 +71,8 @@ full-size planes rather than copying cropped channels. The result carries its
 onto that grid. `ColorComposition::crop` reports each channel's own coverage
 and flags one that sits far from where the others agree — the channel that
 pulled the crop in. `crop_report` and `covered_region` expose the same search
-for callers cropping something other than a composition.
+for callers cropping something other than a composition; `crop_report` takes
+borrowed `ChannelSamples`, so a host measuring its own buffers copies nothing.
 
 Callers that inspect a small area can use `resample_region_to_reference` with
 a `ReferenceRegion`. It applies the same transform and interpolation as the

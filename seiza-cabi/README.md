@@ -47,6 +47,11 @@ exposes the **superset** of what both apps need.
   stable as model options grow. The JSON config can carry normalized ellipses
   or polygons projected from solved catalog bounds, including stored OpenNGC
   contours.
+- **Color crop diagnostics** — `seiza_color_crop_report_json` reports the
+  region a crop would keep across aligned channels and what each channel
+  covers of the shared grid, including any channel sitting far enough from the
+  others to look like a pointing error. It reads the caller's buffers in place
+  and returns owned JSON.
 - **Light deconvolution** — `seiza_deconvolve_in_place` applies the same
   conservative damped Richardson-Lucy operation as the Rust and Python APIs to
   caller-owned linear mono or interleaved RGB `float` samples. The synchronous
@@ -83,6 +88,24 @@ coefficients, so the input buffer may be released after `seiza_background_fit`
 returns. Pass null for both mask/configuration pointers to use automatic
 defaults. Correction mode constants and the precise pointer/length contracts
 are declared in the generated header.
+
+A crop report takes parallel arrays of channel names and sample pointers on
+one shared grid, and the mode `none`, `bounds`, or `inscribed`. It borrows
+those samples for the call rather than copying them. The JSON carries the
+mode, the grid size, the kept `region`, the retained fraction, the offset at
+which a channel is flagged, and one entry per channel with its own covered
+box, covered pixel count, center offset from the other channels, and
+`off_center` flag:
+
+```json
+{"mode":"inscribed","grid":{"width":128,"height":128},
+ "region":{"x":0,"y":80,"width":128,"height":48},
+ "retained_fraction":0.375,"off_center_limit_pixels":32.0,
+ "channels":[{"name":"SII","region":{"x":0,"y":80,"width":128,"height":48},
+              "covered_pixels":6144,"center_offset_x":0.0,
+              "center_offset_y":40.0,"center_offset_pixels":40.0,
+              "off_center":true}]}
+```
 
 Deconvolution uses the same buffer layout and modifies the caller-owned input
 in place. Supply a measured stellar PSF FWHM in pixels; the conservative values

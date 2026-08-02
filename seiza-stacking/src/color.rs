@@ -1,4 +1,4 @@
-use crate::crop::{ColorCrop, CropReport, crop_report};
+use crate::crop::{ChannelSamples, ColorCrop, CropReport, crop_report};
 use crate::{Error, LinearImage, ReferenceRegion, Result};
 use rayon::prelude::*;
 use seiza_stretch::{ResolvedCurve, StretchConfig, StretchParams};
@@ -596,7 +596,13 @@ impl CompositionGrid {
             .1;
         let report = match crop {
             ColorCrop::None => None,
-            _ => Some(crop_report(inputs, crop)?),
+            _ => {
+                let samples = inputs
+                    .iter()
+                    .map(|(name, image)| ChannelSamples::new(name, image))
+                    .collect::<Vec<_>>();
+                Some(crop_report(&samples, crop)?)
+            }
         };
         let region = match &report {
             Some(report) => report.region,
