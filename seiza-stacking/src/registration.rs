@@ -20,6 +20,19 @@ pub struct SimilarityTransform {
     pub translation_y: f64,
 }
 
+/// A source-to-reference affine mapping. Unlike [`SimilarityTransform`], this
+/// can represent a parity flip or unequal axis scales, which are needed when
+/// a solved image is resampled onto a canonical sky grid.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct AffineTransform {
+    /// Linear source-to-reference coordinate transform.
+    pub matrix: [[f64; 2]; 2],
+    /// Horizontal translation in reference pixels.
+    pub translation_x: f64,
+    /// Vertical translation in reference pixels.
+    pub translation_y: f64,
+}
+
 /// A rectangular region on the reference image's pixel grid.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct ReferenceRegion {
@@ -102,11 +115,124 @@ impl SimilarityTransform {
         }
     }
 
+    /// Express this similarity as a general affine transform.
+    pub fn as_affine(self) -> AffineTransform {
+        let cosine = self.rotation_radians.cos() * self.scale;
+        let sine = self.rotation_radians.sin() * self.scale;
+        AffineTransform {
+            matrix: [[cosine, -sine], [sine, cosine]],
+            translation_x: self.translation_x,
+            translation_y: self.translation_y,
+        }
+    }
+
     /// Pixel displacement produced by this transform at one source position.
     pub fn displacement_at(self, x: f64, y: f64) -> f64 {
         let (mapped_x, mapped_y) = self.apply(x, y);
         (mapped_x - x).hypot(mapped_y - y)
     }
+}
+
+impl AffineTransform {
+    /// The transform that leaves every coordinate unchanged.
+    pub const IDENTITY: Self = Self {
+        matrix: [[1.0, 0.0], [0.0, 1.0]],
+        translation_x: 0.0,
+        translation_y: 0.0,
+    };
+
+    /// Check that this transform is finite and invertible.
+    pub fn validate(self) -> Result<()> {
+        let determinant = self.determinant();
+        if self
+            .matrix
+            .into_iter()
+            .flatten()
+            .any(|value| !value.is_finite())
+            || !self.translation_x.is_finite()
+            || !self.translation_y.is_finite()
+            || !determinant.is_finite()
+            || determinant.abs() <= 1.0e-15
+        {
+            return Err(Error::Registration(
+                "affine resampling transform must be finite and invertible".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Map a source coordinate forward to reference space.
+    pub fn apply(self, x: f64, y: f64) -> (f64, f64) {
+        (
+            self.matrix[0][0].mul_add(x, self.matrix[0][1] * y) + self.translation_x,
+            self.matrix[1][0].mul_add(x, self.matrix[1][1] * y) + self.translation_y,
+        )
+    }
+
+    /// Map a reference coordinate back to source space.
+    pub fn inverse_apply(self, x: f64, y: f64) -> (f64, f64) {
+        self.inverse_map()(x, y)
+    }
+
+    /// Compose this source-to-intermediate mapping with an
+    /// intermediate-to-reference mapping. The returned transform applies
+    /// `self` first and `next` second.
+    pub fn then(self, next: Self) -> Self {
+        Self {
+            matrix: multiply_2x2(next.matrix, self.matrix),
+            translation_x: next.matrix[0][0]
+                .mul_add(self.translation_x, next.matrix[0][1] * self.translation_y)
+                + next.translation_x,
+            translation_y: next.matrix[1][0]
+                .mul_add(self.translation_x, next.matrix[1][1] * self.translation_y)
+                + next.translation_y,
+        }
+    }
+
+    fn determinant(self) -> f64 {
+        self.matrix[0][0].mul_add(self.matrix[1][1], -self.matrix[0][1] * self.matrix[1][0])
+    }
+
+    fn inverse_map(self) -> impl Fn(f64, f64) -> (f64, f64) {
+        let determinant = self.determinant();
+        let inverse = [
+            [
+                self.matrix[1][1] / determinant,
+                -self.matrix[0][1] / determinant,
+            ],
+            [
+                -self.matrix[1][0] / determinant,
+                self.matrix[0][0] / determinant,
+            ],
+        ];
+        move |x, y| {
+            let x = x - self.translation_x;
+            let y = y - self.translation_y;
+            (
+                inverse[0][0].mul_add(x, inverse[0][1] * y),
+                inverse[1][0].mul_add(x, inverse[1][1] * y),
+            )
+        }
+    }
+}
+
+impl From<SimilarityTransform> for AffineTransform {
+    fn from(value: SimilarityTransform) -> Self {
+        value.as_affine()
+    }
+}
+
+fn multiply_2x2(left: [[f64; 2]; 2], right: [[f64; 2]; 2]) -> [[f64; 2]; 2] {
+    [
+        [
+            left[0][0].mul_add(right[0][0], left[0][1] * right[1][0]),
+            left[0][0].mul_add(right[0][1], left[0][1] * right[1][1]),
+        ],
+        [
+            left[1][0].mul_add(right[0][0], left[1][1] * right[1][0]),
+            left[1][0].mul_add(right[0][1], left[1][1] * right[1][1]),
+        ],
+    ]
 }
 
 /// Tuning for star detection, triangle matching, and drift limits.
@@ -397,8 +523,65 @@ pub fn resample_region_to_reference(
     region: ReferenceRegion,
     transform: SimilarityTransform,
 ) -> Result<LinearImage> {
-    const COORDINATE_EPSILON: f64 = 1.0e-9;
+    transform.validate()?;
+    resample_region_with_inverse(
+        source,
+        reference_width,
+        reference_height,
+        region,
+        transform.inverse_map(),
+    )
+}
 
+/// Resample a source image through a general source-to-reference affine
+/// transform. This supports parity flips as well as rotation and scale.
+pub fn resample_to_reference_affine(
+    source: &LinearImage,
+    width: usize,
+    height: usize,
+    transform: AffineTransform,
+) -> Result<LinearImage> {
+    resample_region_to_reference_affine(
+        source,
+        width,
+        height,
+        ReferenceRegion {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        },
+        transform,
+    )
+}
+
+/// Resample one bounded reference-grid region through a general affine
+/// transform without allocating the full registered image.
+pub fn resample_region_to_reference_affine(
+    source: &LinearImage,
+    reference_width: usize,
+    reference_height: usize,
+    region: ReferenceRegion,
+    transform: AffineTransform,
+) -> Result<LinearImage> {
+    transform.validate()?;
+    resample_region_with_inverse(
+        source,
+        reference_width,
+        reference_height,
+        region,
+        transform.inverse_map(),
+    )
+}
+
+fn resample_region_with_inverse(
+    source: &LinearImage,
+    reference_width: usize,
+    reference_height: usize,
+    region: ReferenceRegion,
+    inverse: impl Fn(f64, f64) -> (f64, f64) + Sync,
+) -> Result<LinearImage> {
+    const COORDINATE_EPSILON: f64 = 1.0e-9;
     if reference_width == 0 || reference_height == 0 {
         return Err(Error::Registration(
             "resampling reference dimensions must be non-zero".into(),
@@ -422,7 +605,6 @@ pub fn resample_region_to_reference(
             "resampling region exceeds the reference grid".into(),
         ));
     }
-    transform.validate()?;
     let channels = source.channels;
     let sample_count = region
         .width
@@ -436,7 +618,6 @@ pub fn resample_region_to_reference(
     let mut data = vec![f32::NAN; sample_count];
     let maximum_source_x = (source.width - 1) as f64;
     let maximum_source_y = (source.height - 1) as f64;
-    let inverse = transform.inverse_map();
     data.par_chunks_mut(row_samples)
         .enumerate()
         .for_each(|(y, output_row)| {
@@ -851,6 +1032,55 @@ mod tests {
 
         assert!((sequential.0 - composed.0).abs() < 1.0e-10);
         assert!((sequential.1 - composed.1).abs() < 1.0e-10);
+    }
+
+    #[test]
+    fn affine_transform_composition_preserves_a_parity_flip() {
+        let first = SimilarityTransform {
+            scale: 0.98,
+            rotation_radians: 0.13,
+            translation_x: 12.0,
+            translation_y: -4.0,
+        }
+        .as_affine();
+        let second = AffineTransform {
+            matrix: [[-1.0, 0.2], [0.0, 1.0]],
+            translation_x: 40.0,
+            translation_y: 3.0,
+        };
+        let intermediate = first.apply(42.0, 17.0);
+        let sequential = second.apply(intermediate.0, intermediate.1);
+        let composed = first.then(second);
+        let actual = composed.apply(42.0, 17.0);
+
+        assert!(
+            composed.matrix[0][0] * composed.matrix[1][1]
+                - composed.matrix[0][1] * composed.matrix[1][0]
+                < 0.0
+        );
+        assert!((sequential.0 - actual.0).abs() < 1.0e-10);
+        assert!((sequential.1 - actual.1).abs() < 1.0e-10);
+        let restored = composed.inverse_apply(actual.0, actual.1);
+        assert!((restored.0 - 42.0).abs() < 1.0e-10);
+        assert!((restored.1 - 17.0).abs() < 1.0e-10);
+    }
+
+    #[test]
+    fn affine_resampling_can_flip_an_image_horizontally() {
+        let source = LinearImage::new(4, 2, 1, (0..8).map(|value| value as f32).collect()).unwrap();
+        let flipped = resample_to_reference_affine(
+            &source,
+            4,
+            2,
+            AffineTransform {
+                matrix: [[-1.0, 0.0], [0.0, 1.0]],
+                translation_x: 3.0,
+                translation_y: 0.0,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(flipped.data, vec![3.0, 2.0, 1.0, 0.0, 7.0, 6.0, 5.0, 4.0]);
     }
 
     #[test]

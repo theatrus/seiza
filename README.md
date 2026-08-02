@@ -4,7 +4,8 @@
 
 Star detection, WCS fitting, plate solving — hinted and blind — and calibrated
 batch/live image stacking for astrophotography, in Rust. Stacking includes
-linear FITS output and RGB, LRGB, and narrowband composition from mono stacks.
+linear FITS output, canonical north-up/east-left reprojection, and RGB, LRGB,
+and narrowband composition from mono stacks.
 Built to power object overlays and astrometric features in
 [tenrankai](https://github.com/theatrus/tenrankai) and
 [PSF Guard](https://github.com/theatrus/psf-guard).
@@ -269,6 +270,10 @@ The Rust crate, Python wheel, and C ABI expose the same incremental
 `LiveStacker` engine. Live handles can be atomically checkpointed to a
 versioned `.seiza-stack` context, reopened in a later process, and continue
 accepting frames without resetting their registration or rejection history.
+Rust hosts can use `SkyOrientationPlan` after integration to preserve the full
+solved footprint on a north-up, east-left TAN grid. The plan returns the affine
+mapping and replacement FITS WCS, so source-frame crop tools can follow the
+same geometry.
 See the [CLI stacking guide](seiza-cli/README.md#image-stacking),
 [Python API](seiza-py/README.md#image-stacking), and
 [stacking design](docs/design/image-stacking.md).
@@ -538,7 +543,8 @@ seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-
 - **Image stacking** — master bias/dark/flat construction, CFA-aware OSC
   calibration, registration onto the first frame's fixed grid with
   meridian-flip handling, global or tiled local normalization, and online
-  delta-sigma rejection in `seiza-stacking`. The same incremental
+  delta-sigma rejection in `seiza-stacking`. Solved outputs can be reprojected
+  to a full-footprint north-up, east-left grid. The same incremental
   `LiveStacker` engine serves batch and live use, with atomic on-disk contexts
   for exact process-to-process resumption.
 - **Deconvolution (experimental)** — damped Richardson-Lucy restoration from
@@ -640,7 +646,7 @@ and solves in the table's exact frame. Contract details:
 - `seiza-stretch/` — parameterized, format-independent display analysis,
   transfer plans, and mono/RGB application
 - `seiza-stacking/` — linear FITS/XISF calibration, local registration,
-  normalization, additive integration, and rejection
+  normalization, additive integration, rejection, and solved sky orientation
 - `seiza-cabi/` — shared native C ABI for rendering, background extraction,
   live stacking, solving, overlays, and catalog setup
 - `seiza-cli/` — the `seiza` command-line tool: solving, ASTAP mode, the

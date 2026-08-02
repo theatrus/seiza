@@ -9,6 +9,7 @@ mod image;
 mod mapping;
 mod master;
 mod normalization;
+mod orientation;
 mod paths;
 mod registration;
 mod residual_flat;
@@ -31,10 +32,12 @@ pub use master::{
     MasterRejectionOptions, build_master_from_fits,
 };
 pub use normalization::{NormalizationMap, NormalizationMode};
+pub use orientation::{SKY_ORIENTATION_NAME, SKY_ORIENTATION_VERSION, SkyOrientationPlan};
 pub use paths::{path_identity, paths_refer_to_same_file};
 pub use registration::{
-    ReferenceRegion, Registrar, RegistrationOptions, RegistrationResult, SimilarityTransform,
-    resample_region_to_reference, resample_to_reference,
+    AffineTransform, ReferenceRegion, Registrar, RegistrationOptions, RegistrationResult,
+    SimilarityTransform, resample_region_to_reference, resample_region_to_reference_affine,
+    resample_to_reference, resample_to_reference_affine,
 };
 pub use residual_flat::{
     RESIDUAL_FLAT_ALGORITHM_VERSION, ResidualFlatBuild, ResidualFlatDiagnostics,
@@ -61,6 +64,9 @@ pub enum Error {
     /// No star match reached the registration thresholds.
     #[error("registration failed: {0}")]
     Registration(String),
+    /// A solved image could not be placed on the requested celestial grid.
+    #[error("sky orientation failed: {0}")]
+    Orientation(String),
     /// Background matching between reference and source failed.
     #[error("normalization failed: {0}")]
     Normalization(String),

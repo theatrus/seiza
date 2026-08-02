@@ -33,7 +33,7 @@ seiza-download = { path = "seiza-download", version = "0.6.0" }
 seiza-fits = { path = "seiza-fits", version = "0.2.1" }
 seiza-imgproc = { path = "seiza-imgproc", version = "0.3.0" }
 seiza-satellites = { path = "seiza-satellites", version = "0.4.3" }
-seiza-stacking = { path = "seiza-stacking", version = "0.2.0" }
+seiza-stacking = { path = "seiza-stacking", version = "0.3.0" }
 seiza-stats = { path = "seiza-stats", version = "0.1.0" }
 seiza-stretch = { path = "seiza-stretch", version = "0.2.0" }
 seiza-sources = { path = "seiza-sources", version = "0.2.1" }
