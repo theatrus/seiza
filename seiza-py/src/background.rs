@@ -54,10 +54,7 @@ impl PyBackgroundModel {
             self.fit.diagnostics.rejection_iterations,
         )?;
         diagnostics.set_item("sample_radius", self.fit.diagnostics.sample_radius)?;
-        diagnostics.set_item(
-            "protected_regions",
-            self.fit.diagnostics.protected_regions,
-        )?;
+        diagnostics.set_item("protected_regions", self.fit.diagnostics.protected_regions)?;
         if let Some(selection) = &self.fit.diagnostics.model_selection {
             let model_selection = PyDict::new(py);
             model_selection.set_item("selected", &selection.selected)?;

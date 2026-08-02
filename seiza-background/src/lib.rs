@@ -1245,7 +1245,11 @@ fn sample_center_is_excluded(
         return false;
     }
     let point = [unit_coordinate(x, width), unit_coordinate(y, height)];
-    let padding = radius as f64 / width.min(height).saturating_sub(1).max(1) as f64;
+    // A sample is square, so its farthest pixel lies one half-diagonal from
+    // the center. Cover that corner as well as the horizontal and vertical
+    // edges when a catalog region sits close to the window.
+    let padding = std::f64::consts::SQRT_2 * radius as f64
+        / width.min(height).saturating_sub(1).max(1) as f64;
     protected_regions
         .iter()
         .any(|region| region_contains_with_padding(region, point, padding))
@@ -2036,6 +2040,22 @@ mod tests {
         )
         .unwrap();
         assert!(region_contains(&normalized, [0.5, 0.4]));
+    }
+
+    #[test]
+    fn protected_region_padding_covers_a_sample_window_corner() {
+        let region = ProtectedRegion::Polygon {
+            points: vec![[0.495, 0.495], [0.505, 0.495], [0.5, 0.505]],
+        };
+        assert!(sample_center_is_excluded(
+            60,
+            60,
+            101,
+            101,
+            10,
+            None,
+            &[region],
+        ));
     }
 
     fn curved_gradient(width: usize, height: usize) -> Vec<f32> {
