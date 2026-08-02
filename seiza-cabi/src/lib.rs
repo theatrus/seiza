@@ -793,6 +793,9 @@ pub unsafe extern "C" fn seiza_color_crop_report_json(
         if channel_count == 0 {
             return Err("crop report requires at least one channel".into());
         }
+        if width == 0 || height == 0 {
+            return Err("crop report requires a non-empty grid".into());
+        }
         if !matches!(samples_per_pixel, 1 | 3) {
             return Err("crop report requires one or three samples per pixel".into());
         }

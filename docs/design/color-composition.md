@@ -70,9 +70,12 @@ solution.
 
 A crop also reports what each channel covered: its own covered bounding box
 and pixel count, and how far its coverage center sits from the median center
-of the others. A channel past the larger of 32 pixels and 2% of the frame is
-flagged `off_center` — the one that pulled the crop in. With fewer than three
-channels there is no majority to disagree with, so nothing is flagged. The
+of every channel. A channel past the larger of 32 pixels and 2% of the frame
+is flagged `off_center` — the one that pulled the crop in. The consensus is a
+median rather than a mean because one badly placed channel cannot move it; a
+mean would follow the stray and carry the well-placed channels past the limit
+with it. With fewer than three channels there is no majority to disagree with,
+so nothing is flagged. The
 Rust result carries this as `ColorComposition::crop`, the CLI prints a warning
 per flagged channel, Python exposes the same measurements through
 `seiza.crop_report`, and native front-ends read them as JSON from

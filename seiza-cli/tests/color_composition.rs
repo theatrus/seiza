@@ -508,7 +508,7 @@ fn rgb_cli_flags_a_channel_far_from_the_others() {
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(stdout.contains("cropped to 128x48 at (0, 80)"), "{stdout}");
-    assert!(stderr.contains("warning: blue covers a patch"), "{stderr}");
+    assert!(stderr.contains("warning: blue sits"), "{stderr}");
     assert!(!stderr.contains("warning: green"), "{stderr}");
 
     let fits = FitsImage::open(&output).unwrap();

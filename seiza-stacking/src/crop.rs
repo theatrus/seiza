@@ -55,11 +55,11 @@ pub struct ChannelCoverage {
     pub region: ReferenceRegion,
     /// Number of pixels this channel covers.
     pub covered_pixels: usize,
-    /// Horizontal offset of this channel's coverage center from the other
-    /// channels' consensus center, in pixels.
+    /// Horizontal offset of this channel's coverage center from the median
+    /// center of every channel, in pixels.
     pub center_offset_x: f64,
-    /// Vertical offset of this channel's coverage center from the other
-    /// channels' consensus center, in pixels.
+    /// Vertical offset of this channel's coverage center from the median
+    /// center of every channel, in pixels.
     pub center_offset_y: f64,
     /// Whether that offset is large enough to look like a pointing error
     /// rather than ordinary dither and guiding drift.
@@ -158,31 +158,73 @@ impl<'a> ChannelSamples<'a> {
 
     /// Bounding box and pixel count of this channel's own coverage.
     fn coverage(self) -> Option<(ReferenceRegion, usize)> {
-        let mut left = self.width;
-        let mut right = 0;
-        let mut top = self.height;
-        let mut bottom = 0;
-        let mut covered_pixels = 0;
-        for row in 0..self.height {
-            for column in 0..self.width {
-                if self.covers(row * self.width + column) {
-                    covered_pixels += 1;
-                    left = left.min(column);
-                    right = right.max(column);
-                    top = top.min(row);
-                    bottom = bottom.max(row);
+        (0..self.height)
+            .into_par_iter()
+            .map(|row| {
+                let mut bounds = CoverageBounds::default();
+                for column in 0..self.width {
+                    if self.covers(row * self.width + column) {
+                        bounds.include(column, row);
+                    }
                 }
-            }
+                bounds
+            })
+            .reduce(CoverageBounds::default, CoverageBounds::merge)
+            .region()
+    }
+}
+
+/// Running bounding box and pixel count while scanning one channel.
+#[derive(Clone, Copy)]
+struct CoverageBounds {
+    left: usize,
+    right: usize,
+    top: usize,
+    bottom: usize,
+    covered_pixels: usize,
+}
+
+impl Default for CoverageBounds {
+    fn default() -> Self {
+        Self {
+            left: usize::MAX,
+            right: 0,
+            top: usize::MAX,
+            bottom: 0,
+            covered_pixels: 0,
         }
-        (covered_pixels > 0).then(|| {
+    }
+}
+
+impl CoverageBounds {
+    fn include(&mut self, column: usize, row: usize) {
+        self.left = self.left.min(column);
+        self.right = self.right.max(column);
+        self.top = self.top.min(row);
+        self.bottom = self.bottom.max(row);
+        self.covered_pixels += 1;
+    }
+
+    fn merge(self, other: Self) -> Self {
+        Self {
+            left: self.left.min(other.left),
+            right: self.right.max(other.right),
+            top: self.top.min(other.top),
+            bottom: self.bottom.max(other.bottom),
+            covered_pixels: self.covered_pixels + other.covered_pixels,
+        }
+    }
+
+    fn region(self) -> Option<(ReferenceRegion, usize)> {
+        (self.covered_pixels > 0).then(|| {
             (
                 ReferenceRegion {
-                    x: left,
-                    y: top,
-                    width: right - left + 1,
-                    height: bottom - top + 1,
+                    x: self.left,
+                    y: self.top,
+                    width: self.right - self.left + 1,
+                    height: self.bottom - self.top + 1,
                 },
-                covered_pixels,
+                self.covered_pixels,
             )
         })
     }
@@ -288,11 +330,12 @@ fn coverage(channels: &[ChannelSamples<'_>], pixel_count: usize) -> Vec<bool> {
         .collect()
 }
 
-/// Offset each channel's coverage center from the median of the others, and
-/// flag the ones that sit far enough out to look like a pointing error.
+/// Offset each channel's coverage center from the median center, and flag the
+/// ones that sit far enough out to look like a pointing error.
 ///
-/// The median holds the consensus even when one channel is badly placed, which
-/// a mean would not.
+/// The median is the consensus of every channel, including the channel being
+/// measured. One badly placed channel cannot move it, whereas a mean would
+/// follow the stray and drag the well-placed channels past the limit with it.
 fn flag_off_center(channels: &mut [ChannelCoverage], width: usize, height: usize) {
     if channels.len() < 3 {
         // Two channels disagree with each other symmetrically; there is no
@@ -304,19 +347,13 @@ fn flag_off_center(channels: &mut [ChannelCoverage], width: usize, height: usize
         .iter()
         .map(|channel| center_of(channel.region))
         .collect::<Vec<_>>();
-    for (index, channel) in channels.iter_mut().enumerate() {
-        let others = centers
-            .iter()
-            .enumerate()
-            .filter(|(other, _)| *other != index)
-            .map(|(_, center)| *center)
-            .collect::<Vec<_>>();
-        let consensus = (
-            median(others.iter().map(|center| center.0)),
-            median(others.iter().map(|center| center.1)),
-        );
-        channel.center_offset_x = centers[index].0 - consensus.0;
-        channel.center_offset_y = centers[index].1 - consensus.1;
+    let consensus = (
+        median(centers.iter().map(|center| center.0)),
+        median(centers.iter().map(|center| center.1)),
+    );
+    for (channel, center) in channels.iter_mut().zip(&centers) {
+        channel.center_offset_x = center.0 - consensus.0;
+        channel.center_offset_y = center.1 - consensus.1;
         channel.off_center = channel.center_offset_pixels() > limit;
     }
 }
@@ -340,26 +377,20 @@ fn median(values: impl Iterator<Item = f64>) -> f64 {
 }
 
 fn bounding_rectangle(covered: &[bool], width: usize, height: usize) -> Option<ReferenceRegion> {
-    let mut left = width;
-    let mut right = 0;
-    let mut top = height;
-    let mut bottom = 0;
-    for row in 0..height {
-        for column in 0..width {
-            if covered[row * width + column] {
-                left = left.min(column);
-                right = right.max(column);
-                top = top.min(row);
-                bottom = bottom.max(row);
+    (0..height)
+        .into_par_iter()
+        .map(|row| {
+            let mut bounds = CoverageBounds::default();
+            for column in 0..width {
+                if covered[row * width + column] {
+                    bounds.include(column, row);
+                }
             }
-        }
-    }
-    (left <= right && top <= bottom).then(|| ReferenceRegion {
-        x: left,
-        y: top,
-        width: right - left + 1,
-        height: bottom - top + 1,
-    })
+            bounds
+        })
+        .reduce(CoverageBounds::default, CoverageBounds::merge)
+        .region()
+        .map(|(region, _)| region)
 }
 
 /// Largest covered axis-aligned rectangle, by the usual per-row histogram
@@ -653,6 +684,31 @@ mod tests {
         assert!(flagged[0].center_offset_y > 40.0);
         assert!(!report.channels[0].off_center);
         assert!(!report.channels[1].off_center);
+    }
+
+    #[test]
+    fn a_large_stray_does_not_drag_the_others_past_the_limit() {
+        // A consensus that followed the stray would sit halfway to it and put
+        // the two well-placed channels 45px out, past the 32px limit.
+        let reference = shifted(256, 0, 0);
+        let green = shifted(256, 0, 0);
+        let stray = shifted(256, 0, 180);
+        let report = crop_report(
+            &[
+                ChannelSamples::new("red", &reference),
+                ChannelSamples::new("green", &green),
+                ChannelSamples::new("blue", &stray),
+            ],
+            ColorCrop::Inscribed,
+        )
+        .unwrap();
+        let flagged = report
+            .off_center()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(flagged, ["blue"]);
+        assert_eq!(report.channels[0].center_offset_y, 0.0);
+        assert!(report.channels[2].center_offset_y > 80.0);
     }
 
     #[test]

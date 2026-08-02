@@ -254,14 +254,15 @@ pub fn combine_rgb(
     data.par_chunks_mut(3)
         .enumerate()
         .for_each(|(index, output)| {
-            if channels.iter().any(|channel| !channel.valid(index)) {
+            let source = window.source_index(index);
+            if channels.iter().any(|channel| !channel.valid(source)) {
                 output.fill(f32::NAN);
                 return;
             }
             output.copy_from_slice(&[
-                channels[0].sample(index),
-                channels[1].sample(index),
-                channels[2].sample(index),
+                channels[0].sample(source),
+                channels[1].sample(source),
+                channels[2].sample(source),
             ]);
         });
     grid.compose(data, options.input_transfer)
@@ -378,20 +379,21 @@ fn combine_lrgb_with_target(
     data.par_chunks_mut(3)
         .enumerate()
         .for_each(|(index, output)| {
-            if l.as_ref().is_some_and(|l| !l.valid(index))
-                || rgb.iter().any(|channel| !channel.valid(index))
+            let source = window.source_index(index);
+            if l.as_ref().is_some_and(|l| !l.valid(source))
+                || rgb.iter().any(|channel| !channel.valid(source))
             {
                 output.fill(f32::NAN);
                 return;
             }
-            let r = rgb[0].sample(index);
-            let g = rgb[1].sample(index);
-            let b = rgb[2].sample(index);
+            let r = rgb[0].sample(source);
+            let g = rgb[1].sample(source);
+            let b = rgb[2].sample(source);
             let rgb_luminance = crate::image::rec709_luma(r, g, b);
             let target_luminance = match (target, &l) {
                 (LrgbTarget::Replace { luminance_weight }, Some(l)) => (1.0 - luminance_weight)
-                    .mul_add(rgb_luminance, luminance_weight * l.sample(index)),
-                (LrgbTarget::Super, Some(l)) => l.sample(index) + r + g + b,
+                    .mul_add(rgb_luminance, luminance_weight * l.sample(source)),
+                (LrgbTarget::Super, Some(l)) => l.sample(source) + r + g + b,
                 (LrgbTarget::SyntheticSum, _) => r + g + b,
                 // The public wrappers always pair an L-consuming target with
                 // a supplied luminance stack.
@@ -462,13 +464,16 @@ pub fn combine_narrowband(
     data.par_chunks_mut(3)
         .enumerate()
         .for_each(|(index, output)| {
-            if !h.valid(index) || !o.valid(index) || s.is_some_and(|channel| !channel.valid(index))
+            let source = window.source_index(index);
+            if !h.valid(source)
+                || !o.valid(source)
+                || s.is_some_and(|channel| !channel.valid(source))
             {
                 output.fill(f32::NAN);
                 return;
             }
-            let h = h_display.map(h.sample(index));
-            let o = o_display.map(o.sample(index));
+            let h = h_display.map(h.sample(source));
+            let o = o_display.map(o.sample(source));
             let product = (o * h).clamp(0.0, 1.0);
             let green_factor = product.powf(1.0 - product);
             let green = green_factor.mul_add(h, (1.0 - green_factor) * o);
@@ -479,7 +484,7 @@ pub fn combine_narrowband(
                     o_factor.mul_add(
                         s_display
                             .expect("SII was validated")
-                            .map(s.expect("SII was validated").sample(index)),
+                            .map(s.expect("SII was validated").sample(source)),
                         (1.0 - o_factor) * h,
                     )
                 }
@@ -531,20 +536,22 @@ fn combine_prepared_matrix(
     matrix: NarrowbandMatrix,
     transfer: ColorTransfer,
 ) -> Result<ColorComposition> {
+    let window = grid.window();
     let mut data = vec![0.0; grid.pixel_count() * 3];
     data.par_chunks_mut(3)
         .enumerate()
         .for_each(|(index, output)| {
-            if !ha.valid(index)
-                || !oiii.valid(index)
-                || sii.is_some_and(|channel| !channel.valid(index))
+            let source = window.source_index(index);
+            if !ha.valid(source)
+                || !oiii.valid(source)
+                || sii.is_some_and(|channel| !channel.valid(source))
             {
                 output.fill(f32::NAN);
                 return;
             }
-            let h = ha.sample(index);
-            let o = oiii.sample(index);
-            let s = sii.map_or(0.0, |channel| channel.sample(index));
+            let h = ha.sample(source);
+            let o = oiii.sample(source);
+            let s = sii.map_or(0.0, |channel| channel.sample(source));
             for (target, mix) in output
                 .iter_mut()
                 .zip([matrix.red, matrix.green, matrix.blue])
@@ -617,7 +624,10 @@ impl CompositionGrid {
             window: ChannelWindow {
                 source_width: source.width,
                 region,
-                whole_grid: region.width == source.width && region.height == source.height,
+                whole_grid: region.x == 0
+                    && region.y == 0
+                    && region.width == source.width
+                    && region.height == source.height,
             },
             report,
         })
@@ -650,12 +660,17 @@ struct PreparedChannel<'a> {
 }
 
 impl PreparedChannel<'_> {
-    fn valid(self, index: usize) -> bool {
-        self.values[self.window.source_index(index)].is_finite()
+    /// Whether this channel covers the pixel at a source index.
+    ///
+    /// Every channel of one composition shares a window, so the compose loops
+    /// map an output pixel to its source index once and hand it to each
+    /// channel rather than repeating that division per channel.
+    fn valid(self, source: usize) -> bool {
+        self.values[source].is_finite()
     }
 
-    fn sample(self, index: usize) -> f32 {
-        let value = self.values[self.window.source_index(index)];
+    fn sample(self, source: usize) -> f32 {
+        let value = self.values[source];
         if !value.is_finite() {
             return 0.0;
         }
@@ -675,8 +690,9 @@ impl PreparedChannel<'_> {
         let stride = count.div_ceil(max_samples.max(1)).max(1);
         (0..count)
             .step_by(stride)
-            .filter(|index| self.valid(*index))
-            .map(|index| self.sample(index))
+            .map(|index| self.window.source_index(index))
+            .filter(|source| self.valid(*source))
+            .map(|source| self.sample(source))
             .collect()
     }
 }
@@ -743,8 +759,9 @@ fn display_transform(
     if matches!(channel.transform, ChannelTransform::Identity)
         && (0..channel.window.pixel_count())
             .into_par_iter()
-            .filter(|index| channel.valid(*index))
-            .any(|index| !(0.0..=1.0).contains(&channel.sample(index)))
+            .map(|index| channel.window.source_index(index))
+            .filter(|source| channel.valid(*source))
+            .any(|source| !(0.0..=1.0).contains(&channel.sample(source)))
     {
         return Err(Error::Color(
             "Foraxx with normalization disabled requires finite samples in [0, 1]; use percentile normalization for sensor-unit inputs"

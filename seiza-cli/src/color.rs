@@ -420,8 +420,8 @@ fn report_crop(composition: &ColorComposition) {
     );
     for channel in report.off_center() {
         eprintln!(
-            "warning: {} covers a patch {:.0}px off center from the other channels \
-             ({:+.0}, {:+.0}); it is the likely cause of a small crop",
+            "warning: {} sits {:.0}px ({:+.0}, {:+.0}) off center from the other \
+             channels and bounds the crop",
             channel.name,
             channel.center_offset_pixels(),
             channel.center_offset_x,

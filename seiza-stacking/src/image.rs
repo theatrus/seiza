@@ -60,10 +60,12 @@ impl LinearImage {
     ///
     /// The region is in this image's pixel coordinates and must lie inside it.
     pub fn crop(&self, region: ReferenceRegion) -> Result<Self> {
+        let past_right = region.x.checked_add(region.width);
+        let past_bottom = region.y.checked_add(region.height);
         if region.width == 0
             || region.height == 0
-            || region.x + region.width > self.width
-            || region.y + region.height > self.height
+            || past_right.is_none_or(|edge| edge > self.width)
+            || past_bottom.is_none_or(|edge| edge > self.height)
         {
             return Err(Error::InvalidImage(format!(
                 "crop region {}x{} at ({}, {}) does not fit a {}x{} image",
@@ -167,15 +169,29 @@ mod tests {
     #[test]
     fn crop_rejects_a_region_outside_the_image() {
         let image = LinearImage::new(2, 2, 1, vec![0.0; 4]).unwrap();
-        let error = image
-            .crop(ReferenceRegion {
+        for region in [
+            ReferenceRegion {
                 x: 1,
                 y: 0,
                 width: 2,
                 height: 1,
-            })
-            .unwrap_err();
-        assert!(error.to_string().contains("does not fit"));
+            },
+            ReferenceRegion {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 1,
+            },
+            ReferenceRegion {
+                x: usize::MAX,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+        ] {
+            let error = image.crop(region).unwrap_err();
+            assert!(error.to_string().contains("does not fit"), "{region:?}");
+        }
     }
 
     #[test]
