@@ -44,7 +44,8 @@ The same Rust engine drives two real desktop apps through
   native FITS viewer and plate solver. Browse whole folders with thumbnails,
   stretch live with a reorderable stack editor, subtract gradients,
   deconvolve, blind solve on your machine with no uploads, install and verify
-  catalogs, and export images with overlays. Quick Look previews included.
+  catalogs, and export images with overlays. Finder shows image thumbnails,
+  and Quick Look keeps the full frame fitted as its window changes size.
   macOS 15+, Apple silicon and Intel.
 - 🪟 **[Seiza for Windows](https://github.com/theatrus/seiza-win)** — a
   first-class native WinUI 3 viewer and solver. GPU-accelerated pan and
@@ -197,18 +198,18 @@ a linear TAN solution even when a local worker could fit SIP.
 | 16-bit PNG and TIFF export | ✓ | ✓ | — |
 | FITS WCS sidecar or header download | ✓ | ✓ | ✓ |
 | Catalog install, verify, repair, and relocation UI | ✓ | ✓ | — |
-| OS file preview | Quick Look | Preview Pane | — |
-| OS content thumbnails | — | ✓ | — |
+| OS file preview | Fit-to-window Quick Look | Preview Pane | — |
+| OS content thumbnails | ✓ | ✓ | — |
 | Signed in-app updates | ✓ | ✓ | — |
 | Durable queued jobs, accounts, API keys, and solve history | — | — | ✓ |
 
 The app columns describe shipped UI, not every function present in the linked
 C ABI. The Mac and Windows apps both stack folders now; neither exposes hinted
-solve controls or satellite tracks yet. Windows has Explorer content
-thumbnails, while the Mac app currently ships Quick Look previews and document
-icons rather than a Finder thumbnail extension. PSF Guard and Tenrankai are
-downstream products rather than Seiza distributions: PSF Guard uses solving,
-catalog context, and batch stacking, while Tenrankai uses solving and overlays.
+solve controls or satellite tracks yet. Both apps supply file previews and
+content thumbnails through their native file managers. PSF Guard and Tenrankai
+are downstream products rather than Seiza distributions: PSF Guard uses
+solving, catalog context, and batch stacking, while Tenrankai uses solving and
+overlays.
 
 ## Quick start
 
