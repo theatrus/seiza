@@ -127,26 +127,88 @@ compiler, formatter, and linter.
 
 ## Feature matrix
 
-Every surface runs the same engine; pick the one that fits.
+These tables distinguish engine support from what each public API or app
+actually exposes. **✓** means shipped, **◐** means the limited form described
+below, and **—** means that surface does not expose the feature.
 
-| Feature | CLI | Python | C ABI | 🍎 Mac app | 🪟 Windows app |
-|---|:-:|:-:|:-:|:-:|:-:|
-| Plate solving — hinted and blind | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Star, deep-sky, and motion overlays | ✓ | — | ✓ | ✓ | ✓ |
-| Image browsing and native rendering | — | — | ✓ | ✓ | ✓ |
-| Display stretching | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Batch and live stacking | ✓ | ✓ | ✓ | — | — |
-| Calibration masters | ✓ | ✓ | — | — | — |
-| Background extraction | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Deconvolution (experimental) | ✓ | ✓ | ✓ | ✓ | ✓ |
-| RGB, LRGB, and narrowband color | ✓ | ✓ | — | — | — |
-| Satellite track prediction | ✓ | ✓ | — | — | — |
-| Catalog install and verify | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Export with overlays | ✓ | — | — | ✓ | ✓ |
+### Library APIs
 
-The C ABI renders; its host app does the browsing. For stacking on the
-desktop, [PSF Guard](https://github.com/theatrus/psf-guard) stacks the frames
-it selects with this engine.
+| Feature | [Rust crates](#layout) | [Python](seiza-py/README.md) | [C ABI](seiza-cabi/README.md) |
+|---|:-:|:-:|:-:|
+| Standalone star detection | ✓ | ✓ | — |
+| Hinted plate solving | ✓ | ✓ | — |
+| Blind plate solving | ✓ | ✓ | ✓ |
+| WCS and SIP solution output | ✓ | ✓ | ✓ |
+| Pixel/world transforms and FITS WCS cards | ✓ | ✓ | — |
+| Solve-time star, deep-sky, transient, and Solar System annotations | ✓ | — | ✓ |
+| Verified catalog download and setup | ✓ | ✓ | ✓ |
+| FITS, XISF, and raster decoding and rendering | ✓ | — | ✓ |
+| Parameterized display stretching | ✓ | ✓ | ✓ |
+| Background fitting and correction | ✓ | ✓ | ✓ |
+| Light deconvolution | ✓ | ✓ | ✓ |
+| Batch stacking | ✓ | ✓ | ◐ |
+| Incremental stacking with saved contexts | ✓ | ✓ | ✓ |
+| Bias, dark, and flat master construction | ✓ | ✓ | — |
+| RGB, LRGB, and narrowband composition | ✓ | ✓ | ◐ |
+| Satellite track prediction | ✓ | ✓ | — |
+| OpenCV-compatible image-processing primitives | ✓ | ✓ | — |
+
+The C ABI supplies the incremental engine used for batch stacking by the
+desktop apps, but it has no one-call batch helper. Its color API reports shared
+coverage and crop bounds; Rust and Python perform the channel composition.
+
+### Commands and services
+
+| Feature | [CLI commands](seiza-cli/README.md) | [Worker JSON](docs/design/worker-protocol.md) | [seiza-server API and web app](https://github.com/theatrus/seiza-server) |
+|---|:-:|:-:|:-:|
+| Hinted plate solving | ✓ | ✓ | ✓ |
+| Blind plate solving | ✓ | ✓ | ✓ |
+| WCS and SIP solution output | ✓ | ✓ | ✓ |
+| Catalog object and stellar-name queries | ✓ | — | ✓ |
+| Solve overlays and downloadable WCS | ✓ | — | ✓ |
+| Satellite track prediction | ✓ | — | ✓ |
+| Catalog download, setup, and validation | ✓ | — | — |
+| Stretch, background correction, and deconvolution | ✓ | — | — |
+| Batch stacking, calibration masters, and color composition | ✓ | — | — |
+| ASTAP and `solve-field` command compatibility | ✓ | — | — |
+| Persistent local solver process | — | ✓ | — |
+| Remote queued solving | — | ✓ | ✓ |
+| Resumable uploads and durable solve history | — | — | ✓ |
+| Astrometry.net-compatible HTTP API | — | — | ✓ |
+
+The worker protocol stays small on purpose: it keeps catalogs open and serves
+hinted or blind solves. It is not a general image-processing RPC. A worker can
+forward the same requests to seiza-server; remote worker results currently use
+a linear TAN solution even when a local worker could fit SIP.
+
+### Apps
+
+| Feature | [Seiza for Mac](https://github.com/theatrus/seiza-mac) | [Seiza for Windows](https://github.com/theatrus/seiza-win) | [seiza.fyi / seiza-server](https://github.com/theatrus/seiza-server) |
+|---|:-:|:-:|:-:|
+| View or upload FITS, XISF, and raster images | ✓ | ✓ | ✓ |
+| Folder browser with cached thumbnails | ✓ | ✓ | — |
+| Blind plate solving | ✓ | ✓ | ✓ |
+| Hinted plate solving | — | — | ✓ |
+| Named stars, deep-sky objects, transients, and Solar System overlays | ✓ | ✓ | ✓ |
+| Satellite track overlays | — | — | ✓ |
+| Ordered stretch editor, background correction, and deconvolution | ✓ | ✓ | — |
+| Directory stacking with optional calibration masters | ✓ | ✓ | — |
+| Full-resolution PNG, JPEG, and TIFF export with optional overlays | ✓ | ✓ | — |
+| 16-bit PNG and TIFF export | ✓ | ✓ | — |
+| FITS WCS sidecar or header download | ✓ | ✓ | ✓ |
+| Catalog install, verify, repair, and relocation UI | ✓ | ✓ | — |
+| OS file preview | Quick Look | Preview Pane | — |
+| OS content thumbnails | — | ✓ | — |
+| Signed in-app updates | ✓ | ✓ | — |
+| Durable queued jobs, accounts, API keys, and solve history | — | — | ✓ |
+
+The app columns describe shipped UI, not every function present in the linked
+C ABI. The Mac and Windows apps both stack folders now; neither exposes hinted
+solve controls or satellite tracks yet. Windows has Explorer content
+thumbnails, while the Mac app currently ships Quick Look previews and document
+icons rather than a Finder thumbnail extension. PSF Guard and Tenrankai are
+downstream products rather than Seiza distributions: PSF Guard uses solving,
+catalog context, and batch stacking, while Tenrankai uses solving and overlays.
 
 ## Quick start
 
