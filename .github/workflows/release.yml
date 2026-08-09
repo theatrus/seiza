@@ -92,10 +92,19 @@ jobs:
       # hold a short-lived token exchanged over OIDC, so no signing secret is
       # stored in this repository.
       #
+      # This login sits immediately before the signing step, and is repeated
+      # before the second one, rather than being done once at the top of the
+      # job. The GitHub OIDC token azure/login exchanges is a client assertion
+      # valid for only five minutes; authenticate early, build for longer than
+      # that, and signing fails with AADSTS700024 ("Client assertion is not
+      # within its valid time range"), which reads like a wrong tenant or a
+      # missing role but is purely about elapsed time. A credential that lives
+      # five minutes has to be acquired next to where it is used.
+      #
       # Gated on the variable being set so a fork -- which has neither the
       # variables nor access to the federated credential -- still builds, just
       # unsigned, instead of failing the release job outright.
-      - name: Authenticate to Azure for code signing
+      - name: Authenticate to Azure for binary signing
         if: vars.AZURE_CLIENT_ID != ''
         uses: azure/login@v2
         with:
@@ -141,6 +150,18 @@ jobs:
           $zip = (Resolve-Path "dist/seiza-cli-$version-windows-x86_64.zip").Path
           "SEIZA_MSI=$msi" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "SEIZA_ZIP=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # Authenticate again. Packaging sits between the two signing steps, and
+      # `dotnet build` on the wixproj restores the WiX SDK and its two
+      # extensions from NuGet on a cold runner, which is easily longer than the
+      # five minutes the previous assertion was good for.
+      - name: Authenticate to Azure for installer signing
+        if: vars.AZURE_CLIENT_ID != ''
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       # The installer wraps an already-signed executable, so this is the second
       # and last signature spent per release. The loose binary is not re-signed
