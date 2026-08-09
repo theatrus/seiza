@@ -29,6 +29,25 @@ let display = image.stretch_to_u8(&Default::default());
 Distributed XISF units, inline or embedded image blocks, compression subblocks,
 complex samples, CIELab, and dimensions other than two are rejected explicitly.
 
+Samples decode exactly as stored. That matters for floating-point images,
+because PixInsight normalizes them to `bounds="0:1"` and nothing in the
+samples says so — such a frame is not comparable with a camera frame's ADU.
+`read_image` returns the declared range beside the pixels, and `rescale_to`
+converts onto a chosen full scale:
+
+```rust
+let mut read = seiza_xisf::read_image(std::path::Path::new("integration.xisf"))?;
+if read.rescale_to(65535.0) {
+    println!("normalized frame placed on a 16-bit scale");
+}
+# Ok::<(), seiza_xisf::XisfError>(())
+```
+
+`rescale_to` answers `false` and leaves the pixels alone when the file
+declares no bounds, when they are degenerate, or when the samples are
+integers — XISF integer formats already span their type's range. `open` is
+unaffected either way: it still hands back exactly what is stored.
+
 `write_f32_image` mirrors the `seiza-fits` writer: it atomically writes a
 one-image monolithic XISF file with uncompressed little-endian `Float32`
 planar samples and FITS-compatible keywords, sharing the `F32ImageData` and

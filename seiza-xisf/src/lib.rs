@@ -7,10 +7,17 @@
 //! [`write_f32_image`] writes the same layout back out with `Float32` samples,
 //! mirroring the `seiza_fits` writer API.
 //!
-//! Sample values pass through unchanged: the XISF `bounds` attribute is
-//! intentionally ignored, keeping linear data linear, and preserved FITS
-//! scaling keywords (`BZERO`/`BSCALE`) are dropped because XISF samples are
-//! already physical.
+//! Sample values pass through unchanged: decoding never applies the XISF
+//! `bounds` attribute, keeping linear data linear, and preserved FITS scaling
+//! keywords (`BZERO`/`BSCALE`) are dropped because XISF samples are already
+//! physical.
+//!
+//! Bounds still matter, because PixInsight writes floating-point images
+//! normalized to `0:1` and nothing in the samples says so. [`read_image`]
+//! returns the declared range alongside the pixels, and
+//! [`XisfImage::rescale_to`] converts onto a chosen full scale when a caller
+//! needs one frame comparable with another. Both are opt-in; [`open`] still
+//! hands back exactly what is stored.
 
 use flate2::read::ZlibDecoder;
 use quick_xml::events::{BytesStart, Event};
@@ -133,6 +140,15 @@ pub struct XisfImageInfo {
     pub attachment_offset: u64,
     pub attachment_bytes: u64,
     pub compression: Option<CompressionInfo>,
+    /// The declared `bounds` attribute: the low and high sample values the
+    /// writer says this image spans. `None` when the file does not declare
+    /// one.
+    ///
+    /// PixInsight writes `bounds="0:1"` on floating-point images, so a frame
+    /// that looks like it holds physical ADU may in fact be normalized.
+    /// Samples are decoded exactly as stored, so this is the only way to tell
+    /// the two apart. See [`XisfImage::rescale_to`].
+    pub bounds: Option<(f64, f64)>,
     pub headers: Vec<(String, HeaderValue)>,
     pub properties: Vec<XisfProperty>,
     pub cfa_pattern: Option<String>,
@@ -141,6 +157,57 @@ pub struct XisfImageInfo {
 #[derive(Clone, Debug)]
 pub struct XisfFileInfo {
     pub images: Vec<XisfImageInfo>,
+}
+
+/// A decoded image together with the XISF metadata that describes it.
+///
+/// [`open`] answers with pixels alone, which is all most callers want. Use
+/// this when the metadata decides how to read the pixels — above all
+/// [`XisfImageInfo::bounds`], which says whether the samples are normalized.
+#[derive(Clone, Debug)]
+pub struct XisfImage {
+    pub image: FitsImage,
+    pub info: XisfImageInfo,
+}
+
+impl XisfImage {
+    /// Map floating-point samples from their declared bounds onto
+    /// `0..=full_scale`, and report whether anything changed.
+    ///
+    /// A PixInsight frame arrives normalized to `0:1`, which is not
+    /// comparable with a camera frame's ADU. `rescale_to(65535.0)` puts it on
+    /// a 16-bit scale so background and flux can be compared across the two.
+    ///
+    /// Nothing happens, and the answer is `false`, when the file declares no
+    /// bounds, when they are degenerate, or when the samples are integers —
+    /// XISF integer formats already span their type's range, so rescaling
+    /// them would destroy data rather than place it. `bounds` is updated to
+    /// the new range, so a second call is a no-op.
+    pub fn rescale_to(&mut self, full_scale: f32) -> bool {
+        let Some((low, high)) = self.info.bounds else {
+            return false;
+        };
+        if !low.is_finite() || !high.is_finite() || high <= low || !full_scale.is_finite() {
+            return false;
+        }
+        let scale = f64::from(full_scale) / (high - low);
+        match &mut self.image.pixels {
+            Pixels::F32(samples) => {
+                for sample in samples.iter_mut() {
+                    *sample = ((f64::from(*sample) - low) * scale) as f32;
+                }
+            }
+            Pixels::F64(samples) => {
+                for sample in samples.iter_mut() {
+                    *sample = (*sample - low) * scale;
+                }
+            }
+            // Integer samples already span their format's range.
+            Pixels::U8(_) | Pixels::U16(_) | Pixels::I32(_) => return false,
+        }
+        self.info.bounds = Some((0.0, f64::from(full_scale)));
+        true
+    }
 }
 
 /// Whether a path uses the conventional `.xisf` extension.
@@ -221,6 +288,40 @@ pub fn image_from_bytes(bytes: &[u8], index: usize) -> Result<FitsImage, XisfErr
     )
 }
 
+/// Read the first top-level image and the metadata describing it, in one
+/// pass over the file.
+///
+/// The paired form of [`open`]. Reach for it when the metadata decides how to
+/// read the pixels — see [`XisfImageInfo::bounds`].
+pub fn read_image(path: &Path) -> Result<XisfImage, XisfError> {
+    read_image_at(path, 0)
+}
+
+/// [`read_image`] for a top-level image at a zero-based index.
+pub fn read_image_at(path: &Path, index: usize) -> Result<XisfImage, XisfError> {
+    let mut file = std::fs::File::open(path)?;
+    let file_bytes = file.metadata()?.len();
+    read_image_from(&mut file, file_bytes, ImageSelection::Index(index))
+}
+
+/// [`read_image`] for a top-level image with a given case-sensitive XISF
+/// `id` attribute.
+pub fn read_image_by_id(path: &Path, id: &str) -> Result<XisfImage, XisfError> {
+    let mut file = std::fs::File::open(path)?;
+    let file_bytes = file.metadata()?.len();
+    read_image_from(&mut file, file_bytes, ImageSelection::Id(id))
+}
+
+/// [`read_image`] for a complete in-memory monolithic XISF file.
+pub fn read_image_from_bytes(bytes: &[u8], index: usize) -> Result<XisfImage, XisfError> {
+    let mut reader = std::io::Cursor::new(bytes);
+    read_image_from(
+        &mut reader,
+        bytes.len() as u64,
+        ImageSelection::Index(index),
+    )
+}
+
 enum ImageSelection<'a> {
     Index(usize),
     Id(&'a str),
@@ -231,33 +332,46 @@ fn open_image_from(
     file_bytes: u64,
     selection: ImageSelection<'_>,
 ) -> Result<FitsImage, XisfError> {
-    let parsed = parse_file(reader, file_bytes)?;
-    let image = match selection {
-        ImageSelection::Index(index) => parsed
-            .images
-            .get(index)
+    read_image_from(reader, file_bytes, selection).map(|read| read.image)
+}
+
+fn read_image_from(
+    reader: &mut (impl Read + Seek),
+    file_bytes: u64,
+    selection: ImageSelection<'_>,
+) -> Result<XisfImage, XisfError> {
+    let mut parsed = parse_file(reader, file_bytes)?;
+    // Take the chosen image out of the parse, so the metadata moves into the
+    // result instead of being cloned for every caller of `open`.
+    let position = match selection {
+        ImageSelection::Index(index) => (index < parsed.images.len())
+            .then_some(index)
             .ok_or_else(|| XisfError::ImageNotFound(format!("at zero-based index {index}")))?,
         ImageSelection::Id(id) => parsed
             .images
             .iter()
-            .find(|image| image.info.id.as_deref() == Some(id))
+            .position(|image| image.info.id.as_deref() == Some(id))
             .ok_or_else(|| XisfError::ImageNotFound(format!("with id {id:?}")))?,
     };
+    let image = parsed.images.swap_remove(position);
 
     if let Some(checksum) = &image.checksum {
-        verify_checksum(reader, image, checksum)?;
+        verify_checksum(reader, &image, checksum)?;
     }
     reader.seek(SeekFrom::Start(image.info.attachment_offset))?;
-    let pixels = decode_attachment(reader, image)?;
+    let pixels = decode_attachment(reader, &image)?;
     let mut headers = image.info.headers.clone();
     add_structural_headers(&mut headers, &image.info);
 
-    Ok(FitsImage {
-        width: image.info.width,
-        height: image.info.height,
-        planes: image.info.planes,
-        pixels,
-        headers,
+    Ok(XisfImage {
+        image: FitsImage {
+            width: image.info.width,
+            height: image.info.height,
+            planes: image.info.planes,
+            pixels,
+            headers,
+        },
+        info: image.info,
     })
 }
 
@@ -574,6 +688,10 @@ fn parse_image(
             "attachment {attachment_offset}:{attachment_bytes} is outside the file"
         )));
     }
+    let bounds = attributes
+        .get("bounds")
+        .map(|value| parse_bounds(value))
+        .transpose()?;
     let compression = attributes
         .get("compression")
         .map(|value| parse_compression(value))
@@ -613,6 +731,7 @@ fn parse_image(
             attachment_offset,
             attachment_bytes,
             compression,
+            bounds,
             headers: Vec::new(),
             properties: Vec::new(),
             cfa_pattern: None,
@@ -645,6 +764,21 @@ fn required<'a>(
         .get(name)
         .map(String::as_str)
         .ok_or_else(|| XisfError::Malformed(format!("{element} is missing {name}")))
+}
+
+/// Parse a `bounds="low:high"` attribute.
+fn parse_bounds(value: &str) -> Result<(f64, f64), XisfError> {
+    let (low, high) = value
+        .split_once(':')
+        .ok_or_else(|| XisfError::Malformed(format!("invalid bounds {value:?}")))?;
+    let parse = |part: &str| -> Result<f64, XisfError> {
+        part.trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| XisfError::Malformed(format!("invalid bounds {value:?}")))
+    };
+    Ok((parse(low)?, parse(high)?))
 }
 
 fn parse_usize(value: &str) -> Result<usize, XisfError> {
@@ -1365,5 +1499,183 @@ mod tests {
             from_bytes(&truncated),
             Err(XisfError::Malformed(message)) if message.contains("outside the file")
         ));
+    }
+
+    #[test]
+    fn read_image_reports_the_declared_bounds_beside_the_pixels() {
+        let values = [0.0_f32, 0.25, 0.5, 1.0];
+        let raw = values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        let xml = image_element(
+            0,
+            "2:2:1",
+            "Float32",
+            raw.len(),
+            "bounds=\"0:1\" colorSpace=\"Gray\"",
+            "",
+        );
+        let bytes = monolithic(xml, &[&raw]);
+        let read = read_image_from_bytes(&bytes, 0).unwrap();
+
+        assert_eq!(read.info.bounds, Some((0.0, 1.0)));
+        assert!(matches!(read.image.pixels, Pixels::F32(ref actual) if actual == &values));
+        // The paired read must not change what `open` already returns.
+        let opened = from_bytes(&bytes).unwrap();
+        assert!(matches!(
+            (&opened.pixels, &read.image.pixels),
+            (Pixels::F32(opened), Pixels::F32(paired)) if opened == paired
+        ));
+    }
+
+    #[test]
+    fn an_undeclared_range_reads_as_none() {
+        let raw = [1_u8, 2, 3, 4];
+        let xml = image_element(0, "2:2:1", "UInt8", raw.len(), "colorSpace=\"Gray\"", "");
+        let read = read_image_from_bytes(&monolithic(xml, &[&raw]), 0).unwrap();
+        assert_eq!(read.info.bounds, None);
+    }
+
+    #[test]
+    fn a_malformed_range_is_refused() {
+        let raw = [1_u8, 2, 3, 4];
+        for bad in ["1", "0:", "low:high", "0:nan", "0:inf"] {
+            let xml = image_element(
+                0,
+                "2:2:1",
+                "UInt8",
+                raw.len(),
+                &format!("bounds=\"{bad}\" colorSpace=\"Gray\""),
+                "",
+            );
+            assert!(
+                matches!(
+                    from_bytes(&monolithic(xml, &[&raw])),
+                    Err(XisfError::Malformed(message)) if message.contains("bounds")
+                ),
+                "bounds {bad:?} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn rescale_to_puts_a_normalized_frame_on_a_chosen_scale() {
+        let values = [0.0_f32, 0.25, 0.5, 1.0];
+        let raw = values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        let xml = image_element(
+            0,
+            "2:2:1",
+            "Float32",
+            raw.len(),
+            "bounds=\"0:1\" colorSpace=\"Gray\"",
+            "",
+        );
+        let mut read = read_image_from_bytes(&monolithic(xml, &[&raw]), 0).unwrap();
+
+        assert!(read.rescale_to(65535.0));
+        assert!(matches!(read.image.pixels, Pixels::F32(ref actual)
+                if actual == &[0.0, 16383.75, 32767.5, 65535.0]));
+        // Bounds now describe the new range, so a second call changes nothing.
+        assert_eq!(read.info.bounds, Some((0.0, 65535.0)));
+        assert!(read.rescale_to(65535.0));
+        assert!(matches!(read.image.pixels, Pixels::F32(ref actual)
+                if actual == &[0.0, 16383.75, 32767.5, 65535.0]));
+    }
+
+    #[test]
+    fn rescale_to_shifts_a_range_that_does_not_start_at_zero() {
+        let values = [-1.0_f32, 0.0, 1.0, 3.0];
+        let raw = values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        let xml = image_element(
+            0,
+            "2:2:1",
+            "Float32",
+            raw.len(),
+            "bounds=\"-1:3\" colorSpace=\"Gray\"",
+            "",
+        );
+        let mut read = read_image_from_bytes(&monolithic(xml, &[&raw]), 0).unwrap();
+
+        assert!(read.rescale_to(100.0));
+        assert!(matches!(read.image.pixels, Pixels::F32(ref actual)
+            if actual == &[0.0, 25.0, 50.0, 100.0]));
+    }
+
+    #[test]
+    fn rescale_to_declines_what_it_cannot_convert() {
+        // Integer samples already span their format's range.
+        let raw = [1_u8, 2, 3, 4];
+        let xml = image_element(
+            0,
+            "2:2:1",
+            "UInt8",
+            raw.len(),
+            "bounds=\"0:1\" colorSpace=\"Gray\"",
+            "",
+        );
+        let mut read = read_image_from_bytes(&monolithic(xml, &[&raw]), 0).unwrap();
+        assert!(!read.rescale_to(65535.0));
+        assert!(matches!(read.image.pixels, Pixels::U8(ref actual) if actual == &raw));
+
+        // No declared range: nothing to convert from.
+        let values = [0.0_f32, 0.25, 0.5, 1.0];
+        let float_raw = values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        let xml = image_element(
+            0,
+            "2:2:1",
+            "Float32",
+            float_raw.len(),
+            "colorSpace=\"Gray\"",
+            "",
+        );
+        let mut read = read_image_from_bytes(&monolithic(xml, &[&float_raw]), 0).unwrap();
+        assert!(!read.rescale_to(65535.0));
+        assert!(matches!(read.image.pixels, Pixels::F32(ref actual) if actual == &values));
+
+        // A degenerate range would divide by zero.
+        let xml = image_element(
+            0,
+            "2:2:1",
+            "Float32",
+            float_raw.len(),
+            "bounds=\"1:1\" colorSpace=\"Gray\"",
+            "",
+        );
+        let mut read = read_image_from_bytes(&monolithic(xml, &[&float_raw]), 0).unwrap();
+        assert!(!read.rescale_to(65535.0));
+        assert!(matches!(read.image.pixels, Pixels::F32(ref actual) if actual == &values));
+    }
+
+    #[test]
+    fn read_image_selects_by_index_and_id_like_open_does() {
+        let first = [1_u8, 2, 3, 4];
+        let second = [9_u8, 8, 7, 6];
+        let xml = format!(
+            "{}{}",
+            image_element(0, "2:2:1", "UInt8", 4, "colorSpace=\"Gray\"", ""),
+            image_element(1, "2:2:1", "UInt8", 4, "colorSpace=\"Gray\"", "")
+        );
+        let bytes = monolithic(xml, &[&first, &second]);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pair.xisf");
+        std::fs::write(&path, &bytes).unwrap();
+
+        assert_eq!(read_image(&path).unwrap().info.index, 0);
+        let by_index = read_image_at(&path, 1).unwrap();
+        assert_eq!(by_index.info.id.as_deref(), Some("image1"));
+        assert!(matches!(by_index.image.pixels, Pixels::U8(ref actual) if actual == &second));
+        let by_id = read_image_by_id(&path, "image1").unwrap();
+        assert_eq!(by_id.info.index, 1);
+        assert!(read_image_by_id(&path, "nope").is_err());
     }
 }
