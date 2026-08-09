@@ -1031,6 +1031,7 @@ mod tests {
             exposure_seconds: Some(60.0),
             bayer: None,
             source: None,
+            bounds: None,
         };
         let mut stacker = LiveStacker::from_prepared_frame(frame, StackOptions::default()).unwrap();
         assert_eq!(
@@ -1044,6 +1045,7 @@ mod tests {
             exposure_seconds: None,
             bayer: None,
             source: None,
+            bounds: None,
         };
         let error = stacker.push(standard_push).unwrap_err().to_string();
         assert!(error.contains("use push_linear"), "{error}");
@@ -1069,6 +1071,7 @@ mod tests {
                 y_offset: 0,
             }),
             source: None,
+            bounds: None,
         };
         assert!(LiveStacker::from_prepared_frame(raw, StackOptions::default()).is_err());
     }
@@ -1117,6 +1120,7 @@ mod tests {
             exposure_seconds: None,
             bayer: None,
             source: None,
+            bounds: None,
         };
         let error = resumed.push(standard_push).unwrap_err().to_string();
         assert!(error.contains("use push_linear"), "{error}");

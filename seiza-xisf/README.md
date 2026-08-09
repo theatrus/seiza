@@ -32,21 +32,32 @@ complex samples, CIELab, and dimensions other than two are rejected explicitly.
 Samples decode exactly as stored. That matters for floating-point images,
 because PixInsight normalizes them to `bounds="0:1"` and nothing in the
 samples says so — such a frame is not comparable with a camera frame's ADU.
-`read_image` returns the declared range beside the pixels, and `rescale_to`
-converts onto a chosen full scale:
+`read_image` returns the declared range beside the pixels, and
+`rescale_normalized_to` converts such a frame onto a chosen full scale:
 
 ```rust
 let mut read = seiza_xisf::read_image(std::path::Path::new("integration.xisf"))?;
-if read.rescale_to(65535.0) {
+if read.rescale_normalized_to(65535.0) {
     println!("normalized frame placed on a 16-bit scale");
 }
 # Ok::<(), seiza_xisf::XisfError>(())
 ```
 
-`rescale_to` answers `false` and leaves the pixels alone when the file
-declares no bounds, when they are degenerate, or when the samples are
-integers — XISF integer formats already span their type's range. `open` is
-unaffected either way: it still hands back exactly what is stored.
+Treat `bounds` as a hint rather than a fact. Writers disagree about what the
+range means — `write_f32_image` in this crate reports the observed sample
+minimum and maximum, not a nominal `0:1` — so only an exact `0:1` carries a
+settled meaning, and that is the only range `rescale_normalized_to` acts on.
+Converting from anything else would as easily stretch an already-physical
+frame as normalize a normalized one. When a caller knows what the samples mean
+and the file does not say so usefully, `rescale_from` takes the source range
+directly. Both decline integer samples, which already span their format's
+range, and both map linearly without clamping, so unclipped highlights and
+negative background residuals survive. `open` is unaffected either way: it
+still hands back exactly what is stored.
+
+An unusable `bounds` — a spelling this crate cannot read, or a range that does
+not increase — reads as `None` rather than failing the file, because nothing
+here needs the attribute to decode an image.
 
 `write_f32_image` mirrors the `seiza-fits` writer: it atomically writes a
 one-image monolithic XISF file with uncompressed little-endian `Float32`
