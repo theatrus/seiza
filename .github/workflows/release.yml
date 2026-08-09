@@ -210,7 +210,50 @@ jobs:
                   throw "unexpected signing identity for $artifact"
               }
           }
-          Write-Output "OK: the zipped seiza.exe and the MSI are signed as StackFoundry LLC"
+          # And the copy sealed inside the MSI, which is the one that actually
+          # gets installed and run.
+          #
+          # Verifying the MSI proves the installer is signed; it says nothing
+          # about its payload. On psf-guard, signing binaries before packaging
+          # looked correct and was not: the bundler rewrote the executable
+          # afterwards, so the installer was validly signed while the program
+          # inside carried a signature whose digest no longer matched
+          # (0x80096010). Nothing outside-in would have caught it. WiX is not
+          # Tauri and is not expected to rewrite anything, but "not expected to"
+          # is exactly the assumption that failed there.
+          #
+          # Extracted with msiexec /a rather than 7z: an administrative install
+          # restores the real file names, whereas 7z yields the MSI's internal
+          # mangled names and the file cannot be found by name at all.
+          $msiExtract = Join-Path $env:RUNNER_TEMP "msi-signature-check"
+          Remove-Item -Recurse -Force $msiExtract -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force $msiExtract | Out-Null
+          $proc = Start-Process msiexec -Wait -PassThru -ArgumentList @(
+              '/a', "`"$env:SEIZA_MSI`"", '/qn', "TARGETDIR=`"$msiExtract`""
+          )
+          if ($proc.ExitCode -ne 0) {
+              throw "msiexec administrative extract failed with $($proc.ExitCode)"
+          }
+          $inner = Get-ChildItem -Path $msiExtract -Recurse -Filter seiza.exe |
+              Select-Object -First 1
+          if ($null -eq $inner) { throw "seiza.exe was not found inside the MSI" }
+
+          $signedHash = (Get-FileHash -Algorithm SHA256 target/release/seiza.exe).Hash
+          $innerHash = (Get-FileHash -Algorithm SHA256 $inner.FullName).Hash
+          Write-Output "--- (inside MSI) $($inner.FullName)"
+          Write-Output "    signed : $signedHash"
+          Write-Output "    inside : $innerHash"
+          if ($signedHash -ne $innerHash) {
+              Write-Output "    -> DIFFERS from the signed file (packaging rewrote it)"
+          }
+          $report = & $signtool.FullName verify /pa /v $inner.FullName 2>&1 | Out-String
+          Write-Output $report
+          if ($LASTEXITCODE -ne 0) { throw "the seiza.exe inside the MSI is not validly signed" }
+          if ($report -notmatch "StackFoundry LLC") {
+              throw "unexpected signing identity for the seiza.exe inside the MSI"
+          }
+
+          Write-Output "OK: the zipped seiza.exe, the MSI, and the seiza.exe inside the MSI are all signed as StackFoundry LLC"
 
       - name: Smoke-test silent MSI install and uninstall
         shell: pwsh
