@@ -304,10 +304,13 @@ pub(crate) enum FrameInputMode {
 /// Incremental, bounded-memory image stack. Frames are registered to the
 /// immutable first accepted frame and integrated immediately.
 pub struct LiveStacker {
-    options: StackOptions,
-    calibration: CalibrationMasters,
-    reference: LinearImage,
-    registrar: Registrar,
+    // Immutable for the life of a stack, so `pipeline` may share these across
+    // preparation threads while this thread holds `&mut self` for the
+    // accumulator.
+    pub(crate) options: StackOptions,
+    pub(crate) calibration: CalibrationMasters,
+    pub(crate) reference: LinearImage,
+    pub(crate) registrar: Registrar,
     accumulator: Accumulator,
     reference_headers: Vec<(String, HeaderValue)>,
     accepted_frames: u32,
@@ -530,11 +533,7 @@ impl LiveStacker {
     pub fn push_fits(&mut self, path: impl AsRef<Path>) -> Result<FrameDisposition> {
         self.require_fits_input_mode()?;
         let path = path.as_ref();
-        if self
-            .input_paths
-            .iter()
-            .any(|input| paths_refer_to_same_file(input, path))
-        {
+        if self.is_duplicate_input(path) {
             return Err(Error::Stack(format!(
                 "FITS frame {} has already been used by this stack",
                 path.display()
@@ -542,142 +541,80 @@ impl LiveStacker {
         }
         let frame = FitsFrame::open(path)?;
         let disposition = self.push(frame)?;
-        self.input_paths.push(path_identity(path));
+        self.record_input_path(path);
         Ok(disposition)
+    }
+
+    /// Refuse a batch that repeats a path this stack has already taken, or
+    /// repeats one within itself, before any of it is opened.
+    pub(crate) fn reject_duplicate_inputs(&self, paths: &[PathBuf]) -> Result<()> {
+        for (index, path) in paths.iter().enumerate() {
+            if self.is_duplicate_input(path) {
+                return Err(Error::Stack(format!(
+                    "FITS frame {} has already been used by this stack",
+                    path.display()
+                )));
+            }
+            if paths[..index]
+                .iter()
+                .any(|earlier| paths_refer_to_same_file(earlier, path))
+            {
+                return Err(Error::Stack(format!(
+                    "FITS frame {} appears twice in the same batch",
+                    path.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn is_duplicate_input(&self, path: &Path) -> bool {
+        self.input_paths
+            .iter()
+            .any(|input| paths_refer_to_same_file(input, path))
+    }
+
+    /// Retain a consumed path in resumable context state.
+    pub(crate) fn record_input_path(&mut self, path: &Path) {
+        self.input_paths.push(path_identity(path));
     }
 
     /// Register, normalize, and try to integrate an already-prepared linear
     /// frame, applying every admission gate.
     pub fn push_linear(&mut self, frame: LinearImage) -> Result<FrameDisposition> {
-        if self.reference.channels != frame.channels {
-            return Ok(self.reject(FrameRejectionReason::IncompatibleImage(format!(
-                "frame has {} channel(s) but stack has {}",
-                frame.channels, self.reference.channels
-            ))));
-        }
-        let registration = match self.registrar.register(&frame) {
-            Ok(registration) => registration,
-            Err(error) => {
-                let message = match error {
-                    Error::Registration(message) => message,
-                    other => other.to_string(),
-                };
-                return Ok(self.reject(FrameRejectionReason::Registration(message)));
-            }
-        };
-        let criteria = self.options.acceptance;
-        if registration.rms_error_pixels > criteria.maximum_registration_rms_pixels {
-            return Ok(self.reject(FrameRejectionReason::RegistrationRms {
-                measured: registration.rms_error_pixels,
-                maximum: criteria.maximum_registration_rms_pixels,
-            }));
-        }
-        let scale_deviation = (registration.transform.scale - 1.0).abs();
-        if scale_deviation > criteria.maximum_scale_deviation {
-            return Ok(self.reject(FrameRejectionReason::ScaleDeviation {
-                measured: scale_deviation,
-                maximum: criteria.maximum_scale_deviation,
-            }));
-        }
-        let rotation_deviation_degrees =
-            rotation_deviation_degrees(registration.transform.rotation_radians);
-        if rotation_deviation_degrees > criteria.maximum_rotation_degrees {
-            return Ok(self.reject(FrameRejectionReason::Rotation {
-                measured_degrees: rotation_deviation_degrees,
-                maximum_degrees: criteria.maximum_rotation_degrees,
-            }));
-        }
-        let mut registered = resample_to_reference(
-            &frame,
-            self.reference.width,
-            self.reference.height,
-            registration.transform,
-        )?;
-        let finite_samples = registered
-            .data
-            .par_iter()
-            .filter(|value| value.is_finite())
-            .count();
-        let overlap_fraction = finite_samples as f32 / registered.sample_count() as f32;
-        if overlap_fraction < criteria.minimum_overlap_fraction {
-            return Ok(self.reject(FrameRejectionReason::InsufficientOverlap {
-                measured: overlap_fraction,
-                minimum: criteria.minimum_overlap_fraction,
-            }));
-        }
-        let normalization = match NormalizationMap::estimate(
-            &self.reference,
-            &registered,
-            self.options.normalization,
-        ) {
-            Ok(normalization) => normalization,
-            Err(error) => {
-                let message = match error {
-                    Error::Normalization(message) => message,
-                    other => other.to_string(),
-                };
-                return Ok(self.reject(FrameRejectionReason::Normalization(message)));
-            }
-        };
-        let (minimum_gain, maximum_gain) = normalization.gain_range();
-        if minimum_gain < criteria.minimum_normalization_gain
-            || maximum_gain > criteria.maximum_normalization_gain
-        {
-            return Ok(self.reject(FrameRejectionReason::NormalizationGain {
-                measured_minimum: minimum_gain,
-                measured_maximum: maximum_gain,
-                minimum: criteria.minimum_normalization_gain,
-                maximum: criteria.maximum_normalization_gain,
-            }));
-        }
-        if !matches!(self.options.normalization, NormalizationMode::None)
-            && let Err(error) = normalization.apply(&mut registered)
-        {
-            let message = match error {
-                Error::Normalization(message) => message,
-                other => other.to_string(),
-            };
-            return Ok(self.reject(FrameRejectionReason::Normalization(message)));
-        }
-        let normalization_mean_gain = normalization.mean_gain();
-        let normalization_mean_offset = normalization.mean_offset();
-        let mapping = crate::RegisteredFrameMapping::new(
-            self.reference.width,
-            self.reference.height,
-            registration.transform,
-            normalization,
-        )?;
-        let (would_accept, _) = self
-            .accumulator
-            .classify(&registered.data, self.options.rejection);
-        let integrated_fraction = would_accept as f32 / registered.sample_count() as f32;
-        if integrated_fraction < criteria.minimum_integrated_fraction {
-            return Ok(
-                self.reject(FrameRejectionReason::InsufficientIntegratedSamples {
-                    measured: integrated_fraction,
-                    minimum: criteria.minimum_integrated_fraction,
-                }),
-            );
-        }
-        let (accepted_samples, rejected_samples) = self
-            .accumulator
-            .integrate(&registered.data, self.options.rejection);
-        self.accepted_frames += 1;
-        Ok(FrameDisposition::Accepted(FrameDiagnostics {
-            transform: registration.transform,
-            matched_stars: registration.matched_stars,
-            registration_rms_pixels: registration.rms_error_pixels,
-            registration_drift_pixels: registration.drift_pixels,
-            normalization_mean_gain,
-            normalization_mean_offset,
-            mapping: Box::new(mapping),
-            overlap_fraction,
-            integrated_fraction,
-            accepted_samples,
-            rejected_samples,
-        }))
+        let prepared = prepare_frame(&self.reference, &self.registrar, &self.options, frame)?;
+        Ok(self.integrate_prepared(prepared))
     }
 
+    /// Borrow the stack as two disjoint halves: the immutable state every
+    /// frame's preparation reads, and the mutable state integration owns.
+    ///
+    /// This is what lets `pipeline` prepare frames on other threads while this
+    /// thread integrates. The borrow checker enforces the split that makes the
+    /// concurrency sound, rather than a comment promising it.
+    pub(crate) fn split_for_pipeline(&mut self) -> (PreparationHalf<'_>, IntegrationHalf<'_>) {
+        (
+            PreparationHalf {
+                reference: &self.reference,
+                registrar: &self.registrar,
+                calibration: &self.calibration,
+                options: &self.options,
+            },
+            IntegrationHalf {
+                accumulator: &mut self.accumulator,
+                options: &self.options,
+                accepted_frames: &mut self.accepted_frames,
+                rejected_frames: &mut self.rejected_frames,
+                input_paths: &mut self.input_paths,
+            },
+        )
+    }
+
+    /// Integrate what [`prepare_frame`] produced, in the caller's order.
+    pub(crate) fn integrate_prepared(&mut self, prepared: PreparedFrame) -> FrameDisposition {
+        let (_, mut integration) = self.split_for_pipeline();
+        integration.integrate(prepared)
+    }
     /// Copy the current estimate and coverage masks into an owned snapshot.
     pub fn snapshot(&self) -> Result<StackSnapshot> {
         let (mean, variance) = self.accumulator.snapshot();
@@ -757,7 +694,7 @@ impl LiveStacker {
         &self.input_paths
     }
 
-    fn require_fits_input_mode(&self) -> Result<()> {
+    pub(crate) fn require_fits_input_mode(&self) -> Result<()> {
         if self.input_mode == FrameInputMode::PreparedOnly {
             return Err(Error::Stack(
                 "this stack was started from prepared pixels; use push_linear for every later frame"
@@ -770,6 +707,247 @@ impl LiveStacker {
     fn reject(&mut self, reason: FrameRejectionReason) -> FrameDisposition {
         self.rejected_frames += 1;
         FrameDisposition::Rejected(reason)
+    }
+}
+
+/// A frame carried from preparation to integration.
+///
+/// Preparation reads only immutable stack state — the reference image, the
+/// registrar's star catalogue, and the options — so it is a pure function of
+/// the frame and can run for many frames at once. Integration is the part
+/// that cannot.
+pub(crate) enum PreparedFrame {
+    /// Turned away by a gate that does not depend on the accumulator.
+    Rejected(FrameRejectionReason),
+    /// Registered and normalized, waiting its turn to be integrated.
+    Ready(Box<ReadyFrame>),
+}
+
+/// A registered, normalized frame and the measurements taken along the way.
+pub(crate) struct ReadyFrame {
+    registered: LinearImage,
+    transform: SimilarityTransform,
+    matched_stars: usize,
+    registration_rms_pixels: f64,
+    registration_drift_pixels: f64,
+    normalization_mean_gain: f32,
+    normalization_mean_offset: f32,
+    mapping: Box<crate::RegisteredFrameMapping>,
+    overlap_fraction: f32,
+}
+
+/// Register and normalize one frame against the immutable reference.
+///
+/// Every gate applied here — channel count, registration quality, scale,
+/// rotation, overlap, normalization gain — reads only the reference and the
+/// options, so it reaches the same verdict whatever else is in flight. That is
+/// what lets the pipeline prepare frames out of order and still match a
+/// sequential run exactly.
+pub(crate) fn prepare_frame(
+    reference: &LinearImage,
+    registrar: &Registrar,
+    options: &StackOptions,
+    frame: LinearImage,
+) -> Result<PreparedFrame> {
+    if reference.channels != frame.channels {
+        return Ok(PreparedFrame::Rejected(
+            FrameRejectionReason::IncompatibleImage(format!(
+                "frame has {} channel(s) but stack has {}",
+                frame.channels, reference.channels
+            )),
+        ));
+    }
+    let registration = match registrar.register(&frame) {
+        Ok(registration) => registration,
+        Err(error) => {
+            let message = match error {
+                Error::Registration(message) => message,
+                other => other.to_string(),
+            };
+            return Ok(PreparedFrame::Rejected(FrameRejectionReason::Registration(
+                message,
+            )));
+        }
+    };
+    let criteria = options.acceptance;
+    if registration.rms_error_pixels > criteria.maximum_registration_rms_pixels {
+        return Ok(PreparedFrame::Rejected(
+            FrameRejectionReason::RegistrationRms {
+                measured: registration.rms_error_pixels,
+                maximum: criteria.maximum_registration_rms_pixels,
+            },
+        ));
+    }
+    let scale_deviation = (registration.transform.scale - 1.0).abs();
+    if scale_deviation > criteria.maximum_scale_deviation {
+        return Ok(PreparedFrame::Rejected(
+            FrameRejectionReason::ScaleDeviation {
+                measured: scale_deviation,
+                maximum: criteria.maximum_scale_deviation,
+            },
+        ));
+    }
+    let rotation_deviation_degrees =
+        rotation_deviation_degrees(registration.transform.rotation_radians);
+    if rotation_deviation_degrees > criteria.maximum_rotation_degrees {
+        return Ok(PreparedFrame::Rejected(FrameRejectionReason::Rotation {
+            measured_degrees: rotation_deviation_degrees,
+            maximum_degrees: criteria.maximum_rotation_degrees,
+        }));
+    }
+    let mut registered = resample_to_reference(
+        &frame,
+        reference.width,
+        reference.height,
+        registration.transform,
+    )?;
+    let finite_samples = registered
+        .data
+        .par_iter()
+        .filter(|value| value.is_finite())
+        .count();
+    let overlap_fraction = finite_samples as f32 / registered.sample_count() as f32;
+    if overlap_fraction < criteria.minimum_overlap_fraction {
+        return Ok(PreparedFrame::Rejected(
+            FrameRejectionReason::InsufficientOverlap {
+                measured: overlap_fraction,
+                minimum: criteria.minimum_overlap_fraction,
+            },
+        ));
+    }
+    let normalization =
+        match NormalizationMap::estimate(reference, &registered, options.normalization) {
+            Ok(normalization) => normalization,
+            Err(error) => {
+                let message = match error {
+                    Error::Normalization(message) => message,
+                    other => other.to_string(),
+                };
+                return Ok(PreparedFrame::Rejected(
+                    FrameRejectionReason::Normalization(message),
+                ));
+            }
+        };
+    let (minimum_gain, maximum_gain) = normalization.gain_range();
+    if minimum_gain < criteria.minimum_normalization_gain
+        || maximum_gain > criteria.maximum_normalization_gain
+    {
+        return Ok(PreparedFrame::Rejected(
+            FrameRejectionReason::NormalizationGain {
+                measured_minimum: minimum_gain,
+                measured_maximum: maximum_gain,
+                minimum: criteria.minimum_normalization_gain,
+                maximum: criteria.maximum_normalization_gain,
+            },
+        ));
+    }
+    if !matches!(options.normalization, NormalizationMode::None)
+        && let Err(error) = normalization.apply(&mut registered)
+    {
+        let message = match error {
+            Error::Normalization(message) => message,
+            other => other.to_string(),
+        };
+        return Ok(PreparedFrame::Rejected(
+            FrameRejectionReason::Normalization(message),
+        ));
+    }
+    let normalization_mean_gain = normalization.mean_gain();
+    let normalization_mean_offset = normalization.mean_offset();
+    let mapping = crate::RegisteredFrameMapping::new(
+        reference.width,
+        reference.height,
+        registration.transform,
+        normalization,
+    )?;
+    Ok(PreparedFrame::Ready(Box::new(ReadyFrame {
+        registered,
+        transform: registration.transform,
+        matched_stars: registration.matched_stars,
+        registration_rms_pixels: registration.rms_error_pixels,
+        registration_drift_pixels: registration.drift_pixels,
+        normalization_mean_gain,
+        normalization_mean_offset,
+        mapping: Box::new(mapping),
+        overlap_fraction,
+    })))
+}
+
+/// The immutable half of a stack: everything preparing a frame may read.
+pub(crate) struct PreparationHalf<'a> {
+    pub(crate) reference: &'a LinearImage,
+    pub(crate) registrar: &'a Registrar,
+    pub(crate) calibration: &'a CalibrationMasters,
+    pub(crate) options: &'a StackOptions,
+}
+
+/// The mutable half of a stack: the accumulator and the run's tallies.
+pub(crate) struct IntegrationHalf<'a> {
+    accumulator: &'a mut Accumulator,
+    options: &'a StackOptions,
+    accepted_frames: &'a mut u32,
+    rejected_frames: &'a mut u32,
+    input_paths: &'a mut Vec<PathBuf>,
+}
+
+impl IntegrationHalf<'_> {
+    /// Integrate one prepared frame. Must be called in submission order:
+    /// whether a frame survives `minimum_integrated_fraction` depends on every
+    /// frame integrated before it.
+    pub(crate) fn integrate(&mut self, prepared: PreparedFrame) -> FrameDisposition {
+        let ready = match prepared {
+            PreparedFrame::Rejected(reason) => return self.reject(reason),
+            PreparedFrame::Ready(ready) => ready,
+        };
+        let ReadyFrame {
+            registered,
+            transform,
+            matched_stars,
+            registration_rms_pixels,
+            registration_drift_pixels,
+            normalization_mean_gain,
+            normalization_mean_offset,
+            mapping,
+            overlap_fraction,
+        } = *ready;
+
+        let (would_accept, _) = self
+            .accumulator
+            .classify(&registered.data, self.options.rejection);
+        let integrated_fraction = would_accept as f32 / registered.sample_count() as f32;
+        if integrated_fraction < self.options.acceptance.minimum_integrated_fraction {
+            return self.reject(FrameRejectionReason::InsufficientIntegratedSamples {
+                measured: integrated_fraction,
+                minimum: self.options.acceptance.minimum_integrated_fraction,
+            });
+        }
+        let (accepted_samples, rejected_samples) = self
+            .accumulator
+            .integrate(&registered.data, self.options.rejection);
+        *self.accepted_frames += 1;
+        FrameDisposition::Accepted(FrameDiagnostics {
+            transform,
+            matched_stars,
+            registration_rms_pixels,
+            registration_drift_pixels,
+            normalization_mean_gain,
+            normalization_mean_offset,
+            mapping,
+            overlap_fraction,
+            integrated_fraction,
+            accepted_samples,
+            rejected_samples,
+        })
+    }
+
+    fn reject(&mut self, reason: FrameRejectionReason) -> FrameDisposition {
+        *self.rejected_frames += 1;
+        FrameDisposition::Rejected(reason)
+    }
+
+    /// Retain a consumed path in resumable context state.
+    pub(crate) fn record_input_path(&mut self, path: &Path) {
+        self.input_paths.push(path_identity(path));
     }
 }
 
