@@ -65,6 +65,19 @@ jobs:
 
   windows:
     runs-on: windows-latest
+    # The Entra federated credential is bound to the subject
+    # `repo:theatrus/seiza:environment:release`, so this job has to run in the
+    # `release` environment or the OIDC token will not match and azure/login
+    # fails. A classic federated credential needs an exact subject match and
+    # `refs/tags/v*` cannot be written as a wildcard, hence binding to the
+    # environment rather than to the ref.
+    environment: release
+    permissions:
+      # Only this job mints an OIDC token, so the grant sits here rather than
+      # at the top of the file. A job-level block replaces the workflow-level
+      # one outright, so contents: write is repeated for the release upload.
+      contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -73,6 +86,55 @@ jobs:
       - name: Verify Windows CRT is statically linked
         shell: pwsh
         run: ./.github/scripts/assert-static-crt.ps1 -Binary target/release/seiza.exe
+
+      # Authenticode signing through Azure Artifact Signing (the renamed
+      # Trusted Signing). The key stays in Microsoft's HSM and we only ever
+      # hold a short-lived token exchanged over OIDC, so no signing secret is
+      # stored in this repository.
+      #
+      # This login sits immediately before the signing step, and is repeated
+      # before the second one, rather than being done once at the top of the
+      # job. The GitHub OIDC token azure/login exchanges is a client assertion
+      # valid for only five minutes; authenticate early, build for longer than
+      # that, and signing fails with AADSTS700024 ("Client assertion is not
+      # within its valid time range"), which reads like a wrong tenant or a
+      # missing role but is purely about elapsed time. A credential that lives
+      # five minutes has to be acquired next to where it is used.
+      #
+      # Gated on the variable being set so a fork -- which has neither the
+      # variables nor access to the federated credential -- still builds, just
+      # unsigned, instead of failing the release job outright.
+      - name: Authenticate to Azure for binary signing
+        if: vars.AZURE_CLIENT_ID != ''
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Sign the executable before anything packages it. Both shipped
+      # artifacts carry a copy: the zip holds seiza.exe directly, and WiX
+      # embeds target\release\seiza.exe into the MSI. Signing only the MSI
+      # would seal an unsigned executable inside a signed installer and leave
+      # the zip's copy unsigned altogether.
+      #
+      # The file is named explicitly rather than reached through
+      # files-folder + recurse. target\release is full of incidental .exe files
+      # -- build scripts, dependency binaries, test harnesses -- and signing
+      # those would spend the Basic tier's 5,000 signatures a month on things
+      # nobody downloads.
+      - name: Sign seiza.exe before packaging
+        if: vars.AZURE_CLIENT_ID != ''
+        uses: azure/trusted-signing-action@v0
+        with:
+          endpoint: ${{ vars.SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ vars.SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\target\release\seiza.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
       - name: Package ZIP and MSI
         shell: pwsh
         run: |
@@ -81,13 +143,121 @@ jobs:
           $version = ($metadata.packages | Where-Object name -eq "seiza-cli").version
           Compress-Archive -Path target/release/seiza.exe, README.md, LICENSE -DestinationPath "dist/seiza-cli-$version-windows-x86_64.zip"
           dotnet build packaging/windows/seiza.wixproj -c Release -p:SeizaVersion=$version
-      - name: Smoke-test silent MSI install and uninstall
+          # Hand the absolute paths to the later steps. The signing action is
+          # not a shell and cannot work the version out for itself, and this
+          # saves the smoke test a second `cargo metadata` call.
+          $msi = (Resolve-Path "dist/seiza-cli-$version-windows-x86_64.msi").Path
+          $zip = (Resolve-Path "dist/seiza-cli-$version-windows-x86_64.zip").Path
+          "SEIZA_MSI=$msi" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SEIZA_ZIP=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # Authenticate again. Packaging sits between the two signing steps, and
+      # `dotnet build` on the wixproj restores the WiX SDK and its two
+      # extensions from NuGet on a cold runner, which is easily longer than the
+      # five minutes the previous assertion was good for.
+      - name: Authenticate to Azure for installer signing
+        if: vars.AZURE_CLIENT_ID != ''
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # The installer wraps an already-signed executable, so this is the second
+      # and last signature spent per release. The loose binary is not re-signed
+      # here: that would spend quota twice and append a second signature to a
+      # file that already carries a valid one.
+      - name: Sign the MSI
+        if: vars.AZURE_CLIENT_ID != ''
+        uses: azure/trusted-signing-action@v0
+        with:
+          endpoint: ${{ vars.SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ vars.SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.SIGNING_PROFILE }}
+          files: ${{ env.SEIZA_MSI }}
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Verify Windows signatures
+        if: vars.AZURE_CLIENT_ID != ''
         shell: pwsh
         run: |
-          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
-          $version = ($metadata.packages | Where-Object name -eq "seiza-cli").version
-          $msi = Resolve-Path "dist/seiza-cli-$version-windows-x86_64.msi"
-          ./.github/scripts/test-windows-installer.ps1 -Msi $msi
+          $ErrorActionPreference = "Stop"
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+              Where-Object { $_.FullName -like "*\x64\*" } |
+              Sort-Object FullName |
+              Select-Object -Last 1
+          if ($null -eq $signtool) { throw "signtool.exe was not found" }
+          Write-Output "using: $($signtool.FullName)"
+
+          # Read the executable back out of the zip rather than checking the
+          # loose build output. Both artifacts must be signed, and the ordering
+          # that makes that true -- sign, then package -- is the part most
+          # easily broken by a later edit. Checking the copy that ships proves
+          # the ordering held; checking target\release would pass either way.
+          $extracted = Join-Path $env:RUNNER_TEMP "zip-signature-check"
+          Remove-Item -Recurse -Force $extracted -ErrorAction SilentlyContinue
+          Expand-Archive -Path $env:SEIZA_ZIP -DestinationPath $extracted
+
+          foreach ($artifact in @((Join-Path $extracted "seiza.exe"), $env:SEIZA_MSI)) {
+              if (-not (Test-Path -LiteralPath $artifact)) { throw "missing artifact: $artifact" }
+              Write-Output "--- $artifact"
+              $report = & $signtool.FullName verify /pa /v $artifact 2>&1 | Out-String
+              Write-Output $report
+              if ($LASTEXITCODE -ne 0) { throw "signtool verify failed for $artifact" }
+              if ($report -notmatch "StackFoundry LLC") {
+                  throw "unexpected signing identity for $artifact"
+              }
+          }
+          # And the copy sealed inside the MSI, which is the one that actually
+          # gets installed and run.
+          #
+          # Verifying the MSI proves the installer is signed; it says nothing
+          # about its payload. On psf-guard, signing binaries before packaging
+          # looked correct and was not: the bundler rewrote the executable
+          # afterwards, so the installer was validly signed while the program
+          # inside carried a signature whose digest no longer matched
+          # (0x80096010). Nothing outside-in would have caught it. WiX is not
+          # Tauri and is not expected to rewrite anything, but "not expected to"
+          # is exactly the assumption that failed there.
+          #
+          # Extracted with msiexec /a rather than 7z: an administrative install
+          # restores the real file names, whereas 7z yields the MSI's internal
+          # mangled names and the file cannot be found by name at all.
+          $msiExtract = Join-Path $env:RUNNER_TEMP "msi-signature-check"
+          Remove-Item -Recurse -Force $msiExtract -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force $msiExtract | Out-Null
+          $proc = Start-Process msiexec -Wait -PassThru -ArgumentList @(
+              '/a', "`"$env:SEIZA_MSI`"", '/qn', "TARGETDIR=`"$msiExtract`""
+          )
+          if ($proc.ExitCode -ne 0) {
+              throw "msiexec administrative extract failed with $($proc.ExitCode)"
+          }
+          $inner = Get-ChildItem -Path $msiExtract -Recurse -Filter seiza.exe |
+              Select-Object -First 1
+          if ($null -eq $inner) { throw "seiza.exe was not found inside the MSI" }
+
+          $signedHash = (Get-FileHash -Algorithm SHA256 target/release/seiza.exe).Hash
+          $innerHash = (Get-FileHash -Algorithm SHA256 $inner.FullName).Hash
+          Write-Output "--- (inside MSI) $($inner.FullName)"
+          Write-Output "    signed : $signedHash"
+          Write-Output "    inside : $innerHash"
+          if ($signedHash -ne $innerHash) {
+              Write-Output "    -> DIFFERS from the signed file (packaging rewrote it)"
+          }
+          $report = & $signtool.FullName verify /pa /v $inner.FullName 2>&1 | Out-String
+          Write-Output $report
+          if ($LASTEXITCODE -ne 0) { throw "the seiza.exe inside the MSI is not validly signed" }
+          if ($report -notmatch "StackFoundry LLC") {
+              throw "unexpected signing identity for the seiza.exe inside the MSI"
+          }
+
+          Write-Output "OK: the zipped seiza.exe, the MSI, and the seiza.exe inside the MSI are all signed as StackFoundry LLC"
+
+      - name: Smoke-test silent MSI install and uninstall
+        shell: pwsh
+        run: ./.github/scripts/test-windows-installer.ps1 -Msi $env:SEIZA_MSI
       - uses: softprops/action-gh-release@v3.0.2
         if: startsWith(github.ref, 'refs/tags/')
         with:

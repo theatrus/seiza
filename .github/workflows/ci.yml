@@ -26,6 +26,13 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./.github/scripts/assert-static-crt.ps1 -Binary target/release/seiza.exe
+      # Built unsigned on purpose. Authenticode signing lives only in the
+      # release workflow: a pull request from a fork cannot mint the OIDC token
+      # the signing account requires, so the step would be skipped there and
+      # prove nothing, and CI runs on every push and pull request, which would
+      # spend the Basic tier's 5,000 signatures a month on installers that are
+      # never published. This MSI exists to be installed and uninstalled by the
+      # step below, not to be handed to anyone.
       - name: Build Windows MSI
         if: runner.os == 'Windows'
         shell: pwsh
