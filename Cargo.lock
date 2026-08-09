@@ -2248,7 +2248,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "seiza"
-version = "0.15.1"
+version = "0.15.2"
 dependencies = [
  "directories",
  "image",
@@ -2281,7 +2281,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-cabi"
-version = "0.15.1"
+version = "0.15.2"
 dependencies = [
  "cbindgen",
  "image",
@@ -2311,7 +2311,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-cli"
-version = "0.15.1"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -2421,7 +2421,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-stacking"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "rayon",
  "seiza",
@@ -2455,7 +2455,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-xisf"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "lz4_flex",
