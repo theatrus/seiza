@@ -7,10 +7,20 @@
 //! [`write_f32_image`] writes the same layout back out with `Float32` samples,
 //! mirroring the `seiza_fits` writer API.
 //!
-//! Sample values pass through unchanged: the XISF `bounds` attribute is
-//! intentionally ignored, keeping linear data linear, and preserved FITS
-//! scaling keywords (`BZERO`/`BSCALE`) are dropped because XISF samples are
-//! already physical.
+//! Sample values pass through unchanged: decoding never applies the XISF
+//! `bounds` attribute, keeping linear data linear, and preserved FITS scaling
+//! keywords (`BZERO`/`BSCALE`) are dropped because XISF samples are already
+//! physical.
+//!
+//! Bounds still matter, because PixInsight writes floating-point images
+//! normalized to `0:1` and nothing in the samples says so. [`read_image`]
+//! returns the declared range alongside the pixels, and
+//! [`XisfImage::rescale_normalized_to`] converts such a frame onto a chosen
+//! full scale. It acts only on a declared `0:1`, the one spelling whose
+//! meaning is settled — writers disagree about the rest, this crate's own
+//! writer among them — and [`XisfImage::rescale_from`] takes the source range
+//! from a caller who knows better than the file. All of it is opt-in;
+//! [`open`] still hands back exactly what is stored.
 
 use flate2::read::ZlibDecoder;
 use quick_xml::events::{BytesStart, Event};
@@ -133,6 +143,26 @@ pub struct XisfImageInfo {
     pub attachment_offset: u64,
     pub attachment_bytes: u64,
     pub compression: Option<CompressionInfo>,
+    /// The declared `bounds` attribute, as `(low, high)` with `low < high`.
+    ///
+    /// PixInsight writes `bounds="0:1"` on floating-point images, so a frame
+    /// that looks like it holds physical ADU may in fact be normalized.
+    /// Samples decode exactly as stored, so this attribute is the only hint
+    /// that they are.
+    ///
+    /// Read it as a hint, not a fact. Writers disagree about what the range
+    /// means — this crate's own [`write_f32_image`] reports the observed
+    /// sample minimum and maximum, not a nominal `0:1` — so `Some((0.0,
+    /// 30000.0))` may describe a normalization range or may just describe the
+    /// data. Only `Some((0.0, 1.0))` carries the settled meaning that
+    /// [`XisfImage::rescale_normalized_to`] acts on.
+    ///
+    /// `None` means the file declared nothing usable: no attribute, or one
+    /// this crate could not read as a `low:high` pair spanning a real range.
+    /// The XISF default of `0:1` for floating-point formats is deliberately
+    /// not filled in, because a writer that omits the attribute has told us
+    /// nothing about its intent.
+    pub bounds: Option<(f64, f64)>,
     pub headers: Vec<(String, HeaderValue)>,
     pub properties: Vec<XisfProperty>,
     pub cfa_pattern: Option<String>,
@@ -141,6 +171,101 @@ pub struct XisfImageInfo {
 #[derive(Clone, Debug)]
 pub struct XisfFileInfo {
     pub images: Vec<XisfImageInfo>,
+}
+
+/// A decoded image together with the XISF metadata that describes it.
+///
+/// [`open`] answers with pixels alone, which is all most callers want. Use
+/// this when the metadata decides how to read the pixels — above all
+/// [`XisfImageInfo::bounds`], which hints whether the samples are normalized.
+///
+/// The two header lists differ on purpose. `info.headers` holds exactly the
+/// keywords the file preserved, matching what [`inspect`] reports.
+/// `image.headers` is that list plus the structural cards this crate
+/// synthesizes from the image geometry — `BITPIX`, `NAXIS`, `NAXIS1`,
+/// `NAXIS2`, `NAXIS3`, `IMAGETYP` — matching what [`read_header`] and
+/// [`open`] return. Read geometry from `image`, not from `info`.
+#[derive(Clone, Debug)]
+pub struct XisfImage {
+    pub image: FitsImage,
+    pub info: XisfImageInfo,
+}
+
+impl XisfImage {
+    /// Put a frame the file declares as normalized onto `0..=full_scale`.
+    ///
+    /// A PixInsight frame arrives normalized to `0:1`, which is not
+    /// comparable with a camera frame's ADU. `rescale_normalized_to(65535.0)`
+    /// puts it on a 16-bit scale so background and flux can be compared
+    /// across the two.
+    ///
+    /// This acts only on a declared range of exactly `0:1`, the one spelling
+    /// whose meaning is settled. Any other range is ambiguous — writers
+    /// disagree, and this crate's own [`write_f32_image`] reports the observed
+    /// sample minimum and maximum — so converting from it would as easily
+    /// stretch an already-physical frame as normalize a normalized one. When a
+    /// caller knows better than the file, [`rescale_from`] takes the source
+    /// range directly.
+    ///
+    /// [`rescale_from`]: XisfImage::rescale_from
+    ///
+    /// Answers whether the conversion ran. It does not run, and the samples
+    /// are untouched, when the declared range is absent or is anything but
+    /// `0:1`, when `full_scale` is not finite and positive, or when the
+    /// samples are integers — XISF integer formats already span their type's
+    /// range, so rescaling them would destroy data rather than place it.
+    /// A second call answers `false`, because the first rewrote `bounds`.
+    pub fn rescale_normalized_to(&mut self, full_scale: f32) -> bool {
+        if self.info.bounds != Some((0.0, 1.0)) {
+            return false;
+        }
+        self.rescale_from((0.0, 1.0), full_scale)
+    }
+
+    /// Map floating-point samples from `source` onto `0..=full_scale`, taking
+    /// the caller's word for the source range.
+    ///
+    /// The escape hatch from [`rescale_normalized_to`], for a caller who
+    /// knows what a file's samples mean when the file itself does not say so
+    /// usefully. Nothing is inferred from [`XisfImageInfo::bounds`], though
+    /// it is rewritten to the new range on success so the metadata stays
+    /// truthful.
+    ///
+    /// [`rescale_normalized_to`]: XisfImage::rescale_normalized_to
+    ///
+    /// The map is linear and does not clamp: a sample outside `source` lands
+    /// outside `0..=full_scale`, which keeps unclipped highlights and
+    /// negative background residuals intact rather than flattening them.
+    ///
+    /// Answers whether the conversion ran. It does not run when `source` is
+    /// not a finite range with `low < high`, when `full_scale` is not finite
+    /// and positive, or when the samples are integers.
+    pub fn rescale_from(&mut self, source: (f64, f64), full_scale: f32) -> bool {
+        let (low, high) = source;
+        if !low.is_finite() || !high.is_finite() || high <= low {
+            return false;
+        }
+        if !full_scale.is_finite() || full_scale <= 0.0 {
+            return false;
+        }
+        let scale = f64::from(full_scale) / (high - low);
+        match &mut self.image.pixels {
+            Pixels::F32(samples) => {
+                for sample in samples.iter_mut() {
+                    *sample = ((f64::from(*sample) - low) * scale) as f32;
+                }
+            }
+            Pixels::F64(samples) => {
+                for sample in samples.iter_mut() {
+                    *sample = (*sample - low) * scale;
+                }
+            }
+            // Integer samples already span their format's range.
+            Pixels::U8(_) | Pixels::U16(_) | Pixels::I32(_) => return false,
+        }
+        self.info.bounds = Some((0.0, f64::from(full_scale)));
+        true
+    }
 }
 
 /// Whether a path uses the conventional `.xisf` extension.
@@ -194,16 +319,12 @@ pub fn open(path: &Path) -> Result<FitsImage, XisfError> {
 
 /// Open a top-level image by zero-based index.
 pub fn open_image(path: &Path, index: usize) -> Result<FitsImage, XisfError> {
-    let mut file = std::fs::File::open(path)?;
-    let file_bytes = file.metadata()?.len();
-    open_image_from(&mut file, file_bytes, ImageSelection::Index(index))
+    read_image_at(path, index).map(|read| read.image)
 }
 
 /// Open a top-level image by its case-sensitive XISF `id` attribute.
 pub fn open_image_by_id(path: &Path, id: &str) -> Result<FitsImage, XisfError> {
-    let mut file = std::fs::File::open(path)?;
-    let file_bytes = file.metadata()?.len();
-    open_image_from(&mut file, file_bytes, ImageSelection::Id(id))
+    read_image_by_id(path, id).map(|read| read.image)
 }
 
 /// Decode the first image from a complete in-memory monolithic XISF file.
@@ -213,8 +334,37 @@ pub fn from_bytes(bytes: &[u8]) -> Result<FitsImage, XisfError> {
 
 /// Decode an indexed image from a complete in-memory monolithic XISF file.
 pub fn image_from_bytes(bytes: &[u8], index: usize) -> Result<FitsImage, XisfError> {
+    read_image_from_bytes(bytes, index).map(|read| read.image)
+}
+
+/// Read the first top-level image and the metadata describing it, in one
+/// pass over the file.
+///
+/// The paired form of [`open`]. Reach for it when the metadata decides how to
+/// read the pixels — see [`XisfImageInfo::bounds`].
+pub fn read_image(path: &Path) -> Result<XisfImage, XisfError> {
+    read_image_at(path, 0)
+}
+
+/// [`read_image`] for a top-level image at a zero-based index.
+pub fn read_image_at(path: &Path, index: usize) -> Result<XisfImage, XisfError> {
+    let mut file = std::fs::File::open(path)?;
+    let file_bytes = file.metadata()?.len();
+    read_image_from(&mut file, file_bytes, ImageSelection::Index(index))
+}
+
+/// [`read_image`] for a top-level image with a given case-sensitive XISF
+/// `id` attribute.
+pub fn read_image_by_id(path: &Path, id: &str) -> Result<XisfImage, XisfError> {
+    let mut file = std::fs::File::open(path)?;
+    let file_bytes = file.metadata()?.len();
+    read_image_from(&mut file, file_bytes, ImageSelection::Id(id))
+}
+
+/// [`read_image`] for a complete in-memory monolithic XISF file.
+pub fn read_image_from_bytes(bytes: &[u8], index: usize) -> Result<XisfImage, XisfError> {
     let mut reader = std::io::Cursor::new(bytes);
-    open_image_from(
+    read_image_from(
         &mut reader,
         bytes.len() as u64,
         ImageSelection::Index(index),
@@ -226,38 +376,43 @@ enum ImageSelection<'a> {
     Id(&'a str),
 }
 
-fn open_image_from(
+fn read_image_from(
     reader: &mut (impl Read + Seek),
     file_bytes: u64,
     selection: ImageSelection<'_>,
-) -> Result<FitsImage, XisfError> {
-    let parsed = parse_file(reader, file_bytes)?;
-    let image = match selection {
-        ImageSelection::Index(index) => parsed
-            .images
-            .get(index)
+) -> Result<XisfImage, XisfError> {
+    let mut parsed = parse_file(reader, file_bytes)?;
+    // Take the chosen image out of the parse, so the metadata moves into the
+    // result instead of being cloned for every caller of `open`.
+    let position = match selection {
+        ImageSelection::Index(index) => (index < parsed.images.len())
+            .then_some(index)
             .ok_or_else(|| XisfError::ImageNotFound(format!("at zero-based index {index}")))?,
         ImageSelection::Id(id) => parsed
             .images
             .iter()
-            .find(|image| image.info.id.as_deref() == Some(id))
+            .position(|image| image.info.id.as_deref() == Some(id))
             .ok_or_else(|| XisfError::ImageNotFound(format!("with id {id:?}")))?,
     };
+    let image = parsed.images.swap_remove(position);
 
     if let Some(checksum) = &image.checksum {
-        verify_checksum(reader, image, checksum)?;
+        verify_checksum(reader, &image, checksum)?;
     }
     reader.seek(SeekFrom::Start(image.info.attachment_offset))?;
-    let pixels = decode_attachment(reader, image)?;
+    let pixels = decode_attachment(reader, &image)?;
     let mut headers = image.info.headers.clone();
     add_structural_headers(&mut headers, &image.info);
 
-    Ok(FitsImage {
-        width: image.info.width,
-        height: image.info.height,
-        planes: image.info.planes,
-        pixels,
-        headers,
+    Ok(XisfImage {
+        image: FitsImage {
+            width: image.info.width,
+            height: image.info.height,
+            planes: image.info.planes,
+            pixels,
+            headers,
+        },
+        info: image.info,
     })
 }
 
@@ -574,6 +729,9 @@ fn parse_image(
             "attachment {attachment_offset}:{attachment_bytes} is outside the file"
         )));
     }
+    let bounds = attributes
+        .get("bounds")
+        .and_then(|value| parse_bounds(value));
     let compression = attributes
         .get("compression")
         .map(|value| parse_compression(value))
@@ -613,6 +771,7 @@ fn parse_image(
             attachment_offset,
             attachment_bytes,
             compression,
+            bounds,
             headers: Vec::new(),
             properties: Vec::new(),
             cfa_pattern: None,
@@ -645,6 +804,22 @@ fn required<'a>(
         .get(name)
         .map(String::as_str)
         .ok_or_else(|| XisfError::Malformed(format!("{element} is missing {name}")))
+}
+
+/// Parse a `bounds="low:high"` attribute.
+/// Read a `bounds="low:high"` attribute, or `None` when it is not a usable
+/// range.
+///
+/// Deliberately lenient. Nothing in this crate needs `bounds` to decode an
+/// image, and releases before it existed ignored the attribute outright, so
+/// refusing a file over a spelling this crate does not recognize would break
+/// images that used to open. An unusable range reads as "the file said
+/// nothing", which is what it amounts to.
+fn parse_bounds(value: &str) -> Option<(f64, f64)> {
+    let (low, high) = value.split_once(':')?;
+    let parse = |part: &str| part.trim().parse::<f64>().ok().filter(|v| v.is_finite());
+    let (low, high) = (parse(low)?, parse(high)?);
+    (low < high).then_some((low, high))
 }
 
 fn parse_usize(value: &str) -> Result<usize, XisfError> {
@@ -1152,12 +1327,13 @@ mod tests {
         let image = image_from_bytes(&bytes, 1).unwrap();
         assert!(matches!(image.pixels, Pixels::U8(ref actual) if actual == &second));
         let mut cursor = std::io::Cursor::new(&bytes);
-        let image = open_image_from(
+        let image = read_image_from(
             &mut cursor,
             bytes.len() as u64,
             ImageSelection::Id("image1"),
         )
-        .unwrap();
+        .unwrap()
+        .image;
         assert!(matches!(image.pixels, Pixels::U8(ref actual) if actual == &second));
     }
 
@@ -1365,5 +1541,254 @@ mod tests {
             from_bytes(&truncated),
             Err(XisfError::Malformed(message)) if message.contains("outside the file")
         ));
+    }
+
+    #[test]
+    fn read_image_reports_the_declared_bounds_beside_the_pixels() {
+        let values = [0.0_f32, 0.25, 0.5, 1.0];
+        let raw = values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        let xml = image_element(
+            0,
+            "2:2:1",
+            "Float32",
+            raw.len(),
+            "bounds=\"0:1\" colorSpace=\"Gray\"",
+            "",
+        );
+        let bytes = monolithic(xml, &[&raw]);
+        let read = read_image_from_bytes(&bytes, 0).unwrap();
+
+        assert_eq!(read.info.bounds, Some((0.0, 1.0)));
+        assert!(matches!(read.image.pixels, Pixels::F32(ref actual) if actual == &values));
+        // The paired read must not change what `open` already returns.
+        let opened = from_bytes(&bytes).unwrap();
+        assert!(matches!(
+            (&opened.pixels, &read.image.pixels),
+            (Pixels::F32(opened), Pixels::F32(paired)) if opened == paired
+        ));
+    }
+
+    #[test]
+    fn an_undeclared_range_reads_as_none() {
+        let raw = [1_u8, 2, 3, 4];
+        let xml = image_element(0, "2:2:1", "UInt8", raw.len(), "colorSpace=\"Gray\"", "");
+        let read = read_image_from_bytes(&monolithic(xml, &[&raw]), 0).unwrap();
+        assert_eq!(read.info.bounds, None);
+    }
+
+    #[test]
+    /// Releases before `bounds` existed ignored the attribute outright, so a
+    /// spelling this crate cannot read must not cost anyone a file that used
+    /// to open.
+    fn an_unusable_range_reads_as_none_without_failing_the_file() {
+        let raw = [1_u8, 2, 3, 4];
+        for bad in [
+            "1", "0:", "low:high", "0:nan", "0:inf", "0,1", "",
+            "0 1", // Not a range: reversed, or spanning nothing.
+            "1:0", "1:1",
+        ] {
+            let xml = image_element(
+                0,
+                "2:2:1",
+                "UInt8",
+                raw.len(),
+                &format!("bounds=\"{bad}\" colorSpace=\"Gray\""),
+                "",
+            );
+            let bytes = monolithic(xml, &[&raw]);
+            assert!(
+                from_bytes(&bytes).is_ok(),
+                "bounds {bad:?} must not fail the file"
+            );
+            assert_eq!(
+                read_image_from_bytes(&bytes, 0).unwrap().info.bounds,
+                None,
+                "bounds {bad:?} should read as none"
+            );
+        }
+    }
+
+    /// A helper for a 2x2 Float32 image with the given `bounds` spelling.
+    fn float_frame(values: &[f32], bounds: Option<&str>) -> XisfImage {
+        let raw = values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        let extra = match bounds {
+            Some(bounds) => format!("bounds=\"{bounds}\" colorSpace=\"Gray\""),
+            None => "colorSpace=\"Gray\"".into(),
+        };
+        let xml = image_element(0, "2:2:1", "Float32", raw.len(), &extra, "");
+        read_image_from_bytes(&monolithic(xml, &[&raw]), 0).unwrap()
+    }
+
+    fn samples(image: &XisfImage) -> Vec<f32> {
+        match &image.image.pixels {
+            Pixels::F32(values) => values.clone(),
+            other => panic!("expected float samples, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rescale_normalized_to_puts_a_declared_unit_frame_on_a_chosen_scale() {
+        let mut read = float_frame(&[0.0, 0.25, 0.5, 1.0], Some("0:1"));
+
+        assert!(read.rescale_normalized_to(65535.0));
+        assert_eq!(samples(&read), [0.0, 16383.75, 32767.5, 65535.0]);
+        // Bounds describe the new range, so a second call declines.
+        assert_eq!(read.info.bounds, Some((0.0, 65535.0)));
+        assert!(!read.rescale_normalized_to(65535.0));
+        assert_eq!(samples(&read), [0.0, 16383.75, 32767.5, 65535.0]);
+    }
+
+    /// The range this crate's own writer emits describes the data, not a
+    /// normalization. Converting from it would stretch a physical frame, so
+    /// only a declared `0:1` counts.
+    #[test]
+    fn rescale_normalized_to_declines_a_range_that_is_not_unit() {
+        let physical = [100.0_f32, 200.0, 5000.0, 30000.0];
+        let mut written = Vec::new();
+        write_f32_image_to(
+            &mut written,
+            2,
+            2,
+            seiza_fits::F32ImageData::Mono(&physical),
+            &[],
+        )
+        .unwrap();
+        let mut read = read_image_from_bytes(&written, 0).unwrap();
+
+        assert_eq!(read.info.bounds, Some((100.0, 30000.0)));
+        assert!(!read.rescale_normalized_to(65535.0));
+        assert_eq!(samples(&read), physical, "physical samples must survive");
+
+        // A caller who knows the range can still ask for the conversion.
+        assert!(read.rescale_from((100.0, 30000.0), 65535.0));
+        assert_eq!(samples(&read)[0], 0.0);
+        assert_eq!(samples(&read)[3], 65535.0);
+    }
+
+    #[test]
+    fn rescale_normalized_to_declines_an_absent_or_non_unit_range() {
+        for bounds in [None, Some("0:2"), Some("-1:1"), Some("0.5:1")] {
+            let values = [0.0_f32, 0.25, 0.5, 1.0];
+            let mut read = float_frame(&values, bounds);
+            assert!(
+                !read.rescale_normalized_to(65535.0),
+                "bounds {bounds:?} is not a declared unit range"
+            );
+            assert_eq!(samples(&read), values);
+        }
+    }
+
+    #[test]
+    fn rescale_from_takes_the_callers_range_whatever_the_file_says() {
+        let mut read = float_frame(&[-1.0, 0.0, 1.0, 3.0], None);
+        assert!(read.rescale_from((-1.0, 3.0), 100.0));
+        assert_eq!(samples(&read), [0.0, 25.0, 50.0, 100.0]);
+        assert_eq!(read.info.bounds, Some((0.0, 100.0)));
+    }
+
+    /// Clamping would flatten unclipped highlights and negative background
+    /// residuals, so the map stays linear past both ends.
+    #[test]
+    fn rescale_from_maps_linearly_past_the_declared_range() {
+        let mut read = float_frame(&[-0.5, 0.0, 1.0, 2.0], Some("0:1"));
+        assert!(read.rescale_normalized_to(100.0));
+        assert_eq!(samples(&read), [-50.0, 0.0, 100.0, 200.0]);
+    }
+
+    #[test]
+    fn rescale_declines_what_it_cannot_convert() {
+        // A full scale that is not finite and positive would erase the frame.
+        for full_scale in [0.0, -100.0, f32::NAN, f32::INFINITY] {
+            let values = [0.0_f32, 0.25, 0.5, 1.0];
+            let mut read = float_frame(&values, Some("0:1"));
+            assert!(
+                !read.rescale_normalized_to(full_scale),
+                "full scale {full_scale} should be refused"
+            );
+            assert_eq!(samples(&read), values);
+            assert_eq!(read.info.bounds, Some((0.0, 1.0)), "bounds must survive");
+        }
+
+        // A source range that spans nothing would divide by zero.
+        let values = [0.0_f32, 0.25, 0.5, 1.0];
+        let mut read = float_frame(&values, Some("0:1"));
+        assert!(!read.rescale_from((1.0, 1.0), 65535.0));
+        assert!(!read.rescale_from((3.0, 1.0), 65535.0));
+        assert!(!read.rescale_from((f64::NAN, 1.0), 65535.0));
+        assert_eq!(samples(&read), values);
+
+        // Integer samples already span their format's range.
+        let raw = [1_u8, 2, 3, 4];
+        let xml = image_element(
+            0,
+            "2:2:1",
+            "UInt8",
+            raw.len(),
+            "bounds=\"0:1\" colorSpace=\"Gray\"",
+            "",
+        );
+        let mut read = read_image_from_bytes(&monolithic(xml, &[&raw]), 0).unwrap();
+        assert!(!read.rescale_normalized_to(65535.0));
+        assert!(!read.rescale_from((0.0, 1.0), 65535.0));
+        assert!(matches!(read.image.pixels, Pixels::U8(ref actual) if actual == &raw));
+    }
+
+    /// `info` reports what the file preserved; `image` adds the structural
+    /// cards this crate synthesizes. Both are deliberate, so pin the split.
+    #[test]
+    fn the_two_header_lists_differ_in_a_documented_way() {
+        let raw = [1_u8, 2, 3, 4];
+        let xml = image_element(
+            0,
+            "2:2:1",
+            "UInt8",
+            raw.len(),
+            "colorSpace=\"Gray\"",
+            "<FITSKeyword name=\"EXPTIME\" value=\"300\"/>",
+        );
+        let read = read_image_from_bytes(&monolithic(xml, &[&raw]), 0).unwrap();
+
+        let names = |headers: &[(String, HeaderValue)]| {
+            headers
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert!(names(&read.info.headers).contains(&"EXPTIME".to_string()));
+        assert!(
+            !names(&read.info.headers).contains(&"NAXIS1".to_string()),
+            "info reports what the file preserved, matching inspect"
+        );
+        assert!(names(&read.image.headers).contains(&"NAXIS1".to_string()));
+        assert!(names(&read.image.headers).contains(&"EXPTIME".to_string()));
+    }
+
+    #[test]
+    fn read_image_selects_by_index_and_id_like_open_does() {
+        let first = [1_u8, 2, 3, 4];
+        let second = [9_u8, 8, 7, 6];
+        let xml = format!(
+            "{}{}",
+            image_element(0, "2:2:1", "UInt8", 4, "colorSpace=\"Gray\"", ""),
+            image_element(1, "2:2:1", "UInt8", 4, "colorSpace=\"Gray\"", "")
+        );
+        let bytes = monolithic(xml, &[&first, &second]);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pair.xisf");
+        std::fs::write(&path, &bytes).unwrap();
+
+        assert_eq!(read_image(&path).unwrap().info.index, 0);
+        let by_index = read_image_at(&path, 1).unwrap();
+        assert_eq!(by_index.info.id.as_deref(), Some("image1"));
+        assert!(matches!(by_index.image.pixels, Pixels::U8(ref actual) if actual == &second));
+        let by_id = read_image_by_id(&path, "image1").unwrap();
+        assert_eq!(by_id.info.index, 1);
+        assert!(read_image_by_id(&path, "nope").is_err());
     }
 }

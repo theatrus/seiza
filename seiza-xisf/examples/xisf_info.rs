@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}: {} image(s)", path.display(), info.images.len());
     for image in &info.images {
         println!(
-            "  #{} id={:?} {}x{}x{} {:?} {} {:?}",
+            "  #{} id={:?} {}x{}x{} {:?} {} bounds={:?} {:?}",
             image.index,
             image.id,
             image.width,
@@ -22,6 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             image.planes,
             image.sample_format,
             image.color_space,
+            image.bounds,
             image.compression
         );
     }

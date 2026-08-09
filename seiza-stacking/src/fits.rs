@@ -17,24 +17,37 @@ pub struct FitsFrame {
     pub bayer: Option<BayerLayout>,
     /// Path the frame was read from, when opened from disk.
     pub source: Option<PathBuf>,
+    /// The sample range an XISF source declared, when it declared a usable
+    /// one. `None` for FITS, and for XISF that said nothing.
+    ///
+    /// Samples are never rescaled by it — see
+    /// [`seiza_xisf::XisfImageInfo::bounds`] for why the attribute is a hint
+    /// rather than a fact. It rides along so a caller mixing a normalized
+    /// PixInsight frame with camera frames can notice that it is about to
+    /// stack samples four orders of magnitude apart, and decide for itself.
+    pub bounds: Option<(f64, f64)>,
 }
 
 impl FitsFrame {
-    /// Read and decode a FITS file into a linear frame.
+    /// Read and decode a FITS or XISF file into a linear frame.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let image = if seiza_xisf::is_xisf_path(path) {
-            seiza_xisf::open(path).map_err(|source| Error::XisfRead {
+        let (image, bounds) = if seiza_xisf::is_xisf_path(path) {
+            let read = seiza_xisf::read_image(path).map_err(|source| Error::XisfRead {
                 path: path.to_path_buf(),
                 source,
-            })?
+            })?;
+            (read.image, read.info.bounds)
         } else {
-            FitsImage::open(path).map_err(|source| Error::FitsRead {
+            let image = FitsImage::open(path).map_err(|source| Error::FitsRead {
                 path: path.to_path_buf(),
                 source,
-            })?
+            })?;
+            (image, None)
         };
-        Self::from_fits(image, Some(path.to_path_buf()))
+        let mut frame = Self::from_fits(image, Some(path.to_path_buf()))?;
+        frame.bounds = bounds;
+        Ok(frame)
     }
 
     /// Convert an already-decoded [`FitsImage`] into a linear frame,
@@ -73,6 +86,8 @@ impl FitsFrame {
             exposure_seconds,
             bayer,
             source,
+            // Only `open` sees the container, so only `open` can fill this in.
+            bounds: None,
         })
     }
 
@@ -584,6 +599,28 @@ mod tests {
         assert_eq!((frame.image.width, frame.image.height), (2, 2));
         assert_eq!(frame.image.data, [0.0, 0.25, 0.5, 1.0]);
         assert_eq!(frame.exposure_seconds, Some(30.0));
+        // Carried through, never applied: the samples are what the file held.
+        assert_eq!(frame.bounds, None);
+    }
+
+    /// A frame this crate wrote declares its observed range, and reading it
+    /// back must not change a sample.
+    #[test]
+    fn a_declared_range_rides_along_without_touching_the_samples() {
+        let physical = [100.0_f32, 200.0, 5000.0, 30000.0];
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("written.xisf");
+        write_processed_image_fits_f32(
+            &path,
+            &LinearImage::new(2, 2, 1, physical.to_vec()).unwrap(),
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        let frame = FitsFrame::open(&path).unwrap();
+        assert_eq!(frame.bounds, Some((100.0, 30000.0)));
+        assert_eq!(frame.image.data, physical);
     }
 
     #[test]
