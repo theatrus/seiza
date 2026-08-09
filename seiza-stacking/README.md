@@ -183,11 +183,26 @@ worker count falls out of that budget and the machine's parallelism, or can be
 set outright. A budget too small for even one frame ahead degrades to
 sequential rather than failing.
 
-Measured on a 16-core machine over twelve 12MP frames from warm cache, the
-pipelined path runs 2.0x faster than the sequential one. Preparation is already
-Rayon-parallel internally, so the gain comes from covering each frame's serial
-gaps; the curve flattens around six workers. Frames arriving over a network
-gain more, because the read is what the overlap hides best.
+Each frame is read on the worker that will prepare it, so reads overlap both
+with each other and with the integration of earlier frames. Measured on a
+16-core machine over twelve 12MP frames, against a sequential loop:
+
+| read latency per frame | sequential | pipelined | |
+|---|---|---|---|
+| warm local cache | 2.00s | 1.01s | 2.0x |
+| 50ms | 2.67s | 1.16s | 2.3x |
+| 150ms | 3.85s | 1.44s | 2.7x |
+| 300ms | 5.66s | 1.89s | 3.0x |
+
+The latency rows were produced by delaying each read, so they model network
+storage rather than measuring a real one.
+
+Preparation is already Rayon-parallel internally, so on local storage the gain
+comes from covering each frame's serial gaps and the curve flattens around six
+workers — which is what the derived default targets. Remote frames want more:
+at 300ms, eleven workers finished in 1.58s against 1.89s for the derived six.
+Set `PipelineOptions::workers` when the frames are known to be remote, since
+this crate cannot tell a network mount from a local disk.
 
 Integrated flats are applied in the raw light frame's sampling before CFA
 debayering. Master darks and flats retain their Bayer pattern and origin

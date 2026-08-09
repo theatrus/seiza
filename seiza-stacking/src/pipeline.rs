@@ -37,8 +37,17 @@ pub struct PipelineOptions {
     /// Threads preparing frames, or `None` to derive one from the budget and
     /// the machine's parallelism.
     ///
-    /// Preparation is itself parallel internally, so a handful of workers is
-    /// usually enough to fill a machine; more mostly adds memory.
+    /// Each worker reads its own frame before registering it, so this is the
+    /// read concurrency as well as the compute concurrency. The derived
+    /// default suits frames on local storage, where reads are quick and
+    /// preparation — itself parallel internally — is the cost.
+    ///
+    /// **Raise it for frames arriving over a network.** With a 300ms read
+    /// latency and 12 frames, eleven workers finished in 1.58s against 1.89s
+    /// for the derived six: once a worker spends most of its time waiting,
+    /// more of them is what fills the link. A caller that knows its frames are
+    /// remote should say so here, since this crate cannot tell a network mount
+    /// from a local disk. The budget still bounds the memory.
     pub workers: Option<usize>,
 }
 
@@ -49,9 +58,11 @@ const DEFAULT_IN_FLIGHT_BYTES: usize = 1024 * 1024 * 1024;
 
 /// Ceiling on derived worker count. Preparation already uses every core
 /// through Rayon, so the workers only need to cover each other's serial gaps.
-/// Measured on a 16-core machine with 12MP frames, the speedup climbs 1.03x,
-/// 1.41x, 1.67x, 1.86x, 1.98x for one through six workers and then falls back
-/// slightly at eight, so there is nothing past this to win.
+/// Measured on a 16-core machine with 12MP frames from local storage, the
+/// speedup climbs 1.03x, 1.41x, 1.67x, 1.86x, 1.98x for one through six
+/// workers and then falls back slightly at eight, so there is nothing past
+/// this to win locally. Frames read over a network do want more; that is what
+/// [`PipelineOptions::workers`] is for.
 const MAXIMUM_DERIVED_WORKERS: usize = 6;
 
 impl Default for PipelineOptions {
@@ -104,6 +115,12 @@ pub enum Continue {
 
 impl LiveStacker {
     /// Stack a sequence of FITS or XISF paths, preparing several at once.
+    ///
+    /// Each frame is read, calibrated, registered and normalized on a worker
+    /// thread, so reads overlap both with each other and with the integration
+    /// of earlier frames. That matters most when the frames are remote: with a
+    /// simulated 300ms read latency this ran 3.0x faster than a sequential
+    /// loop, against 2.0x on warm local storage.
     ///
     /// `on_frame` is called once per path, in the order given, with the same
     /// disposition a sequential run would have produced — the accumulator is
