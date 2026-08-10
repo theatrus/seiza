@@ -23,7 +23,6 @@ fn stack_error(error: seiza_stacking::Error) -> PyErr {
     StackError::new_err(error.to_string())
 }
 
-
 /// What one pipelined run did.
 #[pyclass(frozen, name = "PipelineReport", module = "seiza")]
 #[derive(Clone, Copy)]
@@ -624,7 +623,10 @@ impl PyLiveStacker {
             .allow_threads(|| {
                 let stacker = self.active_mut()?;
                 stacker.push_fits_pipelined(&paths, &options, |path, outcome| {
-                    outcomes.push((path.to_path_buf(), outcome.map_err(|error| error.to_string())));
+                    outcomes.push((
+                        path.to_path_buf(),
+                        outcome.map_err(|error| error.to_string()),
+                    ));
                     seiza_stacking::Continue::Yes
                 })
             })
