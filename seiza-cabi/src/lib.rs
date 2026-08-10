@@ -470,6 +470,17 @@ struct StackDispositionResponse {
     diagnostics: Option<StackDiagnosticsResponse>,
 }
 
+/// One pipelined run: every frame's outcome in order, plus the tallies a
+/// caller needs when it is not inspecting each one.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StackPipelineResponse {
+    frames: Vec<StackDispositionResponse>,
+    integrated: usize,
+    rejected: usize,
+    failed: usize,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StackDiagnosticsResponse {
@@ -1261,6 +1272,81 @@ pub unsafe extern "C" fn seiza_live_stacker_push_fits_json(
             .push_fits(&path)
             .map_err(|error| error.to_string())?;
         owned_json(&stack_disposition_response(Some(&path), disposition))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// Offer many FITS or XISF paths at once, preparing several frames in
+/// parallel. Returns owned JSON that the caller frees with
+/// [`seiza_string_free`].
+///
+/// Reads, calibration, registration and normalization overlap across frames
+/// while integration stays in the order given, so the result is identical to
+/// offering the same paths one at a time. `paths_json` is a JSON array of
+/// strings. `workers` is the read concurrency as well as the compute
+/// concurrency; pass 0 to derive it, or raise it when the frames are remote.
+/// `max_in_flight_bytes` bounds the memory a derived count may use; pass 0 for
+/// the default.
+///
+/// A path that cannot be read, or that repeats one already stacked, appears in
+/// the `frames` array with `accepted` false and a `reason`, and the run carries
+/// on. Check `failed` rather than assuming an absent error means every frame
+/// landed. There is no cancellation here: a C caller wanting that should offer
+/// paths in batches.
+///
+/// # Safety
+/// `stacker` must be a live pointer returned by a `seiza_live_stacker_*`
+/// constructor. `paths_json` must be a valid NUL-terminated string. When
+/// non-null, `error_out` must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_live_stacker_push_fits_pipelined_json(
+    stacker: *mut SeizaLiveStacker,
+    paths_json: *const c_char,
+    workers: usize,
+    max_in_flight_bytes: usize,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let paths_json = required_str(paths_json, "stack frame paths")?;
+        let paths: Vec<PathBuf> = serde_json::from_str::<Vec<String>>(&paths_json)
+            .map_err(|error| format!("stack frame paths must be a JSON array of strings: {error}"))?
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+        let stacker = unsafe { required_live_stacker_mut(stacker)? };
+
+        let mut options = seiza_stacking::PipelineOptions {
+            workers: (workers > 0).then_some(workers),
+            ..seiza_stacking::PipelineOptions::default()
+        };
+        if max_in_flight_bytes > 0 {
+            options.max_in_flight_bytes = max_in_flight_bytes;
+        }
+
+        let mut frames = Vec::with_capacity(paths.len());
+        let report = stacker
+            .stacker
+            .push_fits_pipelined(&paths, &options, |path, outcome| {
+                frames.push(match outcome {
+                    Ok(disposition) => stack_disposition_response(Some(path), disposition),
+                    Err(error) => StackDispositionResponse {
+                        source: Some(path.to_string_lossy().into_owned()),
+                        accepted: false,
+                        reason: Some(error.to_string()),
+                        diagnostics: None,
+                    },
+                });
+                seiza_stacking::Continue::Yes
+            })
+            .map_err(|error| error.to_string())?;
+
+        owned_json(&StackPipelineResponse {
+            frames,
+            integrated: report.integrated,
+            rejected: report.rejected,
+            failed: report.failed,
+        })
     })
     .unwrap_or(ptr::null_mut())
 }

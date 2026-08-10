@@ -41,7 +41,7 @@ pub use master::{
 pub use normalization::{NormalizationMap, NormalizationMode};
 pub use orientation::{SKY_ORIENTATION_NAME, SKY_ORIENTATION_VERSION, SkyOrientationPlan};
 pub use paths::{path_identity, paths_refer_to_same_file};
-pub use pipeline::{Continue, PipelineOptions};
+pub use pipeline::{Continue, MAXIMUM_WORKERS, PipelineOptions, PipelineReport};
 pub use registration::{
     AffineTransform, ReferenceRegion, Registrar, RegistrationOptions, RegistrationResult,
     SimilarityTransform, resample_region_to_reference, resample_region_to_reference_affine,

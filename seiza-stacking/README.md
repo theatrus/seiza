@@ -164,24 +164,51 @@ at once.
 `push_fits_pipelined` does that, handing results back in the order given:
 
 ```rust
-stacker.push_fits_pipelined(&paths, &PipelineOptions::default(), |path, outcome| {
+let report = stacker.push_fits_pipelined(&paths, &PipelineOptions::default(), |path, outcome| {
     record(path, outcome);
     if cancelled() { Continue::No } else { Continue::Yes }
 })?;
+println!("{} integrated, {} rejected, {} failed", report.integrated, report.rejected, report.failed);
 ```
 
 The callback keeps the caller in charge of cancellation, checkpointing, and
 per-frame decisions, which is why this is not a batch call that swallows the
 loop. The accumulator is still fed strictly in submission order, so a
-pipelined run is bit-identical to a sequential one; a test asserts exactly that
-against the same frames.
+pipelined run is bit-identical to a sequential one; tests assert that against
+the same frames both when every frame is accepted and when the order-dependent
+`minimum_integrated_fraction` gate turns frames away.
+
+The callback sees everything a `push_fits` loop would, errors included: a path
+that cannot be opened, or that repeats one already stacked, arrives as `Err`
+for that path alone and the run carries on. One repeated path in a directory
+listing costs that path, not the batch — and costs no read either, because
+repeats are settled before anything is opened, which is also what keeps the
+concurrent and sequential paths reporting the same error. Since a run can fail
+every path and still answer `Ok`, the returned `PipelineReport` carries the
+counts a caller checking only the return value needs.
+
+`Continue::No` stops the run, but does not reach back into reads already begun.
+Each worker may hold one prepared frame and be building another, so up to two
+frames per worker beyond the cancel point have been opened and are finished and
+discarded. A read cannot be interrupted once started: a path on a stalled
+mount, a FIFO, or a device node holds the call until that read returns. Cancel
+promptness is bounded by the slowest read already in flight.
+
+Called from inside a Rayon pool thread, including under `pool.install(..)`,
+frames are prepared sequentially on the calling thread instead. Parking a pool
+thread while preparation needs that same pool would deadlock, and a caller who
+installed a pool did so to reserve cores, which spawning outside it would
+quietly undo.
 
 `PipelineOptions::max_in_flight_bytes` bounds the memory rather than the frame
 count, because a prepared frame is the reference image's size and that differs
 by an order of magnitude between a guide camera and a full-frame sensor. The
-worker count falls out of that budget and the machine's parallelism, or can be
-set outright. A budget too small for even one frame ahead degrades to
-sequential rather than failing.
+derived worker count falls out of that budget and the machine's parallelism; a
+budget too small for even one frame ahead still runs, one frame at a time. An
+explicit `workers` is taken at its word rather than held to the budget, since a
+caller who names a number has usually measured something this crate cannot see;
+memory then follows the count given, roughly two prepared frames per worker, up
+to a hard ceiling of `MAXIMUM_WORKERS` threads.
 
 Each frame is read on the worker that will prepare it, so reads overlap both
 with each other and with the integration of earlier frames. Measured on a

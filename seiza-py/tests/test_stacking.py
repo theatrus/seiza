@@ -222,6 +222,52 @@ def test_fits_live_stacker_protects_inputs_from_duplicates_and_output(tmp_path):
     assert output.exists()
 
 
+def test_pipelined_push_matches_pushing_one_at_a_time(tmp_path):
+    image = synthetic_star_field()
+    paths = []
+    for index in range(4):
+        path = tmp_path / f"light-{index:03d}.fits"
+        fits.writeto(path, image, overwrite=True)
+        paths.append(path)
+
+    one_at_a_time = seiza.LiveStacker(paths[0], options=no_adjustment_options())
+    for path in paths[1:]:
+        one_at_a_time.push_fits(path)
+    expected = one_at_a_time.snapshot()
+
+    pipelined = seiza.LiveStacker(paths[0], options=no_adjustment_options())
+    dispositions, report = pipelined.push_fits_pipelined(paths[1:], workers=3)
+    actual = pipelined.snapshot()
+
+    assert len(dispositions) == 3
+    assert report.integrated == expected.accepted_frames - 1
+    assert report.failed == 0
+    np.testing.assert_array_equal(actual.image, expected.image)
+    np.testing.assert_array_equal(actual.coverage, expected.coverage)
+
+
+def test_pipelined_push_reports_a_bad_path_in_place(tmp_path):
+    image = synthetic_star_field()
+    first = tmp_path / "light-001.fits"
+    second = tmp_path / "light-002.fits"
+    broken = tmp_path / "broken.fits"
+    fits.writeto(first, image, overwrite=True)
+    fits.writeto(second, image, overwrite=True)
+    broken.write_bytes(b"not a fits file")
+
+    stacker = seiza.LiveStacker(first, options=no_adjustment_options())
+    # A repeat of the reference, an unreadable file, and a usable frame. None
+    # of them raises; the run carries on and the summary counts the trouble.
+    dispositions, report = stacker.push_fits_pipelined(
+        [first, broken, second], workers=2
+    )
+
+    assert [d.accepted for d in dispositions] == [False, False, True]
+    assert "already been used" in dispositions[0].reason
+    assert report.failed == 2
+    assert report.integrated == 1
+
+
 def test_build_bias_stops_when_the_cancel_predicate_says_so(tmp_path):
     paths = []
     for index in range(3):

@@ -196,6 +196,23 @@ coverage = preview_state.coverage
 final = stacker.finish("stack.fits")  # consumes the live accumulator
 ```
 
+When the paths are all known — a finished session rather than a live one —
+`push_fits_pipelined()` prepares several frames at once while integrating in
+the order given, so the result is identical to pushing them one at a time. It
+measured 2.0x faster on local storage and 3.0x with a 300ms read latency:
+
+```python
+dispositions, report = stacker.push_fits_pipelined(paths)
+print(report)  # PipelineReport(integrated=..., rejected=..., failed=...)
+```
+
+A path that cannot be read, or that repeats one already stacked, comes back in
+place with `accepted` false and a reason rather than raising, so one bad path in
+a night's listing does not lose the rest — check `report.failed` rather than
+reading a clean return as success. Pass `workers=` when the frames arrive over a
+network, since the library cannot tell a network mount from a local disk.
+
+
 Checkpointing is non-consuming. Reopening preserves the original registration
 reference, calibration and options, online rejection statistics, coverage, and
 the FITS/XISF source ledger:

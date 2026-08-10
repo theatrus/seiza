@@ -160,6 +160,22 @@ Saving does not consume or otherwise mutate the handle. Context publication is
 atomic, and reopening validates the format version, dimensions, configuration,
 payload checksum, and accumulator invariants before returning a handle.
 
+Offering a whole session at once prepares several frames in parallel while
+integrating in the order given, which is identical to offering them one at a
+time but overlaps the reads with the registration:
+
+```c
+char *outcome = seiza_live_stacker_push_fits_pipelined_json(
+    stacker, "[\"light-001.fits\",\"light-002.fits\"]",
+    0 /* derive workers */, 0 /* default budget */, &error);
+```
+
+Every frame appears in the returned `frames` array in order, a path that could
+not be read among them with `accepted` false and a `reason`; check `failed`
+rather than reading an absent error as success. Raise the worker count when the
+frames arrive over a network, since the library cannot tell a network mount
+from a local disk.
+
 The full C declarations, plus the memory-ownership contract (which returns are
 owned vs. borrowed, and which `seiza_*_free` to call), live in
 [`include/seiza_cabi.h`](include/seiza_cabi.h).

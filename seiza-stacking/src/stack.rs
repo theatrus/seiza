@@ -545,27 +545,13 @@ impl LiveStacker {
         Ok(disposition)
     }
 
-    /// Refuse a batch that repeats a path this stack has already taken, or
-    /// repeats one within itself, before any of it is opened.
-    pub(crate) fn reject_duplicate_inputs(&self, paths: &[PathBuf]) -> Result<()> {
-        for (index, path) in paths.iter().enumerate() {
-            if self.is_duplicate_input(path) {
-                return Err(Error::Stack(format!(
-                    "FITS frame {} has already been used by this stack",
-                    path.display()
-                )));
-            }
-            if paths[..index]
-                .iter()
-                .any(|earlier| paths_refer_to_same_file(earlier, path))
-            {
-                return Err(Error::Stack(format!(
-                    "FITS frame {} appears twice in the same batch",
-                    path.display()
-                )));
-            }
-        }
-        Ok(())
+    /// The identities of every path already taken, for a caller checking many
+    /// candidates. One canonicalization each, rather than one per pair.
+    pub(crate) fn input_identities(&self) -> std::collections::HashSet<PathBuf> {
+        self.input_paths
+            .iter()
+            .map(|path| path_identity(path))
+            .collect()
     }
 
     fn is_duplicate_input(&self, path: &Path) -> bool {
@@ -945,9 +931,11 @@ impl IntegrationHalf<'_> {
         FrameDisposition::Rejected(reason)
     }
 
-    /// Retain a consumed path in resumable context state.
-    pub(crate) fn record_input_path(&mut self, path: &Path) {
-        self.input_paths.push(path_identity(path));
+    /// Retain a consumed path in resumable context state, given the identity
+    /// the caller has already resolved. Canonicalizing is a filesystem call,
+    /// and this runs on the one serial stage a pipeline waits on.
+    pub(crate) fn record_input_identity(&mut self, identity: PathBuf) {
+        self.input_paths.push(identity);
     }
 }
 

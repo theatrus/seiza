@@ -12,12 +12,20 @@
 //! before it. This module runs preparation for several frames at once and
 //! hands the results back in submission order, so the accumulator sees exactly
 //! the sequence it would have seen sequentially and the result is unchanged.
+//!
+//! The handoff is a bounded channel per worker rather than shared flags,
+//! because a channel gets the failure paths right by construction: a worker
+//! that panics drops its sender, so the consumer's `recv` fails instead of
+//! waiting forever, and a consumer that panics drops the receivers, so the
+//! workers' `send` fails and they stop. Either way the scope joins and the
+//! real panic is re-raised rather than becoming a hang.
 
 use crate::stack::{PreparedFrame, prepare_frame};
-use crate::{Error, FitsFrame, FrameDisposition, LiveStacker, Result};
+use crate::{Error, FitsFrame, FrameDisposition, LiveStacker, Result, path_identity};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{SyncSender, sync_channel};
 
 /// How much work to keep in flight while stacking a sequence of frames.
 #[derive(Clone, Copy, Debug)]
@@ -25,14 +33,16 @@ pub struct PipelineOptions {
     /// Ceiling on the bytes held by frames waiting to be integrated.
     ///
     /// A prepared frame is the size of the reference image in `f32` samples,
-    /// and its undecoded source is held briefly alongside it, so the worker
-    /// count falls out of this budget and the reference's size rather than
-    /// being counted in frames. Frame sizes vary by an order of magnitude
-    /// between a small guide camera and a full-frame sensor, so a fixed frame
-    /// count would mean wildly different memory on different rigs.
+    /// so the default worker count falls out of this budget and the
+    /// reference's size rather than being counted in frames. Frame sizes vary
+    /// by an order of magnitude between a small guide camera and a full-frame
+    /// sensor, so a fixed frame count would mean wildly different memory on
+    /// different rigs.
     ///
-    /// At least one frame is always prepared, however small the budget: a
-    /// budget below one frame degrades to sequential rather than failing.
+    /// This bounds the derived worker count only. An explicit [`Self::workers`]
+    /// is taken at its word, because a caller who names a number has usually
+    /// measured something this crate cannot see — remote storage, most often.
+    /// At least one frame is always prepared, however small the budget.
     pub max_in_flight_bytes: usize,
     /// Threads preparing frames, or `None` to derive one from the budget and
     /// the machine's parallelism.
@@ -47,7 +57,8 @@ pub struct PipelineOptions {
     /// for the derived six: once a worker spends most of its time waiting,
     /// more of them is what fills the link. A caller that knows its frames are
     /// remote should say so here, since this crate cannot tell a network mount
-    /// from a local disk. The budget still bounds the memory.
+    /// from a local disk. Memory then follows the count given, roughly two
+    /// prepared frames per worker, held to [`MAXIMUM_WORKERS`] threads.
     pub workers: Option<usize>,
 }
 
@@ -64,6 +75,12 @@ const DEFAULT_IN_FLIGHT_BYTES: usize = 1024 * 1024 * 1024;
 /// this to win locally. Frames read over a network do want more; that is what
 /// [`PipelineOptions::workers`] is for.
 const MAXIMUM_DERIVED_WORKERS: usize = 6;
+
+/// Hard ceiling on threads, however many a caller asks for. Each is an OS
+/// thread holding up to two prepared frames, and `scope.spawn` panics rather
+/// than failing when the system runs out, so a mistyped or config-driven
+/// number must not be able to reach that.
+pub const MAXIMUM_WORKERS: usize = 64;
 
 impl Default for PipelineOptions {
     fn default() -> Self {
@@ -85,9 +102,14 @@ impl PipelineOptions {
 
     /// Workers to run for a reference frame of `frame_bytes`.
     ///
-    /// Each worker may hold a prepared frame and be building another, so it is
-    /// budgeted at two frames. Always at least one.
+    /// An explicit count is honoured as given, held only to
+    /// [`MAXIMUM_WORKERS`]. A derived one is also held to what the budget
+    /// affords, costing each worker the frame it holds plus the one it is
+    /// building. Always at least one.
     fn resolve_workers(&self, frame_bytes: usize) -> usize {
+        if let Some(workers) = self.workers {
+            return workers.clamp(1, MAXIMUM_WORKERS);
+        }
         let affordable = if frame_bytes == 0 {
             MAXIMUM_DERIVED_WORKERS
         } else {
@@ -97,8 +119,8 @@ impl PipelineOptions {
             .map(|value| value.get())
             .unwrap_or(1);
         // Half the cores, since each worker's own work is already parallel.
-        self.workers
-            .unwrap_or_else(|| (parallelism / 2).clamp(1, MAXIMUM_DERIVED_WORKERS))
+        (parallelism / 2)
+            .clamp(1, MAXIMUM_DERIVED_WORKERS)
             .min(affordable.max(1))
             .max(1)
     }
@@ -109,8 +131,37 @@ impl PipelineOptions {
 pub enum Continue {
     /// Keep going.
     Yes,
-    /// Stop; the remaining paths are left untouched.
+    /// Stop. See [`LiveStacker::push_fits_pipelined`] for what is already in
+    /// flight when this takes effect.
     No,
+}
+
+/// What a run did, so trouble is visible to a caller that only checks the
+/// return value.
+///
+/// A failed path is reported to the callback and does not stop the run, which
+/// means the call itself can succeed having integrated nothing. This is the
+/// summary that says so.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[must_use]
+pub struct PipelineReport {
+    /// Frames the accumulator took.
+    pub integrated: usize,
+    /// Frames an admission gate turned away.
+    pub rejected: usize,
+    /// Paths that could not be read, or that repeated one already stacked.
+    pub failed: usize,
+}
+
+/// Whether a path can be prepared at all, decided before anything is opened.
+enum Planned {
+    /// Repeats a path this stack has already taken, or an earlier one in this
+    /// batch. Settled up front so it costs no read, and so the concurrent and
+    /// sequential paths refuse it at the same point.
+    Duplicate,
+    /// To be read and prepared. Carries the resolved identity so the ledger
+    /// does not canonicalize the path a second time.
+    Prepare(PathBuf),
 }
 
 impl LiveStacker {
@@ -123,136 +174,215 @@ impl LiveStacker {
     /// loop, against 2.0x on warm local storage.
     ///
     /// `on_frame` is called once per path, in the order given, with the same
-    /// disposition a sequential run would have produced — the accumulator is
-    /// still fed strictly in order. Answer [`Continue::No`] to stop early;
-    /// paths after that point are never opened. The callback is where a caller
-    /// records decisions, checkpoints, or notices a cancellation, so driving
-    /// the loop is not given up to get the overlap.
+    /// outcome a sequential [`LiveStacker::push_fits`] loop would have
+    /// produced — the accumulator is still fed strictly in order. That
+    /// includes the errors: a path that cannot be opened, or that repeats one
+    /// this stack has already taken, arrives as `Err` for that path alone and
+    /// the run carries on, exactly as a loop that logged and skipped would.
+    /// The returned [`PipelineReport`] counts those failures, so a caller that
+    /// only checks the return value still sees a run that integrated nothing.
     ///
-    /// A path that fails to open is reported to the callback as an error and
-    /// does not stop the run; it is the caller's to decide about, matching
-    /// what a hand-written loop around [`LiveStacker::push_fits`] would do.
+    /// # Cancelling
     ///
-    /// Duplicate paths are refused up front, as [`LiveStacker::push_fits`]
-    /// refuses them one at a time.
+    /// Answering [`Continue::No`] stops the run, but does not reach back into
+    /// reads already begun. Each worker may hold one prepared frame and be
+    /// building another, so up to two frames per worker beyond the cancel
+    /// point have already been opened and are finished and discarded. A read
+    /// cannot be interrupted once started: a path on a stalled mount, a FIFO,
+    /// or a device node will hold the call until that read returns. Cancel
+    /// promptness is bounded by the slowest read already in flight, not by the
+    /// callback.
+    ///
+    /// # Rayon
+    ///
+    /// Running from inside a Rayon pool thread — including under
+    /// `pool.install(..)` — prepares frames sequentially on the calling
+    /// thread. This is deliberately conservative: the deadlock it avoids needs
+    /// the caller's pool to be the one preparation submits to, which cannot be
+    /// told apart through Rayon's API, and a caller who installed a pool did
+    /// so to reserve cores that spawning outside it would quietly undo.
     pub fn push_fits_pipelined(
         &mut self,
         paths: &[PathBuf],
         options: &PipelineOptions,
         mut on_frame: impl FnMut(&Path, Result<FrameDisposition>) -> Continue,
-    ) -> Result<()> {
+    ) -> Result<PipelineReport> {
         self.require_fits_input_mode()?;
-        self.reject_duplicate_inputs(paths)?;
         if paths.is_empty() {
-            return Ok(());
+            return Ok(PipelineReport::default());
         }
 
-        let frame_bytes = self.reference_resident_bytes();
-        let workers = options.resolve_workers(frame_bytes).min(paths.len());
+        // Settled before any thread starts, so both paths refuse a repeat at
+        // the same point and neither reads a frame it is going to discard.
+        let plan = self.plan_batch(paths);
 
-        // One slot per path. A worker fills its own indices and the consumer
-        // reads them in order, so a slow frame never lets a later one overtake
-        // it into the accumulator.
-        let slots: Vec<Mutex<Option<Result<PreparedFrame>>>> =
-            (0..paths.len()).map(|_| Mutex::new(None)).collect();
-        let ready: Vec<(std::sync::Mutex<bool>, std::sync::Condvar)> = (0..paths.len())
-            .map(|_| (Mutex::new(false), std::sync::Condvar::new()))
-            .collect();
-        let next_index = AtomicUsize::new(0);
+        let frame_bytes = self.reference.data.len() * std::mem::size_of::<f32>();
+        let workers = options.resolve_workers(frame_bytes).min(paths.len());
+        // Preparation submits Rayon work; blocking a pool thread while waiting
+        // for it can starve the pool of the threads that would do it.
+        if rayon::current_thread_index().is_some() {
+            return Ok(self.run_sequentially(paths, &plan, &mut on_frame));
+        }
+
         let stop = AtomicBool::new(false);
-        // How far the consumer has got. A worker will not run more than
-        // `workers` frames ahead of it, which is what bounds the memory.
-        let consumed = AtomicUsize::new(0);
-        let consumed_gate = (Mutex::new(0usize), std::sync::Condvar::new());
+
+        // One bounded channel per worker; worker `w` takes indices `w`,
+        // `w + workers`, ... and the consumer reads them round-robin, so a
+        // slow frame never lets a later one overtake it into the accumulator.
+        // Capacity one holds a worker to the frame it has queued plus the one
+        // it is building.
+        let mut senders = Vec::with_capacity(workers);
+        let mut receivers = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            let (sender, receiver) = sync_channel::<Result<PreparedFrame>>(1);
+            senders.push(sender);
+            receivers.push(receiver);
+        }
 
         let (preparation, mut integration) = self.split_for_pipeline();
+        let mut report = PipelineReport::default();
 
         std::thread::scope(|scope| {
-            for _ in 0..workers {
-                scope.spawn(|| {
-                    loop {
-                        if stop.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        let index = next_index.fetch_add(1, Ordering::SeqCst);
-                        if index >= paths.len() {
-                            return;
-                        }
-                        // Wait until this frame is within the in-flight window.
-                        {
-                            let (lock, condvar) = &consumed_gate;
-                            let mut seen = lock.lock().unwrap();
-                            while !stop.load(Ordering::Relaxed)
-                                && index >= consumed.load(Ordering::Acquire) + workers
-                            {
-                                seen = condvar.wait(seen).unwrap();
-                            }
-                        }
-                        if stop.load(Ordering::Relaxed) {
-                            return;
-                        }
-
-                        let outcome = prepare_one(&paths[index], &preparation);
-                        *slots[index].lock().unwrap() = Some(outcome);
-                        let (lock, condvar) = &ready[index];
-                        *lock.lock().unwrap() = true;
-                        condvar.notify_all();
-                    }
+            for (worker, sender) in senders.into_iter().enumerate() {
+                let preparation = &preparation;
+                let stop = &stop;
+                let plan = &plan;
+                scope.spawn(move || {
+                    prepare_worker(worker, workers, paths, plan, preparation, stop, sender)
                 });
             }
 
             // Integrate in order on this thread, so the accumulator sees the
             // sequential sequence.
-            let mut result = Ok(());
             for (index, path) in paths.iter().enumerate() {
-                {
-                    let (lock, condvar) = &ready[index];
-                    let mut done = lock.lock().unwrap();
-                    while !*done {
-                        done = condvar.wait(done).unwrap();
-                    }
-                }
-                let prepared = slots[index]
-                    .lock()
-                    .unwrap()
-                    .take()
-                    .expect("a readied slot always holds an outcome");
+                let Ok(prepared) = receivers[index % workers].recv() else {
+                    // The worker for this index is gone. Either it panicked —
+                    // in which case the scope re-raises that panic when it
+                    // joins, which is a truer report than anything invented
+                    // here — or it stopped because the run is ending.
+                    break;
+                };
 
-                let disposition = match prepared {
+                let outcome = match prepared {
+                    Err(error) => Err(error),
                     Ok(prepared) => {
+                        let identity = match &plan[index] {
+                            Planned::Prepare(identity) => identity.clone(),
+                            Planned::Duplicate => unreachable!("a duplicate is never prepared"),
+                        };
                         let disposition = integration.integrate(prepared);
-                        integration.record_input_path(path);
+                        integration.record_input_identity(identity);
                         Ok(disposition)
                     }
-                    Err(error) => Err(error),
                 };
-                let keep_going = on_frame(path, disposition);
+                report.count(&outcome);
 
-                consumed.store(index + 1, Ordering::Release);
-                {
-                    let (lock, condvar) = &consumed_gate;
-                    *lock.lock().unwrap() = index + 1;
-                    condvar.notify_all();
-                }
-
-                if keep_going == Continue::No {
-                    result = Ok(());
+                if on_frame(path, outcome) == Continue::No {
                     break;
                 }
             }
+
+            // Reached on every exit from the loop, including an early stop and
+            // a `recv` failure. A panic in `on_frame` skips it, but unwinding
+            // drops the receivers, which fails the workers' sends and stops
+            // them just the same — that is why the channel replaced a flag.
             stop.store(true, Ordering::Relaxed);
-            {
-                let (lock, condvar) = &consumed_gate;
-                let _guard = lock.lock().unwrap();
-                condvar.notify_all();
-            }
-            result
-        })
+            drop(receivers);
+        });
+
+        Ok(report)
     }
 
-    /// Bytes one prepared frame occupies, from the reference's shape.
-    fn reference_resident_bytes(&self) -> usize {
-        self.reference.data.len() * std::mem::size_of::<f32>()
+    /// Resolve every path's identity once and mark the repeats, before any of
+    /// them is opened.
+    fn plan_batch(&self, paths: &[PathBuf]) -> Vec<Planned> {
+        let mut seen: HashSet<PathBuf> = self.input_identities();
+        paths
+            .iter()
+            .map(|path| {
+                let identity = path_identity(path);
+                if seen.insert(identity.clone()) {
+                    Planned::Prepare(identity)
+                } else {
+                    Planned::Duplicate
+                }
+            })
+            .collect()
+    }
+
+    /// The fallback taken on a Rayon pool thread, reporting through the same
+    /// callback and refusing the same paths at the same point.
+    fn run_sequentially(
+        &mut self,
+        paths: &[PathBuf],
+        plan: &[Planned],
+        on_frame: &mut impl FnMut(&Path, Result<FrameDisposition>) -> Continue,
+    ) -> PipelineReport {
+        let mut report = PipelineReport::default();
+        let (preparation, mut integration) = self.split_for_pipeline();
+        for (index, path) in paths.iter().enumerate() {
+            let outcome = match &plan[index] {
+                Planned::Duplicate => Err(duplicate_error(path)),
+                Planned::Prepare(identity) => prepare_one(path, &preparation).map(|prepared| {
+                    let disposition = integration.integrate(prepared);
+                    integration.record_input_identity(identity.clone());
+                    disposition
+                }),
+            };
+            report.count(&outcome);
+            if on_frame(path, outcome) == Continue::No {
+                break;
+            }
+        }
+        report
+    }
+}
+
+impl PipelineReport {
+    fn count(&mut self, outcome: &Result<FrameDisposition>) {
+        match outcome {
+            Ok(FrameDisposition::Accepted(_)) => self.integrated += 1,
+            Ok(FrameDisposition::Rejected(_)) => self.rejected += 1,
+            Err(_) => self.failed += 1,
+        }
+    }
+}
+
+fn duplicate_error(path: &Path) -> Error {
+    Error::Stack(format!(
+        "FITS frame {} has already been used by this stack",
+        path.display()
+    ))
+}
+
+/// Prepare this worker's share of the batch, stopping as soon as the consumer
+/// has gone or the run has been cancelled.
+fn prepare_worker(
+    worker: usize,
+    workers: usize,
+    paths: &[PathBuf],
+    plan: &[Planned],
+    preparation: &crate::stack::PreparationHalf<'_>,
+    stop: &AtomicBool,
+    sender: SyncSender<Result<PreparedFrame>>,
+) {
+    let mut index = worker;
+    while index < paths.len() {
+        // Checked before the open, so a cancelled run starts no further read.
+        // It cannot reach into one already begun; see `push_fits_pipelined`.
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        let outcome = match &plan[index] {
+            Planned::Duplicate => Err(duplicate_error(&paths[index])),
+            Planned::Prepare(_) => prepare_one(&paths[index], preparation),
+        };
+        // A closed channel means the consumer has stopped or unwound; there is
+        // nobody left to hand this to.
+        if sender.send(outcome).is_err() {
+            return;
+        }
+        index += workers;
     }
 }
 
@@ -364,6 +494,16 @@ mod tests {
         values.iter().map(|value| value.to_bits()).collect()
     }
 
+    /// Options that force the channel handoff whatever the host's core count.
+    /// A derived count is 1 on a 2-vCPU runner, which would send these tests
+    /// down the sequential fallback and quietly stop testing the concurrency.
+    fn concurrent(workers: usize) -> PipelineOptions {
+        PipelineOptions {
+            workers: Some(workers),
+            ..PipelineOptions::default()
+        }
+    }
+
     fn stacker_from(reference: &Path) -> LiveStacker {
         LiveStacker::new(
             FitsFrame::open(reference).unwrap(),
@@ -389,15 +529,11 @@ mod tests {
 
         let mut pipelined = stacker_from(&paths[0]);
         let mut pipelined_dispositions = Vec::new();
-        pipelined
-            .push_fits_pipelined(
-                &paths[1..],
-                &PipelineOptions::default(),
-                |_, disposition| {
-                    pipelined_dispositions.push(format!("{:?}", disposition.unwrap()));
-                    Continue::Yes
-                },
-            )
+        let _ = pipelined
+            .push_fits_pipelined(&paths[1..], &concurrent(3), |_, disposition| {
+                pipelined_dispositions.push(format!("{:?}", disposition.unwrap()));
+                Continue::Yes
+            })
             .unwrap();
         let actual = pipelined.snapshot().unwrap();
 
@@ -432,11 +568,10 @@ mod tests {
         let expected = sequential.snapshot().unwrap();
 
         let mut pipelined = stacker_from(&paths[0]);
-        let options = PipelineOptions {
-            max_in_flight_bytes: 1,
-            workers: None,
-        };
-        pipelined
+        // One worker, still through the channel: the one configuration where a
+        // capacity-one channel could stall against itself.
+        let options = concurrent(1);
+        let _ = pipelined
             .push_fits_pipelined(&paths[1..], &options, |_, _| Continue::Yes)
             .unwrap();
 
@@ -451,8 +586,8 @@ mod tests {
         let (_directory, paths) = frame_set(6);
         let mut stacker = stacker_from(&paths[0]);
         let mut seen = Vec::new();
-        stacker
-            .push_fits_pipelined(&paths[1..], &PipelineOptions::default(), |path, _| {
+        let _ = stacker
+            .push_fits_pipelined(&paths[1..], &concurrent(3), |path, _| {
                 seen.push(path.to_path_buf());
                 if seen.len() == 2 {
                     Continue::No
@@ -466,24 +601,59 @@ mod tests {
         assert_eq!(stacker.input_paths().len(), 2);
     }
 
+    /// A loop around `push_fits` stacked every other frame and errored only on
+    /// the repeat. Aborting the batch instead would lose a whole night to one
+    /// symlink alias in a directory listing.
     #[test]
-    fn a_repeated_path_is_refused_before_anything_is_opened() {
-        let (_directory, paths) = frame_set(3);
+    fn a_repeated_path_costs_that_path_alone() {
+        let (_directory, paths) = frame_set(4);
         let mut stacker = stacker_from(&paths[0]);
 
-        let repeated = vec![paths[1].clone(), paths[1].clone()];
-        let error = stacker
-            .push_fits_pipelined(&repeated, &PipelineOptions::default(), |_, _| Continue::Yes)
-            .expect_err("a batch repeating a path must be refused");
-        assert!(format!("{error}").contains("twice"), "{error}");
-
-        stacker.push_fits(&paths[1]).unwrap();
-        let error = stacker
-            .push_fits_pipelined(&[paths[1].clone()], &PipelineOptions::default(), |_, _| {
+        let batch = vec![paths[1].clone(), paths[1].clone(), paths[2].clone()];
+        let mut outcomes = Vec::new();
+        let _ = stacker
+            .push_fits_pipelined(&batch, &concurrent(3), |_, outcome| {
+                outcomes.push(outcome.map_err(|error| error.to_string()));
                 Continue::Yes
             })
-            .expect_err("a path already stacked must be refused");
-        assert!(format!("{error}").contains("already been used"), "{error}");
+            .unwrap();
+
+        assert!(outcomes[0].is_ok());
+        assert!(
+            outcomes[1]
+                .as_ref()
+                .unwrap_err()
+                .contains("already been used"),
+            "{outcomes:?}"
+        );
+        assert!(outcomes[2].is_ok(), "the run carries on past the repeat");
+        assert_eq!(stacker.input_paths().len(), 2);
+    }
+
+    /// And a path this stack already took is refused the same way.
+    #[test]
+    fn a_path_already_stacked_is_refused_for_itself() {
+        let (_directory, paths) = frame_set(3);
+        let mut stacker = stacker_from(&paths[0]);
+        stacker.push_fits(&paths[1]).unwrap();
+
+        let mut outcomes = Vec::new();
+        let batch = vec![paths[1].clone(), paths[2].clone()];
+        let _ = stacker
+            .push_fits_pipelined(&batch, &concurrent(3), |_, outcome| {
+                outcomes.push(outcome.map_err(|error| error.to_string()));
+                Continue::Yes
+            })
+            .unwrap();
+
+        assert!(
+            outcomes[0]
+                .as_ref()
+                .unwrap_err()
+                .contains("already been used"),
+            "{outcomes:?}"
+        );
+        assert!(outcomes[1].is_ok());
     }
 
     #[test]
@@ -495,18 +665,19 @@ mod tests {
         let mut stacker = stacker_from(&paths[0]);
         let batch = vec![paths[1].clone(), broken, paths[2].clone()];
         let mut outcomes = Vec::new();
-        stacker
-            .push_fits_pipelined(&batch, &PipelineOptions::default(), |_, disposition| {
+        let report = stacker
+            .push_fits_pipelined(&batch, &concurrent(3), |_, disposition| {
                 outcomes.push(disposition.is_ok());
                 Continue::Yes
             })
             .unwrap();
 
         assert_eq!(outcomes, vec![true, false, true]);
+        assert_eq!(report.failed, 1);
     }
 
     #[test]
-    fn worker_count_falls_out_of_the_budget() {
+    fn a_derived_worker_count_falls_out_of_the_budget() {
         let frame = 100 * 1024 * 1024;
         // Budget for two frames in flight: one worker, since each is costed at
         // the frame it holds plus the one it is building.
@@ -514,17 +685,182 @@ mod tests {
         assert_eq!(options.resolve_workers(frame), 1);
         // Far too small a budget still runs, one frame at a time.
         assert_eq!(PipelineOptions::with_budget(1).resolve_workers(frame), 1);
-        // An explicit count is honoured up to what the budget affords.
+    }
+
+    /// The remote-storage advice is to raise `workers`; clamping that to a
+    /// budget the advice never mentions would make it quietly do nothing.
+    #[test]
+    fn an_explicit_worker_count_is_taken_at_its_word() {
+        let frame = 100 * 1024 * 1024;
         let explicit = PipelineOptions {
-            max_in_flight_bytes: 100 * frame,
-            workers: Some(3),
-        };
-        assert_eq!(explicit.resolve_workers(frame), 3);
-        // And is still clamped by a budget that cannot hold that many.
-        let cramped = PipelineOptions {
             max_in_flight_bytes: 2 * frame,
-            workers: Some(8),
+            workers: Some(11),
         };
-        assert_eq!(cramped.resolve_workers(frame), 1);
+        assert_eq!(explicit.resolve_workers(frame), 11);
+        // Zero would stall the run, so it means one.
+        let zero = PipelineOptions {
+            max_in_flight_bytes: usize::MAX,
+            workers: Some(0),
+        };
+        assert_eq!(zero.resolve_workers(frame), 1);
+    }
+
+    /// A repeat must be refused before the file is touched, so the answer does
+    /// not depend on whether the file is still there — and so the concurrent
+    /// and sequential paths cannot disagree about which error a caller sees.
+    #[test]
+    fn a_repeat_is_refused_without_reading_the_file() {
+        let (_directory, paths) = frame_set(3);
+        let mut stacker = stacker_from(&paths[0]);
+        stacker.push_fits(&paths[1]).unwrap();
+        // The frame is gone now. Opening it would fail with an I/O error; the
+        // duplicate check runs first, so it must not.
+        std::fs::remove_file(&paths[1]).unwrap();
+
+        let mut messages = Vec::new();
+        let report = stacker
+            .push_fits_pipelined(&[paths[1].clone()], &concurrent(3), |_, outcome| {
+                messages.push(outcome.map_err(|error| error.to_string()).unwrap_err());
+                Continue::Yes
+            })
+            .unwrap();
+
+        assert!(
+            messages[0].contains("already been used"),
+            "expected the duplicate error, got {messages:?}"
+        );
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.integrated, 0);
+    }
+
+    /// A run can report an error for every path and still answer `Ok`, so the
+    /// summary is what a caller checking only the return value has to go on.
+    #[test]
+    fn the_report_counts_what_the_run_did() {
+        let (directory, paths) = frame_set(4);
+        let broken = directory.path().join("broken.fits");
+        std::fs::write(&broken, b"not a fits file").unwrap();
+
+        let mut stacker = stacker_from(&paths[0]);
+        let batch = vec![paths[1].clone(), broken, paths[1].clone()];
+        let report = stacker
+            .push_fits_pipelined(&batch, &concurrent(3), |_, _| Continue::Yes)
+            .unwrap();
+
+        assert_eq!(report.integrated, 1);
+        assert_eq!(report.failed, 2, "the unreadable path and the repeat");
+        assert_eq!(report.rejected, 0);
+    }
+
+    /// `scope.spawn` panics rather than failing when the system runs out of
+    /// threads, so a config-driven number must never reach it.
+    #[test]
+    fn an_explicit_worker_count_is_held_to_a_ceiling() {
+        let options = PipelineOptions {
+            max_in_flight_bytes: usize::MAX,
+            workers: Some(100_000),
+        };
+        assert_eq!(options.resolve_workers(1024), MAXIMUM_WORKERS);
+    }
+
+    /// A panic in the caller's callback used to leave workers parked on a
+    /// condvar nobody would notify, so the scope joined forever. It must
+    /// unwind out instead.
+    #[test]
+    fn a_panicking_callback_unwinds_instead_of_hanging() {
+        let (_directory, paths) = frame_set(9);
+        let mut stacker = stacker_from(&paths[0]);
+
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            stacker
+                .push_fits_pipelined(&paths[1..], &concurrent(3), |_, _| panic!("caller blew up"))
+        }));
+        std::panic::set_hook(previous);
+
+        let panic = outcome.expect_err("the caller's panic must reach the caller");
+        let message = panic
+            .downcast_ref::<&str>()
+            .copied()
+            .unwrap_or_else(|| panic.downcast_ref::<String>().map_or("", |s| s.as_str()));
+        assert_eq!(message, "caller blew up");
+    }
+
+    /// Cancelling must not wait on paths that were never started.
+    #[test]
+    fn cancelling_opens_no_further_paths() {
+        let (directory, paths) = frame_set(4);
+        // A path that does not exist would fail if it were ever opened; the
+        // run is cancelled before reaching it, so it must never be reported.
+        let missing = directory.path().join("never-opened.fits");
+        let batch = vec![paths[1].clone(), paths[2].clone(), missing];
+
+        let mut stacker = stacker_from(&paths[0]);
+        let mut seen = Vec::new();
+        let _ = stacker
+            .push_fits_pipelined(&batch, &concurrent(3), |path, _| {
+                seen.push(path.to_path_buf());
+                Continue::No
+            })
+            .unwrap();
+
+        assert_eq!(
+            seen.len(),
+            1,
+            "the callback stops the run at the first frame"
+        );
+        assert_eq!(stacker.input_paths().len(), 1);
+    }
+
+    /// The ordered half of the design only matters when a frame is rejected
+    /// against the accumulator, so the equivalence has to be checked there
+    /// too, not only on a batch where everything is accepted.
+    #[test]
+    fn the_equivalence_holds_when_frames_are_rejected() {
+        let (_directory, paths) = frame_set(7);
+        // Demand that every last sample survive rejection. Once the online
+        // estimator has warmed up some always do not, so frames start being
+        // turned away by the order-dependent gate rather than during
+        // preparation — which is the path this equivalence rests on.
+        let options = StackOptions {
+            acceptance: crate::FrameAcceptanceCriteria {
+                minimum_integrated_fraction: 1.0,
+                ..Default::default()
+            },
+            ..StackOptions::default()
+        };
+        let build = || {
+            LiveStacker::new(
+                FitsFrame::open(&paths[0]).unwrap(),
+                CalibrationMasters::default(),
+                options.clone(),
+            )
+            .unwrap()
+        };
+
+        let mut sequential = build();
+        let mut sequential_dispositions = Vec::new();
+        for path in &paths[1..] {
+            sequential_dispositions.push(format!("{:?}", sequential.push_fits(path).unwrap()));
+        }
+        let expected = sequential.snapshot().unwrap();
+        assert!(expected.rejected_frames > 0, "the gate must actually bite");
+
+        let mut pipelined = build();
+        let mut pipelined_dispositions = Vec::new();
+        let report = pipelined
+            .push_fits_pipelined(&paths[1..], &concurrent(3), |_, outcome| {
+                pipelined_dispositions.push(format!("{:?}", outcome.unwrap()));
+                Continue::Yes
+            })
+            .unwrap();
+        assert_eq!(report.rejected, expected.rejected_frames as usize);
+        let actual = pipelined.snapshot().unwrap();
+
+        assert_eq!(pipelined_dispositions, sequential_dispositions);
+        assert_eq!(actual.rejected_frames, expected.rejected_frames);
+        assert_eq!(actual.accepted_frames, expected.accepted_frames);
+        assert_eq!(bits(&actual.image.data), bits(&expected.image.data));
     }
 }
