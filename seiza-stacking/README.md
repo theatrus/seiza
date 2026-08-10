@@ -153,6 +153,57 @@ shared Rayon worker pool. Applications may set `RAYON_NUM_THREADS` or install
 stacking work in a configured Rayon pool when they need to reserve CPU for
 acquisition and display work.
 
+## Overlapping frames
+
+Pushing frames one at a time leaves the machine half idle: while a frame is
+read and decoded the cores wait, and while it is registered the disk or network
+waits. Only integration depends on the frames before it — everything up to and
+including normalization reads immutable state, so it can run for several frames
+at once.
+
+`push_fits_pipelined` does that, handing results back in the order given:
+
+```rust
+stacker.push_fits_pipelined(&paths, &PipelineOptions::default(), |path, outcome| {
+    record(path, outcome);
+    if cancelled() { Continue::No } else { Continue::Yes }
+})?;
+```
+
+The callback keeps the caller in charge of cancellation, checkpointing, and
+per-frame decisions, which is why this is not a batch call that swallows the
+loop. The accumulator is still fed strictly in submission order, so a
+pipelined run is bit-identical to a sequential one; a test asserts exactly that
+against the same frames.
+
+`PipelineOptions::max_in_flight_bytes` bounds the memory rather than the frame
+count, because a prepared frame is the reference image's size and that differs
+by an order of magnitude between a guide camera and a full-frame sensor. The
+worker count falls out of that budget and the machine's parallelism, or can be
+set outright. A budget too small for even one frame ahead degrades to
+sequential rather than failing.
+
+Each frame is read on the worker that will prepare it, so reads overlap both
+with each other and with the integration of earlier frames. Measured on a
+16-core machine over twelve 12MP frames, against a sequential loop:
+
+| read latency per frame | sequential | pipelined | |
+|---|---|---|---|
+| warm local cache | 2.00s | 1.01s | 2.0x |
+| 50ms | 2.67s | 1.16s | 2.3x |
+| 150ms | 3.85s | 1.44s | 2.7x |
+| 300ms | 5.66s | 1.89s | 3.0x |
+
+The latency rows were produced by delaying each read, so they model network
+storage rather than measuring a real one.
+
+Preparation is already Rayon-parallel internally, so on local storage the gain
+comes from covering each frame's serial gaps and the curve flattens around six
+workers — which is what the derived default targets. Remote frames want more:
+at 300ms, eleven workers finished in 1.58s against 1.89s for the derived six.
+Set `PipelineOptions::workers` when the frames are known to be remote, since
+this crate cannot tell a network mount from a local disk.
+
 Integrated flats are applied in the raw light frame's sampling before CFA
 debayering. Master darks and flats retain their Bayer pattern and origin
 offsets, and a known layout must match the light before calibration. A supplied
