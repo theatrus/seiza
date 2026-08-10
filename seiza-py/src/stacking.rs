@@ -599,16 +599,23 @@ impl PyLiveStacker {
     /// `workers` is the read concurrency as well as the compute concurrency.
     /// Leave it unset for local frames; raise it when the frames are remote,
     /// since this library cannot tell a network mount from a local disk.
-    #[pyo3(signature = (paths, workers=None, max_in_flight_bytes=None))]
+    ///
+    /// `normalized_full_scale` puts a frame the file declares as normalized —
+    /// `bounds="0:1"`, as PixInsight writes — onto that scale as it is read.
+    /// Pass 65535.0 when the other frames are 16-bit camera data, or leave it
+    /// unset to keep every sample exactly as stored.
+    #[pyo3(signature = (paths, workers=None, max_in_flight_bytes=None, normalized_full_scale=None))]
     fn push_fits_pipelined(
         &mut self,
         py: Python<'_>,
         paths: Vec<PathBuf>,
         workers: Option<usize>,
         max_in_flight_bytes: Option<usize>,
+        normalized_full_scale: Option<f32>,
     ) -> PyResult<(Vec<PyFrameDisposition>, PyPipelineReport)> {
         let mut options = PipelineOptions {
             workers,
+            normalized_full_scale,
             ..PipelineOptions::default()
         };
         if let Some(bytes) = max_in_flight_bytes {

@@ -50,6 +50,31 @@ impl FitsFrame {
         Ok(frame)
     }
 
+    /// Put a frame the file declares as normalized onto `full_scale`, and
+    /// report whether it did.
+    ///
+    /// PixInsight writes floating-point images normalized to `bounds="0:1"`,
+    /// so such a frame's samples run 0..1 where a camera frame's run in the
+    /// thousands. Stacking the two together compares values four orders of
+    /// magnitude apart, which wrecks normalization and rejection for the whole
+    /// group.
+    ///
+    /// Only an exact `0:1` is converted, because that is the one spelling
+    /// whose meaning is settled — this toolkit's own writer reports the
+    /// observed sample minimum and maximum, so converting from any other
+    /// declared range would as easily stretch an already-physical frame.
+    /// `bounds` is updated to the new range, so a second call does nothing.
+    pub fn rescale_declared_unit_bounds(&mut self, full_scale: f32) -> bool {
+        if self.bounds != Some((0.0, 1.0)) || !full_scale.is_finite() || full_scale <= 0.0 {
+            return false;
+        }
+        for sample in &mut self.image.data {
+            *sample *= full_scale;
+        }
+        self.bounds = Some((0.0, f64::from(full_scale)));
+        true
+    }
+
     /// Convert an already-decoded [`FitsImage`] into a linear frame,
     /// interleaving color planes and reading exposure and CFA metadata.
     pub fn from_fits(fits: FitsImage, source: Option<PathBuf>) -> Result<Self> {

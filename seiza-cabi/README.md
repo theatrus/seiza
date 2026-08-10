@@ -167,7 +167,9 @@ time but overlaps the reads with the registration:
 ```c
 char *outcome = seiza_live_stacker_push_fits_pipelined_json(
     stacker, "[\"light-001.fits\",\"light-002.fits\"]",
-    0 /* derive workers */, 0 /* default budget */, &error);
+    0 /* derive workers */, 0 /* default budget */,
+    65535.0f /* scale declared-normalized XISF to 16-bit; 0 to leave as stored */,
+    &error);
 ```
 
 Every frame appears in the returned `frames` array in order, a path that could
