@@ -173,15 +173,37 @@ stacker.push_fits_pipelined(&paths, &PipelineOptions::default(), |path, outcome|
 The callback keeps the caller in charge of cancellation, checkpointing, and
 per-frame decisions, which is why this is not a batch call that swallows the
 loop. The accumulator is still fed strictly in submission order, so a
-pipelined run is bit-identical to a sequential one; a test asserts exactly that
-against the same frames.
+pipelined run is bit-identical to a sequential one; tests assert that against
+the same frames both when every frame is accepted and when the order-dependent
+`minimum_integrated_fraction` gate turns frames away.
+
+The callback sees everything a `push_fits` loop would, errors included: a path
+that cannot be opened, or that repeats one already stacked, arrives as `Err`
+for that path alone and the run carries on. One repeated path in a directory
+listing costs that path, not the batch. **The callback is the only report of
+those failures** — the call answers `Ok(())` even for a run that failed every
+path — so a caller porting `push_fits(path)?` must decide there.
+
+`Continue::No` stops the run: no further path is opened, though up to one frame
+per worker may already be in flight and is finished and discarded. Cancelling
+therefore does not wait for the rest of the batch, but does wait for reads
+already started.
+
+Called from inside a Rayon pool thread, including under `pool.install(..)`,
+frames are prepared sequentially on the calling thread instead. Parking a pool
+thread while preparation needs that same pool would deadlock, and a caller who
+installed a pool did so to reserve cores, which spawning outside it would
+quietly undo.
 
 `PipelineOptions::max_in_flight_bytes` bounds the memory rather than the frame
 count, because a prepared frame is the reference image's size and that differs
 by an order of magnitude between a guide camera and a full-frame sensor. The
-worker count falls out of that budget and the machine's parallelism, or can be
-set outright. A budget too small for even one frame ahead degrades to
-sequential rather than failing.
+derived worker count falls out of that budget and the machine's parallelism; a
+budget too small for even one frame ahead degrades to sequential rather than
+failing. An explicit `workers` is taken at its word and is not held to the
+budget, since a caller who names a number has usually measured something this
+crate cannot see — memory then follows the count given, roughly two prepared
+frames per worker.
 
 Each frame is read on the worker that will prepare it, so reads overlap both
 with each other and with the integration of earlier frames. Measured on a
