@@ -931,9 +931,11 @@ impl IntegrationHalf<'_> {
         FrameDisposition::Rejected(reason)
     }
 
-    /// Retain a consumed path in resumable context state.
-    pub(crate) fn record_input_path(&mut self, path: &Path) {
-        self.input_paths.push(path_identity(path));
+    /// Retain a consumed path in resumable context state, given the identity
+    /// the caller has already resolved. Canonicalizing is a filesystem call,
+    /// and this runs on the one serial stage a pipeline waits on.
+    pub(crate) fn record_input_identity(&mut self, identity: PathBuf) {
+        self.input_paths.push(identity);
     }
 }
 
