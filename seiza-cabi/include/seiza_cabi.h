@@ -390,6 +390,36 @@ char *seiza_live_stacker_push_fits_json(SeizaLiveStacker *stacker,
                                         char **error_out);
 
 /*
+ Offer many FITS or XISF paths at once, preparing several frames in
+ parallel. Returns owned JSON that the caller frees with
+ [`seiza_string_free`].
+
+ Reads, calibration, registration and normalization overlap across frames
+ while integration stays in the order given, so the result is identical to
+ offering the same paths one at a time. `paths_json` is a JSON array of
+ strings. `workers` is the read concurrency as well as the compute
+ concurrency; pass 0 to derive it, or raise it when the frames are remote.
+ `max_in_flight_bytes` bounds the memory a derived count may use; pass 0 for
+ the default.
+
+ A path that cannot be read, or that repeats one already stacked, appears in
+ the `frames` array with `accepted` false and a `reason`, and the run carries
+ on. Check `failed` rather than assuming an absent error means every frame
+ landed. There is no cancellation here: a C caller wanting that should offer
+ paths in batches.
+
+ # Safety
+ `stacker` must be a live pointer returned by a `seiza_live_stacker_*`
+ constructor. `paths_json` must be a valid NUL-terminated string. When
+ non-null, `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_live_stacker_push_fits_pipelined_json(SeizaLiveStacker *stacker,
+                                                  const char *paths_json,
+                                                  size_t workers,
+                                                  size_t max_in_flight_bytes,
+                                                  char **error_out);
+
+/*
  # Safety
  `stacker` must be null or a live `SeizaLiveStacker` pointer.
  */
