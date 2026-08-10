@@ -210,7 +210,9 @@ A path that cannot be read, or that repeats one already stacked, comes back in
 place with `accepted` false and a reason rather than raising, so one bad path in
 a night's listing does not lose the rest — check `report.failed` rather than
 reading a clean return as success. Pass `workers=` when the frames arrive over a
-network, since the library cannot tell a network mount from a local disk.
+network, since the library cannot tell a network mount from a local disk, and
+`normalized_full_scale=65535.0` when the set mixes PixInsight XISF frames with
+16-bit camera data.
 
 
 Checkpointing is non-consuming. Reopening preserves the original registration

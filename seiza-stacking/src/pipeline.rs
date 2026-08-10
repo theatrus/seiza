@@ -44,6 +44,19 @@ pub struct PipelineOptions {
     /// measured something this crate cannot see — remote storage, most often.
     /// At least one frame is always prepared, however small the budget.
     pub max_in_flight_bytes: usize,
+    /// Put a frame the file declares as normalized onto this full scale as it
+    /// is read, or `None` to leave every sample exactly as stored.
+    ///
+    /// A PixInsight XISF frame declaring `bounds="0:1"` has samples running
+    /// 0..1 where a camera frame's run in the thousands, so a group mixing the
+    /// two normalizes and rejects against values four orders of magnitude
+    /// apart. Set this to the scale the rest of the frames use — 65535.0 for
+    /// 16-bit camera data — and such a frame arrives comparable. See
+    /// [`FitsFrame::rescale_declared_unit_bounds`], which this applies.
+    ///
+    /// Left off by default, because it changes sample values and only a
+    /// caller knows what scale its other frames are on.
+    pub normalized_full_scale: Option<f32>,
     /// Threads preparing frames, or `None` to derive one from the budget and
     /// the machine's parallelism.
     ///
@@ -86,6 +99,7 @@ impl Default for PipelineOptions {
     fn default() -> Self {
         Self {
             max_in_flight_bytes: DEFAULT_IN_FLIGHT_BYTES,
+            normalized_full_scale: None,
             workers: None,
         }
     }
@@ -96,6 +110,7 @@ impl PipelineOptions {
     pub fn with_budget(max_in_flight_bytes: usize) -> Self {
         Self {
             max_in_flight_bytes,
+            normalized_full_scale: None,
             workers: None,
         }
     }
@@ -221,7 +236,12 @@ impl LiveStacker {
         // Preparation submits Rayon work; blocking a pool thread while waiting
         // for it can starve the pool of the threads that would do it.
         if rayon::current_thread_index().is_some() {
-            return Ok(self.run_sequentially(paths, &plan, &mut on_frame));
+            return Ok(self.run_sequentially(
+                paths,
+                &plan,
+                options.normalized_full_scale,
+                &mut on_frame,
+            ));
         }
 
         let stop = AtomicBool::new(false);
@@ -248,7 +268,18 @@ impl LiveStacker {
                 let stop = &stop;
                 let plan = &plan;
                 scope.spawn(move || {
-                    prepare_worker(worker, workers, paths, plan, preparation, stop, sender)
+                    prepare_worker(
+                        WorkerShare {
+                            worker,
+                            workers,
+                            paths,
+                            plan,
+                            preparation,
+                            normalized_full_scale: options.normalized_full_scale,
+                            stop,
+                        },
+                        sender,
+                    )
                 });
             }
 
@@ -316,6 +347,7 @@ impl LiveStacker {
         &mut self,
         paths: &[PathBuf],
         plan: &[Planned],
+        normalized_full_scale: Option<f32>,
         on_frame: &mut impl FnMut(&Path, Result<FrameDisposition>) -> Continue,
     ) -> PipelineReport {
         let mut report = PipelineReport::default();
@@ -323,11 +355,13 @@ impl LiveStacker {
         for (index, path) in paths.iter().enumerate() {
             let outcome = match &plan[index] {
                 Planned::Duplicate => Err(duplicate_error(path)),
-                Planned::Prepare(identity) => prepare_one(path, &preparation).map(|prepared| {
-                    let disposition = integration.integrate(prepared);
-                    integration.record_input_identity(identity.clone());
-                    disposition
-                }),
+                Planned::Prepare(identity) => {
+                    prepare_one(path, &preparation, normalized_full_scale).map(|prepared| {
+                        let disposition = integration.integrate(prepared);
+                        integration.record_input_identity(identity.clone());
+                        disposition
+                    })
+                }
             };
             report.count(&outcome);
             if on_frame(path, outcome) == Continue::No {
@@ -357,15 +391,28 @@ fn duplicate_error(path: &Path) -> Error {
 
 /// Prepare this worker's share of the batch, stopping as soon as the consumer
 /// has gone or the run has been cancelled.
-fn prepare_worker(
+/// One worker's share of a batch: which indices it owns and everything it
+/// needs to prepare them.
+struct WorkerShare<'a> {
     worker: usize,
     workers: usize,
-    paths: &[PathBuf],
-    plan: &[Planned],
-    preparation: &crate::stack::PreparationHalf<'_>,
-    stop: &AtomicBool,
-    sender: SyncSender<Result<PreparedFrame>>,
-) {
+    paths: &'a [PathBuf],
+    plan: &'a [Planned],
+    preparation: &'a crate::stack::PreparationHalf<'a>,
+    normalized_full_scale: Option<f32>,
+    stop: &'a AtomicBool,
+}
+
+fn prepare_worker(share: WorkerShare<'_>, sender: SyncSender<Result<PreparedFrame>>) {
+    let WorkerShare {
+        worker,
+        workers,
+        paths,
+        plan,
+        preparation,
+        normalized_full_scale,
+        stop,
+    } = share;
     let mut index = worker;
     while index < paths.len() {
         // Checked before the open, so a cancelled run starts no further read.
@@ -375,7 +422,7 @@ fn prepare_worker(
         }
         let outcome = match &plan[index] {
             Planned::Duplicate => Err(duplicate_error(&paths[index])),
-            Planned::Prepare(_) => prepare_one(&paths[index], preparation),
+            Planned::Prepare(_) => prepare_one(&paths[index], preparation, normalized_full_scale),
         };
         // A closed channel means the consumer has stopped or unwound; there is
         // nobody left to hand this to.
@@ -387,8 +434,15 @@ fn prepare_worker(
 }
 
 /// Open, calibrate, register and normalize one path.
-fn prepare_one(path: &Path, half: &crate::stack::PreparationHalf<'_>) -> Result<PreparedFrame> {
+fn prepare_one(
+    path: &Path,
+    half: &crate::stack::PreparationHalf<'_>,
+    normalized_full_scale: Option<f32>,
+) -> Result<PreparedFrame> {
     let mut frame = FitsFrame::open(path)?;
+    if let Some(full_scale) = normalized_full_scale {
+        frame.rescale_declared_unit_bounds(full_scale);
+    }
     if let Err(error) =
         half.calibration
             .apply(&mut frame.image, frame.exposure_seconds, frame.bayer)
@@ -695,12 +749,14 @@ mod tests {
         let explicit = PipelineOptions {
             max_in_flight_bytes: 2 * frame,
             workers: Some(11),
+            ..PipelineOptions::default()
         };
         assert_eq!(explicit.resolve_workers(frame), 11);
         // Zero would stall the run, so it means one.
         let zero = PipelineOptions {
             max_in_flight_bytes: usize::MAX,
             workers: Some(0),
+            ..PipelineOptions::default()
         };
         assert_eq!(zero.resolve_workers(frame), 1);
     }
@@ -759,8 +815,43 @@ mod tests {
         let options = PipelineOptions {
             max_in_flight_bytes: usize::MAX,
             workers: Some(100_000),
+            ..PipelineOptions::default()
         };
         assert_eq!(options.resolve_workers(1024), MAXIMUM_WORKERS);
+    }
+
+    /// A normalized XISF frame must arrive on the same scale as the camera
+    /// frames beside it, or the group normalizes against values four orders of
+    /// magnitude apart.
+    #[test]
+    fn a_declared_unit_frame_is_scaled_as_it_is_read() {
+        let directory = tempfile::tempdir().unwrap();
+        // Samples spanning 0..1, so the writer declares bounds="0:1".
+        let pixels: Vec<f32> = (0..12).map(|index| index as f32 / 11.0).collect();
+        let path = directory.path().join("normalized.xisf");
+        seiza_xisf::write_f32_image(&path, 4, 3, seiza_fits::F32ImageData::Mono(&pixels), &[])
+            .unwrap();
+
+        let plain = FitsFrame::open(&path).unwrap();
+        assert_eq!(plain.bounds, Some((0.0, 1.0)));
+        assert_eq!(plain.image.data.last().copied(), Some(1.0));
+
+        let mut scaled = FitsFrame::open(&path).unwrap();
+        assert!(scaled.rescale_declared_unit_bounds(65535.0));
+        assert_eq!(scaled.image.data.last().copied(), Some(65535.0));
+        assert_eq!(scaled.bounds, Some((0.0, 65535.0)));
+        // Already on the new scale, so a second call changes nothing.
+        assert!(!scaled.rescale_declared_unit_bounds(65535.0));
+
+        // And a range that is not an exact 0:1 is left alone, because this
+        // toolkit's own writer reports the observed minimum and maximum.
+        let physical: Vec<f32> = (0..12).map(|index| 100.0 + index as f32 * 50.0).collect();
+        let path = directory.path().join("physical.xisf");
+        seiza_xisf::write_f32_image(&path, 4, 3, seiza_fits::F32ImageData::Mono(&physical), &[])
+            .unwrap();
+        let mut frame = FitsFrame::open(&path).unwrap();
+        assert!(!frame.rescale_declared_unit_bounds(65535.0));
+        assert_eq!(frame.image.data, physical);
     }
 
     /// A panic in the caller's callback used to leave workers parked on a

@@ -200,6 +200,18 @@ thread while preparation needs that same pool would deadlock, and a caller who
 installed a pool did so to reserve cores, which spawning outside it would
 quietly undo.
 
+PixInsight writes floating-point images normalized to `bounds="0:1"`, so such a
+frame's samples run 0..1 where a camera frame's run in the thousands and a group
+mixing the two normalizes against values four orders of magnitude apart. Set
+`PipelineOptions::normalized_full_scale` to the scale the rest of the frames use
+— 65535.0 for 16-bit camera data — and such a frame arrives comparable;
+`FitsFrame::rescale_declared_unit_bounds` does the same for a frame opened by
+hand. Only an exact `0:1` is converted, because that is the one spelling whose
+meaning is settled: this crate's own writer reports the observed sample minimum
+and maximum, so converting from any other declared range would as easily stretch
+an already-physical frame. It is off by default, since only a caller knows what
+scale its other frames are on.
+
 `PipelineOptions::max_in_flight_bytes` bounds the memory rather than the frame
 count, because a prepared frame is the reference image's size and that differs
 by an order of magnitude between a guide camera and a full-frame sensor. The

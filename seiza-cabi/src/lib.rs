@@ -1287,7 +1287,10 @@ pub unsafe extern "C" fn seiza_live_stacker_push_fits_json(
 /// strings. `workers` is the read concurrency as well as the compute
 /// concurrency; pass 0 to derive it, or raise it when the frames are remote.
 /// `max_in_flight_bytes` bounds the memory a derived count may use; pass 0 for
-/// the default.
+/// the default. `normalized_full_scale` puts a frame the file declares as
+/// normalized (`bounds="0:1"`, as PixInsight writes) onto that scale as it is
+/// read — pass 65535.0 when the other frames are 16-bit camera data, or 0 to
+/// leave every sample exactly as stored.
 ///
 /// A path that cannot be read, or that repeats one already stacked, appears in
 /// the `frames` array with `accepted` false and a `reason`, and the run carries
@@ -1304,6 +1307,7 @@ pub unsafe extern "C" fn seiza_live_stacker_push_fits_pipelined_json(
     paths_json: *const c_char,
     workers: usize,
     max_in_flight_bytes: usize,
+    normalized_full_scale: f32,
     error_out: *mut *mut c_char,
 ) -> *mut c_char {
     clear_error(error_out);
@@ -1322,6 +1326,9 @@ pub unsafe extern "C" fn seiza_live_stacker_push_fits_pipelined_json(
         };
         if max_in_flight_bytes > 0 {
             options.max_in_flight_bytes = max_in_flight_bytes;
+        }
+        if normalized_full_scale > 0.0 {
+            options.normalized_full_scale = Some(normalized_full_scale);
         }
 
         let mut frames = Vec::with_capacity(paths.len());
