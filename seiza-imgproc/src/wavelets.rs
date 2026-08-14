@@ -352,7 +352,7 @@ mod tests {
         let taps = [0.0625f64, 0.25, 0.375, 0.25, 0.0625];
         let mut smoothed = data.to_vec();
         for layer in 0..layers {
-            let scale = (1isize << layer) as isize;
+            let scale = 1isize << layer;
             let mut horizontal = vec![0.0; width * height];
             for y in 0..height {
                 for x in 0..width {
