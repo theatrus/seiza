@@ -893,6 +893,7 @@ mod tests {
             accepted_samples: 47,
             rejected_samples: 1,
             fallback_pixels: 0,
+            defect_pixels_replaced: 0,
             input_statistics: Vec::new(),
             bias_subtracted: true,
             dark_subtracted: false,

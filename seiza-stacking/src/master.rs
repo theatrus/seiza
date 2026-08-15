@@ -71,6 +71,13 @@ pub struct MasterBuildOptions {
     /// build checks this between input frames and returns
     /// [`Error::Cancelled`] without writing anything.
     pub cancel: Option<CancelSignal>,
+    /// Replace impulse pixels in the integrated master with their
+    /// same-plane neighborhood median. A defective sensor pixel repeats in
+    /// every input, so the across-frame clipping keeps it; only a spatial
+    /// pass can take it out. Meant for flat masters, whose true response is
+    /// smooth at pixel scale — a dark master must keep its hot pixels, they
+    /// are what subtracts the light's.
+    pub defect_suppression: Option<crate::cosmetic::ImpulseFilterOptions>,
 }
 
 /// Per-input tally of samples kept and clipped during integration.
@@ -102,6 +109,9 @@ pub struct MasterFrame {
     /// Pixels where rejection removed every sample, integrated as the
     /// unclipped mean instead so the master stays finite.
     pub fallback_pixels: u64,
+    /// Impulse pixels replaced by [`MasterBuildOptions::defect_suppression`].
+    /// Zero when suppression was off.
+    pub defect_pixels_replaced: u64,
     /// Per-input accepted and rejected counts.
     pub input_statistics: Vec<MasterInputStatistics>,
     /// True once the bias pedestal has been removed.
@@ -238,12 +248,18 @@ pub fn build_master_from_fits(
         }
     }
     let signature = reference_signature.expect("at least two paths were validated");
-    let image = LinearImage::new(
+    let mut image = LinearImage::new(
         signature.width,
         signature.height,
         signature.channels,
         integrated,
     )?;
+    let defect_pixels_replaced = match &options.defect_suppression {
+        Some(filter) => {
+            crate::cosmetic::suppress_impulses(&mut image, reference_bayer, filter)? as u64
+        }
+        None => 0,
+    };
     let dark_subtracted = kind == MasterFrameKind::Flat && options.dark.is_some();
     let bias_subtracted = match kind {
         MasterFrameKind::Bias => false,
@@ -267,6 +283,7 @@ pub fn build_master_from_fits(
         input_frames: paths.len(),
         accepted_samples,
         fallback_pixels,
+        defect_pixels_replaced,
         rejected_samples,
         input_statistics,
         bias_subtracted,
@@ -582,11 +599,16 @@ mod tests {
     use crate::{StackSnapshot, write_fits_f32};
 
     fn write_image(path: &std::path::Path, values: &[f32]) {
-        let image = LinearImage::new(2, 2, 1, values.to_vec()).unwrap();
+        write_sized_image(path, 2, 2, values);
+    }
+
+    fn write_sized_image(path: &std::path::Path, width: usize, height: usize, values: &[f32]) {
+        let image = LinearImage::new(width, height, 1, values.to_vec()).unwrap();
+        let samples = width * height;
         let snapshot = StackSnapshot {
-            variance: LinearImage::new(2, 2, 1, vec![0.0; 4]).unwrap(),
-            coverage: vec![1; 4],
-            rejected_samples: vec![0; 4],
+            variance: LinearImage::new(width, height, 1, vec![0.0; samples]).unwrap(),
+            coverage: vec![1; samples],
+            rejected_samples: vec![0; samples],
             image,
             accepted_frames: 1,
             rejected_frames: 0,
@@ -707,6 +729,57 @@ mod tests {
 
         let master = build_master_from_fits(&paths, MasterFrameKind::Bias, &options).unwrap();
         assert_eq!(master.image.data, [10.0, 20.0, 30.0, 40.0]);
+    }
+
+    #[test]
+    fn defect_suppression_removes_a_hot_pixel_every_flat_shares() {
+        // A defective sensor pixel repeats identically in every flat, so
+        // the across-frame clipping keeps it by construction. Only the
+        // spatial pass can take it out of the integrated response.
+        let directory = tempfile::tempdir().unwrap();
+        let (width, height) = (16usize, 16usize);
+        let hot = 7 * width + 9;
+        let paths = (0..2)
+            .map(|index| directory.path().join(format!("flat-{index}.fits")))
+            .collect::<Vec<_>>();
+        for path in &paths {
+            let values: Vec<f32> = (0..width * height)
+                .map(|index| {
+                    let jitter = ((index * 2_654_435_761) % 31) as f32 / 31.0;
+                    if index == hot {
+                        5_000.0
+                    } else {
+                        200.0 + jitter
+                    }
+                })
+                .collect();
+            write_sized_image(path, width, height, &values);
+        }
+
+        let unsuppressed = build_master_from_fits(
+            &paths,
+            MasterFrameKind::Flat,
+            &MasterBuildOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            unsuppressed.image.data[hot] > 20.0,
+            "without suppression the hot pixel dominates the response: {}",
+            unsuppressed.image.data[hot]
+        );
+        assert_eq!(unsuppressed.defect_pixels_replaced, 0);
+
+        let options = MasterBuildOptions {
+            defect_suppression: Some(crate::cosmetic::ImpulseFilterOptions::default()),
+            ..MasterBuildOptions::default()
+        };
+        let master = build_master_from_fits(&paths, MasterFrameKind::Flat, &options).unwrap();
+        assert!(master.defect_pixels_replaced >= 1);
+        assert!(
+            (master.image.data[hot] - 1.0).abs() < 0.1,
+            "the hot pixel must land on the smooth response: {}",
+            master.image.data[hot]
+        );
     }
 
     #[test]

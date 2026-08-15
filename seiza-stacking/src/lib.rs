@@ -5,6 +5,7 @@ mod calibration;
 mod cancel;
 mod color;
 mod context;
+mod cosmetic;
 mod crop;
 mod fits;
 mod image;
@@ -25,6 +26,7 @@ pub use color::{
     NarrowbandMatrix, NarrowbandMix, NarrowbandPalette, combine_lrgb, combine_narrowband,
     combine_narrowband_matrix, combine_rgb, combine_super_lrgb, combine_super_rgb,
 };
+pub use cosmetic::{ImpulseFilterOptions, suppress_impulses};
 pub use crop::{
     ChannelCoverage, ChannelSamples, ColorCrop, CropReport, covered_region, crop_report,
 };

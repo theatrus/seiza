@@ -62,6 +62,11 @@ pub struct StackOptions {
     pub rejection: RejectionMode,
     /// Whole-frame admission gates.
     pub acceptance: FrameAcceptanceCriteria,
+    /// Replace impulse pixels in each frame after calibration and before
+    /// debayering. The defense for lights whose calibration has no dark
+    /// master to subtract their hot pixels; `None` (the default) leaves
+    /// frames untouched.
+    pub cosmetic: Option<crate::cosmetic::ImpulseFilterOptions>,
 }
 
 impl StackOptions {
@@ -83,6 +88,16 @@ impl StackOptions {
                 || rejection.minimum_sigma <= 0.0)
         {
             return Err(Error::Stack("invalid delta-sigma options".into()));
+        }
+        if let Some(cosmetic) = &self.cosmetic
+            && (!cosmetic.low_sigma.is_finite()
+                || cosmetic.low_sigma <= 0.0
+                || !cosmetic.high_sigma.is_finite()
+                || cosmetic.high_sigma <= 0.0)
+        {
+            return Err(Error::Stack(
+                "cosmetic filter sigmas must be positive finite numbers".into(),
+            ));
         }
         let acceptance = self.acceptance;
         if !acceptance.maximum_registration_rms_pixels.is_finite()
@@ -304,9 +319,10 @@ pub(crate) enum FrameInputMode {
 /// Incremental, bounded-memory image stack. Frames are registered to the
 /// immutable first accepted frame and integrated immediately.
 pub struct LiveStacker {
-    // Immutable for the life of a stack, so `pipeline` may share these across
-    // preparation threads while this thread holds `&mut self` for the
-    // accumulator.
+    // Constant for the duration of one pipelined batch, so `pipeline` may
+    // share these across preparation threads while this thread holds
+    // `&mut self` for the accumulator. `set_calibration` swaps the masters
+    // between batches; the borrow checker keeps a swap out of a live batch.
     pub(crate) options: StackOptions,
     pub(crate) calibration: CalibrationMasters,
     pub(crate) reference: LinearImage,
@@ -332,6 +348,9 @@ impl LiveStacker {
             reference.exposure_seconds,
             reference.bayer,
         )?;
+        if let Some(filter) = &options.cosmetic {
+            crate::cosmetic::suppress_impulses(&mut reference.image, reference.bayer, filter)?;
+        }
         let reference = reference.into_prepared()?;
         Self::from_prepared(
             reference.image,
@@ -503,6 +522,30 @@ impl LiveStacker {
         )
     }
 
+    /// Replace the calibration masters applied to every frame pushed from
+    /// now on.
+    ///
+    /// This is how a stack spanning several capture sessions calibrates each
+    /// session with its own masters: push one session's frames as a batch,
+    /// swap, push the next. Nothing already integrated is touched — the
+    /// reference frame keeps the masters it was calibrated with at
+    /// [`LiveStacker::new`], and a saved context records only the masters
+    /// current at [`LiveStacker::save_context`] time, so a caller resuming a
+    /// multi-session stack must call this again before pushing the next
+    /// session's frames.
+    ///
+    /// The masters are validated against the registration reference
+    /// eagerly, so a mismatched set fails here once instead of rejecting a
+    /// whole session frame by frame. A stack started from prepared pixels
+    /// refuses the call: its frames bypass calibration entirely.
+    pub fn set_calibration(&mut self, calibration: CalibrationMasters) -> Result<()> {
+        self.require_fits_input_mode()?;
+        crate::context::validate_calibration(&self.reference, &calibration)
+            .map_err(Error::Calibration)?;
+        self.calibration = calibration;
+        Ok(())
+    }
+
     /// Calibrate, prepare, and try to integrate a FITS frame, reporting whether
     /// it was admitted or turned away. Stacks created from prepared pixels
     /// reject this path so later inputs cannot skip the caller's preparation.
@@ -517,6 +560,12 @@ impl LiveStacker {
                 other => other.to_string(),
             };
             return Ok(self.reject(FrameRejectionReason::Calibration(message)));
+        }
+        if let Some(filter) = &self.options.cosmetic
+            && let Err(error) =
+                crate::cosmetic::suppress_impulses(&mut frame.image, frame.bayer, filter)
+        {
+            return Ok(self.reject(FrameRejectionReason::Calibration(error.to_string())));
         }
         let frame = match frame.into_prepared() {
             Ok(frame) => frame,
@@ -1325,6 +1374,43 @@ mod tests {
             LiveStacker::open_context(&path),
             Err(Error::StackContextRead { .. })
         ));
+    }
+
+    #[test]
+    fn cosmetic_correction_cleans_a_hot_pixel_from_reference_and_pushed_frames() {
+        // Same field twice, both with the same defective pixel — exactly a
+        // sensor defect with no dark master to subtract it. Both the
+        // reference path (`new`) and the push path must clean it, and the
+        // stars must survive the filter untouched enough to register.
+        let hot = 90 * 160 + 60;
+        let frame = |exposure| {
+            let mut image = stacking_star_field(160, 128);
+            image.data[hot] = 60_000.0;
+            FitsFrame {
+                image,
+                headers: Vec::new(),
+                exposure_seconds: Some(exposure),
+                bayer: None,
+                source: None,
+                bounds: None,
+            }
+        };
+        let options = StackOptions {
+            cosmetic: Some(crate::cosmetic::ImpulseFilterOptions::default()),
+            ..StackOptions::default()
+        };
+        let mut stacker =
+            LiveStacker::new(frame(60.0), CalibrationMasters::default(), options).unwrap();
+        assert!(matches!(
+            stacker.push(frame(60.0)).unwrap(),
+            FrameDisposition::Accepted(_)
+        ));
+        let snapshot = stacker.snapshot().unwrap();
+        assert!(
+            snapshot.image.data[hot] < 200.0,
+            "the defect must be gone from the integration: {}",
+            snapshot.image.data[hot]
+        );
     }
 
     #[test]

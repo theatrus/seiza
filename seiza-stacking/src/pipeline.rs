@@ -6,9 +6,10 @@
 //! cores sit idle; while it is being registered, the disk or network sits
 //! idle.
 //!
-//! Preparation reads only immutable stack state — the reference image, the
-//! registrar's star catalogue, the calibration masters, and the options — so
-//! it is a pure function of the frame. Only accumulation depends on the frames
+//! Preparation reads only stack state held constant for the batch — the
+//! reference image, the registrar's star catalogue, the calibration masters
+//! (swappable between batches via `LiveStacker::set_calibration`), and the
+//! options — so it is a pure function of the frame. Only accumulation depends on the frames
 //! before it. This module runs preparation for several frames at once and
 //! hands the results back in submission order, so the accumulator sees exactly
 //! the sequence it would have seen sequentially and the result is unchanged.
@@ -455,6 +456,14 @@ fn prepare_one(
             crate::FrameRejectionReason::Calibration(message),
         ));
     }
+    if let Some(filter) = &half.options.cosmetic
+        && let Err(error) =
+            crate::cosmetic::suppress_impulses(&mut frame.image, frame.bayer, filter)
+    {
+        return Ok(PreparedFrame::Rejected(
+            crate::FrameRejectionReason::Calibration(error.to_string()),
+        ));
+    }
     let frame = match frame.into_prepared() {
         Ok(frame) => frame,
         Err(error) => {
@@ -565,6 +574,88 @@ mod tests {
             StackOptions::default(),
         )
         .unwrap()
+    }
+
+    fn constant_bias(value: f32) -> CalibrationMasters {
+        CalibrationMasters::new(
+            Some(crate::LinearImage::new(192, 160, 1, vec![value; 192 * 160]).unwrap()),
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    /// A multi-session stack pushes each session as a batch with its own
+    /// masters. The pipelined batches must land bit-identically to the same
+    /// sequence of sequential pushes and swaps.
+    #[test]
+    fn a_two_batch_calibration_swap_is_bit_identical_to_a_sequential_one() {
+        let (_directory, paths) = frame_set(7);
+
+        let mut sequential = stacker_from(&paths[0]);
+        sequential.set_calibration(constant_bias(100.0)).unwrap();
+        for path in &paths[1..4] {
+            sequential.push_fits(path).unwrap();
+        }
+        sequential.set_calibration(constant_bias(300.0)).unwrap();
+        for path in &paths[4..] {
+            sequential.push_fits(path).unwrap();
+        }
+        let expected = sequential.snapshot().unwrap();
+
+        let mut pipelined = stacker_from(&paths[0]);
+        pipelined.set_calibration(constant_bias(100.0)).unwrap();
+        let _ = pipelined
+            .push_fits_pipelined(&paths[1..4], &concurrent(3), |_, disposition| {
+                disposition.unwrap();
+                Continue::Yes
+            })
+            .unwrap();
+        pipelined.set_calibration(constant_bias(300.0)).unwrap();
+        let _ = pipelined
+            .push_fits_pipelined(&paths[4..], &concurrent(3), |_, disposition| {
+                disposition.unwrap();
+                Continue::Yes
+            })
+            .unwrap();
+        let actual = pipelined.snapshot().unwrap();
+
+        assert_eq!(actual.accepted_frames, expected.accepted_frames);
+        assert_eq!(
+            bits(&actual.image.data),
+            bits(&expected.image.data),
+            "batched session swaps must match sequential swaps bit for bit"
+        );
+        assert_eq!(pipelined.input_paths(), sequential.input_paths());
+    }
+
+    /// A mismatched master set must fail at the swap, not as a rejection of
+    /// every frame in the following session.
+    #[test]
+    fn set_calibration_rejects_mismatched_masters_eagerly() {
+        let (_directory, paths) = frame_set(1);
+        let mut stacker = stacker_from(&paths[0]);
+        let wrong_size = CalibrationMasters::new(
+            Some(crate::LinearImage::new(8, 8, 1, vec![1.0; 64]).unwrap()),
+            None,
+            None,
+        )
+        .unwrap();
+        let error = stacker.set_calibration(wrong_size).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("dimensions do not match the registration reference"),
+            "{error}"
+        );
+
+        let reference = FitsFrame::open(&paths[0]).unwrap().into_prepared().unwrap();
+        let mut prepared =
+            LiveStacker::from_prepared_frame(reference, StackOptions::default()).unwrap();
+        assert!(
+            prepared.set_calibration(constant_bias(100.0)).is_err(),
+            "a prepared-pixels stack bypasses calibration and must refuse a swap"
+        );
     }
 
     /// The whole point: overlapping preparation must not move a single bit of
