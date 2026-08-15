@@ -195,6 +195,7 @@ fn build(
         bias,
         dark,
         cancel: None,
+        defect_suppression: None,
     };
     if kind == MasterFrameKind::Flat && options.bias.is_none() && options.dark.is_none() {
         eprintln!(

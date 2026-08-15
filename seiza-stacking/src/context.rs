@@ -622,7 +622,7 @@ fn validate_live_arrays(
     Ok(())
 }
 
-fn validate_calibration(
+pub(crate) fn validate_calibration(
     reference: &LinearImage,
     calibration: &CalibrationMasters,
 ) -> std::result::Result<(), String> {
@@ -638,24 +638,24 @@ fn validate_calibration(
     {
         if image.width != reference.width || image.height != reference.height {
             return Err(format!(
-                "context {name} dimensions do not match the registration reference"
+                "{name} dimensions do not match the registration reference"
             ));
         }
         if !matches!((reference.channels, image.channels), (1, 1) | (3, 1 | 3)) {
             return Err(format!(
-                "context {name} channels are incompatible with the registration reference"
+                "{name} channels are incompatible with the registration reference"
             ));
         }
         let dimensions = (image.width, image.height, image.channels);
         if calibration_dimensions.is_some_and(|expected| expected != dimensions) {
-            return Err("context calibration buffers have inconsistent dimensions".into());
+            return Err("calibration buffers have inconsistent dimensions".into());
         }
         calibration_dimensions = Some(dimensions);
     }
     if let (Some(dark), Some(flat)) = (calibration.dark_bayer, calibration.flat_bayer)
         && dark != flat
     {
-        return Err("context master dark and flat have different Bayer layouts".into());
+        return Err("master dark and flat have different Bayer layouts".into());
     }
     for (name, layout, image) in [
         (
@@ -671,7 +671,7 @@ fn validate_calibration(
     ] {
         if layout.is_some() && image.is_none_or(|image| image.channels != 1) {
             return Err(format!(
-                "context {name} Bayer metadata requires a one-channel buffer"
+                "{name} Bayer metadata requires a one-channel buffer"
             ));
         }
     }
