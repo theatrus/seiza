@@ -682,8 +682,11 @@ its plate solver with no plugin:
    ```
 
 3. In N.I.N.A.: **Options → Plate Solving → Plate Solver: ASTAP**, and
-   point the ASTAP path at `seiza.exe`. It works in the blind-solver
-   slot too.
+   point the ASTAP path at the `astap.exe` the installer puts next to
+   `seiza.exe` (`C:\Program Files\Seiza CLI\astap.exe` for an all-users
+   install; the portable ZIP carries the same pair). N.I.N.A. asks for a
+   file of that name, and both names run the same solver. It works in the
+   blind-solver slot too.
 
 seiza auto-detects ASTAP-style invocations (`-f image.fits -fov … -ra …
 -spd …`), solves hinted or blind accordingly, and writes the `.ini`
@@ -691,8 +694,8 @@ result file N.I.N.A. reads — including the full CD matrix, so pixel
 scale, rotation, and flip all come through. Catalog discovery selects the
 right star catalog and blind index from the configured directory; advanced
 single-file overrides remain available through `SEIZA_STAR_DATA` and
-`SEIZA_BLIND_INDEX`. A copy of the binary renamed `astap.exe` behaves
-identically. Details:
+`SEIZA_BLIND_INDEX`. Any copy of the binary named `astap.exe` behaves
+identically, whether or not the command line carries an ASTAP flag. Details:
 [docs/design/astap-mode.md](docs/design/astap-mode.md).
 
 ## Use with Siril (solve-field compatible mode)

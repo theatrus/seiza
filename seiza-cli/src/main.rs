@@ -1003,12 +1003,12 @@ fn with_data_flag_hint<T>(result: Result<T, data_paths::DataPathError>) -> Resul
 }
 
 fn main() -> Result<()> {
-    // A raw ASTAP-style command line (or a copy of the binary named
-    // astap) routes to the ASTAP-compatible mode before clap sees it
+    // Compatibility modes come first, before clap sees the command line.
+    // A copy of the binary named solve-field or bin/bash (or a
+    // solve-field-shaped command line) routes to the astrometry.net mode
+    // Siril drives; a copy named astap, or an ASTAP-style command line,
+    // routes to the ASTAP mode N.I.N.A. drives.
     let raw: Vec<String> = std::env::args().skip(1).collect();
-    // A copy of the binary named solve-field (or a solve-field-shaped
-    // command line) routes to the astrometry.net-compatible mode used by
-    // Siril; ASTAP-style invocations route to the ASTAP-compatible mode.
     let program = std::env::args().next().unwrap_or_default();
     if solve_field::invoked_as_bash(&program) {
         return solve_field::run_as_bash(&raw);
@@ -1016,7 +1016,7 @@ fn main() -> Result<()> {
     if solve_field::invoked_as_solve_field(&program) || solve_field::looks_like_solve_field(&raw) {
         return solve_field::run(&raw);
     }
-    if astap::looks_like_astap(&raw) {
+    if astap::invoked_as_astap(&program) || astap::looks_like_astap(&raw) {
         return astap::run(&raw);
     }
 

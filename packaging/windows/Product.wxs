@@ -16,7 +16,19 @@
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="APPLICATIONFOLDER" Name="Seiza CLI">
         <Component Id="SeizaProgramFiles" Guid="7261E2CA-D4A8-459F-B1A3-23E58C10E3F5">
-          <File Id="SeizaExe" Source="$(var.SeizaBinary)" />
+          <File Id="SeizaExe" Source="$(var.SeizaBinary)">
+            <!-- N.I.N.A. wants an ASTAP path pointing at a file called
+                 astap.exe, so install a second copy under that name.
+                 CopyFile duplicates the installed file rather than adding
+                 a second payload: the MSI stays one binary in size, the
+                 copy is byte-identical (so it keeps the Authenticode
+                 signature and the FileVersion resource N.I.N.A. reads),
+                 and uninstall removes it with the original. -->
+            <CopyFile
+                Id="AstapCompatibilityExe"
+                DestinationDirectory="APPLICATIONFOLDER"
+                DestinationName="astap.exe" />
+          </File>
           <File Id="SeizaReadme" Source="$(var.RepoRoot)README.md" />
           <File Id="SeizaLicense" Source="$(var.RepoRoot)LICENSE" />
           <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />

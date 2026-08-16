@@ -3,6 +3,19 @@ use seiza_stacking::FitsFrame;
 use std::fmt::Arguments;
 use std::path::Path;
 
+/// Compare the final path component of `program` (without `.exe`) with
+/// `expected`, case-insensitively, accepting both separator styles
+/// regardless of host platform. Compatibility modes use this to answer to
+/// a copy of the binary installed under the name the host tool expects.
+pub(crate) fn binary_name_matches(program: &str, expected: &str) -> bool {
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let stem = name
+        .strip_suffix(".exe")
+        .or_else(|| name.strip_suffix(".EXE"))
+        .unwrap_or(name);
+    stem.eq_ignore_ascii_case(expected)
+}
+
 /// Open a FITS frame, tagging any read error with the caller's role.
 pub(crate) fn open_frame(path: &Path, role: &str) -> Result<FitsFrame> {
     FitsFrame::open(path).with_context(|| format!("failed to read {role} {}", path.display()))

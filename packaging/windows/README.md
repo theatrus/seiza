@@ -5,6 +5,14 @@ the installer UI, and the Start menu. The name is distinct from the **Seiza for
 Windows** desktop app (the seiza-win repository) so both products can be
 installed side by side and told apart. The binary itself stays `seiza.exe`.
 
+Alongside it the package installs `astap.exe`, a duplicate of the same file.
+N.I.N.A. asks for a plate-solver path naming a file called `astap.exe`, and
+seiza takes ASTAP-compatible mode when run under that name, so pointing
+N.I.N.A. at the install directory needs no copying or renaming. WiX makes the
+copy at install time (`CopyFile`), so the MSI carries one binary, the copy
+keeps the signature and version resource of the original, and uninstall
+removes both.
+
 The package presents the Apache 2.0 license and lets the user choose between
 an all-users install (the default) and a current-user install. The all-users
 choice installs under 64-bit Program Files and causes Windows Installer to
