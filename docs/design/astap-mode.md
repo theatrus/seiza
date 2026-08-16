@@ -55,8 +55,10 @@ Mapping to seiza:
 - `-ra`/`-spd` present → hinted solve with
   `ra_deg = ra × 15`, `dec = spd − 90`, radius `-r`,
   scale derived from `-fov`: `scale ≈ fov × 3600 / image_height` px.
-- Absent (or `-r 180`) → blind solve with a scale window around the
-  `-fov`-derived value.
+- Absent (or `-r 180`), or a failed hinted solve → blind solve over the
+  practical astrophotography scale range. `-fov` accelerates the hinted
+  attempt but never becomes a hard constraint on the blind fallback; N.I.N.A.
+  may derive it from a stale focal-length setting or a different optical train.
 - Unknown flags must be ignored (forward compatibility with whatever
   N.I.N.A. adds).
 - Timeout budget: N.I.N.A. kills the process after 10 minutes; stay
