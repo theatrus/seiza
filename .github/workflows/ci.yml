@@ -19,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2.9.1
+      - uses: Swatinem/rust-cache@v2.9.2
       - run: cargo test --workspace --all-features
       - run: cargo build --workspace --release --all-features
       - name: Verify Windows CRT is statically linked
@@ -66,7 +66,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2.9.1
+      - uses: Swatinem/rust-cache@v2.9.2
       - name: Test release dependency-chain guard
         run: python3 .github/scripts/test_check_release_version_chain.py
       - name: Verify release dependency version chain
@@ -90,7 +90,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@1.89.0
-      - uses: Swatinem/rust-cache@v2.9.1
+      - uses: Swatinem/rust-cache@v2.9.2
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -103,5 +103,5 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2.9.1
+      - uses: Swatinem/rust-cache@v2.9.2
       - run: cargo test -p seiza-cli --release --test hosted_integration -- --ignored

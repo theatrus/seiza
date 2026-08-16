@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2.9.1
+      - uses: Swatinem/rust-cache@v2.9.2
       - run: cargo install cargo-deb --locked
       - run: cargo deb -p seiza-cli
       - name: Rename with distro suffix
@@ -43,7 +43,7 @@ jobs:
         run: dnf install -y curl gcc rpm-build git
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2.9.1
+      - uses: Swatinem/rust-cache@v2.9.2
       - run: cargo install cargo-generate-rpm --locked
       - run: cargo build --release -p seiza-cli
       - run: ~/.cargo/bin/cargo-generate-rpm -p seiza-cli --payload-compress zstd
@@ -81,7 +81,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2.9.1
+      - uses: Swatinem/rust-cache@v2.9.2
       - run: cargo build --release -p seiza-cli
       - name: Verify Windows CRT is statically linked
         shell: pwsh
@@ -106,7 +106,7 @@ jobs:
       # unsigned, instead of failing the release job outright.
       - name: Authenticate to Azure for binary signing
         if: vars.AZURE_CLIENT_ID != ''
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -126,7 +126,7 @@ jobs:
       # nobody downloads.
       - name: Sign seiza.exe before packaging
         if: vars.AZURE_CLIENT_ID != ''
-        uses: azure/trusted-signing-action@v0
+        uses: azure/trusted-signing-action@v2
         with:
           endpoint: ${{ vars.SIGNING_ENDPOINT }}
           trusted-signing-account-name: ${{ vars.SIGNING_ACCOUNT }}
@@ -163,7 +163,7 @@ jobs:
       # five minutes the previous assertion was good for.
       - name: Authenticate to Azure for installer signing
         if: vars.AZURE_CLIENT_ID != ''
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -175,7 +175,7 @@ jobs:
       # file that already carries a valid one.
       - name: Sign the MSI
         if: vars.AZURE_CLIENT_ID != ''
-        uses: azure/trusted-signing-action@v0
+        uses: azure/trusted-signing-action@v2
         with:
           endpoint: ${{ vars.SIGNING_ENDPOINT }}
           trusted-signing-account-name: ${{ vars.SIGNING_ACCOUNT }}
