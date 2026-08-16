@@ -1,7 +1,8 @@
 # ASTAP-compatible mode: seiza as a N.I.N.A. plate solver
 
-Status: implemented (`seiza` auto-detects ASTAP-style invocations; a copy
-renamed `astap.exe` behaves identically)
+Status: implemented (`seiza` auto-detects ASTAP-style invocations, the
+Windows packages ship an `astap.exe` copy, and a binary of that name takes
+ASTAP mode whatever it is passed)
 
 ## Goal
 
@@ -152,13 +153,30 @@ loop reads as a hang. Small fine-scale fields need the prebuilt index.
 
 ## Mode detection
 
-Two entry styles, same code path:
+Three entry styles, same code path:
 
 - `seiza astap -f ... -fov ...` — explicit subcommand;
 - argv auto-detection: if `argv[1]` starts with `-f`/`-ra`/`-fov`,
-  treat the whole command line as ASTAP-style. This lets a copy (or
-  symlink/hardlink) named `astap.exe` behave correctly when N.I.N.A.
-  or other tools invoke it blind.
+  treat the whole command line as ASTAP-style;
+- binary name: if `argv[0]` is `astap`/`astap.exe`, take ASTAP mode
+  whatever the arguments look like, so an unrecognized command line
+  still answers with an `.ini` instead of a clap usage error.
+
+## Shipping the astap.exe name
+
+N.I.N.A. stores a path to the solver executable and expects it to name a
+file called `astap.exe`, so the Windows packages ship one:
+
+- the MSI installs `seiza.exe` and duplicates it in place as `astap.exe`
+  (WiX `CopyFile`, so the package carries one payload, the copy keeps the
+  Authenticode signature and FileVersion resource, and uninstall removes
+  both);
+- the portable ZIP holds both names, copied after signing.
+
+Nothing to configure: the user browses to `astap.exe` in the install
+directory and the solver is seiza. The Linux packages ship `seiza` only —
+`/usr/bin/astap` belongs to the real ASTAP package there, and N.I.N.A. is
+a Windows program.
 
 ## N.I.N.A. behaviors we inherit for free
 

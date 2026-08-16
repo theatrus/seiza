@@ -113,8 +113,9 @@ jobs:
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       # Sign the executable before anything packages it. Both shipped
-      # artifacts carry a copy: the zip holds seiza.exe directly, and WiX
-      # embeds target\release\seiza.exe into the MSI. Signing only the MSI
+      # artifacts carry a copy: the zip holds seiza.exe (and an astap.exe
+      # copied from it after this step), and WiX embeds
+      # target\release\seiza.exe into the MSI. Signing only the MSI
       # would seal an unsigned executable inside a signed installer and leave
       # the zip's copy unsigned altogether.
       #
@@ -141,7 +142,12 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
           $version = ($metadata.packages | Where-Object name -eq "seiza-cli").version
-          Compress-Archive -Path target/release/seiza.exe, README.md, LICENSE -DestinationPath "dist/seiza-cli-$version-windows-x86_64.zip"
+          # N.I.N.A. asks for an ASTAP path naming a file called astap.exe.
+          # The MSI duplicates the installed binary under that name; the
+          # portable zip carries its own copy so unpacking is enough. Copied
+          # after signing, so the copy carries the same signature.
+          Copy-Item target/release/seiza.exe target/release/astap.exe -Force
+          Compress-Archive -Path target/release/seiza.exe, target/release/astap.exe, README.md, LICENSE -DestinationPath "dist/seiza-cli-$version-windows-x86_64.zip"
           dotnet build packaging/windows/seiza.wixproj -c Release -p:SeizaVersion=$version
           # Hand the absolute paths to the later steps. The signing action is
           # not a shell and cannot work the version out for itself, and this
@@ -200,7 +206,8 @@ jobs:
           Remove-Item -Recurse -Force $extracted -ErrorAction SilentlyContinue
           Expand-Archive -Path $env:SEIZA_ZIP -DestinationPath $extracted
 
-          foreach ($artifact in @((Join-Path $extracted "seiza.exe"), $env:SEIZA_MSI)) {
+          $zipped = @("seiza.exe", "astap.exe") | ForEach-Object { Join-Path $extracted $_ }
+          foreach ($artifact in @($zipped + $env:SEIZA_MSI)) {
               if (-not (Test-Path -LiteralPath $artifact)) { throw "missing artifact: $artifact" }
               Write-Output "--- $artifact"
               $report = & $signtool.FullName verify /pa /v $artifact 2>&1 | Out-String
@@ -253,7 +260,10 @@ jobs:
               throw "unexpected signing identity for the seiza.exe inside the MSI"
           }
 
-          Write-Output "OK: the zipped seiza.exe, the MSI, and the seiza.exe inside the MSI are all signed as StackFoundry LLC"
+          # The MSI's astap.exe is not checked here: it is a duplicate the
+          # installer makes from this same file at install time, so there is
+          # nothing in the package to verify. The smoke test proves it lands.
+          Write-Output "OK: the zipped seiza.exe and astap.exe, the MSI, and the seiza.exe inside the MSI are all signed as StackFoundry LLC"
 
       - name: Smoke-test silent MSI install and uninstall
         shell: pwsh

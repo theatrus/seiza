@@ -45,18 +45,7 @@ struct SolveFieldArgs {
 /// seiza installed as `bin/bash.exe` receives those invocations and
 /// interprets the two commands Siril issues — no cygwin required.
 pub fn invoked_as_bash(program: &str) -> bool {
-    binary_name_matches(program, "bash")
-}
-
-/// Compare the final path component (without `.exe`) case-insensitively,
-/// accepting both separator styles regardless of host platform.
-fn binary_name_matches(program: &str, expected: &str) -> bool {
-    let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
-    let stem = name
-        .strip_suffix(".exe")
-        .or_else(|| name.strip_suffix(".EXE"))
-        .unwrap_or(name);
-    stem.eq_ignore_ascii_case(expected)
+    crate::common::binary_name_matches(program, "bash")
 }
 
 /// Handle a Siril-style `bash -l -c <command>` invocation: either the
@@ -186,7 +175,7 @@ fn split_command_words(command: &str, variables: &[(String, String)]) -> Vec<Str
 
 /// True when the binary itself is named like astrometry.net's solver.
 pub fn invoked_as_solve_field(program: &str) -> bool {
-    binary_name_matches(program, "solve-field")
+    crate::common::binary_name_matches(program, "solve-field")
 }
 
 /// True when the raw arguments carry solve-field-specific markers. Siril

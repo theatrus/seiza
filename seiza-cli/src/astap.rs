@@ -33,6 +33,15 @@ struct AstapArgs {
     detection_fallback_hypotheses: usize,
 }
 
+/// True when the binary itself is named like ASTAP. The Windows installer
+/// puts an `astap.exe` copy next to `seiza.exe` because N.I.N.A. asks for a
+/// file of that name, so a command line carrying no recognizable ASTAP flag
+/// still belongs here rather than in clap's hands: the caller reads the
+/// `.ini` and never sees a usage error.
+pub fn invoked_as_astap(program: &str) -> bool {
+    crate::common::binary_name_matches(program, "astap")
+}
+
 /// True when the raw command line looks like an ASTAP invocation
 /// (lets a copy of the binary named `astap.exe` work without the
 /// explicit subcommand).
@@ -350,6 +359,15 @@ mod tests {
         let unhinted_range = blind_scale_search_range(None);
         assert_eq!(hinted_range, unhinted_range);
         assert!(actual_scale >= hinted_range.0 && actual_scale <= hinted_range.1);
+    }
+
+    #[test]
+    fn recognizes_the_installed_astap_copy_by_name() {
+        assert!(invoked_as_astap("astap.exe"));
+        assert!(invoked_as_astap("C:\\Program Files\\Seiza CLI\\astap.exe"));
+        assert!(invoked_as_astap("/usr/local/bin/astap"));
+        assert!(!invoked_as_astap("seiza.exe"));
+        assert!(!invoked_as_astap("astap-cli.exe"));
     }
 
     #[test]

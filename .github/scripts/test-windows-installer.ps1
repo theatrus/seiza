@@ -20,6 +20,7 @@ else {
     Join-Path $env:LOCALAPPDATA "Apps\Seiza CLI"
 }
 $installedBinary = Join-Path $installDirectory "seiza.exe"
+$installedAstapBinary = Join-Path $installDirectory "astap.exe"
 $machineCatalogDirectory = Join-Path $env:ProgramData "Seiza\catalogs"
 $programMenuDirectory = if ($Scope -eq "perMachine") {
     Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\Seiza CLI"
@@ -97,6 +98,9 @@ try {
     if (-not (Test-Path -LiteralPath $installedBinary)) {
         throw "Installed binary not found at $installedBinary"
     }
+    if (-not (Test-Path -LiteralPath $installedAstapBinary)) {
+        throw "ASTAP-compatible copy not found at $installedAstapBinary"
+    }
     if (-not (Test-Path -LiteralPath $catalogSetupShortcut -PathType Leaf)) {
         throw "Catalog setup shortcut not found at $catalogSetupShortcut"
     }
@@ -163,6 +167,25 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Installed seiza setup --help failed with exit code $LASTEXITCODE"
     }
+
+    # The installed copy must answer to its own name: run it bare, where no
+    # ASTAP flag can give the mode away, and require the ASTAP-mode
+    # complaint rather than a clap usage error. Catalogs are absent on the
+    # runner, but this fails before any catalog is looked up.
+    $astapOut = Join-Path $tempDir "seiza-astap-mode-out.txt"
+    $astapErr = Join-Path $tempDir "seiza-astap-mode-err.txt"
+    $astapRun = Start-Process -FilePath $installedAstapBinary -Wait -PassThru -NoNewWindow `
+        -RedirectStandardOutput $astapOut -RedirectStandardError $astapErr
+    $astapMessage = @(
+        (Get-Content -LiteralPath $astapErr -Raw),
+        (Get-Content -LiteralPath $astapOut -Raw)
+    ) -join ""
+    if ($astapRun.ExitCode -eq 0) {
+        throw "astap.exe with no arguments unexpectedly succeeded"
+    }
+    if ($astapMessage -notmatch "ASTAP mode requires") {
+        throw "astap.exe did not run in ASTAP-compatible mode: $astapMessage"
+    }
 }
 finally {
     if ($installed) {
@@ -172,6 +195,9 @@ finally {
         }
         if (Test-Path -LiteralPath $installedBinary) {
             throw "MSI uninstall left $installedBinary behind"
+        }
+        if (Test-Path -LiteralPath $installedAstapBinary) {
+            throw "MSI uninstall left $installedAstapBinary behind"
         }
         if (Test-Path -LiteralPath $catalogSetupShortcut) {
             throw "MSI uninstall left $catalogSetupShortcut behind"
