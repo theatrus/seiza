@@ -350,8 +350,8 @@ fn solve(args: &SolveFieldArgs, table: &Path) -> Result<(seiza::solve::Solution,
         if stop_requested(args) {
             anyhow::bail!("cancelled");
         }
-        // Stale hints fall back to a scale-bracketed blind search, exactly
-        // like the ASTAP-compatible mode.
+        // Stale position hints fall back to a blind search while preserving
+        // the explicit scale bounds requested by this solve-field protocol.
     }
 
     let (min_scale, max_scale) = scale.unwrap_or((0.1, 20.0));

@@ -124,6 +124,21 @@ fn parse_args(raw: &[String]) -> AstapArgs {
     args
 }
 
+/// Scale range for the ASTAP-compatible blind fallback.
+///
+/// `-fov` is useful for the fast hinted attempt, but it is still only a hint:
+/// N.I.N.A. derives it from the configured focal length, which can be stale or
+/// describe a different optical train than a simulator/file-camera frame. Once
+/// the hinted solve misses, retaining a hard scale bracket can make the
+/// supposedly blind fallback unable to find an otherwise straightforward
+/// field. Keep the parameter here so that policy is explicit at the call site;
+/// a future solver may use it to prioritize hypotheses, but it must not exclude
+/// scales from the practical blind range.
+fn blind_scale_search_range(_fov_scale_hint: Option<f64>) -> (f64, f64) {
+    let defaults = seiza::blind::BlindParams::default();
+    (defaults.min_scale_arcsec_px, defaults.max_scale_arcsec_px)
+}
+
 fn solve(args: &AstapArgs, image_path: &Path) -> Result<Vec<String>> {
     let star_data = resolve_star_data()?;
     let catalog = seiza::catalog::TileCatalog::open(&star_data)
@@ -177,12 +192,10 @@ fn solve(args: &AstapArgs, image_path: &Path) -> Result<Vec<String>> {
     let solution = match hinted {
         Some(solution) => solution,
         None => {
-            // Blind: bracket the scale around the FOV hint when we have
-            // one, otherwise search the practical astrophoto range
-            let (min_scale, max_scale) = match scale {
-                Some(scale) => (scale / 2.0, scale * 2.0),
-                None => (0.1, 20.0),
-            };
+            // A failed hinted solve makes both the pointing and scale hints
+            // suspect. Search the practical scale range instead of turning
+            // N.I.N.A.'s -fov estimate into another hard failure boundary.
+            let (min_scale, max_scale) = blind_scale_search_range(scale);
             let mut params = seiza::blind::BlindParams {
                 min_scale_arcsec_px: min_scale,
                 max_scale_arcsec_px: max_scale,
@@ -322,6 +335,21 @@ mod tests {
         let args = parse_args(&raw);
         assert!(args.ra_hours.is_none());
         assert!((args.radius_deg - 180.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn blind_fallback_does_not_retain_a_stale_fov_scale_constraint() {
+        // Regression: a 749 mm frame presented by a N.I.N.A. profile set to
+        // 300 mm has an actual scale near 1.03"/px but a 2.59"/px hint. The
+        // old half-to-double bracket started above the real solution.
+        let stale_scale_hint = 2.585;
+        let actual_scale = 1.029;
+        assert!(actual_scale < stale_scale_hint / 2.0);
+
+        let hinted_range = blind_scale_search_range(Some(stale_scale_hint));
+        let unhinted_range = blind_scale_search_range(None);
+        assert_eq!(hinted_range, unhinted_range);
+        assert!(actual_scale >= hinted_range.0 && actual_scale <= hinted_range.1);
     }
 
     #[test]
