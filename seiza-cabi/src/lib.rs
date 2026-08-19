@@ -6271,6 +6271,7 @@ pub const SEIZA_TOLERANCE_HAS_MASTER_TEMPERATURE: u32 = 1 << 2;
 pub const SEIZA_TOLERANCE_HAS_ROTATION: u32 = 1 << 3;
 pub const SEIZA_TOLERANCE_HAS_FOCAL_LENGTH: u32 = 1 << 4;
 pub const SEIZA_TOLERANCE_HAS_FLAT_SESSION: u32 = 1 << 5;
+pub const SEIZA_TOLERANCE_HAS_EXPOSURE_FRACTION: u32 = 1 << 6;
 
 /// How close two readings have to be to count as the same.
 ///
@@ -6288,8 +6289,13 @@ pub const SEIZA_TOLERANCE_HAS_FLAT_SESSION: u32 = 1 << 5;
 pub struct SeizaMatchTolerances {
     /// Bitwise OR of the `SEIZA_TOLERANCE_HAS_*` flags this struct overrides.
     pub known: u32,
-    /// Dark exposure against light exposure, in seconds.
+    /// Dark exposure against light exposure: the floor, in seconds. The
+    /// comparison takes whichever of this and `exposure_fraction` is larger.
     pub exposure_seconds: f64,
+    /// Dark exposure against light exposure: the proportional part, as a
+    /// fraction of the longer of the two. Past about a minute this is what
+    /// decides.
+    pub exposure_fraction: f64,
     /// Dark sensor temperature against light sensor temperature, in Celsius.
     pub dark_temperature_c: f64,
     /// Sensor temperature within one master's input set, in Celsius.
@@ -6318,12 +6324,14 @@ pub unsafe extern "C" fn seiza_match_tolerances_default(tolerances: *mut SeizaMa
     unsafe {
         *tolerances = SeizaMatchTolerances {
             known: SEIZA_TOLERANCE_HAS_EXPOSURE
+                | SEIZA_TOLERANCE_HAS_EXPOSURE_FRACTION
                 | SEIZA_TOLERANCE_HAS_DARK_TEMPERATURE
                 | SEIZA_TOLERANCE_HAS_MASTER_TEMPERATURE
                 | SEIZA_TOLERANCE_HAS_ROTATION
                 | SEIZA_TOLERANCE_HAS_FOCAL_LENGTH
                 | SEIZA_TOLERANCE_HAS_FLAT_SESSION,
             exposure_seconds: defaults.exposure_seconds,
+            exposure_fraction: defaults.exposure_fraction,
             dark_temperature_c: defaults.dark_temperature_c,
             master_temperature_c: defaults.master_temperature_c,
             rotation_deg: defaults.rotation_deg,
@@ -6352,6 +6360,12 @@ unsafe fn match_tolerances(
         |flag: u32, value: f64| overrides.known & flag != 0 && value.is_finite() && value >= 0.0;
     if set(SEIZA_TOLERANCE_HAS_EXPOSURE, overrides.exposure_seconds) {
         resolved.exposure_seconds = overrides.exposure_seconds;
+    }
+    if set(
+        SEIZA_TOLERANCE_HAS_EXPOSURE_FRACTION,
+        overrides.exposure_fraction,
+    ) {
+        resolved.exposure_fraction = overrides.exposure_fraction;
     }
     if set(
         SEIZA_TOLERANCE_HAS_DARK_TEMPERATURE,

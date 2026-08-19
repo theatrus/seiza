@@ -9,12 +9,23 @@ PyPI**. They are cut from a single "Release `<version>`" PR followed by two tags
 - `seiza`, `seiza-cabi`, and `seiza-cli` inherit the **workspace version**
   (`[workspace.package] version` in the root `Cargo.toml`) — they always move
   together, and the workspace version is *the* release version.
-- The other crates version **independently** by what actually changed:
-  `seiza-satellites`, `seiza-download`, `seiza-fits`, `seiza-imgproc`,
-  `seiza-xisf`, `seiza-stacking`, and `seiza-sources` each have their own
-  `version =` in
-  their `Cargo.toml`, mirrored by their pin in the root
-  `[workspace.dependencies]`.
+- Every other crate versions **independently** by what actually changed. Each
+  has its own `version =` in its `Cargo.toml`, mirrored by its pin in the root
+  `[workspace.dependencies]`. Rather than trust this list, ask the tree — a
+  crate whose `Cargo.toml` says `version.workspace = true` moves with the
+  workspace, and anything else versions on its own:
+
+  ```bash
+  grep -L 'version.workspace = true' seiza-*/Cargo.toml
+  ```
+
+  At the time of writing that is `seiza-background`, `seiza-calibration`,
+  `seiza-deconvolution`, `seiza-download`, `seiza-fits`, `seiza-imgproc`,
+  `seiza-satellites`, `seiza-sources`, `seiza-stacking`, `seiza-stats`,
+  `seiza-stretch`, and `seiza-xisf`. A list written down goes stale the first
+  time a crate is added, which is how `seiza-calibration`, `seiza-stats`,
+  `seiza-stretch`, `seiza-background` and `seiza-deconvolution` came to be
+  missing from it.
 - `seiza-py` is **`publish = false`** (it goes to PyPI, not crates.io) and its
   version **must always equal the workspace/`seiza` version** — the wheel and the
   crate are the same release.
@@ -88,9 +99,14 @@ waits for the index):
 
 ```
 seiza-stats  →  seiza-stretch  →  seiza-imgproc  →  seiza-fits  →  seiza-xisf
-→  seiza-background  →  seiza-deconvolution  →  seiza-sources  →  seiza-download
-→  seiza  →  seiza-satellites  →  seiza-stacking  →  seiza-cabi  →  seiza-cli
+→  seiza-background  →  seiza-calibration  →  seiza-deconvolution
+→  seiza-sources  →  seiza-download  →  seiza  →  seiza-satellites
+→  seiza-stacking  →  seiza-cabi  →  seiza-cli
 ```
+
+`seiza-calibration` sits before `seiza-stacking`, which depends on it. If you
+ever need to re-derive this order rather than trust it, `cargo tree` gives it:
+a crate must be published after everything it depends on.
 
 ```bash
 git switch main && git pull
