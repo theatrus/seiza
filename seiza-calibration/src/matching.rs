@@ -65,8 +65,18 @@ pub enum FrameRole {
 /// which is how a config struct wants to be written.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MatchTolerances {
-    /// Dark exposure against light exposure, in seconds.
+    /// Dark exposure against light exposure: the floor, in seconds.
+    ///
+    /// The comparison takes whichever of this and
+    /// [`Self::exposure_fraction`] is larger, because neither works alone. A
+    /// fixed 0.05 s is a tenth of a half-second flat and a six-thousandth of a
+    /// five-minute sub — far too loose at one end and tighter than a shutter
+    /// can be trusted at the other.
     pub exposure_seconds: f64,
+    /// Dark exposure against light exposure: the proportional part, as a
+    /// fraction of the longer of the two. Timing error scales with exposure,
+    /// so past about a minute this is what decides.
+    pub exposure_fraction: f64,
     /// Dark sensor temperature against light sensor temperature, in Celsius.
     pub dark_temperature_c: f64,
     /// Sensor temperature within one master's input set, in Celsius. Tighter
@@ -87,6 +97,7 @@ impl Default for MatchTolerances {
     fn default() -> Self {
         Self {
             exposure_seconds: 0.05,
+            exposure_fraction: 1.0e-3,
             dark_temperature_c: 3.0,
             master_temperature_c: 1.0,
             rotation_deg: 1.0,
@@ -220,8 +231,33 @@ pub fn exposure_matches(
     option_near(
         reference.exposure_seconds,
         candidate.exposure_seconds,
-        tolerances.exposure_seconds,
+        exposure_tolerance(
+            reference.exposure_seconds,
+            candidate.exposure_seconds,
+            tolerances,
+        ),
     )
+}
+
+/// How far apart two exposures may be and still count as the same one.
+///
+/// The floor or the proportional part, whichever is larger. This is the single
+/// answer to "are these the same exposure" — the master builder asks it of
+/// frames going into one master, and selection asks it of a dark against a
+/// light. Two answers to one question is how a set that builds cleanly comes
+/// to contain a frame selection would have refused.
+pub fn exposure_tolerance(
+    reference: Option<f64>,
+    candidate: Option<f64>,
+    tolerances: &MatchTolerances,
+) -> f64 {
+    let longer = known(reference)
+        .unwrap_or(0.0)
+        .abs()
+        .max(known(candidate).unwrap_or(0.0).abs());
+    tolerances
+        .exposure_seconds
+        .max(longer * tolerances.exposure_fraction)
 }
 
 /// Whether a dark's sensor temperature suits the frame it would be subtracted
@@ -512,6 +548,17 @@ mod tests {
         let light = with(300.0, -10.0);
         assert!(exposure_matches(&light, &with(300.02, -10.0), &tolerances));
         assert!(!exposure_matches(&light, &with(180.0, -10.0), &tolerances));
+
+        // Past a minute the proportional part decides: 0.1% of 300 s is 0.3 s,
+        // which a fixed 0.05 s floor would have refused.
+        assert!(exposure_matches(&light, &with(300.25, -10.0), &tolerances));
+        assert!(!exposure_matches(&light, &with(301.0, -10.0), &tolerances));
+
+        // Below it the floor decides, because 0.1% of half a second is half a
+        // millisecond and no header is written that precisely.
+        let short = with(0.5, -10.0);
+        assert!(exposure_matches(&short, &with(0.52, -10.0), &tolerances));
+        assert!(!exposure_matches(&short, &with(0.7, -10.0), &tolerances));
         assert!(temperature_matches(
             &light,
             &with(300.0, -12.5),

@@ -141,6 +141,8 @@
 
 #define SEIZA_TOLERANCE_HAS_FLAT_SESSION (1 << 5)
 
+#define SEIZA_TOLERANCE_HAS_EXPOSURE_FRACTION (1 << 6)
+
 /*
  An opaque fitted background model. Release it with
  [`seiza_background_model_free`]. Its diagnostics string is borrowed and
@@ -287,9 +289,16 @@ typedef struct {
    */
   uint32_t known;
   /*
-   Dark exposure against light exposure, in seconds.
+   Dark exposure against light exposure: the floor, in seconds. The
+   comparison takes whichever of this and `exposure_fraction` is larger.
    */
   double exposure_seconds;
+  /*
+   Dark exposure against light exposure: the proportional part, as a
+   fraction of the longer of the two. Past about a minute this is what
+   decides.
+   */
+  double exposure_fraction;
   /*
    Dark sensor temperature against light sensor temperature, in Celsius.
    */

@@ -214,6 +214,7 @@ impl PyMatchTolerances {
     #[new]
     #[pyo3(signature = (
         exposure_seconds=None,
+        exposure_fraction=None,
         dark_temperature_c=None,
         master_temperature_c=None,
         rotation_deg=None,
@@ -222,6 +223,7 @@ impl PyMatchTolerances {
     ))]
     fn new(
         exposure_seconds: Option<f64>,
+        exposure_fraction: Option<f64>,
         dark_temperature_c: Option<f64>,
         master_temperature_c: Option<f64>,
         rotation_deg: Option<f64>,
@@ -231,6 +233,9 @@ impl PyMatchTolerances {
         let mut inner = MatchTolerances::default();
         if let Some(value) = exposure_seconds {
             inner.exposure_seconds = value;
+        }
+        if let Some(value) = exposure_fraction {
+            inner.exposure_fraction = value;
         }
         if let Some(value) = dark_temperature_c {
             inner.dark_temperature_c = value;
@@ -253,6 +258,10 @@ impl PyMatchTolerances {
     #[getter]
     fn exposure_seconds(&self) -> f64 {
         self.inner.exposure_seconds
+    }
+    #[getter]
+    fn exposure_fraction(&self) -> f64 {
+        self.inner.exposure_fraction
     }
     #[getter]
     fn dark_temperature_c(&self) -> f64 {

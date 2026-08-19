@@ -181,7 +181,7 @@ pub fn build_master_from_fits(
         if index == 0 {
             reference_headers = prepared.headers.clone();
             reference_bayer = prepared.bayer;
-            reference_signature = Some(FrameSignature::from_frame(&prepared, kind));
+            reference_signature = Some(InputSignature::from_frame(&prepared, kind));
             if kind == MasterFrameKind::Dark {
                 dark_exposure = prepared.effective_exposure;
             }
@@ -381,7 +381,7 @@ fn prepare_input(
     kind: MasterFrameKind,
     options: &MasterBuildOptions,
     calibration: &CalibrationMasters,
-    reference: Option<&FrameSignature>,
+    reference: Option<&InputSignature>,
     dark_exposure: Option<f64>,
 ) -> Result<PreparedInput> {
     let mut frame = FitsFrame::open(path)?;
@@ -438,12 +438,28 @@ fn prepare_input(
     })
 }
 
+/// Whether two exposures are the same exposure.
+///
+/// Deferred to `seiza-calibration` rather than decided here. This crate asks
+/// the question of frames going into one master, and selection asks it of a
+/// dark against a light; when the two had their own answers they disagreed by
+/// six times at five minutes, so a set could build cleanly while containing a
+/// frame selection would have refused.
 fn close_exposure(left: f64, right: f64) -> bool {
-    (left - right).abs() <= 1.0e-3_f64.max(left.abs().max(right.abs()) * 1.0e-3)
+    let tolerances = seiza_calibration::MatchTolerances::default();
+    let allowed = seiza_calibration::exposure_tolerance(Some(left), Some(right), &tolerances);
+    (left - right).abs() <= allowed
 }
 
+/// What every frame in one master must have in common: the same sensor
+/// geometry and the same acquisition headers.
+///
+/// Not to be confused with `seiza_calibration::FrameSignature`, which answers
+/// a different question — whether a *calibration* frame suits a *light*. This
+/// one asks whether a set is internally consistent, and compares raw header
+/// text rather than parsed settings.
 #[derive(Clone, Debug)]
-struct FrameSignature {
+struct InputSignature {
     width: usize,
     height: usize,
     channels: usize,
@@ -451,7 +467,7 @@ struct FrameSignature {
     metadata: Vec<(&'static str, ComparableHeader)>,
 }
 
-impl FrameSignature {
+impl InputSignature {
     fn from_frame(frame: &PreparedInput, kind: MasterFrameKind) -> Self {
         let mut keys = vec![
             "INSTRUME", "CAMERA", "XBINNING", "YBINNING", "CCDXBIN", "CCDYBIN", "XPIXSZ", "YPIXSZ",
