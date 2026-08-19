@@ -121,11 +121,24 @@ pub fn checkpoint_depths(total: usize) -> Vec<usize> {
 /// `None` when the frame is too small, when too little of it is covered to
 /// measure, or when the samples carry no noise at all — all of which are
 /// ordinary answers early in a build, not errors.
+///
+/// A [`StackView`] whose dimensions do not describe its slices also answers
+/// `None`. Its fields are public, so nothing stops a caller assembling one by
+/// hand, and this reads neighbouring samples by arithmetic on those
+/// dimensions: a library should decline such a view rather than panic inside
+/// somebody else's stack frame.
 pub fn measure_depth(view: StackView<'_>) -> Option<SnrSample> {
-    if view.width < 3 || view.height < 3 {
+    if view.width < 3 || view.height < 3 || view.channels == 0 {
         return None;
     }
-    let channels = view.channels.max(1);
+    let channels = view.channels;
+    let samples = view
+        .width
+        .checked_mul(view.height)
+        .and_then(|pixels| pixels.checked_mul(channels))?;
+    if view.mean.len() != samples || view.coverage.len() != samples {
+        return None;
+    }
     let interior_rows = view.height - 2;
     let stride = interior_rows.div_ceil(MAX_SAMPLED_ROWS).max(1);
     let mut channel_noise = Vec::with_capacity(channels);
@@ -407,5 +420,50 @@ mod tests {
         assert!(measure_depth(tiny.view(1)).is_none());
         let small = frame(20, 20, 12.0, 31);
         assert!(measure_depth(small.view(1)).is_none(), "too few samples");
+    }
+
+    #[test]
+    fn a_view_that_does_not_describe_its_own_slices_is_declined() {
+        // `StackView` has public fields, so a caller can assemble one whose
+        // dimensions and buffers disagree. Reading neighbours is arithmetic on
+        // those dimensions, so this has to be refused rather than indexed.
+        let field = frame(400, 400, 12.0, 37);
+        let honest = field.view(4);
+        assert!(
+            measure_depth(honest).is_some(),
+            "the truthful view measures"
+        );
+
+        let lying = |width, height, channels| StackView {
+            width,
+            height,
+            channels,
+            mean: &field.data,
+            coverage: &field.coverage,
+            rejected_samples: &field.coverage,
+            accepted_frames: 4,
+            rejected_frames: 0,
+        };
+        // Dimensions larger than the buffer, a channel count the buffer cannot
+        // hold, and a zero channel count that `max(1)` used to paper over.
+        assert!(measure_depth(lying(4000, 400, 1)).is_none());
+        assert!(measure_depth(lying(400, 400, 3)).is_none());
+        assert!(measure_depth(lying(400, 400, 0)).is_none());
+
+        // Slices that disagree with each other, not just with the dimensions.
+        let short_coverage = vec![4u32; field.data.len() - 1];
+        assert!(
+            measure_depth(StackView {
+                width: field.width,
+                height: field.height,
+                channels: 1,
+                mean: &field.data,
+                coverage: &short_coverage,
+                rejected_samples: &short_coverage,
+                accepted_frames: 4,
+                rejected_frames: 0,
+            })
+            .is_none()
+        );
     }
 }
