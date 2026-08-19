@@ -2287,6 +2287,7 @@ dependencies = [
  "image",
  "seiza",
  "seiza-background",
+ "seiza-calibration",
  "seiza-deconvolution",
  "seiza-fits",
  "seiza-stacking",

@@ -78,6 +78,13 @@
 #define SEIZA_BACKGROUND_CORRECTION_DIVIDE 1
 
 /*
+ The most channels a measurement reports separately: mono or debayered RGB.
+ */
+#define SEIZA_SNR_MAX_CHANNELS 3
+
+
+
+/*
  An opaque fitted background model. Release it with
  [`seiza_background_model_free`]. Its diagnostics string is borrowed and
  remains valid until the model is freed.
@@ -113,6 +120,82 @@ typedef struct SeizaRenderedImage16 SeizaRenderedImage16;
 typedef struct SeizaStackSnapshot SeizaStackSnapshot;
 
 typedef void (*SeizaCatalogSetupProgressCallback)(const char*, void*);
+
+/*
+ One reading of an accumulator, in the stack's own units. Only ratios
+ between readings of the same stack mean anything.
+ */
+typedef struct {
+  /*
+   Frames the accumulator had taken when this was measured.
+   */
+  uint32_t frames;
+  /*
+   Pixel-scale noise of the integration, averaged across channels.
+   */
+  double noise;
+  /*
+   Median sample, averaged across channels.
+   */
+  double background;
+  /*
+   How far the brightest one percent sits above the background.
+   */
+  double signal;
+  /*
+   `signal / noise` for this one reading. To compare depths, divide one
+   signal — normally the deepest measured — by each depth's noise instead:
+   the brightest-percent statistic is itself lifted by noise where a stack
+   is shallow, so reading each depth against its own signal flatters the
+   early frames.
+   */
+  double snr;
+  /*
+   How many entries of `channel_noise` are meaningful.
+   */
+  size_t channel_count;
+  /*
+   Per-channel noise.
+   */
+  double channel_noise[SEIZA_SNR_MAX_CHANNELS];
+} SeizaSnrSample;
+
+/*
+ What a frame was shot with, as far as matching cares.
+
+ Text fields are null when unknown; numeric fields are `NAN`
+ ([`SEIZA_FRAME_UNKNOWN`]). Integer-valued settings are carried as doubles
+ so one sentinel covers every field; every value a camera reports is exact
+ in a double.
+
+ A missing value on the *candidate* side disqualifies it and a missing value
+ on the *reference* side accepts what it is offered: a light that does not
+ record its gain cannot rule anything out, while a calibration frame that
+ does not record its gain cannot prove it belongs. Rotation is the exception
+ — unknown on either side matches.
+
+ Initialize with [`seiza_frame_signature_init`] rather than zeroing, which
+ would read as gain 0 rather than unknown gain.
+ */
+typedef struct {
+  const char *camera;
+  const char *telescope;
+  const char *bayer_pattern;
+  const char *filter;
+  double width;
+  double height;
+  double channels;
+  double binning_x;
+  double binning_y;
+  double gain;
+  double offset;
+  double readout_mode;
+  double focal_length_mm;
+  double rotation_deg;
+  double exposure_seconds;
+  double camera_temp_c;
+  double captured_at_unix;
+} SeizaFrameSignature;
 
 #ifdef __cplusplus
 extern "C" {
@@ -874,6 +957,121 @@ char *seiza_solve_image_json(const char *path,
  already been freed.
  */
 void seiza_string_free(char *value);
+
+/*
+ Read how deep a live stack is, without copying the accumulator.
+
+ Returns 1 and fills `sample` when the stack could be measured, 0 when it
+ could not — too small a frame, or too little of it covered, which is an
+ ordinary answer early in a build rather than an error — and -1 on failure,
+ with `error_out` set.
+
+ # Safety
+
+ `stacker` must be a live `SeizaLiveStacker` pointer and `sample` must point
+ at writable storage for one `SeizaSnrSample`.
+ */
+int32_t seiza_live_stacker_measure_depth(const SeizaLiveStacker *stacker,
+                                         SeizaSnrSample *sample,
+                                         char **error_out);
+
+/*
+ The depths a build of `total` frames should measure at: the doubling
+ ladder, and the full set.
+
+ Writes up to `out_len` depths into `out` and returns how many the ladder
+ has in total, which may exceed `out_len`. Pass a null `out` with a zero
+ `out_len` to ask for the count alone.
+
+ # Safety
+
+ `out` must point at writable storage for `out_len` values, or be null when
+ `out_len` is zero.
+ */
+size_t seiza_checkpoint_depths(size_t total, size_t *out, size_t out_len);
+
+/*
+ Fill a signature with "nothing known", ready for the caller to set the
+ fields it has.
+
+ # Safety
+
+ `signature` must point at writable storage for one `SeizaFrameSignature`.
+ */
+void seiza_frame_signature_init(SeizaFrameSignature *signature);
+
+/*
+ Whether two frames came off the same sensor in the same mode. Returns 1 for
+ a match, 0 for a mismatch, -1 on failure with `error_out` set.
+
+ # Safety
+
+ Both pointers must reference initialized `SeizaFrameSignature` values, with
+ any text fields either null or valid UTF-8 C strings.
+ */
+int32_t seiza_calibration_sensor_matches(const SeizaFrameSignature *reference,
+                                         const SeizaFrameSignature *candidate,
+                                         char **error_out);
+
+/*
+ Whether a flat describes the same optical path as what it would correct —
+ filter, telescope, focal length and rotator angle. Returns 1, 0, or -1 as
+ [`seiza_calibration_sensor_matches`] does.
+
+ # Safety
+
+ As [`seiza_calibration_sensor_matches`].
+ */
+int32_t seiza_calibration_optics_match(const SeizaFrameSignature *reference,
+                                       const SeizaFrameSignature *candidate,
+                                       char **error_out);
+
+/*
+ Whether a dark's exposure and sensor temperature suit the frame it would be
+ subtracted from. Pass `NAN` for either reading that is unknown. Returns 1
+ for a match and 0 for a mismatch.
+ */
+int32_t seiza_calibration_dark_matches(double reference_exposure_seconds,
+                                       double candidate_exposure_seconds,
+                                       double reference_temp_c,
+                                       double candidate_temp_c);
+
+/*
+ Whether two rotator angles are close enough to share a flat. Wraps at 360,
+ and `NAN` on either side matches — a missing angle means the rig had no
+ rotator, or the record predates keeping one.
+ */
+int32_t seiza_calibration_rotation_matches(double reference_deg,
+                                           double candidate_deg,
+                                           double tolerance_deg);
+
+/*
+ Fit the camera pedestal in `light`, in the light's own units.
+
+ Dividing by a flat only works on a signal that starts at zero; without a
+ bias or dark master the offset is still there. Sky background varies with
+ the flat's own response, so the intercept of that line is the part that
+ does not.
+
+ Returns 1 and writes `pedestal` when the fit succeeded, 0 when the frame
+ cannot support one — too few usable tiles, a flat too uniform to give the
+ line a lever, or a slope saying the model does not describe this field —
+ and -1 on failure with `error_out` set.
+
+ The fit reads low by roughly 0.8 times the frame's noise, by construction.
+ That is the safe direction, and it cancels when comparing two frames.
+
+ # Safety
+
+ `light` and `flat` must each point at `width * height` readable floats.
+ `pedestal` must point at writable storage for one float.
+ */
+int32_t seiza_calibration_fit_flat_pedestal(const float *light,
+                                            const float *flat,
+                                            size_t width,
+                                            size_t height,
+                                            float *pedestal,
+                                            char **error_out);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -5,9 +5,9 @@ use pyo3::prelude::*;
 use seiza_stacking::{
     CalibrationMasters, CancelSignal, DeltaSigmaOptions, FitsFrame, FrameDisposition, LinearImage,
     LiveStacker, MasterBuildOptions, MasterDark, MasterFrameKind, MasterRejectionOptions,
-    NormalizationMode, PipelineOptions, PipelineReport, RejectionMode, StackOptions, StackSnapshot,
-    build_master_from_fits, path_identity, paths_refer_to_same_file, write_fits_f32,
-    write_master_fits_f32,
+    NormalizationMode, PipelineOptions, PipelineReport, RejectionMode, SnrSample, StackOptions,
+    StackSnapshot, build_master_from_fits, checkpoint_depths, measure_depth, path_identity,
+    paths_refer_to_same_file, write_fits_f32, write_master_fits_f32,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -663,6 +663,18 @@ impl PyLiveStacker {
     }
 
     /// Copy the current accumulator into an immutable Python snapshot.
+    /// Read how deep this stack is, without copying the accumulator.
+    ///
+    /// Returns ``None`` when the frame is too small or too little of it is
+    /// covered to measure — an ordinary answer early in a build, not an error.
+    /// Call it at the depths :func:`checkpoint_depths` names.
+    fn measure_depth(&self, py: Python<'_>) -> PyResult<Option<PySnrSample>> {
+        let stacker = self.active()?;
+        Ok(py
+            .allow_threads(|| measure_depth(stacker.view()))
+            .map(|sample| PySnrSample { inner: sample }))
+    }
+
     fn snapshot(&self, py: Python<'_>) -> PyResult<PyStackSnapshot> {
         let stacker = self.active()?;
         let snapshot = py
@@ -1111,12 +1123,89 @@ fn validate_exposure_override(
     Ok(())
 }
 
+/// One reading of an accumulator, in the stack's own units. Only ratios
+/// between readings of the same stack mean anything.
+#[pyclass(frozen, name = "SnrSample", module = "seiza")]
+#[derive(Clone)]
+pub(crate) struct PySnrSample {
+    inner: SnrSample,
+}
+
+#[pymethods]
+impl PySnrSample {
+    /// Frames the accumulator had taken when this was measured.
+    #[getter]
+    fn frames(&self) -> u32 {
+        self.inner.frames
+    }
+
+    /// Pixel-scale noise of the integration, averaged across channels.
+    #[getter]
+    fn noise(&self) -> f64 {
+        self.inner.noise
+    }
+
+    /// Median sample, averaged across channels.
+    #[getter]
+    fn background(&self) -> f64 {
+        self.inner.background
+    }
+
+    /// How far the brightest one percent sits above the background.
+    #[getter]
+    fn signal(&self) -> f64 {
+        self.inner.signal
+    }
+
+    /// Per-channel noise: one entry for mono, three for a debayered stack.
+    #[getter]
+    fn channel_noise(&self) -> Vec<f64> {
+        self.inner.channel_noise.clone()
+    }
+
+    /// This reading's signal against its own noise.
+    ///
+    /// Correct for one depth. To compare depths, divide one signal — normally
+    /// the deepest measured one — by each depth's noise instead. The
+    /// brightest-percent statistic is itself lifted by noise where a stack is
+    /// shallow, so reading each depth against its own signal flatters the
+    /// early frames.
+    #[getter]
+    fn snr(&self) -> f64 {
+        self.inner.snr()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "SnrSample(frames={}, noise={:.4}, signal={:.4}, snr={:.2})",
+            self.inner.frames,
+            self.inner.noise,
+            self.inner.signal,
+            self.inner.snr()
+        )
+    }
+}
+
+/// The depths a build of ``total`` frames should measure at: the doubling
+/// ladder, and the full set.
+///
+/// Doubling keeps the count of measurements logarithmic, so a five-hundred
+/// frame stack is interrupted nine times rather than five hundred, and the
+/// points still spread evenly on a log axis.
+#[pyfunction]
+#[pyo3(name = "checkpoint_depths")]
+pub(crate) fn py_checkpoint_depths(total: usize) -> Vec<usize> {
+    checkpoint_depths(total)
+}
+
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyStackOptions>()?;
     module.add_class::<PyFrameDisposition>()?;
     module.add_class::<PyPipelineReport>()?;
     module.add_class::<PyStackResult>()?;
     module.add_class::<PyStackSnapshot>()?;
+    module.add_class::<PySnrSample>()?;
+    module.add_function(wrap_pyfunction!(py_checkpoint_depths, module)?)?;
     module.add_class::<PyLiveStacker>()?;
     module.add_class::<PyMasterResult>()?;
     module.add_function(wrap_pyfunction!(stack_fits, module)?)?;

@@ -31,6 +31,7 @@ extension-module = ["pyo3/extension-module"]
 [dependencies]
 seiza = { path = "../seiza", features = ["downloads"] }
 seiza-background = { path = "../seiza-background" }
+seiza-calibration = { path = "../seiza-calibration" }
 seiza-deconvolution = { path = "../seiza-deconvolution" }
 seiza-imgproc = { path = "../seiza-imgproc" }
 seiza-satellites = { path = "../seiza-satellites" }

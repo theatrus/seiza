@@ -1500,6 +1500,7 @@ dependencies = [
  "pyo3",
  "seiza",
  "seiza-background",
+ "seiza-calibration",
  "seiza-deconvolution",
  "seiza-imgproc",
  "seiza-satellites",

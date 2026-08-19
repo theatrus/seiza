@@ -15,7 +15,8 @@ use seiza_fits::{FitsImage, HeaderValue, RgbImage16, Statistics, StretchParams};
 use seiza_stacking::{
     ChannelCoverage, ChannelSamples, ColorCrop, CropReport, FrameDiagnostics, FrameDisposition,
     LinearImage, LiveStacker, ReferenceRegion, StackOptions, StackSnapshot as RustStackSnapshot,
-    crop_report, path_identity, paths_refer_to_same_file, write_fits_f32,
+    checkpoint_depths as rust_checkpoint_depths, crop_report, measure_depth as rust_measure_depth,
+    path_identity, paths_refer_to_same_file, write_fits_f32,
 };
 use seiza_stretch::{StretchConfig, StretchStack};
 use serde::{Deserialize, Serialize};
@@ -5886,4 +5887,374 @@ mod tests {
         assert_eq!(transients[0].discovered.as_deref(), Some("2020-01-01"));
         assert_eq!(transients[0].near_capture, Some(false));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Reading how deep a stack is
+// ---------------------------------------------------------------------------
+
+/// The most channels a measurement reports separately: mono or debayered RGB.
+pub const SEIZA_SNR_MAX_CHANNELS: usize = 3;
+
+/// One reading of an accumulator, in the stack's own units. Only ratios
+/// between readings of the same stack mean anything.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SeizaSnrSample {
+    /// Frames the accumulator had taken when this was measured.
+    pub frames: u32,
+    /// Pixel-scale noise of the integration, averaged across channels.
+    pub noise: f64,
+    /// Median sample, averaged across channels.
+    pub background: f64,
+    /// How far the brightest one percent sits above the background.
+    pub signal: f64,
+    /// `signal / noise` for this one reading. To compare depths, divide one
+    /// signal — normally the deepest measured — by each depth's noise instead:
+    /// the brightest-percent statistic is itself lifted by noise where a stack
+    /// is shallow, so reading each depth against its own signal flatters the
+    /// early frames.
+    pub snr: f64,
+    /// How many entries of `channel_noise` are meaningful.
+    pub channel_count: usize,
+    /// Per-channel noise.
+    pub channel_noise: [f64; SEIZA_SNR_MAX_CHANNELS],
+}
+
+/// Read how deep a live stack is, without copying the accumulator.
+///
+/// Returns 1 and fills `sample` when the stack could be measured, 0 when it
+/// could not — too small a frame, or too little of it covered, which is an
+/// ordinary answer early in a build rather than an error — and -1 on failure,
+/// with `error_out` set.
+///
+/// # Safety
+///
+/// `stacker` must be a live `SeizaLiveStacker` pointer and `sample` must point
+/// at writable storage for one `SeizaSnrSample`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_live_stacker_measure_depth(
+    stacker: *const SeizaLiveStacker,
+    sample: *mut SeizaSnrSample,
+    error_out: *mut *mut c_char,
+) -> i32 {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let stacker = unsafe { required_live_stacker(stacker)? };
+        if sample.is_null() {
+            return Err("sample is required".into());
+        }
+        let Some(measured) = rust_measure_depth(stacker.stacker.view()) else {
+            return Ok(0);
+        };
+        let mut channel_noise = [0.0f64; SEIZA_SNR_MAX_CHANNELS];
+        let channel_count = measured.channel_noise.len().min(SEIZA_SNR_MAX_CHANNELS);
+        channel_noise[..channel_count].copy_from_slice(&measured.channel_noise[..channel_count]);
+        unsafe {
+            *sample = SeizaSnrSample {
+                frames: measured.frames,
+                noise: measured.noise,
+                background: measured.background,
+                signal: measured.signal,
+                snr: measured.snr(),
+                channel_count,
+                channel_noise,
+            };
+        }
+        Ok(1)
+    })
+    .unwrap_or(-1)
+}
+
+/// The depths a build of `total` frames should measure at: the doubling
+/// ladder, and the full set.
+///
+/// Writes up to `out_len` depths into `out` and returns how many the ladder
+/// has in total, which may exceed `out_len`. Pass a null `out` with a zero
+/// `out_len` to ask for the count alone.
+///
+/// # Safety
+///
+/// `out` must point at writable storage for `out_len` values, or be null when
+/// `out_len` is zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_checkpoint_depths(
+    total: usize,
+    out: *mut usize,
+    out_len: usize,
+) -> usize {
+    let depths = rust_checkpoint_depths(total);
+    if !out.is_null() && out_len > 0 {
+        let copied = depths.len().min(out_len);
+        unsafe { ptr::copy_nonoverlapping(depths.as_ptr(), out, copied) };
+    }
+    depths.len()
+}
+
+// ---------------------------------------------------------------------------
+// Deciding which calibration frames belong together
+// ---------------------------------------------------------------------------
+
+/// Unknown, for the numeric fields of [`SeizaFrameSignature`]. Any non-finite
+/// value reads as unknown; this is the one to write.
+pub const SEIZA_FRAME_UNKNOWN: f64 = f64::NAN;
+
+/// What a frame was shot with, as far as matching cares.
+///
+/// Text fields are null when unknown; numeric fields are `NAN`
+/// ([`SEIZA_FRAME_UNKNOWN`]). Integer-valued settings are carried as doubles
+/// so one sentinel covers every field; every value a camera reports is exact
+/// in a double.
+///
+/// A missing value on the *candidate* side disqualifies it and a missing value
+/// on the *reference* side accepts what it is offered: a light that does not
+/// record its gain cannot rule anything out, while a calibration frame that
+/// does not record its gain cannot prove it belongs. Rotation is the exception
+/// — unknown on either side matches.
+///
+/// Initialize with [`seiza_frame_signature_init`] rather than zeroing, which
+/// would read as gain 0 rather than unknown gain.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SeizaFrameSignature {
+    pub camera: *const c_char,
+    pub telescope: *const c_char,
+    pub bayer_pattern: *const c_char,
+    pub filter: *const c_char,
+    pub width: f64,
+    pub height: f64,
+    pub channels: f64,
+    pub binning_x: f64,
+    pub binning_y: f64,
+    pub gain: f64,
+    pub offset: f64,
+    pub readout_mode: f64,
+    pub focal_length_mm: f64,
+    pub rotation_deg: f64,
+    pub exposure_seconds: f64,
+    pub camera_temp_c: f64,
+    pub captured_at_unix: f64,
+}
+
+impl Default for SeizaFrameSignature {
+    fn default() -> Self {
+        Self {
+            camera: ptr::null(),
+            telescope: ptr::null(),
+            bayer_pattern: ptr::null(),
+            filter: ptr::null(),
+            width: SEIZA_FRAME_UNKNOWN,
+            height: SEIZA_FRAME_UNKNOWN,
+            channels: SEIZA_FRAME_UNKNOWN,
+            binning_x: SEIZA_FRAME_UNKNOWN,
+            binning_y: SEIZA_FRAME_UNKNOWN,
+            gain: SEIZA_FRAME_UNKNOWN,
+            offset: SEIZA_FRAME_UNKNOWN,
+            readout_mode: SEIZA_FRAME_UNKNOWN,
+            focal_length_mm: SEIZA_FRAME_UNKNOWN,
+            rotation_deg: SEIZA_FRAME_UNKNOWN,
+            exposure_seconds: SEIZA_FRAME_UNKNOWN,
+            camera_temp_c: SEIZA_FRAME_UNKNOWN,
+            captured_at_unix: SEIZA_FRAME_UNKNOWN,
+        }
+    }
+}
+
+/// Fill a signature with "nothing known", ready for the caller to set the
+/// fields it has.
+///
+/// # Safety
+///
+/// `signature` must point at writable storage for one `SeizaFrameSignature`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_frame_signature_init(signature: *mut SeizaFrameSignature) {
+    if !signature.is_null() {
+        unsafe { *signature = SeizaFrameSignature::default() };
+    }
+}
+
+fn optional_number(value: f64) -> Option<f64> {
+    value.is_finite().then_some(value)
+}
+
+fn optional_integer(value: f64) -> Option<i64> {
+    value.is_finite().then_some(value as i64)
+}
+
+unsafe fn optional_text(value: *const c_char) -> Result<Option<String>, String> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    unsafe { CStr::from_ptr(value) }
+        .to_str()
+        .map(|text| Some(text.to_owned()))
+        .map_err(|error| format!("signature text is not valid UTF-8: {error}"))
+}
+
+unsafe fn frame_signature(
+    signature: *const SeizaFrameSignature,
+) -> Result<seiza_calibration::FrameSignature, String> {
+    let signature = unsafe { signature.as_ref() }.ok_or("frame signature is required")?;
+    Ok(seiza_calibration::FrameSignature {
+        camera: unsafe { optional_text(signature.camera) }?,
+        telescope: unsafe { optional_text(signature.telescope) }?,
+        bayer_pattern: unsafe { optional_text(signature.bayer_pattern) }?,
+        filter: unsafe { optional_text(signature.filter) }?,
+        width: optional_integer(signature.width),
+        height: optional_integer(signature.height),
+        channels: optional_integer(signature.channels),
+        binning_x: optional_integer(signature.binning_x),
+        binning_y: optional_integer(signature.binning_y),
+        gain: optional_integer(signature.gain),
+        offset: optional_integer(signature.offset),
+        readout_mode: optional_integer(signature.readout_mode),
+        focal_length_mm: optional_number(signature.focal_length_mm),
+        rotation_deg: optional_number(signature.rotation_deg),
+        exposure_seconds: optional_number(signature.exposure_seconds),
+        camera_temp_c: optional_number(signature.camera_temp_c),
+        captured_at_unix: optional_integer(signature.captured_at_unix),
+    })
+}
+
+/// Whether two frames came off the same sensor in the same mode. Returns 1 for
+/// a match, 0 for a mismatch, -1 on failure with `error_out` set.
+///
+/// # Safety
+///
+/// Both pointers must reference initialized `SeizaFrameSignature` values, with
+/// any text fields either null or valid UTF-8 C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_calibration_sensor_matches(
+    reference: *const SeizaFrameSignature,
+    candidate: *const SeizaFrameSignature,
+    error_out: *mut *mut c_char,
+) -> i32 {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let reference = unsafe { frame_signature(reference) }?;
+        let candidate = unsafe { frame_signature(candidate) }?;
+        Ok(i32::from(seiza_calibration::sensor_matches(
+            &reference, &candidate,
+        )))
+    })
+    .unwrap_or(-1)
+}
+
+/// Whether a flat describes the same optical path as what it would correct —
+/// filter, telescope, focal length and rotator angle. Returns 1, 0, or -1 as
+/// [`seiza_calibration_sensor_matches`] does.
+///
+/// # Safety
+///
+/// As [`seiza_calibration_sensor_matches`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_calibration_optics_match(
+    reference: *const SeizaFrameSignature,
+    candidate: *const SeizaFrameSignature,
+    error_out: *mut *mut c_char,
+) -> i32 {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let reference = unsafe { frame_signature(reference) }?;
+        let candidate = unsafe { frame_signature(candidate) }?;
+        Ok(i32::from(seiza_calibration::optics_match(
+            &reference,
+            &candidate,
+            &seiza_calibration::MatchTolerances::default(),
+        )))
+    })
+    .unwrap_or(-1)
+}
+
+/// Whether a dark's exposure and sensor temperature suit the frame it would be
+/// subtracted from. Pass `NAN` for either reading that is unknown. Returns 1
+/// for a match and 0 for a mismatch.
+#[unsafe(no_mangle)]
+pub extern "C" fn seiza_calibration_dark_matches(
+    reference_exposure_seconds: f64,
+    candidate_exposure_seconds: f64,
+    reference_temp_c: f64,
+    candidate_temp_c: f64,
+) -> i32 {
+    let tolerances = seiza_calibration::MatchTolerances::default();
+    let matched = seiza_calibration::exposure_matches(
+        optional_number(reference_exposure_seconds),
+        optional_number(candidate_exposure_seconds),
+        &tolerances,
+    ) && seiza_calibration::temperature_matches(
+        optional_number(reference_temp_c),
+        optional_number(candidate_temp_c),
+        &tolerances,
+    );
+    i32::from(matched)
+}
+
+/// Whether two rotator angles are close enough to share a flat. Wraps at 360,
+/// and `NAN` on either side matches — a missing angle means the rig had no
+/// rotator, or the record predates keeping one.
+#[unsafe(no_mangle)]
+pub extern "C" fn seiza_calibration_rotation_matches(
+    reference_deg: f64,
+    candidate_deg: f64,
+    tolerance_deg: f64,
+) -> i32 {
+    i32::from(seiza_calibration::rotation_matches(
+        optional_number(reference_deg),
+        optional_number(candidate_deg),
+        tolerance_deg,
+    ))
+}
+
+/// Fit the camera pedestal in `light`, in the light's own units.
+///
+/// Dividing by a flat only works on a signal that starts at zero; without a
+/// bias or dark master the offset is still there. Sky background varies with
+/// the flat's own response, so the intercept of that line is the part that
+/// does not.
+///
+/// Returns 1 and writes `pedestal` when the fit succeeded, 0 when the frame
+/// cannot support one — too few usable tiles, a flat too uniform to give the
+/// line a lever, or a slope saying the model does not describe this field —
+/// and -1 on failure with `error_out` set.
+///
+/// The fit reads low by roughly 0.8 times the frame's noise, by construction.
+/// That is the safe direction, and it cancels when comparing two frames.
+///
+/// # Safety
+///
+/// `light` and `flat` must each point at `width * height` readable floats.
+/// `pedestal` must point at writable storage for one float.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_calibration_fit_flat_pedestal(
+    light: *const f32,
+    flat: *const f32,
+    width: usize,
+    height: usize,
+    pedestal: *mut f32,
+    error_out: *mut *mut c_char,
+) -> i32 {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        if light.is_null() || flat.is_null() || pedestal.is_null() {
+            return Err("light, flat and pedestal are required".into());
+        }
+        let samples = width
+            .checked_mul(height)
+            .ok_or("image dimensions overflow")?;
+        if samples == 0 {
+            return Err("image dimensions must be non-zero".into());
+        }
+        let light = unsafe { std::slice::from_raw_parts(light, samples) };
+        let flat = unsafe { std::slice::from_raw_parts(flat, samples) };
+        let light = seiza_calibration::LinearImageRef::new(light, width, height, 1)
+            .map_err(|error| error.to_string())?;
+        let flat = seiza_calibration::LinearImageRef::new(flat, width, height, 1)
+            .map_err(|error| error.to_string())?;
+        let Some(fitted) = seiza_calibration::fit_flat_pedestal(light, flat) else {
+            return Ok(0);
+        };
+        unsafe { *pedestal = fitted };
+        Ok(1)
+    })
+    .unwrap_or(-1)
 }
