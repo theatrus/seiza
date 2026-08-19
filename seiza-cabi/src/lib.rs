@@ -6044,6 +6044,11 @@ pub const SEIZA_FRAME_HAS_CAPTURED_AT: u32 = 1 << 12;
 /// one's flag — `light.gain = 100;` then
 /// `light.known |= SEIZA_FRAME_HAS_GAIN;`. Text fields need no flag.
 ///
+/// C++ callers should write `SeizaFrameSignature light{};` rather than
+/// `= {0}`; the C spelling is correct but warns under
+/// `-Wmissing-field-initializers`. Both zero the struct, which is what
+/// "nothing recorded" is.
+///
 /// A missing value on the *candidate* side disqualifies it and a missing value
 /// on the *reference* side accepts what it is offered: a light that does not
 /// record its gain cannot rule anything out, while a calibration frame that
@@ -6407,8 +6412,8 @@ pub extern "C" fn seiza_calibration_rotation_matches(
 /// and -1 when the caller passed something unusable, with `error_out` set.
 ///
 /// **Test the return against 1, not for truth.** -1 is non-zero. `pedestal` is
-/// cleared to zero on entry and only carries a fit when the return is exactly
-/// 1.
+/// set to NaN on entry and only carries a fit when the return is exactly 1 —
+/// zero would be ambiguous, since a camera with no offset fits exactly that.
 ///
 /// The fit reads low by roughly 0.8 times the frame's noise, by construction.
 /// That is the safe direction, and it cancels when comparing two frames.
@@ -6428,7 +6433,10 @@ pub unsafe extern "C" fn seiza_calibration_fit_flat_pedestal(
 ) -> i32 {
     clear_error(error_out);
     if !pedestal.is_null() {
-        unsafe { *pedestal = 0.0 };
+        // NaN, not zero: a camera with no offset fits a pedestal of exactly
+        // zero, so clearing to zero would leave "declined" and "fitted zero"
+        // indistinguishable for a caller who ignores the return code.
+        unsafe { *pedestal = f32::NAN };
     }
     ffi_result(error_out, || {
         if light.is_null() || flat.is_null() || pedestal.is_null() {
