@@ -4312,6 +4312,59 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    /// A tolerance a caller cannot express is one that falls back, not one
+    /// that silently matches nothing.
+    #[test]
+    fn tolerance_overrides_fall_back_when_they_cannot_decide() {
+        let defaults = seiza_calibration::MatchTolerances::default();
+
+        // No struct at all, and a zeroed one, both mean "every default".
+        assert_eq!(unsafe { match_tolerances(ptr::null()) }, defaults);
+        let zeroed = SeizaMatchTolerances::default();
+        assert_eq!(unsafe { match_tolerances(&zeroed) }, defaults);
+
+        // A flag set to a usable value is taken.
+        let mut tuned = SeizaMatchTolerances {
+            known: SEIZA_TOLERANCE_HAS_ROTATION,
+            rotation_deg: 5.0,
+            ..Default::default()
+        };
+        assert_eq!(unsafe { match_tolerances(&tuned) }.rotation_deg, 5.0);
+        // ...and only that one.
+        assert_eq!(
+            unsafe { match_tolerances(&tuned) }.exposure_seconds,
+            defaults.exposure_seconds
+        );
+
+        // Zero is a real ask: these must be exactly equal.
+        tuned.rotation_deg = 0.0;
+        assert_eq!(unsafe { match_tolerances(&tuned) }.rotation_deg, 0.0);
+
+        // Neither of these can decide anything, so neither is taken.
+        // `(a - b).abs() <= -1.0` is false for every pair, which would match
+        // nothing and explain nothing.
+        for nonsense in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            tuned.rotation_deg = nonsense;
+            assert_eq!(
+                unsafe { match_tolerances(&tuned) }.rotation_deg,
+                defaults.rotation_deg,
+                "{nonsense} should fall back to the default"
+            );
+        }
+
+        // The session window is a u64 and cannot be negative or NaN, so it is
+        // taken whenever its flag is set — including zero.
+        let session = SeizaMatchTolerances {
+            known: SEIZA_TOLERANCE_HAS_FLAT_SESSION,
+            flat_session_seconds: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            unsafe { match_tolerances(&session) }.flat_session_seconds,
+            0
+        );
+    }
+
     fn card(value: &str) -> [u8; 80] {
         let mut card = [b' '; 80];
         card[..value.len()].copy_from_slice(value.as_bytes());
@@ -6224,7 +6277,8 @@ pub const SEIZA_TOLERANCE_HAS_FLAT_SESSION: u32 = 1 << 5;
 /// Every field is optional: set a `SEIZA_TOLERANCE_HAS_*` bit to override that
 /// tolerance, leave it clear to take the default. A zeroed struct therefore
 /// means "all defaults", and passing a null pointer anywhere one of these is
-/// accepted means the same.
+/// accepted means the same. An override that is negative or not a number is
+/// ignored in favour of the default.
 ///
 /// The defaults are what a rig's own scatter needs rather than what a
 /// specification promises. [`seiza_match_tolerances_default`] fills one in if
@@ -6280,8 +6334,9 @@ pub unsafe extern "C" fn seiza_match_tolerances_default(tolerances: *mut SeizaMa
 }
 
 /// A null pointer, a zeroed struct, or any cleared flag all fall back to the
-/// built-in default for that tolerance. A non-finite override is ignored the
-/// same way: a tolerance that is not a number cannot decide anything.
+/// built-in default for that tolerance. So does an override that is not a
+/// number, or is negative: neither can decide anything, and taking them
+/// literally would quietly match nothing.
 unsafe fn match_tolerances(
     tolerances: *const SeizaMatchTolerances,
 ) -> seiza_calibration::MatchTolerances {
@@ -6289,7 +6344,12 @@ unsafe fn match_tolerances(
     let Some(overrides) = (unsafe { tolerances.as_ref() }) else {
         return resolved;
     };
-    let set = |flag: u32, value: f64| overrides.known & flag != 0 && value.is_finite();
+    // Finite *and* not negative. `(a - b).abs() <= -1.0` is false for every
+    // pair, so a negative tolerance would match nothing and say nothing about
+    // why — the same silent failure a zeroed signature used to cause, reached
+    // by a different mistake.
+    let set =
+        |flag: u32, value: f64| overrides.known & flag != 0 && value.is_finite() && value >= 0.0;
     if set(SEIZA_TOLERANCE_HAS_EXPOSURE, overrides.exposure_seconds) {
         resolved.exposure_seconds = overrides.exposure_seconds;
     }
