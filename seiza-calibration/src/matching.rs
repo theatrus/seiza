@@ -199,12 +199,17 @@ pub fn temperature_matches(
 ///
 /// `flats` tightens the rule: flats additionally have to share a session and a
 /// rotator angle, because they describe one night's dust at one angle.
+///
+/// `minimum` is treated as at least one. A zero would make every cluster large
+/// enough and return whatever the first candidate happened to agree with,
+/// which is not an answer anyone means to ask for.
 pub fn coherent_subset(
     candidates: &[FrameSignature],
     flats: bool,
     minimum: usize,
     tolerances: &MatchTolerances,
 ) -> Vec<FrameSignature> {
+    let minimum = minimum.max(1);
     let coherent = |anchor: &FrameSignature, frame: &FrameSignature| -> bool {
         let temperature = match (anchor.camera_temp_c, frame.camera_temp_c) {
             (Some(anchor), Some(frame)) => {
@@ -479,6 +484,22 @@ mod tests {
         ];
         let chosen = coherent_subset(&candidates, true, 2, &tolerances);
         assert_eq!(chosen.len(), 3, "the complete session wins over the stray");
+    }
+
+    #[test]
+    fn a_minimum_of_zero_is_read_as_one() {
+        let tolerances = MatchTolerances::default();
+        let at = |seconds: i64| FrameSignature {
+            captured_at_unix: Some(seconds),
+            ..signature()
+        };
+        // Two sessions a month apart. A zero minimum would take whatever the
+        // first anchor agreed with and call it done, silently.
+        let candidates = vec![at(1_700_000_000), at(1_700_000_600), at(1_703_000_000)];
+        assert_eq!(
+            coherent_subset(&candidates, true, 0, &tolerances).len(),
+            coherent_subset(&candidates, true, 1, &tolerances).len()
+        );
     }
 
     #[test]
