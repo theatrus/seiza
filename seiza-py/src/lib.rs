@@ -3,6 +3,7 @@
 
 mod arrays;
 mod background;
+mod calibration;
 mod color;
 mod deconvolution;
 mod imgproc;
@@ -742,6 +743,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     deconvolution::register(m)?;
     imgproc::register(m)?;
     stacking::register(m)?;
+    calibration::register(m)?;
     stretch::register(m)?;
     m.add("SolveError", m.py().get_type::<SolveError>())?;
     m.add("EngineError", m.py().get_type::<EngineError>())?;

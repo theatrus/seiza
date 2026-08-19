@@ -78,6 +78,70 @@
 #define SEIZA_BACKGROUND_CORRECTION_DIVIDE 1
 
 /*
+ The most channels a measurement reports separately: mono or debayered RGB.
+ */
+#define SEIZA_SNR_MAX_CHANNELS 3
+
+/*
+ Which numeric fields of a [`SeizaFrameSignature`] were actually recorded.
+
+ A cleared bit means "not recorded", which is not the same as zero: a camera
+ really can be set to gain 0, and a frame that does not say what gain it used
+ is a different thing from one that says zero.
+
+ The flags exist so that a zeroed struct — `= {0}`, `calloc`, `memset`, all
+ of them ordinary C — means "nothing recorded" rather than "every setting is
+ zero". Getting that backwards silently inverts every comparison, so the
+ safe reading is the one you get for free.
+ */
+#define SEIZA_FRAME_HAS_WIDTH (1 << 0)
+
+#define SEIZA_FRAME_HAS_HEIGHT (1 << 1)
+
+#define SEIZA_FRAME_HAS_CHANNELS (1 << 2)
+
+#define SEIZA_FRAME_HAS_BINNING_X (1 << 3)
+
+#define SEIZA_FRAME_HAS_BINNING_Y (1 << 4)
+
+#define SEIZA_FRAME_HAS_GAIN (1 << 5)
+
+#define SEIZA_FRAME_HAS_OFFSET (1 << 6)
+
+#define SEIZA_FRAME_HAS_READOUT_MODE (1 << 7)
+
+#define SEIZA_FRAME_HAS_FOCAL_LENGTH (1 << 8)
+
+#define SEIZA_FRAME_HAS_ROTATION (1 << 9)
+
+#define SEIZA_FRAME_HAS_EXPOSURE (1 << 10)
+
+#define SEIZA_FRAME_HAS_CAMERA_TEMP (1 << 11)
+
+#define SEIZA_FRAME_HAS_CAPTURED_AT (1 << 12)
+
+/*
+ Which fields of a [`SeizaMatchTolerances`] the caller set. A cleared bit
+ takes the built-in default for that tolerance.
+
+ A zero tolerance is a legitimate ask — "these must be exactly equal" — so
+ it cannot double as "unset". The flags keep both expressible, and make a
+ zeroed struct mean "every default", which is what a caller who zeroes one
+ almost certainly wants.
+ */
+#define SEIZA_TOLERANCE_HAS_EXPOSURE (1 << 0)
+
+#define SEIZA_TOLERANCE_HAS_DARK_TEMPERATURE (1 << 1)
+
+#define SEIZA_TOLERANCE_HAS_MASTER_TEMPERATURE (1 << 2)
+
+#define SEIZA_TOLERANCE_HAS_ROTATION (1 << 3)
+
+#define SEIZA_TOLERANCE_HAS_FOCAL_LENGTH (1 << 4)
+
+#define SEIZA_TOLERANCE_HAS_FLAT_SESSION (1 << 5)
+
+/*
  An opaque fitted background model. Release it with
  [`seiza_background_model_free`]. Its diagnostics string is borrowed and
  remains valid until the model is freed.
@@ -113,6 +177,140 @@ typedef struct SeizaRenderedImage16 SeizaRenderedImage16;
 typedef struct SeizaStackSnapshot SeizaStackSnapshot;
 
 typedef void (*SeizaCatalogSetupProgressCallback)(const char*, void*);
+
+/*
+ One reading of an accumulator, in the stack's own units. Only ratios
+ between readings of the same stack mean anything.
+ */
+typedef struct {
+  /*
+   Frames the accumulator had taken when this was measured.
+   */
+  uint32_t frames;
+  /*
+   Pixel-scale noise of the integration, averaged across channels.
+   */
+  double noise;
+  /*
+   Median sample, averaged across channels.
+   */
+  double background;
+  /*
+   How far the brightest one percent sits above the background.
+   */
+  double signal;
+  /*
+   `signal / noise` for this one reading. To compare depths, divide one
+   signal — normally the deepest measured — by each depth's noise instead:
+   the brightest-percent statistic is itself lifted by noise where a stack
+   is shallow, so reading each depth against its own signal flatters the
+   early frames.
+   */
+  double snr;
+  /*
+   How many entries of `channel_noise` are meaningful.
+   */
+  size_t channel_count;
+  /*
+   Per-channel noise.
+   */
+  double channel_noise[SEIZA_SNR_MAX_CHANNELS];
+} SeizaSnrSample;
+
+/*
+ What a frame was shot with, as far as matching cares.
+
+ Text fields are null when unknown. Numeric fields are read only when their
+ `SEIZA_FRAME_HAS_*` bit is set in `known`, so a zeroed struct means nothing
+ was recorded — the safe reading, and the one plain `= {0}` gives you. A
+ non-finite value also reads as unknown, whatever its bit says.
+
+ Integer-valued settings are carried as doubles so the struct has one shape;
+ every value a camera reports is exact in a double.
+
+ To fill one: zero it, assign the fields the frame recorded, and set each
+ one's flag — `light.gain = 100;` then
+ `light.known |= SEIZA_FRAME_HAS_GAIN;`. Text fields need no flag.
+
+ C++ callers should write `SeizaFrameSignature light{};` rather than
+ `= {0}`; the C spelling is correct but warns under
+ `-Wmissing-field-initializers`. Both zero the struct, which is what
+ "nothing recorded" is.
+
+ A missing value on the *candidate* side disqualifies it and a missing value
+ on the *reference* side accepts what it is offered: a light that does not
+ record its gain cannot rule anything out, while a calibration frame that
+ does not record its gain cannot prove it belongs. Rotation is the exception
+ — unknown on either side matches.
+ */
+typedef struct {
+  /*
+   Bitwise OR of the `SEIZA_FRAME_HAS_*` flags for the numeric fields
+   this frame actually recorded.
+   */
+  uint32_t known;
+  const char *camera;
+  const char *telescope;
+  const char *bayer_pattern;
+  const char *filter;
+  double width;
+  double height;
+  double channels;
+  double binning_x;
+  double binning_y;
+  double gain;
+  double offset;
+  double readout_mode;
+  double focal_length_mm;
+  double rotation_deg;
+  double exposure_seconds;
+  double camera_temp_c;
+  double captured_at_unix;
+} SeizaFrameSignature;
+
+/*
+ How close two readings have to be to count as the same.
+
+ Every field is optional: set a `SEIZA_TOLERANCE_HAS_*` bit to override that
+ tolerance, leave it clear to take the default. A zeroed struct therefore
+ means "all defaults", and passing a null pointer anywhere one of these is
+ accepted means the same. An override that is negative or not a number is
+ ignored in favour of the default.
+
+ The defaults are what a rig's own scatter needs rather than what a
+ specification promises. [`seiza_match_tolerances_default`] fills one in if
+ you want to read or adjust them.
+ */
+typedef struct {
+  /*
+   Bitwise OR of the `SEIZA_TOLERANCE_HAS_*` flags this struct overrides.
+   */
+  uint32_t known;
+  /*
+   Dark exposure against light exposure, in seconds.
+   */
+  double exposure_seconds;
+  /*
+   Dark sensor temperature against light sensor temperature, in Celsius.
+   */
+  double dark_temperature_c;
+  /*
+   Sensor temperature within one master's input set, in Celsius.
+   */
+  double master_temperature_c;
+  /*
+   Rotator angle between a flat and what it corrects, in degrees.
+   */
+  double rotation_deg;
+  /*
+   Focal length between a flat and what it corrects, in millimetres.
+   */
+  double focal_length_mm;
+  /*
+   How far apart flats in one master may have been shot, in seconds.
+   */
+  uint64_t flat_session_seconds;
+} SeizaMatchTolerances;
 
 #ifdef __cplusplus
 extern "C" {
@@ -874,6 +1072,159 @@ char *seiza_solve_image_json(const char *path,
  already been freed.
  */
 void seiza_string_free(char *value);
+
+/*
+ Read how deep a live stack is, without copying the accumulator.
+
+ Returns 1 and fills `sample` when the stack could be measured, 0 when it
+ could not — too small a frame, or too little of it covered, which is an
+ ordinary answer early in a build rather than an error — and -1 on failure,
+ with `error_out` set.
+
+ **Test the return against 1, not for truth.** -1 is non-zero, so
+ `if (seiza_live_stacker_measure_depth(...))` is true on failure. `sample`
+ is cleared to zero on entry and only carries a reading when the return is
+ exactly 1.
+
+ # Safety
+
+ `stacker` must be a live `SeizaLiveStacker` pointer and `sample` must point
+ at writable storage for one `SeizaSnrSample`.
+ */
+int32_t seiza_live_stacker_measure_depth(const SeizaLiveStacker *stacker,
+                                         SeizaSnrSample *sample,
+                                         char **error_out);
+
+/*
+ The depths a build of `total` frames should measure at: the doubling
+ ladder, and the full set.
+
+ Writes up to `out_len` depths into `out` and returns how many the ladder
+ has in total, which may exceed `out_len`. Pass a null `out` with a zero
+ `out_len` to ask for the count alone.
+
+ # Safety
+
+ `out` must point at writable storage for `out_len` values, or be null when
+ `out_len` is zero.
+ */
+size_t seiza_checkpoint_depths(size_t total, size_t *out, size_t out_len);
+
+/*
+ Fill a signature with "nothing recorded". Equivalent to zeroing it, and
+ offered so callers in languages without designated initializers have a
+ spelling.
+
+ # Safety
+
+ `signature` must point at writable storage for one `SeizaFrameSignature`.
+ */
+void seiza_frame_signature_init(SeizaFrameSignature *signature);
+
+/*
+ Whether two frames came off the same sensor in the same mode. Returns 1 for
+ a match, 0 for a mismatch, -1 on failure with `error_out` set.
+
+ # Safety
+
+ Both pointers must reference initialized `SeizaFrameSignature` values, with
+ any text fields either null or valid UTF-8 C strings.
+ */
+int32_t seiza_calibration_sensor_matches(const SeizaFrameSignature *reference,
+                                         const SeizaFrameSignature *candidate,
+                                         char **error_out);
+
+/*
+ Fill `tolerances` with the built-in defaults and every flag set, so a
+ caller can read them or adjust one and pass the rest through unchanged.
+
+ # Safety
+
+ `tolerances` must point at writable storage for one
+ `SeizaMatchTolerances`.
+ */
+void seiza_match_tolerances_default(SeizaMatchTolerances *tolerances);
+
+/*
+ Whether a flat describes the same optical path as what it would correct —
+ filter, telescope, focal length and rotator angle. Returns 1, 0, or -1 as
+ [`seiza_calibration_sensor_matches`] does.
+
+ `tolerances` may be null for the defaults; see [`SeizaMatchTolerances`].
+
+ # Safety
+
+ As [`seiza_calibration_sensor_matches`]. `tolerances` must be null or
+ reference an initialized `SeizaMatchTolerances`.
+ */
+int32_t seiza_calibration_optics_match(const SeizaFrameSignature *reference,
+                                       const SeizaFrameSignature *candidate,
+                                       const SeizaMatchTolerances *tolerances,
+                                       char **error_out);
+
+/*
+ Whether a dark's exposure and sensor temperature suit the frame it would be
+ subtracted from. Reads `exposure_seconds` and `camera_temp_c` from both
+ signatures. Returns 1, 0, or -1 as
+ [`seiza_calibration_sensor_matches`] does.
+
+ `tolerances` may be null for the defaults; see [`SeizaMatchTolerances`].
+
+ # Safety
+
+ As [`seiza_calibration_sensor_matches`]. `tolerances` must be null or
+ reference an initialized `SeizaMatchTolerances`.
+ */
+int32_t seiza_calibration_dark_matches(const SeizaFrameSignature *reference,
+                                       const SeizaFrameSignature *candidate,
+                                       const SeizaMatchTolerances *tolerances,
+                                       char **error_out);
+
+/*
+ Whether two rotator angles are close enough to share a flat. Wraps at 360,
+ and a non-finite angle on either side matches — a missing angle means the
+ rig had no rotator, or the record predates keeping one.
+
+ Takes its tolerance directly rather than a [`SeizaMatchTolerances`], being
+ a single comparison with a single tolerance.
+ [`seiza_match_tolerances_default`] gives the value the other entry points
+ use.
+ */
+int32_t seiza_calibration_rotation_matches(double reference_deg,
+                                           double candidate_deg,
+                                           double tolerance_deg);
+
+/*
+ Fit the camera pedestal in `light`, in the light's own units.
+
+ Dividing by a flat only works on a signal that starts at zero; without a
+ bias or dark master the offset is still there. Sky background varies with
+ the flat's own response, so the intercept of that line is the part that
+ does not.
+
+ Returns 1 and writes `pedestal` when the fit succeeded, 0 when the frame
+ cannot support one — too few usable tiles, a flat too uniform to give the
+ line a lever, or a slope saying the model does not describe this field —
+ and -1 when the caller passed something unusable, with `error_out` set.
+
+ **Test the return against 1, not for truth.** -1 is non-zero. `pedestal` is
+ set to NaN on entry and only carries a fit when the return is exactly 1 —
+ zero would be ambiguous, since a camera with no offset fits exactly that.
+
+ The fit reads low by roughly 0.8 times the frame's noise, by construction.
+ That is the safe direction, and it cancels when comparing two frames.
+
+ # Safety
+
+ `light` and `flat` must each point at `width * height` readable floats.
+ `pedestal` must point at writable storage for one float.
+ */
+int32_t seiza_calibration_fit_flat_pedestal(const float *light,
+                                            const float *flat,
+                                            size_t width,
+                                            size_t height,
+                                            float *pedestal,
+                                            char **error_out);
 
 #ifdef __cplusplus
 }  // extern "C"
