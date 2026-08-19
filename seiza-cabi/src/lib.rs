@@ -6200,27 +6200,144 @@ pub unsafe extern "C" fn seiza_calibration_sensor_matches(
     .unwrap_or(-1)
 }
 
+/// Which fields of a [`SeizaMatchTolerances`] the caller set. A cleared bit
+/// takes the built-in default for that tolerance.
+///
+/// A zero tolerance is a legitimate ask — "these must be exactly equal" — so
+/// it cannot double as "unset". The flags keep both expressible, and make a
+/// zeroed struct mean "every default", which is what a caller who zeroes one
+/// almost certainly wants.
+pub const SEIZA_TOLERANCE_HAS_EXPOSURE: u32 = 1 << 0;
+pub const SEIZA_TOLERANCE_HAS_DARK_TEMPERATURE: u32 = 1 << 1;
+pub const SEIZA_TOLERANCE_HAS_MASTER_TEMPERATURE: u32 = 1 << 2;
+pub const SEIZA_TOLERANCE_HAS_ROTATION: u32 = 1 << 3;
+pub const SEIZA_TOLERANCE_HAS_FOCAL_LENGTH: u32 = 1 << 4;
+pub const SEIZA_TOLERANCE_HAS_FLAT_SESSION: u32 = 1 << 5;
+
+/// How close two readings have to be to count as the same.
+///
+/// Every field is optional: set a `SEIZA_TOLERANCE_HAS_*` bit to override that
+/// tolerance, leave it clear to take the default. A zeroed struct therefore
+/// means "all defaults", and passing a null pointer anywhere one of these is
+/// accepted means the same.
+///
+/// The defaults are what a rig's own scatter needs rather than what a
+/// specification promises. [`seiza_match_tolerances_default`] fills one in if
+/// you want to read or adjust them.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SeizaMatchTolerances {
+    /// Bitwise OR of the `SEIZA_TOLERANCE_HAS_*` flags this struct overrides.
+    pub known: u32,
+    /// Dark exposure against light exposure, in seconds.
+    pub exposure_seconds: f64,
+    /// Dark sensor temperature against light sensor temperature, in Celsius.
+    pub dark_temperature_c: f64,
+    /// Sensor temperature within one master's input set, in Celsius.
+    pub master_temperature_c: f64,
+    /// Rotator angle between a flat and what it corrects, in degrees.
+    pub rotation_deg: f64,
+    /// Focal length between a flat and what it corrects, in millimetres.
+    pub focal_length_mm: f64,
+    /// How far apart flats in one master may have been shot, in seconds.
+    pub flat_session_seconds: u64,
+}
+
+/// Fill `tolerances` with the built-in defaults and every flag set, so a
+/// caller can read them or adjust one and pass the rest through unchanged.
+///
+/// # Safety
+///
+/// `tolerances` must point at writable storage for one
+/// `SeizaMatchTolerances`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_match_tolerances_default(tolerances: *mut SeizaMatchTolerances) {
+    if tolerances.is_null() {
+        return;
+    }
+    let defaults = seiza_calibration::MatchTolerances::default();
+    unsafe {
+        *tolerances = SeizaMatchTolerances {
+            known: SEIZA_TOLERANCE_HAS_EXPOSURE
+                | SEIZA_TOLERANCE_HAS_DARK_TEMPERATURE
+                | SEIZA_TOLERANCE_HAS_MASTER_TEMPERATURE
+                | SEIZA_TOLERANCE_HAS_ROTATION
+                | SEIZA_TOLERANCE_HAS_FOCAL_LENGTH
+                | SEIZA_TOLERANCE_HAS_FLAT_SESSION,
+            exposure_seconds: defaults.exposure_seconds,
+            dark_temperature_c: defaults.dark_temperature_c,
+            master_temperature_c: defaults.master_temperature_c,
+            rotation_deg: defaults.rotation_deg,
+            focal_length_mm: defaults.focal_length_mm,
+            flat_session_seconds: defaults.flat_session_seconds,
+        };
+    }
+}
+
+/// A null pointer, a zeroed struct, or any cleared flag all fall back to the
+/// built-in default for that tolerance. A non-finite override is ignored the
+/// same way: a tolerance that is not a number cannot decide anything.
+unsafe fn match_tolerances(
+    tolerances: *const SeizaMatchTolerances,
+) -> seiza_calibration::MatchTolerances {
+    let mut resolved = seiza_calibration::MatchTolerances::default();
+    let Some(overrides) = (unsafe { tolerances.as_ref() }) else {
+        return resolved;
+    };
+    let set = |flag: u32, value: f64| overrides.known & flag != 0 && value.is_finite();
+    if set(SEIZA_TOLERANCE_HAS_EXPOSURE, overrides.exposure_seconds) {
+        resolved.exposure_seconds = overrides.exposure_seconds;
+    }
+    if set(
+        SEIZA_TOLERANCE_HAS_DARK_TEMPERATURE,
+        overrides.dark_temperature_c,
+    ) {
+        resolved.dark_temperature_c = overrides.dark_temperature_c;
+    }
+    if set(
+        SEIZA_TOLERANCE_HAS_MASTER_TEMPERATURE,
+        overrides.master_temperature_c,
+    ) {
+        resolved.master_temperature_c = overrides.master_temperature_c;
+    }
+    if set(SEIZA_TOLERANCE_HAS_ROTATION, overrides.rotation_deg) {
+        resolved.rotation_deg = overrides.rotation_deg;
+    }
+    if set(SEIZA_TOLERANCE_HAS_FOCAL_LENGTH, overrides.focal_length_mm) {
+        resolved.focal_length_mm = overrides.focal_length_mm;
+    }
+    if overrides.known & SEIZA_TOLERANCE_HAS_FLAT_SESSION != 0 {
+        resolved.flat_session_seconds = overrides.flat_session_seconds;
+    }
+    resolved
+}
+
 /// Whether a flat describes the same optical path as what it would correct —
 /// filter, telescope, focal length and rotator angle. Returns 1, 0, or -1 as
 /// [`seiza_calibration_sensor_matches`] does.
 ///
+/// `tolerances` may be null for the defaults; see [`SeizaMatchTolerances`].
+///
 /// # Safety
 ///
-/// As [`seiza_calibration_sensor_matches`].
+/// As [`seiza_calibration_sensor_matches`]. `tolerances` must be null or
+/// reference an initialized `SeizaMatchTolerances`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn seiza_calibration_optics_match(
     reference: *const SeizaFrameSignature,
     candidate: *const SeizaFrameSignature,
+    tolerances: *const SeizaMatchTolerances,
     error_out: *mut *mut c_char,
 ) -> i32 {
     clear_error(error_out);
     ffi_result(error_out, || {
         let reference = unsafe { frame_signature(reference) }?;
         let candidate = unsafe { frame_signature(candidate) }?;
+        let tolerances = unsafe { match_tolerances(tolerances) };
         Ok(i32::from(seiza_calibration::optics_match(
             &reference,
             &candidate,
-            &seiza_calibration::MatchTolerances::default(),
+            &tolerances,
         )))
     })
     .unwrap_or(-1)
@@ -6231,20 +6348,24 @@ pub unsafe extern "C" fn seiza_calibration_optics_match(
 /// signatures. Returns 1, 0, or -1 as
 /// [`seiza_calibration_sensor_matches`] does.
 ///
+/// `tolerances` may be null for the defaults; see [`SeizaMatchTolerances`].
+///
 /// # Safety
 ///
-/// As [`seiza_calibration_sensor_matches`].
+/// As [`seiza_calibration_sensor_matches`]. `tolerances` must be null or
+/// reference an initialized `SeizaMatchTolerances`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn seiza_calibration_dark_matches(
     reference: *const SeizaFrameSignature,
     candidate: *const SeizaFrameSignature,
+    tolerances: *const SeizaMatchTolerances,
     error_out: *mut *mut c_char,
 ) -> i32 {
     clear_error(error_out);
     ffi_result(error_out, || {
         let reference = unsafe { frame_signature(reference) }?;
         let candidate = unsafe { frame_signature(candidate) }?;
-        let tolerances = seiza_calibration::MatchTolerances::default();
+        let tolerances = unsafe { match_tolerances(tolerances) };
         let matched = seiza_calibration::exposure_matches(&reference, &candidate, &tolerances)
             && seiza_calibration::temperature_matches(&reference, &candidate, &tolerances);
         Ok(i32::from(matched))
@@ -6255,6 +6376,11 @@ pub unsafe extern "C" fn seiza_calibration_dark_matches(
 /// Whether two rotator angles are close enough to share a flat. Wraps at 360,
 /// and a non-finite angle on either side matches — a missing angle means the
 /// rig had no rotator, or the record predates keeping one.
+///
+/// Takes its tolerance directly rather than a [`SeizaMatchTolerances`], being
+/// a single comparison with a single tolerance.
+/// [`seiza_match_tolerances_default`] gives the value the other entry points
+/// use.
 #[unsafe(no_mangle)]
 pub extern "C" fn seiza_calibration_rotation_matches(
     reference_deg: f64,

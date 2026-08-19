@@ -121,6 +121,27 @@
 #define SEIZA_FRAME_HAS_CAPTURED_AT (1 << 12)
 
 /*
+ Which fields of a [`SeizaMatchTolerances`] the caller set. A cleared bit
+ takes the built-in default for that tolerance.
+
+ A zero tolerance is a legitimate ask — "these must be exactly equal" — so
+ it cannot double as "unset". The flags keep both expressible, and make a
+ zeroed struct mean "every default", which is what a caller who zeroes one
+ almost certainly wants.
+ */
+#define SEIZA_TOLERANCE_HAS_EXPOSURE (1 << 0)
+
+#define SEIZA_TOLERANCE_HAS_DARK_TEMPERATURE (1 << 1)
+
+#define SEIZA_TOLERANCE_HAS_MASTER_TEMPERATURE (1 << 2)
+
+#define SEIZA_TOLERANCE_HAS_ROTATION (1 << 3)
+
+#define SEIZA_TOLERANCE_HAS_FOCAL_LENGTH (1 << 4)
+
+#define SEIZA_TOLERANCE_HAS_FLAT_SESSION (1 << 5)
+
+/*
  An opaque fitted background model. Release it with
  [`seiza_background_model_free`]. Its diagnostics string is borrowed and
  remains valid until the model is freed.
@@ -241,6 +262,49 @@ typedef struct {
   double camera_temp_c;
   double captured_at_unix;
 } SeizaFrameSignature;
+
+/*
+ How close two readings have to be to count as the same.
+
+ Every field is optional: set a `SEIZA_TOLERANCE_HAS_*` bit to override that
+ tolerance, leave it clear to take the default. A zeroed struct therefore
+ means "all defaults", and passing a null pointer anywhere one of these is
+ accepted means the same.
+
+ The defaults are what a rig's own scatter needs rather than what a
+ specification promises. [`seiza_match_tolerances_default`] fills one in if
+ you want to read or adjust them.
+ */
+typedef struct {
+  /*
+   Bitwise OR of the `SEIZA_TOLERANCE_HAS_*` flags this struct overrides.
+   */
+  uint32_t known;
+  /*
+   Dark exposure against light exposure, in seconds.
+   */
+  double exposure_seconds;
+  /*
+   Dark sensor temperature against light sensor temperature, in Celsius.
+   */
+  double dark_temperature_c;
+  /*
+   Sensor temperature within one master's input set, in Celsius.
+   */
+  double master_temperature_c;
+  /*
+   Rotator angle between a flat and what it corrects, in degrees.
+   */
+  double rotation_deg;
+  /*
+   Focal length between a flat and what it corrects, in millimetres.
+   */
+  double focal_length_mm;
+  /*
+   How far apart flats in one master may have been shot, in seconds.
+   */
+  uint64_t flat_session_seconds;
+} SeizaMatchTolerances;
 
 #ifdef __cplusplus
 extern "C" {
@@ -1065,16 +1129,31 @@ int32_t seiza_calibration_sensor_matches(const SeizaFrameSignature *reference,
                                          char **error_out);
 
 /*
+ Fill `tolerances` with the built-in defaults and every flag set, so a
+ caller can read them or adjust one and pass the rest through unchanged.
+
+ # Safety
+
+ `tolerances` must point at writable storage for one
+ `SeizaMatchTolerances`.
+ */
+void seiza_match_tolerances_default(SeizaMatchTolerances *tolerances);
+
+/*
  Whether a flat describes the same optical path as what it would correct —
  filter, telescope, focal length and rotator angle. Returns 1, 0, or -1 as
  [`seiza_calibration_sensor_matches`] does.
 
+ `tolerances` may be null for the defaults; see [`SeizaMatchTolerances`].
+
  # Safety
 
- As [`seiza_calibration_sensor_matches`].
+ As [`seiza_calibration_sensor_matches`]. `tolerances` must be null or
+ reference an initialized `SeizaMatchTolerances`.
  */
 int32_t seiza_calibration_optics_match(const SeizaFrameSignature *reference,
                                        const SeizaFrameSignature *candidate,
+                                       const SeizaMatchTolerances *tolerances,
                                        char **error_out);
 
 /*
@@ -1083,18 +1162,27 @@ int32_t seiza_calibration_optics_match(const SeizaFrameSignature *reference,
  signatures. Returns 1, 0, or -1 as
  [`seiza_calibration_sensor_matches`] does.
 
+ `tolerances` may be null for the defaults; see [`SeizaMatchTolerances`].
+
  # Safety
 
- As [`seiza_calibration_sensor_matches`].
+ As [`seiza_calibration_sensor_matches`]. `tolerances` must be null or
+ reference an initialized `SeizaMatchTolerances`.
  */
 int32_t seiza_calibration_dark_matches(const SeizaFrameSignature *reference,
                                        const SeizaFrameSignature *candidate,
+                                       const SeizaMatchTolerances *tolerances,
                                        char **error_out);
 
 /*
  Whether two rotator angles are close enough to share a flat. Wraps at 360,
  and a non-finite angle on either side matches — a missing angle means the
  rig had no rotator, or the record predates keeping one.
+
+ Takes its tolerance directly rather than a [`SeizaMatchTolerances`], being
+ a single comparison with a single tolerance.
+ [`seiza_match_tolerances_default`] gives the value the other entry points
+ use.
  */
 int32_t seiza_calibration_rotation_matches(double reference_deg,
                                            double candidate_deg,
