@@ -82,7 +82,43 @@
  */
 #define SEIZA_SNR_MAX_CHANNELS 3
 
+/*
+ Which numeric fields of a [`SeizaFrameSignature`] were actually recorded.
 
+ A cleared bit means "not recorded", which is not the same as zero: a camera
+ really can be set to gain 0, and a frame that does not say what gain it used
+ is a different thing from one that says zero.
+
+ The flags exist so that a zeroed struct — `= {0}`, `calloc`, `memset`, all
+ of them ordinary C — means "nothing recorded" rather than "every setting is
+ zero". Getting that backwards silently inverts every comparison, so the
+ safe reading is the one you get for free.
+ */
+#define SEIZA_FRAME_HAS_WIDTH (1 << 0)
+
+#define SEIZA_FRAME_HAS_HEIGHT (1 << 1)
+
+#define SEIZA_FRAME_HAS_CHANNELS (1 << 2)
+
+#define SEIZA_FRAME_HAS_BINNING_X (1 << 3)
+
+#define SEIZA_FRAME_HAS_BINNING_Y (1 << 4)
+
+#define SEIZA_FRAME_HAS_GAIN (1 << 5)
+
+#define SEIZA_FRAME_HAS_OFFSET (1 << 6)
+
+#define SEIZA_FRAME_HAS_READOUT_MODE (1 << 7)
+
+#define SEIZA_FRAME_HAS_FOCAL_LENGTH (1 << 8)
+
+#define SEIZA_FRAME_HAS_ROTATION (1 << 9)
+
+#define SEIZA_FRAME_HAS_EXPOSURE (1 << 10)
+
+#define SEIZA_FRAME_HAS_CAMERA_TEMP (1 << 11)
+
+#define SEIZA_FRAME_HAS_CAPTURED_AT (1 << 12)
 
 /*
  An opaque fitted background model. Release it with
@@ -163,21 +199,30 @@ typedef struct {
 /*
  What a frame was shot with, as far as matching cares.
 
- Text fields are null when unknown; numeric fields are `NAN`
- ([`SEIZA_FRAME_UNKNOWN`]). Integer-valued settings are carried as doubles
- so one sentinel covers every field; every value a camera reports is exact
- in a double.
+ Text fields are null when unknown. Numeric fields are read only when their
+ `SEIZA_FRAME_HAS_*` bit is set in `known`, so a zeroed struct means nothing
+ was recorded — the safe reading, and the one plain `= {0}` gives you. A
+ non-finite value also reads as unknown, whatever its bit says.
+
+ Integer-valued settings are carried as doubles so the struct has one shape;
+ every value a camera reports is exact in a double.
+
+ To fill one: zero it, assign the fields the frame recorded, and set each
+ one's flag — `light.gain = 100;` then
+ `light.known |= SEIZA_FRAME_HAS_GAIN;`. Text fields need no flag.
 
  A missing value on the *candidate* side disqualifies it and a missing value
  on the *reference* side accepts what it is offered: a light that does not
  record its gain cannot rule anything out, while a calibration frame that
  does not record its gain cannot prove it belongs. Rotation is the exception
  — unknown on either side matches.
-
- Initialize with [`seiza_frame_signature_init`] rather than zeroing, which
- would read as gain 0 rather than unknown gain.
  */
 typedef struct {
+  /*
+   Bitwise OR of the `SEIZA_FRAME_HAS_*` flags for the numeric fields
+   this frame actually recorded.
+   */
+  uint32_t known;
   const char *camera;
   const char *telescope;
   const char *bayer_pattern;
@@ -966,6 +1011,11 @@ void seiza_string_free(char *value);
  ordinary answer early in a build rather than an error — and -1 on failure,
  with `error_out` set.
 
+ **Test the return against 1, not for truth.** -1 is non-zero, so
+ `if (seiza_live_stacker_measure_depth(...))` is true on failure. `sample`
+ is cleared to zero on entry and only carries a reading when the return is
+ exactly 1.
+
  # Safety
 
  `stacker` must be a live `SeizaLiveStacker` pointer and `sample` must point
@@ -991,8 +1041,9 @@ int32_t seiza_live_stacker_measure_depth(const SeizaLiveStacker *stacker,
 size_t seiza_checkpoint_depths(size_t total, size_t *out, size_t out_len);
 
 /*
- Fill a signature with "nothing known", ready for the caller to set the
- fields it has.
+ Fill a signature with "nothing recorded". Equivalent to zeroing it, and
+ offered so callers in languages without designated initializers have a
+ spelling.
 
  # Safety
 
@@ -1042,8 +1093,8 @@ int32_t seiza_calibration_dark_matches(const SeizaFrameSignature *reference,
 
 /*
  Whether two rotator angles are close enough to share a flat. Wraps at 360,
- and `NAN` on either side matches — a missing angle means the rig had no
- rotator, or the record predates keeping one.
+ and a non-finite angle on either side matches — a missing angle means the
+ rig had no rotator, or the record predates keeping one.
  */
 int32_t seiza_calibration_rotation_matches(double reference_deg,
                                            double candidate_deg,
@@ -1060,7 +1111,11 @@ int32_t seiza_calibration_rotation_matches(double reference_deg,
  Returns 1 and writes `pedestal` when the fit succeeded, 0 when the frame
  cannot support one — too few usable tiles, a flat too uniform to give the
  line a lever, or a slope saying the model does not describe this field —
- and -1 on failure with `error_out` set.
+ and -1 when the caller passed something unusable, with `error_out` set.
+
+ **Test the return against 1, not for truth.** -1 is non-zero. `pedestal` is
+ cleared to zero on entry and only carries a fit when the return is exactly
+ 1.
 
  The fit reads low by roughly 0.8 times the frame's noise, by construction.
  That is the safe direction, and it cancels when comparing two frames.

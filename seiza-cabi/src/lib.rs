@@ -5928,6 +5928,11 @@ pub struct SeizaSnrSample {
 /// ordinary answer early in a build rather than an error — and -1 on failure,
 /// with `error_out` set.
 ///
+/// **Test the return against 1, not for truth.** -1 is non-zero, so
+/// `if (seiza_live_stacker_measure_depth(...))` is true on failure. `sample`
+/// is cleared to zero on entry and only carries a reading when the return is
+/// exactly 1.
+///
 /// # Safety
 ///
 /// `stacker` must be a live `SeizaLiveStacker` pointer and `sample` must point
@@ -5939,6 +5944,12 @@ pub unsafe extern "C" fn seiza_live_stacker_measure_depth(
     error_out: *mut *mut c_char,
 ) -> i32 {
     clear_error(error_out);
+    // Cleared on entry like the error slot, so a caller that tests the return
+    // for truth rather than against 1 reads zeros rather than whatever was on
+    // the stack.
+    if !sample.is_null() {
+        unsafe { *sample = SeizaSnrSample::default() };
+    }
     ffi_result(error_out, || {
         let stacker = unsafe { required_live_stacker(stacker)? };
         if sample.is_null() {
@@ -5995,28 +6006,55 @@ pub unsafe extern "C" fn seiza_checkpoint_depths(
 // Deciding which calibration frames belong together
 // ---------------------------------------------------------------------------
 
-/// Unknown, for the numeric fields of [`SeizaFrameSignature`]. Any non-finite
-/// value reads as unknown; this is the one to write.
-pub const SEIZA_FRAME_UNKNOWN: f64 = f64::NAN;
+/// Which numeric fields of a [`SeizaFrameSignature`] were actually recorded.
+///
+/// A cleared bit means "not recorded", which is not the same as zero: a camera
+/// really can be set to gain 0, and a frame that does not say what gain it used
+/// is a different thing from one that says zero.
+///
+/// The flags exist so that a zeroed struct — `= {0}`, `calloc`, `memset`, all
+/// of them ordinary C — means "nothing recorded" rather than "every setting is
+/// zero". Getting that backwards silently inverts every comparison, so the
+/// safe reading is the one you get for free.
+pub const SEIZA_FRAME_HAS_WIDTH: u32 = 1 << 0;
+pub const SEIZA_FRAME_HAS_HEIGHT: u32 = 1 << 1;
+pub const SEIZA_FRAME_HAS_CHANNELS: u32 = 1 << 2;
+pub const SEIZA_FRAME_HAS_BINNING_X: u32 = 1 << 3;
+pub const SEIZA_FRAME_HAS_BINNING_Y: u32 = 1 << 4;
+pub const SEIZA_FRAME_HAS_GAIN: u32 = 1 << 5;
+pub const SEIZA_FRAME_HAS_OFFSET: u32 = 1 << 6;
+pub const SEIZA_FRAME_HAS_READOUT_MODE: u32 = 1 << 7;
+pub const SEIZA_FRAME_HAS_FOCAL_LENGTH: u32 = 1 << 8;
+pub const SEIZA_FRAME_HAS_ROTATION: u32 = 1 << 9;
+pub const SEIZA_FRAME_HAS_EXPOSURE: u32 = 1 << 10;
+pub const SEIZA_FRAME_HAS_CAMERA_TEMP: u32 = 1 << 11;
+pub const SEIZA_FRAME_HAS_CAPTURED_AT: u32 = 1 << 12;
 
 /// What a frame was shot with, as far as matching cares.
 ///
-/// Text fields are null when unknown; numeric fields are `NAN`
-/// ([`SEIZA_FRAME_UNKNOWN`]). Integer-valued settings are carried as doubles
-/// so one sentinel covers every field; every value a camera reports is exact
-/// in a double.
+/// Text fields are null when unknown. Numeric fields are read only when their
+/// `SEIZA_FRAME_HAS_*` bit is set in `known`, so a zeroed struct means nothing
+/// was recorded — the safe reading, and the one plain `= {0}` gives you. A
+/// non-finite value also reads as unknown, whatever its bit says.
+///
+/// Integer-valued settings are carried as doubles so the struct has one shape;
+/// every value a camera reports is exact in a double.
+///
+/// To fill one: zero it, assign the fields the frame recorded, and set each
+/// one's flag — `light.gain = 100;` then
+/// `light.known |= SEIZA_FRAME_HAS_GAIN;`. Text fields need no flag.
 ///
 /// A missing value on the *candidate* side disqualifies it and a missing value
 /// on the *reference* side accepts what it is offered: a light that does not
 /// record its gain cannot rule anything out, while a calibration frame that
 /// does not record its gain cannot prove it belongs. Rotation is the exception
 /// — unknown on either side matches.
-///
-/// Initialize with [`seiza_frame_signature_init`] rather than zeroing, which
-/// would read as gain 0 rather than unknown gain.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct SeizaFrameSignature {
+    /// Bitwise OR of the `SEIZA_FRAME_HAS_*` flags for the numeric fields
+    /// this frame actually recorded.
+    pub known: u32,
     pub camera: *const c_char,
     pub telescope: *const c_char,
     pub bayer_pattern: *const c_char,
@@ -6038,30 +6076,34 @@ pub struct SeizaFrameSignature {
 
 impl Default for SeizaFrameSignature {
     fn default() -> Self {
+        // All zero, which is exactly what a C caller gets from `= {0}`: no
+        // flags set, so nothing recorded.
         Self {
+            known: 0,
             camera: ptr::null(),
             telescope: ptr::null(),
             bayer_pattern: ptr::null(),
             filter: ptr::null(),
-            width: SEIZA_FRAME_UNKNOWN,
-            height: SEIZA_FRAME_UNKNOWN,
-            channels: SEIZA_FRAME_UNKNOWN,
-            binning_x: SEIZA_FRAME_UNKNOWN,
-            binning_y: SEIZA_FRAME_UNKNOWN,
-            gain: SEIZA_FRAME_UNKNOWN,
-            offset: SEIZA_FRAME_UNKNOWN,
-            readout_mode: SEIZA_FRAME_UNKNOWN,
-            focal_length_mm: SEIZA_FRAME_UNKNOWN,
-            rotation_deg: SEIZA_FRAME_UNKNOWN,
-            exposure_seconds: SEIZA_FRAME_UNKNOWN,
-            camera_temp_c: SEIZA_FRAME_UNKNOWN,
-            captured_at_unix: SEIZA_FRAME_UNKNOWN,
+            width: 0.0,
+            height: 0.0,
+            channels: 0.0,
+            binning_x: 0.0,
+            binning_y: 0.0,
+            gain: 0.0,
+            offset: 0.0,
+            readout_mode: 0.0,
+            focal_length_mm: 0.0,
+            rotation_deg: 0.0,
+            exposure_seconds: 0.0,
+            camera_temp_c: 0.0,
+            captured_at_unix: 0.0,
         }
     }
 }
 
-/// Fill a signature with "nothing known", ready for the caller to set the
-/// fields it has.
+/// Fill a signature with "nothing recorded". Equivalent to zeroing it, and
+/// offered so callers in languages without designated initializers have a
+/// spelling.
 ///
 /// # Safety
 ///
@@ -6073,12 +6115,14 @@ pub unsafe extern "C" fn seiza_frame_signature_init(signature: *mut SeizaFrameSi
     }
 }
 
-fn optional_number(value: f64) -> Option<f64> {
-    value.is_finite().then_some(value)
+/// A numeric field is a reading only when its bit is set and the value is
+/// finite.
+fn optional_number(known: u32, flag: u32, value: f64) -> Option<f64> {
+    (known & flag != 0 && value.is_finite()).then_some(value)
 }
 
-fn optional_integer(value: f64) -> Option<i64> {
-    value.is_finite().then_some(value as i64)
+fn optional_integer(known: u32, flag: u32, value: f64) -> Option<i64> {
+    optional_number(known, flag, value).map(|value| value as i64)
 }
 
 unsafe fn optional_text(value: *const c_char) -> Result<Option<String>, String> {
@@ -6103,19 +6147,32 @@ unsafe fn frame_signature(
     converted.telescope = unsafe { optional_text(signature.telescope) }?;
     converted.bayer_pattern = unsafe { optional_text(signature.bayer_pattern) }?;
     converted.filter = unsafe { optional_text(signature.filter) }?;
-    converted.width = optional_integer(signature.width);
-    converted.height = optional_integer(signature.height);
-    converted.channels = optional_integer(signature.channels);
-    converted.binning_x = optional_integer(signature.binning_x);
-    converted.binning_y = optional_integer(signature.binning_y);
-    converted.gain = optional_integer(signature.gain);
-    converted.offset = optional_integer(signature.offset);
-    converted.readout_mode = optional_integer(signature.readout_mode);
-    converted.focal_length_mm = optional_number(signature.focal_length_mm);
-    converted.rotation_deg = optional_number(signature.rotation_deg);
-    converted.exposure_seconds = optional_number(signature.exposure_seconds);
-    converted.camera_temp_c = optional_number(signature.camera_temp_c);
-    converted.captured_at_unix = optional_integer(signature.captured_at_unix);
+    let known = signature.known;
+    converted.width = optional_integer(known, SEIZA_FRAME_HAS_WIDTH, signature.width);
+    converted.height = optional_integer(known, SEIZA_FRAME_HAS_HEIGHT, signature.height);
+    converted.channels = optional_integer(known, SEIZA_FRAME_HAS_CHANNELS, signature.channels);
+    converted.binning_x = optional_integer(known, SEIZA_FRAME_HAS_BINNING_X, signature.binning_x);
+    converted.binning_y = optional_integer(known, SEIZA_FRAME_HAS_BINNING_Y, signature.binning_y);
+    converted.gain = optional_integer(known, SEIZA_FRAME_HAS_GAIN, signature.gain);
+    converted.offset = optional_integer(known, SEIZA_FRAME_HAS_OFFSET, signature.offset);
+    converted.readout_mode =
+        optional_integer(known, SEIZA_FRAME_HAS_READOUT_MODE, signature.readout_mode);
+    converted.focal_length_mm = optional_number(
+        known,
+        SEIZA_FRAME_HAS_FOCAL_LENGTH,
+        signature.focal_length_mm,
+    );
+    converted.rotation_deg =
+        optional_number(known, SEIZA_FRAME_HAS_ROTATION, signature.rotation_deg);
+    converted.exposure_seconds =
+        optional_number(known, SEIZA_FRAME_HAS_EXPOSURE, signature.exposure_seconds);
+    converted.camera_temp_c =
+        optional_number(known, SEIZA_FRAME_HAS_CAMERA_TEMP, signature.camera_temp_c);
+    converted.captured_at_unix = optional_integer(
+        known,
+        SEIZA_FRAME_HAS_CAPTURED_AT,
+        signature.captured_at_unix,
+    );
     Ok(converted)
 }
 
@@ -6196,8 +6253,8 @@ pub unsafe extern "C" fn seiza_calibration_dark_matches(
 }
 
 /// Whether two rotator angles are close enough to share a flat. Wraps at 360,
-/// and `NAN` on either side matches — a missing angle means the rig had no
-/// rotator, or the record predates keeping one.
+/// and a non-finite angle on either side matches — a missing angle means the
+/// rig had no rotator, or the record predates keeping one.
 #[unsafe(no_mangle)]
 pub extern "C" fn seiza_calibration_rotation_matches(
     reference_deg: f64,
@@ -6205,8 +6262,8 @@ pub extern "C" fn seiza_calibration_rotation_matches(
     tolerance_deg: f64,
 ) -> i32 {
     i32::from(seiza_calibration::rotation_matches(
-        optional_number(reference_deg),
-        optional_number(candidate_deg),
+        Some(reference_deg),
+        Some(candidate_deg),
         tolerance_deg,
     ))
 }
@@ -6221,7 +6278,11 @@ pub extern "C" fn seiza_calibration_rotation_matches(
 /// Returns 1 and writes `pedestal` when the fit succeeded, 0 when the frame
 /// cannot support one — too few usable tiles, a flat too uniform to give the
 /// line a lever, or a slope saying the model does not describe this field —
-/// and -1 on failure with `error_out` set.
+/// and -1 when the caller passed something unusable, with `error_out` set.
+///
+/// **Test the return against 1, not for truth.** -1 is non-zero. `pedestal` is
+/// cleared to zero on entry and only carries a fit when the return is exactly
+/// 1.
 ///
 /// The fit reads low by roughly 0.8 times the frame's noise, by construction.
 /// That is the safe direction, and it cancels when comparing two frames.
@@ -6240,6 +6301,9 @@ pub unsafe extern "C" fn seiza_calibration_fit_flat_pedestal(
     error_out: *mut *mut c_char,
 ) -> i32 {
     clear_error(error_out);
+    if !pedestal.is_null() {
+        unsafe { *pedestal = 0.0 };
+    }
     ffi_result(error_out, || {
         if light.is_null() || flat.is_null() || pedestal.is_null() {
             return Err("light, flat and pedestal are required".into());
@@ -6249,6 +6313,16 @@ pub unsafe extern "C" fn seiza_calibration_fit_flat_pedestal(
             .ok_or("image dimensions overflow")?;
         if samples == 0 {
             return Err("image dimensions must be non-zero".into());
+        }
+        // `slice::from_raw_parts` requires the slice to be at most isize::MAX
+        // *bytes*, not elements. Unreachable with real frames, but this is a
+        // stated contract on an unsafe function, so it is checked rather than
+        // assumed.
+        if samples
+            .checked_mul(std::mem::size_of::<f32>())
+            .is_none_or(|bytes| bytes > isize::MAX as usize)
+        {
+            return Err("image is larger than a slice can describe".into());
         }
         let light = unsafe { std::slice::from_raw_parts(light, samples) };
         let flat = unsafe { std::slice::from_raw_parts(flat, samples) };

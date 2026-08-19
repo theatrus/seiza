@@ -173,12 +173,31 @@ impl PyFrameSignature {
                 .as_ref()
                 .map_or_else(|| "None".to_owned(), |value| value.to_string())
         }
+        // Every field matching actually turns on. Two signatures that differ
+        // only in gain or binning have to look different, or a user asking
+        // "why does this dark not match?" is shown a repr that hides why.
         format!(
-            "FrameSignature(camera={}, filter={}, exposure_seconds={}, camera_temp_c={})",
+            "FrameSignature(camera={}, telescope={}, filter={}, size={}x{}, channels={}, \
+             binning={}x{}, gain={}, offset={}, readout_mode={}, bayer_pattern={}, \
+             focal_length_mm={}, rotation_deg={}, exposure_seconds={}, camera_temp_c={}, \
+             captured_at_unix={})",
             text(&self.inner.camera),
+            text(&self.inner.telescope),
             text(&self.inner.filter),
+            number(&self.inner.width),
+            number(&self.inner.height),
+            number(&self.inner.channels),
+            number(&self.inner.binning_x),
+            number(&self.inner.binning_y),
+            number(&self.inner.gain),
+            number(&self.inner.offset),
+            number(&self.inner.readout_mode),
+            text(&self.inner.bayer_pattern),
+            number(&self.inner.focal_length_mm),
+            number(&self.inner.rotation_deg),
             number(&self.inner.exposure_seconds),
-            number(&self.inner.camera_temp_c)
+            number(&self.inner.camera_temp_c),
+            number(&self.inner.captured_at_unix)
         )
     }
 }
@@ -286,8 +305,15 @@ fn py_optics_match(
 /// Whether two rotator angles are close enough to share a flat. Wraps at 360,
 /// and unknown on either side matches.
 #[pyfunction]
-#[pyo3(name = "rotation_matches", signature = (reference, candidate, tolerance_deg=1.0))]
-fn py_rotation_matches(reference: Option<f64>, candidate: Option<f64>, tolerance_deg: f64) -> bool {
+#[pyo3(name = "rotation_matches", signature = (reference, candidate, tolerance_deg=None))]
+fn py_rotation_matches(
+    reference: Option<f64>,
+    candidate: Option<f64>,
+    tolerance_deg: Option<f64>,
+) -> bool {
+    // Defaulted from the tolerance struct rather than repeated here, so the
+    // crate default and the Python default cannot drift apart.
+    let tolerance_deg = tolerance_deg.unwrap_or(MatchTolerances::default().rotation_deg);
     rotation_matches(reference, candidate, tolerance_deg)
 }
 
@@ -337,8 +363,8 @@ fn py_coherent_subset(
     tolerances: Option<PyMatchTolerances>,
 ) -> Vec<PyFrameSignature> {
     let signatures: Vec<FrameSignature> = candidates
-        .iter()
-        .map(|candidate| candidate.inner.clone())
+        .into_iter()
+        .map(|candidate| candidate.inner)
         .collect();
     coherent_subset(
         &signatures,
@@ -379,10 +405,14 @@ fn py_sort_by_proximity(
 /// varies with the flat's own response, so the intercept of that line is the
 /// part that does not.
 ///
-/// Both arrays must be mono and the same shape. Returns ``None`` when the
-/// frame cannot support a fit — too few usable tiles, a flat too uniform to
-/// give the line a lever, or a slope saying the model does not describe this
-/// field.
+/// Returns ``None`` when the frame cannot support a fit: too few usable tiles,
+/// a flat too uniform to give the line a lever, or a slope saying the model
+/// does not describe this field. Carry on without a pedestal.
+///
+/// Raises ``ValueError`` when the arrays themselves are wrong — different
+/// shapes, or more than one channel. That is a caller mistake rather than a
+/// field this cannot fit, and keeping the two apart stops a bug from reading
+/// as "too few tiles".
 ///
 /// The fit reads low by roughly 0.8 times the frame's noise, by construction:
 /// the per-tile sky is taken below the median so stars cannot drag it up. That

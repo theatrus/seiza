@@ -58,10 +58,12 @@ pub enum FrameRole {
 /// specification promises: sensors report temperature to about a degree, and
 /// a set-point hunts by more than that over a night.
 ///
-/// Construct with [`Default::default`] and adjust the fields you care about;
-/// more tolerances may be added without a major version.
+/// Deliberately *not* `#[non_exhaustive]`, unlike [`FrameSignature`]. A new
+/// tolerance changes what matches, so a consumer being made to look at it when
+/// one is added is the point, not a cost — and it keeps
+/// `MatchTolerances { rotation_deg: 2.0, ..Default::default() }` working,
+/// which is how a config struct wants to be written.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[non_exhaustive]
 pub struct MatchTolerances {
     /// Dark exposure against light exposure, in seconds.
     pub exposure_seconds: f64,
@@ -200,7 +202,7 @@ pub fn rotation_matches(
     candidate: Option<f64>,
     tolerance_deg: f64,
 ) -> bool {
-    match (reference, candidate) {
+    match (known(reference), known(candidate)) {
         (Some(reference), Some(candidate)) => {
             let difference = (reference - candidate).rem_euclid(360.0);
             difference.min(360.0 - difference) <= tolerance_deg
@@ -267,7 +269,7 @@ pub fn coherent_subset(
     let minimum = minimum.max(1);
     let flats = role == FrameRole::Flat;
     let coherent = |anchor: &FrameSignature, frame: &FrameSignature| -> bool {
-        let temperature = match (anchor.camera_temp_c, frame.camera_temp_c) {
+        let temperature = match (known(anchor.camera_temp_c), known(frame.camera_temp_c)) {
             (Some(anchor), Some(frame)) => {
                 (anchor - frame).abs() <= tolerances.master_temperature_c
             }
@@ -354,11 +356,23 @@ fn text_equal_if_known(reference: Option<&str>, candidate: Option<&str>) -> bool
 }
 
 fn option_near(reference: Option<f64>, candidate: Option<f64>, tolerance: f64) -> bool {
-    match (reference, candidate) {
+    match (known(reference), known(candidate)) {
         (Some(reference), Some(candidate)) => (reference - candidate).abs() <= tolerance,
         (Some(_), None) => false,
         (None, _) => true,
     }
+}
+
+/// A reading that is not finite is not a reading.
+///
+/// `NaN` compares false against everything including itself, so left alone it
+/// would mean "matches nothing" — while the C ABI uses it as the *unknown*
+/// sentinel, which means the opposite. Worse, a frame with a `NaN` temperature
+/// would fail to be coherent with its own self and drop out of the cluster it
+/// anchors. Reading non-finite as unknown makes every surface agree and keeps
+/// a frame comparable with itself.
+fn known(value: Option<f64>) -> Option<f64> {
+    value.filter(|value| value.is_finite())
 }
 
 #[cfg(test)]
@@ -575,18 +589,28 @@ mod tests {
     }
 
     #[test]
-    fn a_minimum_of_zero_is_read_as_one() {
+    fn a_reading_that_is_not_finite_is_read_as_unknown() {
+        // The C ABI uses NaN as its unknown sentinel. Left alone, NaN compares
+        // false against everything — including itself — so the same value would
+        // mean "unknown, accepts anything" through C and "matches nothing"
+        // through Rust.
         let tolerances = MatchTolerances::default();
-        let at = |seconds: i64| FrameSignature {
-            captured_at_unix: Some(seconds),
+        let nan = FrameSignature {
+            camera_temp_c: Some(f64::NAN),
+            exposure_seconds: Some(f64::NAN),
+            rotation_deg: Some(f64::NAN),
             ..signature()
         };
-        // Two sessions a month apart. A zero minimum would take whatever the
-        // first anchor agreed with and call it done, silently.
-        let candidates = vec![at(1_700_000_000), at(1_700_000_600), at(1_703_000_000)];
+        assert!(temperature_matches(&nan, &signature(), &tolerances));
+        assert!(exposure_matches(&nan, &signature(), &tolerances));
+        assert!(rotation_matches(Some(f64::NAN), Some(120.0), 1.0));
+        assert!(optics_match(&nan, &signature(), &tolerances));
+
+        // And a frame stays comparable with itself, so it cannot drop out of
+        // the cluster it anchors.
         assert_eq!(
-            coherent_subset(&candidates, FrameRole::Flat, 0, &tolerances).len(),
-            coherent_subset(&candidates, FrameRole::Flat, 1, &tolerances).len()
+            coherent_subset(&[nan.clone(), nan], FrameRole::Flat, 1, &tolerances).len(),
+            2
         );
     }
 
