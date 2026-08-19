@@ -1,9 +1,23 @@
-//! Host-neutral calibration response kernels for linear image buffers.
+//! Host-neutral calibration for linear image buffers.
 //!
-//! This crate owns pixel operations only. Hosts retain file loading, source
-//! selection, detector evidence, cache policy, and user confirmation.
+//! Two things live here: the pixel kernels that apply a calibration response,
+//! and the rules for deciding which frames belong together in the first place
+//! — whether a dark suits a light, whether a flat still corrects it, which
+//! candidates can be averaged into one master.
+//!
+//! Both are pure. Hosts retain file loading, detector evidence, cache policy,
+//! and user confirmation; they hand this crate values and act on what comes
+//! back.
 
+pub mod matching;
+pub mod pedestal;
 mod residual_flat;
+
+pub use matching::{
+    FrameSignature, MatchTolerances, coherent_subset, exposure_matches, optics_match,
+    rotation_matches, sensor_matches, sort_by_proximity, temperature_matches,
+};
+pub use pedestal::fit_flat_pedestal;
 
 pub use residual_flat::{
     RESIDUAL_FLAT_ALGORITHM_VERSION, ResidualFlatBuild, ResidualFlatDiagnostics,
