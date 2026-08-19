@@ -6095,25 +6095,28 @@ unsafe fn frame_signature(
     signature: *const SeizaFrameSignature,
 ) -> Result<seiza_calibration::FrameSignature, String> {
     let signature = unsafe { signature.as_ref() }.ok_or("frame signature is required")?;
-    Ok(seiza_calibration::FrameSignature {
-        camera: unsafe { optional_text(signature.camera) }?,
-        telescope: unsafe { optional_text(signature.telescope) }?,
-        bayer_pattern: unsafe { optional_text(signature.bayer_pattern) }?,
-        filter: unsafe { optional_text(signature.filter) }?,
-        width: optional_integer(signature.width),
-        height: optional_integer(signature.height),
-        channels: optional_integer(signature.channels),
-        binning_x: optional_integer(signature.binning_x),
-        binning_y: optional_integer(signature.binning_y),
-        gain: optional_integer(signature.gain),
-        offset: optional_integer(signature.offset),
-        readout_mode: optional_integer(signature.readout_mode),
-        focal_length_mm: optional_number(signature.focal_length_mm),
-        rotation_deg: optional_number(signature.rotation_deg),
-        exposure_seconds: optional_number(signature.exposure_seconds),
-        camera_temp_c: optional_number(signature.camera_temp_c),
-        captured_at_unix: optional_integer(signature.captured_at_unix),
-    })
+    // Built field by field from the default rather than as a literal: the Rust
+    // struct is `#[non_exhaustive]`, so it can gain fields without breaking
+    // this, and anything it gains starts out as "unknown" here.
+    let mut converted = seiza_calibration::FrameSignature::default();
+    converted.camera = unsafe { optional_text(signature.camera) }?;
+    converted.telescope = unsafe { optional_text(signature.telescope) }?;
+    converted.bayer_pattern = unsafe { optional_text(signature.bayer_pattern) }?;
+    converted.filter = unsafe { optional_text(signature.filter) }?;
+    converted.width = optional_integer(signature.width);
+    converted.height = optional_integer(signature.height);
+    converted.channels = optional_integer(signature.channels);
+    converted.binning_x = optional_integer(signature.binning_x);
+    converted.binning_y = optional_integer(signature.binning_y);
+    converted.gain = optional_integer(signature.gain);
+    converted.offset = optional_integer(signature.offset);
+    converted.readout_mode = optional_integer(signature.readout_mode);
+    converted.focal_length_mm = optional_number(signature.focal_length_mm);
+    converted.rotation_deg = optional_number(signature.rotation_deg);
+    converted.exposure_seconds = optional_number(signature.exposure_seconds);
+    converted.camera_temp_c = optional_number(signature.camera_temp_c);
+    converted.captured_at_unix = optional_integer(signature.captured_at_unix);
+    Ok(converted)
 }
 
 /// Whether two frames came off the same sensor in the same mode. Returns 1 for
@@ -6167,26 +6170,29 @@ pub unsafe extern "C" fn seiza_calibration_optics_match(
 }
 
 /// Whether a dark's exposure and sensor temperature suit the frame it would be
-/// subtracted from. Pass `NAN` for either reading that is unknown. Returns 1
-/// for a match and 0 for a mismatch.
+/// subtracted from. Reads `exposure_seconds` and `camera_temp_c` from both
+/// signatures. Returns 1, 0, or -1 as
+/// [`seiza_calibration_sensor_matches`] does.
+///
+/// # Safety
+///
+/// As [`seiza_calibration_sensor_matches`].
 #[unsafe(no_mangle)]
-pub extern "C" fn seiza_calibration_dark_matches(
-    reference_exposure_seconds: f64,
-    candidate_exposure_seconds: f64,
-    reference_temp_c: f64,
-    candidate_temp_c: f64,
+pub unsafe extern "C" fn seiza_calibration_dark_matches(
+    reference: *const SeizaFrameSignature,
+    candidate: *const SeizaFrameSignature,
+    error_out: *mut *mut c_char,
 ) -> i32 {
-    let tolerances = seiza_calibration::MatchTolerances::default();
-    let matched = seiza_calibration::exposure_matches(
-        optional_number(reference_exposure_seconds),
-        optional_number(candidate_exposure_seconds),
-        &tolerances,
-    ) && seiza_calibration::temperature_matches(
-        optional_number(reference_temp_c),
-        optional_number(candidate_temp_c),
-        &tolerances,
-    );
-    i32::from(matched)
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let reference = unsafe { frame_signature(reference) }?;
+        let candidate = unsafe { frame_signature(candidate) }?;
+        let tolerances = seiza_calibration::MatchTolerances::default();
+        let matched = seiza_calibration::exposure_matches(&reference, &candidate, &tolerances)
+            && seiza_calibration::temperature_matches(&reference, &candidate, &tolerances);
+        Ok(i32::from(matched))
+    })
+    .unwrap_or(-1)
 }
 
 /// Whether two rotator angles are close enough to share a flat. Wraps at 360,
@@ -6250,7 +6256,11 @@ pub unsafe extern "C" fn seiza_calibration_fit_flat_pedestal(
             .map_err(|error| error.to_string())?;
         let flat = seiza_calibration::LinearImageRef::new(flat, width, height, 1)
             .map_err(|error| error.to_string())?;
-        let Some(fitted) = seiza_calibration::fit_flat_pedestal(light, flat) else {
+        // An error here is a caller mistake — mismatched sizes, a colour frame
+        // — and is reported as one. A frame this simply cannot fit is 0.
+        let Some(fitted) =
+            seiza_calibration::fit_flat_pedestal(light, flat).map_err(|error| error.to_string())?
+        else {
             return Ok(0);
         };
         unsafe { *pedestal = fitted };

@@ -5,7 +5,7 @@ use crate::arrays::linear_image;
 use numpy::PyReadonlyArrayDyn;
 use pyo3::prelude::*;
 use seiza_calibration::{
-    FrameSignature, LinearImageRef, MatchTolerances, coherent_subset, exposure_matches,
+    FrameRole, FrameSignature, LinearImageRef, MatchTolerances, coherent_subset, exposure_matches,
     fit_flat_pedestal, optics_match, rotation_matches, sensor_matches, sort_by_proximity,
     temperature_matches,
 };
@@ -67,27 +67,28 @@ impl PyFrameSignature {
         camera_temp_c: Option<f64>,
         captured_at_unix: Option<i64>,
     ) -> Self {
-        Self {
-            inner: FrameSignature {
-                camera,
-                telescope,
-                width,
-                height,
-                channels,
-                binning_x,
-                binning_y,
-                gain,
-                offset,
-                readout_mode,
-                bayer_pattern,
-                filter,
-                focal_length_mm,
-                rotation_deg,
-                exposure_seconds,
-                camera_temp_c,
-                captured_at_unix,
-            },
-        }
+        // Field by field from the default, because the Rust struct is
+        // `#[non_exhaustive]`: anything it gains later starts out unknown here
+        // rather than breaking this constructor.
+        let mut inner = FrameSignature::default();
+        inner.camera = camera;
+        inner.telescope = telescope;
+        inner.width = width;
+        inner.height = height;
+        inner.channels = channels;
+        inner.binning_x = binning_x;
+        inner.binning_y = binning_y;
+        inner.gain = gain;
+        inner.offset = offset;
+        inner.readout_mode = readout_mode;
+        inner.bayer_pattern = bayer_pattern;
+        inner.filter = filter;
+        inner.focal_length_mm = focal_length_mm;
+        inner.rotation_deg = rotation_deg;
+        inner.exposure_seconds = exposure_seconds;
+        inner.camera_temp_c = camera_temp_c;
+        inner.captured_at_unix = captured_at_unix;
+        Self { inner }
     }
 
     #[getter]
@@ -208,17 +209,26 @@ impl PyMatchTolerances {
         focal_length_mm: Option<f64>,
         flat_session_seconds: Option<u64>,
     ) -> Self {
-        let defaults = MatchTolerances::default();
-        Self {
-            inner: MatchTolerances {
-                exposure_seconds: exposure_seconds.unwrap_or(defaults.exposure_seconds),
-                dark_temperature_c: dark_temperature_c.unwrap_or(defaults.dark_temperature_c),
-                master_temperature_c: master_temperature_c.unwrap_or(defaults.master_temperature_c),
-                rotation_deg: rotation_deg.unwrap_or(defaults.rotation_deg),
-                focal_length_mm: focal_length_mm.unwrap_or(defaults.focal_length_mm),
-                flat_session_seconds: flat_session_seconds.unwrap_or(defaults.flat_session_seconds),
-            },
+        let mut inner = MatchTolerances::default();
+        if let Some(value) = exposure_seconds {
+            inner.exposure_seconds = value;
         }
+        if let Some(value) = dark_temperature_c {
+            inner.dark_temperature_c = value;
+        }
+        if let Some(value) = master_temperature_c {
+            inner.master_temperature_c = value;
+        }
+        if let Some(value) = rotation_deg {
+            inner.rotation_deg = value;
+        }
+        if let Some(value) = focal_length_mm {
+            inner.focal_length_mm = value;
+        }
+        if let Some(value) = flat_session_seconds {
+            inner.flat_session_seconds = value;
+        }
+        Self { inner }
     }
 
     #[getter]
@@ -277,35 +287,40 @@ fn py_optics_match(
 /// and unknown on either side matches.
 #[pyfunction]
 #[pyo3(name = "rotation_matches", signature = (reference, candidate, tolerance_deg=1.0))]
-fn py_rotation_matches(
-    reference: Option<f64>,
-    candidate: Option<f64>,
-    tolerance_deg: f64,
-) -> bool {
+fn py_rotation_matches(reference: Option<f64>, candidate: Option<f64>, tolerance_deg: f64) -> bool {
     rotation_matches(reference, candidate, tolerance_deg)
 }
 
 /// Whether a dark's exposure suits the frame it would be subtracted from.
+/// Reads ``exposure_seconds`` from both signatures.
 #[pyfunction]
 #[pyo3(name = "exposure_matches", signature = (reference, candidate, tolerances=None))]
 fn py_exposure_matches(
-    reference: Option<f64>,
-    candidate: Option<f64>,
+    reference: &PyFrameSignature,
+    candidate: &PyFrameSignature,
     tolerances: Option<PyMatchTolerances>,
 ) -> bool {
-    exposure_matches(reference, candidate, &tolerances_or_default(tolerances))
+    exposure_matches(
+        &reference.inner,
+        &candidate.inner,
+        &tolerances_or_default(tolerances),
+    )
 }
 
 /// Whether a dark's sensor temperature suits the frame it would be subtracted
-/// from.
+/// from. Reads ``camera_temp_c`` from both signatures.
 #[pyfunction]
 #[pyo3(name = "temperature_matches", signature = (reference, candidate, tolerances=None))]
 fn py_temperature_matches(
-    reference: Option<f64>,
-    candidate: Option<f64>,
+    reference: &PyFrameSignature,
+    candidate: &PyFrameSignature,
     tolerances: Option<PyMatchTolerances>,
 ) -> bool {
-    temperature_matches(reference, candidate, &tolerances_or_default(tolerances))
+    temperature_matches(
+        &reference.inner,
+        &candidate.inner,
+        &tolerances_or_default(tolerances),
+    )
 }
 
 /// The subset of ``candidates`` that can actually be averaged into one master.
@@ -327,7 +342,11 @@ fn py_coherent_subset(
         .collect();
     coherent_subset(
         &signatures,
-        flats,
+        if flats {
+            FrameRole::Flat
+        } else {
+            FrameRole::Other
+        },
         minimum,
         &tolerances_or_default(tolerances),
     )
@@ -344,10 +363,8 @@ fn py_sort_by_proximity(
     frames: Vec<PyFrameSignature>,
     reference_unix: Option<i64>,
 ) -> Vec<PyFrameSignature> {
-    let mut signatures: Vec<FrameSignature> = frames
-        .iter()
-        .map(|frame| frame.inner.clone())
-        .collect();
+    let mut signatures: Vec<FrameSignature> =
+        frames.iter().map(|frame| frame.inner.clone()).collect();
     sort_by_proximity(&mut signatures, reference_unix);
     signatures
         .into_iter()
@@ -384,7 +401,8 @@ fn py_fit_flat_pedestal(
             .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
         let flat = LinearImageRef::new(&flat.data, flat.width, flat.height, flat.channels)
             .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
-        Ok(fit_flat_pedestal(light, flat))
+        fit_flat_pedestal(light, flat)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
     })
 }
 

@@ -11,20 +11,57 @@
 //!
 //! # Unknown matches
 //!
-//! Every comparison treats a missing value on the *candidate* side as
-//! disqualifying and a missing value on the *reference* side as compatible.
-//! The asymmetry is deliberate. A light that does not say what gain it used
-//! cannot rule anything out, so it accepts what it is offered; a calibration
-//! frame that does not say cannot prove it belongs, so it is not offered. The
-//! one exception is rotation, where unknown on either side matches — see
-//! [`rotation_matches`].
+//! The general rule: a missing value on the *candidate* side disqualifies it,
+//! and a missing value on the *reference* side is compatible. The asymmetry is
+//! deliberate. A light that does not say what gain it used cannot rule
+//! anything out, so it accepts what it is offered; a calibration frame that
+//! does not say cannot prove it belongs, so it is not offered.
+//!
+//! Three places depart from it, each for a reason:
+//!
+//! - [`rotation_matches`] accepts unknown on *either* side. A missing angle
+//!   means the rig had no rotator, or the record predates keeping one, and
+//!   treating that as a mismatch would strip flats from every frame shot
+//!   before anyone wrote the angle down.
+//! - [`sensor_matches`] needs positive identity evidence, so an all-unknown
+//!   *reference* matches nothing. Without that floor a frame that recorded
+//!   nothing would match everything.
+//! - [`coherent_subset`] treats unknown temperatures and capture times as
+//!   compatible on either side: it is asking whether frames can be averaged
+//!   together, and an absent reading cannot prove they cannot.
+
+use serde::{Deserialize, Serialize};
+
+/// Which rules a set of frames is being judged under.
+///
+/// Flats are the strict case: they record one session's dust at one rotator
+/// angle, so a flat from another night describes a different optical train
+/// however well its settings agree. Everything else — bias, dark, dark flat —
+/// only has to agree on the sensor.
+///
+/// Dark flats are deliberately [`Self::Other`], matching the rule this was
+/// extracted from: they are darks that happen to be the length of a flat, and
+/// carry none of a flat's optical meaning.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrameRole {
+    /// Bias, dark, or dark flat.
+    #[default]
+    Other,
+    /// A flat, which additionally has to share a session and an angle.
+    Flat,
+}
 
 /// How close two readings have to be to count as the same.
 ///
 /// The defaults are the ones a rig's own scatter needs rather than what a
 /// specification promises: sensors report temperature to about a degree, and
 /// a set-point hunts by more than that over a night.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// Construct with [`Default::default`] and adjust the fields you care about;
+/// more tolerances may be added without a major version.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct MatchTolerances {
     /// Dark exposure against light exposure, in seconds.
     pub exposure_seconds: f64,
@@ -61,7 +98,12 @@ impl Default for MatchTolerances {
 ///
 /// A host's own record will hold more — identity, paths, checksums, grades.
 /// This is the part that decides whether two frames belong together.
-#[derive(Clone, Debug, Default, PartialEq)]
+///
+/// Construct with [`Default::default`] — every field is "unknown" — and set
+/// what the frame actually recorded; more fields may be added without a major
+/// version.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct FrameSignature {
     pub camera: Option<String>,
     pub telescope: Option<String>,
@@ -90,10 +132,14 @@ pub struct FrameSignature {
 /// dark, a dark flat and a flat are all useless against a light read out
 /// differently.
 ///
-/// Identity is established by camera name *or* by matching dimensions, so a
-/// rig that renames its camera mid-season still matches on geometry, and two
-/// different cameras of the same resolution still have to agree by name when
-/// both report one.
+/// Identity needs positive evidence: agreeing camera names, or known and
+/// agreeing dimensions on both sides. Without that floor, a frame that
+/// recorded nothing at all would match everything, because every other rule
+/// treats an unknown reference as compatible.
+///
+/// Note what this does *not* do. Two frames that both name a camera must agree
+/// on that name — geometry does not rescue a rename, because a camera called
+/// something new is, as far as this can tell, a different camera.
 pub fn sensor_matches(reference: &FrameSignature, candidate: &FrameSignature) -> bool {
     sensor_identity_matches(reference, candidate)
         && text_equal_if_known(reference.camera.as_deref(), candidate.camera.as_deref())
@@ -165,22 +211,30 @@ pub fn rotation_matches(
 
 /// Whether a dark's exposure suits the frame it would be subtracted from.
 pub fn exposure_matches(
-    reference: Option<f64>,
-    candidate: Option<f64>,
+    reference: &FrameSignature,
+    candidate: &FrameSignature,
     tolerances: &MatchTolerances,
 ) -> bool {
-    option_near(reference, candidate, tolerances.exposure_seconds)
+    option_near(
+        reference.exposure_seconds,
+        candidate.exposure_seconds,
+        tolerances.exposure_seconds,
+    )
 }
 
 /// Whether a dark's sensor temperature suits the frame it would be subtracted
 /// from. Dark current roughly doubles every six degrees, so this is the
 /// tolerance that decides whether the subtraction helps or hurts.
 pub fn temperature_matches(
-    reference: Option<f64>,
-    candidate: Option<f64>,
+    reference: &FrameSignature,
+    candidate: &FrameSignature,
     tolerances: &MatchTolerances,
 ) -> bool {
-    option_near(reference, candidate, tolerances.dark_temperature_c)
+    option_near(
+        reference.camera_temp_c,
+        candidate.camera_temp_c,
+        tolerances.dark_temperature_c,
+    )
 }
 
 /// The subset of `candidates` that can actually be averaged into one master.
@@ -197,19 +251,21 @@ pub fn temperature_matches(
 /// candidates by preference — see [`sort_by_proximity`]. With no cluster big
 /// enough, the first is returned and the caller can decline to build.
 ///
-/// `flats` tightens the rule: flats additionally have to share a session and a
-/// rotator angle, because they describe one night's dust at one angle.
+/// [`FrameRole::Flat`] tightens the rule: flats additionally have to share a
+/// session and a rotator angle, because they describe one night's dust at one
+/// angle. Dark flats are [`FrameRole::Other`] — see [`FrameRole`].
 ///
 /// `minimum` is treated as at least one. A zero would make every cluster large
 /// enough and return whatever the first candidate happened to agree with,
 /// which is not an answer anyone means to ask for.
 pub fn coherent_subset(
     candidates: &[FrameSignature],
-    flats: bool,
+    role: FrameRole,
     minimum: usize,
     tolerances: &MatchTolerances,
 ) -> Vec<FrameSignature> {
     let minimum = minimum.max(1);
+    let flats = role == FrameRole::Flat;
     let coherent = |anchor: &FrameSignature, frame: &FrameSignature| -> bool {
         let temperature = match (anchor.camera_temp_c, frame.camera_temp_c) {
             (Some(anchor), Some(frame)) => {
@@ -350,14 +406,33 @@ mod tests {
     }
 
     #[test]
-    fn a_renamed_camera_still_matches_on_geometry() {
-        // Identity is name or dimensions, so a rig that changes how it spells
-        // its camera does not lose its whole calibration library.
+    fn a_camera_that_never_recorded_its_name_matches_on_geometry() {
+        // Identity falls back to dimensions, so frames from a rig that never
+        // wrote a camera name still find each other.
         let mut light = signature();
         let mut candidate = signature();
         light.camera = None;
         candidate.camera = None;
         assert!(sensor_matches(&light, &candidate));
+    }
+
+    #[test]
+    fn two_names_that_disagree_do_not_match_however_alike_the_sensors() {
+        // Geometry does not rescue a rename: a camera called something new is,
+        // as far as this can tell, a different camera. Documented rather than
+        // fixed, because the alternative — trusting dimensions over a stated
+        // disagreement — would pair frames from two identical bodies.
+        let light = signature();
+        let mut candidate = signature();
+        candidate.camera = Some("ZWO ASI2600MM Pro".into());
+        assert!(!sensor_matches(&light, &candidate));
+    }
+
+    #[test]
+    fn a_reference_that_recorded_nothing_matches_nothing() {
+        // Every other rule treats an unknown reference as compatible, so
+        // without an identity floor an empty signature would match anything.
+        assert!(!sensor_matches(&FrameSignature::default(), &signature()));
     }
 
     #[test]
@@ -415,10 +490,20 @@ mod tests {
     #[test]
     fn darks_match_on_exposure_and_temperature_within_tolerance() {
         let tolerances = MatchTolerances::default();
-        assert!(exposure_matches(Some(300.0), Some(300.02), &tolerances));
-        assert!(!exposure_matches(Some(300.0), Some(180.0), &tolerances));
-        assert!(temperature_matches(Some(-10.0), Some(-12.5), &tolerances));
-        assert!(!temperature_matches(Some(-10.0), Some(0.0), &tolerances));
+        let with = |exposure, temp| FrameSignature {
+            exposure_seconds: Some(exposure),
+            camera_temp_c: Some(temp),
+            ..signature()
+        };
+        let light = with(300.0, -10.0);
+        assert!(exposure_matches(&light, &with(300.02, -10.0), &tolerances));
+        assert!(!exposure_matches(&light, &with(180.0, -10.0), &tolerances));
+        assert!(temperature_matches(
+            &light,
+            &with(300.0, -12.5),
+            &tolerances
+        ));
+        assert!(!temperature_matches(&light, &with(300.0, 0.0), &tolerances));
     }
 
     #[test]
@@ -437,7 +522,7 @@ mod tests {
             at(1_702_600_000, -6.0),
             at(1_702_600_600, -6.1),
         ];
-        let chosen = coherent_subset(&candidates, false, 2, &tolerances);
+        let chosen = coherent_subset(&candidates, FrameRole::Other, 2, &tolerances);
         assert_eq!(chosen.len(), 3, "the warm month-later pair must not join");
         assert!(
             chosen
@@ -460,9 +545,12 @@ mod tests {
             at(1_700_400_000),
             at(1_700_400_600),
         ];
-        assert_eq!(coherent_subset(&candidates, false, 2, &tolerances).len(), 4);
         assert_eq!(
-            coherent_subset(&candidates, true, 2, &tolerances).len(),
+            coherent_subset(&candidates, FrameRole::Other, 2, &tolerances).len(),
+            4
+        );
+        assert_eq!(
+            coherent_subset(&candidates, FrameRole::Flat, 2, &tolerances).len(),
             2,
             "a flat describes one session's dust"
         );
@@ -482,7 +570,7 @@ mod tests {
             at(1_700_000_600),
             at(1_700_001_200),
         ];
-        let chosen = coherent_subset(&candidates, true, 2, &tolerances);
+        let chosen = coherent_subset(&candidates, FrameRole::Flat, 2, &tolerances);
         assert_eq!(chosen.len(), 3, "the complete session wins over the stray");
     }
 
@@ -497,8 +585,8 @@ mod tests {
         // first anchor agreed with and call it done, silently.
         let candidates = vec![at(1_700_000_000), at(1_700_000_600), at(1_703_000_000)];
         assert_eq!(
-            coherent_subset(&candidates, true, 0, &tolerances).len(),
-            coherent_subset(&candidates, true, 1, &tolerances).len()
+            coherent_subset(&candidates, FrameRole::Flat, 0, &tolerances).len(),
+            coherent_subset(&candidates, FrameRole::Flat, 1, &tolerances).len()
         );
     }
 
@@ -510,7 +598,7 @@ mod tests {
             ..signature()
         };
         let candidates = vec![at(1_700_000_000), at(1_800_000_000)];
-        let chosen = coherent_subset(&candidates, true, 3, &tolerances);
+        let chosen = coherent_subset(&candidates, FrameRole::Flat, 3, &tolerances);
         assert_eq!(chosen.len(), 1, "the caller decides whether to build");
     }
 

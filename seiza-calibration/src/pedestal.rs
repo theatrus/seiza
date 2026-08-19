@@ -36,7 +36,7 @@
 //! the flat division then amplifies the error. Differences between frames are
 //! unaffected — the bias is common to both.
 
-use crate::LinearImageRef;
+use crate::{Error, LinearImageRef, Result};
 
 /// Tiles needed before a fit is worth attempting, and after clipping.
 const MIN_TILES: usize = 32;
@@ -56,19 +56,33 @@ const CLIP_ROUNDS: usize = 3;
 
 /// Fit the pedestal in `light`, in the light's own units.
 ///
-/// Both images must be mono and the same size. Returns `None` when the frame
-/// cannot support a fit — too few usable tiles, too flat a flat, or a slope
-/// that says the model does not describe this field.
+/// `Ok(None)` means the frame cannot support a fit — too few usable tiles, too
+/// flat a flat, or a slope saying the model does not describe this field. That
+/// is an ordinary answer, and a caller should carry on without a pedestal.
 ///
-/// A colour-filter-array frame is not a candidate: interleaved photosites
-/// respond differently per channel, and the single-line model does not hold
-/// across them. Callers should debayer first or skip.
-pub fn fit_flat_pedestal(light: LinearImageRef<'_>, flat: LinearImageRef<'_>) -> Option<f32> {
+/// `Err` means the caller passed something this cannot work on: mismatched
+/// sizes, or more than one channel. A colour-filter-array frame is not a
+/// candidate — interleaved photosites respond differently per channel and the
+/// single-line model does not hold across them — so debayer first or skip.
+/// Keeping that apart from `Ok(None)` stops a caller bug from looking like a
+/// field this happens not to fit.
+pub fn fit_flat_pedestal(
+    light: LinearImageRef<'_>,
+    flat: LinearImageRef<'_>,
+) -> Result<Option<f32>> {
     if light.channels() != 1 || flat.channels() != 1 {
-        return None;
+        return Err(Error::InvalidImage(
+            "the pedestal fit needs mono frames; debayer a colour frame first".into(),
+        ));
     }
     if light.width() != flat.width() || light.height() != flat.height() {
-        return None;
+        return Err(Error::InvalidImage(format!(
+            "light is {}x{} but the flat is {}x{}",
+            light.width(),
+            light.height(),
+            flat.width(),
+            flat.height()
+        )));
     }
     let (width, height) = (light.width(), light.height());
     let tile = (width.min(height) / 32).clamp(8, 128);
@@ -102,12 +116,12 @@ pub fn fit_flat_pedestal(light: LinearImageRef<'_>, flat: LinearImageRef<'_>) ->
         }
     }
     if pairs.len() < MIN_TILES {
-        return None;
+        return Ok(None);
     }
     let span = pairs.iter().map(|(v, _)| *v).fold(f32::MIN, f32::max)
         - pairs.iter().map(|(v, _)| *v).fold(f32::MAX, f32::min);
     if span < MIN_RESPONSE_SPAN {
-        return None;
+        return Ok(None);
     }
 
     let mut kept = pairs;
@@ -127,7 +141,7 @@ pub fn fit_flat_pedestal(light: LinearImageRef<'_>, flat: LinearImageRef<'_>) ->
             .sum();
         let denominator = count * sum_vv - sum_v * sum_v;
         if denominator.abs() < f64::EPSILON {
-            return None;
+            return Ok(None);
         }
         slope = (count * sum_vb - sum_v * sum_b) / denominator;
         intercept = (sum_b - slope * sum_v) / count;
@@ -146,16 +160,16 @@ pub fn fit_flat_pedestal(light: LinearImageRef<'_>, flat: LinearImageRef<'_>) ->
         let limit = residual_sigma * CLIP_SIGMA;
         kept.retain(|(v, b)| (f64::from(*b) - (slope * f64::from(*v) + intercept)).abs() <= limit);
         if kept.len() < MIN_TILES {
-            return None;
+            return Ok(None);
         }
     }
     // The sky term cannot be negative: an anti-correlation between background
     // and flat response means the model does not describe this field — a
     // gradient running against the vignette, say.
     if slope < 0.0 || !intercept.is_finite() {
-        return None;
+        return Ok(None);
     }
-    Some(intercept as f32)
+    Ok(Some(intercept as f32))
 }
 
 #[cfg(test)]
@@ -211,7 +225,9 @@ mod tests {
         let flat = vignette(0.35);
         for pedestal in [200.0f32, 512.0, 1000.0] {
             let light = light_over(&flat, 900.0, pedestal, SIGMA, 7);
-            let fitted = fit_flat_pedestal(image(&light), image(&flat)).expect("fittable");
+            let fitted = fit_flat_pedestal(image(&light), image(&flat))
+                .unwrap()
+                .expect("fittable");
             // Low by roughly 0.8 sigma, and never high: see the module docs.
             assert!(
                 fitted <= pedestal + SIGMA && fitted >= pedestal - 3.0 * SIGMA,
@@ -229,11 +245,13 @@ mod tests {
             image(&light_over(&flat, 900.0, 200.0, 15.0, 11)),
             image(&flat),
         )
+        .unwrap()
         .expect("fittable");
         let high = fit_flat_pedestal(
             image(&light_over(&flat, 900.0, 700.0, 15.0, 11)),
             image(&flat),
         )
+        .unwrap()
         .expect("fittable");
         assert!(
             ((high - low) - 500.0).abs() < 2.0,
@@ -246,7 +264,9 @@ mod tests {
     fn a_frame_with_no_pedestal_fits_near_zero() {
         let flat = vignette(0.35);
         let light = light_over(&flat, 900.0, 0.0, 15.0, 13);
-        let fitted = fit_flat_pedestal(image(&light), image(&flat)).expect("fittable");
+        let fitted = fit_flat_pedestal(image(&light), image(&flat))
+            .unwrap()
+            .expect("fittable");
         assert!(fitted.abs() < 45.0, "fitted {fitted} where there is none");
     }
 
@@ -256,7 +276,11 @@ mod tests {
         // unconstrained. Declining beats returning a number.
         let flat = vignette(0.0);
         let light = light_over(&flat, 900.0, 500.0, 15.0, 17);
-        assert!(fit_flat_pedestal(image(&light), image(&flat)).is_none());
+        assert!(
+            fit_flat_pedestal(image(&light), image(&flat))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -268,7 +292,11 @@ mod tests {
             .iter()
             .map(|response| 900.0 * (2.0 - response) + 400.0)
             .collect();
-        assert!(fit_flat_pedestal(image(&light), image(&flat)).is_none());
+        assert!(
+            fit_flat_pedestal(image(&light), image(&flat))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -281,14 +309,14 @@ mod tests {
                 image(&light),
                 LinearImageRef::new(&small, 16, 16, 1).unwrap()
             )
-            .is_none(),
-            "different sizes"
+            .is_err(),
+            "different sizes are a caller error, not a field this cannot fit"
         );
 
         let colour = vec![0.0f32; WIDTH * HEIGHT * 3];
         let colour = LinearImageRef::new(&colour, WIDTH, HEIGHT, 3).unwrap();
         assert!(
-            fit_flat_pedestal(colour, image(&flat)).is_none(),
+            fit_flat_pedestal(colour, image(&flat)).is_err(),
             "a CFA or colour frame does not fit one line"
         );
     }

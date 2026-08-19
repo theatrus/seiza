@@ -1028,13 +1028,17 @@ int32_t seiza_calibration_optics_match(const SeizaFrameSignature *reference,
 
 /*
  Whether a dark's exposure and sensor temperature suit the frame it would be
- subtracted from. Pass `NAN` for either reading that is unknown. Returns 1
- for a match and 0 for a mismatch.
+ subtracted from. Reads `exposure_seconds` and `camera_temp_c` from both
+ signatures. Returns 1, 0, or -1 as
+ [`seiza_calibration_sensor_matches`] does.
+
+ # Safety
+
+ As [`seiza_calibration_sensor_matches`].
  */
-int32_t seiza_calibration_dark_matches(double reference_exposure_seconds,
-                                       double candidate_exposure_seconds,
-                                       double reference_temp_c,
-                                       double candidate_temp_c);
+int32_t seiza_calibration_dark_matches(const SeizaFrameSignature *reference,
+                                       const SeizaFrameSignature *candidate,
+                                       char **error_out);
 
 /*
  Whether two rotator angles are close enough to share a flat. Wraps at 360,

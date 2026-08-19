@@ -42,6 +42,7 @@
 
 use crate::stack::StackView;
 use seiza_stats::{NORMAL_MAD_SCALE, median_in_place};
+use serde::{Deserialize, Serialize};
 
 /// Rows read per measurement, at most. Noise and level statistics converge
 /// long before a full frame is consumed, and this keeps the cost of a
@@ -52,7 +53,9 @@ const MAX_SAMPLED_ROWS: usize = 512;
 const MIN_SAMPLES: usize = 1024;
 
 /// The brightest share of the frame that stands in for the target's signal.
-const SIGNAL_FRACTION: f64 = 0.01;
+/// Public because a caller plotting the curve may want to say what the signal
+/// figure actually measures.
+pub const SIGNAL_FRACTION: f64 = 0.01;
 
 /// A second difference has coefficients 1, -2, 1, so independent samples with
 /// sigma noise produce a difference with sqrt(6) sigma.
@@ -62,7 +65,7 @@ const SECOND_DIFFERENCE_GAIN_SQUARED: f64 = 6.0;
 ///
 /// Units are the stack's own: whatever scale the frames were integrated on.
 /// Only ratios between readings of the same stack mean anything.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SnrSample {
     /// Frames the accumulator had taken when this was measured.
     pub frames: u32,
@@ -108,7 +111,13 @@ pub fn checkpoint_depths(total: usize) -> Vec<usize> {
     let mut depth = 1usize;
     while depth < total {
         depths.push(depth);
-        depth *= 2;
+        // Saturating, not wrapping: `total` is an unconstrained `usize`, and
+        // doubling past the top would wrap to zero and loop forever pushing
+        // zeros. Unreachable from a real frame count, but this is public.
+        depth = depth.saturating_mul(2);
+        if depth == usize::MAX {
+            break;
+        }
     }
     if total > 0 {
         depths.push(total);
@@ -328,6 +337,8 @@ mod tests {
         // The whole point of the ladder: measuring is cheap, but every depth
         // costs a caller a batch boundary.
         assert_eq!(checkpoint_depths(500).len(), 10);
+        // An unconstrained `usize` must not wrap past the top and loop.
+        assert!(checkpoint_depths(usize::MAX).len() < 70);
     }
 
     #[test]

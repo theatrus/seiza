@@ -3,11 +3,11 @@
 
 mod arrays;
 mod background;
+mod calibration;
 mod color;
 mod deconvolution;
 mod imgproc;
 mod satellites;
-mod calibration;
 mod stacking;
 mod stretch;
 

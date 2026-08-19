@@ -9,12 +9,12 @@
 //! and user confirmation; they hand this crate values and act on what comes
 //! back.
 
-pub mod matching;
-pub mod pedestal;
+mod matching;
+mod pedestal;
 mod residual_flat;
 
 pub use matching::{
-    FrameSignature, MatchTolerances, coherent_subset, exposure_matches, optics_match,
+    FrameRole, FrameSignature, MatchTolerances, coherent_subset, exposure_matches, optics_match,
     rotation_matches, sensor_matches, sort_by_proximity, temperature_matches,
 };
 pub use pedestal::fit_flat_pedestal;
