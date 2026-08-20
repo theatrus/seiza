@@ -14,9 +14,9 @@ mod pedestal;
 mod residual_flat;
 
 pub use matching::{
-    FrameRole, FrameSignature, MatchTolerances, coherent_subset, exposure_matches,
-    exposure_tolerance, optics_consistent, optics_match, rotation_matches, sensor_consistent,
-    sensor_matches, sort_by_proximity, temperature_matches,
+    FrameRole, FrameSignature, MatchTolerances, coherent_subset, coherent_subset_indices,
+    exposure_matches, exposure_tolerance, optics_consistent, optics_match, rotation_matches,
+    sensor_consistent, sensor_matches, sort_by_proximity, temperature_matches,
 };
 pub use pedestal::fit_flat_pedestal;
 

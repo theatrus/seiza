@@ -350,6 +350,28 @@ pub fn coherent_subset(
     minimum: usize,
     tolerances: &MatchTolerances,
 ) -> Vec<FrameSignature> {
+    coherent_subset_indices(candidates, role, minimum, tolerances)
+        .into_iter()
+        .map(|index| candidates[index].clone())
+        .collect()
+}
+
+/// [`coherent_subset`], as positions into `candidates` rather than copies.
+///
+/// A signature is only the part of a frame that decides whether it belongs
+/// with another; a host's own record carries the rest — a path, a checksum, a
+/// catalog row — and copies cannot be traced back to it. Positions can, so a
+/// caller that needs its own frames back asks for these and indexes its own
+/// list.
+///
+/// This is also the cheaper call. It compares signatures without copying any,
+/// where [`coherent_subset`] clones the cluster it settles on.
+pub fn coherent_subset_indices(
+    candidates: &[FrameSignature],
+    role: FrameRole,
+    minimum: usize,
+    tolerances: &MatchTolerances,
+) -> Vec<usize> {
     let minimum = minimum.max(1);
     let flats = role == FrameRole::Flat;
     let coherent = |anchor: &FrameSignature, frame: &FrameSignature| -> bool {
@@ -378,12 +400,13 @@ pub fn coherent_subset(
         temperature && session && rotation
     };
 
-    let mut first: Option<Vec<FrameSignature>> = None;
+    let mut first: Option<Vec<usize>> = None;
     for anchor in candidates {
-        let cluster: Vec<FrameSignature> = candidates
+        let cluster: Vec<usize> = candidates
             .iter()
-            .filter(|frame| coherent(anchor, frame))
-            .cloned()
+            .enumerate()
+            .filter(|(_, frame)| coherent(anchor, frame))
+            .map(|(index, _)| index)
             .collect();
         if cluster.len() >= minimum {
             return cluster;
@@ -766,6 +789,39 @@ mod tests {
         assert_eq!(
             coherent_subset(&[nan.clone(), nan], FrameRole::Flat, 1, &tolerances).len(),
             2
+        );
+    }
+
+    #[test]
+    fn indices_point_back_at_the_caller_s_own_frames() {
+        // The reason this exists: a signature cannot be traced to the record
+        // it came from, so a host that needs its own frames back asks where
+        // they were rather than for copies.
+        let tolerances = MatchTolerances::default();
+        let at = |seconds: i64, temp: f64| FrameSignature {
+            captured_at_unix: Some(seconds),
+            camera_temp_c: Some(temp),
+            ..signature()
+        };
+        // Three from one night, two a month later and four degrees warmer.
+        let candidates = vec![
+            at(1_700_000_000, -10.0),
+            at(1_702_600_000, -6.0),
+            at(1_700_000_600, -10.2),
+            at(1_702_600_600, -6.1),
+            at(1_700_001_200, -10.1),
+        ];
+        let chosen = coherent_subset_indices(&candidates, FrameRole::Other, 2, &tolerances);
+        assert_eq!(chosen, vec![0, 2, 4], "positions, in candidate order");
+
+        // And they agree with what the copying form returns.
+        let copied = coherent_subset(&candidates, FrameRole::Other, 2, &tolerances);
+        assert_eq!(
+            copied,
+            chosen
+                .iter()
+                .map(|index| candidates[*index].clone())
+                .collect::<Vec<_>>()
         );
     }
 
