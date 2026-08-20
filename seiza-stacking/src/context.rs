@@ -1,7 +1,8 @@
 use crate::{
-    BayerLayout, CalibrationMasters, Error, LinearImage, Result, StackOptions,
+    BayerLayout, CalibrationMasters, Error, FrameMetadata, LinearImage, Result, StackOptions,
     stack::FrameInputMode,
 };
+use seiza_calibration::FrameSignature;
 use seiza_fits::{BayerPattern, HeaderValue};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -9,7 +10,8 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 const MAGIC: &[u8; 8] = b"SEIZASTK";
-const FORMAT_VERSION: u32 = 1;
+const MINIMUM_FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 const MAXIMUM_METADATA_BYTES: u64 = 8 * 1024 * 1024;
 const IO_BUFFER_VALUES: usize = 16 * 1024;
 
@@ -18,6 +20,7 @@ pub(crate) struct ContextWriteState<'a> {
     pub calibration: &'a CalibrationMasters,
     pub reference: &'a LinearImage,
     pub reference_headers: &'a [(String, HeaderValue)],
+    pub reference_metadata: &'a FrameMetadata,
     pub mean: &'a [f32],
     pub m2: &'a [f32],
     pub count: &'a [u32],
@@ -33,6 +36,7 @@ pub(crate) struct RestoredContext {
     pub calibration: CalibrationMasters,
     pub reference: LinearImage,
     pub reference_headers: Vec<(String, HeaderValue)>,
+    pub reference_metadata: FrameMetadata,
     pub mean: Vec<f32>,
     pub m2: Vec<f32>,
     pub count: Vec<u32>,
@@ -51,6 +55,8 @@ struct ContextMetadata {
     calibration: CalibrationMetadata,
     reference: ImageMetadata,
     reference_headers: Vec<HeaderCardMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reference_metadata: Option<FrameMetadata>,
     accepted_frames: u32,
     rejected_frames: u32,
     input_paths: Vec<String>,
@@ -62,10 +68,18 @@ struct ContextMetadata {
 #[serde(deny_unknown_fields)]
 struct CalibrationMetadata {
     bias: Option<ImageMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bias_signature: Option<FrameSignature>,
     dark_signal: Option<ImageMetadata>,
     dark_exposure_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    dark_scaling_safe: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dark_signature: Option<FrameSignature>,
     dark_bayer: Option<BayerMetadata>,
     flat_response: Option<ImageMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    flat_signature: Option<FrameSignature>,
     flat_bayer: Option<BayerMetadata>,
 }
 
@@ -102,7 +116,20 @@ enum HeaderValueMetadata {
     Raw(String),
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 pub(crate) fn write(path: &Path, state: ContextWriteState<'_>) -> Result<()> {
+    write_version(path, state, FORMAT_VERSION)
+}
+
+#[cfg(test)]
+pub(crate) fn write_legacy_v1(path: &Path, state: ContextWriteState<'_>) -> Result<()> {
+    write_version(path, state, 1)
+}
+
+fn write_version(path: &Path, state: ContextWriteState<'_>, format_version: u32) -> Result<()> {
     validate_live_arrays(
         state.reference.sample_count(),
         state.mean,
@@ -119,8 +146,15 @@ pub(crate) fn write(path: &Path, state: ContextWriteState<'_>) -> Result<()> {
     validate_calibration(state.reference, state.calibration)
         .map_err(|message| context_write_error(path, message))?;
 
-    let metadata = ContextMetadata::from_state(&state)
+    let mut metadata = ContextMetadata::from_state(&state, format_version)
         .map_err(|message| context_write_error(path, message))?;
+    if format_version == 1 {
+        metadata.reference_metadata = None;
+        metadata.calibration.bias_signature = None;
+        metadata.calibration.dark_signature = None;
+        metadata.calibration.flat_signature = None;
+        metadata.calibration.dark_scaling_safe = false;
+    }
     let metadata = serde_json::to_vec(&metadata)
         .map_err(|error| context_write_error(path, error.to_string()))?;
     if metadata.len() as u64 > MAXIMUM_METADATA_BYTES {
@@ -153,7 +187,7 @@ pub(crate) fn write(path: &Path, state: ContextWriteState<'_>) -> Result<()> {
         let mut writer = BufWriter::new(temporary.as_file_mut());
         writer
             .write_all(MAGIC)
-            .and_then(|()| writer.write_all(&FORMAT_VERSION.to_le_bytes()))
+            .and_then(|()| writer.write_all(&format_version.to_le_bytes()))
             .map_err(|error| context_write_error(path, error.to_string()))?;
         let mut encoder = zstd::stream::write::Encoder::new(writer, 1)
             .map_err(|error| context_write_error(path, error.to_string()))?;
@@ -207,7 +241,7 @@ pub(crate) fn read(path: &Path) -> Result<RestoredContext> {
         return Err(context_read_error(path, "not a Seiza live-stack context"));
     }
     let version = read_u32(&mut reader).map_err(|error| context_read_error(path, error))?;
-    if version != FORMAT_VERSION {
+    if !(MINIMUM_FORMAT_VERSION..=FORMAT_VERSION).contains(&version) {
         return Err(context_read_error(
             path,
             format!("unsupported context format version {version}"),
@@ -230,7 +264,7 @@ pub(crate) fn read(path: &Path) -> Result<RestoredContext> {
     let metadata: ContextMetadata = serde_json::from_slice(&metadata_bytes)
         .map_err(|error| context_read_error(path, error.to_string()))?;
     metadata
-        .validate()
+        .validate(version)
         .map_err(|message| context_read_error(path, message))?;
 
     let reference = read_image(&mut decoder, metadata.reference)
@@ -274,8 +308,11 @@ pub(crate) fn read(path: &Path) -> Result<RestoredContext> {
 
     let calibration = CalibrationMasters {
         bias,
+        bias_signature: metadata.calibration.bias_signature.clone(),
         dark_signal,
         dark_exposure_seconds: metadata.calibration.dark_exposure_seconds,
+        dark_scaling_safe: metadata.calibration.dark_scaling_safe,
+        dark_signature: metadata.calibration.dark_signature.clone(),
         dark_bayer: metadata
             .calibration
             .dark_bayer
@@ -283,6 +320,7 @@ pub(crate) fn read(path: &Path) -> Result<RestoredContext> {
             .transpose()
             .map_err(|message| context_read_error(path, message))?,
         flat_response,
+        flat_signature: metadata.calibration.flat_signature.clone(),
         flat_bayer: metadata
             .calibration
             .flat_bayer
@@ -290,13 +328,19 @@ pub(crate) fn read(path: &Path) -> Result<RestoredContext> {
             .transpose()
             .map_err(|message| context_read_error(path, message))?,
     };
+    calibration
+        .validate_master_set_signatures()
+        .map_err(|error| context_read_error(path, error.to_string()))?;
     validate_calibration(&reference, &calibration)
         .map_err(|message| context_read_error(path, message))?;
     let reference_headers = metadata
         .reference_headers
         .into_iter()
         .map(|card| (card.name, HeaderValue::from(card.value)))
-        .collect();
+        .collect::<Vec<_>>();
+    let reference_metadata = metadata
+        .reference_metadata
+        .unwrap_or_else(|| FrameMetadata::from_image(&reference, &reference_headers));
     let input_paths = metadata
         .input_paths
         .into_iter()
@@ -308,6 +352,7 @@ pub(crate) fn read(path: &Path) -> Result<RestoredContext> {
         calibration,
         reference,
         reference_headers,
+        reference_metadata,
         mean,
         m2,
         count,
@@ -320,7 +365,10 @@ pub(crate) fn read(path: &Path) -> Result<RestoredContext> {
 }
 
 impl ContextMetadata {
-    fn from_state(state: &ContextWriteState<'_>) -> std::result::Result<Self, String> {
+    fn from_state(
+        state: &ContextWriteState<'_>,
+        schema_version: u32,
+    ) -> std::result::Result<Self, String> {
         let input_paths = state
             .input_paths
             .iter()
@@ -331,7 +379,7 @@ impl ContextMetadata {
             })
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(Self {
-            schema_version: FORMAT_VERSION,
+            schema_version,
             options: state.options.clone(),
             calibration: CalibrationMetadata::from(state.calibration),
             reference: ImageMetadata::from(state.reference),
@@ -343,6 +391,7 @@ impl ContextMetadata {
                     value: HeaderValueMetadata::from(value),
                 })
                 .collect(),
+            reference_metadata: Some(state.reference_metadata.clone()),
             accepted_frames: state.accepted_frames,
             rejected_frames: state.rejected_frames,
             input_paths,
@@ -350,11 +399,11 @@ impl ContextMetadata {
         })
     }
 
-    fn validate(&self) -> std::result::Result<(), String> {
-        if self.schema_version != FORMAT_VERSION {
+    fn validate(&self, container_version: u32) -> std::result::Result<(), String> {
+        if self.schema_version != container_version {
             return Err(format!(
-                "metadata schema version {} does not match container version {FORMAT_VERSION}",
-                self.schema_version
+                "metadata schema version {} does not match container version {container_version}",
+                self.schema_version,
             ));
         }
         self.options.validate().map_err(|error| error.to_string())?;
@@ -379,6 +428,42 @@ impl ContextMetadata {
         {
             return Err("context has an invalid master-dark exposure".into());
         }
+        if self.calibration.dark_scaling_safe
+            && (self.calibration.dark_signal.is_none()
+                || self.calibration.dark_exposure_seconds.is_none())
+        {
+            return Err(
+                "context declares safe dark scaling without a usable master exposure".into(),
+            );
+        }
+        if self.schema_version >= 2 {
+            if self.reference_metadata.is_none() {
+                return Err("context is missing reference-frame metadata".into());
+            }
+            for (kind, active, signature) in [
+                (
+                    "bias",
+                    self.calibration.bias.is_some(),
+                    self.calibration.bias_signature.as_ref(),
+                ),
+                (
+                    "dark",
+                    self.calibration.dark_signal.is_some(),
+                    self.calibration.dark_signature.as_ref(),
+                ),
+                (
+                    "flat",
+                    self.calibration.flat_response.is_some(),
+                    self.calibration.flat_signature.as_ref(),
+                ),
+            ] {
+                if active && signature.is_none() {
+                    return Err(format!(
+                        "context is missing master-{kind} compatibility metadata"
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -387,10 +472,14 @@ impl From<&CalibrationMasters> for CalibrationMetadata {
     fn from(calibration: &CalibrationMasters) -> Self {
         Self {
             bias: calibration.bias.as_ref().map(ImageMetadata::from),
+            bias_signature: calibration.bias_signature.clone(),
             dark_signal: calibration.dark_signal.as_ref().map(ImageMetadata::from),
             dark_exposure_seconds: calibration.dark_exposure_seconds,
+            dark_scaling_safe: calibration.dark_scaling_safe,
+            dark_signature: calibration.dark_signature.clone(),
             dark_bayer: calibration.dark_bayer.map(BayerMetadata::from),
             flat_response: calibration.flat_response.as_ref().map(ImageMetadata::from),
+            flat_signature: calibration.flat_signature.clone(),
             flat_bayer: calibration.flat_bayer.map(BayerMetadata::from),
         }
     }

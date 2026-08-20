@@ -1,11 +1,13 @@
 use crate::{
-    CalibrationMasters, Error, FitsFrame, LinearImage, NormalizationMap, NormalizationMode,
-    RegisteredFrameMapping, Registrar, RegistrationOptions, Result, SimilarityTransform, context,
-    path_identity, paths_refer_to_same_file, resample_to_reference,
+    BayerLayout, CalibrationMasters, Error, FitsFrame, FrameMetadata, LinearImage,
+    NormalizationMap, NormalizationMode, RegisteredFrameMapping, Registrar, RegistrationOptions,
+    Result, SimilarityTransform, context, path_identity, paths_refer_to_same_file,
+    resample_to_reference,
 };
 use rayon::prelude::*;
 use seiza_fits::HeaderValue;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 /// Thresholds for per-sample delta-sigma rejection during live stacking.
@@ -286,6 +288,22 @@ pub struct StackSnapshot {
     pub rejected_frames: u32,
 }
 
+/// A compact immutable copy of the current stack for non-destructive output.
+///
+/// Unlike [`StackSnapshot`], this owns only the finalized mean and scalar frame
+/// counts. It deliberately omits variance and both per-sample count maps, so a
+/// caller can hand it to an output worker while the live accumulator continues
+/// without cloning four additional full-frame buffers.
+#[derive(Clone, Debug)]
+pub struct StackExportSnapshot {
+    /// Current mean image; zero-coverage samples are masked with `NaN`.
+    pub image: LinearImage,
+    /// Number of frames admitted when the export snapshot was captured.
+    pub accepted_frames: u32,
+    /// Number of frames turned away when the export snapshot was captured.
+    pub rejected_frames: u32,
+}
+
 /// Zero-copy access to the current online estimate. Samples with zero
 /// coverage have an undefined mean and must be masked by `coverage`.
 #[derive(Clone, Copy, Debug)]
@@ -310,9 +328,13 @@ pub struct StackView<'a> {
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum FrameInputMode {
+/// Selects whether live-stack inputs are calibrated by the stacker or arrive
+/// as already-prepared linear images.
+pub enum FrameInputMode {
+    /// File inputs are decoded, calibrated, and prepared before integration.
     #[default]
     CalibrateAndPrepare,
+    /// The caller supplies prepared linear images; file inputs are rejected.
     PreparedOnly,
 }
 
@@ -326,6 +348,7 @@ pub struct LiveStacker {
     pub(crate) options: StackOptions,
     pub(crate) calibration: CalibrationMasters,
     pub(crate) reference: LinearImage,
+    reference_metadata: FrameMetadata,
     pub(crate) registrar: Registrar,
     accumulator: Accumulator,
     reference_headers: Vec<(String, HeaderValue)>,
@@ -333,6 +356,7 @@ pub struct LiveStacker {
     rejected_frames: u32,
     input_paths: Vec<PathBuf>,
     input_mode: FrameInputMode,
+    configuration_fingerprint: String,
 }
 
 impl LiveStacker {
@@ -343,6 +367,8 @@ impl LiveStacker {
         calibration: CalibrationMasters,
         options: StackOptions,
     ) -> Result<Self> {
+        calibration.validate_light_frame(&reference)?;
+        let reference_metadata = reference.metadata();
         calibration.apply(
             &mut reference.image,
             reference.exposure_seconds,
@@ -355,6 +381,7 @@ impl LiveStacker {
         Self::from_prepared(
             reference.image,
             reference.headers,
+            reference_metadata,
             calibration,
             options,
             FrameInputMode::CalibrateAndPrepare,
@@ -365,9 +392,11 @@ impl LiveStacker {
     /// calibration and no header metadata. Every later frame must use
     /// [`Self::push_linear`].
     pub fn from_linear(reference: LinearImage, options: StackOptions) -> Result<Self> {
+        let reference_metadata = FrameMetadata::from_image(&reference, &[]);
         Self::from_prepared(
             reference,
             Vec::new(),
+            reference_metadata,
             CalibrationMasters::default(),
             options,
             FrameInputMode::PreparedOnly,
@@ -387,9 +416,11 @@ impl LiveStacker {
                 "an already-prepared reference frame must not retain a Bayer layout".into(),
             ));
         }
+        let reference_metadata = reference.metadata();
         Self::from_prepared(
             reference.image,
             reference.headers,
+            reference_metadata,
             CalibrationMasters::default(),
             options,
             FrameInputMode::PreparedOnly,
@@ -399,11 +430,14 @@ impl LiveStacker {
     fn from_prepared(
         reference: LinearImage,
         reference_headers: Vec<(String, HeaderValue)>,
+        reference_metadata: FrameMetadata,
         calibration: CalibrationMasters,
         options: StackOptions,
         input_mode: FrameInputMode,
     ) -> Result<Self> {
         options.validate()?;
+        let configuration_fingerprint =
+            stack_configuration_fingerprint(&options, &calibration, input_mode)?;
         let registrar = Registrar::new(&reference, options.registration.clone())?;
         let mut accumulator = Accumulator::new(reference.sample_count());
         accumulator.integrate(&reference.data, RejectionMode::None);
@@ -411,6 +445,7 @@ impl LiveStacker {
             options,
             calibration,
             reference,
+            reference_metadata,
             registrar,
             accumulator,
             reference_headers,
@@ -418,6 +453,7 @@ impl LiveStacker {
             rejected_frames: 0,
             input_paths: Vec::new(),
             input_mode,
+            configuration_fingerprint,
         })
     }
 
@@ -470,10 +506,16 @@ impl LiveStacker {
                 path: path.to_path_buf(),
                 message: error.to_string(),
             })?;
+        let configuration_fingerprint = stack_configuration_fingerprint(
+            &restored.options,
+            &restored.calibration,
+            restored.input_mode,
+        )?;
         Ok(Self {
             options: restored.options,
             calibration: restored.calibration,
             reference: restored.reference,
+            reference_metadata: restored.reference_metadata,
             registrar,
             accumulator: Accumulator {
                 mean: restored.mean,
@@ -486,6 +528,7 @@ impl LiveStacker {
             rejected_frames: restored.rejected_frames,
             input_paths: restored.input_paths,
             input_mode: restored.input_mode,
+            configuration_fingerprint,
         })
     }
 
@@ -510,6 +553,7 @@ impl LiveStacker {
                 calibration: &self.calibration,
                 reference: &self.reference,
                 reference_headers: &self.reference_headers,
+                reference_metadata: &self.reference_metadata,
                 mean: &self.accumulator.mean,
                 m2: &self.accumulator.m2,
                 count: &self.accumulator.count,
@@ -540,9 +584,78 @@ impl LiveStacker {
     /// refuses the call: its frames bypass calibration entirely.
     pub fn set_calibration(&mut self, calibration: CalibrationMasters) -> Result<()> {
         self.require_fits_input_mode()?;
+        calibration.validate_master_set_signatures()?;
         crate::context::validate_calibration(&self.reference, &calibration)
             .map_err(Error::Calibration)?;
+        calibration.validate_light_signature(&self.reference_metadata.signature)?;
+        let configuration_fingerprint =
+            stack_configuration_fingerprint(&self.options, &calibration, self.input_mode)?;
         self.calibration = calibration;
+        self.configuration_fingerprint = configuration_fingerprint;
+        Ok(())
+    }
+
+    /// Load and atomically replace the calibration masters used by later
+    /// file inputs, retaining their paths in the stack's resumable input
+    /// ledger.
+    ///
+    /// All supplied files are decoded and the complete set is validated
+    /// against the registration reference before either the active masters or
+    /// the path ledger changes. Passing no paths clears calibration. Existing
+    /// integrated frames are never recalibrated.
+    ///
+    /// The same master may be selected again later: a multi-session stack can
+    /// switch from one night's masters to another's and back without making a
+    /// duplicate ledger entry. Supplied paths must still be distinct from one
+    /// another within this call.
+    pub fn set_calibration_from_fits_paths(
+        &mut self,
+        bias_path: Option<&Path>,
+        dark_path: Option<&Path>,
+        flat_path: Option<&Path>,
+        dark_exposure_seconds: Option<f64>,
+    ) -> Result<()> {
+        self.require_fits_input_mode()?;
+        if dark_path.is_none() && dark_exposure_seconds.is_some() {
+            return Err(Error::Calibration(
+                "a master-dark exposure override requires a dark path".into(),
+            ));
+        }
+        if dark_exposure_seconds.is_some_and(|seconds| !seconds.is_finite() || seconds <= 0.0) {
+            return Err(Error::Calibration(
+                "master-dark exposure override must be a positive finite number".into(),
+            ));
+        }
+        let paths = [bias_path, dark_path, flat_path]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        for (index, path) in paths.iter().enumerate() {
+            if paths[..index]
+                .iter()
+                .any(|previous| paths_refer_to_same_file(path, previous))
+            {
+                return Err(Error::Calibration(format!(
+                    "duplicate calibration input {}",
+                    path.display()
+                )));
+            }
+        }
+
+        // Loading and validation happen before assignment. Once
+        // `set_calibration` succeeds, recording identities cannot fail.
+        let calibration = CalibrationMasters::from_fits_paths(
+            bias_path,
+            dark_path,
+            flat_path,
+            dark_exposure_seconds,
+        )?;
+        self.set_calibration(calibration)?;
+        for path in paths {
+            if !self.is_duplicate_input(path) {
+                self.record_input_path(path);
+            }
+        }
         Ok(())
     }
 
@@ -551,6 +664,13 @@ impl LiveStacker {
     /// reject this path so later inputs cannot skip the caller's preparation.
     pub fn push(&mut self, mut frame: FitsFrame) -> Result<FrameDisposition> {
         self.require_fits_input_mode()?;
+        if let Err(error) = self.calibration.validate_light_frame(&frame) {
+            let message = match error {
+                Error::Calibration(message) => message,
+                other => other.to_string(),
+            };
+            return Ok(self.reject(FrameRejectionReason::Calibration(message)));
+        }
         if let Err(error) =
             self.calibration
                 .apply(&mut frame.image, frame.exposure_seconds, frame.bayer)
@@ -673,6 +793,24 @@ impl LiveStacker {
         })
     }
 
+    /// Copy only the state required to write an immutable stack image.
+    ///
+    /// The returned owner is independent of this stacker and may be moved to
+    /// another thread. Capturing it copies one `f32` per image sample; it does
+    /// not copy variance, coverage, or rejected-sample maps.
+    pub fn export_snapshot(&self) -> Result<StackExportSnapshot> {
+        Ok(StackExportSnapshot {
+            image: LinearImage::new(
+                self.reference.width,
+                self.reference.height,
+                self.reference.channels,
+                self.accumulator.mean_snapshot(),
+            )?,
+            accepted_frames: self.accepted_frames,
+            rejected_frames: self.rejected_frames,
+        })
+    }
+
     /// Borrow the current mean and masks without copying full-frame state.
     /// This is the preferred source for a live display renderer.
     pub fn view(&self) -> StackView<'_> {
@@ -724,9 +862,31 @@ impl LiveStacker {
         &self.reference_headers
     }
 
+    /// Normalized acquisition and calibration metadata of the immutable
+    /// reference source.
+    pub fn reference_metadata(&self) -> &FrameMetadata {
+        &self.reference_metadata
+    }
+
     /// Source and calibration paths already used by this stack.
     pub fn input_paths(&self) -> &[PathBuf] {
         &self.input_paths
+    }
+
+    /// Which kind of inputs this stack accepts after its reference.
+    pub fn input_mode(&self) -> FrameInputMode {
+        self.input_mode
+    }
+
+    /// Stable SHA-256 identity of the stack options, current calibration
+    /// content, and input mode.
+    ///
+    /// The fingerprint deliberately excludes counters, accumulated pixels,
+    /// and source paths. It therefore stays fixed while one compatible batch
+    /// grows, changes when calibration is swapped, and recomputes to the same
+    /// value after a context round trip.
+    pub fn configuration_fingerprint(&self) -> &str {
+        &self.configuration_fingerprint
     }
 
     pub(crate) fn require_fits_input_mode(&self) -> Result<()> {
@@ -743,6 +903,92 @@ impl LiveStacker {
         self.rejected_frames += 1;
         FrameDisposition::Rejected(reason)
     }
+}
+
+fn stack_configuration_fingerprint(
+    options: &StackOptions,
+    calibration: &CalibrationMasters,
+    input_mode: FrameInputMode,
+) -> Result<String> {
+    let options = serde_json::to_vec(options)
+        .map_err(|error| Error::Stack(format!("failed to fingerprint stack options: {error}")))?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"seiza-live-stack-configuration-v1\0");
+    hasher.update([match input_mode {
+        FrameInputMode::CalibrateAndPrepare => 0,
+        FrameInputMode::PreparedOnly => 1,
+    }]);
+    hash_bytes(&mut hasher, &options);
+    hash_optional_image(&mut hasher, calibration.bias.as_ref());
+    hash_optional_signature(&mut hasher, calibration.bias_signature.as_ref())?;
+    hash_optional_image(&mut hasher, calibration.dark_signal.as_ref());
+    hash_optional_f64(&mut hasher, calibration.dark_exposure_seconds);
+    hasher.update([u8::from(calibration.dark_scaling_safe)]);
+    hash_optional_signature(&mut hasher, calibration.dark_signature.as_ref())?;
+    hash_optional_bayer(&mut hasher, calibration.dark_bayer);
+    hash_optional_image(&mut hasher, calibration.flat_response.as_ref());
+    hash_optional_signature(&mut hasher, calibration.flat_signature.as_ref())?;
+    hash_optional_bayer(&mut hasher, calibration.flat_bayer);
+    let digest = hasher.finalize();
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn hash_optional_signature(
+    hasher: &mut Sha256,
+    signature: Option<&seiza_calibration::FrameSignature>,
+) -> Result<()> {
+    let Some(signature) = signature else {
+        hasher.update([0]);
+        return Ok(());
+    };
+    hasher.update([1]);
+    let bytes = serde_json::to_vec(signature).map_err(|error| {
+        Error::Stack(format!(
+            "failed to fingerprint calibration metadata: {error}"
+        ))
+    })?;
+    hash_bytes(hasher, &bytes);
+    Ok(())
+}
+
+fn hash_bytes(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+fn hash_optional_image(hasher: &mut Sha256, image: Option<&LinearImage>) {
+    let Some(image) = image else {
+        hasher.update([0]);
+        return;
+    };
+    hasher.update([1]);
+    hasher.update((image.width as u64).to_le_bytes());
+    hasher.update((image.height as u64).to_le_bytes());
+    hasher.update((image.channels as u64).to_le_bytes());
+    for sample in &image.data {
+        hasher.update(sample.to_bits().to_le_bytes());
+    }
+}
+
+fn hash_optional_f64(hasher: &mut Sha256, value: Option<f64>) {
+    match value {
+        Some(value) => {
+            hasher.update([1]);
+            hasher.update(value.to_bits().to_le_bytes());
+        }
+        None => hasher.update([0]),
+    }
+}
+
+fn hash_optional_bayer(hasher: &mut Sha256, value: Option<BayerLayout>) {
+    let Some(value) = value else {
+        hasher.update([0]);
+        return;
+    };
+    hasher.update([1]);
+    hash_bytes(hasher, value.pattern.as_str().as_bytes());
+    hasher.update((value.x_offset as u64).to_le_bytes());
+    hasher.update((value.y_offset as u64).to_le_bytes());
 }
 
 /// A frame carried from preparation to integration.
@@ -1056,12 +1302,7 @@ impl Accumulator {
     }
 
     fn snapshot(&self) -> (Vec<f32>, Vec<f32>) {
-        let mean = self
-            .mean
-            .iter()
-            .zip(&self.count)
-            .map(|(&mean, &count)| finalized_mean(mean, count))
-            .collect();
+        let mean = self.mean_snapshot();
         let variance = self
             .m2
             .iter()
@@ -1069,6 +1310,14 @@ impl Accumulator {
             .map(|(&m2, &count)| finalized_variance(m2, count))
             .collect();
         (mean, variance)
+    }
+
+    fn mean_snapshot(&self) -> Vec<f32> {
+        self.mean
+            .par_iter()
+            .zip(self.count.par_iter())
+            .map(|(&mean, &count)| finalized_mean(mean, count))
+            .collect()
     }
 
     fn into_snapshot(mut self) -> (Vec<f32>, Vec<f32>, Vec<u32>, Vec<u32>) {
@@ -1188,6 +1437,48 @@ mod tests {
         assert_eq!(rejected, 1);
         assert_eq!(accumulator.count[0], 4);
         assert_eq!(accumulator.mean[0], before);
+    }
+
+    #[test]
+    fn export_snapshot_owns_only_a_frozen_finalized_mean() {
+        let mut accumulator = Accumulator::new(2);
+        accumulator.integrate(&[5.0, f32::NAN], RejectionMode::None);
+        let mean = accumulator.mean_snapshot();
+        assert_eq!(mean[0], 5.0);
+        assert!(mean[1].is_nan(), "zero coverage must be finalized as NaN");
+
+        let reference = stacking_star_field(160, 128);
+        let mut stacker = LiveStacker::from_linear(
+            reference.clone(),
+            StackOptions {
+                normalization: NormalizationMode::None,
+                rejection: RejectionMode::None,
+                ..StackOptions::default()
+            },
+        )
+        .unwrap();
+        let export = stacker.export_snapshot().unwrap();
+        assert_eq!(export.image.data, reference.data);
+        assert_eq!(export.accepted_frames, 1);
+        assert_eq!(export.rejected_frames, 0);
+
+        assert!(matches!(
+            stacker.push_linear(offset_image(&reference, 10.0)).unwrap(),
+            FrameDisposition::Accepted(_)
+        ));
+        assert_eq!(export.image.data, reference.data, "the export is immutable");
+        assert_eq!(export.accepted_frames, 1);
+        assert_eq!(stacker.view().accepted_frames, 2);
+        assert!(
+            stacker
+                .export_snapshot()
+                .unwrap()
+                .image
+                .data
+                .iter()
+                .zip(&export.image.data)
+                .any(|(current, frozen)| current != frozen)
+        );
     }
 
     #[test]
@@ -1357,6 +1648,68 @@ mod tests {
     }
 
     #[test]
+    fn legacy_contexts_open_but_fail_closed_until_masters_are_reloaded() {
+        let image = stacking_star_field(160, 128);
+        let frame = || FitsFrame {
+            image: image.clone(),
+            headers: vec![("IMAGETYP".into(), HeaderValue::String("LIGHT".into()))],
+            exposure_seconds: Some(60.0),
+            bayer: None,
+            source: None,
+            bounds: None,
+        };
+        let calibration = CalibrationMasters::new(
+            Some(LinearImage::new(160, 128, 1, vec![2.0; 160 * 128]).unwrap()),
+            None,
+            None,
+        )
+        .unwrap();
+        let stacker =
+            LiveStacker::new(frame(), calibration.clone(), StackOptions::default()).unwrap();
+        let original_fingerprint = stacker.configuration_fingerprint().to_owned();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy-v1.seiza-stack");
+        context::write_legacy_v1(
+            &path,
+            context::ContextWriteState {
+                options: &stacker.options,
+                calibration: &stacker.calibration,
+                reference: &stacker.reference,
+                reference_headers: &stacker.reference_headers,
+                reference_metadata: &stacker.reference_metadata,
+                mean: &stacker.accumulator.mean,
+                m2: &stacker.accumulator.m2,
+                count: &stacker.accumulator.count,
+                rejected: &stacker.accumulator.rejected,
+                accepted_frames: stacker.accepted_frames,
+                rejected_frames: stacker.rejected_frames,
+                input_paths: &stacker.input_paths,
+                input_mode: stacker.input_mode,
+            },
+        )
+        .unwrap();
+
+        let mut restored = LiveStacker::open_context(&path).unwrap();
+        assert_ne!(
+            restored.configuration_fingerprint(),
+            original_fingerprint,
+            "missing v1 signatures are part of the migrated identity"
+        );
+        let rejected = restored.push(frame()).unwrap();
+        assert!(matches!(
+            rejected,
+            FrameDisposition::Rejected(FrameRejectionReason::Calibration(ref reason))
+                if reason.contains("reload calibration masters")
+        ));
+
+        restored.set_calibration(calibration).unwrap();
+        assert!(matches!(
+            restored.push(frame()).unwrap(),
+            FrameDisposition::Accepted(_)
+        ));
+    }
+
+    #[test]
     fn truncated_context_is_rejected() {
         let reference = stacking_star_field(160, 128);
         let stacker = LiveStacker::from_linear(reference, StackOptions::default()).unwrap();
@@ -1418,22 +1771,25 @@ mod tests {
         let reference = stacking_star_field(160, 128);
         let calibration_image = LinearImage::new(160, 128, 1, vec![2.0; 160 * 128]).unwrap();
         let mut stacker = LiveStacker::from_linear(reference, StackOptions::default()).unwrap();
-        stacker.calibration = CalibrationMasters {
-            bias: Some(calibration_image.clone()),
-            dark_signal: Some(calibration_image.clone()),
-            dark_exposure_seconds: Some(300.0),
-            dark_bayer: Some(BayerLayout {
-                pattern: seiza_fits::BayerPattern::Rggb,
-                x_offset: 1,
-                y_offset: 0,
-            }),
-            flat_response: Some(calibration_image),
-            flat_bayer: Some(BayerLayout {
-                pattern: seiza_fits::BayerPattern::Rggb,
-                x_offset: 1,
-                y_offset: 0,
-            }),
+        let bayer = BayerLayout {
+            pattern: seiza_fits::BayerPattern::Rggb,
+            x_offset: 1,
+            y_offset: 0,
         };
+        stacker.calibration = CalibrationMasters::new(
+            Some(calibration_image.clone()),
+            Some(crate::MasterDark {
+                image: calibration_image.clone(),
+                exposure_seconds: Some(300.0),
+                bias_subtracted: false,
+                bayer: Some(bayer),
+            }),
+            Some(crate::MasterFlat::raw_with_bayer(
+                LinearImage::new(160, 128, 1, vec![4.0; 160 * 128]).unwrap(),
+                bayer,
+            )),
+        )
+        .unwrap();
         stacker.reference_headers = vec![
             ("OBJECT".into(), HeaderValue::String("M 31".into())),
             ("ODDVAL".into(), HeaderValue::Float(f64::NAN)),
@@ -1462,5 +1818,90 @@ mod tests {
             HeaderValue::Float(value) if value.is_nan()
         ));
         assert_eq!(stacker.input_paths, restored.input_paths);
+    }
+
+    #[test]
+    fn path_calibration_swap_is_atomic_updates_the_ledger_and_fingerprints() {
+        let directory = tempfile::tempdir().unwrap();
+        let reference_path = directory.path().join("reference.fits");
+        let bias_path = directory.path().join("master-bias.fits");
+        let wrong_bias_path = directory.path().join("wrong-master-bias.fits");
+        let context_path = directory.path().join("live.seiza-stack");
+        let reference = stacking_star_field(160, 128);
+        let bias = LinearImage::new(160, 128, 1, vec![2.0; 160 * 128]).unwrap();
+        let wrong_bias = LinearImage::new(80, 64, 1, vec![3.0; 80 * 64]).unwrap();
+        crate::write_processed_image_fits_f32(&reference_path, &reference, &[], &[]).unwrap();
+        crate::write_processed_image_fits_f32(&bias_path, &bias, &[], &[]).unwrap();
+        crate::write_processed_image_fits_f32(&wrong_bias_path, &wrong_bias, &[], &[]).unwrap();
+
+        let mut stacker = LiveStacker::open_fits(
+            &reference_path,
+            None,
+            None,
+            None,
+            None,
+            StackOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(stacker.input_mode(), FrameInputMode::CalibrateAndPrepare);
+        let empty_fingerprint = stacker.configuration_fingerprint().to_owned();
+        stacker
+            .set_calibration_from_fits_paths(Some(&bias_path), None, None, None)
+            .unwrap();
+        let calibrated_fingerprint = stacker.configuration_fingerprint().to_owned();
+        assert_ne!(calibrated_fingerprint, empty_fingerprint);
+        assert_eq!(calibrated_fingerprint.len(), 64);
+        assert!(
+            stacker
+                .input_paths()
+                .iter()
+                .any(|path| paths_refer_to_same_file(path, &bias_path))
+        );
+        let paths_before_failure = stacker.input_paths().to_vec();
+        let bias_before_failure = stacker.calibration.bias.clone().unwrap();
+
+        assert!(
+            stacker
+                .set_calibration_from_fits_paths(Some(&wrong_bias_path), None, None, None)
+                .is_err()
+        );
+        assert_eq!(stacker.configuration_fingerprint(), calibrated_fingerprint);
+        assert_eq!(stacker.input_paths(), paths_before_failure);
+        assert_eq!(
+            stacker.calibration.bias.as_ref(),
+            Some(&bias_before_failure)
+        );
+
+        // Selecting the same master again neither fails nor duplicates it.
+        stacker
+            .set_calibration_from_fits_paths(Some(&bias_path), None, None, None)
+            .unwrap();
+        assert_eq!(stacker.input_paths(), paths_before_failure);
+        stacker.save_context(&context_path).unwrap();
+        let restored = LiveStacker::open_context(&context_path).unwrap();
+        assert_eq!(restored.configuration_fingerprint(), calibrated_fingerprint);
+        assert_eq!(restored.input_paths(), paths_before_failure);
+
+        let mut stacker = restored;
+        stacker
+            .set_calibration_from_fits_paths(None, None, None, None)
+            .unwrap();
+        assert_eq!(stacker.configuration_fingerprint(), empty_fingerprint);
+        // Clearing calibration does not erase history needed for safe output.
+        assert_eq!(stacker.input_paths(), paths_before_failure);
+    }
+
+    #[test]
+    fn prepared_stack_refuses_path_calibration_without_mutation() {
+        let reference = stacking_star_field(160, 128);
+        let mut stacker = LiveStacker::from_linear(reference, StackOptions::default()).unwrap();
+        let fingerprint = stacker.configuration_fingerprint().to_owned();
+        let error = stacker
+            .set_calibration_from_fits_paths(None, None, None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("prepared pixels"), "{error}");
+        assert_eq!(stacker.configuration_fingerprint(), fingerprint);
+        assert!(stacker.input_paths().is_empty());
     }
 }

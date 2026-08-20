@@ -1,8 +1,97 @@
 use crate::{
-    BayerLayout, ColorComposition, Error, LinearImage, MasterFrame, Result, StackSnapshot,
+    BayerLayout, ColorComposition, Error, LinearImage, MasterFrame, Result, StackExportSnapshot,
+    StackSnapshot,
 };
+use seiza_calibration::FrameSignature;
 use seiza_fits::{F32ImageData, FitsImage, HeaderValue, WriteHeaderCard};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+
+/// Calibration markers carried by a decoded frame's headers.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct FrameCalibrationState {
+    /// A bias pedestal has already been removed.
+    pub bias_subtracted: bool,
+    /// Dark current has already been removed.
+    pub dark_subtracted: bool,
+    /// Flat response has already been normalized/applied.
+    pub flat_normalized: bool,
+}
+
+/// Normalized acquisition role declared by a frame's metadata.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FrameSourceRole {
+    /// A raw or integrated bias/offset frame.
+    Bias,
+    /// A raw or integrated dark frame.
+    Dark,
+    /// A dark captured for flat calibration.
+    DarkFlat,
+    /// A raw or integrated flat frame.
+    Flat,
+    /// A science/light/object frame.
+    Light,
+    /// No recognized role was declared.
+    #[default]
+    Unknown,
+}
+
+impl FrameSourceRole {
+    /// Stable kebab-case spelling used by JSON and diagnostics.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bias => "bias",
+            Self::Dark => "dark",
+            Self::DarkFlat => "dark-flat",
+            Self::Flat => "flat",
+            Self::Light => "light",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl FrameCalibrationState {
+    /// Whether any calibration stage is already declared complete.
+    pub fn is_calibrated(self) -> bool {
+        self.bias_subtracted || self.dark_subtracted || self.flat_normalized
+    }
+}
+
+/// Normalized metadata used to decide whether calibration is safe.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct FrameMetadata {
+    /// Normalized source role.
+    #[serde(default)]
+    pub role: FrameSourceRole,
+    /// Acquisition settings used by shared calibration matching policy.
+    pub signature: FrameSignature,
+    /// Whether the source declares itself to be an integrated master.
+    pub is_master: bool,
+    /// Calibration steps the source says have already been applied.
+    pub calibration_state: FrameCalibrationState,
+}
+
+impl FrameMetadata {
+    /// Normalize calibration metadata from FITS-style header cards.
+    ///
+    /// Structural dimensions come from `NAXIS*` when present. A decoded frame
+    /// should use [`FitsFrame::metadata`] so its verified geometry is used as
+    /// the fallback.
+    pub fn from_headers(headers: &[(String, HeaderValue)]) -> Self {
+        metadata_from_headers(headers, None, None, None)
+    }
+
+    /// Normalize headers while using a decoded image as structural fallback.
+    pub fn from_image(image: &LinearImage, headers: &[(String, HeaderValue)]) -> Self {
+        metadata_from_headers(
+            headers,
+            Some((image.width, image.height, image.channels)),
+            None,
+            None,
+        )
+    }
+}
 
 /// A FITS or XISF frame decoded into linear, un-stretched `f32` samples.
 #[derive(Clone, Debug)]
@@ -116,8 +205,12 @@ impl FitsFrame {
         })
     }
 
-    /// Reject a Seiza master whose declared kind does not match its use.
-    /// External masters without `SEIZAMST` retain the legacy inferred behavior.
+    /// Reject a master whose declared kind does not match its use.
+    ///
+    /// Seiza masters declare `SEIZAMST`. External masters commonly declare
+    /// only `IMAGETYP`/`OBSTYPE`; a recognized, contradictory role there is
+    /// just as unsafe and is rejected too. A source with no recognizable role
+    /// retains the legacy behavior and is accepted.
     pub fn validate_master_kind(&self, expected: &str) -> Result<()> {
         if let Some(actual) = self
             .headers
@@ -130,7 +223,35 @@ impl FitsFrame {
                 "expected a {expected} master but FITS declares {actual}"
             )));
         }
+        let role = self.metadata().role;
+        let role_matches = if expected.eq_ignore_ascii_case("BIAS") {
+            role == FrameSourceRole::Bias
+        } else if expected.eq_ignore_ascii_case("DARK") {
+            matches!(role, FrameSourceRole::Dark | FrameSourceRole::DarkFlat)
+        } else if expected.eq_ignore_ascii_case("FLAT") {
+            role == FrameSourceRole::Flat
+        } else {
+            false
+        };
+        if role != FrameSourceRole::Unknown && !role_matches {
+            return Err(Error::Calibration(format!(
+                "expected a {expected} master but frame metadata declares {}",
+                role.as_str()
+            )));
+        }
         Ok(())
+    }
+
+    /// Normalize the acquisition and calibration metadata of this decoded
+    /// frame. Decoded dimensions, channel count, exposure, and CFA layout are
+    /// authoritative when a header omitted them.
+    pub fn metadata(&self) -> FrameMetadata {
+        metadata_from_headers(
+            &self.headers,
+            Some((self.image.width, self.image.height, self.image.channels)),
+            self.exposure_seconds,
+            self.bayer,
+        )
     }
 
     /// Convert raw CFA sampling to the prepared RGB grid used by registration
@@ -141,6 +262,168 @@ impl FitsFrame {
         }
         Ok(self)
     }
+}
+
+fn metadata_from_headers(
+    headers: &[(String, HeaderValue)],
+    fallback_dimensions: Option<(usize, usize, usize)>,
+    fallback_exposure: Option<f64>,
+    fallback_bayer: Option<BayerLayout>,
+) -> FrameMetadata {
+    let fallback_width = fallback_dimensions.and_then(|value| i64::try_from(value.0).ok());
+    let fallback_height = fallback_dimensions.and_then(|value| i64::try_from(value.1).ok());
+    let fallback_channels = fallback_dimensions.and_then(|value| i64::try_from(value.2).ok());
+    let width = header_i64(headers, &["NAXIS1"])
+        .filter(|value| *value > 0)
+        .or(fallback_width);
+    let height = header_i64(headers, &["NAXIS2"])
+        .filter(|value| *value > 0)
+        .or(fallback_height);
+    let bayer_pattern = header_text(headers, &["BAYERPAT"])
+        .map(|value| value.to_ascii_uppercase())
+        .or_else(|| fallback_bayer.map(|layout| layout.pattern.as_str().to_ascii_uppercase()));
+    let channels = if width.is_some() && height.is_some() {
+        Some(
+            header_i64(headers, &["NAXIS3"])
+                .filter(|value| *value > 0)
+                .or_else(|| bayer_pattern.as_ref().map(|_| 1))
+                .or(fallback_channels)
+                .unwrap_or(1),
+        )
+    } else {
+        fallback_channels
+    };
+    let exposure_seconds = header_f64(headers, &["XPOSURE", "EXPTIME", "EXPOSURE"])
+        .filter(|value| *value > 0.0)
+        .or(fallback_exposure);
+    let declared_master = header_text(headers, &["SEIZAMST"]);
+    let raw_image_type = header_text(headers, &["IMAGETYP", "OBSTYPE", "FRAME"]);
+    let role_source = declared_master.as_deref().or(raw_image_type.as_deref());
+    let normalized_type = role_source.map(normalize_role_text).unwrap_or_default();
+
+    let mut signature = FrameSignature::default();
+    signature.camera = header_text(headers, &["INSTRUME", "CAMERA"]);
+    signature.telescope = header_text(headers, &["TELESCOP", "TELESCOPE"]);
+    signature.width = width;
+    signature.height = height;
+    signature.channels = channels;
+    signature.binning_x = header_i64(headers, &["XBINNING", "CCDXBIN"]);
+    signature.binning_y = header_i64(headers, &["YBINNING", "CCDYBIN"]);
+    signature.gain = header_i64(headers, &["GAIN"]);
+    signature.offset = header_i64(headers, &["OFFSET"]);
+    signature.readout_mode = header_i64(headers, &["READOUTM", "READMODE", "READOUT"]);
+    signature.bayer_pattern = bayer_pattern;
+    signature.filter = header_text(headers, &["FILTER"]);
+    signature.focal_length_mm =
+        header_f64(headers, &["FOCALLEN", "FOCALLENGTH", "FOCAL"]).filter(|value| *value > 0.0);
+    signature.rotation_deg = header_f64(headers, &["ROTATANG", "ROTATOR", "ROTPOS"]);
+    signature.exposure_seconds = exposure_seconds;
+    signature.camera_temp_c = header_f64(headers, &["CCD-TEMP", "SET-TEMP"]);
+    signature.captured_at_unix = header_text(headers, &["DATE-OBS", "DATE-BEG", "DATE-AVG"])
+        .as_deref()
+        .and_then(parse_iso_unix);
+
+    FrameMetadata {
+        role: normalize_source_role(&normalized_type),
+        signature,
+        is_master: declared_master.is_some() || normalized_type.contains("master"),
+        calibration_state: FrameCalibrationState {
+            bias_subtracted: header_bool(headers, "BIASSUB").unwrap_or(false),
+            dark_subtracted: header_bool(headers, "DARKSUB").unwrap_or(false),
+            flat_normalized: header_bool(headers, "FLATNORM").unwrap_or(false),
+        },
+    }
+}
+
+fn normalize_source_role(normalized: &str) -> FrameSourceRole {
+    if normalized.contains("darkflat") || normalized.contains("flatdark") {
+        FrameSourceRole::DarkFlat
+    } else if normalized.contains("bias") || normalized.contains("offset") {
+        FrameSourceRole::Bias
+    } else if normalized.contains("dark") {
+        FrameSourceRole::Dark
+    } else if normalized.contains("flat") {
+        FrameSourceRole::Flat
+    } else if normalized.contains("light") || normalized.contains("object") {
+        FrameSourceRole::Light
+    } else {
+        FrameSourceRole::Unknown
+    }
+}
+
+fn normalize_role_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn header_value<'a>(
+    headers: &'a [(String, HeaderValue)],
+    keys: &[&str],
+) -> Option<&'a HeaderValue> {
+    keys.iter().find_map(|key| {
+        headers
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
+            .map(|(_, value)| value)
+    })
+}
+
+fn header_text(headers: &[(String, HeaderValue)], keys: &[&str]) -> Option<String> {
+    let value = header_value(headers, keys)?;
+    let value = match value {
+        HeaderValue::String(value) | HeaderValue::Raw(value) => value.trim(),
+        _ => return None,
+    };
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn header_f64(headers: &[(String, HeaderValue)], keys: &[&str]) -> Option<f64> {
+    header_value(headers, keys)?
+        .as_f64()
+        .filter(|value| value.is_finite())
+}
+
+fn header_i64(headers: &[(String, HeaderValue)], keys: &[&str]) -> Option<i64> {
+    let value = header_f64(headers, keys)?;
+    (value >= i64::MIN as f64 && value <= i64::MAX as f64).then_some(value as i64)
+}
+
+fn header_bool(headers: &[(String, HeaderValue)], key: &str) -> Option<bool> {
+    let value = header_value(headers, &[key])?;
+    match value {
+        HeaderValue::Logical(value) => Some(*value),
+        HeaderValue::Integer(value) => Some(*value != 0),
+        HeaderValue::Float(value) if value.is_finite() => Some(*value != 0.0),
+        HeaderValue::String(value) | HeaderValue::Raw(value) => {
+            match value.trim().to_ascii_lowercase().as_str() {
+                "true" | "t" | "yes" | "y" | "1" => Some(true),
+                "false" | "f" | "no" | "n" | "0" => Some(false),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn parse_iso_unix(value: &str) -> Option<i64> {
+    let value = value.trim().trim_end_matches('Z');
+    let (date, clock) = value.split_once('T').unwrap_or((value, "0:0:0"));
+    let mut date_parts = date.split('-');
+    let year: i32 = date_parts.next()?.parse().ok()?;
+    let month: u32 = date_parts.next()?.parse().ok()?;
+    let day: u32 = date_parts.next()?.parse().ok()?;
+    let mut clock_parts = clock.split(':');
+    let hour: f64 = clock_parts.next()?.parse().ok()?;
+    let minute: f64 = clock_parts.next().unwrap_or("0").parse().ok()?;
+    let second: f64 = clock_parts.next().unwrap_or("0").parse().ok()?;
+    let day_fraction = day as f64 + (hour + minute / 60.0 + second / 3_600.0) / 24.0;
+    let julian = seiza::minor_bodies::julian_date(year, month, day_fraction);
+    let seconds = (julian - 2_440_587.5) * 86_400.0;
+    (seconds.is_finite() && seconds >= i64::MIN as f64 && seconds <= i64::MAX as f64)
+        .then_some(seconds.round() as i64)
 }
 
 fn planar_to_interleaved(planar: &[f32], pixel_count: usize) -> Vec<f32> {
@@ -160,17 +443,49 @@ pub fn write_fits_f32(
     snapshot: &StackSnapshot,
     reference_headers: &[(String, HeaderValue)],
 ) -> Result<()> {
+    write_stack_image_fits_f32(
+        path,
+        &snapshot.image,
+        snapshot.accepted_frames,
+        snapshot.rejected_frames,
+        reference_headers,
+    )
+}
+
+/// Write a compact immutable live-stack export as unstretched 32-bit floating
+/// point FITS, or as monolithic XISF when the path ends in `.xisf`.
+pub fn write_stack_export_fits_f32(
+    path: impl AsRef<Path>,
+    snapshot: &StackExportSnapshot,
+    reference_headers: &[(String, HeaderValue)],
+) -> Result<()> {
+    write_stack_image_fits_f32(
+        path,
+        &snapshot.image,
+        snapshot.accepted_frames,
+        snapshot.rejected_frames,
+        reference_headers,
+    )
+}
+
+fn write_stack_image_fits_f32(
+    path: impl AsRef<Path>,
+    image: &LinearImage,
+    accepted_frames: u32,
+    rejected_frames: u32,
+    reference_headers: &[(String, HeaderValue)],
+) -> Result<()> {
     let mut cards = vec![integer_card(
         "STACKCNT",
-        snapshot.accepted_frames as i64,
+        accepted_frames as i64,
         "accepted input frames",
     )];
     cards.push(integer_card(
         "STACKREJ",
-        snapshot.rejected_frames as i64,
+        rejected_frames as i64,
         "rejected input frames",
     ));
-    write_linear_image_fits_f32(path, &snapshot.image, reference_headers, &cards)
+    write_linear_image_fits_f32(path, image, reference_headers, &cards)
 }
 
 /// Write a composed RGB image as primary-HDU 32-bit floating-point FITS.
@@ -587,6 +902,21 @@ mod tests {
             planar_to_interleaved(&[1.0, 2.0, 10.0, 20.0, 100.0, 200.0], 2),
             [1.0, 10.0, 100.0, 2.0, 20.0, 200.0]
         );
+    }
+
+    #[test]
+    fn raw_bayer_headers_keep_one_channel_when_a_restored_image_is_prepared_rgb() {
+        let prepared = LinearImage::new(2, 2, 3, vec![0.0; 12]).unwrap();
+        let headers = vec![
+            ("NAXIS1".into(), HeaderValue::Integer(2)),
+            ("NAXIS2".into(), HeaderValue::Integer(2)),
+            ("BAYERPAT".into(), HeaderValue::String("RGGB".into())),
+            ("IMAGETYP".into(), HeaderValue::String("LIGHT".into())),
+        ];
+        let metadata = FrameMetadata::from_image(&prepared, &headers);
+        assert_eq!(metadata.signature.channels, Some(1));
+        assert_eq!(metadata.signature.bayer_pattern.as_deref(), Some("RGGB"));
+        assert_eq!(metadata.role, FrameSourceRole::Light);
     }
 
     #[test]

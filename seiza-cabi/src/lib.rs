@@ -13,12 +13,16 @@ use seiza_background::{BackgroundConfig, BackgroundFit, CorrectionMode, fit_back
 use seiza_deconvolution::{DeconvolutionConfig, deconvolve, deconvolve_masked};
 use seiza_fits::{FitsImage, HeaderValue, RgbImage16, Statistics, StretchParams};
 use seiza_stacking::{
-    ChannelCoverage, ChannelSamples, ColorCrop, CropReport, FrameDiagnostics, FrameDisposition,
-    LinearImage, LiveStacker, ReferenceRegion, StackOptions, StackSnapshot as RustStackSnapshot,
+    CancelSignal, ChannelCoverage, ChannelSamples, ColorCrop, CropReport, FitsFrame,
+    FrameDiagnostics, FrameDisposition, FrameInputMode, FrameSourceRole, ImpulseFilterOptions,
+    LinearImage, LiveStacker, MasterBuildOptions, MasterDark, MasterFrameKind,
+    MasterRejectionOptions, ReferenceRegion, StackExportSnapshot as RustStackExportSnapshot,
+    StackOptions, StackSnapshot as RustStackSnapshot, build_master_from_fits,
     checkpoint_depths as rust_checkpoint_depths, crop_report, measure_depth as rust_measure_depth,
-    path_identity, paths_refer_to_same_file, write_fits_f32,
+    path_identity, paths_refer_to_same_file, write_fits_f32, write_master_fits_f32,
+    write_stack_export_fits_f32,
 };
-use seiza_stretch::{StretchConfig, StretchStack};
+use seiza_stretch::{StretchAnalysis, StretchConfig, StretchStack};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::borrow::Cow;
@@ -27,7 +31,7 @@ use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::ptr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, SystemTime};
 
@@ -116,11 +120,13 @@ struct PreparedFitsRender {
     render_height: usize,
     channels: usize,
     data: Vec<f32>,
+    validity_mask: Option<Vec<bool>>,
     statistics: Value,
     input_histogram: Value,
     background_metadata: Option<Value>,
     headers: Map<String, Value>,
     interactive_preview: bool,
+    live_stack: Option<LivePreviewMetadata>,
 }
 
 struct PreparedStretchInput<'a> {
@@ -454,10 +460,27 @@ pub struct SeizaLiveStacker {
     stacker: LiveStacker,
 }
 
+/// An opaque, thread-safe cooperative cancellation flag. Release it with
+/// [`seiza_cancel_signal_free`] after every operation borrowing it has
+/// returned.
+pub struct SeizaCancelSignal {
+    cancelled: Arc<AtomicBool>,
+}
+
 /// An immutable owned stack result. Its image and count pointers are borrowed
 /// until [`seiza_stack_snapshot_free`] is called.
 pub struct SeizaStackSnapshot {
     snapshot: RustStackSnapshot,
+    reference_headers: Vec<(String, HeaderValue)>,
+    input_paths: Vec<PathBuf>,
+}
+
+/// A compact immutable live-stack result for non-destructive output. It owns
+/// only the finalized mean, reference headers, scalar frame counts, and the
+/// small source-path ledger. Release it with
+/// [`seiza_stack_export_snapshot_free`].
+pub struct SeizaStackExportSnapshot {
+    snapshot: RustStackExportSnapshot,
     reference_headers: Vec<(String, HeaderValue)>,
     input_paths: Vec<PathBuf>,
 }
@@ -498,6 +521,366 @@ struct StackDiagnosticsResponse {
     integrated_fraction: f32,
     accepted_samples: usize,
     rejected_samples: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LiveStackStateResponse {
+    schema_version: u32,
+    core_version: &'static str,
+    configuration_fingerprint: String,
+    width: usize,
+    height: usize,
+    channels: usize,
+    accepted_frames: u32,
+    rejected_frames: u32,
+    input_mode: &'static str,
+    input_paths: Vec<String>,
+    reference_frame: LiveStackReferenceResponse,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LiveStackReferenceResponse {
+    role: CalibrationFrameRole,
+    is_master: bool,
+    signature: FrameProbeSignature,
+    calibration_state: FrameCalibrationStateResponse,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LivePreviewMetadata {
+    schema_version: u32,
+    accepted_frames: u32,
+    rejected_frames: u32,
+    input_mode: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum CalibrationFrameRole {
+    Bias,
+    Dark,
+    DarkFlat,
+    Flat,
+    Light,
+    #[default]
+    Unknown,
+}
+
+impl From<FrameSourceRole> for CalibrationFrameRole {
+    fn from(value: FrameSourceRole) -> Self {
+        match value {
+            FrameSourceRole::Bias => Self::Bias,
+            FrameSourceRole::Dark => Self::Dark,
+            FrameSourceRole::DarkFlat => Self::DarkFlat,
+            FrameSourceRole::Flat => Self::Flat,
+            FrameSourceRole::Light => Self::Light,
+            FrameSourceRole::Unknown => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+struct FrameProbeSignature {
+    camera: Option<String>,
+    telescope: Option<String>,
+    width: Option<i64>,
+    height: Option<i64>,
+    channels: Option<i64>,
+    binning_x: Option<i64>,
+    binning_y: Option<i64>,
+    gain: Option<i64>,
+    offset: Option<i64>,
+    readout_mode: Option<i64>,
+    bayer_pattern: Option<String>,
+    filter: Option<String>,
+    focal_length_mm: Option<f64>,
+    rotation_deg: Option<f64>,
+    exposure_seconds: Option<f64>,
+    camera_temp_c: Option<f64>,
+    captured_at_unix: Option<i64>,
+}
+
+impl From<&FrameProbeSignature> for seiza_calibration::FrameSignature {
+    fn from(value: &FrameProbeSignature) -> Self {
+        let mut signature = Self::default();
+        signature.camera = value.camera.clone();
+        signature.telescope = value.telescope.clone();
+        signature.width = value.width;
+        signature.height = value.height;
+        signature.channels = value.channels;
+        signature.binning_x = value.binning_x;
+        signature.binning_y = value.binning_y;
+        signature.gain = value.gain;
+        signature.offset = value.offset;
+        signature.readout_mode = value.readout_mode;
+        signature.bayer_pattern = value.bayer_pattern.clone();
+        signature.filter = value.filter.clone();
+        signature.focal_length_mm = value.focal_length_mm;
+        signature.rotation_deg = value.rotation_deg;
+        signature.exposure_seconds = value.exposure_seconds;
+        signature.camera_temp_c = value.camera_temp_c;
+        signature.captured_at_unix = value.captured_at_unix;
+        signature
+    }
+}
+
+impl From<&seiza_calibration::FrameSignature> for FrameProbeSignature {
+    fn from(value: &seiza_calibration::FrameSignature) -> Self {
+        Self {
+            camera: value.camera.clone(),
+            telescope: value.telescope.clone(),
+            width: value.width,
+            height: value.height,
+            channels: value.channels,
+            binning_x: value.binning_x,
+            binning_y: value.binning_y,
+            gain: value.gain,
+            offset: value.offset,
+            readout_mode: value.readout_mode,
+            bayer_pattern: value.bayer_pattern.clone(),
+            filter: value.filter.clone(),
+            focal_length_mm: value.focal_length_mm,
+            rotation_deg: value.rotation_deg,
+            exposure_seconds: value.exposure_seconds,
+            camera_temp_c: value.camera_temp_c,
+            captured_at_unix: value.captured_at_unix,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FrameCalibrationStateResponse {
+    bias_subtracted: bool,
+    dark_subtracted: bool,
+    flat_normalized: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FrameProbeResponse {
+    schema_version: u32,
+    path: String,
+    format: &'static str,
+    role: CalibrationFrameRole,
+    raw_image_type: Option<String>,
+    is_master: bool,
+    signature: FrameProbeSignature,
+    calibration_state: FrameCalibrationStateResponse,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum CalibrationPlanKind {
+    Bias,
+    Dark,
+    DarkFlat,
+    Flat,
+}
+
+impl CalibrationPlanKind {
+    fn role(self) -> CalibrationFrameRole {
+        match self {
+            Self::Bias => CalibrationFrameRole::Bias,
+            Self::Dark => CalibrationFrameRole::Dark,
+            Self::DarkFlat => CalibrationFrameRole::DarkFlat,
+            Self::Flat => CalibrationFrameRole::Flat,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Bias => "bias",
+            Self::Dark => "dark",
+            Self::DarkFlat => "dark-flat",
+            Self::Flat => "flat",
+        }
+    }
+
+    fn uses_dark_matching(self) -> bool {
+        matches!(self, Self::Dark | Self::DarkFlat)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CalibrationPlanRecord {
+    path: String,
+    #[serde(default)]
+    role: CalibrationFrameRole,
+    signature: FrameProbeSignature,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CalibrationPlanTolerancesRequest {
+    exposure_seconds: Option<f64>,
+    exposure_fraction: Option<f64>,
+    dark_temperature_c: Option<f64>,
+    master_temperature_c: Option<f64>,
+    rotation_deg: Option<f64>,
+    focal_length_mm: Option<f64>,
+    flat_session_seconds: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CalibrationPlanRequest {
+    kind: CalibrationPlanKind,
+    reference: CalibrationPlanRecord,
+    #[serde(default)]
+    references: Vec<CalibrationPlanRecord>,
+    candidates: Vec<CalibrationPlanRecord>,
+    #[serde(default = "default_calibration_plan_minimum")]
+    minimum: usize,
+    #[serde(default)]
+    tolerances: CalibrationPlanTolerancesRequest,
+    #[serde(default)]
+    dependencies: CalibrationPlanDependenciesRequest,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CalibrationPlanDependenciesRequest {
+    /// An actually built, usable bias master will isolate dark current and
+    /// make exposure scaling safe. This is a fact, not user intent.
+    bias_available: bool,
+}
+
+const fn default_calibration_plan_minimum() -> usize {
+    2
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CalibrationPlanExclusionResponse {
+    path: String,
+    reason: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CalibrationPlanResponse {
+    schema_version: u32,
+    kind: &'static str,
+    minimum: usize,
+    ready: bool,
+    matched_paths: Vec<String>,
+    selected_paths: Vec<String>,
+    excluded: Vec<CalibrationPlanExclusionResponse>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum MasterBuildKindRequest {
+    Bias,
+    Dark,
+    Flat,
+}
+
+impl MasterBuildKindRequest {
+    fn into_core(self) -> MasterFrameKind {
+        match self {
+            Self::Bias => MasterFrameKind::Bias,
+            Self::Dark => MasterFrameKind::Dark,
+            Self::Flat => MasterFrameKind::Flat,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+struct MasterRejectionRequest {
+    low_sigma: f32,
+    high_sigma: f32,
+}
+
+impl Default for MasterRejectionRequest {
+    fn default() -> Self {
+        let defaults = MasterRejectionOptions::default();
+        Self {
+            low_sigma: defaults.low_sigma,
+            high_sigma: defaults.high_sigma,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+struct ImpulseFilterRequest {
+    low_sigma: f32,
+    high_sigma: f32,
+}
+
+impl Default for ImpulseFilterRequest {
+    fn default() -> Self {
+        let defaults = ImpulseFilterOptions::default();
+        Self {
+            low_sigma: defaults.low_sigma,
+            high_sigma: defaults.high_sigma,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MasterBuildRequest {
+    kind: MasterBuildKindRequest,
+    inputs: Vec<PathBuf>,
+    output: PathBuf,
+    #[serde(default)]
+    bias: Option<PathBuf>,
+    #[serde(default)]
+    dark: Option<PathBuf>,
+    #[serde(default)]
+    dark_exposure_seconds: Option<f64>,
+    #[serde(default)]
+    exposure_seconds: Option<f64>,
+    #[serde(default)]
+    rejection: MasterRejectionRequest,
+    #[serde(default)]
+    defect_suppression: Option<ImpulseFilterRequest>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MasterBuildInputResponse {
+    path: String,
+    accepted_samples: u64,
+    rejected_samples: u64,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MasterBuildRejectionResponse {
+    low_sigma: f32,
+    high_sigma: f32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MasterBuildResponse {
+    schema_version: u32,
+    kind: &'static str,
+    output: String,
+    width: usize,
+    height: usize,
+    channels: usize,
+    input_frames: usize,
+    accepted_samples: u64,
+    rejected_samples: u64,
+    fallback_pixels: u64,
+    defect_pixels_replaced: u64,
+    bias_subtracted: bool,
+    dark_subtracted: bool,
+    normalized: bool,
+    output_exposure_seconds: Option<f64>,
+    rejection: MasterBuildRejectionResponse,
+    inputs: Vec<MasterBuildInputResponse>,
 }
 
 /// Additive background subtraction mode for
@@ -1072,6 +1455,39 @@ pub unsafe extern "C" fn seiza_background_model_free(model: *mut SeizaBackground
 }
 
 #[unsafe(no_mangle)]
+/// Create a thread-safe cooperative cancellation flag. The returned owner is
+/// initially clear and must be released with [`seiza_cancel_signal_free`].
+pub extern "C" fn seiza_cancel_signal_create() -> *mut SeizaCancelSignal {
+    Box::into_raw(Box::new(SeizaCancelSignal {
+        cancelled: Arc::new(AtomicBool::new(false)),
+    }))
+}
+
+#[unsafe(no_mangle)]
+/// Ask work borrowing this signal to stop. The call is thread-safe and may be
+/// made from a UI thread while a worker is inside a cancellable operation.
+///
+/// # Safety
+/// `signal` must be null or a live pointer returned by
+/// [`seiza_cancel_signal_create`]. It must not be freed concurrently.
+pub unsafe extern "C" fn seiza_cancel_signal_cancel(signal: *const SeizaCancelSignal) {
+    if let Some(signal) = unsafe { signal.as_ref() } {
+        signal.cancelled.store(true, Ordering::Relaxed);
+    }
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `signal` must be null or a pointer returned by
+/// [`seiza_cancel_signal_create`] that has not already been freed. Do not free
+/// it until every operation borrowing it has returned.
+pub unsafe extern "C" fn seiza_cancel_signal_free(signal: *mut SeizaCancelSignal) {
+    if !signal.is_null() {
+        unsafe { drop(Box::from_raw(signal)) };
+    }
+}
+
+#[unsafe(no_mangle)]
 /// Creates an incremental stack from a copied linear mono or interleaved RGB
 /// reference frame. Array frames are assumed to be calibrated and debayered.
 /// Pass null or empty `options_json` for `StackOptions::default()`.
@@ -1213,6 +1629,151 @@ pub unsafe extern "C" fn seiza_live_stacker_save_context(
             .map_err(|error| error.to_string())
     })
     .is_some()
+}
+
+#[unsafe(no_mangle)]
+/// Returns an owned JSON snapshot of the live stack's resumable identity and
+/// counters. Free it with [`seiza_string_free`].
+///
+/// `inputPaths` is the native, ordered source/calibration ledger used for
+/// duplicate-input and output protection. `configurationFingerprint` is a
+/// lowercase SHA-256 identity of stack options, current calibration content,
+/// and input mode; it excludes counters and paths, changes when calibration
+/// changes, and survives a context round trip.
+///
+/// # Safety
+/// `stacker` must be a live `SeizaLiveStacker` pointer. When non-null,
+/// `error_out` must point to writable storage for one pointer. Externally
+/// synchronize this read with every mutable operation on the same stacker.
+pub unsafe extern "C" fn seiza_live_stacker_state_json(
+    stacker: *const SeizaLiveStacker,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let stacker = unsafe { required_live_stacker(stacker)? };
+        let view = stacker.stacker.view();
+        let reference_metadata = stacker.stacker.reference_metadata();
+        owned_json(&LiveStackStateResponse {
+            schema_version: 1,
+            core_version: env!("CARGO_PKG_VERSION"),
+            configuration_fingerprint: stacker.stacker.configuration_fingerprint().to_owned(),
+            width: view.width,
+            height: view.height,
+            channels: view.channels,
+            accepted_frames: view.accepted_frames,
+            rejected_frames: view.rejected_frames,
+            input_mode: live_stack_input_mode_name(stacker.stacker.input_mode()),
+            input_paths: stacker
+                .stacker
+                .input_paths()
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            reference_frame: LiveStackReferenceResponse {
+                role: CalibrationFrameRole::from(reference_metadata.role),
+                is_master: reference_metadata.is_master,
+                signature: FrameProbeSignature::from(&reference_metadata.signature),
+                calibration_state: FrameCalibrationStateResponse {
+                    bias_subtracted: reference_metadata.calibration_state.bias_subtracted,
+                    dark_subtracted: reference_metadata.calibration_state.dark_subtracted,
+                    flat_normalized: reference_metadata.calibration_state.flat_normalized,
+                },
+            },
+        })
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// Load and atomically replace the masters used by later FITS/XISF pushes.
+///
+/// Each master path is optional. Passing all null/empty paths clears the
+/// calibration set. A positive `dark_exposure_seconds` overrides the dark
+/// header; zero uses the header and requires no override. All supplied files
+/// are fully decoded and the complete set is validated against the immutable
+/// registration reference before either active calibration or the input-path
+/// ledger changes. Already integrated frames are not recalibrated. A stack
+/// created from prepared arrays refuses this operation.
+///
+/// # Safety
+/// `stacker` must be a live `SeizaLiveStacker` pointer. Non-null paths must be
+/// valid NUL-terminated strings. When non-null, `error_out` must point to
+/// writable storage for one pointer.
+pub unsafe extern "C" fn seiza_live_stacker_set_calibration_fits(
+    stacker: *mut SeizaLiveStacker,
+    bias_path: *const c_char,
+    dark_path: *const c_char,
+    flat_path: *const c_char,
+    dark_exposure_seconds: f64,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let bias_path = optional_path(bias_path)?;
+        let dark_path = optional_path(dark_path)?;
+        let flat_path = optional_path(flat_path)?;
+        if dark_path.is_none() && dark_exposure_seconds != 0.0 {
+            return Err("a master-dark exposure override requires a dark path".into());
+        }
+        let dark_exposure_seconds =
+            optional_positive_seconds(dark_exposure_seconds, "master-dark exposure override")?;
+        let stacker = unsafe { required_live_stacker_mut(stacker)? };
+        stacker
+            .stacker
+            .set_calibration_from_fits_paths(
+                bias_path.as_deref(),
+                dark_path.as_deref(),
+                flat_path.as_deref(),
+                dark_exposure_seconds,
+            )
+            .map_err(|error| error.to_string())
+    })
+    .is_some()
+}
+
+#[unsafe(no_mangle)]
+/// Render a bounded RGBA8 preview directly from the current live mean.
+///
+/// `config_json` accepts the same stretch / optional background / optional
+/// deconvolution schema as
+/// [`seiza_rendered_image_open_with_stretch_config`]. `max_dimension` must be
+/// positive and bounds the linear buffer before background fitting,
+/// deconvolution, and stretch. The returned image owns its pixels and remains
+/// valid after the stack changes; free it with [`seiza_rendered_image_free`].
+///
+/// # Safety
+/// `stacker` must be a live `SeizaLiveStacker` pointer and `config_json` a
+/// valid NUL-terminated string. When non-null, `error_out` must point to
+/// writable storage for one pointer. Externally synchronize this read with
+/// every mutable operation on the same stacker.
+pub unsafe extern "C" fn seiza_live_stacker_render_preview(
+    stacker: *const SeizaLiveStacker,
+    config_json: *const c_char,
+    max_dimension: u32,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaRenderedImage {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        if max_dimension == 0 {
+            return Err("live preview maximum dimension must be positive".into());
+        }
+        let config_json = required_str(config_json, "stretch config JSON")?;
+        let request: ImageRenderConfigRequest = serde_json::from_str(&config_json)
+            .map_err(|error| format!("invalid stretch config JSON: {error}"))?;
+        let (stretch, background, deconvolution, _) = request.into_parts();
+        let stacker = unsafe { required_live_stacker(stacker)? };
+        let prepared =
+            prepare_live_stack_render(&stacker.stacker, background.as_ref(), max_dimension)?;
+        render_prepared_fits(
+            &prepared,
+            &stretch,
+            deconvolution.as_ref(),
+            max_dimension,
+            false,
+        )
+    })
+    .map_or(ptr::null_mut(), |image| Box::into_raw(Box::new(image)))
 }
 
 #[unsafe(no_mangle)]
@@ -1511,6 +2072,42 @@ pub unsafe extern "C" fn seiza_live_stacker_snapshot(
 }
 
 #[unsafe(no_mangle)]
+/// Copies only the finalized mean and scalar frame counts into an immutable
+/// export owner. Unlike [`seiza_live_stacker_snapshot`], this does not clone
+/// variance, per-sample coverage, or per-sample rejection maps.
+///
+/// The returned owner is independent of `stacker`: after this call returns it
+/// may be transferred to a worker thread, written, and freed without holding
+/// the live stacker's synchronization lock while ingestion continues.
+///
+/// # Safety
+/// `stacker` must be a live `SeizaLiveStacker` pointer. When non-null,
+/// `error_out` must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_live_stacker_export_snapshot(
+    stacker: *const SeizaLiveStacker,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaStackExportSnapshot {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let stacker = unsafe { required_live_stacker(stacker)? };
+        let reference_headers = stacker.stacker.reference_headers().to_vec();
+        let input_paths = stacker.stacker.input_paths().to_vec();
+        let snapshot = stacker
+            .stacker
+            .export_snapshot()
+            .map_err(|error| error.to_string())?;
+        Ok(SeizaStackExportSnapshot {
+            snapshot,
+            reference_headers,
+            input_paths,
+        })
+    })
+    .map_or(ptr::null_mut(), |snapshot| {
+        Box::into_raw(Box::new(snapshot))
+    })
+}
+
+#[unsafe(no_mangle)]
 /// Consumes a live stacker and moves its full-frame state into an immutable
 /// snapshot without cloning it. Once a non-null live handle is accepted,
 /// `*stacker` is set to null and consumed even if finalization reports an
@@ -1734,6 +2331,55 @@ pub unsafe extern "C" fn seiza_stack_snapshot_write_fits(
 /// `snapshot` must be null or a live pointer returned by a snapshot/finalize
 /// function and must not already be freed.
 pub unsafe extern "C" fn seiza_stack_snapshot_free(snapshot: *mut SeizaStackSnapshot) {
+    if !snapshot.is_null() {
+        unsafe { drop(Box::from_raw(snapshot)) };
+    }
+}
+
+#[unsafe(no_mangle)]
+/// Writes a compact immutable export snapshot as an unstretched 32-bit
+/// floating-point FITS, preserving compatible reference headers. The same
+/// extension-based XISF behavior as [`seiza_stack_snapshot_write_fits`] is
+/// retained.
+///
+/// This call reads only the export owner and may run on a worker thread after
+/// [`seiza_live_stacker_export_snapshot`] returns; the live stacker is no
+/// longer involved.
+///
+/// # Safety
+/// `snapshot` must be a live `SeizaStackExportSnapshot` pointer. `path` must
+/// be a valid NUL-terminated string. When non-null, `error_out` must point to
+/// writable storage for one pointer. Do not free `snapshot` until this call
+/// returns.
+pub unsafe extern "C" fn seiza_stack_export_snapshot_write_fits(
+    snapshot: *const SeizaStackExportSnapshot,
+    path: *const c_char,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let snapshot = unsafe { required_stack_export_snapshot(snapshot)? };
+        let path = required_path(path, "stack output path")?;
+        if snapshot
+            .input_paths
+            .iter()
+            .any(|input| paths_refer_to_same_file(input, &path))
+        {
+            return Err(
+                "stack output path must not refer to an input frame or calibration master".into(),
+            );
+        }
+        write_stack_export_fits_f32(path, &snapshot.snapshot, &snapshot.reference_headers)
+            .map_err(|error| error.to_string())
+    })
+    .is_some()
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `snapshot` must be null or a live pointer returned by
+/// [`seiza_live_stacker_export_snapshot`] and must not already be freed.
+pub unsafe extern "C" fn seiza_stack_export_snapshot_free(snapshot: *mut SeizaStackExportSnapshot) {
     if !snapshot.is_null() {
         unsafe { drop(Box::from_raw(snapshot)) };
     }
@@ -3153,12 +3799,199 @@ fn prepare_fits_render(
         render_height,
         channels,
         data,
+        validity_mask: None,
         statistics: statistics_json(&statistics),
         input_histogram,
         background_metadata,
         headers,
         interactive_preview,
+        live_stack: None,
     })
+}
+
+fn prepare_live_stack_render(
+    stacker: &LiveStacker,
+    background: Option<&BackgroundRenderRequest>,
+    max_dimension: u32,
+) -> Result<PreparedFitsRender, String> {
+    let view = stacker.view();
+    let source_width = view.width;
+    let source_height = view.height;
+    let channels = view.channels;
+    let (render_width, render_height, mut data, validity_mask) =
+        sample_live_stack_view(view, usize::try_from(max_dimension).unwrap_or(usize::MAX))?;
+    let statistics = live_stack_statistics_json(&data, channels)?;
+    let (input_histogram, background_metadata) = if let Some(background) = background {
+        let exclusion_mask = validity_mask.iter().map(|valid| !valid).collect::<Vec<_>>();
+        let fit = fit_background_masked(
+            &data,
+            render_width,
+            render_height,
+            channels,
+            Some(&exclusion_mask),
+            &background.config,
+        )
+        .map_err(|error| format!("failed to fit image background: {error}"))?;
+        fit.correct_in_place_with_strength(&mut data, background.mode, background.strength)
+            .map_err(|error| format!("failed to correct image background: {error}"))?;
+        let metadata = json!({
+            "mode": background.mode,
+            "strength": background.strength,
+            "model": fit.model.family_name(),
+            "diagnostics": &fit.diagnostics,
+            "reference": &fit.reference,
+        });
+        (
+            input_histogram_scaled_f32_json(&data, channels),
+            Some(metadata),
+        )
+    } else {
+        (input_histogram_scaled_f32_json(&data, channels), None)
+    };
+    let mut headers = Map::new();
+    for (key, value) in stacker.reference_headers() {
+        headers.insert(key.clone(), header_json(value));
+    }
+    let state = stacker.view();
+
+    Ok(PreparedFitsRender {
+        source_format: "Live stack",
+        source_width,
+        source_height,
+        planes: channels,
+        color_kind: if channels == 3 { "planar-rgb" } else { "mono" },
+        render_width,
+        render_height,
+        channels,
+        data,
+        validity_mask: Some(validity_mask),
+        statistics,
+        input_histogram,
+        background_metadata,
+        headers,
+        interactive_preview: true,
+        live_stack: Some(LivePreviewMetadata {
+            schema_version: 1,
+            accepted_frames: state.accepted_frames,
+            rejected_frames: state.rejected_frames,
+            input_mode: live_stack_input_mode_name(stacker.input_mode()),
+        }),
+    })
+}
+
+/// Copy at most `max_dimension` squared pixels from a borrowed live view.
+/// Bilinear samples ignore uncovered neighbors, so the undefined mean values
+/// behind zero coverage never enter the preview.
+fn sample_live_stack_view(
+    view: seiza_stacking::StackView<'_>,
+    max_dimension: usize,
+) -> Result<(usize, usize, Vec<f32>, Vec<bool>), String> {
+    if max_dimension == 0 {
+        return Err("live preview maximum dimension must be positive".into());
+    }
+    let scale = (max_dimension as f64 / view.width.max(view.height) as f64).min(1.0);
+    let output_width = ((view.width as f64 * scale).round() as usize).max(1);
+    let output_height = ((view.height as f64 * scale).round() as usize).max(1);
+    let output_samples = output_width
+        .checked_mul(output_height)
+        .and_then(|pixels| pixels.checked_mul(view.channels))
+        .ok_or("live preview dimensions overflow")?;
+    let mut output = vec![0.0_f32; output_samples];
+    let mut validity_mask = vec![false; output_width * output_height];
+
+    if output_width == view.width && output_height == view.height {
+        for (pixel, output_pixel) in output.chunks_exact_mut(view.channels).enumerate() {
+            let mut valid = true;
+            for (channel, value) in output_pixel.iter_mut().enumerate() {
+                let index = pixel * view.channels + channel;
+                if view.coverage[index] > 0 && view.mean[index].is_finite() {
+                    *value = view.mean[index];
+                } else {
+                    *value = f32::NAN;
+                    valid = false;
+                }
+            }
+            validity_mask[pixel] = valid;
+            if !valid {
+                output_pixel.fill(f32::NAN);
+            }
+        }
+        return Ok((output_width, output_height, output, validity_mask));
+    }
+
+    let scale_x = view.width as f64 / output_width as f64;
+    let scale_y = view.height as f64 / output_height as f64;
+    for output_y in 0..output_height {
+        let source_y = ((output_y as f64 + 0.5) * scale_y - 0.5)
+            .clamp(0.0, view.height.saturating_sub(1) as f64);
+        let y0 = source_y.floor() as usize;
+        let y1 = (y0 + 1).min(view.height - 1);
+        let wy = (source_y - y0 as f64) as f32;
+        for output_x in 0..output_width {
+            let source_x = ((output_x as f64 + 0.5) * scale_x - 0.5)
+                .clamp(0.0, view.width.saturating_sub(1) as f64);
+            let x0 = source_x.floor() as usize;
+            let x1 = (x0 + 1).min(view.width - 1);
+            let wx = (source_x - x0 as f64) as f32;
+            let neighbors = [
+                (x0, y0, (1.0 - wx) * (1.0 - wy)),
+                (x1, y0, wx * (1.0 - wy)),
+                (x0, y1, (1.0 - wx) * wy),
+                (x1, y1, wx * wy),
+            ];
+            for channel in 0..view.channels {
+                let mut sum = 0.0_f32;
+                let mut weight = 0.0_f32;
+                for (x, y, spatial_weight) in neighbors {
+                    let index = (y * view.width + x) * view.channels + channel;
+                    if view.coverage[index] > 0 && view.mean[index].is_finite() {
+                        sum += view.mean[index] * spatial_weight;
+                        weight += spatial_weight;
+                    }
+                }
+                if weight > 0.0 {
+                    output[(output_y * output_width + output_x) * view.channels + channel] =
+                        sum / weight;
+                } else {
+                    output[(output_y * output_width + output_x) * view.channels + channel] =
+                        f32::NAN;
+                }
+            }
+            let output_pixel = output_y * output_width + output_x;
+            validity_mask[output_pixel] = output
+                [output_pixel * view.channels..(output_pixel + 1) * view.channels]
+                .iter()
+                .all(|value| value.is_finite());
+            if !validity_mask[output_pixel] {
+                output[output_pixel * view.channels..(output_pixel + 1) * view.channels]
+                    .fill(f32::NAN);
+            }
+        }
+    }
+    Ok((output_width, output_height, output, validity_mask))
+}
+
+fn live_stack_statistics_json(samples: &[f32], channels: usize) -> Result<Value, String> {
+    let analysis = StretchAnalysis::analyze(samples, channels, 262_144)
+        .map_err(|error| format!("failed to analyze live preview: {error}"))?;
+    let statistics = analysis.linked_statistics();
+    let (sum, count) = samples
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .fold((0.0_f64, 0_u64), |(sum, count), value| {
+            (sum + f64::from(value), count + 1)
+        });
+    Ok(json!({
+        "minimum": statistics.min,
+        "maximum": statistics.max,
+        "mean": (count > 0).then_some(sum / count as f64),
+        "median": statistics.median,
+        "mad": statistics.mad,
+        "sampleCount": statistics.count,
+        "scale": Value::Null,
+        "normalized": Value::Null,
+    }))
 }
 
 fn prepare_stretch_input<'a>(
@@ -3203,7 +4036,11 @@ fn prepare_stretch_input<'a>(
             })
         })
         .collect::<Vec<_>>();
-    let input_histogram = input_histogram_f32_json(&restored.data, prepared.channels);
+    let input_histogram = if prepared.validity_mask.is_some() {
+        input_histogram_scaled_f32_json(&restored.data, prepared.channels)
+    } else {
+        input_histogram_f32_json(&restored.data, prepared.channels)
+    };
     Ok(PreparedStretchInput {
         data: Cow::Owned(restored.data),
         input_histogram,
@@ -3236,7 +4073,7 @@ fn render_prepared_fits(
         .apply_u8(&data, prepared.channels)
         .map_err(|error| error.to_string())?
         .data;
-    let rgba: Vec<u8> = if prepared.channels == 3 {
+    let mut rgba: Vec<u8> = if prepared.channels == 3 {
         stretched
             .chunks_exact(3)
             .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255])
@@ -3247,6 +4084,13 @@ fn render_prepared_fits(
             .flat_map(|value| [value, value, value, 255])
             .collect()
     };
+    if let Some(mask) = &prepared.validity_mask {
+        for (pixel, valid) in rgba.chunks_exact_mut(4).zip(mask) {
+            if !valid {
+                pixel.fill(0);
+            }
+        }
+    }
 
     let display_histogram = display_histogram_json(&rgba);
     let (width, height, rgba) = downsample_rgba(
@@ -3264,6 +4108,7 @@ fn render_prepared_fits(
         "stretchStages": stack.len(),
         "interactivePreview": prepared.interactive_preview,
         "interactivePreviewCacheHit": interactive_preview_cache_hit,
+        "liveStack": prepared.live_stack,
         "backgroundProcessing": prepared.background_metadata,
         "deconvolutionProcessing": deconvolution_metadata,
         "statistics": prepared.statistics,
@@ -3327,6 +4172,7 @@ fn render_prepared_fits16(
         "stretchStages": stack.len(),
         "interactivePreview": prepared.interactive_preview,
         "interactivePreviewCacheHit": interactive_preview_cache_hit,
+        "liveStack": prepared.live_stack,
         "backgroundProcessing": prepared.background_metadata,
         "deconvolutionProcessing": deconvolution_metadata,
         "statistics": prepared.statistics,
@@ -3743,6 +4589,43 @@ fn input_histogram_f32_json(samples: &[f32], stride: usize) -> Value {
         blue[blue_value] += 1;
     }
     histogram_json(&red, &green, &blue, 0.0, 1.0)
+}
+
+fn input_histogram_scaled_f32_json(samples: &[f32], stride: usize) -> Value {
+    let mut minimum = f32::INFINITY;
+    let mut maximum = f32::NEG_INFINITY;
+    for value in samples.iter().copied().filter(|value| value.is_finite()) {
+        minimum = minimum.min(value);
+        maximum = maximum.max(value);
+    }
+    if !minimum.is_finite() || !maximum.is_finite() {
+        return histogram_json(&[0; 256], &[0; 256], &[0; 256], 0.0, 1.0);
+    }
+    let span = (maximum - minimum).max(f32::EPSILON);
+    let bin = |value: f32| (((value - minimum) / span).clamp(0.0, 1.0) * 255.0).round() as usize;
+    let mut red = [0_u64; 256];
+    let mut green = [0_u64; 256];
+    let mut blue = [0_u64; 256];
+    for pixel in samples.chunks_exact(stride) {
+        if !pixel.iter().all(|value| value.is_finite()) {
+            continue;
+        }
+        let red_value = bin(pixel[0]);
+        let green_value = if stride == 1 {
+            red_value
+        } else {
+            bin(pixel[1])
+        };
+        let blue_value = if stride == 1 {
+            red_value
+        } else {
+            bin(pixel[2])
+        };
+        red[red_value] += 1;
+        green[green_value] += 1;
+        blue[blue_value] += 1;
+    }
+    histogram_json(&red, &green, &blue, f64::from(minimum), f64::from(maximum))
 }
 
 fn histogram_json(
@@ -4172,6 +5055,491 @@ fn stack_diagnostics_response(diagnostics: FrameDiagnostics) -> StackDiagnostics
     }
 }
 
+fn live_stack_input_mode_name(mode: FrameInputMode) -> &'static str {
+    match mode {
+        FrameInputMode::CalibrateAndPrepare => "calibrate-and-prepare",
+        FrameInputMode::PreparedOnly => "prepared-only",
+    }
+}
+
+fn probe_frame_header(path: &Path) -> Result<FrameProbeResponse, String> {
+    let format = astronomy_image_format(path)
+        .ok_or_else(|| format!("{} is not a FITS or XISF path", path.display()))?;
+    let headers = match format {
+        AstronomyImageFormat::Fits => seiza_fits::read_header(path)
+            .map_err(|error| format!("failed to read FITS header {}: {error}", path.display()))?,
+        AstronomyImageFormat::Xisf => seiza_xisf::read_header(path)
+            .map_err(|error| format!("failed to read XISF header {}: {error}", path.display()))?,
+    };
+    let metadata = seiza_stacking::FrameMetadata::from_headers(&headers);
+    let raw_image_type = probe_header_text(&headers, &["IMAGETYP", "OBSTYPE", "FRAME"]);
+
+    Ok(FrameProbeResponse {
+        schema_version: 1,
+        path: path.to_string_lossy().into_owned(),
+        format: format.name(),
+        role: CalibrationFrameRole::from(metadata.role),
+        raw_image_type,
+        is_master: metadata.is_master,
+        signature: FrameProbeSignature::from(&metadata.signature),
+        calibration_state: FrameCalibrationStateResponse {
+            bias_subtracted: metadata.calibration_state.bias_subtracted,
+            dark_subtracted: metadata.calibration_state.dark_subtracted,
+            flat_normalized: metadata.calibration_state.flat_normalized,
+        },
+    })
+}
+
+fn probe_header_text(headers: &[(String, HeaderValue)], keys: &[&str]) -> Option<String> {
+    let value = keys.iter().find_map(|key| {
+        headers
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
+            .map(|(_, value)| value)
+    })?;
+    let value = match value {
+        HeaderValue::String(value) | HeaderValue::Raw(value) => value.trim(),
+        _ => return None,
+    };
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn build_calibration_plan(
+    request: CalibrationPlanRequest,
+) -> Result<CalibrationPlanResponse, String> {
+    let CalibrationPlanRequest {
+        kind,
+        reference: primary_record,
+        references,
+        candidates,
+        minimum,
+        tolerances,
+        dependencies,
+    } = request;
+    let minimum = minimum.max(1);
+    let tolerances = resolve_calibration_plan_tolerances(tolerances)?;
+    if primary_record.path.trim().is_empty() {
+        return Err("primary calibration reference path must not be empty".into());
+    }
+    let expected_reference_role = if kind == CalibrationPlanKind::DarkFlat {
+        CalibrationFrameRole::Flat
+    } else {
+        CalibrationFrameRole::Light
+    };
+    let references = if references.is_empty() {
+        vec![primary_record.clone()]
+    } else {
+        references
+    };
+    let reference_paths = references
+        .iter()
+        .map(|record| PathBuf::from(&record.path))
+        .collect::<Vec<_>>();
+    if reference_paths
+        .iter()
+        .any(|path| path.as_os_str().is_empty())
+    {
+        return Err("calibration reference paths must not be empty".into());
+    }
+    validate_distinct_stack_paths(&reference_paths)
+        .map_err(|error| error.replace("stack input", "calibration reference"))?;
+    let primary_in_references = references.iter().find(|record| {
+        paths_refer_to_same_file(Path::new(&record.path), Path::new(&primary_record.path))
+    });
+    let Some(primary_in_references) = primary_in_references else {
+        return Err("calibration references must include the primary reference path".into());
+    };
+    if primary_in_references.role != primary_record.role
+        || primary_in_references.signature != primary_record.signature
+    {
+        return Err("the primary calibration reference must match its record in references".into());
+    }
+    if primary_record.role != expected_reference_role
+        || references
+            .iter()
+            .any(|record| record.role != expected_reference_role)
+    {
+        return Err(format!(
+            "{} calibration references must all have role {}",
+            kind.as_str(),
+            match expected_reference_role {
+                CalibrationFrameRole::Flat => "flat",
+                _ => "light",
+            }
+        ));
+    }
+    let reference = seiza_calibration::FrameSignature::from(&primary_record.signature);
+    let reference_signatures = references
+        .iter()
+        .map(|record| seiza_calibration::FrameSignature::from(&record.signature))
+        .collect::<Vec<_>>();
+    let scalable_dark = kind.uses_dark_matching() && dependencies.bias_available;
+    let dark_targets_have_exposure = !kind.uses_dark_matching()
+        || reference_signatures
+            .iter()
+            .all(has_positive_signature_exposure);
+
+    let paths = candidates
+        .iter()
+        .map(|candidate| PathBuf::from(&candidate.path))
+        .collect::<Vec<_>>();
+    if paths.iter().any(|path| path.as_os_str().is_empty()) {
+        return Err("calibration candidate paths must not be empty".into());
+    }
+    validate_distinct_stack_paths(&paths)
+        .map_err(|error| error.replace("stack input", "calibration candidate"))?;
+
+    let mut excluded = Vec::new();
+    let mut matched = Vec::new();
+    for record in candidates {
+        let signature = seiza_calibration::FrameSignature::from(&record.signature);
+        let reason = if record.role != kind.role() {
+            Some("role-mismatch")
+        } else if !reference_signatures
+            .iter()
+            .all(|light| seiza_calibration::sensor_matches(light, &signature))
+        {
+            Some("sensor-mismatch")
+        } else if kind.uses_dark_matching()
+            && (!dark_targets_have_exposure || !has_positive_signature_exposure(&signature))
+        {
+            Some("missing-exposure")
+        } else if kind.uses_dark_matching()
+            && !scalable_dark
+            && !reference_signatures
+                .iter()
+                .all(|light| seiza_calibration::exposure_matches(light, &signature, &tolerances))
+        {
+            Some("exposure-mismatch")
+        } else if kind.uses_dark_matching()
+            && !reference_signatures
+                .iter()
+                .all(|light| seiza_calibration::temperature_matches(light, &signature, &tolerances))
+        {
+            Some("temperature-mismatch")
+        } else if kind == CalibrationPlanKind::Flat
+            && !reference_signatures
+                .iter()
+                .all(|light| seiza_calibration::optics_match(light, &signature, &tolerances))
+        {
+            Some("optics-mismatch")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            excluded.push(CalibrationPlanExclusionResponse {
+                path: record.path,
+                reason,
+            });
+        } else {
+            matched.push((record, signature));
+        }
+    }
+
+    let mut ordered_signatures = matched
+        .iter()
+        .map(|(_, signature)| signature.clone())
+        .collect::<Vec<_>>();
+    seiza_calibration::sort_by_proximity(&mut ordered_signatures, reference.captured_at_unix);
+    let mut unordered = matched;
+    let mut ordered = Vec::with_capacity(unordered.len());
+    for signature in ordered_signatures {
+        let index = unordered
+            .iter()
+            .position(|(_, candidate)| *candidate == signature)
+            .ok_or_else(|| "calibration plan ordering lost a candidate".to_string())?;
+        ordered.push(unordered.remove(index));
+    }
+    let matched_paths = ordered
+        .iter()
+        .map(|(record, _)| record.path.clone())
+        .collect::<Vec<_>>();
+    let ordered_signatures = ordered
+        .iter()
+        .map(|(_, signature)| signature.clone())
+        .collect::<Vec<_>>();
+    let coherent = coherent_calibration_signatures(&ordered_signatures, kind, minimum, &tolerances);
+    let mut selected = vec![false; ordered.len()];
+    for signature in coherent {
+        if let Some(index) = ordered
+            .iter()
+            .enumerate()
+            .find(|(index, (_, candidate))| !selected[*index] && *candidate == signature)
+            .map(|(index, _)| index)
+        {
+            selected[index] = true;
+        }
+    }
+    let mut selected_paths = Vec::new();
+    for (index, (record, _)) in ordered.into_iter().enumerate() {
+        if selected[index] {
+            selected_paths.push(record.path);
+        } else {
+            excluded.push(CalibrationPlanExclusionResponse {
+                path: record.path,
+                reason: "outside-coherent-set",
+            });
+        }
+    }
+
+    Ok(CalibrationPlanResponse {
+        schema_version: 1,
+        kind: kind.as_str(),
+        minimum,
+        ready: selected_paths.len() >= minimum,
+        matched_paths,
+        selected_paths,
+        excluded,
+    })
+}
+
+fn has_positive_signature_exposure(signature: &seiza_calibration::FrameSignature) -> bool {
+    signature
+        .exposure_seconds
+        .is_some_and(|value| value.is_finite() && value > 0.0)
+}
+
+fn coherent_calibration_signatures(
+    signatures: &[seiza_calibration::FrameSignature],
+    kind: CalibrationPlanKind,
+    minimum: usize,
+    tolerances: &seiza_calibration::MatchTolerances,
+) -> Vec<seiza_calibration::FrameSignature> {
+    let mut first = None;
+    for anchor in signatures {
+        let compatible_group = signatures
+            .iter()
+            .filter(|candidate| {
+                internally_compatible_calibration_signatures(anchor, candidate, kind, tolerances)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let cluster = seiza_calibration::coherent_subset(
+            &compatible_group,
+            if kind == CalibrationPlanKind::Flat {
+                seiza_calibration::FrameRole::Flat
+            } else {
+                seiza_calibration::FrameRole::Other
+            },
+            minimum,
+            tolerances,
+        );
+        if cluster.len() >= minimum.max(1) {
+            return cluster;
+        }
+        if first.is_none() {
+            first = Some(cluster);
+        }
+    }
+    first.unwrap_or_default()
+}
+
+fn internally_compatible_calibration_signatures(
+    left: &seiza_calibration::FrameSignature,
+    right: &seiza_calibration::FrameSignature,
+    kind: CalibrationPlanKind,
+    tolerances: &seiza_calibration::MatchTolerances,
+) -> bool {
+    // Light-to-calibration matching is deliberately asymmetric: unknown
+    // metadata on a light cannot rule a candidate out. A master set needs the
+    // stricter answer, because two candidates with conflicting known settings
+    // must never be averaged merely because every target omitted that field.
+    seiza_calibration::sensor_consistent(left, right)
+        && (!kind.uses_dark_matching()
+            || seiza_calibration::exposure_matches(left, right, tolerances))
+        && (kind != CalibrationPlanKind::Flat
+            || seiza_calibration::optics_consistent(left, right, tolerances))
+}
+
+fn resolve_calibration_plan_tolerances(
+    request: CalibrationPlanTolerancesRequest,
+) -> Result<seiza_calibration::MatchTolerances, String> {
+    let mut tolerances = seiza_calibration::MatchTolerances::default();
+    let finite_nonnegative = |name: &str, value: Option<f64>, target: &mut f64| {
+        if let Some(value) = value {
+            if !value.is_finite() || value < 0.0 {
+                return Err(format!(
+                    "calibration {name} tolerance must be finite and non-negative"
+                ));
+            }
+            *target = value;
+        }
+        Ok(())
+    };
+    finite_nonnegative(
+        "exposure-seconds",
+        request.exposure_seconds,
+        &mut tolerances.exposure_seconds,
+    )?;
+    finite_nonnegative(
+        "exposure-fraction",
+        request.exposure_fraction,
+        &mut tolerances.exposure_fraction,
+    )?;
+    finite_nonnegative(
+        "dark-temperature",
+        request.dark_temperature_c,
+        &mut tolerances.dark_temperature_c,
+    )?;
+    finite_nonnegative(
+        "master-temperature",
+        request.master_temperature_c,
+        &mut tolerances.master_temperature_c,
+    )?;
+    finite_nonnegative(
+        "rotation",
+        request.rotation_deg,
+        &mut tolerances.rotation_deg,
+    )?;
+    finite_nonnegative(
+        "focal-length",
+        request.focal_length_mm,
+        &mut tolerances.focal_length_mm,
+    )?;
+    if let Some(seconds) = request.flat_session_seconds {
+        tolerances.flat_session_seconds = seconds;
+    }
+    Ok(tolerances)
+}
+
+fn build_master_request(
+    request: MasterBuildRequest,
+    cancellation: Option<CancelSignal>,
+) -> Result<MasterBuildResponse, String> {
+    let kind = request.kind.into_core();
+    if request.output.as_os_str().is_empty() {
+        return Err("master output path must not be empty".into());
+    }
+    if request
+        .inputs
+        .iter()
+        .any(|path| path.as_os_str().is_empty())
+    {
+        return Err("master input paths must not be empty".into());
+    }
+    if request.dark.is_none() && request.dark_exposure_seconds.is_some() {
+        return Err("a master-dark exposure override requires a dark path".into());
+    }
+    validate_optional_positive_seconds(request.dark_exposure_seconds, "master-dark exposure")?;
+    validate_optional_positive_seconds(request.exposure_seconds, "master exposure")?;
+    if !request.rejection.low_sigma.is_finite()
+        || request.rejection.low_sigma <= 0.0
+        || !request.rejection.high_sigma.is_finite()
+        || request.rejection.high_sigma <= 0.0
+    {
+        return Err("master rejection sigmas must be positive finite numbers".into());
+    }
+    if let Some(filter) = request.defect_suppression {
+        if kind != MasterFrameKind::Flat {
+            return Err("defect suppression is supported only for flat masters".into());
+        }
+        if !filter.low_sigma.is_finite()
+            || filter.low_sigma <= 0.0
+            || !filter.high_sigma.is_finite()
+            || filter.high_sigma <= 0.0
+        {
+            return Err("defect-suppression sigmas must be positive finite numbers".into());
+        }
+    }
+    match kind {
+        MasterFrameKind::Bias if request.bias.is_some() || request.dark.is_some() => {
+            return Err("bias masters cannot use bias or dark calibration inputs".into());
+        }
+        MasterFrameKind::Dark if request.dark.is_some() => {
+            return Err("dark masters cannot use a dark calibration input".into());
+        }
+        _ => {}
+    }
+
+    let mut all_paths = request.inputs.clone();
+    all_paths.extend(request.bias.iter().cloned());
+    all_paths.extend(request.dark.iter().cloned());
+    all_paths.push(request.output.clone());
+    validate_distinct_stack_paths(&all_paths)
+        .map_err(|error| error.replace("stack input", "master input/output"))?;
+
+    let bias = request
+        .bias
+        .as_deref()
+        .map(FitsFrame::open)
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .map(|frame| {
+            frame.validate_master_kind("BIAS")?;
+            Ok::<_, seiza_stacking::Error>(frame.image)
+        })
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    let dark = request
+        .dark
+        .as_deref()
+        .map(FitsFrame::open)
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .map(|frame| MasterDark::from_fits_frame(frame, request.dark_exposure_seconds))
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    let defect_suppression = request
+        .defect_suppression
+        .map(|filter| ImpulseFilterOptions {
+            low_sigma: filter.low_sigma,
+            high_sigma: filter.high_sigma,
+        });
+    let options = MasterBuildOptions {
+        rejection: MasterRejectionOptions {
+            low_sigma: request.rejection.low_sigma,
+            high_sigma: request.rejection.high_sigma,
+        },
+        exposure_seconds: request.exposure_seconds,
+        bias,
+        dark,
+        cancel: cancellation,
+        defect_suppression,
+    };
+    let master = build_master_from_fits(&request.inputs, kind, &options)
+        .map_err(|error| error.to_string())?;
+    write_master_fits_f32(&request.output, &master).map_err(|error| error.to_string())?;
+    let inputs = request
+        .inputs
+        .iter()
+        .zip(&master.input_statistics)
+        .map(|(path, statistics)| MasterBuildInputResponse {
+            path: path.to_string_lossy().into_owned(),
+            accepted_samples: statistics.accepted_samples,
+            rejected_samples: statistics.rejected_samples,
+        })
+        .collect();
+    Ok(MasterBuildResponse {
+        schema_version: 1,
+        kind: master.kind.as_str(),
+        output: request.output.to_string_lossy().into_owned(),
+        width: master.image.width,
+        height: master.image.height,
+        channels: master.image.channels,
+        input_frames: master.input_frames,
+        accepted_samples: master.accepted_samples,
+        rejected_samples: master.rejected_samples,
+        fallback_pixels: master.fallback_pixels,
+        defect_pixels_replaced: master.defect_pixels_replaced,
+        bias_subtracted: master.bias_subtracted,
+        dark_subtracted: master.dark_subtracted,
+        normalized: master.normalized,
+        output_exposure_seconds: master.exposure_seconds,
+        rejection: MasterBuildRejectionResponse {
+            low_sigma: master.rejection.low_sigma,
+            high_sigma: master.rejection.high_sigma,
+        },
+        inputs,
+    })
+}
+
+fn validate_optional_positive_seconds(value: Option<f64>, name: &str) -> Result<(), String> {
+    if value.is_some_and(|value| !value.is_finite() || value <= 0.0) {
+        return Err(format!("{name} must be a positive finite number"));
+    }
+    Ok(())
+}
+
 fn owned_json(value: &impl Serialize) -> Result<*mut c_char, String> {
     let json = serde_json::to_string(value).map_err(|error| error.to_string())?;
     CString::new(json)
@@ -4244,6 +5612,12 @@ unsafe fn required_stack_snapshot<'a>(
     snapshot: *const SeizaStackSnapshot,
 ) -> Result<&'a SeizaStackSnapshot, String> {
     unsafe { snapshot.as_ref() }.ok_or_else(|| "stack snapshot is required".into())
+}
+
+unsafe fn required_stack_export_snapshot<'a>(
+    snapshot: *const SeizaStackExportSnapshot,
+) -> Result<&'a SeizaStackExportSnapshot, String> {
+    unsafe { snapshot.as_ref() }.ok_or_else(|| "stack export snapshot is required".into())
 }
 
 fn required_path(value: *const c_char, name: &str) -> Result<PathBuf, String> {
@@ -4808,6 +6182,73 @@ mod tests {
     }
 
     #[test]
+    fn lightweight_export_snapshot_writes_off_thread_while_ingestion_continues() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<SeizaStackExportSnapshot>();
+
+        let (width, height) = (160, 128);
+        let image = stacking_star_field(width, height);
+        let config = no_adjustment_stack_options();
+        let mut error = ptr::null_mut();
+        let stacker = unsafe {
+            seiza_live_stacker_create(
+                image.as_ptr(),
+                image.len(),
+                width,
+                height,
+                1,
+                config.as_ptr(),
+                &mut error,
+            )
+        };
+        assert!(!stacker.is_null());
+        let export = unsafe { seiza_live_stacker_export_snapshot(stacker, &mut error) };
+        assert!(!export.is_null());
+        assert!(error.is_null());
+
+        let later = image.iter().map(|value| value + 10.0).collect::<Vec<_>>();
+        let disposition = unsafe {
+            seiza_live_stacker_push_linear_json(
+                stacker,
+                later.as_ptr(),
+                later.len(),
+                width,
+                height,
+                1,
+                &mut error,
+            )
+        };
+        assert!(!disposition.is_null());
+        unsafe { seiza_string_free(disposition) };
+        assert_eq!(unsafe { seiza_live_stacker_accepted_frames(stacker) }, 2);
+
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("frozen-export.fits");
+        let output_for_worker = output.clone();
+        let export = unsafe { Box::from_raw(export) };
+        std::thread::spawn(move || {
+            let export = Box::into_raw(export);
+            let output_c = CString::new(output_for_worker.to_str().unwrap()).unwrap();
+            let mut error = ptr::null_mut();
+            assert!(unsafe {
+                seiza_stack_export_snapshot_write_fits(export, output_c.as_ptr(), &mut error)
+            });
+            assert!(error.is_null());
+            unsafe { seiza_stack_export_snapshot_free(export) };
+        })
+        .join()
+        .unwrap();
+
+        let written = FitsImage::open(&output).unwrap();
+        assert_eq!(written.header_f64("STACKCNT"), Some(1.0));
+        let seiza_fits::Pixels::F32(values) = written.pixels else {
+            panic!("stack export must remain floating point");
+        };
+        assert_eq!(values, image, "the worker wrote the frozen mean");
+        unsafe { seiza_live_stacker_free(stacker) };
+    }
+
+    #[test]
     fn stacking_cabi_checkpoints_reopens_and_continues() {
         let (width, height) = (160, 128);
         let image = stacking_star_field(width, height);
@@ -4949,6 +6390,826 @@ mod tests {
             seiza_stack_snapshot_free(snapshot);
             seiza_live_stacker_free(stacker);
         }
+    }
+
+    #[test]
+    fn live_state_calibration_swap_and_bounded_preview_share_native_state() {
+        let (width, height) = (160, 128);
+        let reference =
+            LinearImage::new(width, height, 1, stacking_star_field(width, height)).unwrap();
+        let bias = LinearImage::new(width, height, 1, vec![2.0; width * height]).unwrap();
+        let wrong_bias = LinearImage::new(80, 64, 1, vec![3.0; 80 * 64]).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let reference_path = directory.path().join("reference.fits");
+        let bias_path = directory.path().join("master-bias.fits");
+        let wrong_bias_path = directory.path().join("wrong-bias.fits");
+        seiza_stacking::write_processed_image_fits_f32(&reference_path, &reference, &[], &[])
+            .unwrap();
+        seiza_stacking::write_processed_image_fits_f32(&bias_path, &bias, &[], &[]).unwrap();
+        seiza_stacking::write_processed_image_fits_f32(&wrong_bias_path, &wrong_bias, &[], &[])
+            .unwrap();
+        let reference_c = CString::new(reference_path.to_str().unwrap()).unwrap();
+        let bias_c = CString::new(bias_path.to_str().unwrap()).unwrap();
+        let wrong_bias_c = CString::new(wrong_bias_path.to_str().unwrap()).unwrap();
+        let config = no_adjustment_stack_options();
+        let mut error = ptr::null_mut();
+        let stacker = unsafe {
+            seiza_live_stacker_open_fits(
+                reference_c.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                0.0,
+                config.as_ptr(),
+                &mut error,
+            )
+        };
+        assert!(!stacker.is_null());
+
+        let read_state = |error: &mut *mut c_char| {
+            let state = unsafe { seiza_live_stacker_state_json(stacker, error) };
+            assert!(!state.is_null());
+            let parsed =
+                serde_json::from_str::<Value>(unsafe { CStr::from_ptr(state) }.to_str().unwrap())
+                    .unwrap();
+            unsafe { seiza_string_free(state) };
+            parsed
+        };
+        let initial = read_state(&mut error);
+        assert_eq!(initial["schemaVersion"], 1);
+        assert_eq!(initial["coreVersion"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(initial["inputMode"], "calibrate-and-prepare");
+        assert_eq!(initial["inputPaths"].as_array().unwrap().len(), 1);
+        assert_eq!(initial["referenceFrame"]["isMaster"], false);
+        assert_eq!(initial["referenceFrame"]["signature"]["width"], width);
+        assert_eq!(initial["referenceFrame"]["signature"]["height"], height);
+        assert_eq!(initial["referenceFrame"]["signature"]["channels"], 1);
+        assert_eq!(
+            initial["referenceFrame"]["calibrationState"]["biasSubtracted"],
+            false
+        );
+        assert_eq!(
+            initial["configurationFingerprint"].as_str().unwrap().len(),
+            64
+        );
+
+        assert!(unsafe {
+            seiza_live_stacker_set_calibration_fits(
+                stacker,
+                bias_c.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                0.0,
+                &mut error,
+            )
+        });
+        let calibrated = read_state(&mut error);
+        assert_ne!(
+            calibrated["configurationFingerprint"],
+            initial["configurationFingerprint"]
+        );
+        assert_eq!(calibrated["inputPaths"].as_array().unwrap().len(), 2);
+
+        assert!(!unsafe {
+            seiza_live_stacker_set_calibration_fits(
+                stacker,
+                wrong_bias_c.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                0.0,
+                &mut error,
+            )
+        });
+        assert!(
+            unsafe { CStr::from_ptr(error) }
+                .to_str()
+                .unwrap()
+                .contains("dimensions")
+        );
+        unsafe { seiza_string_free(error) };
+        error = ptr::null_mut();
+        let after_failure = read_state(&mut error);
+        assert_eq!(
+            after_failure["configurationFingerprint"],
+            calibrated["configurationFingerprint"]
+        );
+        assert_eq!(after_failure["inputPaths"], calibrated["inputPaths"]);
+
+        let stretch = CString::new(
+            r#"{"model":{"type":"identity"},"color_strategy":"linked","max_analysis_samples":4096}"#,
+        )
+        .unwrap();
+        let preview =
+            unsafe { seiza_live_stacker_render_preview(stacker, stretch.as_ptr(), 64, &mut error) };
+        assert!(!preview.is_null());
+        assert!(error.is_null());
+        assert!(unsafe { seiza_rendered_image_width(preview) } <= 64);
+        assert!(unsafe { seiza_rendered_image_height(preview) } <= 64);
+        let metadata: Value = serde_json::from_str(
+            unsafe { CStr::from_ptr(seiza_rendered_image_metadata_json(preview)) }
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(metadata["format"], "Live stack");
+        assert_eq!(metadata["liveStack"]["acceptedFrames"], 1);
+        assert_eq!(metadata["interactivePreview"], true);
+        unsafe { seiza_rendered_image_free(preview) };
+
+        assert!(unsafe {
+            seiza_live_stacker_set_calibration_fits(
+                stacker,
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                0.0,
+                &mut error,
+            )
+        });
+        let cleared = read_state(&mut error);
+        assert_eq!(
+            cleared["configurationFingerprint"],
+            initial["configurationFingerprint"]
+        );
+        // The used-master history remains output-protective after clearing.
+        assert_eq!(cleared["inputPaths"].as_array().unwrap().len(), 2);
+        unsafe { seiza_live_stacker_free(stacker) };
+    }
+
+    #[test]
+    fn stacking_cabi_refuses_double_calibration_and_incompatible_lights() {
+        let (width, height) = (160, 128);
+        let image = LinearImage::new(width, height, 1, stacking_star_field(width, height)).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let reference_path = directory.path().join("reference.fits");
+        let bias_path = directory.path().join("master-bias.fits");
+        let calibrated_path = directory.path().join("already-calibrated.fits");
+        let wrong_gain_path = directory.path().join("wrong-gain.fits");
+        let master_light_path = directory.path().join("master-as-light.fits");
+        let raw_dark_path = directory.path().join("raw-dark-as-light.fits");
+        let cards = |gain, extra: Option<(&str, HeaderValue)>| {
+            let mut cards = vec![
+                seiza_fits::WriteHeaderCard::new("IMAGETYP", HeaderValue::String("LIGHT".into())),
+                seiza_fits::WriteHeaderCard::new("GAIN", HeaderValue::Integer(gain)),
+                seiza_fits::WriteHeaderCard::new("EXPTIME", HeaderValue::Float(60.0)),
+            ];
+            if let Some((name, value)) = extra {
+                cards.push(seiza_fits::WriteHeaderCard::new(name, value));
+            }
+            cards
+        };
+        seiza_stacking::write_processed_image_fits_f32(
+            &reference_path,
+            &image,
+            &[],
+            &cards(100, None),
+        )
+        .unwrap();
+        seiza_stacking::write_processed_image_fits_f32(
+            &bias_path,
+            &LinearImage::new(width, height, 1, vec![2.0; width * height]).unwrap(),
+            &[],
+            &[
+                seiza_fits::WriteHeaderCard::new("SEIZAMST", HeaderValue::String("BIAS".into())),
+                seiza_fits::WriteHeaderCard::new("GAIN", HeaderValue::Integer(100)),
+            ],
+        )
+        .unwrap();
+        seiza_stacking::write_processed_image_fits_f32(
+            &calibrated_path,
+            &image,
+            &[],
+            &cards(100, Some(("BIASSUB", HeaderValue::Logical(true)))),
+        )
+        .unwrap();
+        seiza_stacking::write_processed_image_fits_f32(
+            &wrong_gain_path,
+            &image,
+            &[],
+            &cards(200, None),
+        )
+        .unwrap();
+        seiza_stacking::write_processed_image_fits_f32(
+            &master_light_path,
+            &image,
+            &[],
+            &cards(100, Some(("SEIZAMST", HeaderValue::String("DARK".into())))),
+        )
+        .unwrap();
+        seiza_stacking::write_processed_image_fits_f32(
+            &raw_dark_path,
+            &image,
+            &[],
+            &[
+                seiza_fits::WriteHeaderCard::new("IMAGETYP", HeaderValue::String("DARK".into())),
+                seiza_fits::WriteHeaderCard::new("GAIN", HeaderValue::Integer(100)),
+                seiza_fits::WriteHeaderCard::new("EXPTIME", HeaderValue::Float(60.0)),
+            ],
+        )
+        .unwrap();
+
+        let reference_c = CString::new(reference_path.to_str().unwrap()).unwrap();
+        let bias_c = CString::new(bias_path.to_str().unwrap()).unwrap();
+        let calibrated_c = CString::new(calibrated_path.to_str().unwrap()).unwrap();
+        let wrong_gain_c = CString::new(wrong_gain_path.to_str().unwrap()).unwrap();
+        let master_light_c = CString::new(master_light_path.to_str().unwrap()).unwrap();
+        let raw_dark_c = CString::new(raw_dark_path.to_str().unwrap()).unwrap();
+        let config = no_adjustment_stack_options();
+        let mut error = ptr::null_mut();
+
+        for (invalid_reference, reason) in [
+            (&master_light_c, "master cannot be used as a light"),
+            (&raw_dark_c, "dark frame cannot be used as a light"),
+        ] {
+            let rejected = unsafe {
+                seiza_live_stacker_open_fits(
+                    invalid_reference.as_ptr(),
+                    bias_c.as_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    0.0,
+                    config.as_ptr(),
+                    &mut error,
+                )
+            };
+            assert!(rejected.is_null());
+            assert!(
+                unsafe { CStr::from_ptr(error) }
+                    .to_str()
+                    .unwrap()
+                    .contains(reason)
+            );
+            unsafe { seiza_string_free(error) };
+            error = ptr::null_mut();
+        }
+
+        let stacker = unsafe {
+            seiza_live_stacker_open_fits(
+                reference_c.as_ptr(),
+                bias_c.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                0.0,
+                config.as_ptr(),
+                &mut error,
+            )
+        };
+        assert!(!stacker.is_null());
+        for (path, reason) in [
+            (&calibrated_c, "double-calibrate"),
+            (&wrong_gain_c, "sensor or readout mode"),
+        ] {
+            let disposition =
+                unsafe { seiza_live_stacker_push_fits_json(stacker, path.as_ptr(), &mut error) };
+            assert!(!disposition.is_null());
+            let response: Value =
+                serde_json::from_str(unsafe { CStr::from_ptr(disposition) }.to_str().unwrap())
+                    .unwrap();
+            assert_eq!(response["accepted"], false);
+            assert!(response["reason"].as_str().unwrap().contains(reason));
+            unsafe { seiza_string_free(disposition) };
+        }
+        unsafe { seiza_live_stacker_free(stacker) };
+
+        let no_masters = unsafe {
+            seiza_live_stacker_open_fits(
+                calibrated_c.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                0.0,
+                config.as_ptr(),
+                &mut error,
+            )
+        };
+        assert!(!no_masters.is_null());
+        unsafe { seiza_live_stacker_free(no_masters) };
+    }
+
+    #[test]
+    fn live_preview_sampling_excludes_uncovered_pixels_instead_of_making_black_data() {
+        let mean = vec![10.0_f32; 16];
+        let mut coverage = vec![1_u32; 16];
+        for index in [0, 1, 2, 3, 4, 7, 8, 11, 12, 13, 14, 15] {
+            coverage[index] = 0;
+        }
+        let rejected = vec![0_u32; 16];
+        let view = seiza_stacking::StackView {
+            width: 4,
+            height: 4,
+            channels: 1,
+            mean: &mean,
+            coverage: &coverage,
+            rejected_samples: &rejected,
+            accepted_frames: 2,
+            rejected_frames: 0,
+        };
+        let (_, _, sampled, mask) = sample_live_stack_view(view, 4).unwrap();
+        assert!(sampled[0].is_nan());
+        assert!(!mask[0]);
+        assert_eq!(sampled[5], 10.0);
+        assert!(mask[5]);
+    }
+
+    #[test]
+    fn frame_probe_is_header_only_and_normalizes_role_and_signature() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("header-only.fits");
+        let image = LinearImage::new(2, 2, 1, vec![1.0; 4]).unwrap();
+        let cards = vec![
+            seiza_fits::WriteHeaderCard::new(
+                "IMAGETYP",
+                HeaderValue::String("Master Dark Frame".into()),
+            ),
+            seiza_fits::WriteHeaderCard::new("INSTRUME", HeaderValue::String("ASI2600MM".into())),
+            seiza_fits::WriteHeaderCard::new("XBINNING", HeaderValue::Integer(2)),
+            seiza_fits::WriteHeaderCard::new("YBINNING", HeaderValue::Integer(2)),
+            seiza_fits::WriteHeaderCard::new("GAIN", HeaderValue::Integer(100)),
+            seiza_fits::WriteHeaderCard::new("EXPTIME", HeaderValue::Float(60.0)),
+            seiza_fits::WriteHeaderCard::new(
+                "DATE-OBS",
+                HeaderValue::String("2026-01-02T03:04:05Z".into()),
+            ),
+            seiza_fits::WriteHeaderCard::new("BIASSUB", HeaderValue::Logical(true)),
+        ];
+        seiza_stacking::write_processed_image_fits_f32(&path, &image, &[], &cards).unwrap();
+        // Leave a complete FITS header but no pixel payload. A full decoder
+        // fails; the metadata-only API must still succeed.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(2880)
+            .unwrap();
+        assert!(FitsImage::open(&path).is_err());
+
+        let path_c = CString::new(path.to_str().unwrap()).unwrap();
+        let mut error = ptr::null_mut();
+        let result = unsafe { seiza_probe_frame_json(path_c.as_ptr(), &mut error) };
+        assert!(!result.is_null());
+        assert!(error.is_null());
+        let probe: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap()).unwrap();
+        unsafe { seiza_string_free(result) };
+        assert_eq!(probe["format"], "FITS");
+        assert_eq!(probe["role"], "dark");
+        assert_eq!(probe["isMaster"], true);
+        assert_eq!(probe["signature"]["camera"], "ASI2600MM");
+        assert_eq!(probe["signature"]["width"], 2);
+        assert_eq!(probe["signature"]["height"], 2);
+        assert_eq!(probe["signature"]["channels"], 1);
+        assert_eq!(probe["signature"]["binningX"], 2);
+        assert_eq!(probe["signature"]["gain"], 100);
+        assert!(probe["signature"]["capturedAtUnix"].as_i64().is_some());
+        assert_eq!(probe["calibrationState"]["biasSubtracted"], true);
+    }
+
+    #[test]
+    fn calibration_plan_sorts_by_proximity_and_reports_exclusions() {
+        let request = CString::new(
+            json!({
+                "kind": "dark",
+                "minimum": 2,
+                "reference": {
+                    "path": "light.fits",
+                    "role": "light",
+                    "signature": {
+                        "camera": "ASI2600MM", "width": 100, "height": 80,
+                        "channels": 1, "exposureSeconds": 60.0,
+                        "cameraTempC": -10.0, "capturedAtUnix": 1000
+                    }
+                },
+                "candidates": [
+                    {
+                        "path": "dark-later.fits", "role": "dark",
+                        "signature": {
+                            "camera": "ASI2600MM", "width": 100, "height": 80,
+                            "channels": 1, "exposureSeconds": 60.0,
+                            "cameraTempC": -9.8, "capturedAtUnix": 1100
+                        }
+                    },
+                    {
+                        "path": "dark-nearest.fits", "role": "dark",
+                        "signature": {
+                            "camera": "ASI2600MM", "width": 100, "height": 80,
+                            "channels": 1, "exposureSeconds": 60.0,
+                            "cameraTempC": -10.1, "capturedAtUnix": 1005
+                        }
+                    },
+                    {
+                        "path": "wrong-exposure.fits", "role": "dark",
+                        "signature": {
+                            "camera": "ASI2600MM", "width": 100, "height": 80,
+                            "channels": 1, "exposureSeconds": 120.0,
+                            "cameraTempC": -10.0, "capturedAtUnix": 1001
+                        }
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut error = ptr::null_mut();
+        let result = unsafe { seiza_calibration_plan_json(request.as_ptr(), &mut error) };
+        assert!(!result.is_null());
+        let plan: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap()).unwrap();
+        unsafe { seiza_string_free(result) };
+        assert_eq!(plan["ready"], true);
+        assert_eq!(plan["matchedPaths"][0], "dark-nearest.fits");
+        assert_eq!(plan["selectedPaths"].as_array().unwrap().len(), 2);
+        assert_eq!(plan["excluded"][0]["path"], "wrong-exposure.fits");
+        assert_eq!(plan["excluded"][0]["reason"], "exposure-mismatch");
+    }
+
+    #[test]
+    fn calibration_plan_matches_dark_flats_to_the_selected_flat() {
+        let request = CString::new(
+            json!({
+                "kind": "dark-flat",
+                "minimum": 2,
+                "reference": {
+                    "path": "flat-reference.fits",
+                    "role": "flat",
+                    "signature": {
+                        "camera": "ASI2600MM", "width": 100, "height": 80,
+                        "channels": 1, "exposureSeconds": 2.0,
+                        "cameraTempC": -10.0, "capturedAtUnix": 1000
+                    }
+                },
+                "candidates": [
+                    {
+                        "path": "dark-flat-nearest.fits", "role": "dark-flat",
+                        "signature": {
+                            "camera": "ASI2600MM", "width": 100, "height": 80,
+                            "channels": 1, "exposureSeconds": 2.0,
+                            "cameraTempC": -10.1, "capturedAtUnix": 1005
+                        }
+                    },
+                    {
+                        "path": "dark-flat-later.fits", "role": "dark-flat",
+                        "signature": {
+                            "camera": "ASI2600MM", "width": 100, "height": 80,
+                            "channels": 1, "exposureSeconds": 2.0,
+                            "cameraTempC": -9.8, "capturedAtUnix": 1100
+                        }
+                    },
+                    {
+                        "path": "dark-flat-warm-session.fits", "role": "dark-flat",
+                        "signature": {
+                            "camera": "ASI2600MM", "width": 100, "height": 80,
+                            "channels": 1, "exposureSeconds": 2.0,
+                            "cameraTempC": -7.5, "capturedAtUnix": 1006
+                        }
+                    },
+                    {
+                        "path": "ordinary-dark.fits", "role": "dark",
+                        "signature": {
+                            "camera": "ASI2600MM", "width": 100, "height": 80,
+                            "channels": 1, "exposureSeconds": 2.0,
+                            "cameraTempC": -10.0, "capturedAtUnix": 1001
+                        }
+                    },
+                    {
+                        "path": "wrong-exposure.fits", "role": "dark-flat",
+                        "signature": {
+                            "camera": "ASI2600MM", "width": 100, "height": 80,
+                            "channels": 1, "exposureSeconds": 300.0,
+                            "cameraTempC": -10.0, "capturedAtUnix": 1002
+                        }
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut error = ptr::null_mut();
+        let result = unsafe { seiza_calibration_plan_json(request.as_ptr(), &mut error) };
+        assert!(!result.is_null());
+        assert!(error.is_null());
+        let plan: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap()).unwrap();
+        unsafe { seiza_string_free(result) };
+
+        assert_eq!(plan["kind"], "dark-flat");
+        assert_eq!(plan["ready"], true);
+        assert_eq!(plan["matchedPaths"][0], "dark-flat-nearest.fits");
+        assert_eq!(plan["selectedPaths"].as_array().unwrap().len(), 2);
+        assert!(plan["excluded"].as_array().unwrap().iter().any(|entry| {
+            entry["path"] == "ordinary-dark.fits" && entry["reason"] == "role-mismatch"
+        }));
+        assert!(plan["excluded"].as_array().unwrap().iter().any(|entry| {
+            entry["path"] == "wrong-exposure.fits" && entry["reason"] == "exposure-mismatch"
+        }));
+        assert!(plan["excluded"].as_array().unwrap().iter().any(|entry| {
+            entry["path"] == "dark-flat-warm-session.fits"
+                && entry["reason"] == "outside-coherent-set"
+        }));
+    }
+
+    #[test]
+    fn calibration_plan_requires_one_safe_set_for_every_target() {
+        let reference = json!({
+            "path": "light-60.fits", "role": "light",
+            "signature": {
+                "camera": "ASI2600MM", "width": 100, "height": 80,
+                "channels": 1, "exposureSeconds": 60.0,
+                "cameraTempC": -10.0, "capturedAtUnix": 1000
+            }
+        });
+        let references = json!([
+            reference.clone(),
+            {
+                "path": "light-120.fits", "role": "light",
+                "signature": {
+                    "camera": "ASI2600MM", "width": 100, "height": 80,
+                    "channels": 1, "exposureSeconds": 120.0,
+                    "cameraTempC": -10.5, "capturedAtUnix": 1010
+                }
+            }
+        ]);
+        let candidates = json!([
+            {
+                "path": "dark-60-a.fits", "role": "dark",
+                "signature": {
+                    "camera": "ASI2600MM", "width": 100, "height": 80,
+                    "channels": 1, "exposureSeconds": 60.0,
+                    "cameraTempC": -10.0, "capturedAtUnix": 1001
+                }
+            },
+            {
+                "path": "dark-60-b.fits", "role": "dark",
+                "signature": {
+                    "camera": "ASI2600MM", "width": 100, "height": 80,
+                    "channels": 1, "exposureSeconds": 60.0,
+                    "cameraTempC": -9.8, "capturedAtUnix": 1002
+                }
+            },
+            {
+                "path": "dark-120.fits", "role": "dark",
+                "signature": {
+                    "camera": "ASI2600MM", "width": 100, "height": 80,
+                    "channels": 1, "exposureSeconds": 120.0,
+                    "cameraTempC": -10.0, "capturedAtUnix": 1003
+                }
+            },
+            {
+                "path": "dark-unknown.fits", "role": "dark",
+                "signature": {
+                    "camera": "ASI2600MM", "width": 100, "height": 80,
+                    "channels": 1, "cameraTempC": -10.0
+                }
+            }
+        ]);
+        let invoke = |bias_available| {
+            let request = CString::new(
+                json!({
+                    "kind": "dark", "minimum": 2,
+                    "reference": reference.clone(),
+                    "references": references.clone(),
+                    "dependencies": {"biasAvailable": bias_available},
+                    "candidates": candidates.clone()
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let mut error = ptr::null_mut();
+            let result = unsafe { seiza_calibration_plan_json(request.as_ptr(), &mut error) };
+            assert!(!result.is_null());
+            assert!(error.is_null());
+            let plan: Value =
+                serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap()).unwrap();
+            unsafe { seiza_string_free(result) };
+            plan
+        };
+
+        let unscaled = invoke(false);
+        assert_eq!(unscaled["ready"], false);
+        assert!(
+            unscaled["excluded"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| {
+                    entry["path"] == "dark-60-a.fits" && entry["reason"] == "exposure-mismatch"
+                })
+        );
+
+        let scalable = invoke(true);
+        assert_eq!(scalable["ready"], true);
+        assert_eq!(scalable["matchedPaths"].as_array().unwrap().len(), 3);
+        assert_eq!(scalable["selectedPaths"].as_array().unwrap().len(), 2);
+        assert!(
+            scalable["selectedPaths"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|path| path.as_str().unwrap().starts_with("dark-60-"))
+        );
+        assert!(
+            scalable["excluded"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| {
+                    entry["path"] == "dark-unknown.fits" && entry["reason"] == "missing-exposure"
+                })
+        );
+        assert!(
+            scalable["excluded"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| {
+                    entry["path"] == "dark-120.fits" && entry["reason"] == "outside-coherent-set"
+                })
+        );
+    }
+
+    #[test]
+    fn calibration_plan_checks_flat_optics_against_every_reference() {
+        let primary = json!({
+            "path":"ha-light.fits", "role":"light",
+            "signature":{"camera":"ASI2600MM","width":100,"height":80,
+                         "channels":1,"filter":"Ha"}
+        });
+        let request = CString::new(
+            json!({
+                "kind":"flat", "minimum":1,
+                "reference":primary.clone(),
+                "references":[
+                    primary.clone(),
+                    {"path":"oiii-light.fits","role":"light",
+                     "signature":{"camera":"ASI2600MM","width":100,"height":80,
+                                  "channels":1,"filter":"OIII"}}
+                ],
+                "candidates":[
+                    {"path":"ha-flat.fits","role":"flat",
+                     "signature":{"camera":"ASI2600MM","width":100,"height":80,
+                                  "channels":1,"filter":"Ha"}}
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut error = ptr::null_mut();
+        let result = unsafe { seiza_calibration_plan_json(request.as_ptr(), &mut error) };
+        assert!(!result.is_null());
+        let plan: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap()).unwrap();
+        unsafe { seiza_string_free(result) };
+        assert_eq!(plan["ready"], false);
+        assert_eq!(plan["excluded"][0]["reason"], "optics-mismatch");
+    }
+
+    #[test]
+    fn calibration_plan_never_combines_conflicting_sensor_settings_hidden_by_target_metadata() {
+        let request = CString::new(
+            json!({
+                "kind":"bias", "minimum":2,
+                "reference":{
+                    "path":"light.fits", "role":"light",
+                    "signature":{"camera":"ASI2600MM","width":100,"height":80,
+                                 "channels":1}
+                },
+                "candidates":[
+                    {"path":"bias-100-a.fits","role":"bias",
+                     "signature":{"camera":"ASI2600MM","width":100,"height":80,
+                                  "channels":1,"gain":100,"capturedAtUnix":1000}},
+                    {"path":"bias-200.fits","role":"bias",
+                     "signature":{"camera":"ASI2600MM","width":100,"height":80,
+                                  "channels":1,"gain":200,"capturedAtUnix":1001}},
+                    {"path":"bias-100-b.fits","role":"bias",
+                     "signature":{"camera":"ASI2600MM","width":100,"height":80,
+                                  "channels":1,"gain":100,"capturedAtUnix":1002}}
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut error = ptr::null_mut();
+        let result = unsafe { seiza_calibration_plan_json(request.as_ptr(), &mut error) };
+        assert!(!result.is_null());
+        assert!(error.is_null());
+        let plan: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap()).unwrap();
+        unsafe { seiza_string_free(result) };
+        assert_eq!(plan["ready"], true);
+        assert_eq!(
+            plan["selectedPaths"],
+            json!(["bias-100-a.fits", "bias-100-b.fits"])
+        );
+        assert!(plan["excluded"].as_array().unwrap().iter().any(|entry| {
+            entry["path"] == "bias-200.fits" && entry["reason"] == "outside-coherent-set"
+        }));
+    }
+
+    #[test]
+    fn calibration_plan_never_combines_conflicting_flats_when_target_optics_are_unknown() {
+        let request = CString::new(
+            json!({
+                "kind":"flat", "minimum":2,
+                "reference":{
+                    "path":"light.fits", "role":"light",
+                    "signature":{"camera":"ASI2600MM","width":100,"height":80,
+                                 "channels":1}
+                },
+                "candidates":[
+                    {"path":"ha-flat.fits","role":"flat",
+                     "signature":{"camera":"ASI2600MM","width":100,"height":80,
+                                  "channels":1,"filter":"Ha"}},
+                    {"path":"oiii-flat.fits","role":"flat",
+                     "signature":{"camera":"ASI2600MM","width":100,"height":80,
+                                  "channels":1,"filter":"OIII"}}
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut error = ptr::null_mut();
+        let result = unsafe { seiza_calibration_plan_json(request.as_ptr(), &mut error) };
+        assert!(!result.is_null());
+        assert!(error.is_null());
+        let plan: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap()).unwrap();
+        unsafe { seiza_string_free(result) };
+        assert_eq!(plan["ready"], false);
+        assert_eq!(plan["selectedPaths"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn master_builder_publishes_atomically_reports_stats_and_can_cancel() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("bias-001.fits");
+        let second = directory.path().join("bias-002.fits");
+        let wrong = directory.path().join("bias-wrong.fits");
+        let output = directory.path().join("master-bias.fits");
+        let cancelled_output = directory.path().join("cancelled-master.fits");
+        let preserved_output = directory.path().join("preserved.fits");
+        let first_image = LinearImage::new(8, 8, 1, vec![100.0; 64]).unwrap();
+        let second_image = LinearImage::new(8, 8, 1, vec![102.0; 64]).unwrap();
+        let wrong_image = LinearImage::new(4, 4, 1, vec![101.0; 16]).unwrap();
+        seiza_stacking::write_processed_image_fits_f32(&first, &first_image, &[], &[]).unwrap();
+        seiza_stacking::write_processed_image_fits_f32(&second, &second_image, &[], &[]).unwrap();
+        seiza_stacking::write_processed_image_fits_f32(&wrong, &wrong_image, &[], &[]).unwrap();
+        let request_for = |inputs: &[&Path], output: &Path| {
+            CString::new(
+                json!({
+                    "kind": "bias",
+                    "inputs": inputs,
+                    "output": output,
+                    "rejection": {"lowSigma": 3.0, "highSigma": 3.0}
+                })
+                .to_string(),
+            )
+            .unwrap()
+        };
+        let mut error = ptr::null_mut();
+        let request = request_for(&[&first, &second], &output);
+        let result = unsafe {
+            seiza_calibration_build_master_json(request.as_ptr(), ptr::null(), &mut error)
+        };
+        assert!(!result.is_null());
+        let report: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap()).unwrap();
+        unsafe { seiza_string_free(result) };
+        assert_eq!(report["kind"], "bias");
+        assert_eq!(report["inputFrames"], 2);
+        assert_eq!(report["inputs"].as_array().unwrap().len(), 2);
+        let written = FitsImage::open(&output).unwrap();
+        assert_eq!(written.header_str("SEIZAMST"), Some("BIAS"));
+        assert_eq!(written.header_f64("NCOMBINE"), Some(2.0));
+
+        let signal = seiza_cancel_signal_create();
+        unsafe { seiza_cancel_signal_cancel(signal) };
+        let request = request_for(&[&first, &second], &cancelled_output);
+        let result =
+            unsafe { seiza_calibration_build_master_json(request.as_ptr(), signal, &mut error) };
+        assert!(result.is_null());
+        assert!(!cancelled_output.exists());
+        assert!(
+            unsafe { CStr::from_ptr(error) }
+                .to_str()
+                .unwrap()
+                .contains("cancelled")
+        );
+        unsafe {
+            seiza_string_free(error);
+            seiza_cancel_signal_free(signal);
+        }
+
+        std::fs::write(&preserved_output, b"existing output").unwrap();
+        error = ptr::null_mut();
+        let request = request_for(&[&first, &wrong], &preserved_output);
+        let result = unsafe {
+            seiza_calibration_build_master_json(request.as_ptr(), ptr::null(), &mut error)
+        };
+        assert!(result.is_null());
+        assert_eq!(
+            std::fs::read(&preserved_output).unwrap(),
+            b"existing output"
+        );
+        unsafe { seiza_string_free(error) };
     }
 
     #[test]
@@ -5940,6 +8201,101 @@ mod tests {
         assert_eq!(transients[0].discovered.as_deref(), Some("2020-01-01"));
         assert_eq!(transients[0].near_capture, Some(false));
     }
+}
+
+// ---------------------------------------------------------------------------
+// File metadata and calibration-master orchestration
+// ---------------------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+/// Read only a FITS/XISF header and return normalized frame-role, calibration
+/// state, and matching-signature JSON. No pixel payload is decoded. The owned
+/// string must be released with [`seiza_string_free`].
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated string. When non-null, `error_out`
+/// must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_probe_frame_json(
+    path: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let path = required_path(path, "frame path")?;
+        owned_json(&probe_frame_header(&path)?)
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// Select a proximity-ordered, internally coherent set of calibration-frame
+/// probe records without duplicating Seiza's matching policy in a host.
+///
+/// `request_json` contains `kind` (`bias`, `dark`, `dark-flat`, or `flat`), a
+/// `reference` record, `candidates`, optional `minimum` (default 2), and
+/// optional camelCase tolerances. Dark flats use dark exposure/temperature
+/// matching and should reference the selected flat they will calibrate. Each
+/// record has `path`, `role`, and the `signature` object returned by
+/// [`seiza_probe_frame_json`]; extra probe fields are ignored.
+/// The owned response reports `matchedPaths`, coherent `selectedPaths`,
+/// `ready`, and one stable exclusion reason per omitted candidate. Free it
+/// with [`seiza_string_free`].
+///
+/// # Safety
+/// `request_json` must be a valid NUL-terminated string. When non-null,
+/// `error_out` must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_calibration_plan_json(
+    request_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let request_json = required_str(request_json, "calibration plan JSON")?;
+        let request: CalibrationPlanRequest = serde_json::from_str(&request_json)
+            .map_err(|error| format!("invalid calibration plan JSON: {error}"))?;
+        owned_json(&build_calibration_plan(request)?)
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// Build and atomically publish one calibration master from raw FITS/XISF
+/// paths, returning an owned JSON integration report.
+///
+/// The camelCase request has `kind`, at least two `inputs`, and `output`;
+/// optional fields are `bias`, `dark`, `darkExposureSeconds`,
+/// `exposureSeconds`, `rejection` (`lowSigma`, `highSigma`), and
+/// `defectSuppression` (`lowSigma`, `highSigma`). `dark` is a dark-flat when
+/// building a flat. Defect suppression is accepted only for flats, because a
+/// dark master must retain the hot pixels it is meant to subtract.
+///
+/// Construction is a two-pass leave-one-out sigma-clipped mean and may take
+/// minutes. Run it off the UI thread. `cancel` may be null; otherwise another
+/// thread may call [`seiza_cancel_signal_cancel`]. Cancellation is checked
+/// between input frames, returns failure through `error_out`, and publishes no
+/// output. FITS/XISF writers publish through a same-directory temporary file,
+/// so every successful output is atomic. Free the response with
+/// [`seiza_string_free`].
+///
+/// # Safety
+/// `request_json` must be a valid NUL-terminated string. `cancel` must be null
+/// or a live [`SeizaCancelSignal`] retained until this call returns. When
+/// non-null, `error_out` must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_calibration_build_master_json(
+    request_json: *const c_char,
+    cancel: *const SeizaCancelSignal,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let request_json = required_str(request_json, "master build JSON")?;
+        let request: MasterBuildRequest = serde_json::from_str(&request_json)
+            .map_err(|error| format!("invalid master build JSON: {error}"))?;
+        let cancellation = unsafe { cancel.as_ref() }
+            .map(|signal| CancelSignal::from(Arc::clone(&signal.cancelled)));
+        owned_json(&build_master_request(request, cancellation)?)
+    })
+    .unwrap_or(ptr::null_mut())
 }
 
 // ---------------------------------------------------------------------------

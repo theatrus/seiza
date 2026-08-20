@@ -1,7 +1,7 @@
 use crate::calibration::normalize_flat_response;
 use crate::{
-    BayerLayout, CalibrationMasters, CancelSignal, Error, FitsFrame, LinearImage, MasterDark,
-    Result, paths_refer_to_same_file,
+    BayerLayout, CalibrationMasters, CancelSignal, Error, FitsFrame, FrameMetadata,
+    FrameSourceRole, LinearImage, MasterDark, Result, paths_refer_to_same_file,
 };
 use seiza_fits::HeaderValue;
 use std::path::{Path, PathBuf};
@@ -374,6 +374,7 @@ struct PreparedInput {
     headers: Vec<(String, HeaderValue)>,
     bayer: Option<BayerLayout>,
     effective_exposure: Option<f64>,
+    metadata: FrameMetadata,
 }
 
 fn prepare_input(
@@ -385,6 +386,8 @@ fn prepare_input(
     dark_exposure: Option<f64>,
 ) -> Result<PreparedInput> {
     let mut frame = FitsFrame::open(path)?;
+    let metadata = frame.metadata();
+    validate_raw_master_input(&metadata, kind, path)?;
     if let Some(reference) = reference {
         reference.validate(&frame, path)?;
     }
@@ -435,7 +438,44 @@ fn prepare_input(
         headers: frame.headers,
         bayer: frame.bayer,
         effective_exposure,
+        metadata,
     })
+}
+
+fn validate_raw_master_input(
+    metadata: &FrameMetadata,
+    kind: MasterFrameKind,
+    path: &Path,
+) -> Result<()> {
+    if metadata.is_master {
+        return Err(Error::Calibration(format!(
+            "{} is already an integrated calibration master; raw calibration inputs are required",
+            path.display()
+        )));
+    }
+    if metadata.calibration_state.is_calibrated() {
+        return Err(Error::Calibration(format!(
+            "{} declares prior calibration; applying master-build calibration again would double-calibrate it",
+            path.display()
+        )));
+    }
+    let role_matches = match kind {
+        MasterFrameKind::Bias => metadata.role == FrameSourceRole::Bias,
+        MasterFrameKind::Dark => matches!(
+            metadata.role,
+            FrameSourceRole::Dark | FrameSourceRole::DarkFlat
+        ),
+        MasterFrameKind::Flat => metadata.role == FrameSourceRole::Flat,
+    };
+    if metadata.role != FrameSourceRole::Unknown && !role_matches {
+        return Err(Error::Calibration(format!(
+            "{} is a {} frame, not a raw {} calibration input",
+            path.display(),
+            metadata.role.as_str(),
+            kind.as_str()
+        )));
+    }
+    Ok(())
 }
 
 /// Whether two exposures are the same exposure.
@@ -464,6 +504,8 @@ struct InputSignature {
     height: usize,
     channels: usize,
     bayer: Option<BayerLayout>,
+    kind: MasterFrameKind,
+    source_metadata: FrameMetadata,
     metadata: Vec<(&'static str, ComparableHeader)>,
 }
 
@@ -485,6 +527,8 @@ impl InputSignature {
             height: frame.image.height,
             channels: frame.image.channels,
             bayer: frame.bayer,
+            kind,
+            source_metadata: frame.metadata.clone(),
             metadata,
         }
     }
@@ -510,6 +554,40 @@ impl InputSignature {
                 "{} has a different Bayer layout from the calibration set",
                 path.display()
             )));
+        }
+        let metadata = frame.metadata();
+        if self.source_metadata.role != FrameSourceRole::Unknown
+            && metadata.role != FrameSourceRole::Unknown
+            && self.source_metadata.role != metadata.role
+        {
+            return Err(Error::Calibration(format!(
+                "{} has role {} but the calibration set uses {} frames",
+                path.display(),
+                metadata.role.as_str(),
+                self.source_metadata.role.as_str()
+            )));
+        }
+        if !seiza_calibration::sensor_consistent(
+            &self.source_metadata.signature,
+            &metadata.signature,
+        ) {
+            return Err(Error::Calibration(format!(
+                "{} has incompatible sensor or readout metadata",
+                path.display()
+            )));
+        }
+        if self.kind == MasterFrameKind::Flat {
+            let tolerances = seiza_calibration::MatchTolerances::default();
+            if !seiza_calibration::optics_consistent(
+                &self.source_metadata.signature,
+                &metadata.signature,
+                &tolerances,
+            ) {
+                return Err(Error::Calibration(format!(
+                    "{} has incompatible optical metadata",
+                    path.display()
+                )));
+            }
         }
         for (key, expected) in &self.metadata {
             let Some(actual) = header(&frame.headers, key) else {
@@ -612,7 +690,8 @@ fn rejects_sample(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{StackSnapshot, write_fits_f32};
+    use crate::{StackSnapshot, write_fits_f32, write_processed_image_fits_f32};
+    use seiza_fits::WriteHeaderCard;
 
     fn write_image(path: &std::path::Path, values: &[f32]) {
         write_sized_image(path, 2, 2, values);
@@ -630,6 +709,11 @@ mod tests {
             rejected_frames: 0,
         };
         write_fits_f32(path, &snapshot, &[]).unwrap();
+    }
+
+    fn write_tagged_image(path: &Path, cards: Vec<WriteHeaderCard>) {
+        let image = LinearImage::new(2, 2, 1, vec![100.0; 4]).unwrap();
+        write_processed_image_fits_f32(path, &image, &[], &cards).unwrap();
     }
 
     #[test]
@@ -677,6 +761,74 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("duplicate calibration input"));
+    }
+
+    #[test]
+    fn raw_master_build_rejects_wrong_roles_masters_and_preprocessed_inputs() {
+        let directory = tempfile::tempdir().unwrap();
+        for (name, cards, expected) in [
+            (
+                "light",
+                vec![WriteHeaderCard::new(
+                    "IMAGETYP",
+                    HeaderValue::String("LIGHT".into()),
+                )],
+                "not a raw bias",
+            ),
+            (
+                "master",
+                vec![WriteHeaderCard::new(
+                    "SEIZAMST",
+                    HeaderValue::String("BIAS".into()),
+                )],
+                "already an integrated calibration master",
+            ),
+            (
+                "processed",
+                vec![
+                    WriteHeaderCard::new("IMAGETYP", HeaderValue::String("BIAS".into())),
+                    WriteHeaderCard::new("BIASSUB", HeaderValue::Logical(true)),
+                ],
+                "double-calibrate",
+            ),
+        ] {
+            let first = directory.path().join(format!("{name}-1.fits"));
+            let second = directory.path().join(format!("{name}-2.fits"));
+            write_tagged_image(&first, cards.clone());
+            write_tagged_image(&second, cards);
+            let error = build_master_from_fits(
+                &[first, second],
+                MasterFrameKind::Bias,
+                &MasterBuildOptions::default(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn raw_dark_master_does_not_mix_dark_and_dark_flat_roles() {
+        let directory = tempfile::tempdir().unwrap();
+        let dark = directory.path().join("dark.fits");
+        let dark_flat = directory.path().join("dark-flat.fits");
+        let cards = |role: &str| {
+            vec![
+                WriteHeaderCard::new("IMAGETYP", HeaderValue::String(role.into())),
+                WriteHeaderCard::new("EXPTIME", HeaderValue::Float(2.0)),
+            ]
+        };
+        write_tagged_image(&dark, cards("DARK"));
+        write_tagged_image(&dark_flat, cards("DARKFLAT"));
+
+        let error = build_master_from_fits(
+            &[dark, dark_flat],
+            MasterFrameKind::Dark,
+            &MasterBuildOptions::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("role dark-flat"), "{error}");
     }
 
     #[test]
