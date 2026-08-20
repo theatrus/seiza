@@ -14,6 +14,7 @@ The first release supports:
 - online residual (delta-sigma) rejection with coverage and rejection maps;
 - non-mutating frame admission gates for additive live stacks;
 - versioned, checksummed, atomic live-stack checkpoints that can be reopened;
+- compact immutable export snapshots that clone only the integrated mean;
 - floating-point FITS output on the reference frame's pixel grid.
 
 ## Canonical sky orientation
@@ -121,6 +122,22 @@ safety. Live renderers can borrow `LiveStacker::view` without copying the
 full-resolution accumulator; any display stretch remains a caller-only visual
 operation.
 
+When masters are active, every decoded reference and pushed path is checked
+before pixel calibration. Known calibration-frame roles, integrated masters,
+and inputs already marked bias/dark/flat-corrected are refused. Shared
+`seiza-calibration` matching verifies sensor/readout compatibility for every
+master, dark temperature, and flat optics. Bias-isolated dark current may be
+scaled by exposure; a dark that still contains its pedestal must have the same
+known positive exposure as the light. With no masters, preprocessed lights
+remain valid inputs.
+
+For a full-resolution output that must not stop a live session, use
+`LiveStacker::export_snapshot`. It freezes the finalized mean and scalar frame
+counts without cloning variance, coverage, or rejection maps. The independent
+owner can move to an output worker and be written with
+`write_stack_export_fits_f32` while the accumulator continues. The older
+`snapshot` API is unchanged for callers that need all diagnostic maps.
+
 Long-running acquisition tools can checkpoint without consuming the live
 handle and reopen the exact online estimator later:
 
@@ -134,6 +151,12 @@ stacker.push_fits("light-042.fits")?;
 The context retains the original prepared registration reference, calibration
 masters, stack options, Welford mean and second moment, coverage and rejection
 maps, frame counters, compatible FITS headers, and the source-path ledger.
+Version 2 additionally retains the normalized reference/master signatures and
+whether a dark is safely exposure-scalable. The reader migrates version-1
+contexts; if an old context contains masters, later file pushes fail closed
+until the caller reloads those masters because v1 cannot prove their metadata.
+No-master v1 contexts continue normally.
+
 Writes use an adjacent temporary file and publish by atomic rename only after a
 checksummed compressed payload is complete. A context is mutable processing
 state, not the final interoperable image product; use `write_fits_f32` for the

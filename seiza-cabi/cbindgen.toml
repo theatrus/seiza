@@ -21,6 +21,7 @@ after_includes = """
  *
  * OWNED by the caller (you must release it):
  *   - SeizaRenderedImage* returned by the seiza_rendered_image_open* functions
+ *     or seiza_live_stacker_render_preview
  *       -> release with seiza_rendered_image_free().
  *   - SeizaRenderedImage16* returned by the seiza_rendered_image16_open*
  *     functions -> release with seiza_rendered_image16_free().
@@ -30,11 +31,19 @@ after_includes = """
  *     _open_context
  *       -> release with seiza_live_stacker_free(), or consume with
  *          seiza_live_stacker_finish().
+ *   - SeizaCancelSignal* returned by seiza_cancel_signal_create
+ *       -> release with seiza_cancel_signal_free() after all borrowing work
+ *          has returned.
  *   - SeizaStackSnapshot* returned by seiza_live_stacker_snapshot / _finish
  *       -> release with seiza_stack_snapshot_free().
- *   - char* returned by seiza_catalog_status_json, seiza_solve_image_json, and
- *     seiza_live_stacker_push_*_json, plus any char* stored into an `error_out`
- *     argument on failure
+ *   - SeizaStackExportSnapshot* returned by
+ *     seiza_live_stacker_export_snapshot
+ *       -> release with seiza_stack_export_snapshot_free().
+ *   - char* returned by seiza_catalog_status_json, seiza_solve_image_json,
+ *     seiza_probe_frame_json, seiza_calibration_plan_json,
+ *     seiza_calibration_build_master_json, seiza_live_stacker_state_json, and
+ *     seiza_live_stacker_push_*_json, plus any char* stored into an
+ *     `error_out` argument on failure
  *       -> release with seiza_string_free().
  *
  * BORROWED by the caller (do NOT free; valid only while the owner is alive):
@@ -65,6 +74,12 @@ after_includes = """
  * Threading: externally synchronize each live stacker and do not mutate,
  * finish, or free it while another thread reads a borrowed live view. Do not
  * free any opaque owner while another thread uses it or its borrowed pointers.
+ * A SeizaStackExportSnapshot is independent of its live stacker and may be
+ * transferred to an output worker after capture; do not free it until every
+ * write using it has returned.
+ * seiza_cancel_signal_cancel is the exception: it is thread-safe and is meant
+ * to be called while a worker borrows the signal, but the owner still must not
+ * be freed until that worker returns.
  * Do not free the same pointer twice or use a pointer after its owner is freed.
  */"""
 

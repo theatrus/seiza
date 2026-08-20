@@ -32,8 +32,9 @@ pub use crop::{
     ChannelCoverage, ChannelSamples, ColorCrop, CropReport, covered_region, crop_report,
 };
 pub use fits::{
-    FitsFrame, write_color_fits_f32, write_fits_f32, write_linear_image_fits_f32,
-    write_master_fits_f32, write_processed_image_fits_f32,
+    FitsFrame, FrameCalibrationState, FrameMetadata, FrameSourceRole, write_color_fits_f32,
+    write_fits_f32, write_linear_image_fits_f32, write_master_fits_f32,
+    write_processed_image_fits_f32, write_stack_export_fits_f32,
 };
 pub use image::{BayerLayout, LinearImage};
 pub use mapping::RegisteredFrameMapping;
@@ -56,8 +57,9 @@ pub use residual_flat::{
 };
 pub use snr::{SIGNAL_FRACTION, SnrSample, checkpoint_depths, measure_depth};
 pub use stack::{
-    DeltaSigmaOptions, FrameAcceptanceCriteria, FrameDiagnostics, FrameDisposition,
-    FrameRejectionReason, LiveStacker, RejectionMode, StackOptions, StackSnapshot, StackView,
+    DeltaSigmaOptions, FrameAcceptanceCriteria, FrameDiagnostics, FrameDisposition, FrameInputMode,
+    FrameRejectionReason, LiveStacker, RejectionMode, StackExportSnapshot, StackOptions,
+    StackSnapshot, StackView,
 };
 
 use std::path::PathBuf;

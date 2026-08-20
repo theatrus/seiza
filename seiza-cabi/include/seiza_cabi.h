@@ -18,6 +18,7 @@
  *
  * OWNED by the caller (you must release it):
  *   - SeizaRenderedImage* returned by the seiza_rendered_image_open* functions
+ *     or seiza_live_stacker_render_preview
  *       -> release with seiza_rendered_image_free().
  *   - SeizaRenderedImage16* returned by the seiza_rendered_image16_open*
  *     functions -> release with seiza_rendered_image16_free().
@@ -27,11 +28,19 @@
  *     _open_context
  *       -> release with seiza_live_stacker_free(), or consume with
  *          seiza_live_stacker_finish().
+ *   - SeizaCancelSignal* returned by seiza_cancel_signal_create
+ *       -> release with seiza_cancel_signal_free() after all borrowing work
+ *          has returned.
  *   - SeizaStackSnapshot* returned by seiza_live_stacker_snapshot / _finish
  *       -> release with seiza_stack_snapshot_free().
- *   - char* returned by seiza_catalog_status_json, seiza_solve_image_json, and
- *     seiza_live_stacker_push_*_json, plus any char* stored into an `error_out`
- *     argument on failure
+ *   - SeizaStackExportSnapshot* returned by
+ *     seiza_live_stacker_export_snapshot
+ *       -> release with seiza_stack_export_snapshot_free().
+ *   - char* returned by seiza_catalog_status_json, seiza_solve_image_json,
+ *     seiza_probe_frame_json, seiza_calibration_plan_json,
+ *     seiza_calibration_build_master_json, seiza_live_stacker_state_json, and
+ *     seiza_live_stacker_push_*_json, plus any char* stored into an
+ *     `error_out` argument on failure
  *       -> release with seiza_string_free().
  *
  * BORROWED by the caller (do NOT free; valid only while the owner is alive):
@@ -62,6 +71,12 @@
  * Threading: externally synchronize each live stacker and do not mutate,
  * finish, or free it while another thread reads a borrowed live view. Do not
  * free any opaque owner while another thread uses it or its borrowed pointers.
+ * A SeizaStackExportSnapshot is independent of its live stacker and may be
+ * transferred to an output worker after capture; do not free it until every
+ * write using it has returned.
+ * seiza_cancel_signal_cancel is the exception: it is thread-safe and is meant
+ * to be called while a worker borrows the signal, but the owner still must not
+ * be freed until that worker returns.
  * Do not free the same pointer twice or use a pointer after its owner is freed.
  */
 
@@ -151,6 +166,13 @@
 typedef struct SeizaBackgroundModel SeizaBackgroundModel;
 
 /*
+ An opaque, thread-safe cooperative cancellation flag. Release it with
+ [`seiza_cancel_signal_free`] after every operation borrowing it has
+ returned.
+ */
+typedef struct SeizaCancelSignal SeizaCancelSignal;
+
+/*
  An opaque incremental stacker. Release it with
  [`seiza_live_stacker_free`], or consume it with
  [`seiza_live_stacker_finish`].
@@ -171,6 +193,14 @@ typedef struct SeizaRenderedImage SeizaRenderedImage;
  pointer; release it with [`seiza_rendered_image16_free`].
  */
 typedef struct SeizaRenderedImage16 SeizaRenderedImage16;
+
+/*
+ A compact immutable live-stack result for non-destructive output. It owns
+ only the finalized mean, reference headers, scalar frame counts, and the
+ small source-path ledger. Release it with
+ [`seiza_stack_export_snapshot_free`].
+ */
+typedef struct SeizaStackExportSnapshot SeizaStackExportSnapshot;
 
 /*
  An immutable owned stack result. Its image and count pointers are borrowed
@@ -499,6 +529,30 @@ bool seiza_background_model_correct_in_place_with_strength(const SeizaBackground
 void seiza_background_model_free(SeizaBackgroundModel *model);
 
 /*
+ Create a thread-safe cooperative cancellation flag. The returned owner is
+ initially clear and must be released with [`seiza_cancel_signal_free`].
+ */
+SeizaCancelSignal *seiza_cancel_signal_create(void);
+
+/*
+ Ask work borrowing this signal to stop. The call is thread-safe and may be
+ made from a UI thread while a worker is inside a cancellable operation.
+
+ # Safety
+ `signal` must be null or a live pointer returned by
+ [`seiza_cancel_signal_create`]. It must not be freed concurrently.
+ */
+void seiza_cancel_signal_cancel(const SeizaCancelSignal *signal);
+
+/*
+ # Safety
+ `signal` must be null or a pointer returned by
+ [`seiza_cancel_signal_create`] that has not already been freed. Do not free
+ it until every operation borrowing it has returned.
+ */
+void seiza_cancel_signal_free(SeizaCancelSignal *signal);
+
+/*
  Creates an incremental stack from a copied linear mono or interleaved RGB
  reference frame. Array frames are assumed to be calibrated and debayered.
  Pass null or empty `options_json` for `StackOptions::default()`.
@@ -561,6 +615,67 @@ SeizaLiveStacker *seiza_live_stacker_open_context(const char *context_path, char
 bool seiza_live_stacker_save_context(const SeizaLiveStacker *stacker,
                                      const char *context_path,
                                      char **error_out);
+
+/*
+ Returns an owned JSON snapshot of the live stack's resumable identity and
+ counters. Free it with [`seiza_string_free`].
+
+ `inputPaths` is the native, ordered source/calibration ledger used for
+ duplicate-input and output protection. `configurationFingerprint` is a
+ lowercase SHA-256 identity of stack options, current calibration content,
+ and input mode; it excludes counters and paths, changes when calibration
+ changes, and survives a context round trip.
+
+ # Safety
+ `stacker` must be a live `SeizaLiveStacker` pointer. When non-null,
+ `error_out` must point to writable storage for one pointer. Externally
+ synchronize this read with every mutable operation on the same stacker.
+ */
+char *seiza_live_stacker_state_json(const SeizaLiveStacker *stacker, char **error_out);
+
+/*
+ Load and atomically replace the masters used by later FITS/XISF pushes.
+
+ Each master path is optional. Passing all null/empty paths clears the
+ calibration set. A positive `dark_exposure_seconds` overrides the dark
+ header; zero uses the header and requires no override. All supplied files
+ are fully decoded and the complete set is validated against the immutable
+ registration reference before either active calibration or the input-path
+ ledger changes. Already integrated frames are not recalibrated. A stack
+ created from prepared arrays refuses this operation.
+
+ # Safety
+ `stacker` must be a live `SeizaLiveStacker` pointer. Non-null paths must be
+ valid NUL-terminated strings. When non-null, `error_out` must point to
+ writable storage for one pointer.
+ */
+bool seiza_live_stacker_set_calibration_fits(SeizaLiveStacker *stacker,
+                                             const char *bias_path,
+                                             const char *dark_path,
+                                             const char *flat_path,
+                                             double dark_exposure_seconds,
+                                             char **error_out);
+
+/*
+ Render a bounded RGBA8 preview directly from the current live mean.
+
+ `config_json` accepts the same stretch / optional background / optional
+ deconvolution schema as
+ [`seiza_rendered_image_open_with_stretch_config`]. `max_dimension` must be
+ positive and bounds the linear buffer before background fitting,
+ deconvolution, and stretch. The returned image owns its pixels and remains
+ valid after the stack changes; free it with [`seiza_rendered_image_free`].
+
+ # Safety
+ `stacker` must be a live `SeizaLiveStacker` pointer and `config_json` a
+ valid NUL-terminated string. When non-null, `error_out` must point to
+ writable storage for one pointer. Externally synchronize this read with
+ every mutable operation on the same stacker.
+ */
+SeizaRenderedImage *seiza_live_stacker_render_preview(const SeizaLiveStacker *stacker,
+                                                      const char *config_json,
+                                                      uint32_t max_dimension,
+                                                      char **error_out);
 
 /*
  Registers and offers one copied, calibrated linear frame to the stack.
@@ -708,6 +823,22 @@ const uint32_t *seiza_live_stacker_rejected_samples(const SeizaLiveStacker *stac
 SeizaStackSnapshot *seiza_live_stacker_snapshot(const SeizaLiveStacker *stacker, char **error_out);
 
 /*
+ Copies only the finalized mean and scalar frame counts into an immutable
+ export owner. Unlike [`seiza_live_stacker_snapshot`], this does not clone
+ variance, per-sample coverage, or per-sample rejection maps.
+
+ The returned owner is independent of `stacker`: after this call returns it
+ may be transferred to a worker thread, written, and freed without holding
+ the live stacker's synchronization lock while ingestion continues.
+
+ # Safety
+ `stacker` must be a live `SeizaLiveStacker` pointer. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+SeizaStackExportSnapshot *seiza_live_stacker_export_snapshot(const SeizaLiveStacker *stacker,
+                                                             char **error_out);
+
+/*
  Consumes a live stacker and moves its full-frame state into an immutable
  snapshot without cloning it. Once a non-null live handle is accepted,
  `*stacker` is set to null and consumed even if finalization reports an
@@ -817,6 +948,33 @@ bool seiza_stack_snapshot_write_fits(const SeizaStackSnapshot *snapshot,
  function and must not already be freed.
  */
 void seiza_stack_snapshot_free(SeizaStackSnapshot *snapshot);
+
+/*
+ Writes a compact immutable export snapshot as an unstretched 32-bit
+ floating-point FITS, preserving compatible reference headers. The same
+ extension-based XISF behavior as [`seiza_stack_snapshot_write_fits`] is
+ retained.
+
+ This call reads only the export owner and may run on a worker thread after
+ [`seiza_live_stacker_export_snapshot`] returns; the live stacker is no
+ longer involved.
+
+ # Safety
+ `snapshot` must be a live `SeizaStackExportSnapshot` pointer. `path` must
+ be a valid NUL-terminated string. When non-null, `error_out` must point to
+ writable storage for one pointer. Do not free `snapshot` until this call
+ returns.
+ */
+bool seiza_stack_export_snapshot_write_fits(const SeizaStackExportSnapshot *snapshot,
+                                            const char *path,
+                                            char **error_out);
+
+/*
+ # Safety
+ `snapshot` must be null or a live pointer returned by
+ [`seiza_live_stacker_export_snapshot`] and must not already be freed.
+ */
+void seiza_stack_export_snapshot_free(SeizaStackExportSnapshot *snapshot);
 
 /*
  Returns catalog readiness and resolved component paths as JSON.
@@ -1081,6 +1239,65 @@ char *seiza_solve_image_json(const char *path,
  already been freed.
  */
 void seiza_string_free(char *value);
+
+/*
+ Read only a FITS/XISF header and return normalized frame-role, calibration
+ state, and matching-signature JSON. No pixel payload is decoded. The owned
+ string must be released with [`seiza_string_free`].
+
+ # Safety
+ `path` must be a valid NUL-terminated string. When non-null, `error_out`
+ must point to writable storage for one pointer.
+ */
+char *seiza_probe_frame_json(const char *path, char **error_out);
+
+/*
+ Select a proximity-ordered, internally coherent set of calibration-frame
+ probe records without duplicating Seiza's matching policy in a host.
+
+ `request_json` contains `kind` (`bias`, `dark`, `dark-flat`, or `flat`), a
+ `reference` record, `candidates`, optional `minimum` (default 2), and
+ optional camelCase tolerances. Dark flats use dark exposure/temperature
+ matching and should reference the selected flat they will calibrate. Each
+ record has `path`, `role`, and the `signature` object returned by
+ [`seiza_probe_frame_json`]; extra probe fields are ignored.
+ The owned response reports `matchedPaths`, coherent `selectedPaths`,
+ `ready`, and one stable exclusion reason per omitted candidate. Free it
+ with [`seiza_string_free`].
+
+ # Safety
+ `request_json` must be a valid NUL-terminated string. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_calibration_plan_json(const char *request_json, char **error_out);
+
+/*
+ Build and atomically publish one calibration master from raw FITS/XISF
+ paths, returning an owned JSON integration report.
+
+ The camelCase request has `kind`, at least two `inputs`, and `output`;
+ optional fields are `bias`, `dark`, `darkExposureSeconds`,
+ `exposureSeconds`, `rejection` (`lowSigma`, `highSigma`), and
+ `defectSuppression` (`lowSigma`, `highSigma`). `dark` is a dark-flat when
+ building a flat. Defect suppression is accepted only for flats, because a
+ dark master must retain the hot pixels it is meant to subtract.
+
+ Construction is a two-pass leave-one-out sigma-clipped mean and may take
+ minutes. Run it off the UI thread. `cancel` may be null; otherwise another
+ thread may call [`seiza_cancel_signal_cancel`]. Cancellation is checked
+ between input frames, returns failure through `error_out`, and publishes no
+ output. FITS/XISF writers publish through a same-directory temporary file,
+ so every successful output is atomic. Free the response with
+ [`seiza_string_free`].
+
+ # Safety
+ `request_json` must be a valid NUL-terminated string. `cancel` must be null
+ or a live [`SeizaCancelSignal`] retained until this call returns. When
+ non-null, `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_calibration_build_master_json(const char *request_json,
+                                          const SeizaCancelSignal *cancel,
+                                          char **error_out);
 
 /*
  Read how deep a live stack is, without copying the accumulator.

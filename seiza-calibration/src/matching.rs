@@ -170,6 +170,30 @@ pub fn sensor_matches(reference: &FrameSignature, candidate: &FrameSignature) ->
         )
 }
 
+/// Whether two calibration frames have no contradictory sensor settings.
+///
+/// This is deliberately symmetric and differs from [`sensor_matches`]. A
+/// missing setting on either side is tolerated because absence does not prove
+/// two calibration frames disagree; two known values must agree. Positive
+/// identity evidence is still required through an agreeing camera name or
+/// agreeing dimensions, so two empty signatures are not called consistent.
+pub fn sensor_consistent(left: &FrameSignature, right: &FrameSignature) -> bool {
+    sensor_identity_matches(left, right)
+        && text_equal_if_both_known(left.camera.as_deref(), right.camera.as_deref())
+        && equal_if_both_known(left.width, right.width)
+        && equal_if_both_known(left.height, right.height)
+        && equal_if_both_known(left.channels, right.channels)
+        && equal_if_both_known(left.binning_x, right.binning_x)
+        && equal_if_both_known(left.binning_y, right.binning_y)
+        && equal_if_both_known(left.gain, right.gain)
+        && equal_if_both_known(left.offset, right.offset)
+        && equal_if_both_known(left.readout_mode, right.readout_mode)
+        && text_equal_if_both_known(
+            left.bayer_pattern.as_deref(),
+            right.bayer_pattern.as_deref(),
+        )
+}
+
 /// Whether a flat describes the same optical path as what it would correct.
 ///
 /// A flat records the dust and vignetting of one train at one angle. Change
@@ -193,6 +217,30 @@ pub fn optics_match(
         && rotation_matches(
             reference.rotation_deg,
             candidate.rotation_deg,
+            tolerances.rotation_deg,
+        )
+}
+
+/// Whether two calibration frames have no contradictory optical settings.
+///
+/// Unlike [`optics_match`], neither side is privileged as the candidate: a
+/// missing value is tolerated, while two recorded values must agree. This is
+/// the appropriate question before averaging flat candidates into one master.
+pub fn optics_consistent(
+    left: &FrameSignature,
+    right: &FrameSignature,
+    tolerances: &MatchTolerances,
+) -> bool {
+    text_equal_if_both_known(left.filter.as_deref(), right.filter.as_deref())
+        && text_equal_if_both_known(left.telescope.as_deref(), right.telescope.as_deref())
+        && option_near_if_both_known(
+            left.focal_length_mm,
+            right.focal_length_mm,
+            tolerances.focal_length_mm,
+        )
+        && rotation_matches(
+            left.rotation_deg,
+            right.rotation_deg,
             tolerances.rotation_deg,
         )
 }
@@ -381,6 +429,13 @@ fn equal_if_known<T: PartialEq>(reference: Option<T>, candidate: Option<T>) -> b
     }
 }
 
+fn equal_if_both_known<T: PartialEq>(left: Option<T>, right: Option<T>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left == right,
+        _ => true,
+    }
+}
+
 fn text_equal_if_known(reference: Option<&str>, candidate: Option<&str>) -> bool {
     match (reference, candidate) {
         (Some(reference), Some(candidate)) => {
@@ -391,11 +446,25 @@ fn text_equal_if_known(reference: Option<&str>, candidate: Option<&str>) -> bool
     }
 }
 
+fn text_equal_if_both_known(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left.trim().eq_ignore_ascii_case(right.trim()),
+        _ => true,
+    }
+}
+
 fn option_near(reference: Option<f64>, candidate: Option<f64>, tolerance: f64) -> bool {
     match (known(reference), known(candidate)) {
         (Some(reference), Some(candidate)) => (reference - candidate).abs() <= tolerance,
         (Some(_), None) => false,
         (None, _) => true,
+    }
+}
+
+fn option_near_if_both_known(left: Option<f64>, right: Option<f64>, tolerance: f64) -> bool {
+    match (known(left), known(right)) {
+        (Some(left), Some(right)) => (left - right).abs() <= tolerance,
+        _ => true,
     }
 }
 
@@ -504,6 +573,26 @@ mod tests {
     }
 
     #[test]
+    fn calibration_sensor_consistency_tolerates_missing_but_not_conflicting_settings() {
+        let mut left = signature();
+        let mut right = signature();
+        left.gain = None;
+        assert!(sensor_consistent(&left, &right));
+        right.gain = Some(200);
+        left.gain = Some(100);
+        assert!(!sensor_consistent(&left, &right));
+
+        let unidentified = FrameSignature {
+            gain: Some(100),
+            ..FrameSignature::default()
+        };
+        assert!(!sensor_consistent(
+            &unidentified,
+            &FrameSignature::default()
+        ));
+    }
+
+    #[test]
     fn a_flat_only_corrects_its_own_optical_path() {
         let tolerances = MatchTolerances::default();
         let light = signature();
@@ -522,6 +611,25 @@ mod tests {
                 "{candidate:?}"
             );
         }
+    }
+
+    #[test]
+    fn flat_optics_consistency_tolerates_missing_but_not_conflicting_settings() {
+        let mut left = signature();
+        let mut right = signature();
+        left.filter = None;
+        assert!(optics_consistent(
+            &left,
+            &right,
+            &MatchTolerances::default()
+        ));
+        left.filter = Some("Ha".into());
+        right.filter = Some("OIII".into());
+        assert!(!optics_consistent(
+            &left,
+            &right,
+            &MatchTolerances::default()
+        ));
     }
 
     #[test]

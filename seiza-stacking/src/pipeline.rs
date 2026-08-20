@@ -444,6 +444,15 @@ fn prepare_one(
     if let Some(full_scale) = normalized_full_scale {
         frame.rescale_declared_unit_bounds(full_scale);
     }
+    if let Err(error) = half.calibration.validate_light_frame(&frame) {
+        let message = match error {
+            Error::Calibration(message) => message,
+            other => other.to_string(),
+        };
+        return Ok(PreparedFrame::Rejected(
+            crate::FrameRejectionReason::Calibration(message),
+        ));
+    }
     if let Err(error) =
         half.calibration
             .apply(&mut frame.image, frame.exposure_seconds, frame.bayer)

@@ -1540,6 +1540,7 @@ dependencies = [
  "seiza-xisf",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "zstd",
