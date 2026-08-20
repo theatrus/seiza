@@ -5,9 +5,9 @@ use crate::arrays::linear_image;
 use numpy::PyReadonlyArrayDyn;
 use pyo3::prelude::*;
 use seiza_calibration::{
-    FrameRole, FrameSignature, LinearImageRef, MatchTolerances, coherent_subset, exposure_matches,
-    fit_flat_pedestal, optics_match, rotation_matches, sensor_matches, sort_by_proximity,
-    temperature_matches,
+    FrameRole, FrameSignature, LinearImageRef, MatchTolerances, coherent_subset,
+    coherent_subset_indices, exposure_matches, fit_flat_pedestal, optics_match, rotation_matches,
+    sensor_matches, sort_by_proximity, temperature_matches,
 };
 
 /// What a frame was shot with, as far as matching cares.
@@ -362,6 +362,36 @@ fn py_temperature_matches(
 ///
 /// Matching says what may be *used*; this says what may be *combined*. Frames
 /// that each suit the light can still disagree with each other. Pass
+/// [`coherent_subset`], as positions into ``candidates`` rather than copies.
+///
+/// A ``FrameSignature`` is only the part of a frame that decides whether it
+/// belongs with another, so a copy cannot be traced back to whatever record it
+/// came from. A caller holding its own objects — rows, paths, dataclasses —
+/// asks for these and indexes its own list.
+#[pyfunction]
+#[pyo3(name = "coherent_subset_indices", signature = (candidates, flats=false, minimum=2, tolerances=None))]
+fn py_coherent_subset_indices(
+    candidates: Vec<PyFrameSignature>,
+    flats: bool,
+    minimum: usize,
+    tolerances: Option<PyMatchTolerances>,
+) -> Vec<usize> {
+    let signatures: Vec<FrameSignature> = candidates
+        .into_iter()
+        .map(|candidate| candidate.inner)
+        .collect();
+    coherent_subset_indices(
+        &signatures,
+        if flats {
+            FrameRole::Flat
+        } else {
+            FrameRole::Other
+        },
+        minimum,
+        &tolerances_or_default(tolerances),
+    )
+}
+
 /// ``flats=True`` to additionally require a shared session and rotator angle.
 #[pyfunction]
 #[pyo3(name = "coherent_subset", signature = (candidates, flats=false, minimum=2, tolerances=None))]
@@ -454,6 +484,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(py_exposure_matches, module)?)?;
     module.add_function(wrap_pyfunction!(py_temperature_matches, module)?)?;
     module.add_function(wrap_pyfunction!(py_coherent_subset, module)?)?;
+    module.add_function(wrap_pyfunction!(py_coherent_subset_indices, module)?)?;
     module.add_function(wrap_pyfunction!(py_sort_by_proximity, module)?)?;
     module.add_function(wrap_pyfunction!(py_fit_flat_pedestal, module)?)?;
     Ok(())
