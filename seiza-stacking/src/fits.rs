@@ -1230,6 +1230,7 @@ mod tests {
             normalized: false,
             rejection: crate::MasterRejectionOptions::default(),
             reference_headers: vec![("INSTRUME".into(), HeaderValue::String("Test Camera".into()))],
+            skipped_inputs: Vec::new(),
         };
         write_master_fits_f32(&path, &master).unwrap();
         let decoded = FitsImage::open(&path).unwrap();

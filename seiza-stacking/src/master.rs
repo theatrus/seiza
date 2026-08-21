@@ -90,7 +90,14 @@ pub struct MasterInputStatistics {
 }
 
 /// An integrated calibration master with its provenance and clipping stats.
+///
+/// Non-exhaustive: this grows a field whenever the build learns to report
+/// something new, and a consumer reads what it needs rather than naming every
+/// field. Adding one is then a compatible change instead of a break, which
+/// `skipped_inputs` — added in the same release that sealed this — otherwise
+/// would have been.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct MasterFrame {
     /// Which kind of master this is.
     pub kind: MasterFrameKind,
@@ -124,6 +131,23 @@ pub struct MasterFrame {
     pub rejection: MasterRejectionOptions,
     /// Header cards from the first input, copied onto the written master.
     pub reference_headers: Vec<(String, HeaderValue)>,
+    /// Inputs left out because their metadata contradicted the reference
+    /// frame, each with the reason. Empty for an ordinary build.
+    ///
+    /// A calibration library is not always tidy. A rotator moves between
+    /// nights, a filter wheel runs the whole set back to back, a reducer is
+    /// swapped. Refusing the master outright over one such frame throws away
+    /// every good frame with it, so they are set aside and named here.
+    pub skipped_inputs: Vec<SkippedInput>,
+}
+
+/// One input the master build declined, and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SkippedInput {
+    /// The frame that was left out.
+    pub path: PathBuf,
+    /// Why it could not join, in the integrator's own words.
+    pub reason: String,
 }
 
 impl MasterFrame {
@@ -147,6 +171,10 @@ impl MasterFrame {
 ///
 /// Inputs are reread on the second pass, so memory scales with one image rather
 /// than with the number of calibration frames.
+/// Fewest frames that can make a master. Below this, sigma rejection has
+/// nothing to compare against and the "master" is just a copy of one frame.
+const MINIMUM_MASTER_INPUTS: usize = 2;
+
 pub fn build_master_from_fits(
     paths: &[PathBuf],
     kind: MasterFrameKind,
@@ -168,17 +196,36 @@ pub fn build_master_from_fits(
     let mut mean = Vec::<f32>::new();
     let mut m2 = Vec::<f32>::new();
 
-    for (index, path) in paths.iter().enumerate() {
+    // The first frame sets the reference, so it can never be the odd one out;
+    // every later frame is measured against it and set aside if it disagrees.
+    // Both passes must combine exactly the same frames, so pass one records
+    // what it accepted and pass two walks that list rather than `paths`.
+    let mut accepted: Vec<&PathBuf> = Vec::with_capacity(paths.len());
+    let mut skipped_inputs: Vec<SkippedInput> = Vec::new();
+
+    for path in paths {
         check_cancelled(options)?;
-        let prepared = prepare_input(
+        let prepared = match prepare_input(
             path,
             kind,
             options,
             &calibration,
             reference_signature.as_ref(),
             dark_exposure,
-        )?;
-        if index == 0 {
+        ) {
+            Ok(prepared) => prepared,
+            // Only a metadata disagreement is survivable. An unreadable file
+            // or a failed calibration is a real fault and still stops here.
+            Err(Error::Calibration(reason)) if reference_signature.is_some() => {
+                skipped_inputs.push(SkippedInput {
+                    path: path.clone(),
+                    reason,
+                });
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if accepted.is_empty() {
             reference_headers = prepared.headers.clone();
             reference_bayer = prepared.bayer;
             reference_signature = Some(InputSignature::from_frame(&prepared, kind));
@@ -188,7 +235,8 @@ pub fn build_master_from_fits(
             mean.resize(prepared.image.sample_count(), 0.0);
             m2.resize(prepared.image.sample_count(), 0.0);
         }
-        let count = (index + 1) as f32;
+        accepted.push(path);
+        let count = accepted.len() as f32;
         for ((mean, m2), value) in mean.iter_mut().zip(&mut m2).zip(prepared.image.data) {
             let delta = value - *mean;
             *mean += delta / count;
@@ -196,14 +244,30 @@ pub fn build_master_from_fits(
         }
     }
 
+    // Tolerating odd frames must not quietly produce a master from one frame:
+    // sigma rejection has nothing to compare and the result is just that frame.
+    if accepted.len() < MINIMUM_MASTER_INPUTS {
+        let detail = skipped_inputs
+            .iter()
+            .map(|skipped| skipped.reason.clone())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(Error::Calibration(format!(
+            "only {} of {} calibration frames could be combined, fewer than the {} required — {detail}",
+            accepted.len(),
+            paths.len(),
+            MINIMUM_MASTER_INPUTS
+        )));
+    }
+
     let mut integrated = vec![0.0_f32; mean.len()];
     let mut accepted_counts = vec![0_u32; mean.len()];
-    let mut input_statistics = Vec::with_capacity(paths.len());
+    let mut input_statistics = Vec::with_capacity(accepted.len());
     let mut accepted_samples = 0_u64;
     let mut rejected_samples = 0_u64;
-    let count = paths.len();
+    let count = accepted.len();
 
-    for path in paths {
+    for path in &accepted {
         check_cancelled(options)?;
         let prepared = prepare_input(
             path,
@@ -247,7 +311,7 @@ pub fn build_master_from_fits(
             fallback_pixels += 1;
         }
     }
-    let signature = reference_signature.expect("at least two paths were validated");
+    let signature = reference_signature.expect("the accepted count was checked above");
     let mut image = LinearImage::new(
         signature.width,
         signature.height,
@@ -280,7 +344,7 @@ pub fn build_master_from_fits(
             .then_some(dark_exposure)
             .flatten(),
         bayer: reference_bayer,
-        input_frames: paths.len(),
+        input_frames: accepted.len(),
         accepted_samples,
         fallback_pixels,
         defect_pixels_replaced,
@@ -291,6 +355,7 @@ pub fn build_master_from_fits(
         normalized: kind == MasterFrameKind::Flat,
         rejection: options.rejection,
         reference_headers,
+        skipped_inputs,
     })
 }
 
@@ -309,7 +374,7 @@ fn validate_options(
     kind: MasterFrameKind,
     options: &MasterBuildOptions,
 ) -> Result<()> {
-    if paths.len() < 2 {
+    if paths.len() < MINIMUM_MASTER_INPUTS {
         return Err(Error::Calibration(
             "at least two calibration frames are required".into(),
         ));
@@ -805,6 +870,91 @@ mod tests {
             .to_string();
             assert!(error.contains(expected), "{error}");
         }
+    }
+
+    #[test]
+    fn a_flat_from_another_night_is_set_aside_not_fatal() {
+        // Drawn from a real library: C925 flats, filter R, focal length
+        // 2350 mm on every night — but the rotator sat at 103.22° on one
+        // night and 101.99° on the next, 1.23° apart against a 1° tolerance.
+        //
+        // The build used to compare each frame against the first and refuse
+        // the whole master on the first disagreement, so eight good frames
+        // were lost to one from the wrong night.
+        let directory = tempfile::tempdir().unwrap();
+        let flat = |name: &str, angle: f64| {
+            let path = directory.path().join(name);
+            write_tagged_image(
+                &path,
+                vec![
+                    WriteHeaderCard::new("IMAGETYP", HeaderValue::String("FLAT".into())),
+                    WriteHeaderCard::new("FILTER", HeaderValue::String("R".into())),
+                    WriteHeaderCard::new("FOCALLEN", HeaderValue::Float(2350.0)),
+                    WriteHeaderCard::new("ROTATANG", HeaderValue::Float(angle)),
+                ],
+            );
+            path
+        };
+        let paths = vec![
+            flat("flat-0.fits", 101.99),
+            flat("flat-1.fits", 101.99),
+            flat("stray.fits", 103.22),
+            flat("flat-2.fits", 101.99),
+        ];
+
+        let master = build_master_from_fits(
+            &paths,
+            MasterFrameKind::Flat,
+            &MasterBuildOptions::default(),
+        )
+        .expect("one frame from another night must not cost the master");
+
+        assert_eq!(master.input_frames, 3, "the three coherent flats combined");
+        assert_eq!(master.skipped_inputs.len(), 1);
+        assert_eq!(master.skipped_inputs[0].path, paths[2]);
+        assert!(
+            master.skipped_inputs[0].reason.contains("optical"),
+            "the reason must say why: {}",
+            master.skipped_inputs[0].reason
+        );
+        assert_eq!(
+            master.input_statistics.len(),
+            3,
+            "per-input statistics cover exactly the frames that combined"
+        );
+    }
+
+    #[test]
+    fn a_master_is_never_built_from_one_surviving_frame() {
+        // Setting frames aside must not slide into integrating a single
+        // frame and calling it a master: rejection has nothing to compare.
+        let directory = tempfile::tempdir().unwrap();
+        let flat = |name: &str, angle: f64| {
+            let path = directory.path().join(name);
+            write_tagged_image(
+                &path,
+                vec![
+                    WriteHeaderCard::new("IMAGETYP", HeaderValue::String("FLAT".into())),
+                    WriteHeaderCard::new("FILTER", HeaderValue::String("R".into())),
+                    WriteHeaderCard::new("ROTATANG", HeaderValue::Float(angle)),
+                ],
+            );
+            path
+        };
+        let paths = vec![
+            flat("keep.fits", 10.0),
+            flat("stray-a.fits", 90.0),
+            flat("stray-b.fits", 200.0),
+        ];
+
+        let error = build_master_from_fits(
+            &paths,
+            MasterFrameKind::Flat,
+            &MasterBuildOptions::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("only 1 of 3"), "{error}");
     }
 
     #[test]
