@@ -15,7 +15,7 @@ use seiza_fits::{FitsImage, HeaderValue, RgbImage16, Statistics, StretchParams};
 use seiza_stacking::{
     CancelSignal, ChannelCoverage, ChannelSamples, ColorCrop, CropReport, FitsFrame,
     FrameDiagnostics, FrameDisposition, FrameInputMode, FrameSourceRole, ImpulseFilterOptions,
-    LinearImage, LiveStacker, MasterBuildOptions, MasterDark, MasterFrameKind,
+    LinearImage, LiveStacker, MasterBuildOptions, MasterDark, MasterFrame, MasterFrameKind,
     MasterRejectionOptions, ReferenceRegion, StackExportSnapshot as RustStackExportSnapshot,
     StackOptions, StackSnapshot as RustStackSnapshot, build_master_from_fits,
     checkpoint_depths as rust_checkpoint_depths, crop_report, measure_depth as rust_measure_depth,
@@ -880,6 +880,13 @@ struct MasterBuildInputResponse {
     rejected_samples: u64,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MasterBuildSkippedInputResponse {
+    path: String,
+    reason: String,
+}
+
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MasterBuildRejectionResponse {
@@ -896,6 +903,7 @@ struct MasterBuildResponse {
     width: usize,
     height: usize,
     channels: usize,
+    requested_frames: usize,
     input_frames: usize,
     accepted_samples: u64,
     rejected_samples: u64,
@@ -907,6 +915,7 @@ struct MasterBuildResponse {
     output_exposure_seconds: Option<f64>,
     rejection: MasterBuildRejectionResponse,
     inputs: Vec<MasterBuildInputResponse>,
+    skipped_inputs: Vec<MasterBuildSkippedInputResponse>,
 }
 
 /// Additive background subtraction mode for
@@ -5653,24 +5662,19 @@ fn build_master_request(
     };
     let master = build_master_from_fits(&request.inputs, kind, &options)
         .map_err(|error| error.to_string())?;
+    let (inputs, skipped_inputs) = master_build_provenance(&request.inputs, &master)?;
+    // Validate every piece of provenance before publishing the output. A
+    // response that cannot account for its requested inputs must not leave a
+    // master behind for a caller to trust despite receiving an error.
     write_master_fits_f32(&request.output, &master).map_err(|error| error.to_string())?;
-    let inputs = request
-        .inputs
-        .iter()
-        .zip(&master.input_statistics)
-        .map(|(path, statistics)| MasterBuildInputResponse {
-            path: path.to_string_lossy().into_owned(),
-            accepted_samples: statistics.accepted_samples,
-            rejected_samples: statistics.rejected_samples,
-        })
-        .collect();
     Ok(MasterBuildResponse {
-        schema_version: 1,
+        schema_version: 2,
         kind: master.kind.as_str(),
         output: request.output.to_string_lossy().into_owned(),
         width: master.image.width,
         height: master.image.height,
         channels: master.image.channels,
+        requested_frames: request.inputs.len(),
         input_frames: master.input_frames,
         accepted_samples: master.accepted_samples,
         rejected_samples: master.rejected_samples,
@@ -5685,7 +5689,124 @@ fn build_master_request(
             high_sigma: master.rejection.high_sigma,
         },
         inputs,
+        skipped_inputs,
     })
+}
+
+fn master_build_provenance(
+    requested_inputs: &[PathBuf],
+    master: &MasterFrame,
+) -> Result<
+    (
+        Vec<MasterBuildInputResponse>,
+        Vec<MasterBuildSkippedInputResponse>,
+    ),
+    String,
+> {
+    if master.input_frames < 2 {
+        return Err(format!(
+            "master input accounting is invalid: only {} accepted frame(s)",
+            master.input_frames
+        ));
+    }
+    if master.input_frames != master.input_statistics.len() {
+        return Err(format!(
+            "master input accounting is invalid: {} accepted frames but {} per-input tallies",
+            master.input_frames,
+            master.input_statistics.len()
+        ));
+    }
+    let accounted_frames = master
+        .input_frames
+        .checked_add(master.skipped_inputs.len())
+        .ok_or_else(|| "master input accounting overflowed".to_string())?;
+    if accounted_frames != requested_inputs.len() {
+        return Err(format!(
+            "master input accounting is invalid: {} requested, {} accepted, and {} skipped",
+            requested_inputs.len(),
+            master.input_frames,
+            master.skipped_inputs.len()
+        ));
+    }
+    for (index, skipped) in master.skipped_inputs.iter().enumerate() {
+        let requested_matches = requested_inputs
+            .iter()
+            .filter(|path| **path == skipped.path)
+            .count();
+        if requested_matches != 1 {
+            return Err(format!(
+                "master input accounting is invalid: skipped path {} occurs {requested_matches} times in the request",
+                skipped.path.display()
+            ));
+        }
+        if master.skipped_inputs[..index]
+            .iter()
+            .any(|previous| previous.path == skipped.path)
+        {
+            return Err(format!(
+                "master input accounting is invalid: skipped path {} was reported more than once",
+                skipped.path.display()
+            ));
+        }
+    }
+
+    let mut statistics = master.input_statistics.iter();
+    let mut inputs = Vec::with_capacity(master.input_frames);
+    for path in requested_inputs {
+        if master
+            .skipped_inputs
+            .iter()
+            .any(|skipped| skipped.path == *path)
+        {
+            continue;
+        }
+        let tally = statistics.next().ok_or_else(|| {
+            "master input accounting is invalid: an accepted path has no per-input tally"
+                .to_string()
+        })?;
+        inputs.push(MasterBuildInputResponse {
+            path: path.to_string_lossy().into_owned(),
+            accepted_samples: tally.accepted_samples,
+            rejected_samples: tally.rejected_samples,
+        });
+    }
+    if statistics.next().is_some() || inputs.len() != master.input_frames {
+        return Err(format!(
+            "master input accounting is invalid: mapped {} accepted paths for {} frames",
+            inputs.len(),
+            master.input_frames
+        ));
+    }
+    let accepted_samples = master
+        .input_statistics
+        .iter()
+        .try_fold(0_u64, |total, tally| {
+            total.checked_add(tally.accepted_samples)
+        })
+        .ok_or_else(|| "master accepted-sample accounting overflowed".to_string())?;
+    let rejected_samples = master
+        .input_statistics
+        .iter()
+        .try_fold(0_u64, |total, tally| {
+            total.checked_add(tally.rejected_samples)
+        })
+        .ok_or_else(|| "master rejected-sample accounting overflowed".to_string())?;
+    if accepted_samples != master.accepted_samples || rejected_samples != master.rejected_samples {
+        return Err(format!(
+            "master sample accounting is invalid: per-input totals are {accepted_samples} accepted/{rejected_samples} rejected but the master reports {}/{}",
+            master.accepted_samples, master.rejected_samples
+        ));
+    }
+
+    let skipped_inputs = master
+        .skipped_inputs
+        .iter()
+        .map(|skipped| MasterBuildSkippedInputResponse {
+            path: skipped.path.to_string_lossy().into_owned(),
+            reason: skipped.reason.clone(),
+        })
+        .collect();
+    Ok((inputs, skipped_inputs))
 }
 
 fn validate_optional_positive_seconds(value: Option<f64>, name: &str) -> Result<(), String> {
@@ -7553,9 +7674,12 @@ mod tests {
         let report: Value =
             serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap()).unwrap();
         unsafe { seiza_string_free(result) };
+        assert_eq!(report["schemaVersion"], 2);
         assert_eq!(report["kind"], "bias");
+        assert_eq!(report["requestedFrames"], 2);
         assert_eq!(report["inputFrames"], 2);
         assert_eq!(report["inputs"].as_array().unwrap().len(), 2);
+        assert_eq!(report["skippedInputs"], json!([]));
         let written = FitsImage::open(&output).unwrap();
         assert_eq!(written.header_str("SEIZAMST"), Some("BIAS"));
         assert_eq!(written.header_f64("NCOMBINE"), Some(2.0));
@@ -7589,6 +7713,115 @@ mod tests {
             std::fs::read(&preserved_output).unwrap(),
             b"existing output"
         );
+        unsafe { seiza_string_free(error) };
+    }
+
+    #[test]
+    fn master_builder_reports_a_skipped_middle_input_without_mislabeling_tallies() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("flat-001.fits");
+        let stray = directory.path().join("flat-stray.fits");
+        let third = directory.path().join("flat-002.fits");
+        let output = directory.path().join("master-flat.fits");
+        let write_flat = |path: &Path, rotation: f64, value: f32| {
+            let image = LinearImage::new(8, 8, 1, vec![value; 64]).unwrap();
+            seiza_stacking::write_processed_image_fits_f32(
+                path,
+                &image,
+                &[],
+                &[
+                    seiza_fits::WriteHeaderCard::new(
+                        "IMAGETYP",
+                        HeaderValue::String("FLAT".into()),
+                    ),
+                    seiza_fits::WriteHeaderCard::new("FILTER", HeaderValue::String("R".into())),
+                    seiza_fits::WriteHeaderCard::new("ROTATANG", HeaderValue::Float(rotation)),
+                ],
+            )
+            .unwrap();
+        };
+        write_flat(&first, 10.0, 100.0);
+        write_flat(&stray, 90.0, 150.0);
+        write_flat(&third, 10.0, 110.0);
+
+        let request = CString::new(
+            json!({
+                "kind": "flat",
+                "inputs": [&first, &stray, &third],
+                "output": &output
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut error = ptr::null_mut();
+        let result = unsafe {
+            seiza_calibration_build_master_json(request.as_ptr(), ptr::null(), &mut error)
+        };
+        assert!(!result.is_null());
+        assert!(error.is_null());
+        let report: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap()).unwrap();
+        unsafe { seiza_string_free(result) };
+
+        assert_eq!(report["schemaVersion"], 2);
+        assert_eq!(report["requestedFrames"], 3);
+        assert_eq!(report["inputFrames"], 2);
+        assert_eq!(
+            report["inputs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["path"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [first.to_str().unwrap(), third.to_str().unwrap()]
+        );
+        let skipped = report["skippedInputs"].as_array().unwrap();
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0]["path"], stray.to_str().unwrap());
+        assert!(skipped[0]["reason"].as_str().unwrap().contains("optical"));
+        assert_eq!(
+            FitsImage::open(&output).unwrap().header_f64("NCOMBINE"),
+            Some(2.0)
+        );
+    }
+
+    #[test]
+    fn master_builder_preserves_output_when_fewer_than_two_inputs_survive() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("flat-001.fits");
+        let stray = directory.path().join("flat-stray.fits");
+        let output = directory.path().join("preserved-master.fits");
+        let image = LinearImage::new(8, 8, 1, vec![100.0; 64]).unwrap();
+        for (path, rotation) in [(&first, 10.0), (&stray, 90.0)] {
+            seiza_stacking::write_processed_image_fits_f32(
+                path,
+                &image,
+                &[],
+                &[
+                    seiza_fits::WriteHeaderCard::new(
+                        "IMAGETYP",
+                        HeaderValue::String("FLAT".into()),
+                    ),
+                    seiza_fits::WriteHeaderCard::new("FILTER", HeaderValue::String("R".into())),
+                    seiza_fits::WriteHeaderCard::new("ROTATANG", HeaderValue::Float(rotation)),
+                ],
+            )
+            .unwrap();
+        }
+        std::fs::write(&output, b"existing output").unwrap();
+        let request = CString::new(
+            json!({"kind":"flat", "inputs":[&first, &stray], "output":&output}).to_string(),
+        )
+        .unwrap();
+        let mut error = ptr::null_mut();
+        let result = unsafe {
+            seiza_calibration_build_master_json(request.as_ptr(), ptr::null(), &mut error)
+        };
+        assert!(result.is_null());
+        assert!(!error.is_null());
+        let message = unsafe { CStr::from_ptr(error) }.to_str().unwrap();
+        assert!(message.contains("only 1 of 2"), "{message}");
+        assert_eq!(std::fs::read(&output).unwrap(), b"existing output");
         unsafe { seiza_string_free(error) };
     }
 
@@ -8746,6 +8979,12 @@ pub unsafe extern "C" fn seiza_calibration_plan_json(
 /// output. FITS/XISF writers publish through a same-directory temporary file,
 /// so every successful output is atomic. Free the response with
 /// [`seiza_string_free`].
+///
+/// Response schema 2 reports `requestedFrames`, accepted `inputFrames` and
+/// accepted-only per-frame `inputs`, plus `skippedInputs` entries with `path`
+/// and `reason` for metadata disagreements the integrator set aside. The
+/// accepted and skipped paths are disjoint and account for every requested
+/// input in request order.
 ///
 /// # Safety
 /// `request_json` must be a valid NUL-terminated string. `cancel` must be null

@@ -7,6 +7,17 @@ use seiza_fits::{F32ImageData, FitsImage, HeaderValue, WriteHeaderCard};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+const CAMERA_HEADER_KEYS: &[&str] = &["INSTRUME", "CAMERA"];
+const TELESCOPE_HEADER_KEYS: &[&str] = &["TELESCOP", "TELESCOPE"];
+const BINNING_X_HEADER_KEYS: &[&str] = &["XBINNING", "CCDXBIN"];
+const BINNING_Y_HEADER_KEYS: &[&str] = &["YBINNING", "CCDYBIN"];
+const READOUT_HEADER_KEYS: &[&str] = &["READOUTM", "READMODE", "READOUT"];
+const EXPOSURE_HEADER_KEYS: &[&str] = &["XPOSURE", "EXPTIME", "EXPOSURE"];
+const TEMPERATURE_HEADER_KEYS: &[&str] = &["CCD-TEMP", "SET-TEMP"];
+const FOCAL_LENGTH_HEADER_KEYS: &[&str] = &["FOCALLEN", "FOCALLENGTH", "FOCAL"];
+const ROTATION_HEADER_KEYS: &[&str] = &["ROTATANG", "ROTATOR", "ROTPOS"];
+const CAPTURE_TIME_HEADER_KEYS: &[&str] = &["DATE-OBS", "DATE-BEG", "DATE-AVG"];
+
 /// Calibration markers carried by a decoded frame's headers.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct FrameCalibrationState {
@@ -170,7 +181,7 @@ impl FitsFrame {
         let bayer_pattern = fits.bayer_pattern();
         let x_offset = fits.header_f64("XBAYROFF").unwrap_or(0.0).max(0.0) as usize;
         let y_offset = fits.header_f64("YBAYROFF").unwrap_or(0.0).max(0.0) as usize;
-        let exposure_seconds = ["XPOSURE", "EXPTIME", "EXPOSURE"]
+        let exposure_seconds = EXPOSURE_HEADER_KEYS
             .iter()
             .find_map(|key| fits.header_f64(key))
             .filter(|value| value.is_finite() && *value > 0.0);
@@ -293,7 +304,7 @@ fn metadata_from_headers(
     } else {
         fallback_channels
     };
-    let exposure_seconds = header_f64(headers, &["XPOSURE", "EXPTIME", "EXPOSURE"])
+    let exposure_seconds = header_f64(headers, EXPOSURE_HEADER_KEYS)
         .filter(|value| *value > 0.0)
         .or(fallback_exposure);
     let declared_master = header_text(headers, &["SEIZAMST"]);
@@ -302,24 +313,24 @@ fn metadata_from_headers(
     let normalized_type = role_source.map(normalize_role_text).unwrap_or_default();
 
     let mut signature = FrameSignature::default();
-    signature.camera = header_text(headers, &["INSTRUME", "CAMERA"]);
-    signature.telescope = header_text(headers, &["TELESCOP", "TELESCOPE"]);
+    signature.camera = header_text(headers, CAMERA_HEADER_KEYS);
+    signature.telescope = header_text(headers, TELESCOPE_HEADER_KEYS);
     signature.width = width;
     signature.height = height;
     signature.channels = channels;
-    signature.binning_x = header_i64(headers, &["XBINNING", "CCDXBIN"]);
-    signature.binning_y = header_i64(headers, &["YBINNING", "CCDYBIN"]);
+    signature.binning_x = header_i64(headers, BINNING_X_HEADER_KEYS);
+    signature.binning_y = header_i64(headers, BINNING_Y_HEADER_KEYS);
     signature.gain = header_i64(headers, &["GAIN"]);
     signature.offset = header_i64(headers, &["OFFSET"]);
-    signature.readout_mode = header_i64(headers, &["READOUTM", "READMODE", "READOUT"]);
+    signature.readout_mode = header_i64(headers, READOUT_HEADER_KEYS);
     signature.bayer_pattern = bayer_pattern;
     signature.filter = header_text(headers, &["FILTER"]);
     signature.focal_length_mm =
-        header_f64(headers, &["FOCALLEN", "FOCALLENGTH", "FOCAL"]).filter(|value| *value > 0.0);
-    signature.rotation_deg = header_f64(headers, &["ROTATANG", "ROTATOR", "ROTPOS"]);
+        header_f64(headers, FOCAL_LENGTH_HEADER_KEYS).filter(|value| *value > 0.0);
+    signature.rotation_deg = header_f64(headers, ROTATION_HEADER_KEYS);
     signature.exposure_seconds = exposure_seconds;
-    signature.camera_temp_c = header_f64(headers, &["CCD-TEMP", "SET-TEMP"]);
-    signature.captured_at_unix = header_text(headers, &["DATE-OBS", "DATE-BEG", "DATE-AVG"])
+    signature.camera_temp_c = header_f64(headers, TEMPERATURE_HEADER_KEYS);
+    signature.captured_at_unix = header_text(headers, CAPTURE_TIME_HEADER_KEYS)
         .as_deref()
         .and_then(parse_iso_unix);
 
@@ -560,7 +571,9 @@ fn shift_reference_origin(
         .collect()
 }
 
-/// Write an integrated calibration master with explicit calibration-state headers.
+/// Write an integrated calibration master with explicit calibration-state
+/// headers and the normalized acquisition metadata used to match it later.
+/// Header aliases collapse to one canonical FITS card per semantic field.
 pub fn write_master_fits_f32(path: impl AsRef<Path>, master: &MasterFrame) -> Result<()> {
     let mut cards = vec![
         string_card(
@@ -639,11 +652,20 @@ pub fn write_master_fits_f32(path: impl AsRef<Path>, master: &MasterFrame) -> Re
             "CFA vertical origin offset",
         ));
     }
-    for (key, value) in &master.reference_headers {
-        if preserve_master_key(key)
-            && !cards.iter().any(|card| card.keyword() == key)
-            && let Some(card) = value_card(key, value)
-        {
+    for &(output_key, aliases) in MASTER_METADATA_HEADER_GROUPS {
+        if cards.iter().any(|card| card.keyword() == output_key) {
+            continue;
+        }
+        let Some(value) = aliases.iter().find_map(|alias| {
+            master
+                .reference_headers
+                .iter()
+                .find(|(candidate, _)| candidate.eq_ignore_ascii_case(alias))
+                .map(|(_, value)| value)
+        }) else {
+            continue;
+        };
+        if let Some(card) = value_card(output_key, value) {
             cards.push(card);
         }
     }
@@ -812,32 +834,40 @@ fn has_reference_wcs(headers: &[(String, HeaderValue)]) -> bool {
         .all(|required| headers.iter().any(|(key, _)| key == required))
 }
 
+/// One canonical FITS key and its priority-ordered aliases per normalized
+/// acquisition field. Long XISF aliases such as `TELESCOPE` and
+/// `FOCALLENGTH` become legal eight-character FITS cards, and contradictory
+/// aliases collapse to the same value `metadata_from_headers` selected.
+const MASTER_METADATA_HEADER_GROUPS: &[(&str, &[&str])] = &[
+    ("INSTRUME", CAMERA_HEADER_KEYS),
+    ("TELESCOP", TELESCOPE_HEADER_KEYS),
+    ("XBINNING", BINNING_X_HEADER_KEYS),
+    ("YBINNING", BINNING_Y_HEADER_KEYS),
+    ("XPIXSZ", &["XPIXSZ"]),
+    ("YPIXSZ", &["YPIXSZ"]),
+    ("GAIN", &["GAIN"]),
+    ("EGAIN", &["EGAIN"]),
+    ("OFFSET", &["OFFSET"]),
+    ("CCD-TEMP", TEMPERATURE_HEADER_KEYS),
+    ("READOUTM", READOUT_HEADER_KEYS),
+    ("FILTER", &["FILTER"]),
+    ("FOCALLEN", FOCAL_LENGTH_HEADER_KEYS),
+    ("ROTATANG", ROTATION_HEADER_KEYS),
+    ("EXPTIME", EXPOSURE_HEADER_KEYS),
+    ("DATE-OBS", CAPTURE_TIME_HEADER_KEYS),
+    ("BAYERPAT", &["BAYERPAT"]),
+    ("XBAYROFF", &["XBAYROFF"]),
+    ("YBAYROFF", &["YBAYROFF"]),
+];
+
 fn preserve_master_key(key: &str) -> bool {
-    matches!(
-        key,
-        "INSTRUME"
-            | "CAMERA"
-            | "XBINNING"
-            | "YBINNING"
-            | "CCDXBIN"
-            | "CCDYBIN"
-            | "XPIXSZ"
-            | "YPIXSZ"
-            | "GAIN"
-            | "EGAIN"
-            | "OFFSET"
-            | "CCD-TEMP"
-            | "SET-TEMP"
-            | "READOUTM"
-            | "FILTER"
-            | "BAYERPAT"
-            | "XBAYROFF"
-            | "YBAYROFF"
-    )
+    MASTER_METADATA_HEADER_GROUPS
+        .iter()
+        .any(|(_, aliases)| aliases.contains(&key))
 }
 
 fn preserve_processed_key(key: &str) -> bool {
-    preserve_master_key(key)
+    (key.len() <= 8 && preserve_master_key(key))
         || matches!(
             key,
             "OBJECT"
@@ -1207,7 +1237,7 @@ mod tests {
     }
 
     #[test]
-    fn master_writer_round_trips_calibration_state() {
+    fn master_writer_round_trips_state_and_canonicalizes_metadata_aliases() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("master-dark.fits");
         let master = MasterFrame {
@@ -1229,7 +1259,18 @@ mod tests {
             dark_subtracted: false,
             normalized: false,
             rejection: crate::MasterRejectionOptions::default(),
-            reference_headers: vec![("INSTRUME".into(), HeaderValue::String("Test Camera".into()))],
+            reference_headers: vec![
+                ("INSTRUME".into(), HeaderValue::String("Test Camera".into())),
+                ("CAMERA".into(), HeaderValue::String("Ignored Alias".into())),
+                ("TELESCOPE".into(), HeaderValue::String("Test Scope".into())),
+                ("FOCALLENGTH".into(), HeaderValue::Float(400.0)),
+                ("ROTPOS".into(), HeaderValue::Float(45.0)),
+                (
+                    "DATE-BEG".into(),
+                    HeaderValue::String("2026-08-20T04:00:00Z".into()),
+                ),
+                ("EXPOSURE".into(), HeaderValue::Float(999.0)),
+            ],
             skipped_inputs: Vec::new(),
         };
         write_master_fits_f32(&path, &master).unwrap();
@@ -1242,6 +1283,23 @@ mod tests {
             Some(true)
         );
         assert_eq!(decoded.header_str("INSTRUME"), Some("Test Camera"));
+        assert_eq!(decoded.header_str("TELESCOP"), Some("Test Scope"));
+        assert_eq!(decoded.header_f64("FOCALLEN"), Some(400.0));
+        assert_eq!(decoded.header_f64("ROTATANG"), Some(45.0));
+        assert_eq!(decoded.header_str("DATE-OBS"), Some("2026-08-20T04:00:00Z"));
+        for alias in [
+            "CAMERA",
+            "TELESCOPE",
+            "FOCALLENGTH",
+            "ROTPOS",
+            "DATE-BEG",
+            "EXPOSURE",
+        ] {
+            assert!(
+                decoded.header(alias).is_none(),
+                "the master must not duplicate the canonical field as {alias}"
+            );
+        }
         let frame = FitsFrame::open(&path).unwrap();
         assert_eq!(frame.bayer, master.bayer);
         frame.validate_master_kind("DARK").unwrap();

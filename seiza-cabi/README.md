@@ -77,8 +77,9 @@ exposes the **superset** of what both apps need.
   metadata without decoding pixels, `seiza_calibration_plan_json` applies the
   core sensor/optics/exposure/temperature/proximity/coherence rules, and
   `seiza_calibration_build_master_json` atomically publishes a two-pass
-  sigma-clipped bias, dark, or flat master from raw paths. Long builds accept
-  the thread-safe `SeizaCancelSignal` owner.
+  sigma-clipped bias, dark, or flat master from raw paths while reporting any
+  metadata outliers it set aside. Long builds accept the thread-safe
+  `SeizaCancelSignal` owner.
 - **Stack-depth analysis** — `seiza_live_stacker_measure_depth` measures the
   borrowed live accumulator without a snapshot, and `seiza_checkpoint_depths`
   returns the doubling ladder at which a host should sample a finite batch.
@@ -473,10 +474,19 @@ Raw master construction uses one synchronous JSON call:
 
 `bias` is valid for dark/flat builds; `dark` is valid only for flat builds.
 Defect suppression is restricted to flats so a dark retains the hot pixels it
-must subtract. The response reports dimensions, all integration/rejection
-tallies, calibration state, exposure, and per-input accepted/rejected samples.
-The writer publishes atomically and no output appears after validation,
-construction, or cancellation failure.
+must subtract. Response schema 2 reports dimensions, all integration/rejection
+tallies, calibration state, exposure, and this input provenance:
+
+- `requestedFrames` is the number of paths supplied by the caller.
+- `inputFrames` and `inputs` cover only the paths actually integrated, in
+  request order; each input includes its accepted/rejected sample counts.
+- `skippedInputs` names every metadata disagreement set aside by the
+  integrator, with its `path` and human-readable `reason`.
+
+The accepted and skipped paths are disjoint and together account for every
+requested path. This accounting is validated before the writer publishes, so
+no output appears after provenance validation, construction, or cancellation
+failure. The writer itself publishes atomically.
 
 ```c
 SeizaCancelSignal *cancel = seiza_cancel_signal_create();
