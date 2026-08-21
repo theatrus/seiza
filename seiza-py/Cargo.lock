@@ -1528,7 +1528,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-stacking"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "rayon",
  "seiza",
