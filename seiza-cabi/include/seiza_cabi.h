@@ -208,47 +208,6 @@ typedef struct SeizaStackExportSnapshot SeizaStackExportSnapshot;
  */
 typedef struct SeizaStackSnapshot SeizaStackSnapshot;
 
-typedef void (*SeizaCatalogSetupProgressCallback)(const char*, void*);
-
-/*
- One reading of an accumulator, in the stack's own units. Only ratios
- between readings of the same stack mean anything.
- */
-typedef struct {
-  /*
-   Frames the accumulator had taken when this was measured.
-   */
-  uint32_t frames;
-  /*
-   Pixel-scale noise of the integration, averaged across channels.
-   */
-  double noise;
-  /*
-   Median sample, averaged across channels.
-   */
-  double background;
-  /*
-   How far the brightest one percent sits above the background.
-   */
-  double signal;
-  /*
-   `signal / noise` for this one reading. To compare depths, divide one
-   signal — normally the deepest measured — by each depth's noise instead:
-   the brightest-percent statistic is itself lifted by noise where a stack
-   is shallow, so reading each depth against its own signal flatters the
-   early frames.
-   */
-  double snr;
-  /*
-   How many entries of `channel_noise` are meaningful.
-   */
-  size_t channel_count;
-  /*
-   Per-channel noise.
-   */
-  double channel_noise[SEIZA_SNR_MAX_CHANNELS];
-} SeizaSnrSample;
-
 /*
  What a frame was shot with, as far as matching cares.
 
@@ -350,6 +309,47 @@ typedef struct {
    */
   uint64_t flat_session_seconds;
 } SeizaMatchTolerances;
+
+typedef void (*SeizaCatalogSetupProgressCallback)(const char*, void*);
+
+/*
+ One reading of an accumulator, in the stack's own units. Only ratios
+ between readings of the same stack mean anything.
+ */
+typedef struct {
+  /*
+   Frames the accumulator had taken when this was measured.
+   */
+  uint32_t frames;
+  /*
+   Pixel-scale noise of the integration, averaged across channels.
+   */
+  double noise;
+  /*
+   Median sample, averaged across channels.
+   */
+  double background;
+  /*
+   How far the brightest one percent sits above the background.
+   */
+  double signal;
+  /*
+   `signal / noise` for this one reading. To compare depths, divide one
+   signal — normally the deepest measured — by each depth's noise instead:
+   the brightest-percent statistic is itself lifted by noise where a stack
+   is shallow, so reading each depth against its own signal flatters the
+   early frames.
+   */
+  double snr;
+  /*
+   How many entries of `channel_noise` are meaningful.
+   */
+  size_t channel_count;
+  /*
+   Per-channel noise.
+   */
+  double channel_noise[SEIZA_SNR_MAX_CHANNELS];
+} SeizaSnrSample;
 
 #ifdef __cplusplus
 extern "C" {
@@ -615,6 +615,31 @@ SeizaLiveStacker *seiza_live_stacker_open_context(const char *context_path, char
 bool seiza_live_stacker_save_context(const SeizaLiveStacker *stacker,
                                      const char *context_path,
                                      char **error_out);
+
+/*
+ Which of the stacker's active masters a prospective light could accept,
+ and why each refused master was set aside. The answer to ask BEFORE
+ pushing a frame in a mode that must warn rather than fail.
+
+ JSON shape: `{"schemaVersion":1,"kept":["bias","dark"],"dropped":
+ [{"kind":"flat","reason":"flat set aside: rotation light=..."}]}` — `kept`
+ lists only masters that are loaded and acceptable; a master that was never
+ loaded appears in neither list. `tolerances` may be null for the defaults.
+ Returns a string released with [`seiza_string_free`], or null with
+ `error_out` set.
+
+ # Safety
+
+ `stacker` must be a live stacker from this library, with this read
+ externally synchronized against mutable operations. `signature` must
+ reference an initialized `SeizaFrameSignature`; `tolerances` must be null
+ or reference an initialized `SeizaMatchTolerances`. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_live_stacker_compatible_calibration_json(const SeizaLiveStacker *stacker,
+                                                     const SeizaFrameSignature *signature,
+                                                     const SeizaMatchTolerances *tolerances,
+                                                     char **error_out);
 
 /*
  Returns an owned JSON snapshot of the live stack's resumable identity and
@@ -1419,6 +1444,39 @@ int32_t seiza_calibration_dark_matches(const SeizaFrameSignature *reference,
                                        const SeizaFrameSignature *candidate,
                                        const SeizaMatchTolerances *tolerances,
                                        char **error_out);
+
+/*
+ Why two frames' sensor readings refuse to match, as a human-readable
+ string naming every differing field and both readings — for example
+ `gain light=100 master=200`. Never empty on a mismatch; on frames that
+ match it still reports (the caller decides when to ask). Returns a string
+ the caller owns and must release with [`seiza_string_free`], or null with
+ `error_out` set.
+
+ # Safety
+
+ As [`seiza_calibration_sensor_matches`].
+ */
+char *seiza_calibration_describe_sensor_mismatch(const SeizaFrameSignature *reference,
+                                                 const SeizaFrameSignature *candidate,
+                                                 char **error_out);
+
+/*
+ Why a flat's optical path refuses the frame it would correct: every
+ differing field with both readings, and for rotation the gap against the
+ tolerance — for example `rotation light=101.93deg master=104.24deg (2.31
+ deg apart, tolerance 2.00)`. `tolerances` may be null for the defaults.
+ Returns a string released with [`seiza_string_free`], or null with
+ `error_out` set.
+
+ # Safety
+
+ As [`seiza_calibration_optics_match`].
+ */
+char *seiza_calibration_describe_optics_mismatch(const SeizaFrameSignature *reference,
+                                                 const SeizaFrameSignature *candidate,
+                                                 const SeizaMatchTolerances *tolerances,
+                                                 char **error_out);
 
 /*
  Whether two rotator angles are close enough to share a flat. Wraps at 360,

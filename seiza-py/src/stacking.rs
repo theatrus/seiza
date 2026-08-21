@@ -549,6 +549,38 @@ impl PyLiveStacker {
         Ok(Self { inner: Some(inner) })
     }
 
+    /// Which of the active masters a prospective light could accept, and why
+    /// each refused master was set aside. The question to ask before pushing
+    /// a frame in a mode that must warn rather than fail.
+    ///
+    /// Returns ``(kept, dropped)``: ``kept`` names the master kinds that are
+    /// loaded and acceptable (``"bias"``, ``"dark"``, ``"flat"``); ``dropped``
+    /// carries one human-readable reason per refused master, each naming the
+    /// differing fields and both readings.
+    #[pyo3(signature = (light, tolerances=None))]
+    fn compatible_calibration(
+        &self,
+        light: &crate::calibration::PyFrameSignature,
+        tolerances: Option<crate::calibration::PyMatchTolerances>,
+    ) -> PyResult<(Vec<&'static str>, Vec<String>)> {
+        let stacker = self.active()?;
+        let tolerances = crate::calibration::tolerances_or_default(tolerances);
+        let (kept, dropped) = stacker
+            .calibration()
+            .compatible_for_light_with(&light.inner, &tolerances);
+        let mut kinds = Vec::new();
+        if kept.has_bias() {
+            kinds.push("bias");
+        }
+        if kept.has_dark() {
+            kinds.push("dark");
+        }
+        if kept.has_flat() {
+            kinds.push("flat");
+        }
+        Ok((kinds, dropped))
+    }
+
     /// Atomically checkpoint this live stack without consuming it.
     fn save_context(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {
         let stacker = self.active()?;
