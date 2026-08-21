@@ -90,7 +90,14 @@ pub struct MasterInputStatistics {
 }
 
 /// An integrated calibration master with its provenance and clipping stats.
+///
+/// Non-exhaustive: this grows a field whenever the build learns to report
+/// something new, and a consumer reads what it needs rather than naming every
+/// field. Adding one is then a compatible change instead of a break, which
+/// `skipped_inputs` — added in the same release that sealed this — otherwise
+/// would have been.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct MasterFrame {
     /// Which kind of master this is.
     pub kind: MasterFrameKind,
