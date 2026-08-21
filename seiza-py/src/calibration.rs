@@ -285,7 +285,7 @@ impl PyMatchTolerances {
     }
 }
 
-fn tolerances_or_default(tolerances: Option<PyMatchTolerances>) -> MatchTolerances {
+pub(crate) fn tolerances_or_default(tolerances: Option<PyMatchTolerances>) -> MatchTolerances {
     tolerances.map_or_else(MatchTolerances::default, |value| value.inner)
 }
 
@@ -305,6 +305,36 @@ fn py_optics_match(
     tolerances: Option<PyMatchTolerances>,
 ) -> bool {
     optics_match(
+        &reference.inner,
+        &candidate.inner,
+        &tolerances_or_default(tolerances),
+    )
+}
+
+/// Every sensor field two frames disagree on, with both readings — for
+/// example ``gain light=100 master=200`` — or a note that the signatures
+/// disagree when no single field can be blamed.
+#[pyfunction]
+#[pyo3(name = "describe_sensor_mismatch")]
+fn py_describe_sensor_mismatch(
+    reference: &PyFrameSignature,
+    candidate: &PyFrameSignature,
+) -> String {
+    seiza_calibration::describe_sensor_mismatch(&reference.inner, &candidate.inner)
+}
+
+/// Every optical field two frames disagree on, with both readings; rotation
+/// additionally reports the gap against the tolerance — for example
+/// ``rotation light=101.93deg master=104.24deg (2.31 deg apart, tolerance
+/// 2.00)``.
+#[pyfunction]
+#[pyo3(name = "describe_optics_mismatch", signature = (reference, candidate, tolerances=None))]
+fn py_describe_optics_mismatch(
+    reference: &PyFrameSignature,
+    candidate: &PyFrameSignature,
+    tolerances: Option<PyMatchTolerances>,
+) -> String {
+    seiza_calibration::describe_optics_mismatch(
         &reference.inner,
         &candidate.inner,
         &tolerances_or_default(tolerances),
@@ -481,6 +511,8 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(py_sensor_matches, module)?)?;
     module.add_function(wrap_pyfunction!(py_optics_match, module)?)?;
     module.add_function(wrap_pyfunction!(py_rotation_matches, module)?)?;
+    module.add_function(wrap_pyfunction!(py_describe_sensor_mismatch, module)?)?;
+    module.add_function(wrap_pyfunction!(py_describe_optics_mismatch, module)?)?;
     module.add_function(wrap_pyfunction!(py_exposure_matches, module)?)?;
     module.add_function(wrap_pyfunction!(py_temperature_matches, module)?)?;
     module.add_function(wrap_pyfunction!(py_coherent_subset, module)?)?;

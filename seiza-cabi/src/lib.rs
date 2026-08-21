@@ -1666,6 +1666,62 @@ pub unsafe extern "C" fn seiza_live_stacker_save_context(
     .is_some()
 }
 
+/// Which of the stacker's active masters a prospective light could accept,
+/// and why each refused master was set aside. The answer to ask BEFORE
+/// pushing a frame in a mode that must warn rather than fail.
+///
+/// JSON shape: `{"schemaVersion":1,"kept":["bias","dark"],"dropped":
+/// [{"kind":"flat","reason":"flat set aside: rotation light=..."}]}` — `kept`
+/// lists only masters that are loaded and acceptable; a master that was never
+/// loaded appears in neither list. `tolerances` may be null for the defaults.
+/// Returns a string released with [`seiza_string_free`], or null with
+/// `error_out` set.
+///
+/// # Safety
+///
+/// `stacker` must be a live stacker from this library, with this read
+/// externally synchronized against mutable operations. `signature` must
+/// reference an initialized `SeizaFrameSignature`; `tolerances` must be null
+/// or reference an initialized `SeizaMatchTolerances`. When non-null,
+/// `error_out` must point to writable storage for one pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_live_stacker_compatible_calibration_json(
+    stacker: *const SeizaLiveStacker,
+    signature: *const SeizaFrameSignature,
+    tolerances: *const SeizaMatchTolerances,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let stacker = unsafe { required_live_stacker(stacker)? };
+        let light = unsafe { frame_signature(signature) }?;
+        let tolerances = unsafe { match_tolerances(tolerances) };
+        let masters = stacker.stacker.calibration();
+        let (kept, dropped) = masters.compatible_for_light_with(&light, &tolerances);
+        let kind_of = |reason: &str| -> &'static str {
+            if reason.starts_with("bias") {
+                "bias"
+            } else if reason.starts_with("dark") {
+                "dark"
+            } else {
+                "flat"
+            }
+        };
+        owned_json(&CompatibleCalibrationResponse {
+            schema_version: 1,
+            kept: active_master_kinds(&kept),
+            dropped: dropped
+                .iter()
+                .map(|reason| DroppedMaster {
+                    kind: kind_of(reason),
+                    reason: reason.clone(),
+                })
+                .collect(),
+        })
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
 #[unsafe(no_mangle)]
 /// Returns an owned JSON snapshot of the live stack's resumable identity and
 /// counters. Free it with [`seiza_string_free`].
@@ -5816,6 +5872,35 @@ fn validate_optional_positive_seconds(value: Option<f64>, name: &str) -> Result<
     Ok(())
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompatibleCalibrationResponse {
+    schema_version: u32,
+    kept: Vec<&'static str>,
+    dropped: Vec<DroppedMaster>,
+}
+
+#[derive(Serialize)]
+struct DroppedMaster {
+    kind: &'static str,
+    reason: String,
+}
+
+/// The master kinds a set actually holds, in the order a reader expects.
+fn active_master_kinds(masters: &seiza_stacking::CalibrationMasters) -> Vec<&'static str> {
+    let mut kinds = Vec::new();
+    if masters.has_bias() {
+        kinds.push("bias");
+    }
+    if masters.has_dark() {
+        kinds.push("dark");
+    }
+    if masters.has_flat() {
+        kinds.push("flat");
+    }
+    kinds
+}
+
 fn owned_json(value: &impl Serialize) -> Result<*mut c_char, String> {
     let json = serde_json::to_string(value).map_err(|error| error.to_string())?;
     CString::new(json)
@@ -7826,6 +7911,68 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_over_the_c_surface_names_the_field_and_both_readings() {
+        // The zeroed struct means "nothing recorded"; set only what the case
+        // needs, plus the known bits that make those readings count.
+        let mut light: SeizaFrameSignature = unsafe { std::mem::zeroed() };
+        light.rotation_deg = 101.93;
+        light.known = SEIZA_FRAME_HAS_ROTATION;
+        let mut flat: SeizaFrameSignature = unsafe { std::mem::zeroed() };
+        flat.rotation_deg = 104.24;
+        flat.known = SEIZA_FRAME_HAS_ROTATION;
+
+        let mut error = ptr::null_mut();
+        let text = unsafe {
+            seiza_calibration_describe_optics_mismatch(&light, &flat, ptr::null(), &mut error)
+        };
+        assert!(!text.is_null());
+        assert!(error.is_null());
+        let reason = unsafe { CStr::from_ptr(text) }.to_str().unwrap().to_owned();
+        unsafe { seiza_string_free(text) };
+        assert!(reason.contains("101.93"), "{reason}");
+        assert!(reason.contains("104.24"), "{reason}");
+        assert!(reason.contains("deg apart"), "{reason}");
+    }
+
+    #[test]
+    fn a_stacker_answers_what_a_prospective_light_could_accept() {
+        // A stack with no masters loaded keeps both lists empty: nothing to
+        // accept, nothing refused. The shape is what a C host parses, so the
+        // schema is asserted, not just the emptiness.
+        let (width, height) = (160, 128);
+        let image = stacking_star_field(width, height);
+        let config = no_adjustment_stack_options();
+        let mut error = ptr::null_mut();
+        let stacker = unsafe {
+            seiza_live_stacker_create(
+                image.as_ptr(),
+                image.len(),
+                width,
+                height,
+                1,
+                config.as_ptr(),
+                &mut error,
+            )
+        };
+        assert!(!stacker.is_null());
+        let mut light: SeizaFrameSignature = unsafe { std::mem::zeroed() };
+        light.rotation_deg = 101.93;
+        light.known = SEIZA_FRAME_HAS_ROTATION;
+        let json = unsafe {
+            seiza_live_stacker_compatible_calibration_json(stacker, &light, ptr::null(), &mut error)
+        };
+        assert!(!json.is_null());
+        assert!(error.is_null());
+        let parsed: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(json) }.to_str().unwrap()).unwrap();
+        unsafe { seiza_string_free(json) };
+        assert_eq!(parsed["schemaVersion"], 1);
+        assert_eq!(parsed["kept"].as_array().unwrap().len(), 0);
+        assert_eq!(parsed["dropped"].as_array().unwrap().len(), 0);
+        unsafe { seiza_live_stacker_free(stacker) };
+    }
+
+    #[test]
     fn stacking_cabi_rejects_unknown_configuration_fields() {
         let image = stacking_star_field(160, 128);
         let config = CString::new(r#"{"mystery":true}"#).unwrap();
@@ -9515,6 +9662,64 @@ pub unsafe extern "C" fn seiza_calibration_dark_matches(
         Ok(i32::from(matched))
     })
     .unwrap_or(-1)
+}
+
+/// Why two frames' sensor readings refuse to match, as a human-readable
+/// string naming every differing field and both readings — for example
+/// `gain light=100 master=200`. Never empty on a mismatch; on frames that
+/// match it still reports (the caller decides when to ask). Returns a string
+/// the caller owns and must release with [`seiza_string_free`], or null with
+/// `error_out` set.
+///
+/// # Safety
+///
+/// As [`seiza_calibration_sensor_matches`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_calibration_describe_sensor_mismatch(
+    reference: *const SeizaFrameSignature,
+    candidate: *const SeizaFrameSignature,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let reference = unsafe { frame_signature(reference) }?;
+        let candidate = unsafe { frame_signature(candidate) }?;
+        let text = seiza_calibration::describe_sensor_mismatch(&reference, &candidate);
+        CString::new(text)
+            .map(CString::into_raw)
+            .map_err(|_| "mismatch description contains a NUL byte".to_string())
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Why a flat's optical path refuses the frame it would correct: every
+/// differing field with both readings, and for rotation the gap against the
+/// tolerance — for example `rotation light=101.93deg master=104.24deg (2.31
+/// deg apart, tolerance 2.00)`. `tolerances` may be null for the defaults.
+/// Returns a string released with [`seiza_string_free`], or null with
+/// `error_out` set.
+///
+/// # Safety
+///
+/// As [`seiza_calibration_optics_match`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_calibration_describe_optics_mismatch(
+    reference: *const SeizaFrameSignature,
+    candidate: *const SeizaFrameSignature,
+    tolerances: *const SeizaMatchTolerances,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let reference = unsafe { frame_signature(reference) }?;
+        let candidate = unsafe { frame_signature(candidate) }?;
+        let tolerances = unsafe { match_tolerances(tolerances) };
+        let text = seiza_calibration::describe_optics_mismatch(&reference, &candidate, &tolerances);
+        CString::new(text)
+            .map(CString::into_raw)
+            .map_err(|_| "mismatch description contains a NUL byte".to_string())
+    })
+    .unwrap_or(ptr::null_mut())
 }
 
 /// Whether two rotator angles are close enough to share a flat. Wraps at 360,

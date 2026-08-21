@@ -594,6 +594,15 @@ impl LiveStacker {
     /// check that actually protects the pixels — and a light that fails it
     /// is rejected alone, never the stack. A stack started from prepared
     /// pixels refuses the call: its frames bypass calibration entirely.
+    /// The calibration masters currently applied to pushed frames.
+    ///
+    /// Read access so a host can ask questions of the active set — which
+    /// masters a prospective light could accept, and why not — without
+    /// keeping its own copy in sync with every swap.
+    pub fn calibration(&self) -> &CalibrationMasters {
+        &self.calibration
+    }
+
     pub fn set_calibration(&mut self, calibration: CalibrationMasters) -> Result<()> {
         self.require_fits_input_mode()?;
         calibration.validate_master_set_signatures()?;

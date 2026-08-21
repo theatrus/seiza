@@ -257,6 +257,21 @@ impl CalibrationMasters {
     }
 
     /// Whether no master is present, so calibration would be a no-op.
+    /// True when a bias master is loaded.
+    pub fn has_bias(&self) -> bool {
+        self.bias.is_some()
+    }
+
+    /// True when a dark master is loaded.
+    pub fn has_dark(&self) -> bool {
+        self.dark_signal.is_some()
+    }
+
+    /// True when a flat master is loaded.
+    pub fn has_flat(&self) -> bool {
+        self.flat_response.is_some()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.bias.is_none() && self.dark_signal.is_none() && self.flat_response.is_none()
     }
@@ -367,7 +382,17 @@ impl CalibrationMasters {
     /// that fails sensor identity casts doubt on nothing else — each master
     /// is judged only against the light, exactly as validation does.
     pub fn compatible_for_light(&self, light: &FrameSignature) -> (Self, Vec<String>) {
-        let tolerances = MatchTolerances::default();
+        self.compatible_for_light_with(light, &MatchTolerances::default())
+    }
+
+    /// [`Self::compatible_for_light`] under a caller's own tolerances — the
+    /// form the C and Python surfaces bind, since a host that lets its user
+    /// widen the rotation gate has to ask this question with that same gate.
+    pub fn compatible_for_light_with(
+        &self,
+        light: &FrameSignature,
+        tolerances: &MatchTolerances,
+    ) -> (Self, Vec<String>) {
         let mut kept = self.clone();
         let mut dropped = Vec::new();
 
@@ -387,14 +412,14 @@ impl CalibrationMasters {
         {
             let reason = if !sensor_matches(light, dark) {
                 Some(seiza_calibration::describe_sensor_mismatch(light, dark))
-            } else if !temperature_matches(light, dark, &tolerances) {
+            } else if !temperature_matches(light, dark, tolerances) {
                 Some(seiza_calibration::describe_value(
                     "temperature",
                     light.camera_temp_c,
                     dark.camera_temp_c,
                     "C",
                 ))
-            } else if !self.dark_scaling_safe && !exposure_matches(light, dark, &tolerances) {
+            } else if !self.dark_scaling_safe && !exposure_matches(light, dark, tolerances) {
                 Some(seiza_calibration::describe_value(
                     "exposure",
                     light.exposure_seconds,
@@ -417,11 +442,9 @@ impl CalibrationMasters {
         {
             let reason = if !sensor_matches(light, flat) {
                 Some(seiza_calibration::describe_sensor_mismatch(light, flat))
-            } else if !optics_match(light, flat, &tolerances) {
+            } else if !optics_match(light, flat, tolerances) {
                 Some(seiza_calibration::describe_optics_mismatch(
-                    light,
-                    flat,
-                    &tolerances,
+                    light, flat, tolerances,
                 ))
             } else {
                 None

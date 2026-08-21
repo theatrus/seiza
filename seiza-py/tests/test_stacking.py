@@ -319,3 +319,29 @@ def test_build_bias_writes_master_metadata_and_statistics(tmp_path):
         assert hdus[0].header["SEIZAMST"] == "BIAS"
         assert hdus[0].header["NCOMBINE"] == 2
         np.testing.assert_allclose(hdus[0].data, 101.0)
+
+
+def test_compatible_calibration_names_what_a_light_could_accept():
+    """The warn-don't-fail question, asked from Python.
+
+    A stack with no masters keeps both lists empty; the describe functions
+    carry the same field-and-both-readings text the Rust surface produces.
+    """
+    stacker = seiza.LiveStacker.from_array(
+        synthetic_star_field(), options=no_adjustment_options()
+    )
+    light = seiza.FrameSignature(rotation_deg=101.93)
+    kept, dropped = stacker.compatible_calibration(light)
+    assert kept == []
+    assert dropped == []
+
+    flat = seiza.FrameSignature(rotation_deg=104.24)
+    reason = seiza.describe_optics_mismatch(light, flat)
+    assert "101.93" in reason
+    assert "104.24" in reason
+    assert "deg apart" in reason
+
+    # The tolerance parameter is honored: wide enough, nothing to describe as
+    # a rotation gap, and the match itself flips.
+    wide = seiza.MatchTolerances(rotation_deg=5.0)
+    assert seiza.optics_match(light, flat, wide)
