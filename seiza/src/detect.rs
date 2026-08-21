@@ -500,7 +500,7 @@ fn threshold_excess(
                 for (chunk, out_chunk) in (&mut chunks).zip(&mut out_chunks) {
                     let value = f32x8::from(<[f32; 8]>::try_from(chunk).unwrap()) - bg;
                     let keep = value.simd_gt(threshold);
-                    out_chunk.copy_from_slice(&keep.blend(value, f32x8::ZERO).to_array());
+                    out_chunk.copy_from_slice(&keep.select(value, f32x8::ZERO).to_array());
                 }
                 let done = seg.len() - chunks.remainder().len();
                 for (value, out_value) in chunks.remainder().iter().zip(&mut out[done..]) {
