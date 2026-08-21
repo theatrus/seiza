@@ -22,6 +22,238 @@ pub enum StretchError {
 
 pub type Result<T> = std::result::Result<T, StretchError>;
 
+/// Default lower percentile used to map physical linear samples into the
+/// unit-linear domain expected by display stretches.
+pub const DEFAULT_SAMPLE_BLACK_PERCENTILE: f64 = 0.001;
+/// Default upper percentile used to map physical linear samples into the
+/// unit-linear domain expected by display stretches.
+pub const DEFAULT_SAMPLE_WHITE_PERCENTILE: f64 = 0.999;
+/// Default scalar-sample budget used while resolving a robust sample domain.
+pub const DEFAULT_SAMPLE_ANALYSIS_SAMPLES: usize = 200_000;
+
+/// Numeric domain of linear samples offered to a display-stretch pipeline.
+///
+/// Stretch curves operate in a unit-linear domain. Callers whose pixels are
+/// already expressed that way can use [`Self::UnitLinear`]. Physical camera or
+/// calibrated samples retain their scientific units until a caller explicitly
+/// selects [`Self::PhysicalLinear`], which resolves one linked range across all
+/// channels and maps that range to zero and one.
+///
+/// This is deliberately independent of whether an image is linear-light or
+/// display-referred. It describes numeric scale, not transfer semantics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum SampleDomain {
+    /// Samples are already in the unit-linear domain expected by stretch
+    /// curves. Resolving and applying this domain is an identity operation.
+    #[default]
+    UnitLinear,
+    /// Samples retain physical linear values and must be mapped to unit-linear
+    /// before stretching.
+    PhysicalLinear {
+        #[serde(default)]
+        normalization: SampleNormalization,
+    },
+}
+
+/// How a physical linear sample domain is resolved into unit-linear values.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum SampleNormalization {
+    /// Resolve a linked black and white point from a bounded, pixel-aware
+    /// sample. The same range is used for every channel, preserving channel
+    /// relationships without introducing an implicit per-channel balance.
+    RobustPercentile {
+        #[serde(default = "default_sample_black_percentile")]
+        black_percentile: f64,
+        #[serde(default = "default_sample_white_percentile")]
+        white_percentile: f64,
+        #[serde(default = "default_sample_analysis_samples")]
+        max_analysis_samples: usize,
+    },
+    /// Use a caller-supplied physical range. Values outside the range are not
+    /// clamped here; the selected stretch curve decides how to handle them.
+    ExplicitRange { black: f32, white: f32 },
+}
+
+impl Default for SampleNormalization {
+    fn default() -> Self {
+        Self::RobustPercentile {
+            black_percentile: DEFAULT_SAMPLE_BLACK_PERCENTILE,
+            white_percentile: DEFAULT_SAMPLE_WHITE_PERCENTILE,
+            max_analysis_samples: DEFAULT_SAMPLE_ANALYSIS_SAMPLES,
+        }
+    }
+}
+
+const fn default_sample_black_percentile() -> f64 {
+    DEFAULT_SAMPLE_BLACK_PERCENTILE
+}
+
+const fn default_sample_white_percentile() -> f64 {
+    DEFAULT_SAMPLE_WHITE_PERCENTILE
+}
+
+const fn default_sample_analysis_samples() -> usize {
+    DEFAULT_SAMPLE_ANALYSIS_SAMPLES
+}
+
+/// Concrete mapping from an input sample domain to unit-linear values.
+///
+/// This value is serializable for render metadata and can be persisted by a
+/// presentation client that wants to lock an automatically resolved range for
+/// later frames without changing the underlying physical stack.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum ResolvedSampleDomain {
+    /// Identity mapping for samples already expressed as unit-linear values.
+    UnitLinear,
+    /// Affine physical-to-unit mapping. `black` maps to zero and `white` maps
+    /// to one; finite outliers remain outside that interval until stretching.
+    PhysicalLinear { black: f32, white: f32 },
+}
+
+impl SampleDomain {
+    /// Resolve this domain for mono or interleaved multi-channel samples.
+    ///
+    /// Robust resolution samples complete pixels, so bounded RGB analysis
+    /// cannot accidentally observe only one color plane. Non-finite values are
+    /// excluded from range selection.
+    pub fn resolve(&self, data: &[f32], channel_count: usize) -> Result<ResolvedSampleDomain> {
+        validate_sample_buffer(data, channel_count)?;
+        match *self {
+            Self::UnitLinear => Ok(ResolvedSampleDomain::UnitLinear),
+            Self::PhysicalLinear { normalization } => match normalization {
+                SampleNormalization::ExplicitRange { black, white } => {
+                    validate_sample_range(black, white)?;
+                    Ok(ResolvedSampleDomain::PhysicalLinear { black, white })
+                }
+                SampleNormalization::RobustPercentile {
+                    black_percentile,
+                    white_percentile,
+                    max_analysis_samples,
+                } => {
+                    validate_sample_percentiles(black_percentile, white_percentile)?;
+                    if max_analysis_samples < channel_count {
+                        return Err(StretchError::Invalid(
+                            "maximum sample-domain analysis samples must accommodate one complete pixel"
+                                .into(),
+                        ));
+                    }
+                    let (black, white) = robust_sample_range(
+                        data,
+                        channel_count,
+                        black_percentile,
+                        white_percentile,
+                        max_analysis_samples,
+                    )?;
+                    Ok(ResolvedSampleDomain::PhysicalLinear { black, white })
+                }
+            },
+        }
+    }
+}
+
+impl ResolvedSampleDomain {
+    /// The input values that map to zero and one, respectively.
+    pub fn input_range(self) -> (f32, f32) {
+        match self {
+            Self::UnitLinear => (0.0, 1.0),
+            Self::PhysicalLinear { black, white } => (black, white),
+        }
+    }
+
+    /// Copy samples and apply this mapping to the copy.
+    pub fn apply(self, data: &[f32], channel_count: usize) -> Result<Vec<f32>> {
+        let mut mapped = data.to_vec();
+        self.apply_in_place(&mut mapped, channel_count)?;
+        Ok(mapped)
+    }
+
+    /// Apply this mapping in place while preserving every non-finite sample.
+    ///
+    /// The physical mapping is affine and intentionally does not clamp. This
+    /// keeps highlights and shadows available to the subsequent stretch and
+    /// leaves `NaN` coverage masks intact.
+    pub fn apply_in_place(self, data: &mut [f32], channel_count: usize) -> Result<()> {
+        validate_sample_buffer(data, channel_count)?;
+        let Self::PhysicalLinear { black, white } = self else {
+            return Ok(());
+        };
+        let span = validate_sample_range(black, white)?;
+        data.par_iter_mut().for_each(|value| {
+            if value.is_finite() {
+                *value = (*value - black) / span;
+            }
+        });
+        Ok(())
+    }
+}
+
+fn validate_sample_buffer(data: &[f32], channel_count: usize) -> Result<usize> {
+    if channel_count == 0 || data.is_empty() || !data.len().is_multiple_of(channel_count) {
+        return Err(StretchError::Invalid(
+            "sample-domain input must contain non-empty complete interleaved pixels".into(),
+        ));
+    }
+    Ok(data.len() / channel_count)
+}
+
+fn validate_sample_percentiles(black: f64, white: f64) -> Result<()> {
+    if !black.is_finite()
+        || !white.is_finite()
+        || !(0.0..=1.0).contains(&black)
+        || !(0.0..=1.0).contains(&white)
+        || white <= black
+    {
+        return Err(StretchError::Invalid(
+            "sample-domain percentiles must be finite, within zero and one, and increasing".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_sample_range(black: f32, white: f32) -> Result<f32> {
+    let span = white - black;
+    if !black.is_finite() || !white.is_finite() || !span.is_finite() || span <= 0.0 {
+        return Err(StretchError::Invalid(
+            "sample-domain black and white points must be finite and separated".into(),
+        ));
+    }
+    Ok(span)
+}
+
+fn robust_sample_range(
+    data: &[f32],
+    channel_count: usize,
+    black_percentile: f64,
+    white_percentile: f64,
+    max_analysis_samples: usize,
+) -> Result<(f32, f32)> {
+    let pixel_count = data.len() / channel_count;
+    let maximum_pixels = max_analysis_samples / channel_count;
+    let pixel_stride = pixel_count.div_ceil(maximum_pixels).max(1);
+    let capacity = maximum_pixels.min(pixel_count) * channel_count;
+    let mut sample = Vec::with_capacity(capacity);
+    for pixel in data.chunks_exact(channel_count).step_by(pixel_stride) {
+        sample.extend(pixel.iter().copied().filter(|value| value.is_finite()));
+    }
+    if sample.len() < 2 {
+        return Err(StretchError::Invalid(
+            "physical sample domain contains too few finite samples".into(),
+        ));
+    }
+    sample.sort_unstable_by(f32::total_cmp);
+    let percentile = |value: f64| {
+        let index = ((sample.len() - 1) as f64 * value).round() as usize;
+        sample[index]
+    };
+    let black = percentile(black_percentile);
+    let white = percentile(white_percentile);
+    validate_sample_range(black, white)?;
+    Ok((black, white))
+}
+
 /// How one or more channels share analysis and transfer curves.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1289,6 +1521,235 @@ mod tests {
             })
             .collect::<Vec<_>>();
         data.iter().map(|value| map[usize::from(*value)]).collect()
+    }
+
+    #[test]
+    fn sample_domain_defaults_are_opt_in_and_serde_friendly() {
+        assert_eq!(SampleDomain::default(), SampleDomain::UnitLinear);
+        assert_eq!(
+            SampleNormalization::default(),
+            SampleNormalization::RobustPercentile {
+                black_percentile: 0.001,
+                white_percentile: 0.999,
+                max_analysis_samples: 200_000,
+            }
+        );
+
+        let domain = serde_json::from_value::<SampleDomain>(serde_json::json!({
+            "type": "physical-linear"
+        }))
+        .unwrap();
+        assert_eq!(
+            domain,
+            SampleDomain::PhysicalLinear {
+                normalization: SampleNormalization::default(),
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(domain).unwrap(),
+            serde_json::json!({
+                "type": "physical-linear",
+                "normalization": {
+                    "type": "robust-percentile",
+                    "black_percentile": 0.001,
+                    "white_percentile": 0.999,
+                    "max_analysis_samples": 200_000,
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn unit_linear_domain_is_an_exact_identity_including_non_finite_values() {
+        let input = [f32::NAN, f32::NEG_INFINITY, -1.0, 0.5, 2.0, f32::INFINITY];
+        let resolved = SampleDomain::UnitLinear.resolve(&input, 1).unwrap();
+        assert_eq!(resolved, ResolvedSampleDomain::UnitLinear);
+        assert_eq!(resolved.input_range(), (0.0, 1.0));
+
+        let output = resolved.apply(&input, 1).unwrap();
+        assert!(output[0].is_nan());
+        assert_eq!(&output[1..], &input[1..]);
+    }
+
+    #[test]
+    fn explicit_physical_range_maps_without_clamping_and_preserves_nan() {
+        let domain = SampleDomain::PhysicalLinear {
+            normalization: SampleNormalization::ExplicitRange {
+                black: 100.0,
+                white: 1_100.0,
+            },
+        };
+        let input = [0.0, 100.0, 600.0, 1_100.0, 1_200.0, f32::NAN];
+        let resolved = domain.resolve(&input, 1).unwrap();
+        assert_eq!(resolved.input_range(), (100.0, 1_100.0));
+        let output = resolved.apply(&input, 1).unwrap();
+        assert_eq!(&output[..5], &[-0.1, 0.0, 0.5, 1.0, 1.1]);
+        assert!(output[5].is_nan());
+        assert_eq!(
+            serde_json::to_value(resolved).unwrap(),
+            serde_json::json!({
+                "type": "physical-linear",
+                "black": 100.0,
+                "white": 1_100.0,
+            })
+        );
+
+        let tiny = SampleDomain::PhysicalLinear {
+            normalization: SampleNormalization::ExplicitRange {
+                black: 1.0e-9,
+                white: 2.0e-9,
+            },
+        }
+        .resolve(&[1.0e-9, 1.5e-9, 2.0e-9], 1)
+        .unwrap();
+        let tiny_output = tiny.apply(&[1.0e-9, 1.5e-9, 2.0e-9], 1).unwrap();
+        assert_eq!((tiny_output[0], tiny_output[2]), (0.0, 1.0));
+        assert!((tiny_output[1] - 0.5).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn robust_domain_samples_complete_rgb_pixels_with_a_scalar_budget() {
+        let data = (0..10)
+            .flat_map(|pixel| {
+                let base = pixel as f32 * 100.0;
+                [base + 1.0, base + 2.0, base + 3.0]
+            })
+            .collect::<Vec<_>>();
+        let domain = SampleDomain::PhysicalLinear {
+            normalization: SampleNormalization::RobustPercentile {
+                black_percentile: 0.0,
+                white_percentile: 1.0,
+                // Two complete RGB pixels. With ten pixels, the selected
+                // pixels are zero and five; later extremes stay unsampled.
+                max_analysis_samples: 6,
+            },
+        };
+        assert_eq!(
+            domain.resolve(&data, 3).unwrap(),
+            ResolvedSampleDomain::PhysicalLinear {
+                black: 1.0,
+                white: 503.0,
+            }
+        );
+    }
+
+    #[test]
+    fn robust_domain_uses_one_linked_range_and_ignores_nan_for_resolution() {
+        let input = [f32::NAN, 100.0, 200.0, 300.0, 400.0, 500.0];
+        let domain = SampleDomain::PhysicalLinear {
+            normalization: SampleNormalization::RobustPercentile {
+                black_percentile: 0.0,
+                white_percentile: 1.0,
+                max_analysis_samples: input.len(),
+            },
+        };
+        let resolved = domain.resolve(&input, 3).unwrap();
+        assert_eq!(
+            resolved,
+            ResolvedSampleDomain::PhysicalLinear {
+                black: 100.0,
+                white: 500.0,
+            }
+        );
+        let output = resolved.apply(&input, 3).unwrap();
+        assert!(output[0].is_nan());
+        assert_eq!(&output[1..], &[0.0, 0.25, 0.5, 0.75, 1.0]);
+    }
+
+    #[test]
+    fn robust_domain_is_affine_scale_invariant() {
+        let mut input = (0..1_000).map(|value| value as f32).collect::<Vec<_>>();
+        input[17] = f32::NAN;
+        let transformed = input
+            .iter()
+            .map(|value| {
+                if value.is_finite() {
+                    *value * 4.5 + 1_234.0
+                } else {
+                    *value
+                }
+            })
+            .collect::<Vec<_>>();
+        let domain = SampleDomain::PhysicalLinear {
+            normalization: SampleNormalization::RobustPercentile {
+                black_percentile: 0.1,
+                white_percentile: 0.9,
+                max_analysis_samples: 1_000,
+            },
+        };
+        let first = domain.resolve(&input, 1).unwrap().apply(&input, 1).unwrap();
+        let second = domain
+            .resolve(&transformed, 1)
+            .unwrap()
+            .apply(&transformed, 1)
+            .unwrap();
+        for (left, right) in first.iter().zip(&second) {
+            if left.is_nan() {
+                assert!(right.is_nan());
+            } else {
+                assert!((left - right).abs() < 2.0e-6, "{left} != {right}");
+            }
+        }
+    }
+
+    #[test]
+    fn sample_domain_rejects_invalid_buffers_parameters_and_flat_ranges() {
+        assert!(SampleDomain::UnitLinear.resolve(&[], 1).is_err());
+        assert!(SampleDomain::UnitLinear.resolve(&[0.0], 0).is_err());
+        assert!(SampleDomain::UnitLinear.resolve(&[0.0, 1.0], 3).is_err());
+
+        for normalization in [
+            SampleNormalization::ExplicitRange {
+                black: 1.0,
+                white: 1.0,
+            },
+            SampleNormalization::ExplicitRange {
+                black: f32::NAN,
+                white: 1.0,
+            },
+            SampleNormalization::RobustPercentile {
+                black_percentile: 0.9,
+                white_percentile: 0.1,
+                max_analysis_samples: 3,
+            },
+            SampleNormalization::RobustPercentile {
+                black_percentile: 0.0,
+                white_percentile: 1.0,
+                max_analysis_samples: 2,
+            },
+        ] {
+            let domain = SampleDomain::PhysicalLinear { normalization };
+            assert!(domain.resolve(&[1.0, 2.0, 3.0], 3).is_err());
+        }
+
+        let flat = SampleDomain::PhysicalLinear {
+            normalization: SampleNormalization::default(),
+        };
+        assert!(flat.resolve(&[42.0; 1_000], 1).is_err());
+    }
+
+    #[test]
+    fn domain_mapping_does_not_change_existing_stretch_entry_points() {
+        let stack = StretchStack::single(StretchConfig {
+            model: StretchModel::Identity,
+            color_strategy: ColorStrategy::Linked,
+            max_analysis_samples: 2,
+        });
+        let physical = [100.0, 200.0];
+        assert_eq!(stack.apply_u8(&physical, 1).unwrap().data, [255, 255]);
+
+        let domain = SampleDomain::PhysicalLinear {
+            normalization: SampleNormalization::ExplicitRange {
+                black: 0.0,
+                white: 1_000.0,
+            },
+        };
+        let mapped = domain
+            .resolve(&physical, 1)
+            .unwrap()
+            .apply(&physical, 1)
+            .unwrap();
+        assert_eq!(stack.apply_u8(&mapped, 1).unwrap().data, [26, 51]);
     }
 
     #[test]

@@ -22,7 +22,9 @@ use seiza_stacking::{
     path_identity, paths_refer_to_same_file, write_fits_f32, write_master_fits_f32,
     write_stack_export_fits_f32,
 };
-use seiza_stretch::{StretchAnalysis, StretchConfig, StretchStack};
+use seiza_stretch::{
+    ResolvedSampleDomain, SampleDomain, StretchAnalysis, StretchConfig, StretchStack,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::borrow::Cow;
@@ -107,6 +109,7 @@ struct InteractivePreviewCacheKey {
     file_size: u64,
     modified: Option<SystemTime>,
     max_dimension: u32,
+    physical_samples: bool,
     background: Option<String>,
 }
 
@@ -133,6 +136,16 @@ struct PreparedStretchInput<'a> {
     data: Cow<'a, [f32]>,
     input_histogram: Value,
     deconvolution_metadata: Option<Value>,
+    sample_domain: ResolvedSampleDomain,
+}
+
+#[derive(Clone, Copy)]
+struct RenderPipelineOptions<'a> {
+    background: Option<&'a BackgroundRenderRequest>,
+    deconvolution: Option<&'a DeconvolutionRenderRequest>,
+    sample_domain: &'a SampleDomain,
+    max_dimension: u32,
+    interactive_preview: bool,
 }
 
 type InteractivePreviewCache =
@@ -145,6 +158,8 @@ const INTERACTIVE_PREVIEW_CACHE_CAPACITY: usize = 2;
 struct ProcessedRenderRequest {
     stretch: StretchConfigRequest,
     #[serde(default)]
+    sample_domain: Option<SampleDomain>,
+    #[serde(default)]
     background: Option<BackgroundRenderRequest>,
     #[serde(default)]
     deconvolution: Option<DeconvolutionRenderRequest>,
@@ -155,7 +170,7 @@ struct ProcessedRenderRequest {
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum ImageRenderConfigRequest {
-    Processed(ProcessedRenderRequest),
+    Processed(Box<ProcessedRenderRequest>),
     Stretch(StretchConfigRequest),
 }
 
@@ -167,15 +182,26 @@ impl ImageRenderConfigRequest {
         Option<BackgroundRenderRequest>,
         Option<DeconvolutionRenderRequest>,
         bool,
+        Option<SampleDomain>,
     ) {
         match self {
-            Self::Processed(request) => (
-                request.stretch.into_stack(),
-                request.background,
-                request.deconvolution,
-                request.interactive_preview,
-            ),
-            Self::Stretch(request) => (request.into_stack(), None, None, false),
+            Self::Processed(request) => {
+                let ProcessedRenderRequest {
+                    stretch,
+                    sample_domain,
+                    background,
+                    deconvolution,
+                    interactive_preview,
+                } = *request;
+                (
+                    stretch.into_stack(),
+                    background,
+                    deconvolution,
+                    interactive_preview,
+                    sample_domain,
+                )
+            }
+            Self::Stretch(request) => (request.into_stack(), None, None, false, None),
         }
     }
 }
@@ -1736,11 +1762,15 @@ pub unsafe extern "C" fn seiza_live_stacker_set_calibration_fits(
 /// Render a bounded RGBA8 preview directly from the current live mean.
 ///
 /// `config_json` accepts the same stretch / optional background / optional
-/// deconvolution schema as
-/// [`seiza_rendered_image_open_with_stretch_config`]. `max_dimension` must be
-/// positive and bounds the linear buffer before background fitting,
-/// deconvolution, and stretch. The returned image owns its pixels and remains
-/// valid after the stack changes; free it with [`seiza_rendered_image_free`].
+/// deconvolution / optional `sample_domain` schema as
+/// [`seiza_rendered_image_open_with_stretch_config`]. Physical-domain mapping
+/// is presentation-only and runs after physical background correction and
+/// deconvolution, immediately before stretch. When omitted, file-backed
+/// calibrate-and-prepare stacks use linked robust physical normalization;
+/// prepared-array stacks retain the legacy unit-linear interpretation.
+/// `max_dimension` must be positive and bounds the linear buffer before that
+/// processing. The returned image owns its pixels and remains valid after the
+/// stack changes; free it with [`seiza_rendered_image_free`].
 ///
 /// # Safety
 /// `stacker` must be a live `SeizaLiveStacker` pointer and `config_json` a
@@ -1761,14 +1791,17 @@ pub unsafe extern "C" fn seiza_live_stacker_render_preview(
         let config_json = required_str(config_json, "stretch config JSON")?;
         let request: ImageRenderConfigRequest = serde_json::from_str(&config_json)
             .map_err(|error| format!("invalid stretch config JSON: {error}"))?;
-        let (stretch, background, deconvolution, _) = request.into_parts();
+        let (stretch, background, deconvolution, _, sample_domain) = request.into_parts();
         let stacker = unsafe { required_live_stacker(stacker)? };
+        let sample_domain = sample_domain
+            .unwrap_or_else(|| default_live_preview_sample_domain(stacker.stacker.input_mode()));
         let prepared =
             prepare_live_stack_render(&stacker.stacker, background.as_ref(), max_dimension)?;
         render_prepared_fits(
             &prepared,
             &stretch,
             deconvolution.as_ref(),
+            &sample_domain,
             max_dimension,
             false,
         )
@@ -2501,14 +2534,18 @@ pub unsafe extern "C" fn seiza_rendered_image_open_with_rgb_stretch(
 /// Opens a FITS or XISF image and renders it with parameterized processing described by
 /// `config_json`. The value may be one serialized `seiza-stretch`
 /// `StretchConfig` (the original schema), a non-empty array of configs, or an
-/// object with `stretch`, optional `background`, optional `deconvolution`, and
-/// optional `interactive_preview` fields. Array stages are applied in order
-/// using `f32` intermediates and converted to RGBA only after the final stage.
-/// Background correction and deconvolution, when requested, are applied to
-/// linear samples in that order before the first stretch stage. Interactive
-/// preview mode bounds the linear samples to `max_dimension` before processing
-/// and reuses the source/background-prepared pixels across stretch and
-/// deconvolution edits; full renders should leave it false.
+/// object with `stretch`, optional `background`, optional `deconvolution`,
+/// optional `sample_domain`, and optional `interactive_preview` fields. Array
+/// stages are applied in order using `f32` intermediates and converted to RGBA
+/// only after the final stage. Background correction and deconvolution, when
+/// requested, are applied to linear samples in that order. Sample-domain
+/// mapping then converts physical values to the unit-linear domain expected by
+/// stretch, without changing the source image or scientific outputs. Omitting
+/// it retains the legacy unit-linear interpretation for file renders.
+/// Interactive preview mode bounds the linear samples to `max_dimension`
+/// before processing and reuses the source/background-prepared pixels across
+/// stretch, domain, and deconvolution edits; full renders should leave it
+/// false. Metadata reports both the requested and resolved sample domain.
 ///
 /// # Safety
 /// `path` and `config_json` must be valid NUL-terminated strings. When non-null,
@@ -2525,13 +2562,16 @@ pub unsafe extern "C" fn seiza_rendered_image_open_with_stretch_config(
         let config_json = required_str(config_json, "stretch config JSON")?;
         let request: ImageRenderConfigRequest = serde_json::from_str(&config_json)
             .map_err(|error| format!("invalid image processing config JSON: {error}"))?;
-        let (stack, background, deconvolution, interactive_preview) = request.into_parts();
+        let (stack, background, deconvolution, interactive_preview, sample_domain) =
+            request.into_parts();
+        let sample_domain = sample_domain.unwrap_or_default();
         if interactive_preview {
             render_cached_interactive_preview(
                 &path,
                 &stack,
                 background.as_ref(),
                 deconvolution.as_ref(),
+                &sample_domain,
                 max_dimension,
             )
         } else {
@@ -2540,10 +2580,13 @@ pub unsafe extern "C" fn seiza_rendered_image_open_with_stretch_config(
                 image,
                 format,
                 &stack,
-                background.as_ref(),
-                deconvolution.as_ref(),
-                max_dimension,
-                false,
+                RenderPipelineOptions {
+                    background: background.as_ref(),
+                    deconvolution: deconvolution.as_ref(),
+                    sample_domain: &sample_domain,
+                    max_dimension,
+                    interactive_preview: false,
+                },
             )
         }
     })
@@ -2620,13 +2663,16 @@ pub unsafe extern "C" fn seiza_rendered_image16_open_with_stretch_config(
         let config_json = required_str(config_json, "stretch config JSON")?;
         let request: ImageRenderConfigRequest = serde_json::from_str(&config_json)
             .map_err(|error| format!("invalid image processing config JSON: {error}"))?;
-        let (stack, background, deconvolution, interactive_preview) = request.into_parts();
+        let (stack, background, deconvolution, interactive_preview, sample_domain) =
+            request.into_parts();
+        let sample_domain = sample_domain.unwrap_or_default();
         if interactive_preview {
             render_cached_interactive_preview16(
                 &path,
                 &stack,
                 background.as_ref(),
                 deconvolution.as_ref(),
+                &sample_domain,
                 max_dimension,
             )
         } else {
@@ -2635,10 +2681,13 @@ pub unsafe extern "C" fn seiza_rendered_image16_open_with_stretch_config(
                 image,
                 format,
                 &stack,
-                background.as_ref(),
-                deconvolution.as_ref(),
-                max_dimension,
-                false,
+                RenderPipelineOptions {
+                    background: background.as_ref(),
+                    deconvolution: deconvolution.as_ref(),
+                    sample_domain: &sample_domain,
+                    max_dimension,
+                    interactive_preview: false,
+                },
             )
         }
     })
@@ -3677,10 +3726,13 @@ fn render_fits_with_stack(
         fits,
         AstronomyImageFormat::Fits,
         stack,
-        None,
-        None,
-        max_dimension,
-        false,
+        RenderPipelineOptions {
+            background: None,
+            deconvolution: None,
+            sample_domain: &SampleDomain::UnitLinear,
+            max_dimension,
+            interactive_preview: false,
+        },
     )
 }
 
@@ -3688,70 +3740,97 @@ fn render_astronomy_with_pipeline(
     image: FitsImage,
     source_format: AstronomyImageFormat,
     stack: &StretchStack,
-    background: Option<&BackgroundRenderRequest>,
-    deconvolution: Option<&DeconvolutionRenderRequest>,
-    max_dimension: u32,
-    interactive_preview: bool,
+    options: RenderPipelineOptions<'_>,
 ) -> Result<SeizaRenderedImage, String> {
     let prepared = prepare_fits_render(
         image,
         source_format,
-        background,
-        max_dimension,
-        interactive_preview,
+        options.background,
+        options.sample_domain,
+        options.max_dimension,
+        options.interactive_preview,
     )?;
-    render_prepared_fits(&prepared, stack, deconvolution, max_dimension, false)
+    render_prepared_fits(
+        &prepared,
+        stack,
+        options.deconvolution,
+        options.sample_domain,
+        options.max_dimension,
+        false,
+    )
 }
 
 fn render_astronomy_with_pipeline16(
     image: FitsImage,
     source_format: AstronomyImageFormat,
     stack: &StretchStack,
-    background: Option<&BackgroundRenderRequest>,
-    deconvolution: Option<&DeconvolutionRenderRequest>,
-    max_dimension: u32,
-    interactive_preview: bool,
+    options: RenderPipelineOptions<'_>,
 ) -> Result<SeizaRenderedImage16, String> {
     let prepared = prepare_fits_render(
         image,
         source_format,
-        background,
-        max_dimension,
-        interactive_preview,
+        options.background,
+        options.sample_domain,
+        options.max_dimension,
+        options.interactive_preview,
     )?;
-    render_prepared_fits16(&prepared, stack, deconvolution, max_dimension, false)
+    render_prepared_fits16(
+        &prepared,
+        stack,
+        options.deconvolution,
+        options.sample_domain,
+        options.max_dimension,
+        false,
+    )
 }
 
 fn prepare_fits_render(
     fits: FitsImage,
     source_format: AstronomyImageFormat,
     background: Option<&BackgroundRenderRequest>,
+    sample_domain: &SampleDomain,
     max_dimension: u32,
     interactive_preview: bool,
 ) -> Result<PreparedFitsRender, String> {
     let source_width = fits.width;
     let source_height = fits.height;
-    let statistics = fits.statistics();
+    let source_planes = fits.planes;
     let color_kind = fits_color_kind(&fits);
 
-    let rgb = fits.debayer().or_else(|| fits.rgb_planes());
-    let original_input_histogram = if let Some(rgb) = &rgb {
-        input_histogram_u16_json(&rgb.data, 3, false)
-    } else {
-        input_histogram_u16_json(&fits.to_u16(), 1, true)
-    };
-
-    // The pipeline consumes interleaved f32 samples normalized to [0, 1], the
-    // same convention as `FitsImage::to_luma_f32`.
-    let (data, channels): (Vec<f32>, usize) = match &rgb {
-        Some(rgb) => (
-            rgb.data
-                .iter()
-                .map(|&value| f32::from(value) / f32::from(u16::MAX))
-                .collect(),
-            3,
-        ),
-        None => (fits.to_luma_f32(), 1),
+    let headers = fits_headers_json(&fits);
+    let (data, channels, original_input_histogram, statistics) = match sample_domain {
+        SampleDomain::UnitLinear => {
+            let statistics = statistics_json(&fits.statistics());
+            let rgb = fits.debayer().or_else(|| fits.rgb_planes());
+            let input_histogram = if let Some(rgb) = &rgb {
+                input_histogram_u16_json(&rgb.data, 3, false)
+            } else {
+                input_histogram_u16_json(&fits.to_u16(), 1, true)
+            };
+            // Legacy file renders offer the stretch pipeline interleaved f32
+            // samples normalized to [0, 1].
+            let (data, channels) = match &rgb {
+                Some(rgb) => (
+                    rgb.data
+                        .iter()
+                        .map(|&value| f32::from(value) / f32::from(u16::MAX))
+                        .collect(),
+                    3,
+                ),
+                None => (fits.to_luma_f32(), 1),
+            };
+            (data, channels, input_histogram, statistics)
+        }
+        SampleDomain::PhysicalLinear { .. } => {
+            let frame = FitsFrame::from_fits(fits, None)
+                .and_then(FitsFrame::into_prepared)
+                .map_err(|error| format!("failed to prepare physical render samples: {error}"))?;
+            let channels = frame.image.channels;
+            let data = frame.image.data;
+            let input_histogram = input_histogram_scaled_f32_json(&data, channels);
+            let statistics = linear_f32_statistics_json(&data, channels)?;
+            (data, channels, input_histogram, statistics)
+        }
     };
     let (render_width, render_height, mut data) = if interactive_preview {
         downsample_interleaved_f32(
@@ -3783,24 +3862,26 @@ fn prepare_fits_render(
             "diagnostics": &fit.diagnostics,
             "reference": &fit.reference,
         });
-        (input_histogram_f32_json(&data, channels), Some(metadata))
+        let input_histogram = match sample_domain {
+            SampleDomain::UnitLinear => input_histogram_f32_json(&data, channels),
+            SampleDomain::PhysicalLinear { .. } => input_histogram_scaled_f32_json(&data, channels),
+        };
+        (input_histogram, Some(metadata))
     } else {
         (original_input_histogram, None)
     };
-    let headers = fits_headers_json(&fits);
-
     Ok(PreparedFitsRender {
         source_format: source_format.name(),
         source_width,
         source_height,
-        planes: fits.planes,
+        planes: source_planes,
         color_kind,
         render_width,
         render_height,
         channels,
         data,
         validity_mask: None,
-        statistics: statistics_json(&statistics),
+        statistics,
         input_histogram,
         background_metadata,
         headers,
@@ -3820,7 +3901,7 @@ fn prepare_live_stack_render(
     let channels = view.channels;
     let (render_width, render_height, mut data, validity_mask) =
         sample_live_stack_view(view, usize::try_from(max_dimension).unwrap_or(usize::MAX))?;
-    let statistics = live_stack_statistics_json(&data, channels)?;
+    let statistics = linear_f32_statistics_json(&data, channels)?;
     let (input_histogram, background_metadata) = if let Some(background) = background {
         let exclusion_mask = validity_mask.iter().map(|valid| !valid).collect::<Vec<_>>();
         let fit = fit_background_masked(
@@ -3971,9 +4052,9 @@ fn sample_live_stack_view(
     Ok((output_width, output_height, output, validity_mask))
 }
 
-fn live_stack_statistics_json(samples: &[f32], channels: usize) -> Result<Value, String> {
+fn linear_f32_statistics_json(samples: &[f32], channels: usize) -> Result<Value, String> {
     let analysis = StretchAnalysis::analyze(samples, channels, 262_144)
-        .map_err(|error| format!("failed to analyze live preview: {error}"))?;
+        .map_err(|error| format!("failed to analyze linear render samples: {error}"))?;
     let statistics = analysis.linked_statistics();
     let (sum, count) = samples
         .iter()
@@ -3997,63 +4078,82 @@ fn live_stack_statistics_json(samples: &[f32], channels: usize) -> Result<Value,
 fn prepare_stretch_input<'a>(
     prepared: &'a PreparedFitsRender,
     deconvolution: Option<&DeconvolutionRenderRequest>,
+    sample_domain: &SampleDomain,
 ) -> Result<PreparedStretchInput<'a>, String> {
-    let Some(request) = deconvolution else {
-        return Ok(PreparedStretchInput {
-            data: Cow::Borrowed(&prepared.data),
-            input_histogram: prepared.input_histogram.clone(),
-            deconvolution_metadata: None,
-        });
+    let (mut data, input_histogram, deconvolution_metadata) = if let Some(request) = deconvolution {
+        let scale = (prepared.render_width as f32 / prepared.source_width as f32)
+            .min(prepared.render_height as f32 / prepared.source_height as f32);
+        let effective_psf_fwhm_pixels = (request.psf_fwhm_pixels * scale).max(0.25);
+        let config = DeconvolutionConfig {
+            psf_fwhm_pixels: effective_psf_fwhm_pixels,
+            iterations: request.iterations,
+            amount: request.amount,
+            noise_fraction: request.noise_fraction,
+            max_correction: request.max_correction,
+        };
+        let restored = deconvolve_masked(
+            &prepared.data,
+            prepared.render_width,
+            prepared.render_height,
+            prepared.channels,
+            &config,
+        )
+        .map_err(|error| format!("failed to deconvolve image: {error}"))?;
+        let channels = restored
+            .channels
+            .iter()
+            .map(|channel| {
+                json!({
+                    "inputFlux": channel.input_flux,
+                    "outputFlux": channel.output_flux,
+                    "inputPeak": channel.input_peak,
+                    "outputPeak": channel.output_peak,
+                })
+            })
+            .collect::<Vec<_>>();
+        let input_histogram = if prepared.validity_mask.is_some()
+            || matches!(sample_domain, SampleDomain::PhysicalLinear { .. })
+        {
+            input_histogram_scaled_f32_json(&restored.data, prepared.channels)
+        } else {
+            input_histogram_f32_json(&restored.data, prepared.channels)
+        };
+        (
+            Cow::Owned(restored.data),
+            input_histogram,
+            Some(json!({
+                "algorithmVersion": seiza_deconvolution::ALGORITHM_VERSION,
+                "psfFwhmPixels": request.psf_fwhm_pixels,
+                "effectivePsfFwhmPixels": effective_psf_fwhm_pixels,
+                "iterations": request.iterations,
+                "amount": request.amount,
+                "noiseFraction": request.noise_fraction,
+                "maxCorrection": request.max_correction,
+                "channels": channels,
+            })),
+        )
+    } else {
+        (
+            Cow::Borrowed(prepared.data.as_slice()),
+            prepared.input_histogram.clone(),
+            None,
+        )
     };
 
-    let scale = (prepared.render_width as f32 / prepared.source_width as f32)
-        .min(prepared.render_height as f32 / prepared.source_height as f32);
-    let effective_psf_fwhm_pixels = (request.psf_fwhm_pixels * scale).max(0.25);
-    let config = DeconvolutionConfig {
-        psf_fwhm_pixels: effective_psf_fwhm_pixels,
-        iterations: request.iterations,
-        amount: request.amount,
-        noise_fraction: request.noise_fraction,
-        max_correction: request.max_correction,
-    };
-    let restored = deconvolve_masked(
-        &prepared.data,
-        prepared.render_width,
-        prepared.render_height,
-        prepared.channels,
-        &config,
-    )
-    .map_err(|error| format!("failed to deconvolve image: {error}"))?;
-    let channels = restored
-        .channels
-        .iter()
-        .map(|channel| {
-            json!({
-                "inputFlux": channel.input_flux,
-                "outputFlux": channel.output_flux,
-                "inputPeak": channel.input_peak,
-                "outputPeak": channel.output_peak,
-            })
-        })
-        .collect::<Vec<_>>();
-    let input_histogram = if prepared.validity_mask.is_some() {
-        input_histogram_scaled_f32_json(&restored.data, prepared.channels)
-    } else {
-        input_histogram_f32_json(&restored.data, prepared.channels)
-    };
+    let resolved_sample_domain = sample_domain
+        .resolve(&data, prepared.channels)
+        .map_err(|error| format!("failed to resolve render sample domain: {error}"))?;
+    if !matches!(resolved_sample_domain, ResolvedSampleDomain::UnitLinear) {
+        resolved_sample_domain
+            .apply_in_place(data.to_mut(), prepared.channels)
+            .map_err(|error| format!("failed to apply render sample domain: {error}"))?;
+    }
+
     Ok(PreparedStretchInput {
-        data: Cow::Owned(restored.data),
+        data,
         input_histogram,
-        deconvolution_metadata: Some(json!({
-            "algorithmVersion": seiza_deconvolution::ALGORITHM_VERSION,
-            "psfFwhmPixels": request.psf_fwhm_pixels,
-            "effectivePsfFwhmPixels": effective_psf_fwhm_pixels,
-            "iterations": request.iterations,
-            "amount": request.amount,
-            "noiseFraction": request.noise_fraction,
-            "maxCorrection": request.max_correction,
-            "channels": channels,
-        })),
+        deconvolution_metadata,
+        sample_domain: resolved_sample_domain,
     })
 }
 
@@ -4061,6 +4161,7 @@ fn render_prepared_fits(
     prepared: &PreparedFitsRender,
     stack: &StretchStack,
     deconvolution: Option<&DeconvolutionRenderRequest>,
+    requested_sample_domain: &SampleDomain,
     max_dimension: u32,
     interactive_preview_cache_hit: bool,
 ) -> Result<SeizaRenderedImage, String> {
@@ -4068,7 +4169,8 @@ fn render_prepared_fits(
         data,
         input_histogram,
         deconvolution_metadata,
-    } = prepare_stretch_input(prepared, deconvolution)?;
+        sample_domain: resolved_sample_domain,
+    } = prepare_stretch_input(prepared, deconvolution, requested_sample_domain)?;
     let stretched = stack
         .apply_u8(&data, prepared.channels)
         .map_err(|error| error.to_string())?
@@ -4111,6 +4213,10 @@ fn render_prepared_fits(
         "liveStack": prepared.live_stack,
         "backgroundProcessing": prepared.background_metadata,
         "deconvolutionProcessing": deconvolution_metadata,
+        "sampleDomain": {
+            "requested": requested_sample_domain,
+            "resolved": resolved_sample_domain,
+        },
         "statistics": prepared.statistics,
         "inputHistogram": input_histogram,
         "displayHistogram": display_histogram,
@@ -4131,6 +4237,7 @@ fn render_prepared_fits16(
     prepared: &PreparedFitsRender,
     stack: &StretchStack,
     deconvolution: Option<&DeconvolutionRenderRequest>,
+    requested_sample_domain: &SampleDomain,
     max_dimension: u32,
     interactive_preview_cache_hit: bool,
 ) -> Result<SeizaRenderedImage16, String> {
@@ -4138,7 +4245,8 @@ fn render_prepared_fits16(
         data,
         input_histogram,
         deconvolution_metadata,
-    } = prepare_stretch_input(prepared, deconvolution)?;
+        sample_domain: resolved_sample_domain,
+    } = prepare_stretch_input(prepared, deconvolution, requested_sample_domain)?;
     let stretched = stack
         .apply_u16(&data, prepared.channels)
         .map_err(|error| error.to_string())?
@@ -4175,6 +4283,10 @@ fn render_prepared_fits16(
         "liveStack": prepared.live_stack,
         "backgroundProcessing": prepared.background_metadata,
         "deconvolutionProcessing": deconvolution_metadata,
+        "sampleDomain": {
+            "requested": requested_sample_domain,
+            "resolved": resolved_sample_domain,
+        },
         "statistics": prepared.statistics,
         "inputHistogram": input_histogram,
         "displayHistogram": display_histogram,
@@ -4195,14 +4307,22 @@ fn render_cached_interactive_preview(
     stack: &StretchStack,
     background: Option<&BackgroundRenderRequest>,
     deconvolution: Option<&DeconvolutionRenderRequest>,
+    sample_domain: &SampleDomain,
     max_dimension: u32,
 ) -> Result<SeizaRenderedImage, String> {
-    let key = interactive_preview_cache_key(path, background, max_dimension)?;
+    let key = interactive_preview_cache_key(path, background, sample_domain, max_dimension)?;
     let cache = INTERACTIVE_PREVIEW_CACHE
         .get_or_init(|| Mutex::new(VecDeque::with_capacity(INTERACTIVE_PREVIEW_CACHE_CAPACITY)));
 
     if let Some(prepared) = cached_interactive_preview(cache, &key)? {
-        return render_prepared_fits(&prepared, stack, deconvolution, max_dimension, true);
+        return render_prepared_fits(
+            &prepared,
+            stack,
+            deconvolution,
+            sample_domain,
+            max_dimension,
+            true,
+        );
     }
 
     let (image, format) = open_astronomy_image(path)?;
@@ -4210,11 +4330,19 @@ fn render_cached_interactive_preview(
         image,
         format,
         background,
+        sample_domain,
         max_dimension,
         true,
     )?);
     let prepared = store_interactive_preview(cache, key, prepared)?;
-    render_prepared_fits(&prepared, stack, deconvolution, max_dimension, false)
+    render_prepared_fits(
+        &prepared,
+        stack,
+        deconvolution,
+        sample_domain,
+        max_dimension,
+        false,
+    )
 }
 
 fn render_cached_interactive_preview16(
@@ -4222,14 +4350,22 @@ fn render_cached_interactive_preview16(
     stack: &StretchStack,
     background: Option<&BackgroundRenderRequest>,
     deconvolution: Option<&DeconvolutionRenderRequest>,
+    sample_domain: &SampleDomain,
     max_dimension: u32,
 ) -> Result<SeizaRenderedImage16, String> {
-    let key = interactive_preview_cache_key(path, background, max_dimension)?;
+    let key = interactive_preview_cache_key(path, background, sample_domain, max_dimension)?;
     let cache = INTERACTIVE_PREVIEW_CACHE
         .get_or_init(|| Mutex::new(VecDeque::with_capacity(INTERACTIVE_PREVIEW_CACHE_CAPACITY)));
 
     if let Some(prepared) = cached_interactive_preview(cache, &key)? {
-        return render_prepared_fits16(&prepared, stack, deconvolution, max_dimension, true);
+        return render_prepared_fits16(
+            &prepared,
+            stack,
+            deconvolution,
+            sample_domain,
+            max_dimension,
+            true,
+        );
     }
 
     let (image, format) = open_astronomy_image(path)?;
@@ -4237,16 +4373,25 @@ fn render_cached_interactive_preview16(
         image,
         format,
         background,
+        sample_domain,
         max_dimension,
         true,
     )?);
     let prepared = store_interactive_preview(cache, key, prepared)?;
-    render_prepared_fits16(&prepared, stack, deconvolution, max_dimension, false)
+    render_prepared_fits16(
+        &prepared,
+        stack,
+        deconvolution,
+        sample_domain,
+        max_dimension,
+        false,
+    )
 }
 
 fn interactive_preview_cache_key(
     path: &Path,
     background: Option<&BackgroundRenderRequest>,
+    sample_domain: &SampleDomain,
     max_dimension: u32,
 ) -> Result<InteractivePreviewCacheKey, String> {
     let metadata = std::fs::metadata(path)
@@ -4256,6 +4401,7 @@ fn interactive_preview_cache_key(
         file_size: metadata.len(),
         modified: metadata.modified().ok(),
         max_dimension,
+        physical_samples: matches!(sample_domain, SampleDomain::PhysicalLinear { .. }),
         background: background
             .map(serde_json::to_string)
             .transpose()
@@ -5059,6 +5205,15 @@ fn live_stack_input_mode_name(mode: FrameInputMode) -> &'static str {
     match mode {
         FrameInputMode::CalibrateAndPrepare => "calibrate-and-prepare",
         FrameInputMode::PreparedOnly => "prepared-only",
+    }
+}
+
+fn default_live_preview_sample_domain(mode: FrameInputMode) -> SampleDomain {
+    match mode {
+        FrameInputMode::CalibrateAndPrepare => SampleDomain::PhysicalLinear {
+            normalization: Default::default(),
+        },
+        FrameInputMode::PreparedOnly => SampleDomain::UnitLinear,
     }
 }
 
@@ -6496,9 +6651,10 @@ mod tests {
         assert_eq!(after_failure["inputPaths"], calibrated["inputPaths"]);
 
         let stretch = CString::new(
-            r#"{"model":{"type":"identity"},"color_strategy":"linked","max_analysis_samples":4096}"#,
+            r#"{"stretch":[{"model":{"type":"auto-mtf","target_median":0.2,"shadows_clip":-2.8},"color_strategy":"unlinked","max_analysis_samples":200000}]}"#,
         )
         .unwrap();
+        let physical_mean_before = unsafe { (*stacker).stacker.view().mean.to_vec() };
         let preview =
             unsafe { seiza_live_stacker_render_preview(stacker, stretch.as_ptr(), 64, &mut error) };
         assert!(!preview.is_null());
@@ -6514,6 +6670,46 @@ mod tests {
         assert_eq!(metadata["format"], "Live stack");
         assert_eq!(metadata["liveStack"]["acceptedFrames"], 1);
         assert_eq!(metadata["interactivePreview"], true);
+        assert_eq!(
+            metadata["sampleDomain"]["requested"]["type"],
+            "physical-linear"
+        );
+        assert_eq!(
+            metadata["sampleDomain"]["requested"]["normalization"]["type"],
+            "robust-percentile"
+        );
+        assert_eq!(
+            metadata["sampleDomain"]["resolved"]["type"],
+            "physical-linear"
+        );
+        let black = metadata["sampleDomain"]["resolved"]["black"]
+            .as_f64()
+            .unwrap();
+        let white = metadata["sampleDomain"]["resolved"]["white"]
+            .as_f64()
+            .unwrap();
+        assert!(black.is_finite() && white.is_finite() && white > black);
+        let rgba = unsafe {
+            std::slice::from_raw_parts(
+                seiza_rendered_image_rgba(preview),
+                seiza_rendered_image_rgba_length(preview),
+            )
+        };
+        let display_codes = rgba
+            .chunks_exact(4)
+            .filter(|pixel| pixel[3] != 0)
+            .map(|pixel| pixel[0])
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            display_codes.len() > 16,
+            "physical live preview collapsed to {} gray codes",
+            display_codes.len()
+        );
+        assert_eq!(
+            unsafe { (*stacker).stacker.view().mean },
+            physical_mean_before,
+            "presentation mapping changed the physical live mean"
+        );
         unsafe { seiza_rendered_image_free(preview) };
 
         assert!(unsafe {
@@ -6534,6 +6730,190 @@ mod tests {
         // The used-master history remains output-protective after clearing.
         assert_eq!(cleared["inputPaths"].as_array().unwrap().len(), 2);
         unsafe { seiza_live_stacker_free(stacker) };
+    }
+
+    #[test]
+    fn live_preview_defaults_follow_the_stacker_input_mode() {
+        assert_eq!(
+            default_live_preview_sample_domain(FrameInputMode::PreparedOnly),
+            SampleDomain::UnitLinear
+        );
+        assert_eq!(
+            default_live_preview_sample_domain(FrameInputMode::CalibrateAndPrepare),
+            SampleDomain::PhysicalLinear {
+                normalization: Default::default(),
+            }
+        );
+
+        let (width, height) = (160, 128);
+        let scale = stacking_star_field(width, height)
+            .into_iter()
+            .map(|value| value / 3_000.0)
+            .collect::<Vec<_>>();
+        let options = no_adjustment_stack_options();
+        let config = CString::new(
+            r#"{"model":{"type":"identity"},"color_strategy":"linked","max_analysis_samples":4096}"#,
+        )
+        .unwrap();
+        let mut error = ptr::null_mut();
+        let stacker = unsafe {
+            seiza_live_stacker_create(
+                scale.as_ptr(),
+                scale.len(),
+                width,
+                height,
+                1,
+                options.as_ptr(),
+                &mut error,
+            )
+        };
+        assert!(!stacker.is_null());
+        assert!(error.is_null());
+        let preview =
+            unsafe { seiza_live_stacker_render_preview(stacker, config.as_ptr(), 64, &mut error) };
+        assert!(!preview.is_null());
+        assert!(error.is_null());
+        let metadata: Value = serde_json::from_str(
+            unsafe { CStr::from_ptr(seiza_rendered_image_metadata_json(preview)) }
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(metadata["liveStack"]["inputMode"], "prepared-only");
+        assert_eq!(metadata["sampleDomain"]["requested"]["type"], "unit-linear");
+        assert_eq!(metadata["sampleDomain"]["resolved"]["type"], "unit-linear");
+        unsafe {
+            seiza_rendered_image_free(preview);
+            seiza_live_stacker_free(stacker);
+        }
+    }
+
+    #[test]
+    fn explicit_physical_sample_domain_maps_display_buffers_without_mutating_source() {
+        let source = vec![0.0_f32, 16_384.0, 32_768.0, 49_152.0, 65_535.0];
+        let prepared = PreparedFitsRender {
+            source_format: "Live stack",
+            source_width: source.len(),
+            source_height: 1,
+            planes: 1,
+            color_kind: "mono",
+            render_width: source.len(),
+            render_height: 1,
+            channels: 1,
+            data: source.clone(),
+            validity_mask: None,
+            statistics: json!({}),
+            input_histogram: json!({}),
+            background_metadata: None,
+            headers: Map::new(),
+            interactive_preview: true,
+            live_stack: None,
+        };
+        let stack = StretchStack::single(
+            serde_json::from_value(json!({
+                "model": { "type": "identity" },
+                "color_strategy": "linked",
+                "max_analysis_samples": 4096
+            }))
+            .unwrap(),
+        );
+        let sample_domain = SampleDomain::PhysicalLinear {
+            normalization: seiza_stretch::SampleNormalization::ExplicitRange {
+                black: 0.0,
+                white: 65_535.0,
+            },
+        };
+
+        let image8 =
+            render_prepared_fits(&prepared, &stack, None, &sample_domain, 0, false).unwrap();
+        let image16 =
+            render_prepared_fits16(&prepared, &stack, None, &sample_domain, 0, false).unwrap();
+
+        assert_eq!(prepared.data, source, "render mutated physical source data");
+        assert_eq!(
+            image8
+                .rgba
+                .chunks_exact(4)
+                .map(|pixel| pixel[0])
+                .collect::<Vec<_>>(),
+            [0, 64, 128, 191, 255]
+        );
+        assert_eq!(
+            image16
+                .rgba
+                .chunks_exact(4)
+                .map(|pixel| pixel[0])
+                .collect::<Vec<_>>(),
+            [0, 16_384, 32_768, 49_152, 65_535]
+        );
+        for metadata in [&image8.metadata_json, &image16.metadata_json] {
+            let metadata: Value = serde_json::from_str(metadata.to_str().unwrap()).unwrap();
+            assert_eq!(
+                metadata["sampleDomain"]["requested"]["type"],
+                "physical-linear"
+            );
+            assert_eq!(
+                metadata["sampleDomain"]["requested"]["normalization"]["type"],
+                "explicit-range"
+            );
+            assert_eq!(metadata["sampleDomain"]["resolved"]["black"], 0.0);
+            assert_eq!(metadata["sampleDomain"]["resolved"]["white"], 65_535.0);
+        }
+    }
+
+    #[test]
+    fn file_render_physical_domain_decodes_physical_samples_before_mapping() {
+        let fits = FitsImage {
+            width: 5,
+            height: 1,
+            planes: 1,
+            pixels: seiza_fits::Pixels::U16(vec![0, 16_384, 32_768, 49_152, 65_535]),
+            headers: Vec::new(),
+        };
+        let stack = StretchStack::single(
+            serde_json::from_value(json!({
+                "model": { "type": "identity" },
+                "color_strategy": "linked",
+                "max_analysis_samples": 4096
+            }))
+            .unwrap(),
+        );
+        let sample_domain = SampleDomain::PhysicalLinear {
+            normalization: seiza_stretch::SampleNormalization::ExplicitRange {
+                black: 0.0,
+                white: 65_535.0,
+            },
+        };
+
+        let image = render_astronomy_with_pipeline(
+            fits,
+            AstronomyImageFormat::Fits,
+            &stack,
+            RenderPipelineOptions {
+                background: None,
+                deconvolution: None,
+                sample_domain: &sample_domain,
+                max_dimension: 0,
+                interactive_preview: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            image
+                .rgba
+                .chunks_exact(4)
+                .map(|pixel| pixel[0])
+                .collect::<Vec<_>>(),
+            [0, 64, 128, 191, 255]
+        );
+        let metadata: Value = serde_json::from_str(image.metadata_json.to_str().unwrap()).unwrap();
+        assert_eq!(metadata["sampleDomain"]["resolved"]["black"], 0.0);
+        assert_eq!(metadata["sampleDomain"]["resolved"]["white"], 65_535.0);
+        assert_eq!(metadata["statistics"]["minimum"], 0.0);
+        assert_eq!(metadata["statistics"]["maximum"], 65_535.0);
+        assert_eq!(metadata["inputHistogram"]["lowerBound"], 0.0);
+        assert_eq!(metadata["inputHistogram"]["upperBound"], 65_535.0);
     }
 
     #[test]
@@ -7375,20 +7755,26 @@ mod tests {
             fits.clone(),
             AstronomyImageFormat::Fits,
             &stack,
-            None,
-            None,
-            0,
-            false,
+            RenderPipelineOptions {
+                background: None,
+                deconvolution: None,
+                sample_domain: &SampleDomain::UnitLinear,
+                max_dimension: 0,
+                interactive_preview: false,
+            },
         )
         .unwrap();
         let image16 = render_astronomy_with_pipeline16(
             fits,
             AstronomyImageFormat::Fits,
             &stack,
-            None,
-            None,
-            0,
-            false,
+            RenderPipelineOptions {
+                background: None,
+                deconvolution: None,
+                sample_domain: &SampleDomain::UnitLinear,
+                max_dimension: 0,
+                interactive_preview: false,
+            },
         )
         .unwrap();
 
@@ -7490,6 +7876,44 @@ mod tests {
     }
 
     #[test]
+    fn render_config_accepts_a_presentation_only_physical_sample_domain() {
+        let request: ImageRenderConfigRequest = serde_json::from_value(json!({
+            "stretch": [{
+                "model": { "type": "identity" },
+                "color_strategy": "linked",
+                "max_analysis_samples": 4096
+            }],
+            "sample_domain": {
+                "type": "physical-linear",
+                "normalization": {
+                    "type": "robust-percentile",
+                    "black_percentile": 0.001,
+                    "white_percentile": 0.999,
+                    "max_analysis_samples": 200000
+                }
+            }
+        }))
+        .unwrap();
+
+        let (stack, background, deconvolution, interactive_preview, sample_domain) =
+            request.into_parts();
+        assert_eq!(stack.len(), 1);
+        assert!(background.is_none());
+        assert!(deconvolution.is_none());
+        assert!(!interactive_preview);
+        assert_eq!(
+            sample_domain,
+            Some(SampleDomain::PhysicalLinear {
+                normalization: seiza_stretch::SampleNormalization::RobustPercentile {
+                    black_percentile: 0.001,
+                    white_percentile: 0.999,
+                    max_analysis_samples: 200_000,
+                },
+            })
+        );
+    }
+
+    #[test]
     fn render_config_composes_background_correction_before_the_stretch_stack() {
         let first: StretchConfig = serde_json::from_value(json!({
             "model": { "type": "identity" },
@@ -7512,10 +7936,12 @@ mod tests {
             }
         }))
         .unwrap();
-        let (stack, background, deconvolution, interactive_preview) = request.into_parts();
+        let (stack, background, deconvolution, interactive_preview, sample_domain) =
+            request.into_parts();
         assert_eq!(stack.len(), 1);
         assert!(!interactive_preview);
         assert!(deconvolution.is_none());
+        assert!(sample_domain.is_none());
         let background = background.unwrap();
         assert_eq!(background.mode, CorrectionMode::Subtract);
         assert_eq!(background.strength, 1.0);
@@ -7555,10 +7981,13 @@ mod tests {
             fits,
             AstronomyImageFormat::Fits,
             &stack,
-            Some(&background),
-            None,
-            0,
-            false,
+            RenderPipelineOptions {
+                background: Some(&background),
+                deconvolution: None,
+                sample_domain: &SampleDomain::UnitLinear,
+                max_dimension: 0,
+                interactive_preview: false,
+            },
         )
         .unwrap();
         assert_ne!(corrected.rgba, uncorrected.rgba);
@@ -7624,10 +8053,13 @@ mod tests {
             fits,
             AstronomyImageFormat::Fits,
             &stack,
-            None,
-            Some(&deconvolution),
-            0,
-            false,
+            RenderPipelineOptions {
+                background: None,
+                deconvolution: Some(&deconvolution),
+                sample_domain: &SampleDomain::UnitLinear,
+                max_dimension: 0,
+                interactive_preview: false,
+            },
         )
         .unwrap();
         assert_ne!(restored.rgba, plain.rgba);
@@ -7670,8 +8102,10 @@ mod tests {
             "interactive_preview": true
         }))
         .unwrap();
-        let (stack, background, deconvolution, interactive_preview) = request.into_parts();
+        let (stack, background, deconvolution, interactive_preview, sample_domain) =
+            request.into_parts();
         assert!(background.is_none());
+        assert!(sample_domain.is_none());
         let deconvolution = deconvolution.unwrap();
         assert_eq!(deconvolution.iterations, 4);
         assert_eq!(deconvolution.amount, 0.35);
@@ -7688,10 +8122,13 @@ mod tests {
             fits,
             AstronomyImageFormat::Fits,
             &stack,
-            None,
-            Some(&deconvolution),
-            100,
-            interactive_preview,
+            RenderPipelineOptions {
+                background: None,
+                deconvolution: Some(&deconvolution),
+                sample_domain: &SampleDomain::UnitLinear,
+                max_dimension: 100,
+                interactive_preview,
+            },
         )
         .unwrap();
         assert_eq!((preview.width, preview.height), (100, 50));
@@ -7726,22 +8163,52 @@ mod tests {
             noise_fraction: 0.001,
             max_correction: 2.0,
         };
-        let first = render_cached_interactive_preview(&path, &stack, None, None, 100).unwrap();
-        let second =
-            render_cached_interactive_preview(&path, &stack, None, Some(&deconvolution), 100)
+        let automatic_domain = SampleDomain::PhysicalLinear {
+            normalization: Default::default(),
+        };
+        let first =
+            render_cached_interactive_preview(&path, &stack, None, None, &automatic_domain, 100)
+                .unwrap();
+        let second = render_cached_interactive_preview(
+            &path,
+            &stack,
+            None,
+            Some(&deconvolution),
+            &automatic_domain,
+            100,
+        )
+        .unwrap();
+        let explicit_domain = SampleDomain::PhysicalLinear {
+            normalization: seiza_stretch::SampleNormalization::ExplicitRange {
+                black: 0.0,
+                white: 0.5,
+            },
+        };
+        let remapped =
+            render_cached_interactive_preview(&path, &stack, None, None, &explicit_domain, 100)
                 .unwrap();
         let first_metadata: Value =
             serde_json::from_str(first.metadata_json.to_str().unwrap()).unwrap();
         let second_metadata: Value =
             serde_json::from_str(second.metadata_json.to_str().unwrap()).unwrap();
+        let remapped_metadata: Value =
+            serde_json::from_str(remapped.metadata_json.to_str().unwrap()).unwrap();
         assert_eq!(first_metadata["interactivePreviewCacheHit"], false);
         assert_eq!(second_metadata["interactivePreviewCacheHit"], true);
+        assert_eq!(remapped_metadata["interactivePreviewCacheHit"], true);
         assert!(second_metadata["deconvolutionProcessing"].is_object());
+        assert_eq!(remapped_metadata["sampleDomain"]["resolved"]["white"], 0.5);
+        assert_ne!(first.rgba, remapped.rgba);
 
         let background = BackgroundRenderRequest::default();
         assert_ne!(
-            interactive_preview_cache_key(&path, None, 100).unwrap(),
-            interactive_preview_cache_key(&path, Some(&background), 100).unwrap()
+            interactive_preview_cache_key(&path, None, &automatic_domain, 100).unwrap(),
+            interactive_preview_cache_key(&path, Some(&background), &automatic_domain, 100)
+                .unwrap()
+        );
+        assert_ne!(
+            interactive_preview_cache_key(&path, None, &SampleDomain::UnitLinear, 100).unwrap(),
+            interactive_preview_cache_key(&path, None, &automatic_domain, 100).unwrap()
         );
     }
 
@@ -7901,10 +8368,13 @@ mod tests {
             fits,
             AstronomyImageFormat::Fits,
             &StretchStack::single(config),
-            None,
-            None,
-            0,
-            false,
+            RenderPipelineOptions {
+                background: None,
+                deconvolution: None,
+                sample_domain: &SampleDomain::UnitLinear,
+                max_dimension: 0,
+                interactive_preview: false,
+            },
         )
         .unwrap();
         let directory = tempfile::tempdir().unwrap();
