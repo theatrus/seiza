@@ -1298,6 +1298,12 @@ char *seiza_calibration_plan_json(const char *request_json, char **error_out);
  so every successful output is atomic. Free the response with
  [`seiza_string_free`].
 
+ Response schema 2 reports `requestedFrames`, accepted `inputFrames` and
+ accepted-only per-frame `inputs`, plus `skippedInputs` entries with `path`
+ and `reason` for metadata disagreements the integrator set aside. The
+ accepted and skipped paths are disjoint and account for every requested
+ input in request order.
+
  # Safety
  `request_json` must be a valid NUL-terminated string. `cancel` must be null
  or a live [`SeizaCancelSignal`] retained until this call returns. When
