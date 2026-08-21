@@ -418,6 +418,139 @@ pub fn coherent_subset_indices(
     first.unwrap_or_default()
 }
 
+/// Name one differing reading, or say which side never recorded it.
+///
+/// A refusal that only says two things disagree leaves the reader to go and
+/// find out how, on a rig where a rotator moves between nights and a reducer
+/// is swapped between seasons. Saying `rotation light=101.93 master=104.24`
+/// ends the question.
+pub fn describe_value<T: std::fmt::Display>(
+    field: &str,
+    light: Option<T>,
+    master: Option<T>,
+    unit: &str,
+) -> String {
+    match (light, master) {
+        (Some(light), Some(master)) => {
+            format!("{field} light={light}{unit} master={master}{unit}")
+        }
+        (Some(light), None) => format!("{field} light={light}{unit}, master did not record one"),
+        (None, Some(master)) => format!("{field} master={master}{unit}, light did not record one"),
+        (None, None) => format!("neither frame recorded {field}"),
+    }
+}
+
+pub fn describe_text(field: &str, light: Option<&str>, master: Option<&str>) -> String {
+    match (light, master) {
+        (Some(light), Some(master)) => format!("{field} light={light:?} master={master:?}"),
+        (Some(light), None) => format!("{field} light={light:?}, master did not record one"),
+        (None, Some(master)) => format!("{field} master={master:?}, light did not record one"),
+        (None, None) => format!("neither frame recorded {field}"),
+    }
+}
+
+/// Every optical field the two frames disagree on, not merely the first.
+///
+/// A rotator that moved and a reducer that was swapped are one report, so a
+/// reader is not sent back for a second run to discover the rest.
+pub fn describe_optics_mismatch(
+    light: &FrameSignature,
+    flat: &FrameSignature,
+    tolerances: &MatchTolerances,
+) -> String {
+    let mut reasons = Vec::new();
+    if !text_equal_if_known(light.filter.as_deref(), flat.filter.as_deref()) {
+        reasons.push(describe_text(
+            "filter",
+            light.filter.as_deref(),
+            flat.filter.as_deref(),
+        ));
+    }
+    if !text_equal_if_known(light.telescope.as_deref(), flat.telescope.as_deref()) {
+        reasons.push(describe_text(
+            "telescope",
+            light.telescope.as_deref(),
+            flat.telescope.as_deref(),
+        ));
+    }
+    if !option_near(
+        light.focal_length_mm,
+        flat.focal_length_mm,
+        tolerances.focal_length_mm,
+    ) {
+        reasons.push(describe_value(
+            "focal length",
+            light.focal_length_mm,
+            flat.focal_length_mm,
+            "mm",
+        ));
+    }
+    if !rotation_matches(
+        light.rotation_deg,
+        flat.rotation_deg,
+        tolerances.rotation_deg,
+    ) {
+        let mut reason = describe_value("rotation", light.rotation_deg, flat.rotation_deg, "deg");
+        if let (Some(light), Some(flat)) = (light.rotation_deg, flat.rotation_deg) {
+            let mut apart = (light - flat).abs() % 360.0;
+            if apart > 180.0 {
+                apart = 360.0 - apart;
+            }
+            reason.push_str(&format!(
+                " ({apart:.2} deg apart, tolerance {:.2})",
+                tolerances.rotation_deg
+            ));
+        }
+        reasons.push(reason);
+    }
+    if reasons.is_empty() {
+        // Unreachable while this mirrors `optics_match`, and a bare "they
+        // disagree" is still better than a panic if it ever drifts.
+        return "the optical signatures disagree".into();
+    }
+    reasons.join("; ")
+}
+
+/// Every sensor field the two frames disagree on.
+pub fn describe_sensor_mismatch(light: &FrameSignature, master: &FrameSignature) -> String {
+    let mut reasons = Vec::new();
+    if !text_equal_if_known(light.camera.as_deref(), master.camera.as_deref()) {
+        reasons.push(describe_text(
+            "camera",
+            light.camera.as_deref(),
+            master.camera.as_deref(),
+        ));
+    }
+    for (field, light, master) in [
+        ("width", light.width, master.width),
+        ("height", light.height, master.height),
+        ("channels", light.channels, master.channels),
+        ("binning x", light.binning_x, master.binning_x),
+        ("binning y", light.binning_y, master.binning_y),
+        ("gain", light.gain, master.gain),
+        ("offset", light.offset, master.offset),
+        ("readout mode", light.readout_mode, master.readout_mode),
+    ] {
+        if !equal_if_known(light, master) {
+            reasons.push(describe_value(field, light, master, ""));
+        }
+    }
+    if !text_equal_if_known(
+        light.bayer_pattern.as_deref(),
+        master.bayer_pattern.as_deref(),
+    ) {
+        reasons.push(describe_text(
+            "Bayer pattern",
+            light.bayer_pattern.as_deref(),
+            master.bayer_pattern.as_deref(),
+        ));
+    }
+    if reasons.is_empty() {
+        return "the sensor signatures disagree".into();
+    }
+    reasons.join("; ")
+}
+
 /// Order candidates by how close in time they were shot to `reference_unix`,
 /// nearest first.
 ///
@@ -653,6 +786,72 @@ mod tests {
             &right,
             &MatchTolerances::default()
         ));
+    }
+
+    #[test]
+    fn a_refusal_names_the_field_and_both_readings() {
+        // Taken from a real stack that failed at frame 45 of 100 with only
+        // "master flat does not match the light frame's optical
+        // configuration" -- true, unhelpful, and the same sentence whether a
+        // rotator had moved or a reducer had been swapped.
+        let light = FrameSignature {
+            filter: Some("OIII".into()),
+            telescope: Some("C925".into()),
+            focal_length_mm: Some(2350.0),
+            rotation_deg: Some(101.93),
+            ..Default::default()
+        };
+
+        let mut flat = light.clone();
+        flat.rotation_deg = Some(104.24);
+
+        let tolerances = MatchTolerances::default();
+        assert!(!optics_match(&light, &flat, &tolerances));
+        let reason = describe_optics_mismatch(&light, &flat, &tolerances);
+        assert!(reason.contains("rotation"), "{reason}");
+        assert!(reason.contains("101.93"), "{reason}");
+        assert!(reason.contains("104.24"), "{reason}");
+        assert!(reason.contains("2.31 deg apart"), "{reason}");
+
+        // Every disagreement at once, so nobody runs a second time to find
+        // the rest: a rotator that moved and a reducer that was swapped.
+        flat.focal_length_mm = Some(1645.0);
+        let reason = describe_optics_mismatch(&light, &flat, &tolerances);
+        assert!(reason.contains("focal length"), "{reason}");
+        assert!(reason.contains("1645"), "{reason}");
+        assert!(reason.contains("rotation"), "{reason}");
+
+        // An unrecorded reading says so rather than printing an empty value.
+        let mut unknown = light.clone();
+        unknown.rotation_deg = None;
+        let reason = describe_value("rotation", light.rotation_deg, unknown.rotation_deg, "deg");
+        assert!(reason.contains("master did not record one"), "{reason}");
+    }
+
+    #[test]
+    fn a_sensor_refusal_names_every_field_that_differs() {
+        let light = FrameSignature {
+            camera: Some("ZWO ASI2600MM Pro".into()),
+            gain: Some(100),
+            offset: Some(30),
+            ..Default::default()
+        };
+
+        let mut master = light.clone();
+        master.camera = Some("ZWO ASI6200MM Pro".into());
+        master.gain = Some(200);
+
+        assert!(!sensor_matches(&light, &master));
+        let reason = describe_sensor_mismatch(&light, &master);
+        assert!(reason.contains("camera"), "{reason}");
+        assert!(reason.contains("ASI6200MM"), "{reason}");
+        assert!(reason.contains("gain"), "{reason}");
+        assert!(reason.contains("100"), "{reason}");
+        assert!(reason.contains("200"), "{reason}");
+        assert!(
+            !reason.contains("offset"),
+            "an agreeing field is not listed: {reason}"
+        );
     }
 
     #[test]
