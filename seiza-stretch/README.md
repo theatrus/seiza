@@ -29,5 +29,11 @@ full-resolution image. Deterministic models also resolve directly without an
 analysis pass. Future informed automatic modes can select one of these models
 without embedding policy in the transfer implementation.
 
+`SampleDomain` keeps numeric scale separate from those transfer curves. A
+caller can leave already unit-linear samples untouched, robustly map physical
+camera or calibrated values through one linked percentile range, or provide an
+explicit physical range. The resolved mapping is serializable for provenance,
+preserves non-finite coverage masks, and is only applied when requested.
+
 Stretching never happens implicitly. Linear stacking, calibration, and FITS
 writing remain linear unless a caller explicitly resolves and applies a model.

@@ -660,11 +660,15 @@ bool seiza_live_stacker_set_calibration_fits(SeizaLiveStacker *stacker,
  Render a bounded RGBA8 preview directly from the current live mean.
 
  `config_json` accepts the same stretch / optional background / optional
- deconvolution schema as
- [`seiza_rendered_image_open_with_stretch_config`]. `max_dimension` must be
- positive and bounds the linear buffer before background fitting,
- deconvolution, and stretch. The returned image owns its pixels and remains
- valid after the stack changes; free it with [`seiza_rendered_image_free`].
+ deconvolution / optional `sample_domain` schema as
+ [`seiza_rendered_image_open_with_stretch_config`]. Physical-domain mapping
+ is presentation-only and runs after physical background correction and
+ deconvolution, immediately before stretch. When omitted, file-backed
+ calibrate-and-prepare stacks use linked robust physical normalization;
+ prepared-array stacks retain the legacy unit-linear interpretation.
+ `max_dimension` must be positive and bounds the linear buffer before that
+ processing. The returned image owns its pixels and remains valid after the
+ stack changes; free it with [`seiza_rendered_image_free`].
 
  # Safety
  `stacker` must be a live `SeizaLiveStacker` pointer and `config_json` a
@@ -1042,14 +1046,18 @@ SeizaRenderedImage *seiza_rendered_image_open_with_rgb_stretch(const char *path,
  Opens a FITS or XISF image and renders it with parameterized processing described by
  `config_json`. The value may be one serialized `seiza-stretch`
  `StretchConfig` (the original schema), a non-empty array of configs, or an
- object with `stretch`, optional `background`, optional `deconvolution`, and
- optional `interactive_preview` fields. Array stages are applied in order
- using `f32` intermediates and converted to RGBA only after the final stage.
- Background correction and deconvolution, when requested, are applied to
- linear samples in that order before the first stretch stage. Interactive
- preview mode bounds the linear samples to `max_dimension` before processing
- and reuses the source/background-prepared pixels across stretch and
- deconvolution edits; full renders should leave it false.
+ object with `stretch`, optional `background`, optional `deconvolution`,
+ optional `sample_domain`, and optional `interactive_preview` fields. Array
+ stages are applied in order using `f32` intermediates and converted to RGBA
+ only after the final stage. Background correction and deconvolution, when
+ requested, are applied to linear samples in that order. Sample-domain
+ mapping then converts physical values to the unit-linear domain expected by
+ stretch, without changing the source image or scientific outputs. Omitting
+ it retains the legacy unit-linear interpretation for file renders.
+ Interactive preview mode bounds the linear samples to `max_dimension`
+ before processing and reuses the source/background-prepared pixels across
+ stretch, domain, and deconvolution edits; full renders should leave it
+ false. Metadata reports both the requested and resolved sample domain.
 
  # Safety
  `path` and `config_json` must be valid NUL-terminated strings. When non-null,

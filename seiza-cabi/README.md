@@ -28,11 +28,12 @@ exposes the **superset** of what both apps need.
   or XISF image
   through the full GHS/MTF/percentile pipeline. It also accepts a non-empty
   config array for an ordered `f32` stack, or an object with `stretch`, optional
-  `background` correction, optional `deconvolution`, and optional
-  `interactive_preview` mode. Background fitting and subtraction/division run
-  first on linear FITS samples, followed by deconvolution and then the display
-  stretch. Interactive previews bound those samples before expensive processing
-  while committed renders remain full resolution. The two most recent prepared
+  `sample_domain`, optional `background` correction, optional `deconvolution`,
+  and optional `interactive_preview` mode. Background fitting and
+  subtraction/division run first on linear input samples, followed by
+  deconvolution, sample-domain mapping, and then the display stretch.
+  Interactive previews bound those samples before expensive processing while
+  committed renders remain full resolution. The two most recent prepared
   preview buffers are cached by file identity, maximum dimension, and background
   configuration; stretch and deconvolution edits reuse the same corrected linear
   pixels. New processing capabilities remain in their core crates; this shim
@@ -87,7 +88,75 @@ exposes the **superset** of what both apps need.
   `seiza-download`'s `materialize_with`; the shim carries no download logic.
 - **Memory** — `seiza_core_version`, `seiza_string_free`.
 
-Rendered-image metadata includes input and display histograms.
+Rendered-image metadata includes input and display histograms plus the requested
+and resolved sample domains used for that render.
+
+### Render sample domains
+
+`sample_domain` describes the numeric scale presented to the stretch pipeline;
+it is render policy, not frame-to-frame stack normalization. Samples already in
+the zero-to-one working domain use an identity mapping. The examples below show
+the optional field only; it sits beside the required `stretch` field in a
+processed render request.
+
+```json
+{"sample_domain":{"type":"unit-linear"}}
+```
+
+Physical camera, calibrated, or stacked samples can resolve a robust display
+range before stretching:
+
+```json
+{
+  "sample_domain": {
+    "type": "physical-linear",
+    "normalization": {
+      "type": "robust-percentile",
+      "black_percentile": 0.001,
+      "white_percentile": 0.999,
+      "max_analysis_samples": 200000
+    }
+  }
+}
+```
+
+Within `physical-linear`, robust-percentile with those three values is used
+when `normalization` is omitted; omitted robust fields take those values.
+Resolution samples complete pixels and pools their finite values into one
+linked range for mono or RGB, so it does not silently perform a per-channel
+color balance. Non-finite samples are excluded from analysis and remain
+non-finite during affine mapping, preserving live-stack coverage masks. A
+caller can lock a known physical range instead:
+
+```json
+{
+  "sample_domain": {
+    "type": "physical-linear",
+    "normalization": {
+      "type": "explicit-range",
+      "black": 512.0,
+      "white": 16384.0
+    }
+  }
+}
+```
+
+The mapping always runs after optional physical-domain background correction
+and deconvolution and immediately before the first stretch stage. Both the
+requested policy and its resolved mapping (including the black/white range for
+physical samples) are retained in render metadata for provenance or a later
+locked-range request.
+
+Omission is backward-compatible. Ordinary file rendering and a live stack in
+`PreparedOnly` input mode retain the historical `unit-linear` behavior. A live
+stack in `CalibrateAndPrepare` mode defaults to `physical-linear` with robust
+percentiles because its native mean remains in physical sample units. An
+explicit `sample_domain` always overrides that live default.
+
+Sample-domain mapping modifies only the temporary render buffer. Live means,
+variances, SNR measurements, saved contexts, export snapshots, and written
+FITS/XISF samples remain physical linear `f32`; neither the requested nor the
+resolved display range becomes part of scientific stack state.
 
 Use `seiza_rendered_image16_open_with_stretch_config` for a processed FITS
 export, or `seiza_rendered_image16_open` for the default FITS/raster path. The
@@ -227,7 +296,7 @@ independent of the live stacker and may be transferred to another thread; do
 not free it until its write returns.
 
 For frequent display updates, render the live mean through the same stretch,
-background, and deconvolution JSON as file rendering:
+`sample_domain`, background, and deconvolution JSON as file rendering:
 
 ```c
 SeizaRenderedImage *preview = seiza_live_stacker_render_preview(
@@ -237,9 +306,9 @@ SeizaRenderedImage *preview = seiza_live_stacker_render_preview(
 The maximum dimension is required and bounds copied linear samples before any
 expensive processing. The implementation samples the borrowed accumulator
 directly rather than making a full snapshot. Zero-coverage pixels stay masked
-through statistics, background fitting, and deconvolution and are transparent
-in RGBA. The returned image is independent of the stack and uses the ordinary
-`SeizaRenderedImage` accessors/free function.
+through statistics, background fitting, deconvolution, sample-domain mapping,
+and stretching; they are transparent in RGBA. The returned image is independent
+of the stack and uses the ordinary `SeizaRenderedImage` accessors/free function.
 
 Stack options are serialized `seiza-stacking` `StackOptions`. Every nested
 object accepts omitted fields from its defaults. For example, this disables
