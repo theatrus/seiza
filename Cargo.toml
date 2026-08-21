@@ -65,7 +65,9 @@ tokio-util = { version = "0.7.18", features = ["io"] }
 zstd = "0.13.3"
 rayon = "1"
 rustc-hash = { version = "2" }
-wide = "1.5"
+# 1.6 renamed `blend` to `select`; `seiza/src/detect.rs` calls the new name,
+# so an older 1.x would resolve and then fail to compile.
+wide = "1.6"
 multiversion = "0.8"
 quick-xml = "0.41"
 lz4_flex = "0.14"
