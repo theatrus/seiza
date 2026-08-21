@@ -1,8 +1,8 @@
 use crate::{BayerLayout, Error, FitsFrame, FrameSourceRole, LinearImage, Result};
 use rayon::prelude::*;
 use seiza_calibration::{
-    FrameSignature, MatchTolerances, exposure_matches, optics_match, sensor_consistent,
-    sensor_matches, temperature_matches,
+    FrameSignature, MatchTolerances, exposure_matches, optics_consistent, sensor_consistent,
+    temperature_matches,
 };
 use std::path::Path;
 
@@ -398,7 +398,7 @@ impl CalibrationMasters {
 
         if let Some(bias) = &self.bias_signature
             && self.bias.is_some()
-            && !sensor_matches(light, bias)
+            && !sensor_consistent(light, bias)
         {
             kept.bias = None;
             kept.bias_signature = None;
@@ -410,7 +410,7 @@ impl CalibrationMasters {
         if let Some(dark) = &self.dark_signature
             && self.dark_signal.is_some()
         {
-            let reason = if !sensor_matches(light, dark) {
+            let reason = if !sensor_consistent(light, dark) {
                 Some(seiza_calibration::describe_sensor_mismatch(light, dark))
             } else if !temperature_matches(light, dark, tolerances) {
                 Some(seiza_calibration::describe_value(
@@ -440,9 +440,9 @@ impl CalibrationMasters {
         if let Some(flat) = &self.flat_signature
             && self.flat_response.is_some()
         {
-            let reason = if !sensor_matches(light, flat) {
+            let reason = if !sensor_consistent(light, flat) {
                 Some(seiza_calibration::describe_sensor_mismatch(light, flat))
-            } else if !optics_match(light, flat, tolerances) {
+            } else if !optics_consistent(light, flat, tolerances) {
                 Some(seiza_calibration::describe_optics_mismatch(
                     light, flat, tolerances,
                 ))
@@ -460,6 +460,17 @@ impl CalibrationMasters {
     }
 
     /// Validate acquisition metadata against every active master.
+    ///
+    /// The question here is consistency, not candidacy: two RECORDED readings
+    /// must agree, and an unrecorded one proves nothing. Candidate-selection
+    /// semantics — where a candidate missing a reading is passed over,
+    /// because a library usually holds a better-documented alternative — are
+    /// `seiza-calibration`'s business at selection time. By the time a master
+    /// is loaded here it has already been chosen, and there is no
+    /// alternative to prefer; judging its silence as disagreement rejected
+    /// every light against masters written before the writer preserved
+    /// optics metadata, which is how two filters of a real archive stopped
+    /// stacking while the other five worked.
     pub fn validate_light_signature(&self, light: &FrameSignature) -> Result<()> {
         let tolerances = MatchTolerances::default();
         for (kind, active, signature) in [
@@ -483,7 +494,7 @@ impl CalibrationMasters {
                     "master {kind} has no compatibility metadata; reload calibration masters before pushing more lights"
                 )));
             };
-            if !sensor_matches(light, signature) {
+            if !sensor_consistent(light, signature) {
                 return Err(Error::Calibration(format!(
                     "master {kind} does not match the light frame's sensor or readout mode: {}",
                     seiza_calibration::describe_sensor_mismatch(light, signature)
@@ -527,7 +538,7 @@ impl CalibrationMasters {
             }
         }
         if let Some(flat) = &self.flat_signature
-            && !optics_match(light, flat, &tolerances)
+            && !optics_consistent(light, flat, &tolerances)
         {
             return Err(Error::Calibration(format!(
                 "master flat does not match the light frame's optical configuration: {}",
@@ -714,6 +725,47 @@ mod tests {
         calibration.apply(&mut light, Some(10.0), None).unwrap();
         assert!((light.data[0] - 147.0).abs() < 1.0e-4);
         assert!((light.data[2] - 73.5).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn a_master_that_never_recorded_its_optics_still_validates() {
+        // Taken from a live cache: a master flat written on 2026-08-14, before
+        // the writer preserved optics metadata, carries FILTER and the sensor
+        // cards but no TELESCOP and no FOCALLEN. The lights record both. Two
+        // recorded readings must agree; a reading nobody wrote down is not a
+        // disagreement — the old rule read it as one, and every OIII and SII
+        // stack died at frame zero while five other filters worked.
+        let mut calibration = CalibrationMasters::new(
+            None,
+            None,
+            Some(MasterFlat::raw(mono(&[30.0, 30.0, 30.0, 30.0]))),
+        )
+        .unwrap();
+        let mut master = FrameSignature::default();
+        master.camera = Some("ZWO ASI2600MM Pro".into());
+        master.filter = Some("OIII".into());
+        // telescope, focal_length_mm, rotation_deg: never recorded.
+        calibration.flat_signature = Some(master);
+
+        let mut light = FrameSignature::default();
+        light.camera = Some("ZWO ASI2600MM Pro".into());
+        light.filter = Some("OIII".into());
+        light.telescope = Some("C925".into());
+        light.focal_length_mm = Some(2350.0);
+        light.rotation_deg = Some(103.94);
+
+        calibration
+            .validate_light_signature(&light)
+            .expect("an unrecorded reading is not a disagreement");
+        let (kept, dropped) = calibration.compatible_for_light(&light);
+        assert!(kept.has_flat(), "auto mode keeps it too");
+        assert!(dropped.is_empty(), "{dropped:?}");
+
+        // Two recorded readings that disagree still refuse: this is a
+        // loosening of what silence means, not of what a reading means.
+        let mut wrong = calibration.clone();
+        wrong.flat_signature.as_mut().unwrap().filter = Some("SII".into());
+        assert!(wrong.validate_light_signature(&light).is_err());
     }
 
     #[test]
