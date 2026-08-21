@@ -578,16 +578,27 @@ impl LiveStacker {
     /// multi-session stack must call this again before pushing the next
     /// session's frames.
     ///
-    /// The masters are validated against the registration reference
-    /// eagerly, so a mismatched set fails here once instead of rejecting a
-    /// whole session frame by frame. A stack started from prepared pixels
-    /// refuses the call: its frames bypass calibration entirely.
+    /// The masters must fit the stack's geometry — dimensions and Bayer
+    /// layout are checked against the registration reference eagerly, and a
+    /// master missing its compatibility metadata is refused here once.
+    ///
+    /// What is deliberately NOT checked here is the reference frame's own
+    /// acquisition signature. These masters calibrate the frames pushed
+    /// while they are active, not the reference, which is already
+    /// integrated. A multi-session stack swaps masters at each session
+    /// boundary, and a later night's flat legitimately disagrees with the
+    /// reference's rotator angle; judging it against the reference refused
+    /// the swap and killed a hundred-frame stack at frame 45 over a flat
+    /// that matched every frame it would actually touch. Each pushed light
+    /// is validated against the active masters individually, which is the
+    /// check that actually protects the pixels — and a light that fails it
+    /// is rejected alone, never the stack. A stack started from prepared
+    /// pixels refuses the call: its frames bypass calibration entirely.
     pub fn set_calibration(&mut self, calibration: CalibrationMasters) -> Result<()> {
         self.require_fits_input_mode()?;
         calibration.validate_master_set_signatures()?;
         crate::context::validate_calibration(&self.reference, &calibration)
             .map_err(Error::Calibration)?;
-        calibration.validate_light_signature(&self.reference_metadata.signature)?;
         let configuration_fingerprint =
             stack_configuration_fingerprint(&self.options, &calibration, self.input_mode)?;
         self.calibration = calibration;

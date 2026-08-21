@@ -641,6 +641,38 @@ mod tests {
     /// A mismatched master set must fail at the swap, not as a rejection of
     /// every frame in the following session.
     #[test]
+    fn a_session_swap_is_not_judged_against_the_reference_frame() {
+        // The bug this guards against: a hundred-frame stack spanning nights
+        // died at its first session boundary because set_calibration checked
+        // the incoming flat against the REFERENCE light's rotator angle. The
+        // reference is already integrated; a session's masters calibrate only
+        // the frames pushed while they are active, and each of those is
+        // validated individually at push.
+        let (_directory, paths) = frame_set(2);
+        let mut stacker = stacker_from(&paths[0]);
+
+        let mut swapped = constant_bias(100.0);
+        // Give the incoming set a flat whose recorded angle disagrees with
+        // anything the reference could carry. Bias and flat share a sensor
+        // identity: the set must stay internally coherent, that check is not
+        // the one under test.
+        let mut sensor = seiza_calibration::FrameSignature::default();
+        sensor.camera = Some("Test Camera".into());
+        swapped.bias_signature = Some(sensor.clone());
+        swapped.flat_signature = Some({
+            let mut signature = sensor;
+            signature.rotation_deg = Some(104.24);
+            signature
+        });
+        swapped.flat_response =
+            Some(crate::LinearImage::new(192, 160, 1, vec![1.0; 192 * 160]).unwrap());
+
+        stacker
+            .set_calibration(swapped)
+            .expect("a session swap must not be judged against the reference frame");
+    }
+
+    #[test]
     fn set_calibration_rejects_mismatched_masters_eagerly() {
         let (_directory, paths) = frame_set(1);
         let mut stacker = stacker_from(&paths[0]);
