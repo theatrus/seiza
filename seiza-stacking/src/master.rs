@@ -755,7 +755,9 @@ fn rejects_sample(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{StackSnapshot, write_fits_f32, write_processed_image_fits_f32};
+    use crate::{
+        StackSnapshot, write_fits_f32, write_master_fits_f32, write_processed_image_fits_f32,
+    };
     use seiza_fits::WriteHeaderCard;
 
     fn write_image(path: &std::path::Path, values: &[f32]) {
@@ -921,6 +923,105 @@ mod tests {
             master.input_statistics.len(),
             3,
             "per-input statistics cover exactly the frames that combined"
+        );
+    }
+
+    #[test]
+    fn written_flat_master_preserves_matching_metadata_and_reloads_for_its_light() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("flat-001.fits");
+        let second = directory.path().join("flat-002.fits");
+        let light_path = directory.path().join("light.fits");
+        let master_path = directory.path().join("master-flat.fits");
+        let acquisition_cards =
+            |role: &str, exposure: f64, captured: &str| -> Vec<WriteHeaderCard> {
+                vec![
+                    WriteHeaderCard::new("IMAGETYP", HeaderValue::String(role.into())),
+                    WriteHeaderCard::new("CAMERA", HeaderValue::String("ASI2600MM Pro".into())),
+                    WriteHeaderCard::new("TELESCOP", HeaderValue::String("C925".into())),
+                    WriteHeaderCard::new("CCDXBIN", HeaderValue::Integer(1)),
+                    WriteHeaderCard::new("CCDYBIN", HeaderValue::Integer(1)),
+                    WriteHeaderCard::new("GAIN", HeaderValue::Integer(100)),
+                    WriteHeaderCard::new("OFFSET", HeaderValue::Integer(50)),
+                    WriteHeaderCard::new("READMODE", HeaderValue::Integer(2)),
+                    WriteHeaderCard::new("BAYERPAT", HeaderValue::String("RGGB".into())),
+                    WriteHeaderCard::new("XBAYROFF", HeaderValue::Integer(0)),
+                    WriteHeaderCard::new("YBAYROFF", HeaderValue::Integer(0)),
+                    WriteHeaderCard::new("FILTER", HeaderValue::String("R".into())),
+                    WriteHeaderCard::new("FOCALLEN", HeaderValue::Float(2350.0)),
+                    // The normalizer prefers FOCALLEN. The written master
+                    // must not carry this contradictory alias beside it.
+                    WriteHeaderCard::new("FOCAL", HeaderValue::Float(1200.0)),
+                    WriteHeaderCard::new("ROTATOR", HeaderValue::Float(101.99)),
+                    WriteHeaderCard::new("EXPOSURE", HeaderValue::Float(exposure)),
+                    WriteHeaderCard::new("SET-TEMP", HeaderValue::Float(-10.0)),
+                    WriteHeaderCard::new("DATE-AVG", HeaderValue::String(captured.into())),
+                ]
+            };
+        let flat = LinearImage::new(2, 2, 1, vec![80.0, 100.0, 120.0, 100.0]).unwrap();
+        for path in [&first, &second] {
+            write_processed_image_fits_f32(
+                path,
+                &flat,
+                &[],
+                &acquisition_cards("FLAT", 2.0, "2026-08-20T04:00:00Z"),
+            )
+            .unwrap();
+        }
+        let light = LinearImage::new(2, 2, 1, vec![800.0, 1000.0, 1200.0, 1000.0]).unwrap();
+        write_processed_image_fits_f32(
+            &light_path,
+            &light,
+            &[],
+            &acquisition_cards("LIGHT", 60.0, "2026-08-20T05:00:00Z"),
+        )
+        .unwrap();
+
+        let source_signature = FitsFrame::open(&first).unwrap().metadata().signature;
+        let master = build_master_from_fits(
+            &[first, second],
+            MasterFrameKind::Flat,
+            &MasterBuildOptions::default(),
+        )
+        .unwrap();
+        write_master_fits_f32(&master_path, &master).unwrap();
+
+        let written = FitsFrame::open(&master_path).unwrap();
+        assert_eq!(
+            written.metadata().signature,
+            source_signature,
+            "the persisted master must retain every normalized acquisition field"
+        );
+        let focal_cards = written
+            .headers
+            .iter()
+            .filter(|(key, _)| matches!(key.as_str(), "FOCALLEN" | "FOCALLENGTH" | "FOCAL"))
+            .count();
+        assert_eq!(focal_cards, 1, "semantic aliases must not be duplicated");
+        assert_eq!(
+            written
+                .headers
+                .iter()
+                .find(|(key, _)| key == "FOCALLEN")
+                .and_then(|(_, value)| value.as_f64()),
+            Some(2350.0),
+            "alias priority must match metadata normalization"
+        );
+
+        let calibration =
+            CalibrationMasters::from_fits_paths(None, None, Some(&master_path), None).unwrap();
+        let mut light = FitsFrame::open(&light_path).unwrap();
+        calibration.validate_light_frame(&light).unwrap();
+        calibration
+            .apply(&mut light.image, light.exposure_seconds, light.bayer)
+            .unwrap();
+        assert!(
+            light
+                .image
+                .data
+                .iter()
+                .all(|sample| (*sample - 1000.0).abs() < 1.0e-3),
+            "the reloaded master must apply to the originating optical train"
         );
     }
 
