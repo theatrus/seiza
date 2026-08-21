@@ -61,7 +61,7 @@ pub enum FrameRole {
 /// Deliberately *not* `#[non_exhaustive]`, unlike [`FrameSignature`]. A new
 /// tolerance changes what matches, so a consumer being made to look at it when
 /// one is added is the point, not a cost — and it keeps
-/// `MatchTolerances { rotation_deg: 2.0, ..Default::default() }` working,
+/// `MatchTolerances { rotation_deg: 0.5, ..Default::default() }` working,
 /// which is how a config struct wants to be written.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MatchTolerances {
@@ -84,6 +84,13 @@ pub struct MatchTolerances {
     /// this decides what may be averaged together.
     pub master_temperature_c: f64,
     /// Rotator angle between a flat and what it corrects, in degrees.
+    ///
+    /// Wide enough to absorb a rotator re-homing to the same arrangement on
+    /// another night: a real rig re-slewed to nominally identical framing
+    /// with up to about 0.8 degrees of scatter, and a 1 degree gate split
+    /// those nights into separate flat sessions for no optical reason. Two
+    /// degrees still refuses a genuinely different framing, which sits tens
+    /// of degrees away, not fractions of one.
     pub rotation_deg: f64,
     /// Focal length between a flat and what it corrects, in millimetres.
     pub focal_length_mm: f64,
@@ -100,7 +107,7 @@ impl Default for MatchTolerances {
             exposure_fraction: 1.0e-3,
             dark_temperature_c: 3.0,
             master_temperature_c: 1.0,
-            rotation_deg: 1.0,
+            rotation_deg: 2.0,
             focal_length_mm: 1.0,
             flat_session_seconds: 24 * 60 * 60,
         }

@@ -877,8 +877,11 @@ mod tests {
     #[test]
     fn a_flat_from_another_night_is_set_aside_not_fatal() {
         // Drawn from a real library: C925 flats, filter R, focal length
-        // 2350 mm on every night — but the rotator sat at 103.22° on one
-        // night and 101.99° on the next, 1.23° apart against a 1° tolerance.
+        // 2350 mm on every night — but one frame's rotator angle sits well
+        // past the rotation tolerance, on the other side of a real re-frame.
+        // (The night that motivated this was 1.23° of re-homing scatter,
+        // which the widened default now rightly accepts; the mechanism under
+        // test is the same either way.)
         //
         // The build used to compare each frame against the first and refuse
         // the whole master on the first disagreement, so eight good frames
@@ -900,7 +903,7 @@ mod tests {
         let paths = vec![
             flat("flat-0.fits", 101.99),
             flat("flat-1.fits", 101.99),
-            flat("stray.fits", 103.22),
+            flat("stray.fits", 106.80),
             flat("flat-2.fits", 101.99),
         ];
 
