@@ -1446,6 +1446,43 @@ int32_t seiza_calibration_dark_matches(const SeizaFrameSignature *reference,
                                        char **error_out);
 
 /*
+ Detect and measure stars in a mono 16-bit frame with the HocusFocus
+ detector (seiza-stars): wavelet structure removal, kappa-sigma thresholds,
+ hot-pixel filtering, multi-criteria validation, and optional PSF fitting —
+ the measurement detector, distinct from the fast alignment detector the
+ solver uses. `data` holds `width * height` samples, row-major.
+
+ `options_json` may be null for the defaults, or an object with any of:
+ `preset` ("widefield" | "standard" | "longfocal"), `focalLengthMm` +
+ `pixelSizeUm` (classify the pixel scale when no preset is given),
+ `psfType` ("none" | "gaussian" | "moffat4"; default "moffat4"),
+ `structureRemoval` ("filtered" | "atrous"), `detectionBinning`,
+ `keepSaturated`, `noiseReductionRadius`, `sensitivity`. Unknown fields
+ are an error, so a typo cannot silently run the defaults.
+
+ Returns owned JSON, released with [`seiza_string_free`]:
+ `{"schemaVersion":1,"averageHfr":..,"averageFwhm":..,"noiseSigma":..,
+ "backgroundMean":..,"stars":[{"x":..,"y":..,"hfr":..,"fwhm":..,
+ "brightness":..,"background":..,"snr":..,"flux":..,"pixelCount":..,
+ "saturated":..,"eccentricity":?,"theta":?,"rSquared":?}],
+ "cells":[..3x3 region statistics..],"tilt":{..ASTAP corner verdict..}}` —
+ the tilt analysis is folded in because it is derived and cheap, so every
+ consumer reads the same verdict from one call.
+
+ # Safety
+
+ `data` must reference `width * height` readable `uint16_t` samples.
+ `options_json` must be null or a NUL-terminated UTF-8 string. When
+ non-null, `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_stars_detect_luma_u16_json(const uint16_t *data,
+                                       size_t len,
+                                       size_t width,
+                                       size_t height,
+                                       const char *options_json,
+                                       char **error_out);
+
+/*
  Why two frames' sensor readings refuse to match, as a human-readable
  string naming every differing field and both readings — for example
  `gain light=100 master=200`. Never empty on a mismatch; on frames that
