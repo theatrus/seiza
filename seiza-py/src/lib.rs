@@ -9,6 +9,7 @@ mod deconvolution;
 mod imgproc;
 mod satellites;
 mod stacking;
+mod stars;
 mod stretch;
 
 use numpy::{PyReadonlyArray2, PyUntypedArrayMethods};
@@ -743,6 +744,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     deconvolution::register(m)?;
     imgproc::register(m)?;
     stacking::register(m)?;
+    stars::register(m)?;
     calibration::register(m)?;
     stretch::register(m)?;
     m.add("SolveError", m.py().get_type::<SolveError>())?;

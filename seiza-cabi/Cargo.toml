@@ -22,6 +22,7 @@ seiza-deconvolution.workspace = true
 seiza-fits = { workspace = true }
 seiza-xisf = { workspace = true }
 seiza-stacking = { workspace = true }
+seiza-stars = { workspace = true }
 seiza-stretch = { workspace = true }
 image = { workspace = true, features = ["tiff"] }
 serde = { workspace = true }
