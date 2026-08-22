@@ -199,8 +199,7 @@ fn detect_measured_stars(
         params.sensitivity = value;
     }
 
-    let result =
-        py.allow_threads(move || detect_stars_hocus_focus(&data, width, height, &params));
+    let result = py.allow_threads(move || detect_stars_hocus_focus(&data, width, height, &params));
     Ok(PyStarDetectionResult {
         stars: result
             .stars
@@ -234,9 +233,7 @@ fn detect_measured_stars(
 /// result: the 3×3 grid's per-cell statistics and the corner-vs-center
 /// verdict. Stars without a fitted PSF contribute HFR but no direction.
 #[pyfunction]
-fn tilt_analysis(
-    result: &PyStarDetectionResult,
-) -> PyResult<(Vec<PyTiltCell>, PyTiltSummary)> {
+fn tilt_analysis(result: &PyStarDetectionResult) -> PyResult<(Vec<PyTiltCell>, PyTiltSummary)> {
     let stars: Vec<tilt::TiltStar> = result
         .stars
         .iter()
@@ -273,8 +270,12 @@ fn tilt_analysis(
             mean_hfr: summary.mean_hfr,
             tilt_percent: summary.tilt_percent,
             curvature_percent: summary.curvature_percent,
-            worst_corner: summary.worst_corner.map(|corner| corner.as_str().to_string()),
-            best_corner: summary.best_corner.map(|corner| corner.as_str().to_string()),
+            worst_corner: summary
+                .worst_corner
+                .map(|corner| corner.as_str().to_string()),
+            best_corner: summary
+                .best_corner
+                .map(|corner| corner.as_str().to_string()),
         },
     ))
 }
