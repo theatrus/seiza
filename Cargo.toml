@@ -12,6 +12,7 @@ members = [
     "seiza-imgproc",
     "seiza-satellites",
     "seiza-stacking",
+    "seiza-stars",
     "seiza-stats",
     "seiza-stretch",
     "seiza-sources",
@@ -36,6 +37,7 @@ seiza-fits = { path = "seiza-fits", version = "0.2.1" }
 seiza-imgproc = { path = "seiza-imgproc", version = "0.3.2" }
 seiza-satellites = { path = "seiza-satellites", version = "0.7.0" }
 seiza-stacking = { path = "seiza-stacking", version = "0.11.4" }
+seiza-stars = { path = "seiza-stars", version = "0.1.0" }
 seiza-stats = { path = "seiza-stats", version = "0.1.0" }
 seiza-stretch = { path = "seiza-stretch", version = "0.2.1" }
 seiza-sources = { path = "seiza-sources", version = "0.2.1" }
@@ -64,6 +66,7 @@ tokio = { version = "1", features = ["fs", "io-util", "macros", "rt", "time"] }
 tokio-util = { version = "0.7.18", features = ["io"] }
 zstd = "0.13.3"
 rayon = "1"
+nalgebra = { version = "0.35", default-features = false, features = ["std"] }
 rustc-hash = { version = "2" }
 # 1.6 renamed `blend` to `select`; `seiza/src/detect.rs` calls the new name,
 # so an older 1.x would resolve and then fail to compile.

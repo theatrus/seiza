@@ -1,0 +1,19 @@
+[package]
+name = "seiza-stars"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Star detection, PSF fitting, and sensor tilt analysis for astronomical images"
+keywords = ["astronomy", "astrophotography", "star-detection", "psf"]
+categories = ["science", "computer-vision"]
+
+[dependencies]
+seiza-imgproc = { workspace = true, features = ["parallel"] }
+nalgebra = { workspace = true }
+rayon = { workspace = true }
+
+[dev-dependencies]
+image = { workspace = true }

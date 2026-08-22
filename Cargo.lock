@@ -2447,6 +2447,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "seiza-stars"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "nalgebra",
+ "rayon",
+ "seiza-imgproc",
+]
+
+[[package]]
 name = "seiza-stats"
 version = "0.1.0"
 
