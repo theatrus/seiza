@@ -8359,6 +8359,37 @@ mod tests {
     }
 
     #[test]
+    fn star_detection_rejects_invalid_slice_dimensions_before_borrowing() {
+        let mut error = ptr::null_mut();
+        let sample = 0u16;
+        let json =
+            unsafe { seiza_stars_detect_luma_u16_json(&sample, 0, 0, 1, ptr::null(), &mut error) };
+        assert!(json.is_null());
+        assert!(!error.is_null());
+        let message = unsafe { CStr::from_ptr(error) }.to_str().unwrap();
+        assert!(message.contains("must be non-zero"), "{message}");
+        unsafe { seiza_string_free(error) };
+
+        let oversized = isize::MAX as usize / std::mem::size_of::<u16>() + 1;
+        let mut error = ptr::null_mut();
+        let json = unsafe {
+            seiza_stars_detect_luma_u16_json(
+                std::ptr::NonNull::<u16>::dangling().as_ptr(),
+                oversized,
+                oversized,
+                1,
+                ptr::null(),
+                &mut error,
+            )
+        };
+        assert!(json.is_null());
+        assert!(!error.is_null());
+        let message = unsafe { CStr::from_ptr(error) }.to_str().unwrap();
+        assert!(message.contains("larger than a slice"), "{message}");
+        unsafe { seiza_string_free(error) };
+    }
+
+    #[test]
     fn fits_path_detection_is_byte_for_byte_the_buffer_contract() {
         let (width, height) = (160usize, 128usize);
         let field = stacking_star_field(width, height);
@@ -10290,7 +10321,8 @@ pub unsafe extern "C" fn seiza_calibration_dark_matches(
 ///
 /// # Safety
 ///
-/// `data` must reference `width * height` readable `uint16_t` samples.
+/// `data` must reference `width * height` readable `uint16_t` samples; both
+/// dimensions must be non-zero.
 /// `options_json` must be null or a NUL-terminated UTF-8 string. `error_out`
 /// must be null or point to writable storage for one pointer.
 #[unsafe(no_mangle)]
@@ -10310,8 +10342,25 @@ pub unsafe extern "C" fn seiza_stars_detect_luma_u16_json(
         let expected = width
             .checked_mul(height)
             .ok_or_else(|| format!("image dimensions {width}x{height} overflow"))?;
+        if expected == 0 {
+            return Err("image dimensions must be non-zero".into());
+        }
         if len != expected {
             return Err(format!("data length {len} does not match {width}x{height}"));
+        }
+        // `slice::from_raw_parts` limits the byte span, not the element
+        // count, to `isize::MAX`. A real frame cannot approach this, but an
+        // FFI caller controls all three dimensions, so reject it before the
+        // unsafe slice construction instead of relying on an unstated Rust
+        // precondition.
+        if len
+            .checked_mul(std::mem::size_of::<u16>())
+            .is_none_or(|bytes| bytes > isize::MAX as usize)
+        {
+            return Err("image is larger than a slice can describe".into());
+        }
+        if !(data as usize).is_multiple_of(std::mem::align_of::<u16>()) {
+            return Err("data is not aligned for uint16_t samples".into());
         }
         let samples = unsafe { std::slice::from_raw_parts(data, len) };
         let options = unsafe { parse_star_detect_options(options_json) }?;

@@ -1474,7 +1474,8 @@ int32_t seiza_calibration_dark_matches(const SeizaFrameSignature *reference,
 
  # Safety
 
- `data` must reference `width * height` readable `uint16_t` samples.
+ `data` must reference `width * height` readable `uint16_t` samples; both
+ dimensions must be non-zero.
  `options_json` must be null or a NUL-terminated UTF-8 string. `error_out`
  must be null or point to writable storage for one pointer.
  */
