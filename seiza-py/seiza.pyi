@@ -35,6 +35,49 @@ class Star:
         area: int = 1,
     ) -> None: ...
 
+class MeasuredStar:
+    x: float
+    y: float
+    hfr: float
+    fwhm: float
+    brightness: float
+    background: float
+    snr: float
+    flux: float
+    pixel_count: int
+    saturated: bool
+    eccentricity: float | None
+    # Ellipse major-axis orientation in radians over [0, pi).
+    theta: float | None
+    r_squared: float | None
+
+class StarDetectionResult:
+    stars: list[MeasuredStar]
+    average_hfr: float
+    average_fwhm: float
+    noise_sigma: float
+    background_mean: float
+    width: int
+    height: int
+
+class TiltCell:
+    row: int
+    col: int
+    star_count: int
+    median_hfr: float | None
+    median_eccentricity: float | None
+    mean_theta: float | None
+    theta_coherence: float
+
+class TiltSummary:
+    center_hfr: float | None
+    corners: list[tuple[str, float | None]]
+    mean_hfr: float | None
+    tilt_percent: float | None
+    curvature_percent: float | None
+    worst_corner: str | None
+    best_corner: str | None
+
 class StarCatalog:
     @staticmethod
     def open(path: str | Path | None = None) -> StarCatalog: ...
@@ -340,6 +383,22 @@ def detect(
     max_elongation: float = 2.5,
     ignore_border: int = 0,
 ) -> list[Star]: ...
+def detect_measured_stars(
+    image: npt.NDArray[np.uint16],
+    *,
+    preset: str | None = None,
+    focal_length_mm: float | None = None,
+    pixel_size_um: float | None = None,
+    psf_type: str = "moffat4",
+    structure_removal: str | None = None,
+    detection_binning: int | None = None,
+    keep_saturated: bool | None = None,
+    noise_reduction_radius: int | None = None,
+    sensitivity: float | None = None,
+) -> StarDetectionResult: ...
+def tilt_analysis(
+    result: StarDetectionResult,
+) -> tuple[list[TiltCell], TiltSummary]: ...
 def solve(
     stars: Sequence[StarInput],
     catalog: StarCatalog,

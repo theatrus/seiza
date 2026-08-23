@@ -58,6 +58,31 @@ solution = seiza.solve([(x1, y1, f1), (x2, y2, f2), ...], catalog, w, h,
                        ra=..., dec=..., scale_arcsec_px=...)
 ```
 
+## Measure stars and sensor tilt
+
+The measurement detector is separate from the fast alignment detector above.
+It reports HFR, FWHM, SNR, flux, and optional Gaussian/Moffat PSF fits from a
+mono `uint16` frame. The returned coordinates and radii are always in input
+pixels, including when detection binning is enabled:
+
+```python
+measured = seiza.detect_measured_stars(
+    image_u16,
+    focal_length_mm=550.0,
+    pixel_size_um=3.76,
+    psf_type="moffat4",
+)
+cells, tilt = seiza.tilt_analysis(measured)
+print(len(measured.stars), measured.average_hfr, measured.average_fwhm)
+print(tilt.tilt_percent, tilt.curvature_percent, tilt.worst_corner)
+```
+
+The nine cells cover a 3×3 sensor grid. Fitted star `theta` and cell
+`mean_theta` values are ellipse major-axis orientations in radians over
+`[0, π)`; `theta_coherence` describes how consistently stars in that cell
+share the direction. Tilt and curvature need measurements in all four corner
+cells, and curvature also needs the center cell.
+
 ## Blind solve
 
 No position hint, only a plausible scale range. Uses the prebuilt whole-sky
