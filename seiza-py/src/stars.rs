@@ -14,7 +14,8 @@ use seiza_stars::psf_fitting::PSFType;
 use seiza_stars::tilt;
 
 /// One detected star with its measurements. `eccentricity`, `theta`, and
-/// `r_squared` are present when a PSF model was fitted.
+/// `r_squared` are present when a PSF model was fitted. `theta` is the
+/// ellipse major-axis orientation in radians over `[0, π)`.
 #[pyclass(name = "MeasuredStar", module = "seiza", frozen)]
 #[derive(Clone)]
 pub(crate) struct PyMeasuredStar {
@@ -216,7 +217,10 @@ fn detect_measured_stars(
                 pixel_count: star.pixel_count,
                 saturated: star.saturated,
                 eccentricity: star.psf_model.as_ref().map(|psf| psf.eccentricity),
-                theta: star.psf_model.as_ref().map(|psf| psf.theta),
+                theta: star
+                    .psf_model
+                    .as_ref()
+                    .map(seiza_stars::psf_fitting::PSFModel::major_axis_theta),
                 r_squared: star.psf_model.as_ref().map(|psf| psf.r_squared),
             })
             .collect(),

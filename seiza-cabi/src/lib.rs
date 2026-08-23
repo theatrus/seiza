@@ -5901,8 +5901,9 @@ fn active_master_kinds(masters: &seiza_stacking::CalibrationMasters) -> Vec<&'st
     kinds
 }
 
-/// Options for [`seiza_stars_detect_luma_u16_json`]. Everything optional;
-/// unknown fields are an error so a typo cannot silently run the defaults.
+/// Options for [`seiza_stars_detect_luma_u16_json`] and
+/// [`seiza_stars_detect_path_json`]. Everything optional; unknown fields are
+/// an error so a typo cannot silently run the defaults.
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StarDetectOptions {
@@ -5917,7 +5918,26 @@ struct StarDetectOptions {
     sensitivity: Option<f64>,
 }
 
+const STAR_FOCAL_LENGTH_HEADER_KEYS: &[&str] = &["FOCALLEN", "FOCALLENGTH", "FOCAL"];
+const STAR_PIXEL_SIZE_HEADER_KEYS: &[&str] = &["XPIXSZ"];
+
 impl StarDetectOptions {
+    /// Fill only the detector classification inputs the caller omitted.
+    /// An explicit preset is a complete classification choice and therefore
+    /// never consults frame metadata.
+    fn with_frame_headers(mut self, image: &FitsImage) -> Self {
+        if self.preset.is_some() {
+            return self;
+        }
+        if self.focal_length_mm.is_none() {
+            self.focal_length_mm = first_positive_header(image, STAR_FOCAL_LENGTH_HEADER_KEYS);
+        }
+        if self.pixel_size_um.is_none() {
+            self.pixel_size_um = first_positive_header(image, STAR_PIXEL_SIZE_HEADER_KEYS);
+        }
+        self
+    }
+
     fn into_params(
         self,
     ) -> Result<seiza_stars::hocus_focus_star_detection::HocusFocusParams, String> {
@@ -6030,6 +6050,9 @@ struct TiltSummaryJson {
 #[serde(rename_all = "camelCase")]
 struct StarDetectResponse {
     schema_version: u32,
+    width: usize,
+    height: usize,
+    major_axis_orientations_normalized: bool,
     average_hfr: f64,
     average_fwhm: f64,
     noise_sigma: f64,
@@ -6037,6 +6060,133 @@ struct StarDetectResponse {
     stars: Vec<DetectedStarJson>,
     cells: Vec<TiltCellJson>,
     tilt: TiltSummaryJson,
+}
+
+fn first_positive_header(image: &FitsImage, keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|key| {
+        image
+            .headers
+            .iter()
+            .filter(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
+            .filter_map(|(_, value)| value.as_f64())
+            .find(|value| value.is_finite() && *value > 0.0)
+    })
+}
+
+unsafe fn parse_star_detect_options(
+    options_json: *const c_char,
+) -> Result<StarDetectOptions, String> {
+    if options_json.is_null() {
+        return Ok(StarDetectOptions::default());
+    }
+    let text = unsafe { CStr::from_ptr(options_json) }
+        .to_str()
+        .map_err(|_| "options_json is not valid UTF-8".to_string())?;
+    serde_json::from_str(text).map_err(|error| error.to_string())
+}
+
+/// Linear 16-bit luminance for measurement. Mono u16 stays borrowed; planar
+/// RGB is collapsed to luminance, and a raw Bayer mosaic is debayered before
+/// its luminance is measured.
+fn astronomy_luma_u16(image: &FitsImage) -> Cow<'_, [u16]> {
+    match image.debayer() {
+        Some(rgb) => Cow::Owned(rgb.to_luma_u16()),
+        None => image.to_u16(),
+    }
+}
+
+fn detect_stars_response(
+    samples: &[u16],
+    width: usize,
+    height: usize,
+    options: StarDetectOptions,
+) -> Result<StarDetectResponse, String> {
+    let expected = width
+        .checked_mul(height)
+        .ok_or_else(|| format!("image dimensions {width}x{height} overflow"))?;
+    if samples.len() != expected {
+        return Err(format!(
+            "data length {} does not match {width}x{height}",
+            samples.len()
+        ));
+    }
+    let params = options.into_params()?;
+    let result = seiza_stars::hocus_focus_star_detection::detect_stars_hocus_focus(
+        samples, width, height, &params,
+    );
+    let stars: Vec<DetectedStarJson> = result
+        .stars
+        .iter()
+        .map(|star| DetectedStarJson {
+            x: star.position.0,
+            y: star.position.1,
+            hfr: star.hfr,
+            fwhm: star.fwhm,
+            brightness: star.brightness,
+            background: star.background,
+            snr: star.snr,
+            flux: star.flux,
+            pixel_count: star.pixel_count,
+            saturated: star.saturated,
+            eccentricity: star.psf_model.as_ref().map(|psf| psf.eccentricity),
+            theta: star
+                .psf_model
+                .as_ref()
+                .map(seiza_stars::psf_fitting::PSFModel::major_axis_theta),
+            r_squared: star.psf_model.as_ref().map(|psf| psf.r_squared),
+        })
+        .collect();
+    let tilt_stars: Vec<seiza_stars::tilt::TiltStar> = stars
+        .iter()
+        .map(|star| seiza_stars::tilt::TiltStar {
+            x: star.x,
+            y: star.y,
+            hfr: star.hfr,
+            eccentricity: star.eccentricity.unwrap_or(0.0),
+            theta: star.theta,
+        })
+        .collect();
+    let cells = seiza_stars::tilt::analyze_cells(&tilt_stars, width, height);
+    let summary = seiza_stars::tilt::tilt_summary(&cells);
+    Ok(StarDetectResponse {
+        schema_version: 1,
+        width,
+        height,
+        major_axis_orientations_normalized: true,
+        average_hfr: result.average_hfr,
+        average_fwhm: result.average_fwhm,
+        noise_sigma: result.noise_sigma,
+        background_mean: result.background_mean,
+        stars,
+        cells: cells
+            .iter()
+            .map(|cell| TiltCellJson {
+                row: cell.row,
+                col: cell.col,
+                star_count: cell.star_count,
+                median_hfr: cell.median_hfr,
+                median_eccentricity: cell.median_eccentricity,
+                mean_theta: cell.mean_theta,
+                theta_coherence: cell.theta_coherence,
+            })
+            .collect(),
+        tilt: TiltSummaryJson {
+            center_hfr: summary.center_hfr,
+            corners: summary
+                .corners
+                .iter()
+                .map(|corner| TiltCornerJson {
+                    corner: corner.corner.as_str(),
+                    hfr: corner.hfr,
+                })
+                .collect(),
+            mean_hfr: summary.mean_hfr,
+            tilt_percent: summary.tilt_percent,
+            curvature_percent: summary.curvature_percent,
+            worst_corner: summary.worst_corner.map(seiza_stars::tilt::Corner::as_str),
+            best_corner: summary.best_corner.map(seiza_stars::tilt::Corner::as_str),
+        },
+    })
 }
 
 fn owned_json(value: &impl Serialize) -> Result<*mut c_char, String> {
@@ -6265,6 +6415,95 @@ mod tests {
         }
         bytes.resize(5760, 0);
         bytes
+    }
+
+    fn synthetic_u16_fits(
+        width: usize,
+        height: usize,
+        samples: &[u16],
+        extra_headers: &[(&str, &str)],
+    ) -> Vec<u8> {
+        assert_eq!(samples.len(), width * height);
+        let mut bytes = Vec::new();
+        for (keyword, value) in [
+            ("SIMPLE", "T".to_string()),
+            ("BITPIX", "16".to_string()),
+            ("NAXIS", "2".to_string()),
+            ("NAXIS1", width.to_string()),
+            ("NAXIS2", height.to_string()),
+            ("BZERO", "32768".to_string()),
+        ] {
+            bytes.extend_from_slice(&card(&format!("{keyword:<8}= {value:>20}")));
+        }
+        for (keyword, value) in extra_headers {
+            bytes.extend_from_slice(&card(&format!("{keyword:<8}= {value:>20}")));
+        }
+        bytes.extend_from_slice(&card("END"));
+        bytes.resize(bytes.len().next_multiple_of(2880), b' ');
+        for value in samples {
+            bytes.extend_from_slice(&(*value ^ 0x8000).to_be_bytes());
+        }
+        bytes.resize(bytes.len().next_multiple_of(2880), 0);
+        bytes
+    }
+
+    fn call_star_buffer(
+        samples: &[u16],
+        width: usize,
+        height: usize,
+        options: Option<&str>,
+    ) -> Result<Value, String> {
+        let options = options.map(|text| CString::new(text).unwrap());
+        let mut error = ptr::null_mut();
+        let json = unsafe {
+            seiza_stars_detect_luma_u16_json(
+                samples.as_ptr(),
+                samples.len(),
+                width,
+                height,
+                options.as_ref().map_or(ptr::null(), |text| text.as_ptr()),
+                &mut error,
+            )
+        };
+        if json.is_null() {
+            assert!(!error.is_null());
+            let message = unsafe { CStr::from_ptr(error) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { seiza_string_free(error) };
+            return Err(message);
+        }
+        assert!(error.is_null());
+        let parsed = serde_json::from_str(unsafe { CStr::from_ptr(json) }.to_str().unwrap())
+            .map_err(|error| error.to_string());
+        unsafe { seiza_string_free(json) };
+        parsed
+    }
+
+    fn call_star_path(path: &Path, options: Option<&str>) -> Result<Value, String> {
+        let path = CString::new(path.to_str().unwrap()).unwrap();
+        let options = options.map(|text| CString::new(text).unwrap());
+        let mut error = ptr::null_mut();
+        let json = unsafe {
+            seiza_stars_detect_path_json(
+                path.as_ptr(),
+                options.as_ref().map_or(ptr::null(), |text| text.as_ptr()),
+                &mut error,
+            )
+        };
+        if json.is_null() {
+            assert!(!error.is_null());
+            let message = unsafe { CStr::from_ptr(error) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { seiza_string_free(error) };
+            return Err(message);
+        }
+        assert!(error.is_null());
+        let parsed = serde_json::from_str(unsafe { CStr::from_ptr(json) }.to_str().unwrap())
+            .map_err(|error| error.to_string());
+        unsafe { seiza_string_free(json) };
+        parsed
     }
 
     fn background_plane(width: usize, height: usize) -> Vec<f32> {
@@ -8078,6 +8317,9 @@ mod tests {
             serde_json::from_str(unsafe { CStr::from_ptr(json) }.to_str().unwrap()).unwrap();
         unsafe { seiza_string_free(json) };
         assert_eq!(parsed["schemaVersion"], 1);
+        assert_eq!(parsed["width"], width);
+        assert_eq!(parsed["height"], height);
+        assert_eq!(parsed["majorAxisOrientationsNormalized"], true);
         assert!(
             !parsed["stars"].as_array().unwrap().is_empty(),
             "no stars found"
@@ -8087,6 +8329,13 @@ mod tests {
         assert!(parsed["tilt"].is_object());
         let star = &parsed["stars"][0];
         assert!(star["eccentricity"].is_number(), "PSF was fitted");
+        let theta = star["theta"].as_f64().expect("PSF orientation");
+        assert!((0.0..std::f64::consts::PI).contains(&theta), "{theta}");
+        for cell in parsed["cells"].as_array().unwrap() {
+            if let Some(theta) = cell["meanTheta"].as_f64() {
+                assert!((0.0..std::f64::consts::PI).contains(&theta), "{theta}");
+            }
+        }
 
         // A typo in the options is an error, never silently the defaults.
         let typo = CString::new(r#"{"psftype":"gaussian"}"#).unwrap();
@@ -8110,6 +8359,191 @@ mod tests {
                 .contains("unknown field"),
         );
         unsafe { seiza_string_free(error) };
+    }
+
+    #[test]
+    fn star_detection_rejects_invalid_slice_dimensions_before_borrowing() {
+        let mut error = ptr::null_mut();
+        let sample = 0u16;
+        let json =
+            unsafe { seiza_stars_detect_luma_u16_json(&sample, 0, 0, 1, ptr::null(), &mut error) };
+        assert!(json.is_null());
+        assert!(!error.is_null());
+        let message = unsafe { CStr::from_ptr(error) }.to_str().unwrap();
+        assert!(message.contains("must be non-zero"), "{message}");
+        unsafe { seiza_string_free(error) };
+
+        let oversized = isize::MAX as usize / std::mem::size_of::<u16>() + 1;
+        let mut error = ptr::null_mut();
+        let json = unsafe {
+            seiza_stars_detect_luma_u16_json(
+                std::ptr::NonNull::<u16>::dangling().as_ptr(),
+                oversized,
+                oversized,
+                1,
+                ptr::null(),
+                &mut error,
+            )
+        };
+        assert!(json.is_null());
+        assert!(!error.is_null());
+        let message = unsafe { CStr::from_ptr(error) }.to_str().unwrap();
+        assert!(message.contains("larger than a slice"), "{message}");
+        unsafe { seiza_string_free(error) };
+    }
+
+    #[test]
+    fn fits_path_detection_is_byte_for_byte_the_buffer_contract() {
+        let (width, height) = (160usize, 128usize);
+        let field = stacking_star_field(width, height);
+        let samples: Vec<u16> = field.iter().map(|value| *value as u16).collect();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("measured-field.FiTs");
+        std::fs::write(
+            &path,
+            synthetic_u16_fits(
+                width,
+                height,
+                &samples,
+                &[("FOCALLEN", "2000.0"), ("XPIXSZ", "3.76")],
+            ),
+        )
+        .unwrap();
+        let options = Some(r#"{"psfType":"gaussian","preset":"standard"}"#);
+
+        let direct = call_star_buffer(&samples, width, height, options).unwrap();
+        let from_path = call_star_path(&path, options).unwrap();
+
+        assert_eq!(from_path, direct);
+        assert_eq!(from_path["width"], width);
+        assert_eq!(from_path["height"], height);
+        assert_eq!(from_path["majorAxisOrientationsNormalized"], true);
+    }
+
+    #[test]
+    fn xisf_path_detection_uses_the_astronomy_loader_and_refuses_rasters() {
+        let (width, height) = (160usize, 128usize);
+        let field = stacking_star_field(width, height);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("measured-field.xisf");
+        seiza_xisf::write_f32_image(
+            &path,
+            width,
+            height,
+            seiza_fits::F32ImageData::Mono(&field),
+            &[
+                seiza_fits::WriteHeaderCard::new("FOCALLEN", HeaderValue::Float(2000.0)),
+                seiza_fits::WriteHeaderCard::new("XPIXSZ", HeaderValue::Float(3.76)),
+            ],
+        )
+        .unwrap();
+
+        let result = call_star_path(&path, Some(r#"{"psfType":"none"}"#)).unwrap();
+        assert_eq!(result["schemaVersion"], 1);
+        assert_eq!(result["width"], width);
+        assert_eq!(result["height"], height);
+        assert_eq!(result["cells"].as_array().unwrap().len(), 9);
+
+        let bad_options = call_star_path(&path, Some(r#"{"psftype":"none"}"#)).unwrap_err();
+        assert!(bad_options.contains("unknown field"), "{bad_options}");
+        let missing = directory.path().join("missing.fits");
+        let bad_options = call_star_path(&missing, Some(r#"{"psftype":"none"}"#)).unwrap_err();
+        assert!(bad_options.contains("unknown field"), "{bad_options}");
+
+        let raster = directory.path().join("ordinary.png");
+        std::fs::write(&raster, b"not actually a raster").unwrap();
+        let message = call_star_path(&raster, None).unwrap_err();
+        assert!(message.contains("not a FITS or XISF path"), "{message}");
+    }
+
+    #[test]
+    fn path_detection_headers_only_fill_options_the_caller_omitted() {
+        use seiza_stars::hocus_focus_star_detection::StructureRemovalMethod;
+
+        let image = FitsImage {
+            width: 2,
+            height: 2,
+            planes: 1,
+            pixels: seiza_fits::Pixels::U16(vec![1, 2, 3, 4]),
+            headers: vec![
+                ("FOCALLEN".into(), HeaderValue::Float(-1.0)),
+                ("focallength".into(), HeaderValue::Float(2000.0)),
+                ("xpixsz".into(), HeaderValue::Float(3.76)),
+            ],
+        };
+
+        // The usable aliases are case-insensitive, as FITS-derived XISF
+        // metadata is not required to preserve FITS keyword casing.
+        let from_headers = StarDetectOptions::default()
+            .with_frame_headers(&image)
+            .into_params()
+            .unwrap();
+        assert_eq!(from_headers.structure_layers, 5);
+        assert_eq!(from_headers.noise_reduction_radius, 0);
+
+        // Caller pixel size wins while the missing focal length still comes
+        // from the frame, yielding the wide-field class.
+        let caller_pixel = StarDetectOptions {
+            pixel_size_um: Some(12.0),
+            ..Default::default()
+        }
+        .with_frame_headers(&image)
+        .into_params()
+        .unwrap();
+        assert_eq!(caller_pixel.structure_layers, 3);
+
+        // Caller focal length also wins independently while pixel size comes
+        // from the frame.
+        let caller_focal = StarDetectOptions {
+            focal_length_mm: Some(500.0),
+            ..Default::default()
+        }
+        .with_frame_headers(&image)
+        .into_params()
+        .unwrap();
+        assert_eq!(caller_focal.structure_layers, 3);
+
+        // An explicit preset is complete and all explicit fine tuning still
+        // lands after it.
+        let explicit = StarDetectOptions {
+            preset: Some("standard".into()),
+            focal_length_mm: Some(50.0),
+            pixel_size_um: Some(50.0),
+            structure_removal: Some("atrous".into()),
+            detection_binning: Some(3),
+            sensitivity: Some(7.5),
+            ..Default::default()
+        }
+        .with_frame_headers(&image)
+        .into_params()
+        .unwrap();
+        assert_eq!(explicit.structure_layers, 4);
+        assert_eq!(explicit.structure_removal, StructureRemovalMethod::Atrous);
+        assert_eq!(explicit.detection_binning, 3);
+        assert_eq!(explicit.sensitivity, 7.5);
+
+        let luma = astronomy_luma_u16(&image);
+        assert!(matches!(luma, Cow::Borrowed(_)), "mono u16 should not copy");
+        assert_eq!(luma.as_ref(), [1, 2, 3, 4]);
+
+        let planar_rgb = FitsImage {
+            width: 2,
+            height: 1,
+            planes: 3,
+            pixels: seiza_fits::Pixels::U16(vec![10, 40, 20, 50, 30, 60]),
+            headers: vec![],
+        };
+        assert_eq!(astronomy_luma_u16(&planar_rgb).as_ref(), [20, 50]);
+
+        let bayer = FitsImage {
+            width: 2,
+            height: 2,
+            planes: 1,
+            pixels: seiza_fits::Pixels::U16(vec![10_000, 20_000, 30_000, 40_000]),
+            headers: vec![("BAYERPAT".into(), HeaderValue::String("RGGB".into()))],
+        };
+        let expected = bayer.debayer().unwrap().to_luma_u16();
+        assert_eq!(astronomy_luma_u16(&bayer).as_ref(), expected);
     }
 
     #[test]
@@ -9881,19 +10315,23 @@ pub unsafe extern "C" fn seiza_calibration_dark_matches(
 /// are an error, so a typo cannot silently run the defaults.
 ///
 /// Returns owned JSON, released with [`seiza_string_free`]:
-/// `{"schemaVersion":1,"averageHfr":..,"averageFwhm":..,"noiseSigma":..,
-/// "backgroundMean":..,"stars":[{"x":..,"y":..,"hfr":..,"fwhm":..,
-/// "brightness":..,"background":..,"snr":..,"flux":..,"pixelCount":..,
-/// "saturated":..,"eccentricity":?,"theta":?,"rSquared":?}],
-/// "cells":[..3x3 region statistics..],"tilt":{..ASTAP corner verdict..}}` —
-/// the tilt analysis is folded in because it is derived and cheap, so every
-/// consumer reads the same verdict from one call.
+/// `{"schemaVersion":1,"width":..,"height":..,
+/// "majorAxisOrientationsNormalized":true,"averageHfr":..,
+/// "averageFwhm":..,"noiseSigma":..,"backgroundMean":..,
+/// "stars":[{"x":..,"y":..,"hfr":..,"fwhm":..,"brightness":..,
+/// "background":..,"snr":..,"flux":..,"pixelCount":..,"saturated":..,
+/// "eccentricity":?,"theta":?,"rSquared":?}],"cells":[..3x3 region
+/// statistics..],"tilt":{..ASTAP corner verdict..}}`. Fitted `theta` and cell
+/// `meanTheta` are normalized ellipse major-axis orientations in radians over
+/// `[0, π)`. The tilt analysis is folded in because it is derived and cheap,
+/// so every consumer reads the same verdict from one call.
 ///
 /// # Safety
 ///
-/// `data` must reference `width * height` readable `uint16_t` samples.
-/// `options_json` must be null or a NUL-terminated UTF-8 string. When
-/// non-null, `error_out` must point to writable storage for one pointer.
+/// `data` must reference `width * height` readable `uint16_t` samples; both
+/// dimensions must be non-zero.
+/// `options_json` must be null or a NUL-terminated UTF-8 string. `error_out`
+/// must be null or point to writable storage for one pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn seiza_stars_detect_luma_u16_json(
     data: *const u16,
@@ -9908,89 +10346,78 @@ pub unsafe extern "C" fn seiza_stars_detect_luma_u16_json(
         if data.is_null() {
             return Err("data is required".into());
         }
-        if len != width * height {
+        let expected = width
+            .checked_mul(height)
+            .ok_or_else(|| format!("image dimensions {width}x{height} overflow"))?;
+        if expected == 0 {
+            return Err("image dimensions must be non-zero".into());
+        }
+        if len != expected {
             return Err(format!("data length {len} does not match {width}x{height}"));
         }
+        // `slice::from_raw_parts` limits the byte span, not the element
+        // count, to `isize::MAX`. A real frame cannot approach this, but an
+        // FFI caller controls all three dimensions, so reject it before the
+        // unsafe slice construction instead of relying on an unstated Rust
+        // precondition.
+        if len
+            .checked_mul(std::mem::size_of::<u16>())
+            .is_none_or(|bytes| bytes > isize::MAX as usize)
+        {
+            return Err("image is larger than a slice can describe".into());
+        }
+        if !(data as usize).is_multiple_of(std::mem::align_of::<u16>()) {
+            return Err("data is not aligned for uint16_t samples".into());
+        }
         let samples = unsafe { std::slice::from_raw_parts(data, len) };
-        let options: StarDetectOptions = if options_json.is_null() {
-            StarDetectOptions::default()
-        } else {
-            let text = unsafe { CStr::from_ptr(options_json) }
-                .to_str()
-                .map_err(|_| "options_json is not valid UTF-8".to_string())?;
-            serde_json::from_str(text).map_err(|error| error.to_string())?
-        };
-        let params = options.into_params()?;
-        let result = seiza_stars::hocus_focus_star_detection::detect_stars_hocus_focus(
-            samples, width, height, &params,
-        );
-        let stars: Vec<DetectedStarJson> = result
-            .stars
-            .iter()
-            .map(|star| DetectedStarJson {
-                x: star.position.0,
-                y: star.position.1,
-                hfr: star.hfr,
-                fwhm: star.fwhm,
-                brightness: star.brightness,
-                background: star.background,
-                snr: star.snr,
-                flux: star.flux,
-                pixel_count: star.pixel_count,
-                saturated: star.saturated,
-                eccentricity: star.psf_model.as_ref().map(|psf| psf.eccentricity),
-                theta: star.psf_model.as_ref().map(|psf| psf.theta),
-                r_squared: star.psf_model.as_ref().map(|psf| psf.r_squared),
-            })
-            .collect();
-        let tilt_stars: Vec<seiza_stars::tilt::TiltStar> = stars
-            .iter()
-            .map(|star| seiza_stars::tilt::TiltStar {
-                x: star.x,
-                y: star.y,
-                hfr: star.hfr,
-                eccentricity: star.eccentricity.unwrap_or(0.0),
-                theta: star.theta,
-            })
-            .collect();
-        let cells = seiza_stars::tilt::analyze_cells(&tilt_stars, width, height);
-        let summary = seiza_stars::tilt::tilt_summary(&cells);
-        owned_json(&StarDetectResponse {
-            schema_version: 1,
-            average_hfr: result.average_hfr,
-            average_fwhm: result.average_fwhm,
-            noise_sigma: result.noise_sigma,
-            background_mean: result.background_mean,
-            stars,
-            cells: cells
-                .iter()
-                .map(|cell| TiltCellJson {
-                    row: cell.row,
-                    col: cell.col,
-                    star_count: cell.star_count,
-                    median_hfr: cell.median_hfr,
-                    median_eccentricity: cell.median_eccentricity,
-                    mean_theta: cell.mean_theta,
-                    theta_coherence: cell.theta_coherence,
-                })
-                .collect(),
-            tilt: TiltSummaryJson {
-                center_hfr: summary.center_hfr,
-                corners: summary
-                    .corners
-                    .iter()
-                    .map(|corner| TiltCornerJson {
-                        corner: corner.corner.as_str(),
-                        hfr: corner.hfr,
-                    })
-                    .collect(),
-                mean_hfr: summary.mean_hfr,
-                tilt_percent: summary.tilt_percent,
-                curvature_percent: summary.curvature_percent,
-                worst_corner: summary.worst_corner.map(seiza_stars::tilt::Corner::as_str),
-                best_corner: summary.best_corner.map(seiza_stars::tilt::Corner::as_str),
-            },
-        })
+        let options = unsafe { parse_star_detect_options(options_json) }?;
+        owned_json(&detect_stars_response(samples, width, height, options)?)
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Open a FITS or XISF image and run the same measurement detector and tilt
+/// analysis as [`seiza_stars_detect_luma_u16_json`] on its linear 16-bit
+/// luminance. Mono u16 is measured without a display-render copy; planar RGB
+/// is collapsed to luminance, raw Bayer data is debayered to luminance, and
+/// other numeric sample types use the astronomy loader's linear u16 mapping.
+/// Raster image formats are deliberately refused.
+///
+/// `options_json` has the same shape as the buffer entry point. When no
+/// `preset` is given, an omitted `focalLengthMm` is read from `FOCALLEN`,
+/// `FOCALLENGTH`, or `FOCAL`, and an omitted `pixelSizeUm` is read from
+/// `XPIXSZ`; caller-provided values win independently. An explicit `preset`
+/// is the complete classification choice and does not consult those headers.
+/// The returned schema-1 JSON, including `width` and `height`, has the same
+/// shape as the buffer entry point and is byte-for-byte identical for the
+/// same samples and resolved options.
+///
+/// # Safety
+///
+/// `path` must reference a NUL-terminated UTF-8 FITS or XISF path.
+/// `options_json` must be null or a NUL-terminated UTF-8 string. `error_out`
+/// must be null or point to writable storage for one pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_stars_detect_path_json(
+    path: *const c_char,
+    options_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let path = required_path(path, "image path")?;
+        // Refuse caller mistakes before opening what may be a multi-hundred
+        // megabyte astronomy frame.
+        let options = unsafe { parse_star_detect_options(options_json) }?;
+        let (image, _) = open_astronomy_image(&path)?;
+        let options = options.with_frame_headers(&image);
+        let samples = astronomy_luma_u16(&image);
+        owned_json(&detect_stars_response(
+            &samples,
+            image.width,
+            image.height,
+            options,
+        )?)
     })
     .unwrap_or(ptr::null_mut())
 }

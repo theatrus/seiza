@@ -45,7 +45,8 @@ pub struct PSFModel {
     pub sigma_x: f64,
     /// Sigma in Y direction
     pub sigma_y: f64,
-    /// Rotation angle in radians
+    /// Rotation of the fitted model's X axis in radians. Use
+    /// [`Self::major_axis_theta`] for an elongation direction.
     pub theta: f64,
     /// R-squared goodness of fit
     pub r_squared: f64,
@@ -58,6 +59,22 @@ pub struct PSFModel {
 }
 
 impl PSFModel {
+    /// Orientation of the fitted ellipse's major axis in radians over
+    /// `[0, π)`.
+    ///
+    /// [`Self::theta`] rotates the model's X axis. The major axis is instead
+    /// the fitted X axis when `sigma_x >= sigma_y`, and the perpendicular Y
+    /// axis otherwise. Consumers drawing elongation vectors or combining
+    /// axial directions should use this normalized value.
+    pub fn major_axis_theta(&self) -> f64 {
+        let theta = if self.sigma_x >= self.sigma_y {
+            self.theta
+        } else {
+            self.theta + PI / 2.0
+        };
+        theta.rem_euclid(PI)
+    }
+
     /// Calculate FWHM from sigma values based on PSF type
     pub fn calculate_fwhm(&self) -> f64 {
         let avg_sigma = (self.sigma_x + self.sigma_y) / 2.0;
@@ -651,5 +668,46 @@ impl PSFFitter {
         }
 
         Some((observed, fitted, residuals))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn model(sigma_x: f64, sigma_y: f64, theta: f64) -> PSFModel {
+        PSFModel {
+            psf_type: PSFType::Gaussian,
+            amplitude: 1.0,
+            background: 0.0,
+            x0: 0.0,
+            y0: 0.0,
+            sigma_x,
+            sigma_y,
+            theta,
+            r_squared: 1.0,
+            rmse: 0.0,
+            fwhm: 1.0,
+            eccentricity: 0.5,
+        }
+    }
+
+    #[test]
+    fn major_axis_orientation_uses_the_wider_fitted_axis() {
+        let x_major = model(3.0, 1.0, 0.2);
+        assert!((x_major.major_axis_theta() - 0.2).abs() < 1e-12);
+
+        let y_major = model(1.0, 3.0, 0.2);
+        assert!((y_major.major_axis_theta() - (0.2 + PI / 2.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn major_axis_orientation_is_normalized_as_an_axial_direction() {
+        let wrapped_positive = model(1.0, 3.0, 3.0 * PI / 4.0);
+        assert!((wrapped_positive.major_axis_theta() - PI / 4.0).abs() < 1e-12);
+
+        let wrapped_negative = model(3.0, 1.0, -PI / 4.0);
+        assert!((wrapped_negative.major_axis_theta() - 3.0 * PI / 4.0).abs() < 1e-12);
+        assert!((0.0..PI).contains(&wrapped_negative.major_axis_theta()));
     }
 }
