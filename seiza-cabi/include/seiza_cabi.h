@@ -1457,11 +1457,15 @@ int32_t seiza_calibration_dark_matches(const SeizaFrameSignature *reference,
  `pixelSizeUm` (classify the pixel scale when no preset is given),
  `psfType` ("none" | "gaussian" | "moffat4"; default "moffat4"),
  `structureRemoval` ("filtered" | "atrous"), `detectionBinning`,
- `keepSaturated`, `noiseReductionRadius`, `sensitivity`, and optional
- `triangleAngleDegrees`. Unknown fields are an error, so a typo cannot
- silently run the defaults. A triangle angle may be any finite degree
- value; the response normalizes it over `[0, 360)`, with zero pointing to
- the top of the image and positive angles turning clockwise.
+ `keepSaturated`, `noiseReductionRadius`, `sensitivity`, optional
+ `triangleAngleDegrees`, and optional `targetStarCount`. Unknown fields
+ are an error, so a typo cannot silently run the defaults. A triangle
+ angle may be any finite degree value; the response normalizes it over
+ `[0, 360)`, with zero pointing to the top of the image and positive
+ angles turning clockwise. A positive `targetStarCount` retries detection
+ with progressively more permissive settings (a relaxed SNR gate, then
+ native-resolution unblurred detection) until at least that many stars
+ are measured, returning the best pass otherwise.
 
  Returns owned JSON, released with [`seiza_string_free`]:
  `{"schemaVersion":1,"width":..,"height":..,

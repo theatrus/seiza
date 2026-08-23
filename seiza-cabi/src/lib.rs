@@ -5919,6 +5919,11 @@ struct StarDetectOptions {
     /// Optional first adjustment-screw axis for triangle tilt analysis. Any
     /// finite degree value is accepted and normalized in the response.
     triangle_angle_degrees: Option<f64>,
+    /// When present and positive, detection retries with progressively more
+    /// permissive settings until it measures at least this many stars
+    /// (ASTAP-style), returning the best pass otherwise. Absent or zero runs
+    /// the single configured pass exactly as before.
+    target_star_count: Option<usize>,
 }
 
 const STAR_FOCAL_LENGTH_HEADER_KEYS: &[&str] = &["FOCALLEN", "FOCALLENGTH", "FOCAL"];
@@ -6148,10 +6153,18 @@ fn detect_stars_response(
         ));
     }
     let triangle_angle_degrees = options.triangle_angle_degrees;
+    let target_star_count = options.target_star_count;
     let params = options.into_params()?;
-    let result = seiza_stars::hocus_focus_star_detection::detect_stars_hocus_focus(
-        samples, width, height, &params,
-    );
+    let result = match target_star_count {
+        Some(target) if target > 0 => {
+            seiza_stars::hocus_focus_star_detection::detect_stars_hocus_focus_adaptive(
+                samples, width, height, &params, target,
+            )
+        }
+        _ => seiza_stars::hocus_focus_star_detection::detect_stars_hocus_focus(
+            samples, width, height, &params,
+        ),
+    };
     let stars: Vec<DetectedStarJson> = result
         .stars
         .iter()
@@ -8498,6 +8511,64 @@ mod tests {
     }
 
     #[test]
+    fn star_detection_target_star_count_retries_toward_the_target() {
+        // A grid of small faint stars that strict binned-and-blurred
+        // detection misses: the adaptive ladder's native-resolution rung
+        // must measure at least as many as the strict single pass, and the
+        // option must parse over the C surface.
+        let (width, height) = (256usize, 256usize);
+        let mut data = vec![1000u16; width * height];
+        for row in 0..5usize {
+            for col in 0..5usize {
+                let (cx, cy) = (40.0 + col as f64 * 44.0, 40.0 + row as f64 * 44.0);
+                for dy in -7i64..=7 {
+                    for dx in -7i64..=7 {
+                        let x = (cx as i64 + dx) as usize;
+                        let y = (cy as i64 + dy) as usize;
+                        let d2 = (x as f64 - cx).powi(2) + (y as f64 - cy).powi(2);
+                        let value = 3000.0 * (-d2 / (2.0 * 1.3 * 1.3)).exp();
+                        data[y * width + x] =
+                            (f64::from(data[y * width + x]) + value).min(65535.0) as u16;
+                    }
+                }
+            }
+        }
+
+        let run = |options: &str| -> usize {
+            let options = CString::new(options).unwrap();
+            let mut error = ptr::null_mut();
+            let json = unsafe {
+                seiza_stars_detect_luma_u16_json(
+                    data.as_ptr(),
+                    data.len(),
+                    width,
+                    height,
+                    options.as_ptr(),
+                    &mut error,
+                )
+            };
+            assert!(!json.is_null());
+            assert!(error.is_null());
+            let parsed: Value =
+                serde_json::from_str(unsafe { CStr::from_ptr(json) }.to_str().unwrap()).unwrap();
+            unsafe { seiza_string_free(json) };
+            parsed["stars"].as_array().unwrap().len()
+        };
+
+        let strict =
+            r#"{"psfType":"none","preset":"standard","detectionBinning":2,"sensitivity":30}"#;
+        let adaptive = r#"{"psfType":"none","preset":"standard","detectionBinning":2,"sensitivity":30,"targetStarCount":25}"#;
+        let single_pass = run(strict);
+        let with_target = run(adaptive);
+        assert!(single_pass < 25, "premise: strict pass misses stars");
+        assert_eq!(with_target, 25, "the ladder measures the full field");
+
+        // Zero keeps the single-pass behavior bit-for-bit.
+        let zero_target = r#"{"psfType":"none","preset":"standard","detectionBinning":2,"sensitivity":30,"targetStarCount":0}"#;
+        assert_eq!(run(zero_target), single_pass);
+    }
+
+    #[test]
     fn star_detection_rejects_invalid_slice_dimensions_before_borrowing() {
         let mut error = ptr::null_mut();
         let sample = 0u16;
@@ -10450,11 +10521,15 @@ pub unsafe extern "C" fn seiza_calibration_dark_matches(
 /// `pixelSizeUm` (classify the pixel scale when no preset is given),
 /// `psfType` ("none" | "gaussian" | "moffat4"; default "moffat4"),
 /// `structureRemoval` ("filtered" | "atrous"), `detectionBinning`,
-/// `keepSaturated`, `noiseReductionRadius`, `sensitivity`, and optional
-/// `triangleAngleDegrees`. Unknown fields are an error, so a typo cannot
-/// silently run the defaults. A triangle angle may be any finite degree
-/// value; the response normalizes it over `[0, 360)`, with zero pointing to
-/// the top of the image and positive angles turning clockwise.
+/// `keepSaturated`, `noiseReductionRadius`, `sensitivity`, optional
+/// `triangleAngleDegrees`, and optional `targetStarCount`. Unknown fields
+/// are an error, so a typo cannot silently run the defaults. A triangle
+/// angle may be any finite degree value; the response normalizes it over
+/// `[0, 360)`, with zero pointing to the top of the image and positive
+/// angles turning clockwise. A positive `targetStarCount` retries detection
+/// with progressively more permissive settings (a relaxed SNR gate, then
+/// native-resolution unblurred detection) until at least that many stars
+/// are measured, returning the best pass otherwise.
 ///
 /// Returns owned JSON, released with [`seiza_string_free`]:
 /// `{"schemaVersion":1,"width":..,"height":..,

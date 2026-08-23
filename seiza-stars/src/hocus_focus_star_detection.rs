@@ -243,6 +243,70 @@ pub fn detect_stars_hocus_focus(
     detect_on_prepared(&working_data, width, height, params)
 }
 
+/// The sensitivity floor the adaptive ladder relaxes to: the calibrated
+/// HocusFocus default, and the SNR gate ASTAP itself uses when solving.
+const ADAPTIVE_SENSITIVITY_FLOOR: f64 = 10.0;
+
+/// [`detect_stars_hocus_focus`] with an ASTAP-style retry ladder: when a
+/// pass measures fewer than `target_star_count` stars, the detector retries
+/// with progressively more permissive settings and returns the first pass
+/// that reaches the target, or the best pass otherwise.
+///
+/// The ladder relaxes exactly two things, in order:
+///
+/// 1. the SNR gate, down to the calibrated default of 10 when the caller
+///    asked for a stricter one; then
+/// 2. the detection scale — native resolution with no noise-reduction blur.
+///    Rigs whose stars span only a few pixels lose most of their stars to
+///    software binning plus the detection blur: the blur alone divides a
+///    faint star's peak several-fold before the threshold ever sees it.
+///
+/// Structure removal, the shape gates, and every measurement stay exactly
+/// as configured, so a returned star means the same thing on every rung.
+/// A pass that finds fewer stars than a previous one is discarded rather
+/// than merged: mixing rungs would mix measurement scales.
+pub fn detect_stars_hocus_focus_adaptive(
+    data: &[u16],
+    width: usize,
+    height: usize,
+    params: &HocusFocusParams,
+    target_star_count: usize,
+) -> HocusFocusDetectionResult {
+    let mut best = detect_stars_hocus_focus(data, width, height, params);
+    if best.stars.len() >= target_star_count {
+        return best;
+    }
+    for rung in adaptive_ladder(params) {
+        let result = detect_stars_hocus_focus(data, width, height, &rung);
+        if result.stars.len() >= target_star_count {
+            return result;
+        }
+        if result.stars.len() > best.stars.len() {
+            best = result;
+        }
+    }
+    best
+}
+
+/// The retry rungs for [`detect_stars_hocus_focus_adaptive`], skipping any
+/// rung whose settings would repeat the pass before it.
+fn adaptive_ladder(params: &HocusFocusParams) -> Vec<HocusFocusParams> {
+    let mut rungs = Vec::new();
+    if params.sensitivity > ADAPTIVE_SENSITIVITY_FLOOR {
+        let mut relaxed = params.clone();
+        relaxed.sensitivity = ADAPTIVE_SENSITIVITY_FLOOR;
+        rungs.push(relaxed);
+    }
+    if params.detection_binning > 1 || params.noise_reduction_radius > 0 {
+        let mut native = params.clone();
+        native.detection_binning = 1;
+        native.noise_reduction_radius = 0;
+        native.sensitivity = params.sensitivity.min(ADAPTIVE_SENSITIVITY_FLOOR);
+        rungs.push(native);
+    }
+    rungs
+}
+
 /// Recommend a detection binning factor from a measured in-focus HFR in
 /// captured pixels, following HocusFocus's DetectionBinningResolver: the
 /// integer factor that brings the HFR closest to the detector's calibrated
@@ -1636,6 +1700,110 @@ mod tests {
         let (params, class) = HocusFocusParams::for_frame_headers(None, Some(3.76));
         assert_eq!(class, TelescopeClass::Standard);
         assert_eq!(params.min_star_size, standard.min_star_size);
+    }
+
+    /// A field of small stars in the regime the ladder exists for: after
+    /// 2x software binning plus the 9x9 detection blur their peaks fall
+    /// under the candidate threshold, while native-resolution detection
+    /// with no blur measures every one.
+    fn small_star_field() -> Vec<u16> {
+        let mut stars = Vec::new();
+        for row in 0..5 {
+            for col in 0..5 {
+                stars.push((
+                    40.0 + col as f64 * 44.0,
+                    40.0 + row as f64 * 44.0,
+                    3000.0,
+                    1.3,
+                ));
+            }
+        }
+        star_field(256, 256, &stars)
+    }
+
+    #[test]
+    fn adaptive_ladder_recovers_small_stars_the_first_pass_misses() {
+        let data = small_star_field();
+        let strict = HocusFocusParams {
+            detection_binning: 2,
+            sensitivity: 30.0,
+            ..Default::default()
+        };
+
+        let single = detect_stars_hocus_focus(&data, 256, 256, &strict);
+        assert!(
+            single.stars.len() < 25,
+            "premise: the strict pass must miss stars, found {}",
+            single.stars.len()
+        );
+
+        let adaptive = detect_stars_hocus_focus_adaptive(&data, 256, 256, &strict, 25);
+        assert_eq!(
+            adaptive.stars.len(),
+            25,
+            "the native-resolution rung measures the full field"
+        );
+        // The returned measurements come from one rung, not a mix: every
+        // HFR is the native-scale value for a sigma-1.3 Gaussian.
+        for star in &adaptive.stars {
+            assert!(
+                star.hfr > 0.8 && star.hfr < 2.5,
+                "native-scale HFR expected, got {}",
+                star.hfr
+            );
+        }
+    }
+
+    #[test]
+    fn adaptive_returns_the_first_pass_when_it_meets_the_target() {
+        let data = small_star_field();
+        let native = HocusFocusParams {
+            detection_binning: 1,
+            noise_reduction_radius: 0,
+            sensitivity: 10.0,
+            ..Default::default()
+        };
+        let single = detect_stars_hocus_focus(&data, 256, 256, &native);
+        let adaptive = detect_stars_hocus_focus_adaptive(&data, 256, 256, &native, 1);
+        assert_eq!(adaptive.stars.len(), single.stars.len());
+        assert_eq!(adaptive.average_hfr, single.average_hfr);
+    }
+
+    #[test]
+    fn adaptive_ladder_skips_rungs_that_repeat_the_caller_settings() {
+        // Caller already at the floor on every axis: no rungs at all.
+        let floor = HocusFocusParams {
+            detection_binning: 1,
+            noise_reduction_radius: 0,
+            sensitivity: 10.0,
+            ..Default::default()
+        };
+        assert!(adaptive_ladder(&floor).is_empty());
+
+        // Stricter sensitivity alone adds the relaxed rung, then the
+        // native rung is skipped because geometry already matches it.
+        let strict_only = HocusFocusParams {
+            detection_binning: 1,
+            noise_reduction_radius: 0,
+            sensitivity: 30.0,
+            ..Default::default()
+        };
+        let rungs = adaptive_ladder(&strict_only);
+        assert_eq!(rungs.len(), 1);
+        assert_eq!(rungs[0].sensitivity, 10.0);
+
+        // Binned caller gets both rungs, and a caller sensitivity below
+        // the floor is never raised.
+        let binned_sensitive = HocusFocusParams {
+            detection_binning: 2,
+            sensitivity: 5.0,
+            ..Default::default()
+        };
+        let rungs = adaptive_ladder(&binned_sensitive);
+        assert_eq!(rungs.len(), 1, "sensitivity rung skipped below the floor");
+        assert_eq!(rungs[0].detection_binning, 1);
+        assert_eq!(rungs[0].noise_reduction_radius, 0);
+        assert_eq!(rungs[0].sensitivity, 5.0);
     }
 
     #[test]

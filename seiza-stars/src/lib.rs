@@ -36,7 +36,8 @@ pub mod tilt;
 
 pub use hocus_focus_star_detection::{
     HocusFocusDetectionResult, HocusFocusParams, TelescopeClass, classify_pixel_scale,
-    detect_stars_hocus_focus, pixel_scale_arcsec, recommend_detection_binning,
+    detect_stars_hocus_focus, detect_stars_hocus_focus_adaptive, pixel_scale_arcsec,
+    recommend_detection_binning,
 };
 pub use psf_fitting::{PSFModel, PSFType};
 pub use tilt::{
