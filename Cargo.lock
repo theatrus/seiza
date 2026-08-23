@@ -2254,7 +2254,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "seiza"
-version = "0.18.6"
+version = "0.18.7"
 dependencies = [
  "directories",
  "image",
@@ -2287,7 +2287,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-cabi"
-version = "0.18.6"
+version = "0.18.7"
 dependencies = [
  "cbindgen",
  "image",
@@ -2319,7 +2319,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-cli"
-version = "0.18.6"
+version = "0.18.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -2449,7 +2449,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-stars"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "image",
  "nalgebra",
