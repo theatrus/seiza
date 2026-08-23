@@ -21,11 +21,11 @@ PyPI**. They are cut from a single "Release `<version>`" PR followed by two tags
 
   At the time of writing that is `seiza-background`, `seiza-calibration`,
   `seiza-deconvolution`, `seiza-download`, `seiza-fits`, `seiza-imgproc`,
-  `seiza-satellites`, `seiza-sources`, `seiza-stacking`, `seiza-stats`,
-  `seiza-stretch`, and `seiza-xisf`. A list written down goes stale the first
-  time a crate is added, which is how `seiza-calibration`, `seiza-stats`,
-  `seiza-stretch`, `seiza-background` and `seiza-deconvolution` came to be
-  missing from it.
+  `seiza-satellites`, `seiza-sources`, `seiza-stacking`, `seiza-stars`,
+  `seiza-stats`, `seiza-stretch`, and `seiza-xisf`. A list written down goes
+  stale the first time a crate is added, which is how `seiza-calibration`,
+  `seiza-stats`, `seiza-stretch`, `seiza-background` and
+  `seiza-deconvolution` came to be missing from it.
 - `seiza-py` is **`publish = false`** (it goes to PyPI, not crates.io) and its
   version **must always equal the workspace/`seiza` version** — the wheel and the
   crate are the same release.
@@ -41,9 +41,9 @@ git log --oneline "$(git log --grep='^Release' -1 --format=%H)"..HEAD
 git diff --stat "$(git log --grep='^Release' -1 --format=%H)"..HEAD
 ```
 
-Bump the workspace version if `seiza` or `seiza-cli` changed (they almost always
-do). Bump each changed leaf crate by its own change. Fixes-only → patch;
-new features → minor.
+Bump the workspace version if `seiza`, `seiza-cabi`, `seiza-cli`, or `seiza-py`
+changed (they almost always do). Bump each changed leaf crate by its own change.
+Fixes-only → patch; new features → minor.
 
 For a pre-1.0 workspace minor bump, also bump every published leaf crate that
 depends on `seiza`, even when its source did not change. Its existing caret
@@ -101,7 +101,7 @@ waits for the index):
 seiza-stats  →  seiza-stretch  →  seiza-imgproc  →  seiza-fits  →  seiza-xisf
 →  seiza-background  →  seiza-calibration  →  seiza-deconvolution
 →  seiza-sources  →  seiza-download  →  seiza  →  seiza-satellites
-→  seiza-stacking  →  seiza-cabi  →  seiza-cli
+→  seiza-stacking  →  seiza-stars  →  seiza-cabi  →  seiza-cli
 ```
 
 `seiza-calibration` sits before `seiza-stacking`, which depends on it. If you
