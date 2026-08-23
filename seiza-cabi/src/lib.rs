@@ -6065,8 +6065,11 @@ struct StarDetectResponse {
 fn first_positive_header(image: &FitsImage, keys: &[&str]) -> Option<f64> {
     keys.iter().find_map(|key| {
         image
-            .header_f64(key)
-            .filter(|value| value.is_finite() && *value > 0.0)
+            .headers
+            .iter()
+            .filter(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
+            .filter_map(|(_, value)| value.as_f64())
+            .find(|value| value.is_finite() && *value > 0.0)
     })
 }
 
@@ -8461,12 +8464,13 @@ mod tests {
             pixels: seiza_fits::Pixels::U16(vec![1, 2, 3, 4]),
             headers: vec![
                 ("FOCALLEN".into(), HeaderValue::Float(-1.0)),
-                ("FOCALLENGTH".into(), HeaderValue::Float(2000.0)),
-                ("XPIXSZ".into(), HeaderValue::Float(3.76)),
+                ("focallength".into(), HeaderValue::Float(2000.0)),
+                ("xpixsz".into(), HeaderValue::Float(3.76)),
             ],
         };
 
-        // The usable alias and XPIXSZ resolve a long-focal preset.
+        // The usable aliases are case-insensitive, as FITS-derived XISF
+        // metadata is not required to preserve FITS keyword casing.
         let from_headers = StarDetectOptions::default()
             .with_frame_headers(&image)
             .into_params()
