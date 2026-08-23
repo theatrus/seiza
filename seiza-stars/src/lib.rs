@@ -17,8 +17,8 @@
 //! where speed matters and photometric fidelity does not; the two are
 //! different tools, not rivals.
 //!
-//! [`tilt`] turns per-star PSF measurements into ASTAP-style sensor tilt and
-//! field-curvature numbers.
+//! [`tilt`] turns per-star PSF measurements into parallelogram and triangle
+//! sensor-tilt diagrams plus field-curvature numbers.
 //!
 //! A porting note that is also a warranty: the detector reductions are
 //! order-sensitive, and their numeric behavior decides star counts. The code
@@ -39,4 +39,9 @@ pub use hocus_focus_star_detection::{
     detect_stars_hocus_focus, pixel_scale_arcsec, recommend_detection_binning,
 };
 pub use psf_fitting::{PSFModel, PSFType};
-pub use tilt::{CellStats, Corner, CornerHfr, TiltStar, TiltSummary, analyze_cells, tilt_summary};
+pub use tilt::{
+    CellStats, Corner, CornerHfr, TRIANGLE_INNER_RADIUS_FRACTION,
+    TRIANGLE_MINIMUM_STARS_PER_REGION, TRIANGLE_OUTER_RADIUS_FRACTION, TiltStar, TiltSummary,
+    TriangleCenterStats, TriangleSectorStats, TriangleTiltError, TriangleTiltSummary,
+    analyze_cells, analyze_triangle, tilt_summary,
+};

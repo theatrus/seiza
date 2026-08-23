@@ -78,6 +78,32 @@ class TiltSummary:
     worst_corner: str | None
     best_corner: str | None
 
+class TriangleTiltCenter:
+    star_count: int
+    median_hfr: float | None
+
+class TriangleTiltSector:
+    # Stable 1-based adjustment-screw identifier.
+    sector: int
+    # Image-coordinate degrees: 0 points up, positive turns clockwise.
+    axis_angle_degrees: float
+    star_count: int
+    median_hfr: float | None
+
+class TriangleTiltSummary:
+    angle_degrees: float
+    inner_radius_pixels: float
+    outer_radius_pixels: float
+    minimum_stars_per_region: int
+    ready: bool
+    center: TriangleTiltCenter
+    sectors: list[TriangleTiltSector]
+    # Median HFR of every usable annular star, not the sector medians.
+    overall_median_hfr: float | None
+    tilt_percent: float | None
+    best_sector: int | None
+    worst_sector: int | None
+
 class StarCatalog:
     @staticmethod
     def open(path: str | Path | None = None) -> StarCatalog: ...
@@ -399,6 +425,11 @@ def detect_measured_stars(
 def tilt_analysis(
     result: StarDetectionResult,
 ) -> tuple[list[TiltCell], TiltSummary]: ...
+def triangle_tilt_analysis(
+    result: StarDetectionResult,
+    *,
+    angle_degrees: float = 0.0,
+) -> TriangleTiltSummary: ...
 def solve(
     stars: Sequence[StarInput],
     catalog: StarCatalog,

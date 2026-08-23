@@ -137,6 +137,7 @@ below, and **—** means that surface does not expose the feature.
 | Feature | [Rust crates](#layout) | [Python](seiza-py/README.md) | [C ABI](seiza-cabi/README.md) |
 |---|:-:|:-:|:-:|
 | Standalone star detection | ✓ | ✓ | — |
+| Measured-star detection and parallelogram/triangle tilt analysis | ✓ | ✓ | ✓ |
 | Hinted plate solving | ✓ | ✓ | — |
 | Blind plate solving | ✓ | ✓ | ✓ |
 | WCS and SIP solution output | ✓ | ✓ | ✓ |

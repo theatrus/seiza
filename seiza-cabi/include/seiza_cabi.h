@@ -1457,8 +1457,11 @@ int32_t seiza_calibration_dark_matches(const SeizaFrameSignature *reference,
  `pixelSizeUm` (classify the pixel scale when no preset is given),
  `psfType` ("none" | "gaussian" | "moffat4"; default "moffat4"),
  `structureRemoval` ("filtered" | "atrous"), `detectionBinning`,
- `keepSaturated`, `noiseReductionRadius`, `sensitivity`. Unknown fields
- are an error, so a typo cannot silently run the defaults.
+ `keepSaturated`, `noiseReductionRadius`, `sensitivity`, and optional
+ `triangleAngleDegrees`. Unknown fields are an error, so a typo cannot
+ silently run the defaults. A triangle angle may be any finite degree
+ value; the response normalizes it over `[0, 360)`, with zero pointing to
+ the top of the image and positive angles turning clockwise.
 
  Returns owned JSON, released with [`seiza_string_free`]:
  `{"schemaVersion":1,"width":..,"height":..,
@@ -1467,10 +1470,23 @@ int32_t seiza_calibration_dark_matches(const SeizaFrameSignature *reference,
  "stars":[{"x":..,"y":..,"hfr":..,"fwhm":..,"brightness":..,
  "background":..,"snr":..,"flux":..,"pixelCount":..,"saturated":..,
  "eccentricity":?,"theta":?,"rSquared":?}],"cells":[..3x3 region
- statistics..],"tilt":{..ASTAP corner verdict..}}`. Fitted `theta` and cell
+ statistics..],"tilt":{..parallelogram corner verdict..},
+ "triangleTilt":?}`. Fitted `theta` and cell
  `meanTheta` are normalized ellipse major-axis orientations in radians over
  `[0, π)`. The tilt analysis is folded in because it is derived and cheap,
  so every consumer reads the same verdict from one call.
+
+ `triangleTilt` is omitted unless `triangleAngleDegrees` was supplied. It
+ reports the normalized angle, center/annulus radii in pixels, the native
+ minimum-star confidence policy and readiness, center statistics, and three
+ ordered sectors with 1-based sector ID, axis angle, star count, and median
+ HFR. The center is `radius < 0.25 * hypot(width/2, height/2)`. The annulus
+ is `innerRadiusPixels <= radius <= 0.5 * min(width, height)` and is split
+ into three complete, half-open 120-degree sectors. `overallMedianHfr` is
+ the median of every usable annular star. `tiltPercent`, `bestSector`, and
+ `worstSector` are null until every sector has at least
+ `minimumStarsPerRegion` measurements; otherwise tilt is
+ `100 * (worst median - best median) / overallMedianHfr`.
 
  # Safety
 

@@ -1,13 +1,15 @@
 //! Sensor tilt and field-curvature analysis from detected stars.
 //!
-//! The frame divides into a 3×3 grid — the layout ASTAP's HFD inspection and
-//! PixInsight's aberration mosaic both use. Each cell aggregates the stars
-//! detected inside it; the summary compares corner cells against the center
-//! the way ASTAP derives its tilt numbers.
+//! The parallelogram view divides the frame into a 3×3 grid. Each cell
+//! aggregates the stars detected inside it, and the summary compares corner
+//! cells against the center. The triangle view instead groups stars around
+//! three adjustment-screw axes supplied by the caller.
 //!
-//! Ported from PSF Guard's tilt inspector, where this math lived in the
-//! browser and was therefore unreachable from any command line, binding, or
-//! report. The numbers are the same; only the address changed.
+//! The nine-cell analysis was ported from PSF Guard's tilt inspector, where
+//! that math lived in the browser and was therefore unreachable from any
+//! command line, binding, or report. Triangle sectoring reuses the same
+//! measurements while keeping its aggregation and confidence policy here for
+//! every host.
 
 /// One star's contribution to the analysis: position plus the point-spread
 /// measurements the fitter produced for it.
@@ -85,8 +87,9 @@ pub struct TiltSummary {
     pub corners: [CornerHfr; 4],
     /// Median HFR over every cell that has stars.
     pub mean_hfr: Option<f64>,
-    /// `(worst corner − best corner) / mean HFR`, as a percentage. ASTAP's
-    /// tilt indicator: one soft corner against a sharp opposite one.
+    /// `(worst corner − best corner) / mean HFR`, as a percentage. The
+    /// parallelogram tilt indicator: one soft corner against a sharp opposite
+    /// one.
     pub tilt_percent: Option<f64>,
     /// `mean(corners) / center − 1` as a percentage. Uniformly soft corners
     /// with a sharp center indicate field curvature, not tilt.
@@ -94,6 +97,82 @@ pub struct TiltSummary {
     pub worst_corner: Option<Corner>,
     pub best_corner: Option<Corner>,
 }
+
+/// Minimum number of measured stars a triangle sector needs before it can
+/// contribute to a tilt verdict.
+pub const TRIANGLE_MINIMUM_STARS_PER_REGION: usize = 3;
+
+/// Radius of the triangle diagram's center disk as a fraction of the distance
+/// from the image center to a corner.
+pub const TRIANGLE_INNER_RADIUS_FRACTION: f64 = 0.25;
+
+/// Radius of the triangle diagram's annulus as a fraction of the image's
+/// shorter dimension. This is the radius of the largest circle that fits in
+/// the frame.
+pub const TRIANGLE_OUTER_RADIUS_FRACTION: f64 = 0.5;
+
+/// Aggregate HFR statistics for the circular center of a triangle analysis.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TriangleCenterStats {
+    pub star_count: usize,
+    pub median_hfr: Option<f64>,
+}
+
+/// Aggregate HFR statistics for one adjustment-screw sector.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TriangleSectorStats {
+    /// Stable, human-facing sector identifier in `1..=3`.
+    pub sector: u8,
+    /// Sector axis in image-coordinate degrees: zero points toward the top of
+    /// the image and positive angles turn clockwise.
+    pub axis_angle_degrees: f64,
+    pub star_count: usize,
+    pub median_hfr: Option<f64>,
+}
+
+/// Triangle tilt measurements and the confidence policy used to judge them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TriangleTiltSummary {
+    /// Normalized first-sector axis in image-coordinate degrees over
+    /// `[0, 360)`: zero points up and positive angles turn clockwise.
+    pub angle_degrees: f64,
+    pub inner_radius_pixels: f64,
+    pub outer_radius_pixels: f64,
+    pub minimum_stars_per_region: usize,
+    /// True when the annulus is non-empty and all three sectors meet
+    /// [`TRIANGLE_MINIMUM_STARS_PER_REGION`]. The center does not gate the
+    /// triangle because it is contextual rather than part of the differential
+    /// tilt verdict.
+    pub ready: bool,
+    pub center: TriangleCenterStats,
+    /// Always ordered by [`TriangleSectorStats::sector`] as 1, 2, 3.
+    pub sectors: [TriangleSectorStats; 3],
+    /// Median HFR of every usable star selected in the annulus, not a median
+    /// of the three sector medians.
+    pub overall_median_hfr: Option<f64>,
+    /// `100 * (worst sector median - best sector median) /
+    /// overall_median_hfr`. Withheld together with best/worst sector until
+    /// [`Self::ready`] is true.
+    pub tilt_percent: Option<f64>,
+    pub best_sector: Option<u8>,
+    pub worst_sector: Option<u8>,
+}
+
+/// Invalid caller input to [`analyze_triangle`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriangleTiltError {
+    NonFiniteAngle,
+}
+
+impl std::fmt::Display for TriangleTiltError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NonFiniteAngle => formatter.write_str("triangle angle must be finite"),
+        }
+    }
+}
+
+impl std::error::Error for TriangleTiltError {}
 
 fn median(mut values: Vec<f64>) -> Option<f64> {
     if values.is_empty() {
@@ -105,6 +184,147 @@ fn median(mut values: Vec<f64>) -> Option<f64> {
         values[mid]
     } else {
         (values[mid - 1] + values[mid]) / 2.0
+    })
+}
+
+fn normalize_degrees(angle_degrees: f64) -> f64 {
+    let normalized = angle_degrees.rem_euclid(360.0);
+    if normalized == 0.0 { 0.0 } else { normalized }
+}
+
+fn triangle_sector_index(star_angle_degrees: f64, first_axis_degrees: f64) -> usize {
+    let relative_angle = normalize_degrees(star_angle_degrees - first_axis_degrees);
+    (normalize_degrees(relative_angle + 60.0) / 120.0).floor() as usize
+}
+
+/// Group measured stars for a three-screw triangle tilt diagram.
+///
+/// Image coordinates have their origin at the top-left, +X points right, and
+/// +Y points down. `angle_degrees` locates sector 1: zero points to the top of
+/// the image and positive angles turn clockwise. Sectors 2 and 3 are 120° and
+/// 240° clockwise from sector 1.
+///
+/// The center disk radius is 25% of the center-to-corner distance. The outer
+/// radius is half the shorter image dimension, producing a true circular
+/// annulus that stays inside the frame. A star exactly on the inner boundary
+/// belongs to the annulus; a star exactly on the outer boundary is included.
+/// The three sectors are a complete, non-overlapping partition of that
+/// annulus. Relative to sector 1, their half-open angular ranges are
+/// `[300°, 360°) ∪ [0°, 60°)`, `[60°, 180°)`, and `[180°, 300°)`.
+///
+/// Only stars with finite in-frame centroids and finite positive HFR are
+/// usable. If an unusually elongated or empty frame makes the inner radius at
+/// least the outer radius, the returned provenance remains valid but the
+/// analysis is not ready and contains no annular measurements.
+pub fn analyze_triangle(
+    stars: &[TiltStar],
+    width: usize,
+    height: usize,
+    angle_degrees: f64,
+) -> Result<TriangleTiltSummary, TriangleTiltError> {
+    if !angle_degrees.is_finite() {
+        return Err(TriangleTiltError::NonFiniteAngle);
+    }
+
+    let angle_degrees = normalize_degrees(angle_degrees);
+    let center_x = width as f64 / 2.0;
+    let center_y = height as f64 / 2.0;
+    let inner_radius_pixels = TRIANGLE_INNER_RADIUS_FRACTION * center_x.hypot(center_y);
+    let outer_radius_pixels = TRIANGLE_OUTER_RADIUS_FRACTION * width.min(height) as f64;
+    let has_annulus = inner_radius_pixels < outer_radius_pixels;
+
+    let mut center_hfrs = Vec::new();
+    let mut annular_hfrs = Vec::new();
+    let mut sector_hfrs: [Vec<f64>; 3] = std::array::from_fn(|_| Vec::new());
+    for star in stars {
+        if !star.x.is_finite()
+            || !star.y.is_finite()
+            || !star.hfr.is_finite()
+            || star.hfr <= 0.0
+            || star.x < 0.0
+            || star.x >= width as f64
+            || star.y < 0.0
+            || star.y >= height as f64
+        {
+            continue;
+        }
+
+        let dx = star.x - center_x;
+        let dy = star.y - center_y;
+        let radius = dx.hypot(dy);
+        if radius < inner_radius_pixels {
+            center_hfrs.push(star.hfr);
+            continue;
+        }
+        if !has_annulus || radius > outer_radius_pixels {
+            continue;
+        }
+
+        // atan2(dx, -dy) implements the documented image convention: zero
+        // points up and positive angles turn clockwise.
+        let star_angle_degrees = normalize_degrees(dx.atan2(-dy).to_degrees());
+        let sector_index = triangle_sector_index(star_angle_degrees, angle_degrees);
+        annular_hfrs.push(star.hfr);
+        sector_hfrs[sector_index].push(star.hfr);
+    }
+
+    let center = TriangleCenterStats {
+        star_count: center_hfrs.len(),
+        median_hfr: median(center_hfrs),
+    };
+    let sectors = std::array::from_fn(|index| {
+        let values = std::mem::take(&mut sector_hfrs[index]);
+        TriangleSectorStats {
+            sector: index as u8 + 1,
+            axis_angle_degrees: normalize_degrees(angle_degrees + index as f64 * 120.0),
+            star_count: values.len(),
+            median_hfr: median(values),
+        }
+    });
+    let overall_median_hfr = median(annular_hfrs);
+    let ready = has_annulus
+        && sectors
+            .iter()
+            .all(|sector| sector.star_count >= TRIANGLE_MINIMUM_STARS_PER_REGION)
+        && overall_median_hfr.is_some_and(|hfr| hfr > 0.0);
+
+    let (tilt_percent, best_sector, worst_sector) = if ready {
+        let mut best_index = 0;
+        let mut worst_index = 0;
+        for index in 1..sectors.len() {
+            let hfr = sectors[index]
+                .median_hfr
+                .expect("ready sector has a median");
+            if hfr < sectors[best_index].median_hfr.unwrap() {
+                best_index = index;
+            }
+            if hfr > sectors[worst_index].median_hfr.unwrap() {
+                worst_index = index;
+            }
+        }
+        let best_hfr = sectors[best_index].median_hfr.unwrap();
+        let worst_hfr = sectors[worst_index].median_hfr.unwrap();
+        (
+            Some((worst_hfr - best_hfr) / overall_median_hfr.unwrap() * 100.0),
+            Some(sectors[best_index].sector),
+            Some(sectors[worst_index].sector),
+        )
+    } else {
+        (None, None, None)
+    };
+
+    Ok(TriangleTiltSummary {
+        angle_degrees,
+        inner_radius_pixels,
+        outer_radius_pixels,
+        minimum_stars_per_region: TRIANGLE_MINIMUM_STARS_PER_REGION,
+        ready,
+        center,
+        sectors,
+        overall_median_hfr,
+        tilt_percent,
+        best_sector,
+        worst_sector,
     })
 }
 
@@ -237,6 +457,25 @@ mod tests {
         }
     }
 
+    fn triangle_star(
+        width: usize,
+        height: usize,
+        radius: f64,
+        angle_degrees: f64,
+        hfr: f64,
+    ) -> TiltStar {
+        let angle = angle_degrees.to_radians();
+        star(
+            width as f64 / 2.0 + radius * angle.sin(),
+            height as f64 / 2.0 - radius * angle.cos(),
+            hfr,
+        )
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!((actual - expected).abs() < 1e-9, "{actual} != {expected}");
+    }
+
     /// One star in the middle of every 3×3 cell of a 300×300 frame.
     fn star_per_cell(hfr_at: impl Fn(usize, usize) -> f64) -> Vec<TiltStar> {
         let mut stars = Vec::new();
@@ -359,5 +598,156 @@ mod tests {
         let summary = tilt_summary(&analyze_cells(&stars, 300, 300));
         assert_eq!(summary.tilt_percent, None);
         assert_eq!(summary.worst_corner, None);
+    }
+
+    #[test]
+    fn triangle_aggregates_center_and_three_screw_sectors() {
+        let (width, height) = (400, 400);
+        let mut stars = Vec::new();
+        for hfr in [1.0, 1.1, 1.2] {
+            stars.push(triangle_star(width, height, 20.0, 0.0, hfr));
+        }
+        for (angle, hfr) in [(0.0, 2.0), (120.0, 3.0), (240.0, 4.0)] {
+            for offset in [-5.0, 0.0, 5.0] {
+                stars.push(triangle_star(width, height, 120.0, angle + offset, hfr));
+            }
+        }
+
+        let summary = analyze_triangle(&stars, width, height, 0.0).unwrap();
+        assert_eq!(summary.angle_degrees, 0.0);
+        assert_close(summary.inner_radius_pixels, 50.0 * 2.0_f64.sqrt());
+        assert_eq!(summary.outer_radius_pixels, 200.0);
+        assert_eq!(summary.minimum_stars_per_region, 3);
+        assert!(summary.ready);
+        assert_eq!(summary.center.star_count, 3);
+        assert_eq!(summary.center.median_hfr, Some(1.1));
+        assert_eq!(
+            summary.sectors.map(|sector| (
+                sector.sector,
+                sector.axis_angle_degrees,
+                sector.star_count
+            )),
+            [(1, 0.0, 3), (2, 120.0, 3), (3, 240.0, 3)]
+        );
+        assert_eq!(
+            summary.sectors.map(|sector| sector.median_hfr),
+            [Some(2.0), Some(3.0), Some(4.0)]
+        );
+        assert_eq!(summary.overall_median_hfr, Some(3.0));
+        assert_close(summary.tilt_percent.unwrap(), 200.0 / 3.0);
+        assert_eq!(summary.best_sector, Some(1));
+        assert_eq!(summary.worst_sector, Some(3));
+    }
+
+    #[test]
+    fn triangle_rotation_normalizes_axes_and_rejects_non_finite_angles() {
+        let (width, height) = (400, 400);
+        let mut stars = Vec::new();
+        for angle in [330.0, 90.0, 210.0] {
+            for _ in 0..3 {
+                stars.push(triangle_star(width, height, 120.0, angle, 2.0));
+            }
+        }
+
+        let summary = analyze_triangle(&stars, width, height, -30.0).unwrap();
+        assert_eq!(summary.angle_degrees, 330.0);
+        assert_eq!(
+            summary.sectors.map(|sector| sector.axis_angle_degrees),
+            [330.0, 90.0, 210.0]
+        );
+        assert!(summary.ready);
+        assert_eq!(summary.best_sector, Some(1));
+        assert_eq!(summary.worst_sector, Some(1));
+        assert_eq!(summary.tilt_percent, Some(0.0));
+        assert_eq!(
+            analyze_triangle(&stars, width, height, f64::INFINITY),
+            Err(TriangleTiltError::NonFiniteAngle)
+        );
+    }
+
+    #[test]
+    fn triangle_sector_boundaries_are_half_open_and_complete() {
+        assert_eq!(triangle_sector_index(0.0, 0.0), 0);
+        assert_eq!(triangle_sector_index(59.999, 0.0), 0);
+        assert_eq!(triangle_sector_index(60.0, 0.0), 1);
+        assert_eq!(triangle_sector_index(179.999, 0.0), 1);
+        assert_eq!(triangle_sector_index(180.0, 0.0), 2);
+        assert_eq!(triangle_sector_index(299.999, 0.0), 2);
+        assert_eq!(triangle_sector_index(300.0, 0.0), 0);
+        assert_eq!(triangle_sector_index(20.0, 20.0), 0);
+        assert_eq!(triangle_sector_index(80.0, 20.0), 1);
+    }
+
+    #[test]
+    fn triangle_retains_sparse_measurements_but_withholds_the_verdict() {
+        let (width, height) = (400, 400);
+        let mut stars = Vec::new();
+        for (sector, count, hfr) in [(0.0, 3, 2.0), (120.0, 3, 3.0), (240.0, 2, 4.0)] {
+            for _ in 0..count {
+                stars.push(triangle_star(width, height, 120.0, sector, hfr));
+            }
+        }
+
+        let summary = analyze_triangle(&stars, width, height, 0.0).unwrap();
+        assert!(!summary.ready);
+        assert_eq!(summary.sectors[2].star_count, 2);
+        assert_eq!(summary.sectors[2].median_hfr, Some(4.0));
+        assert!(summary.overall_median_hfr.is_some());
+        assert_eq!(summary.tilt_percent, None);
+        assert_eq!(summary.best_sector, None);
+        assert_eq!(summary.worst_sector, None);
+    }
+
+    #[test]
+    fn triangle_uses_documented_radial_boundaries_and_ignores_invalid_stars() {
+        // 300x400 makes the center-to-corner distance exactly 250 pixels, so
+        // the 62.5-pixel inner boundary is exactly representable.
+        let (width, height) = (300, 400);
+        let inner = 62.5;
+        let stars = [
+            triangle_star(width, height, inner - 0.01, 0.0, 1.0),
+            triangle_star(width, height, inner, 0.0, 2.0),
+            triangle_star(width, height, 150.0, 0.0, 3.0),
+            triangle_star(width, height, 160.0, 45.0, 99.0),
+            star(-1.0, 150.0, 99.0),
+            star(150.0, 200.0, f64::NAN),
+        ];
+
+        let summary = analyze_triangle(&stars, width, height, 0.0).unwrap();
+        assert_eq!(summary.center.star_count, 1);
+        assert_eq!(summary.center.median_hfr, Some(1.0));
+        assert_eq!(summary.sectors[0].star_count, 2);
+        assert_eq!(summary.sectors[0].median_hfr, Some(2.5));
+        assert_eq!(summary.overall_median_hfr, Some(2.5));
+    }
+
+    #[test]
+    fn triangle_overall_median_uses_every_annular_star() {
+        let (width, height) = (400, 400);
+        let mut stars = Vec::new();
+        for (angle, count, hfr) in [(0.0, 3, 1.0), (120.0, 3, 2.0), (240.0, 100, 100.0)] {
+            for _ in 0..count {
+                stars.push(triangle_star(width, height, 120.0, angle, hfr));
+            }
+        }
+
+        let summary = analyze_triangle(&stars, width, height, 0.0).unwrap();
+        assert!(summary.ready);
+        assert_eq!(summary.overall_median_hfr, Some(100.0));
+        assert_eq!(summary.tilt_percent, Some(99.0));
+    }
+
+    #[test]
+    fn triangle_reports_an_empty_annulus_for_an_extreme_aspect_ratio() {
+        let (width, height) = (1000, 100);
+        let stars = [star(500.0, 50.0, 2.0), star(500.0, 0.0, 3.0)];
+        let summary = analyze_triangle(&stars, width, height, 0.0).unwrap();
+
+        assert!(summary.inner_radius_pixels >= summary.outer_radius_pixels);
+        assert!(!summary.ready);
+        assert_eq!(summary.center.star_count, 2);
+        assert_eq!(summary.sectors.map(|sector| sector.star_count), [0, 0, 0]);
+        assert_eq!(summary.overall_median_hfr, None);
+        assert_eq!(summary.tilt_percent, None);
     }
 }
