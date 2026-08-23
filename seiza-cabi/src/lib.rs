@@ -8446,6 +8446,9 @@ mod tests {
 
         let bad_options = call_star_path(&path, Some(r#"{"psftype":"none"}"#)).unwrap_err();
         assert!(bad_options.contains("unknown field"), "{bad_options}");
+        let missing = directory.path().join("missing.fits");
+        let bad_options = call_star_path(&missing, Some(r#"{"psftype":"none"}"#)).unwrap_err();
+        assert!(bad_options.contains("unknown field"), "{bad_options}");
 
         let raster = directory.path().join("ordinary.png");
         std::fs::write(&raster, b"not actually a raster").unwrap();
@@ -10403,9 +10406,11 @@ pub unsafe extern "C" fn seiza_stars_detect_path_json(
     clear_error(error_out);
     ffi_result(error_out, || {
         let path = required_path(path, "image path")?;
+        // Refuse caller mistakes before opening what may be a multi-hundred
+        // megabyte astronomy frame.
+        let options = unsafe { parse_star_detect_options(options_json) }?;
         let (image, _) = open_astronomy_image(&path)?;
-        let options =
-            unsafe { parse_star_detect_options(options_json) }?.with_frame_headers(&image);
+        let options = options.with_frame_headers(&image);
         let samples = astronomy_luma_u16(&image);
         owned_json(&detect_stars_response(
             &samples,
