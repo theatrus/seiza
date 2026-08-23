@@ -73,8 +73,10 @@ measured = seiza.detect_measured_stars(
     psf_type="moffat4",
 )
 cells, tilt = seiza.tilt_analysis(measured)
+triangle = seiza.triangle_tilt_analysis(measured, angle_degrees=0)
 print(len(measured.stars), measured.average_hfr, measured.average_fwhm)
 print(tilt.tilt_percent, tilt.curvature_percent, tilt.worst_corner)
+print(triangle.ready, triangle.tilt_percent, triangle.worst_sector)
 ```
 
 The nine cells cover a 3×3 sensor grid. Fitted star `theta` and cell
@@ -82,6 +84,16 @@ The nine cells cover a 3×3 sensor grid. Fitted star `theta` and cell
 `[0, π)`; `theta_coherence` describes how consistently stars in that cell
 share the direction. Tilt and curvature need measurements in all four corner
 cells, and curvature also needs the center cell.
+
+`tilt_analysis` supplies the 3×3 measurements for a parallelogram diagram.
+`triangle_tilt_analysis` reuses the same detected stars and groups an inscribed
+circular annulus around three adjustment-screw axes. Its angle uses image
+coordinates: `0` points to the top and positive values turn clockwise. Sector
+IDs are 1-based, and their axes are the normalized input angle plus 0°, 120°,
+and 240°. Per-sector medians remain available for sparse data, but `ready`,
+`tilt_percent`, and best/worst sector enforce the native minimum of three
+stars per sector. `overall_median_hfr` is the median of every selected annular
+star, not the median of the sector medians.
 
 ## Blind solve
 

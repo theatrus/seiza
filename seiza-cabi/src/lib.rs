@@ -5916,6 +5916,9 @@ struct StarDetectOptions {
     keep_saturated: Option<bool>,
     noise_reduction_radius: Option<usize>,
     sensitivity: Option<f64>,
+    /// Optional first adjustment-screw axis for triangle tilt analysis. Any
+    /// finite degree value is accepted and normalized in the response.
+    triangle_angle_degrees: Option<f64>,
 }
 
 const STAR_FOCAL_LENGTH_HEADER_KEYS: &[&str] = &["FOCALLEN", "FOCALLENGTH", "FOCAL"];
@@ -6048,6 +6051,38 @@ struct TiltSummaryJson {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct TriangleCenterJson {
+    star_count: usize,
+    median_hfr: Option<f64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TriangleSectorJson {
+    sector: u8,
+    axis_angle_degrees: f64,
+    star_count: usize,
+    median_hfr: Option<f64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TriangleTiltJson {
+    angle_degrees: f64,
+    inner_radius_pixels: f64,
+    outer_radius_pixels: f64,
+    minimum_stars_per_region: usize,
+    ready: bool,
+    center: TriangleCenterJson,
+    sectors: Vec<TriangleSectorJson>,
+    overall_median_hfr: Option<f64>,
+    tilt_percent: Option<f64>,
+    best_sector: Option<u8>,
+    worst_sector: Option<u8>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct StarDetectResponse {
     schema_version: u32,
     width: usize,
@@ -6060,6 +6095,8 @@ struct StarDetectResponse {
     stars: Vec<DetectedStarJson>,
     cells: Vec<TiltCellJson>,
     tilt: TiltSummaryJson,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    triangle_tilt: Option<TriangleTiltJson>,
 }
 
 fn first_positive_header(image: &FitsImage, keys: &[&str]) -> Option<f64> {
@@ -6110,6 +6147,7 @@ fn detect_stars_response(
             samples.len()
         ));
     }
+    let triangle_angle_degrees = options.triangle_angle_degrees;
     let params = options.into_params()?;
     let result = seiza_stars::hocus_focus_star_detection::detect_stars_hocus_focus(
         samples, width, height, &params,
@@ -6148,6 +6186,35 @@ fn detect_stars_response(
         .collect();
     let cells = seiza_stars::tilt::analyze_cells(&tilt_stars, width, height);
     let summary = seiza_stars::tilt::tilt_summary(&cells);
+    let triangle_tilt = triangle_angle_degrees
+        .map(|angle| seiza_stars::tilt::analyze_triangle(&tilt_stars, width, height, angle))
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .map(|triangle| TriangleTiltJson {
+            angle_degrees: triangle.angle_degrees,
+            inner_radius_pixels: triangle.inner_radius_pixels,
+            outer_radius_pixels: triangle.outer_radius_pixels,
+            minimum_stars_per_region: triangle.minimum_stars_per_region,
+            ready: triangle.ready,
+            center: TriangleCenterJson {
+                star_count: triangle.center.star_count,
+                median_hfr: triangle.center.median_hfr,
+            },
+            sectors: triangle
+                .sectors
+                .iter()
+                .map(|sector| TriangleSectorJson {
+                    sector: sector.sector,
+                    axis_angle_degrees: sector.axis_angle_degrees,
+                    star_count: sector.star_count,
+                    median_hfr: sector.median_hfr,
+                })
+                .collect(),
+            overall_median_hfr: triangle.overall_median_hfr,
+            tilt_percent: triangle.tilt_percent,
+            best_sector: triangle.best_sector,
+            worst_sector: triangle.worst_sector,
+        });
     Ok(StarDetectResponse {
         schema_version: 1,
         width,
@@ -6186,6 +6253,7 @@ fn detect_stars_response(
             worst_corner: summary.worst_corner.map(seiza_stars::tilt::Corner::as_str),
             best_corner: summary.best_corner.map(seiza_stars::tilt::Corner::as_str),
         },
+        triangle_tilt,
     })
 }
 
@@ -8299,7 +8367,10 @@ mod tests {
         let field = stacking_star_field(width, height);
         let data: Vec<u16> = field.iter().map(|value| *value as u16).collect();
 
-        let options = CString::new(r#"{"psfType":"gaussian","preset":"standard"}"#).unwrap();
+        let options = CString::new(
+            r#"{"psfType":"gaussian","preset":"standard","triangleAngleDegrees":-30}"#,
+        )
+        .unwrap();
         let mut error = ptr::null_mut();
         let json = unsafe {
             seiza_stars_detect_luma_u16_json(
@@ -8327,6 +8398,49 @@ mod tests {
         assert!(parsed["averageHfr"].as_f64().unwrap() > 0.0);
         assert_eq!(parsed["cells"].as_array().unwrap().len(), 9);
         assert!(parsed["tilt"].is_object());
+        let triangle = &parsed["triangleTilt"];
+        assert_eq!(triangle["angleDegrees"], 330.0);
+        let expected_inner = 0.25 * (width as f64 / 2.0).hypot(height as f64 / 2.0);
+        let expected_outer = 0.5 * width.min(height) as f64;
+        assert!((triangle["innerRadiusPixels"].as_f64().unwrap() - expected_inner).abs() < 1e-12);
+        assert_eq!(triangle["outerRadiusPixels"], expected_outer);
+        assert_eq!(triangle["minimumStarsPerRegion"], 3);
+        assert!(triangle["center"].is_object());
+        let center_count = triangle["center"]["starCount"].as_u64().unwrap();
+        assert_eq!(
+            triangle["center"]["medianHfr"].is_number(),
+            center_count > 0
+        );
+        let sectors = triangle["sectors"].as_array().unwrap();
+        assert_eq!(sectors.len(), 3);
+        for (index, (sector, axis)) in sectors
+            .iter()
+            .zip([(1, 330.0), (2, 90.0), (3, 210.0)])
+            .enumerate()
+        {
+            assert_eq!(sector["sector"], axis.0, "sector {index}");
+            assert_eq!(sector["axisAngleDegrees"], axis.1, "sector {index}");
+            let count = sector["starCount"].as_u64().unwrap();
+            assert_eq!(sector["medianHfr"].is_number(), count > 0);
+        }
+        let expected_ready = sectors
+            .iter()
+            .all(|sector| sector["starCount"].as_u64().unwrap() >= 3);
+        assert_eq!(triangle["ready"], expected_ready);
+        let annular_count: u64 = sectors
+            .iter()
+            .map(|sector| sector["starCount"].as_u64().unwrap())
+            .sum();
+        assert_eq!(triangle["overallMedianHfr"].is_number(), annular_count > 0);
+        for field in ["tiltPercent", "bestSector", "worstSector"] {
+            assert_eq!(triangle[field].is_number(), expected_ready, "{field}");
+        }
+        if expected_ready {
+            assert!(triangle["tiltPercent"].as_f64().unwrap() >= 0.0);
+            for field in ["bestSector", "worstSector"] {
+                assert!((1..=3).contains(&triangle[field].as_u64().unwrap()));
+            }
+        }
         let star = &parsed["stars"][0];
         assert!(star["eccentricity"].is_number(), "PSF was fitted");
         let theta = star["theta"].as_f64().expect("PSF orientation");
@@ -8357,6 +8471,28 @@ mod tests {
                 .to_str()
                 .unwrap()
                 .contains("unknown field"),
+        );
+        unsafe { seiza_string_free(error) };
+
+        let bad_angle = CString::new(r#"{"triangleAngleDegrees":"up"}"#).unwrap();
+        let mut error = ptr::null_mut();
+        let json = unsafe {
+            seiza_stars_detect_luma_u16_json(
+                data.as_ptr(),
+                data.len(),
+                width,
+                height,
+                bad_angle.as_ptr(),
+                &mut error,
+            )
+        };
+        assert!(json.is_null());
+        assert!(!error.is_null());
+        assert!(
+            unsafe { CStr::from_ptr(error) }
+                .to_str()
+                .unwrap()
+                .contains("invalid type"),
         );
         unsafe { seiza_string_free(error) };
     }
@@ -8409,7 +8545,8 @@ mod tests {
             ),
         )
         .unwrap();
-        let options = Some(r#"{"psfType":"gaussian","preset":"standard"}"#);
+        let options =
+            Some(r#"{"psfType":"gaussian","preset":"standard","triangleAngleDegrees":390}"#);
 
         let direct = call_star_buffer(&samples, width, height, options).unwrap();
         let from_path = call_star_path(&path, options).unwrap();
@@ -8418,6 +8555,7 @@ mod tests {
         assert_eq!(from_path["width"], width);
         assert_eq!(from_path["height"], height);
         assert_eq!(from_path["majorAxisOrientationsNormalized"], true);
+        assert_eq!(from_path["triangleTilt"]["angleDegrees"], 30.0);
     }
 
     #[test]
@@ -8443,6 +8581,7 @@ mod tests {
         assert_eq!(result["width"], width);
         assert_eq!(result["height"], height);
         assert_eq!(result["cells"].as_array().unwrap().len(), 9);
+        assert!(result.get("triangleTilt").is_none());
 
         let bad_options = call_star_path(&path, Some(r#"{"psftype":"none"}"#)).unwrap_err();
         assert!(bad_options.contains("unknown field"), "{bad_options}");
@@ -10311,8 +10450,11 @@ pub unsafe extern "C" fn seiza_calibration_dark_matches(
 /// `pixelSizeUm` (classify the pixel scale when no preset is given),
 /// `psfType` ("none" | "gaussian" | "moffat4"; default "moffat4"),
 /// `structureRemoval` ("filtered" | "atrous"), `detectionBinning`,
-/// `keepSaturated`, `noiseReductionRadius`, `sensitivity`. Unknown fields
-/// are an error, so a typo cannot silently run the defaults.
+/// `keepSaturated`, `noiseReductionRadius`, `sensitivity`, and optional
+/// `triangleAngleDegrees`. Unknown fields are an error, so a typo cannot
+/// silently run the defaults. A triangle angle may be any finite degree
+/// value; the response normalizes it over `[0, 360)`, with zero pointing to
+/// the top of the image and positive angles turning clockwise.
 ///
 /// Returns owned JSON, released with [`seiza_string_free`]:
 /// `{"schemaVersion":1,"width":..,"height":..,
@@ -10321,10 +10463,23 @@ pub unsafe extern "C" fn seiza_calibration_dark_matches(
 /// "stars":[{"x":..,"y":..,"hfr":..,"fwhm":..,"brightness":..,
 /// "background":..,"snr":..,"flux":..,"pixelCount":..,"saturated":..,
 /// "eccentricity":?,"theta":?,"rSquared":?}],"cells":[..3x3 region
-/// statistics..],"tilt":{..ASTAP corner verdict..}}`. Fitted `theta` and cell
+/// statistics..],"tilt":{..parallelogram corner verdict..},
+/// "triangleTilt":?}`. Fitted `theta` and cell
 /// `meanTheta` are normalized ellipse major-axis orientations in radians over
 /// `[0, π)`. The tilt analysis is folded in because it is derived and cheap,
 /// so every consumer reads the same verdict from one call.
+///
+/// `triangleTilt` is omitted unless `triangleAngleDegrees` was supplied. It
+/// reports the normalized angle, center/annulus radii in pixels, the native
+/// minimum-star confidence policy and readiness, center statistics, and three
+/// ordered sectors with 1-based sector ID, axis angle, star count, and median
+/// HFR. The center is `radius < 0.25 * hypot(width/2, height/2)`. The annulus
+/// is `innerRadiusPixels <= radius <= 0.5 * min(width, height)` and is split
+/// into three complete, half-open 120-degree sectors. `overallMedianHfr` is
+/// the median of every usable annular star. `tiltPercent`, `bestSector`, and
+/// `worstSector` are null until every sector has at least
+/// `minimumStarsPerRegion` measurements; otherwise tilt is
+/// `100 * (worst median - best median) / overallMedianHfr`.
 ///
 /// # Safety
 ///

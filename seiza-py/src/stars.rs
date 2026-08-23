@@ -86,8 +86,9 @@ pub(crate) struct PyTiltCell {
     theta_coherence: f64,
 }
 
-/// ASTAP-style corner-vs-center tilt and curvature verdict. Corner names are
-/// kebab-case: ``top-left``, ``top-right``, ``bottom-left``, ``bottom-right``.
+/// Parallelogram corner-vs-center tilt and curvature verdict. Corner names
+/// are kebab-case: ``top-left``, ``top-right``, ``bottom-left``,
+/// ``bottom-right``.
 #[pyclass(name = "TiltSummary", module = "seiza", frozen)]
 pub(crate) struct PyTiltSummary {
     #[pyo3(get)]
@@ -105,6 +106,59 @@ pub(crate) struct PyTiltSummary {
     worst_corner: Option<String>,
     #[pyo3(get)]
     best_corner: Option<String>,
+}
+
+/// Aggregate statistics for the circular center of a triangle tilt analysis.
+#[pyclass(name = "TriangleTiltCenter", module = "seiza", frozen)]
+#[derive(Clone)]
+pub(crate) struct PyTriangleTiltCenter {
+    #[pyo3(get)]
+    star_count: usize,
+    #[pyo3(get)]
+    median_hfr: Option<f64>,
+}
+
+/// Aggregate statistics for one triangle adjustment-screw sector.
+#[pyclass(name = "TriangleTiltSector", module = "seiza", frozen)]
+#[derive(Clone)]
+pub(crate) struct PyTriangleTiltSector {
+    /// Stable 1-based adjustment-screw identifier.
+    #[pyo3(get)]
+    sector: u8,
+    /// Image-coordinate degrees: zero points up, positive turns clockwise.
+    #[pyo3(get)]
+    axis_angle_degrees: f64,
+    #[pyo3(get)]
+    star_count: usize,
+    #[pyo3(get)]
+    median_hfr: Option<f64>,
+}
+
+/// Native triangle-sector tilt analysis and its confidence provenance.
+#[pyclass(name = "TriangleTiltSummary", module = "seiza", frozen)]
+pub(crate) struct PyTriangleTiltSummary {
+    #[pyo3(get)]
+    angle_degrees: f64,
+    #[pyo3(get)]
+    inner_radius_pixels: f64,
+    #[pyo3(get)]
+    outer_radius_pixels: f64,
+    #[pyo3(get)]
+    minimum_stars_per_region: usize,
+    #[pyo3(get)]
+    ready: bool,
+    #[pyo3(get)]
+    center: PyTriangleTiltCenter,
+    #[pyo3(get)]
+    sectors: Vec<PyTriangleTiltSector>,
+    #[pyo3(get)]
+    overall_median_hfr: Option<f64>,
+    #[pyo3(get)]
+    tilt_percent: Option<f64>,
+    #[pyo3(get)]
+    best_sector: Option<u8>,
+    #[pyo3(get)]
+    worst_sector: Option<u8>,
 }
 
 fn parse_psf_type(name: &str) -> PyResult<PSFType> {
@@ -233,12 +287,8 @@ fn detect_measured_stars(
     })
 }
 
-/// ASTAP-style sensor tilt and field-curvature analysis over a detection
-/// result: the 3×3 grid's per-cell statistics and the corner-vs-center
-/// verdict. Stars without a fitted PSF contribute HFR but no direction.
-#[pyfunction]
-fn tilt_analysis(result: &PyStarDetectionResult) -> PyResult<(Vec<PyTiltCell>, PyTiltSummary)> {
-    let stars: Vec<tilt::TiltStar> = result
+fn tilt_stars(result: &PyStarDetectionResult) -> Vec<tilt::TiltStar> {
+    result
         .stars
         .iter()
         .map(|star| tilt::TiltStar {
@@ -248,7 +298,15 @@ fn tilt_analysis(result: &PyStarDetectionResult) -> PyResult<(Vec<PyTiltCell>, P
             eccentricity: star.eccentricity.unwrap_or(0.0),
             theta: star.theta,
         })
-        .collect();
+        .collect()
+}
+
+/// Parallelogram sensor-tilt and field-curvature analysis over a detection
+/// result: the 3×3 grid's per-cell statistics and the corner-vs-center
+/// verdict. Stars without a fitted PSF contribute HFR but no direction.
+#[pyfunction]
+fn tilt_analysis(result: &PyStarDetectionResult) -> PyResult<(Vec<PyTiltCell>, PyTiltSummary)> {
+    let stars = tilt_stars(result);
     let cells = tilt::analyze_cells(&stars, result.width, result.height);
     let summary = tilt::tilt_summary(&cells);
     Ok((
@@ -284,12 +342,62 @@ fn tilt_analysis(result: &PyStarDetectionResult) -> PyResult<(Vec<PyTiltCell>, P
     ))
 }
 
+/// Triangle tilt analysis over an existing detection result without running
+/// the detector again.
+///
+/// ``angle_degrees`` locates sector 1 in image coordinates: zero points to
+/// the top and positive angles turn clockwise. The result normalizes it over
+/// ``[0, 360)``. The center disk ends at 25% of the center-to-corner distance;
+/// the outer annulus radius is half the shorter image dimension. Annular stars
+/// are divided among three complete, half-open 120-degree sectors. The tilt
+/// verdict is withheld until every sector contains at least
+/// ``minimum_stars_per_region`` measurements.
+#[pyfunction]
+#[pyo3(signature = (result, *, angle_degrees=0.0))]
+fn triangle_tilt_analysis(
+    result: &PyStarDetectionResult,
+    angle_degrees: f64,
+) -> PyResult<PyTriangleTiltSummary> {
+    let stars = tilt_stars(result);
+    let summary = tilt::analyze_triangle(&stars, result.width, result.height, angle_degrees)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    Ok(PyTriangleTiltSummary {
+        angle_degrees: summary.angle_degrees,
+        inner_radius_pixels: summary.inner_radius_pixels,
+        outer_radius_pixels: summary.outer_radius_pixels,
+        minimum_stars_per_region: summary.minimum_stars_per_region,
+        ready: summary.ready,
+        center: PyTriangleTiltCenter {
+            star_count: summary.center.star_count,
+            median_hfr: summary.center.median_hfr,
+        },
+        sectors: summary
+            .sectors
+            .iter()
+            .map(|sector| PyTriangleTiltSector {
+                sector: sector.sector,
+                axis_angle_degrees: sector.axis_angle_degrees,
+                star_count: sector.star_count,
+                median_hfr: sector.median_hfr,
+            })
+            .collect(),
+        overall_median_hfr: summary.overall_median_hfr,
+        tilt_percent: summary.tilt_percent,
+        best_sector: summary.best_sector,
+        worst_sector: summary.worst_sector,
+    })
+}
+
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyMeasuredStar>()?;
     module.add_class::<PyStarDetectionResult>()?;
     module.add_class::<PyTiltCell>()?;
     module.add_class::<PyTiltSummary>()?;
+    module.add_class::<PyTriangleTiltCenter>()?;
+    module.add_class::<PyTriangleTiltSector>()?;
+    module.add_class::<PyTriangleTiltSummary>()?;
     module.add_function(wrap_pyfunction!(detect_measured_stars, module)?)?;
     module.add_function(wrap_pyfunction!(tilt_analysis, module)?)?;
+    module.add_function(wrap_pyfunction!(triangle_tilt_analysis, module)?)?;
     Ok(())
 }

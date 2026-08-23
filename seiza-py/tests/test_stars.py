@@ -47,6 +47,41 @@ def test_tilt_analysis_sees_the_soft_corner():
     assert summary.tilt_percent > 0
 
 
+def test_triangle_tilt_analysis_exposes_native_geometry_and_confidence():
+    result = seiza.detect_measured_stars(synthetic_field(), psf_type="gaussian")
+    summary = seiza.triangle_tilt_analysis(result, angle_degrees=-30)
+
+    assert summary.angle_degrees == pytest.approx(330.0)
+    assert summary.inner_radius_pixels == pytest.approx(
+        0.25 * np.hypot(result.width / 2, result.height / 2)
+    )
+    assert summary.outer_radius_pixels == pytest.approx(
+        0.5 * min(result.width, result.height)
+    )
+    assert summary.minimum_stars_per_region == 3
+    assert [sector.sector for sector in summary.sectors] == [1, 2, 3]
+    assert [sector.axis_angle_degrees for sector in summary.sectors] == pytest.approx(
+        [330.0, 90.0, 210.0]
+    )
+    for sector in summary.sectors:
+        assert (sector.median_hfr is not None) == (sector.star_count > 0)
+
+    expected_ready = all(
+        sector.star_count >= summary.minimum_stars_per_region
+        for sector in summary.sectors
+    )
+    assert summary.ready == expected_ready
+    assert (summary.tilt_percent is not None) == expected_ready
+    assert (summary.best_sector is not None) == expected_ready
+    assert (summary.worst_sector is not None) == expected_ready
+
+
+def test_triangle_tilt_analysis_rejects_a_non_finite_angle():
+    result = seiza.detect_measured_stars(synthetic_field(), psf_type="none")
+    with pytest.raises(ValueError, match="triangle angle must be finite"):
+        seiza.triangle_tilt_analysis(result, angle_degrees=float("inf"))
+
+
 def test_a_bad_knob_is_an_error_not_a_default():
     with pytest.raises(ValueError, match="psf_type"):
         seiza.detect_measured_stars(synthetic_field(), psf_type="parabolic")
