@@ -1461,19 +1461,22 @@ int32_t seiza_calibration_dark_matches(const SeizaFrameSignature *reference,
  are an error, so a typo cannot silently run the defaults.
 
  Returns owned JSON, released with [`seiza_string_free`]:
- `{"schemaVersion":1,"averageHfr":..,"averageFwhm":..,"noiseSigma":..,
- "backgroundMean":..,"stars":[{"x":..,"y":..,"hfr":..,"fwhm":..,
- "brightness":..,"background":..,"snr":..,"flux":..,"pixelCount":..,
- "saturated":..,"eccentricity":?,"theta":?,"rSquared":?}],
- "cells":[..3x3 region statistics..],"tilt":{..ASTAP corner verdict..}}` —
- the tilt analysis is folded in because it is derived and cheap, so every
- consumer reads the same verdict from one call.
+ `{"schemaVersion":1,"width":..,"height":..,
+ "majorAxisOrientationsNormalized":true,"averageHfr":..,
+ "averageFwhm":..,"noiseSigma":..,"backgroundMean":..,
+ "stars":[{"x":..,"y":..,"hfr":..,"fwhm":..,"brightness":..,
+ "background":..,"snr":..,"flux":..,"pixelCount":..,"saturated":..,
+ "eccentricity":?,"theta":?,"rSquared":?}],"cells":[..3x3 region
+ statistics..],"tilt":{..ASTAP corner verdict..}}`. Fitted `theta` and cell
+ `meanTheta` are normalized ellipse major-axis orientations in radians over
+ `[0, π)`. The tilt analysis is folded in because it is derived and cheap,
+ so every consumer reads the same verdict from one call.
 
  # Safety
 
  `data` must reference `width * height` readable `uint16_t` samples.
- `options_json` must be null or a NUL-terminated UTF-8 string. When
- non-null, `error_out` must point to writable storage for one pointer.
+ `options_json` must be null or a NUL-terminated UTF-8 string. `error_out`
+ must be null or point to writable storage for one pointer.
  */
 char *seiza_stars_detect_luma_u16_json(const uint16_t *data,
                                        size_t len,
@@ -1481,6 +1484,31 @@ char *seiza_stars_detect_luma_u16_json(const uint16_t *data,
                                        size_t height,
                                        const char *options_json,
                                        char **error_out);
+
+/*
+ Open a FITS or XISF image and run the same measurement detector and tilt
+ analysis as [`seiza_stars_detect_luma_u16_json`] on its linear 16-bit
+ luminance. Mono u16 is measured without a display-render copy; planar RGB
+ is collapsed to luminance, raw Bayer data is debayered to luminance, and
+ other numeric sample types use the astronomy loader's linear u16 mapping.
+ Raster image formats are deliberately refused.
+
+ `options_json` has the same shape as the buffer entry point. When no
+ `preset` is given, an omitted `focalLengthMm` is read from `FOCALLEN`,
+ `FOCALLENGTH`, or `FOCAL`, and an omitted `pixelSizeUm` is read from
+ `XPIXSZ`; caller-provided values win independently. An explicit `preset`
+ is the complete classification choice and does not consult those headers.
+ The returned schema-1 JSON, including `width` and `height`, has the same
+ shape as the buffer entry point and is byte-for-byte identical for the
+ same samples and resolved options.
+
+ # Safety
+
+ `path` must reference a NUL-terminated UTF-8 FITS or XISF path.
+ `options_json` must be null or a NUL-terminated UTF-8 string. `error_out`
+ must be null or point to writable storage for one pointer.
+ */
+char *seiza_stars_detect_path_json(const char *path, const char *options_json, char **error_out);
 
 /*
  Why two frames' sensor readings refuse to match, as a human-readable

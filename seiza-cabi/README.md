@@ -83,6 +83,16 @@ exposes the **superset** of what both apps need.
 - **Stack-depth analysis** — `seiza_live_stacker_measure_depth` measures the
   borrowed live accumulator without a snapshot, and `seiza_checkpoint_depths`
   returns the doubling ladder at which a host should sample a finite batch.
+- **Measured stars and sensor tilt** —
+  `seiza_stars_detect_luma_u16_json` measures a caller-owned mono u16 frame,
+  while `seiza_stars_detect_path_json` opens FITS/XISF directly and measures
+  its linear luminance without routing through display RGBA. Both return the
+  same schema-1 JSON: source dimensions, stars with HFR/FWHM/PSF measurements,
+  a 3×3 cell grid, and the derived corner tilt/curvature verdict. Path options
+  can infer a detector preset from `FOCALLEN`/`FOCALLENGTH`/`FOCAL` and
+  `XPIXSZ`; explicit caller choices win. PSF directions are normalized ellipse
+  major-axis orientations over `[0, π)` and are advertised by
+  `majorAxisOrientationsNormalized: true`.
 - **Plate solving** — `seiza_solve_image_json`.
 - **Catalog setup** — `seiza_catalog_status_json` and `seiza_catalog_setup`
   (with a progress callback). The install path delegates to

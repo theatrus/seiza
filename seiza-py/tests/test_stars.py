@@ -31,6 +31,7 @@ def test_detects_and_measures_stars():
     star = result.stars[0]
     assert star.hfr > 0 and star.fwhm > 0
     assert star.eccentricity is not None, "PSF was fitted"
+    assert 0.0 <= star.theta < np.pi, "major-axis orientation is normalized"
 
 
 def test_tilt_analysis_sees_the_soft_corner():
