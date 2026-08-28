@@ -387,6 +387,37 @@ flat = seiza.dt_filter(guide, src, sigma_spatial=10.0, sigma_color=30.0)
 stars_plus_noise = seiza.remove_structures(image.astype(np.float64), layers=4)
 ```
 
+## RC-Astro external tools
+
+Drive RC-Astro's standalone `rc-astro` CLI (BlurXTerminator, StarXTerminator,
+NoiseXTerminator) on image files. The CLI publishes its own contract — read
+each tool's parameters from `rc_astro_tool_schema` rather than hard-coding
+flags, because they change between CLI builds. Runs need an installed,
+licensed CLI; the schema's `licensed` flag and `cli_version`/`ml_version`
+(cache-key material) come from the same probe.
+
+```python
+import seiza
+
+print(seiza.rc_astro_locate())               # None when not installed
+
+schema = seiza.rc_astro_tool_schema("sxt")
+for p in schema.parameters:
+    print(p.name, p.type, p.default, p.min, p.max)
+
+# Star removal, keeping the stars image as a sidecar so starless and
+# stars can be stretched independently.
+run = seiza.rc_astro_process_file(
+    "sxt", "stack.fits", "starless.fits",
+    parameters={"stars": True},
+    progress=lambda fraction: print(f"{fraction:.0%}"),
+)
+print(run.primary, run.sidecars, run.device)
+```
+
+A child completely silent for ten minutes is killed; a first run downloads
+ML models, which `rc-astro download-models` handles ahead of time.
+
 ## Predicted satellite tracks
 
 After a solve, predict which satellites crossed the image while the shutter

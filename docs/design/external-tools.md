@@ -50,6 +50,18 @@ A host caching results must include `cliVersion` and `mlVersion` from the
 schema in its cache key besides the parameter values: a CLI or model
 upgrade changes the output for identical inputs.
 
+## Bindings
+
+The C ABI exposes the same surface as two JSON functions:
+`seiza_rc_astro_tool_schema_json` (the live contract as schema-1 JSON) and
+`seiza_rc_astro_process_file_json` (a file-level run taking the request as
+JSON and an optional `SeizaCancelSignal`). Python mirrors it with
+`seiza.rc_astro_locate`, `seiza.rc_astro_tool_schema`, and
+`seiza.rc_astro_process_file`, which releases the GIL for the run and
+reports progress through an optional callback. Both bindings work at the
+file level — array round trips stay a Rust-level (`process_image`)
+concern.
+
 ## Validation
 
 Unit tests run against a fake `rc-astro` shell script replaying a captured

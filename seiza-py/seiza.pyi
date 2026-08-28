@@ -425,6 +425,52 @@ def detect_measured_stars(
 def tilt_analysis(
     result: StarDetectionResult,
 ) -> tuple[list[TiltCell], TiltSummary]: ...
+
+class RcAstroParameter:
+    name: str
+    flag: str | None
+    label: str
+    description: str
+    type: str
+    default: float | bool | int
+    min: float | None
+    max: float | None
+
+class RcAstroSchema:
+    contract_version: int
+    cli_version: str
+    key: str
+    name: str
+    ml_version: int | None
+    licensed: bool
+    license_message: str | None
+    parameters: list[RcAstroParameter]
+
+class RcAstroRun:
+    primary: str
+    sidecars: list[str]
+    device: str | None
+    warnings: list[str]
+    cli_version: str
+    ml_version: int | None
+
+def rc_astro_locate() -> str | None: ...
+def rc_astro_tool_schema(
+    tool: str,
+    *,
+    executable: str | None = None,
+) -> RcAstroSchema: ...
+def rc_astro_process_file(
+    tool: str,
+    input: str,
+    output: str,
+    *,
+    parameters: dict[str, float | bool | int] | None = None,
+    device: str | None = None,
+    executable: str | None = None,
+    host: str | None = None,
+    progress: Callable[[float], None] | None = None,
+) -> RcAstroRun: ...
 def triangle_tilt_analysis(
     result: StarDetectionResult,
     *,

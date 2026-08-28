@@ -13,11 +13,13 @@ use seiza_background::{BackgroundConfig, BackgroundFit, CorrectionMode, fit_back
 use seiza_deconvolution::{DeconvolutionConfig, deconvolve, deconvolve_masked};
 use seiza_fits::{FitsImage, HeaderValue, RgbImage16, Statistics, StretchParams};
 use seiza_stacking::{
-    CancelSignal, ChannelCoverage, ChannelSamples, ColorCrop, CropReport, FitsFrame,
-    FrameDiagnostics, FrameDisposition, FrameInputMode, FrameSourceRole, ImpulseFilterOptions,
-    LinearImage, LiveStacker, MasterBuildOptions, MasterDark, MasterFrame, MasterFrameKind,
-    MasterRejectionOptions, ReferenceRegion, StackExportSnapshot as RustStackExportSnapshot,
-    StackOptions, StackSnapshot as RustStackSnapshot, build_master_from_fits,
+    CancelSignal, ChannelCoverage, ChannelSamples, ColorCrop, CropReport, ExternalParameterKind,
+    ExternalParameterValue, ExternalToolRequest, ExternalToolSchema, FitsFrame, FrameDiagnostics,
+    FrameDisposition, FrameInputMode, FrameSourceRole, ImpulseFilterOptions, LinearImage,
+    LiveStacker, MasterBuildOptions, MasterDark, MasterFrame, MasterFrameKind,
+    MasterRejectionOptions, RcAstroCli, ReferenceRegion,
+    StackExportSnapshot as RustStackExportSnapshot, StackOptions,
+    StackSnapshot as RustStackSnapshot, build_master_from_fits,
     checkpoint_depths as rust_checkpoint_depths, crop_report, measure_depth as rust_measure_depth,
     path_identity, paths_refer_to_same_file, write_fits_f32, write_master_fits_f32,
     write_stack_export_fits_f32,
@@ -10807,4 +10809,379 @@ pub unsafe extern "C" fn seiza_calibration_fit_flat_pedestal(
         Ok(1)
     })
     .unwrap_or(-1)
+}
+
+// ---------------------------------------------------------------------------
+// RC-Astro external tools (BlurXTerminator, StarXTerminator, NoiseXTerminator)
+// ---------------------------------------------------------------------------
+
+fn rc_astro_cli(executable: Option<PathBuf>, host: Option<String>) -> Result<RcAstroCli, String> {
+    let cli = match executable {
+        Some(path) => RcAstroCli::with_executable(path),
+        None => RcAstroCli::locate().ok_or_else(|| "rc-astro was not found on PATH".to_string())?,
+    };
+    Ok(match host {
+        Some(host) => cli.with_host(host),
+        None => cli,
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RcAstroParameterResponse {
+    name: String,
+    /// Absent for a GUI-only parameter that cannot be set through the CLI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    flag: Option<String>,
+    label: String,
+    description: String,
+    /// "float", "bool", or "int".
+    r#type: &'static str,
+    default: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max: Option<f64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RcAstroSchemaResponse {
+    schema_version: u32,
+    /// The tool's own --json contract version (v3 through v6 are known).
+    contract_version: u32,
+    cli_version: String,
+    key: String,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ml_version: Option<i64>,
+    licensed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    license_message: Option<String>,
+    parameters: Vec<RcAstroParameterResponse>,
+}
+
+fn rc_astro_schema_response(schema: &ExternalToolSchema) -> RcAstroSchemaResponse {
+    RcAstroSchemaResponse {
+        schema_version: 1,
+        contract_version: schema.schema_version,
+        cli_version: schema.cli_version.clone(),
+        key: schema.key.clone(),
+        name: schema.name.clone(),
+        ml_version: schema.ml_version,
+        licensed: schema.licensed,
+        license_message: schema.license_message.clone(),
+        parameters: schema
+            .parameters
+            .iter()
+            .map(|parameter| {
+                let (kind, default, min, max) = match &parameter.kind {
+                    ExternalParameterKind::Float { default, min, max } => (
+                        "float",
+                        serde_json::json!(default),
+                        Some(*min).filter(|value| value.is_finite()),
+                        Some(*max).filter(|value| value.is_finite()),
+                    ),
+                    ExternalParameterKind::Bool { default } => {
+                        ("bool", serde_json::json!(default), None, None)
+                    }
+                    ExternalParameterKind::Int { default, min, max } => (
+                        "int",
+                        serde_json::json!(default),
+                        (*min != i64::MIN).then_some(*min as f64),
+                        (*max != i64::MAX).then_some(*max as f64),
+                    ),
+                };
+                RcAstroParameterResponse {
+                    name: parameter.name.clone(),
+                    flag: parameter.flag.clone(),
+                    label: parameter.label.clone(),
+                    description: parameter.description.clone(),
+                    r#type: kind,
+                    default,
+                    min,
+                    max,
+                }
+            })
+            .collect(),
+    }
+}
+
+/// One RC-Astro file-processing request for
+/// [`seiza_rc_astro_process_file_json`]. Unknown fields are an error so a
+/// typo cannot silently run the defaults.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RcAstroProcessRequest {
+    /// "bxt", "sxt", or "nxt".
+    tool: String,
+    input: PathBuf,
+    output: PathBuf,
+    /// Parameter values keyed by schema name; anything absent keeps the
+    /// tool's default. Booleans for switches, numbers for the rest.
+    #[serde(default)]
+    parameters: serde_json::Map<String, serde_json::Value>,
+    /// "auto", "cpu", "gpu", or "gpuN"; absent uses the tool's saved default.
+    #[serde(default)]
+    device: Option<String>,
+    /// Executable path; absent searches PATH.
+    #[serde(default)]
+    executable: Option<PathBuf>,
+    /// Integrator identification for RC-Astro support, e.g. "MyApp-1.2".
+    #[serde(default)]
+    host: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RcAstroProcessResponse {
+    schema_version: u32,
+    primary: PathBuf,
+    /// Extra files written beside the output — StarXTerminator's stars
+    /// image when the "stars" parameter was on.
+    sidecars: Vec<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device: Option<String>,
+    warnings: Vec<String>,
+    cli_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ml_version: Option<i64>,
+}
+
+fn rc_astro_parameter_values(
+    parameters: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Vec<(String, ExternalParameterValue)>, String> {
+    parameters
+        .iter()
+        .map(|(name, value)| {
+            let value = match value {
+                serde_json::Value::Bool(flag) => ExternalParameterValue::Bool(*flag),
+                serde_json::Value::Number(number) => match number.as_i64() {
+                    Some(whole) => ExternalParameterValue::Int(whole),
+                    None => ExternalParameterValue::Float(
+                        number
+                            .as_f64()
+                            .ok_or_else(|| format!("parameter {name:?} is not a finite number"))?,
+                    ),
+                },
+                _ => return Err(format!("parameter {name:?} must be a boolean or a number")),
+            };
+            Ok((name.clone(), value))
+        })
+        .collect()
+}
+
+/// One RC-Astro tool's live contract as schema-1 JSON: its parameters with
+/// flags, types, ranges, and defaults, plus CLI/model versions and license
+/// state, read from `rc-astro <tool> --json`. Flags change between CLI
+/// builds, so build requests from this document rather than hard-coding
+/// them. `executable` may be null to search PATH. Returns a string released
+/// with [`seiza_string_free`], or null with `error_out` set.
+///
+/// # Safety
+///
+/// `tool` must be a NUL-terminated UTF-8 string. `executable` must be null
+/// or a NUL-terminated UTF-8 path. When non-null, `error_out` must point to
+/// writable storage for one pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_rc_astro_tool_schema_json(
+    executable: *const c_char,
+    tool: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let tool = required_str(tool, "rc-astro tool")?;
+        let executable = optional_path(executable)?;
+        let cli = rc_astro_cli(executable, None)?;
+        let schema = cli.tool_schema(&tool).map_err(|error| error.to_string())?;
+        owned_json(&rc_astro_schema_response(&schema))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Run one RC-Astro tool on an image file. The request names the tool, the
+/// input and output paths, and parameter values keyed by schema name (see
+/// [`seiza_rc_astro_tool_schema_json`]); whole-number floats are accepted
+/// for float parameters. The run streams the tool's progress internally,
+/// kills a child silent for ten minutes, and honors `cancel` within half a
+/// second. The response lists the written files — StarXTerminator's stars
+/// sidecar included — and the device the tool reported using. Returns a
+/// string released with [`seiza_string_free`], or null with `error_out`
+/// set.
+///
+/// # Safety
+///
+/// `request_json` must be a NUL-terminated UTF-8 string. `cancel` must be
+/// null or a live [`SeizaCancelSignal`] retained until this call returns.
+/// When non-null, `error_out` must point to writable storage for one
+/// pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_rc_astro_process_file_json(
+    request_json: *const c_char,
+    cancel: *const SeizaCancelSignal,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let request_json = required_str(request_json, "rc-astro request JSON")?;
+        let request: RcAstroProcessRequest = serde_json::from_str(&request_json)
+            .map_err(|error| format!("invalid rc-astro request JSON: {error}"))?;
+        let cli = rc_astro_cli(request.executable.clone(), request.host.clone())?;
+        let schema = cli
+            .tool_schema(&request.tool)
+            .map_err(|error| error.to_string())?;
+        let tool_request = ExternalToolRequest {
+            tool: request.tool.clone(),
+            parameters: rc_astro_parameter_values(&request.parameters)?,
+            device: request.device.clone(),
+        };
+        let cancellation = unsafe { cancel.as_ref() }
+            .map(|signal| CancelSignal::from(Arc::clone(&signal.cancelled)));
+        let run = cli
+            .run_on_file(
+                &schema,
+                &tool_request,
+                &request.input,
+                &request.output,
+                cancellation.as_ref(),
+                &mut |_| {},
+            )
+            .map_err(|error| error.to_string())?;
+        owned_json(&RcAstroProcessResponse {
+            schema_version: 1,
+            primary: run.primary,
+            sidecars: run.sidecars,
+            device: run.device,
+            warnings: run.warnings,
+            cli_version: schema.cli_version.clone(),
+            ml_version: schema.ml_version,
+        })
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[cfg(test)]
+mod rc_astro_tests {
+    use super::*;
+
+    /// A stand-in rc-astro: answers `<tool> --json` with a schema document
+    /// and otherwise copies the input to the output (with a stars sidecar
+    /// when asked), emitting the real event-stream shape.
+    #[cfg(unix)]
+    fn fake_rc_astro(directory: &std::path::Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = directory.join("rc-astro");
+        let script = r#"#!/bin/sh
+if [ "$2" = "--json" ] && [ $# -eq 2 ]; then
+  cat <<'SCHEMA'
+{"schemaVersion": 6, "cliVersion": "2.6.6", "key": "sxt",
+ "name": "RC-Astro StarXTerminator", "mlVersion": 11,
+ "license": {"status": "permanent", "valid": true, "message": "Permanently licensed"},
+ "parameters": [
+   {"label": "Tile Overlap", "name": "overlap", "flag": "--overlap",
+    "description": "Fractional overlap", "type": "float",
+    "default": 0.2, "min": 0.0, "max": 0.5},
+   {"label": "Generate Star Image", "name": "stars", "flag": "--stars",
+    "description": "Also write a stars-only image", "type": "bool", "default": false}
+ ]}
+SCHEMA
+  exit 0
+fi
+out=""
+input=""
+stars=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    --stars) stars=1; shift ;;
+    --host|--depth|--device) shift 2 ;;
+    --*|sxt|bxt|nxt) shift ;;
+    *) input="$1"; shift ;;
+  esac
+done
+cp "$input" "$out"
+echo '{"event":"info","topic":"device","device":"cpu"}'
+echo "{\"event\":\"status\",\"phase\":\"complete\",\"output\":\"$out\"}"
+if [ "$stars" = 1 ]; then
+  sidecar="${out%.fits}-stars.fits"
+  cp "$input" "$sidecar"
+  echo "{\"event\":\"status\",\"phase\":\"complete\",\"output\":\"$sidecar\"}"
+fi
+"#;
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    fn call_json(json: *mut c_char, error: *mut c_char) -> Result<serde_json::Value, String> {
+        if json.is_null() {
+            assert!(!error.is_null());
+            let message = unsafe { CStr::from_ptr(error) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { seiza_string_free(error) };
+            return Err(message);
+        }
+        let value = unsafe { CStr::from_ptr(json) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { seiza_string_free(json) };
+        Ok(serde_json::from_str(&value).unwrap())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_schema_and_a_run_round_trip_through_the_abi() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = fake_rc_astro(directory.path());
+        let executable_c = CString::new(executable.to_str().unwrap()).unwrap();
+        let tool = CString::new("sxt").unwrap();
+
+        let mut error: *mut c_char = ptr::null_mut();
+        let schema = unsafe {
+            seiza_rc_astro_tool_schema_json(executable_c.as_ptr(), tool.as_ptr(), &mut error)
+        };
+        let schema = call_json(schema, error).unwrap();
+        assert_eq!(schema["contractVersion"], 6);
+        assert_eq!(schema["licensed"], true);
+        assert_eq!(schema["parameters"][1]["name"], "stars");
+        assert_eq!(schema["parameters"][1]["type"], "bool");
+
+        let input = directory.path().join("in.fits");
+        std::fs::write(&input, b"fake fits").unwrap();
+        let output = directory.path().join("out.fits");
+        let request = serde_json::json!({
+            "tool": "sxt",
+            "input": input,
+            "output": output,
+            "parameters": {"stars": true, "overlap": 0.3},
+            "executable": executable,
+        });
+        let request_c = CString::new(request.to_string()).unwrap();
+        let mut error: *mut c_char = ptr::null_mut();
+        let response = unsafe {
+            seiza_rc_astro_process_file_json(request_c.as_ptr(), ptr::null(), &mut error)
+        };
+        let response = call_json(response, error).unwrap();
+        assert_eq!(response["primary"], output.to_str().unwrap());
+        assert_eq!(response["sidecars"].as_array().unwrap().len(), 1);
+        assert_eq!(response["device"], "cpu");
+        assert_eq!(response["cliVersion"], "2.6.6");
+        assert!(output.is_file());
+    }
+
+    #[test]
+    fn a_malformed_request_reports_a_clear_error() {
+        let request_c = CString::new(r#"{"tool": "sxt"}"#).unwrap();
+        let mut error: *mut c_char = ptr::null_mut();
+        let response = unsafe {
+            seiza_rc_astro_process_file_json(request_c.as_ptr(), ptr::null(), &mut error)
+        };
+        let message = call_json(response, error).unwrap_err();
+        assert!(
+            message.contains("invalid rc-astro request JSON"),
+            "{message}"
+        );
+    }
 }
