@@ -430,6 +430,53 @@ def triangle_tilt_analysis(
     *,
     angle_degrees: float = 0.0,
 ) -> TriangleTiltSummary: ...
+
+class RcAstroParameter:
+    name: str
+    flag: str | None
+    label: str
+    description: str
+    type: str
+    default: float | bool | int
+    min: float | None
+    max: float | None
+
+class RcAstroSchema:
+    contract_version: int
+    cli_version: str
+    key: str
+    name: str
+    ml_version: int | None
+    licensed: bool
+    license_message: str | None
+    parameters: list[RcAstroParameter]
+
+class RcAstroRun:
+    primary: Path
+    sidecars: list[Path]
+    device: str | None
+    warnings: list[str]
+    cli_version: str
+    ml_version: int | None
+
+def rc_astro_locate() -> str | None: ...
+def rc_astro_tool_schema(
+    tool: str,
+    *,
+    executable: str | Path | None = None,
+) -> RcAstroSchema: ...
+def rc_astro_process_file(
+    tool: str,
+    input: str | Path,
+    output: str | Path,
+    *,
+    parameters: dict[str, float | bool | int] | None = None,
+    device: str | None = None,
+    executable: str | Path | None = None,
+    host: str | None = None,
+    progress: Callable[[float], None] | None = None,
+    cancel: Callable[[], bool] | None = None,
+) -> RcAstroRun: ...
 def solve(
     stars: Sequence[StarInput],
     catalog: StarCatalog,

@@ -7,6 +7,7 @@ mod color;
 mod context;
 mod cosmetic;
 mod crop;
+mod external;
 mod fits;
 mod image;
 mod mapping;
@@ -30,6 +31,10 @@ pub use color::{
 pub use cosmetic::{ImpulseFilterOptions, suppress_impulses};
 pub use crop::{
     ChannelCoverage, ChannelSamples, ColorCrop, CropReport, covered_region, crop_report,
+};
+pub use external::{
+    ExternalParameterKind, ExternalParameterValue, ExternalToolParameter, ExternalToolRequest,
+    ExternalToolRun, ExternalToolSchema, ProcessedStackImage, RC_ASTRO_TOOLS, RcAstroCli,
 };
 pub use fits::{
     FitsFrame, FrameCalibrationState, FrameMetadata, FrameSourceRole, write_color_fits_f32,
@@ -144,6 +149,14 @@ pub enum Error {
         /// Underlying XISF encode error.
         #[source]
         source: seiza_xisf::XisfError,
+    },
+    /// An external image-processing tool failed or refused to run.
+    #[error("external tool {tool}: {message}")]
+    ExternalTool {
+        /// The tool that failed, e.g. "sxt".
+        tool: String,
+        /// What went wrong.
+        message: String,
     },
 }
 

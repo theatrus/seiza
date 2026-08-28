@@ -351,6 +351,13 @@ typedef struct {
   double channel_noise[SEIZA_SNR_MAX_CHANNELS];
 } SeizaSnrSample;
 
+/*
+ Progress callback for [`seiza_rc_astro_process_file_json`]: the fraction
+ complete in `[0, 1]` as the tool reports it, plus the caller's context
+ pointer. Called on the thread that made the call.
+ */
+typedef void (*SeizaRcAstroProgressCallback)(float, void*);
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -1609,6 +1616,59 @@ int32_t seiza_calibration_fit_flat_pedestal(const float *light,
                                             size_t height,
                                             float *pedestal,
                                             char **error_out);
+
+/*
+ The path of the `rc-astro` executable on `PATH`, as a string released
+ with [`seiza_string_free`]. Returns null with `error_out` untouched when
+ the CLI is simply not installed — absence is a state, not an error.
+
+ # Safety
+
+ `error_out` must be null or point to writable storage for one pointer.
+ */
+char *seiza_rc_astro_locate(char **error_out);
+
+/*
+ One RC-Astro tool's live contract as schema-1 JSON: its parameters with
+ flags, types, ranges, and defaults, plus CLI/model versions and license
+ state, read from `rc-astro <tool> --json`. Flags change between CLI
+ builds, so build requests from this document rather than hard-coding
+ them. `executable` may be null to search PATH. Returns a string released
+ with [`seiza_string_free`], or null with `error_out` set.
+
+ # Safety
+
+ `tool` must be a NUL-terminated UTF-8 string. `executable` must be null
+ or a NUL-terminated UTF-8 path. When non-null, `error_out` must point to
+ writable storage for one pointer.
+ */
+char *seiza_rc_astro_tool_schema_json(const char *executable, const char *tool, char **error_out);
+
+/*
+ Run one RC-Astro tool on an image file. The request names the tool, the
+ input and output paths, and parameter values keyed by schema name (see
+ [`seiza_rc_astro_tool_schema_json`]); whole-number floats are accepted
+ for float parameters. The run streams the tool's progress internally,
+ kills a child silent for ten minutes, and honors `cancel` within half a
+ second. The response lists the written files — StarXTerminator's stars
+ sidecar included — and the device the tool reported using. Returns a
+ string released with [`seiza_string_free`], or null with `error_out`
+ set. `progress` (nullable) receives the fraction complete in `[0, 1]`
+ as the tool reports it, on the calling thread, with `context` passed
+ through untouched.
+
+ # Safety
+
+ `request_json` must be a NUL-terminated UTF-8 string. `cancel` must be
+ null or a live [`SeizaCancelSignal`] retained until this call returns.
+ `context` is passed through untouched to `progress`. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_rc_astro_process_file_json(const char *request_json,
+                                       const SeizaCancelSignal *cancel,
+                                       SeizaRcAstroProgressCallback progress,
+                                       void *context,
+                                       char **error_out);
 
 #ifdef __cplusplus
 }  // extern "C"
