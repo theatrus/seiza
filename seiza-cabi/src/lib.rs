@@ -10820,10 +10820,30 @@ fn rc_astro_cli(executable: Option<PathBuf>, host: Option<String>) -> Result<RcA
         Some(path) => RcAstroCli::with_executable(path),
         None => RcAstroCli::locate().ok_or_else(|| "rc-astro was not found on PATH".to_string())?,
     };
-    Ok(match host {
-        Some(host) => cli.with_host(host),
-        None => cli,
+    // RC-Astro's --host names the integrator to their support; a cabi
+    // consumer that says nothing is a cabi-based application.
+    Ok(cli.with_host(host.unwrap_or_else(|| format!("seiza-cabi-{}", env!("CARGO_PKG_VERSION")))))
+}
+
+/// The path of the `rc-astro` executable on `PATH`, as a string released
+/// with [`seiza_string_free`]. Returns null with `error_out` untouched when
+/// the CLI is simply not installed — absence is a state, not an error.
+///
+/// # Safety
+///
+/// `error_out` must be null or point to writable storage for one pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_rc_astro_locate(error_out: *mut *mut c_char) -> *mut c_char {
+    clear_error(error_out);
+    let Some(cli) = RcAstroCli::locate() else {
+        return ptr::null_mut();
+    };
+    ffi_result(error_out, || {
+        CString::new(cli.executable().display().to_string())
+            .map(CString::into_raw)
+            .map_err(|_| "rc-astro path contains a NUL byte".to_string())
     })
+    .unwrap_or(ptr::null_mut())
 }
 
 #[derive(Serialize)]
@@ -11083,7 +11103,11 @@ if [ "$2" = "--json" ] && [ $# -eq 2 ]; then
     "description": "Fractional overlap", "type": "float",
     "default": 0.2, "min": 0.0, "max": 0.5},
    {"label": "Generate Star Image", "name": "stars", "flag": "--stars",
-    "description": "Also write a stars-only image", "type": "bool", "default": false}
+    "description": "Also write a stars-only image", "type": "bool", "default": false},
+   {"label": "Iterations", "name": "it", "flag": "--it",
+    "description": "Passes", "type": "int", "default": 2, "min": 1, "max": 5},
+   {"label": "Color Separation", "name": "csep",
+    "description": "GUI only", "type": "bool", "default": false}
  ]}
 SCHEMA
   exit 0
@@ -11147,15 +11171,23 @@ fi
         assert_eq!(schema["licensed"], true);
         assert_eq!(schema["parameters"][1]["name"], "stars");
         assert_eq!(schema["parameters"][1]["type"], "bool");
+        assert_eq!(schema["parameters"][2]["type"], "int");
+        assert_eq!(schema["parameters"][2]["min"], 1.0);
+        assert_eq!(schema["parameters"][2]["max"], 5.0);
+        // A GUI-only parameter carries no flag key at all.
+        assert!(schema["parameters"][3].get("flag").is_none());
 
         let input = directory.path().join("in.fits");
         std::fs::write(&input, b"fake fits").unwrap();
         let output = directory.path().join("out.fits");
+        // "it": 3.0 exercises the float-for-int coercion a consumer hits
+        // when it clamps to the schema's numeric bounds and sends the
+        // result back.
         let request = serde_json::json!({
             "tool": "sxt",
             "input": input,
             "output": output,
-            "parameters": {"stars": true, "overlap": 0.3},
+            "parameters": {"stars": true, "overlap": 0.3, "it": 3.0},
             "executable": executable,
         });
         let request_c = CString::new(request.to_string()).unwrap();

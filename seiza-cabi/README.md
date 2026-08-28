@@ -98,14 +98,18 @@ exposes the **superset** of what both apps need.
   `FOCALLEN`/`FOCALLENGTH`/`FOCAL` and `XPIXSZ`; explicit caller choices win.
   PSF directions are normalized ellipse major-axis orientations over `[0, π)`
   and are advertised by `majorAxisOrientationsNormalized: true`.
-- **RC-Astro external tools** — `seiza_rc_astro_tool_schema_json` reads one
-  tool's live contract (`rc-astro <tool> --json`: parameters with flags,
-  types, ranges, defaults, plus CLI/model versions and license state) as
-  schema-1 JSON, and `seiza_rc_astro_process_file_json` runs BXT, SXT, or
-  NXT on an image file with parameter values keyed by schema name — flags
-  change between CLI builds, so requests are built from the schema. The run
-  accepts a `SeizaCancelSignal`, kills a child silent for ten minutes, and
-  reports every written file, StarXTerminator's stars sidecar included.
+- **RC-Astro external tools** — `seiza_rc_astro_locate` finds the CLI on
+  `PATH` (null without an error when absent), `seiza_rc_astro_tool_schema_json`
+  reads one tool's live contract (`rc-astro <tool> --json`: parameters with
+  flags, types, ranges, defaults, plus CLI/model versions and license
+  state) as schema-1 JSON, and `seiza_rc_astro_process_file_json` runs BXT,
+  SXT, or NXT on an image file with parameter values keyed by schema name —
+  flags change between CLI builds, so requests are built from the schema.
+  Whole numbers satisfy float parameters and fraction-free floats satisfy
+  int parameters, so bounds read from the schema round-trip; a `false`
+  switch emits the CLI's `--no-` negation, overriding a true default. The
+  run accepts a `SeizaCancelSignal`, kills a child silent for ten minutes,
+  and reports every written file, StarXTerminator's stars sidecar included.
   Include the schema's `cliVersion`/`mlVersion` in any cache key: a tool
   upgrade changes the output for identical inputs.
 - **Plate solving** — `seiza_solve_image_json`.

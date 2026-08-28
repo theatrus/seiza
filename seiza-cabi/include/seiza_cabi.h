@@ -1611,6 +1611,17 @@ int32_t seiza_calibration_fit_flat_pedestal(const float *light,
                                             char **error_out);
 
 /*
+ The path of the `rc-astro` executable on `PATH`, as a string released
+ with [`seiza_string_free`]. Returns null with `error_out` untouched when
+ the CLI is simply not installed — absence is a state, not an error.
+
+ # Safety
+
+ `error_out` must be null or point to writable storage for one pointer.
+ */
+char *seiza_rc_astro_locate(char **error_out);
+
+/*
  One RC-Astro tool's live contract as schema-1 JSON: its parameters with
  flags, types, ranges, and defaults, plus CLI/model versions and license
  state, read from `rc-astro <tool> --json`. Flags change between CLI

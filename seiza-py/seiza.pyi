@@ -425,6 +425,11 @@ def detect_measured_stars(
 def tilt_analysis(
     result: StarDetectionResult,
 ) -> tuple[list[TiltCell], TiltSummary]: ...
+def triangle_tilt_analysis(
+    result: StarDetectionResult,
+    *,
+    angle_degrees: float = 0.0,
+) -> TriangleTiltSummary: ...
 
 class RcAstroParameter:
     name: str
@@ -447,8 +452,8 @@ class RcAstroSchema:
     parameters: list[RcAstroParameter]
 
 class RcAstroRun:
-    primary: str
-    sidecars: list[str]
+    primary: Path
+    sidecars: list[Path]
     device: str | None
     warnings: list[str]
     cli_version: str
@@ -458,24 +463,20 @@ def rc_astro_locate() -> str | None: ...
 def rc_astro_tool_schema(
     tool: str,
     *,
-    executable: str | None = None,
+    executable: str | Path | None = None,
 ) -> RcAstroSchema: ...
 def rc_astro_process_file(
     tool: str,
-    input: str,
-    output: str,
+    input: str | Path,
+    output: str | Path,
     *,
     parameters: dict[str, float | bool | int] | None = None,
     device: str | None = None,
-    executable: str | None = None,
+    executable: str | Path | None = None,
     host: str | None = None,
     progress: Callable[[float], None] | None = None,
+    cancel: Callable[[], bool] | None = None,
 ) -> RcAstroRun: ...
-def triangle_tilt_analysis(
-    result: StarDetectionResult,
-    *,
-    angle_degrees: float = 0.0,
-) -> TriangleTiltSummary: ...
 def solve(
     stars: Sequence[StarInput],
     catalog: StarCatalog,

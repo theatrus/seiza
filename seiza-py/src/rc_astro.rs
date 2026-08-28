@@ -8,14 +8,15 @@
 //! tool on an image file, returning every written file — StarXTerminator's
 //! stars sidecar included.
 
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyFileNotFoundError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use seiza_stacking::{
-    ExternalParameterKind, ExternalParameterValue, ExternalToolRequest, ExternalToolSchema,
-    RcAstroCli,
+    CancelSignal, ExternalParameterKind, ExternalParameterValue, ExternalToolRequest,
+    ExternalToolSchema, RcAstroCli,
 };
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 /// One schema parameter: its request name, CLI flag (absent for GUI-only
 /// parameters), display strings, type ("float", "bool", or "int"), default,
@@ -109,9 +110,9 @@ pub(crate) struct PyRcAstroSchema {
 #[pyclass(name = "RcAstroRun", module = "seiza", frozen)]
 pub(crate) struct PyRcAstroRun {
     #[pyo3(get)]
-    primary: String,
+    primary: PathBuf,
     #[pyo3(get)]
-    sidecars: Vec<String>,
+    sidecars: Vec<PathBuf>,
     #[pyo3(get)]
     device: Option<String>,
     #[pyo3(get)]
@@ -136,7 +137,7 @@ fn cli(executable: Option<PathBuf>, host: Option<String>) -> PyResult<RcAstroCli
     let cli = match executable {
         Some(path) => RcAstroCli::with_executable(path),
         None => RcAstroCli::locate()
-            .ok_or_else(|| PyValueError::new_err("rc-astro was not found on PATH"))?,
+            .ok_or_else(|| PyFileNotFoundError::new_err("rc-astro was not found on PATH"))?,
     };
     Ok(match host {
         Some(host) => cli.with_host(host),
@@ -187,21 +188,23 @@ pub(crate) fn rc_astro_tool_schema(
     let tool = tool.to_string();
     let schema = py
         .allow_threads(move || cli.tool_schema(&tool))
-        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
     Ok(schema_class(&schema))
 }
 
 /// Run one RC-Astro tool on an image file (FITS, XISF, or TIFF — whatever
 /// the installed CLI accepts), writing `output` and possibly sidecars
-/// beside it. `parameters` maps schema names to values (bools for switches,
-/// numbers for the rest; whole numbers are fine for float parameters).
-/// `progress` is called with a fraction in 0..1 as the tool reports it.
-/// A child completely silent for ten minutes is killed — a first run
-/// downloads ML models, which `rc-astro download-models` handles ahead of
-/// time. StarXTerminator's "stars" parameter puts the stars image in
-/// `sidecars`.
+/// beside it. `parameters` maps schema names to values (bools for switches
+/// — `False` emits the CLI's `--no-` negation, overriding a true default —
+/// and numbers for the rest; whole numbers are fine for float parameters
+/// and vice versa). `progress` is called with a fraction in 0..1 as the
+/// tool reports it. Ctrl-C cancels within half a second, as does `cancel`
+/// returning true; a child completely silent for ten minutes is killed —
+/// a first run downloads ML models, which `rc-astro download-models`
+/// handles ahead of time. StarXTerminator's "stars" parameter puts the
+/// stars image in `sidecars`.
 #[pyfunction]
-#[pyo3(signature = (tool, input, output, *, parameters=None, device=None, executable=None, host=None, progress=None))]
+#[pyo3(signature = (tool, input, output, *, parameters=None, device=None, executable=None, host=None, progress=None, cancel=None))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn rc_astro_process_file(
     py: Python<'_>,
@@ -213,6 +216,7 @@ pub(crate) fn rc_astro_process_file(
     executable: Option<PathBuf>,
     host: Option<String>,
     progress: Option<PyObject>,
+    cancel: Option<PyObject>,
 ) -> PyResult<PyRcAstroRun> {
     let cli = cli(executable, host)?;
     let mut values = Vec::new();
@@ -239,27 +243,69 @@ pub(crate) fn rc_astro_process_file(
         device,
     };
     let tool_name = tool.to_string();
-    let (schema, run) = py
-        .allow_threads(move || {
-            let schema = cli.tool_schema(&tool_name)?;
-            let mut report = |fraction: f32| {
-                if let Some(callback) = &progress {
-                    Python::with_gil(|py| {
-                        let _ = callback.call1(py, (fraction,));
-                    });
+    // A raising progress callback must not vanish: the first exception is
+    // kept and re-raised once the run settles (the run itself is not
+    // interrupted — progress is advisory). A raising cancel predicate stops
+    // the run and re-raises the same way, so Ctrl-C surfaces as
+    // KeyboardInterrupt rather than a generic run error.
+    let raised: Arc<Mutex<Option<PyErr>>> = Arc::new(Mutex::new(None));
+    let signal = {
+        let raised = Arc::clone(&raised);
+        CancelSignal::new(move || {
+            Python::with_gil(|py| {
+                let asked = py.check_signals().and_then(|()| match &cancel {
+                    Some(cancel) => cancel
+                        .call0(py)
+                        .and_then(|value| value.bind(py).is_truthy()),
+                    None => Ok(false),
+                });
+                match asked {
+                    Ok(stop) => stop,
+                    Err(error) => {
+                        if let Ok(mut slot) = raised.lock()
+                            && slot.is_none()
+                        {
+                            *slot = Some(error);
+                        }
+                        true
+                    }
                 }
-            };
-            let run = cli.run_on_file(&schema, &request, &input, &output, None, &mut report)?;
-            Ok::<_, seiza_stacking::Error>((schema, run))
+            })
         })
-        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    };
+    let outcome = py.allow_threads(|| {
+        let schema = cli.tool_schema(&tool_name)?;
+        let mut report = |fraction: f32| {
+            if let Some(callback) = &progress {
+                Python::with_gil(|py| {
+                    if let Err(error) = callback.call1(py, (fraction,))
+                        && let Ok(mut slot) = raised.lock()
+                        && slot.is_none()
+                    {
+                        *slot = Some(error);
+                    }
+                });
+            }
+        };
+        let run = cli.run_on_file(
+            &schema,
+            &request,
+            &input,
+            &output,
+            Some(&signal),
+            &mut report,
+        )?;
+        Ok::<_, seiza_stacking::Error>((schema, run))
+    });
+    if let Ok(mut slot) = raised.lock()
+        && let Some(error) = slot.take()
+    {
+        return Err(error);
+    }
+    let (schema, run) = outcome.map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
     Ok(PyRcAstroRun {
-        primary: run.primary.display().to_string(),
-        sidecars: run
-            .sidecars
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect(),
+        primary: run.primary,
+        sidecars: run.sidecars,
         device: run.device,
         warnings: run.warnings,
         cli_version: schema.cli_version.clone(),

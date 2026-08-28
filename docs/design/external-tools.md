@@ -24,7 +24,10 @@ Parameter names and flags change between CLI builds (`--stars` became
 `--difference` on some builds; bxt's `--nsr` became `--nsd`), so
 [`RcAstroCli`] resolves every flag from the live schema instead of
 hard-coding it, and a host UI should render its controls from
-[`ExternalToolSchema`] the same way.
+[`ExternalToolSchema`] the same way. Values coerce across the JSON number
+divide — a whole number satisfies a float parameter and a fraction-free
+float satisfies an int parameter — and a `false` switch emits the CLI's
+documented `--no-<flag>` negation so it really overrides a true default.
 
 ## Sample scale
 

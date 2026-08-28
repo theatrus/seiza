@@ -758,6 +758,16 @@ fn build_arguments(
             (ExternalParameterKind::Bool { .. }, ExternalParameterValue::Bool(enabled)) => {
                 if *enabled {
                     arguments.push(flag.into());
+                } else if let Some(stem) = flag.strip_prefix("--") {
+                    // The CLI documents a --no-<flag> negation for every
+                    // switch. Emitting it makes `false` a real override of a
+                    // true default instead of a silent no-op.
+                    arguments.push(format!("--no-{stem}").into());
+                } else {
+                    return Err(external_error(
+                        &request.tool,
+                        format!("parameter {name:?} has no negatable flag"),
+                    ));
                 }
             }
             (ExternalParameterKind::Float { min, max, .. }, ExternalParameterValue::Float(v)) => {
@@ -786,6 +796,25 @@ fn build_arguments(
             }
             (ExternalParameterKind::Int { min, max, .. }, ExternalParameterValue::Int(v)) => {
                 if v < min || v > max {
+                    return Err(external_error(
+                        &request.tool,
+                        format!("{name} = {v} is outside [{min}, {max}]"),
+                    ));
+                }
+                arguments.push(flag.into());
+                arguments.push(format!("{v}").into());
+            }
+            // The mirror coercion: schemas hand int bounds back as JSON
+            // numbers, so a caller clamping to them sends 2.0 for 2.
+            (ExternalParameterKind::Int { min, max, .. }, ExternalParameterValue::Float(real)) => {
+                if !real.is_finite() || real.fract() != 0.0 {
+                    return Err(external_error(
+                        &request.tool,
+                        format!("{name} = {real} is not a whole number"),
+                    ));
+                }
+                let v = *real as i64;
+                if v < *min || v > *max {
                     return Err(external_error(
                         &request.tool,
                         format!("{name} = {v} is outside [{min}, {max}]"),
@@ -995,7 +1024,7 @@ mod tests {
     }
 
     #[test]
-    fn a_false_switch_emits_no_flag_and_old_contracts_drop_host() {
+    fn a_false_switch_emits_the_negation_and_old_contracts_drop_host() {
         let mut schema = sxt_schema();
         schema.schema_version = 4;
         let arguments = build_arguments(
@@ -1007,9 +1036,57 @@ mod tests {
         )
         .unwrap();
         let rendered = strings(&arguments);
+        // The CLI's --no-<flag> negation makes false a real override of a
+        // true default, not a silent no-op.
         assert!(!rendered.contains(&"--stars".to_string()));
+        assert!(rendered.contains(&"--no-stars".to_string()));
         assert!(!rendered.contains(&"--host".to_string()));
         assert!(rendered.contains(&"--device".to_string()));
+    }
+
+    #[test]
+    fn int_parameters_accept_whole_floats_and_refuse_fractions() {
+        // Schemas hand int bounds back as JSON numbers, so a caller
+        // clamping to them sends 2.0 for 2.
+        let mut schema = sxt_schema();
+        schema.parameters.push(ExternalToolParameter {
+            name: "it".into(),
+            flag: Some("--it".into()),
+            label: "Iterations".into(),
+            description: String::new(),
+            kind: ExternalParameterKind::Int {
+                default: 2,
+                min: 1,
+                max: 5,
+            },
+        });
+        let arguments = build_arguments(
+            &schema,
+            &request(vec![("it", ExternalParameterValue::Float(3.0))]),
+            "h",
+            Path::new("/i"),
+            Path::new("/o"),
+        )
+        .unwrap();
+        let rendered = strings(&arguments);
+        let position = rendered.iter().position(|value| value == "--it").unwrap();
+        assert_eq!(rendered[position + 1], "3");
+
+        for value in [
+            ExternalParameterValue::Float(2.5),
+            ExternalParameterValue::Int(9),
+        ] {
+            assert!(
+                build_arguments(
+                    &schema,
+                    &request(vec![("it", value)]),
+                    "h",
+                    Path::new("/i"),
+                    Path::new("/o"),
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]

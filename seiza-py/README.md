@@ -415,8 +415,11 @@ run = seiza.rc_astro_process_file(
 print(run.primary, run.sidecars, run.device)
 ```
 
-A child completely silent for ten minutes is killed; a first run downloads
-ML models, which `rc-astro download-models` handles ahead of time.
+Ctrl-C cancels a running tool within half a second, as does an optional
+`cancel=lambda: ...` predicate returning true. A `False` switch emits the
+CLI's `--no-` negation, overriding a true default. A child completely
+silent for ten minutes is killed; a first run downloads ML models, which
+`rc-astro download-models` handles ahead of time.
 
 ## Predicted satellite tracks
 
