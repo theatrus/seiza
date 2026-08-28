@@ -18,7 +18,6 @@
 //! (the original minus the starless result) comes back as a sidecar image
 //! so a caller can stretch starless and stars independently.
 
-use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -35,6 +34,35 @@ pub const RC_ASTRO_TOOLS: [&str; 3] = ["bxt", "sxt", "nxt"];
 /// The exchange bit depth for every run. Linear stacked data loses precision
 /// below 32-bit float, and the tools accept it on every platform.
 const EXCHANGE_DEPTH: &str = "32F";
+
+/// How long a child may stay completely silent before the run is killed.
+/// The tools emit progress events about once a second while working; the
+/// legitimate silent phase is a first-run ML model download, which
+/// `rc-astro download-models` handles ahead of time.
+const SILENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Kills the child on drop, so an early return or unwind never leaves the
+/// tool computing in the background. `take` disarms it for the normal wait.
+struct ChildGuard(Option<std::process::Child>);
+
+impl ChildGuard {
+    fn inner(&mut self) -> &mut std::process::Child {
+        self.0.as_mut().expect("child not yet taken")
+    }
+
+    fn take(&mut self) -> std::process::Child {
+        self.0.take().expect("child not yet taken")
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
 
 /// A handle on an installed `rc-astro` executable.
 #[derive(Debug, Clone)]
@@ -185,10 +213,14 @@ impl RcAstroCli {
         None
     }
 
-    /// Use a specific executable.
+    /// Use a specific executable. A relative path is made absolute now:
+    /// the child runs with its working directory changed, under which a
+    /// relative program path resolves unpredictably.
     pub fn with_executable(executable: impl Into<PathBuf>) -> Self {
+        let executable = executable.into();
+        let executable = std::path::absolute(&executable).unwrap_or(executable);
         Self {
-            executable: executable.into(),
+            executable,
             host: format!("seiza-stacking-{}", env!("CARGO_PKG_VERSION")),
         }
     }
@@ -213,6 +245,22 @@ impl RcAstroCli {
             .stdin(Stdio::null())
             .output()
             .map_err(|error| external_error(tool, format!("could not run rc-astro: {error}")))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = stderr.trim();
+            return Err(external_error(
+                tool,
+                format!(
+                    "schema request exited with {}{}",
+                    output.status,
+                    if stderr.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {stderr}")
+                    }
+                ),
+            ));
+        }
         let document: serde_json::Value = serde_json::from_slice(&output.stdout)
             .map_err(|error| external_error(tool, format!("schema is not JSON: {error}")))?;
         parse_schema(tool, &document)
@@ -258,28 +306,102 @@ impl RcAstroCli {
         {
             command.current_dir(directory);
         }
-        let mut child = command
+        let child = command
             .spawn()
             .map_err(|error| external_error(&request.tool, format!("could not spawn: {error}")))?;
+        // The guard kills the child on every early return and on unwind (a
+        // panicking progress callback included), so a cancelled or failed
+        // run never leaves the tool computing in the background.
+        let mut child = ChildGuard(Some(child));
 
-        let stdout = child.stdout.take().expect("stdout was piped");
+        let stdout = child.inner().stdout.take().expect("stdout was piped");
+        // Drain stderr on its own thread: a child that fills the pipe while
+        // this thread is blocked reading stdout would deadlock both sides.
+        // Only a bounded tail is kept, for the error message.
+        let stderr = child.inner().stderr.take().expect("stderr was piped");
+        let stderr_tail = std::thread::spawn(move || {
+            use std::io::Read;
+            let mut tail: Vec<u8> = Vec::new();
+            let mut buffer = [0u8; 4096];
+            let mut reader = stderr;
+            while let Ok(read) = reader.read(&mut buffer) {
+                if read == 0 {
+                    break;
+                }
+                tail.extend_from_slice(&buffer[..read]);
+                if tail.len() > 4096 {
+                    let start = tail.len() - 4096;
+                    tail.drain(..start);
+                }
+            }
+            String::from_utf8_lossy(&tail).into_owned()
+        });
+        // Read stdout on its own thread too, so this loop can poll
+        // cancellation and notice a silent child instead of blocking in a
+        // line read forever. A non-UTF-8 line is passed through lossily
+        // rather than abandoning the stream: later events (outputs, error
+        // detail) matter more than one garbled line.
+        let (line_sender, line_receiver) = std::sync::mpsc::channel::<String>();
+        let reader_thread = std::thread::spawn(move || {
+            use std::io::BufRead;
+            let mut reader = std::io::BufReader::new(stdout);
+            let mut buffer = Vec::new();
+            loop {
+                buffer.clear();
+                match reader.read_until(b'\n', &mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let line = String::from_utf8_lossy(&buffer).into_owned();
+                        if line_sender.send(line).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
         let mut events = RunEvents::default();
-        let reader = std::io::BufReader::new(stdout);
-        for line in reader.lines() {
+        let mut last_activity = std::time::Instant::now();
+        let outcome: Result<()> = loop {
+            match line_receiver.recv_timeout(std::time::Duration::from_millis(500)) {
+                Ok(line) => {
+                    last_activity = std::time::Instant::now();
+                    absorb_event_line(&line, &mut events, progress);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break Ok(()),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
             if let Some(cancel) = cancel
                 && cancel.is_cancelled()
             {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(Error::Cancelled);
+                break Err(Error::Cancelled);
             }
-            let Ok(line) = line else { break };
-            absorb_event_line(&line, &mut events, progress);
+            if last_activity.elapsed() > SILENCE_TIMEOUT {
+                break Err(external_error(
+                    &request.tool,
+                    format!(
+                        "produced no output for {} seconds; killed. A first run \
+                         downloads ML models: run 'rc-astro download-models' once",
+                        SILENCE_TIMEOUT.as_secs()
+                    ),
+                ));
+            }
+        };
+        if let Err(error) = outcome {
+            // Kill and reap via the guard. The pipe threads are deliberately
+            // not joined: a grandchild the kill cannot reach (the tool's own
+            // worker) may hold the pipes open, and the threads exit on their
+            // own when the last writer does.
+            drop(child);
+            return Err(error);
         }
+        let _ = reader_thread.join();
 
         let status = child
+            .take()
             .wait()
             .map_err(|error| external_error(&request.tool, format!("wait failed: {error}")))?;
+        let stderr_tail = stderr_tail.join().unwrap_or_default();
         if let Some(cancel) = cancel
             && cancel.is_cancelled()
         {
@@ -294,6 +416,8 @@ impl RcAstroCli {
             };
             if !events.errors.is_empty() {
                 message = format!("{message}: {}", events.errors.join("; "));
+            } else if !stderr_tail.trim().is_empty() {
+                message = format!("{message}: {}", stderr_tail.trim());
             }
             return Err(external_error(&request.tool, message));
         }
@@ -304,24 +428,44 @@ impl RcAstroCli {
             ));
         }
 
-        let mut sidecars: Vec<PathBuf> = events
-            .outputs
-            .iter()
-            .map(|reported| {
-                // Event paths mirror what we passed for -o (absolute), but a
-                // build that reports relative names resolves beside the output.
-                if reported.is_absolute() {
-                    reported.clone()
-                } else {
-                    output
-                        .parent()
-                        .map(|parent| parent.join(reported))
-                        .unwrap_or_else(|| reported.clone())
+        // The primary is excluded by file identity, not path spelling: the
+        // tool may report the same file under a different form (case,
+        // separators, a Windows verbatim prefix).
+        let mut sidecars: Vec<PathBuf> = Vec::new();
+        for reported in &events.outputs {
+            // Event paths mirror what we passed for -o (absolute), but a
+            // build that reports relative names resolves beside the output.
+            let resolved = if reported.is_absolute() {
+                reported.clone()
+            } else {
+                output
+                    .parent()
+                    .map(|parent| parent.join(reported))
+                    .unwrap_or_else(|| reported.clone())
+            };
+            if !resolved.is_file()
+                || crate::paths::paths_refer_to_same_file(&resolved, &output)
+                || sidecars
+                    .iter()
+                    .any(|seen| crate::paths::paths_refer_to_same_file(seen, &resolved))
+            {
+                continue;
+            }
+            sidecars.push(resolved);
+        }
+        // Fallback for a build that never reports the sidecar in its event
+        // stream: the well-known name suffixes beside the output.
+        if sidecars.is_empty()
+            && let Some(stem) = output.file_stem().and_then(|stem| stem.to_str())
+        {
+            for suffix in ["-stars", "-difference"] {
+                let candidate = output.with_file_name(format!("{stem}{suffix}.fits"));
+                if candidate.is_file() {
+                    sidecars.push(candidate);
+                    break;
                 }
-            })
-            .filter(|path| path != &output && path.is_file())
-            .collect();
-        sidecars.dedup();
+            }
+        }
         Ok(ExternalToolRun {
             primary: output,
             sidecars,
@@ -336,9 +480,13 @@ impl RcAstroCli {
     /// processed file keeps its provenance.
     ///
     /// The tools clamp float samples to `[0, 1]` (the PixInsight
-    /// convention), so an image on a physical ADU scale is divided by its
-    /// peak on the way out and multiplied back on the way in — starless and
-    /// stars alike, so their sum still reconstructs the original.
+    /// convention), so the image is mapped onto that range on the way out
+    /// and back on the way in. The map is affine — offset by the most
+    /// negative sample (a background-subtracted stack legitimately holds
+    /// negatives), then scaled by the span. The primary restores with both
+    /// offset and scale; a difference sidecar (the stars image) restores
+    /// with the scale alone, so `starless + stars` still reconstructs the
+    /// original exactly.
     pub fn process_image(
         &self,
         schema: &ExternalToolSchema,
@@ -352,14 +500,36 @@ impl RcAstroCli {
             .map_err(|error| external_error(&request.tool, format!("tempdir: {error}")))?;
         let input = workdir.path().join("input.fits");
         let output = workdir.path().join("processed.fits");
-        let peak = image.data.iter().copied().fold(0.0f32, f32::max);
-        let scale = if peak > 1.0 { peak } else { 1.0 };
-        if scale > 1.0 {
+        let mut peak = f32::NEG_INFINITY;
+        let mut floor = f32::INFINITY;
+        for sample in &image.data {
+            if sample.is_finite() {
+                peak = peak.max(*sample);
+                floor = floor.min(*sample);
+            }
+        }
+        if !peak.is_finite() || !floor.is_finite() {
+            return Err(external_error(
+                &request.tool,
+                "the image has no finite samples to process",
+            ));
+        }
+        let offset = floor.min(0.0);
+        let scale = if peak - offset > 1.0 {
+            peak - offset
+        } else {
+            1.0
+        };
+        if offset != 0.0 || scale != 1.0 {
             let scaled = LinearImage::new(
                 image.width,
                 image.height,
                 image.channels,
-                image.data.iter().map(|sample| sample / scale).collect(),
+                image
+                    .data
+                    .iter()
+                    .map(|sample| (sample - offset) / scale)
+                    .collect(),
             )?;
             write_processed_image_fits_f32(&input, &scaled, reference_headers, &[])?;
         } else {
@@ -368,7 +538,7 @@ impl RcAstroCli {
 
         let run = self.run_on_file(schema, request, &input, &output, cancel, progress)?;
 
-        let read_back = |path: &Path| -> Result<LinearImage> {
+        let read_back = |path: &Path, restore_offset: f32| -> Result<LinearImage> {
             let frame = FitsFrame::open(path)?;
             if frame.image.width != image.width
                 || frame.image.height != image.height
@@ -388,19 +558,33 @@ impl RcAstroCli {
                 ));
             }
             let mut restored = frame.image;
-            if scale > 1.0 {
+            if restore_offset != 0.0 || scale != 1.0 {
                 for sample in &mut restored.data {
-                    *sample *= scale;
+                    *sample = *sample * scale + restore_offset;
                 }
             }
             Ok(restored)
         };
 
-        let processed = read_back(&run.primary)?;
+        let processed = read_back(&run.primary, offset)?;
+        // The sidecar is a difference of two images in normalized space, so
+        // the offset cancels out of it: restore with scale alone.
         let stars = match run.sidecars.first() {
-            Some(sidecar) => Some(read_back(sidecar)?),
+            Some(sidecar) => Some(read_back(sidecar, 0.0)?),
             None => None,
         };
+        // Asking for the stars image and not getting one is a failure, not
+        // a quiet omission: the caller will store and serve that file.
+        let stars_requested = request.parameters.iter().any(|(name, value)| {
+            matches!(value, ExternalParameterValue::Bool(true))
+                && (name == "stars" || name == "difference")
+        });
+        if stars_requested && stars.is_none() {
+            return Err(external_error(
+                &request.tool,
+                "the stars image was requested but the tool wrote none",
+            ));
+        }
         Ok(ProcessedStackImage {
             image: processed,
             stars,
@@ -578,6 +762,20 @@ fn build_arguments(
             }
             (ExternalParameterKind::Float { min, max, .. }, ExternalParameterValue::Float(v)) => {
                 if !v.is_finite() || v < min || v > max {
+                    return Err(external_error(
+                        &request.tool,
+                        format!("{name} = {v} is outside [{min}, {max}]"),
+                    ));
+                }
+                arguments.push(flag.into());
+                arguments.push(format!("{v}").into());
+            }
+            // JSON writers (and JavaScript above them) render 1.0 as 1, and
+            // the untagged deserializer reads that as an integer. A whole
+            // number is a fine float.
+            (ExternalParameterKind::Float { min, max, .. }, ExternalParameterValue::Int(raw)) => {
+                let v = *raw as f64;
+                if v < *min || v > *max {
                     return Err(external_error(
                         &request.tool,
                         format!("{name} = {v} is outside [{min}, {max}]"),
@@ -987,6 +1185,154 @@ fi
             )
             .unwrap();
         assert!(processed.stars.is_none());
+    }
+
+    #[test]
+    fn a_whole_number_is_accepted_for_a_float_parameter() {
+        // JSON writers render 1.0 as 1; the untagged deserializer reads
+        // that as an integer, which must still satisfy a float parameter.
+        let mut schema = sxt_schema();
+        schema.parameters[0].kind = ExternalParameterKind::Float {
+            default: 0.2,
+            min: 0.0,
+            max: 2.0,
+        };
+        let arguments = build_arguments(
+            &schema,
+            &request(vec![("overlap", ExternalParameterValue::Int(1))]),
+            "h",
+            Path::new("/i"),
+            Path::new("/o"),
+        )
+        .unwrap();
+        let rendered = strings(&arguments);
+        let position = rendered
+            .iter()
+            .position(|value| value == "--overlap")
+            .unwrap();
+        assert_eq!(rendered[position + 1], "1");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn negative_samples_survive_the_round_trip() {
+        // A background-subtracted stack holds negatives; the affine map
+        // must bring them back instead of leaving them clamped at zero.
+        let directory = tempfile::tempdir().unwrap();
+        let cli = RcAstroCli::with_executable(fake_rc_astro(directory.path()));
+        let image = LinearImage::new(2, 2, 1, vec![-50.0, 100.0, 0.0, 25.0]).unwrap();
+        let processed = cli
+            .process_image(
+                &sxt_schema(),
+                &request(vec![]),
+                &image,
+                &[],
+                None,
+                &mut |_| {},
+            )
+            .unwrap();
+        for (restored, original) in processed.image.data.iter().zip(&image.data) {
+            assert!(
+                (restored - original).abs() < 1e-3,
+                "expected {original}, got {restored}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_requested_stars_image_that_never_appears_is_an_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        // A tool that ignores --stars entirely.
+        let path = directory.path().join("rc-astro");
+        std::fs::write(
+            &path,
+            r#"#!/bin/sh
+out=""
+input=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    --host|--depth|--device) shift 2 ;;
+    --*|sxt|bxt|nxt) shift ;;
+    *) input="$1"; shift ;;
+  esac
+done
+cp "$input" "$out"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cli = RcAstroCli::with_executable(path);
+        let image = LinearImage::new(2, 2, 1, vec![0.1, 0.2, 0.3, 0.4]).unwrap();
+        let error = cli
+            .process_image(
+                &sxt_schema(),
+                &request(vec![("stars", ExternalParameterValue::Bool(true))]),
+                &image,
+                &[],
+                None,
+                &mut |_| {},
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("stars image was requested"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_completely_silent_child_is_still_cancellable() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        // Emits nothing at all: cancellation must fire from the polling
+        // loop, not from a line arriving.
+        let path = directory.path().join("rc-astro");
+        std::fs::write(&path, "#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cli = RcAstroCli::with_executable(path);
+        let cancel = CancelSignal::new(|| true);
+        let started = std::time::Instant::now();
+        let error = cli
+            .run_on_file(
+                &sxt_schema(),
+                &request(vec![]),
+                Path::new("/dev/null"),
+                &directory.path().join("out.fits"),
+                Some(&cancel),
+                &mut |_| {},
+            )
+            .unwrap_err();
+        assert!(matches!(error, Error::Cancelled));
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_tool_with_a_chatty_stderr_neither_deadlocks_nor_loses_the_reason() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        // 256 KiB of stderr overflows the pipe buffer: without a drain
+        // thread this test hangs on the write while we block on stdout.
+        let path = directory.path().join("rc-astro");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\ni=0\nwhile [ $i -lt 4096 ]; do echo 'stderr noise stderr noise stderr noise stderr noise' >&2; i=$((i+1)); done\necho 'model checksum mismatch' >&2\nexit 3\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cli = RcAstroCli::with_executable(path);
+        let error = cli
+            .run_on_file(
+                &sxt_schema(),
+                &request(vec![]),
+                Path::new("/dev/null"),
+                &directory.path().join("out.fits"),
+                None,
+                &mut |_| {},
+            )
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("model checksum mismatch"), "{message}");
     }
 
     #[cfg(unix)]
