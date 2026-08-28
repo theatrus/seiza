@@ -108,7 +108,9 @@ exposes the **superset** of what both apps need.
   Whole numbers satisfy float parameters and fraction-free floats satisfy
   int parameters, so bounds read from the schema round-trip; a `false`
   switch emits the CLI's `--no-` negation, overriding a true default. The
-  run accepts a `SeizaCancelSignal`, kills a child silent for ten minutes,
+  run accepts a `SeizaCancelSignal` and a progress callback
+  (`SeizaRcAstroProgressCallback`: the fraction complete plus a context
+  pointer, on the calling thread), kills a child silent for ten minutes,
   and reports every written file, StarXTerminator's stars sidecar included.
   Include the schema's `cliVersion`/`mlVersion` in any cache key: a tool
   upgrade changes the output for identical inputs.

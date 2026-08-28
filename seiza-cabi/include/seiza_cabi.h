@@ -351,6 +351,13 @@ typedef struct {
   double channel_noise[SEIZA_SNR_MAX_CHANNELS];
 } SeizaSnrSample;
 
+/*
+ Progress callback for [`seiza_rc_astro_process_file_json`]: the fraction
+ complete in `[0, 1]` as the tool reports it, plus the caller's context
+ pointer. Called on the thread that made the call.
+ */
+typedef void (*SeizaRcAstroProgressCallback)(float, void*);
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -1646,17 +1653,21 @@ char *seiza_rc_astro_tool_schema_json(const char *executable, const char *tool, 
  second. The response lists the written files — StarXTerminator's stars
  sidecar included — and the device the tool reported using. Returns a
  string released with [`seiza_string_free`], or null with `error_out`
- set.
+ set. `progress` (nullable) receives the fraction complete in `[0, 1]`
+ as the tool reports it, on the calling thread, with `context` passed
+ through untouched.
 
  # Safety
 
  `request_json` must be a NUL-terminated UTF-8 string. `cancel` must be
  null or a live [`SeizaCancelSignal`] retained until this call returns.
- When non-null, `error_out` must point to writable storage for one
- pointer.
+ `context` is passed through untouched to `progress`. When non-null,
+ `error_out` must point to writable storage for one pointer.
  */
 char *seiza_rc_astro_process_file_json(const char *request_json,
                                        const SeizaCancelSignal *cancel,
+                                       SeizaRcAstroProgressCallback progress,
+                                       void *context,
                                        char **error_out);
 
 #ifdef __cplusplus

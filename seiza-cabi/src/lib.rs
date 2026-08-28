@@ -10815,6 +10815,11 @@ pub unsafe extern "C" fn seiza_calibration_fit_flat_pedestal(
 // RC-Astro external tools (BlurXTerminator, StarXTerminator, NoiseXTerminator)
 // ---------------------------------------------------------------------------
 
+/// Progress callback for [`seiza_rc_astro_process_file_json`]: the fraction
+/// complete in `[0, 1]` as the tool reports it, plus the caller's context
+/// pointer. Called on the thread that made the call.
+pub type SeizaRcAstroProgressCallback = Option<unsafe extern "C" fn(f32, *mut c_void)>;
+
 fn rc_astro_cli(executable: Option<PathBuf>, host: Option<String>) -> Result<RcAstroCli, String> {
     let cli = match executable {
         Some(path) => RcAstroCli::with_executable(path),
@@ -11028,21 +11033,29 @@ pub unsafe extern "C" fn seiza_rc_astro_tool_schema_json(
 /// second. The response lists the written files — StarXTerminator's stars
 /// sidecar included — and the device the tool reported using. Returns a
 /// string released with [`seiza_string_free`], or null with `error_out`
-/// set.
+/// set. `progress` (nullable) receives the fraction complete in `[0, 1]`
+/// as the tool reports it, on the calling thread, with `context` passed
+/// through untouched.
 ///
 /// # Safety
 ///
 /// `request_json` must be a NUL-terminated UTF-8 string. `cancel` must be
 /// null or a live [`SeizaCancelSignal`] retained until this call returns.
-/// When non-null, `error_out` must point to writable storage for one
-/// pointer.
+/// `context` is passed through untouched to `progress`. When non-null,
+/// `error_out` must point to writable storage for one pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn seiza_rc_astro_process_file_json(
     request_json: *const c_char,
     cancel: *const SeizaCancelSignal,
+    progress: SeizaRcAstroProgressCallback,
+    context: *mut c_void,
     error_out: *mut *mut c_char,
 ) -> *mut c_char {
     clear_error(error_out);
+    // Raw pointers are not UnwindSafe; the callback runs on this thread and
+    // the context's lifetime is the caller's promise, so the address is
+    // carried as a plain integer across the catch_unwind boundary.
+    let context = context as usize;
     ffi_result(error_out, || {
         let request_json = required_str(request_json, "rc-astro request JSON")?;
         let request: RcAstroProcessRequest = serde_json::from_str(&request_json)
@@ -11058,6 +11071,11 @@ pub unsafe extern "C" fn seiza_rc_astro_process_file_json(
         };
         let cancellation = unsafe { cancel.as_ref() }
             .map(|signal| CancelSignal::from(Arc::clone(&signal.cancelled)));
+        let mut report = |fraction: f32| {
+            if let Some(callback) = progress {
+                unsafe { callback(fraction, context as *mut c_void) };
+            }
+        };
         let run = cli
             .run_on_file(
                 &schema,
@@ -11065,7 +11083,7 @@ pub unsafe extern "C" fn seiza_rc_astro_process_file_json(
                 &request.input,
                 &request.output,
                 cancellation.as_ref(),
-                &mut |_| {},
+                &mut report,
             )
             .map_err(|error| error.to_string())?;
         owned_json(&RcAstroProcessResponse {
@@ -11126,6 +11144,8 @@ while [ $# -gt 0 ]; do
 done
 cp "$input" "$out"
 echo '{"event":"info","topic":"device","device":"cpu"}'
+echo '{"event":"progress","done":50.0}'
+echo '{"event":"progress","done":100.0}'
 echo "{\"event\":\"status\",\"phase\":\"complete\",\"output\":\"$out\"}"
 if [ "$stars" = 1 ]; then
   sidecar="${out%.fits}-stars.fits"
@@ -11190,12 +11210,24 @@ fi
             "parameters": {"stars": true, "overlap": 0.3, "it": 3.0},
             "executable": executable,
         });
+        unsafe extern "C" fn collect(fraction: f32, context: *mut c_void) {
+            let fractions = unsafe { &mut *(context as *mut Vec<f32>) };
+            fractions.push(fraction);
+        }
+        let mut fractions: Vec<f32> = Vec::new();
         let request_c = CString::new(request.to_string()).unwrap();
         let mut error: *mut c_char = ptr::null_mut();
         let response = unsafe {
-            seiza_rc_astro_process_file_json(request_c.as_ptr(), ptr::null(), &mut error)
+            seiza_rc_astro_process_file_json(
+                request_c.as_ptr(),
+                ptr::null(),
+                Some(collect),
+                (&raw mut fractions).cast(),
+                &mut error,
+            )
         };
         let response = call_json(response, error).unwrap();
+        assert_eq!(fractions, vec![0.5, 1.0]);
         assert_eq!(response["primary"], output.to_str().unwrap());
         assert_eq!(response["sidecars"].as_array().unwrap().len(), 1);
         assert_eq!(response["device"], "cpu");
@@ -11208,7 +11240,13 @@ fi
         let request_c = CString::new(r#"{"tool": "sxt"}"#).unwrap();
         let mut error: *mut c_char = ptr::null_mut();
         let response = unsafe {
-            seiza_rc_astro_process_file_json(request_c.as_ptr(), ptr::null(), &mut error)
+            seiza_rc_astro_process_file_json(
+                request_c.as_ptr(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
         };
         let message = call_json(response, error).unwrap_err();
         assert!(
