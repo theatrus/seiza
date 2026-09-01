@@ -23,7 +23,7 @@ jobs:
           for f in target/debian/*.deb; do
             cp "$f" "dist/$(basename "${f%.deb}")-ubuntu.deb"
           done
-      - uses: softprops/action-gh-release@v3.0.2
+      - uses: softprops/action-gh-release@v3.0.3
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: dist/*.deb
@@ -54,7 +54,7 @@ jobs:
             base=$(basename "$f" .rpm)
             cp "$f" "dist/${base}.fc${{ matrix.fedora }}.rpm"
           done
-      - uses: softprops/action-gh-release@v3.0.2
+      - uses: softprops/action-gh-release@v3.0.3
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: dist/*.rpm
@@ -268,7 +268,7 @@ jobs:
       - name: Smoke-test silent MSI install and uninstall
         shell: pwsh
         run: ./.github/scripts/test-windows-installer.ps1 -Msi $env:SEIZA_MSI
-      - uses: softprops/action-gh-release@v3.0.2
+      - uses: softprops/action-gh-release@v3.0.3
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
