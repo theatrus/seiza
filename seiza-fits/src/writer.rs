@@ -318,6 +318,116 @@ fn encode_card(keyword: &str, value: &HeaderValue, comment: &str) -> Result<Stri
     Ok(format!("{text:<CARD$}"))
 }
 
+/// Update or insert a FITS header keyword in place without modifying or
+/// rewriting the underlying image pixels.
+///
+/// If the keyword already exists in the header, its 80-byte card is overwritten
+/// in place. If the keyword does not exist and the header block containing
+/// `END` has spare card slots, the new card is inserted before `END`.
+///
+/// Modifying structural cards (`SIMPLE`, `BITPIX`, `NAXIS*`, `END`, etc.) is
+/// rejected with an error to prevent corrupting the file layout.
+pub fn update_header_in_place(
+    path: &Path,
+    keyword: &str,
+    value: &HeaderValue,
+    comment: Option<&str>,
+) -> Result<bool, FitsError> {
+    validate_keyword(keyword)?;
+    if is_structural_keyword(keyword) {
+        return Err(FitsError::Malformed(format!(
+            "cannot modify structural FITS card {keyword} in place"
+        )));
+    }
+    let encoded_card = encode_card(keyword, value, comment.unwrap_or(""))?;
+    assert_eq!(encoded_card.len(), CARD);
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(FitsError::Io)?;
+
+    let mut block = [0u8; BLOCK];
+    let key_bytes = keyword.as_bytes();
+
+    let mut block_idx: u64 = 0;
+    let mut end_card_location: Option<(u64, usize)> = None;
+
+    loop {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        let start_pos = block_idx * BLOCK as u64;
+        file.seek(SeekFrom::Start(start_pos))
+            .map_err(FitsError::Io)?;
+
+        if let Err(error) = file.read_exact(&mut block) {
+            if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                if block_idx == 0 {
+                    return Err(FitsError::NotFits);
+                }
+                return Err(FitsError::Malformed("missing END card".into()));
+            }
+            return Err(FitsError::Io(error));
+        }
+
+        if block_idx == 0 && &block[0..6] != b"SIMPLE" {
+            return Err(FitsError::NotFits);
+        }
+
+        for (card_idx, card) in block.chunks_exact(CARD).enumerate() {
+            let card_kw = card[0..8].trim_ascii_end();
+            if card_kw.eq_ignore_ascii_case(key_bytes) && card[8] == b'=' {
+                let target_offset = start_pos + (card_idx * CARD) as u64;
+                file.seek(SeekFrom::Start(target_offset))
+                    .map_err(FitsError::Io)?;
+                file.write_all(encoded_card.as_bytes())
+                    .map_err(FitsError::Io)?;
+                file.flush().map_err(FitsError::Io)?;
+                return Ok(true);
+            }
+
+            if card.starts_with(b"END") && (card.len() <= 3 || card[3] == b' ') {
+                end_card_location = Some((block_idx, card_idx));
+                break;
+            }
+        }
+
+        if end_card_location.is_some() {
+            break;
+        }
+
+        block_idx += 1;
+    }
+
+    let Some((end_block, end_card_idx)) = end_card_location else {
+        return Err(FitsError::Malformed("missing END card".into()));
+    };
+
+    if end_card_idx + 1 < BLOCK / CARD {
+        use std::io::{Seek, SeekFrom, Write};
+        let insert_offset = end_block * BLOCK as u64 + (end_card_idx * CARD) as u64;
+        let new_end_offset = insert_offset + CARD as u64;
+
+        file.seek(SeekFrom::Start(insert_offset))
+            .map_err(FitsError::Io)?;
+        file.write_all(encoded_card.as_bytes())
+            .map_err(FitsError::Io)?;
+
+        let end_card_str = format!("{:<80}", "END");
+        file.seek(SeekFrom::Start(new_end_offset))
+            .map_err(FitsError::Io)?;
+        file.write_all(end_card_str.as_bytes())
+            .map_err(FitsError::Io)?;
+        file.flush().map_err(FitsError::Io)?;
+        Ok(true)
+    } else {
+        Err(FitsError::Malformed(
+            "header block is full; inserting new keyword requires allocating new header block"
+                .into(),
+        ))
+    }
+}
+
 fn write_float_values(
     writer: &mut impl Write,
     values: impl Iterator<Item = f32>,
@@ -433,5 +543,68 @@ mod tests {
         )];
         assert!(write_f32_image(&path, 1, 1, F32ImageData::Mono(&[1.0]), &invalid,).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"previous complete output");
+    }
+
+    #[test]
+    fn in_place_header_updates_existing_and_adds_new() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("test_header.fits");
+        let initial_headers = [
+            WriteHeaderCard::new("OBJECT", HeaderValue::String("OldTarget".into())),
+            WriteHeaderCard::new("EXPTIME", HeaderValue::Float(1.0)),
+        ];
+        write_f32_image(
+            &path,
+            2,
+            2,
+            F32ImageData::Mono(&[1.0, 2.0, 3.0, 4.0]),
+            &initial_headers,
+        )
+        .unwrap();
+
+        // 1. Update existing OBJECT header
+        let updated = update_header_in_place(
+            &path,
+            "OBJECT",
+            &HeaderValue::String("Kite Cluster".into()),
+            Some("NGC 6819"),
+        )
+        .unwrap();
+        assert!(updated);
+
+        // 2. Insert new GAIN header
+        let inserted = update_header_in_place(
+            &path,
+            "GAIN",
+            &HeaderValue::Integer(160),
+            Some("sensor gain"),
+        )
+        .unwrap();
+        assert!(inserted);
+
+        // 3. Verify via FitsImage
+        let image = FitsImage::open(&path).unwrap();
+        assert_eq!(
+            image.header("OBJECT"),
+            Some(&HeaderValue::String("Kite Cluster".into()))
+        );
+        assert_eq!(image.header("GAIN"), Some(&HeaderValue::Integer(160)));
+        assert_eq!(image.header("EXPTIME"), Some(&HeaderValue::Float(1.0)));
+
+        // 4. Verify pixel data remains intact
+        let Pixels::F32(pixels) = image.pixels else {
+            panic!("expected f32 pixels");
+        };
+        assert_eq!(pixels, vec![1.0, 2.0, 3.0, 4.0]);
+
+        // 5. Reject modifying structural cards
+        assert!(
+            update_header_in_place(&path, "SIMPLE", &HeaderValue::Logical(true), None).is_err()
+        );
+        assert!(update_header_in_place(&path, "BITPIX", &HeaderValue::Integer(16), None).is_err());
+        assert!(update_header_in_place(&path, "NAXIS1", &HeaderValue::Integer(100), None).is_err());
+        assert!(
+            update_header_in_place(&path, "END", &HeaderValue::String("".into()), None).is_err()
+        );
     }
 }

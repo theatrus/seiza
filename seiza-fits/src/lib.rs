@@ -18,7 +18,9 @@ pub use seiza_stretch::{
     Statistics, StretchParams, midtones_transfer_function, statistics_u16, stretch_u16_to_u8,
     stretch_u16_to_u16,
 };
-pub use writer::{F32ImageData, WriteHeaderCard, write_f32_image, write_f32_image_to};
+pub use writer::{
+    F32ImageData, WriteHeaderCard, update_header_in_place, write_f32_image, write_f32_image_to,
+};
 
 use std::io::Read;
 use std::path::Path;
