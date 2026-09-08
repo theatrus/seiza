@@ -68,6 +68,16 @@ estimate when planning the host's budget, and
 `CalibrationMasters::image_buffer_bytes` to count resident master samples;
 session masters and their active deep clones both consume storage.
 
+When even one queued worker would exceed the host's memory policy, use
+`push_fits_sequential_with_pool(paths, normalized_full_scale, pool, callback)`.
+It reads, prepares and integrates one frame at a time without reader threads
+or a queue budget. It reports `SequentialRequested`, zero coordinator wait,
+and `PoolPipelineMemory::sequential_bytes`: `64 * pixels + 8 * samples` of
+reference-sized scratch. The host must reserve its persistent stack and master
+buffers separately. Do not inflate a pipeline budget to request this mode.
+Cancellation stops before the next frame is read, and callbacks remain on the
+caller even when called from a one-thread Rayon pool.
+
 The original `push_fits_pipelined` API and its explicit-worker override remain
 unchanged. Its existing Rayon fallback is intentional: wrapping the entire
 batch in `pool.install` does not enable overlapped preparation.

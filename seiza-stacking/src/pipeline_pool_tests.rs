@@ -93,22 +93,93 @@ fn supplied_pools_preserve_exact_order_results_and_read_failures() {
 }
 
 #[test]
+fn explicit_serial_pools_preserve_decisions_failures_and_caller_state() {
+    let (directory, paths) = frame_set(7);
+    let batch = [
+        &paths[1..3],
+        &[directory.path().join("missing.fits"), paths[1].clone()],
+        &paths[3..],
+    ]
+    .concat();
+    for threads in [1, 3] {
+        let pool = pool(threads);
+        let options = StackOptions {
+            acceptance: crate::FrameAcceptanceCriteria {
+                minimum_integrated_fraction: 1.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let build = || {
+            pool.install(|| {
+                LiveStacker::new(
+                    FitsFrame::open(&paths[0]).unwrap(),
+                    CalibrationMasters::default(),
+                    options.clone(),
+                )
+                .unwrap()
+            })
+        };
+        let mut expected = build();
+        let expected_outcomes = batch
+            .iter()
+            .map(|path| format!("{:?}", pool.install(|| expected.push_fits(path))))
+            .collect::<Vec<_>>();
+        let mut actual = build();
+        let outcomes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let coordinator = std::thread::current().id();
+        let report = actual
+            .push_fits_sequential_with_pool(&batch, None, &pool, |path, outcome| {
+                assert_eq!(std::thread::current().id(), coordinator);
+                assert_eq!(path, batch[outcomes.borrow().len()]);
+                outcomes.borrow_mut().push(format!("{outcome:?}"));
+                Continue::Yes
+            })
+            .unwrap();
+        assert_eq!(*outcomes.borrow(), expected_outcomes);
+        assert_same_stack(&actual, &expected);
+        assert_eq!(report.execution, PipelineExecution::SequentialRequested);
+        assert_eq!(report.workers, 1);
+        assert_eq!(report.frames.failed, 2);
+        assert!(report.frames.rejected > 0);
+        assert!(report.timings.read_decode > Duration::ZERO);
+        assert!(report.timings.preparation > Duration::ZERO);
+        assert!(report.timings.integration > Duration::ZERO);
+        assert_eq!(report.timings.coordinator_wait, Duration::ZERO);
+        assert_eq!(
+            report.estimated_in_flight_bytes,
+            PoolPipelineMemory::for_reference(
+                actual.reference.pixel_count(),
+                actual.reference.sample_count(),
+            )
+            .sequential_bytes,
+        );
+    }
+}
+
+#[test]
 fn supplied_pool_session_master_changes_match_sequential_batches() {
     let (_directory, paths) = frame_set(7);
     let pool = pool(2);
     let mut expected = stacker_from(&paths[0]);
     let mut actual = stacker_from(&paths[0]);
+    let mut serial = stacker_from(&paths[0]);
     for (batch, bias) in [(&paths[1..4], 100.0), (&paths[4..], 250.0)] {
         expected.set_calibration(constant_bias(bias)).unwrap();
         actual.set_calibration(constant_bias(bias)).unwrap();
+        serial.set_calibration(constant_bias(bias)).unwrap();
         for path in batch {
             pool.install(|| expected.push_fits(path)).unwrap();
         }
         let _ = actual
             .push_fits_pipelined_with_pool(batch, &concurrent(2), &pool, |_, _| Continue::Yes)
             .unwrap();
+        let _ = serial
+            .push_fits_sequential_with_pool(batch, None, &pool, |_, _| Continue::Yes)
+            .unwrap();
     }
     assert_same_stack(&actual, &expected);
+    assert_same_stack(&serial, &expected);
 }
 
 #[test]
@@ -163,6 +234,7 @@ fn rgb_and_cfa_frames_match_sequential_preparation() {
             .collect();
         let mut expected = pool.install(|| stacker_from(&paths[0]));
         let mut actual = pool.install(|| stacker_from(&paths[0]));
+        let mut serial = pool.install(|| stacker_from(&paths[0]));
         for path in &paths[1..] {
             pool.install(|| expected.push_fits(path)).unwrap();
         }
@@ -170,6 +242,11 @@ fn rgb_and_cfa_frames_match_sequential_preparation() {
             .push_fits_pipelined_with_pool(&paths[1..], &concurrent(2), &pool, |_, _| Continue::Yes)
             .unwrap();
         assert_same_stack(&actual, &expected);
+        let serial_report = serial
+            .push_fits_sequential_with_pool(&paths[1..], None, &pool, |_, _| Continue::Yes)
+            .unwrap();
+        assert_eq!(serial_report.frames, report.frames);
+        assert_same_stack(&serial, &expected);
         assert_eq!(actual.snapshot().unwrap().image.channels, 3);
         assert_eq!(report.frames.failed, 0);
         assert_eq!(report.frames.integrated, paths.len() - 1);
@@ -203,6 +280,21 @@ fn nested_same_or_other_single_thread_pool_falls_back_without_deadlock() {
         assert_eq!(report.execution, PipelineExecution::SequentialRayonFallback);
         assert_eq!(report.workers, 1);
         assert_same_stack(&actual, &expected);
+        let mut serial = stacker_from(&paths[0]);
+        let serial_report = caller
+            .install(|| {
+                serial.push_fits_sequential_with_pool(&paths[1..], None, &supplied, |_, _| {
+                    assert!(caller.current_thread_index().is_some());
+                    Continue::Yes
+                })
+            })
+            .unwrap();
+        assert_eq!(
+            serial_report.execution,
+            PipelineExecution::SequentialRequested
+        );
+        assert_eq!(serial_report.workers, 1);
+        assert_same_stack(&serial, &expected);
     }
 }
 
@@ -233,6 +325,7 @@ fn normalized_xisf_inputs_match_the_legacy_pool_fallback() {
     };
     let mut expected = stacker_from(&paths[0]);
     let mut actual = stacker_from(&paths[0]);
+    let mut serial = stacker_from(&paths[0]);
     let expected_report = pool
         .install(|| expected.push_fits_pipelined(&batch, &options, |_, _| Continue::Yes))
         .unwrap();
@@ -242,6 +335,11 @@ fn normalized_xisf_inputs_match_the_legacy_pool_fallback() {
     assert_eq!(actual_report.frames, expected_report);
     assert_eq!(actual_report.frames.integrated, 2);
     assert_same_stack(&actual, &expected);
+    let serial_report = serial
+        .push_fits_sequential_with_pool(&batch, Some(65535.0), &pool, |_, _| Continue::Yes)
+        .unwrap();
+    assert_eq!(serial_report.frames, expected_report);
+    assert_same_stack(&serial, &expected);
 }
 
 #[test]
@@ -305,6 +403,12 @@ fn budget_caps_explicit_workers_and_includes_rgb_intermediates() {
     assert_eq!(mono_memory.worker_bytes, 800_000);
     assert_eq!(rgb_memory.worker_bytes, 1_120_000);
     assert_eq!(rgb_memory.integration_bytes, 120_000);
+    assert_eq!(mono_memory.sequential_bytes, 720_000);
+    assert_eq!(rgb_memory.sequential_bytes, 880_000);
+    assert_eq!(
+        PoolPipelineMemory::for_reference(usize::MAX, usize::MAX).sequential_bytes,
+        usize::MAX,
+    );
     assert_eq!(rgb_memory.in_flight_bytes(0), 0);
     assert_eq!(
         PoolPipelineMemory::for_reference(usize::MAX, usize::MAX).in_flight_bytes(2),
@@ -326,6 +430,23 @@ fn budget_caps_explicit_workers_and_includes_rgb_intermediates() {
         resolve_pool_workers(&options, &rgb, &pool).unwrap(),
         MAXIMUM_WORKERS
     );
+}
+
+#[test]
+fn serial_scratch_and_persistent_buffers_fit_a_96_byte_sample_envelope() {
+    for pixels in [1, 10_000, 61_000_000] {
+        for channels in [1, 3] {
+            let samples = pixels * channels;
+            let scratch = PoolPipelineMemory::for_reference(pixels, samples).sequential_bytes;
+            // Reference + mean, M2, coverage and rejection counters. Masters,
+            // decoder/allocator overhead and larger sources remain separate.
+            let persistent = samples * 20;
+            assert!(scratch + persistent <= samples * 96);
+            assert!(
+                scratch < PoolPipelineMemory::for_reference(pixels, samples).in_flight_bytes(1)
+            );
+        }
+    }
 }
 
 #[test]
@@ -430,6 +551,99 @@ fn cancellation_and_callback_panic_join_bounded_in_flight_work() {
 }
 
 #[test]
+fn explicit_serial_stop_and_callback_panic_preserve_an_exact_resumable_prefix() {
+    let (_directory, paths) = frame_set(5);
+    let pool = pool(1);
+    for panic in [false, true] {
+        let mut actual = pool.install(|| stacker_from(&paths[0]));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            actual.push_fits_sequential_with_pool(&paths[1..], None, &pool, |_, outcome| {
+                outcome.unwrap();
+                assert!(!panic, "serial callback panic");
+                Continue::No
+            })
+        }));
+        if panic {
+            assert!(result.is_err());
+        } else {
+            assert_eq!(result.unwrap().unwrap().frames.integrated, 1);
+        }
+        assert_eq!(actual.input_paths(), &[path_identity(&paths[1])]);
+        let _ = actual
+            .push_fits_sequential_with_pool(&paths[2..], None, &pool, |_, _| Continue::Yes)
+            .unwrap();
+        let mut expected = pool.install(|| stacker_from(&paths[0]));
+        for path in &paths[1..] {
+            pool.install(|| expected.push_fits(path)).unwrap();
+        }
+        assert_same_stack(&actual, &expected);
+    }
+}
+
+#[test]
+fn serial_core_keeps_reads_on_caller_and_does_not_read_past_stop() {
+    let (_directory, paths) = frame_set(4);
+    let pool = pool(2);
+    let mut actual = pool.install(|| stacker_from(&paths[0]));
+    let plan = actual.plan_batch(&paths[1..]);
+    let caller = std::thread::current().id();
+    let report = actual.run_sequentially(
+        &paths[1..],
+        &plan,
+        None,
+        ComputePool(Some(&pool)),
+        &|path| {
+            assert_eq!(std::thread::current().id(), caller);
+            assert_eq!(path, paths[1]);
+            FitsFrame::open(path)
+        },
+        &|frame, half, scale| {
+            assert!(pool.current_thread_index().is_some());
+            (0..32)
+                .into_par_iter()
+                .for_each(|_| assert!(pool.current_thread_index().is_some()));
+            prepare_decoded(frame, half, scale)
+        },
+        &mut |_, outcome| {
+            assert_eq!(std::thread::current().id(), caller);
+            outcome.unwrap();
+            Continue::No
+        },
+    );
+    assert_eq!(report.frames.integrated, 1);
+    assert_eq!(report.timings.coordinator_wait, Duration::ZERO);
+}
+
+#[test]
+fn serial_core_read_and_preparation_panics_propagate_without_advancing() {
+    let (_directory, paths) = frame_set(3);
+    let pool = pool(1);
+    for in_read in [false, true] {
+        let mut actual = pool.install(|| stacker_from(&paths[0]));
+        let plan = actual.plan_batch(&paths[1..]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            actual.run_sequentially(
+                &paths[1..],
+                &plan,
+                None,
+                ComputePool(Some(&pool)),
+                &|path| {
+                    assert!(!in_read, "serial read panic");
+                    FitsFrame::open(path)
+                },
+                &|frame, half, scale| {
+                    assert!(in_read, "serial preparation panic");
+                    prepare_decoded(frame, half, scale)
+                },
+                &mut |_, _| panic!("an unwound frame must not be delivered"),
+            )
+        }));
+        assert!(result.is_err());
+        assert!(actual.input_paths().is_empty());
+    }
+}
+
+#[test]
 fn read_and_preparation_panics_propagate_and_do_not_hang() {
     let (_directory, paths) = frame_set(7);
     let pool = pool(1);
@@ -469,6 +683,15 @@ fn empty_batch_has_no_workers_or_artificial_timings() {
             .push_fits_pipelined_with_pool(&[], &concurrent(3), &pool, |_, _| unreachable!())
             .unwrap(),
         PoolPipelineReport::default()
+    );
+    assert_eq!(
+        stacker
+            .push_fits_sequential_with_pool(&[], None, &pool, |_, _| unreachable!())
+            .unwrap(),
+        PoolPipelineReport {
+            execution: PipelineExecution::SequentialRequested,
+            ..PoolPipelineReport::default()
+        },
     );
 }
 

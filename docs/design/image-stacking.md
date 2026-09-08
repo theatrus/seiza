@@ -75,7 +75,7 @@ A caller already on a Rayon worker takes a sequential fallback; it never waits
 on a channel whose producer needs that occupied pool. The legacy pipelined API
 keeps its original fallback and explicit-worker override behavior.
 
-The explicit-pool API caps even requested worker counts by its frame budget,
+The explicit-pool pipelined API caps even requested worker counts by its frame budget,
 reserving `(64 * pixels + 16 * samples)` bytes per worker and `4 * samples` for
 the currently integrating reference-sized frame. This conservatively includes
 decoded/calibrated/CFA/RGB buffers, detector scratch, and a queued frame. The
@@ -88,6 +88,21 @@ the same worker/integration estimate for host budget policy, without duplicating
 the formula downstream. `CalibrationMasters::image_buffer_bytes`
 counts sample lengths without claiming total process memory; deep clones must
 also be counted.
+
+`push_fits_sequential_with_pool` is the explicit no-queue alternative. It
+shares the sequential engine used by the Rayon fallback, but reports
+`SequentialRequested` and accepts only the normalized full-scale conversion,
+pool and callback alongside the paths. Each callback completes before the next
+read starts; neither decoding nor preparation overlaps another frame. The host
+owns memory policy, with no pretend queue allowance needed to call this API.
+`PoolPipelineMemory::sequential_bytes` estimates `64 * pixels + 8 * samples`
+of scratch, excluding the reference, accumulator and masters. The smaller
+sample allowance covers the source plus either conversion or registration,
+without a queued or concurrently integrating frame. Both serial execution
+modes report this estimate. The live reference and four accumulator arrays
+add 20 bytes per sample; masters and the documented estimate exclusions remain
+separate. The pipelined API still validates its queue budget before taking an
+automatic Rayon fallback.
 
 The returned report exposes execution mode, resolved workers and estimated
 in-flight bytes. Timings sum read/decode, preparation and ordered integration,

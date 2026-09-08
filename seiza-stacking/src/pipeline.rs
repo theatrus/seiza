@@ -183,6 +183,8 @@ pub enum PipelineExecution {
     Overlapped,
     /// A Rayon caller prepares one frame at a time to avoid blocking its pool.
     SequentialRayonFallback,
+    /// The caller explicitly requested one-frame-at-a-time processing.
+    SequentialRequested,
 }
 
 /// Aggregate elapsed times, not CPU time. Worker sums may exceed batch time.
@@ -225,6 +227,8 @@ pub struct PoolPipelineMemory {
     pub worker_bytes: usize,
     /// One reference-sized frame currently being integrated.
     pub integration_bytes: usize,
+    /// One-frame-at-a-time scratch, without queued or concurrently integrating frames.
+    pub sequential_bytes: usize,
 }
 
 impl PoolPipelineMemory {
@@ -235,6 +239,9 @@ impl PoolPipelineMemory {
                 .saturating_mul(64)
                 .saturating_add(samples.saturating_mul(16)),
             integration_bytes: samples.saturating_mul(4),
+            sequential_bytes: pixels
+                .saturating_mul(64)
+                .saturating_add(samples.saturating_mul(8)),
         }
     }
 
@@ -400,6 +407,60 @@ impl LiveStacker {
             &prepare_decoded,
             on_frame,
         )
+    }
+
+    /// Stack one FITS/XISF frame at a time using the supplied compute pool.
+    ///
+    /// This is a memory-saving alternative to [`Self::push_fits_pipelined_with_pool`].
+    /// It creates no reader threads or preparation queue: each read, preparation,
+    /// integration and callback finishes before the next path is read. Reads and
+    /// callbacks stay on the caller; preparation and integration enter `pool`.
+    /// Calling from the same or another Rayon pool is supported, including a
+    /// one-thread pool. The callback need not be `Send`.
+    ///
+    /// `normalized_full_scale` has the same meaning as
+    /// [`PipelineOptions::normalized_full_scale`]. Duplicate handling, per-path
+    /// errors, cancellation and panic propagation follow the pipelined API.
+    /// A cancellation or callback panic never starts the next frame; an active
+    /// read still cannot be interrupted.
+    ///
+    /// There is no queue budget to apply. The caller must check its available
+    /// memory, accounting for the reference, accumulator and calibration masters
+    /// as well as [`PoolPipelineMemory::sequential_bytes`]. The serial scratch
+    /// estimate is 64 bytes per reference pixel plus 8 per reference sample,
+    /// covering detector scratch and a source buffer plus conversion or
+    /// registration output.
+    /// It excludes persistent stack buffers and has the same reference-size,
+    /// codec, registration-setting and allocator limitations as the pipeline
+    /// estimate. It is not an allocation or RSS limit.
+    pub fn push_fits_sequential_with_pool(
+        &mut self,
+        paths: &[PathBuf],
+        normalized_full_scale: Option<f32>,
+        pool: &rayon::ThreadPool,
+        mut on_frame: impl FnMut(&Path, Result<FrameDisposition>) -> Continue,
+    ) -> Result<PoolPipelineReport> {
+        let started = Instant::now();
+        self.require_fits_input_mode()?;
+        if paths.is_empty() {
+            return Ok(PoolPipelineReport {
+                execution: PipelineExecution::SequentialRequested,
+                ..PoolPipelineReport::default()
+            });
+        }
+        let plan = self.plan_batch(paths);
+        let mut report = self.run_sequentially(
+            paths,
+            &plan,
+            normalized_full_scale,
+            ComputePool(Some(pool)),
+            &|path| FitsFrame::open(path),
+            &prepare_decoded,
+            &mut on_frame,
+        );
+        report.execution = PipelineExecution::SequentialRequested;
+        report.timings.elapsed = started.elapsed();
+        Ok(report)
     }
 
     fn run_pipeline(
@@ -591,7 +652,7 @@ impl LiveStacker {
                 self.reference.pixel_count(),
                 self.reference.sample_count(),
             )
-            .in_flight_bytes(1),
+            .sequential_bytes,
             ..PoolPipelineReport::default()
         };
         let (preparation, mut integration) = self.split_for_pipeline();
