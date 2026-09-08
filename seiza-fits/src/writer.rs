@@ -296,10 +296,11 @@ fn encode_card(keyword: &str, value: &HeaderValue, comment: &str) -> Result<Stri
                 "FITS string {keyword} is not ASCII"
             )));
         }
-        HeaderValue::Raw(value) if !value.is_empty() && value.is_ascii() => value.clone(),
+        // An empty raw value is a valid FITS undefined value, not an empty string.
+        HeaderValue::Raw(value) if value.is_ascii() => value.clone(),
         HeaderValue::Raw(_) => {
             return Err(FitsError::Malformed(format!(
-                "empty or non-ASCII raw FITS header {keyword}"
+                "non-ASCII raw FITS header {keyword}"
             )));
         }
     };
@@ -406,6 +407,51 @@ mod tests {
     }
 
     #[test]
+    fn writer_preserves_undefined_and_empty_string_values() {
+        for raw in ["", "                    "] {
+            for comment in ["", "no filter"] {
+                let headers = [
+                    WriteHeaderCard::new("FILTER", HeaderValue::Raw(raw.into()))
+                        .with_comment(comment),
+                    WriteHeaderCard::new("EMPTYSTR", HeaderValue::String(String::new())),
+                    WriteHeaderCard::new("EXPTIME", HeaderValue::Float(30.0)),
+                ];
+                let mut encoded = Vec::new();
+                write_f32_image_to(
+                    &mut encoded,
+                    2,
+                    1,
+                    F32ImageData::Mono(&[1.25, 2.5]),
+                    &headers,
+                )
+                .unwrap();
+                let filter_card = encoded[..BLOCK]
+                    .chunks_exact(CARD)
+                    .find(|card| card.starts_with(b"FILTER  = "))
+                    .unwrap();
+                assert!(filter_card[10..30].iter().all(|byte| *byte == b' '));
+                if comment.is_empty() {
+                    assert!(filter_card[30..].iter().all(|byte| *byte == b' '));
+                } else {
+                    assert!(filter_card[30..].starts_with(b" / no filter"));
+                }
+
+                let decoded = FitsImage::from_bytes(&encoded).unwrap();
+                assert_eq!(
+                    decoded.header("FILTER"),
+                    Some(&HeaderValue::Raw(String::new()))
+                );
+                assert_eq!(
+                    decoded.header("EMPTYSTR"),
+                    Some(&HeaderValue::String(String::new()))
+                );
+                assert_eq!(decoded.header_f64("EXPTIME"), Some(30.0));
+                assert!(matches!(decoded.pixels, Pixels::F32(values) if values == [1.25, 2.5]));
+            }
+        }
+    }
+
+    #[test]
     fn writer_rejects_invalid_shapes_and_headers() {
         let mut output = Vec::new();
         assert!(write_f32_image_to(&mut output, 2, 2, F32ImageData::Mono(&[1.0; 3]), &[]).is_err());
@@ -420,6 +466,14 @@ mod tests {
         assert!(
             write_f32_image_to(&mut output, 1, 1, F32ImageData::Mono(&[1.0]), &duplicate).is_err()
         );
+        let non_ascii = [WriteHeaderCard::new(
+            "FILTER",
+            HeaderValue::Raw("\u{00e9}".into()),
+        )];
+        assert!(
+            write_f32_image_to(&mut output, 1, 1, F32ImageData::Mono(&[1.0]), &non_ascii).is_err()
+        );
+        assert!(output.is_empty());
     }
 
     #[test]

@@ -18,6 +18,9 @@ one linear-image API without coupling operations to the source container.
   exponents, quote escapes).
 - Writes primary-HDU mono, interleaved RGB, or planar RGB linear `f32` images,
   with typed non-structural headers and FITS block padding.
+- Preserves undefined header values as `HeaderValue::Raw(String::new())`,
+  distinct from quoted empty strings. Writers retain the keyword with a blank
+  value field, including optional comments.
 - Publishes complete files atomically so a failed write cannot replace the
   previous output; stream-oriented callers can use `write_f32_image_to`.
 - Exact median and MAD statistics via a single histogram pass

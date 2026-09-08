@@ -2380,7 +2380,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-fits"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "memmap2",
  "multiversion",
@@ -2474,7 +2474,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-xisf"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "flate2",
  "lz4_flex",

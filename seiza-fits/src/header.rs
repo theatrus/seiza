@@ -7,7 +7,8 @@ pub enum HeaderValue {
     Integer(i64),
     Float(f64),
     String(String),
-    /// Unparseable or empty value; the raw text is kept
+    /// Unparseable value, or an undefined value represented by an empty string.
+    /// A quoted empty FITS string is instead `String(String::new())`.
     Raw(String),
 }
 
@@ -118,5 +119,15 @@ mod tests {
             parse_header_value("'it''s quoted'"),
             HeaderValue::String("it's quoted".to_string())
         );
+    }
+
+    #[test]
+    fn distinguishes_undefined_values_from_empty_strings() {
+        for raw in ["", "                    ", "        / no filter"] {
+            assert_eq!(parse_header_value(raw), HeaderValue::Raw(String::new()));
+        }
+        for raw in ["''", "'        ' / empty string"] {
+            assert_eq!(parse_header_value(raw), HeaderValue::String(String::new()));
+        }
     }
 }
