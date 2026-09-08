@@ -65,7 +65,7 @@ sha2 = "0.11"
 statrs = { version = "0.19.1", default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["fs", "io-util", "macros", "rt", "time"] }
 tokio-util = { version = "0.7.18", features = ["io"] }
-zstd = "0.13.3"
+zstd = "0.14.0"
 rayon = "1"
 nalgebra = { version = "0.35", default-features = false, features = ["std"] }
 rustc-hash = { version = "2" }
@@ -73,8 +73,8 @@ rustc-hash = { version = "2" }
 # so an older 1.x would resolve and then fail to compile.
 wide = "1.6"
 multiversion = "0.8"
-quick-xml = "0.41"
+quick-xml = "0.42"
 lz4_flex = "0.14"
 sha1 = "0.11"
-satkit = { version = "0.20.2", default-features = false }
+satkit = { version = "0.21.2", default-features = false }
 font8x8 = "0.3"
