@@ -604,6 +604,34 @@ enum Command {
         #[command(subcommand)]
         query: CatalogCommand,
     },
+    /// Inspect or modify FITS header cards in place
+    Header {
+        #[command(subcommand)]
+        command: HeaderCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum HeaderCommand {
+    /// Update or add a FITS header keyword in place without rewriting pixel data
+    Set {
+        /// FITS image file to modify
+        image: PathBuf,
+        /// FITS keyword to set (e.g. OBJECT, EXPTIME, GAIN, DATE-OBS)
+        keyword: String,
+        /// New value for the keyword
+        value: String,
+        /// Optional comment for the header card
+        #[arg(long)]
+        comment: Option<String>,
+    },
+    /// Read a specific FITS header keyword value
+    Get {
+        /// FITS image file to query
+        image: PathBuf,
+        /// FITS keyword to read
+        keyword: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1299,6 +1327,7 @@ fn main() -> Result<()> {
             CatalogCommand::Star { args } => catalog_star(args),
             CatalogCommand::Validate { data } => catalog_validate(&data),
         },
+        Command::Header { command } => header_command(command),
     }
 }
 
@@ -1831,6 +1860,79 @@ fn fits_info(path: &std::path::Path, stretch: Option<&std::path::Path>) -> Resul
         );
     }
     Ok(())
+}
+
+fn parse_cli_header_value(raw: &str) -> seiza_fits::HeaderValue {
+    if (raw.starts_with('\'') && raw.ends_with('\'') && raw.len() >= 2)
+        || (raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2)
+    {
+        return seiza_fits::HeaderValue::String(raw[1..raw.len() - 1].to_string());
+    }
+    if raw.eq_ignore_ascii_case("true") {
+        return seiza_fits::HeaderValue::Logical(true);
+    }
+    if raw.eq_ignore_ascii_case("false") {
+        return seiza_fits::HeaderValue::Logical(false);
+    }
+    if let Ok(i) = raw.parse::<i64>() {
+        return seiza_fits::HeaderValue::Integer(i);
+    }
+    if (raw.contains('.') || raw.contains('e') || raw.contains('E'))
+        && let Ok(f) = raw.parse::<f64>()
+        && f.is_finite()
+    {
+        return seiza_fits::HeaderValue::Float(f);
+    }
+    seiza_fits::HeaderValue::String(raw.to_string())
+}
+
+fn header_command(command: HeaderCommand) -> Result<()> {
+    match command {
+        HeaderCommand::Set {
+            image,
+            keyword,
+            value,
+            comment,
+        } => {
+            if !is_fits_path(&image) {
+                anyhow::bail!(
+                    "{}: in-place header editing is only supported on FITS files",
+                    image.display()
+                );
+            }
+            let parsed_value = parse_cli_header_value(&value);
+            let keyword_upper = keyword.to_ascii_uppercase();
+            seiza_fits::update_header_in_place(
+                &image,
+                &keyword_upper,
+                &parsed_value,
+                comment.as_deref(),
+            )
+            .with_context(|| format!("failed to update header in {}", image.display()))?;
+            println!(
+                "{}: set {} = {:?}",
+                image.display(),
+                keyword_upper,
+                parsed_value
+            );
+            Ok(())
+        }
+        HeaderCommand::Get { image, keyword } => {
+            let img = open_astronomy_image(&image)
+                .with_context(|| format!("failed to open {}", image.display()))?;
+            let keyword_upper = keyword.to_ascii_uppercase();
+            if let Some(val) = img.header(&keyword_upper) {
+                println!("{}: {} = {:?}", image.display(), keyword_upper, val);
+                Ok(())
+            } else {
+                anyhow::bail!(
+                    "{}: header keyword {} not found",
+                    image.display(),
+                    keyword_upper
+                );
+            }
+        }
+    }
 }
 
 fn detect(
