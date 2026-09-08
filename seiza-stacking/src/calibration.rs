@@ -92,6 +92,20 @@ pub struct CalibrationMasters {
 }
 
 impl CalibrationMasters {
+    /// Bytes occupied by the bias, dark signal and flat response sample buffers.
+    ///
+    /// Excludes metadata and allocator overhead. Cloning these masters creates
+    /// independent image buffers, so hosts retaining session masters and an
+    /// active stacker should reserve both copies before budgeting frame workers.
+    pub fn image_buffer_bytes(&self) -> usize {
+        [&self.bias, &self.dark_signal, &self.flat_response]
+            .into_iter()
+            .flatten()
+            .fold(0_usize, |bytes, image| {
+                bytes.saturating_add(image.data.len().saturating_mul(std::mem::size_of::<f32>()))
+            })
+    }
+
     /// Load optional integrated calibration masters from FITS paths.
     ///
     /// A supplied dark exposure overrides its FITS metadata. Paths are read
@@ -691,6 +705,26 @@ fn robust_positive_median(data: impl ExactSizeIterator<Item = f32>) -> Option<f3
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_buffer_bytes_counts_all_master_sample_buffers() {
+        assert_eq!(CalibrationMasters::default().image_buffer_bytes(), 0);
+        let image = || LinearImage::new(4, 3, 3, vec![1.0; 36]).unwrap();
+        let masters = CalibrationMasters {
+            bias: Some(image()),
+            dark_signal: Some(image()),
+            flat_response: Some(image()),
+            ..Default::default()
+        };
+        assert_eq!(
+            masters.image_buffer_bytes(),
+            3 * 36 * std::mem::size_of::<f32>()
+        );
+        assert_eq!(
+            masters.clone().image_buffer_bytes(),
+            masters.image_buffer_bytes()
+        );
+    }
     use seiza_fits::{HeaderValue, WriteHeaderCard};
 
     fn mono(values: &[f32]) -> LinearImage {
