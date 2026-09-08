@@ -12,10 +12,33 @@ The first release supports:
 - bounded-drift star registration with translation/rotation/scale refinement;
 - robust global or tiled local normalization;
 - online residual (delta-sigma) rejection with coverage and rejection maps;
+- two-pass completed-stack rejection which revisits early transient samples;
 - non-mutating frame admission gates for additive live stacks;
 - versioned, checksummed, atomic live-stack checkpoints that can be reopened;
 - compact immutable export snapshots that clone only the integrated mean;
 - floating-point FITS output on the reference frame's pixel grid.
+
+## Completed-stack rejection
+
+Live delta-sigma rejection cannot remove trails admitted during its warm-up.
+For a completed preview, use `integrate_registered_frames` to reread admitted
+frames with their saved calibration and `RegisteredFrameMapping`. The loader
+receives `BatchStackPass` and the frame index, so a host can report both passes
+and cancel the work. `BatchStackResult` includes the final mean, variance,
+coverage, rejection maps, and per-frame finite/integrated sample counts.
+
+The estimator uses leave-one-out sigma clipping rather than comparing a
+transient to statistics that include its own pixels. It removes sufficiently
+strong isolated early or late trails at three or more finite observations;
+shallower pixels are averaged without rejection. Student-t predictive limits
+preserve the configured Gaussian tail probabilities when only a few other
+frames estimate noise, protecting ordinary low-depth noise samples from
+over-rejection. Multiple overlapping trails can still mask one another in
+shallow stacks. All normalized frames have equal weight, and
+`BatchStackOptions::minimum_sigma` is in their physical sample units.
+Memory stays proportional to the output image (about 36 bytes per sample plus
+one loaded input), and each frame is loaded twice. Changed shapes or sample
+digests abort the result. Live checkpoint formats and semantics do not change.
 
 ## Canonical sky orientation
 

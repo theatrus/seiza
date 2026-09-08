@@ -1,6 +1,7 @@
 //! Linear calibration, local registration, normalization, and incremental
 //! image stacking for astrophotography.
 
+mod batch;
 mod calibration;
 mod cancel;
 mod color;
@@ -21,6 +22,10 @@ mod residual_flat;
 mod snr;
 mod stack;
 
+pub use batch::{
+    BatchFrameDiagnostics, BatchStackOptions, BatchStackPass, BatchStackResult,
+    integrate_registered_frames,
+};
 pub use calibration::{CalibrationMasters, MasterDark, MasterFlat};
 pub use cancel::CancelSignal;
 pub use color::{
@@ -68,6 +73,9 @@ pub use stack::{
 };
 
 use std::path::PathBuf;
+
+/// The package version of the stacking algorithms used by this build.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Anything that can go wrong while calibrating, registering, normalizing, or
 /// stacking frames.

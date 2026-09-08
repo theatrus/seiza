@@ -1,7 +1,7 @@
 # Image and live stacking
 
-Status: online engine, native bindings, and resumable contexts implemented;
-exact two-pass batch estimator remains future work
+Status: online engine, native bindings, resumable contexts, and two-pass
+registered-frame integration implemented
 
 ## Boundary
 
@@ -201,10 +201,53 @@ The generic mono/RGB float serialization and atomic FITS publication live in
 header semantics.
 
 This is appropriate for live feedback and bounded-memory pre-stacks, but it is
-order-dependent and cannot revisit warm-up samples. A future exact batch mode
-will make two passes: first estimate registered per-pixel location/dispersion,
-then reread frames and accumulate only accepted samples. It can share cached
-registration and normalization parameters with the online engine.
+order-dependent and cannot revisit warm-up samples. An early satellite or
+aircraft trail raises both the running mean and variance and can stay in the
+image even when an identical late trail would be rejected. Lowering the online
+sigma threshold cannot remove a sample already integrated.
+
+`integrate_registered_frames` supplies the completed-stack path. It reads each
+admitted frame twice through a caller-supplied loader: first to estimate
+per-sample moments, then to compute a mean and variance after leave-one-out
+sigma rejection. Removing the candidate sample from its comparison statistics
+allows a sufficiently strong isolated transient to be rejected even at
+three-frame depth, including the registration reference and other online
+warm-up frames. Multiple
+similar transients overlapping one pixel can still inflate the comparison
+variance and mask one another, especially in shallow stacks; this estimator is
+not a robust median/MAD estimator and cannot promise to remove every trail.
+
+Low-depth noise estimates are themselves uncertain. A three-sigma rule applied
+directly to two other observations rejects about a quarter of ordinary Gaussian
+noise samples. The batch estimator therefore converts each nominal Gaussian
+tail probability to a Student-t predictive threshold, with `N - 2` degrees of
+freedom and scale `sqrt(1 + 1 / (N - 1))`. This is the single-future-observation
+case of the [NIST prediction-limit formula](https://www.itl.nist.gov/div898/software/dataplot/refman1/auxillar/predlimi.htm),
+using the other `N - 1` samples as the comparison set. The
+[statrs distribution implementation](https://docs.rs/statrs/latest/statrs/distribution/struct.StudentsT.html)
+supplies the normal survival function and Student-t quantile; thresholds are
+computed once per coverage count, not per pixel. Three-sigma defaults retain
+approximately the nominal 99.73% of independent Gaussian noise at depths 3,
+5, 20, and 100 without introducing masked holes. Shallow stacks consequently
+need stronger evidence of a trail than deep ones.
+
+The caller reuses the original calibration, preparation, registration, and
+normalization mapping. The API checks identical shapes and per-frame sample
+digests across passes and fails if any replayed input changes. It does not
+repeat frame admission or silently drop unreadable inputs. Frames have equal
+weight after normalization, matching the online stack. Non-finite border
+samples do not contribute to moments or rejection counts; fewer than three
+finite samples at a pixel are averaged without clipping. The noise floor is
+explicit in the registered image's physical units. Returned per-frame counts
+describe the completed estimator rather than earlier online decisions.
+
+Batch moments use `f64` for the leave-one-out subtraction. Total working state
+is approximately 36 bytes per output sample plus the current loaded image and
+small per-frame digests and diagnostics. Loading runs in index order in each
+pass and receives a pass enum for progress reporting; optional cancellation
+is checked before and after each load. A caller can checkpoint and release its
+online state before this stage. Resumable live contexts are unchanged and do
+not pretend that a completed, clipped mean is an additive accumulator.
 
 ## Memory and integration
 
