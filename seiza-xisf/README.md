@@ -66,6 +66,12 @@ planar samples and FITS-compatible keywords, sharing the `F32ImageData` and
 Files written this way round-trip through this crate's reader and load in
 PixInsight.
 
+FITS keywords with missing or blank `value` attributes are preserved as
+undefined values (`HeaderValue::Raw(String::new())`). Both the FITS and XISF
+writers retain them, including blank `FILTER` keywords in calibration masters.
+A quoted empty value (`value="''"`) remains an empty string, not an undefined
+value.
+
 ## License
 
 Apache-2.0

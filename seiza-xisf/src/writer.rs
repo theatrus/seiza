@@ -250,14 +250,6 @@ fn validate_image(
                 header.keyword()
             )));
         }
-        if let HeaderValue::Raw(value) = header.value()
-            && value.is_empty()
-        {
-            return Err(XisfError::Malformed(format!(
-                "empty raw FITS header {}",
-                header.keyword()
-            )));
-        }
     }
     Ok(())
 }

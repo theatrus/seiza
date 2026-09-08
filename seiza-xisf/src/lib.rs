@@ -1284,6 +1284,79 @@ mod tests {
     }
 
     #[test]
+    fn undefined_fits_keywords_round_trip_through_both_writers() {
+        use seiza_fits::{F32ImageData, WriteHeaderCard};
+
+        let samples = [0.25_f32, 0.5, 1.0, -0.5];
+        let raw = samples
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect::<Vec<_>>();
+        for value_attribute in ["", " value=\"\"", " value=\"        \"", " value=\"''\""] {
+            let expected = if value_attribute.contains("''") {
+                HeaderValue::String(String::new())
+            } else {
+                HeaderValue::Raw(String::new())
+            };
+            let xml = image_element(
+                0,
+                "2:2:1",
+                "Float32",
+                raw.len(),
+                "bounds=\"0:1\" colorSpace=\"Gray\" imageType=\"Bias\"",
+                &format!(
+                    "<FITSKeyword name=\"FILTER\"{value_attribute}/><FITSKeyword name=\"EXPTIME\" value=\"0\"/>"
+                ),
+            );
+            let decoded = from_bytes(&monolithic(xml, &[&raw])).unwrap();
+            assert_eq!(decoded.header("FILTER"), Some(&expected));
+            let headers = ["FILTER", "EXPTIME", "IMAGETYP"].map(|keyword| {
+                WriteHeaderCard::new(keyword, decoded.header(keyword).unwrap().clone())
+            });
+            let Pixels::F32(pixels) = decoded.pixels else {
+                panic!("Float32 samples must preserve their representation");
+            };
+
+            let mut fits = Vec::new();
+            seiza_fits::write_f32_image_to(
+                &mut fits,
+                decoded.width,
+                decoded.height,
+                F32ImageData::Mono(&pixels),
+                &headers,
+            )
+            .unwrap();
+            let mut xisf = Vec::new();
+            write_f32_image_to(
+                &mut xisf,
+                decoded.width,
+                decoded.height,
+                F32ImageData::Mono(&pixels),
+                &headers,
+            )
+            .unwrap();
+
+            for round_tripped in [
+                FitsImage::from_bytes(&fits).unwrap(),
+                from_bytes(&xisf).unwrap(),
+            ] {
+                assert_eq!(round_tripped.header("FILTER"), Some(&expected));
+                assert_eq!(round_tripped.header_f64("EXPTIME"), Some(0.0));
+                assert_eq!(round_tripped.header_str("IMAGETYP"), Some("Bias"));
+                assert_eq!(
+                    (
+                        round_tripped.width,
+                        round_tripped.height,
+                        round_tripped.planes
+                    ),
+                    (2, 2, 1)
+                );
+                assert!(matches!(round_tripped.pixels, Pixels::F32(actual) if actual == samples));
+            }
+        }
+    }
+
+    #[test]
     fn reads_uncompressed_float_and_fits_keywords() {
         let values = [0.25_f32, 0.5, 1.0, -0.5];
         let raw = values
