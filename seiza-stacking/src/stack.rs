@@ -1460,6 +1460,33 @@ mod tests {
     }
 
     #[test]
+    fn batch_rejection_removes_trail_that_live_warmup_cannot_revisit() {
+        let frames: Vec<_> = (0..20)
+            .map(|index| {
+                LinearImage::new(1, 1, 1, vec![if index == 0 { 11_000.0 } else { 1000.0 }]).unwrap()
+            })
+            .collect();
+        let mut online = Accumulator::new(1);
+        for frame in &frames {
+            online.integrate(&frame.data, RejectionMode::default());
+        }
+        assert!(
+            online.mean[0] > 1400.0,
+            "the live reference trail stays in its mean"
+        );
+        let completed = crate::integrate_registered_frames(
+            frames.len(),
+            &crate::BatchStackOptions::default(),
+            |_, index| Ok(frames[index].clone()),
+        )
+        .unwrap()
+        .snapshot;
+        assert_eq!(completed.image.data, vec![1000.0]);
+        assert_eq!(completed.coverage, vec![19]);
+        assert_eq!(completed.rejected_samples, vec![1]);
+    }
+
+    #[test]
     fn export_snapshot_owns_only_a_frozen_finalized_mean() {
         let mut accumulator = Accumulator::new(2);
         accumulator.integrate(&[5.0, f32::NAN], RejectionMode::None);
