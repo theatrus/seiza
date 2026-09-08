@@ -40,6 +40,38 @@ Memory stays proportional to the output image (about 36 bytes per sample plus
 one loaded input), and each frame is loaded twice. Changed shapes or sample
 digests abort the result. Live checkpoint formats and semantics do not change.
 
+## Pipelined preparation with a shared pool
+
+`LiveStacker::push_fits_pipelined_with_pool` takes a host-owned Rayon pool and
+coordinates outside it. Scoped reader workers overlap storage reads and
+decoding with other frames' preparation and ordered integration. Calibration,
+cosmetic correction, debayering, registration, normalization and integration
+run in the supplied pool, not the global one. Callbacks stay on the coordinator
+thread and results retain sequential order. Calling from any Rayon worker
+instead selects a safe sequential fallback, including one-thread pools.
+
+`PoolPipelineReport` contains frame counts, execution mode, actual worker count,
+a frame-memory estimate and aggregate read/decode, preparation, integration,
+coordinator-wait and whole-batch elapsed times. Preparation and integration
+timers exclude waits to enter the compute pool. Worker sums include discarded
+in-flight work and may exceed elapsed batch time; they are not CPU timings.
+
+This API caps explicit worker requests by `max_in_flight_bytes`. Its estimate
+reserves 80 bytes per reference pixel for each mono worker, 112 for RGB, and
+one extra integrating frame. A budget below one worker plus that frame fails
+before reading. These estimates include preparation scratch and buffered
+frames, but assume source images no larger than the reference and are not hard
+RSS limits. Hosts must also reserve their reference, accumulator, calibration
+masters, larger inputs and codec/allocator overhead. Use
+`PoolPipelineMemory::for_reference` to share the same worker/integration
+estimate when planning the host's budget, and
+`CalibrationMasters::image_buffer_bytes` to count resident master samples;
+session masters and their active deep clones both consume storage.
+
+The original `push_fits_pipelined` API and its explicit-worker override remain
+unchanged. Its existing Rayon fallback is intentional: wrapping the entire
+batch in `pool.install` does not enable overlapped preparation.
+
 ## Canonical sky orientation
 
 `SkyOrientationPlan` reprojects an integrated mono or RGB image onto a

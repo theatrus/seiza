@@ -27,6 +27,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
+use std::time::{Duration, Instant};
 
 /// How much work to keep in flight while stacking a sequence of frames.
 #[derive(Clone, Copy, Debug)]
@@ -40,10 +41,14 @@ pub struct PipelineOptions {
     /// sensor, so a fixed frame count would mean wildly different memory on
     /// different rigs.
     ///
-    /// This bounds the derived worker count only. An explicit [`Self::workers`]
-    /// is taken at its word, because a caller who names a number has usually
+    /// In [`LiveStacker::push_fits_pipelined`] this bounds the derived worker
+    /// count only. An explicit [`Self::workers`] is taken at its word, because
+    /// a caller who names a number has usually
     /// measured something this crate cannot see — remote storage, most often.
-    /// At least one frame is always prepared, however small the budget.
+    /// At least one frame is always prepared, however small that legacy budget.
+    /// [`LiveStacker::push_fits_pipelined_with_pool`] instead budgets preparation
+    /// intermediates too, caps explicit worker counts, and refuses a budget
+    /// below one worker's estimated working set before reading.
     pub max_in_flight_bytes: usize,
     /// Put a frame the file declares as normalized onto this full scale as it
     /// is read, or `None` to leave every sample exactly as stored.
@@ -73,6 +78,7 @@ pub struct PipelineOptions {
     /// remote should say so here, since this crate cannot tell a network mount
     /// from a local disk. Memory then follows the count given, roughly two
     /// prepared frames per worker, held to [`MAXIMUM_WORKERS`] threads.
+    /// The explicit-pool API additionally caps this count by the memory budget.
     pub workers: Option<usize>,
 }
 
@@ -169,6 +175,123 @@ pub struct PipelineReport {
     pub failed: usize,
 }
 
+/// How an explicit-pool batch executed.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PipelineExecution {
+    /// Scoped reader workers overlap preparation with ordered integration.
+    #[default]
+    Overlapped,
+    /// A Rayon caller prepares one frame at a time to avoid blocking its pool.
+    SequentialRayonFallback,
+}
+
+/// Aggregate elapsed times, not CPU time. Worker sums may exceed batch time.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PipelineTimings {
+    /// Sum of reads and container decoding, including storage waits.
+    pub read_decode: Duration,
+    /// Sum of preparation elapsed time, excluding waits to enter the pool.
+    pub preparation: Duration,
+    /// Ordered integration elapsed time, excluding waits to enter the pool.
+    pub integration: Duration,
+    /// Time the coordinator waited for the next ordered worker result.
+    pub coordinator_wait: Duration,
+    /// Whole batch elapsed time, including joining discarded in-flight work.
+    pub elapsed: Duration,
+}
+
+/// Outcomes and resolved resources of an explicit-pool batch.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[must_use]
+pub struct PoolPipelineReport {
+    pub frames: PipelineReport,
+    pub execution: PipelineExecution,
+    /// Reader/preparation workers actually used, or zero for an empty batch.
+    pub workers: usize,
+    /// Conservative reference-sized frame working-set estimate, not process RSS.
+    /// Excludes the caller's reference, accumulator, and calibration masters.
+    pub estimated_in_flight_bytes: usize,
+    pub timings: PipelineTimings,
+}
+
+/// Reference-sized frame estimates for host memory planning.
+///
+/// These exclude the host's reference, accumulator and masters. Sources larger
+/// than the reference, codec buffers and allocator overhead can exceed them;
+/// see [`LiveStacker::push_fits_pipelined_with_pool`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PoolPipelineMemory {
+    /// Preparation scratch, decoded data and one queued frame per worker.
+    pub worker_bytes: usize,
+    /// One reference-sized frame currently being integrated.
+    pub integration_bytes: usize,
+}
+
+impl PoolPipelineMemory {
+    /// Estimate from the prepared reference's pixel and interleaved sample counts.
+    pub fn for_reference(pixels: usize, samples: usize) -> Self {
+        Self {
+            worker_bytes: pixels
+                .saturating_mul(64)
+                .saturating_add(samples.saturating_mul(16)),
+            integration_bytes: samples.saturating_mul(4),
+        }
+    }
+
+    /// Total frame estimate for a resolved worker count, or zero for no work.
+    pub fn in_flight_bytes(self, workers: usize) -> usize {
+        if workers == 0 {
+            0
+        } else {
+            self.worker_bytes
+                .saturating_mul(workers)
+                .saturating_add(self.integration_bytes)
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ComputePool<'a>(Option<&'a rayon::ThreadPool>);
+
+impl ComputePool<'_> {
+    fn install<T: Send>(&self, work: impl FnOnce() -> T + Send) -> T {
+        match self.0 {
+            Some(pool) => pool.install(work),
+            None => work(),
+        }
+    }
+}
+
+fn timed<T>(work: impl FnOnce() -> T) -> (T, Duration) {
+    let started = Instant::now();
+    let result = work();
+    (result, started.elapsed())
+}
+
+fn resolve_pool_workers(
+    options: &PipelineOptions,
+    reference: &crate::LinearImage,
+    pool: &rayon::ThreadPool,
+) -> Result<usize> {
+    let memory =
+        PoolPipelineMemory::for_reference(reference.pixel_count(), reference.sample_count());
+    let affordable = options
+        .max_in_flight_bytes
+        .saturating_sub(memory.integration_bytes)
+        / memory.worker_bytes.max(1);
+    if affordable == 0 {
+        return Err(Error::Stack(format!(
+            "pipeline memory budget of {} bytes cannot fit one worker and integration frame ({} bytes estimated)",
+            options.max_in_flight_bytes,
+            memory.in_flight_bytes(1)
+        )));
+    }
+    let requested = options
+        .workers
+        .unwrap_or_else(|| (pool.current_num_threads() / 2).clamp(1, MAXIMUM_DERIVED_WORKERS));
+    Ok(requested.clamp(1, MAXIMUM_WORKERS).min(affordable))
+}
+
 /// Whether a path can be prepared at all, decided before anything is opened.
 enum Planned {
     /// Repeats a path this stack has already taken, or an earlier one in this
@@ -221,28 +344,105 @@ impl LiveStacker {
         &mut self,
         paths: &[PathBuf],
         options: &PipelineOptions,
-        mut on_frame: impl FnMut(&Path, Result<FrameDisposition>) -> Continue,
+        on_frame: impl FnMut(&Path, Result<FrameDisposition>) -> Continue,
     ) -> Result<PipelineReport> {
+        self.run_pipeline(
+            paths,
+            options,
+            ComputePool(None),
+            &|path| FitsFrame::open(path),
+            &prepare_decoded,
+            on_frame,
+        )
+        .map(|report| report.frames)
+    }
+
+    /// Overlap reads while keeping all image preparation and integration in
+    /// the supplied Rayon pool. Call from a non-Rayon coordinator thread.
+    ///
+    /// Bounded scoped OS workers read and decode FITS/XISF containers outside
+    /// the pool, then submit calibration, cosmetic correction, CFA conversion,
+    /// registration and normalization to it. The coordinator submits ordered
+    /// integration to the same pool and invokes `on_frame` on its own thread.
+    /// This preserves the sequential result without borrowing the global pool.
+    ///
+    /// A caller already on any Rayon worker gets a sequential fallback, even
+    /// with a one-thread supplied pool. It still uses the supplied pool for
+    /// preparation and integration; the callback stays on the calling thread.
+    /// Cancellation, per-path errors, duplicate handling and panic propagation
+    /// follow [`Self::push_fits_pipelined`]. Started reads cannot be interrupted.
+    ///
+    /// Unlike the legacy API, this caps explicit worker requests by the memory
+    /// budget too. The estimate allows 64 bytes per reference pixel plus 16
+    /// bytes per reference sample per worker (80 for mono, 112 for RGB), plus
+    /// one reference-sized integrating frame. It includes detector scratch,
+    /// decoded/calibrated/CFA buffers and a queued frame per worker, but excludes
+    /// the caller's reference, accumulator and masters. A budget too small for
+    /// one worker and its integration frame returns an error before any read.
+    ///
+    /// This is a conservative estimate for reference-sized or smaller sources,
+    /// not a hard allocation/RSS limit: larger source images, container codec
+    /// buffers, unusual registration settings and allocator overhead can use
+    /// more. No up-front header scan is imposed on remote storage. Hosts with
+    /// larger sources should reserve that memory or reduce `workers` themselves.
+    pub fn push_fits_pipelined_with_pool(
+        &mut self,
+        paths: &[PathBuf],
+        options: &PipelineOptions,
+        pool: &rayon::ThreadPool,
+        on_frame: impl FnMut(&Path, Result<FrameDisposition>) -> Continue,
+    ) -> Result<PoolPipelineReport> {
+        self.run_pipeline(
+            paths,
+            options,
+            ComputePool(Some(pool)),
+            &|path| FitsFrame::open(path),
+            &prepare_decoded,
+            on_frame,
+        )
+    }
+
+    fn run_pipeline(
+        &mut self,
+        paths: &[PathBuf],
+        options: &PipelineOptions,
+        compute: ComputePool<'_>,
+        read: &(impl Fn(&Path) -> Result<FitsFrame> + Sync),
+        prepare: &(
+             impl Fn(FitsFrame, &crate::stack::PreparationHalf<'_>, Option<f32>) -> Result<PreparedFrame>
+             + Sync
+         ),
+        mut on_frame: impl FnMut(&Path, Result<FrameDisposition>) -> Continue,
+    ) -> Result<PoolPipelineReport> {
+        let started = Instant::now();
         self.require_fits_input_mode()?;
         if paths.is_empty() {
-            return Ok(PipelineReport::default());
+            return Ok(PoolPipelineReport::default());
         }
 
-        // Settled before any thread starts, so both paths refuse a repeat at
-        // the same point and neither reads a frame it is going to discard.
-        let plan = self.plan_batch(paths);
-
         let frame_bytes = self.reference.data.len() * std::mem::size_of::<f32>();
-        let workers = options.resolve_workers(frame_bytes).min(paths.len());
+        let workers = match compute.0 {
+            Some(pool) => resolve_pool_workers(options, &self.reference, pool)?,
+            None => options.resolve_workers(frame_bytes),
+        }
+        .min(paths.len());
+        // Resolve the budget before path metadata I/O, and settle duplicates
+        // before workers start so neither path opens a frame it will discard.
+        let plan = self.plan_batch(paths);
         // Preparation submits Rayon work; blocking a pool thread while waiting
         // for it can starve the pool of the threads that would do it.
         if rayon::current_thread_index().is_some() {
-            return Ok(self.run_sequentially(
+            let mut report = self.run_sequentially(
                 paths,
                 &plan,
                 options.normalized_full_scale,
+                compute,
+                read,
+                prepare,
                 &mut on_frame,
-            ));
+            );
+            report.timings.elapsed = started.elapsed();
+            return Ok(report);
         }
 
         let stop = AtomicBool::new(false);
@@ -261,14 +461,23 @@ impl LiveStacker {
         }
 
         let (preparation, mut integration) = self.split_for_pipeline();
-        let mut report = PipelineReport::default();
+        let mut report = PoolPipelineReport {
+            workers,
+            estimated_in_flight_bytes: PoolPipelineMemory::for_reference(
+                preparation.reference.pixel_count(),
+                preparation.reference.sample_count(),
+            )
+            .in_flight_bytes(workers),
+            ..PoolPipelineReport::default()
+        };
 
         std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(workers);
             for (worker, sender) in senders.into_iter().enumerate() {
                 let preparation = &preparation;
                 let stop = &stop;
                 let plan = &plan;
-                scope.spawn(move || {
+                handles.push(scope.spawn(move || {
                     prepare_worker(
                         WorkerShare {
                             worker,
@@ -280,14 +489,19 @@ impl LiveStacker {
                             stop,
                         },
                         sender,
+                        compute,
+                        read,
+                        prepare,
                     )
-                });
+                }));
             }
 
             // Integrate in order on this thread, so the accumulator sees the
             // sequential sequence.
             for (index, path) in paths.iter().enumerate() {
-                let Ok(prepared) = receivers[index % workers].recv() else {
+                let (received, waited) = timed(|| receivers[index % workers].recv());
+                report.timings.coordinator_wait += waited;
+                let Ok(prepared) = received else {
                     // The worker for this index is gone. Either it panicked —
                     // in which case the scope re-raises that panic when it
                     // joins, which is a truer report than anything invented
@@ -302,12 +516,14 @@ impl LiveStacker {
                             Planned::Prepare(identity) => identity.clone(),
                             Planned::Duplicate => unreachable!("a duplicate is never prepared"),
                         };
-                        let disposition = integration.integrate(prepared);
+                        let (disposition, elapsed) =
+                            compute.install(|| timed(|| integration.integrate(prepared)));
+                        report.timings.integration += elapsed;
                         integration.record_input_identity(identity);
                         Ok(disposition)
                     }
                 };
-                report.count(&outcome);
+                report.frames.count(&outcome);
 
                 if on_frame(path, outcome) == Continue::No {
                     break;
@@ -320,8 +536,18 @@ impl LiveStacker {
             // them just the same — that is why the channel replaced a flag.
             stop.store(true, Ordering::Relaxed);
             drop(receivers);
+            for handle in handles {
+                match handle.join() {
+                    Ok(timings) => {
+                        report.timings.read_decode += timings.read_decode;
+                        report.timings.preparation += timings.preparation;
+                    }
+                    Err(panic) => std::panic::resume_unwind(panic),
+                }
+            }
         });
 
+        report.timings.elapsed = started.elapsed();
         Ok(report)
     }
 
@@ -344,27 +570,53 @@ impl LiveStacker {
 
     /// The fallback taken on a Rayon pool thread, reporting through the same
     /// callback and refusing the same paths at the same point.
+    #[allow(clippy::too_many_arguments)]
     fn run_sequentially(
         &mut self,
         paths: &[PathBuf],
         plan: &[Planned],
         normalized_full_scale: Option<f32>,
+        compute: ComputePool<'_>,
+        read: &(impl Fn(&Path) -> Result<FitsFrame> + Sync),
+        prepare: &(
+             impl Fn(FitsFrame, &crate::stack::PreparationHalf<'_>, Option<f32>) -> Result<PreparedFrame>
+             + Sync
+         ),
         on_frame: &mut impl FnMut(&Path, Result<FrameDisposition>) -> Continue,
-    ) -> PipelineReport {
-        let mut report = PipelineReport::default();
+    ) -> PoolPipelineReport {
+        let mut report = PoolPipelineReport {
+            workers: 1,
+            execution: PipelineExecution::SequentialRayonFallback,
+            estimated_in_flight_bytes: PoolPipelineMemory::for_reference(
+                self.reference.pixel_count(),
+                self.reference.sample_count(),
+            )
+            .in_flight_bytes(1),
+            ..PoolPipelineReport::default()
+        };
         let (preparation, mut integration) = self.split_for_pipeline();
         for (index, path) in paths.iter().enumerate() {
             let outcome = match &plan[index] {
                 Planned::Duplicate => Err(duplicate_error(path)),
                 Planned::Prepare(identity) => {
-                    prepare_one(path, &preparation, normalized_full_scale).map(|prepared| {
-                        let disposition = integration.integrate(prepared);
-                        integration.record_input_identity(identity.clone());
-                        disposition
+                    let (frame, elapsed) = timed(|| read(path));
+                    report.timings.read_decode += elapsed;
+                    frame.and_then(|frame| {
+                        let (prepared, elapsed) = compute.install(|| {
+                            timed(|| prepare(frame, &preparation, normalized_full_scale))
+                        });
+                        report.timings.preparation += elapsed;
+                        prepared.map(|prepared| {
+                            let (disposition, elapsed) =
+                                compute.install(|| timed(|| integration.integrate(prepared)));
+                            report.timings.integration += elapsed;
+                            integration.record_input_identity(identity.clone());
+                            disposition
+                        })
                     })
                 }
             };
-            report.count(&outcome);
+            report.frames.count(&outcome);
             if on_frame(path, outcome) == Continue::No {
                 break;
             }
@@ -404,7 +656,16 @@ struct WorkerShare<'a> {
     stop: &'a AtomicBool,
 }
 
-fn prepare_worker(share: WorkerShare<'_>, sender: SyncSender<Result<PreparedFrame>>) {
+fn prepare_worker(
+    share: WorkerShare<'_>,
+    sender: SyncSender<Result<PreparedFrame>>,
+    compute: ComputePool<'_>,
+    read: &(impl Fn(&Path) -> Result<FitsFrame> + Sync),
+    prepare: &(
+         impl Fn(FitsFrame, &crate::stack::PreparationHalf<'_>, Option<f32>) -> Result<PreparedFrame>
+         + Sync
+     ),
+) -> PipelineTimings {
     let WorkerShare {
         worker,
         workers,
@@ -414,33 +675,43 @@ fn prepare_worker(share: WorkerShare<'_>, sender: SyncSender<Result<PreparedFram
         normalized_full_scale,
         stop,
     } = share;
+    let mut timings = PipelineTimings::default();
     let mut index = worker;
     while index < paths.len() {
         // Checked before the open, so a cancelled run starts no further read.
         // It cannot reach into one already begun; see `push_fits_pipelined`.
         if stop.load(Ordering::Relaxed) {
-            return;
+            return timings;
         }
         let outcome = match &plan[index] {
             Planned::Duplicate => Err(duplicate_error(&paths[index])),
-            Planned::Prepare(_) => prepare_one(&paths[index], preparation, normalized_full_scale),
+            Planned::Prepare(_) => {
+                let (frame, elapsed) = timed(|| read(&paths[index]));
+                timings.read_decode += elapsed;
+                frame.and_then(|frame| {
+                    let (prepared, elapsed) = compute
+                        .install(|| timed(|| prepare(frame, preparation, normalized_full_scale)));
+                    timings.preparation += elapsed;
+                    prepared
+                })
+            }
         };
         // A closed channel means the consumer has stopped or unwound; there is
         // nobody left to hand this to.
         if sender.send(outcome).is_err() {
-            return;
+            return timings;
         }
         index += workers;
     }
+    timings
 }
 
-/// Open, calibrate, register and normalize one path.
-fn prepare_one(
-    path: &Path,
+/// Calibrate, register and normalize a decoded frame in the compute pool.
+fn prepare_decoded(
+    mut frame: FitsFrame,
     half: &crate::stack::PreparationHalf<'_>,
     normalized_full_scale: Option<f32>,
 ) -> Result<PreparedFrame> {
-    let mut frame = FitsFrame::open(path)?;
     if let Some(full_scale) = normalized_full_scale {
         frame.rescale_declared_unit_bounds(full_scale);
     }
@@ -483,6 +754,10 @@ fn prepare_one(
     };
     prepare_frame(half.reference, half.registrar, half.options, frame.image)
 }
+
+#[cfg(test)]
+#[path = "pipeline_pool_tests.rs"]
+mod pool_tests;
 
 #[cfg(test)]
 mod tests {
@@ -548,7 +823,7 @@ mod tests {
         file.write_all(&body).unwrap();
     }
 
-    fn frame_set(count: usize) -> (tempfile::TempDir, Vec<PathBuf>) {
+    pub(super) fn frame_set(count: usize) -> (tempfile::TempDir, Vec<PathBuf>) {
         let directory = tempfile::tempdir().unwrap();
         let paths: Vec<PathBuf> = (0..count)
             .map(|frame| {
@@ -562,21 +837,21 @@ mod tests {
 
     /// Compare as raw bits, so a masked `NaN` counts as equal to itself and
     /// any drift in the low bits is caught rather than tolerated.
-    fn bits(values: &[f32]) -> Vec<u32> {
+    pub(super) fn bits(values: &[f32]) -> Vec<u32> {
         values.iter().map(|value| value.to_bits()).collect()
     }
 
     /// Options that force the channel handoff whatever the host's core count.
     /// A derived count is 1 on a 2-vCPU runner, which would send these tests
     /// down the sequential fallback and quietly stop testing the concurrency.
-    fn concurrent(workers: usize) -> PipelineOptions {
+    pub(super) fn concurrent(workers: usize) -> PipelineOptions {
         PipelineOptions {
             workers: Some(workers),
             ..PipelineOptions::default()
         }
     }
 
-    fn stacker_from(reference: &Path) -> LiveStacker {
+    pub(super) fn stacker_from(reference: &Path) -> LiveStacker {
         LiveStacker::new(
             FitsFrame::open(reference).unwrap(),
             CalibrationMasters::default(),
@@ -585,7 +860,7 @@ mod tests {
         .unwrap()
     }
 
-    fn constant_bias(value: f32) -> CalibrationMasters {
+    pub(super) fn constant_bias(value: f32) -> CalibrationMasters {
         CalibrationMasters::new(
             Some(crate::LinearImage::new(192, 160, 1, vec![value; 192 * 160]).unwrap()),
             None,

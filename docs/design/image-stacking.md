@@ -58,6 +58,44 @@ itself still receives its configured bias and dark correction. Master dark and
 flat loaders also retain `BAYERPAT`, `XBAYROFF`, and `YBAYROFF`; when present,
 that sampling must match the raw light rather than relying on dimensions alone.
 
+## Host-owned compute pools
+
+`push_fits_pipelined_with_pool` separates a non-Rayon coordinator and bounded
+scoped reader workers from a supplied Rayon compute pool. Read/decode remains
+outside the pool; all preparation after decode and ordered integration use
+`ThreadPool::install`. A result channel per worker has capacity one, so each
+worker holds at most one queued prepared frame plus the frame it is building.
+The coordinator can hold one additional integrating frame. Reading the channels
+round-robin preserves input order, admission decisions and accumulator bits.
+
+Callbacks run only on the coordinator and need not be `Send`. Cancellation
+drops receivers and joins workers, without interrupting reads already started.
+Worker and callback panics unwind rather than leaving a blocked result channel.
+A caller already on a Rayon worker takes a sequential fallback; it never waits
+on a channel whose producer needs that occupied pool. The legacy pipelined API
+keeps its original fallback and explicit-worker override behavior.
+
+The explicit-pool API caps even requested worker counts by its frame budget,
+reserving `(64 * pixels + 16 * samples)` bytes per worker and `4 * samples` for
+the currently integrating reference-sized frame. This conservatively includes
+decoded/calibrated/CFA/RGB buffers, detector scratch, and a queued frame. The
+minimum one-worker budget is checked before reading. Larger-than-reference
+sources, codec buffers, allocator overhead and unusual registration settings
+are outside the estimate; a mandatory all-frame header scan would add latency
+to remote storage. Hosts reserve their own reference, accumulator and every
+resident session master separately. `PoolPipelineMemory::for_reference` exports
+the same worker/integration estimate for host budget policy, without duplicating
+the formula downstream. `CalibrationMasters::image_buffer_bytes`
+counts sample lengths without claiming total process memory; deep clones must
+also be counted.
+
+The returned report exposes execution mode, resolved workers and estimated
+in-flight bytes. Timings sum read/decode, preparation and ordered integration,
+and measure coordinator channel waits and whole-batch elapsed time. Preparation
+and integration are timed inside the supplied pool, excluding admission to the
+pool. Worker sums include discarded frames and may exceed wall time, so they
+must not be presented as CPU utilization.
+
 ## Master construction
 
 `build_master_from_fits` and `seiza master bias|dark|flat` construct the
