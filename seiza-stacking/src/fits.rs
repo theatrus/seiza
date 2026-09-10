@@ -602,15 +602,20 @@ pub fn write_master_fits_f32(path: impl AsRef<Path>, master: &MasterFrame) -> Re
             master.normalized,
             "flat response normalized before combine",
         ),
+        string_card(
+            "REJMETH",
+            master.rejection_method.as_str(),
+            "temporal sample rejection method",
+        ),
         float_card(
             "CLIPLOW",
             f64::from(master.rejection.low_sigma),
-            "low leave-one-out sigma threshold",
+            "low sigma threshold",
         ),
         float_card(
             "CLIPHIGH",
             f64::from(master.rejection.high_sigma),
-            "high leave-one-out sigma threshold",
+            "high sigma threshold",
         ),
         integer_card(
             "CLIPREJ",
@@ -625,7 +630,7 @@ pub fn write_master_fits_f32(path: impl AsRef<Path>, master: &MasterFrame) -> Re
         integer_card(
             "CLIPFBK",
             i64::try_from(master.fallback_pixels).unwrap_or(i64::MAX),
-            "pixels written as the unclipped mean",
+            "pixels using the fallback center",
         ),
     ];
     if let Some(exposure_seconds) = master.exposure_seconds {
@@ -1259,6 +1264,7 @@ mod tests {
             dark_subtracted: false,
             normalized: false,
             rejection: crate::MasterRejectionOptions::default(),
+            rejection_method: crate::MasterRejectionMethod::LeaveOneOut,
             reference_headers: vec![
                 ("INSTRUME".into(), HeaderValue::String("Test Camera".into())),
                 ("CAMERA".into(), HeaderValue::String("Ignored Alias".into())),
@@ -1276,6 +1282,7 @@ mod tests {
         write_master_fits_f32(&path, &master).unwrap();
         let decoded = FitsImage::open(&path).unwrap();
         assert_eq!(decoded.header_str("SEIZAMST"), Some("DARK"));
+        assert_eq!(decoded.header_str("REJMETH"), Some("LEAVE_ONE_OUT"));
         assert_eq!(decoded.header_f64("NCOMBINE"), Some(12.0));
         assert_eq!(decoded.header_f64("EXPTIME"), Some(30.0));
         assert_eq!(

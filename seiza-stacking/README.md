@@ -341,11 +341,40 @@ duration rather than silently assuming a 1:1 scale.
 
 `build_master_from_fits` retains its compatibility name but accepts FITS and
 XISF inputs. It builds reusable calibration masters without retaining the
-input sequence in memory and rereads each file for a leave-one-out
-sigma-clipped second pass, validates available acquisition metadata, calibrates
-and normalizes each flat before integration, and returns per-input rejection
-statistics. `write_master_fits_f32` records the master kind, input count,
-rejection settings, and bias/dark/normalization state in the FITS header. Those
+input sequence in memory, validates available acquisition metadata, and returns
+per-input rejection statistics. Bias and dark masters reread each file for a
+leave-one-out sigma-clipped second pass.
+
+Flat inputs are bias/dark calibrated and normalized to a common median before
+integration. Temporal sigma clipping uses the median and a MAD-derived scale,
+then averages the surviving values. This rejects moving stars in sky flats
+even when a star covers a sensor pixel in multiple exposures. It does not align
+stars or smooth the sensor response: dust, vignetting, and persistent pixel
+response remain. The existing low/high thresholds default to 3 sigma. This
+follows the robust combination approach in the
+[Astropy flat-combination guide](https://www.astropy.org/ccd-reduction-and-photometry-guide/v/dev/notebooks/05-04-Combining-flats.html).
+
+At least three inputs are needed for rejection; two are averaged without
+clipping. More frames and sufficient star motion are important: clipping
+cannot reliably distinguish stars from the flat response when contamination
+covers half or more of the samples at a pixel. Changing gradients, saturation,
+and stationary stars are not repaired by temporal rejection. A zero MAD uses
+a floating-point tolerance; if custom thresholds remove every sample, the
+flat pixel falls back to its temporal median instead of its contaminated mean.
+The fallback count is reported separately.
+
+Flat integration decodes each input once and temporarily spools its calibrated,
+normalized f32 pixels. Scratch space is about four bytes per input sample
+(about 14.5 GiB for 64 mono 61 MP frames), and tile payload, read buffer, and
+per-pixel statistics workspace are bounded together at 64 MiB. Memory also
+includes the decoded image or output image, calibration masters, and per-input
+metadata/tallies. The scratch file is removed on success, cancellation, or
+failure. `build_master_from_fits_with_scratch` lets hosts choose an existing
+cache directory on their image volume; the original entry point uses OS temp.
+
+`write_master_fits_f32` records the master kind, input count, actual rejection
+method (`REJMETH`: `MEDIAN_MAD`, `LEAVE_ONE_OUT`, or `NONE` for two inputs),
+thresholds, counts, and bias/dark/normalization state in the FITS header. Those
 state fields prevent a later `CalibrationMasters` consumer from calibrating a
 prepared dark or flat twice.
 

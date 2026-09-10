@@ -49,8 +49,8 @@ pub use fits::{
 pub use image::{BayerLayout, LinearImage};
 pub use mapping::RegisteredFrameMapping;
 pub use master::{
-    MasterBuildOptions, MasterFrame, MasterFrameKind, MasterInputStatistics,
-    MasterRejectionOptions, build_master_from_fits,
+    MasterBuildOptions, MasterFrame, MasterFrameKind, MasterInputStatistics, MasterRejectionMethod,
+    MasterRejectionOptions, build_master_from_fits, build_master_from_fits_with_scratch,
 };
 pub use normalization::{NormalizationMap, NormalizationMode};
 pub use orientation::{SKY_ORIENTATION_NAME, SKY_ORIENTATION_VERSION, SkyOrientationPlan};
