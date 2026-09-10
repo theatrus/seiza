@@ -1,9 +1,9 @@
 use crate::provenance::{FileIdentity, file_identity, validate_path_roles, write_json_atomic};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use seiza_stacking::{
-    FitsFrame, MasterBuildOptions, MasterDark, MasterFrameKind, MasterRejectionOptions,
-    build_master_from_fits, write_master_fits_f32,
+    FitsFrame, MasterBuildOptions, MasterDark, MasterFrame, MasterFrameKind, MasterRejectionMethod,
+    MasterRejectionOptions, build_master_from_fits, write_master_fits_f32,
 };
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -35,10 +35,10 @@ struct CommonArgs {
     /// JSON integration/provenance report with SHA-256 input identities
     #[arg(long)]
     report: Option<PathBuf>,
-    /// Low leave-one-out sigma rejection threshold
+    /// Low sigma rejection threshold
     #[arg(long, default_value_t = 3.0)]
     sigma_low: f32,
-    /// High leave-one-out sigma rejection threshold
+    /// High sigma rejection threshold
     #[arg(long, default_value_t = 3.0)]
     sigma_high: f32,
 }
@@ -86,7 +86,38 @@ struct MasterConfigurationReport {
     high_sigma: f32,
     exposure_seconds_override: Option<f64>,
     integration: &'static str,
+    rejection_method: &'static str,
+    fallback_center: &'static str,
     rereads_inputs: bool,
+}
+
+impl MasterConfigurationReport {
+    fn from_master(master: &MasterFrame, options: &MasterBuildOptions) -> Self {
+        Self {
+            low_sigma: options.rejection.low_sigma,
+            high_sigma: options.rejection.high_sigma,
+            exposure_seconds_override: options.exposure_seconds,
+            integration: integration_name(master.rejection_method),
+            rejection_method: master.rejection_method.as_str(),
+            fallback_center: fallback_center(master.kind),
+            rereads_inputs: master.kind != MasterFrameKind::Flat,
+        }
+    }
+}
+
+fn integration_name(method: MasterRejectionMethod) -> &'static str {
+    match method {
+        MasterRejectionMethod::None => "mean-without-rejection",
+        MasterRejectionMethod::MedianMad => "median-mad-sigma-clipped-mean",
+        MasterRejectionMethod::LeaveOneOut => "two-pass-leave-one-out-sigma-clipped-mean",
+    }
+}
+
+fn fallback_center(kind: MasterFrameKind) -> &'static str {
+    match kind {
+        MasterFrameKind::Flat => "temporal median",
+        MasterFrameKind::Bias | MasterFrameKind::Dark => "unclipped mean",
+    }
 }
 
 #[derive(Serialize)]
@@ -97,6 +128,12 @@ struct MasterInputReport {
 }
 
 #[derive(Serialize)]
+struct MasterSkippedInputReport {
+    source: FileIdentity,
+    reason: String,
+}
+
+#[derive(Serialize)]
 struct MasterReport {
     schema_version: u32,
     kind: &'static str,
@@ -104,6 +141,7 @@ struct MasterReport {
     calibration: MasterCalibrationReport,
     configuration: MasterConfigurationReport,
     inputs: Vec<MasterInputReport>,
+    skipped_inputs: Vec<MasterSkippedInputReport>,
     input_frames: usize,
     accepted_samples: u64,
     rejected_samples: u64,
@@ -203,52 +241,76 @@ fn build(
         );
     }
     println!(
-        "building {} master from {} frame(s): two-pass sigma-clipped mean",
+        "building {} master from {} frame(s): {}",
         kind.as_str(),
-        common.images.len()
+        common.images.len(),
+        if kind == MasterFrameKind::Flat {
+            "calibration, normalization, and scratch-backed integration"
+        } else {
+            "two-pass integration"
+        }
     );
     let master = build_master_from_fits(&common.images, kind, &options)?;
     write_master_fits_f32(&common.output, &master)?;
     if master.fallback_pixels > 0 {
         eprintln!(
-            "warning: rejection removed every sample at {} pixel(s); wrote their unclipped mean",
-            master.fallback_pixels
+            "warning: rejection removed every sample at {} pixel(s); wrote their {}",
+            master.fallback_pixels,
+            fallback_center(master.kind)
         );
     }
     crate::common::wrote(
         &common.output,
         format_args!(
-            "{} {} frame(s), {} rejected sample(s), linear f32",
+            "{} {} frame(s), {}, {} rejected sample(s), linear f32",
             master.input_frames,
             kind.as_str(),
+            integration_name(master.rejection_method),
             master.rejected_samples
         ),
     );
 
     if let Some(report_path) = common.report {
-        let inputs = input_identities
+        let identities = input_identities
             .expect("input identities were prepared for the report")
-            .into_iter()
-            .zip(&master.input_statistics)
-            .map(|(source, statistics)| MasterInputReport {
+            .into_iter();
+        let skipped_by_path = master
+            .skipped_inputs
+            .iter()
+            .map(|skipped| (skipped.path.as_path(), skipped.reason.as_str()))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut statistics = master.input_statistics.iter();
+        let mut inputs = Vec::with_capacity(master.input_frames);
+        let mut skipped_inputs = Vec::with_capacity(master.skipped_inputs.len());
+        for (path, source) in common.images.iter().zip(identities) {
+            if let Some(reason) = skipped_by_path.get(path.as_path()) {
+                skipped_inputs.push(MasterSkippedInputReport {
+                    source,
+                    reason: (*reason).to_owned(),
+                });
+                continue;
+            }
+            let statistics = statistics
+                .next()
+                .context("master report is missing statistics for an accepted input")?;
+            inputs.push(MasterInputReport {
                 source,
                 accepted_samples: statistics.accepted_samples,
                 rejected_samples: statistics.rejected_samples,
-            })
-            .collect();
+            });
+        }
+        anyhow::ensure!(
+            statistics.next().is_none(),
+            "master report has more statistics than accepted inputs"
+        );
         let report = MasterReport {
             schema_version: 1,
             kind: kind.as_str(),
             output: file_identity(&common.output)?,
             calibration: calibration_report.expect("calibration report was prepared"),
-            configuration: MasterConfigurationReport {
-                low_sigma: common.sigma_low,
-                high_sigma: common.sigma_high,
-                exposure_seconds_override: exposure_seconds,
-                integration: "two-pass-leave-one-out-sigma-clipped-mean",
-                rereads_inputs: true,
-            },
+            configuration: MasterConfigurationReport::from_master(&master, &options),
             inputs,
+            skipped_inputs,
             input_frames: master.input_frames,
             accepted_samples: master.accepted_samples,
             rejected_samples: master.rejected_samples,
