@@ -1053,6 +1053,7 @@ fn build_master(
             dark,
             cancel: Some(signal),
             defect_suppression: None,
+            flat_star_masking: None,
         };
         let master = build_master_from_fits(&images, kind, &options)?;
         write_master_fits_f32(&output, &master)?;

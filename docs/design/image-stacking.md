@@ -135,6 +135,26 @@ contaminated majorities (including saturated cores) can be reinforced rather
 than removed. Robust temporal clipping improves rejection but does not
 guarantee star-free flats.
 
+Optional `MasterBuildOptions::flat_star_masking` uses Seiza's native star
+detector on a calibrated 2x2 analysis proxy, then expands star footprints on
+the original grid before normalization. Raw encoding or explicit saturation
+metadata separately seeds extended saturated components, including elongated
+cores; isolated saturated impulses are counted without creating star-sized
+holes. Unknown ceilings are reported. No detector maximum-star cap truncates
+the masks, and odd final rows/columns participate in the analysis proxy.
+All original channels share each geometric mask; no demosaicing, smoothing,
+inpainting, or external tool modifies the retained samples.
+
+The private f32 scratch stream represents masked samples with NaN sentinels.
+Only that internal stream admits them; successful masters remain finite.
+Masked samples are excluded before median/MAD statistics. At least the
+configured number of samples (default two) must survive masking and clipping
+at every output sample, otherwise `InsufficientFlatCoverage` discards the
+whole result. There is no fallback over masked values. FITS and JSON record
+masked counts, observed minimum/maximum retained coverage, two-sample limited
+coverage, and saturation caveats. Accepted + rejected + masked counts equal
+the original sample count, including per-input statistics.
+
 The flat tile, input read buffer, and per-pixel statistics workspace share a
 64 MiB budget. Scratch space is four bytes per input sample, separate from the
 output image, calibration masters, and per-input metadata. The default API
@@ -175,7 +195,8 @@ published atomically. Actual rejection is recorded in FITS `REJMETH` and the
 JSON configuration, including `NONE` when only two inputs survived admission.
 The JSON `rereads_inputs` describes integration pixel reads, excluding the
 separate provenance hash pass. If all samples are rejected, flats fall back
-to their temporal median while bias/dark masters retain the unclipped mean.
+to their temporal median when masking is disabled, while bias/dark masters
+retain the unclipped mean. Masked flats instead fail their coverage requirement.
 Accepted input statistics retain the corresponding source identity even when
 an earlier frame is skipped; skipped identities and admission reasons are
 reported separately rather than paired with an accepted frame's counts.

@@ -2,8 +2,9 @@ use crate::provenance::{FileIdentity, file_identity, validate_path_roles, write_
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use seiza_stacking::{
-    FitsFrame, MasterBuildOptions, MasterDark, MasterFrame, MasterFrameKind, MasterRejectionMethod,
-    MasterRejectionOptions, build_master_from_fits, write_master_fits_f32,
+    FitsFrame, FlatStarMaskingOptions, FlatStarMaskingStatistics, MasterBuildOptions, MasterDark,
+    MasterFrame, MasterFrameKind, MasterRejectionMethod, MasterRejectionOptions,
+    build_master_from_fits, write_master_fits_f32,
 };
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -71,6 +72,15 @@ struct FlatArgs {
     /// Assert the flat exposure when headers omit or misreport it
     #[arg(long)]
     exposure_seconds: Option<f64>,
+    /// Exclude native star and extended saturation footprints before flat integration
+    #[arg(long)]
+    star_mask: bool,
+    /// Minimum unmasked samples retained at every pixel after clipping
+    #[arg(long, default_value_t = 2, requires = "star_mask")]
+    minimum_clean_samples: usize,
+    /// Raw-input saturation ceiling; otherwise use explicit metadata/integer encoding
+    #[arg(long, requires = "star_mask")]
+    saturation_level: Option<f32>,
 }
 
 #[derive(Serialize)]
@@ -99,7 +109,11 @@ impl MasterConfigurationReport {
             exposure_seconds_override: options.exposure_seconds,
             integration: integration_name(master.rejection_method),
             rejection_method: master.rejection_method.as_str(),
-            fallback_center: fallback_center(master.kind),
+            fallback_center: if master.flat_star_masking.is_some() {
+                "none; insufficient coverage fails"
+            } else {
+                fallback_center(master.kind)
+            },
             rereads_inputs: master.kind != MasterFrameKind::Flat,
         }
     }
@@ -125,6 +139,7 @@ struct MasterInputReport {
     source: FileIdentity,
     accepted_samples: u64,
     rejected_samples: u64,
+    masked_samples: u64,
 }
 
 #[derive(Serialize)]
@@ -145,6 +160,8 @@ struct MasterReport {
     input_frames: usize,
     accepted_samples: u64,
     rejected_samples: u64,
+    masked_samples: u64,
+    flat_star_masking: Option<FlatStarMaskingStatistics>,
     fallback_pixels: u64,
     bias_subtracted: bool,
     dark_subtracted: bool,
@@ -154,7 +171,9 @@ struct MasterReport {
 
 pub(crate) fn run(args: MasterArgs) -> Result<()> {
     match args.command {
-        MasterCommand::Bias(common) => build(common, MasterFrameKind::Bias, None, None, None, None),
+        MasterCommand::Bias(common) => {
+            build(common, MasterFrameKind::Bias, None, None, None, None, None)
+        }
         MasterCommand::Dark(args) => build(
             args.common,
             MasterFrameKind::Dark,
@@ -162,6 +181,7 @@ pub(crate) fn run(args: MasterArgs) -> Result<()> {
             None,
             None,
             args.exposure_seconds,
+            None,
         ),
         MasterCommand::Flat(args) => build(
             args.common,
@@ -170,6 +190,11 @@ pub(crate) fn run(args: MasterArgs) -> Result<()> {
             args.dark_flat,
             args.dark_flat_exposure_seconds,
             args.exposure_seconds,
+            args.star_mask.then_some(FlatStarMaskingOptions {
+                minimum_clean_samples: args.minimum_clean_samples,
+                saturation_level: args.saturation_level,
+                ..Default::default()
+            }),
         ),
     }
 }
@@ -181,6 +206,7 @@ fn build(
     dark_path: Option<PathBuf>,
     dark_exposure_seconds: Option<f64>,
     exposure_seconds: Option<f64>,
+    flat_star_masking: Option<FlatStarMaskingOptions>,
 ) -> Result<()> {
     validate_input_paths(&common, bias_path.as_deref(), dark_path.as_deref())?;
     let input_identities = common
@@ -234,6 +260,7 @@ fn build(
         dark,
         cancel: None,
         defect_suppression: None,
+        flat_star_masking,
     };
     if kind == MasterFrameKind::Flat && options.bias.is_none() && options.dark.is_none() {
         eprintln!(
@@ -251,6 +278,33 @@ fn build(
         }
     );
     let master = build_master_from_fits(&common.images, kind, &options)?;
+    if let Some(masking) = &master.flat_star_masking {
+        println!(
+            "star masking: {} excluded sample(s), {} affected pixel(s), retained coverage {}..{}",
+            masking.masked_samples,
+            masking.masked_pixels,
+            masking.minimum_clean_samples,
+            masking.maximum_clean_samples
+        );
+        if masking.low_coverage_samples > 0 {
+            eprintln!(
+                "warning: {} output sample(s) have fewer than three retained inputs; robust rejection is limited",
+                masking.low_coverage_samples
+            );
+        }
+        if masking.unknown_saturation_inputs > 0 {
+            eprintln!(
+                "warning: saturation ceiling is unknown for {} input(s); supply --saturation-level in raw units when known",
+                masking.unknown_saturation_inputs
+            );
+        }
+        if masking.unmasked_saturation_samples > 0 {
+            eprintln!(
+                "warning: {} isolated saturated sample(s) were not expanded into star masks; review detector defects",
+                masking.unmasked_saturation_samples
+            );
+        }
+    }
     write_master_fits_f32(&common.output, &master)?;
     if master.fallback_pixels > 0 {
         eprintln!(
@@ -297,6 +351,7 @@ fn build(
                 source,
                 accepted_samples: statistics.accepted_samples,
                 rejected_samples: statistics.rejected_samples,
+                masked_samples: statistics.masked_samples,
             });
         }
         anyhow::ensure!(
@@ -314,6 +369,8 @@ fn build(
             input_frames: master.input_frames,
             accepted_samples: master.accepted_samples,
             rejected_samples: master.rejected_samples,
+            masked_samples: master.masked_samples,
+            flat_star_masking: master.flat_star_masking.clone(),
             fallback_pixels: master.fallback_pixels,
             bias_subtracted: master.bias_subtracted,
             dark_subtracted: master.dark_subtracted,

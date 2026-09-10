@@ -187,4 +187,88 @@ fn flat_help_does_not_advertise_leave_one_out_thresholds() {
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(stdout.contains("Low sigma rejection threshold"), "{stdout}");
     assert!(!stdout.contains("leave-one-out"), "{stdout}");
+    assert!(stdout.contains("--star-mask"), "{stdout}");
+}
+
+#[test]
+fn masked_flat_cli_reports_coverage_and_never_writes_an_unsupported_master() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = (0..4)
+        .map(|index| directory.path().join(format!("flat-{index}.fits")))
+        .collect::<Vec<_>>();
+    for stationary in [false, true] {
+        for (index, path) in paths.iter().enumerate() {
+            let mut pixels = vec![1000.0; 128 * 64];
+            let center = if stationary || index < 2 { 32 } else { 96 };
+            for y in 30..34 {
+                for x in center - 2..center + 2 {
+                    pixels[y * 128 + x] = 60000.0;
+                }
+            }
+            write_f32_image(
+                path,
+                128,
+                64,
+                F32ImageData::Mono(&pixels),
+                &[WriteHeaderCard::new(
+                    "IMAGETYP",
+                    HeaderValue::String("FLAT".into()),
+                )],
+            )
+            .unwrap();
+        }
+        let output = directory.path().join(format!("master-{stationary}.fits"));
+        let report = directory.path().join(format!("report-{stationary}.json"));
+        let args = ["--star-mask", "--saturation-level", "60000"];
+        if stationary {
+            let result = Command::new(env!("CARGO_BIN_EXE_seiza"))
+                .args(["master", "flat"])
+                .args(&paths)
+                .arg("--output")
+                .arg(&output)
+                .arg("--report")
+                .arg(&report)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(!result.status.success());
+            assert!(String::from_utf8_lossy(&result.stderr).contains("insufficient coverage"));
+            assert!(!output.exists());
+            assert!(!report.exists());
+        } else {
+            let result = run_master("flat", &paths, &output, &report, &args);
+            let report = read_report(&report);
+            let masking = &report["flat_star_masking"];
+            assert_eq!(masking["minimum_clean_samples"], 2);
+            assert_eq!(masking["maximum_clean_samples"], 4);
+            assert_eq!(masking["unknown_saturation_inputs"], 0);
+            assert!(masking["low_coverage_samples"].as_u64().unwrap() > 0);
+            assert!(report["masked_samples"].as_u64().unwrap() > 0);
+            assert_eq!(
+                report["accepted_samples"].as_u64().unwrap()
+                    + report["rejected_samples"].as_u64().unwrap()
+                    + report["masked_samples"].as_u64().unwrap(),
+                128 * 64 * 4
+            );
+            assert_eq!(
+                report["configuration"]["fallback_center"],
+                "none; insufficient coverage fails"
+            );
+            for input in report["inputs"].as_array().unwrap() {
+                assert_eq!(
+                    input["accepted_samples"].as_u64().unwrap()
+                        + input["rejected_samples"].as_u64().unwrap()
+                        + input["masked_samples"].as_u64().unwrap(),
+                    128 * 64
+                );
+            }
+            assert!(String::from_utf8_lossy(&result.stdout).contains("retained coverage 2..4"));
+            assert!(String::from_utf8_lossy(&result.stderr).contains("fewer than three retained"));
+            let image = FitsImage::open(&output).unwrap();
+            assert_eq!(
+                image.header("STARMASK").and_then(HeaderValue::as_bool),
+                Some(true)
+            );
+        }
+    }
 }

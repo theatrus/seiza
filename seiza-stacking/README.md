@@ -364,7 +364,38 @@ sets can retain faint halos even when most samples are clean. A contaminated
 majority, including saturated star cores, can be retained more strongly than
 with an ordinary average. A zero MAD uses
 a floating-point tolerance; if custom thresholds remove every sample, the
-flat pixel falls back to its temporal median instead of its contaminated mean.
+flat pixel falls back to its temporal median instead of its contaminated mean
+when star masking is disabled.
+
+Sky flats can opt into `MasterBuildOptions::flat_star_masking` (CLI:
+`seiza master flat --star-mask`). This detects stars on a native 2x2 analysis
+proxy after calibration, expands their footprints to cover halos, and excludes
+those original samples before normalization and temporal clipping. The proxy
+does not alter the output sensor grid, CFA phases, or RGB samples; a footprint
+excludes every channel at that sensor pixel. Extended saturated cores are
+masked even when their shape fails normal star admission. Saturation is read
+before calibration from an explicit raw-unit override, `SATURATE`/`SATLEVEL`,
+or the integer FITS encoding ceiling, never from `DATAMAX` or an observed peak.
+Floating-point inputs without an explicit ceiling report unknown saturation.
+Isolated one/two-pixel saturated impulses are reported, not expanded into star
+masks; existing defect suppression remains a separate option.
+
+Masked integration requires at least two retained unmasked samples at every
+output sample after clipping, configurable with `minimum_clean_samples` (CLI:
+`--minimum-clean-samples`). Missing coverage fails the whole build with an
+actionable error; no masked samples are reused, smoothed, or filled. Two-sample
+coverage is reported as limited and averaged without rejection. More sky flats
+with greater star motion may be necessary. Native detection can miss faint
+halos or mistake sensor features for stars; coverage reports retained samples,
+not guaranteed artifact-free data. Masking is disabled by default. Stacking
+0.14 adds this option and separate masked counts to the public build/statistics
+structs; callers using exhaustive literals must add the fields.
+
+FITS `STARMASK`, `MASKSAMP`, `MASKPIX`, `COVMIN`, `COVMAX`, `COVREQ`, and
+`COVLOW` record masking and retained coverage. `SATUNMSK` and `SATUNKN` expose
+isolated saturation and unknown ceilings. JSON reports include the thresholds,
+coverage, and per-input masked counts. Accepted, rejected, and masked samples
+partition the input samples; coverage failure never publishes a master.
 The fallback count is reported separately.
 
 Flat integration decodes each input once and temporarily spools its calibrated,

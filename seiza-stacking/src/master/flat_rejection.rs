@@ -19,6 +19,11 @@ pub(super) struct IntegratedFlat {
     pub input_statistics: Vec<MasterInputStatistics>,
     pub accepted_samples: u64,
     pub rejected_samples: u64,
+    pub masked_samples: u64,
+    pub masked_output_samples: u64,
+    pub minimum_clean_samples: usize,
+    pub maximum_clean_samples: usize,
+    pub low_coverage_samples: u64,
     pub fallback_pixels: u64,
 }
 
@@ -78,16 +83,23 @@ impl FlatScratch {
                 MasterInputStatistics {
                     accepted_samples: 0,
                     rejected_samples: 0,
+                    masked_samples: 0,
                 };
                 self.frames
             ],
             accepted_samples: 0,
             rejected_samples: 0,
+            masked_samples: 0,
+            masked_output_samples: 0,
+            minimum_clean_samples: self.frames,
+            maximum_clean_samples: 0,
+            low_coverage_samples: 0,
             fallback_pixels: 0,
         };
         let mut tile = vec![0.0; tile_samples * self.frames];
         let mut bytes = vec![0_u8; tile_samples * 4];
         let mut statistics = vec![0.0; self.frames];
+        let mut insufficient_samples = 0_u64;
 
         for start in (0..self.samples).step_by(tile_samples) {
             check_cancelled(options)?;
@@ -102,8 +114,15 @@ impl FlatScratch {
                 let bytes = &mut bytes[..length * 4];
                 self.file.read_exact(bytes).map_err(scratch_error)?;
                 for (index, bytes) in bytes.chunks_exact(4).enumerate() {
-                    tile[index * self.frames + frame] =
-                        f32::from_le_bytes(bytes.try_into().expect("four-byte sample"));
+                    let value = f32::from_le_bytes(bytes.try_into().expect("four-byte sample"));
+                    if !value.is_finite()
+                        && !(options.flat_star_masking.is_some() && value.is_nan())
+                    {
+                        return Err(Error::FlatStarMasking(
+                            "unexpected non-finite sample in flat scratch storage".into(),
+                        ));
+                    }
+                    tile[index * self.frames + frame] = value;
                 }
             }
             for (index, values) in tile[..length * self.frames]
@@ -114,10 +133,17 @@ impl FlatScratch {
                     check_cancelled(options)?;
                 }
                 let bounds = rejection_bounds(values, &mut statistics, options.rejection);
+                let available = values.iter().filter(|value| value.is_finite()).count();
+                if available < self.frames {
+                    result.masked_output_samples += 1;
+                }
                 let mut sum = 0.0_f64;
                 let mut kept = 0;
                 for (value, counts) in values.iter().zip(&mut result.input_statistics) {
-                    if self.frames >= 3 && bounds.rejects(*value) {
+                    if value.is_nan() {
+                        counts.masked_samples += 1;
+                        result.masked_samples += 1;
+                    } else if available >= 3 && bounds.rejects(*value) {
                         counts.rejected_samples += 1;
                         result.rejected_samples += 1;
                     } else {
@@ -126,7 +152,22 @@ impl FlatScratch {
                         counts.accepted_samples += 1;
                     }
                 }
-                result.samples[start + index] = if kept == 0 {
+                result.minimum_clean_samples = result.minimum_clean_samples.min(kept);
+                result.maximum_clean_samples = result.maximum_clean_samples.max(kept);
+                result.low_coverage_samples += u64::from(kept < 3);
+                if options
+                    .flat_star_masking
+                    .as_ref()
+                    .is_some_and(|masking| kept < masking.minimum_clean_samples)
+                {
+                    insufficient_samples += 1;
+                }
+                result.samples[start + index] = if kept == 0 && options.flat_star_masking.is_some()
+                {
+                    // Never expose this incomplete image: the coverage error
+                    // below discards it, including on all-masked pixels.
+                    f32::NAN
+                } else if kept == 0 {
                     result.fallback_pixels += 1;
                     bounds.center as f32
                 } else {
@@ -134,7 +175,20 @@ impl FlatScratch {
                 };
             }
         }
-        result.accepted_samples = total_samples - result.rejected_samples;
+        result.accepted_samples = total_samples - result.rejected_samples - result.masked_samples;
+        if insufficient_samples > 0 {
+            return Err(Error::InsufficientFlatCoverage {
+                insufficient_samples,
+                required_clean_samples: options
+                    .flat_star_masking
+                    .as_ref()
+                    .unwrap()
+                    .minimum_clean_samples,
+                minimum_clean_samples: result.minimum_clean_samples,
+                maximum_clean_samples: result.maximum_clean_samples,
+                masked_samples: result.masked_samples,
+            });
+        }
         Ok(result)
     }
 }
@@ -191,16 +245,32 @@ fn rejection_bounds(
     statistics: &mut [f32],
     options: MasterRejectionOptions,
 ) -> RejectionBounds {
+    let mut count = 0;
+    for value in values.iter().filter(|value| value.is_finite()) {
+        statistics[count] = *value;
+        count += 1;
+    }
+    let statistics = &mut statistics[..count];
+    if statistics.is_empty() {
+        return RejectionBounds {
+            center: 0.0,
+            low: 0.0,
+            high: 0.0,
+        };
+    }
     // Scaling only extreme finite inputs prevents overflow in the shared
     // f32 median/MAD helpers without changing ordinary normalized flats.
-    let maximum = values.iter().map(|value| value.abs()).fold(1.0, f32::max);
+    let maximum = statistics
+        .iter()
+        .map(|value| value.abs())
+        .fold(1.0, f32::max);
     let scale = if maximum > f32::MAX / 4.0 {
         maximum
     } else {
         1.0
     };
-    for (destination, value) in statistics.iter_mut().zip(values) {
-        *destination = *value / scale;
+    for value in statistics.iter_mut() {
+        *value /= scale;
     }
     let center = seiza_stats::median_in_place(statistics).expect("nonempty temporal sample");
     let sigma =
@@ -379,6 +449,63 @@ mod tests {
         assert!(tile_samples(0, 8, TILE_BYTES).is_err());
         assert!(tile_samples(100, 1, TILE_BYTES).is_err());
         assert!(byte_offset(usize::MAX, 2, 0).is_err());
+    }
+
+    #[test]
+    fn masks_partition_counts_and_two_retained_samples_are_not_clipped() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut scratch = FlatScratch::new(Some(directory.path())).unwrap();
+        let options = MasterBuildOptions {
+            flat_star_masking: Some(super::super::FlatStarMaskingOptions::default()),
+            ..Default::default()
+        };
+        for values in [[1.0, 1.0], [1.0, 1.0], [f32::NAN, 10.0], [f32::NAN, 1.0]] {
+            scratch.append(&values, &options).unwrap();
+        }
+        let result = scratch.integrate_with_budget(&options, 36).unwrap();
+        assert_eq!(result.samples, [1.0, 1.0]);
+        assert_eq!(result.masked_samples, 2);
+        assert_eq!(result.rejected_samples, 1);
+        assert_eq!(result.accepted_samples, 5);
+        assert_eq!(result.masked_output_samples, 1);
+        assert_eq!(result.minimum_clean_samples, 2);
+        assert_eq!(result.maximum_clean_samples, 3);
+        assert_eq!(result.low_coverage_samples, 1);
+        assert_eq!(result.input_statistics[2].masked_samples, 1);
+        assert_eq!(result.input_statistics[2].rejected_samples, 1);
+        assert_eq!(directory.path().read_dir().unwrap().count(), 0);
+    }
+
+    #[test]
+    fn insufficient_masked_or_post_clipped_coverage_fails_without_a_fallback() {
+        for values in [
+            vec![f32::NAN; 4],
+            vec![1.0, f32::NAN, f32::NAN, f32::NAN],
+            vec![0.8, 1.0, 1.2, 10.0],
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut scratch = FlatScratch::new(Some(directory.path())).unwrap();
+            let options = MasterBuildOptions {
+                flat_star_masking: Some(super::super::FlatStarMaskingOptions::default()),
+                rejection: MasterRejectionOptions {
+                    low_sigma: 0.1,
+                    high_sigma: 0.1,
+                },
+                ..Default::default()
+            };
+            for value in values {
+                scratch.append(&[value], &options).unwrap();
+            }
+            assert!(matches!(
+                scratch.integrate(&options),
+                Err(Error::InsufficientFlatCoverage {
+                    insufficient_samples: 1,
+                    required_clean_samples: 2,
+                    ..
+                })
+            ));
+            assert_eq!(directory.path().read_dir().unwrap().count(), 0);
+        }
     }
 
     #[test]

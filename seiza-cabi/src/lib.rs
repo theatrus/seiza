@@ -5717,6 +5717,7 @@ fn build_master_request(
         dark,
         cancel: cancellation,
         defect_suppression,
+        flat_star_masking: None,
     };
     let master = build_master_from_fits(&request.inputs, kind, &options)
         .map_err(|error| error.to_string())?;
