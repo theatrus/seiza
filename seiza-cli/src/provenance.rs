@@ -35,7 +35,7 @@ pub(crate) fn file_identity(path: &Path) -> Result<FileIdentity> {
         .with_context(|| format!("failed to fingerprint {}", path.display()))?;
     let bytes = file.metadata()?.len();
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 1024 * 1024];
+    let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
         let read = file.read(&mut buffer)?;
         if read == 0 {

@@ -177,12 +177,30 @@ seiza master flat flats/*.fits --bias master-bias.fits \
   --report master-flat.json
 ```
 
-Master construction uses a two-pass, leave-one-out sigma-clipped mean. It
-rereads inputs for the second pass, so memory is proportional to image size,
-not frame count. Dimensions, channels, CFA layout, and available camera,
+Bias and dark construction uses a two-pass, leave-one-out sigma-clipped mean.
+Flat construction calibrates and normalizes each input once, then uses a
+scratch-backed temporal median/MAD sigma-clipped mean. This improves rejection
+of moving stars that overlap a sensor pixel in multiple sky flats without aligning the
+stars or smoothing the sensor response. Two-frame sets are averaged without
+rejection, regardless of master kind. More frames and enough star motion are
+needed to distinguish stars from persistent flat response. Faint halos can
+remain in small or noisy sets even with a clean majority; saturated or other
+contamination present in most inputs can be retained more strongly.
+
+Flat scratch storage uses OS temp and needs about four bytes per input sample;
+tile memory is bounded at 64 MiB in addition to the image and master buffers.
+The temporary file is removed after completion, cancellation, or failure.
+Dimensions, channels, CFA layout, and available camera,
 binning, gain, offset, temperature, filter, and dark-exposure metadata are
-checked before incompatible frames can be mixed. Flat frames are calibrated
-and normalized individually before integration.
+checked before incompatible frames can be mixed. The completion message and
+JSON `configuration` report the actual integration and rejection method. The
+`rereads_inputs` field describes source pixel reads during integration (not
+the separate SHA-256 provenance pass): false for flats, true for bias/dark.
+An all-rejected flat pixel falls back to its temporal median; bias/dark pixels
+use the unclipped mean. Both the report and warning identify that fallback.
+The report's `inputs` contains only the combined frames with their own sample
+counts; `skipped_inputs` retains the identity and reason for every excluded
+frame, so a metadata mismatch cannot shift another frame's statistics.
 
 Calibration, registration, normalization, online delta-sigma rejection, and
 integration all operate on linear `f32` samples. `--preview` is an optional

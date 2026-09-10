@@ -114,20 +114,61 @@ must not be presented as CPU utilization.
 ## Master construction
 
 `build_master_from_fits` and `seiza master bias|dark|flat` construct the
-masters consumed above. The estimator makes two passes over the source paths:
+masters consumed above. Bias and dark integration makes two passes over the
+source paths:
 
 1. calibrate each input as appropriate and estimate a per-sample mean and
    second central moment;
 2. reread each input and compute the final mean after leave-one-out low/high
    sigma rejection.
 
-Both passes read every input, so a master over dozens of frames is minutes of
-work. `MasterBuildOptions::cancel` takes a `CancelSignal`, checked once per
-input in each pass, and returns `Error::Cancelled` without writing anything.
+Both bias/dark passes read every accepted input. Flat integration instead
+calibrates and normalizes each input once, spools those f32 samples to temporary
+storage, and combines bounded tiles with temporal median/MAD sigma rejection.
+This avoids the inflated mean/variance that can retain overlapping stars in
+sky flats. It preserves the raw sensor grid and CFA sampling; no star alignment
+or spatial smoothing is applied. Two-input sets of any kind are averaged
+without rejection. Temporal clipping still needs enough clean samples and
+star motion; it cannot separate stationary stars or majority contamination
+from the sensor response. Small or noisy sets can retain faint halos, and
+contaminated majorities (including saturated cores) can be reinforced rather
+than removed. Robust temporal clipping improves rejection but does not
+guarantee star-free flats.
+
+Optional `MasterBuildOptions::flat_star_masking` uses Seiza's native star
+detector on a calibrated 2x2 analysis proxy, then expands star footprints on
+the original grid before normalization. Raw encoding or explicit saturation
+metadata separately seeds extended saturated components, including elongated
+cores; isolated saturated impulses are counted without creating star-sized
+holes. Unknown ceilings are reported. No detector maximum-star cap truncates
+the masks, and odd final rows/columns participate in the analysis proxy.
+All original channels share each geometric mask; no demosaicing, smoothing,
+inpainting, or external tool modifies the retained samples.
+
+The private f32 scratch stream represents masked samples with NaN sentinels.
+Only that internal stream admits them; successful masters remain finite.
+Masked samples are excluded before median/MAD statistics. At least the
+configured number of samples (default two) must survive masking and clipping
+at every output sample, otherwise `InsufficientFlatCoverage` discards the
+whole result. There is no fallback over masked values. FITS and JSON record
+masked counts, observed minimum/maximum retained coverage, two-sample limited
+coverage, and saturation caveats. Accepted + rejected + masked counts equal
+the original sample count, including per-input statistics.
+
+The flat tile, input read buffer, and per-pixel statistics workspace share a
+64 MiB budget. Scratch space is four bytes per input sample, separate from the
+output image, calibration masters, and per-input metadata. The default API
+uses OS temp; `build_master_from_fits_with_scratch` accepts an existing host
+cache directory. Scratch is removed on success, failure, or cancellation.
+
+`MasterBuildOptions::cancel` takes a `CancelSignal`, checked between input
+frames and during flat scratch I/O/tile processing, and returns
+`Error::Cancelled` without writing a master.
 An interactive caller that builds masters inside a user-visible job needs that
 way out; batch callers leave it `None`.
 
-Leave-one-out statistics let a single cosmic-ray outlier be rejected even in
+For bias and dark masters, leave-one-out statistics let a single cosmic-ray
+outlier be rejected even in
 a small calibration set. Rereading keeps memory proportional to a handful of
 image-sized buffers rather than the number of source frames. It intentionally
 trades additional sequential I/O for bounded memory; master generation is an
@@ -150,7 +191,15 @@ binning, pixel size, gain, offset, readout mode, temperature, and filter; dark
 exposures must agree or be explicitly asserted. The CLI's optional JSON report
 adds SHA-256 identities, configuration, calibration inputs, and accepted and
 rejected sample counts for every source frame. Both FITS and JSON outputs are
-published atomically.
+published atomically. Actual rejection is recorded in FITS `REJMETH` and the
+JSON configuration, including `NONE` when only two inputs survived admission.
+The JSON `rereads_inputs` describes integration pixel reads, excluding the
+separate provenance hash pass. If all samples are rejected, flats fall back
+to their temporal median when masking is disabled, while bias/dark masters
+retain the unclipped mean. Masked flats instead fail their coverage requirement.
+Accepted input statistics retain the corresponding source identity even when
+an earlier frame is skipped; skipped identities and admission reasons are
+reported separately rather than paired with an accepted frame's counts.
 
 ## Registration
 

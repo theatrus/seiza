@@ -6,6 +6,11 @@ use crate::{
 use seiza_fits::HeaderValue;
 use std::path::{Path, PathBuf};
 
+mod flat_rejection;
+mod star_masking;
+
+pub use star_masking::{FlatStarMaskingOptions, FlatStarMaskingStatistics};
+
 /// Which kind of calibration master a frame represents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MasterFrameKind {
@@ -36,13 +41,13 @@ impl MasterFrameKind {
     }
 }
 
-/// Sigma thresholds for the leave-one-out clipping used when integrating a
-/// master.
+/// Sigma thresholds used when integrating a master. Flats use a temporal
+/// median and MAD scale; bias and dark masters use leave-one-out statistics.
 #[derive(Clone, Copy, Debug)]
 pub struct MasterRejectionOptions {
-    /// Reject a sample this many sigma below the leave-one-out mean.
+    /// Reject a sample this many sigma below the integration center.
     pub low_sigma: f32,
-    /// Reject a sample this many sigma above the leave-one-out mean.
+    /// Reject a sample this many sigma above the integration center.
     pub high_sigma: f32,
 }
 
@@ -51,6 +56,28 @@ impl Default for MasterRejectionOptions {
         Self {
             low_sigma: 3.0,
             high_sigma: 3.0,
+        }
+    }
+}
+
+/// Rejection actually applied to the accepted calibration inputs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MasterRejectionMethod {
+    /// Two inputs cannot identify an outlier; both are averaged.
+    None,
+    /// Temporal median/MAD rejection for normalized flat inputs.
+    MedianMad,
+    /// Leave-one-out rejection for bias and dark inputs.
+    LeaveOneOut,
+}
+
+impl MasterRejectionMethod {
+    /// Stable name used by diagnostics and the FITS `REJMETH` card.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "NONE",
+            Self::MedianMad => "MEDIAN_MAD",
+            Self::LeaveOneOut => "LEAVE_ONE_OUT",
         }
     }
 }
@@ -78,6 +105,9 @@ pub struct MasterBuildOptions {
     /// smooth at pixel scale — a dark master must keep its hot pixels, they
     /// are what subtracts the light's.
     pub defect_suppression: Option<crate::cosmetic::ImpulseFilterOptions>,
+    /// Exclude native star and broad saturation footprints before flat
+    /// normalization and combination. Off by default; invalid for bias/dark.
+    pub flat_star_masking: Option<FlatStarMaskingOptions>,
 }
 
 /// Per-input tally of samples kept and clipped during integration.
@@ -87,6 +117,8 @@ pub struct MasterInputStatistics {
     pub accepted_samples: u64,
     /// Samples from this input that were clipped.
     pub rejected_samples: u64,
+    /// Samples excluded by per-input flat star/saturation masks, not sigma clipping.
+    pub masked_samples: u64,
 }
 
 /// An integrated calibration master with its provenance and clipping stats.
@@ -113,8 +145,13 @@ pub struct MasterFrame {
     pub accepted_samples: u64,
     /// Total samples clipped across all inputs.
     pub rejected_samples: u64,
-    /// Pixels where rejection removed every sample, integrated as the
-    /// unclipped mean instead so the master stays finite.
+    /// Samples excluded by flat star/saturation masks across every input.
+    pub masked_samples: u64,
+    /// Mask configuration and retained-sample coverage when masking was enabled.
+    pub flat_star_masking: Option<FlatStarMaskingStatistics>,
+    /// Pixels where rejection removed every sample. Unmasked flats fall back
+    /// to the temporal median; bias/dark use the unclipped mean. Masked flats
+    /// fail their retained-coverage requirement and never return a fallback.
     pub fallback_pixels: u64,
     /// Impulse pixels replaced by [`MasterBuildOptions::defect_suppression`].
     /// Zero when suppression was off.
@@ -129,6 +166,8 @@ pub struct MasterFrame {
     pub normalized: bool,
     /// Clipping thresholds used for the integration.
     pub rejection: MasterRejectionOptions,
+    /// Rejection method actually applied, including the two-input exception.
+    pub rejection_method: MasterRejectionMethod,
     /// Header cards from the first input, copied onto the written master.
     pub reference_headers: Vec<(String, HeaderValue)>,
     /// Inputs left out because their metadata contradicted the reference
@@ -167,18 +206,45 @@ impl MasterFrame {
     }
 }
 
-/// Build a calibration master with a two-pass, leave-one-out sigma-clipped mean.
-///
-/// Inputs are reread on the second pass, so memory scales with one image rather
-/// than with the number of calibration frames.
 /// Fewest frames that can make a master. Below this, sigma rejection has
 /// nothing to compare against and the "master" is just a copy of one frame.
 const MINIMUM_MASTER_INPUTS: usize = 2;
 
+/// Build a calibration master with a sigma-clipped mean.
+///
+/// Flat inputs are calibrated and normalized before temporal median/MAD
+/// rejection. A temporary file stores these prepared pixels so each input is
+/// decoded once and integration uses bounded tiles, not an in-memory image
+/// cube. Scratch storage is about four bytes per input sample and is removed
+/// on success, cancellation, or error. Bias and dark inputs retain two-pass
+/// leave-one-out rejection. Two-frame sets are averaged without clipping.
 pub fn build_master_from_fits(
     paths: &[PathBuf],
     kind: MasterFrameKind,
     options: &MasterBuildOptions,
+) -> Result<MasterFrame> {
+    build_master(paths, kind, options, None)
+}
+
+/// Build a master, placing temporary flat pixels in an existing directory.
+///
+/// Use this when the host's image/cache volume is more appropriate than the
+/// operating system's temporary directory. Bias and dark builds need no
+/// scratch file. All other behavior matches [`build_master_from_fits`].
+pub fn build_master_from_fits_with_scratch(
+    paths: &[PathBuf],
+    kind: MasterFrameKind,
+    options: &MasterBuildOptions,
+    scratch_directory: &Path,
+) -> Result<MasterFrame> {
+    build_master(paths, kind, options, Some(scratch_directory))
+}
+
+fn build_master(
+    paths: &[PathBuf],
+    kind: MasterFrameKind,
+    options: &MasterBuildOptions,
+    scratch_directory: Option<&Path>,
 ) -> Result<MasterFrame> {
     validate_options(paths, kind, options)?;
     let calibration = match kind {
@@ -195,6 +261,11 @@ pub fn build_master_from_fits(
     let mut dark_exposure = None;
     let mut mean = Vec::<f32>::new();
     let mut m2 = Vec::<f32>::new();
+    let mut flat_scratch = if kind == MasterFrameKind::Flat {
+        Some(flat_rejection::FlatScratch::new(scratch_directory)?)
+    } else {
+        None
+    };
 
     // The first frame sets the reference, so it can never be the odd one out;
     // every later frame is measured against it and set aside if it disagrees.
@@ -202,6 +273,8 @@ pub fn build_master_from_fits(
     // what it accepted and pass two walks that list rather than `paths`.
     let mut accepted: Vec<&PathBuf> = Vec::with_capacity(paths.len());
     let mut skipped_inputs: Vec<SkippedInput> = Vec::new();
+    let mut unmasked_saturation_samples = 0_u64;
+    let mut unknown_saturation_inputs = 0_usize;
 
     for path in paths {
         check_cancelled(options)?;
@@ -232,10 +305,18 @@ pub fn build_master_from_fits(
             if kind == MasterFrameKind::Dark {
                 dark_exposure = prepared.effective_exposure;
             }
-            mean.resize(prepared.image.sample_count(), 0.0);
-            m2.resize(prepared.image.sample_count(), 0.0);
+            if flat_scratch.is_none() {
+                mean.resize(prepared.image.sample_count(), 0.0);
+                m2.resize(prepared.image.sample_count(), 0.0);
+            }
         }
         accepted.push(path);
+        unmasked_saturation_samples += prepared.unmasked_saturation_samples;
+        unknown_saturation_inputs += usize::from(prepared.unknown_saturation);
+        if let Some(scratch) = &mut flat_scratch {
+            scratch.append(&prepared.image.data, options)?;
+            continue;
+        }
         let count = accepted.len() as f32;
         for ((mean, m2), value) in mean.iter_mut().zip(&mut m2).zip(prepared.image.data) {
             let delta = value - *mean;
@@ -267,7 +348,7 @@ pub fn build_master_from_fits(
     let mut rejected_samples = 0_u64;
     let count = accepted.len();
 
-    for path in &accepted {
+    for path in accepted.iter().filter(|_| flat_scratch.is_none()) {
         check_cancelled(options)?;
         let prepared = prepare_input(
             path,
@@ -297,6 +378,7 @@ pub fn build_master_from_fits(
         input_statistics.push(MasterInputStatistics {
             accepted_samples: frame_accepted,
             rejected_samples: frame_rejected,
+            masked_samples: 0,
         });
     }
 
@@ -309,6 +391,33 @@ pub fn build_master_from_fits(
         if count == 0 {
             *value = mean[index];
             fallback_pixels += 1;
+        }
+    }
+    let mut masked_samples = 0;
+    let mut flat_star_masking = None;
+    if let Some(scratch) = flat_scratch {
+        let result = scratch.integrate(options)?;
+        integrated = result.samples;
+        input_statistics = result.input_statistics;
+        accepted_samples = result.accepted_samples;
+        rejected_samples = result.rejected_samples;
+        fallback_pixels = result.fallback_pixels;
+        masked_samples = result.masked_samples;
+        if let Some(masking) = &options.flat_star_masking {
+            flat_star_masking = Some(FlatStarMaskingStatistics {
+                options: masking.clone(),
+                masked_samples,
+                masked_pixels: result.masked_output_samples
+                    / reference_signature
+                        .as_ref()
+                        .expect("accepted inputs")
+                        .channels as u64,
+                minimum_clean_samples: result.minimum_clean_samples,
+                maximum_clean_samples: result.maximum_clean_samples,
+                low_coverage_samples: result.low_coverage_samples,
+                unmasked_saturation_samples,
+                unknown_saturation_inputs,
+            });
         }
     }
     let signature = reference_signature.expect("the accepted count was checked above");
@@ -349,11 +458,20 @@ pub fn build_master_from_fits(
         fallback_pixels,
         defect_pixels_replaced,
         rejected_samples,
+        masked_samples,
+        flat_star_masking,
         input_statistics,
         bias_subtracted,
         dark_subtracted,
         normalized: kind == MasterFrameKind::Flat,
         rejection: options.rejection,
+        rejection_method: if accepted.len() < 3 {
+            MasterRejectionMethod::None
+        } else if kind == MasterFrameKind::Flat {
+            MasterRejectionMethod::MedianMad
+        } else {
+            MasterRejectionMethod::LeaveOneOut
+        },
         reference_headers,
         skipped_inputs,
     })
@@ -378,6 +496,14 @@ fn validate_options(
         return Err(Error::Calibration(
             "at least two calibration frames are required".into(),
         ));
+    }
+    if let Some(masking) = &options.flat_star_masking {
+        if kind != MasterFrameKind::Flat {
+            return Err(Error::Calibration(
+                "star masking is only supported for flat masters".into(),
+            ));
+        }
+        masking.validate()?;
     }
     for (index, path) in paths.iter().enumerate() {
         if paths[..index]
@@ -440,6 +566,8 @@ struct PreparedInput {
     bayer: Option<BayerLayout>,
     effective_exposure: Option<f64>,
     metadata: FrameMetadata,
+    unmasked_saturation_samples: u64,
+    unknown_saturation: bool,
 }
 
 fn prepare_input(
@@ -488,11 +616,40 @@ fn prepare_input(
             path.display()
         )));
     }
+    let saturation = options
+        .flat_star_masking
+        .as_ref()
+        .map(|masking| star_masking::saturation_seeds(&frame, masking, options))
+        .transpose()?;
     calibration.apply(&mut frame.image, effective_exposure, frame.bayer)?;
-    if kind == MasterFrameKind::Flat {
-        normalize_flat_response(&mut frame.image)?;
-    }
     if frame.image.data.iter().any(|value| !value.is_finite()) {
+        return Err(Error::Calibration(format!(
+            "{} contains non-finite samples after calibration",
+            path.display()
+        )));
+    }
+    let mut unmasked_saturation_samples = 0;
+    let mut unknown_saturation = false;
+    if let (Some(masking), Some(saturation)) = (&options.flat_star_masking, saturation) {
+        unknown_saturation = !saturation.known_ceiling;
+        unmasked_saturation_samples =
+            star_masking::mask_stars(&mut frame.image, masking, saturation, options)?;
+    }
+    if kind == MasterFrameKind::Flat {
+        normalize_flat_response(&mut frame.image).map_err(|error| {
+            if options.flat_star_masking.is_some() {
+                Error::FlatStarMasking(format!(
+                    "{} has no usable normalization after masking: {error}",
+                    path.display()
+                ))
+            } else {
+                error
+            }
+        })?;
+    }
+    if options.flat_star_masking.is_none()
+        && frame.image.data.iter().any(|value| !value.is_finite())
+    {
         return Err(Error::Calibration(format!(
             "{} contains non-finite samples after calibration",
             path.display()
@@ -504,6 +661,8 @@ fn prepare_input(
         bayer: frame.bayer,
         effective_exposure,
         metadata,
+        unmasked_saturation_samples,
+        unknown_saturation,
     })
 }
 
@@ -991,6 +1150,10 @@ mod tests {
 
         let written = FitsFrame::open(&master_path).unwrap();
         assert_eq!(
+            header(&written.headers, "REJMETH").and_then(HeaderValue::as_str),
+            Some("NONE")
+        );
+        assert_eq!(
             written.metadata().signature,
             source_signature,
             "the persisted master must retain every normalized acquisition field"
@@ -1104,6 +1267,13 @@ mod tests {
         assert_eq!(master.image.data, [10.0, 20.0, 30.0, 40.0]);
         assert_eq!(master.rejected_samples, 1);
         assert_eq!(master.input_statistics[2].rejected_samples, 1);
+        let master_path = directory.path().join("master.fits");
+        write_master_fits_f32(&master_path, &master).unwrap();
+        let written = FitsFrame::open(master_path).unwrap();
+        assert_eq!(
+            header(&written.headers, "REJMETH").and_then(HeaderValue::as_str),
+            Some("LEAVE_ONE_OUT")
+        );
     }
 
     #[test]
@@ -1220,6 +1390,7 @@ mod tests {
         let master = build_master_from_fits(&paths, MasterFrameKind::Flat, &options).unwrap();
         assert!(master.bias_subtracted);
         assert!(master.normalized);
+        assert_eq!(master.rejection_method, MasterRejectionMethod::None);
         for (actual, expected) in
             master
                 .image
@@ -1229,5 +1400,315 @@ mod tests {
         {
             assert!((actual - expected).abs() < 1.0e-5);
         }
+    }
+
+    #[test]
+    fn sky_flat_clipping_removes_overlapping_moving_stars_without_erasing_response() {
+        let directory = tempfile::tempdir().unwrap();
+        let (width, height) = (32, 16);
+        let response = (0..width * height)
+            .map(|index| {
+                let (x, y) = (index % width, index / width);
+                if (3..6).contains(&x) && (4..7).contains(&y) {
+                    0.65
+                } else if x < 3 || x >= width - 3 {
+                    0.8
+                } else {
+                    1.0
+                }
+            })
+            .collect::<Vec<f32>>();
+        let bias = (0..width * height)
+            .map(|index| 20.0 + (index % 7) as f32)
+            .collect::<Vec<_>>();
+        let paths = (0..8)
+            .map(|index| directory.path().join(format!("sky-flat-{index}.fits")))
+            .collect::<Vec<_>>();
+        for (frame_index, path) in paths.iter().enumerate() {
+            let illumination = 600.0 + 300.0 * frame_index as f32;
+            let mut data = response
+                .iter()
+                .zip(&bias)
+                .map(|(response, bias)| illumination * response + bias + 5.0)
+                .collect::<Vec<_>>();
+            // A compact star moves one pixel per exposure: interior pixels in
+            // its path are contaminated twice, not just once.
+            let star = 8 * width + 8 + frame_index;
+            for (offset, signal) in [(0, 1.0), (1, 1.0), (width, 0.5), (width + 1, 0.5)] {
+                data[star + offset] += illumination * signal;
+            }
+            write_processed_image_fits_f32(
+                path,
+                &LinearImage::new(width, height, 1, data).unwrap(),
+                &[],
+                &[
+                    WriteHeaderCard::new("IMAGETYP", HeaderValue::String("FLAT".into())),
+                    WriteHeaderCard::new("EXPTIME", HeaderValue::Float(4.0)),
+                ],
+            )
+            .unwrap();
+        }
+        let options = MasterBuildOptions {
+            bias: Some(LinearImage::new(width, height, 1, bias).unwrap()),
+            dark: Some(MasterDark {
+                image: LinearImage::new(width, height, 1, vec![5.0; width * height]).unwrap(),
+                exposure_seconds: Some(4.0),
+                bias_subtracted: true,
+                bayer: None,
+            }),
+            ..MasterBuildOptions::default()
+        };
+
+        let master = build_master_from_fits(&paths, MasterFrameKind::Flat, &options).unwrap();
+        assert!(master.bias_subtracted && master.dark_subtracted && master.normalized);
+        assert_eq!(master.defect_pixels_replaced, 0);
+        for (index, (actual, expected)) in master.image.data.iter().zip(response).enumerate() {
+            assert!(
+                (actual - expected).abs() < 1.0e-5,
+                "pixel {index}: expected sensor response {expected}, got {actual}"
+            );
+        }
+        assert_eq!(master.rejected_samples, 8 * 4);
+        assert_eq!(master.fallback_pixels, 0);
+        assert_eq!(master.rejection_method, MasterRejectionMethod::MedianMad);
+        let master_path = directory.path().join("master.fits");
+        write_master_fits_f32(&master_path, &master).unwrap();
+        let decoded = FitsFrame::open(&master_path).unwrap();
+        assert_eq!(
+            header(&decoded.headers, "REJMETH").and_then(HeaderValue::as_str),
+            Some("MEDIAN_MAD")
+        );
+    }
+
+    #[test]
+    fn sky_flat_rejection_retains_cfa_sampling_and_persistent_pixel_response() {
+        let directory = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let (width, height) = (16, 16);
+        let mut response = (0..width * height)
+            .map(|index| match (index % width % 2, index / width % 2) {
+                (0, 0) => 1.0,
+                (1, 1) => 2.0,
+                _ => 1.5,
+            })
+            .collect::<Vec<_>>();
+        // A real sensor response at one pixel must survive temporal rejection.
+        response[90] *= 0.6;
+        let paths = (0..8)
+            .map(|frame| directory.path().join(format!("cfa-flat-{frame}.fits")))
+            .collect::<Vec<_>>();
+        for (frame, path) in paths.iter().enumerate() {
+            let illumination = 700.0 + frame as f32 * 250.0;
+            let mut data = response
+                .iter()
+                .map(|value| illumination * value + 100.0)
+                .collect::<Vec<_>>();
+            if frame < 2 {
+                data[109] += 5.0 * illumination;
+            }
+            write_processed_image_fits_f32(
+                path,
+                &LinearImage::new(width, height, 1, data).unwrap(),
+                &[],
+                &[
+                    WriteHeaderCard::new("BAYERPAT", HeaderValue::String("RGGB".into())),
+                    WriteHeaderCard::new("XBAYROFF", HeaderValue::Integer(1)),
+                    WriteHeaderCard::new("YBAYROFF", HeaderValue::Integer(1)),
+                ],
+            )
+            .unwrap();
+        }
+        let master = build_master_from_fits_with_scratch(
+            &paths,
+            MasterFrameKind::Flat,
+            &MasterBuildOptions {
+                bias: Some(
+                    LinearImage::new(width, height, 1, vec![100.0; width * height]).unwrap(),
+                ),
+                ..Default::default()
+            },
+            scratch.path(),
+        )
+        .unwrap();
+        assert_eq!(
+            master.bayer,
+            Some(BayerLayout {
+                pattern: seiza_fits::BayerPattern::Rggb,
+                x_offset: 1,
+                y_offset: 1,
+            })
+        );
+        let mut expected = LinearImage::new(width, height, 1, response).unwrap();
+        normalize_flat_response(&mut expected).unwrap();
+        for (actual, expected) in master.image.data.iter().zip(expected.data) {
+            assert!((actual - expected).abs() < 1.0e-5);
+        }
+        assert_eq!(master.rejected_samples, 2);
+        assert_eq!(scratch.path().read_dir().unwrap().count(), 0);
+    }
+
+    fn masked_sky_flats(directory: &Path, stationary: bool) -> (Vec<PathBuf>, Vec<f32>) {
+        let (width, height) = (129, 127);
+        let mut response = (0..width * height)
+            .map(|index| match (index % width % 2, index / width % 2) {
+                (0, 0) => 1.0,
+                (1, 1) => 2.0,
+                _ => 1.5,
+            })
+            .collect::<Vec<f32>>();
+        for y in 10..20 {
+            for x in 10..20 {
+                response[y * width + x] *= 0.7;
+            }
+        }
+        let paths = (0..10)
+            .map(|frame| directory.join(format!("masked-{frame}.fits")))
+            .collect::<Vec<_>>();
+        for (frame, path) in paths.iter().enumerate() {
+            let illumination = 1000.0 + frame as f32 * 500.0;
+            let center_x = if stationary || frame < 6 { 40.0 } else { 88.0 };
+            let data = response
+                .iter()
+                .enumerate()
+                .map(|(index, response)| {
+                    let radius = (index % width) as f32 - center_x;
+                    let radius = radius * radius + ((index / width) as f32 - 64.0).powi(2);
+                    let star = if radius <= 36.0 {
+                        8.0 * (-radius / 8.0).exp()
+                    } else {
+                        0.0
+                    };
+                    illumination * (response + star) + 205.0
+                })
+                .collect();
+            write_processed_image_fits_f32(
+                path,
+                &LinearImage::new(width, height, 1, data).unwrap(),
+                &[],
+                &[
+                    WriteHeaderCard::new("IMAGETYP", HeaderValue::String("FLAT".into())),
+                    WriteHeaderCard::new("EXPTIME", HeaderValue::Float(4.0)),
+                    WriteHeaderCard::new("BAYERPAT", HeaderValue::String("RGGB".into())),
+                ],
+            )
+            .unwrap();
+        }
+        (paths, response)
+    }
+
+    fn masking_options() -> MasterBuildOptions {
+        MasterBuildOptions {
+            bias: Some(LinearImage::new(129, 127, 1, vec![200.0; 129 * 127]).unwrap()),
+            dark: Some(MasterDark {
+                image: LinearImage::new(129, 127, 1, vec![5.0; 129 * 127]).unwrap(),
+                exposure_seconds: Some(4.0),
+                bias_subtracted: true,
+                bayer: None,
+            }),
+            flat_star_masking: Some(FlatStarMaskingOptions::default()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn native_masks_remove_majority_stars_with_coverage_preserving_cfa_and_response() {
+        let directory = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let (mut paths, response) = masked_sky_flats(directory.path(), false);
+        let options = masking_options();
+        let master = build_master_from_fits_with_scratch(
+            &paths,
+            MasterFrameKind::Flat,
+            &options,
+            scratch.path(),
+        )
+        .unwrap();
+        let statistics = master.flat_star_masking.as_ref().unwrap();
+        assert!(master.masked_samples > 0);
+        assert_eq!(statistics.minimum_clean_samples, 4);
+        assert_eq!(statistics.maximum_clean_samples, 10);
+        assert_eq!(statistics.low_coverage_samples, 0);
+        assert_eq!(statistics.unknown_saturation_inputs, 10);
+        assert_eq!(statistics.unmasked_saturation_samples, 0);
+        assert_eq!(statistics.masked_samples, master.masked_samples);
+        assert_eq!(master.fallback_pixels, 0);
+        assert_eq!(
+            master.accepted_samples + master.rejected_samples + master.masked_samples,
+            129 * 127 * 10
+        );
+        for input in &master.input_statistics {
+            assert_eq!(
+                input.accepted_samples + input.rejected_samples + input.masked_samples,
+                129 * 127
+            );
+        }
+        assert!(master.bias_subtracted && master.dark_subtracted);
+        assert_eq!(
+            master.bayer.unwrap().pattern,
+            seiza_fits::BayerPattern::Rggb
+        );
+        let mut expected = LinearImage::new(129, 127, 1, response).unwrap();
+        normalize_flat_response(&mut expected).unwrap();
+        for (index, (actual, expected)) in master.image.data.iter().zip(expected.data).enumerate() {
+            assert!(
+                (actual - expected).abs() < 1.0e-5,
+                "sample {index}: {actual} != {expected}"
+            );
+        }
+        paths.reverse();
+        let reversed = build_master_from_fits_with_scratch(
+            &paths,
+            MasterFrameKind::Flat,
+            &options,
+            scratch.path(),
+        )
+        .unwrap();
+        assert_eq!(master.image.data, reversed.image.data);
+        assert_eq!(master.masked_samples, reversed.masked_samples);
+        assert_eq!(master.rejected_samples, reversed.rejected_samples);
+        assert_eq!(scratch.path().read_dir().unwrap().count(), 0);
+        let output = directory.path().join("masked-master.fits");
+        write_master_fits_f32(&output, &master).unwrap();
+        let decoded = FitsFrame::open(&output).unwrap();
+        assert_eq!(
+            header(&decoded.headers, "STARMASK").and_then(HeaderValue::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            header(&decoded.headers, "COVMIN").and_then(HeaderValue::as_i64),
+            Some(4)
+        );
+        assert_eq!(
+            header(&decoded.headers, "COVREQ").and_then(HeaderValue::as_i64),
+            Some(2)
+        );
+        assert_eq!(
+            header(&decoded.headers, "MASKSAMP").and_then(HeaderValue::as_i64),
+            Some(master.masked_samples as i64)
+        );
+    }
+
+    #[test]
+    fn stationary_star_fails_coverage_and_cleans_scratch_instead_of_filling_holes() {
+        let directory = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let (paths, _) = masked_sky_flats(directory.path(), true);
+        let error = build_master_from_fits_with_scratch(
+            &paths,
+            MasterFrameKind::Flat,
+            &masking_options(),
+            scratch.path(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::InsufficientFlatCoverage {
+                minimum_clean_samples: 0,
+                required_clean_samples: 2,
+                ..
+            }
+        ));
+        assert!(error.to_string().contains("insufficient coverage"));
+        assert_eq!(scratch.path().read_dir().unwrap().count(), 0);
     }
 }

@@ -49,8 +49,9 @@ pub use fits::{
 pub use image::{BayerLayout, LinearImage};
 pub use mapping::RegisteredFrameMapping;
 pub use master::{
-    MasterBuildOptions, MasterFrame, MasterFrameKind, MasterInputStatistics,
-    MasterRejectionOptions, build_master_from_fits,
+    FlatStarMaskingOptions, FlatStarMaskingStatistics, MasterBuildOptions, MasterFrame,
+    MasterFrameKind, MasterInputStatistics, MasterRejectionMethod, MasterRejectionOptions,
+    build_master_from_fits, build_master_from_fits_with_scratch,
 };
 pub use normalization::{NormalizationMap, NormalizationMode};
 pub use orientation::{SKY_ORIENTATION_NAME, SKY_ORIENTATION_VERSION, SkyOrientationPlan};
@@ -91,6 +92,20 @@ pub enum Error {
     /// A calibration master or its metadata could not be applied.
     #[error("calibration error: {0}")]
     Calibration(String),
+    /// Per-input flat masking could not be evaluated safely.
+    #[error("flat star masking failed: {0}")]
+    FlatStarMasking(String),
+    /// At least one output sample lacks the requested retained input coverage.
+    #[error(
+        "flat master has insufficient coverage: {insufficient_samples} samples have fewer than {required_clean_samples} unmasked retained inputs (observed range {minimum_clean_samples}..{maximum_clean_samples}, {masked_samples} masked input samples); capture more sky flats with greater star motion or use a different flat set; masked samples were not used to fill gaps"
+    )]
+    InsufficientFlatCoverage {
+        insufficient_samples: u64,
+        required_clean_samples: usize,
+        minimum_clean_samples: usize,
+        maximum_clean_samples: usize,
+        masked_samples: u64,
+    },
     /// No star match reached the registration thresholds.
     #[error("registration failed: {0}")]
     Registration(String),

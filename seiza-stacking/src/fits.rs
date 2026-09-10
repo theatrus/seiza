@@ -602,15 +602,20 @@ pub fn write_master_fits_f32(path: impl AsRef<Path>, master: &MasterFrame) -> Re
             master.normalized,
             "flat response normalized before combine",
         ),
+        string_card(
+            "REJMETH",
+            master.rejection_method.as_str(),
+            "temporal sample rejection method",
+        ),
         float_card(
             "CLIPLOW",
             f64::from(master.rejection.low_sigma),
-            "low leave-one-out sigma threshold",
+            "low sigma threshold",
         ),
         float_card(
             "CLIPHIGH",
             f64::from(master.rejection.high_sigma),
-            "high leave-one-out sigma threshold",
+            "high sigma threshold",
         ),
         integer_card(
             "CLIPREJ",
@@ -625,9 +630,80 @@ pub fn write_master_fits_f32(path: impl AsRef<Path>, master: &MasterFrame) -> Re
         integer_card(
             "CLIPFBK",
             i64::try_from(master.fallback_pixels).unwrap_or(i64::MAX),
-            "pixels written as the unclipped mean",
+            "pixels using the fallback center",
+        ),
+        logical_card(
+            "STARMASK",
+            master.flat_star_masking.is_some(),
+            "native per-input flat star masks",
+        ),
+        integer_card(
+            "MASKSAMP",
+            i64::try_from(master.masked_samples).unwrap_or(i64::MAX),
+            "input samples excluded by masks",
         ),
     ];
+    if let Some(masking) = &master.flat_star_masking {
+        cards.extend([
+            integer_card(
+                "MASKPIX",
+                i64::try_from(masking.masked_pixels).unwrap_or(i64::MAX),
+                "output pixels touched by input masks",
+            ),
+            integer_card(
+                "COVMIN",
+                i64::try_from(masking.minimum_clean_samples).unwrap_or(i64::MAX),
+                "minimum retained input coverage",
+            ),
+            integer_card(
+                "COVMAX",
+                i64::try_from(masking.maximum_clean_samples).unwrap_or(i64::MAX),
+                "maximum retained input coverage",
+            ),
+            integer_card(
+                "COVLOW",
+                i64::try_from(masking.low_coverage_samples).unwrap_or(i64::MAX),
+                "output samples with fewer than 3 inputs",
+            ),
+            integer_card(
+                "COVREQ",
+                i64::try_from(masking.options.minimum_clean_samples).unwrap_or(i64::MAX),
+                "required retained input coverage",
+            ),
+            integer_card(
+                "SATUNMSK",
+                i64::try_from(masking.unmasked_saturation_samples).unwrap_or(i64::MAX),
+                "unmasked isolated saturation samples",
+            ),
+            integer_card(
+                "SATUNKN",
+                i64::try_from(masking.unknown_saturation_inputs).unwrap_or(i64::MAX),
+                "inputs without known saturation ceiling",
+            ),
+            float_card(
+                "MSKSIG",
+                f64::from(masking.options.detection_sigma),
+                "star detection sigma threshold",
+            ),
+            float_card(
+                "MSKRAD",
+                f64::from(masking.options.halo_radius_factor),
+                "star halo radius multiplier",
+            ),
+            float_card(
+                "MSKMINR",
+                f64::from(masking.options.minimum_radius_pixels),
+                "minimum mask radius in raw pixels",
+            ),
+        ]);
+        if let Some(level) = masking.options.saturation_level {
+            cards.push(float_card(
+                "MSKSAT",
+                f64::from(level),
+                "explicit raw saturation ceiling",
+            ));
+        }
+    }
     if let Some(exposure_seconds) = master.exposure_seconds {
         cards.push(float_card(
             "EXPTIME",
@@ -1252,6 +1328,8 @@ mod tests {
             input_frames: 12,
             accepted_samples: 47,
             rejected_samples: 1,
+            masked_samples: 0,
+            flat_star_masking: None,
             fallback_pixels: 0,
             defect_pixels_replaced: 0,
             input_statistics: Vec::new(),
@@ -1259,6 +1337,7 @@ mod tests {
             dark_subtracted: false,
             normalized: false,
             rejection: crate::MasterRejectionOptions::default(),
+            rejection_method: crate::MasterRejectionMethod::LeaveOneOut,
             reference_headers: vec![
                 ("INSTRUME".into(), HeaderValue::String("Test Camera".into())),
                 ("CAMERA".into(), HeaderValue::String("Ignored Alias".into())),
@@ -1276,6 +1355,7 @@ mod tests {
         write_master_fits_f32(&path, &master).unwrap();
         let decoded = FitsImage::open(&path).unwrap();
         assert_eq!(decoded.header_str("SEIZAMST"), Some("DARK"));
+        assert_eq!(decoded.header_str("REJMETH"), Some("LEAVE_ONE_OUT"));
         assert_eq!(decoded.header_f64("NCOMBINE"), Some(12.0));
         assert_eq!(decoded.header_f64("EXPTIME"), Some(30.0));
         assert_eq!(
