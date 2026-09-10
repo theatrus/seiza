@@ -347,8 +347,9 @@ leave-one-out sigma-clipped second pass.
 
 Flat inputs are bias/dark calibrated and normalized to a common median before
 integration. Temporal sigma clipping uses the median and a MAD-derived scale,
-then averages the surviving values. This rejects moving stars in sky flats
-even when a star covers a sensor pixel in multiple exposures. It does not align
+then averages the surviving values. This improves rejection of moving stars
+when a star covers a sensor pixel in multiple exposures, but does not guarantee
+a star-free sky flat. It does not align
 stars or smooth the sensor response: dust, vignetting, and persistent pixel
 response remain. The existing low/high thresholds default to 3 sigma. This
 follows the robust combination approach in the
@@ -358,7 +359,10 @@ At least three inputs are needed for rejection; two are averaged without
 clipping. More frames and sufficient star motion are important: clipping
 cannot reliably distinguish stars from the flat response when contamination
 covers half or more of the samples at a pixel. Changing gradients, saturation,
-and stationary stars are not repaired by temporal rejection. A zero MAD uses
+and stationary stars are not repaired by temporal rejection. Small or noisy
+sets can retain faint halos even when most samples are clean. A contaminated
+majority, including saturated star cores, can be retained more strongly than
+with an ordinary average. A zero MAD uses
 a floating-point tolerance; if custom thresholds remove every sample, the
 flat pixel falls back to its temporal median instead of its contaminated mean.
 The fallback count is reported separately.

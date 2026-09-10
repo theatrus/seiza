@@ -130,7 +130,10 @@ sky flats. It preserves the raw sensor grid and CFA sampling; no star alignment
 or spatial smoothing is applied. Two-input sets of any kind are averaged
 without rejection. Temporal clipping still needs enough clean samples and
 star motion; it cannot separate stationary stars or majority contamination
-from the sensor response.
+from the sensor response. Small or noisy sets can retain faint halos, and
+contaminated majorities (including saturated cores) can be reinforced rather
+than removed. Robust temporal clipping improves rejection but does not
+guarantee star-free flats.
 
 The flat tile, input read buffer, and per-pixel statistics workspace share a
 64 MiB budget. Scratch space is four bytes per input sample, separate from the

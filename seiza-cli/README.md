@@ -179,11 +179,13 @@ seiza master flat flats/*.fits --bias master-bias.fits \
 
 Bias and dark construction uses a two-pass, leave-one-out sigma-clipped mean.
 Flat construction calibrates and normalizes each input once, then uses a
-scratch-backed temporal median/MAD sigma-clipped mean. This rejects moving
-stars that overlap a sensor pixel in multiple sky flats without aligning the
+scratch-backed temporal median/MAD sigma-clipped mean. This improves rejection
+of moving stars that overlap a sensor pixel in multiple sky flats without aligning the
 stars or smoothing the sensor response. Two-frame sets are averaged without
 rejection, regardless of master kind. More frames and enough star motion are
-needed to distinguish stars from persistent flat response.
+needed to distinguish stars from persistent flat response. Faint halos can
+remain in small or noisy sets even with a clean majority; saturated or other
+contamination present in most inputs can be retained more strongly.
 
 Flat scratch storage uses OS temp and needs about four bytes per input sample;
 tile memory is bounded at 64 MiB in addition to the image and master buffers.
