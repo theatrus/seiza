@@ -1,4 +1,6 @@
 use image::DynamicImage;
+mod resample;
+use resample::{downsample_interleaved_f32, downsample_rgba};
 use seiza::blind::{BlindIndex, BlindParams, solve_blind};
 use seiza::catalog::{StarCatalog, tiles::TileCatalog};
 use seiza::downloads::{CachePolicy, CatalogManager, CatalogSet, Dataset, DownloadEvent};
@@ -4027,9 +4029,8 @@ fn prepare_live_stack_render(
     })
 }
 
-/// Copy at most `max_dimension` squared pixels from a borrowed live view.
-/// Bilinear samples ignore uncovered neighbors, so the undefined mean values
-/// behind zero coverage never enter the preview.
+/// Reduce a borrowed live view with area averaging and bounded output storage.
+/// Ignore uncovered samples so undefined means never enter the preview.
 fn sample_live_stack_view(
     view: seiza_stacking::StackView<'_>,
     max_dimension: usize,
@@ -4067,39 +4068,26 @@ fn sample_live_stack_view(
         return Ok((output_width, output_height, output, validity_mask));
     }
 
-    let scale_x = view.width as f64 / output_width as f64;
-    let scale_y = view.height as f64 / output_height as f64;
-    for output_y in 0..output_height {
-        let source_y = ((output_y as f64 + 0.5) * scale_y - 0.5)
-            .clamp(0.0, view.height.saturating_sub(1) as f64);
-        let y0 = source_y.floor() as usize;
-        let y1 = (y0 + 1).min(view.height - 1);
-        let wy = (source_y - y0 as f64) as f32;
-        for output_x in 0..output_width {
-            let source_x = ((output_x as f64 + 0.5) * scale_x - 0.5)
-                .clamp(0.0, view.width.saturating_sub(1) as f64);
-            let x0 = source_x.floor() as usize;
-            let x1 = (x0 + 1).min(view.width - 1);
-            let wx = (source_x - x0 as f64) as f32;
-            let neighbors = [
-                (x0, y0, (1.0 - wx) * (1.0 - wy)),
-                (x1, y0, wx * (1.0 - wy)),
-                (x0, y1, (1.0 - wx) * wy),
-                (x1, y1, wx * wy),
-            ];
+    let xs = resample::footprints(view.width, output_width);
+    let ys = resample::footprints(view.height, output_height);
+    for (output_y, y) in ys.iter().enumerate() {
+        for (output_x, x) in xs.iter().enumerate() {
             for channel in 0..view.channels {
-                let mut sum = 0.0_f32;
-                let mut weight = 0.0_f32;
-                for (x, y, spatial_weight) in neighbors {
-                    let index = (y * view.width + x) * view.channels + channel;
-                    if view.coverage[index] > 0 && view.mean[index].is_finite() {
-                        sum += view.mean[index] * spatial_weight;
-                        weight += spatial_weight;
+                let mut sum = 0.0_f64;
+                let mut weight = 0.0_f64;
+                for (dy, wy) in y.weights.iter().enumerate() {
+                    for (dx, wx) in x.weights.iter().enumerate() {
+                        let index =
+                            ((y.start + dy) * view.width + x.start + dx) * view.channels + channel;
+                        if view.coverage[index] > 0 && view.mean[index].is_finite() {
+                            sum += f64::from(view.mean[index]) * wx * wy;
+                            weight += wx * wy;
+                        }
                     }
                 }
                 if weight > 0.0 {
                     output[(output_y * output_width + output_x) * view.channels + channel] =
-                        sum / weight;
+                        (sum / weight) as f32;
                 } else {
                     output[(output_y * output_width + output_x) * view.channels + channel] =
                         f32::NAN;
@@ -4935,82 +4923,6 @@ fn linked_rgb_statistics(rgb: &RgbImage16) -> Statistics {
 
 fn linear_u16_to_u8(value: u16) -> u8 {
     ((u32::from(value) * 255 + 32_767) / 65_535) as u8
-}
-
-fn downsample_rgba<T: Copy>(
-    width: usize,
-    height: usize,
-    rgba: Vec<T>,
-    max_dimension: usize,
-) -> (usize, usize, Vec<T>) {
-    if max_dimension == 0 || width.max(height) <= max_dimension {
-        return (width, height, rgba);
-    }
-    let scale = max_dimension as f64 / width.max(height) as f64;
-    let output_width = ((width as f64 * scale).round() as usize).max(1);
-    let output_height = ((height as f64 * scale).round() as usize).max(1);
-    let mut output = Vec::with_capacity(output_width * output_height * 4);
-    for y in 0..output_height {
-        let source_y = y * height / output_height;
-        for x in 0..output_width {
-            let source_x = x * width / output_width;
-            let offset = (source_y * width + source_x) * 4;
-            output.extend_from_slice(&rgba[offset..offset + 4]);
-        }
-    }
-    (output_width, output_height, output)
-}
-
-/// Bounds an interactive render before expensive processing. Bilinear sampling
-/// keeps the preview representative without spending time on source-resolution
-/// background fitting and stretch stages. Full and non-interactive renders do
-/// not use this path.
-fn downsample_interleaved_f32(
-    width: usize,
-    height: usize,
-    pixels: Vec<f32>,
-    channels: usize,
-    max_dimension: usize,
-) -> (usize, usize, Vec<f32>) {
-    if max_dimension == 0 || width.max(height) <= max_dimension {
-        return (width, height, pixels);
-    }
-
-    let scale = max_dimension as f64 / width.max(height) as f64;
-    let output_width = ((width as f64 * scale).round() as usize).max(1);
-    let output_height = ((height as f64 * scale).round() as usize).max(1);
-    let mut output = vec![0.0; output_width * output_height * channels];
-    let scale_x = width as f64 / output_width as f64;
-    let scale_y = height as f64 / output_height as f64;
-
-    for output_y in 0..output_height {
-        let source_y =
-            ((output_y as f64 + 0.5) * scale_y - 0.5).clamp(0.0, height.saturating_sub(1) as f64);
-        let y0 = source_y.floor() as usize;
-        let y1 = (y0 + 1).min(height - 1);
-        let y_weight = (source_y - y0 as f64) as f32;
-
-        for output_x in 0..output_width {
-            let source_x = ((output_x as f64 + 0.5) * scale_x - 0.5)
-                .clamp(0.0, width.saturating_sub(1) as f64);
-            let x0 = source_x.floor() as usize;
-            let x1 = (x0 + 1).min(width - 1);
-            let x_weight = (source_x - x0 as f64) as f32;
-            let output_start = (output_y * output_width + output_x) * channels;
-
-            for channel in 0..channels {
-                let top_left = pixels[(y0 * width + x0) * channels + channel];
-                let top_right = pixels[(y0 * width + x1) * channels + channel];
-                let bottom_left = pixels[(y1 * width + x0) * channels + channel];
-                let bottom_right = pixels[(y1 * width + x1) * channels + channel];
-                let top = top_left + (top_right - top_left) * x_weight;
-                let bottom = bottom_left + (bottom_right - bottom_left) * x_weight;
-                output[output_start + channel] = top + (bottom - top) * y_weight;
-            }
-        }
-    }
-
-    (output_width, output_height, output)
 }
 
 fn header_json(value: &HeaderValue) -> Value {
@@ -7759,6 +7671,39 @@ mod tests {
     }
 
     #[test]
+    fn live_preview_area_sampling_keeps_off_center_signal_and_ignores_gaps() {
+        let mut mean = vec![0.0_f32; 8 * 8 * 3];
+        mean[..3].copy_from_slice(&[16.0, 32.0, 48.0]);
+        let mut coverage = vec![1_u32; mean.len()];
+        // One invalid sample in the first footprint, and an entirely empty
+        // bottom-right footprint. Neither may supply black image data.
+        coverage[3] = 0;
+        mean[3] = 9999.0;
+        for y in 4..8 {
+            for x in 4..8 {
+                coverage[(y * 8 + x) * 3..(y * 8 + x + 1) * 3].fill(0);
+            }
+        }
+        let rejected = vec![0_u32; mean.len()];
+        let view = seiza_stacking::StackView {
+            width: 8,
+            height: 8,
+            channels: 3,
+            mean: &mean,
+            coverage: &coverage,
+            rejected_samples: &rejected,
+            accepted_frames: 2,
+            rejected_frames: 0,
+        };
+        let (w, h, sampled, mask) = sample_live_stack_view(view, 2).unwrap();
+        assert_eq!((w, h), (2, 2));
+        assert!((sampled[0] - 16.0 / 15.0).abs() < 1e-6);
+        assert_eq!(&sampled[1..3], &[2.0, 3.0]);
+        assert_eq!(mask, [true, true, true, false]);
+        assert!(sampled[9..].iter().all(|value| value.is_nan()));
+    }
+
+    #[test]
     fn frame_probe_is_header_only_and_normalizes_role_and_signature() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("header-only.fits");
@@ -9628,7 +9573,7 @@ mod tests {
 
     #[test]
     fn downsampling_preserves_aspect_ratio() {
-        let rgba = vec![255; 400 * 200 * 4];
+        let rgba = vec![255_u8; 400 * 200 * 4];
         let (width, height, pixels) = downsample_rgba(400, 200, rgba, 100);
         assert_eq!((width, height), (100, 50));
         assert_eq!(pixels.len(), 100 * 50 * 4);

@@ -16,6 +16,14 @@ exposes the **superset** of what both apps need.
   and `seiza_rendered_image_bgra` (Direct2D / WinUI), each with a `_length`
   companion. RGBA is canonical; the BGRA view is computed on first request and
   cached, so a consumer only ever pays for the order it uses.
+- **Filtered reduced images** — a nonzero maximum dimension uses area averaging,
+  with weights for partial edge pixels, instead of selecting single pixels.
+  RGBA8 and RGBA16 average display values with alpha-weighted colors. Interactive
+  file previews average linear samples before processing; live-stack previews
+  also exclude uncovered samples. These are display reductions, not changes to
+  stored image or stack data. A zero limit leaves full-size file render buffers
+  unchanged. Because stretch and background fitting are nonlinear, a bounded
+  interactive preview can still differ from a reduced full-resolution render.
 - **Native 16-bit export pixels** — the parallel
   `seiza_rendered_image16_open*` API returns a separate
   `SeizaRenderedImage16` with borrowed native-endian RGBA `uint16_t` samples.
