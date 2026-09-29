@@ -75,6 +75,7 @@ pub fn write_f32_image_to(
     let data_bytes = std::mem::size_of_val(pixels.samples());
     let bounds = sample_bounds(pixels.samples());
 
+    let created = utc_timestamp(std::time::SystemTime::now());
     let mut data_offset = BLOCK_ALIGNMENT;
     let xml = loop {
         let xml = render_xml(
@@ -83,8 +84,8 @@ pub fn write_f32_image_to(
             pixels,
             headers,
             bounds,
-            data_offset,
-            data_bytes,
+            (data_offset, data_bytes),
+            &created,
         );
         let end = PREAMBLE_LEN + xml.len();
         let needed = end.div_ceil(BLOCK_ALIGNMENT) * BLOCK_ALIGNMENT;
@@ -133,8 +134,8 @@ fn render_xml(
     pixels: F32ImageData<'_>,
     headers: &[WriteHeaderCard],
     bounds: (f32, f32),
-    data_offset: usize,
-    data_bytes: usize,
+    (data_offset, data_bytes): (usize, usize),
+    created: &str,
 ) -> String {
     let planes = pixels.planes();
     let color_space = if planes == 3 { "RGB" } else { "Gray" };
@@ -154,27 +155,55 @@ fn render_xml(
         bounds.0, bounds.1
     );
     for header in headers {
+        // name, value and comment are all mandatory attributes.
         let _ = write!(
             xml,
-            "<FITSKeyword name=\"{}\" value=\"{}\"",
+            "<FITSKeyword name=\"{}\" value=\"{}\" comment=\"{}\"/>",
             escape(header.keyword()),
-            escape(fits_value_text(header.value()))
+            escape(fits_value_text(header.value())),
+            escape(header.comment())
         );
-        if header.comment().is_empty() {
-            xml.push_str("/>");
-        } else {
-            let _ = write!(xml, " comment=\"{}\"/>", escape(header.comment()));
-        }
     }
     xml.push_str("</Image>");
     let _ = write!(
         xml,
-        "<Metadata><Property id=\"XISF:CreatorApplication\" type=\"String\">seiza-xisf {}\
-         </Property></Metadata>",
+        "<Metadata><Property id=\"XISF:CreationTime\" type=\"TimePoint\" value=\"{created}\"/>\
+         <Property id=\"XISF:CreatorApplication\" type=\"String\">seiza-xisf {}</Property>\
+         </Metadata>",
         env!("CARGO_PKG_VERSION")
     );
     xml.push_str("</xisf>");
     xml
+}
+
+/// Format a time as an ISO 8601 UTC timestamp, such as `2026-09-28T05:02:40Z`.
+fn utc_timestamp(time: std::time::SystemTime) -> String {
+    let seconds = time
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let (days, second_of_day) = (seconds / 86_400, seconds % 86_400);
+    // Civil date from days since 1970-01-01, after Howard Hinnant's
+    // days_from_civil inverse, in 400-year eras starting on March 1.
+    let days = days + 719_468;
+    let era = days / 146_097;
+    let day_of_era = days % 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
+    let year = year_of_era + era * 400 + u64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        second_of_day / 3_600,
+        second_of_day / 60 % 60,
+        second_of_day % 60
+    )
 }
 
 /// Serialize a header value with FITS text conventions so the reader's
@@ -313,6 +342,30 @@ mod tests {
     use seiza_fits::Pixels;
 
     #[test]
+    fn formats_utc_timestamps() {
+        let at = |seconds| std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+        assert_eq!(utc_timestamp(at(0)), "1970-01-01T00:00:00Z");
+        assert_eq!(utc_timestamp(at(951_782_400)), "2000-02-29T00:00:00Z");
+        assert_eq!(utc_timestamp(at(1_790_571_760)), "2026-09-28T05:02:40Z");
+        assert_eq!(utc_timestamp(at(4_107_542_399)), "2100-02-28T23:59:59Z");
+    }
+
+    #[test]
+    fn writes_the_mandatory_metadata_and_keyword_attributes() {
+        let headers = [WriteHeaderCard::new("EXPTIME", HeaderValue::Float(30.0))];
+        let mut encoded = Vec::new();
+        write_f32_image_to(&mut encoded, 1, 1, F32ImageData::Mono(&[0.5]), &headers).unwrap();
+        let header = String::from_utf8_lossy(&encoded);
+        assert!(header.contains("<Property id=\"XISF:CreationTime\" type=\"TimePoint\" value=\""));
+        assert!(header.contains("<Property id=\"XISF:CreatorApplication\" type=\"String\">"));
+        assert!(
+            header.contains(
+                "<FITSKeyword name=\"EXPTIME\" value=\"3.000000000000E1\" comment=\"\"/>"
+            )
+        );
+    }
+
+    #[test]
     fn atomic_mono_writer_round_trips_pixels_and_headers() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mono.xisf");
@@ -362,7 +415,10 @@ mod tests {
         assert_eq!((image.width, image.height, image.planes), (2, 2, 1));
         assert_eq!(image.sample_format, crate::SampleFormat::Float32);
         assert!(image.compression.is_none());
-        assert_eq!(image.attachment_offset % BLOCK_ALIGNMENT as u64, 0);
+        let crate::BlockLocation::Attachment { offset, .. } = image.location else {
+            panic!("writer must attach the pixel block");
+        };
+        assert_eq!(offset % BLOCK_ALIGNMENT as u64, 0);
     }
 
     #[test]
@@ -438,7 +494,9 @@ mod tests {
 
         let mut cursor = std::io::Cursor::new(encoded.as_slice());
         let parsed = crate::parse_file(&mut cursor, encoded.len() as u64).unwrap();
-        let offset = parsed.images[0].info.attachment_offset;
+        let crate::BlockLocation::Attachment { offset, .. } = parsed.images[0].info.location else {
+            panic!("writer must attach the pixel block");
+        };
         assert!(offset > BLOCK_ALIGNMENT as u64);
         assert_eq!(offset % BLOCK_ALIGNMENT as u64, 0);
         let decoded = crate::from_bytes(&encoded).unwrap();

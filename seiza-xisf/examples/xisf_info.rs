@@ -26,6 +26,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             image.compression
         );
     }
+    for image in &info.unavailable {
+        println!(
+            "  #{} id={:?} unavailable: {}",
+            image.index, image.id, image.reason
+        );
+    }
 
     if decode {
         let image = seiza_xisf::open(&path)?;
