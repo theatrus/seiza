@@ -34,10 +34,15 @@ use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+mod astrometry;
 mod metadata;
 mod writer;
 mod xml;
 
+pub use astrometry::{
+    AstrometricSolution, BasisFunction, Distortion, DistortionModel, FallbackTerm, LocalTerm,
+    Projection, ProjectionSystem, ProjectiveTransformation, Provenance, Spline, SplinePair,
+};
 use metadata::UnitMetadata;
 pub use metadata::XisfMetadata;
 pub use xml::XisfElement;
@@ -1354,6 +1359,25 @@ fn parse_block(
             )));
         }
     };
+    finish_block(
+        location,
+        inline_data,
+        block_attributes,
+        attributes,
+        expected,
+    )
+}
+
+/// Complete a data block from its location and the attributes that describe
+/// its encoding. `block_attributes` take precedence over `attributes`: for an
+/// embedded block they are those of the `Data` element.
+fn finish_block(
+    location: BlockLocation,
+    inline_data: Option<Vec<u8>>,
+    block_attributes: &BTreeMap<String, String>,
+    attributes: &BTreeMap<String, String>,
+    expected: Option<usize>,
+) -> Result<DataBlock, XisfError> {
     let attribute = |name: &str| {
         block_attributes
             .get(name)
@@ -1423,6 +1447,51 @@ fn parse_block(
         byte_order,
         expected_bytes,
     })
+}
+
+/// The block of a carried element, whose attached or external bytes were
+/// loaded into [`XisfElement::block`] when it was read.
+fn element_block(element: &XisfElement, expected: Option<usize>) -> Result<DataBlock, XisfError> {
+    let location = element
+        .attribute("location")
+        .ok_or_else(|| XisfError::Malformed("data block has no location".into()))?
+        .trim();
+    let empty = BTreeMap::new();
+    let (stored, block_attributes) = if let Some(block) = &element.block {
+        (block.clone(), &empty)
+    } else if let Some(encoding) = location.strip_prefix("inline:") {
+        (decode_text_block(&element.text, encoding)?, &empty)
+    } else if location == "embedded" {
+        let data = element
+            .child("Data")
+            .ok_or_else(|| XisfError::Malformed("embedded block has no Data element".into()))?;
+        let encoding = data
+            .attribute("encoding")
+            .ok_or_else(|| XisfError::Malformed("Data element has no encoding".into()))?;
+        (decode_text_block(&data.text, encoding)?, &data.attributes)
+    } else {
+        return Err(XisfError::Malformed(format!(
+            "data block {location:?} was not loaded"
+        )));
+    };
+    let bytes = stored.len() as u64;
+    finish_block(
+        BlockLocation::Inline { bytes },
+        Some(stored),
+        block_attributes,
+        &element.attributes,
+        expected,
+    )
+}
+
+/// Decode the whole value of a carried element's data block.
+fn element_block_bytes(
+    element: &XisfElement,
+    expected: Option<usize>,
+) -> Result<(Vec<u8>, ByteOrder), XisfError> {
+    let block = element_block(element, expected)?;
+    let bytes = read_block_bytes(&mut std::io::Cursor::new(&[][..]), &block)?;
+    Ok((bytes, block.byte_order))
 }
 
 /// Whether a preserved FITS keyword describes storage scaling or geometry
@@ -3496,6 +3565,287 @@ mod tests {
                 .iter()
                 .any(|element| element.local_name() == "ColorFilterArray")
         );
+    }
+
+    fn f64_property(id: &str, dimensions: &str, values: &[f64]) -> String {
+        let kind = if dimensions.starts_with("rows") {
+            "F64Matrix"
+        } else {
+            "F64Vector"
+        };
+        let hex = lowercase_hex(
+            &values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>(),
+        );
+        format!(
+            "<Property id=\"AstrometricSolution:{id}\" type=\"{kind}\" {dimensions} location=\"inline:hex\">{hex}</Property>"
+        )
+    }
+
+    fn text_property(id: &str, value: &str) -> String {
+        format!("<Property id=\"AstrometricSolution:{id}\" type=\"String\">{value}</Property>")
+    }
+
+    fn layer_one(version: &str, projection: &str) -> String {
+        [
+            text_property("Version", version),
+            text_property("ProjectionSystem", projection),
+            f64_property(
+                "ReferenceCelestialCoordinates",
+                "length=\"2\"",
+                &[83.8, -5.4],
+            ),
+            f64_property("ReferenceImageCoordinates", "length=\"2\"", &[100.5, 80.5]),
+            f64_property(
+                "LinearTransformationMatrix",
+                "rows=\"2\" columns=\"2\"",
+                &[-2e-4, 1e-6, 1e-6, 2e-4],
+            ),
+        ]
+        .concat()
+    }
+
+    fn layer_two() -> String {
+        let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        [
+            f64_property(
+                "ProjectiveTransformation:ImageToProjection",
+                "rows=\"3\" columns=\"3\"",
+                &identity,
+            ),
+            f64_property(
+                "ProjectiveTransformation:ProjectionToImage",
+                "rows=\"3\" columns=\"3\"",
+                &identity,
+            ),
+        ]
+        .concat()
+    }
+
+    /// Local terms and a Fallback with a thin-plate family kernel whose Y
+    /// components share the X nodes, and a Gaussian Global term without a
+    /// polynomial part whose Y component has nodes of its own.
+    fn layer_three(image_to_projection_basis: &str, terms: &str) -> String {
+        let forward = "DistortionModel:ImageToProjection:";
+        let inverse = "DistortionModel:ProjectionToImage:";
+        // Order 3 gives six polynomial coefficients per spline.
+        let local_coefficients = (0..(3 + 2 * 6)).map(f64::from).collect::<Vec<_>>();
+        let fallback_coefficients = (0..(1 + 6)).map(f64::from).collect::<Vec<_>>();
+        [
+            text_property(&format!("{forward}BasisFunction"), image_to_projection_basis),
+            format!("<Property id=\"AstrometricSolution:{forward}Order\" type=\"Int32\" value=\"3\"/>"),
+            text_property(&format!("{forward}Terms"), terms),
+            f64_property(&format!("{forward}Local:Center"), "rows=\"2\" columns=\"2\"", &[10.0, 10.0, 50.0, 40.0]),
+            f64_property(&format!("{forward}Local:Radius"), "length=\"2\"", &[30.0, 25.0]),
+            f64_property(
+                &format!("{forward}Local:X:Normalization"),
+                "rows=\"2\" columns=\"3\"",
+                &[10.0, 10.0, 0.03, 50.0, 40.0, 0.04],
+            ),
+            format!(
+                "<Property id=\"AstrometricSolution:{forward}Local:X:NodeOffsets\" type=\"I32Vector\" length=\"3\" location=\"inline:hex\">{}</Property>",
+                lowercase_hex(&[0_i32, 2, 3].iter().flat_map(|value| value.to_le_bytes()).collect::<Vec<_>>())
+            ),
+            f64_property(
+                &format!("{forward}Local:X:Nodes"),
+                "rows=\"3\" columns=\"2\"",
+                &[0.0, 0.0, 0.5, 0.5, -0.2, 0.1],
+            ),
+            f64_property(&format!("{forward}Local:X:Coefficients"), "length=\"15\"", &local_coefficients),
+            f64_property(&format!("{forward}Local:Y:Coefficients"), "length=\"15\"", &local_coefficients),
+            format!("<Property id=\"AstrometricSolution:{forward}Fallback:Threshold\" type=\"Float64\" value=\"0.25\"/>"),
+            f64_property(&format!("{forward}Fallback:X:Normalization"), "length=\"3\"", &[50.0, 40.0, 0.01]),
+            f64_property(&format!("{forward}Fallback:X:Nodes"), "rows=\"1\" columns=\"2\"", &[0.0, 0.0]),
+            f64_property(&format!("{forward}Fallback:X:Coefficients"), "length=\"7\"", &fallback_coefficients),
+            f64_property(&format!("{forward}Fallback:Y:Coefficients"), "length=\"7\"", &fallback_coefficients),
+            text_property(&format!("{inverse}BasisFunction"), "Gaussian"),
+            format!("<Property id=\"AstrometricSolution:{inverse}Order\" type=\"Int32\" value=\"2\"/>"),
+            format!("<Property id=\"AstrometricSolution:{inverse}Polynomial\" type=\"Boolean\" value=\"false\"/>"),
+            text_property(&format!("{inverse}Terms"), "Global"),
+            f64_property(&format!("{inverse}Global:X:Normalization"), "length=\"3\"", &[0.0, 0.0, 50.0]),
+            f64_property(&format!("{inverse}Global:X:Nodes"), "rows=\"2\" columns=\"2\"", &[0.0, 0.0, 1.0, 1.0]),
+            f64_property(&format!("{inverse}Global:X:Coefficients"), "length=\"2\"", &[0.5, -0.5]),
+            format!("<Property id=\"AstrometricSolution:{inverse}Global:X:ShapeParameter\" type=\"Float64\" value=\"1.5\"/>"),
+            f64_property(&format!("{inverse}Global:Y:Normalization"), "length=\"3\"", &[0.0, 0.0, 40.0]),
+            f64_property(&format!("{inverse}Global:Y:Nodes"), "rows=\"1\" columns=\"2\"", &[0.2, 0.3]),
+            f64_property(&format!("{inverse}Global:Y:Coefficients"), "length=\"1\"", &[0.25]),
+            format!("<Property id=\"AstrometricSolution:{inverse}Global:Y:ShapeParameter\" type=\"Float64\" value=\"2.5\"/>"),
+        ]
+        .concat()
+    }
+
+    fn solution_file(properties: &str, attachments: &[&[u8]]) -> Vec<u8> {
+        let pixels = [0_u8; 4];
+        let blocks = [&[&pixels[..]], attachments].concat();
+        monolithic(
+            image_element(0, "2:2:1", "UInt8", 4, "", properties),
+            &blocks,
+        )
+    }
+
+    fn solution(properties: &str) -> Result<Option<AstrometricSolution>, XisfError> {
+        let file = solution_file(properties, &[]);
+        read_image_from_bytes(&file, 0)
+            .unwrap()
+            .metadata
+            .astrometric_solution()
+    }
+
+    #[test]
+    fn reads_every_layer_of_an_astrometric_solution() {
+        let image_points = [10.0, 20.0, 30.0, 40.0];
+        let raw = image_points
+            .iter()
+            .flat_map(|value: &f64| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        let compressed = zstd::bulk::compress(&shuffled(&raw, 8), 3).unwrap();
+        let properties = [
+            // A later minor revision may add properties, which are ignored.
+            layer_one("1.3", "Gnomonic"),
+            text_property("SomethingNew", "ignored"),
+            layer_two(),
+            layer_three("VariableOrder", "Local\nFallback"),
+            f64_property("ControlPoints:Celestial", "rows=\"2\" columns=\"2\"", &[83.0, -5.0, 83.1, -5.1]),
+            format!(
+                "<Property id=\"AstrometricSolution:ControlPoints:Image\" type=\"F64Matrix\" rows=\"2\" columns=\"2\" compression=\"zstd+sh:32:8\" location=\"attachment:@OFFSET1@:{}\"/>",
+                compressed.len()
+            ),
+            text_property("Catalog", "Gaia DR3"),
+        ]
+        .concat();
+        let file = solution_file(&properties, &[&compressed]);
+        let solution = read_image_from_bytes(&file, 0)
+            .unwrap()
+            .metadata
+            .astrometric_solution()
+            .unwrap()
+            .unwrap();
+        assert!(
+            solution.unavailable.is_empty(),
+            "{:?}",
+            solution.unavailable
+        );
+        assert_eq!(solution.version, (1, 3));
+        let projection = &solution.projection;
+        assert_eq!(projection.system, ProjectionSystem::Gnomonic);
+        assert_eq!(projection.reference_native, [0.0, 90.0]);
+        assert_eq!(projection.celestial_reference_system, "ICRS");
+        assert_eq!(projection.linear, [[-2e-4, 1e-6], [1e-6, 2e-4]]);
+        assert!(solution.projective.is_some());
+
+        let distortion = solution.distortion.unwrap();
+        let forward = &distortion.image_to_projection;
+        assert_eq!(
+            (forward.basis_function, forward.order, forward.polynomial),
+            (BasisFunction::VariableOrder, 3, true)
+        );
+        assert_eq!(forward.local.len(), 2);
+        assert_eq!(forward.local[0].splines.x.nodes, [[0.0, 0.0], [0.5, 0.5]]);
+        assert_eq!(
+            forward.local[1].splines.x.coefficients,
+            (8..15).map(f64::from).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            forward.local[1].splines.y.nodes,
+            forward.local[1].splines.x.nodes
+        );
+        assert_eq!(forward.local[1].center, [50.0, 40.0]);
+        assert_eq!(forward.fallback.as_ref().unwrap().threshold, 0.25);
+        let inverse = &distortion.projection_to_image;
+        let global = inverse.global.as_ref().unwrap();
+        assert!(!inverse.polynomial);
+        assert_eq!(global.x.shape_parameter, Some(1.5));
+        assert_eq!(global.y.nodes, [[0.2, 0.3]]);
+        assert_eq!(global.y.normalization, [0.0, 0.0, 40.0]);
+
+        assert_eq!(
+            solution.provenance.control_points_image,
+            Some(vec![[10.0, 20.0], [30.0, 40.0]])
+        );
+        assert_eq!(solution.provenance.catalog.as_deref(), Some("Gaia DR3"));
+
+        // The solution survives a write that keeps the geometry.
+        let source = read_image_from_bytes(&file, 0).unwrap();
+        let mut written = Vec::new();
+        write_f32_image_to_with_options(
+            &mut written,
+            2,
+            2,
+            seiza_fits::F32ImageData::Mono(&[0.0; 4]),
+            &[],
+            &WriteOptions {
+                metadata: Some(&source.metadata),
+                ..WriteOptions::default()
+            },
+        )
+        .unwrap();
+        let reread = read_image_from_bytes(&written, 0)
+            .unwrap()
+            .metadata
+            .astrometric_solution()
+            .unwrap();
+        assert_eq!(reread, source.metadata.astrometric_solution().unwrap());
+    }
+
+    #[test]
+    fn unusable_solution_layers_fall_back() {
+        let only_forward = f64_property(
+            "ProjectiveTransformation:ImageToProjection",
+            "rows=\"3\" columns=\"3\"",
+            &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        );
+        let solution = solution(
+            &[
+                layer_one("1.0", "Mercator"),
+                only_forward,
+                layer_three("VariableOrder", "Local\nFallback"),
+            ]
+            .concat(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(solution.projection.reference_native, [0.0, 0.0]);
+        assert!(solution.projective.is_none() && solution.distortion.is_none());
+        assert_eq!(solution.unavailable.len(), 2, "{:?}", solution.unavailable);
+
+        for (basis, terms) in [
+            ("Wavelet", "Local\nFallback"),
+            ("VariableOrder", "Local\nFallback\nRing"),
+        ] {
+            let solution = self::solution(
+                &[
+                    layer_one("1.0", "Gnomonic"),
+                    layer_two(),
+                    layer_three(basis, terms),
+                ]
+                .concat(),
+            )
+            .unwrap()
+            .unwrap();
+            assert!(solution.projective.is_some());
+            assert!(solution.distortion.is_none(), "{basis} {terms}");
+        }
+    }
+
+    #[test]
+    fn an_unusable_first_layer_makes_the_solution_unavailable() {
+        assert!(solution("").unwrap().is_none());
+        assert!(matches!(
+            solution(&layer_one("2.0", "Gnomonic")),
+            Err(XisfError::Unsupported(_))
+        ));
+        assert!(matches!(
+            solution(&layer_one("1.0", "Bonne")),
+            Err(XisfError::Malformed(message)) if message.contains("Bonne")
+        ));
+        let without_version =
+            layer_one("1.0", "Gnomonic").replacen(&text_property("Version", "1.0"), "", 1);
+        assert!(matches!(
+            solution(&without_version),
+            Err(XisfError::Malformed(_))
+        ));
     }
 
     #[test]
