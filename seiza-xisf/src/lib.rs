@@ -72,6 +72,11 @@ pub enum SampleFormat {
     UInt64,
     Float32,
     Float64,
+    /// Two `Float32` values, real then imaginary. Only
+    /// [`read_complex_image`] decodes complex samples.
+    Complex32,
+    /// Two `Float64` values, real then imaginary.
+    Complex64,
 }
 
 impl SampleFormat {
@@ -81,6 +86,8 @@ impl SampleFormat {
             "UInt16" | "UShort" => Ok(Self::UInt16),
             "UInt32" | "UInt" => Ok(Self::UInt32),
             "UInt64" => Ok(Self::UInt64),
+            "Complex32" => Ok(Self::Complex32),
+            "Complex64" => Ok(Self::Complex64),
             "Float32" | "Float" => Ok(Self::Float32),
             "Float64" | "Double" => Ok(Self::Float64),
             value => Err(XisfError::Unsupported(format!("sample format {value:?}"))),
@@ -92,8 +99,13 @@ impl SampleFormat {
             Self::UInt8 => 1,
             Self::UInt16 => 2,
             Self::UInt32 | Self::Float32 => 4,
-            Self::UInt64 | Self::Float64 => 8,
+            Self::UInt64 | Self::Float64 | Self::Complex32 => 8,
+            Self::Complex64 => 16,
         }
+    }
+
+    pub fn is_complex(self) -> bool {
+        matches!(self, Self::Complex32 | Self::Complex64)
     }
 
     fn fits_bitpix(self) -> i64 {
@@ -102,8 +114,8 @@ impl SampleFormat {
             Self::UInt16 => 16,
             Self::UInt32 => 32,
             Self::UInt64 => 64,
-            Self::Float32 => -32,
-            Self::Float64 => -64,
+            Self::Float32 | Self::Complex32 => -32,
+            Self::Float64 | Self::Complex64 => -64,
         }
     }
 }
@@ -748,6 +760,161 @@ pub fn read_image_from_bytes(bytes: &[u8], index: usize) -> Result<XisfImage, Xi
     )
 }
 
+/// Complex pixel samples in planar order, as `[real, imaginary]` pairs.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ComplexSamples {
+    C32(Vec<[f32; 2]>),
+    C64(Vec<[f64; 2]>),
+}
+
+/// A decoded complex image. `FitsImage` has no complex sample type, so these
+/// images have a reader of their own.
+#[derive(Clone, Debug)]
+pub struct ComplexImage {
+    pub width: usize,
+    pub height: usize,
+    pub planes: usize,
+    pub samples: ComplexSamples,
+    pub info: XisfImageInfo,
+}
+
+/// Read a complex image (`Complex32` or `Complex64` samples) by zero-based
+/// index. Real images fail with [`XisfError::Unsupported`]; open those with
+/// [`open_image`].
+pub fn read_complex_image(path: &Path, index: usize) -> Result<ComplexImage, XisfError> {
+    let mut file = std::fs::File::open(path)?;
+    let file_bytes = file.metadata()?.len();
+    read_complex_from(
+        &mut file,
+        file_bytes,
+        Some(&header_dir(path)),
+        ImageSelection::Index(index),
+    )
+}
+
+/// [`read_complex_image`] by case-sensitive XISF `id` attribute.
+pub fn read_complex_image_by_id(path: &Path, id: &str) -> Result<ComplexImage, XisfError> {
+    let mut file = std::fs::File::open(path)?;
+    let file_bytes = file.metadata()?.len();
+    read_complex_from(
+        &mut file,
+        file_bytes,
+        Some(&header_dir(path)),
+        ImageSelection::Id(id),
+    )
+}
+
+/// [`read_complex_image`] for a complete in-memory monolithic XISF file.
+pub fn read_complex_image_from_bytes(
+    bytes: &[u8],
+    index: usize,
+) -> Result<ComplexImage, XisfError> {
+    let mut reader = std::io::Cursor::new(bytes);
+    read_complex_from(
+        &mut reader,
+        bytes.len() as u64,
+        None,
+        ImageSelection::Index(index),
+    )
+}
+
+fn read_complex_from(
+    reader: &mut (impl Read + Seek),
+    file_bytes: u64,
+    header_dir: Option<&Path>,
+    selection: ImageSelection<'_>,
+) -> Result<ComplexImage, XisfError> {
+    let mut parsed = parse_file(reader, file_bytes, header_dir)?;
+    let index = match selection {
+        ImageSelection::Index(index) => index,
+        ImageSelection::Id(id) => parsed
+            .index_of_id(id)
+            .ok_or_else(|| XisfError::ImageNotFound(format!("with id {id:?}")))?,
+    };
+    let image = parsed.take(index)?;
+    let format = image.info.sample_format;
+    if !format.is_complex() {
+        return Err(XisfError::Unsupported(format!(
+            "{format:?} samples are real; open the image with open_image"
+        )));
+    }
+    if let Some(checksum) = &image.checksum {
+        verify_checksum(reader, &image, checksum)?;
+    }
+    let bytes = match &image.info.compression {
+        None => with_block(reader, &image, |block| {
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(image.expected_bytes)
+                .map_err(|_| XisfError::Malformed("pixel buffer allocation failed".into()))?;
+            read_decompressed(block, image.expected_bytes, &mut bytes)?;
+            Ok(bytes)
+        })?,
+        Some(compression) => {
+            let raw = with_block(reader, &image, |block| {
+                decompress(block, &image, compression)
+            })?;
+            match compression.shuffled_item_bytes {
+                Some(item_bytes) => unshuffle(&raw, item_bytes),
+                None => raw,
+            }
+        }
+    };
+    let order = image.info.byte_order;
+    let component_bytes = format.bytes_per_sample() / 2;
+    let components = bytes.chunks_exact(component_bytes);
+    let (width, height, planes) = (image.info.width, image.info.height, image.info.planes);
+    let mut samples = match format {
+        SampleFormat::Complex32 => {
+            let values = components
+                .map(|bytes| {
+                    let bytes = bytes.try_into().unwrap();
+                    match order {
+                        ByteOrder::Little => f32::from_le_bytes(bytes),
+                        ByteOrder::Big => f32::from_be_bytes(bytes),
+                    }
+                })
+                .collect::<Vec<_>>();
+            ComplexSamples::C32(
+                values
+                    .chunks_exact(2)
+                    .map(|pair| [pair[0], pair[1]])
+                    .collect(),
+            )
+        }
+        _ => {
+            let values = components
+                .map(|bytes| {
+                    let bytes = bytes.try_into().unwrap();
+                    match order {
+                        ByteOrder::Little => f64::from_le_bytes(bytes),
+                        ByteOrder::Big => f64::from_be_bytes(bytes),
+                    }
+                })
+                .collect::<Vec<_>>();
+            ComplexSamples::C64(
+                values
+                    .chunks_exact(2)
+                    .map(|pair| [pair[0], pair[1]])
+                    .collect(),
+            )
+        }
+    };
+    if image.info.pixel_storage == PixelStorage::Normal && planes > 1 {
+        match &mut samples {
+            ComplexSamples::C32(values) => reorder_normal(values, planes),
+            ComplexSamples::C64(values) => reorder_normal(values, planes),
+        }
+    }
+    Ok(ComplexImage {
+        width,
+        height,
+        planes,
+        samples,
+        info: image.info,
+    })
+}
+
 enum ImageSelection<'a> {
     Index(usize),
     Id(&'a str),
@@ -1246,6 +1413,11 @@ fn parse_image(
         .get("colorSpace")
         .map(|value| value.trim().to_string())
         .unwrap_or_else(|| "Gray".into());
+    if sample_format.is_complex() && color_space == "CIELab" {
+        return Err(XisfError::Unsupported(
+            "complex CIELab image; complex images have no representable range".into(),
+        ));
+    }
     if !matches!(
         (planes, color_space.as_str()),
         (1, "Gray") | (3, "RGB") | (3, "CIELab")
@@ -1840,6 +2012,9 @@ fn lowercase_hex(bytes: &[u8]) -> String {
 }
 
 fn decode_block(reader: &mut (impl Read + Seek), image: &ParsedImage) -> Result<Pixels, XisfError> {
+    if image.info.sample_format.is_complex() {
+        return Err(complex_needs_its_own_reader());
+    }
     let mut pixels = match &image.info.compression {
         None => with_block(reader, image, |block| decode_reader(block, image))?,
         Some(compression) => {
@@ -1962,25 +2137,26 @@ fn unshuffle(bytes: &[u8], item_bytes: usize) -> Vec<u8> {
     output
 }
 
+fn reorder_normal<T: Copy>(values: &mut Vec<T>, planes: usize) {
+    let mut planar = Vec::with_capacity(values.len());
+    for channel in 0..planes {
+        planar.extend(values.iter().skip(channel).step_by(planes).copied());
+    }
+    *values = planar;
+}
+
 /// Reorder pixel-by-pixel samples into the channel-by-channel order that
 /// decoded images use.
 fn planar_from_normal(pixels: &mut Pixels, planes: usize) {
-    fn reorder<T: Copy>(values: &mut Vec<T>, planes: usize) {
-        let mut planar = Vec::with_capacity(values.len());
-        for channel in 0..planes {
-            planar.extend(values.iter().skip(channel).step_by(planes).copied());
-        }
-        *values = planar;
-    }
     if planes < 2 {
         return;
     }
     match pixels {
-        Pixels::U8(values) => reorder(values, planes),
-        Pixels::U16(values) => reorder(values, planes),
-        Pixels::I32(values) => reorder(values, planes),
-        Pixels::F32(values) => reorder(values, planes),
-        Pixels::F64(values) => reorder(values, planes),
+        Pixels::U8(values) => reorder_normal(values, planes),
+        Pixels::U16(values) => reorder_normal(values, planes),
+        Pixels::I32(values) => reorder_normal(values, planes),
+        Pixels::F32(values) => reorder_normal(values, planes),
+        Pixels::F64(values) => reorder_normal(values, planes),
     }
 }
 
@@ -2026,7 +2202,12 @@ fn empty_pixels(format: SampleFormat, count: usize) -> Result<Pixels, XisfError>
             reserve(count).map(Pixels::F64)
         }
         SampleFormat::Float32 => reserve(count).map(Pixels::F32),
+        SampleFormat::Complex32 | SampleFormat::Complex64 => Err(complex_needs_its_own_reader()),
     }
+}
+
+fn complex_needs_its_own_reader() -> XisfError {
+    XisfError::Unsupported("complex samples; use read_complex_image".into())
 }
 
 fn append_decoded(
@@ -3215,6 +3396,60 @@ mod tests {
         assert!(matches!(
             from_bytes(header.as_bytes()),
             Err(XisfError::Unsupported(message)) if message.contains("header file")
+        ));
+    }
+
+    #[test]
+    fn reads_complex_samples_through_their_own_api() {
+        let values = [[1.5_f32, -2.0], [0.0, 3.25], [-4.0, 0.5], [7.0, -8.0]];
+        let raw = values
+            .iter()
+            .flatten()
+            .flat_map(|value| value.to_be_bytes())
+            .collect::<Vec<_>>();
+        let xml = image_element(0, "2:2:1", "Complex32", raw.len(), "byteOrder=\"big\"", "");
+        let bytes = monolithic(xml, &[&raw]);
+        let image = read_complex_image_from_bytes(&bytes, 0).unwrap();
+        assert_eq!((image.width, image.height, image.planes), (2, 2, 1));
+        assert_eq!(image.samples, ComplexSamples::C32(values.to_vec()));
+        assert!(matches!(
+            from_bytes(&bytes),
+            Err(XisfError::Unsupported(message)) if message.contains("read_complex_image")
+        ));
+
+        // Complex64 RGB, stored pixel by pixel and shuffled as 16-byte items.
+        let pixel = |index: usize, plane: usize| [index as f64, plane as f64 * 10.0];
+        let normal = (0..2)
+            .flat_map(|index| (0..3).map(move |plane| pixel(index, plane)))
+            .collect::<Vec<_>>();
+        let raw = normal
+            .iter()
+            .flatten()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        let compressed = zstd::bulk::compress(&shuffled(&raw, 16), 3).unwrap();
+        let xml = image_element(
+            0,
+            "2:1:3",
+            "Complex64",
+            compressed.len(),
+            &format!(
+                "colorSpace=\"RGB\" pixelStorage=\"Normal\" compression=\"zstd+sh:{}:16\"",
+                raw.len()
+            ),
+            "",
+        );
+        let image = read_complex_image_from_bytes(&monolithic(xml, &[&compressed]), 0).unwrap();
+        let planar = (0..3)
+            .flat_map(|plane| (0..2).map(move |index| pixel(index, plane)))
+            .collect::<Vec<_>>();
+        assert_eq!(image.samples, ComplexSamples::C64(planar));
+
+        let raw = [1_u8, 2, 3, 4];
+        let real = monolithic(image_element(0, "2:2:1", "UInt8", 4, "", ""), &[&raw]);
+        assert!(matches!(
+            read_complex_image_from_bytes(&real, 0),
+            Err(XisfError::Unsupported(_))
         ));
     }
 
