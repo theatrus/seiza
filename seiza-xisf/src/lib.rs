@@ -216,6 +216,248 @@ pub struct XisfImageInfo {
     pub headers: Vec<(String, HeaderValue)>,
     pub properties: Vec<XisfProperty>,
     pub cfa_pattern: Option<String>,
+    /// The image's `RGBWorkingSpace`, when it declares a usable one. XISF
+    /// takes sRGB when none is declared.
+    pub rgb_working_space: Option<RgbWorkingSpace>,
+}
+
+/// How an RGB working space turns nominal components into linear ones.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Gamma {
+    /// The sRGB piecewise function.
+    Srgb,
+    /// A power law with this exponent.
+    Exponent(f64),
+}
+
+/// A colorimetrically defined RGB working space, relative to the D50
+/// reference white.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RgbWorkingSpace {
+    pub name: Option<String>,
+    pub gamma: Gamma,
+    /// Chromaticity x of the red, green and blue primaries.
+    pub x: [f64; 3],
+    /// Chromaticity y of the red, green and blue primaries.
+    pub y: [f64; 3],
+    /// Luminance coefficients of the red, green and blue primaries.
+    pub luminance: [f64; 3],
+}
+
+impl RgbWorkingSpace {
+    /// sRGB adapted to D50 with the Bradford transform, the default XISF
+    /// working space.
+    pub fn srgb() -> Self {
+        Self {
+            name: Some("sRGB IEC61966-2.1".into()),
+            gamma: Gamma::Srgb,
+            x: [0.648431, 0.321152, 0.155886],
+            y: [0.330856, 0.597871, 0.066044],
+            luminance: [0.222491, 0.716888, 0.060621],
+        }
+    }
+
+    fn parse(attributes: &BTreeMap<String, String>) -> Result<Self, XisfError> {
+        let triple = |name: &str| -> Result<[f64; 3], XisfError> {
+            let value = required(attributes, name, "RGBWorkingSpace")?;
+            let parts = value
+                .split(':')
+                .map(|part| part.trim().parse::<f64>().ok().filter(|v| v.is_finite()))
+                .collect::<Option<Vec<_>>>()
+                .filter(|parts| parts.len() == 3)
+                .ok_or_else(|| {
+                    XisfError::Malformed(format!("invalid RGBWorkingSpace {name}={value:?}"))
+                })?;
+            Ok([parts[0], parts[1], parts[2]])
+        };
+        let gamma = required(attributes, "gamma", "RGBWorkingSpace")?.trim();
+        let gamma = if gamma.eq_ignore_ascii_case("srgb") {
+            Gamma::Srgb
+        } else {
+            gamma
+                .parse::<f64>()
+                .ok()
+                .filter(|gamma| gamma.is_finite() && *gamma > 0.0)
+                .map(Gamma::Exponent)
+                .ok_or_else(|| {
+                    XisfError::Malformed(format!("invalid RGBWorkingSpace gamma {gamma:?}"))
+                })?
+        };
+        let space = Self {
+            name: attributes.get("name").cloned(),
+            gamma,
+            x: triple("x")?,
+            y: triple("y")?,
+            luminance: triple("Y")?,
+        };
+        if space.y.contains(&0.0) || space.xyz_from_linear_rgb().inverse().is_none() {
+            return Err(XisfError::Malformed(
+                "RGBWorkingSpace primaries do not define a valid space".into(),
+            ));
+        }
+        Ok(space)
+    }
+
+    /// The matrix M of Annex B, taking linear RGB to CIE XYZ.
+    fn xyz_from_linear_rgb(&self) -> Matrix3 {
+        let column = |channel: usize| {
+            let (x, y, luminance) = (self.x[channel], self.y[channel], self.luminance[channel]);
+            [luminance * x / y, luminance, luminance * (1.0 - x - y) / y]
+        };
+        let (red, green, blue) = (column(0), column(1), column(2));
+        Matrix3(std::array::from_fn(|row| [red[row], green[row], blue[row]]))
+    }
+
+    fn delinearize(&self, value: f64) -> f64 {
+        match self.gamma {
+            Gamma::Srgb if value <= 0.003_130_8 => 12.92 * value,
+            Gamma::Srgb => 1.055 * value.powf(1.0 / 2.4) - 0.055,
+            Gamma::Exponent(gamma) => value.powf(1.0 / gamma),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Matrix3([[f64; 3]; 3]);
+
+impl Matrix3 {
+    fn inverse(&self) -> Option<Self> {
+        let m = &self.0;
+        let cofactor = |row: usize, column: usize| {
+            let (r0, r1) = ((row + 1) % 3, (row + 2) % 3);
+            let (c0, c1) = ((column + 1) % 3, (column + 2) % 3);
+            m[r0][c0] * m[r1][c1] - m[r0][c1] * m[r1][c0]
+        };
+        let determinant = (0..3)
+            .map(|column| m[0][column] * cofactor(0, column))
+            .sum::<f64>();
+        if !determinant.is_normal() {
+            return None;
+        }
+        // The inverse is the transposed cofactor matrix over the determinant.
+        Some(Self(std::array::from_fn(|row| {
+            std::array::from_fn(|column| cofactor(column, row) / determinant)
+        })))
+    }
+
+    fn apply(&self, vector: [f64; 3]) -> [f64; 3] {
+        std::array::from_fn(|row| {
+            (0..3)
+                .map(|column| self.0[row][column] * vector[column])
+                .sum()
+        })
+    }
+}
+
+/// Convert decoded CIE L*a*b* samples to RGB in place, with the equations of
+/// Annex B and the image's working space. Samples are mapped to the nominal
+/// `[0, 1]` range through the image's representable range and back, so the
+/// RGB samples keep the stored sample format and range.
+fn rgb_from_lab(pixels: &mut Pixels, info: &XisfImageInfo) -> Result<(), XisfError> {
+    let (low, high) = match (info.bounds, info.sample_format) {
+        (Some(bounds), _) => bounds,
+        (None, SampleFormat::Float32 | SampleFormat::Float64) => {
+            return Err(XisfError::Malformed(
+                "floating-point CIELab image has no usable bounds".into(),
+            ));
+        }
+        (None, format) => (0.0, 2_f64.powi(8 * format.bytes_per_sample() as i32) - 1.0),
+    };
+    let space = info
+        .rgb_working_space
+        .clone()
+        .unwrap_or_else(RgbWorkingSpace::srgb);
+    let linear_from_xyz = space
+        .xyz_from_linear_rgb()
+        .inverse()
+        .expect("working spaces are validated when parsed");
+    const WHITE_X: f64 = 0.96422;
+    const WHITE_Z: f64 = 0.82521;
+    const EPSILON: f64 = 216.0 / 24389.0;
+    const KAPPA: f64 = 24389.0 / 27.0;
+    let g = |t: f64| {
+        let cube = t * t * t;
+        if cube > EPSILON {
+            cube
+        } else {
+            (116.0 * t - 16.0) / KAPPA
+        }
+    };
+    let convert = |[l, a, b]: [f64; 3]| -> [f64; 3] {
+        let f_y = (l + 0.16) / 1.16;
+        let f_x = f_y + 50.0 / 29.0 * (a - 0.5);
+        let f_z = f_y - 50.0 / 29.0 * (b - 0.5);
+        let xyz = [WHITE_X * g(f_x), g(f_y), WHITE_Z * g(f_z)];
+        linear_from_xyz
+            .apply(xyz)
+            .map(|linear| space.delinearize(linear.clamp(0.0, 1.0)).clamp(0.0, 1.0))
+    };
+    let pixel_count = info.width * info.height;
+    let scale = high - low;
+    fn convert_planes<T: Copy>(
+        values: &mut [T],
+        pixel_count: usize,
+        to_f64: impl Fn(T) -> f64,
+        from_f64: impl Fn(f64) -> T,
+        convert: impl Fn([f64; 3]) -> [f64; 3],
+    ) {
+        for index in 0..pixel_count {
+            let lab = std::array::from_fn(|plane| to_f64(values[plane * pixel_count + index]));
+            let rgb = convert(lab);
+            for (plane, value) in rgb.into_iter().enumerate() {
+                values[plane * pixel_count + index] = from_f64(value);
+            }
+        }
+    }
+    let nominal = |value: f64| ((value - low) / scale).clamp(0.0, 1.0);
+    let stored = |value: f64| low + value * scale;
+    match pixels {
+        Pixels::U8(values) => convert_planes(
+            values,
+            pixel_count,
+            |value| nominal(f64::from(value)),
+            |value| stored(value).round() as u8,
+            convert,
+        ),
+        Pixels::U16(values) => convert_planes(
+            values,
+            pixel_count,
+            |value| nominal(f64::from(value)),
+            |value| stored(value).round() as u16,
+            convert,
+        ),
+        Pixels::I32(values) => convert_planes(
+            values,
+            pixel_count,
+            |value| nominal(f64::from(value)),
+            |value| stored(value).round() as i32,
+            convert,
+        ),
+        Pixels::F32(values) => convert_planes(
+            values,
+            pixel_count,
+            |value| nominal(f64::from(value)),
+            |value| stored(value) as f32,
+            convert,
+        ),
+        Pixels::F64(values) => {
+            let integer = !matches!(info.sample_format, SampleFormat::Float64);
+            convert_planes(
+                values,
+                pixel_count,
+                nominal,
+                |value| {
+                    if integer {
+                        stored(value).round()
+                    } else {
+                        stored(value)
+                    }
+                },
+                convert,
+            )
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -564,15 +806,7 @@ fn parse_xml(xml: &[u8], header_end: u64, file_bytes: u64) -> Result<ParsedFile,
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(false);
     let mut buffer = Vec::new();
-    let mut state = ParseState {
-        header_end,
-        file_bytes,
-        images: Vec::new(),
-        unavailable: Vec::new(),
-        image_count: 0,
-        pending: None,
-        saw_root: false,
-    };
+    let mut state = ParseState::default();
     let mut depth = 0_usize;
 
     loop {
@@ -619,8 +853,8 @@ fn parse_xml(xml: &[u8], header_end: u64, file_bytes: u64) -> Result<ParsedFile,
                 };
                 state.text(&text, depth);
             }
-            Event::End(element) => {
-                state.end(element.local_name().as_ref(), depth);
+            Event::End(_) => {
+                state.end(depth);
                 depth = depth.saturating_sub(1);
             }
             Event::Eof => break,
@@ -635,42 +869,62 @@ fn parse_xml(xml: &[u8], header_end: u64, file_bytes: u64) -> Result<ParsedFile,
     if !state.saw_root {
         return Err(XisfError::Malformed("missing xisf root element".into()));
     }
-    if state.image_count == 0 {
+    if state.images.is_empty() {
         return Err(XisfError::Malformed("file contains no images".into()));
     }
-    Ok(ParsedFile {
-        images: state.images,
-        unavailable: state.unavailable,
-    })
+    // Shared elements may follow the images that reference them, so images
+    // are only interpreted once the whole header has been read.
+    let mut parsed = ParsedFile {
+        images: Vec::new(),
+        unavailable: Vec::new(),
+    };
+    for image in state.images {
+        let image = match image {
+            Ok(image) => image,
+            Err((index, error)) => {
+                parsed.unavailable.push((index, None, error));
+                continue;
+            }
+        };
+        let (index, id) = (image.index, image.attributes.get("id").cloned());
+        match parse_image(image, &state.shared, header_end, file_bytes) {
+            Ok(image) => parsed.images.push(image),
+            Err(error) => parsed.unavailable.push((index, id, error)),
+        }
+    }
+    Ok(parsed)
 }
 
-/// An `Image` element whose end tag has not been read yet. Its pixel block
-/// can live in its own character data or in a child `Data` element, so it is
-/// only interpreted once complete.
+/// An XML element with its attributes and character data. Elements nested
+/// inside it are not kept.
+#[derive(Clone, Debug, Default)]
+struct Element {
+    name: String,
+    attributes: BTreeMap<String, String>,
+    text: String,
+}
+
+/// An `Image` element, kept whole until the header has been read.
 struct PendingImage {
     index: usize,
-    depth: usize,
     attributes: BTreeMap<String, String>,
-    headers: Vec<(String, HeaderValue)>,
-    properties: Vec<XisfProperty>,
-    cfa_pattern: Option<String>,
     /// Character data directly inside the `Image` element: an inline block.
     text: String,
-    /// The attributes and character data of a child `Data` element: an
-    /// embedded block.
-    data: Option<(BTreeMap<String, String>, String)>,
-    in_data: bool,
-    /// The property collecting character data, with its element depth.
-    property: Option<(usize, usize)>,
+    children: Vec<Element>,
 }
 
+#[derive(Default)]
 struct ParseState {
-    header_end: u64,
-    file_bytes: u64,
-    images: Vec<ParsedImage>,
-    unavailable: Vec<(usize, Option<String>, XisfError)>,
-    image_count: usize,
-    pending: Option<PendingImage>,
+    images: Vec<Result<PendingImage, (usize, XisfError)>>,
+    /// Child elements of the root with a `uid`, which `Reference` elements
+    /// inside images point to.
+    shared: BTreeMap<String, Element>,
+    /// Whether the last `images` entry is open.
+    in_image: bool,
+    /// A shared root element being read.
+    open_shared: Option<(String, Element)>,
+    /// A child element of the open image being read.
+    open_child: Option<Element>,
     saw_root: bool,
 }
 
@@ -683,136 +937,105 @@ impl ParseState {
         empty: bool,
     ) -> Result<(), XisfError> {
         let name = element.local_name();
-        if depth == 1 && name.as_ref() == b"xisf" {
-            let attributes = attributes(reader, element)?;
-            if attributes.get("version").map(|value| value.trim()) != Some("1.0") {
-                return Err(XisfError::Unsupported(format!(
-                    "XISF version {:?}",
-                    attributes.get("version")
-                )));
-            }
-            self.saw_root = true;
-            return Ok(());
-        }
-        if depth == 2 && name.as_ref() == b"Image" {
-            let index = self.image_count;
-            self.image_count += 1;
-            let attributes = match attributes(reader, element) {
-                Ok(attributes) => attributes,
-                Err(error) => {
-                    self.unavailable.push((index, None, error));
-                    return Ok(());
+        let name = String::from_utf8_lossy(name.as_ref());
+        match depth {
+            1 if name == "xisf" => {
+                let attributes = attributes(reader, element)?;
+                if attributes.get("version").map(|value| value.trim()) != Some("1.0") {
+                    return Err(XisfError::Unsupported(format!(
+                        "XISF version {:?}",
+                        attributes.get("version")
+                    )));
                 }
-            };
-            self.pending = Some(PendingImage {
-                index,
-                depth,
-                attributes,
-                headers: Vec::new(),
-                properties: Vec::new(),
-                cfa_pattern: None,
-                text: String::new(),
-                data: None,
-                in_data: false,
-                property: None,
-            });
-            if empty {
-                self.finish_image();
+                self.saw_root = true;
             }
-            return Ok(());
-        }
-        let Some(image) = &mut self.pending else {
-            return Ok(());
-        };
-        if depth != image.depth + 1 {
-            return Ok(());
-        }
-        let attributes = attributes(reader, element)?;
-        match name.as_ref() {
-            b"FITSKeyword" => {
-                let keyword = required(&attributes, "name", "FITSKeyword")?
-                    .trim()
-                    .to_string();
-                // XISF samples are already physical and the XML geometry is
-                // authoritative, so preserved FITS scaling and structure
-                // keywords must not be re-applied by FITS-side consumers
-                // such as into_physical_f32. COMMENT/HISTORY-style keywords
-                // legitimately carry no value.
-                if !structural_fits_keyword(&keyword) {
-                    let raw = attributes.get("value").map(String::as_str).unwrap_or("");
-                    image.headers.push((keyword, parse_header_value(raw)));
+            2 if name == "Image" => {
+                let index = self.images.len();
+                let image = attributes(reader, element)
+                    .map(|attributes| PendingImage {
+                        index,
+                        attributes,
+                        text: String::new(),
+                        children: Vec::new(),
+                    })
+                    .map_err(|error| (index, error));
+                self.in_image = image.is_ok() && !empty;
+                self.images.push(image);
+            }
+            2 => {
+                let attributes = attributes(reader, element)?;
+                if let Some(uid) = attributes.get("uid") {
+                    let shared = Element {
+                        name: name.into_owned(),
+                        attributes: attributes.clone(),
+                        text: String::new(),
+                    };
+                    let uid = uid.trim().to_string();
+                    if empty {
+                        self.shared.insert(uid, shared);
+                    } else {
+                        self.open_shared = Some((uid, shared));
+                    }
                 }
             }
-            b"Property" => {
-                image.properties.push(XisfProperty {
-                    id: required(&attributes, "id", "Property")?.to_string(),
-                    type_name: required(&attributes, "type", "Property")?.to_string(),
-                    value: attributes.get("value").cloned(),
-                    comment: attributes.get("comment").cloned(),
-                    format: attributes.get("format").cloned(),
-                    location: attributes.get("location").cloned(),
-                });
-                if !empty {
-                    image.property = Some((image.properties.len() - 1, depth));
+            3 if self.in_image => {
+                let child = Element {
+                    name: name.into_owned(),
+                    attributes: attributes(reader, element)?,
+                    text: String::new(),
+                };
+                if empty {
+                    self.push_child(child);
+                } else {
+                    self.open_child = Some(child);
                 }
-            }
-            b"ColorFilterArray" => {
-                let width = parse_usize(required(&attributes, "width", "ColorFilterArray")?)?;
-                let height = parse_usize(required(&attributes, "height", "ColorFilterArray")?)?;
-                let pattern = required(&attributes, "pattern", "ColorFilterArray")?.trim();
-                if width == 2 && height == 2 && pattern.len() == 4 {
-                    image.cfa_pattern = Some(pattern.to_string());
-                }
-            }
-            b"Data" => {
-                image.data = Some((attributes, String::new()));
-                image.in_data = !empty;
             }
             _ => {}
         }
         Ok(())
     }
 
+    fn push_child(&mut self, child: Element) {
+        if let Some(Ok(image)) = self.images.last_mut() {
+            image.children.push(child);
+        }
+    }
+
     fn text(&mut self, text: &str, depth: usize) {
-        let Some(image) = &mut self.pending else {
-            return;
-        };
-        if let Some((property, property_depth)) = image.property
-            && depth == property_depth
-        {
-            image.properties[property]
-                .value
-                .get_or_insert_with(String::new)
-                .push_str(text);
-        } else if image.in_data && depth == image.depth + 1 {
-            if let Some((_, data)) = &mut image.data {
-                data.push_str(text);
+        match depth {
+            3 => {
+                if let Some(child) = &mut self.open_child {
+                    child.text.push_str(text);
+                }
             }
-        } else if depth == image.depth {
-            image.text.push_str(text);
+            2 if self.in_image => {
+                if let Some(Ok(image)) = self.images.last_mut() {
+                    image.text.push_str(text);
+                }
+            }
+            2 => {
+                if let Some((_, shared)) = &mut self.open_shared {
+                    shared.text.push_str(text);
+                }
+            }
+            _ => {}
         }
     }
 
-    fn end(&mut self, name: &[u8], depth: usize) {
-        let Some(image) = &mut self.pending else {
-            return;
-        };
-        if depth == image.depth && name == b"Image" {
-            self.finish_image();
-        } else if depth == image.depth + 1 {
-            image.property = None;
-            image.in_data = false;
-        }
-    }
-
-    fn finish_image(&mut self) {
-        let Some(image) = self.pending.take() else {
-            return;
-        };
-        let (index, id) = (image.index, image.attributes.get("id").cloned());
-        match parse_image(image, self.header_end, self.file_bytes) {
-            Ok(image) => self.images.push(image),
-            Err(error) => self.unavailable.push((index, id, error)),
+    fn end(&mut self, depth: usize) {
+        match depth {
+            3 => {
+                if let Some(child) = self.open_child.take() {
+                    self.push_child(child);
+                }
+            }
+            2 => {
+                self.in_image = false;
+                if let Some((uid, shared)) = self.open_shared.take() {
+                    self.shared.insert(uid, shared);
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -837,10 +1060,76 @@ fn attributes(
 
 fn parse_image(
     image: PendingImage,
+    shared: &BTreeMap<String, Element>,
     header_end: u64,
     file_bytes: u64,
 ) -> Result<ParsedImage, XisfError> {
     let attributes = &image.attributes;
+    let mut headers = Vec::new();
+    let mut properties = Vec::new();
+    let mut cfa_pattern = None;
+    let mut data = None;
+    let mut working_space = None;
+    // A Reference child stands for the shared root element it names.
+    // Chained references are not allowed, so one lookup suffices.
+    let children = image.children.iter().filter_map(|child| {
+        if child.name == "Reference" {
+            child
+                .attributes
+                .get("ref")
+                .and_then(|reference| shared.get(reference.trim()))
+        } else {
+            Some(child)
+        }
+    });
+    for child in children {
+        let child_attributes = &child.attributes;
+        match child.name.as_str() {
+            "FITSKeyword" => {
+                let keyword = required(child_attributes, "name", "FITSKeyword")?
+                    .trim()
+                    .to_string();
+                // XISF samples are already physical and the XML geometry is
+                // authoritative, so preserved FITS scaling and structure
+                // keywords must not be re-applied by FITS-side consumers
+                // such as into_physical_f32. COMMENT/HISTORY-style keywords
+                // legitimately carry no value.
+                if !structural_fits_keyword(&keyword) {
+                    let raw = child_attributes
+                        .get("value")
+                        .map(String::as_str)
+                        .unwrap_or("");
+                    headers.push((keyword, parse_header_value(raw)));
+                }
+            }
+            "Property" => {
+                let mut value = child_attributes.get("value").cloned();
+                if !child.text.is_empty() {
+                    value.get_or_insert_with(String::new).push_str(&child.text);
+                }
+                properties.push(XisfProperty {
+                    id: required(child_attributes, "id", "Property")?.to_string(),
+                    type_name: required(child_attributes, "type", "Property")?.to_string(),
+                    value,
+                    comment: child_attributes.get("comment").cloned(),
+                    format: child_attributes.get("format").cloned(),
+                    location: child_attributes.get("location").cloned(),
+                });
+            }
+            "ColorFilterArray" => {
+                let width = parse_usize(required(child_attributes, "width", "ColorFilterArray")?)?;
+                let height =
+                    parse_usize(required(child_attributes, "height", "ColorFilterArray")?)?;
+                let pattern = required(child_attributes, "pattern", "ColorFilterArray")?.trim();
+                if width == 2 && height == 2 && pattern.len() == 4 {
+                    cfa_pattern = Some(pattern.to_string());
+                }
+            }
+            "Data" => data = Some(child),
+            "RGBWorkingSpace" => working_space = Some(RgbWorkingSpace::parse(child_attributes)),
+            _ => {}
+        }
+    }
     let geometry = required(attributes, "geometry", "Image")?
         .split(':')
         .collect::<Vec<_>>();
@@ -883,11 +1172,21 @@ fn parse_image(
         .get("colorSpace")
         .map(|value| value.trim().to_string())
         .unwrap_or_else(|| "Gray".into());
-    if !matches!((planes, color_space.as_str()), (1, "Gray") | (3, "RGB")) {
+    if !matches!(
+        (planes, color_space.as_str()),
+        (1, "Gray") | (3, "RGB") | (3, "CIELab")
+    ) {
         return Err(XisfError::Unsupported(format!(
             "{planes}-channel {color_space} image"
         )));
     }
+    // A working space only matters to this crate for CIELab images, so a
+    // broken one fails only those.
+    let rgb_working_space = match working_space {
+        Some(Ok(space)) => Some(space),
+        Some(Err(error)) if color_space == "CIELab" => return Err(error),
+        Some(Err(_)) | None => None,
+    };
 
     // An embedded block carries its encoding, compression and subblocks on
     // the child Data element; every other location carries them on Image.
@@ -915,9 +1214,11 @@ fn parse_image(
             (BlockLocation::Inline { bytes }, Some(data), attributes)
         }
         None if location_value == "embedded" => {
-            let (data_attributes, text) = image
-                .data
-                .as_ref()
+            let Element {
+                attributes: data_attributes,
+                text,
+                ..
+            } = data
                 .ok_or_else(|| XisfError::Malformed("embedded image has no Data element".into()))?;
             let encoding = required(data_attributes, "encoding", "Data")?;
             let data = decode_text_block(text, encoding)?;
@@ -1014,9 +1315,10 @@ fn parse_image(
             location,
             compression,
             bounds,
-            headers: image.headers,
-            properties: image.properties,
-            cfa_pattern: image.cfa_pattern,
+            headers,
+            properties,
+            cfa_pattern,
+            rgb_working_space,
         },
         expected_bytes,
         inline_data,
@@ -1296,6 +1598,9 @@ fn decode_block(reader: &mut (impl Read + Seek), image: &ParsedImage) -> Result<
     };
     if image.info.pixel_storage == PixelStorage::Normal {
         planar_from_normal(&mut pixels, image.info.planes);
+    }
+    if image.info.color_space == "CIELab" {
+        rgb_from_lab(&mut pixels, &image.info)?;
     }
     Ok(pixels)
 }
@@ -2161,7 +2466,7 @@ mod tests {
     fn an_unsupported_image_leaves_the_rest_of_the_file_readable() {
         let raw = [1_u8, 2, 3, 4];
         let xml = format!(
-            "<Image id=\"lab\" geometry=\"2:2:3\" sampleFormat=\"UInt8\" colorSpace=\"CIELab\" location=\"attachment:@OFFSET0@:12\"/>\
+            "<Image id=\"alpha\" geometry=\"2:2:2\" sampleFormat=\"UInt8\" colorSpace=\"Gray\" location=\"attachment:@OFFSET0@:8\"/>\
              <Image id=\"cube\" geometry=\"2:2:2:1\" sampleFormat=\"UInt8\" location=\"attachment:@OFFSET0@:16\"/>\
              <Image id=\"remote\" geometry=\"2:2:1\" sampleFormat=\"UInt8\" location=\"url(https://example.com/a(1).bin)\"/>\
              {}",
@@ -2200,11 +2505,11 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             unavailable,
-            [(0, Some("lab")), (1, Some("cube")), (2, Some("remote"))]
+            [(0, Some("alpha")), (1, Some("cube")), (2, Some("remote"))]
         );
         assert!(open_image_by_id(&path, "gray").is_ok());
         assert!(matches!(
-            open_image_by_id(&path, "lab"),
+            open_image_by_id(&path, "alpha"),
             Err(XisfError::Unsupported(_))
         ));
     }
@@ -2367,6 +2672,161 @@ mod tests {
         );
         let image = from_bytes(&monolithic(xml, &[&compressed])).unwrap();
         assert!(matches!(image.pixels, Pixels::F64(ref actual) if actual == &expected));
+    }
+
+    #[test]
+    fn default_working_space_takes_linear_white_to_d50() {
+        let white = RgbWorkingSpace::srgb()
+            .xyz_from_linear_rgb()
+            .apply([1.0, 1.0, 1.0]);
+        for (actual, expected) in white.into_iter().zip([0.96422, 1.0, 0.82521]) {
+            assert!((actual - expected).abs() < 1e-5, "{white:?}");
+        }
+    }
+
+    /// Annex B forward transform, RGB to normalized L*a*b*.
+    fn lab_from_rgb(space: &RgbWorkingSpace, rgb: [f64; 3]) -> [f64; 3] {
+        let linear = rgb.map(|value| match space.gamma {
+            Gamma::Srgb if value <= 0.04045 => value / 12.92,
+            Gamma::Srgb => ((value + 0.055) / 1.055).powf(2.4),
+            Gamma::Exponent(gamma) => value.powf(gamma),
+        });
+        let [x, y, z] = space.xyz_from_linear_rgb().apply(linear);
+        let f = |t: f64| {
+            if t > 216.0 / 24389.0 {
+                t.cbrt()
+            } else {
+                (24389.0 / 27.0 * t + 16.0) / 116.0
+            }
+        };
+        let (f_x, f_y, f_z) = (f(x / 0.96422), f(y), f(z / 0.82521));
+        [
+            1.16 * f_y - 0.16,
+            0.5 + 29.0 / 50.0 * (f_x - f_y),
+            0.5 + 29.0 / 50.0 * (f_y - f_z),
+        ]
+    }
+
+    const COLORS: [[f64; 3]; 6] = [
+        [0.0, 0.0, 0.0],
+        [1.0, 1.0, 1.0],
+        [0.8, 0.1, 0.2],
+        [0.05, 0.6, 0.3],
+        [0.2, 0.3, 0.9],
+        [0.002, 0.001, 0.003],
+    ];
+
+    fn lab_planes(space: &RgbWorkingSpace) -> Vec<f64> {
+        let lab = COLORS.map(|rgb| lab_from_rgb(space, rgb));
+        (0..3)
+            .flat_map(|plane| lab.iter().map(move |pixel| pixel[plane]))
+            .collect()
+    }
+
+    fn rgb_planes() -> Vec<f64> {
+        (0..3)
+            .flat_map(|plane| COLORS.iter().map(move |pixel| pixel[plane]))
+            .collect()
+    }
+
+    #[test]
+    fn converts_cielab_to_rgb_in_the_default_space() {
+        let lab = lab_planes(&RgbWorkingSpace::srgb());
+        let raw = lab
+            .iter()
+            .flat_map(|value| (*value as f32).to_le_bytes())
+            .collect::<Vec<_>>();
+        let xml = image_element(
+            0,
+            "6:1:3",
+            "Float32",
+            raw.len(),
+            "colorSpace=\"CIELab\" bounds=\"0:1\"",
+            "",
+        );
+        let image = from_bytes(&monolithic(xml, &[&raw])).unwrap();
+        let Pixels::F32(actual) = &image.pixels else {
+            panic!("CIELab Float32 must decode to f32");
+        };
+        for (actual, expected) in actual.iter().zip(rgb_planes()) {
+            assert!(
+                (f64::from(*actual) - expected).abs() < 1e-5,
+                "{actual} vs {expected}"
+            );
+        }
+
+        // A float image without bounds cannot be mapped to nominal values.
+        let xml = image_element(
+            0,
+            "6:1:3",
+            "Float32",
+            raw.len(),
+            "colorSpace=\"CIELab\"",
+            "",
+        );
+        assert!(matches!(
+            from_bytes(&monolithic(xml, &[&raw])),
+            Err(XisfError::Malformed(message)) if message.contains("bounds")
+        ));
+    }
+
+    #[test]
+    fn converts_cielab_with_a_referenced_working_space() {
+        let linear = RgbWorkingSpace {
+            name: None,
+            gamma: Gamma::Exponent(1.0),
+            ..RgbWorkingSpace::srgb()
+        };
+        let raw = lab_planes(&linear)
+            .iter()
+            .flat_map(|value| ((value * 65535.0).round() as u16).to_le_bytes())
+            .collect::<Vec<_>>();
+        let xml = format!(
+            "{}<RGBWorkingSpace uid=\"linear\" x=\"0.648431:0.321152:0.155886\" y=\"0.330856:0.597871:0.066044\" Y=\"0.222491:0.716888:0.060621\" gamma=\"1\" name=\"Linear sRGB\"/>\
+             <FITSKeyword uid=\"shared-object\" name=\"OBJECT\" value=\"'M 42'\" comment=\"\"/>",
+            image_element(
+                0,
+                "6:1:3",
+                "UInt16",
+                raw.len(),
+                "colorSpace=\"CIELab\"",
+                "<Reference ref=\"linear\"/><Reference ref=\"shared-object\"/>",
+            )
+        );
+        let read = read_image_from_bytes(&monolithic(xml, &[&raw]), 0).unwrap();
+        assert_eq!(
+            read.info
+                .rgb_working_space
+                .as_ref()
+                .map(|space| space.gamma),
+            Some(Gamma::Exponent(1.0))
+        );
+        assert_eq!(read.image.header_str("OBJECT"), Some("M 42"));
+        let Pixels::U16(actual) = &read.image.pixels else {
+            panic!("CIELab UInt16 must decode to u16");
+        };
+        for (actual, expected) in actual.iter().zip(rgb_planes()) {
+            // 16-bit Lab quantization moves dark colors by a few counts.
+            assert!(
+                (f64::from(*actual) / 65535.0 - expected).abs() < 2e-3,
+                "{actual} vs {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_broken_working_space_only_fails_cielab_images() {
+        let raw = [0_u8; 3];
+        let broken =
+            "<RGBWorkingSpace x=\"0.6:0.3\" y=\"0.3:0.6:0.06\" Y=\"0.2:0.7:0.1\" gamma=\"2.2\"/>";
+        let rgb = image_element(0, "1:1:3", "UInt8", 3, "colorSpace=\"RGB\"", broken);
+        let read = read_image_from_bytes(&monolithic(rgb, &[&raw]), 0).unwrap();
+        assert!(read.info.rgb_working_space.is_none());
+        let lab = image_element(0, "1:1:3", "UInt8", 3, "colorSpace=\"CIELab\"", broken);
+        assert!(matches!(
+            from_bytes(&monolithic(lab, &[&raw])),
+            Err(XisfError::Malformed(_))
+        ));
     }
 
     #[test]
