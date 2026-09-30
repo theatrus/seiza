@@ -2,12 +2,12 @@
 //!
 //! The output mirrors the layout the reader supports: an `XISF0100` preamble,
 //! a UTF-8 XML header padded to a 4096-byte block boundary, and one attached
-//! uncompressed little-endian `Float32` planar data block. FITS-compatible
-//! metadata is stored as `FITSKeyword` elements whose values use FITS text
-//! conventions, so files round-trip through this crate's reader and load in
-//! PixInsight.
+//! little-endian `Float32` planar data block, optionally compressed and
+//! checksummed. FITS-compatible metadata is stored as `FITSKeyword` elements
+//! whose values use FITS text conventions, so files round-trip through this
+//! crate's reader and load in PixInsight.
 
-use crate::{MAX_HEADER_BYTES, MAX_SAMPLES, SIGNATURE, XisfError};
+use crate::{CompressionCodec, MAX_HEADER_BYTES, MAX_SAMPLES, SIGNATURE, XisfError};
 use quick_xml::escape::escape;
 use seiza_fits::{F32ImageData, HeaderValue, WriteHeaderCard};
 use std::collections::HashSet;
@@ -17,6 +17,83 @@ use std::path::Path;
 
 const BLOCK_ALIGNMENT: usize = 4096;
 const PIXEL_CHUNK_BYTES: usize = 1024 * 1024;
+/// The largest block compressed as one unit. Larger blocks are split into
+/// subblocks, which keeps every codec within its input limit.
+const SUBBLOCK_BYTES: usize = 1 << 30;
+
+/// Choices for [`write_f32_image_with_options`].
+///
+/// The default writes an uncompressed block without a checksum, which every
+/// XISF reader can open.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WriteOptions {
+    pub compression: Option<WriteCompression>,
+    /// Hash the stored pixel block so readers can detect corruption.
+    pub checksum: Option<ChecksumAlgorithm>,
+}
+
+/// How to compress the pixel block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WriteCompression {
+    /// [`CompressionCodec::Lz4Hc`] is not available for writing.
+    pub codec: CompressionCodec,
+    /// Group the bytes of equal significance before compressing, which
+    /// usually compresses floating-point pixels much better.
+    pub byte_shuffle: bool,
+    /// The codec's own level: 0 to 9 for zlib, 1 to 22 for zstd, and none
+    /// for LZ4. `None` picks the codec's default.
+    pub level: Option<i32>,
+}
+
+impl WriteCompression {
+    /// Zstandard with byte shuffling at its default level, the codec the
+    /// XISF specification recommends for pixel data.
+    ///
+    /// Readers built on the original 2017 specification cannot decode
+    /// Zstandard; use zlib or LZ4 when they must open the file.
+    pub fn recommended() -> Self {
+        Self {
+            codec: CompressionCodec::Zstd,
+            byte_shuffle: true,
+            level: None,
+        }
+    }
+}
+
+/// A hashing algorithm for data block checksums.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChecksumAlgorithm {
+    Sha1,
+    Sha256,
+    Sha512,
+    Sha3_256,
+    Sha3_512,
+}
+
+impl ChecksumAlgorithm {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Sha1 => "sha-1",
+            Self::Sha256 => "sha-256",
+            Self::Sha512 => "sha-512",
+            Self::Sha3_256 => "sha3-256",
+            Self::Sha3_512 => "sha3-512",
+        }
+    }
+
+    fn digest(self, bytes: &[u8]) -> String {
+        fn hex<D: sha2::Digest>(bytes: &[u8]) -> String {
+            crate::lowercase_hex(D::digest(bytes).as_ref())
+        }
+        match self {
+            Self::Sha1 => hex::<sha1::Sha1>(bytes),
+            Self::Sha256 => hex::<sha2::Sha256>(bytes),
+            Self::Sha512 => hex::<sha2::Sha512>(bytes),
+            Self::Sha3_256 => hex::<sha3::Sha3_256>(bytes),
+            Self::Sha3_512 => hex::<sha3::Sha3_512>(bytes),
+        }
+    }
+}
 
 /// Atomically write a one-image monolithic XISF file with `Float32` samples.
 ///
@@ -30,7 +107,27 @@ pub fn write_f32_image(
     pixels: F32ImageData<'_>,
     headers: &[WriteHeaderCard],
 ) -> Result<(), XisfError> {
+    write_f32_image_with_options(
+        path,
+        width,
+        height,
+        pixels,
+        headers,
+        &WriteOptions::default(),
+    )
+}
+
+/// [`write_f32_image`] with compression and checksum choices.
+pub fn write_f32_image_with_options(
+    path: impl AsRef<Path>,
+    width: usize,
+    height: usize,
+    pixels: F32ImageData<'_>,
+    headers: &[WriteHeaderCard],
+    options: &WriteOptions,
+) -> Result<(), XisfError> {
     validate_image(width, height, pixels, headers)?;
+    validate_options(options)?;
     let path = path.as_ref();
     let parent = path
         .parent()
@@ -52,7 +149,7 @@ pub fn write_f32_image(
     }
     let mut temporary = builder.tempfile_in(parent)?;
     let mut writer = BufWriter::new(temporary.as_file_mut());
-    write_f32_image_to(&mut writer, width, height, pixels, headers)?;
+    write_f32_image_to_with_options(&mut writer, width, height, pixels, headers, options)?;
     writer.flush()?;
     drop(writer);
     temporary.as_file().sync_all()?;
@@ -65,14 +162,50 @@ pub fn write_f32_image(
 /// The caller owns flushing and durability. Prefer [`write_f32_image`] for an
 /// atomic on-disk file.
 pub fn write_f32_image_to(
-    mut writer: impl Write,
+    writer: impl Write,
     width: usize,
     height: usize,
     pixels: F32ImageData<'_>,
     headers: &[WriteHeaderCard],
 ) -> Result<(), XisfError> {
+    write_f32_image_to_with_options(
+        writer,
+        width,
+        height,
+        pixels,
+        headers,
+        &WriteOptions::default(),
+    )
+}
+
+/// [`write_f32_image_to`] with compression and checksum choices.
+pub fn write_f32_image_to_with_options(
+    writer: impl Write,
+    width: usize,
+    height: usize,
+    pixels: F32ImageData<'_>,
+    headers: &[WriteHeaderCard],
+    options: &WriteOptions,
+) -> Result<(), XisfError> {
+    write_image(
+        writer,
+        (width, height, pixels),
+        headers,
+        options,
+        SUBBLOCK_BYTES,
+    )
+}
+
+fn write_image(
+    mut writer: impl Write,
+    (width, height, pixels): (usize, usize, F32ImageData<'_>),
+    headers: &[WriteHeaderCard],
+    options: &WriteOptions,
+    subblock_bytes: usize,
+) -> Result<(), XisfError> {
     validate_image(width, height, pixels, headers)?;
-    let data_bytes = std::mem::size_of_val(pixels.samples());
+    validate_options(options)?;
+    let block = prepare_block(width, height, pixels, options, subblock_bytes);
     let bounds = sample_bounds(pixels.samples());
 
     let created = utc_timestamp(std::time::SystemTime::now());
@@ -84,7 +217,7 @@ pub fn write_f32_image_to(
             pixels,
             headers,
             bounds,
-            (data_offset, data_bytes),
+            (data_offset, &block),
             &created,
         );
         let end = PREAMBLE_LEN + xml.len();
@@ -107,6 +240,10 @@ pub fn write_f32_image_to(
     writer.write_all(xml.as_bytes())?;
     writer.write_all(&vec![b' '; data_offset - PREAMBLE_LEN - xml.len()])?;
 
+    if let Some(stored) = &block.stored {
+        writer.write_all(stored)?;
+        return Ok(());
+    }
     let mut byte_buffer = Vec::with_capacity(PIXEL_CHUNK_BYTES);
     match pixels {
         F32ImageData::Mono(samples) | F32ImageData::RgbPlanar(samples) => {
@@ -126,6 +263,207 @@ pub fn write_f32_image_to(
     Ok(())
 }
 
+/// The pixel block as it will be stored, with the `Image` attributes and
+/// `Metadata` properties that describe it.
+struct PreparedBlock {
+    /// The stored bytes, or `None` to stream the samples uncompressed.
+    stored: Option<Vec<u8>>,
+    bytes: usize,
+    attributes: String,
+    metadata: Vec<(&'static str, &'static str, String)>,
+}
+
+fn validate_options(options: &WriteOptions) -> Result<(), XisfError> {
+    let Some(compression) = options.compression else {
+        return Ok(());
+    };
+    let level_range = match compression.codec {
+        CompressionCodec::Zlib => Some(0..=9),
+        CompressionCodec::Zstd => Some(1..=22),
+        CompressionCodec::Lz4 => None,
+        CompressionCodec::Lz4Hc => {
+            return Err(XisfError::Unsupported(
+                "LZ4HC compression is not available for writing".into(),
+            ));
+        }
+    };
+    match (compression.level, level_range) {
+        (None, _) => Ok(()),
+        (Some(level), Some(range)) if range.contains(&level) => Ok(()),
+        (Some(level), _) => Err(XisfError::Malformed(format!(
+            "compression level {level} is outside the range of {:?}",
+            compression.codec
+        ))),
+    }
+}
+
+fn prepare_block(
+    width: usize,
+    height: usize,
+    pixels: F32ImageData<'_>,
+    options: &WriteOptions,
+    subblock_bytes: usize,
+) -> PreparedBlock {
+    let raw_bytes = std::mem::size_of_val(pixels.samples());
+    if options.compression.is_none() && options.checksum.is_none() {
+        return PreparedBlock {
+            stored: None,
+            bytes: raw_bytes,
+            attributes: String::new(),
+            metadata: Vec::new(),
+        };
+    }
+    let mut raw = Vec::with_capacity(raw_bytes);
+    match pixels {
+        F32ImageData::Mono(samples) | F32ImageData::RgbPlanar(samples) => {
+            raw.extend(samples.iter().flat_map(|value| value.to_le_bytes()));
+        }
+        F32ImageData::RgbInterleaved(samples) => {
+            for channel in 0..3 {
+                raw.extend(
+                    (0..width * height)
+                        .flat_map(|index| samples[index * 3 + channel].to_le_bytes()),
+                );
+            }
+        }
+    }
+    let mut block = PreparedBlock {
+        stored: None,
+        bytes: raw.len(),
+        attributes: String::new(),
+        metadata: Vec::new(),
+    };
+    let mut stored = raw;
+    if let Some(compression) = options.compression {
+        let item_bytes = std::mem::size_of::<f32>();
+        let input = if compression.byte_shuffle {
+            shuffle(&stored, item_bytes)
+        } else {
+            stored.clone()
+        };
+        let subblocks = input
+            .chunks(subblock_bytes)
+            .map(|chunk| (compress(chunk, compression), chunk.len()))
+            .collect::<Vec<_>>();
+        let compressed_bytes = subblocks.iter().map(|(data, _)| data.len()).sum::<usize>();
+        // A block that does not shrink is stored as it is.
+        if compressed_bytes < stored.len() {
+            let name = codec_name(compression.codec);
+            let _ = write!(block.attributes, " compression=\"{name}");
+            if compression.byte_shuffle {
+                let _ = write!(block.attributes, "+sh:{}:{item_bytes}\"", stored.len());
+            } else {
+                let _ = write!(block.attributes, ":{}\"", stored.len());
+            }
+            if subblocks.len() > 1 {
+                let list = subblocks
+                    .iter()
+                    .map(|(data, uncompressed)| format!("{},{uncompressed}", data.len()))
+                    .collect::<Vec<_>>()
+                    .join(":");
+                let _ = write!(block.attributes, " subblocks=\"{list}\"");
+            }
+            let shuffle_suffix = if compression.byte_shuffle { "+sh" } else { "" };
+            block.metadata.push((
+                "XISF:CompressionCodecs",
+                "String",
+                format!("{name}{shuffle_suffix}"),
+            ));
+            if let Some(level) = abstract_compression_level(compression) {
+                block
+                    .metadata
+                    .push(("XISF:CompressionLevel", "Int32", level.to_string()));
+            }
+            stored = subblocks.into_iter().flat_map(|(data, _)| data).collect();
+        }
+    }
+    if let Some(checksum) = options.checksum {
+        let _ = write!(
+            block.attributes,
+            " checksum=\"{}:{}\"",
+            checksum.name(),
+            checksum.digest(&stored)
+        );
+        block
+            .metadata
+            .push(("XISF:ChecksumAlgorithms", "String", checksum.name().into()));
+    }
+    block.bytes = stored.len();
+    block.stored = Some(stored);
+    block
+}
+
+fn codec_name(codec: CompressionCodec) -> &'static str {
+    match codec {
+        CompressionCodec::Zlib => "zlib",
+        CompressionCodec::Lz4 => "lz4",
+        CompressionCodec::Lz4Hc => "lz4hc",
+        CompressionCodec::Zstd => "zstd",
+    }
+}
+
+const DEFAULT_ZLIB_LEVEL: i32 = 6;
+const DEFAULT_ZSTD_LEVEL: i32 = 3;
+
+fn compress(chunk: &[u8], compression: WriteCompression) -> Vec<u8> {
+    match compression.codec {
+        CompressionCodec::Zlib => {
+            let level = compression.level.unwrap_or(DEFAULT_ZLIB_LEVEL) as u32;
+            let mut encoder = flate2::write::ZlibEncoder::new(
+                Vec::with_capacity(chunk.len() / 2),
+                flate2::Compression::new(level),
+            );
+            encoder
+                .write_all(chunk)
+                .and_then(|()| encoder.finish())
+                .expect("compressing into memory cannot fail")
+        }
+        CompressionCodec::Zstd => {
+            let level = compression.level.unwrap_or(DEFAULT_ZSTD_LEVEL);
+            zstd::bulk::compress(chunk, level).expect("compressing into memory cannot fail")
+        }
+        CompressionCodec::Lz4 | CompressionCodec::Lz4Hc => lz4_flex::block::compress(chunk),
+    }
+}
+
+/// The codec-independent `XISF:CompressionLevel`: the codec's level range
+/// mapped linearly onto 1 to 100.
+fn abstract_compression_level(compression: WriteCompression) -> Option<i32> {
+    let (level, low, high) = match compression.codec {
+        CompressionCodec::Zlib => (compression.level.unwrap_or(DEFAULT_ZLIB_LEVEL), 0, 9),
+        CompressionCodec::Zstd => (compression.level.unwrap_or(DEFAULT_ZSTD_LEVEL), 1, 22),
+        CompressionCodec::Lz4 | CompressionCodec::Lz4Hc => return None,
+    };
+    Some(1 + ((level - low) * 99 + (high - low) / 2) / (high - low))
+}
+
+/// The XISF byte shuffle: all first bytes of each item, then all second
+/// bytes, and so on. Trailing bytes that do not form a whole item stay last.
+fn shuffle(bytes: &[u8], item_bytes: usize) -> Vec<u8> {
+    let items = bytes.len() / item_bytes;
+    let mut output = Vec::with_capacity(bytes.len());
+    for lane in 0..item_bytes {
+        output.extend((0..items).map(|item| bytes[item * item_bytes + lane]));
+    }
+    output.extend_from_slice(&bytes[items * item_bytes..]);
+    output
+}
+
+/// The `XISF:CreatorOS` value for the operating system this build targets.
+fn creator_os() -> Option<&'static str> {
+    if cfg!(target_os = "linux") {
+        Some("Linux")
+    } else if cfg!(target_os = "macos") {
+        Some("macOS")
+    } else if cfg!(target_os = "windows") {
+        Some("Windows")
+    } else if cfg!(target_os = "freebsd") {
+        Some("FreeBSD")
+    } else {
+        None
+    }
+}
+
 const PREAMBLE_LEN: usize = 16;
 
 fn render_xml(
@@ -134,7 +472,7 @@ fn render_xml(
     pixels: F32ImageData<'_>,
     headers: &[WriteHeaderCard],
     bounds: (f32, f32),
-    (data_offset, data_bytes): (usize, usize),
+    (data_offset, block): (usize, &PreparedBlock),
     created: &str,
 ) -> String {
     let planes = pixels.planes();
@@ -151,8 +489,8 @@ fn render_xml(
         xml,
         "<Image geometry=\"{width}:{height}:{planes}\" sampleFormat=\"Float32\" \
          bounds=\"{}:{}\" colorSpace=\"{color_space}\" pixelStorage=\"Planar\" \
-         location=\"attachment:{data_offset}:{data_bytes}\">",
-        bounds.0, bounds.1
+         location=\"attachment:{data_offset}:{}\"{}>",
+        bounds.0, bounds.1, block.bytes, block.attributes
     );
     for header in headers {
         // name, value and comment are all mandatory attributes.
@@ -168,10 +506,34 @@ fn render_xml(
     let _ = write!(
         xml,
         "<Metadata><Property id=\"XISF:CreationTime\" type=\"TimePoint\" value=\"{created}\"/>\
-         <Property id=\"XISF:CreatorApplication\" type=\"String\">seiza-xisf {}</Property>\
-         </Metadata>",
+         <Property id=\"XISF:CreatorApplication\" type=\"String\">seiza-xisf {}</Property>",
         env!("CARGO_PKG_VERSION")
     );
+    if let Some(os) = creator_os() {
+        let _ = write!(
+            xml,
+            "<Property id=\"XISF:CreatorOS\" type=\"String\">{os}</Property>"
+        );
+    }
+    let _ = write!(
+        xml,
+        "<Property id=\"XISF:BlockAlignmentSize\" type=\"UInt16\" value=\"{BLOCK_ALIGNMENT}\"/>"
+    );
+    for (id, type_name, value) in &block.metadata {
+        if *type_name == "String" {
+            let _ = write!(
+                xml,
+                "<Property id=\"{id}\" type=\"String\">{}</Property>",
+                escape(value.as_str())
+            );
+        } else {
+            let _ = write!(
+                xml,
+                "<Property id=\"{id}\" type=\"{type_name}\" value=\"{value}\"/>"
+            );
+        }
+    }
+    xml.push_str("</Metadata>");
     xml.push_str("</xisf>");
     xml
 }
@@ -340,6 +702,178 @@ fn write_float_values(
 mod tests {
     use super::*;
     use seiza_fits::Pixels;
+
+    fn smooth_rgb(width: usize, height: usize) -> Vec<f32> {
+        (0..width * height * 3)
+            .map(|index| 0.25 + (index % 97) as f32 / 1000.0)
+            .collect()
+    }
+
+    fn write_to_memory(values: &[f32], options: &WriteOptions, subblock_bytes: usize) -> Vec<u8> {
+        let mut encoded = Vec::new();
+        write_image(
+            &mut encoded,
+            (16, 8, F32ImageData::RgbInterleaved(values)),
+            &[],
+            options,
+            subblock_bytes,
+        )
+        .unwrap();
+        encoded
+    }
+
+    fn planar_from(values: &[f32], pixels: usize) -> Vec<f32> {
+        (0..3)
+            .flat_map(|channel| (0..pixels).map(move |index| values[index * 3 + channel]))
+            .collect()
+    }
+
+    #[test]
+    fn compressed_and_checksummed_files_round_trip() {
+        let values = smooth_rgb(16, 8);
+        let expected = planar_from(&values, 16 * 8);
+        let checksums = [
+            ChecksumAlgorithm::Sha1,
+            ChecksumAlgorithm::Sha256,
+            ChecksumAlgorithm::Sha512,
+            ChecksumAlgorithm::Sha3_256,
+            ChecksumAlgorithm::Sha3_512,
+        ];
+        let mut cases = Vec::new();
+        for codec in [
+            CompressionCodec::Zlib,
+            CompressionCodec::Lz4,
+            CompressionCodec::Zstd,
+        ] {
+            for byte_shuffle in [false, true] {
+                cases.push(Some(WriteCompression {
+                    codec,
+                    byte_shuffle,
+                    level: None,
+                }));
+            }
+        }
+        cases.push(None);
+        for (case, compression) in cases.into_iter().enumerate() {
+            for subblock_bytes in [SUBBLOCK_BYTES, 500] {
+                let options = WriteOptions {
+                    compression,
+                    checksum: Some(checksums[case % checksums.len()]),
+                };
+                let encoded = write_to_memory(&values, &options, subblock_bytes);
+                let read = crate::read_image_from_bytes(&encoded, 0).unwrap();
+                let Pixels::F32(actual) = &read.image.pixels else {
+                    panic!("writer must emit f32 pixels");
+                };
+                assert_eq!(actual, &expected, "{options:?}");
+                if let Some(compression) = compression {
+                    let info = read.info.compression.expect("block must be compressed");
+                    assert_eq!(info.codec, compression.codec);
+                    assert_eq!(info.shuffled_item_bytes.is_some(), compression.byte_shuffle);
+                    assert_eq!(info.subblocks.len() > 1, subblock_bytes == 500);
+                }
+                let header = String::from_utf8_lossy(&encoded[..4096]);
+                assert!(header.contains("XISF:ChecksumAlgorithms"));
+                assert_eq!(
+                    header.contains("XISF:CompressionCodecs"),
+                    compression.is_some()
+                );
+
+                // A flipped stored byte must fail verification before decoding.
+                let mut corrupt = encoded.clone();
+                let last = corrupt.len() - 1;
+                corrupt[last] ^= 0x55;
+                assert!(matches!(
+                    crate::from_bytes(&corrupt),
+                    Err(XisfError::Malformed(message)) if message.contains("checksum mismatch")
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn stores_a_block_that_does_not_shrink_uncompressed() {
+        // Pseudo-random bits leave nothing for LZ4 to find.
+        let mut state = 0x9e37_79b9_u32;
+        let values = (0..16 * 8 * 3)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                f32::from_bits(state & 0x3fff_ffff)
+            })
+            .collect::<Vec<_>>();
+        let options = WriteOptions {
+            compression: Some(WriteCompression {
+                codec: CompressionCodec::Lz4,
+                byte_shuffle: false,
+                level: None,
+            }),
+            checksum: None,
+        };
+        let encoded = write_to_memory(&values, &options, SUBBLOCK_BYTES);
+        let read = crate::read_image_from_bytes(&encoded, 0).unwrap();
+        assert!(read.info.compression.is_none());
+        assert!(!String::from_utf8_lossy(&encoded[..4096]).contains("CompressionCodecs"));
+    }
+
+    #[test]
+    fn rejects_unavailable_codecs_and_levels() {
+        let values = smooth_rgb(16, 8);
+        let write = |codec, level| {
+            let options = WriteOptions {
+                compression: Some(WriteCompression {
+                    codec,
+                    byte_shuffle: true,
+                    level,
+                }),
+                checksum: None,
+            };
+            write_image(
+                Vec::new(),
+                (16, 8, F32ImageData::RgbInterleaved(&values)),
+                &[],
+                &options,
+                SUBBLOCK_BYTES,
+            )
+        };
+        assert!(matches!(
+            write(CompressionCodec::Lz4Hc, None),
+            Err(XisfError::Unsupported(_))
+        ));
+        assert!(write(CompressionCodec::Zlib, Some(10)).is_err());
+        assert!(write(CompressionCodec::Zstd, Some(0)).is_err());
+        assert!(write(CompressionCodec::Lz4, Some(1)).is_err());
+        assert!(write(CompressionCodec::Zlib, Some(9)).is_ok());
+        assert!(write(CompressionCodec::Zstd, Some(22)).is_ok());
+    }
+
+    #[test]
+    fn maps_codec_levels_onto_the_abstract_range() {
+        let level = |codec, level| {
+            abstract_compression_level(WriteCompression {
+                codec,
+                byte_shuffle: false,
+                level: Some(level),
+            })
+        };
+        assert_eq!(level(CompressionCodec::Zlib, 0), Some(1));
+        assert_eq!(level(CompressionCodec::Zlib, 9), Some(100));
+        assert_eq!(level(CompressionCodec::Zstd, 1), Some(1));
+        assert_eq!(level(CompressionCodec::Zstd, 22), Some(100));
+        assert_eq!(level(CompressionCodec::Lz4, 0), None);
+    }
+
+    #[test]
+    fn shuffle_matches_the_readers_unshuffle() {
+        let bytes = (0_u8..23).collect::<Vec<_>>();
+        for item_bytes in [1, 2, 4, 8] {
+            assert_eq!(
+                crate::unshuffle(&shuffle(&bytes, item_bytes), item_bytes),
+                bytes
+            );
+        }
+    }
 
     #[test]
     fn formats_utc_timestamps() {

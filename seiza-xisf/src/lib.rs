@@ -38,7 +38,10 @@ use std::path::Path;
 
 mod writer;
 
-pub use writer::{write_f32_image, write_f32_image_to};
+pub use writer::{
+    ChecksumAlgorithm, WriteCompression, WriteOptions, write_f32_image, write_f32_image_to,
+    write_f32_image_to_with_options, write_f32_image_with_options,
+};
 
 const SIGNATURE: &[u8; 8] = b"XISF0100";
 const PREAMBLE_BYTES: u64 = 16;
@@ -65,6 +68,8 @@ pub enum SampleFormat {
     UInt8,
     UInt16,
     UInt32,
+    /// Decoded to `f64`, which holds integers exactly only up to 2^53.
+    UInt64,
     Float32,
     Float64,
 }
@@ -75,6 +80,7 @@ impl SampleFormat {
             "UInt8" | "Byte" => Ok(Self::UInt8),
             "UInt16" | "UShort" => Ok(Self::UInt16),
             "UInt32" | "UInt" => Ok(Self::UInt32),
+            "UInt64" => Ok(Self::UInt64),
             "Float32" | "Float" => Ok(Self::Float32),
             "Float64" | "Double" => Ok(Self::Float64),
             value => Err(XisfError::Unsupported(format!("sample format {value:?}"))),
@@ -86,7 +92,7 @@ impl SampleFormat {
             Self::UInt8 => 1,
             Self::UInt16 => 2,
             Self::UInt32 | Self::Float32 => 4,
-            Self::Float64 => 8,
+            Self::UInt64 | Self::Float64 => 8,
         }
     }
 
@@ -95,6 +101,7 @@ impl SampleFormat {
             Self::UInt8 => 8,
             Self::UInt16 => 16,
             Self::UInt32 => 32,
+            Self::UInt64 => 64,
             Self::Float32 => -32,
             Self::Float64 => -64,
         }
@@ -1453,7 +1460,9 @@ fn empty_pixels(format: SampleFormat, count: usize) -> Result<Pixels, XisfError>
     match format {
         SampleFormat::UInt8 => reserve(count).map(Pixels::U8),
         SampleFormat::UInt16 => reserve(count).map(Pixels::U16),
-        SampleFormat::UInt32 | SampleFormat::Float64 => reserve(count).map(Pixels::F64),
+        SampleFormat::UInt32 | SampleFormat::UInt64 | SampleFormat::Float64 => {
+            reserve(count).map(Pixels::F64)
+        }
         SampleFormat::Float32 => reserve(count).map(Pixels::F32),
     }
 }
@@ -1490,6 +1499,15 @@ fn append_decoded(
                 match order {
                     ByteOrder::Little => u32::from_le_bytes(bytes) as f64,
                     ByteOrder::Big => u32::from_be_bytes(bytes) as f64,
+                }
+            }))
+        }
+        (Pixels::F64(values), SampleFormat::UInt64) => {
+            values.extend(bytes.chunks_exact(8).map(|bytes| {
+                let bytes = bytes.try_into().unwrap();
+                match order {
+                    ByteOrder::Little => u64::from_le_bytes(bytes) as f64,
+                    ByteOrder::Big => u64::from_be_bytes(bytes) as f64,
                 }
             }))
         }
@@ -1548,6 +1566,9 @@ fn decode_shuffled(bytes: &[u8], image: &ParsedImage) -> Result<Pixels, XisfErro
         ),
         (Pixels::F64(values), SampleFormat::UInt32) => values.extend((0..count).map(|sample| {
             u32::from_le_bytes(std::array::from_fn(|lane| byte_at(sample, lane))) as f64
+        })),
+        (Pixels::F64(values), SampleFormat::UInt64) => values.extend((0..count).map(|sample| {
+            u64::from_le_bytes(std::array::from_fn(|lane| byte_at(sample, lane))) as f64
         })),
         (Pixels::F32(values), SampleFormat::Float32) => {
             values.extend((0..count).map(|sample| {
@@ -2298,6 +2319,54 @@ mod tests {
                 .any(|(name, value)| name == "RA" && *value == HeaderValue::Float(83.822))
         );
         assert!(!image.headers.iter().any(|(name, _)| name == "DEC"));
+    }
+
+    #[test]
+    fn decodes_uint64_samples_in_both_byte_orders() {
+        let values = [0_u64, 1, 1 << 40, (1 << 53) + 2];
+        let expected = values.map(|value| value as f64);
+        for (order, raw) in [
+            (
+                "little",
+                values
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "big",
+                values
+                    .iter()
+                    .flat_map(|value| value.to_be_bytes())
+                    .collect::<Vec<_>>(),
+            ),
+        ] {
+            let xml = image_element(
+                0,
+                "2:2:1",
+                "UInt64",
+                raw.len(),
+                &format!("byteOrder=\"{order}\""),
+                "",
+            );
+            let image = from_bytes(&monolithic(xml, &[&raw])).unwrap();
+            assert!(matches!(image.pixels, Pixels::F64(ref actual) if actual == &expected));
+        }
+        let raw = values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        let compressed = zstd::bulk::compress(&shuffled(&raw, 8), 3).unwrap();
+        let xml = image_element(
+            0,
+            "2:2:1",
+            "UInt64",
+            compressed.len(),
+            "compression=\"zstd+sh:32:8\"",
+            "",
+        );
+        let image = from_bytes(&monolithic(xml, &[&compressed])).unwrap();
+        assert!(matches!(image.pixels, Pixels::F64(ref actual) if actual == &expected));
     }
 
     #[test]
