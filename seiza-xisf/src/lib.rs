@@ -1,14 +1,18 @@
 //! Practical XISF 1.0 image reading and writing for Seiza.
 //!
-//! The reader meets the baseline decoder rules of XISF 1.0, Revision 1: it
-//! reads monolithic files with attached, inline, or embedded pixel blocks,
+//! The reader follows XISF 1.0, Revision 1: monolithic files and local
+//! distributed units, attached, inline, embedded or external pixel blocks,
 //! planar or normal storage, and every standard codec, subblocks included.
 //! An image it cannot decode is unavailable on its own and leaves the rest of
 //! the file readable; see [`XisfFileInfo::unavailable`]. Decoded
 //! images use [`seiza_fits::FitsImage`] so downstream statistics, stretching,
-//! Bayer handling, stacking, and solving do not depend on the source format.
+//! Bayer handling, stacking, and solving do not depend on the source format;
+//! complex images, which it cannot hold, have [`read_complex_image`].
 //! [`write_f32_image`] writes the same layout back out with `Float32` samples,
-//! mirroring the `seiza_fits` writer API.
+//! mirroring the `seiza_fits` writer API, and
+//! [`write_f32_image_with_options`] adds compression, checksums, and the
+//! [`XisfMetadata`] of a read, so a file keeps every field through
+//! processing.
 //!
 //! Sample values pass through unchanged: decoding never applies the XISF
 //! `bounds` attribute, keeping linear data linear, and preserved FITS scaling
