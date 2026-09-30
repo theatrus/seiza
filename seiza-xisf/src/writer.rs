@@ -1027,7 +1027,7 @@ mod tests {
         write_f32_image_to(&mut encoded, 3, 2, F32ImageData::Mono(&[0.5; 6]), &headers).unwrap();
 
         let mut cursor = std::io::Cursor::new(encoded.as_slice());
-        let parsed = crate::parse_file(&mut cursor, encoded.len() as u64).unwrap();
+        let parsed = crate::parse_file(&mut cursor, encoded.len() as u64, None).unwrap();
         let crate::BlockLocation::Attachment { offset, .. } = parsed.images[0].info.location else {
             panic!("writer must attach the pixel block");
         };

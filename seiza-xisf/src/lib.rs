@@ -34,7 +34,7 @@ use sha2::{Sha256, Sha512};
 use sha3::{Sha3_256, Sha3_512};
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 mod writer;
 
@@ -145,7 +145,7 @@ pub enum PixelStorage {
 }
 
 /// Where an image's pixel data block is stored.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BlockLocation {
     /// Attached to a monolithic file at a byte offset.
     Attachment { offset: u64, bytes: u64 },
@@ -155,16 +155,24 @@ pub enum BlockLocation {
     /// Base64 or hex text inside a child `Data` element; `bytes` is the
     /// decoded length.
     Embedded { bytes: u64 },
+    /// A local file named by a distributed unit's header: all of it, or one
+    /// block of an XISF data blocks (`.xisb`) file.
+    External {
+        path: PathBuf,
+        offset: u64,
+        bytes: u64,
+    },
 }
 
 impl BlockLocation {
     /// The stored length of the block in bytes, after any text decoding and
     /// before decompression.
-    pub fn bytes(self) -> u64 {
-        match self {
-            Self::Attachment { bytes, .. } | Self::Inline { bytes } | Self::Embedded { bytes } => {
-                bytes
-            }
+    pub fn bytes(&self) -> u64 {
+        match *self {
+            Self::Attachment { bytes, .. }
+            | Self::Inline { bytes }
+            | Self::Embedded { bytes }
+            | Self::External { bytes, .. } => bytes,
         }
     }
 }
@@ -579,7 +587,9 @@ impl XisfImage {
 pub fn is_xisf_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("xisf"))
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("xisf") || extension.eq_ignore_ascii_case("xish")
+        })
 }
 
 #[derive(Clone, Debug)]
@@ -642,7 +652,7 @@ impl ParsedFile {
 pub fn inspect(path: &Path) -> Result<XisfFileInfo, XisfError> {
     let mut file = std::fs::File::open(path)?;
     let file_bytes = file.metadata()?.len();
-    let parsed = parse_file(&mut file, file_bytes)?;
+    let parsed = parse_file(&mut file, file_bytes, Some(&header_dir(path)))?;
     Ok(XisfFileInfo {
         images: parsed.images.into_iter().map(|image| image.info).collect(),
         unavailable: parsed
@@ -661,7 +671,7 @@ pub fn inspect(path: &Path) -> Result<XisfFileInfo, XisfError> {
 pub fn read_header(path: &Path) -> Result<Vec<(String, HeaderValue)>, XisfError> {
     let mut file = std::fs::File::open(path)?;
     let file_bytes = file.metadata()?.len();
-    let mut parsed = parse_file(&mut file, file_bytes)?;
+    let mut parsed = parse_file(&mut file, file_bytes, Some(&header_dir(path)))?;
     let image = parsed.take(0)?;
     let mut headers = image.info.headers.clone();
     add_structural_headers(&mut headers, &image.info);
@@ -706,7 +716,12 @@ pub fn read_image(path: &Path) -> Result<XisfImage, XisfError> {
 pub fn read_image_at(path: &Path, index: usize) -> Result<XisfImage, XisfError> {
     let mut file = std::fs::File::open(path)?;
     let file_bytes = file.metadata()?.len();
-    read_image_from(&mut file, file_bytes, ImageSelection::Index(index))
+    read_image_from(
+        &mut file,
+        file_bytes,
+        Some(&header_dir(path)),
+        ImageSelection::Index(index),
+    )
 }
 
 /// [`read_image`] for a top-level image with a given case-sensitive XISF
@@ -714,7 +729,12 @@ pub fn read_image_at(path: &Path, index: usize) -> Result<XisfImage, XisfError> 
 pub fn read_image_by_id(path: &Path, id: &str) -> Result<XisfImage, XisfError> {
     let mut file = std::fs::File::open(path)?;
     let file_bytes = file.metadata()?.len();
-    read_image_from(&mut file, file_bytes, ImageSelection::Id(id))
+    read_image_from(
+        &mut file,
+        file_bytes,
+        Some(&header_dir(path)),
+        ImageSelection::Id(id),
+    )
 }
 
 /// [`read_image`] for a complete in-memory monolithic XISF file.
@@ -723,6 +743,7 @@ pub fn read_image_from_bytes(bytes: &[u8], index: usize) -> Result<XisfImage, Xi
     read_image_from(
         &mut reader,
         bytes.len() as u64,
+        None,
         ImageSelection::Index(index),
     )
 }
@@ -732,12 +753,22 @@ enum ImageSelection<'a> {
     Id(&'a str),
 }
 
+/// The directory that `@header_dir` block paths in a header file resolve
+/// against.
+fn header_dir(path: &Path) -> PathBuf {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
 fn read_image_from(
     reader: &mut (impl Read + Seek),
     file_bytes: u64,
+    header_dir: Option<&Path>,
     selection: ImageSelection<'_>,
 ) -> Result<XisfImage, XisfError> {
-    let mut parsed = parse_file(reader, file_bytes)?;
+    let mut parsed = parse_file(reader, file_bytes, header_dir)?;
     // Take the chosen image out of the parse, so the metadata moves into the
     // result instead of being cloned for every caller of `open`.
     let index = match selection {
@@ -767,7 +798,28 @@ fn read_image_from(
     })
 }
 
-fn parse_file(reader: &mut (impl Read + Seek), file_bytes: u64) -> Result<ParsedFile, XisfError> {
+/// What kind of XISF unit a header belongs to, which decides where its data
+/// blocks may live.
+#[derive(Clone, Debug)]
+enum Unit {
+    Monolithic {
+        header_end: u64,
+        file_bytes: u64,
+    },
+    /// A header file (`.xish`); `header_dir` is `None` for one read from
+    /// memory, which leaves `@header_dir` paths unresolvable.
+    Distributed {
+        header_dir: Option<PathBuf>,
+    },
+}
+
+/// Parse a monolithic XISF file or the header file of a distributed unit,
+/// told apart by their first bytes.
+fn parse_file(
+    reader: &mut (impl Read + Seek),
+    file_bytes: u64,
+    header_dir: Option<&Path>,
+) -> Result<ParsedFile, XisfError> {
     reader.seek(SeekFrom::Start(0))?;
     let mut preamble = [0_u8; PREAMBLE_BYTES as usize];
     reader.read_exact(&mut preamble).map_err(|error| {
@@ -778,7 +830,24 @@ fn parse_file(reader: &mut (impl Read + Seek), file_bytes: u64) -> Result<Parsed
         }
     })?;
     if &preamble[..8] != SIGNATURE {
-        return Err(XisfError::NotXisf);
+        let start = preamble.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&preamble);
+        let start = start.trim_ascii_start();
+        if !start.starts_with(b"<?xml") {
+            return Err(XisfError::NotXisf);
+        }
+        let header_bytes = usize::try_from(file_bytes)
+            .ok()
+            .filter(|bytes| *bytes <= MAX_HEADER_BYTES)
+            .ok_or_else(|| XisfError::Malformed("XML header file is too large".into()))?;
+        let mut xml = Vec::with_capacity(header_bytes);
+        reader.seek(SeekFrom::Start(0))?;
+        reader.take(header_bytes as u64).read_to_end(&mut xml)?;
+        return parse_xml(
+            &xml,
+            &Unit::Distributed {
+                header_dir: header_dir.map(Path::to_path_buf),
+            },
+        );
     }
     if preamble[12..16] != [0; 4] {
         return Err(XisfError::Malformed(
@@ -799,10 +868,16 @@ fn parse_file(reader: &mut (impl Read + Seek), file_bytes: u64) -> Result<Parsed
     }
     let mut xml = vec![0_u8; header_bytes];
     reader.read_exact(&mut xml)?;
-    parse_xml(&xml, header_end, file_bytes)
+    parse_xml(
+        &xml,
+        &Unit::Monolithic {
+            header_end,
+            file_bytes,
+        },
+    )
 }
 
-fn parse_xml(xml: &[u8], header_end: u64, file_bytes: u64) -> Result<ParsedFile, XisfError> {
+fn parse_xml(xml: &[u8], unit: &Unit) -> Result<ParsedFile, XisfError> {
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(false);
     let mut buffer = Vec::new();
@@ -887,7 +962,7 @@ fn parse_xml(xml: &[u8], header_end: u64, file_bytes: u64) -> Result<ParsedFile,
             }
         };
         let (index, id) = (image.index, image.attributes.get("id").cloned());
-        match parse_image(image, &state.shared, header_end, file_bytes) {
+        match parse_image(image, &state.shared, unit) {
             Ok(image) => parsed.images.push(image),
             Err(error) => parsed.unavailable.push((index, id, error)),
         }
@@ -1061,8 +1136,7 @@ fn attributes(
 fn parse_image(
     image: PendingImage,
     shared: &BTreeMap<String, Element>,
-    header_end: u64,
-    file_bytes: u64,
+    unit: &Unit,
 ) -> Result<ParsedImage, XisfError> {
     let attributes = &image.attributes;
     let mut headers = Vec::new();
@@ -1193,6 +1267,15 @@ fn parse_image(
     let location_value = required(attributes, "location", "Image")?.trim();
     let (location, inline_data, block_attributes) = match location_value.split_once(':') {
         Some(("attachment", position)) => {
+            let &Unit::Monolithic {
+                header_end,
+                file_bytes,
+            } = unit
+            else {
+                return Err(XisfError::Malformed(
+                    "attached data block in an XISF header file".into(),
+                ));
+            };
             let (offset, bytes) = parse_attachment(position, location_value)?;
             let end = offset
                 .checked_add(bytes)
@@ -1230,9 +1313,21 @@ fn parse_image(
             )
         }
         _ if location_value.starts_with("url(") || location_value.starts_with("path(") => {
-            return Err(XisfError::Unsupported(format!(
-                "external data block {location_value:?}; distributed XISF units are not supported"
-            )));
+            let Unit::Distributed { header_dir } = unit else {
+                return Err(XisfError::Malformed(format!(
+                    "external data block {location_value:?} in a monolithic XISF file"
+                )));
+            };
+            let (path, offset, bytes) = resolve_external(location_value, header_dir.as_deref())?;
+            (
+                BlockLocation::External {
+                    path,
+                    offset,
+                    bytes,
+                },
+                None,
+                attributes,
+            )
         }
         _ => {
             return Err(XisfError::Malformed(format!(
@@ -1388,6 +1483,156 @@ fn parse_attachment(position: &str, location: &str) -> Result<(u64, u64), XisfEr
     Ok((parse_u64(offset)?, parse_u64(bytes)?))
 }
 
+/// Resolve a `url(...)` or `path(...)` block location, with its optional
+/// `:index-id` suffix, to a local file and a byte range in it.
+fn resolve_external(
+    location: &str,
+    header_dir: Option<&Path>,
+) -> Result<(PathBuf, u64, u64), XisfError> {
+    let invalid = || XisfError::Malformed(format!("invalid data block location {location:?}"));
+    // The URL or path extends to the last closing parenthesis, so it may
+    // itself contain parentheses.
+    let close = location.rfind(')').ok_or_else(invalid)?;
+    let (specification, suffix) = (&location[..close], location[close + 1..].trim());
+    let path = if let Some(url) = specification.strip_prefix("url(") {
+        file_url_path(url.trim())?
+    } else {
+        let path = specification
+            .strip_prefix("path(")
+            .ok_or_else(invalid)?
+            .trim();
+        match path.strip_prefix("@header_dir/") {
+            Some(relative) => header_dir
+                .ok_or_else(|| {
+                    XisfError::Unsupported(
+                        "a relative block path needs the header file's directory; \
+                         open the header file by path"
+                            .into(),
+                    )
+                })?
+                .join(relative),
+            None if Path::new(path).is_absolute() => PathBuf::from(path),
+            None => return Err(invalid()),
+        }
+    };
+    let file_bytes = std::fs::metadata(&path)?.len();
+    if suffix.is_empty() {
+        return Ok((path, 0, file_bytes));
+    }
+    let index_id = suffix.strip_prefix(':').ok_or_else(invalid)?.trim();
+    let index_id = match index_id
+        .strip_prefix("0x")
+        .or_else(|| index_id.strip_prefix("0X"))
+    {
+        Some(hex) => u64::from_str_radix(hex, 16).ok(),
+        None => index_id.parse().ok(),
+    }
+    .ok_or_else(invalid)?;
+    let (offset, bytes) = find_indexed_block(&path, file_bytes, index_id)?;
+    Ok((path, offset, bytes))
+}
+
+/// The local path of a `file:` URL. Other schemes are remote and
+/// unsupported.
+fn file_url_path(url: &str) -> Result<PathBuf, XisfError> {
+    let remote = || XisfError::Unsupported(format!("remote data block {url:?}"));
+    let scheme_end = url.find(':').ok_or_else(remote)?;
+    if !url[..scheme_end].eq_ignore_ascii_case("file") {
+        return Err(remote());
+    }
+    let rest = url[scheme_end + 1..]
+        .strip_prefix("//")
+        .ok_or_else(|| XisfError::Malformed(format!("invalid file URL {url:?}")))?;
+    let (host, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    if !(host.is_empty() || host.eq_ignore_ascii_case("localhost")) {
+        return Err(remote());
+    }
+    let decoded = percent_decode(path)
+        .ok_or_else(|| XisfError::Malformed(format!("invalid file URL {url:?}")))?;
+    // file:///C:/dir names C:/dir on Windows.
+    let decoded = match decoded.as_bytes() {
+        [b'/', drive, b':', ..] if cfg!(windows) && drive.is_ascii_alphabetic() => {
+            decoded[1..].to_string()
+        }
+        _ => decoded,
+    };
+    Ok(PathBuf::from(decoded))
+}
+
+fn percent_decode(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(index + 1..index + 3)?).ok()?;
+            output.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
+        } else {
+            output.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(output).ok()
+}
+
+const BLOCKS_SIGNATURE: &[u8; 8] = b"XISB0100";
+const BLOCK_INDEX_ELEMENT_BYTES: u64 = 40;
+
+/// Find the position and length of the block with a given identifier in the
+/// block index of an XISF data blocks file.
+fn find_indexed_block(path: &Path, file_bytes: u64, id: u64) -> Result<(u64, u64), XisfError> {
+    let malformed =
+        |message: String| XisfError::Malformed(format!("{}: {message}", path.display()));
+    let mut file = std::io::BufReader::new(std::fs::File::open(path)?);
+    let mut header = [0_u8; 16];
+    file.read_exact(&mut header)
+        .map_err(|_| malformed("not an XISF data blocks file".into()))?;
+    if &header[..8] != BLOCKS_SIGNATURE {
+        return Err(malformed("not an XISF data blocks file".into()));
+    }
+    let u64_at =
+        |bytes: &[u8], at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+    let mut node = 16_u64;
+    let mut visited = std::collections::BTreeSet::new();
+    loop {
+        if !visited.insert(node) {
+            return Err(malformed("the block index loops".into()));
+        }
+        file.seek(SeekFrom::Start(node))?;
+        let mut node_header = [0_u8; 16];
+        file.read_exact(&mut node_header)
+            .map_err(|_| malformed("the block index is truncated".into()))?;
+        let length = u64::from(u32::from_le_bytes(node_header[..4].try_into().unwrap()));
+        let next = u64_at(&node_header, 8);
+        let elements_bytes = length * BLOCK_INDEX_ELEMENT_BYTES;
+        if node.saturating_add(16).saturating_add(elements_bytes) > file_bytes {
+            return Err(malformed("the block index is truncated".into()));
+        }
+        let mut elements = vec![0_u8; elements_bytes as usize];
+        file.read_exact(&mut elements)?;
+        for element in elements.chunks_exact(BLOCK_INDEX_ELEMENT_BYTES as usize) {
+            let (unique_id, position, bytes) =
+                (u64_at(element, 0), u64_at(element, 8), u64_at(element, 16));
+            // A zero position marks a free element, which holds no block.
+            if unique_id != id || position == 0 {
+                continue;
+            }
+            if position
+                .checked_add(bytes)
+                .is_none_or(|end| end > file_bytes)
+            {
+                return Err(malformed(format!("block {id:#x} is outside the file")));
+            }
+            return Ok((position, bytes));
+        }
+        if next == 0 {
+            return Err(malformed(format!("the block index has no block {id:#x}")));
+        }
+        node = next;
+    }
+}
+
 /// Parse a `subblocks="c1,u1:c2,u2:..."` attribute.
 fn parse_subblocks(value: &str) -> Result<Vec<(u64, u64)>, XisfError> {
     value
@@ -1513,10 +1758,22 @@ fn with_block<T>(
     image: &ParsedImage,
     read: impl FnOnce(&mut dyn Read) -> Result<T, XisfError>,
 ) -> Result<T, XisfError> {
-    match (image.info.location, &image.inline_data) {
-        (BlockLocation::Attachment { offset, bytes }, _) => {
+    match (&image.info.location, &image.inline_data) {
+        (&BlockLocation::Attachment { offset, bytes }, _) => {
             reader.seek(SeekFrom::Start(offset))?;
             read(&mut reader.take(bytes))
+        }
+        (
+            BlockLocation::External {
+                path,
+                offset,
+                bytes,
+            },
+            _,
+        ) => {
+            let mut file = std::fs::File::open(path)?;
+            file.seek(SeekFrom::Start(*offset))?;
+            read(&mut file.take(*bytes))
         }
         (_, Some(data)) => read(&mut data.as_slice()),
         (_, None) => Err(XisfError::Malformed("inline data block is missing".into())),
@@ -2115,7 +2372,7 @@ mod tests {
         assert_eq!(image.header_f64("RA"), Some(83.822));
         assert_eq!(image.header_str("DATE-OBS"), Some("2026-01-02T03:04:05Z"));
         let mut cursor = std::io::Cursor::new(&bytes);
-        let parsed = parse_file(&mut cursor, bytes.len() as u64).unwrap();
+        let parsed = parse_file(&mut cursor, bytes.len() as u64, None).unwrap();
         assert_eq!(
             parsed.images[0].info.properties[0].value.as_deref(),
             Some("M42")
@@ -2138,6 +2395,7 @@ mod tests {
         let image = read_image_from(
             &mut cursor,
             bytes.len() as u64,
+            None,
             ImageSelection::Id("image1"),
         )
         .unwrap()
@@ -2483,9 +2741,10 @@ mod tests {
             image_from_bytes(&bytes, 1),
             Err(XisfError::Unsupported(_))
         ));
+        // External blocks are not allowed in a monolithic file.
         assert!(matches!(
             image_from_bytes(&bytes, 2),
-            Err(XisfError::Unsupported(_))
+            Err(XisfError::Malformed(_))
         ));
         assert!(matches!(
             image_from_bytes(&bytes, 4),
@@ -2826,6 +3085,136 @@ mod tests {
         assert!(matches!(
             from_bytes(&monolithic(lab, &[&raw])),
             Err(XisfError::Malformed(_))
+        ));
+    }
+
+    /// Build an XISF data blocks file whose index spans two linked nodes,
+    /// with a free element in the first.
+    fn data_blocks_file(blocks: &[(u64, &[u8])]) -> Vec<u8> {
+        let (first, second) = blocks.split_at(blocks.len() / 2);
+        let first_node_bytes = 16 + 40 * (first.len() as u64 + 1);
+        let second_node = 16 + first_node_bytes;
+        let mut position = second_node + 16 + 40 * second.len() as u64;
+        let mut element = |id: u64, data: &[u8]| {
+            let mut bytes = Vec::new();
+            for value in [id, position, data.len() as u64, 0, 0] {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            position += data.len() as u64;
+            bytes
+        };
+        let mut file = BLOCKS_SIGNATURE.to_vec();
+        file.extend_from_slice(&[0; 8]);
+        file.extend_from_slice(&(first.len() as u32 + 1).to_le_bytes());
+        file.extend_from_slice(&[0; 4]);
+        file.extend_from_slice(&second_node.to_le_bytes());
+        // A free element: any identifier, position zero.
+        file.extend_from_slice(&[0xee; 8]);
+        file.extend_from_slice(&[0; 32]);
+        for (id, data) in first {
+            let bytes = element(*id, data);
+            file.extend_from_slice(&bytes);
+        }
+        file.extend_from_slice(&(second.len() as u32).to_le_bytes());
+        file.extend_from_slice(&[0; 12]);
+        for (id, data) in second {
+            let bytes = element(*id, data);
+            file.extend_from_slice(&bytes);
+        }
+        for (_, data) in blocks {
+            file.extend_from_slice(data);
+        }
+        file
+    }
+
+    fn header_file(images: &str) -> String {
+        format!(
+            "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<xisf version=\"1.0\" xmlns=\"http://www.pixinsight.com/xisf\">{images}</xisf>"
+        )
+    }
+
+    #[test]
+    fn reads_distributed_units_from_local_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let nested = directory.path().join("raw data");
+        std::fs::create_dir(&nested).unwrap();
+        let gray = [1_u8, 2, 3, 4];
+        std::fs::write(nested.join("frame(1).bin"), gray).unwrap();
+
+        let values = [10_u16, 20, 30, 40];
+        let raw = values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        let compressed = zstd::bulk::compress(&shuffled(&raw, 2), 3).unwrap();
+        let digest = lowercase_hex(<Sha1 as sha1::Digest>::digest(&compressed).as_ref());
+        let other = [9_u8; 4];
+        let blocks = data_blocks_file(&[
+            (0x1111, &other),
+            (0x7a73_526b_584c_6167, &compressed),
+            (0x2222, &gray),
+        ]);
+        std::fs::write(directory.path().join("blocks.xisb"), blocks).unwrap();
+
+        let url_path = nested
+            .join("frame(1).bin")
+            .to_string_lossy()
+            .replace('\\', "/")
+            .replace(' ', "%20");
+        let url_path = if url_path.starts_with('/') {
+            url_path
+        } else {
+            format!("/{url_path}")
+        };
+        let header = header_file(&format!(
+            "<Image id=\"relative\" geometry=\"2:2:1\" sampleFormat=\"UInt8\" location=\"path(@header_dir/raw data/frame(1).bin)\"/>\
+             <Image id=\"indexed\" geometry=\"2:2:1\" sampleFormat=\"UInt16\" compression=\"zstd+sh:8:2\" checksum=\"sha1:{digest}\" location=\"path(@header_dir/blocks.xisb):0x7a73526b584c6167\"/>\
+             <Image id=\"decimal\" geometry=\"2:2:1\" sampleFormat=\"UInt8\" location=\"path(@header_dir/blocks.xisb):8738\"/>\
+             <Image id=\"url\" geometry=\"2:2:1\" sampleFormat=\"UInt8\" location=\"url(file://{url_path})\"/>\
+             <Image id=\"remote\" geometry=\"2:2:1\" sampleFormat=\"UInt8\" location=\"url(https://example.com/frame.bin)\"/>\
+             <Image id=\"missing\" geometry=\"2:2:1\" sampleFormat=\"UInt8\" location=\"path(@header_dir/blocks.xisb):0x3333\"/>\
+             <Image id=\"attached\" geometry=\"2:2:1\" sampleFormat=\"UInt8\" location=\"attachment:0:4\"/>"
+        ));
+        let path = directory.path().join("unit.xish");
+        std::fs::write(&path, &header).unwrap();
+        assert!(is_xisf_path(&path));
+
+        assert_eq!(
+            u8_samples(&open_image_by_id(&path, "relative").unwrap()),
+            gray
+        );
+        assert!(matches!(
+            open_image_by_id(&path, "indexed").unwrap().pixels,
+            Pixels::U16(ref actual) if actual == &values
+        ));
+        assert_eq!(
+            u8_samples(&open_image_by_id(&path, "decimal").unwrap()),
+            gray
+        );
+        assert_eq!(u8_samples(&open_image_by_id(&path, "url").unwrap()), gray);
+        assert!(matches!(
+            open_image_by_id(&path, "remote"),
+            Err(XisfError::Unsupported(_))
+        ));
+        assert!(matches!(
+            open_image_by_id(&path, "missing"),
+            Err(XisfError::Malformed(message)) if message.contains("no block 0x3333")
+        ));
+        assert!(matches!(
+            open_image_by_id(&path, "attached"),
+            Err(XisfError::Malformed(_))
+        ));
+        let info = inspect(&path).unwrap();
+        assert_eq!(info.images.len(), 4);
+        assert!(matches!(
+            &info.images[1].location,
+            BlockLocation::External { bytes, .. } if *bytes == compressed.len() as u64
+        ));
+
+        // From memory there is no header directory to resolve against.
+        assert!(matches!(
+            from_bytes(header.as_bytes()),
+            Err(XisfError::Unsupported(message)) if message.contains("header file")
         ));
     }
 
