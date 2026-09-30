@@ -1462,15 +1462,9 @@ fn select_surface(
                         .map(|score| (candidate, score))
                 })
                 .collect();
-            let Some(&(mut selected, mut selected_error)) = scored.first() else {
+            let Some(selected) = choose_candidate(&scored, minimum_improvement) else {
                 return Err(Error::SingularFit);
             };
-            for &(candidate, error) in scored.iter().skip(1) {
-                if error + 0.01 < selected_error * (1.0 - minimum_improvement) {
-                    selected = candidate;
-                    selected_error = error;
-                }
-            }
             let diagnostics = ModelSelectionDiagnostics {
                 selected: surface_label(selected),
                 candidates: scored
@@ -1484,6 +1478,76 @@ fn select_surface(
             Ok((selected, Some(diagnostics)))
         }
     }
+}
+
+/// Walk the candidates from stiffest to most flexible and keep a more flexible
+/// one only when it beats the current choice by the configured margin.
+fn choose_candidate<T: Copy>(scored: &[(T, f64)], minimum_improvement: f64) -> Option<T> {
+    let &(mut selected, mut selected_error) = scored.first()?;
+    for &(candidate, error) in scored.iter().skip(1) {
+        if error + 0.01 < selected_error * (1.0 - minimum_improvement) {
+            selected = candidate;
+            selected_error = error;
+        }
+    }
+    Some(selected)
+}
+
+/// Choose one surface for channels of one scene that were fitted one at a time.
+///
+/// Automatic selection runs per fit, so the channels of a color image fitted
+/// separately can each land on a different surface: a constant in one, a
+/// curve in another. Correcting them with different shapes leaves a color
+/// cast that grows toward the edges. This averages each candidate's held-out
+/// error over every fit and applies the rule automatic selection uses for a
+/// single fit. Refit each channel with the returned model.
+///
+/// Returns `None` when `config` is not [`ModelConfig::Automatic`], when a fit
+/// carries no selection diagnostics, or when no candidate was scored in every
+/// fit.
+pub fn select_shared_model(config: &ModelConfig, fits: &[&BackgroundFit]) -> Option<ModelConfig> {
+    let ModelConfig::Automatic {
+        ridge,
+        rbf_smoothing,
+        max_control_points,
+        minimum_improvement,
+        ..
+    } = *config
+    else {
+        return None;
+    };
+    let selections: Vec<&ModelSelectionDiagnostics> = fits
+        .iter()
+        .map(|fit| fit.diagnostics.model_selection.as_ref())
+        .collect::<Option<_>>()?;
+    let first = selections.first()?;
+    let scored: Vec<(&str, f64)> = first
+        .candidates
+        .iter()
+        .filter_map(|candidate| {
+            let errors: Vec<f64> = selections
+                .iter()
+                .map(|selection| {
+                    selection
+                        .candidates
+                        .iter()
+                        .find(|other| other.model == candidate.model)
+                        .map(|other| other.validation_error)
+                })
+                .collect::<Option<_>>()?;
+            let mean = errors.iter().sum::<f64>() / errors.len() as f64;
+            Some((candidate.model.as_str(), mean))
+        })
+        .collect();
+    let selected = choose_candidate(&scored, minimum_improvement)?;
+    if selected == "radial_basis" {
+        return Some(ModelConfig::RadialBasis {
+            smoothing: rbf_smoothing,
+            max_control_points,
+        });
+    }
+    let degree = selected.strip_prefix("polynomial_")?.parse().ok()?;
+    Some(ModelConfig::Polynomial { degree, ridge })
 }
 
 fn surface_label(surface: SurfaceSpec) -> String {
@@ -2221,6 +2285,116 @@ mod tests {
             None,
             &[region],
         ));
+    }
+
+    fn with_selection(fit: &BackgroundFit, scores: [f64; 3]) -> BackgroundFit {
+        let mut fit = fit.clone();
+        fit.diagnostics.model_selection = Some(ModelSelectionDiagnostics {
+            selected: "polynomial_0".into(),
+            candidates: scores
+                .iter()
+                .enumerate()
+                .map(|(degree, &validation_error)| ModelCandidateDiagnostics {
+                    model: format!("polynomial_{degree}"),
+                    validation_error,
+                })
+                .collect(),
+        });
+        fit
+    }
+
+    #[test]
+    fn shared_selection_gives_every_channel_one_surface() {
+        let automatic = ModelConfig::Automatic {
+            max_degree: 2,
+            ridge: 1.0e-8,
+            rbf_smoothing: 0.01,
+            max_control_points: 192,
+            allow_radial_basis: false,
+            minimum_improvement: 0.08,
+        };
+        let (width, height) = (112, 84);
+        let config = BackgroundConfig {
+            model: automatic.clone(),
+            samples_per_axis: 14,
+            sample_radius: Some(1),
+            search_steps: 0,
+            ..BackgroundConfig::default()
+        };
+        let base =
+            fit_background(&curved_gradient(width, height), width, height, 1, &config).unwrap();
+        // Held-out errors from an RGB stack of NGC 7023 where selection per
+        // channel picked a curve for red, a constant for green, and a plane
+        // for blue, and the preview came out green in one corner and magenta
+        // in the opposite one.
+        let red = with_selection(&base, [0.7645, 0.8048, 0.6879]);
+        let green = with_selection(&base, [0.6723, 0.6813, 0.6383]);
+        let blue = with_selection(&base, [0.6303, 0.5494, 0.5393]);
+        for (fit, degree) in [(&red, 2), (&green, 0), (&blue, 1)] {
+            let selection = fit.diagnostics.model_selection.as_ref().unwrap();
+            let scored: Vec<(&str, f64)> = selection
+                .candidates
+                .iter()
+                .map(|candidate| (candidate.model.as_str(), candidate.validation_error))
+                .collect();
+            assert_eq!(
+                choose_candidate(&scored, 0.08),
+                Some(format!("polynomial_{degree}").as_str())
+            );
+        }
+
+        let shared = select_shared_model(&automatic, &[&red, &green, &blue]).unwrap();
+        assert_eq!(
+            shared,
+            ModelConfig::Polynomial {
+                degree: 2,
+                ridge: 1.0e-8
+            }
+        );
+
+        let fixed = BackgroundConfig {
+            model: shared,
+            ..config
+        };
+        let refit =
+            fit_background(&curved_gradient(width, height), width, height, 1, &fixed).unwrap();
+        assert!(matches!(
+            refit.model,
+            FittedModel::Polynomial { degree: 2, .. }
+        ));
+    }
+
+    #[test]
+    fn shared_selection_needs_automatic_scores_from_every_fit() {
+        let (width, height) = (112, 84);
+        let config = BackgroundConfig {
+            samples_per_axis: 14,
+            sample_radius: Some(1),
+            search_steps: 0,
+            ..BackgroundConfig::default()
+        };
+        let fixed =
+            fit_background(&curved_gradient(width, height), width, height, 1, &config).unwrap();
+        assert!(fixed.diagnostics.model_selection.is_none());
+        let scored = with_selection(&fixed, [0.5, 0.4, 0.3]);
+        let automatic = ModelConfig::Automatic {
+            max_degree: 2,
+            ridge: 1.0e-8,
+            rbf_smoothing: 0.01,
+            max_control_points: 192,
+            allow_radial_basis: false,
+            minimum_improvement: 0.08,
+        };
+        assert_eq!(select_shared_model(&config.model, &[&scored]), None);
+        assert_eq!(select_shared_model(&automatic, &[&scored, &fixed]), None);
+        assert_eq!(select_shared_model(&automatic, &[]), None);
+        assert_eq!(
+            select_shared_model(&automatic, &[&scored]),
+            Some(ModelConfig::Polynomial {
+                degree: 2,
+                ridge: 1.0e-8
+            })
+        );
     }
 
     fn curved_gradient(width: usize, height: usize) -> Vec<f32> {

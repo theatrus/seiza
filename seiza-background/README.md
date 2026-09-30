@@ -12,6 +12,11 @@ flexible model when the normalized validation error improves by a set margin.
 Callers can add the radial-basis candidate, but must do so explicitly because
 held-out samples can share the same real extended emission.
 
+Channels of one color image fitted one at a time can each select a different
+surface, and the mismatch shows as a color cast toward the edges.
+`select_shared_model` averages each candidate's held-out error over those fits
+and returns one model to refit every channel with.
+
 Candidate windows are spread across the frame, moved toward nearby quiet
 locations, and filtered with local-dispersion and iterative residual rejection.
 Mono and RGB images share sample positions while fitting each channel
