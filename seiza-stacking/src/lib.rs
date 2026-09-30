@@ -18,6 +18,7 @@ mod orientation;
 mod paths;
 mod pipeline;
 mod registration;
+mod replay;
 mod residual_flat;
 mod snr;
 mod stack;

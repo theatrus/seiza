@@ -310,6 +310,14 @@ typedef struct {
   uint64_t flat_session_seconds;
 } SeizaMatchTolerances;
 
+/*
+ Progress callback for [`seiza_live_stacker_reintegrate`]: the pass (0
+ while estimating statistics, 1 while integrating), the zero-based frame
+ index, the admitted-frame count, and the caller's context pointer. Called
+ on the thread that made the call, before each frame is read.
+ */
+typedef void (*SeizaStackReintegrateProgressCallback)(uint32_t, size_t, size_t, void*);
+
 typedef void (*SeizaCatalogSetupProgressCallback)(const char*, void*);
 
 /*
@@ -873,6 +881,42 @@ SeizaStackSnapshot *seiza_live_stacker_snapshot(const SeizaLiveStacker *stacker,
  */
 SeizaStackExportSnapshot *seiza_live_stacker_export_snapshot(const SeizaLiveStacker *stacker,
                                                              char **error_out);
+
+/*
+ Integrate every admitted frame again with two-pass, leave-one-out
+ rejection and return the result as a new snapshot.
+
+ Online rejection cannot revisit the reference frame or the warm-up frames
+ it admitted before it had statistics, so a satellite or aircraft trail in
+ one of them stays in the live mean. This reads each admitted frame twice
+ more from its source file, prepares it exactly as the live pass did (the
+ same calibration masters, cosmetic filter, debayering, and recorded
+ registration and normalization), and rejects samples more than
+ `low_sigma` below or `high_sigma` above the other frames. A value of zero
+ or less uses the default of 3. Star detection and registration do not run
+ again, and every admitted frame takes part.
+
+ The live stacker is not changed and may keep integrating afterwards. The
+ stack must be replayable: `reintegrationUnavailable` in
+ [`seiza_live_stacker_state_json`] says why not when it is not, and this
+ call fails with the same message. A source file changed since it was
+ stacked also fails the call. Memory use is about 36 bytes per output
+ sample plus one frame, independent of the frame count.
+
+ # Safety
+ `stacker` must be a live `SeizaLiveStacker` pointer, externally
+ synchronized with every mutable operation on it for the duration of the
+ call. `cancel` must be null or a live [`SeizaCancelSignal`] retained until
+ this call returns. `context` is passed through untouched to `progress`.
+ When non-null, `error_out` must point to writable storage for one pointer.
+ */
+SeizaStackSnapshot *seiza_live_stacker_reintegrate(const SeizaLiveStacker *stacker,
+                                                   float low_sigma,
+                                                   float high_sigma,
+                                                   const SeizaCancelSignal *cancel,
+                                                   SeizaStackReintegrateProgressCallback progress,
+                                                   void *context,
+                                                   char **error_out);
 
 /*
  Consumes a live stacker and moves its full-frame state into an immutable

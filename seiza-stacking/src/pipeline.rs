@@ -776,6 +776,8 @@ fn prepare_decoded(
     if let Some(full_scale) = normalized_full_scale {
         frame.rescale_declared_unit_bounds(full_scale);
     }
+    // Recorded after the rescale, which a replay repeats.
+    let source = crate::replay::FrameSource::of(&frame);
     if let Err(error) = half.calibration.validate_light_frame(&frame) {
         let message = match error {
             Error::Calibration(message) => message,
@@ -813,7 +815,10 @@ fn prepare_decoded(
             ));
         }
     };
-    prepare_frame(half.reference, half.registrar, half.options, frame.image)
+    Ok(
+        prepare_frame(half.reference, half.registrar, half.options, frame.image)?
+            .with_source(source),
+    )
 }
 
 #[cfg(test)]
@@ -836,6 +841,15 @@ mod tests {
     /// A dithered star field, big enough for registration to have real work
     /// and small enough to stay a unit test.
     fn write_frame(path: &Path, frame: usize) {
+        write_frame_with(path, frame, false);
+    }
+
+    /// Row of the satellite trail [`write_frame_with`] can draw.
+    const TRAIL_ROW: usize = 80;
+
+    /// [`write_frame`], optionally with a bright satellite trail across
+    /// [`TRAIL_ROW`].
+    fn write_frame_with(path: &Path, frame: usize, trail: bool) {
         let (width, height) = (192usize, 160usize);
         let stars: Vec<(f32, f32, f32)> = (0..24)
             .map(|index| {
@@ -865,6 +879,9 @@ mod tests {
             for x in 0..width {
                 let noise = ((x * 17 + y * 31 + frame * 11) % 23) as f32 * 1.5;
                 let mut value = 1000.0 + noise;
+                if trail && y.abs_diff(TRAIL_ROW) <= 1 && (8..184).contains(&x) {
+                    value += 20000.0;
+                }
                 for (star_x, star_y, brightness) in &stars {
                     let ddx = x as f32 - (star_x + dx);
                     let ddy = y as f32 - (star_y + dy);
@@ -900,6 +917,167 @@ mod tests {
     /// any drift in the low bits is caught rather than tolerated.
     pub(super) fn bits(values: &[f32]) -> Vec<u32> {
         values.iter().map(|value| value.to_bits()).collect()
+    }
+
+    /// The median of the trail row, which stars barely touch.
+    fn trail_row_median(image: &crate::LinearImage) -> f32 {
+        let mut row = image.data[TRAIL_ROW * image.width + 20..TRAIL_ROW * image.width + 170]
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite())
+            .collect::<Vec<_>>();
+        row.sort_by(f32::total_cmp);
+        row[row.len() / 2]
+    }
+
+    fn trailed_reference_set() -> (tempfile::TempDir, Vec<PathBuf>) {
+        let (directory, paths) = frame_set(8);
+        write_frame_with(&paths[0], 0, true);
+        (directory, paths)
+    }
+
+    #[test]
+    fn reintegration_rejects_a_trail_the_live_pass_admitted_in_the_reference() {
+        let (_directory, paths) = trailed_reference_set();
+        let mut stacker =
+            LiveStacker::open_fits(&paths[0], None, None, None, None, StackOptions::default())
+                .unwrap();
+        let report = stacker
+            .push_fits_pipelined(&paths[1..], &concurrent(3), |_, _| Continue::Yes)
+            .unwrap();
+        assert_eq!(report.integrated, 7);
+        assert_eq!(stacker.snapshot().unwrap().accepted_frames, 8);
+        assert_eq!(stacker.reintegration_unavailable(), None);
+
+        let live = stacker.snapshot().unwrap();
+        assert!(
+            trail_row_median(&live.image) > 2500.0,
+            "the live pass keeps the reference trail"
+        );
+        let mut reads = Vec::new();
+        let replayed = stacker
+            .reintegrate(
+                &crate::BatchStackOptions::default(),
+                |pass, index, count| {
+                    reads.push((pass, index, count));
+                },
+            )
+            .unwrap();
+        assert!(
+            trail_row_median(&replayed.snapshot.image) < 1100.0,
+            "reintegration rejects the trail: {}",
+            trail_row_median(&replayed.snapshot.image)
+        );
+        let trail_sample = TRAIL_ROW * replayed.snapshot.image.width + 100;
+        assert_eq!(replayed.snapshot.rejected_samples[trail_sample], 1);
+        assert_eq!(replayed.snapshot.accepted_frames, 8);
+        assert_eq!(
+            reads.len(),
+            16,
+            "each admitted frame is read on both passes"
+        );
+        assert_eq!(reads[0], (crate::BatchStackPass::Estimate, 0, 8));
+        assert_eq!(reads[8], (crate::BatchStackPass::Integrate, 0, 8));
+        // Reintegration leaves the live stack untouched.
+        assert_eq!(
+            bits(&stacker.snapshot().unwrap().image.data),
+            bits(&live.image.data)
+        );
+
+        // Sequential pushes record the same ledger and replay identically.
+        let mut sequential =
+            LiveStacker::open_fits(&paths[0], None, None, None, None, StackOptions::default())
+                .unwrap();
+        for path in &paths[1..] {
+            sequential.push_fits(path).unwrap();
+        }
+        let sequential = sequential
+            .reintegrate(&crate::BatchStackOptions::default(), |_, _, _| {})
+            .unwrap();
+        assert_eq!(
+            bits(&sequential.snapshot.image.data),
+            bits(&replayed.snapshot.image.data)
+        );
+    }
+
+    #[test]
+    fn reintegration_survives_a_saved_context_and_refuses_changed_sources() {
+        let (directory, paths) = trailed_reference_set();
+        let mut stacker =
+            LiveStacker::open_fits(&paths[0], None, None, None, None, StackOptions::default())
+                .unwrap();
+        for path in &paths[1..] {
+            stacker.push_fits(path).unwrap();
+        }
+        let before = stacker
+            .reintegrate(&crate::BatchStackOptions::default(), |_, _, _| {})
+            .unwrap();
+        let context = directory.path().join("stack.seiza-stack");
+        stacker.save_context(&context).unwrap();
+        let restored = LiveStacker::open_context(&context).unwrap();
+        let after = restored
+            .reintegrate(&crate::BatchStackOptions::default(), |_, _, _| {})
+            .unwrap();
+        assert_eq!(
+            bits(&after.snapshot.image.data),
+            bits(&before.snapshot.image.data)
+        );
+
+        // A source rewritten after stacking is refused rather than mixed in.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_frame_with(&paths[3], 30, false);
+        let error = restored
+            .reintegrate(&crate::BatchStackOptions::default(), |_, _, _| {})
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("changed since it was stacked"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn reintegration_follows_calibration_sets_it_can_reload() {
+        let (_directory, paths) = trailed_reference_set();
+        let mut stacker =
+            LiveStacker::open_fits(&paths[0], None, None, None, None, StackOptions::default())
+                .unwrap();
+        stacker.push_fits(&paths[1]).unwrap();
+        stacker.push_fits(&paths[2]).unwrap();
+        // A swap loaded from paths keeps earlier frames replayable.
+        stacker
+            .set_calibration_from_fits_paths(None, None, None, None)
+            .unwrap();
+        stacker.push_fits(&paths[3]).unwrap();
+        stacker.push_fits(&paths[4]).unwrap();
+        assert_eq!(stacker.reintegration_unavailable(), None);
+        stacker
+            .reintegrate(&crate::BatchStackOptions::default(), |_, _, _| {})
+            .unwrap();
+
+        // Masters supplied in memory cannot be reloaded once replaced.
+        let mut in_memory = stacker_from(&paths[0]);
+        in_memory.push_fits(&paths[1]).unwrap();
+        in_memory.set_calibration(constant_bias(10.0)).unwrap();
+        in_memory.push_fits(&paths[2]).unwrap();
+        let reason = in_memory.reintegration_unavailable().unwrap();
+        assert!(reason.contains("masters supplied in memory"), "{reason}");
+        assert!(
+            in_memory
+                .reintegrate(&crate::BatchStackOptions::default(), |_, _, _| {})
+                .is_err()
+        );
+
+        // A stack built from pixels has no files to replay.
+        let pixels = LiveStacker::from_linear(
+            FitsFrame::open(&paths[0])
+                .unwrap()
+                .into_prepared()
+                .unwrap()
+                .image,
+            StackOptions::default(),
+        )
+        .unwrap();
+        assert!(pixels.reintegration_unavailable().is_some());
     }
 
     /// Options that force the channel handoff whatever the host's core count.

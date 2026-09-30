@@ -1,6 +1,6 @@
 use crate::{
     BayerLayout, CalibrationMasters, Error, FrameMetadata, LinearImage, Result, StackOptions,
-    stack::FrameInputMode,
+    replay::Ledger, stack::FrameInputMode,
 };
 use seiza_calibration::FrameSignature;
 use seiza_fits::{BayerPattern, HeaderValue};
@@ -11,8 +11,14 @@ use std::path::{Path, PathBuf};
 
 const MAGIC: &[u8; 8] = b"SEIZASTK";
 const MINIMUM_FORMAT_VERSION: u32 = 1;
-const FORMAT_VERSION: u32 = 2;
+const FORMAT_VERSION: u32 = 3;
+/// The first format version with an admitted-frame ledger section.
+const LEDGER_FORMAT_VERSION: u32 = 3;
 const MAXIMUM_METADATA_BYTES: u64 = 8 * 1024 * 1024;
+/// The ledger holds one registration and normalization mapping per admitted
+/// frame. Local normalization grids make those large, so the ledger is a
+/// compact binary section with its own, larger limit.
+const MAXIMUM_LEDGER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const IO_BUFFER_VALUES: usize = 16 * 1024;
 
 pub(crate) struct ContextWriteState<'a> {
@@ -29,6 +35,7 @@ pub(crate) struct ContextWriteState<'a> {
     pub rejected_frames: u32,
     pub input_paths: &'a [PathBuf],
     pub input_mode: FrameInputMode,
+    pub ledger: &'a Ledger,
 }
 
 pub(crate) struct RestoredContext {
@@ -45,6 +52,8 @@ pub(crate) struct RestoredContext {
     pub rejected_frames: u32,
     pub input_paths: Vec<PathBuf>,
     pub input_mode: FrameInputMode,
+    /// `None` for a context saved before ledgers existed.
+    pub ledger: Option<Ledger>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -160,6 +169,19 @@ fn write_version(path: &Path, state: ContextWriteState<'_>, format_version: u32)
     if metadata.len() as u64 > MAXIMUM_METADATA_BYTES {
         return Err(context_write_error(path, "context metadata is too large"));
     }
+    let ledger = if format_version >= LEDGER_FORMAT_VERSION {
+        let bytes = postcard::to_stdvec(state.ledger)
+            .map_err(|error| context_write_error(path, error.to_string()))?;
+        if bytes.len() as u64 > MAXIMUM_LEDGER_BYTES {
+            return Err(context_write_error(
+                path,
+                "admitted-frame ledger is too large",
+            ));
+        }
+        Some(bytes)
+    } else {
+        None
+    };
 
     let parent = path
         .parent()
@@ -210,6 +232,12 @@ fn write_version(path: &Path, state: ContextWriteState<'_>, format_version: u32)
             })
             .and_then(|()| {
                 write_optional_image(&mut encoder, state.calibration.flat_response.as_ref())
+            })
+            .and_then(|()| match &ledger {
+                Some(ledger) => encoder
+                    .write_all(&(ledger.len() as u64).to_le_bytes())
+                    .and_then(|()| encoder.write_all(ledger)),
+                None => Ok(()),
             })
             .map_err(|error| context_write_error(path, error.to_string()))?;
 
@@ -284,6 +312,37 @@ pub(crate) fn read(path: &Path) -> Result<RestoredContext> {
         .map_err(|error| context_read_error(path, error))?;
     let flat_response = read_optional_image(&mut decoder, metadata.calibration.flat_response)
         .map_err(|error| context_read_error(path, error))?;
+    let ledger = if version >= LEDGER_FORMAT_VERSION {
+        let length = read_u64(&mut decoder).map_err(|error| context_read_error(path, error))?;
+        if length > MAXIMUM_LEDGER_BYTES {
+            return Err(context_read_error(
+                path,
+                "admitted-frame ledger is too large",
+            ));
+        }
+        let length = usize::try_from(length).map_err(|_| {
+            context_read_error(path, "admitted-frame ledger length overflows this platform")
+        })?;
+        let mut bytes = Vec::new();
+        (&mut decoder)
+            .take(length as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|error| context_read_error(path, error.to_string()))?;
+        if bytes.len() != length {
+            return Err(context_read_error(
+                path,
+                "admitted-frame ledger is truncated",
+            ));
+        }
+        let ledger: Ledger = postcard::from_bytes(&bytes)
+            .map_err(|error| context_read_error(path, error.to_string()))?;
+        ledger
+            .validate(metadata.accepted_frames)
+            .map_err(|message| context_read_error(path, message))?;
+        Some(ledger)
+    } else {
+        None
+    };
 
     let mut trailing = [0_u8; 1];
     if decoder
@@ -361,6 +420,7 @@ pub(crate) fn read(path: &Path) -> Result<RestoredContext> {
         rejected_frames: metadata.rejected_frames,
         input_paths,
         input_mode: metadata.input_mode,
+        ledger,
     })
 }
 

@@ -66,6 +66,12 @@ pub(crate) struct StackArgs {
     /// Accepted observations before online rejection begins
     #[arg(long, default_value_t = 5)]
     rejection_warmup: u32,
+    /// After stacking, read every admitted frame twice more and integrate
+    /// them with leave-one-out rejection at --sigma-low and --sigma-high.
+    /// This removes satellite trails and other transients from the
+    /// reference and warm-up frames, which online rejection cannot revisit.
+    #[arg(long)]
+    reintegrate: bool,
     /// Maximum registration residual for additive admission
     #[arg(long, default_value_t = 2.0)]
     max_registration_rms: f64,
@@ -114,6 +120,7 @@ struct ConfigurationReport {
     sigma_high: f32,
     rejection_warmup: u32,
     rejection_minimum_sigma: f32,
+    reintegrate: bool,
     maximum_registration_rms_pixels: f64,
     maximum_scale_deviation: f64,
     maximum_rotation_degrees: f64,
@@ -310,6 +317,7 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
         sigma_low: options.sigma_low,
         sigma_high: options.sigma_high,
         rejection_warmup: options.rejection_warmup,
+        reintegrate: options.reintegrate,
         rejection_minimum_sigma: match stack_options.rejection {
             RejectionMode::None => DeltaSigmaOptions::default().minimum_sigma,
             RejectionMode::DeltaSigma(options) => options.minimum_sigma,
@@ -408,7 +416,37 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
     }
 
     let reference_headers = stacker.reference_headers().to_vec();
-    let mut snapshot = stacker.into_snapshot()?;
+    let mut snapshot = if options.reintegrate {
+        if let Some(reason) = stacker.reintegration_unavailable() {
+            anyhow::bail!("cannot reintegrate: {reason}");
+        }
+        let batch = seiza_stacking::BatchStackOptions {
+            rejection: seiza_stacking::MasterRejectionOptions {
+                low_sigma: options.sigma_low,
+                high_sigma: options.sigma_high,
+            },
+            ..seiza_stacking::BatchStackOptions::default()
+        };
+        let result = stacker.reintegrate(&batch, |pass, index, count| {
+            if index == 0 {
+                let what = match pass {
+                    seiza_stacking::BatchStackPass::Estimate => "estimating",
+                    seiza_stacking::BatchStackPass::Integrate => "integrating",
+                };
+                println!("reintegrate {what} {count} admitted frame(s)");
+            }
+        })?;
+        let rejected = result
+            .snapshot
+            .rejected_samples
+            .iter()
+            .map(|&count| u64::from(count))
+            .sum::<u64>();
+        println!("reintegrate rejected {rejected} sample(s)");
+        result.snapshot
+    } else {
+        stacker.into_snapshot()?
+    };
     snapshot.rejected_frames = snapshot.rejected_frames.saturating_add(unreadable_frames);
     seiza_stacking::write_fits_f32(&options.output, &snapshot, &reference_headers)?;
     crate::common::wrote(

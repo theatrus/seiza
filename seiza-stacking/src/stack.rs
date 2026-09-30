@@ -352,11 +352,12 @@ pub struct LiveStacker {
     pub(crate) registrar: Registrar,
     accumulator: Accumulator,
     reference_headers: Vec<(String, HeaderValue)>,
-    accepted_frames: u32,
-    rejected_frames: u32,
+    pub(crate) accepted_frames: u32,
+    pub(crate) rejected_frames: u32,
     input_paths: Vec<PathBuf>,
     input_mode: FrameInputMode,
     configuration_fingerprint: String,
+    pub(crate) ledger: crate::replay::Ledger,
 }
 
 impl LiveStacker {
@@ -368,6 +369,7 @@ impl LiveStacker {
         options: StackOptions,
     ) -> Result<Self> {
         calibration.validate_light_frame(&reference)?;
+        let source = crate::replay::FrameSource::of(&reference);
         let reference_metadata = reference.metadata();
         calibration.apply(
             &mut reference.image,
@@ -378,14 +380,16 @@ impl LiveStacker {
             crate::cosmetic::suppress_impulses(&mut reference.image, reference.bayer, filter)?;
         }
         let reference = reference.into_prepared()?;
-        Self::from_prepared(
+        let mut stacker = Self::from_prepared(
             reference.image,
             reference.headers,
             reference_metadata,
             calibration,
             options,
             FrameInputMode::CalibrateAndPrepare,
-        )
+        )?;
+        stacker.ledger.set_reference_source(source);
+        Ok(stacker)
     }
 
     /// Start a stack from an already-prepared linear reference, with no
@@ -441,6 +445,7 @@ impl LiveStacker {
         let registrar = Registrar::new(&reference, options.registration.clone())?;
         let mut accumulator = Accumulator::new(reference.sample_count());
         accumulator.integrate(&reference.data, RejectionMode::None);
+        let ledger = crate::replay::Ledger::new(&reference);
         Ok(Self {
             options,
             calibration,
@@ -454,6 +459,7 @@ impl LiveStacker {
             input_paths: Vec::new(),
             input_mode,
             configuration_fingerprint,
+            ledger,
         })
     }
 
@@ -493,6 +499,14 @@ impl LiveStacker {
         let reference = FitsFrame::open(reference_path)?;
         let mut stacker = Self::new(reference, calibration, options)?;
         stacker.input_paths = input_paths;
+        stacker
+            .ledger
+            .set_current_calibration(crate::replay::CalibrationRecord::from_paths(
+                bias_path,
+                dark_path,
+                flat_path,
+                dark_exposure_seconds,
+            ));
         Ok(stacker)
     }
 
@@ -529,6 +543,9 @@ impl LiveStacker {
             input_paths: restored.input_paths,
             input_mode: restored.input_mode,
             configuration_fingerprint,
+            ledger: restored
+                .ledger
+                .unwrap_or_else(crate::replay::Ledger::legacy),
         })
     }
 
@@ -562,6 +579,7 @@ impl LiveStacker {
                 rejected_frames: self.rejected_frames,
                 input_paths: &self.input_paths,
                 input_mode: self.input_mode,
+                ledger: &self.ledger,
             },
         )
     }
@@ -612,6 +630,8 @@ impl LiveStacker {
             stack_configuration_fingerprint(&self.options, &calibration, self.input_mode)?;
         self.calibration = calibration;
         self.configuration_fingerprint = configuration_fingerprint;
+        self.ledger
+            .begin_calibration(crate::replay::CalibrationRecord::default());
         Ok(())
     }
 
@@ -671,6 +691,13 @@ impl LiveStacker {
             dark_exposure_seconds,
         )?;
         self.set_calibration(calibration)?;
+        self.ledger
+            .set_current_calibration(crate::replay::CalibrationRecord::from_paths(
+                bias_path,
+                dark_path,
+                flat_path,
+                dark_exposure_seconds,
+            ));
         for path in paths {
             if !self.is_duplicate_input(path) {
                 self.record_input_path(path);
@@ -684,6 +711,7 @@ impl LiveStacker {
     /// reject this path so later inputs cannot skip the caller's preparation.
     pub fn push(&mut self, mut frame: FitsFrame) -> Result<FrameDisposition> {
         self.require_fits_input_mode()?;
+        let source = crate::replay::FrameSource::of(&frame);
         if let Err(error) = self.calibration.validate_light_frame(&frame) {
             let message = match error {
                 Error::Calibration(message) => message,
@@ -713,7 +741,9 @@ impl LiveStacker {
                 return Ok(self.reject(FrameRejectionReason::IncompatibleImage(error.to_string())));
             }
         };
-        self.push_linear(frame.image)
+        let prepared = prepare_frame(&self.reference, &self.registrar, &self.options, frame.image)?
+            .with_source(source);
+        Ok(self.integrate_prepared(prepared))
     }
 
     /// Open and offer one FITS or XISF path, rejecting duplicate source or
@@ -781,6 +811,7 @@ impl LiveStacker {
                 accepted_frames: &mut self.accepted_frames,
                 rejected_frames: &mut self.rejected_frames,
                 input_paths: &mut self.input_paths,
+                ledger: &mut self.ledger,
             },
         )
     }
@@ -1035,6 +1066,18 @@ pub(crate) struct ReadyFrame {
     normalization_mean_offset: f32,
     mapping: Box<crate::RegisteredFrameMapping>,
     overlap_fraction: f32,
+    /// The file the frame came from, for a later reintegration.
+    source: Option<crate::replay::FrameSource>,
+}
+
+impl PreparedFrame {
+    /// Attach the file a ready frame came from.
+    pub(crate) fn with_source(mut self, source: Option<crate::replay::FrameSource>) -> Self {
+        if let Self::Ready(ready) = &mut self {
+            ready.source = source;
+        }
+        self
+    }
 }
 
 /// Register and normalize one frame against the immutable reference.
@@ -1171,6 +1214,7 @@ pub(crate) fn prepare_frame(
         normalization_mean_offset,
         mapping: Box::new(mapping),
         overlap_fraction,
+        source: None,
     })))
 }
 
@@ -1189,6 +1233,7 @@ pub(crate) struct IntegrationHalf<'a> {
     accepted_frames: &'a mut u32,
     rejected_frames: &'a mut u32,
     input_paths: &'a mut Vec<PathBuf>,
+    ledger: &'a mut crate::replay::Ledger,
 }
 
 impl IntegrationHalf<'_> {
@@ -1210,6 +1255,7 @@ impl IntegrationHalf<'_> {
             normalization_mean_offset,
             mapping,
             overlap_fraction,
+            source,
         } = *ready;
 
         let (would_accept, _) = self
@@ -1226,6 +1272,7 @@ impl IntegrationHalf<'_> {
             .accumulator
             .integrate(&registered.data, self.options.rejection);
         *self.accepted_frames += 1;
+        self.ledger.admit(source, (*mapping).clone());
         FrameDisposition::Accepted(FrameDiagnostics {
             transform,
             matched_stars,
@@ -1732,11 +1779,14 @@ mod tests {
                 rejected_frames: stacker.rejected_frames,
                 input_paths: &stacker.input_paths,
                 input_mode: stacker.input_mode,
+                ledger: &stacker.ledger,
             },
         )
         .unwrap();
 
         let mut restored = LiveStacker::open_context(&path).unwrap();
+        // A v1 context has no ledger, so the stack cannot be replayed.
+        assert!(restored.reintegration_unavailable().is_some());
         assert_ne!(
             restored.configuration_fingerprint(),
             original_fingerprint,

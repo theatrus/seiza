@@ -81,6 +81,13 @@ exposes the **superset** of what both apps need.
   and `..._render_preview` renders from a bounded sample of the live mean
   without making a full-frame snapshot. `..._export_snapshot` copies only one
   full-frame mean for non-destructive FITS/XISF output on a worker thread.
+  `seiza_live_stacker_reintegrate` rereads every admitted frame and returns a
+  new snapshot integrated with leave-one-out rejection, which removes trails
+  from the reference and warm-up frames that online rejection kept. It
+  reports both passes through a progress callback, accepts a
+  `SeizaCancelSignal`, and leaves the live stack unchanged;
+  `reintegrationUnavailable` in the state JSON says when a stack cannot be
+  replayed.
 - **Calibration orchestration** — `seiza_probe_frame_json` reads FITS/XISF
   metadata without decoding pixels, `seiza_calibration_plan_json` applies the
   core sensor/optics/exposure/temperature/proximity/coherence rules, and

@@ -567,6 +567,9 @@ struct LiveStackStateResponse {
     input_mode: &'static str,
     input_paths: Vec<String>,
     reference_frame: LiveStackReferenceResponse,
+    /// Why [`seiza_live_stacker_reintegrate`] cannot replay this stack, or
+    /// null when it can.
+    reintegration_unavailable: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1775,6 +1778,7 @@ pub unsafe extern "C" fn seiza_live_stacker_state_json(
                     flat_normalized: reference_metadata.calibration_state.flat_normalized,
                 },
             },
+            reintegration_unavailable: stacker.stacker.reintegration_unavailable(),
         })
     })
     .unwrap_or(ptr::null_mut())
@@ -2202,6 +2206,94 @@ pub unsafe extern "C" fn seiza_live_stacker_export_snapshot(
             snapshot,
             reference_headers,
             input_paths,
+        })
+    })
+    .map_or(ptr::null_mut(), |snapshot| {
+        Box::into_raw(Box::new(snapshot))
+    })
+}
+
+/// Progress callback for [`seiza_live_stacker_reintegrate`]: the pass (0
+/// while estimating statistics, 1 while integrating), the zero-based frame
+/// index, the admitted-frame count, and the caller's context pointer. Called
+/// on the thread that made the call, before each frame is read.
+pub type SeizaStackReintegrateProgressCallback =
+    Option<unsafe extern "C" fn(u32, usize, usize, *mut c_void)>;
+
+#[unsafe(no_mangle)]
+/// Integrate every admitted frame again with two-pass, leave-one-out
+/// rejection and return the result as a new snapshot.
+///
+/// Online rejection cannot revisit the reference frame or the warm-up frames
+/// it admitted before it had statistics, so a satellite or aircraft trail in
+/// one of them stays in the live mean. This reads each admitted frame twice
+/// more from its source file, prepares it exactly as the live pass did (the
+/// same calibration masters, cosmetic filter, debayering, and recorded
+/// registration and normalization), and rejects samples more than
+/// `low_sigma` below or `high_sigma` above the other frames. A value of zero
+/// or less uses the default of 3. Star detection and registration do not run
+/// again, and every admitted frame takes part.
+///
+/// The live stacker is not changed and may keep integrating afterwards. The
+/// stack must be replayable: `reintegrationUnavailable` in
+/// [`seiza_live_stacker_state_json`] says why not when it is not, and this
+/// call fails with the same message. A source file changed since it was
+/// stacked also fails the call. Memory use is about 36 bytes per output
+/// sample plus one frame, independent of the frame count.
+///
+/// # Safety
+/// `stacker` must be a live `SeizaLiveStacker` pointer, externally
+/// synchronized with every mutable operation on it for the duration of the
+/// call. `cancel` must be null or a live [`SeizaCancelSignal`] retained until
+/// this call returns. `context` is passed through untouched to `progress`.
+/// When non-null, `error_out` must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_live_stacker_reintegrate(
+    stacker: *const SeizaLiveStacker,
+    low_sigma: f32,
+    high_sigma: f32,
+    cancel: *const SeizaCancelSignal,
+    progress: SeizaStackReintegrateProgressCallback,
+    context: *mut c_void,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaStackSnapshot {
+    clear_error(error_out);
+    // Raw pointers are not UnwindSafe; the callback runs on this thread and
+    // the context's lifetime is the caller's promise.
+    let context = context as usize;
+    ffi_result(error_out, || {
+        let stacker = unsafe { required_live_stacker(stacker)? };
+        let sigma = |value: f32| {
+            if value.is_finite() && value > 0.0 {
+                value
+            } else {
+                3.0
+            }
+        };
+        let options = seiza_stacking::BatchStackOptions {
+            rejection: seiza_stacking::MasterRejectionOptions {
+                low_sigma: sigma(low_sigma),
+                high_sigma: sigma(high_sigma),
+            },
+            cancel: unsafe { cancel.as_ref() }
+                .map(|signal| CancelSignal::from(Arc::clone(&signal.cancelled))),
+            ..seiza_stacking::BatchStackOptions::default()
+        };
+        let result = stacker
+            .stacker
+            .reintegrate(&options, |pass, index, count| {
+                if let Some(callback) = progress {
+                    let pass = match pass {
+                        seiza_stacking::BatchStackPass::Estimate => 0,
+                        seiza_stacking::BatchStackPass::Integrate => 1,
+                    };
+                    unsafe { callback(pass, index, count, context as *mut c_void) };
+                }
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(SeizaStackSnapshot {
+            snapshot: result.snapshot,
+            reference_headers: stacker.stacker.reference_headers().to_vec(),
+            input_paths: stacker.stacker.input_paths().to_vec(),
         })
     })
     .map_or(ptr::null_mut(), |snapshot| {
@@ -7122,6 +7214,155 @@ mod tests {
         );
         unsafe {
             seiza_string_free(error);
+            seiza_stack_snapshot_free(snapshot);
+            seiza_live_stacker_free(stacker);
+        }
+    }
+
+    #[test]
+    fn reintegration_cabi_rejects_a_reference_trail_the_live_stack_kept() {
+        let (width, height) = (160, 128);
+        let clean = stacking_star_field(width, height);
+        let mut trailed = clean.clone();
+        let trail_row = 60;
+        for value in &mut trailed[trail_row * width + 10..trail_row * width + 150] {
+            *value += 5000.0;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let reference = directory.path().join("light-000.fits");
+        seiza_stacking::write_processed_image_fits_f32(
+            &reference,
+            &LinearImage::new(width, height, 1, trailed).unwrap(),
+            &[],
+            &[],
+        )
+        .unwrap();
+        let mut others = Vec::new();
+        for index in 1..6 {
+            let path = directory.path().join(format!("light-{index:03}.fits"));
+            let noisy = clean
+                .iter()
+                .enumerate()
+                .map(|(sample, value)| value + ((sample * 7 + index * 13) % 5) as f32 * 0.1)
+                .collect::<Vec<_>>();
+            seiza_stacking::write_processed_image_fits_f32(
+                &path,
+                &LinearImage::new(width, height, 1, noisy).unwrap(),
+                &[],
+                &[],
+            )
+            .unwrap();
+            others.push(path.to_str().unwrap().to_owned());
+        }
+        let reference_c = CString::new(reference.to_str().unwrap()).unwrap();
+        let paths_c = CString::new(serde_json::to_string(&others).unwrap()).unwrap();
+        let config = no_adjustment_stack_options();
+        let mut error = ptr::null_mut();
+        let stacker = unsafe {
+            seiza_live_stacker_open_fits(
+                reference_c.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                0.0,
+                config.as_ptr(),
+                &mut error,
+            )
+        };
+        assert!(!stacker.is_null());
+        let response = unsafe {
+            seiza_live_stacker_push_fits_pipelined_json(
+                stacker,
+                paths_c.as_ptr(),
+                2,
+                0,
+                0.0,
+                &mut error,
+            )
+        };
+        assert!(!response.is_null(), "{:?}", unsafe {
+            error.as_ref().map(|e| CStr::from_ptr(e))
+        });
+        unsafe { seiza_string_free(response) };
+        assert_eq!(unsafe { seiza_live_stacker_accepted_frames(stacker) }, 6);
+
+        let state = unsafe { seiza_live_stacker_state_json(stacker, &mut error) };
+        let parsed =
+            serde_json::from_str::<Value>(unsafe { CStr::from_ptr(state) }.to_str().unwrap())
+                .unwrap();
+        unsafe { seiza_string_free(state) };
+        assert!(parsed["reintegrationUnavailable"].is_null(), "{parsed}");
+
+        unsafe extern "C" fn count_reads(
+            pass: u32,
+            index: usize,
+            count: usize,
+            context: *mut c_void,
+        ) {
+            let reads = unsafe { &mut *(context as *mut Vec<(u32, usize, usize)>) };
+            reads.push((pass, index, count));
+        }
+        let mut reads = Vec::<(u32, usize, usize)>::new();
+        let snapshot = unsafe {
+            seiza_live_stacker_reintegrate(
+                stacker,
+                0.0,
+                0.0,
+                ptr::null(),
+                Some(count_reads),
+                (&mut reads as *mut Vec<(u32, usize, usize)>).cast(),
+                &mut error,
+            )
+        };
+        assert!(!snapshot.is_null(), "{:?}", unsafe {
+            error.as_ref().map(|e| CStr::from_ptr(e))
+        });
+        assert_eq!(reads.len(), 12);
+        assert_eq!(reads[6], (1, 0, 6));
+        let sample = trail_row * width + 80;
+        let replayed = unsafe {
+            std::slice::from_raw_parts(
+                seiza_stack_snapshot_image(snapshot),
+                seiza_stack_snapshot_data_length(snapshot),
+            )
+        };
+        let live = unsafe {
+            std::slice::from_raw_parts(
+                seiza_live_stacker_mean(stacker),
+                seiza_live_stacker_data_length(stacker),
+            )
+        };
+        assert!(
+            live[sample] - clean[sample] > 500.0,
+            "the live mean keeps the trail"
+        );
+        assert!(
+            (replayed[sample] - clean[sample]).abs() < 1.0,
+            "reintegration rejects it: {} vs {}",
+            replayed[sample],
+            clean[sample]
+        );
+        assert_eq!(unsafe { seiza_stack_snapshot_accepted_frames(snapshot) }, 6);
+
+        // A cancelled replay stops with an error rather than a snapshot.
+        let cancel = seiza_cancel_signal_create();
+        unsafe { seiza_cancel_signal_cancel(cancel) };
+        let cancelled = unsafe {
+            seiza_live_stacker_reintegrate(
+                stacker,
+                3.0,
+                3.0,
+                cancel,
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(cancelled.is_null());
+        assert!(!error.is_null());
+        unsafe {
+            seiza_string_free(error);
+            seiza_cancel_signal_free(cancel);
             seiza_stack_snapshot_free(snapshot);
             seiza_live_stacker_free(stacker);
         }

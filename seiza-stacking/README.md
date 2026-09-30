@@ -21,8 +21,21 @@ The first release supports:
 ## Completed-stack rejection
 
 Live delta-sigma rejection cannot remove trails admitted during its warm-up.
-For a completed preview, use `integrate_registered_frames` to reread admitted
-frames with their saved calibration and `RegisteredFrameMapping`. The loader
+`LiveStacker::reintegrate` fixes that for a live stack. The stacker keeps a
+ledger of every admitted frame: its source file, the calibration masters that
+applied, and the registration and normalization mapping the live pass chose.
+Reintegration reads each frame twice more, prepares it exactly as the live
+pass did, and integrates it with leave-one-out rejection, leaving the live
+stack unchanged. Star detection and registration do not run again. A source
+file that changed since it was stacked is refused, and
+`LiveStacker::reintegration_unavailable` says why a stack cannot be replayed:
+frames pushed as pixels, frames calibrated with in-memory masters that were
+since replaced, or a context saved before the ledger existed. Saved contexts
+carry the ledger from format version 3; versions 1 and 2 still open.
+
+Hosts that keep their own records can call `integrate_registered_frames`
+directly to reread admitted frames with their saved calibration and
+`RegisteredFrameMapping`. The loader
 receives `BatchStackPass` and the frame index, so a host can report both passes
 and cancel the work. `BatchStackResult` includes the final mean, variance,
 coverage, rejection maps, and per-frame finite/integrated sample counts.
@@ -38,7 +51,7 @@ shallow stacks. All normalized frames have equal weight, and
 `BatchStackOptions::minimum_sigma` is in their physical sample units.
 Memory stays proportional to the output image (about 36 bytes per sample plus
 one loaded input), and each frame is loaded twice. Changed shapes or sample
-digests abort the result. Live checkpoint formats and semantics do not change.
+digests abort the result.
 
 ## Pipelined preparation with a shared pool
 
