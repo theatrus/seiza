@@ -70,7 +70,7 @@ impl XisfElement {
                 (Some(location), "location") => location.as_str(),
                 _ => value.as_str(),
             };
-            let _ = write!(xml, " {name}=\"{}\"", escape(value));
+            let _ = write!(xml, " {name}=\"{}\"", escape_attribute(value));
         }
         // White space between child elements is not significant.
         let text = if self.children.is_empty() || !self.text.trim().is_empty() {
@@ -97,6 +97,16 @@ impl XisfElement {
             child.visit_mut(visit);
         }
     }
+}
+
+/// Escape an attribute value. Besides the markup characters, tabs and line
+/// breaks become character references, since a reader's attribute value
+/// normalization would otherwise turn them into spaces.
+pub(crate) fn escape_attribute(value: &str) -> String {
+    escape(value)
+        .replace('\t', "&#9;")
+        .replace('\n', "&#10;")
+        .replace('\r', "&#13;")
 }
 
 /// Parse an XISF header into the tree of its `xisf` root element. Other

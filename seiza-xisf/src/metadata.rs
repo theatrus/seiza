@@ -19,6 +19,11 @@ pub(crate) const PIXEL_ATTRIBUTES: [&str; 10] = [
     "byteOrder",
 ];
 
+/// Image attributes that describe the source image rather than its metadata:
+/// the pedestal already added to its samples, and its unique identifier. A
+/// writer writing new samples does not carry them.
+pub(crate) const SOURCE_ATTRIBUTES: [&str; 2] = ["offset", "uuid"];
+
 /// Metadata properties that describe how a unit was encoded. A writer
 /// states its own.
 pub(crate) const ENCODING_PROPERTIES: [&str; 10] = [
@@ -43,18 +48,28 @@ const ROOT_ATTRIBUTES: [&str; 5] = ["version", "xmlns", "xmlns:xsi", "xsi:schema
 ///
 /// Pass it to the writer through [`WriteOptions::metadata`]. The writer
 /// states the pixel format, geometry, storage and encoding itself, and drops
-/// what the new pixels would make false: FITS scaling keywords, the
-/// astrometric solution when the width or height changed, and the color
-/// filter array when the channel count changed. Anything else that no
-/// longer holds after processing, such as an astrometric solution after a
-/// registration that kept the size, is for the caller to remove.
+/// what the new pixels would make false:
+///
+/// - the `offset` and `uuid` attributes, which describe the source samples;
+/// - FITS scaling and structure keywords, and keywords the caller passes
+///   anew, except that `HISTORY` and `COMMENT` cards are added after the
+///   carried ones;
+/// - when the width or height changed, the astrometric solution, in both
+///   the `AstrometricSolution` and PixInsight's `PCL:AstrometricSolution`
+///   namespaces, and the FITS WCS keywords;
+/// - when the channel count changed, the color filter array and the Bayer
+///   pattern keywords.
+///
+/// Anything else that no longer holds after processing, such as an
+/// astrometric solution after a registration that kept the size, is for the
+/// caller to remove.
 ///
 /// [`WriteOptions::metadata`]: crate::WriteOptions::metadata
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct XisfMetadata {
     /// Attributes of the `Image` element other than those that describe the
     /// stored pixels: `id`, `uuid`, `imageType`, `offset`, `orientation` and
-    /// any other.
+    /// any other. The writer leaves out `offset` and `uuid`.
     pub image_attributes: BTreeMap<String, String>,
     /// Every child element of the `Image` element, in order, with each
     /// `Reference` replaced by the element it names and attached or external

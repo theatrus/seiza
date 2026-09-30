@@ -74,7 +74,7 @@ for (var n = 0; n < lines.length; ++n) {
          var a = metadata(BASE + "/from_pi/" + source + ".xisf");
          var b = metadata(path);
          var problems = pixelProblems.concat(compareMaps("prop", a.props, b.props, function (k) { return false; })
-            .concat(compareMaps("unit", a.unit, b.unit, function (k) { return /^XISF:(Creat|Compression|Checksum|BlockAlign|OriginalCreation|MaxInlineBlockSize|OutputHints|ResourceURL)/.test(k); })));
+            .concat(compareMaps("unit", a.unit, b.unit, function (k) { return /^XISF:(Creat|Compression|Checksum|BlockAlign|OriginalCreation|MaxInlineBlockSize|OutputHints|ResourceURL|LoadTime)/.test(k); })));
          if (a.keys.join("\n") != b.keys.join("\n")) problems.push("keywords differ: " + a.keys.join(";") + " VS " + b.keys.join(";"));
          if (a.thumb != b.thumb) problems.push("thumbnail " + a.thumb + " != " + b.thumb);
          if (a.cfa != b.cfa) problems.push("cfa " + a.cfa + " != " + b.cfa);

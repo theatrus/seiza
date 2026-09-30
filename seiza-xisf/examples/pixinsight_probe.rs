@@ -153,6 +153,7 @@ fn main() {
             compression: Some(WriteCompression::recommended()),
             checksum: Some(ChecksumAlgorithm::Sha256),
             metadata: Some(&read.metadata),
+            bounds: Some((0.0, 1.0)),
         };
         let out = format!("rt_{name}");
         seiza_xisf::write_f32_image_with_options(
@@ -210,6 +211,7 @@ fn main() {
                 }),
                 checksum: Some(sums[i % 3]),
                 metadata: None,
+                bounds: Some((0.0, 1.0)),
             };
             let out = format!("seiza_{label}_{ch}");
             let headers = [seiza_fits::WriteHeaderCard::new(

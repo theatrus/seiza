@@ -346,7 +346,10 @@ impl<'a> Properties<'a> {
         let count = rows
             .checked_mul(columns)
             .ok_or_else(|| format!("{id} is too large"))?;
-        let (bytes, order) = element_block_bytes(element, Some(count * item.bytes()))
+        let expected = count
+            .checked_mul(item.bytes())
+            .ok_or_else(|| format!("{id} is too large"))?;
+        let (bytes, order) = element_block_bytes(element, Some(expected))
             .map_err(|error| format!("{id}: {error}"))?;
         let values = bytes
             .chunks_exact(item.bytes())

@@ -132,19 +132,26 @@ impl FitsFrame {
     /// Read and decode a FITS or XISF file into a linear frame.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let (image, bounds) = if seiza_xisf::is_xisf_path(path) {
-            let read = seiza_xisf::read_image(path).map_err(|source| Error::XisfRead {
-                path: path.to_path_buf(),
-                source,
-            })?;
-            (read.image, read.info.bounds)
-        } else {
-            let image = FitsImage::open(path).map_err(|source| Error::FitsRead {
-                path: path.to_path_buf(),
-                source,
-            })?;
-            (image, None)
-        };
+        let (image, bounds) =
+            if seiza_xisf::is_xisf_path(path) || seiza_xisf::is_xisf_header_path(path) {
+                // Only the pixels and the declared bounds are needed, so skip
+                // loading thumbnails and other blocks the metadata locates.
+                let options = seiza_xisf::ReadOptions { metadata: false };
+                let read =
+                    seiza_xisf::read_image_with_options(path, 0, &options).map_err(|source| {
+                        Error::XisfRead {
+                            path: path.to_path_buf(),
+                            source,
+                        }
+                    })?;
+                (read.image, read.info.bounds)
+            } else {
+                let image = FitsImage::open(path).map_err(|source| Error::FitsRead {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+                (image, None)
+            };
         let mut frame = Self::from_fits(image, Some(path.to_path_buf()))?;
         frame.bounds = bounds;
         Ok(frame)
@@ -802,12 +809,34 @@ fn write_linear_fits_f32(
     } else {
         F32ImageData::Mono(&image.data)
     };
+    if seiza_xisf::is_xisf_header_path(path) {
+        return Err(Error::XisfWrite {
+            path: path.to_path_buf(),
+            source: seiza_xisf::XisfError::Unsupported(
+                ".xish names a distributed unit's header file; write a .xisf file".into(),
+            ),
+        });
+    }
     if seiza_xisf::is_xisf_path(path) {
-        seiza_xisf::write_f32_image(path, image.width, image.height, pixels, &extra_cards)
-            .map_err(|source| Error::XisfWrite {
-                path: path.to_path_buf(),
-                source,
-            })?;
+        // Stacking works in 16-bit camera counts. Declaring that range
+        // lets PixInsight load the samples on that scale rather than
+        // stretching their own minimum and maximum across the display.
+        let options = seiza_xisf::WriteOptions {
+            bounds: Some((0.0, 65535.0)),
+            ..seiza_xisf::WriteOptions::default()
+        };
+        seiza_xisf::write_f32_image_with_options(
+            path,
+            image.width,
+            image.height,
+            pixels,
+            &extra_cards,
+            &options,
+        )
+        .map_err(|source| Error::XisfWrite {
+            path: path.to_path_buf(),
+            source,
+        })?;
         return Ok(());
     }
     seiza_fits::write_f32_image(path, image.width, image.height, pixels, &extra_cards).map_err(
@@ -1079,9 +1108,22 @@ mod tests {
         )
         .unwrap();
 
+        // Stacking declares the 16-bit camera range, and the samples are
+        // stored as they are.
         let frame = FitsFrame::open(&path).unwrap();
-        assert_eq!(frame.bounds, Some((100.0, 30000.0)));
+        assert_eq!(frame.bounds, Some((0.0, 65535.0)));
         assert_eq!(frame.image.data, physical);
+
+        let header_path = directory.path().join("written.xish");
+        assert!(
+            write_processed_image_fits_f32(
+                &header_path,
+                &LinearImage::new(2, 2, 1, physical.to_vec()).unwrap(),
+                &[],
+                &[],
+            )
+            .is_err()
+        );
     }
 
     #[test]

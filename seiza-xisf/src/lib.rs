@@ -235,7 +235,7 @@ pub struct XisfImageInfo {
     ///
     /// Read it as a hint, not a fact. Writers disagree about what the range
     /// means — this crate's own [`write_f32_image`] reports the observed
-    /// sample minimum and maximum, not a nominal `0:1` — so `Some((0.0,
+    /// sample minimum and maximum unless told otherwise — so `Some((0.0,
     /// 30000.0))` may describe a normalization range or may just describe the
     /// data. Only `Some((0.0, 1.0))` carries the settled meaning that
     /// [`XisfImage::rescale_normalized_to`] acts on.
@@ -545,7 +545,8 @@ impl XisfImage {
     /// This acts only on a declared range of exactly `0:1`, the one spelling
     /// whose meaning is settled. Any other range is ambiguous — writers
     /// disagree, and this crate's own [`write_f32_image`] reports the observed
-    /// sample minimum and maximum — so converting from it would as easily
+    /// sample minimum and maximum unless told otherwise — so converting from
+    /// it would as easily
     /// stretch an already-physical frame as normalize a normalized one. When a
     /// caller knows better than the file, [`rescale_from`] takes the source
     /// range directly.
@@ -584,6 +585,14 @@ impl XisfImage {
     /// not a finite range with `low < high`, when `full_scale` is not finite
     /// and positive, or when the samples are integers.
     pub fn rescale_from(&mut self, source: (f64, f64), full_scale: f32) -> bool {
+        // Integer samples already span their format's range, whatever buffer
+        // type they decode into.
+        if !matches!(
+            self.info.sample_format,
+            SampleFormat::Float32 | SampleFormat::Float64
+        ) {
+            return false;
+        }
         let (low, high) = source;
         if !low.is_finite() || !high.is_finite() || high <= low {
             return false;
@@ -611,13 +620,22 @@ impl XisfImage {
     }
 }
 
-/// Whether a path uses the conventional `.xisf` extension.
-pub fn is_xisf_path(path: &Path) -> bool {
+fn has_extension(path: &Path, wanted: &str) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("xisf") || extension.eq_ignore_ascii_case("xish")
-        })
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(wanted))
+}
+
+/// Whether a path uses the `.xisf` extension of monolithic XISF files, the
+/// only kind this crate writes.
+pub fn is_xisf_path(path: &Path) -> bool {
+    has_extension(path, "xisf")
+}
+
+/// Whether a path uses the `.xish` extension of the header files of
+/// distributed XISF units, which this crate reads but does not write.
+pub fn is_xisf_header_path(path: &Path) -> bool {
+    has_extension(path, "xish")
 }
 
 #[derive(Clone, Debug)]
@@ -698,7 +716,7 @@ impl ParsedFile {
 pub fn inspect(path: &Path) -> Result<XisfFileInfo, XisfError> {
     let mut file = std::fs::File::open(path)?;
     let file_bytes = file.metadata()?.len();
-    let parsed = parse_file(&mut file, file_bytes, Some(&header_dir(path)))?;
+    let parsed = parse_file(&mut file, file_bytes, header_dir(path).as_deref())?;
     Ok(XisfFileInfo {
         images: parsed.images.into_iter().map(|image| image.info).collect(),
         unavailable: parsed
@@ -717,7 +735,7 @@ pub fn inspect(path: &Path) -> Result<XisfFileInfo, XisfError> {
 pub fn read_header(path: &Path) -> Result<Vec<(String, HeaderValue)>, XisfError> {
     let mut file = std::fs::File::open(path)?;
     let file_bytes = file.metadata()?.len();
-    let mut parsed = parse_file(&mut file, file_bytes, Some(&header_dir(path)))?;
+    let mut parsed = parse_file(&mut file, file_bytes, header_dir(path).as_deref())?;
     let image = parsed.take(0)?;
     let mut headers = image.info.headers.clone();
     add_structural_headers(&mut headers, &image.info);
@@ -731,12 +749,12 @@ pub fn open(path: &Path) -> Result<FitsImage, XisfError> {
 
 /// Open a top-level image by zero-based index.
 pub fn open_image(path: &Path, index: usize) -> Result<FitsImage, XisfError> {
-    read_image_at(path, index).map(|read| read.image)
+    read_path(path, ImageSelection::Index(index), &PIXELS_ONLY).map(|read| read.image)
 }
 
 /// Open a top-level image by its case-sensitive XISF `id` attribute.
 pub fn open_image_by_id(path: &Path, id: &str) -> Result<FitsImage, XisfError> {
-    read_image_by_id(path, id).map(|read| read.image)
+    read_path(path, ImageSelection::Id(id), &PIXELS_ONLY).map(|read| read.image)
 }
 
 /// Decode the first image from a complete in-memory monolithic XISF file.
@@ -746,7 +764,58 @@ pub fn from_bytes(bytes: &[u8]) -> Result<FitsImage, XisfError> {
 
 /// Decode an indexed image from a complete in-memory monolithic XISF file.
 pub fn image_from_bytes(bytes: &[u8], index: usize) -> Result<FitsImage, XisfError> {
-    read_image_from_bytes(bytes, index).map(|read| read.image)
+    let mut reader = std::io::Cursor::new(bytes);
+    read_image_from(
+        &mut reader,
+        bytes.len() as u64,
+        None,
+        ImageSelection::Index(index),
+        &PIXELS_ONLY,
+    )
+    .map(|read| read.image)
+}
+
+/// Choices for [`read_image_with_options`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReadOptions {
+    /// Collect [`XisfImage::metadata`], which loads every attached or
+    /// external block its elements locate, such as thumbnails and solution
+    /// arrays. When off, `metadata` is empty. On by default.
+    pub metadata: bool,
+}
+
+impl Default for ReadOptions {
+    fn default() -> Self {
+        Self { metadata: true }
+    }
+}
+
+const PIXELS_ONLY: ReadOptions = ReadOptions { metadata: false };
+
+/// [`read_image_at`] with reading choices, such as skipping the metadata
+/// when only the pixels and [`XisfImageInfo`] are needed.
+pub fn read_image_with_options(
+    path: &Path,
+    index: usize,
+    options: &ReadOptions,
+) -> Result<XisfImage, XisfError> {
+    read_path(path, ImageSelection::Index(index), options)
+}
+
+fn read_path(
+    path: &Path,
+    selection: ImageSelection<'_>,
+    options: &ReadOptions,
+) -> Result<XisfImage, XisfError> {
+    let mut file = std::fs::File::open(path)?;
+    let file_bytes = file.metadata()?.len();
+    read_image_from(
+        &mut file,
+        file_bytes,
+        header_dir(path).as_deref(),
+        selection,
+        options,
+    )
 }
 
 /// Read the first top-level image and the metadata describing it, in one
@@ -760,27 +829,13 @@ pub fn read_image(path: &Path) -> Result<XisfImage, XisfError> {
 
 /// [`read_image`] for a top-level image at a zero-based index.
 pub fn read_image_at(path: &Path, index: usize) -> Result<XisfImage, XisfError> {
-    let mut file = std::fs::File::open(path)?;
-    let file_bytes = file.metadata()?.len();
-    read_image_from(
-        &mut file,
-        file_bytes,
-        Some(&header_dir(path)),
-        ImageSelection::Index(index),
-    )
+    read_path(path, ImageSelection::Index(index), &ReadOptions::default())
 }
 
 /// [`read_image`] for a top-level image with a given case-sensitive XISF
 /// `id` attribute.
 pub fn read_image_by_id(path: &Path, id: &str) -> Result<XisfImage, XisfError> {
-    let mut file = std::fs::File::open(path)?;
-    let file_bytes = file.metadata()?.len();
-    read_image_from(
-        &mut file,
-        file_bytes,
-        Some(&header_dir(path)),
-        ImageSelection::Id(id),
-    )
+    read_path(path, ImageSelection::Id(id), &ReadOptions::default())
 }
 
 /// [`read_image`] for a complete in-memory monolithic XISF file.
@@ -791,6 +846,7 @@ pub fn read_image_from_bytes(bytes: &[u8], index: usize) -> Result<XisfImage, Xi
         bytes.len() as u64,
         None,
         ImageSelection::Index(index),
+        &ReadOptions::default(),
     )
 }
 
@@ -822,7 +878,7 @@ pub fn read_complex_image(path: &Path, index: usize) -> Result<ComplexImage, Xis
     read_complex_from(
         &mut file,
         file_bytes,
-        Some(&header_dir(path)),
+        header_dir(path).as_deref(),
         ImageSelection::Index(index),
     )
 }
@@ -834,7 +890,7 @@ pub fn read_complex_image_by_id(path: &Path, id: &str) -> Result<ComplexImage, X
     read_complex_from(
         &mut file,
         file_bytes,
-        Some(&header_dir(path)),
+        header_dir(path).as_deref(),
         ImageSelection::Id(id),
     )
 }
@@ -936,13 +992,17 @@ enum ImageSelection<'a> {
     Id(&'a str),
 }
 
-/// The directory that `@header_dir` block paths in a header file resolve
-/// against.
-fn header_dir(path: &Path) -> PathBuf {
-    match path.parent() {
+/// The directory that `@header_dir` block paths resolve against, for a
+/// `.xish` header file. Only such a file may locate blocks in other local
+/// files; for anything else this is `None`, which refuses distributed units.
+fn header_dir(path: &Path) -> Option<PathBuf> {
+    if !is_xisf_header_path(path) {
+        return None;
+    }
+    Some(match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
         _ => PathBuf::from("."),
-    }
+    })
 }
 
 fn read_image_from(
@@ -950,6 +1010,7 @@ fn read_image_from(
     file_bytes: u64,
     header_dir: Option<&Path>,
     selection: ImageSelection<'_>,
+    options: &ReadOptions,
 ) -> Result<XisfImage, XisfError> {
     let mut parsed = parse_file(reader, file_bytes, header_dir)?;
     // Take the chosen image out of the parse, so the metadata moves into the
@@ -965,7 +1026,11 @@ fn read_image_from(
     let mut headers = image.info.headers.clone();
     add_structural_headers(&mut headers, &image.info);
 
-    let metadata = image.metadata(reader, &parsed);
+    let metadata = if options.metadata {
+        image.metadata(reader, &parsed)
+    } else {
+        XisfMetadata::default()
+    };
     Ok(XisfImage {
         image: FitsImage {
             width: image.info.width,
@@ -1016,6 +1081,16 @@ fn parse_file(
         if !start.starts_with(b"<?xml") {
             return Err(XisfError::NotXisf);
         }
+        // A header can name any local file as a block location, so only a
+        // `.xish` file opened by path may be read as one; bytes from memory
+        // or a `.xisf` file must be monolithic.
+        if header_dir.is_none() {
+            return Err(XisfError::Unsupported(
+                "an XML header without the XISF0100 signature is a distributed unit, \
+                 which is read only from a .xish header file opened by path"
+                    .into(),
+            ));
+        }
         let header_bytes = usize::try_from(file_bytes)
             .ok()
             .filter(|bytes| *bytes <= MAX_HEADER_BYTES)
@@ -1060,14 +1135,21 @@ fn parse_file(
 
 fn parse_xml(xml: &[u8], unit: &Unit) -> Result<ParsedFile, XisfError> {
     let root = xml::parse_tree(xml)?;
-    // Child elements of the root with a uid, which Reference elements
-    // inside images point to.
-    let shared = root
-        .children
-        .iter()
-        .filter(|child| child.local_name() != "Image")
-        .filter_map(|child| Some((child.attribute("uid")?.trim().to_string(), child)))
-        .collect::<BTreeMap<_, _>>();
+    // Elements with a uid, which Reference elements point to. The
+    // specification lets them sit anywhere in the header, such as inside
+    // another image; the first one with a given uid wins.
+    fn collect_uids<'e>(element: &'e XisfElement, shared: &mut BTreeMap<String, &'e XisfElement>) {
+        for child in &element.children {
+            if child.local_name() != "Reference"
+                && let Some(uid) = child.attribute("uid")
+            {
+                shared.entry(uid.trim().to_string()).or_insert(child);
+            }
+            collect_uids(child, shared);
+        }
+    }
+    let mut shared = BTreeMap::new();
+    collect_uids(&root, &mut shared);
     let mut parsed = ParsedFile {
         images: Vec::new(),
         unavailable: Vec::new(),
@@ -1107,19 +1189,21 @@ fn parse_image(
     let mut working_space = None;
     // A Reference child stands for the shared root element it names.
     // Chained references are not allowed, so one lookup suffices.
+    // A Reference stands for the element it names. Chained references are
+    // not allowed, so one lookup suffices.
     let children = image
         .children
         .iter()
-        .filter_map(|child| {
-            if child.local_name() == "Reference" {
-                child
-                    .attribute("ref")
-                    .and_then(|reference| shared.get(reference.trim()).copied())
-            } else {
-                Some(child)
+        .map(|child| {
+            if child.local_name() != "Reference" {
+                return Ok(child);
             }
+            let reference = child.attribute("ref").unwrap_or("").trim();
+            shared.get(reference).copied().ok_or_else(|| {
+                XisfError::Malformed(format!("Reference to undefined element {reference:?}"))
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
     for &child in &children {
         let child_attributes = &child.attributes;
         match child.local_name() {
@@ -1589,7 +1673,9 @@ fn resolve_external(
                     )
                 })?
                 .join(relative),
-            None if Path::new(path).is_absolute() => PathBuf::from(path),
+            // XISF paths use UNIX syntax on every platform, so a leading
+            // slash is absolute even where the OS wants a drive prefix.
+            None if path.starts_with('/') || Path::new(path).is_absolute() => PathBuf::from(path),
             None => return Err(invalid()),
         }
     };
@@ -1967,38 +2053,27 @@ fn decompress(
     for &(compressed, uncompressed) in subblocks {
         let uncompressed = usize::try_from(uncompressed)
             .map_err(|_| XisfError::Malformed("subblock is too large".into()))?;
-        let mut subblock = Read::take(&mut *stored, compressed);
-        match compression.codec {
-            CompressionCodec::Zlib => {
-                read_decompressed(ZlibDecoder::new(subblock), uncompressed, &mut raw)?;
-            }
-            CompressionCodec::Zstd => {
-                let decoder = zstd::stream::read::Decoder::new(subblock).map_err(|error| {
-                    XisfError::Malformed(format!("invalid zstd stream: {error}"))
-                })?;
-                read_decompressed(decoder, uncompressed, &mut raw)?;
-            }
-            CompressionCodec::Lz4 | CompressionCodec::Lz4Hc => {
-                let compressed = usize::try_from(compressed)
-                    .map_err(|_| XisfError::Malformed("subblock is too large".into()))?;
-                let mut bytes = vec![0_u8; compressed];
-                subblock.read_exact(&mut bytes).map_err(|error| {
-                    if error.kind() == std::io::ErrorKind::UnexpectedEof {
-                        XisfError::Malformed("compressed data block is truncated".into())
-                    } else {
-                        XisfError::Io(error)
-                    }
-                })?;
-                let decoded = lz4_flex::block::decompress(&bytes, uncompressed)
-                    .map_err(|error| XisfError::Malformed(format!("invalid LZ4 block: {error}")))?;
-                if decoded.len() != uncompressed {
-                    return Err(XisfError::Malformed(format!(
-                        "decompressed {} bytes; expected {uncompressed}",
-                        decoded.len()
-                    )));
-                }
-                raw.extend_from_slice(&decoded);
-            }
+        let compressed = usize::try_from(compressed)
+            .map_err(|_| XisfError::Malformed("subblock is too large".into()))?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(compressed)
+            .map_err(|_| XisfError::Malformed("decompression allocation failed".into()))?;
+        Read::take(&mut *stored, compressed as u64).read_to_end(&mut bytes)?;
+        if bytes.len() != compressed {
+            return Err(XisfError::Malformed(
+                "compressed data block is truncated".into(),
+            ));
+        }
+        let decoded = decompress_subblock(compression.codec, &bytes, uncompressed);
+        // PixInsight stores a subblock as it is when compressing it would not
+        // shrink it, so a subblock exactly as long as its uncompressed data
+        // that does not decode is raw. Codec output of that length from
+        // another encoder still decodes first.
+        match decoded {
+            Ok(decoded) => raw.extend_from_slice(&decoded),
+            Err(_) if compressed == uncompressed => raw.extend_from_slice(&bytes),
+            Err(error) => return Err(error),
         }
     }
     if raw.len() != block.expected_bytes {
@@ -2009,6 +2084,39 @@ fn decompress(
         )));
     }
     Ok(raw)
+}
+
+/// Decompress one subblock to exactly `uncompressed` bytes.
+fn decompress_subblock(
+    codec: CompressionCodec,
+    bytes: &[u8],
+    uncompressed: usize,
+) -> Result<Vec<u8>, XisfError> {
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(uncompressed)
+        .map_err(|_| XisfError::Malformed("decompression allocation failed".into()))?;
+    match codec {
+        CompressionCodec::Zlib => {
+            read_decompressed(ZlibDecoder::new(bytes), uncompressed, &mut output)?
+        }
+        CompressionCodec::Zstd => {
+            let decoder = zstd::stream::read::Decoder::new(bytes)
+                .map_err(|error| XisfError::Malformed(format!("invalid zstd stream: {error}")))?;
+            read_decompressed(decoder, uncompressed, &mut output)?;
+        }
+        CompressionCodec::Lz4 | CompressionCodec::Lz4Hc => {
+            output = lz4_flex::block::decompress(bytes, uncompressed)
+                .map_err(|error| XisfError::Malformed(format!("invalid LZ4 block: {error}")))?;
+            if output.len() != uncompressed {
+                return Err(XisfError::Malformed(format!(
+                    "decompressed {} bytes; expected {uncompressed}",
+                    output.len()
+                )));
+            }
+        }
+    }
+    Ok(output)
 }
 
 /// Verify, read, decompress and unshuffle a whole data block.
@@ -2518,6 +2626,7 @@ mod tests {
             bytes.len() as u64,
             None,
             ImageSelection::Id("image1"),
+            &ReadOptions::default(),
         )
         .unwrap()
         .image;
@@ -3298,7 +3407,7 @@ mod tests {
         ));
         let path = directory.path().join("unit.xish");
         std::fs::write(&path, &header).unwrap();
-        assert!(is_xisf_path(&path));
+        assert!(is_xisf_header_path(&path) && !is_xisf_path(&path));
 
         assert_eq!(
             u8_samples(&open_image_by_id(&path, "relative").unwrap()),
@@ -3332,10 +3441,17 @@ mod tests {
             BlockLocation::External { bytes, .. } if *bytes == compressed.len() as u64
         ));
 
-        // From memory there is no header directory to resolve against.
+        // A header names local files, so it is read only from a .xish file
+        // opened by path: never from memory, and never under another name.
         assert!(matches!(
             from_bytes(header.as_bytes()),
-            Err(XisfError::Unsupported(message)) if message.contains("header file")
+            Err(XisfError::Unsupported(message)) if message.contains(".xish")
+        ));
+        let disguised = directory.path().join("unit.xisf");
+        std::fs::write(&disguised, &header).unwrap();
+        assert!(matches!(
+            open_image_by_id(&disguised, "relative"),
+            Err(XisfError::Unsupported(_))
         ));
     }
 
@@ -3423,6 +3539,10 @@ mod tests {
             "<FITSKeyword name=\"EXPTIME\" value=\"300\" comment=\"seconds\"/>\
              <FITSKeyword name=\"BZERO\" value=\"32768\" comment=\"\"/>\
              <FITSKeyword name=\"HISTORY\" value=\"\" comment=\"calibrated &amp; stacked\"/>\
+             <FITSKeyword name=\"CRPIX1\" value=\"1.5\" comment=\"first line&#10;second line\"/>\
+             <FITSKeyword name=\"CD1_1\" value=\"-2E-4\" comment=\"\"/>\
+             <FITSKeyword name=\"BAYERPAT\" value=\"'RGGB'\" comment=\"\"/>\
+             <Property id=\"PCL:AstrometricSolution:ProjectionSystem\" type=\"String\">Gnomonic</Property>\
              <Property id=\"Observation:Object:Name\" type=\"String\">M 42</Property>\
              <Property id=\"AstrometricSolution:Version\" type=\"String\">1.0</Property>\
              <Property id=\"Custom:Vector\" type=\"F64Vector\" length=\"3\" compression=\"zstd+sh:24:8\" checksum=\"sha1:{digest}\" location=\"attachment:@OFFSET1@:{}\"/>\
@@ -3478,10 +3598,13 @@ mod tests {
             metadata: Some(metadata),
             ..WriteOptions::default()
         };
-        let headers = [seiza_fits::WriteHeaderCard::new(
-            "EXPTIME",
-            HeaderValue::Float(60.0),
-        )];
+        let headers = [
+            seiza_fits::WriteHeaderCard::new("EXPTIME", HeaderValue::Float(60.0)),
+            seiza_fits::WriteHeaderCard::new("HISTORY", HeaderValue::Raw(String::new()))
+                .with_comment("scaled"),
+            seiza_fits::WriteHeaderCard::new("HISTORY", HeaderValue::Raw(String::new()))
+                .with_comment("written"),
+        ];
         let mut written = Vec::new();
         write_f32_image_to_with_options(
             &mut written,
@@ -3496,10 +3619,14 @@ mod tests {
         let reread = read_image_from_bytes(&written, 0).unwrap();
         let carried = &reread.metadata;
         assert!(carried.dropped.is_empty(), "{:?}", carried.dropped);
-        assert_eq!(carried.image_attributes, metadata.image_attributes);
-        // The caller's EXPTIME replaces the old one, and BZERO would
-        // misdescribe the new samples; everything else is carried in order,
-        // with the caller's cards after it.
+        // The pedestal and identity of the source image are not carried.
+        let mut attributes = metadata.image_attributes.clone();
+        attributes.remove("offset");
+        attributes.remove("uuid");
+        assert_eq!(carried.image_attributes, attributes);
+        // The caller's EXPTIME replaces the old one and BZERO would
+        // misdescribe the new samples. Everything else is carried in order,
+        // the carried HISTORY included, with the caller's cards after it.
         let expected = without_locations(
             &metadata
                 .image_elements
@@ -3510,7 +3637,36 @@ mod tests {
         );
         let actual = without_locations(&carried.image_elements);
         assert_eq!(&actual[..expected.len()], &expected[..]);
-        assert_eq!(actual[expected.len()].attribute("name"), Some("EXPTIME"));
+        let added = actual[expected.len()..]
+            .iter()
+            .map(|element| (element.attribute("name"), element.attribute("comment")))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            added,
+            [
+                (Some("EXPTIME"), Some("")),
+                (Some("HISTORY"), Some("scaled")),
+                (Some("HISTORY"), Some("written"))
+            ]
+        );
+        // A line break in an attribute survives the write.
+        assert!(
+            carried
+                .image_elements
+                .iter()
+                .any(|element| { element.attribute("comment") == Some("first line\nsecond line") })
+        );
+        // Every carried attached block starts on the declared alignment.
+        for element in &carried.image_elements {
+            if element.block.is_some() {
+                let location = element.attribute("location").unwrap();
+                let (offset, _) = location
+                    .strip_prefix("attachment:")
+                    .and_then(|rest| rest.split_once(':'))
+                    .unwrap();
+                assert_eq!(offset.parse::<usize>().unwrap() % 4096, 0, "{location}");
+            }
+        }
         assert_eq!(reread.image.header_str("OBJECT"), Some("M 42"));
 
         let property = |metadata: &XisfMetadata, id: &str| {
@@ -3529,7 +3685,16 @@ mod tests {
                 .and_then(|element| element.attribute("value").map(str::to_string)),
             Some("2025-01-02T03:04:05Z".into())
         );
-        assert!(property(carried, "XISF:CompressionCodecs").is_none());
+        // The carried block's codec and checksum are listed, although the
+        // pixel block is plain.
+        assert_eq!(
+            property(carried, "XISF:CompressionCodecs").map(|element| element.text),
+            Some("zstd+sh".into())
+        );
+        assert_eq!(
+            property(carried, "XISF:ChecksumAlgorithms").map(|element| element.text),
+            Some("sha1".into())
+        );
         assert!(
             property(carried, "XISF:CreatorApplication")
                 .is_some_and(|element| element.text.starts_with("seiza-xisf"))
@@ -3562,7 +3727,21 @@ mod tests {
         .unwrap();
         let carried = read_image_from_bytes(&written, 0).unwrap().metadata;
         assert!(carried.property("AstrometricSolution:Version").is_none());
+        assert!(
+            carried
+                .property("PCL:AstrometricSolution:ProjectionSystem")
+                .is_none()
+        );
         assert!(carried.property("Custom:Vector").is_some());
+        let keywords = carried
+            .image_elements
+            .iter()
+            .filter(|element| element.local_name() == "FITSKeyword")
+            .filter_map(|element| element.attribute("name"))
+            .collect::<Vec<_>>();
+        // WCS cards describe the old geometry and the Bayer pattern the old
+        // mosaic; other cards stay.
+        assert_eq!(keywords, ["EXPTIME", "HISTORY"]);
         assert!(
             !carried
                 .image_elements
@@ -3850,6 +4029,128 @@ mod tests {
             solution(&without_version),
             Err(XisfError::Malformed(_))
         ));
+    }
+
+    #[test]
+    fn references_resolve_anywhere_and_must_resolve() {
+        let raw = [1_u8, 2, 3, 4];
+        let first = image_element(
+            0,
+            "2:2:1",
+            "UInt8",
+            4,
+            "",
+            "<FITSKeyword uid=\"K1\" name=\"EXPTIME\" value=\"300\" comment=\"\"/>",
+        );
+        let second = image_element(1, "2:2:1", "UInt8", 4, "", "<Reference ref=\"K1\"/>");
+        let broken = image_element(2, "2:2:1", "UInt8", 4, "", "<Reference ref=\"missing\"/>");
+        let bytes = monolithic(format!("{first}{second}{broken}"), &[&raw, &raw, &raw]);
+        let headers = image_from_bytes(&bytes, 1).unwrap().headers;
+        assert!(headers.contains(&("EXPTIME".to_string(), HeaderValue::Integer(300))));
+        assert!(matches!(
+            image_from_bytes(&bytes, 2),
+            Err(XisfError::Malformed(message)) if message.contains("missing")
+        ));
+    }
+
+    #[test]
+    fn a_subblock_stored_at_its_uncompressed_length_is_raw() {
+        // PixInsight stores a subblock that would not shrink as it is.
+        // A run that LZ4 shrinks, then counts it would not.
+        let values = (0..64_u16)
+            .map(|value| if value < 48 { 7 } else { value * 1031 })
+            .collect::<Vec<_>>();
+        let raw = values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        let first = lz4_flex::block::compress(&raw[..96]);
+        assert!(first.len() < 96);
+        let stored = [first.as_slice(), &raw[96..]].concat();
+        let xml = image_element(
+            0,
+            "8:8:1",
+            "UInt16",
+            stored.len(),
+            &format!(
+                "compression=\"lz4:128\" subblocks=\"{},96:32,32\"",
+                first.len()
+            ),
+            "",
+        );
+        let image = from_bytes(&monolithic(xml, &[&stored])).unwrap();
+        assert!(matches!(image.pixels, Pixels::U16(ref actual) if actual == &values));
+    }
+
+    #[test]
+    fn rescale_leaves_integer_samples_alone() {
+        let raw = [1_u32, 2, 3, 4]
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        let xml = image_element(0, "2:2:1", "UInt32", raw.len(), "", "");
+        let mut read = read_image_from_bytes(&monolithic(xml, &[&raw]), 0).unwrap();
+        assert!(!read.rescale_from((0.0, 1.0), 65535.0));
+        assert!(
+            matches!(read.image.pixels, Pixels::F64(ref actual) if actual == &[1.0, 2.0, 3.0, 4.0])
+        );
+    }
+
+    #[test]
+    fn huge_solution_dimensions_are_malformed_not_a_panic() {
+        let properties = [
+            text_property("Version", "1.0"),
+            text_property("ProjectionSystem", "Gnomonic"),
+            "<Property id=\"AstrometricSolution:ReferenceImageCoordinates\" type=\"F64Vector\" length=\"4611686018427387904\" location=\"inline:hex\"></Property>".to_string(),
+        ]
+        .concat();
+        assert!(matches!(
+            solution(&properties),
+            Err(XisfError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn pixel_only_reads_skip_the_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("rich.xisf");
+        std::fs::write(&path, rich_source()).unwrap();
+        let light = read_image_with_options(&path, 0, &ReadOptions { metadata: false }).unwrap();
+        assert!(light.metadata.image_elements.is_empty());
+        let full = read_image_with_options(&path, 0, &ReadOptions::default()).unwrap();
+        assert!(
+            full.metadata
+                .property("Custom:Vector")
+                .is_some_and(|element| element.block.is_some())
+        );
+        assert_eq!(light.image.headers, full.image.headers);
+    }
+
+    #[test]
+    fn the_writer_declares_the_bounds_it_is_given() {
+        let write = |bounds| {
+            let mut written = Vec::new();
+            write_f32_image_to_with_options(
+                &mut written,
+                2,
+                1,
+                seiza_fits::F32ImageData::Mono(&[100.0, 200.0]),
+                &[],
+                &WriteOptions {
+                    bounds,
+                    ..WriteOptions::default()
+                },
+            )
+            .map(|()| written)
+        };
+        let bounds = |written: Vec<u8>| read_image_from_bytes(&written, 0).unwrap().info.bounds;
+        assert_eq!(bounds(write(None).unwrap()), Some((100.0, 200.0)));
+        assert_eq!(
+            bounds(write(Some((0.0, 65535.0))).unwrap()),
+            Some((0.0, 65535.0))
+        );
+        assert!(write(Some((1.0, 1.0))).is_err());
+        assert!(write(Some((0.0, f64::NAN))).is_err());
     }
 
     #[test]

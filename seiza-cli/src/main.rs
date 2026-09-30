@@ -36,7 +36,7 @@ enum AstronomyImageFormat {
 }
 
 fn astronomy_image_format(path: &std::path::Path) -> Option<AstronomyImageFormat> {
-    if seiza_xisf::is_xisf_path(path) {
+    if seiza_xisf::is_xisf_path(path) || seiza_xisf::is_xisf_header_path(path) {
         return Some(AstronomyImageFormat::Xisf);
     }
     path.extension()
