@@ -88,6 +88,23 @@ impl PSFModel {
         }
     }
 
+    /// Total flux under the fitted model above its background, in the same
+    /// units as `amplitude`.
+    ///
+    /// The integral of the fitted surface: `2π·A·σx·σy` for the Gaussian and
+    /// `π·A·σx·σy/(β−1)` with β = 4 for the Moffat. Unlike a sum over a
+    /// fixed box, it does not grow or shrink with seeing, so it compares one
+    /// star's brightness between frames. Only meaningful for a star whose
+    /// core was not clipped by saturation.
+    pub fn integrated_flux(&self) -> f64 {
+        let area = self.sigma_x.abs() * self.sigma_y.abs();
+        match self.psf_type {
+            PSFType::Gaussian => 2.0 * std::f64::consts::PI * self.amplitude * area,
+            PSFType::Moffat4 => std::f64::consts::PI * self.amplitude * area / 3.0,
+            PSFType::None => 0.0,
+        }
+    }
+
     /// Calculate eccentricity from sigma values
     pub fn calculate_eccentricity(&self) -> f64 {
         let a = self.sigma_x.max(self.sigma_y);
@@ -690,6 +707,60 @@ mod tests {
             fwhm: 1.0,
             eccentricity: 0.5,
         }
+    }
+
+    /// Sum a model over a fine grid wide enough to hold its wings.
+    fn numeric_flux(model: &PSFModel) -> f64 {
+        let psf: Box<dyn PSFFunction> = match model.psf_type {
+            PSFType::Gaussian => Box::new(GaussianPSF),
+            PSFType::Moffat4 => Box::new(Moffat4PSF),
+            PSFType::None => unreachable!(),
+        };
+        let params = [
+            model.amplitude,
+            0.0,
+            0.0,
+            0.0,
+            model.sigma_x,
+            model.sigma_y,
+            model.theta,
+        ];
+        let step = 0.05;
+        let half = 120.0;
+        let steps = (2.0 * half / step) as usize;
+        let mut sum = 0.0;
+        for row in 0..steps {
+            let y = -half + (row as f64 + 0.5) * step;
+            for column in 0..steps {
+                let x = -half + (column as f64 + 0.5) * step;
+                sum += psf.value(x, y, &params);
+            }
+        }
+        sum * step * step
+    }
+
+    #[test]
+    fn integrated_flux_matches_the_fitted_surface() {
+        for psf_type in [PSFType::Gaussian, PSFType::Moffat4] {
+            let mut fitted = model(2.5, 1.6, 0.4);
+            fitted.psf_type = psf_type;
+            fitted.amplitude = 1_000.0;
+            let numeric = numeric_flux(&fitted);
+            let closed = fitted.integrated_flux();
+            assert!(
+                (closed - numeric).abs() / numeric < 1e-3,
+                "{psf_type:?}: {closed} vs {numeric}"
+            );
+        }
+        // One star seen through worse seeing: the same light spread wider.
+        let mut sharp = model(1.5, 1.5, 0.0);
+        sharp.psf_type = PSFType::Moffat4;
+        sharp.amplitude = 4_000.0;
+        let mut soft = sharp.clone();
+        soft.sigma_x = 3.0;
+        soft.sigma_y = 3.0;
+        soft.amplitude = 1_000.0;
+        assert!((sharp.integrated_flux() - soft.integrated_flux()).abs() < 1e-9);
     }
 
     #[test]
