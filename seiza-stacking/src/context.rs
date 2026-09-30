@@ -1,6 +1,7 @@
 use crate::{
     BayerLayout, CalibrationMasters, Error, FrameMetadata, LinearImage, Result, StackOptions,
-    replay::Ledger, stack::FrameInputMode,
+    replay::{FrameWeightRecord, Ledger},
+    stack::FrameInputMode,
 };
 use seiza_calibration::FrameSignature;
 use seiza_fits::{BayerPattern, HeaderValue};
@@ -11,9 +12,14 @@ use std::path::{Path, PathBuf};
 
 const MAGIC: &[u8; 8] = b"SEIZASTK";
 const MINIMUM_FORMAT_VERSION: u32 = 1;
+/// Written for stacks whose frames are weighted equally.
 const FORMAT_VERSION: u32 = 3;
 /// The first format version with an admitted-frame ledger section.
 const LEDGER_FORMAT_VERSION: u32 = 3;
+/// Written for weighted stacks: the equal-weight layout plus per-sample
+/// weight sums and the reference frame's noise after the rejection counts.
+const WEIGHTED_FORMAT_VERSION: u32 = 4;
+const MAXIMUM_FORMAT_VERSION: u32 = WEIGHTED_FORMAT_VERSION;
 const MAXIMUM_METADATA_BYTES: u64 = 8 * 1024 * 1024;
 /// The ledger holds one registration and normalization mapping per admitted
 /// frame. Local normalization grids make those large, so the ledger is a
@@ -31,6 +37,8 @@ pub(crate) struct ContextWriteState<'a> {
     pub m2: &'a [f32],
     pub count: &'a [u32],
     pub rejected: &'a [u32],
+    pub weight_sum: Option<&'a [f32]>,
+    pub reference_noise: &'a [f32],
     pub accepted_frames: u32,
     pub rejected_frames: u32,
     pub input_paths: &'a [PathBuf],
@@ -48,6 +56,8 @@ pub(crate) struct RestoredContext {
     pub m2: Vec<f32>,
     pub count: Vec<u32>,
     pub rejected: Vec<u32>,
+    pub weight_sum: Option<Vec<f32>>,
+    pub reference_noise: Vec<f32>,
     pub accepted_frames: u32,
     pub rejected_frames: u32,
     pub input_paths: Vec<PathBuf>,
@@ -130,7 +140,12 @@ fn is_false(value: &bool) -> bool {
 }
 
 pub(crate) fn write(path: &Path, state: ContextWriteState<'_>) -> Result<()> {
-    write_version(path, state, FORMAT_VERSION)
+    let version = if state.weight_sum.is_some() {
+        WEIGHTED_FORMAT_VERSION
+    } else {
+        FORMAT_VERSION
+    };
+    write_version(path, state, version)
 }
 
 #[cfg(test)]
@@ -148,6 +163,20 @@ fn write_version(path: &Path, state: ContextWriteState<'_>, format_version: u32)
         state.accepted_frames,
     )
     .map_err(|message| context_write_error(path, message))?;
+    validate_weights(
+        &state.options.weighting,
+        state.reference.channels,
+        state.count,
+        state.weight_sum,
+        state.reference_noise,
+    )
+    .map_err(|message| context_write_error(path, message))?;
+    if state.weight_sum.is_some() != (format_version >= WEIGHTED_FORMAT_VERSION) {
+        return Err(context_write_error(
+            path,
+            format!("context format version {format_version} cannot hold this stack's weighting"),
+        ));
+    }
     state
         .options
         .validate()
@@ -176,6 +205,19 @@ fn write_version(path: &Path, state: ContextWriteState<'_>, format_version: u32)
             return Err(context_write_error(
                 path,
                 "admitted-frame ledger is too large",
+            ));
+        }
+        Some(bytes)
+    } else {
+        None
+    };
+    let weight_records = if format_version >= WEIGHTED_FORMAT_VERSION {
+        let bytes = postcard::to_stdvec(&state.ledger.weights())
+            .map_err(|error| context_write_error(path, error.to_string()))?;
+        if bytes.len() as u64 > MAXIMUM_LEDGER_BYTES {
+            return Err(context_write_error(
+                path,
+                "frame weight records are too large",
             ));
         }
         Some(bytes)
@@ -226,6 +268,11 @@ fn write_version(path: &Path, state: ContextWriteState<'_>, format_version: u32)
             .and_then(|()| write_f32_values(&mut encoder, state.m2))
             .and_then(|()| write_u32_values(&mut encoder, state.count))
             .and_then(|()| write_u32_values(&mut encoder, state.rejected))
+            .and_then(|()| match state.weight_sum {
+                Some(weight_sum) => write_f32_values(&mut encoder, weight_sum)
+                    .and_then(|()| write_f32_values(&mut encoder, state.reference_noise)),
+                None => Ok(()),
+            })
             .and_then(|()| write_optional_image(&mut encoder, state.calibration.bias.as_ref()))
             .and_then(|()| {
                 write_optional_image(&mut encoder, state.calibration.dark_signal.as_ref())
@@ -237,6 +284,12 @@ fn write_version(path: &Path, state: ContextWriteState<'_>, format_version: u32)
                 Some(ledger) => encoder
                     .write_all(&(ledger.len() as u64).to_le_bytes())
                     .and_then(|()| encoder.write_all(ledger)),
+                None => Ok(()),
+            })
+            .and_then(|()| match &weight_records {
+                Some(records) => encoder
+                    .write_all(&(records.len() as u64).to_le_bytes())
+                    .and_then(|()| encoder.write_all(records)),
                 None => Ok(()),
             })
             .map_err(|error| context_write_error(path, error.to_string()))?;
@@ -269,7 +322,7 @@ pub(crate) fn read(path: &Path) -> Result<RestoredContext> {
         return Err(context_read_error(path, "not a Seiza live-stack context"));
     }
     let version = read_u32(&mut reader).map_err(|error| context_read_error(path, error))?;
-    if !(MINIMUM_FORMAT_VERSION..=FORMAT_VERSION).contains(&version) {
+    if !(MINIMUM_FORMAT_VERSION..=MAXIMUM_FORMAT_VERSION).contains(&version) {
         return Err(context_read_error(
             path,
             format!("unsupported context format version {version}"),
@@ -306,6 +359,15 @@ pub(crate) fn read(path: &Path) -> Result<RestoredContext> {
         .map_err(|error| context_read_error(path, error))?;
     let rejected = read_u32_values(&mut decoder, sample_count)
         .map_err(|error| context_read_error(path, error))?;
+    let (weight_sum, reference_noise) = if version >= WEIGHTED_FORMAT_VERSION {
+        let weight_sum = read_f32_values(&mut decoder, sample_count)
+            .map_err(|error| context_read_error(path, error))?;
+        let reference_noise = read_f32_values(&mut decoder, reference.channels)
+            .map_err(|error| context_read_error(path, error))?;
+        (Some(weight_sum), reference_noise)
+    } else {
+        (None, Vec::new())
+    };
     let bias = read_optional_image(&mut decoder, metadata.calibration.bias)
         .map_err(|error| context_read_error(path, error))?;
     let dark_signal = read_optional_image(&mut decoder, metadata.calibration.dark_signal)
@@ -334,11 +396,20 @@ pub(crate) fn read(path: &Path) -> Result<RestoredContext> {
                 "admitted-frame ledger is truncated",
             ));
         }
-        let ledger: Ledger = postcard::from_bytes(&bytes)
+        let mut ledger: Ledger = postcard::from_bytes(&bytes)
             .map_err(|error| context_read_error(path, error.to_string()))?;
         ledger
             .validate(metadata.accepted_frames)
             .map_err(|message| context_read_error(path, message))?;
+        if version >= WEIGHTED_FORMAT_VERSION {
+            let bytes = read_section(&mut decoder, "frame weight records")
+                .map_err(|message| context_read_error(path, message))?;
+            let records: Vec<FrameWeightRecord> = postcard::from_bytes(&bytes)
+                .map_err(|error| context_read_error(path, error.to_string()))?;
+            ledger
+                .attach_weights(records, reference.channels)
+                .map_err(|message| context_read_error(path, message))?;
+        }
         Some(ledger)
     } else {
         None
@@ -362,6 +433,14 @@ pub(crate) fn read(path: &Path) -> Result<RestoredContext> {
         &count,
         &rejected,
         metadata.accepted_frames,
+    )
+    .map_err(|message| context_read_error(path, message))?;
+    validate_weights(
+        &metadata.options.weighting,
+        reference.channels,
+        &count,
+        weight_sum.as_deref(),
+        &reference_noise,
     )
     .map_err(|message| context_read_error(path, message))?;
 
@@ -416,6 +495,8 @@ pub(crate) fn read(path: &Path) -> Result<RestoredContext> {
         m2,
         count,
         rejected,
+        weight_sum,
+        reference_noise,
         accepted_frames: metadata.accepted_frames,
         rejected_frames: metadata.rejected_frames,
         input_paths,
@@ -467,6 +548,16 @@ impl ContextMetadata {
             ));
         }
         self.options.validate().map_err(|error| error.to_string())?;
+        let weighted = !self.options.weighting.is_equal();
+        if weighted && self.schema_version < WEIGHTED_FORMAT_VERSION {
+            return Err(format!(
+                "context format version {} cannot hold a weighted stack",
+                self.schema_version
+            ));
+        }
+        if !weighted && self.schema_version >= WEIGHTED_FORMAT_VERSION {
+            return Err("weighted context options do not select frame weighting".into());
+        }
         self.reference.sample_count()?;
         for image in [
             self.calibration.bias,
@@ -716,6 +807,26 @@ fn read_u32_values(reader: &mut impl Read, length: usize) -> std::result::Result
     Ok(values)
 }
 
+/// Read one length-prefixed binary section of at most
+/// [`MAXIMUM_LEDGER_BYTES`].
+fn read_section(reader: &mut impl Read, name: &str) -> std::result::Result<Vec<u8>, String> {
+    let length = read_u64(reader)?;
+    if length > MAXIMUM_LEDGER_BYTES {
+        return Err(format!("{name} are too large"));
+    }
+    let length =
+        usize::try_from(length).map_err(|_| format!("{name} length overflows this platform"))?;
+    let mut bytes = Vec::new();
+    reader
+        .take(length as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() != length {
+        return Err(format!("{name} are truncated"));
+    }
+    Ok(bytes)
+}
+
 fn read_u32(reader: &mut impl Read) -> std::result::Result<u32, String> {
     let mut bytes = [0_u8; 4];
     reader
@@ -765,6 +876,57 @@ fn validate_live_arrays(
             return Err(format!(
                 "context coverage {} exceeds accepted frame count {accepted_frames} at sample {index}",
                 count[index]
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Check the weighted-stack state against the options: present exactly when
+/// frames are weighted, one noise value per channel, and weight sums that are
+/// finite, positive where a sample has coverage, and zero where it has none.
+fn validate_weights(
+    weighting: &crate::FrameWeighting,
+    channels: usize,
+    count: &[u32],
+    weight_sum: Option<&[f32]>,
+    reference_noise: &[f32],
+) -> std::result::Result<(), String> {
+    let Some(weight_sum) = weight_sum else {
+        if !weighting.is_equal() {
+            return Err("weighted stack has no weight sums".into());
+        }
+        if !reference_noise.is_empty() {
+            return Err("equally weighted stack carries reference noise".into());
+        }
+        return Ok(());
+    };
+    if weighting.is_equal() {
+        return Err("equally weighted stack carries weight sums".into());
+    }
+    if weight_sum.len() != count.len() {
+        return Err(format!(
+            "context weight buffer has {} samples; expected {}",
+            weight_sum.len(),
+            count.len()
+        ));
+    }
+    if reference_noise.len() != channels
+        || !reference_noise
+            .iter()
+            .all(|noise| noise.is_finite() && *noise > 0.0)
+    {
+        return Err("context has invalid reference-frame noise".into());
+    }
+    for (index, (&weight, &count)) in weight_sum.iter().zip(count).enumerate() {
+        let valid = if count == 0 {
+            weight == 0.0
+        } else {
+            weight.is_finite() && weight > 0.0
+        };
+        if !valid {
+            return Err(format!(
+                "context has an invalid weight sum {weight} for coverage {count} at sample {index}"
             ));
         }
     }
@@ -838,5 +1000,38 @@ fn context_write_error(path: &Path, message: impl Into<String>) -> Error {
     Error::StackContextWrite {
         path: path.to_path_buf(),
         message: message.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::FrameWeighting;
+
+    #[test]
+    fn weight_sums_must_match_coverage_and_weighting() {
+        let weighted = FrameWeighting::inverse_noise_variance();
+        let count = [0, 2, 1];
+        let noise = [3.0];
+        assert!(validate_weights(&weighted, 1, &count, Some(&[0.0, 1.5, 1.0]), &noise).is_ok());
+        for weight_sum in [
+            [0.5, 1.5, 1.0],
+            [0.0, 0.0, 1.0],
+            [0.0, f32::INFINITY, 1.0],
+            [0.0, 1.5, -1.0],
+        ] {
+            assert!(
+                validate_weights(&weighted, 1, &count, Some(&weight_sum), &noise).is_err(),
+                "{weight_sum:?}"
+            );
+        }
+        assert!(validate_weights(&weighted, 1, &count, Some(&[0.0, 1.0]), &noise).is_err());
+        assert!(validate_weights(&weighted, 3, &count, Some(&[0.0, 1.5, 1.0]), &noise).is_err());
+        assert!(validate_weights(&weighted, 1, &count, None, &[]).is_err());
+
+        let equal = FrameWeighting::Equal;
+        assert!(validate_weights(&equal, 1, &count, None, &[]).is_ok());
+        assert!(validate_weights(&equal, 1, &count, None, &noise).is_err());
+        assert!(validate_weights(&equal, 1, &count, Some(&[0.0, 1.5, 1.0]), &noise).is_err());
     }
 }

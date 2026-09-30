@@ -340,6 +340,13 @@ impl NormalizationMap {
         self.gains.iter().sum::<f32>() / self.gains.len() as f32
     }
 
+    /// Mean gain of one channel across all tiles.
+    pub(crate) fn channel_mean_gain(&self, channel: usize) -> f32 {
+        let gains = self.gains.iter().skip(channel).step_by(self.channels);
+        let tiles = self.columns * self.rows;
+        gains.sum::<f32>() / tiles as f32
+    }
+
     /// Mean offset across all channels and tiles.
     pub fn mean_offset(&self) -> f32 {
         self.offsets.iter().sum::<f32>() / self.offsets.len() as f32
@@ -528,6 +535,25 @@ mod tests {
         value["gains"] = serde_json::json!([]);
 
         assert!(serde_json::from_value::<NormalizationMap>(value).is_err());
+    }
+
+    #[test]
+    fn channel_mean_gain_averages_one_channel_across_tiles() {
+        let map = NormalizationMap {
+            schema_version: NORMALIZATION_MAP_SCHEMA_VERSION,
+            width: 32,
+            height: 16,
+            channels: 3,
+            tile_size: 16,
+            columns: 2,
+            rows: 1,
+            gains: vec![1.0, 2.0, 3.0, 3.0, 4.0, 5.0],
+            offsets: vec![0.0; 6],
+        };
+        map.validate().unwrap();
+        assert_eq!(map.channel_mean_gain(0), 2.0);
+        assert_eq!(map.channel_mean_gain(1), 3.0);
+        assert_eq!(map.channel_mean_gain(2), 4.0);
     }
 
     #[test]

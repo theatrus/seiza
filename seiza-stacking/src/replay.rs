@@ -123,6 +123,22 @@ pub(crate) struct AdmittedFrame {
     /// Index into [`Ledger::calibrations`].
     calibration: u32,
     mapping: RegisteredFrameMapping,
+    /// The frame's weight and noise in a weighted stack.
+    ///
+    /// Skipped by serde: the postcard ledger section keeps the layout of
+    /// context format 3, and a weighted context (format 4) stores these in a
+    /// section of its own, which [`Ledger::weights`] and
+    /// [`Ledger::attach_weights`] move in and out.
+    #[serde(skip)]
+    weighting: FrameWeightRecord,
+}
+
+/// Per-channel noise and weight recorded for one admitted frame. Both are
+/// empty in an equally weighted stack.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct FrameWeightRecord {
+    pub(crate) noise: Vec<f32>,
+    pub(crate) weight: Vec<f32>,
 }
 
 /// Every admitted frame, in admission order, and every calibration set the
@@ -142,6 +158,7 @@ impl Ledger {
                 source: None,
                 calibration: 0,
                 mapping: RegisteredFrameMapping::identity(reference),
+                weighting: FrameWeightRecord::default(),
             }],
             calibrations: vec![CalibrationRecord::default()],
         }
@@ -174,13 +191,79 @@ impl Ledger {
         self.calibrations.push(record);
     }
 
-    pub(crate) fn admit(&mut self, source: Option<FrameSource>, mapping: RegisteredFrameMapping) {
+    /// Record the reference frame's weight record: its noise, and weight 1
+    /// in every channel.
+    pub(crate) fn set_reference_weighting(&mut self, noise: &[f32]) {
+        if let Some(reference) = self.frames.first_mut() {
+            reference.weighting = FrameWeightRecord {
+                noise: noise.to_vec(),
+                weight: vec![1.0; noise.len()],
+            };
+        }
+    }
+
+    pub(crate) fn admit(
+        &mut self,
+        source: Option<FrameSource>,
+        mapping: RegisteredFrameMapping,
+        weighting: FrameWeightRecord,
+    ) {
         let calibration = self.current_calibration();
         self.frames.push(AdmittedFrame {
             source,
             calibration,
             mapping,
+            weighting,
         });
+    }
+
+    /// Every frame's weight record, in admission order, for a weighted
+    /// context.
+    pub(crate) fn weights(&self) -> Vec<FrameWeightRecord> {
+        self.frames
+            .iter()
+            .map(|frame| frame.weighting.clone())
+            .collect()
+    }
+
+    /// Restore the weight records a weighted context saved beside the
+    /// ledger, checking one record per frame, one value per channel, and
+    /// weight 1 for the reference.
+    pub(crate) fn attach_weights(
+        &mut self,
+        records: Vec<FrameWeightRecord>,
+        channels: usize,
+    ) -> std::result::Result<(), String> {
+        if records.len() != self.frames.len() {
+            return Err(format!(
+                "context has {} frame weight records for {} admitted frames",
+                records.len(),
+                self.frames.len()
+            ));
+        }
+        for (index, record) in records.iter().enumerate() {
+            let valid = record.noise.len() == channels
+                && record.weight.len() == channels
+                && record
+                    .noise
+                    .iter()
+                    .all(|noise| noise.is_finite() && *noise >= 0.0)
+                && record
+                    .weight
+                    .iter()
+                    .all(|weight| weight.is_finite() && *weight > 0.0)
+                && (index > 0 || record.weight.iter().all(|weight| *weight == 1.0));
+            if !valid {
+                return Err(format!(
+                    "context has an invalid weight record for admitted frame {}",
+                    index + 1
+                ));
+            }
+        }
+        for (frame, record) in self.frames.iter_mut().zip(records) {
+            frame.weighting = record;
+        }
+        Ok(())
     }
 
     fn current_calibration(&self) -> u32 {
@@ -266,6 +349,11 @@ impl LiveStacker {
     /// The live stack is left as it was. `progress` receives the pass, the
     /// zero-based frame index, and the frame count before each read. See
     /// [`integrate_registered_frames`] for the rejection and its memory use.
+    ///
+    /// A weighted stack replays each frame with the weight the live pass
+    /// recorded, so noise is not measured again. It fills
+    /// [`BatchStackOptions::frame_weights`] itself and refuses options that
+    /// already carry weights.
     pub fn reintegrate(
         &self,
         options: &BatchStackOptions,
@@ -275,6 +363,29 @@ impl LiveStacker {
             return Err(Error::Stack(reason));
         }
         let ledger = &self.ledger;
+        let weighted_options;
+        let options = if self.options.weighting.is_equal() {
+            options
+        } else {
+            if options.frame_weights.is_some() {
+                return Err(Error::Stack(
+                    "a weighted stack replays with its recorded frame weights; \
+                     do not supply frame_weights"
+                        .into(),
+                ));
+            }
+            weighted_options = BatchStackOptions {
+                frame_weights: Some(
+                    ledger
+                        .frames
+                        .iter()
+                        .map(|frame| frame.weighting.weight.clone())
+                        .collect(),
+                ),
+                ..options.clone()
+            };
+            &weighted_options
+        };
         let current = ledger.current_calibration();
         let count = ledger.frames.len();
         // Masters of earlier calibration sets, loaded once per switch.
@@ -345,5 +456,55 @@ impl LiveStacker {
             return Err(changed());
         }
         Ok(image)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(noise: f32, weight: f32) -> FrameWeightRecord {
+        FrameWeightRecord {
+            noise: vec![noise],
+            weight: vec![weight],
+        }
+    }
+
+    #[test]
+    fn weight_records_must_cover_every_frame_and_weigh_the_reference_as_one() {
+        let reference = LinearImage::new(4, 4, 1, vec![1.0; 16]).unwrap();
+        let mut ledger = Ledger::new(&reference);
+        ledger.admit(
+            None,
+            RegisteredFrameMapping::identity(&reference),
+            record(4.0, 0.5),
+        );
+        let valid = vec![record(2.0, 1.0), record(4.0, 0.25)];
+        for invalid in [
+            vec![record(2.0, 1.0)],
+            vec![record(2.0, 0.5), record(4.0, 0.25)],
+            vec![record(2.0, 1.0), record(4.0, 0.0)],
+            vec![record(2.0, 1.0), record(f32::NAN, 0.25)],
+            vec![
+                record(2.0, 1.0),
+                FrameWeightRecord {
+                    noise: vec![4.0; 3],
+                    weight: vec![0.25; 3],
+                },
+            ],
+        ] {
+            assert!(ledger.clone().attach_weights(invalid, 1).is_err());
+        }
+        ledger.attach_weights(valid.clone(), 1).unwrap();
+        assert_eq!(ledger.weights(), valid);
+        // The postcard ledger layout does not carry the records.
+        let bytes = postcard::to_stdvec(&ledger).unwrap();
+        let restored: Ledger = postcard::from_bytes(&bytes).unwrap();
+        assert!(
+            restored
+                .weights()
+                .iter()
+                .all(|record| record.weight.is_empty())
+        );
     }
 }

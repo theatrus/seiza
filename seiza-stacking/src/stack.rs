@@ -51,6 +51,103 @@ impl Default for RejectionMode {
     }
 }
 
+/// How much each admitted frame counts toward the stack mean.
+///
+/// The default, [`FrameWeighting::Equal`], gives every frame the same weight
+/// and is exactly the behaviour of earlier releases. It is omitted from
+/// serialized [`StackOptions`], so it leaves the configuration fingerprint and
+/// saved contexts unchanged.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum FrameWeighting {
+    /// Every admitted frame has weight 1.
+    #[default]
+    Equal,
+    /// Weight each frame by the inverse of its noise variance, relative to the
+    /// reference frame.
+    ///
+    /// Each channel's noise is measured on the calibrated frame before
+    /// resampling and scaled by that channel's normalization gain, so it is in
+    /// the units the frame is stacked in. The weight is
+    /// `(reference_noise / frame_noise)^2`, clamped to
+    /// `minimum_weight..=maximum_weight`. The reference frame therefore has
+    /// weight 1, and a frame twice as noisy as the reference has weight 0.25.
+    ///
+    /// In this mode the stack's variance output is the variance of a frame
+    /// with weight 1 (a frame as noisy as the reference), not the plain
+    /// sample variance.
+    InverseNoiseVariance {
+        /// Smallest weight a frame can receive. Must be in `(0, 1]`.
+        #[serde(default = "default_minimum_weight")]
+        minimum_weight: f32,
+        /// Largest weight a frame can receive. Must be at least 1.
+        #[serde(default = "default_maximum_weight")]
+        maximum_weight: f32,
+    },
+}
+
+fn default_minimum_weight() -> f32 {
+    0.05
+}
+
+fn default_maximum_weight() -> f32 {
+    20.0
+}
+
+impl FrameWeighting {
+    /// Inverse-noise-variance weighting with the default bounds: 0.05 to 20.
+    pub fn inverse_noise_variance() -> Self {
+        Self::InverseNoiseVariance {
+            minimum_weight: default_minimum_weight(),
+            maximum_weight: default_maximum_weight(),
+        }
+    }
+
+    /// Whether every frame has the same weight.
+    pub fn is_equal(&self) -> bool {
+        matches!(self, Self::Equal)
+    }
+
+    /// Check that the weight bounds are finite and bracket 1.
+    pub fn validate(&self) -> Result<()> {
+        if let Self::InverseNoiseVariance {
+            minimum_weight,
+            maximum_weight,
+        } = *self
+            && !(minimum_weight.is_finite()
+                && maximum_weight.is_finite()
+                && minimum_weight > 0.0
+                && minimum_weight <= 1.0
+                && maximum_weight >= 1.0)
+        {
+            return Err(Error::Stack(
+                "frame weight bounds must be finite with 0 < minimum <= 1 <= maximum".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The weight of a frame whose normalized noise is `frame_noise`, given
+    /// the reference frame's noise in the same channel. `None` for
+    /// [`FrameWeighting::Equal`].
+    fn weight(&self, reference_noise: f32, frame_noise: f32) -> Option<f32> {
+        let Self::InverseNoiseVariance {
+            minimum_weight,
+            maximum_weight,
+        } = *self
+        else {
+            return None;
+        };
+        let ratio = f64::from(reference_noise) / f64::from(frame_noise);
+        let weight = if ratio.is_finite() {
+            (ratio * ratio) as f32
+        } else {
+            maximum_weight
+        };
+        Some(weight.clamp(minimum_weight, maximum_weight))
+    }
+}
+
 /// Everything that governs how frames are aligned, matched, rejected, and
 /// admitted into a stack.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -69,12 +166,19 @@ pub struct StackOptions {
     /// master to subtract their hot pixels; `None` (the default) leaves
     /// frames untouched.
     pub cosmetic: Option<crate::cosmetic::ImpulseFilterOptions>,
+    /// How much each admitted frame counts toward the mean. The default,
+    /// [`FrameWeighting::Equal`], is not serialized, so existing options,
+    /// fingerprints and contexts keep their exact bytes.
+    #[serde(default, skip_serializing_if = "FrameWeighting::is_equal")]
+    pub weighting: FrameWeighting,
 }
 
 impl StackOptions {
-    /// Validate registration, normalization, rejection, and admission bounds.
+    /// Validate registration, normalization, rejection, weighting, and
+    /// admission bounds.
     pub fn validate(&self) -> Result<()> {
         self.registration.validate()?;
+        self.weighting.validate()?;
         if matches!(self.normalization, NormalizationMode::Local { tile_size } if tile_size < 16) {
             return Err(Error::Stack(
                 "local normalization tile size must be at least 16 pixels".into(),
@@ -186,6 +290,18 @@ pub struct FrameDiagnostics {
     pub accepted_samples: usize,
     /// Samples rejected from this frame.
     pub rejected_samples: usize,
+    /// Pixel-scale noise of each channel, measured on the calibrated frame
+    /// before resampling and scaled by the channel's normalization gain.
+    /// Empty when [`StackOptions::weighting`] is [`FrameWeighting::Equal`],
+    /// because noise is then not measured.
+    pub noise: Vec<f32>,
+    /// Weight of each channel in the stack mean. Empty when
+    /// [`StackOptions::weighting`] is [`FrameWeighting::Equal`], where every
+    /// frame has weight 1. [`LiveStacker::reintegrate`] replays with these
+    /// automatically. To replay frames yourself, persist them (the reference
+    /// frame has weight 1 in every channel) and pass them as
+    /// [`crate::BatchStackOptions::frame_weights`].
+    pub weight: Vec<f32>,
 }
 
 /// Why a frame was turned away from the stack.
@@ -276,7 +392,8 @@ pub enum FrameDisposition {
 pub struct StackSnapshot {
     /// Current mean image; zero-coverage samples are masked with `NaN`.
     pub image: LinearImage,
-    /// Per-sample variance of the integrated observations.
+    /// Per-sample variance of the integrated observations. With frame
+    /// weighting it is the variance of a weight-1 frame.
     pub variance: LinearImage,
     /// Accepted observation count for every image sample.
     pub coverage: Vec<u32>,
@@ -350,6 +467,9 @@ pub struct LiveStacker {
     pub(crate) reference: LinearImage,
     reference_metadata: FrameMetadata,
     pub(crate) registrar: Registrar,
+    /// Per-channel noise of the reference frame, the unit of frame weights.
+    /// Empty when frames are weighted equally.
+    reference_noise: Vec<f32>,
     accumulator: Accumulator,
     reference_headers: Vec<(String, HeaderValue)>,
     pub(crate) accepted_frames: u32,
@@ -443,15 +563,26 @@ impl LiveStacker {
         let configuration_fingerprint =
             stack_configuration_fingerprint(&options, &calibration, input_mode)?;
         let registrar = Registrar::new(&reference, options.registration.clone())?;
-        let mut accumulator = Accumulator::new(reference.sample_count());
-        accumulator.integrate(&reference.data, RejectionMode::None);
-        let ledger = crate::replay::Ledger::new(&reference);
+        let reference_noise = if options.weighting.is_equal() {
+            Vec::new()
+        } else {
+            measure_reference_noise(&reference)?
+        };
+        let mut accumulator =
+            Accumulator::new(reference.sample_count(), !options.weighting.is_equal());
+        // The reference is the unit of weight: it integrates with weight 1.
+        accumulator.integrate(&reference.data, RejectionMode::None, None);
+        let mut ledger = crate::replay::Ledger::new(&reference);
+        if !reference_noise.is_empty() {
+            ledger.set_reference_weighting(&reference_noise);
+        }
         Ok(Self {
             options,
             calibration,
             reference,
             reference_metadata,
             registrar,
+            reference_noise,
             accumulator,
             reference_headers,
             accepted_frames: 1,
@@ -531,11 +662,13 @@ impl LiveStacker {
             reference: restored.reference,
             reference_metadata: restored.reference_metadata,
             registrar,
+            reference_noise: restored.reference_noise,
             accumulator: Accumulator {
                 mean: restored.mean,
                 m2: restored.m2,
                 count: restored.count,
                 rejected: restored.rejected,
+                weight_sum: restored.weight_sum,
             },
             reference_headers: restored.reference_headers,
             accepted_frames: restored.accepted_frames,
@@ -575,6 +708,8 @@ impl LiveStacker {
                 m2: &self.accumulator.m2,
                 count: &self.accumulator.count,
                 rejected: &self.accumulator.rejected,
+                weight_sum: self.accumulator.weight_sum.as_deref(),
+                reference_noise: &self.reference_noise,
                 accepted_frames: self.accepted_frames,
                 rejected_frames: self.rejected_frames,
                 input_paths: &self.input_paths,
@@ -741,8 +876,14 @@ impl LiveStacker {
                 return Ok(self.reject(FrameRejectionReason::IncompatibleImage(error.to_string())));
             }
         };
-        let prepared = prepare_frame(&self.reference, &self.registrar, &self.options, frame.image)?
-            .with_source(source);
+        let prepared = prepare_frame(
+            &self.reference,
+            &self.registrar,
+            &self.options,
+            &self.reference_noise,
+            frame.image,
+        )?
+        .with_source(source);
         Ok(self.integrate_prepared(prepared))
     }
 
@@ -787,7 +928,13 @@ impl LiveStacker {
     /// Register, normalize, and try to integrate an already-prepared linear
     /// frame, applying every admission gate.
     pub fn push_linear(&mut self, frame: LinearImage) -> Result<FrameDisposition> {
-        let prepared = prepare_frame(&self.reference, &self.registrar, &self.options, frame)?;
+        let prepared = prepare_frame(
+            &self.reference,
+            &self.registrar,
+            &self.options,
+            &self.reference_noise,
+            frame,
+        )?;
         Ok(self.integrate_prepared(prepared))
     }
 
@@ -804,6 +951,7 @@ impl LiveStacker {
                 registrar: &self.registrar,
                 calibration: &self.calibration,
                 options: &self.options,
+                reference_noise: &self.reference_noise,
             },
             IntegrationHalf {
                 accumulator: &mut self.accumulator,
@@ -929,6 +1077,14 @@ impl LiveStacker {
         self.input_mode
     }
 
+    /// Per-channel noise of the reference frame, measured the same way as
+    /// [`FrameDiagnostics::noise`]. It is the unit of frame weights: the
+    /// reference frame has weight 1 in every channel. Empty when
+    /// [`StackOptions::weighting`] is [`FrameWeighting::Equal`].
+    pub fn reference_noise(&self) -> &[f32] {
+        &self.reference_noise
+    }
+
     /// Stable SHA-256 identity of the stack options, current calibration
     /// content, and input mode.
     ///
@@ -954,6 +1110,18 @@ impl LiveStacker {
         self.rejected_frames += 1;
         FrameDisposition::Rejected(reason)
     }
+}
+
+/// Measure the reference frame's per-channel noise, which weighted stacks
+/// need before they can weigh any other frame.
+fn measure_reference_noise(reference: &LinearImage) -> Result<Vec<f32>> {
+    crate::snr::frame_noise(reference)
+        .filter(|noise| noise.iter().all(|value| value.is_finite() && *value > 0.0))
+        .ok_or_else(|| {
+            Error::Stack(
+                "frame weighting needs a reference frame whose noise can be measured".into(),
+            )
+        })
 }
 
 fn stack_configuration_fingerprint(
@@ -1068,6 +1236,10 @@ pub(crate) struct ReadyFrame {
     overlap_fraction: f32,
     /// The file the frame came from, for a later reintegration.
     source: Option<crate::replay::FrameSource>,
+    /// Per-channel normalized noise; empty for equal weighting.
+    noise: Vec<f32>,
+    /// Per-channel weight; empty for equal weighting.
+    weight: Vec<f32>,
 }
 
 impl PreparedFrame {
@@ -1091,6 +1263,7 @@ pub(crate) fn prepare_frame(
     reference: &LinearImage,
     registrar: &Registrar,
     options: &StackOptions,
+    reference_noise: &[f32],
     frame: LinearImage,
 ) -> Result<PreparedFrame> {
     if reference.channels != frame.channels {
@@ -1196,6 +1369,36 @@ pub(crate) fn prepare_frame(
             FrameRejectionReason::Normalization(message),
         ));
     }
+    // Noise is read from the calibrated frame before resampling. Bilinear
+    // resampling averages neighbouring pixels by an amount that depends on
+    // each frame's sub-pixel shift, which would bias the weights.
+    let (noise, weight) = if options.weighting.is_equal() {
+        (Vec::new(), Vec::new())
+    } else {
+        let Some(raw_noise) = crate::snr::frame_noise(&frame) else {
+            return Ok(PreparedFrame::Rejected(
+                FrameRejectionReason::IncompatibleImage(
+                    "frame noise could not be measured for weighting".into(),
+                ),
+            ));
+        };
+        let noise: Vec<f32> = raw_noise
+            .iter()
+            .enumerate()
+            .map(|(channel, &raw)| raw * normalization.channel_mean_gain(channel).abs())
+            .collect();
+        let weight = noise
+            .iter()
+            .zip(reference_noise)
+            .map(|(&noise, &reference)| {
+                options
+                    .weighting
+                    .weight(reference, noise)
+                    .expect("weighting is not equal")
+            })
+            .collect();
+        (noise, weight)
+    };
     let normalization_mean_gain = normalization.mean_gain();
     let normalization_mean_offset = normalization.mean_offset();
     let mapping = crate::RegisteredFrameMapping::new(
@@ -1215,6 +1418,8 @@ pub(crate) fn prepare_frame(
         mapping: Box::new(mapping),
         overlap_fraction,
         source: None,
+        noise,
+        weight,
     })))
 }
 
@@ -1224,6 +1429,7 @@ pub(crate) struct PreparationHalf<'a> {
     pub(crate) registrar: &'a Registrar,
     pub(crate) calibration: &'a CalibrationMasters,
     pub(crate) options: &'a StackOptions,
+    pub(crate) reference_noise: &'a [f32],
 }
 
 /// The mutable half of a stack: the accumulator and the run's tallies.
@@ -1256,11 +1462,14 @@ impl IntegrationHalf<'_> {
             mapping,
             overlap_fraction,
             source,
+            noise,
+            weight,
         } = *ready;
+        let weights = (!weight.is_empty()).then_some(weight.as_slice());
 
-        let (would_accept, _) = self
-            .accumulator
-            .classify(&registered.data, self.options.rejection);
+        let (would_accept, _) =
+            self.accumulator
+                .classify(&registered.data, self.options.rejection, weights);
         let integrated_fraction = would_accept as f32 / registered.sample_count() as f32;
         if integrated_fraction < self.options.acceptance.minimum_integrated_fraction {
             return self.reject(FrameRejectionReason::InsufficientIntegratedSamples {
@@ -1268,11 +1477,18 @@ impl IntegrationHalf<'_> {
                 minimum: self.options.acceptance.minimum_integrated_fraction,
             });
         }
-        let (accepted_samples, rejected_samples) = self
-            .accumulator
-            .integrate(&registered.data, self.options.rejection);
+        let (accepted_samples, rejected_samples) =
+            self.accumulator
+                .integrate(&registered.data, self.options.rejection, weights);
         *self.accepted_frames += 1;
-        self.ledger.admit(source, (*mapping).clone());
+        self.ledger.admit(
+            source,
+            (*mapping).clone(),
+            crate::replay::FrameWeightRecord {
+                noise: noise.clone(),
+                weight: weight.clone(),
+            },
+        );
         FrameDisposition::Accepted(FrameDiagnostics {
             transform,
             matched_stars,
@@ -1285,6 +1501,8 @@ impl IntegrationHalf<'_> {
             integrated_fraction,
             accepted_samples,
             rejected_samples,
+            noise,
+            weight,
         })
     }
 
@@ -1301,62 +1519,162 @@ impl IntegrationHalf<'_> {
     }
 }
 
+/// Online per-sample moments.
+///
+/// With equal weights this is Welford's algorithm. With frame weights it is
+/// West's weighted form: `weight_sum` holds each sample's total weight, `mean`
+/// is the weighted mean, and `m2` is the weighted sum of squared deviations.
+/// Weights are relative to the reference frame, so `m2 / (count - 1)` still
+/// estimates the variance of a frame with weight 1. `count` always counts
+/// frames, never weight: coverage, warm-up, and depth readings use it.
 struct Accumulator {
     mean: Vec<f32>,
     m2: Vec<f32>,
     count: Vec<u32>,
     rejected: Vec<u32>,
+    /// Per-sample sum of weights; `None` when frames are weighted equally.
+    weight_sum: Option<Vec<f32>>,
 }
 
 impl Accumulator {
-    fn new(samples: usize) -> Self {
+    fn new(samples: usize, weighted: bool) -> Self {
         Self {
             mean: vec![0.0; samples],
             m2: vec![0.0; samples],
             count: vec![0; samples],
             rejected: vec![0; samples],
+            weight_sum: weighted.then(|| vec![0.0; samples]),
         }
     }
 
-    fn integrate(&mut self, samples: &[f32], rejection: RejectionMode) -> (usize, usize) {
+    /// Integrate one frame. `weights` holds one weight per channel and is
+    /// ignored by an equal-weight accumulator; a weighted accumulator given
+    /// `None` uses weight 1.
+    fn integrate(
+        &mut self,
+        samples: &[f32],
+        rejection: RejectionMode,
+        weights: Option<&[f32]>,
+    ) -> (usize, usize) {
+        let Some(weight_sum) = self.weight_sum.as_mut() else {
+            debug_assert!(weights.is_none(), "equal-weight stack given weights");
+            return self
+                .mean
+                .par_iter_mut()
+                .zip(self.m2.par_iter_mut())
+                .zip(self.count.par_iter_mut())
+                .zip(self.rejected.par_iter_mut())
+                .zip(samples.par_iter())
+                .map(|((((mean, m2), count), rejected), &sample)| {
+                    if !sample.is_finite() {
+                        return (0, 0);
+                    }
+                    if should_reject_sample(*mean, *m2, *count, sample, rejection) {
+                        *rejected = rejected.saturating_add(1);
+                        return (0, 1);
+                    }
+                    let next_count = count.saturating_add(1);
+                    let delta = sample - *mean;
+                    *mean += delta / next_count as f32;
+                    let delta_after = sample - *mean;
+                    *m2 += delta * delta_after;
+                    *count = next_count;
+                    (1, 0)
+                })
+                .reduce(
+                    || (0, 0),
+                    |left, right| (left.0 + right.0, left.1 + right.1),
+                );
+        };
+        let unit = [1.0_f32];
+        let weights = weights.unwrap_or(&unit);
+        let channels = weights.len();
         self.mean
             .par_iter_mut()
             .zip(self.m2.par_iter_mut())
             .zip(self.count.par_iter_mut())
             .zip(self.rejected.par_iter_mut())
+            .zip(weight_sum.par_iter_mut())
             .zip(samples.par_iter())
-            .map(|((((mean, m2), count), rejected), &sample)| {
-                if !sample.is_finite() {
-                    return (0, 0);
-                }
-                if should_reject_sample(*mean, *m2, *count, sample, rejection) {
-                    *rejected = rejected.saturating_add(1);
-                    return (0, 1);
-                }
-                let next_count = count.saturating_add(1);
-                let delta = sample - *mean;
-                *mean += delta / next_count as f32;
-                let delta_after = sample - *mean;
-                *m2 += delta * delta_after;
-                *count = next_count;
-                (1, 0)
-            })
+            .enumerate()
+            .map(
+                |(index, (((((mean, m2), count), rejected), weight_sum), &sample))| {
+                    if !sample.is_finite() {
+                        return (0, 0);
+                    }
+                    let weight = weights[index % channels];
+                    if should_reject_weighted_sample(*mean, *m2, *count, sample, weight, rejection)
+                    {
+                        *rejected = rejected.saturating_add(1);
+                        return (0, 1);
+                    }
+                    // West's weighted update. With weight 1 every operation
+                    // matches the equal-weight update bit for bit.
+                    let next_weight = *weight_sum + weight;
+                    let delta = sample - *mean;
+                    let weighted_delta = delta * weight;
+                    *mean += weighted_delta / next_weight;
+                    let delta_after = sample - *mean;
+                    *m2 += weighted_delta * delta_after;
+                    *weight_sum = next_weight;
+                    *count = count.saturating_add(1);
+                    (1, 0)
+                },
+            )
             .reduce(
                 || (0, 0),
                 |left, right| (left.0 + right.0, left.1 + right.1),
             )
     }
 
-    fn classify(&self, samples: &[f32], rejection: RejectionMode) -> (usize, usize) {
+    fn classify(
+        &self,
+        samples: &[f32],
+        rejection: RejectionMode,
+        weights: Option<&[f32]>,
+    ) -> (usize, usize) {
+        if self.weight_sum.is_none() {
+            debug_assert!(weights.is_none(), "equal-weight stack given weights");
+            return self
+                .mean
+                .par_iter()
+                .zip(self.m2.par_iter())
+                .zip(self.count.par_iter())
+                .zip(samples.par_iter())
+                .map(|(((mean, m2), count), &sample)| {
+                    if !sample.is_finite() {
+                        (0, 0)
+                    } else if should_reject_sample(*mean, *m2, *count, sample, rejection) {
+                        (0, 1)
+                    } else {
+                        (1, 0)
+                    }
+                })
+                .reduce(
+                    || (0, 0),
+                    |left, right| (left.0 + right.0, left.1 + right.1),
+                );
+        }
+        let unit = [1.0_f32];
+        let weights = weights.unwrap_or(&unit);
+        let channels = weights.len();
         self.mean
             .par_iter()
             .zip(self.m2.par_iter())
             .zip(self.count.par_iter())
             .zip(samples.par_iter())
-            .map(|(((mean, m2), count), &sample)| {
+            .enumerate()
+            .map(|(index, (((mean, m2), count), &sample))| {
                 if !sample.is_finite() {
                     (0, 0)
-                } else if should_reject_sample(*mean, *m2, *count, sample, rejection) {
+                } else if should_reject_weighted_sample(
+                    *mean,
+                    *m2,
+                    *count,
+                    sample,
+                    weights[index % channels],
+                    rejection,
+                ) {
                     (0, 1)
                 } else {
                     (1, 0)
@@ -1432,6 +1750,31 @@ fn should_reject_sample(
     }
 }
 
+/// Delta-sigma rejection for a weighted stack. `m2 / (count - 1)` estimates
+/// the variance of a weight-1 frame, so a sample from a frame of weight `w`
+/// is expected to scatter with variance `m2 / (count - 1) / w`. With weight 1
+/// this is [`should_reject_sample`] bit for bit.
+fn should_reject_weighted_sample(
+    mean: f32,
+    m2: f32,
+    count: u32,
+    sample: f32,
+    weight: f32,
+    rejection: RejectionMode,
+) -> bool {
+    match rejection {
+        RejectionMode::None => false,
+        RejectionMode::DeltaSigma(options) if count >= options.warmup_samples && count > 1 => {
+            let sigma = (m2 / (count - 1) as f32 / weight)
+                .sqrt()
+                .max(options.minimum_sigma);
+            let delta = sample - mean;
+            delta < -options.low_sigma * sigma || delta > options.high_sigma * sigma
+        }
+        RejectionMode::DeltaSigma(_) => false,
+    }
+}
+
 /// Angular distance from the closest valid German-equatorial-mount pier
 /// orientation. A meridian flip rotates the camera by 180 degrees, so a
 /// transform near either zero or half a turn has the same admission error.
@@ -1489,7 +1832,7 @@ mod tests {
 
     #[test]
     fn delta_sigma_rejects_late_outlier_without_moving_mean() {
-        let mut accumulator = Accumulator::new(1);
+        let mut accumulator = Accumulator::new(1, false);
         let rejection = RejectionMode::DeltaSigma(DeltaSigmaOptions {
             warmup_samples: 4,
             low_sigma: 3.0,
@@ -1497,10 +1840,10 @@ mod tests {
             minimum_sigma: 0.01,
         });
         for value in [10.0, 10.1, 9.9, 10.05] {
-            accumulator.integrate(&[value], rejection);
+            accumulator.integrate(&[value], rejection, None);
         }
         let before = accumulator.mean[0];
-        let (_, rejected) = accumulator.integrate(&[1000.0], rejection);
+        let (_, rejected) = accumulator.integrate(&[1000.0], rejection, None);
         assert_eq!(rejected, 1);
         assert_eq!(accumulator.count[0], 4);
         assert_eq!(accumulator.mean[0], before);
@@ -1513,9 +1856,9 @@ mod tests {
                 LinearImage::new(1, 1, 1, vec![if index == 0 { 11_000.0 } else { 1000.0 }]).unwrap()
             })
             .collect();
-        let mut online = Accumulator::new(1);
+        let mut online = Accumulator::new(1, false);
         for frame in &frames {
-            online.integrate(&frame.data, RejectionMode::default());
+            online.integrate(&frame.data, RejectionMode::default(), None);
         }
         assert!(
             online.mean[0] > 1400.0,
@@ -1535,8 +1878,8 @@ mod tests {
 
     #[test]
     fn export_snapshot_owns_only_a_frozen_finalized_mean() {
-        let mut accumulator = Accumulator::new(2);
-        accumulator.integrate(&[5.0, f32::NAN], RejectionMode::None);
+        let mut accumulator = Accumulator::new(2, false);
+        accumulator.integrate(&[5.0, f32::NAN], RejectionMode::None, None);
         let mean = accumulator.mean_snapshot();
         assert_eq!(mean[0], 5.0);
         assert!(mean[1].is_nan(), "zero coverage must be finalized as NaN");
@@ -1775,6 +2118,8 @@ mod tests {
                 m2: &stacker.accumulator.m2,
                 count: &stacker.accumulator.count,
                 rejected: &stacker.accumulator.rejected,
+                weight_sum: None,
+                reference_noise: &[],
                 accepted_frames: stacker.accepted_frames,
                 rejected_frames: stacker.rejected_frames,
                 input_paths: &stacker.input_paths,
@@ -2000,5 +2345,770 @@ mod tests {
         assert!(error.contains("prepared pixels"), "{error}");
         assert_eq!(stacker.configuration_fingerprint(), fingerprint);
         assert!(stacker.input_paths().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod weighting_tests {
+    use super::*;
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn digest(values: &[f32]) -> String {
+        let mut hasher = Sha256::new();
+        for value in values {
+            hasher.update(value.to_bits().to_le_bytes());
+        }
+        hex(&hasher.finalize())
+    }
+
+    fn bits(values: &[f32]) -> Vec<u32> {
+        values.iter().map(|value| value.to_bits()).collect()
+    }
+
+    const WIDTH: usize = 160;
+    const HEIGHT: usize = 128;
+    const STARS: [(f32, f32); 12] = [
+        (19.7, 16.4),
+        (71.3, 28.1),
+        (132.2, 34.8),
+        (43.1, 49.7),
+        (103.4, 58.3),
+        (22.8, 70.2),
+        (82.7, 76.5),
+        (143.1, 87.8),
+        (54.4, 96.2),
+        (116.8, 104.1),
+        (31.2, 113.0),
+        (91.5, 118.4),
+    ];
+
+    /// The star field the other stack tests use, with its fixed pattern
+    /// noise, so the golden digests below describe a realistic run.
+    fn field() -> LinearImage {
+        let mut data = Vec::with_capacity(WIDTH * HEIGHT);
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let noise = ((x * 17 + y * 31) % 23) as f32 * 0.12 - 1.32;
+                let mut value = 100.0 + noise;
+                for (index, (star_x, star_y)) in STARS.iter().enumerate() {
+                    let dx = x as f32 - star_x;
+                    let dy = y as f32 - star_y;
+                    value +=
+                        (900.0 + index as f32 * 130.0) * (-(dx.mul_add(dx, dy * dy)) / 3.2).exp();
+                }
+                data.push(value);
+            }
+        }
+        LinearImage::new(WIDTH, HEIGHT, 1, data).unwrap()
+    }
+
+    /// Bright stars on a flat sky with no noise: the truth a noisy stack is
+    /// measured against.
+    fn clean_field() -> LinearImage {
+        let mut data = Vec::with_capacity(WIDTH * HEIGHT);
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let mut value = 1000.0_f32;
+                for (index, (star_x, star_y)) in STARS.iter().enumerate() {
+                    let dx = x as f32 - star_x;
+                    let dy = y as f32 - star_y;
+                    value += (20_000.0 + index as f32 * 1_500.0)
+                        * (-(dx.mul_add(dx, dy * dy)) / 3.2).exp();
+                }
+                data.push(value);
+            }
+        }
+        LinearImage::new(WIDTH, HEIGHT, 1, data).unwrap()
+    }
+
+    /// A deterministic normal generator.
+    struct Gaussian(u64);
+
+    impl Gaussian {
+        fn uniform(&mut self) -> f64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            ((self.0 >> 11) as f64 + 0.5) / (1_u64 << 53) as f64
+        }
+
+        fn normal(&mut self) -> f64 {
+            (-2.0 * self.uniform().ln()).sqrt() * (std::f64::consts::TAU * self.uniform()).cos()
+        }
+    }
+
+    fn noisy(truth: &LinearImage, sigma: f64, seed: u64) -> LinearImage {
+        let mut rng = Gaussian(seed);
+        LinearImage::new(
+            truth.width,
+            truth.height,
+            truth.channels,
+            truth
+                .data
+                .iter()
+                .map(|value| (f64::from(*value) + rng.normal() * sigma) as f32)
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    /// Frames for the golden run: the pattern field plus a varying ripple
+    /// and one late outlier, so rejection has work to do.
+    fn golden_frames(reference: &LinearImage) -> Vec<LinearImage> {
+        [0.3_f32, -0.2, 0.1, -0.4, 0.25]
+            .iter()
+            .enumerate()
+            .map(|(index, offset)| {
+                let mut frame = reference.clone();
+                for (sample, value) in frame.data.iter_mut().enumerate() {
+                    *value += offset + ((sample * 13 + index * 7) % 17) as f32 * 0.3;
+                }
+                if index == 4 {
+                    frame.data[5000] += 5000.0;
+                }
+                frame
+            })
+            .collect()
+    }
+
+    fn golden_options(weighting: FrameWeighting) -> StackOptions {
+        StackOptions {
+            rejection: RejectionMode::DeltaSigma(DeltaSigmaOptions {
+                warmup_samples: 3,
+                minimum_sigma: 0.01,
+                ..DeltaSigmaOptions::default()
+            }),
+            weighting,
+            ..StackOptions::default()
+        }
+    }
+
+    fn batch_frames(reference: &LinearImage) -> Vec<LinearImage> {
+        (0..8)
+            .map(|index| {
+                let mut frame = reference.clone();
+                for (sample, value) in frame.data.iter_mut().enumerate() {
+                    *value += ((sample * 13 + index * 7) % 17) as f32 * 0.3;
+                }
+                if index == 2 {
+                    frame.data[700] += 9000.0;
+                }
+                frame
+            })
+            .collect()
+    }
+
+    /// Weighting where every frame clamps to weight 1.
+    fn unit_weighting() -> FrameWeighting {
+        FrameWeighting::InverseNoiseVariance {
+            minimum_weight: 1.0,
+            maximum_weight: 1.0,
+        }
+    }
+
+    /// Digests recorded from `main` (seiza-stacking 0.17.0) before frame
+    /// weighting existed. Equal weighting must keep producing exactly these
+    /// bytes.
+    #[test]
+    fn equal_weighting_matches_the_release_before_weighting() {
+        let reference = field();
+        let mut stacker =
+            LiveStacker::from_linear(reference.clone(), golden_options(FrameWeighting::Equal))
+                .unwrap();
+        for frame in golden_frames(&reference) {
+            let FrameDisposition::Accepted(diagnostics) = stacker.push_linear(frame).unwrap()
+            else {
+                panic!("golden frames are accepted");
+            };
+            assert!(diagnostics.noise.is_empty() && diagnostics.weight.is_empty());
+        }
+        assert!(stacker.reference_noise().is_empty());
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("golden.seiza-stack");
+        stacker.save_context(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[8..12], &3_u32.to_le_bytes(), "equal stacks write v3");
+        let snapshot = stacker.snapshot().unwrap();
+        assert_eq!(
+            stacker.configuration_fingerprint(),
+            "d60e7ea72f889e480f3c7865b62f606b73c474629f2ce033f2921c239a6a2bed"
+        );
+        assert_eq!(
+            hex(&Sha256::digest(&bytes)),
+            "88fe4b86a6ef8928d62d5630e47e3500dd24419fbf94887ad3e8b118c41793e4"
+        );
+        assert_eq!(
+            digest(&snapshot.image.data),
+            "03e76662472764fa23b29b7dc17ff51872783095c8531ba094fa274113fdd523"
+        );
+        assert_eq!(
+            digest(&snapshot.variance.data),
+            "78202b30a58da1d67aca708eb811fbe29bb2701ad27110112199f9416a23d3be"
+        );
+        assert_eq!(snapshot.rejected_samples.iter().sum::<u32>(), 334);
+
+        let frames = batch_frames(&reference);
+        let batch = crate::integrate_registered_frames(
+            frames.len(),
+            &crate::BatchStackOptions::default(),
+            |_, index| Ok(frames[index].clone()),
+        )
+        .unwrap()
+        .snapshot;
+        assert_eq!(
+            digest(&batch.image.data),
+            "226ad323408cc5cf365ff6670be69a60f0d88f5312362a484a61de43b3dd5bd9"
+        );
+        assert_eq!(
+            digest(&batch.variance.data),
+            "f416eb68eca424d5ec5ce2338d576fa867e116d169e24bbb0433342fb6378645"
+        );
+        assert_eq!(batch.rejected_samples.iter().sum::<u32>(), 1);
+    }
+
+    #[test]
+    fn equal_weighting_is_not_serialized_and_weighted_options_parse() {
+        let equal = serde_json::to_string(&StackOptions::default()).unwrap();
+        assert!(!equal.contains("weighting"), "{equal}");
+
+        let options: StackOptions =
+            serde_json::from_str(r#"{"weighting": {"mode": "inverse-noise-variance"}}"#).unwrap();
+        assert_eq!(options.weighting, FrameWeighting::inverse_noise_variance());
+        options.validate().unwrap();
+        let json = serde_json::to_string(&options).unwrap();
+        assert!(json.contains(r#""weighting":{"mode":"inverse-noise-variance","minimum_weight":0.05,"maximum_weight":20.0}"#), "{json}");
+        let round_trip: StackOptions = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_trip.weighting, options.weighting);
+
+        let equal: StackOptions =
+            serde_json::from_str(r#"{"weighting": {"mode": "equal"}}"#).unwrap();
+        assert!(equal.weighting.is_equal());
+        assert!(
+            serde_json::from_str::<StackOptions>(
+                r#"{"weighting": {"mode": "inverse-noise-variance", "mystery": 1}}"#
+            )
+            .is_err()
+        );
+
+        for (minimum_weight, maximum_weight) in [
+            (0.0, 20.0),
+            (1.5, 20.0),
+            (0.05, 0.5),
+            (f32::NAN, 20.0),
+            (0.05, f32::INFINITY),
+        ] {
+            let options = StackOptions {
+                weighting: FrameWeighting::InverseNoiseVariance {
+                    minimum_weight,
+                    maximum_weight,
+                },
+                ..StackOptions::default()
+            };
+            assert!(
+                options.validate().is_err(),
+                "{minimum_weight}..{maximum_weight}"
+            );
+        }
+        let weighted = StackOptions {
+            weighting: FrameWeighting::inverse_noise_variance(),
+            ..StackOptions::default()
+        };
+        let equal = LiveStacker::from_linear(field(), StackOptions::default()).unwrap();
+        let weighted = LiveStacker::from_linear(field(), weighted).unwrap();
+        assert_ne!(
+            equal.configuration_fingerprint(),
+            weighted.configuration_fingerprint(),
+            "weighting is part of the stack's identity"
+        );
+        assert_eq!(weighted.reference_noise().len(), 1);
+        assert!(weighted.reference_noise()[0] > 0.0);
+    }
+
+    #[test]
+    fn unit_weights_integrate_bit_identically_to_equal_weights() {
+        let reference = field();
+        let mut equal =
+            LiveStacker::from_linear(reference.clone(), golden_options(FrameWeighting::Equal))
+                .unwrap();
+        let mut weighted =
+            LiveStacker::from_linear(reference.clone(), golden_options(unit_weighting())).unwrap();
+        for frame in golden_frames(&reference) {
+            let expected = equal.push_linear(frame.clone()).unwrap();
+            let actual = weighted.push_linear(frame).unwrap();
+            let (FrameDisposition::Accepted(expected), FrameDisposition::Accepted(actual)) =
+                (expected, actual)
+            else {
+                panic!("both stacks accept every frame");
+            };
+            assert_eq!(actual.weight, vec![1.0]);
+            assert_eq!(actual.noise.len(), 1);
+            assert_eq!(actual.accepted_samples, expected.accepted_samples);
+            assert_eq!(actual.rejected_samples, expected.rejected_samples);
+        }
+        let expected = equal.snapshot().unwrap();
+        let actual = weighted.snapshot().unwrap();
+        assert!(expected.rejected_samples.iter().sum::<u32>() > 0);
+        assert_eq!(bits(&actual.image.data), bits(&expected.image.data));
+        assert_eq!(bits(&actual.variance.data), bits(&expected.variance.data));
+        assert_eq!(actual.coverage, expected.coverage);
+        assert_eq!(actual.rejected_samples, expected.rejected_samples);
+
+        let frames = batch_frames(&reference);
+        let run = |frame_weights| {
+            crate::integrate_registered_frames(
+                frames.len(),
+                &crate::BatchStackOptions {
+                    frame_weights,
+                    ..crate::BatchStackOptions::default()
+                },
+                |_, index| Ok(frames[index].clone()),
+            )
+            .unwrap()
+            .snapshot
+        };
+        let expected = run(None);
+        let actual = run(Some(vec![vec![1.0]; frames.len()]));
+        assert_eq!(expected.rejected_samples.iter().sum::<u32>(), 1);
+        assert_eq!(bits(&actual.image.data), bits(&expected.image.data));
+        assert_eq!(bits(&actual.variance.data), bits(&expected.variance.data));
+        assert_eq!(actual.coverage, expected.coverage);
+        assert_eq!(actual.rejected_samples, expected.rejected_samples);
+    }
+
+    /// Frames of two noise levels over the same sky, interleaved; the first
+    /// is a quiet one and serves as the reference.
+    fn mixed_noise_frames() -> (LinearImage, Vec<(f64, LinearImage)>) {
+        let truth = clean_field();
+        let frames = (0..30)
+            .map(|index| {
+                let sigma = if index % 3 == 2 { 25.0 } else { 10.0 };
+                (
+                    sigma,
+                    noisy(&truth, sigma, 0x9e37_79b9_7f4a_7c15 ^ (index as u64 + 1)),
+                )
+            })
+            .collect();
+        (truth, frames)
+    }
+
+    /// Standard deviation of the stack about the truth, over sky pixels away
+    /// from stars.
+    fn sky_residual(stack: &LinearImage, truth: &LinearImage) -> f64 {
+        let (mut sum, mut count) = (0.0_f64, 0usize);
+        for (value, truth) in stack.data.iter().zip(&truth.data) {
+            if *truth < 1000.5 && value.is_finite() {
+                sum += (f64::from(*value) - f64::from(*truth)).powi(2);
+                count += 1;
+            }
+        }
+        (sum / count as f64).sqrt()
+    }
+
+    fn stack_mixed(
+        weighting: FrameWeighting,
+        rejection: RejectionMode,
+    ) -> (StackSnapshot, Vec<(f64, FrameDiagnostics)>) {
+        let (_, frames) = mixed_noise_frames();
+        let options = StackOptions {
+            normalization: NormalizationMode::None,
+            rejection,
+            weighting,
+            ..StackOptions::default()
+        };
+        let mut frames = frames.into_iter();
+        let (_, reference) = frames.next().unwrap();
+        let mut stacker = LiveStacker::from_linear(reference, options).unwrap();
+        let diagnostics = frames
+            .map(|(sigma, frame)| match stacker.push_linear(frame).unwrap() {
+                FrameDisposition::Accepted(diagnostics) => (sigma, diagnostics),
+                FrameDisposition::Rejected(reason) => panic!("frame rejected: {reason}"),
+            })
+            .collect();
+        (stacker.into_snapshot().unwrap(), diagnostics)
+    }
+
+    #[test]
+    fn inverse_noise_weighting_reaches_the_optimal_stack_noise() {
+        let (truth, frames) = mixed_noise_frames();
+        let optimal = 1.0
+            / frames
+                .iter()
+                .map(|(sigma, _)| 1.0 / (sigma * sigma))
+                .sum::<f64>()
+                .sqrt();
+        let (equal, _) = stack_mixed(FrameWeighting::Equal, RejectionMode::None);
+        let (weighted, diagnostics) = stack_mixed(
+            FrameWeighting::inverse_noise_variance(),
+            RejectionMode::None,
+        );
+        for (sigma, frame) in &diagnostics {
+            let expected = (10.0 / sigma).powi(2) as f32;
+            assert!(
+                (frame.weight[0] / expected - 1.0).abs() < 0.08,
+                "sigma {sigma}: weight {} expected {expected}",
+                frame.weight[0]
+            );
+            // The estimator reads a few percent high on this small, star-rich
+            // field; the bias is shared by every frame, so weights are not.
+            assert!((f64::from(frame.noise[0]) / sigma - 1.0).abs() < 0.10);
+        }
+        let equal_noise = sky_residual(&equal.image, &truth);
+        let weighted_noise = sky_residual(&weighted.image, &truth);
+        eprintln!("optimal={optimal:.4} equal={equal_noise:.4} weighted={weighted_noise:.4}");
+        assert!(weighted_noise < equal_noise * 0.8);
+        assert!(
+            (weighted_noise / optimal - 1.0).abs() < 0.05,
+            "weighted {weighted_noise} vs optimal {optimal}"
+        );
+        // The depth reader sees the same improvement.
+        let view = |snapshot: &StackSnapshot| {
+            crate::measure_depth(StackView {
+                width: snapshot.image.width,
+                height: snapshot.image.height,
+                channels: 1,
+                mean: &snapshot.image.data,
+                coverage: &snapshot.coverage,
+                rejected_samples: &snapshot.rejected_samples,
+                accepted_frames: snapshot.accepted_frames,
+                rejected_frames: 0,
+            })
+            .unwrap()
+            .noise
+        };
+        assert!(view(&weighted) < view(&equal));
+        assert_eq!(weighted.coverage, equal.coverage, "coverage counts frames");
+        // Variance output is that of a weight-1 (reference-quality) frame.
+        let sky_variance = weighted
+            .variance
+            .data
+            .iter()
+            .zip(&truth.data)
+            .filter(|(_, truth)| **truth < 1000.5)
+            .map(|(variance, _)| f64::from(*variance))
+            .sum::<f64>()
+            / weighted
+                .variance
+                .data
+                .iter()
+                .zip(&truth.data)
+                .filter(|(_, truth)| **truth < 1000.5)
+                .count() as f64;
+        assert!(
+            (sky_variance.sqrt() / 10.0 - 1.0).abs() < 0.05,
+            "unit-weight sigma {}",
+            sky_variance.sqrt()
+        );
+    }
+
+    #[test]
+    fn weighted_rejection_scales_sigma_to_each_frames_noise() {
+        let rejection = RejectionMode::DeltaSigma(DeltaSigmaOptions {
+            warmup_samples: 5,
+            ..DeltaSigmaOptions::default()
+        });
+        let rejected_fraction = |diagnostics: &[(f64, FrameDiagnostics)], noisy: bool| {
+            let (rejected, total) = diagnostics
+                .iter()
+                .filter(|(sigma, _)| (*sigma > 20.0) == noisy)
+                .fold((0, 0), |(rejected, total), (_, frame)| {
+                    (
+                        rejected + frame.rejected_samples,
+                        total + frame.rejected_samples + frame.accepted_samples,
+                    )
+                });
+            rejected as f64 / total as f64
+        };
+        let (_, weighted) = stack_mixed(FrameWeighting::inverse_noise_variance(), rejection);
+        let (_, equal) = stack_mixed(FrameWeighting::Equal, rejection);
+        let weighted_noisy = rejected_fraction(&weighted, true);
+        let weighted_quiet = rejected_fraction(&weighted, false);
+        let equal_noisy = rejected_fraction(&equal, true);
+        eprintln!(
+            "rejected: weighted noisy={weighted_noisy:.4} quiet={weighted_quiet:.4} equal noisy={equal_noisy:.4}"
+        );
+        // Live delta-sigma estimates sigma from few frames early on, so it
+        // clips more than the 0.27% a 3-sigma cut takes from Gaussian noise.
+        // Weighted rejection clips both kinds of frame at about the same
+        // rate; pooled sigma clips the noisy frames far harder.
+        assert!(weighted_noisy < 0.04, "{weighted_noisy}");
+        assert!(weighted_quiet < 0.04, "{weighted_quiet}");
+        assert!(
+            (weighted_noisy / weighted_quiet - 1.0).abs() < 0.3,
+            "{weighted_noisy} vs {weighted_quiet}"
+        );
+        assert!(equal_noisy > 4.0 * weighted_noisy, "{equal_noisy}");
+
+        // A real outlier in a noisy frame is still removed.
+        let (_, frames) = mixed_noise_frames();
+        let mut frames = frames.into_iter();
+        let (_, reference) = frames.next().unwrap();
+        let mut stacker = LiveStacker::from_linear(
+            reference,
+            StackOptions {
+                normalization: NormalizationMode::None,
+                rejection,
+                weighting: FrameWeighting::inverse_noise_variance(),
+                ..StackOptions::default()
+            },
+        )
+        .unwrap();
+        let trail = 40 * WIDTH + 5;
+        for (index, (_, mut frame)) in frames.enumerate() {
+            if index == 16 {
+                frame.data[trail] += 2_000.0;
+            }
+            stacker.push_linear(frame).unwrap();
+        }
+        let snapshot = stacker.snapshot().unwrap();
+        assert!((snapshot.image.data[trail] - 1000.0).abs() < 20.0);
+        assert_eq!(snapshot.rejected_samples[trail], 1);
+    }
+
+    #[test]
+    fn weighted_batch_replay_matches_optimal_noise_and_removes_trails() {
+        let (truth, frames) = mixed_noise_frames();
+        let mut images: Vec<LinearImage> = frames.iter().map(|(_, frame)| frame.clone()).collect();
+        let trail = 60 * WIDTH + 3;
+        images[0].data[trail] += 3_000.0;
+        let weights: Vec<Vec<f32>> = frames
+            .iter()
+            .map(|(sigma, _)| vec![(100.0 / (sigma * sigma)) as f32])
+            .collect();
+        let result = crate::integrate_registered_frames(
+            images.len(),
+            &crate::BatchStackOptions {
+                frame_weights: Some(weights),
+                ..crate::BatchStackOptions::default()
+            },
+            |_, index| Ok(images[index].clone()),
+        )
+        .unwrap();
+        let equal = crate::integrate_registered_frames(
+            images.len(),
+            &crate::BatchStackOptions::default(),
+            |_, index| Ok(images[index].clone()),
+        )
+        .unwrap();
+        let optimal = 1.0
+            / frames
+                .iter()
+                .map(|(sigma, _)| 1.0 / (sigma * sigma))
+                .sum::<f64>()
+                .sqrt();
+        let weighted_noise = sky_residual(&result.snapshot.image, &truth);
+        let equal_noise = sky_residual(&equal.snapshot.image, &truth);
+        eprintln!("batch optimal={optimal:.4} equal={equal_noise:.4} weighted={weighted_noise:.4}");
+        assert!((weighted_noise / optimal - 1.0).abs() < 0.05);
+        assert!(weighted_noise < equal_noise * 0.8);
+        assert_eq!(result.snapshot.rejected_samples[trail], 1);
+        let noisy_rejected: usize = frames
+            .iter()
+            .zip(&result.frames)
+            .filter(|((sigma, _), _)| *sigma > 20.0)
+            .map(|(_, frame)| frame.finite_samples - frame.integrated_samples)
+            .sum();
+        let noisy_total: usize = frames
+            .iter()
+            .zip(&result.frames)
+            .filter(|((sigma, _), _)| *sigma > 20.0)
+            .map(|(_, frame)| frame.finite_samples)
+            .sum();
+        assert!((noisy_rejected as f64 / noisy_total as f64) < 0.012);
+
+        let options = |frame_weights| crate::BatchStackOptions {
+            frame_weights: Some(frame_weights),
+            ..crate::BatchStackOptions::default()
+        };
+        let load = |_, _| LinearImage::new(1, 1, 1, vec![1.0]);
+        assert!(crate::integrate_registered_frames(2, &options(vec![vec![1.0]]), load).is_err());
+        assert!(
+            crate::integrate_registered_frames(2, &options(vec![vec![1.0], vec![0.0]]), load)
+                .is_err()
+        );
+        assert!(
+            crate::integrate_registered_frames(2, &options(vec![vec![1.0], vec![f32::NAN]]), load)
+                .is_err()
+        );
+        assert!(
+            crate::integrate_registered_frames(
+                2,
+                &options(vec![vec![1.0, 1.0, 1.0], vec![1.0, 1.0, 1.0]]),
+                load
+            )
+            .is_err(),
+            "weights must match the channel count"
+        );
+    }
+
+    fn weighted_stack() -> (LiveStacker, Vec<LinearImage>) {
+        let (_, frames) = mixed_noise_frames();
+        let mut frames = frames.into_iter().map(|(_, frame)| frame);
+        let reference = frames.next().unwrap();
+        let stacker = LiveStacker::from_linear(
+            reference,
+            StackOptions {
+                normalization: NormalizationMode::None,
+                rejection: RejectionMode::DeltaSigma(DeltaSigmaOptions {
+                    warmup_samples: 4,
+                    ..DeltaSigmaOptions::default()
+                }),
+                weighting: FrameWeighting::inverse_noise_variance(),
+                ..StackOptions::default()
+            },
+        )
+        .unwrap();
+        (stacker, frames.take(9).collect())
+    }
+
+    #[test]
+    fn weighted_context_round_trips_bit_exactly_as_version_4() {
+        let (mut uninterrupted, frames) = weighted_stack();
+        let (mut checkpointed, _) = weighted_stack();
+        for frame in &frames[..5] {
+            uninterrupted.push_linear(frame.clone()).unwrap();
+            checkpointed.push_linear(frame.clone()).unwrap();
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("weighted.seiza-stack");
+        checkpointed.save_context(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[8..12], &4_u32.to_le_bytes());
+        let mut resumed = LiveStacker::open_context(&path).unwrap();
+        assert_eq!(
+            bits(resumed.reference_noise()),
+            bits(checkpointed.reference_noise())
+        );
+        assert_eq!(
+            bits(resumed.accumulator.weight_sum.as_ref().unwrap()),
+            bits(checkpointed.accumulator.weight_sum.as_ref().unwrap())
+        );
+        assert_eq!(
+            resumed.configuration_fingerprint(),
+            checkpointed.configuration_fingerprint()
+        );
+        let records = resumed.ledger.weights();
+        assert_eq!(records, checkpointed.ledger.weights());
+        assert_eq!(records.len(), 6);
+        assert_eq!(records[0].weight, vec![1.0]);
+        assert_eq!(
+            bits(&records[0].noise),
+            bits(checkpointed.reference_noise())
+        );
+        assert!(records[1..].iter().all(|record| record.weight.len() == 1));
+        for frame in &frames[5..] {
+            uninterrupted.push_linear(frame.clone()).unwrap();
+            resumed.push_linear(frame.clone()).unwrap();
+        }
+        let expected = uninterrupted.into_snapshot().unwrap();
+        let actual = resumed.into_snapshot().unwrap();
+        assert_eq!(bits(&actual.image.data), bits(&expected.image.data));
+        assert_eq!(bits(&actual.variance.data), bits(&expected.variance.data));
+        assert_eq!(actual.coverage, expected.coverage);
+        assert_eq!(actual.rejected_samples, expected.rejected_samples);
+    }
+
+    /// Rewrite the compressed payload of a context file.
+    fn tamper(path: &Path, edit: impl FnOnce(&mut Vec<u8>, usize)) {
+        let bytes = std::fs::read(path).unwrap();
+        let mut payload = zstd::stream::decode_all(&bytes[12..]).unwrap();
+        let metadata_length = u64::from_le_bytes(payload[..8].try_into().unwrap()) as usize;
+        edit(&mut payload, 8 + metadata_length);
+        let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 1).unwrap();
+        encoder.include_checksum(true).unwrap();
+        std::io::Write::write_all(&mut encoder, &payload).unwrap();
+        let mut rewritten = bytes[..12].to_vec();
+        rewritten.extend(encoder.finish().unwrap());
+        std::fs::write(path, rewritten).unwrap();
+    }
+
+    #[test]
+    fn tampered_weighted_contexts_are_refused() {
+        let (mut stacker, frames) = weighted_stack();
+        for frame in &frames[..3] {
+            stacker.push_linear(frame.clone()).unwrap();
+        }
+        let samples = WIDTH * HEIGHT;
+        // Reference, mean, m2, coverage, rejected, then weight sums.
+        let weight_offset = move |arrays_start: usize| arrays_start + 5 * samples * 4;
+        let directory = tempfile::tempdir().unwrap();
+        type Edit<'a> = Box<dyn Fn(&mut Vec<u8>, usize) + 'a>;
+        let cases: [(&str, Edit); 6] = [
+            (
+                "non-finite weight sum",
+                Box::new(move |payload, start| {
+                    let at = weight_offset(start) + 40;
+                    payload[at..at + 4].copy_from_slice(&f32::NAN.to_bits().to_le_bytes());
+                }),
+            ),
+            (
+                "zero weight on a covered sample",
+                Box::new(move |payload, start| {
+                    let at = weight_offset(start) + 80;
+                    payload[at..at + 4].copy_from_slice(&0.0_f32.to_bits().to_le_bytes());
+                }),
+            ),
+            (
+                "negative weight sum",
+                Box::new(move |payload, start| {
+                    let at = weight_offset(start);
+                    payload[at..at + 4].copy_from_slice(&(-1.0_f32).to_bits().to_le_bytes());
+                }),
+            ),
+            (
+                "zero reference noise",
+                Box::new(move |payload, start| {
+                    let at = weight_offset(start) + samples * 4;
+                    payload[at..at + 4].copy_from_slice(&0.0_f32.to_bits().to_le_bytes());
+                }),
+            ),
+            (
+                "truncated frame weight records",
+                Box::new(move |payload, _| {
+                    payload.pop();
+                }),
+            ),
+            (
+                "missing weight sums",
+                Box::new(move |payload, start| {
+                    let at = weight_offset(start);
+                    payload.drain(at..at + samples * 4 + 4);
+                }),
+            ),
+        ];
+        for (name, edit) in cases {
+            let path = directory.path().join(format!("{name}.seiza-stack"));
+            stacker.save_context(&path).unwrap();
+            LiveStacker::open_context(&path).unwrap();
+            tamper(&path, |payload, start| edit(payload, start));
+            assert!(
+                matches!(
+                    LiveStacker::open_context(&path),
+                    Err(Error::StackContextRead { .. })
+                ),
+                "{name}"
+            );
+        }
+
+        // A weighted stack relabelled as version 3, container and metadata
+        // both, is refused: version 3 cannot hold weighted options.
+        let path = directory.path().join("relabelled.seiza-stack");
+        stacker.save_context(&path).unwrap();
+        tamper(&path, |payload, start| {
+            let metadata = std::str::from_utf8(&payload[8..start]).unwrap();
+            let relabelled = metadata.replacen(r#""schema_version":4"#, r#""schema_version":3"#, 1);
+            assert_ne!(metadata, relabelled);
+            payload.splice(8..start, relabelled.into_bytes());
+        });
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[8..12].copy_from_slice(&3_u32.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        let Err(error) = LiveStacker::open_context(&path) else {
+            panic!("a relabelled weighted context must be refused");
+        };
+        let error = error.to_string();
+        assert!(error.contains("cannot hold a weighted stack"), "{error}");
     }
 }

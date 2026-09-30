@@ -47,11 +47,44 @@ shallower pixels are averaged without rejection. Student-t predictive limits
 preserve the configured Gaussian tail probabilities when only a few other
 frames estimate noise, protecting ordinary low-depth noise samples from
 over-rejection. Multiple overlapping trails can still mask one another in
-shallow stacks. All normalized frames have equal weight, and
+shallow stacks. Normalized frames have equal weight unless
+`BatchStackOptions::frame_weights` supplies weights (see below), and
 `BatchStackOptions::minimum_sigma` is in their physical sample units.
 Memory stays proportional to the output image (about 36 bytes per sample plus
 one loaded input), and each frame is loaded twice. Changed shapes or sample
 digests abort the result.
+
+## Frame weighting
+
+By default every admitted frame counts equally. Set
+`StackOptions::weighting` to `FrameWeighting::inverse_noise_variance()` to
+weight each frame by the inverse of its noise variance instead. The stacker
+measures each channel's pixel noise on the calibrated frame before
+resampling, using the same second-difference estimator as `measure_depth`
+(public as `frame_noise`), and scales it by that channel's normalization
+gain. A frame's weight is
+`(reference noise / frame noise)^2`, clamped to 0.05..=20 by default, so the
+reference frame has weight 1 and a frame twice as noisy has weight 0.25.
+Delta-sigma rejection widens its limits for low-weight frames to match their
+noise.
+
+`FrameDiagnostics::noise` and `FrameDiagnostics::weight` report the values
+for each accepted frame, and `LiveStacker::reference_noise` reports the
+reference's. They are empty in equal mode, which measures nothing. The
+admitted-frame ledger keeps each frame's weight, so `LiveStacker::reintegrate`
+replays a weighted stack with the live weights and does not measure noise
+again. To replay frames yourself with `integrate_registered_frames`, pass the
+recorded weights, with 1 for the reference, as
+`BatchStackOptions::frame_weights`.
+
+Coverage still counts frames. In weighted mode the variance output is the
+variance of a weight-1 frame, not the plain sample variance. Weighted live
+contexts use checkpoint format 4: format 3 plus per-sample weight sums and
+the reference noise after the rejection counts, and each admitted frame's
+noise and weight after the ledger. Formats 1 to 3 open only as equal-weight
+stacks, and format 4 only as a weighted one. Equal-weight stacks keep writing
+format 3, byte for byte as before, and their options and configuration
+fingerprint do not change.
 
 ## Pipelined preparation with a shared pool
 

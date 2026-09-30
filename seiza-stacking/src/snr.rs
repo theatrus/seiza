@@ -40,7 +40,9 @@
 //! curve comes from the noise alone. [`SnrSample::snr`] is offered for a
 //! single reading; it is not the right thing to plot across depths.
 
+use crate::LinearImage;
 use crate::stack::StackView;
+use rayon::prelude::*;
 use seiza_stats::{NORMAL_MAD_SCALE, median_in_place};
 use serde::{Deserialize, Serialize};
 
@@ -223,6 +225,70 @@ pub fn measure_depth(view: StackView<'_>) -> Option<SnrSample> {
         signal: mean(&channel_signal),
         channel_noise,
     })
+}
+
+/// Per-channel pixel-scale noise of one image, as a standard deviation in the
+/// image's own units.
+///
+/// This is the estimator [`crate::FrameWeighting::InverseNoiseVariance`]
+/// uses to weight frames, and the one [`measure_depth`] uses on a stack: the
+/// median absolute deviation of second differences taken along each axis,
+/// scaled to a Gaussian standard deviation, keeping the noisier axis. Second
+/// differences cancel a sky gradient and the median ignores stars. At most
+/// 512 rows are read, so the cost does not grow with sensor height.
+/// Non-finite samples, and differences that touch one, are skipped.
+///
+/// The result has one entry per channel, interleaved channel order. It is
+/// `None` when the image is smaller than 3 by 3 pixels, its buffer does not
+/// match its dimensions, or any channel has fewer than 1024 usable
+/// differences on either axis.
+pub fn frame_noise(image: &LinearImage) -> Option<Vec<f32>> {
+    let (width, height, channels) = (image.width, image.height, image.channels);
+    if width < 3 || height < 3 || channels == 0 {
+        return None;
+    }
+    if width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(channels))
+        != Some(image.data.len())
+    {
+        return None;
+    }
+    let data = &image.data;
+    let stride = (height - 2).div_ceil(MAX_SAMPLED_ROWS).max(1);
+    (0..channels)
+        .into_par_iter()
+        .map(|channel| {
+            let mut horizontal: Vec<f32> = Vec::new();
+            let mut vertical: Vec<f32> = Vec::new();
+            let mut y = 1usize;
+            while y + 1 < height {
+                let row = y * width;
+                for x in 1..width - 1 {
+                    let index = (row + x) * channels + channel;
+                    let value = data[index];
+                    if !value.is_finite() {
+                        continue;
+                    }
+                    let (left, right) = (data[index - channels], data[index + channels]);
+                    if left.is_finite() && right.is_finite() {
+                        horizontal.push(left - 2.0 * value + right);
+                    }
+                    let (above, below) = (
+                        data[index - width * channels],
+                        data[index + width * channels],
+                    );
+                    if above.is_finite() && below.is_finite() {
+                        vertical.push(above - 2.0 * value + below);
+                    }
+                }
+                y += stride;
+            }
+            let noise = second_difference_noise(&mut horizontal)?
+                .max(second_difference_noise(&mut vertical)?);
+            Some(noise as f32)
+        })
+        .collect()
 }
 
 /// The standard deviation the second differences imply, or `None` when the
@@ -476,5 +542,30 @@ mod tests {
             })
             .is_none()
         );
+    }
+
+    #[test]
+    fn frame_noise_reads_each_channel_of_one_image() {
+        let (width, height) = (256, 200);
+        let mut noise = Noise(7);
+        let mut data = Vec::with_capacity(width * height * 3);
+        for index in 0..width * height {
+            let (x, y) = (index % width, index / width);
+            let gradient = x as f64 * 0.05 + y as f64 * 0.03;
+            for sigma in [5.0, 10.0, 20.0] {
+                data.push((500.0 + gradient + noise.next_normal() * sigma) as f32);
+            }
+        }
+        data[1234] = f32::NAN;
+        let image = LinearImage::new(width, height, 3, data).unwrap();
+        let measured = crate::frame_noise(&image).unwrap();
+        for (measured, sigma) in measured.iter().zip([5.0_f32, 10.0, 20.0]) {
+            assert!(
+                (measured / sigma - 1.0).abs() < 0.05,
+                "{measured} vs {sigma}"
+            );
+        }
+        let tiny = LinearImage::new(2, 2, 1, vec![1.0; 4]).unwrap();
+        assert_eq!(crate::frame_noise(&tiny), None);
     }
 }

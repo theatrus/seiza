@@ -71,11 +71,11 @@ pub use residual_flat::{
     RESIDUAL_FLAT_ALGORITHM_VERSION, ResidualFlatBuild, ResidualFlatDiagnostics,
     ResidualFlatOptions, ResidualFlatPatch, build_residual_flat_patch,
 };
-pub use snr::{SIGNAL_FRACTION, SnrSample, checkpoint_depths, measure_depth};
+pub use snr::{SIGNAL_FRACTION, SnrSample, checkpoint_depths, frame_noise, measure_depth};
 pub use stack::{
     DeltaSigmaOptions, FrameAcceptanceCriteria, FrameDiagnostics, FrameDisposition, FrameInputMode,
-    FrameRejectionReason, LiveStacker, RejectionMode, StackExportSnapshot, StackOptions,
-    StackSnapshot, StackView,
+    FrameRejectionReason, FrameWeighting, LiveStacker, RejectionMode, StackExportSnapshot,
+    StackOptions, StackSnapshot, StackView,
 };
 
 use std::path::PathBuf;

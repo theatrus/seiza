@@ -815,10 +815,14 @@ fn prepare_decoded(
             ));
         }
     };
-    Ok(
-        prepare_frame(half.reference, half.registrar, half.options, frame.image)?
-            .with_source(source),
-    )
+    Ok(prepare_frame(
+        half.reference,
+        half.registrar,
+        half.options,
+        half.reference_noise,
+        frame.image,
+    )?
+    .with_source(source))
 }
 
 #[cfg(test)]
@@ -1548,6 +1552,162 @@ mod tests {
             "the callback stops the run at the first frame"
         );
         assert_eq!(stacker.input_paths().len(), 1);
+    }
+
+    /// A weighted stack's reintegration uses the weights the live pass
+    /// recorded, and the same weights survive a context round trip. The
+    /// reference replay is an equal-weight stack over the same files, which
+    /// shares every mapping, given those weights explicitly.
+    #[test]
+    fn weighted_reintegration_replays_the_recorded_weights() {
+        let (directory, paths) = trailed_reference_set();
+        let open = |weighting| {
+            LiveStacker::open_fits(
+                &paths[0],
+                None,
+                None,
+                None,
+                None,
+                StackOptions {
+                    weighting,
+                    ..StackOptions::default()
+                },
+            )
+            .unwrap()
+        };
+        let mut weighted = open(crate::FrameWeighting::inverse_noise_variance());
+        let mut equal = open(crate::FrameWeighting::Equal);
+        let mut recorded = vec![vec![1.0_f32]];
+        for path in &paths[1..] {
+            match weighted.push_fits(path).unwrap() {
+                crate::FrameDisposition::Accepted(diagnostics) => {
+                    recorded.push(diagnostics.weight);
+                }
+                crate::FrameDisposition::Rejected(reason) => panic!("{reason}"),
+            }
+            assert!(matches!(
+                equal.push_fits(path).unwrap(),
+                crate::FrameDisposition::Accepted(_)
+            ));
+        }
+        assert!(
+            recorded.iter().any(|weight| weight[0] != 1.0),
+            "the test needs weights other than 1: {recorded:?}"
+        );
+
+        let replayed = weighted
+            .reintegrate(&crate::BatchStackOptions::default(), |_, _, _| {})
+            .unwrap();
+        let expected = equal
+            .reintegrate(
+                &crate::BatchStackOptions {
+                    frame_weights: Some(recorded.clone()),
+                    ..crate::BatchStackOptions::default()
+                },
+                |_, _, _| {},
+            )
+            .unwrap();
+        assert_eq!(
+            bits(&replayed.snapshot.image.data),
+            bits(&expected.snapshot.image.data)
+        );
+        assert_eq!(
+            bits(&replayed.snapshot.variance.data),
+            bits(&expected.snapshot.variance.data)
+        );
+        assert_eq!(
+            replayed.snapshot.rejected_samples,
+            expected.snapshot.rejected_samples
+        );
+        let trail_sample = TRAIL_ROW * replayed.snapshot.image.width + 100;
+        assert_eq!(replayed.snapshot.rejected_samples[trail_sample], 1);
+
+        // Equal reintegration still ignores weighting entirely.
+        let unweighted = equal
+            .reintegrate(&crate::BatchStackOptions::default(), |_, _, _| {})
+            .unwrap();
+        assert_ne!(
+            bits(&unweighted.snapshot.image.data),
+            bits(&replayed.snapshot.image.data)
+        );
+
+        // A weighted stack refuses caller weights rather than pick one set.
+        assert!(
+            weighted
+                .reintegrate(
+                    &crate::BatchStackOptions {
+                        frame_weights: Some(recorded),
+                        ..crate::BatchStackOptions::default()
+                    },
+                    |_, _, _| {}
+                )
+                .is_err()
+        );
+
+        let context = directory.path().join("weighted.seiza-stack");
+        weighted.save_context(&context).unwrap();
+        let resumed = LiveStacker::open_context(&context).unwrap();
+        let resumed = resumed
+            .reintegrate(&crate::BatchStackOptions::default(), |_, _, _| {})
+            .unwrap();
+        assert_eq!(
+            bits(&resumed.snapshot.image.data),
+            bits(&replayed.snapshot.image.data)
+        );
+    }
+
+    /// Frame weights come from preparation, which runs out of order in a
+    /// pipeline. Each frame's weight depends only on that frame and the
+    /// reference, so the pipelined stack must still match a sequential one
+    /// bit for bit, weights included.
+    #[test]
+    fn weighted_pipelined_stack_matches_sequential_weighted_stack() {
+        let (_directory, paths) = frame_set(7);
+        let options = StackOptions {
+            weighting: crate::FrameWeighting::inverse_noise_variance(),
+            ..StackOptions::default()
+        };
+        let build = || {
+            LiveStacker::new(
+                FitsFrame::open(&paths[0]).unwrap(),
+                CalibrationMasters::default(),
+                options.clone(),
+            )
+            .unwrap()
+        };
+
+        let mut sequential = build();
+        let mut sequential_weights = Vec::new();
+        for path in &paths[1..] {
+            match sequential.push_fits(path).unwrap() {
+                crate::FrameDisposition::Accepted(diagnostics) => {
+                    assert_eq!(diagnostics.weight.len(), 1);
+                    sequential_weights.push((diagnostics.noise, diagnostics.weight));
+                }
+                crate::FrameDisposition::Rejected(reason) => panic!("{reason}"),
+            }
+        }
+        let expected = sequential.snapshot().unwrap();
+
+        let mut pipelined = build();
+        let mut pipelined_weights = Vec::new();
+        let report = pipelined
+            .push_fits_pipelined(&paths[1..], &concurrent(3), |_, outcome| {
+                if let crate::FrameDisposition::Accepted(diagnostics) = outcome.unwrap() {
+                    pipelined_weights.push((diagnostics.noise, diagnostics.weight));
+                }
+                Continue::Yes
+            })
+            .unwrap();
+        assert_eq!(report.integrated, paths.len() - 1);
+        let actual = pipelined.snapshot().unwrap();
+
+        assert_eq!(pipelined_weights, sequential_weights);
+        assert_eq!(pipelined.reference_noise(), sequential.reference_noise());
+        assert_eq!(bits(&actual.image.data), bits(&expected.image.data));
+        assert_eq!(bits(&actual.variance.data), bits(&expected.variance.data));
+        assert_eq!(actual.coverage, expected.coverage);
+        assert_eq!(actual.rejected_samples, expected.rejected_samples);
     }
 
     /// The ordered half of the design only matters when a frame is rejected
