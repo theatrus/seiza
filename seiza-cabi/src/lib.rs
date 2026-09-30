@@ -5630,6 +5630,7 @@ fn build_master_request(
         cancel: cancellation,
         defect_suppression,
         flat_star_masking: None,
+        dark_level_screening: None,
     };
     let master = build_master_from_fits(&request.inputs, kind, &options)
         .map_err(|error| error.to_string())?;

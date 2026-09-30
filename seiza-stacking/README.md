@@ -196,6 +196,14 @@ scaled by exposure; a dark that still contains its pedestal must have the same
 known positive exposure as the light. With no masters, preprocessed lights
 remain valid inputs.
 
+Darks that caught stray light, such as dawn through an open roof, look like
+ordinary darks in their headers. `MasterBuildOptions::dark_level_screening`
+measures each dark's robust level and sets aside any frame more than a set
+number of pixel-noise sigmas above the quietest input, naming it in
+`MasterFrame::skipped_inputs`. It is off by default. `DarkLevel::measure` and
+`screen_dark_levels` apply the same rule to a catalog without building a
+master.
+
 For a full-resolution output that must not stop a live session, use
 `LiveStacker::export_snapshot`. It freezes the finalized mean and scalar frame
 counts without cloning variance, coverage, or rejection maps. The independent

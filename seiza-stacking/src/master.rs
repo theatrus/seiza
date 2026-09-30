@@ -108,6 +108,94 @@ pub struct MasterBuildOptions {
     /// Exclude native star and broad saturation footprints before flat
     /// normalization and combination. Off by default; invalid for bias/dark.
     pub flat_star_masking: Option<FlatStarMaskingOptions>,
+    /// Set aside dark inputs whose level rose above the quietest input, the
+    /// mark of stray light. Off by default; invalid for bias/flat.
+    pub dark_level_screening: Option<DarkLevelScreening>,
+}
+
+/// Set aside dark frames that caught stray light.
+///
+/// A dark's level barely moves from frame to frame: it holds the bias
+/// pedestal and a dark current fixed by exposure and temperature. Light that
+/// reaches the sensor, such as dawn through an open roof or a cap left off,
+/// lifts the whole frame, and usually more with each frame. Each input's
+/// robust level is measured after bias subtraction and compared with the
+/// quietest input. An input more than `max_excess_sigma` times that input's
+/// pixel noise above it is left out and named in
+/// [`MasterFrame::skipped_inputs`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DarkLevelScreening {
+    /// How far above the quietest input's level a frame may sit, in units of
+    /// that input's robust pixel noise.
+    pub max_excess_sigma: f32,
+}
+
+impl Default for DarkLevelScreening {
+    fn default() -> Self {
+        Self {
+            max_excess_sigma: 1.0,
+        }
+    }
+}
+
+/// Robust level and pixel noise of one dark frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DarkLevel {
+    /// Median sample value.
+    pub level: f32,
+    /// Normal-equivalent median absolute deviation around that level.
+    pub sigma: f32,
+}
+
+impl DarkLevel {
+    /// Measure a frame's level from every sixteenth sample, which is plenty
+    /// for a median over tens of millions of pixels. Non-finite samples are
+    /// ignored.
+    pub fn measure(samples: &[f32]) -> Self {
+        let mut values: Vec<f32> = samples
+            .iter()
+            .step_by(16)
+            .copied()
+            .filter(|value| value.is_finite())
+            .collect();
+        let level = seiza_stats::median_in_place(&mut values).unwrap_or(0.0);
+        let sigma = seiza_stats::robust_sigma_in_place(&mut values, level).unwrap_or(0.0);
+        Self { level, sigma }
+    }
+}
+
+/// Judge a set of darks that should match: same exposure, gain, offset and
+/// temperature. Returns one entry per input, `None` for a frame that stays
+/// and the reason for one that caught stray light.
+///
+/// Every level must be measured the same way, raw or bias-subtracted; the
+/// rule compares frames only with each other.
+pub fn screen_dark_levels(
+    levels: &[DarkLevel],
+    screening: DarkLevelScreening,
+) -> Vec<Option<String>> {
+    let Some(quietest) = levels
+        .iter()
+        .copied()
+        .min_by(|a, b| a.level.total_cmp(&b.level))
+    else {
+        return Vec::new();
+    };
+    let limit = quietest.level + screening.max_excess_sigma * quietest.sigma;
+    levels
+        .iter()
+        .map(|input| {
+            (input.level > limit).then(|| {
+                format!(
+                    "stray light: level {:.1} sits {:.1} above the quietest dark, more than {} times its pixel noise of {:.1}",
+                    input.level,
+                    input.level - quietest.level,
+                    screening.max_excess_sigma,
+                    quietest.sigma
+                )
+            })
+        })
+        .collect()
 }
 
 /// Per-input tally of samples kept and clipped during integration.
@@ -275,6 +363,7 @@ fn build_master(
     let mut skipped_inputs: Vec<SkippedInput> = Vec::new();
     let mut unmasked_saturation_samples = 0_u64;
     let mut unknown_saturation_inputs = 0_usize;
+    let mut levels: Vec<DarkLevel> = Vec::new();
 
     for path in paths {
         check_cancelled(options)?;
@@ -311,6 +400,9 @@ fn build_master(
             }
         }
         accepted.push(path);
+        if options.dark_level_screening.is_some() {
+            levels.push(DarkLevel::measure(&prepared.image.data));
+        }
         unmasked_saturation_samples += prepared.unmasked_saturation_samples;
         unknown_saturation_inputs += usize::from(prepared.unknown_saturation);
         if let Some(scratch) = &mut flat_scratch {
@@ -322,6 +414,47 @@ fn build_master(
             let delta = value - *mean;
             *mean += delta / count;
             *m2 += delta * (value - *mean);
+        }
+    }
+
+    if let Some(screening) = options.dark_level_screening {
+        let verdicts = screen_dark_levels(&levels, screening);
+        let mut kept = Vec::with_capacity(accepted.len());
+        for (path, verdict) in accepted.iter().zip(verdicts) {
+            match verdict {
+                Some(reason) => skipped_inputs.push(SkippedInput {
+                    path: (*path).clone(),
+                    reason,
+                }),
+                None => kept.push(*path),
+            }
+        }
+        if kept.len() < accepted.len() {
+            // Rebuild the running statistics from the frames that stay, so
+            // the rejected ones do not pull the clipping center.
+            accepted = kept;
+            mean.fill(0.0);
+            m2.fill(0.0);
+            for (index, path) in accepted.iter().enumerate() {
+                check_cancelled(options)?;
+                let prepared = prepare_input(
+                    path,
+                    kind,
+                    options,
+                    &calibration,
+                    reference_signature.as_ref(),
+                    dark_exposure,
+                )?;
+                if index == 0 {
+                    reference_headers = prepared.headers.clone();
+                }
+                let count = (index + 1) as f32;
+                for ((mean, m2), value) in mean.iter_mut().zip(&mut m2).zip(prepared.image.data) {
+                    let delta = value - *mean;
+                    *mean += delta / count;
+                    *m2 += delta * (value - *mean);
+                }
+            }
         }
     }
 
@@ -496,6 +629,18 @@ fn validate_options(
         return Err(Error::Calibration(
             "at least two calibration frames are required".into(),
         ));
+    }
+    if let Some(screening) = &options.dark_level_screening {
+        if kind != MasterFrameKind::Dark {
+            return Err(Error::Calibration(
+                "level screening is only supported for dark masters".into(),
+            ));
+        }
+        if !screening.max_excess_sigma.is_finite() || screening.max_excess_sigma <= 0.0 {
+            return Err(Error::Calibration(
+                "dark level screening needs a positive finite sigma limit".into(),
+            ));
+        }
     }
     if let Some(masking) = &options.flat_star_masking {
         if kind != MasterFrameKind::Flat {
@@ -1246,6 +1391,134 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("role dark-flat"), "{error}");
+    }
+
+    /// A 32x32 dark at `level` with a fixed noise pattern of about 4 ADU,
+    /// plus `leak` ADU of light that falls off toward the corners.
+    fn write_dark(path: &Path, level: f32, leak: f32) {
+        let values: Vec<f32> = (0..32 * 32)
+            .map(|index| {
+                let (x, y) = ((index % 32) as f32 - 15.5, (index / 32) as f32 - 15.5);
+                let noise = ((index * 37 + 11) % 17) as f32 * 0.6 - 4.8;
+                let falloff = 1.0 - 0.06 * (x * x + y * y) / (2.0 * 15.5 * 15.5);
+                level + noise + leak * falloff
+            })
+            .collect();
+        write_sized_image(path, 32, 32, &values);
+    }
+
+    #[test]
+    fn dark_screening_sets_aside_frames_that_caught_light() {
+        let directory = tempfile::tempdir().unwrap();
+        // Dawn through an open roof: the level climbs frame by frame.
+        let leaks = [0.0, 0.5, 0.0, 40.0, 400.0];
+        let paths: Vec<PathBuf> = leaks
+            .iter()
+            .enumerate()
+            .map(|(index, &leak)| {
+                let path = directory.path().join(format!("dark-{index}.fits"));
+                write_dark(&path, 503.0, leak);
+                path
+            })
+            .collect();
+
+        let unscreened = build_master_from_fits(
+            &paths,
+            MasterFrameKind::Dark,
+            &MasterBuildOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(unscreened.input_frames, 5);
+        assert!(unscreened.skipped_inputs.is_empty());
+
+        let options = MasterBuildOptions {
+            dark_level_screening: Some(DarkLevelScreening::default()),
+            ..MasterBuildOptions::default()
+        };
+        let screened = build_master_from_fits(&paths, MasterFrameKind::Dark, &options).unwrap();
+        assert_eq!(screened.input_frames, 3);
+        let skipped: Vec<&Path> = screened
+            .skipped_inputs
+            .iter()
+            .map(|skipped| skipped.path.as_path())
+            .collect();
+        assert_eq!(skipped, [paths[3].as_path(), paths[4].as_path()]);
+        assert!(
+            screened.skipped_inputs[0].reason.starts_with("stray light"),
+            "{}",
+            screened.skipped_inputs[0].reason
+        );
+        let level = |master: &MasterFrame| {
+            master.image.data.iter().sum::<f32>() / master.image.data.len() as f32
+        };
+        assert!(
+            (level(&screened) - 503.2).abs() < 0.5,
+            "{}",
+            level(&screened)
+        );
+        // Clipping per pixel drops the brightest frame but keeps the milder
+        // leak, so without screening the master still sits high.
+        assert!(level(&unscreened) > 508.0, "{}", level(&unscreened));
+    }
+
+    #[test]
+    fn dark_screening_replays_a_dawn_leak() {
+        // Raw levels of the 300 s darks one rig used for 2026-09-15 lights:
+        // three clean frames from an earlier morning, then a dawn series
+        // whose level climbs as the sky brightens.
+        let level = |level, sigma| DarkLevel { level, sigma };
+        let levels = [
+            level(504.0, 4.4),
+            level(504.0, 4.4),
+            level(505.0, 4.4),
+            level(588.0, 19.3),
+            level(774.0, 34.1),
+            level(1172.0, 53.4),
+        ];
+        let verdicts = screen_dark_levels(&levels, DarkLevelScreening::default());
+        let rejected: Vec<bool> = verdicts.iter().map(Option::is_some).collect();
+        assert_eq!(rejected, [false, false, false, true, true, true]);
+        assert!(verdicts[3].as_deref().unwrap().contains("84.0 above"));
+        assert!(screen_dark_levels(&[], DarkLevelScreening::default()).is_empty());
+    }
+
+    #[test]
+    fn dark_screening_keeps_a_steady_set_and_refuses_other_kinds() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths: Vec<PathBuf> = (0..4)
+            .map(|index| {
+                let path = directory.path().join(format!("dark-{index}.fits"));
+                // A cooler settling adds a little dark current, well inside
+                // the noise.
+                write_dark(&path, 503.0 + index as f32 * 0.5, 0.0);
+                path
+            })
+            .collect();
+        let options = MasterBuildOptions {
+            dark_level_screening: Some(DarkLevelScreening::default()),
+            ..MasterBuildOptions::default()
+        };
+        let master = build_master_from_fits(&paths, MasterFrameKind::Dark, &options).unwrap();
+        assert_eq!(master.input_frames, 4);
+        assert!(master.skipped_inputs.is_empty());
+
+        let error = build_master_from_fits(&paths, MasterFrameKind::Bias, &options)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("only supported for dark"), "{error}");
+        let error = build_master_from_fits(
+            &paths,
+            MasterFrameKind::Dark,
+            &MasterBuildOptions {
+                dark_level_screening: Some(DarkLevelScreening {
+                    max_excess_sigma: 0.0,
+                }),
+                ..MasterBuildOptions::default()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("positive finite"), "{error}");
     }
 
     #[test]

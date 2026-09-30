@@ -261,6 +261,7 @@ fn build(
         cancel: None,
         defect_suppression: None,
         flat_star_masking,
+        dark_level_screening: None,
     };
     if kind == MasterFrameKind::Flat && options.bias.is_none() && options.dark.is_none() {
         eprintln!(
