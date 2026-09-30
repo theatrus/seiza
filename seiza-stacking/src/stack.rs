@@ -2512,6 +2512,14 @@ mod weighting_tests {
     /// Digests recorded from `main` (seiza-stacking 0.17.0) before frame
     /// weighting existed. Equal weighting must keep producing exactly these
     /// bytes.
+    ///
+    /// The configuration fingerprint hashes serialized options only, so it is
+    /// checked on every platform. The pixel, variance, and context digests
+    /// were recorded on Linux x86-64: the test field uses `exp`, and
+    /// registration uses trigonometry, whose last bits come from each
+    /// platform's math library. Those digests are checked only there. The
+    /// in-process tests that compare unit weights with equal weights bit for
+    /// bit run everywhere.
     #[test]
     fn equal_weighting_matches_the_release_before_weighting() {
         let reference = field();
@@ -2536,19 +2544,23 @@ mod weighting_tests {
             stacker.configuration_fingerprint(),
             "d60e7ea72f889e480f3c7865b62f606b73c474629f2ce033f2921c239a6a2bed"
         );
-        assert_eq!(
-            hex(&Sha256::digest(&bytes)),
-            "88fe4b86a6ef8928d62d5630e47e3500dd24419fbf94887ad3e8b118c41793e4"
-        );
-        assert_eq!(
-            digest(&snapshot.image.data),
-            "03e76662472764fa23b29b7dc17ff51872783095c8531ba094fa274113fdd523"
-        );
-        assert_eq!(
-            digest(&snapshot.variance.data),
-            "78202b30a58da1d67aca708eb811fbe29bb2701ad27110112199f9416a23d3be"
-        );
-        assert_eq!(snapshot.rejected_samples.iter().sum::<u32>(), 334);
+        assert!(snapshot.rejected_samples.iter().sum::<u32>() > 0);
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        {
+            assert_eq!(
+                hex(&Sha256::digest(&bytes)),
+                "88fe4b86a6ef8928d62d5630e47e3500dd24419fbf94887ad3e8b118c41793e4"
+            );
+            assert_eq!(
+                digest(&snapshot.image.data),
+                "03e76662472764fa23b29b7dc17ff51872783095c8531ba094fa274113fdd523"
+            );
+            assert_eq!(
+                digest(&snapshot.variance.data),
+                "78202b30a58da1d67aca708eb811fbe29bb2701ad27110112199f9416a23d3be"
+            );
+            assert_eq!(snapshot.rejected_samples.iter().sum::<u32>(), 334);
+        }
 
         let frames = batch_frames(&reference);
         let batch = crate::integrate_registered_frames(
@@ -2558,15 +2570,18 @@ mod weighting_tests {
         )
         .unwrap()
         .snapshot;
-        assert_eq!(
-            digest(&batch.image.data),
-            "226ad323408cc5cf365ff6670be69a60f0d88f5312362a484a61de43b3dd5bd9"
-        );
-        assert_eq!(
-            digest(&batch.variance.data),
-            "f416eb68eca424d5ec5ce2338d576fa867e116d169e24bbb0433342fb6378645"
-        );
         assert_eq!(batch.rejected_samples.iter().sum::<u32>(), 1);
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        {
+            assert_eq!(
+                digest(&batch.image.data),
+                "226ad323408cc5cf365ff6670be69a60f0d88f5312362a484a61de43b3dd5bd9"
+            );
+            assert_eq!(
+                digest(&batch.variance.data),
+                "f416eb68eca424d5ec5ce2338d576fa867e116d169e24bbb0433342fb6378645"
+            );
+        }
     }
 
     #[test]
