@@ -7,7 +7,11 @@
 //! whose values use FITS text conventions, so files round-trip through this
 //! crate's reader and load in PixInsight.
 
-use crate::{CompressionCodec, MAX_HEADER_BYTES, MAX_SAMPLES, SIGNATURE, XisfError};
+use crate::metadata::{ENCODING_PROPERTIES, PIXEL_ATTRIBUTES};
+use crate::{
+    CompressionCodec, MAX_HEADER_BYTES, MAX_SAMPLES, SIGNATURE, XisfElement, XisfError,
+    XisfMetadata,
+};
 use quick_xml::escape::escape;
 use seiza_fits::{F32ImageData, HeaderValue, WriteHeaderCard};
 use std::collections::HashSet;
@@ -26,10 +30,16 @@ const SUBBLOCK_BYTES: usize = 1 << 30;
 /// The default writes an uncompressed block without a checksum, which every
 /// XISF reader can open.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct WriteOptions {
+pub struct WriteOptions<'a> {
     pub compression: Option<WriteCompression>,
     /// Hash the stored pixel block so readers can detect corruption.
     pub checksum: Option<ChecksumAlgorithm>,
+    /// Metadata read from a file, such as [`XisfImage::metadata`], to write
+    /// back out along with the new pixels. See [`XisfMetadata`] for what the
+    /// writer leaves out.
+    ///
+    /// [`XisfImage::metadata`]: crate::XisfImage::metadata
+    pub metadata: Option<&'a XisfMetadata>,
 }
 
 /// How to compress the pixel block.
@@ -124,7 +134,7 @@ pub fn write_f32_image_with_options(
     height: usize,
     pixels: F32ImageData<'_>,
     headers: &[WriteHeaderCard],
-    options: &WriteOptions,
+    options: &WriteOptions<'_>,
 ) -> Result<(), XisfError> {
     validate_image(width, height, pixels, headers)?;
     validate_options(options)?;
@@ -185,7 +195,7 @@ pub fn write_f32_image_to_with_options(
     height: usize,
     pixels: F32ImageData<'_>,
     headers: &[WriteHeaderCard],
-    options: &WriteOptions,
+    options: &WriteOptions<'_>,
 ) -> Result<(), XisfError> {
     write_image(
         writer,
@@ -200,24 +210,24 @@ fn write_image(
     mut writer: impl Write,
     (width, height, pixels): (usize, usize, F32ImageData<'_>),
     headers: &[WriteHeaderCard],
-    options: &WriteOptions,
+    options: &WriteOptions<'_>,
     subblock_bytes: usize,
 ) -> Result<(), XisfError> {
     validate_image(width, height, pixels, headers)?;
     validate_options(options)?;
     let block = prepare_block(width, height, pixels, options, subblock_bytes);
     let bounds = sample_bounds(pixels.samples());
+    let carried = Carried::new(options.metadata, (width, height, pixels.planes()), headers);
 
     let created = utc_timestamp(std::time::SystemTime::now());
     let mut data_offset = BLOCK_ALIGNMENT;
     let xml = loop {
         let xml = render_xml(
-            width,
-            height,
-            pixels,
+            (width, height, pixels),
             headers,
             bounds,
             (data_offset, &block),
+            &carried,
             &created,
         );
         let end = PREAMBLE_LEN + xml.len();
@@ -242,8 +252,21 @@ fn write_image(
 
     if let Some(stored) = &block.stored {
         writer.write_all(stored)?;
-        return Ok(());
+    } else {
+        write_samples(&mut writer, width, height, pixels)?;
     }
+    for bytes in carried.blocks() {
+        writer.write_all(bytes)?;
+    }
+    Ok(())
+}
+
+fn write_samples(
+    mut writer: impl Write,
+    width: usize,
+    height: usize,
+    pixels: F32ImageData<'_>,
+) -> Result<(), XisfError> {
     let mut byte_buffer = Vec::with_capacity(PIXEL_CHUNK_BYTES);
     match pixels {
         F32ImageData::Mono(samples) | F32ImageData::RgbPlanar(samples) => {
@@ -263,6 +286,128 @@ fn write_image(
     Ok(())
 }
 
+/// The metadata carried from a read into this write, less what the new
+/// pixels make false.
+#[derive(Default)]
+struct Carried {
+    image_attributes: Vec<(String, String)>,
+    image_elements: Vec<XisfElement>,
+    unit_properties: Vec<XisfElement>,
+    root_elements: Vec<XisfElement>,
+    root_attributes: Vec<(String, String)>,
+    /// The source's creation time, to record as `XISF:OriginalCreationTime`.
+    original_creation_time: Option<String>,
+}
+
+impl Carried {
+    fn new(
+        metadata: Option<&XisfMetadata>,
+        (width, height, planes): (usize, usize, usize),
+        headers: &[WriteHeaderCard],
+    ) -> Self {
+        let Some(metadata) = metadata else {
+            return Self::default();
+        };
+        let (source_width, source_height, source_planes) = metadata.source_geometry;
+        let resized = (width, height) != (source_width, source_height);
+        let image_elements = metadata
+            .image_elements
+            .iter()
+            .filter(|element| match element.local_name() {
+                // The caller's cards replace carried ones of the same name,
+                // and scaling or structure cards would describe the old
+                // samples.
+                "FITSKeyword" => element.attribute("name").is_some_and(|name| {
+                    let name = name.trim();
+                    !is_structural_keyword(name)
+                        && !headers.iter().any(|header| header.keyword() == name)
+                }),
+                // A solution describes the old geometry; the specification
+                // requires dropping it when the geometry changes.
+                "Property" => {
+                    !(resized
+                        && element
+                            .attribute("id")
+                            .is_some_and(|id| id.starts_with("AstrometricSolution:")))
+                }
+                "ColorFilterArray" => planes == source_planes,
+                _ => true,
+            })
+            .cloned()
+            .collect();
+        let property_id =
+            |element: &XisfElement| element.attribute("id").unwrap_or("").trim().to_string();
+        let original_creation_time = metadata
+            .unit_properties
+            .iter()
+            .find(|element| property_id(element) == "XISF:OriginalCreationTime")
+            .or_else(|| {
+                metadata
+                    .unit_properties
+                    .iter()
+                    .find(|element| property_id(element) == "XISF:CreationTime")
+            })
+            // PixInsight writes the time as String text rather than a
+            // TimePoint value attribute.
+            .and_then(|element| {
+                element
+                    .attribute("value")
+                    .or(Some(element.text.as_str()))
+                    .map(str::trim)
+                    .filter(|time| !time.is_empty())
+            })
+            .map(str::to_string);
+        let unit_properties = metadata
+            .unit_properties
+            .iter()
+            .filter(|element| {
+                let id = property_id(element);
+                !ENCODING_PROPERTIES.contains(&id.as_str()) && id != "XISF:OriginalCreationTime"
+            })
+            .cloned()
+            .collect();
+        Self {
+            image_attributes: metadata
+                .image_attributes
+                .iter()
+                .filter(|(name, _)| !PIXEL_ATTRIBUTES.contains(&name.as_str()))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+            image_elements,
+            unit_properties,
+            root_elements: metadata.root_elements.clone(),
+            root_attributes: metadata
+                .root_attributes
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+            original_creation_time,
+        }
+    }
+
+    /// The loaded blocks of the carried elements, in document order.
+    fn blocks(&self) -> Vec<&[u8]> {
+        fn collect<'e>(element: &'e XisfElement, blocks: &mut Vec<&'e [u8]>) {
+            if let Some(block) = &element.block {
+                blocks.push(block);
+            }
+            for child in &element.children {
+                collect(child, blocks);
+            }
+        }
+        let mut blocks = Vec::new();
+        for element in self
+            .image_elements
+            .iter()
+            .chain(&self.unit_properties)
+            .chain(&self.root_elements)
+        {
+            collect(element, &mut blocks);
+        }
+        blocks
+    }
+}
+
 /// The pixel block as it will be stored, with the `Image` attributes and
 /// `Metadata` properties that describe it.
 struct PreparedBlock {
@@ -273,7 +418,7 @@ struct PreparedBlock {
     metadata: Vec<(&'static str, &'static str, String)>,
 }
 
-fn validate_options(options: &WriteOptions) -> Result<(), XisfError> {
+fn validate_options(options: &WriteOptions<'_>) -> Result<(), XisfError> {
     let Some(compression) = options.compression else {
         return Ok(());
     };
@@ -301,7 +446,7 @@ fn prepare_block(
     width: usize,
     height: usize,
     pixels: F32ImageData<'_>,
-    options: &WriteOptions,
+    options: &WriteOptions<'_>,
     subblock_bytes: usize,
 ) -> PreparedBlock {
     let raw_bytes = std::mem::size_of_val(pixels.samples());
@@ -467,31 +612,53 @@ fn creator_os() -> Option<&'static str> {
 const PREAMBLE_LEN: usize = 16;
 
 fn render_xml(
-    width: usize,
-    height: usize,
-    pixels: F32ImageData<'_>,
+    (width, height, pixels): (usize, usize, F32ImageData<'_>),
     headers: &[WriteHeaderCard],
     bounds: (f32, f32),
     (data_offset, block): (usize, &PreparedBlock),
+    carried: &Carried,
     created: &str,
 ) -> String {
     let planes = pixels.planes();
     let color_space = if planes == 3 { "RGB" } else { "Gray" };
+    // Carried blocks follow the pixel block, in document order.
+    let mut position = data_offset + block.bytes;
+    let mut locations = carried
+        .blocks()
+        .into_iter()
+        .map(|bytes| {
+            let location = format!("attachment:{position}:{}", bytes.len());
+            position += bytes.len();
+            location
+        })
+        .collect::<Vec<_>>()
+        .into_iter();
     let mut xml = String::with_capacity(1024);
     xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
     xml.push_str(
         "<xisf version=\"1.0\" xmlns=\"http://www.pixinsight.com/xisf\" \
          xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" \
          xsi:schemaLocation=\"http://www.pixinsight.com/xisf \
-         http://pixinsight.com/xisf/xisf-1.0.xsd\">",
+         http://pixinsight.com/xisf/xisf-1.0.xsd\"",
     );
+    for (name, value) in &carried.root_attributes {
+        let _ = write!(xml, " {name}=\"{}\"", escape(value.as_str()));
+    }
+    xml.push('>');
     let _ = write!(
         xml,
         "<Image geometry=\"{width}:{height}:{planes}\" sampleFormat=\"Float32\" \
          bounds=\"{}:{}\" colorSpace=\"{color_space}\" pixelStorage=\"Planar\" \
-         location=\"attachment:{data_offset}:{}\"{}>",
+         location=\"attachment:{data_offset}:{}\"{}",
         bounds.0, bounds.1, block.bytes, block.attributes
     );
+    for (name, value) in &carried.image_attributes {
+        let _ = write!(xml, " {name}=\"{}\"", escape(value.as_str()));
+    }
+    xml.push('>');
+    for element in &carried.image_elements {
+        element.write(&mut xml, &mut locations);
+    }
     for header in headers {
         // name, value and comment are all mandatory attributes.
         let _ = write!(
@@ -533,7 +700,20 @@ fn render_xml(
             );
         }
     }
+    if let Some(time) = &carried.original_creation_time {
+        let _ = write!(
+            xml,
+            "<Property id=\"XISF:OriginalCreationTime\" type=\"TimePoint\" value=\"{}\"/>",
+            escape(time.as_str())
+        );
+    }
+    for element in &carried.unit_properties {
+        element.write(&mut xml, &mut locations);
+    }
     xml.push_str("</Metadata>");
+    for element in &carried.root_elements {
+        element.write(&mut xml, &mut locations);
+    }
     xml.push_str("</xisf>");
     xml
 }
@@ -709,7 +889,11 @@ mod tests {
             .collect()
     }
 
-    fn write_to_memory(values: &[f32], options: &WriteOptions, subblock_bytes: usize) -> Vec<u8> {
+    fn write_to_memory(
+        values: &[f32],
+        options: &WriteOptions<'_>,
+        subblock_bytes: usize,
+    ) -> Vec<u8> {
         let mut encoded = Vec::new();
         write_image(
             &mut encoded,
@@ -759,6 +943,7 @@ mod tests {
                 let options = WriteOptions {
                     compression,
                     checksum: Some(checksums[case % checksums.len()]),
+                    metadata: None,
                 };
                 let encoded = write_to_memory(&values, &options, subblock_bytes);
                 let read = crate::read_image_from_bytes(&encoded, 0).unwrap();
@@ -810,6 +995,7 @@ mod tests {
                 level: None,
             }),
             checksum: None,
+            metadata: None,
         };
         let encoded = write_to_memory(&values, &options, SUBBLOCK_BYTES);
         let read = crate::read_image_from_bytes(&encoded, 0).unwrap();
@@ -828,6 +1014,7 @@ mod tests {
                     level,
                 }),
                 checksum: None,
+                metadata: None,
             };
             write_image(
                 Vec::new(),

@@ -26,8 +26,6 @@
 //! [`open`] still hands back exactly what is stored.
 
 use flate2::read::ZlibDecoder;
-use quick_xml::events::{BytesStart, Event};
-use quick_xml::{Reader, XmlVersion};
 use seiza_fits::{FitsImage, HeaderValue, Pixels, parse_header_value};
 use sha1::Sha1;
 use sha2::{Sha256, Sha512};
@@ -36,7 +34,13 @@ use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+mod metadata;
 mod writer;
+mod xml;
+
+use metadata::UnitMetadata;
+pub use metadata::XisfMetadata;
+pub use xml::XisfElement;
 
 pub use writer::{
     ChecksumAlgorithm, WriteCompression, WriteOptions, write_f32_image, write_f32_image_to,
@@ -516,6 +520,9 @@ pub struct UnavailableImage {
 pub struct XisfImage {
     pub image: FitsImage,
     pub info: XisfImageInfo,
+    /// Everything else the file says about the image and its unit, for
+    /// writing it back out.
+    pub metadata: XisfMetadata,
 }
 
 impl XisfImage {
@@ -607,16 +614,34 @@ pub fn is_xisf_path(path: &Path) -> bool {
 #[derive(Clone, Debug)]
 struct ParsedImage {
     info: XisfImageInfo,
-    checksum: Option<String>,
-    expected_bytes: usize,
-    /// The decoded contents of an inline or embedded block.
-    inline_data: Option<Vec<u8>>,
+    block: DataBlock,
+    /// The attributes of the `Image` element.
+    attributes: BTreeMap<String, String>,
+    /// Every child element of the image, references resolved.
+    elements: Vec<XisfElement>,
+}
+
+impl ParsedImage {
+    /// Collect the metadata to carry to a later write, loading the blocks
+    /// it needs.
+    fn metadata(&self, reader: &mut (impl Read + Seek), file: &ParsedFile) -> XisfMetadata {
+        metadata::collect(
+            reader,
+            &file.unit,
+            &file.unit_metadata,
+            &self.attributes,
+            &self.elements,
+            (self.info.width, self.info.height, self.info.planes),
+        )
+    }
 }
 
 #[derive(Debug)]
 struct ParsedFile {
     images: Vec<ParsedImage>,
     unavailable: Vec<(usize, Option<String>, XisfError)>,
+    unit: Unit,
+    unit_metadata: UnitMetadata,
 }
 
 impl ParsedFile {
@@ -776,6 +801,7 @@ pub struct ComplexImage {
     pub planes: usize,
     pub samples: ComplexSamples,
     pub info: XisfImageInfo,
+    pub metadata: XisfMetadata,
 }
 
 /// Read a complex image (`Complex32` or `Complex64` samples) by zero-based
@@ -838,28 +864,7 @@ fn read_complex_from(
             "{format:?} samples are real; open the image with open_image"
         )));
     }
-    if let Some(checksum) = &image.checksum {
-        verify_checksum(reader, &image, checksum)?;
-    }
-    let bytes = match &image.info.compression {
-        None => with_block(reader, &image, |block| {
-            let mut bytes = Vec::new();
-            bytes
-                .try_reserve_exact(image.expected_bytes)
-                .map_err(|_| XisfError::Malformed("pixel buffer allocation failed".into()))?;
-            read_decompressed(block, image.expected_bytes, &mut bytes)?;
-            Ok(bytes)
-        })?,
-        Some(compression) => {
-            let raw = with_block(reader, &image, |block| {
-                decompress(block, &image, compression)
-            })?;
-            match compression.shuffled_item_bytes {
-                Some(item_bytes) => unshuffle(&raw, item_bytes),
-                None => raw,
-            }
-        }
-    };
+    let bytes = read_block_bytes(reader, &image.block)?;
     let order = image.info.byte_order;
     let component_bytes = format.bytes_per_sample() / 2;
     let components = bytes.chunks_exact(component_bytes);
@@ -906,12 +911,14 @@ fn read_complex_from(
             ComplexSamples::C64(values) => reorder_normal(values, planes),
         }
     }
+    let metadata = image.metadata(reader, &parsed);
     Ok(ComplexImage {
         width,
         height,
         planes,
         samples,
         info: image.info,
+        metadata,
     })
 }
 
@@ -945,14 +952,11 @@ fn read_image_from(
             .ok_or_else(|| XisfError::ImageNotFound(format!("with id {id:?}")))?,
     };
     let image = parsed.take(index)?;
-
-    if let Some(checksum) = &image.checksum {
-        verify_checksum(reader, &image, checksum)?;
-    }
     let pixels = decode_block(reader, &image)?;
     let mut headers = image.info.headers.clone();
     add_structural_headers(&mut headers, &image.info);
 
+    let metadata = image.metadata(reader, &parsed);
     Ok(XisfImage {
         image: FitsImage {
             width: image.info.width,
@@ -962,6 +966,7 @@ fn read_image_from(
             headers,
         },
         info: image.info,
+        metadata,
     })
 }
 
@@ -1045,264 +1050,44 @@ fn parse_file(
 }
 
 fn parse_xml(xml: &[u8], unit: &Unit) -> Result<ParsedFile, XisfError> {
-    let mut reader = Reader::from_reader(xml);
-    reader.config_mut().trim_text(false);
-    let mut buffer = Vec::new();
-    let mut state = ParseState::default();
-    let mut depth = 0_usize;
-
-    loop {
-        match reader
-            .read_event_into(&mut buffer)
-            .map_err(|error| XisfError::Malformed(format!("invalid XML header: {error}")))?
-        {
-            Event::Start(element) => {
-                depth += 1;
-                state.start(&reader, &element, depth, false)?;
-            }
-            Event::Empty(element) => {
-                state.start(&reader, &element, depth + 1, true)?;
-            }
-            Event::Text(text) => {
-                let text = text
-                    .decode()
-                    .map_err(|error| XisfError::Malformed(format!("invalid XML text: {error}")))?;
-                state.text(&text, depth);
-            }
-            Event::CData(text) => {
-                let text = text
-                    .decode()
-                    .map_err(|error| XisfError::Malformed(format!("invalid XML text: {error}")))?;
-                state.text(&text, depth);
-            }
-            Event::GeneralRef(reference) => {
-                let invalid = |error: &dyn std::fmt::Display| {
-                    XisfError::Malformed(format!("invalid XML reference: {error}"))
-                };
-                let character = reference
-                    .resolve_char_ref()
-                    .map_err(|error| invalid(&error))?;
-                let text = match character {
-                    Some(character) => character.to_string(),
-                    None => {
-                        let name = reference.decode().map_err(|error| invalid(&error))?;
-                        quick_xml::escape::resolve_predefined_entity(&name)
-                            .ok_or_else(|| {
-                                XisfError::Malformed(format!("undefined XML entity &{name};"))
-                            })?
-                            .to_string()
-                    }
-                };
-                state.text(&text, depth);
-            }
-            Event::End(_) => {
-                state.end(depth);
-                depth = depth.saturating_sub(1);
-            }
-            Event::Eof => break,
-            Event::DocType(_) => {
-                return Err(XisfError::Unsupported("XML document types".into()));
-            }
-            _ => {}
-        }
-        buffer.clear();
-    }
-
-    if !state.saw_root {
-        return Err(XisfError::Malformed("missing xisf root element".into()));
-    }
-    if state.images.is_empty() {
-        return Err(XisfError::Malformed("file contains no images".into()));
-    }
-    // Shared elements may follow the images that reference them, so images
-    // are only interpreted once the whole header has been read.
+    let root = xml::parse_tree(xml)?;
+    // Child elements of the root with a uid, which Reference elements
+    // inside images point to.
+    let shared = root
+        .children
+        .iter()
+        .filter(|child| child.local_name() != "Image")
+        .filter_map(|child| Some((child.attribute("uid")?.trim().to_string(), child)))
+        .collect::<BTreeMap<_, _>>();
     let mut parsed = ParsedFile {
         images: Vec::new(),
         unavailable: Vec::new(),
+        unit: unit.clone(),
+        unit_metadata: UnitMetadata::from_root(&root),
     };
-    for image in state.images {
-        let image = match image {
-            Ok(image) => image,
-            Err((index, error)) => {
-                parsed.unavailable.push((index, None, error));
-                continue;
-            }
-        };
-        let (index, id) = (image.index, image.attributes.get("id").cloned());
-        match parse_image(image, &state.shared, unit) {
+    let images = root
+        .children
+        .iter()
+        .filter(|child| child.local_name() == "Image");
+    for (index, image) in images.enumerate() {
+        match parse_image(image, index, &shared, unit) {
             Ok(image) => parsed.images.push(image),
-            Err(error) => parsed.unavailable.push((index, id, error)),
+            Err(error) => {
+                let id = image.attribute("id").map(str::to_string);
+                parsed.unavailable.push((index, id, error));
+            }
         }
+    }
+    if parsed.images.is_empty() && parsed.unavailable.is_empty() {
+        return Err(XisfError::Malformed("file contains no images".into()));
     }
     Ok(parsed)
 }
 
-/// An XML element with its attributes and character data. Elements nested
-/// inside it are not kept.
-#[derive(Clone, Debug, Default)]
-struct Element {
-    name: String,
-    attributes: BTreeMap<String, String>,
-    text: String,
-}
-
-/// An `Image` element, kept whole until the header has been read.
-struct PendingImage {
-    index: usize,
-    attributes: BTreeMap<String, String>,
-    /// Character data directly inside the `Image` element: an inline block.
-    text: String,
-    children: Vec<Element>,
-}
-
-#[derive(Default)]
-struct ParseState {
-    images: Vec<Result<PendingImage, (usize, XisfError)>>,
-    /// Child elements of the root with a `uid`, which `Reference` elements
-    /// inside images point to.
-    shared: BTreeMap<String, Element>,
-    /// Whether the last `images` entry is open.
-    in_image: bool,
-    /// A shared root element being read.
-    open_shared: Option<(String, Element)>,
-    /// A child element of the open image being read.
-    open_child: Option<Element>,
-    saw_root: bool,
-}
-
-impl ParseState {
-    fn start(
-        &mut self,
-        reader: &Reader<&[u8]>,
-        element: &BytesStart<'_>,
-        depth: usize,
-        empty: bool,
-    ) -> Result<(), XisfError> {
-        let name = element.local_name();
-        let name = String::from_utf8_lossy(name.as_ref());
-        match depth {
-            1 if name == "xisf" => {
-                let attributes = attributes(reader, element)?;
-                if attributes.get("version").map(|value| value.trim()) != Some("1.0") {
-                    return Err(XisfError::Unsupported(format!(
-                        "XISF version {:?}",
-                        attributes.get("version")
-                    )));
-                }
-                self.saw_root = true;
-            }
-            2 if name == "Image" => {
-                let index = self.images.len();
-                let image = attributes(reader, element)
-                    .map(|attributes| PendingImage {
-                        index,
-                        attributes,
-                        text: String::new(),
-                        children: Vec::new(),
-                    })
-                    .map_err(|error| (index, error));
-                self.in_image = image.is_ok() && !empty;
-                self.images.push(image);
-            }
-            2 => {
-                let attributes = attributes(reader, element)?;
-                if let Some(uid) = attributes.get("uid") {
-                    let shared = Element {
-                        name: name.into_owned(),
-                        attributes: attributes.clone(),
-                        text: String::new(),
-                    };
-                    let uid = uid.trim().to_string();
-                    if empty {
-                        self.shared.insert(uid, shared);
-                    } else {
-                        self.open_shared = Some((uid, shared));
-                    }
-                }
-            }
-            3 if self.in_image => {
-                let child = Element {
-                    name: name.into_owned(),
-                    attributes: attributes(reader, element)?,
-                    text: String::new(),
-                };
-                if empty {
-                    self.push_child(child);
-                } else {
-                    self.open_child = Some(child);
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    fn push_child(&mut self, child: Element) {
-        if let Some(Ok(image)) = self.images.last_mut() {
-            image.children.push(child);
-        }
-    }
-
-    fn text(&mut self, text: &str, depth: usize) {
-        match depth {
-            3 => {
-                if let Some(child) = &mut self.open_child {
-                    child.text.push_str(text);
-                }
-            }
-            2 if self.in_image => {
-                if let Some(Ok(image)) = self.images.last_mut() {
-                    image.text.push_str(text);
-                }
-            }
-            2 => {
-                if let Some((_, shared)) = &mut self.open_shared {
-                    shared.text.push_str(text);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn end(&mut self, depth: usize) {
-        match depth {
-            3 => {
-                if let Some(child) = self.open_child.take() {
-                    self.push_child(child);
-                }
-            }
-            2 => {
-                self.in_image = false;
-                if let Some((uid, shared)) = self.open_shared.take() {
-                    self.shared.insert(uid, shared);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-fn attributes(
-    reader: &Reader<&[u8]>,
-    element: &BytesStart<'_>,
-) -> Result<BTreeMap<String, String>, XisfError> {
-    let mut values = BTreeMap::new();
-    for attribute in element.attributes() {
-        let attribute = attribute
-            .map_err(|error| XisfError::Malformed(format!("invalid XML attribute: {error}")))?;
-        let key = std::str::from_utf8(attribute.key.as_ref())
-            .map_err(|_| XisfError::Malformed("non-UTF-8 XML attribute name".into()))?;
-        let value = attribute
-            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
-            .map_err(|error| XisfError::Malformed(format!("invalid XML attribute: {error}")))?;
-        values.insert(key.to_string(), value.into_owned());
-    }
-    Ok(values)
-}
-
 fn parse_image(
-    image: PendingImage,
-    shared: &BTreeMap<String, Element>,
+    image: &XisfElement,
+    index: usize,
+    shared: &BTreeMap<String, &XisfElement>,
     unit: &Unit,
 ) -> Result<ParsedImage, XisfError> {
     let attributes = &image.attributes;
@@ -1313,19 +1098,22 @@ fn parse_image(
     let mut working_space = None;
     // A Reference child stands for the shared root element it names.
     // Chained references are not allowed, so one lookup suffices.
-    let children = image.children.iter().filter_map(|child| {
-        if child.name == "Reference" {
-            child
-                .attributes
-                .get("ref")
-                .and_then(|reference| shared.get(reference.trim()))
-        } else {
-            Some(child)
-        }
-    });
-    for child in children {
+    let children = image
+        .children
+        .iter()
+        .filter_map(|child| {
+            if child.local_name() == "Reference" {
+                child
+                    .attribute("ref")
+                    .and_then(|reference| shared.get(reference.trim()).copied())
+            } else {
+                Some(child)
+            }
+        })
+        .collect::<Vec<_>>();
+    for &child in &children {
         let child_attributes = &child.attributes;
-        match child.name.as_str() {
+        match child.local_name() {
             "FITSKeyword" => {
                 let keyword = required(child_attributes, "name", "FITSKeyword")?
                     .trim()
@@ -1434,9 +1222,68 @@ fn parse_image(
         Some(Err(_)) | None => None,
     };
 
+    let block = parse_block(attributes, &image.text, data, unit, Some(expected_bytes))?;
+    let bounds = attributes
+        .get("bounds")
+        .and_then(|value| parse_bounds(value));
+    Ok(ParsedImage {
+        info: XisfImageInfo {
+            index,
+            id: attributes.get("id").cloned(),
+            image_type: attributes
+                .get("imageType")
+                .map(|value| value.trim().to_string()),
+            width,
+            height,
+            planes,
+            sample_format,
+            color_space,
+            byte_order: block.byte_order,
+            pixel_storage,
+            location: block.location.clone(),
+            compression: block.compression.clone(),
+            bounds,
+            headers,
+            properties,
+            cfa_pattern,
+            rgb_working_space,
+        },
+        block,
+        attributes: attributes.clone(),
+        elements: children.into_iter().cloned().collect(),
+    })
+}
+
+/// A data block as its XML element describes it, ready to be read.
+#[derive(Clone, Debug)]
+struct DataBlock {
+    location: BlockLocation,
+    /// The decoded contents of an inline or embedded block.
+    inline_data: Option<Vec<u8>>,
+    compression: Option<CompressionInfo>,
+    checksum: Option<String>,
+    byte_order: ByteOrder,
+    /// The length of the block once decompressed.
+    expected_bytes: usize,
+}
+
+/// Interpret the `location`, `compression`, `subblocks`, `checksum` and
+/// `byteOrder` attributes of an element that serializes a data block.
+/// `text` is the element's character data and `data` its `Data` child, for
+/// inline and embedded blocks.
+fn parse_block(
+    attributes: &BTreeMap<String, String>,
+    text: &str,
+    data: Option<&XisfElement>,
+    unit: &Unit,
+    expected: Option<usize>,
+) -> Result<DataBlock, XisfError> {
     // An embedded block carries its encoding, compression and subblocks on
     // the child Data element; every other location carries them on Image.
-    let location_value = required(attributes, "location", "Image")?.trim();
+    let location_value = attributes
+        .get("location")
+        .ok_or_else(|| XisfError::Malformed("data block has no location".into()))?
+        .trim();
     let (location, inline_data, block_attributes) = match location_value.split_once(':') {
         Some(("attachment", position)) => {
             let &Unit::Monolithic {
@@ -1464,17 +1311,17 @@ fn parse_image(
             )
         }
         Some(("inline", encoding)) => {
-            let data = decode_text_block(&image.text, encoding)?;
+            let data = decode_text_block(text, encoding)?;
             let bytes = data.len() as u64;
             (BlockLocation::Inline { bytes }, Some(data), attributes)
         }
         None if location_value == "embedded" => {
-            let Element {
+            let XisfElement {
                 attributes: data_attributes,
                 text,
                 ..
             } = data
-                .ok_or_else(|| XisfError::Malformed("embedded image has no Data element".into()))?;
+                .ok_or_else(|| XisfError::Malformed("embedded block has no Data element".into()))?;
             let encoding = required(data_attributes, "encoding", "Data")?;
             let data = decode_text_block(text, encoding)?;
             let bytes = data.len() as u64;
@@ -1522,17 +1369,21 @@ fn parse_image(
             )));
         }
     };
-    let bounds = attributes
-        .get("bounds")
-        .and_then(|value| parse_bounds(value));
     let mut compression = attribute("compression")
         .map(parse_compression)
         .transpose()?;
     let block_bytes = location.bytes();
+    // Without a stated size, the block holds whatever it holds.
+    let expected_bytes = match (expected, &compression) {
+        (Some(bytes), _) => bytes,
+        (None, Some(compression)) => compression.uncompressed_bytes,
+        (None, None) => usize::try_from(block_bytes)
+            .map_err(|_| XisfError::Malformed("data block is too large".into()))?,
+    };
     if let Some(compression) = &mut compression {
         if compression.uncompressed_bytes != expected_bytes {
             return Err(XisfError::Malformed(format!(
-                "declared uncompressed size {} does not match image size {expected_bytes}",
+                "declared uncompressed size {} does not match the expected {expected_bytes}",
                 compression.uncompressed_bytes
             )));
         }
@@ -1551,7 +1402,7 @@ fn parse_image(
             if compressed != block_bytes || uncompressed != expected_bytes as u64 {
                 return Err(XisfError::Malformed(format!(
                     "subblocks hold {compressed} compressed and {uncompressed} uncompressed \
-                     bytes; the block holds {block_bytes} and the image {expected_bytes}"
+                     bytes; the block holds {block_bytes} and should expand to {expected_bytes}"
                 )));
             }
         }
@@ -1560,35 +1411,17 @@ fn parse_image(
         }
     } else if block_bytes != expected_bytes as u64 {
         return Err(XisfError::Malformed(format!(
-            "data block size {block_bytes} does not match image size {expected_bytes}"
+            "data block size {block_bytes} does not match the expected {expected_bytes}"
         )));
     }
 
-    Ok(ParsedImage {
+    Ok(DataBlock {
         checksum: attribute("checksum").map(str::to_string),
-        info: XisfImageInfo {
-            index: image.index,
-            id: attributes.get("id").cloned(),
-            image_type: attributes
-                .get("imageType")
-                .map(|value| value.trim().to_string()),
-            width,
-            height,
-            planes,
-            sample_format,
-            color_space,
-            byte_order,
-            pixel_storage,
-            location,
-            compression,
-            bounds,
-            headers,
-            properties,
-            cfa_pattern,
-            rgb_working_space,
-        },
-        expected_bytes,
+        location,
         inline_data,
+        compression,
+        byte_order,
+        expected_bytes,
     })
 }
 
@@ -1923,14 +1756,14 @@ fn parse_compression(value: &str) -> Result<CompressionInfo, XisfError> {
     })
 }
 
-/// Run `read` over the stored bytes of an image's data block, wherever the
-/// block lives.
+/// Run `read` over the stored bytes of a data block, wherever the block
+/// lives.
 fn with_block<T>(
     reader: &mut (impl Read + Seek),
-    image: &ParsedImage,
+    block: &DataBlock,
     read: impl FnOnce(&mut dyn Read) -> Result<T, XisfError>,
 ) -> Result<T, XisfError> {
-    match (&image.info.location, &image.inline_data) {
+    match (&block.location, &block.inline_data) {
         (&BlockLocation::Attachment { offset, bytes }, _) => {
             reader.seek(SeekFrom::Start(offset))?;
             read(&mut reader.take(bytes))
@@ -1954,18 +1787,18 @@ fn with_block<T>(
 
 fn verify_checksum(
     reader: &mut (impl Read + Seek),
-    image: &ParsedImage,
+    block: &DataBlock,
     checksum: &str,
 ) -> Result<(), XisfError> {
     let (algorithm, expected) = checksum
         .split_once(':')
         .ok_or_else(|| XisfError::Malformed(format!("invalid checksum {checksum:?}")))?;
     let actual = match algorithm.trim() {
-        "sha1" | "sha-1" => block_digest::<Sha1>(reader, image)?,
-        "sha256" | "sha-256" => block_digest::<Sha256>(reader, image)?,
-        "sha512" | "sha-512" => block_digest::<Sha512>(reader, image)?,
-        "sha3-256" => block_digest::<Sha3_256>(reader, image)?,
-        "sha3-512" => block_digest::<Sha3_512>(reader, image)?,
+        "sha1" | "sha-1" => block_digest::<Sha1>(reader, block)?,
+        "sha256" | "sha-256" => block_digest::<Sha256>(reader, block)?,
+        "sha512" | "sha-512" => block_digest::<Sha512>(reader, block)?,
+        "sha3-256" => block_digest::<Sha3_256>(reader, block)?,
+        "sha3-512" => block_digest::<Sha3_512>(reader, block)?,
         algorithm => {
             return Err(XisfError::Unsupported(format!(
                 "checksum algorithm {algorithm:?}"
@@ -1985,9 +1818,9 @@ fn verify_checksum(
 /// compressed block, and the decoded bytes of an inline or embedded one.
 fn block_digest<D: sha2::Digest>(
     reader: &mut (impl Read + Seek),
-    image: &ParsedImage,
+    block: &DataBlock,
 ) -> Result<String, XisfError> {
-    with_block(reader, image, |block| {
+    with_block(reader, block, |block| {
         let mut digest = D::new();
         let mut buffer = vec![0_u8; CHUNK_BYTES];
         loop {
@@ -2015,10 +1848,15 @@ fn decode_block(reader: &mut (impl Read + Seek), image: &ParsedImage) -> Result<
     if image.info.sample_format.is_complex() {
         return Err(complex_needs_its_own_reader());
     }
-    let mut pixels = match &image.info.compression {
-        None => with_block(reader, image, |block| decode_reader(block, image))?,
+    if let Some(checksum) = &image.block.checksum {
+        verify_checksum(reader, &image.block, checksum)?;
+    }
+    let mut pixels = match &image.block.compression {
+        None => with_block(reader, &image.block, |block| decode_reader(block, image))?,
         Some(compression) => {
-            let raw = with_block(reader, image, |block| decompress(block, image, compression))?;
+            let raw = with_block(reader, &image.block, |stored| {
+                decompress(stored, &image.block, compression)
+            })?;
             match compression.shuffled_item_bytes {
                 None => decode_bytes(&raw, image)?,
                 Some(item_bytes) if item_bytes == image.info.sample_format.bytes_per_sample() => {
@@ -2040,29 +1878,29 @@ fn decode_block(reader: &mut (impl Read + Seek), image: &ParsedImage) -> Result<
 /// Decompress a whole data block, one independently compressed subblock at a
 /// time. A block without a `subblocks` attribute is a single subblock.
 fn decompress(
-    block: &mut dyn Read,
-    image: &ParsedImage,
+    stored: &mut dyn Read,
+    block: &DataBlock,
     compression: &CompressionInfo,
 ) -> Result<Vec<u8>, XisfError> {
-    let whole = [(image.info.location.bytes(), image.expected_bytes as u64)];
+    let whole = [(block.location.bytes(), block.expected_bytes as u64)];
     let subblocks = if compression.subblocks.is_empty() {
         &whole[..]
     } else {
         &compression.subblocks[..]
     };
     let mut raw = Vec::new();
-    raw.try_reserve_exact(image.expected_bytes)
+    raw.try_reserve_exact(block.expected_bytes)
         .map_err(|_| XisfError::Malformed("decompression allocation failed".into()))?;
     for &(compressed, uncompressed) in subblocks {
         let uncompressed = usize::try_from(uncompressed)
             .map_err(|_| XisfError::Malformed("subblock is too large".into()))?;
-        let mut stored = Read::take(&mut *block, compressed);
+        let mut subblock = Read::take(&mut *stored, compressed);
         match compression.codec {
             CompressionCodec::Zlib => {
-                read_decompressed(ZlibDecoder::new(stored), uncompressed, &mut raw)?;
+                read_decompressed(ZlibDecoder::new(subblock), uncompressed, &mut raw)?;
             }
             CompressionCodec::Zstd => {
-                let decoder = zstd::stream::read::Decoder::new(stored).map_err(|error| {
+                let decoder = zstd::stream::read::Decoder::new(subblock).map_err(|error| {
                     XisfError::Malformed(format!("invalid zstd stream: {error}"))
                 })?;
                 read_decompressed(decoder, uncompressed, &mut raw)?;
@@ -2071,7 +1909,7 @@ fn decompress(
                 let compressed = usize::try_from(compressed)
                     .map_err(|_| XisfError::Malformed("subblock is too large".into()))?;
                 let mut bytes = vec![0_u8; compressed];
-                stored.read_exact(&mut bytes).map_err(|error| {
+                subblock.read_exact(&mut bytes).map_err(|error| {
                     if error.kind() == std::io::ErrorKind::UnexpectedEof {
                         XisfError::Malformed("compressed data block is truncated".into())
                     } else {
@@ -2090,14 +1928,43 @@ fn decompress(
             }
         }
     }
-    if raw.len() != image.expected_bytes {
+    if raw.len() != block.expected_bytes {
         return Err(XisfError::Malformed(format!(
             "decompressed {} bytes; expected {}",
             raw.len(),
-            image.expected_bytes
+            block.expected_bytes
         )));
     }
     Ok(raw)
+}
+
+/// Verify, read, decompress and unshuffle a whole data block.
+fn read_block_bytes(
+    reader: &mut (impl Read + Seek),
+    block: &DataBlock,
+) -> Result<Vec<u8>, XisfError> {
+    if let Some(checksum) = &block.checksum {
+        verify_checksum(reader, block, checksum)?;
+    }
+    match &block.compression {
+        None => with_block(reader, block, |stored| {
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(block.expected_bytes)
+                .map_err(|_| XisfError::Malformed("data block allocation failed".into()))?;
+            read_decompressed(stored, block.expected_bytes, &mut bytes)?;
+            Ok(bytes)
+        }),
+        Some(compression) => {
+            let raw = with_block(reader, block, |stored| {
+                decompress(stored, block, compression)
+            })?;
+            Ok(match compression.shuffled_item_bytes {
+                Some(item_bytes) => unshuffle(&raw, item_bytes),
+                None => raw,
+            })
+        }
+    }
 }
 
 /// Append exactly `expected_bytes` decompressed bytes to `output`.
@@ -3451,6 +3318,184 @@ mod tests {
             read_complex_image_from_bytes(&real, 0),
             Err(XisfError::Unsupported(_))
         ));
+    }
+
+    /// Elements with their relocatable `location` attributes cleared, for
+    /// comparing what a round trip carried.
+    fn without_locations(elements: &[XisfElement]) -> Vec<XisfElement> {
+        elements
+            .iter()
+            .cloned()
+            .map(|mut element| {
+                element.visit_mut(&mut |element| {
+                    if element.block.is_some() {
+                        element.attributes.remove("location");
+                    }
+                });
+                element
+            })
+            .collect()
+    }
+
+    fn rich_source() -> Vec<u8> {
+        let pixels = [1_u8, 2, 3, 4];
+        let vector = [1.5_f64, -2.25, 3.0]
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        let compressed = zstd::bulk::compress(&shuffled(&vector, 8), 3).unwrap();
+        let digest = lowercase_hex(<Sha1 as sha1::Digest>::digest(&compressed).as_ref());
+        let thumbnail = [7_u8; 4];
+        let children = format!(
+            "<FITSKeyword name=\"EXPTIME\" value=\"300\" comment=\"seconds\"/>\
+             <FITSKeyword name=\"BZERO\" value=\"32768\" comment=\"\"/>\
+             <FITSKeyword name=\"HISTORY\" value=\"\" comment=\"calibrated &amp; stacked\"/>\
+             <Property id=\"Observation:Object:Name\" type=\"String\">M 42</Property>\
+             <Property id=\"AstrometricSolution:Version\" type=\"String\">1.0</Property>\
+             <Property id=\"Custom:Vector\" type=\"F64Vector\" length=\"3\" compression=\"zstd+sh:24:8\" checksum=\"sha1:{digest}\" location=\"attachment:@OFFSET1@:{}\"/>\
+             <Property id=\"Custom:Inline\" type=\"UI8Vector\" length=\"2\" location=\"inline:hex\">0aff</Property>\
+             <Property id=\"Custom:Embedded\" type=\"ByteArray\" length=\"2\" location=\"embedded\"><Data encoding=\"base64\">AQI=</Data></Property>\
+             <Property id=\"Custom:Empty\" type=\"F64Vector\" length=\"0\" location=\"inline:base64\"></Property>\
+             <ColorFilterArray pattern=\"RGGB\" width=\"2\" height=\"2\"/>\
+             <Reference ref=\"space\"/>\
+             <Resolution horizontal=\"72\" vertical=\"72\" unit=\"inch\"/>\
+             <Thumbnail geometry=\"2:2:1\" sampleFormat=\"UInt8\" colorSpace=\"Gray\" location=\"attachment:@OFFSET2@:4\"/>\
+             <acme:Note xmlns:acme=\"urn:acme\">kept as is</acme:Note>",
+            compressed.len()
+        );
+        let xml = format!(
+            "{}<RGBWorkingSpace uid=\"space\" x=\"0.648431:0.321152:0.155886\" y=\"0.330856:0.597871:0.066044\" Y=\"0.222491:0.716888:0.060621\" gamma=\"2.2\" name=\"Custom\"/>\
+             <Metadata><Property id=\"XISF:CreationTime\" type=\"TimePoint\" value=\"2025-01-02T03:04:05Z\"/>\
+             <Property id=\"XISF:CreatorApplication\" type=\"String\">PixInsight 1.9.3</Property>\
+             <Property id=\"XISF:CompressionCodecs\" type=\"String\">zstd+sh</Property>\
+             <Property id=\"XISF:Title\" type=\"String\">Orion &lt;wide&gt;</Property></Metadata>\
+             <ext:Processing xmlns:ext=\"urn:ext\" step=\"3\"><ext:Step>stack</ext:Step></ext:Processing>",
+            image_element(
+                0,
+                "2:2:1",
+                "UInt8",
+                4,
+                "imageType=\"Light\" uuid=\"6f1d\" offset=\"0\"",
+                &children
+            )
+        );
+        monolithic(xml, &[&pixels, &compressed, &thumbnail])
+    }
+
+    #[test]
+    fn a_write_carries_every_field_it_does_not_replace() {
+        let source = read_image_from_bytes(&rich_source(), 0).unwrap();
+        let metadata = &source.metadata;
+        assert!(metadata.dropped.is_empty(), "{:?}", metadata.dropped);
+        assert_eq!(
+            metadata.image_attributes.get("uuid").map(String::as_str),
+            Some("6f1d")
+        );
+        assert_eq!(metadata.image_attributes.get("geometry"), None);
+        // References are resolved, and outside blocks are loaded.
+        assert!(
+            metadata
+                .image_elements
+                .iter()
+                .any(|element| element.local_name() == "RGBWorkingSpace")
+        );
+        assert!(metadata.property("Custom:Vector").unwrap().block.is_some());
+
+        let options = WriteOptions {
+            metadata: Some(metadata),
+            ..WriteOptions::default()
+        };
+        let headers = [seiza_fits::WriteHeaderCard::new(
+            "EXPTIME",
+            HeaderValue::Float(60.0),
+        )];
+        let mut written = Vec::new();
+        write_f32_image_to_with_options(
+            &mut written,
+            2,
+            2,
+            seiza_fits::F32ImageData::Mono(&[0.1, 0.2, 0.3, 0.4]),
+            &headers,
+            &options,
+        )
+        .unwrap();
+
+        let reread = read_image_from_bytes(&written, 0).unwrap();
+        let carried = &reread.metadata;
+        assert!(carried.dropped.is_empty(), "{:?}", carried.dropped);
+        assert_eq!(carried.image_attributes, metadata.image_attributes);
+        // The caller's EXPTIME replaces the old one, and BZERO would
+        // misdescribe the new samples; everything else is carried in order,
+        // with the caller's cards after it.
+        let expected = without_locations(
+            &metadata
+                .image_elements
+                .iter()
+                .filter(|element| !matches!(element.attribute("name"), Some("EXPTIME" | "BZERO")))
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+        let actual = without_locations(&carried.image_elements);
+        assert_eq!(&actual[..expected.len()], &expected[..]);
+        assert_eq!(actual[expected.len()].attribute("name"), Some("EXPTIME"));
+        assert_eq!(reread.image.header_str("OBJECT"), Some("M 42"));
+
+        let property = |metadata: &XisfMetadata, id: &str| {
+            metadata
+                .unit_properties
+                .iter()
+                .find(|element| element.attribute("id") == Some(id))
+                .cloned()
+        };
+        assert_eq!(
+            property(carried, "XISF:Title").map(|element| element.text),
+            Some("Orion <wide>".into())
+        );
+        assert_eq!(
+            property(carried, "XISF:OriginalCreationTime")
+                .and_then(|element| element.attribute("value").map(str::to_string)),
+            Some("2025-01-02T03:04:05Z".into())
+        );
+        assert!(property(carried, "XISF:CompressionCodecs").is_none());
+        assert!(
+            property(carried, "XISF:CreatorApplication")
+                .is_some_and(|element| element.text.starts_with("seiza-xisf"))
+        );
+        assert_eq!(carried.root_elements, metadata.root_elements);
+
+        // The relocated, still compressed and checksummed block reads back.
+        let rewritten = read_image_from_bytes(&written, 0).unwrap();
+        let block =
+            |metadata: &XisfMetadata| metadata.property("Custom:Vector").unwrap().block.clone();
+        assert_eq!(block(&rewritten.metadata), block(metadata));
+    }
+
+    #[test]
+    fn a_write_drops_what_the_new_geometry_makes_false() {
+        let source = read_image_from_bytes(&rich_source(), 0).unwrap();
+        let options = WriteOptions {
+            metadata: Some(&source.metadata),
+            ..WriteOptions::default()
+        };
+        let mut written = Vec::new();
+        write_f32_image_to_with_options(
+            &mut written,
+            1,
+            1,
+            seiza_fits::F32ImageData::RgbPlanar(&[0.1, 0.2, 0.3]),
+            &[],
+            &options,
+        )
+        .unwrap();
+        let carried = read_image_from_bytes(&written, 0).unwrap().metadata;
+        assert!(carried.property("AstrometricSolution:Version").is_none());
+        assert!(carried.property("Custom:Vector").is_some());
+        assert!(
+            !carried
+                .image_elements
+                .iter()
+                .any(|element| element.local_name() == "ColorFilterArray")
+        );
     }
 
     #[test]
