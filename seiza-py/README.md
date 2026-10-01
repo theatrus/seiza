@@ -196,8 +196,9 @@ FITS paths and writes an unstretched linear `float32` FITS result:
 
 ```python
 options = seiza.StackOptions(
-    normalization="local",
+    normalization="local-background",
     local_tile_size=256,
+    demosaic="vng",
     maximum_drift_pixels=256.0,
     maximum_drift_fraction=0.15,
 )
@@ -212,6 +213,15 @@ result = seiza.stack_fits(
 for frame in result.frames:
     print(frame.source, frame.accepted, frame.reason, frame.registration_rms_pixels)
 ```
+
+`normalization` is `"none"`, `"global"` (the default), `"local"`, or
+`"local-background"`, which keeps one gain per channel and matches each tile's
+background to the reference's so frame edges leave no seams. `demosaic` chooses
+how one-shot-colour frames are demosaiced: `"vng"` (the default) keeps each
+star's colour across its profile, `"mhc"` gives slightly sharper stars but rings
+around small ones, and `"bilinear"` is fastest. The CLI's other stacking
+options (reference choice, registration model, interpolation, weighting, Bayer
+drizzle) are not yet exposed here.
 
 For live integration, construct from a FITS path or a C-contiguous mono/HWC
 RGB NumPy `float32` array. An array-based stacker accepts only already-linear,
