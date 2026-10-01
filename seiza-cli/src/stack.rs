@@ -2,10 +2,12 @@ use crate::preview::{PreviewTransfer, write_preview};
 use crate::provenance::{FileIdentity, file_identity, validate_path_roles, write_json_atomic};
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
+use rayon::prelude::*;
 use seiza_stacking::{
     CalibrationMasters, DeltaSigmaOptions, FitsFrame, FrameDisposition, MasterDark, MasterFlat,
     NormalizationMode, RegistrationOptions, RejectionMode, StackOptions,
 };
+use seiza_stacking::{Continue, PipelineOptions};
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -66,7 +68,7 @@ pub(crate) struct StackArgs {
     /// Accepted observations before online rejection begins
     #[arg(long, default_value_t = 5)]
     rejection_warmup: u32,
-    /// After stacking, read every admitted frame twice more and integrate
+    /// After stacking, read every admitted frame three more times and integrate
     /// them with leave-one-out rejection at --sigma-low and --sigma-high.
     /// This removes satellite trails and other transients from the
     /// reference and warm-up frames, which online rejection cannot revisit.
@@ -90,6 +92,13 @@ pub(crate) struct StackArgs {
     /// Minimum fraction of samples overlapping the reference
     #[arg(long, default_value_t = 0.60)]
     min_overlap: f32,
+    /// Frames read and prepared at once. By default this follows
+    /// --pipeline-memory-mib and the machine's cores
+    #[arg(long, value_parser = clap::value_parser!(usize))]
+    workers: Option<usize>,
+    /// Memory for frames prepared ahead of integration, in MiB
+    #[arg(long, default_value_t = 4096)]
+    pipeline_memory_mib: usize,
 }
 
 #[derive(Serialize)]
@@ -344,15 +353,26 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
         effective_maximum_drift_pixels,
     );
 
+    // Fingerprint every frame up front, on all cores, so the report costs the
+    // stacking loop nothing.
+    let paths = images.cloned().collect::<Vec<_>>();
+    let mut source_identities = match &report_path {
+        Some(_) => paths
+            .par_iter()
+            .map(|path| file_identity(path).map(Some))
+            .collect::<Result<Vec<_>>>()?,
+        None => paths.iter().map(|_| None).collect(),
+    }
+    .into_iter();
+    let pipeline = PipelineOptions {
+        workers: options.workers,
+        ..PipelineOptions::with_budget(options.pipeline_memory_mib.saturating_mul(1024 * 1024))
+    };
     let mut unreadable_frames = 0_u32;
     let mut admission_records = Vec::new();
-    for path in images {
-        let source_identity = report_path
-            .as_ref()
-            .map(|_| file_identity(path))
-            .transpose()?;
-        let frame = match FitsFrame::open(path) {
-            Ok(frame) => frame,
+    let _counted_above = stacker.push_fits_pipelined(&paths, &pipeline, |path, outcome| {
+        let source_identity = source_identities.next().flatten();
+        match outcome {
             Err(error) => {
                 eprintln!("rejected   {}: {error}", path.display());
                 unreadable_frames = unreadable_frames.saturating_add(1);
@@ -364,11 +384,8 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
                         diagnostics: None,
                     });
                 }
-                continue;
             }
-        };
-        match stacker.push(frame)? {
-            FrameDisposition::Accepted(diagnostics) => {
+            Ok(FrameDisposition::Accepted(diagnostics)) => {
                 println!(
                     "accepted   {}: {} stars, {:.3}px RMS, {:.1}px drift, {:+.3}deg, {:.1}% samples",
                     path.display(),
@@ -401,7 +418,7 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
                     });
                 }
             }
-            FrameDisposition::Rejected(reason) => {
+            Ok(FrameDisposition::Rejected(reason)) => {
                 eprintln!("rejected   {}: {reason}", path.display());
                 if let Some(source) = source_identity {
                     admission_records.push(AdmissionRecord {
@@ -413,7 +430,8 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
                 }
             }
         }
-    }
+        Continue::Yes
+    })?;
 
     let reference_headers = stacker.reference_headers().to_vec();
     let mut snapshot = if options.reintegrate {
@@ -431,6 +449,7 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
             if index == 0 {
                 let what = match pass {
                     seiza_stacking::BatchStackPass::Estimate => "estimating",
+                    seiza_stacking::BatchStackPass::Refine => "refining",
                     seiza_stacking::BatchStackPass::Integrate => "integrating",
                 };
                 println!("reintegrate {what} {count} admitted frame(s)");

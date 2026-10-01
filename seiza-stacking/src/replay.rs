@@ -338,7 +338,7 @@ impl LiveStacker {
     /// rejection, so a transient in the reference or a warm-up frame is
     /// rejected like any other.
     ///
-    /// Each frame is read twice, from the file it came from, and prepared
+    /// Each frame is read three times, from the file it came from, and prepared
     /// exactly as the live pass prepared it: the same declared-range
     /// rescale, calibration masters, cosmetic filter, debayering, and the
     /// recorded registration and normalization mapping. Star detection and

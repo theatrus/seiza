@@ -2213,10 +2213,12 @@ pub unsafe extern "C" fn seiza_live_stacker_export_snapshot(
     })
 }
 
-/// Progress callback for [`seiza_live_stacker_reintegrate`]: the pass (0
-/// while estimating statistics, 1 while integrating), the zero-based frame
-/// index, the admitted-frame count, and the caller's context pointer. Called
-/// on the thread that made the call, before each frame is read.
+/// Progress callback for [`seiza_live_stacker_reintegrate`]: the pass, in
+/// the order the three run (0 while estimating statistics, 1 while refining
+/// them without the samples the estimate rejects, 2 while integrating), the
+/// zero-based frame index, the admitted-frame count, and the caller's context
+/// pointer. Called on the thread that made the call, before each frame is
+/// read.
 pub type SeizaStackReintegrateProgressCallback =
     Option<unsafe extern "C" fn(u32, usize, usize, *mut c_void)>;
 
@@ -2226,9 +2228,9 @@ pub type SeizaStackReintegrateProgressCallback =
 ///
 /// Online rejection cannot revisit the reference frame or the warm-up frames
 /// it admitted before it had statistics, so a satellite or aircraft trail in
-/// one of them stays in the live mean. This reads each admitted frame twice
-/// more from its source file, prepares it exactly as the live pass did (the
-/// same calibration masters, cosmetic filter, debayering, and recorded
+/// one of them stays in the live mean. This reads each admitted frame three
+/// more times from its source file, prepares it exactly as the live pass did
+/// (the same calibration masters, cosmetic filter, debayering, and recorded
 /// registration and normalization), and rejects samples more than
 /// `low_sigma` below or `high_sigma` above the other frames. A value of zero
 /// or less uses the default of 3. Star detection and registration do not run
@@ -2238,7 +2240,7 @@ pub type SeizaStackReintegrateProgressCallback =
 /// stack must be replayable: `reintegrationUnavailable` in
 /// [`seiza_live_stacker_state_json`] says why not when it is not, and this
 /// call fails with the same message. A source file changed since it was
-/// stacked also fails the call. Memory use is about 36 bytes per output
+/// stacked also fails the call. Memory use is about 64 bytes per output
 /// sample plus one frame, independent of the frame count.
 ///
 /// # Safety
@@ -2284,7 +2286,8 @@ pub unsafe extern "C" fn seiza_live_stacker_reintegrate(
                 if let Some(callback) = progress {
                     let pass = match pass {
                         seiza_stacking::BatchStackPass::Estimate => 0,
-                        seiza_stacking::BatchStackPass::Integrate => 1,
+                        seiza_stacking::BatchStackPass::Refine => 1,
+                        seiza_stacking::BatchStackPass::Integrate => 2,
                     };
                     unsafe { callback(pass, index, count, context as *mut c_void) };
                 }
@@ -7317,8 +7320,9 @@ mod tests {
         assert!(!snapshot.is_null(), "{:?}", unsafe {
             error.as_ref().map(|e| CStr::from_ptr(e))
         });
-        assert_eq!(reads.len(), 12);
+        assert_eq!(reads.len(), 18);
         assert_eq!(reads[6], (1, 0, 6));
+        assert_eq!(reads[12], (2, 0, 6));
         let sample = trail_row * width + 80;
         let replayed = unsafe {
             std::slice::from_raw_parts(

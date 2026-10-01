@@ -195,6 +195,33 @@ pub fn debayer_rgb_f32(
     }
 }
 
+/// Bilinear-debayer rows `first_row..` of a floating-point CFA frame into
+/// `out`, which holds a whole number of interleaved RGB rows.
+///
+/// Each output row depends only on the mosaic, so callers can fill disjoint
+/// bands of one image from several threads. The samples are exactly those
+/// [`debayer_rgb_f32`] produces for the same rows.
+///
+/// # Panics
+///
+/// When `mosaic` is not `width * height` samples, `out` is not a whole number
+/// of `width * 3` rows, or the band runs past the last row.
+#[allow(clippy::too_many_arguments)]
+pub fn debayer_rgb_f32_rows(
+    mosaic: &[f32],
+    width: usize,
+    height: usize,
+    pattern: BayerPattern,
+    x_offset: usize,
+    y_offset: usize,
+    first_row: usize,
+    out: &mut [f32],
+) {
+    debayer_rows(
+        mosaic, width, height, pattern, x_offset, y_offset, first_row, out,
+    );
+}
+
 fn debayer_interleaved<T: DebayerSample>(
     mosaic: &[T],
     width: usize,
@@ -203,33 +230,112 @@ fn debayer_interleaved<T: DebayerSample>(
     x_offset: usize,
     y_offset: usize,
 ) -> Vec<T> {
-    assert_eq!(mosaic.len(), width * height);
     let mut data = vec![T::default(); width * height * 3];
+    debayer_rows(
+        mosaic, width, height, pattern, x_offset, y_offset, 0, &mut data,
+    );
+    data
+}
 
-    for y in 0..height {
+/// Every carrier of a channel in the 3×3 neighborhood, averaged. Interior
+/// pixels take a fixed shape by site: at a red or blue site the other two
+/// channels sit on the four edge and four corner neighbors; at a green site
+/// they sit left and right, and above and below. The sums run in the same
+/// row-major neighbor order as the general case, so both paths agree exactly.
+#[allow(clippy::too_many_arguments)]
+fn debayer_rows<T: DebayerSample>(
+    mosaic: &[T],
+    width: usize,
+    height: usize,
+    pattern: BayerPattern,
+    x_offset: usize,
+    y_offset: usize,
+    first_row: usize,
+    out: &mut [T],
+) {
+    assert_eq!(mosaic.len(), width * height);
+    if width == 0 {
+        return;
+    }
+    let row_samples = width * 3;
+    assert_eq!(out.len() % row_samples, 0, "output is not whole rows");
+    let rows = out.len() / row_samples;
+    assert!(first_row + rows <= height, "output runs past the last row");
+
+    let average = |values: &[T]| {
+        let mut sum = T::Sum::default();
+        for &value in values {
+            T::add(&mut sum, value);
+        }
+        T::average(sum, values.len() as u32)
+    };
+    for (band_row, out_row) in out.chunks_exact_mut(row_samples).enumerate() {
+        let y = first_row + band_row;
+        let interior_row = y > 0 && y + 1 < height;
+        // Channels by column parity on this row and the rows above and below.
+        let own = [
+            pattern.channel_at(0, y, x_offset, y_offset),
+            pattern.channel_at(1, y, x_offset, y_offset),
+        ];
+        let vertical = [
+            pattern.channel_at(0, y + 1, x_offset, y_offset),
+            pattern.channel_at(1, y + 1, x_offset, y_offset),
+        ];
         for x in 0..width {
-            let mut sums: [T::Sum; 3] = std::array::from_fn(|_| T::Sum::default());
-            let mut counts = [0u32; 3];
-            for ny in y.saturating_sub(1)..(y + 2).min(height) {
-                for nx in x.saturating_sub(1)..(x + 2).min(width) {
-                    let channel = pattern.channel_at(nx, ny, x_offset, y_offset);
-                    T::add(&mut sums[channel], mosaic[ny * width + nx]);
-                    counts[channel] += 1;
-                }
+            let pixel = &mut out_row[x * 3..x * 3 + 3];
+            if !interior_row || x == 0 || x + 1 == width {
+                debayer_edge_pixel(
+                    mosaic, width, height, pattern, x_offset, y_offset, x, y, pixel,
+                );
+                continue;
             }
-            let own = pattern.channel_at(x, y, x_offset, y_offset);
-            let out = &mut data[(y * width + x) * 3..(y * width + x) * 3 + 3];
-            for (channel, (sum, count)) in sums.into_iter().zip(counts).enumerate() {
-                out[channel] = if channel == own {
-                    mosaic[y * width + x]
-                } else {
-                    T::average(sum, count)
-                };
+            let at = |dx: isize, dy: isize| {
+                mosaic[(y as isize + dy) as usize * width + (x as isize + dx) as usize]
+            };
+            let channel = own[x & 1];
+            pixel[channel] = at(0, 0);
+            if channel == 1 {
+                // Green: the row's other color left and right, the
+                // column's other color above and below.
+                pixel[own[(x + 1) & 1]] = average(&[at(-1, 0), at(1, 0)]);
+                pixel[vertical[x & 1]] = average(&[at(0, -1), at(0, 1)]);
+            } else {
+                pixel[1] = average(&[at(0, -1), at(-1, 0), at(1, 0), at(0, 1)]);
+                pixel[2 - channel] = average(&[at(-1, -1), at(1, -1), at(-1, 1), at(1, 1)]);
             }
         }
     }
+}
 
-    data
+#[allow(clippy::too_many_arguments)]
+fn debayer_edge_pixel<T: DebayerSample>(
+    mosaic: &[T],
+    width: usize,
+    height: usize,
+    pattern: BayerPattern,
+    x_offset: usize,
+    y_offset: usize,
+    x: usize,
+    y: usize,
+    out: &mut [T],
+) {
+    let mut sums: [T::Sum; 3] = std::array::from_fn(|_| T::Sum::default());
+    let mut counts = [0u32; 3];
+    for ny in y.saturating_sub(1)..(y + 2).min(height) {
+        for nx in x.saturating_sub(1)..(x + 2).min(width) {
+            let channel = pattern.channel_at(nx, ny, x_offset, y_offset);
+            T::add(&mut sums[channel], mosaic[ny * width + nx]);
+            counts[channel] += 1;
+        }
+    }
+    let own = pattern.channel_at(x, y, x_offset, y_offset);
+    for (channel, (sum, count)) in sums.into_iter().zip(counts).enumerate() {
+        out[channel] = if channel == own {
+            mosaic[y * width + x]
+        } else {
+            T::average(sum, count)
+        };
+    }
 }
 
 #[cfg(test)]
@@ -352,6 +458,82 @@ mod tests {
                 let input = y * 4 + x;
                 assert_eq!(integer_rgb.data[output], integers[input]);
                 assert_eq!(float_rgb.data[output], floats[input]);
+            }
+        }
+    }
+
+    /// The original per-neighbor kernel, kept as the reference the fast
+    /// interior path must match sample for sample.
+    fn reference_debayer(
+        mosaic: &[f32],
+        width: usize,
+        height: usize,
+        pattern: BayerPattern,
+        x_offset: usize,
+        y_offset: usize,
+    ) -> Vec<f32> {
+        let mut data = vec![0.0; width * height * 3];
+        for y in 0..height {
+            for x in 0..width {
+                debayer_edge_pixel(
+                    mosaic,
+                    width,
+                    height,
+                    pattern,
+                    x_offset,
+                    y_offset,
+                    x,
+                    y,
+                    &mut data[(y * width + x) * 3..(y * width + x) * 3 + 3],
+                );
+            }
+        }
+        data
+    }
+
+    #[test]
+    fn interior_kernel_and_bands_match_the_reference_exactly() {
+        let mut state = 0x9e37_79b9_u32;
+        for (width, height) in [(1, 1), (2, 2), (3, 2), (7, 5), (16, 9), (33, 17)] {
+            let mosaic = (0..width * height)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    (state % 65_536) as f32 * 0.37 + 0.1
+                })
+                .collect::<Vec<_>>();
+            for pattern in [
+                BayerPattern::Rggb,
+                BayerPattern::Bggr,
+                BayerPattern::Grbg,
+                BayerPattern::Gbrg,
+            ] {
+                for (x_offset, y_offset) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let expected =
+                        reference_debayer(&mosaic, width, height, pattern, x_offset, y_offset);
+                    let whole =
+                        debayer_rgb_f32(&mosaic, width, height, pattern, x_offset, y_offset);
+                    assert_eq!(
+                        whole.data.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        "{width}x{height} {pattern:?} offset ({x_offset}, {y_offset})"
+                    );
+                    let mut banded = vec![0.0; width * height * 3];
+                    for (band, rows) in banded.chunks_mut(width * 3 * 2).enumerate() {
+                        debayer_rgb_f32_rows(
+                            &mosaic,
+                            width,
+                            height,
+                            pattern,
+                            x_offset,
+                            y_offset,
+                            band * 2,
+                            rows,
+                        );
+                    }
+                    assert_eq!(banded, whole.data);
+                }
             }
         }
     }

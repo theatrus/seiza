@@ -311,10 +311,12 @@ typedef struct {
 } SeizaMatchTolerances;
 
 /*
- Progress callback for [`seiza_live_stacker_reintegrate`]: the pass (0
- while estimating statistics, 1 while integrating), the zero-based frame
- index, the admitted-frame count, and the caller's context pointer. Called
- on the thread that made the call, before each frame is read.
+ Progress callback for [`seiza_live_stacker_reintegrate`]: the pass, in
+ the order the three run (0 while estimating statistics, 1 while refining
+ them without the samples the estimate rejects, 2 while integrating), the
+ zero-based frame index, the admitted-frame count, and the caller's context
+ pointer. Called on the thread that made the call, before each frame is
+ read.
  */
 typedef void (*SeizaStackReintegrateProgressCallback)(uint32_t, size_t, size_t, void*);
 
@@ -888,9 +890,9 @@ SeizaStackExportSnapshot *seiza_live_stacker_export_snapshot(const SeizaLiveStac
 
  Online rejection cannot revisit the reference frame or the warm-up frames
  it admitted before it had statistics, so a satellite or aircraft trail in
- one of them stays in the live mean. This reads each admitted frame twice
- more from its source file, prepares it exactly as the live pass did (the
- same calibration masters, cosmetic filter, debayering, and recorded
+ one of them stays in the live mean. This reads each admitted frame three
+ more times from its source file, prepares it exactly as the live pass did
+ (the same calibration masters, cosmetic filter, debayering, and recorded
  registration and normalization), and rejects samples more than
  `low_sigma` below or `high_sigma` above the other frames. A value of zero
  or less uses the default of 3. Star detection and registration do not run
@@ -900,7 +902,7 @@ SeizaStackExportSnapshot *seiza_live_stacker_export_snapshot(const SeizaLiveStac
  stack must be replayable: `reintegrationUnavailable` in
  [`seiza_live_stacker_state_json`] says why not when it is not, and this
  call fails with the same message. A source file changed since it was
- stacked also fails the call. Memory use is about 36 bytes per output
+ stacked also fails the call. Memory use is about 64 bytes per output
  sample plus one frame, independent of the frame count.
 
  # Safety

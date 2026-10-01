@@ -12,7 +12,10 @@ mod bayer;
 mod header;
 mod writer;
 
-pub use bayer::{BayerPattern, RgbImage16, RgbImageF32, RowOrder, debayer_rgb_f32, debayer_rgb16};
+pub use bayer::{
+    BayerPattern, RgbImage16, RgbImageF32, RowOrder, debayer_rgb_f32, debayer_rgb_f32_rows,
+    debayer_rgb16,
+};
 pub use header::{HeaderValue, parse_header_value};
 pub use seiza_stretch::{
     Statistics, StretchParams, midtones_transfer_function, statistics_u16, stretch_u16_to_u8,

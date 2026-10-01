@@ -637,8 +637,10 @@ fn resample_region_with_inverse(
                 // to lie within the epsilon-expanded source grid.
                 let source_x = source_x.clamp(0.0, maximum_source_x);
                 let source_y = source_y.clamp(0.0, maximum_source_y);
-                let x0 = source_x.floor() as usize;
-                let y0 = source_y.floor() as usize;
+                // Both coordinates are non-negative here, so truncation is
+                // the floor, without a libm call on baseline x86-64.
+                let x0 = source_x as usize;
+                let y0 = source_y as usize;
                 let x1 = (x0 + 1).min(source.width - 1);
                 let y1 = (y0 + 1).min(source.height - 1);
                 let tx = (source_x - x0 as f64) as f32;

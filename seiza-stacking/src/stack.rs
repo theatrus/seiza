@@ -1558,28 +1558,42 @@ impl Accumulator {
     ) -> (usize, usize) {
         let Some(weight_sum) = self.weight_sum.as_mut() else {
             debug_assert!(weights.is_none(), "equal-weight stack given weights");
+            // Fixed chunks with a plain inner loop: each sample's update is
+            // independent, so this is the same arithmetic as one pass per
+            // sample, without a rayon split and tuple reduce per element.
             return self
                 .mean
-                .par_iter_mut()
-                .zip(self.m2.par_iter_mut())
-                .zip(self.count.par_iter_mut())
-                .zip(self.rejected.par_iter_mut())
-                .zip(samples.par_iter())
-                .map(|((((mean, m2), count), rejected), &sample)| {
-                    if !sample.is_finite() {
-                        return (0, 0);
+                .par_chunks_mut(ACCUMULATE_CHUNK)
+                .zip(self.m2.par_chunks_mut(ACCUMULATE_CHUNK))
+                .zip(self.count.par_chunks_mut(ACCUMULATE_CHUNK))
+                .zip(self.rejected.par_chunks_mut(ACCUMULATE_CHUNK))
+                .zip(samples.par_chunks(ACCUMULATE_CHUNK))
+                .map(|((((means, m2s), counts), rejecteds), samples)| {
+                    let (mut accepted, mut refused) = (0, 0);
+                    for ((((mean, m2), count), rejected), &sample) in means
+                        .iter_mut()
+                        .zip(m2s.iter_mut())
+                        .zip(counts.iter_mut())
+                        .zip(rejecteds.iter_mut())
+                        .zip(samples)
+                    {
+                        if !sample.is_finite() {
+                            continue;
+                        }
+                        if should_reject_sample(*mean, *m2, *count, sample, rejection) {
+                            *rejected = rejected.saturating_add(1);
+                            refused += 1;
+                            continue;
+                        }
+                        let next_count = count.saturating_add(1);
+                        let delta = sample - *mean;
+                        *mean += delta / next_count as f32;
+                        let delta_after = sample - *mean;
+                        *m2 += delta * delta_after;
+                        *count = next_count;
+                        accepted += 1;
                     }
-                    if should_reject_sample(*mean, *m2, *count, sample, rejection) {
-                        *rejected = rejected.saturating_add(1);
-                        return (0, 1);
-                    }
-                    let next_count = count.saturating_add(1);
-                    let delta = sample - *mean;
-                    *mean += delta / next_count as f32;
-                    let delta_after = sample - *mean;
-                    *m2 += delta * delta_after;
-                    *count = next_count;
-                    (1, 0)
+                    (accepted, refused)
                 })
                 .reduce(
                     || (0, 0),
@@ -1637,18 +1651,23 @@ impl Accumulator {
             debug_assert!(weights.is_none(), "equal-weight stack given weights");
             return self
                 .mean
-                .par_iter()
-                .zip(self.m2.par_iter())
-                .zip(self.count.par_iter())
-                .zip(samples.par_iter())
-                .map(|(((mean, m2), count), &sample)| {
-                    if !sample.is_finite() {
-                        (0, 0)
-                    } else if should_reject_sample(*mean, *m2, *count, sample, rejection) {
-                        (0, 1)
-                    } else {
-                        (1, 0)
+                .par_chunks(ACCUMULATE_CHUNK)
+                .zip(self.m2.par_chunks(ACCUMULATE_CHUNK))
+                .zip(self.count.par_chunks(ACCUMULATE_CHUNK))
+                .zip(samples.par_chunks(ACCUMULATE_CHUNK))
+                .map(|(((means, m2s), counts), samples)| {
+                    let (mut accepted, mut refused) = (0, 0);
+                    for (((&mean, &m2), &count), &sample) in
+                        means.iter().zip(m2s).zip(counts).zip(samples)
+                    {
+                        if !sample.is_finite() {
+                        } else if should_reject_sample(mean, m2, count, sample, rejection) {
+                            refused += 1;
+                        } else {
+                            accepted += 1;
+                        }
                     }
+                    (accepted, refused)
                 })
                 .reduce(
                     || (0, 0),
@@ -1715,6 +1734,9 @@ impl Accumulator {
         (self.mean, self.m2, self.count, self.rejected)
     }
 }
+
+/// Samples per parallel task in the accumulator's per-sample passes.
+const ACCUMULATE_CHUNK: usize = 16 * 1024;
 
 /// A sample never observed has an undefined mean; mask it so downstream
 /// renderers can drop it by coverage.

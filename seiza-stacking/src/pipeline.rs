@@ -977,11 +977,12 @@ mod tests {
         assert_eq!(replayed.snapshot.accepted_frames, 8);
         assert_eq!(
             reads.len(),
-            16,
-            "each admitted frame is read on both passes"
+            24,
+            "each admitted frame is read on all three passes"
         );
         assert_eq!(reads[0], (crate::BatchStackPass::Estimate, 0, 8));
-        assert_eq!(reads[8], (crate::BatchStackPass::Integrate, 0, 8));
+        assert_eq!(reads[8], (crate::BatchStackPass::Refine, 0, 8));
+        assert_eq!(reads[16], (crate::BatchStackPass::Integrate, 0, 8));
         // Reintegration leaves the live stack untouched.
         assert_eq!(
             bits(&stacker.snapshot().unwrap().image.data),

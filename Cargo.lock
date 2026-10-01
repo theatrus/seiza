@@ -2264,7 +2264,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "seiza"
-version = "0.18.19"
+version = "0.18.20"
 dependencies = [
  "directories",
  "image",
@@ -2297,7 +2297,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-cabi"
-version = "0.18.19"
+version = "0.18.20"
 dependencies = [
  "cbindgen",
  "image",
@@ -2329,7 +2329,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-cli"
-version = "0.18.19"
+version = "0.18.20"
 dependencies = [
  "anyhow",
  "clap",
@@ -2338,6 +2338,7 @@ dependencies = [
  "font8x8",
  "image",
  "imageproc",
+ "rayon",
  "seiza",
  "seiza-background",
  "seiza-deconvolution",
@@ -2390,7 +2391,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-fits"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "memmap2",
  "multiversion",
@@ -2439,8 +2440,9 @@ dependencies = [
 
 [[package]]
 name = "seiza-stacking"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
+ "multiversion",
  "postcard",
  "rayon",
  "seiza",

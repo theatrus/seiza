@@ -257,13 +257,11 @@ impl NormalizationMap {
                 "normalization channel count does not match".into(),
             ));
         }
-        image.data.par_chunks_mut(image.channels).for_each(|pixel| {
-            for (channel, value) in pixel.iter_mut().enumerate() {
-                if value.is_finite() {
-                    *value = value.mul_add(self.gains[channel], self.offsets[channel]);
-                }
-            }
-        });
+        let channels = image.channels;
+        image
+            .data
+            .par_chunks_mut(channels * 4096)
+            .for_each(|pixels| apply_affine(pixels, &self.gains, &self.offsets));
         Ok(())
     }
 
@@ -394,6 +392,22 @@ fn bilinear(
     top * (1.0 - y) + bottom * y
 }
 
+/// `value * gain + offset` per channel on whole interleaved pixels, leaving
+/// non-finite samples alone. `mul_add` rounds once whether the CPU fuses it
+/// or libm does, so the dispatched builds agree with the baseline one exactly;
+/// they only avoid a call per sample.
+#[multiversion::multiversion(targets("x86_64+avx2+fma", "aarch64+neon"))]
+fn apply_affine(pixels: &mut [f32], gains: &[f32], offsets: &[f32]) {
+    let channels = gains.len();
+    for pixel in pixels.chunks_exact_mut(channels) {
+        for ((value, &gain), &offset) in pixel.iter_mut().zip(gains).zip(offsets) {
+            if value.is_finite() {
+                *value = value.mul_add(gain, offset);
+            }
+        }
+    }
+}
+
 fn affine_for_region(
     reference: &LinearImage,
     source: &LinearImage,
@@ -406,19 +420,17 @@ fn affine_for_region(
     let stride = (width * height / 20_000).max(1);
     let mut reference_values = Vec::new();
     let mut source_values = Vec::new();
-    let mut sample_index = 0;
-    for row in y..y + height {
-        for column in x..x + width {
-            if sample_index % stride == 0 {
-                let index = (row * source.width + column) * source.channels + channel;
-                let reference_value = reference.data[index];
-                let source_value = source.data[index];
-                if reference_value.is_finite() && source_value.is_finite() {
-                    reference_values.push(reference_value);
-                    source_values.push(source_value);
-                }
-            }
-            sample_index += 1;
+    // Every `stride`-th pixel of the region in row-major order, visited
+    // directly rather than by testing each pixel's index.
+    for sample_index in (0..width * height).step_by(stride) {
+        let row = y + sample_index / width;
+        let column = x + sample_index % width;
+        let index = (row * source.width + column) * source.channels + channel;
+        let reference_value = reference.data[index];
+        let source_value = source.data[index];
+        if reference_value.is_finite() && source_value.is_finite() {
+            reference_values.push(reference_value);
+            source_values.push(source_value);
         }
     }
     if reference_values.len() < 32 {

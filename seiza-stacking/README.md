@@ -12,7 +12,7 @@ The first release supports:
 - bounded-drift star registration with translation/rotation/scale refinement;
 - robust global or tiled local normalization;
 - online residual (delta-sigma) rejection with coverage and rejection maps;
-- two-pass completed-stack rejection which revisits early transient samples;
+- three-pass completed-stack rejection which revisits early transient samples;
 - non-mutating frame admission gates for additive live stacks;
 - versioned, checksummed, atomic live-stack checkpoints that can be reopened;
 - compact immutable export snapshots that clone only the integrated mean;
@@ -24,7 +24,7 @@ Live delta-sigma rejection cannot remove trails admitted during its warm-up.
 `LiveStacker::reintegrate` fixes that for a live stack. The stacker keeps a
 ledger of every admitted frame: its source file, the calibration masters that
 applied, and the registration and normalization mapping the live pass chose.
-Reintegration reads each frame twice more, prepares it exactly as the live
+Reintegration reads each frame three more times, prepares it exactly as the live
 pass did, and integrates it with leave-one-out rejection, leaving the live
 stack unchanged. Star detection and registration do not run again. A source
 file that changed since it was stacked is refused, and
@@ -36,7 +36,7 @@ carry the ledger from format version 3; versions 1 and 2 still open.
 Hosts that keep their own records can call `integrate_registered_frames`
 directly to reread admitted frames with their saved calibration and
 `RegisteredFrameMapping`. The loader
-receives `BatchStackPass` and the frame index, so a host can report both passes
+receives `BatchStackPass` and the frame index, so a host can report each pass
 and cancel the work. `BatchStackResult` includes the final mean, variance,
 coverage, rejection maps, and per-frame finite/integrated sample counts.
 
@@ -46,12 +46,23 @@ strong isolated early or late trails at three or more finite observations;
 shallower pixels are averaged without rejection. Student-t predictive limits
 preserve the configured Gaussian tail probabilities when only a few other
 frames estimate noise, protecting ordinary low-depth noise samples from
-over-rejection. Multiple overlapping trails can still mask one another in
-shallow stacks. Normalized frames have equal weight unless
+over-rejection.
+
+One large outlier inflates the dispersion its pixel's other samples are judged
+by. In a 98-frame M45 stack a satellite trail 50 000 ADU above the sky raised
+that pixel's sigma from about 300 to 5 000, so hazy frames 2 000 to 9 000 above
+the sky survived along the trail and nowhere else, drawing the trail's line in
+the result. So the first pass estimates each pixel's moments without its
+largest and smallest sample once it has ten, the second estimates them again
+from only the samples the first keeps, and the third rejects against the
+second. Both estimates are corrected for the variance that trimming and
+clipping take from Gaussian noise, so plain noise is still rejected at the
+configured rate. Three or more large outliers at one pixel can still mask one
+another. Normalized frames have equal weight unless
 `BatchStackOptions::frame_weights` supplies weights (see below), and
 `BatchStackOptions::minimum_sigma` is in their physical sample units.
-Memory stays proportional to the output image (about 36 bytes per sample plus
-one loaded input), and each frame is loaded twice. Changed shapes or sample
+Memory stays proportional to the output image (about 64 bytes per sample plus
+one loaded input), and each frame is loaded three times. Changed shapes or sample
 digests abort the result.
 
 ## Frame weighting
@@ -384,6 +395,12 @@ workers — which is what the derived default targets. Remote frames want more:
 at 300ms, eleven workers finished in 1.58s against 1.89s for the derived six.
 Set `PipelineOptions::workers` when the frames are known to be remote, since
 this crate cannot tell a network mount from a local disk.
+
+Bayer frames are demosaiced with Malvar, He and Cutler's gradient-corrected
+linear interpolation, which keeps each color's centroid of an undersampled
+star where it belongs: on a 98-frame M45 stack at 2.6px FWHM, bilinear
+interpolation left red and blue 0.42px apart and stars 3.1px wide, against
+0.15px and 2.6px. The two-pixel border keeps bilinear estimates.
 
 Integrated flats are applied in the raw light frame's sampling before CFA
 debayering. Master darks and flats retain their Bayer pattern and origin
