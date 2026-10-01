@@ -876,9 +876,8 @@ pub enum Interpolation {
     Bilinear,
     /// Lanczos-3 over the 6x6 nearest samples, dropping the negative lobes
     /// where they would ring at a high-contrast edge, as PixInsight's
-    /// clamping does. Sharper:
-    /// with Malvar-He-Cutler demosaicing on a 98-frame M45 stack it took
-    /// FWHM from 2.63 to 2.47px, at about twice the resampling cost. Falls
+    /// clamping does. Sharper: on a 98-frame M45 stack it took FWHM from
+    /// 2.63 to 2.47px, at about twice the resampling cost. Falls
     /// back to bilinear within three pixels of the source edge and where
     /// a tap is not finite.
     Lanczos3,

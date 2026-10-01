@@ -400,11 +400,16 @@ this crate cannot tell a network mount from a local disk.
 
 ## Bayer frames
 
-Bayer frames are demosaiced with Malvar, He and Cutler's gradient-corrected
-linear interpolation, which keeps each color's centroid of an undersampled
-star where it belongs: on a 98-frame M45 stack at 2.6px FWHM, bilinear
-interpolation left red and blue 0.42px apart and stars 3.1px wide, against
-0.15px and 2.6px. The two-pixel border keeps bilinear estimates.
+Bayer frames are demosaiced with VNG (variable number of gradients, Chang,
+Cheung and Pang 1999), PixInsight's default, after balancing the mosaic's
+channels to green by their medians; each photosite keeps its own sample. On a
+98-frame M45 stack, bilinear interpolation left red and blue 0.42px apart and
+stars 3.1px wide; VNG leaves 0.10px and 2.7px (WBPP: 0.09px and 2.6px), and a
+star's red and blue stay within 0.75 to 1.16 of its colour across its profile.
+Malvar, He and Cutler's linear interpolation, tried first, gave 2.4px stars
+but rang around them: unbalanced it left a cyan halo (red at half the star's
+colour three to eight pixels out), and balanced, a red ring two pixels out.
+The two-pixel border keeps bilinear estimates.
 
 ## Normalization and frame-edge seams
 
