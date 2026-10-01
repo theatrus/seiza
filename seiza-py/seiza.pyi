@@ -251,6 +251,7 @@ class SatelliteCatalog:
 class StackOptions:
     normalization: str
     local_tile_size: int | None
+    demosaic: str
     rejection: str
     maximum_drift_pixels: float
     maximum_drift_fraction: float
@@ -281,6 +282,7 @@ class StackOptions:
         minimum_normalization_gain: float = 0.25,
         maximum_normalization_gain: float = 4.0,
         minimum_integrated_fraction: float = 0.50,
+        demosaic: str = "vng",
     ) -> None: ...
 
 class FrameDisposition:

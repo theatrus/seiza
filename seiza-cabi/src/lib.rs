@@ -1570,7 +1570,13 @@ pub unsafe extern "C" fn seiza_live_stacker_create(
 #[unsafe(no_mangle)]
 /// Opens a FITS or XISF reference and optional integrated bias, dark, and flat
 /// masters. A positive `dark_exposure_seconds` overrides the dark metadata; zero
-/// uses the metadata. Pass null or empty `options_json` for defaults. All files
+/// uses the metadata. Pass null or empty `options_json` for defaults; its
+/// fields are `seiza_stacking::StackOptions`'s, so a host can choose, for
+/// example, `"demosaic": "vng" | "mhc" | "bilinear"`,
+/// `"interpolation": "bilinear" | "lanczos3"`,
+/// `"normalization": {"mode": "local-background", "options": {"tile_size": 256}}`,
+/// `"weighting": {"mode": "inverse-noise-variance"}`, or
+/// `"registration": {"model": "quadratic"}`. All files
 /// are fully read during this call and are not kept open afterward.
 ///
 /// # Safety
@@ -6425,6 +6431,40 @@ fn set_error(error_out: *mut *mut c_char, error: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stack_options_json_chooses_the_demosaic() {
+        let options = std::ffi::CString::new(r#"{"demosaic": "mhc"}"#).unwrap();
+        assert_eq!(
+            stack_options(options.as_ptr()).unwrap().demosaic,
+            seiza_stacking::Demosaic::Mhc
+        );
+        assert_eq!(
+            stack_options(ptr::null()).unwrap().demosaic,
+            seiza_stacking::Demosaic::Vng
+        );
+        // Every spelling the open call's documentation gives.
+        let documented = std::ffi::CString::new(
+            r#"{"demosaic": "bilinear", "interpolation": "lanczos3",
+                "normalization": {"mode": "local-background", "options": {"tile_size": 256}},
+                "weighting": {"mode": "inverse-noise-variance"},
+                "registration": {"model": "quadratic"}}"#,
+        )
+        .unwrap();
+        let options = stack_options(documented.as_ptr()).unwrap();
+        assert_eq!(options.demosaic, seiza_stacking::Demosaic::Bilinear);
+        assert_eq!(
+            options.interpolation,
+            seiza_stacking::Interpolation::Lanczos3
+        );
+        assert!(!options.weighting.is_equal());
+        assert_eq!(
+            options.registration.model,
+            seiza_stacking::RegistrationModel::Quadratic
+        );
+        let unknown = std::ffi::CString::new(r#"{"demosaic": "ahd"}"#).unwrap();
+        assert!(stack_options(unknown.as_ptr()).is_err());
+    }
     use std::io::Write;
 
     /// A tolerance a caller cannot express is one that falls back, not one

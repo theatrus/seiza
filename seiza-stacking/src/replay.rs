@@ -681,7 +681,7 @@ impl LiveStacker {
         if let Some(filter) = &self.options.cosmetic {
             crate::cosmetic::suppress_impulses(&mut frame.image, frame.bayer, filter)?;
         }
-        let prepared = frame.into_prepared_with_layout()?;
+        let prepared = frame.into_prepared_with_layout(self.options.demosaic)?;
         if source.stamp.is_some() && SourceStamp::of(&source.path) != source.stamp {
             return Err(changed());
         }

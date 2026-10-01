@@ -181,6 +181,11 @@ pub struct StackOptions {
     /// options, fingerprints and contexts keep their exact bytes.
     #[serde(default, skip_serializing_if = "crate::Interpolation::is_bilinear")]
     pub interpolation: crate::Interpolation,
+    /// How Bayer frames are demosaiced. The default, [`crate::Demosaic::Vng`],
+    /// is not serialized, so existing options, fingerprints and contexts
+    /// keep their exact bytes.
+    #[serde(default, skip_serializing_if = "crate::Demosaic::is_vng")]
+    pub demosaic: crate::Demosaic,
 }
 
 /// How a Bayer frame's colors reach the accumulator. Registration and
@@ -543,7 +548,7 @@ impl LiveStacker {
         if let Some(filter) = &options.cosmetic {
             crate::cosmetic::suppress_impulses(&mut reference.image, reference.bayer, filter)?;
         }
-        let (reference, cfa) = reference.into_prepared_with_layout()?;
+        let (reference, cfa) = reference.into_prepared_with_layout(options.demosaic)?;
         let mut stacker = Self::from_prepared(
             reference.image,
             reference.headers,
@@ -940,7 +945,7 @@ impl LiveStacker {
         {
             return Ok(self.reject(FrameRejectionReason::Calibration(error.to_string())));
         }
-        let (frame, cfa) = match frame.into_prepared_with_layout() {
+        let (frame, cfa) = match frame.into_prepared_with_layout(self.options.demosaic) {
             Ok(prepared) => prepared,
             Err(error) => {
                 return Ok(self.reject(FrameRejectionReason::IncompatibleImage(error.to_string())));

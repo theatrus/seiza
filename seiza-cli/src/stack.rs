@@ -47,6 +47,13 @@ enum WeightingArg {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum DemosaicArg {
+    Vng,
+    Mhc,
+    Bilinear,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 enum InterpolationArg {
     Bilinear,
     Lanczos3,
@@ -121,6 +128,11 @@ pub(crate) struct StackArgs {
     /// against ringing, which is sharper and slower
     #[arg(long, value_enum, default_value = "lanczos3")]
     interpolation: InterpolationArg,
+    /// How Bayer frames are demosaiced: VNG keeps stars' colour across their
+    /// profile; MHC is sharper but rings around small stars; bilinear is
+    /// fastest and softest
+    #[arg(long, value_enum, default_value = "vng")]
+    demosaic: DemosaicArg,
     /// Geometry fitted to each frame after the similarity match: similarity
     /// (shift, rotation, scale), affine, or quadratic, which follows lens
     /// distortion, for example after a meridian flip turns it against the
@@ -186,6 +198,7 @@ struct ConfigurationReport {
     bayer_drizzle: bool,
     weighting: &'static str,
     interpolation: &'static str,
+    demosaic: &'static str,
     registration_model: &'static str,
     maximum_registration_rms_pixels: f64,
     maximum_scale_deviation: f64,
@@ -351,6 +364,11 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
     let mut stack_options = StackOptions {
         normalization,
         rejection,
+        demosaic: match options.demosaic {
+            DemosaicArg::Vng => seiza_stacking::Demosaic::Vng,
+            DemosaicArg::Mhc => seiza_stacking::Demosaic::Mhc,
+            DemosaicArg::Bilinear => seiza_stacking::Demosaic::Bilinear,
+        },
         interpolation: match options.interpolation {
             InterpolationArg::Bilinear => seiza_stacking::Interpolation::Bilinear,
             InterpolationArg::Lanczos3 => seiza_stacking::Interpolation::Lanczos3,
@@ -441,6 +459,11 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
         weighting: match options.weighting {
             WeightingArg::Equal => "equal",
             WeightingArg::InverseNoise => "inverse-noise",
+        },
+        demosaic: match options.demosaic {
+            DemosaicArg::Vng => "vng",
+            DemosaicArg::Mhc => "mhc",
+            DemosaicArg::Bilinear => "bilinear",
         },
         interpolation: match options.interpolation {
             InterpolationArg::Bilinear => "bilinear",

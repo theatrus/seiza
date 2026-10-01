@@ -3,11 +3,11 @@ use numpy::{PyArrayDyn, PyReadonlyArrayDyn};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use seiza_stacking::{
-    CalibrationMasters, CancelSignal, DeltaSigmaOptions, FitsFrame, FrameDisposition, LinearImage,
-    LiveStacker, MasterBuildOptions, MasterDark, MasterFrameKind, MasterRejectionOptions,
-    NormalizationMode, PipelineOptions, PipelineReport, RejectionMode, SnrSample, StackOptions,
-    StackSnapshot, build_master_from_fits, checkpoint_depths, measure_depth, path_identity,
-    paths_refer_to_same_file, write_fits_f32, write_master_fits_f32,
+    CalibrationMasters, CancelSignal, DeltaSigmaOptions, Demosaic, FitsFrame, FrameDisposition,
+    LinearImage, LiveStacker, MasterBuildOptions, MasterDark, MasterFrameKind,
+    MasterRejectionOptions, NormalizationMode, PipelineOptions, PipelineReport, RejectionMode,
+    SnrSample, StackOptions, StackSnapshot, build_master_from_fits, checkpoint_depths,
+    measure_depth, path_identity, paths_refer_to_same_file, write_fits_f32, write_master_fits_f32,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -92,7 +92,8 @@ impl PyStackOptions {
         minimum_overlap=0.60,
         minimum_normalization_gain=0.25,
         maximum_normalization_gain=4.0,
-        minimum_integrated_fraction=0.50
+        minimum_integrated_fraction=0.50,
+        demosaic="vng"
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -120,7 +121,18 @@ impl PyStackOptions {
         minimum_normalization_gain: f32,
         maximum_normalization_gain: f32,
         minimum_integrated_fraction: f32,
+        demosaic: &str,
     ) -> PyResult<Self> {
+        let demosaic = match demosaic {
+            "vng" => Demosaic::Vng,
+            "mhc" => Demosaic::Mhc,
+            "bilinear" => Demosaic::Bilinear,
+            value => {
+                return Err(PyValueError::new_err(format!(
+                    "demosaic must be 'vng', 'mhc', or 'bilinear', not {value:?}"
+                )));
+            }
+        };
         let normalization = match normalization {
             "none" => NormalizationMode::None,
             "global" => NormalizationMode::Global,
@@ -173,6 +185,7 @@ impl PyStackOptions {
         inner.acceptance.minimum_normalization_gain = minimum_normalization_gain;
         inner.acceptance.maximum_normalization_gain = maximum_normalization_gain;
         inner.acceptance.minimum_integrated_fraction = minimum_integrated_fraction;
+        inner.demosaic = demosaic;
         inner
             .validate()
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
@@ -186,6 +199,16 @@ impl PyStackOptions {
             NormalizationMode::Global => "global",
             NormalizationMode::Local { .. } => "local",
             NormalizationMode::LocalBackground { .. } => "local-background",
+        }
+    }
+
+    /// How Bayer frames are demosaiced: "vng", "mhc", or "bilinear".
+    #[getter]
+    fn demosaic(&self) -> &'static str {
+        match self.inner.demosaic {
+            Demosaic::Vng => "vng",
+            Demosaic::Mhc => "mhc",
+            Demosaic::Bilinear => "bilinear",
         }
     }
 

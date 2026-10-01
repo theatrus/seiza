@@ -590,7 +590,13 @@ SeizaLiveStacker *seiza_live_stacker_create(const float *reference,
 /*
  Opens a FITS or XISF reference and optional integrated bias, dark, and flat
  masters. A positive `dark_exposure_seconds` overrides the dark metadata; zero
- uses the metadata. Pass null or empty `options_json` for defaults. All files
+ uses the metadata. Pass null or empty `options_json` for defaults; its
+ fields are `seiza_stacking::StackOptions`'s, so a host can choose, for
+ example, `"demosaic": "vng" | "mhc" | "bilinear"`,
+ `"interpolation": "bilinear" | "lanczos3"`,
+ `"normalization": {"mode": "local-background", "options": {"tile_size": 256}}`,
+ `"weighting": {"mode": "inverse-noise-variance"}`, or
+ `"registration": {"model": "quadratic"}`. All files
  are fully read during this call and are not kept open afterward.
 
  # Safety

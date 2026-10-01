@@ -48,7 +48,7 @@ pub use fits::{
     write_fits_f32, write_linear_image_fits_f32, write_master_fits_f32,
     write_processed_image_fits_f32, write_stack_export_fits_f32,
 };
-pub use image::{BayerLayout, LinearImage};
+pub use image::{BayerLayout, Demosaic, LinearImage};
 pub use mapping::RegisteredFrameMapping;
 pub use master::{
     DarkLevel, DarkLevelScreening, FlatStarMaskingOptions, FlatStarMaskingStatistics,

@@ -100,7 +100,13 @@ impl LinearImage {
             .collect()
     }
 
+    #[cfg(test)]
     pub(crate) fn debayer(self, layout: BayerLayout) -> Result<Self> {
+        self.debayer_with(layout, Demosaic::default())
+    }
+
+    /// Debayer a one-channel CFA frame with the given method.
+    pub(crate) fn debayer_with(self, layout: BayerLayout, demosaic: Demosaic) -> Result<Self> {
         if self.channels != 1 {
             return Err(Error::InvalidImage(
                 "only a one-channel CFA image can be debayered".into(),
@@ -142,7 +148,20 @@ impl LinearImage {
                         first_row,
                         rows,
                     );
-                    vng_rows(&balanced, self.width, self.height, layout, first_row, rows);
+                    match demosaic {
+                        Demosaic::Vng => {
+                            vng_rows(&balanced, self.width, self.height, layout, first_row, rows)
+                        }
+                        Demosaic::Mhc => malvar_he_cutler_rows(
+                            &balanced,
+                            self.width,
+                            self.height,
+                            layout,
+                            first_row,
+                            rows,
+                        ),
+                        Demosaic::Bilinear => {}
+                    }
                     for (band_row, out_row) in rows.chunks_exact_mut(row_samples).enumerate() {
                         let y = first_row + band_row;
                         for (x, pixel) in out_row.chunks_exact_mut(3).enumerate() {
@@ -155,6 +174,97 @@ impl LinearImage {
                 });
         }
         Self::new(self.width, self.height, 3, rgb)
+    }
+}
+
+/// How a stack fills in the two colours each Bayer photosite does not record.
+/// Every method balances the mosaic's channels to green first and keeps each
+/// photosite's own sample exactly.
+///
+/// On a 98-frame M45 stack (FWHM, red-blue centroid offset, and red near a
+/// star relative to its colour):
+///
+/// | method   | FWHM  | offset | red 2-3 px out |
+/// |----------|-------|--------|----------------|
+/// | VNG      | 2.7px | 0.10px | 0.75-1.16      |
+/// | MHC      | 2.4px | 0.08px | 1.4-2.0        |
+/// | bilinear | 2.9px | 0.43px | 1.0-1.3        |
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Demosaic {
+    /// Variable number of gradients (Chang, Cheung and Pang, 1999),
+    /// PixInsight's default: interpolates only along the smoothest
+    /// directions, so stars keep their colour across their profile.
+    #[default]
+    Vng,
+    /// Malvar, He and Cutler's gradient-corrected linear interpolation:
+    /// the sharpest, but it rings around small stars.
+    Mhc,
+    /// The mean of each colour's neighbours: fastest and softest, and it
+    /// pulls each colour's centroid toward its own photosites.
+    Bilinear,
+}
+
+impl Demosaic {
+    /// Whether this is the default, which options leave unserialized.
+    pub fn is_vng(&self) -> bool {
+        *self == Self::Vng
+    }
+}
+
+/// Overwrite the interpolated samples of pixels at least two from every edge
+/// with Malvar, He and Cutler's gradient-corrected estimates ("High-quality
+/// linear interpolation for demosaicing of Bayer-patterned color images",
+/// ICASSP 2004), leaving the bilinear estimates on the two-pixel border.
+///
+/// The sharpest of the three demosaics (2.4px stars on M45, against 2.7 for
+/// VNG), but its linear correction rings around stars a few pixels wide: on
+/// the balanced mosaic it leaves red about 1.5 to 2 times a star's colour two
+/// pixels out.
+fn malvar_he_cutler_rows(
+    mosaic: &[f32],
+    width: usize,
+    height: usize,
+    layout: BayerLayout,
+    first_row: usize,
+    out: &mut [f32],
+) {
+    if width < 5 || height < 5 {
+        return;
+    }
+    for (band_row, out_row) in out.chunks_exact_mut(width * 3).enumerate() {
+        let y = first_row + band_row;
+        if y < 2 || y + 2 >= height {
+            continue;
+        }
+        for x in 2..width - 2 {
+            let at = |dx: isize, dy: isize| {
+                mosaic[(y as isize + dy) as usize * width + (x as isize + dx) as usize]
+            };
+            let center = at(0, 0);
+            let pixel = &mut out_row[x * 3..x * 3 + 3];
+            let own = layout.channel_at(x, y);
+            let orth1 = at(-1, 0) + at(1, 0) + at(0, -1) + at(0, 1);
+            let orth2 = at(-2, 0) + at(2, 0) + at(0, -2) + at(0, 2);
+            let diag = at(-1, -1) + at(1, -1) + at(-1, 1) + at(1, 1);
+            if own == 1 {
+                let horizontal = layout.channel_at(x + 1, y);
+                let vertical = layout.channel_at(x, y + 1);
+                let row_estimate =
+                    (5.0 * center + 4.0 * (at(-1, 0) + at(1, 0)) - (at(-2, 0) + at(2, 0)) - diag
+                        + 0.5 * (at(0, -2) + at(0, 2)))
+                        / 8.0;
+                let column_estimate =
+                    (5.0 * center + 4.0 * (at(0, -1) + at(0, 1)) - (at(0, -2) + at(0, 2)) - diag
+                        + 0.5 * (at(-2, 0) + at(2, 0)))
+                        / 8.0;
+                pixel[horizontal] = row_estimate;
+                pixel[vertical] = column_estimate;
+            } else {
+                pixel[1] = (4.0 * center + 2.0 * orth1 - orth2) / 8.0;
+                pixel[2 - own] = (6.0 * center + 2.0 * diag - 1.5 * orth2) / 8.0;
+            }
+        }
     }
 }
 
@@ -467,12 +577,17 @@ mod tests {
     #[test]
     fn a_flat_colour_field_demosaics_exactly() {
         let sensitivity = [0.5, 1.0, 0.7];
-        let rgb = mosaic(24, 20, sensitivity, |_, _| [800.0, 1000.0, 600.0])
-            .debayer(rggb())
-            .unwrap();
-        for pixel in rgb.data.chunks_exact(3) {
-            for (channel, expected) in [400.0_f32, 1000.0, 420.0].into_iter().enumerate() {
-                assert!((pixel[channel] - expected).abs() < 1.0e-2, "{pixel:?}");
+        for demosaic in [Demosaic::Vng, Demosaic::Mhc, Demosaic::Bilinear] {
+            let rgb = mosaic(24, 20, sensitivity, |_, _| [800.0, 1000.0, 600.0])
+                .debayer_with(rggb(), demosaic)
+                .unwrap();
+            for pixel in rgb.data.chunks_exact(3) {
+                for (channel, expected) in [400.0_f32, 1000.0, 420.0].into_iter().enumerate() {
+                    assert!(
+                        (pixel[channel] - expected).abs() < 1.0e-2,
+                        "{demosaic:?}: {pixel:?}"
+                    );
+                }
             }
         }
     }
@@ -529,17 +644,21 @@ mod tests {
 
     #[test]
     fn debayer_preserves_samples_at_native_color_sites() {
-        let raw = LinearImage::new(4, 4, 1, (0..16).map(|v| v as f32).collect()).unwrap();
-        let rgb = raw
-            .debayer(BayerLayout {
-                pattern: BayerPattern::Rggb,
-                x_offset: 0,
-                y_offset: 0,
-            })
-            .unwrap();
-        assert_eq!(rgb.channels, 3);
-        assert_eq!(rgb.data[0], 0.0);
-        assert_eq!(rgb.data[4], 1.0);
-        assert_eq!(rgb.data[(3 * 4 + 3) * 3 + 2], 15.0);
+        // Large enough that MHC and VNG reach the interior.
+        let raw = LinearImage::new(8, 8, 1, (0..64).map(|v| v as f32 + 1.0).collect()).unwrap();
+        for demosaic in [Demosaic::Vng, Demosaic::Mhc, Demosaic::Bilinear] {
+            let rgb = raw.clone().debayer_with(rggb(), demosaic).unwrap();
+            assert_eq!(rgb.channels, 3);
+            for y in 0..8 {
+                for x in 0..8 {
+                    let own = rggb().channel_at(x, y);
+                    assert_eq!(
+                        rgb.data[(y * 8 + x) * 3 + own],
+                        raw.data[y * 8 + x],
+                        "{demosaic:?} ({x}, {y})"
+                    );
+                }
+            }
+        }
     }
 }

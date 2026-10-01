@@ -275,16 +275,21 @@ impl FitsFrame {
     /// Convert raw CFA sampling to the prepared RGB grid used by registration
     /// and stacking. Planar RGB and mono frames pass through unchanged.
     pub fn into_prepared(self) -> Result<Self> {
-        Ok(self.into_prepared_with_layout()?.0)
+        Ok(self
+            .into_prepared_with_layout(crate::Demosaic::default())?
+            .0)
     }
 
     /// [`Self::into_prepared`], also returning the Bayer layout the frame was
     /// debayered from, for Bayer drizzle. The prepared frame itself carries
     /// none.
-    pub(crate) fn into_prepared_with_layout(mut self) -> Result<(Self, Option<BayerLayout>)> {
+    pub(crate) fn into_prepared_with_layout(
+        mut self,
+        demosaic: crate::Demosaic,
+    ) -> Result<(Self, Option<BayerLayout>)> {
         let layout = self.bayer.take();
         if let Some(layout) = layout {
-            self.image = self.image.debayer(layout)?;
+            self.image = self.image.debayer_with(layout, demosaic)?;
         }
         Ok((self, layout))
     }

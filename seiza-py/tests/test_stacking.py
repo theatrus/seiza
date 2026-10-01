@@ -44,6 +44,14 @@ def test_stack_options_reject_unknown_modes():
         seiza.StackOptions(rejection="mystery")
     with pytest.raises(ValueError, match="delta-sigma"):
         seiza.StackOptions(rejection_warmup=1)
+    with pytest.raises(ValueError, match="demosaic"):
+        seiza.StackOptions(demosaic="mystery")
+
+
+def test_stack_options_choose_the_demosaic():
+    assert seiza.StackOptions().demosaic == "vng"
+    for method in ["vng", "mhc", "bilinear"]:
+        assert seiza.StackOptions(demosaic=method).demosaic == method
 
 
 def test_live_stacker_accepts_numpy_and_returns_owned_snapshot():

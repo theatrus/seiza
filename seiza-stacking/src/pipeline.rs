@@ -807,7 +807,7 @@ fn prepare_decoded(
             crate::FrameRejectionReason::Calibration(error.to_string()),
         ));
     }
-    let (frame, cfa) = match frame.into_prepared_with_layout() {
+    let (frame, cfa) = match frame.into_prepared_with_layout(half.options.demosaic) {
         Ok(prepared) => prepared,
         Err(error) => {
             return Ok(PreparedFrame::Rejected(

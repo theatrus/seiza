@@ -411,6 +411,12 @@ but rang around them: unbalanced it left a cyan halo (red at half the star's
 colour three to eight pixels out), and balanced, a red ring two pixels out.
 The two-pixel border keeps bilinear estimates.
 
+`StackOptions::demosaic` chooses the method: `Demosaic::Vng` (the default),
+`Demosaic::Mhc` for the sharpest stars at the cost of a coloured ring around
+small ones, or `Demosaic::Bilinear`, the fastest. The CLI takes
+`--demosaic vng|mhc|bilinear`, Python `StackOptions(demosaic=...)`, and the C
+API's options JSON `"demosaic": "vng" | "mhc" | "bilinear"`.
+
 ## Normalization and frame-edge seams
 
 Global normalization gives each frame one gain and one offset per channel. A
