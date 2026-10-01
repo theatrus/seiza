@@ -153,7 +153,7 @@ to a provenance-bearing learned operation.
 ## Image stacking
 
 `seiza stack` calibrates, registers, and incrementally integrates FITS or XISF light
-frames. The first light is the fixed output/reference grid:
+frames onto the reference frame's fixed output grid:
 
 ```
 seiza stack light-001.fits light-002.fits light-003.fits \
@@ -161,10 +161,31 @@ seiza stack light-001.fits light-002.fits light-003.fits \
 
 seiza stack lights/*.fits --output stack.fits \
   --bias master-bias.fits --dark master-dark.fits --flat master-flat.fits \
-  --normalization local --local-tile-size 256 \
-  --max-registration-drift 256 \
+  --reintegrate --max-registration-drift 256 \
   --max-registration-drift-fraction 0.15 --min-overlap 0.60
 ```
+
+### Defaults and quality options
+
+The defaults aim for the best result from a night of frames; each step can be
+changed:
+
+| Option | Default | What it does |
+|---|---|---|
+| `--reference auto\|first` | `auto` | `auto` scores every frame on a half-resolution view (star signal over sky noise, which seeing, trailing, haze and twilight all lower) and, among frames near the best score, takes the flattest sky. `first` keeps the first frame given. |
+| `--registration-model similarity\|affine\|quadratic` | `quadratic` | After the similarity match, fit a polynomial to up to 2 000 stars to follow lens distortion. A frame with too few stars keeps its similarity. |
+| `--normalization none\|global\|local\|local-background` | `local-background` | `local-background` keeps one gain per channel, measured from star photometry, and matches each tile's background to the reference's, so frames whose sky gradients differ leave no seams where coverage changes. `local` also fits a gain per tile. |
+| `--local-tile-size` | `256` | Tile size for `local` and `local-background`. |
+| `--weighting equal\|inverse-noise` | `inverse-noise` | Weight each frame by the inverse of its noise variance relative to the reference, so hazy frames count for less. |
+| `--interpolation bilinear\|lanczos3` | `lanczos3` | Lanczos-3 resampling, with PixInsight-style clamping against ringing; sharper, at about twice the resampling cost. |
+| `--demosaic vng\|mhc\|bilinear` | `vng` | Bayer frames: VNG keeps each star's colour across its profile; MHC gives slightly sharper stars but rings around small ones; bilinear is fastest and softest. All three balance the mosaic's channels first. |
+| `--bayer-drizzle` | off | Integrate each Bayer frame's photosites without demosaicing; pays off on well-dithered data. |
+| `--reintegrate` | off | After stacking, read every admitted frame three more times and integrate with leave-one-out rejection. This removes trails in the first frames, which online rejection cannot revisit, and refits each frame's background against an integration of the best twenty. |
+| `--workers`, `--pipeline-memory-mib` | derived, `4096` | Frames read and prepared at once, and the memory for them. |
+
+On 126 one-shot-color frames of M45 (ASI2600MC, 173 mm, no calibration) the
+defaults stacked in 143 s at 2.7px FWHM with a 0.10px red-blue offset; the
+settings before these options took 3 min 16 s at 3.1px and 0.42px.
 
 Raw calibration sequences can be integrated into reusable masters first:
 
@@ -210,16 +231,16 @@ excess transform drift, low overlap, or implausible normalization leave the
 existing additive stack unchanged. The optional `--report` JSON records
 SHA-256 identities for every source and calibration master, the complete
 configuration, and the ordered accepted/rejected disposition ledger. The
-reference is the first light and is always integrated, so it counts toward
-`accepted_frames` but has no entry in the per-frame `frames` ledger; that
-ledger lists only the frames pushed after it. FITS and report outputs are
+reference is always integrated, so it counts toward `accepted_frames` but has
+no entry in the per-frame `frames` ledger; that ledger lists only the frames
+pushed after it, with each one's weight when frames are weighted. FITS and report outputs are
 published atomically after they are complete.
 
 Mono inputs produce a one-plane linear FITS stack. Three-plane FITS/XISF inputs
 remain RGB, while raw one-shot-color frames with `BAYERPAT` are calibrated in
-their native CFA sampling before debayering. Star detection uses a temporary
-luminance view, but registration is applied to all three channels and global or
-local normalization is estimated per channel. The output is an unstretched
+their native CFA sampling before demosaicing. Star detection uses a temporary
+luminance view, but registration is applied to all three channels and
+normalization is estimated per channel. The output is an unstretched
 three-plane `float32` RGB FITS; `--preview` writes an RGB display stretch.
 
 The registration search is explicitly bounded at the center of the reference
@@ -229,7 +250,7 @@ reference frame's larger dimension. Configure those components with
 either for a sequence with larger dithers or crop-origin offsets; lower values
 make the expected motion constraint tighter. Set the fractional component to
 zero when a strict pixel-only limit is desired. Light frames may have different
-dimensions: valid samples are mapped onto the first frame's fixed grid, pixels
+dimensions: valid samples are mapped onto the reference frame's fixed grid, pixels
 outside a source crop remain masked, and `--min-overlap` controls how much
 usable overlap is required for admission.
 

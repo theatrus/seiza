@@ -306,17 +306,21 @@ protocol, so your application code does not change.
 
 ## Image stacking
 
-`seiza stack` calibrates and registers linear FITS or XISF light frames, optionally
-applies global or tiled local normalization, and integrates them with online
-delta-sigma rejection. Differently sized or cropped frames are mapped onto the
-first frame's fixed output grid. Frames acquired after a German-equatorial-mount
-meridian flip are handled automatically: a transform near 180 degrees is
-accepted under the normal rotation tolerance and the pixels are rotated back
-onto the reference orientation before integration.
+`seiza stack` calibrates and registers linear FITS or XISF light frames,
+normalizes their backgrounds, and integrates them with online delta-sigma
+rejection; `--reintegrate` adds a completed-stack pass that removes satellite
+trails and other transients. By default it picks the clearest, sharpest frame
+as the reference, fits a quadratic warp to follow lens distortion, matches each
+frame's background tile by tile so frame edges leave no seams, weights frames
+by their noise, and resamples with Lanczos-3. Differently sized or cropped
+frames are mapped onto the reference's fixed output grid. Frames acquired after
+a German-equatorial-mount meridian flip are handled automatically: a transform
+near 180 degrees is accepted under the normal rotation tolerance and the pixels
+are rotated back onto the reference orientation before integration.
 
 Color remains color. Three-plane FITS/XISF inputs are stacked as linear RGB; raw
 one-shot-color frames carrying `BAYERPAT` are calibrated in their native CFA
-sampling and then debayered. Registration detects stars from a luminance view,
+sampling and then demosaiced with VNG (or MHC, bilinear, or Bayer drizzle). Registration detects stars from a luminance view,
 but the resulting transform, per-channel normalization, rejection, and
 accumulation retain all three channels. The result is an unstretched
 three-plane `float32` RGB FITS, and `--preview` produces an RGB display image.
@@ -324,7 +328,7 @@ three-plane `float32` RGB FITS, and `--preview` produces an RGB display image.
 ```text
 seiza stack lights/*.fits --output stack.fits \
   --bias master-bias.fits --dark master-dark.fits --flat master-flat.fits \
-  --normalization local --preview stack.png --report stack-report.json
+  --reintegrate --preview stack.png --report stack-report.json
 ```
 
 ![Eight-frame Sadr and Crescent Nebula H-alpha stack](docs/images/stacking/sadr-ha-8-frame.jpg)
@@ -630,9 +634,12 @@ seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-
   multiplicative correction in `seiza-background`. Model fitting is compact;
   rendering a full model image is explicit.
 - **Image stacking** — master bias/dark/flat construction, CFA-aware OSC
-  calibration, registration onto the first frame's fixed grid with
-  meridian-flip handling, global or tiled local normalization, and online
-  delta-sigma rejection in `seiza-stacking`. Solved outputs can be reprojected
+  calibration with VNG, MHC, bilinear, or Bayer-drizzle colour, automatic
+  reference choice, similarity, affine, or quadratic registration with
+  meridian-flip handling, global, tiled local, or local-background
+  normalization, noise weighting, bilinear or Lanczos-3 resampling, online
+  delta-sigma rejection, and three-pass completed-stack rejection in
+  `seiza-stacking`. Solved outputs can be reprojected
   to a full-footprint north-up, east-left grid. The same incremental
   `LiveStacker` engine serves batch and live use, with atomic on-disk contexts
   for exact process-to-process resumption.
