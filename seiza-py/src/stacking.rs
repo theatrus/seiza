@@ -127,9 +127,13 @@ impl PyStackOptions {
             "local" => NormalizationMode::Local {
                 tile_size: local_tile_size,
             },
+            "local-background" | "local_background" => NormalizationMode::LocalBackground {
+                tile_size: local_tile_size,
+            },
             value => {
                 return Err(PyValueError::new_err(format!(
-                    "normalization must be 'none', 'global', or 'local', not {value:?}"
+                    "normalization must be 'none', 'global', 'local', or 'local-background', \
+                     not {value:?}"
                 )));
             }
         };
@@ -181,13 +185,15 @@ impl PyStackOptions {
             NormalizationMode::None => "none",
             NormalizationMode::Global => "global",
             NormalizationMode::Local { .. } => "local",
+            NormalizationMode::LocalBackground { .. } => "local-background",
         }
     }
 
     #[getter]
     fn local_tile_size(&self) -> Option<usize> {
         match self.inner.normalization {
-            NormalizationMode::Local { tile_size } => Some(tile_size),
+            NormalizationMode::Local { tile_size }
+            | NormalizationMode::LocalBackground { tile_size } => Some(tile_size),
             _ => None,
         }
     }
