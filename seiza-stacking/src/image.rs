@@ -120,7 +120,7 @@ impl LinearImage {
 /// Raw color-filter-array sampling of a one-channel frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BayerLayout {
-    /// The CFA color order.
+    /// The CFA color order at the first stored pixel, with ROWORDER resolved.
     pub pattern: BayerPattern,
     /// Horizontal offset of the pattern origin, in pixels.
     pub x_offset: usize,

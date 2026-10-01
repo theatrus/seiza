@@ -2,12 +2,40 @@
 //!
 //! OSC cameras write the raw color filter array: each pixel carries only
 //! one of R/G/B, laid out in a 2×2 mosaic named by the `BAYERPAT` header
-//! (with optional `XBAYROFF`/`YBAYROFF` origin offsets). Missing channel
+//! (with optional `XBAYROFF`/`YBAYROFF` origin offsets). `ROWORDER` maps
+//! that sensor pattern into storage order without moving any pixels.
+//! Missing channel
 //! samples are reconstructed by averaging every carrier of that channel
 //! in the 3×3 neighborhood — bilinear interpolation, adequate for star
 //! detection and display.
 
-/// The 2×2 color filter array layout, named by its top-left origin.
+/// The stored row direction declared by the FITS `ROWORDER` keyword.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowOrder {
+    TopDown,
+    BottomUp,
+}
+
+impl RowOrder {
+    /// Parse a `ROWORDER` value, allowing FITS padding and mixed case.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_uppercase().as_str() {
+            "TOP-DOWN" => Some(Self::TopDown),
+            "BOTTOM-UP" => Some(Self::BottomUp),
+            _ => None,
+        }
+    }
+
+    /// Canonical FITS `ROWORDER` spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TopDown => "TOP-DOWN",
+            Self::BottomUp => "BOTTOM-UP",
+        }
+    }
+}
+
+/// The 2×2 color filter array layout, named by its origin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BayerPattern {
     Rggb,
@@ -35,6 +63,26 @@ impl BayerPattern {
             Self::Bggr => "BGGR",
             Self::Grbg => "GRBG",
             Self::Gbrg => "GBRG",
+        }
+    }
+
+    /// Convert a top-left sensor pattern to the pattern at the first stored
+    /// pixel. For bottom-up data, sensor row `height - 1` is stored first:
+    /// even heights swap the two CFA rows; odd heights retain their phase.
+    /// Origin offsets can be applied after this conversion.
+    ///
+    /// This is also its own inverse, for writing a stored pattern back to a
+    /// FITS header. It never flips pixel data or changes image coordinates.
+    pub fn in_row_order(self, row_order: RowOrder, height: usize) -> Self {
+        if row_order == RowOrder::BottomUp && height > 0 && height.is_multiple_of(2) {
+            match self {
+                Self::Rggb => Self::Gbrg,
+                Self::Bggr => Self::Grbg,
+                Self::Grbg => Self::Bggr,
+                Self::Gbrg => Self::Rggb,
+            }
+        } else {
+            self
         }
     }
 
@@ -110,7 +158,8 @@ impl RgbImage16 {
     }
 }
 
-/// Bilinear-debayer a raw CFA frame into interleaved RGB.
+/// Bilinear-debayer a raw CFA frame into interleaved RGB, in storage order.
+/// For a sensor pattern with `ROWORDER`, first use [`BayerPattern::in_row_order`].
 pub fn debayer_rgb16(
     mosaic: &[u16],
     width: usize,
@@ -129,7 +178,8 @@ pub fn debayer_rgb16(
 /// Bilinear-debayer a linear floating-point CFA frame into interleaved RGB.
 ///
 /// This uses the same kernel and native-sample preservation as [`debayer_rgb16`]
-/// without quantizing calibrated sensor values.
+/// without quantizing calibrated sensor values. The pattern and result are in
+/// storage order; use [`BayerPattern::in_row_order`] for a sensor pattern.
 pub fn debayer_rgb_f32(
     mosaic: &[f32],
     width: usize,
@@ -191,6 +241,67 @@ mod tests {
         assert_eq!(BayerPattern::parse("RGGB"), Some(BayerPattern::Rggb));
         assert_eq!(BayerPattern::parse(" bggr "), Some(BayerPattern::Bggr));
         assert_eq!(BayerPattern::parse("XTRANS"), None);
+    }
+
+    #[test]
+    fn row_order_parsing() {
+        for order in [RowOrder::TopDown, RowOrder::BottomUp] {
+            assert_eq!(RowOrder::parse(order.as_str()), Some(order));
+        }
+        assert_eq!(RowOrder::parse(" bottom-up "), Some(RowOrder::BottomUp));
+        assert_eq!(RowOrder::parse("Top-Down"), Some(RowOrder::TopDown));
+        assert_eq!(RowOrder::parse(""), None);
+        assert_eq!(RowOrder::parse("SIDEWAYS"), None);
+    }
+
+    #[test]
+    fn row_order_preserves_color_and_native_samples_in_both_kernels() {
+        // Independent sensor layouts. Vary the stored values by position so
+        // an accidental pixel flip cannot pass as a correctly colored field.
+        for (pattern, sites) in [
+            (BayerPattern::Rggb, [[0, 1], [1, 2]]),
+            (BayerPattern::Bggr, [[2, 1], [1, 0]]),
+            (BayerPattern::Grbg, [[1, 0], [2, 1]]),
+            (BayerPattern::Gbrg, [[1, 2], [0, 1]]),
+        ] {
+            for height in [5, 6] {
+                for order in [RowOrder::TopDown, RowOrder::BottomUp] {
+                    for (x_off, y_off) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                        let width = 6;
+                        let channels = (0..width * height)
+                            .map(|i| {
+                                let sensor_y = match order {
+                                    RowOrder::TopDown => i / width,
+                                    RowOrder::BottomUp => height - 1 - i / width,
+                                };
+                                sites[(sensor_y + y_off) % 2][(i % width + x_off) % 2]
+                            })
+                            .collect::<Vec<_>>();
+                        let mosaic = channels
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &channel)| [1000, 2000, 3000][channel] + i as u16)
+                            .collect::<Vec<_>>();
+                        let floats = mosaic.iter().map(|&v| f32::from(v)).collect::<Vec<_>>();
+                        let stored = pattern.in_row_order(order, height);
+                        let rgb16 = debayer_rgb16(&mosaic, width, height, stored, x_off, y_off);
+                        let rgb32 = debayer_rgb_f32(&floats, width, height, stored, x_off, y_off);
+                        for (i, &own) in channels.iter().enumerate() {
+                            assert_eq!(rgb16.data[3 * i + own], mosaic[i]);
+                            assert_eq!(rgb32.data[3 * i + own], floats[i]);
+                            for channel in 0..3 {
+                                let base = [1000, 2000, 3000][channel];
+                                assert!((base..base + 36).contains(&rgb16.data[3 * i + channel]));
+                                assert!(
+                                    (f32::from(base)..f32::from(base + 36))
+                                        .contains(&rgb32.data[3 * i + channel])
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

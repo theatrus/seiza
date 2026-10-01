@@ -3,7 +3,7 @@ use crate::{
     StackSnapshot,
 };
 use seiza_calibration::FrameSignature;
-use seiza_fits::{F32ImageData, FitsImage, HeaderValue, WriteHeaderCard};
+use seiza_fits::{BayerPattern, F32ImageData, FitsImage, HeaderValue, RowOrder, WriteHeaderCard};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -185,7 +185,7 @@ impl FitsFrame {
     /// Convert an already-decoded [`FitsImage`] into a linear frame,
     /// interleaving color planes and reading exposure and CFA metadata.
     pub fn from_fits(fits: FitsImage, source: Option<PathBuf>) -> Result<Self> {
-        let bayer_pattern = fits.bayer_pattern();
+        let bayer_pattern = fits.bayer_pattern_in_storage_order();
         let x_offset = fits.header_f64("XBAYROFF").unwrap_or(0.0).max(0.0) as usize;
         let y_offset = fits.header_f64("YBAYROFF").unwrap_or(0.0).max(0.0) as usize;
         let exposure_seconds = EXPOSURE_HEADER_KEYS
@@ -298,7 +298,18 @@ fn metadata_from_headers(
         .filter(|value| *value > 0)
         .or(fallback_height);
     let bayer_pattern = header_text(headers, &["BAYERPAT"])
-        .map(|value| value.to_ascii_uppercase())
+        .map(|value| {
+            let pattern = BayerPattern::parse(&value);
+            let row_order =
+                header_text(headers, &["ROWORDER"]).and_then(|value| RowOrder::parse(&value));
+            match (pattern, row_order, height) {
+                (Some(pattern), Some(order), Some(height)) => pattern
+                    .in_row_order(order, height as usize)
+                    .as_str()
+                    .to_owned(),
+                _ => value.to_ascii_uppercase(),
+            }
+        })
         .or_else(|| fallback_bayer.map(|layout| layout.pattern.as_str().to_ascii_uppercase()));
     let channels = if width.is_some() && height.is_some() {
         Some(
@@ -719,9 +730,17 @@ pub fn write_master_fits_f32(path: impl AsRef<Path>, master: &MasterFrame) -> Re
         ));
     }
     if let Some(bayer) = master.bayer {
+        // The in-memory layout is in storage order. Convert it back to the
+        // sensor convention of the retained ROWORDER, avoiding a second flip
+        // when this master is read again.
+        let pattern = header_text(&master.reference_headers, &["ROWORDER"])
+            .and_then(|value| RowOrder::parse(&value))
+            .map_or(bayer.pattern, |order| {
+                bayer.pattern.in_row_order(order, master.image.height)
+            });
         cards.push(string_card(
             "BAYERPAT",
-            bayer.pattern.as_str(),
+            pattern.as_str(),
             "raw color-filter-array layout",
         ));
         cards.push(integer_card(
@@ -963,6 +982,7 @@ const MASTER_METADATA_HEADER_GROUPS: &[(&str, &[&str])] = &[
     ("BAYERPAT", &["BAYERPAT"]),
     ("XBAYROFF", &["XBAYROFF"]),
     ("YBAYROFF", &["YBAYROFF"]),
+    ("ROWORDER", &["ROWORDER"]),
 ];
 
 fn preserve_master_key(key: &str) -> bool {
@@ -1037,6 +1057,81 @@ mod tests {
             planar_to_interleaved(&[1.0, 2.0, 10.0, 20.0, 100.0, 200.0], 2),
             [1.0, 10.0, 100.0, 2.0, 20.0, 200.0]
         );
+    }
+
+    #[test]
+    fn bottom_up_cfa_is_resolved_before_preparation_and_survives_processed_output() {
+        let directory = tempfile::tempdir().unwrap();
+        for height in [3, 4] {
+            // Sensor RGGB with both offsets set: BG/GR from the top.
+            let data = (0..height)
+                .flat_map(|stored_y| {
+                    let top_y = height - 1 - stored_y;
+                    if top_y % 2 == 0 {
+                        [3000, 2000, 3000, 2000]
+                    } else {
+                        [2000, 1000, 2000, 1000]
+                    }
+                })
+                .collect::<Vec<_>>();
+            let fits = FitsImage {
+                width: 4,
+                height,
+                planes: 1,
+                pixels: Pixels::U16(data.clone()),
+                headers: vec![
+                    ("NAXIS1".into(), HeaderValue::Integer(4)),
+                    ("NAXIS2".into(), HeaderValue::Integer(height as i64)),
+                    ("BAYERPAT".into(), HeaderValue::String("RGGB".into())),
+                    ("ROWORDER".into(), HeaderValue::String("BOTTOM-UP".into())),
+                    ("XBAYROFF".into(), HeaderValue::Integer(1)),
+                    ("YBAYROFF".into(), HeaderValue::Integer(1)),
+                ],
+            };
+            assert!(
+                fits.debayer()
+                    .unwrap()
+                    .data
+                    .chunks_exact(3)
+                    .all(|pixel| pixel == [1000, 2000, 3000])
+            );
+            let frame = FitsFrame::from_fits(fits, None).unwrap();
+            let expected = if height == 4 {
+                BayerPattern::Gbrg
+            } else {
+                BayerPattern::Rggb
+            };
+            assert_eq!(frame.bayer.unwrap().pattern, expected);
+            assert_eq!(
+                frame.metadata().signature.bayer_pattern.as_deref(),
+                Some(expected.as_str())
+            );
+            assert_eq!(
+                FrameMetadata::from_headers(&frame.headers).signature,
+                frame.metadata().signature
+            );
+            assert_eq!(
+                frame.image.data,
+                data.iter().map(|&v| f32::from(v)).collect::<Vec<_>>()
+            );
+            for extension in ["fits", "xisf"] {
+                let path = directory
+                    .path()
+                    .join(format!("processed-{height}.{extension}"));
+                write_processed_image_fits_f32(&path, &frame.image, &frame.headers, &[]).unwrap();
+                let restored = FitsFrame::open(&path).unwrap();
+                assert_eq!(restored.bayer, frame.bayer);
+                assert_eq!(restored.image.data, frame.image.data);
+                let prepared = restored.into_prepared().unwrap();
+                assert!(
+                    prepared
+                        .image
+                        .data
+                        .chunks_exact(3)
+                        .all(|pixel| pixel == [1000.0, 2000.0, 3000.0])
+                );
+            }
+        }
     }
 
     #[test]
@@ -1345,6 +1440,7 @@ mod tests {
             ("BAYERPAT".into(), HeaderValue::String("RGGB".into())),
             ("XBAYROFF".into(), HeaderValue::Integer(0)),
             ("YBAYROFF".into(), HeaderValue::Integer(0)),
+            ("ROWORDER".into(), HeaderValue::String("BOTTOM-UP".into())),
         ];
         write_processed_image_fits_f32(&path, &image, &reference_headers, &[]).unwrap();
         let decoded = FitsImage::open(&path).unwrap();
@@ -1352,6 +1448,8 @@ mod tests {
         assert!(decoded.header("BAYERPAT").is_none());
         assert!(decoded.header("XBAYROFF").is_none());
         assert!(decoded.header("YBAYROFF").is_none());
+        // Row direction also describes RGB/mono display orientation.
+        assert_eq!(decoded.row_order(), Some(RowOrder::BottomUp));
     }
 
     #[test]
@@ -1381,6 +1479,8 @@ mod tests {
             rejection: crate::MasterRejectionOptions::default(),
             rejection_method: crate::MasterRejectionMethod::LeaveOneOut,
             reference_headers: vec![
+                ("ROWORDER".into(), HeaderValue::String("BOTTOM-UP".into())),
+                ("BAYERPAT".into(), HeaderValue::String("GBRG".into())),
                 ("INSTRUME".into(), HeaderValue::String("Test Camera".into())),
                 ("CAMERA".into(), HeaderValue::String("Ignored Alias".into())),
                 ("TELESCOPE".into(), HeaderValue::String("Test Scope".into())),
@@ -1397,6 +1497,12 @@ mod tests {
         write_master_fits_f32(&path, &master).unwrap();
         let decoded = FitsImage::open(&path).unwrap();
         assert_eq!(decoded.header_str("SEIZAMST"), Some("DARK"));
+        assert_eq!(decoded.row_order(), Some(RowOrder::BottomUp));
+        assert_eq!(decoded.bayer_pattern(), Some(BayerPattern::Gbrg));
+        assert_eq!(
+            decoded.bayer_pattern_in_storage_order(),
+            Some(BayerPattern::Rggb)
+        );
         assert_eq!(decoded.header_str("REJMETH"), Some("LEAVE_ONE_OUT"));
         assert_eq!(decoded.header_f64("NCOMBINE"), Some(12.0));
         assert_eq!(decoded.header_f64("EXPTIME"), Some(30.0));

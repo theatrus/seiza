@@ -12,7 +12,7 @@ mod bayer;
 mod header;
 mod writer;
 
-pub use bayer::{BayerPattern, RgbImage16, RgbImageF32, debayer_rgb_f32, debayer_rgb16};
+pub use bayer::{BayerPattern, RgbImage16, RgbImageF32, RowOrder, debayer_rgb_f32, debayer_rgb16};
 pub use header::{HeaderValue, parse_header_value};
 pub use seiza_stretch::{
     Statistics, StretchParams, midtones_transfer_function, statistics_u16, stretch_u16_to_u8,
@@ -556,13 +556,32 @@ impl FitsImage {
         BayerPattern::parse(self.header_str("BAYERPAT")?)
     }
 
+    /// Declared row direction, or `None` when absent or unrecognized.
+    /// Reading an image always preserves the stored pixel order.
+    pub fn row_order(&self) -> Option<RowOrder> {
+        RowOrder::parse(self.header_str("ROWORDER")?)
+    }
+
+    /// CFA pattern at the first stored pixel, before origin offsets.
+    /// Missing or unknown `ROWORDER` retains the historical interpretation of
+    /// `BAYERPAT` as already describing storage order.
+    pub fn bayer_pattern_in_storage_order(&self) -> Option<BayerPattern> {
+        let pattern = self.bayer_pattern()?;
+        Some(match self.row_order() {
+            Some(order) => pattern.in_row_order(order, self.height),
+            None => pattern,
+        })
+    }
+
     /// Debayer a raw one-shot-color mosaic to interleaved RGB, honoring
-    /// `XBAYROFF`/`YBAYROFF` origin offsets. `None` for mono images.
+    /// `ROWORDER` and `XBAYROFF`/`YBAYROFF` origin offsets. The result retains
+    /// storage order, preserving calibration and astrometric coordinates.
+    /// `None` for mono images.
     pub fn debayer(&self) -> Option<RgbImage16> {
         if self.planes != 1 {
             return None;
         }
-        let pattern = self.bayer_pattern()?;
+        let pattern = self.bayer_pattern_in_storage_order()?;
         let x_off = self.header_f64("XBAYROFF").unwrap_or(0.0) as usize;
         let y_off = self.header_f64("YBAYROFF").unwrap_or(0.0) as usize;
         Some(debayer_rgb16(
@@ -885,6 +904,40 @@ mod io_tests {
         let rgb = image.debayer().unwrap();
         assert_eq!((rgb.width, rgb.height), (4, 4));
         assert!(rgb.data.iter().all(|value| *value == 1000));
+    }
+
+    #[test]
+    fn debayer_resolves_row_order_and_offsets_without_reordering_pixels() {
+        // Bottom-up, even-height RGGB with X offset 1 is BG/GR in storage.
+        let samples = [3000, 2000, 3002, 2002, 2004, 1004, 2006, 1006];
+        let payload = unsigned_u16_payload(&samples);
+        for (row_order, expected) in [
+            (Some("' bottom-up '"), BayerPattern::Gbrg),
+            (Some("'TOP-DOWN'"), BayerPattern::Rggb),
+            (Some("'unknown'"), BayerPattern::Rggb),
+            (None, BayerPattern::Rggb),
+        ] {
+            let mut headers = vec![
+                ("BZERO", "32768"),
+                ("BAYERPAT", "'RGGB'"),
+                ("XBAYROFF", "1"),
+                ("YBAYROFF", "0"),
+            ];
+            if let Some(value) = row_order {
+                headers.push(("ROWORDER", value));
+            }
+            let image = FitsImage::from_bytes(&image_bytes(16, &[4, 2], &headers, &payload, false))
+                .unwrap();
+            assert_eq!(image.bayer_pattern(), Some(BayerPattern::Rggb));
+            assert_eq!(image.bayer_pattern_in_storage_order(), Some(expected));
+            assert_eq!(image.to_u16().as_ref(), samples);
+            let rgb = image.debayer().unwrap();
+            assert_eq!(rgb.data, debayer_rgb16(&samples, 4, 2, expected, 1, 0).data);
+            if image.row_order() == Some(RowOrder::BottomUp) {
+                assert_eq!(rgb.data[2], 3000);
+                assert_eq!(rgb.data[5 * 3], 1004);
+            }
+        }
     }
 
     #[test]

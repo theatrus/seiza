@@ -12,8 +12,12 @@ one linear-image API without coupling operations to the source container.
   layout is folded directly into the big-endian decode).
 - Streams full-image opens directly into the final typed pixel vector using a
   fixed 1 MiB conversion buffer; it does not retain a second whole-file copy.
-- Planar RGB (`NAXIS3`) support and OSC debayering from the `BAYERPAT`
-  header.
+- Planar RGB (`NAXIS3`) support and OSC debayering from `BAYERPAT`,
+  `XBAYROFF`/`YBAYROFF`, and `ROWORDER` (`TOP-DOWN` or `BOTTOM-UP`).
+  Row order corrects the CFA color phase without moving pixels or changing
+  astrometric coordinates. Missing/unknown row order keeps the legacy behavior.
+  Direct Bayer-engine callers can use `BayerPattern::in_row_order` before
+  either the integer or linear floating-point debayer function.
 - Typed header access (logicals, integers, floats, strings, FORTRAN `D`
   exponents, quote escapes).
 - Writes primary-HDU mono, interleaved RGB, or planar RGB linear `f32` images,
