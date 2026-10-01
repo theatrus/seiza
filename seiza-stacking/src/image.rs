@@ -140,17 +140,6 @@ impl LinearImage {
     }
 }
 
-/// Channel (0 R, 1 G, 2 B) at a mosaic position.
-fn cfa_channel(layout: BayerLayout, x: usize, y: usize) -> usize {
-    let (column, row) = ((x + layout.x_offset) & 1, (y + layout.y_offset) & 1);
-    match layout.pattern {
-        BayerPattern::Rggb => [[0, 1], [1, 2]][row][column],
-        BayerPattern::Bggr => [[2, 1], [1, 0]][row][column],
-        BayerPattern::Grbg => [[1, 0], [2, 1]][row][column],
-        BayerPattern::Gbrg => [[1, 2], [0, 1]][row][column],
-    }
-}
-
 /// Overwrite the interpolated samples of pixels at least two from every edge
 /// with Malvar, He and Cutler's gradient-corrected estimates ("High-quality
 /// linear interpolation for demosaicing of Bayer-patterned color images",
@@ -184,13 +173,13 @@ fn malvar_he_cutler_rows(
             };
             let center = at(0, 0);
             let pixel = &mut out_row[x * 3..x * 3 + 3];
-            let own = cfa_channel(layout, x, y);
+            let own = layout.channel_at(x, y);
             let orth1 = at(-1, 0) + at(1, 0) + at(0, -1) + at(0, 1);
             let orth2 = at(-2, 0) + at(2, 0) + at(0, -2) + at(0, 2);
             let diag = at(-1, -1) + at(1, -1) + at(-1, 1) + at(1, 1);
             if own == 1 {
-                let horizontal = cfa_channel(layout, x + 1, y);
-                let vertical = cfa_channel(layout, x, y + 1);
+                let horizontal = layout.channel_at(x + 1, y);
+                let vertical = layout.channel_at(x, y + 1);
                 let row_estimate =
                     (5.0 * center + 4.0 * (at(-1, 0) + at(1, 0)) - (at(-2, 0) + at(2, 0)) - diag
                         + 0.5 * (at(0, -2) + at(0, 2)))
@@ -218,6 +207,19 @@ pub struct BayerLayout {
     pub x_offset: usize,
     /// Vertical offset of the pattern origin, in pixels.
     pub y_offset: usize,
+}
+
+impl BayerLayout {
+    /// The channel (0 red, 1 green, 2 blue) a photosite at `(x, y)` records.
+    pub(crate) fn channel_at(self, x: usize, y: usize) -> usize {
+        let (column, row) = ((x + self.x_offset) & 1, (y + self.y_offset) & 1);
+        match self.pattern {
+            BayerPattern::Rggb => [[0, 1], [1, 2]][row][column],
+            BayerPattern::Bggr => [[2, 1], [1, 0]][row][column],
+            BayerPattern::Grbg => [[1, 0], [2, 1]][row][column],
+            BayerPattern::Gbrg => [[1, 2], [0, 1]][row][column],
+        }
+    }
 }
 
 /// Rec.709 luma from linear RGB samples.

@@ -1,8 +1,8 @@
 use crate::{
     BayerLayout, CalibrationMasters, Error, FitsFrame, FrameMetadata, LinearImage,
-    NormalizationMap, NormalizationMode, RegisteredFrameMapping, Registrar, RegistrationOptions,
-    Result, SimilarityTransform, context, path_identity, paths_refer_to_same_file,
-    resample_to_reference,
+    NormalizationMap, NormalizationMode, ReferenceRegion, RegisteredFrameMapping, Registrar,
+    RegistrationOptions, Result, SimilarityTransform, context, path_identity,
+    paths_refer_to_same_file, resample_to_reference,
 };
 use rayon::prelude::*;
 use seiza_fits::HeaderValue;
@@ -171,6 +171,41 @@ pub struct StackOptions {
     /// fingerprints and contexts keep their exact bytes.
     #[serde(default, skip_serializing_if = "FrameWeighting::is_equal")]
     pub weighting: FrameWeighting,
+    /// How a Bayer frame's colors reach the accumulator. The default,
+    /// [`CfaIntegration::Demosaic`], is not serialized, so existing options,
+    /// fingerprints and contexts keep their exact bytes.
+    #[serde(default, skip_serializing_if = "CfaIntegration::is_demosaic")]
+    pub cfa_integration: CfaIntegration,
+}
+
+/// How a Bayer frame's colors reach the accumulator. Registration and
+/// normalization use the demosaiced frame either way.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CfaIntegration {
+    /// Integrate the demosaiced frame, every channel at every pixel.
+    #[default]
+    Demosaic,
+    /// Bayer drizzle: each registered pixel takes only the nearest source
+    /// photosite, in the one channel that photosite records, and the stack
+    /// fills the colors in from frames that land on different photosites.
+    ///
+    /// Nothing is interpolated, so stars keep their sharpness and colors
+    /// keep their place, but each channel sees a third to a quarter of the
+    /// samples. It pays when frames are dithered by several pixels; on a
+    /// 98-frame M45 stack that drifted only 10 to 20 pixels in a night it
+    /// gave lower SNR than demosaicing. Channels no frame reached at a pixel
+    /// are filled from the same channel's neighbours in snapshots, with
+    /// their coverage left at zero. Frames without a Bayer layout integrate
+    /// as demosaiced frames would.
+    BayerDrizzle,
+}
+
+impl CfaIntegration {
+    /// Whether this is the default, which options leave unserialized.
+    pub fn is_demosaic(&self) -> bool {
+        *self == Self::Demosaic
+    }
 }
 
 impl StackOptions {
@@ -499,7 +534,7 @@ impl LiveStacker {
         if let Some(filter) = &options.cosmetic {
             crate::cosmetic::suppress_impulses(&mut reference.image, reference.bayer, filter)?;
         }
-        let reference = reference.into_prepared()?;
+        let (reference, cfa) = reference.into_prepared_with_layout()?;
         let mut stacker = Self::from_prepared(
             reference.image,
             reference.headers,
@@ -507,6 +542,7 @@ impl LiveStacker {
             calibration,
             options,
             FrameInputMode::CalibrateAndPrepare,
+            cfa,
         )?;
         stacker.ledger.set_reference_source(source);
         Ok(stacker)
@@ -524,6 +560,7 @@ impl LiveStacker {
             CalibrationMasters::default(),
             options,
             FrameInputMode::PreparedOnly,
+            None,
         )
     }
 
@@ -548,6 +585,7 @@ impl LiveStacker {
             CalibrationMasters::default(),
             options,
             FrameInputMode::PreparedOnly,
+            None,
         )
     }
 
@@ -558,6 +596,7 @@ impl LiveStacker {
         calibration: CalibrationMasters,
         options: StackOptions,
         input_mode: FrameInputMode,
+        reference_cfa: Option<BayerLayout>,
     ) -> Result<Self> {
         options.validate()?;
         let configuration_fingerprint =
@@ -571,7 +610,29 @@ impl LiveStacker {
         let mut accumulator =
             Accumulator::new(reference.sample_count(), !options.weighting.is_equal());
         // The reference is the unit of weight: it integrates with weight 1.
-        accumulator.integrate(&reference.data, RejectionMode::None, None);
+        // Under Bayer drizzle it contributes its own photosites, like every
+        // later frame, while the demosaiced image stays the alignment target.
+        match reference_cfa.filter(|_| options.cfa_integration == CfaIntegration::BayerDrizzle) {
+            Some(layout) => {
+                let photosites = crate::registration::resample_region_photosites(
+                    &reference,
+                    reference.width,
+                    reference.height,
+                    ReferenceRegion {
+                        x: 0,
+                        y: 0,
+                        width: reference.width,
+                        height: reference.height,
+                    },
+                    SimilarityTransform::IDENTITY,
+                    layout,
+                )?;
+                accumulator.integrate(&photosites.data, RejectionMode::None, None);
+            }
+            None => {
+                accumulator.integrate(&reference.data, RejectionMode::None, None);
+            }
+        }
         let mut ledger = crate::replay::Ledger::new(&reference);
         if !reference_noise.is_empty() {
             ledger.set_reference_weighting(&reference_noise);
@@ -870,8 +931,8 @@ impl LiveStacker {
         {
             return Ok(self.reject(FrameRejectionReason::Calibration(error.to_string())));
         }
-        let frame = match frame.into_prepared() {
-            Ok(frame) => frame,
+        let (frame, cfa) = match frame.into_prepared_with_layout() {
+            Ok(prepared) => prepared,
             Err(error) => {
                 return Ok(self.reject(FrameRejectionReason::IncompatibleImage(error.to_string())));
             }
@@ -882,6 +943,7 @@ impl LiveStacker {
             &self.options,
             &self.reference_noise,
             frame.image,
+            cfa,
         )?
         .with_source(source);
         Ok(self.integrate_prepared(prepared))
@@ -934,6 +996,7 @@ impl LiveStacker {
             &self.options,
             &self.reference_noise,
             frame,
+            None,
         )?;
         Ok(self.integrate_prepared(prepared))
     }
@@ -971,7 +1034,8 @@ impl LiveStacker {
     }
     /// Copy the current estimate and coverage masks into an owned snapshot.
     pub fn snapshot(&self) -> Result<StackSnapshot> {
-        let (mean, variance) = self.accumulator.snapshot();
+        let (mut mean, variance) = self.accumulator.snapshot();
+        self.fill_photosite_gaps(&mut mean, &self.accumulator.count);
         Ok(StackSnapshot {
             image: LinearImage::new(
                 self.reference.width,
@@ -998,19 +1062,36 @@ impl LiveStacker {
     /// another thread. Capturing it copies one `f32` per image sample; it does
     /// not copy variance, coverage, or rejected-sample maps.
     pub fn export_snapshot(&self) -> Result<StackExportSnapshot> {
+        let mut mean = self.accumulator.mean_snapshot();
+        self.fill_photosite_gaps(&mut mean, &self.accumulator.count);
         Ok(StackExportSnapshot {
             image: LinearImage::new(
                 self.reference.width,
                 self.reference.height,
                 self.reference.channels,
-                self.accumulator.mean_snapshot(),
+                mean,
             )?,
             accepted_frames: self.accepted_frames,
             rejected_frames: self.rejected_frames,
         })
     }
 
+    /// Under Bayer drizzle, fill each channel no frame reached at a pixel
+    /// from that channel's covered neighbours; see [`fill_photosite_gaps`].
+    pub(crate) fn fill_photosite_gaps(&self, mean: &mut [f32], coverage: &[u32]) {
+        if self.options.cfa_integration == CfaIntegration::BayerDrizzle {
+            fill_photosite_gaps(
+                mean,
+                coverage,
+                self.reference.width,
+                self.reference.channels,
+            );
+        }
+    }
+
     /// Borrow the current mean and masks without copying full-frame state.
+    /// Under Bayer drizzle the borrowed mean is not gap-filled: a channel no
+    /// frame has reached reads `NaN` with zero coverage.
     /// This is the preferred source for a live display renderer.
     pub fn view(&self) -> StackView<'_> {
         StackView {
@@ -1035,7 +1116,15 @@ impl LiveStacker {
     /// Consume the live state and move its full-frame buffers into a final
     /// snapshot. Batch callers should prefer this to avoid snapshot copies.
     pub fn into_snapshot(self) -> Result<StackSnapshot> {
-        let (mean, variance, coverage, rejected_samples) = self.accumulator.into_snapshot();
+        let (mut mean, variance, coverage, rejected_samples) = self.accumulator.into_snapshot();
+        if self.options.cfa_integration == CfaIntegration::BayerDrizzle {
+            fill_photosite_gaps(
+                &mut mean,
+                &coverage,
+                self.reference.width,
+                self.reference.channels,
+            );
+        }
         Ok(StackSnapshot {
             image: LinearImage::new(
                 self.reference.width,
@@ -1240,6 +1329,9 @@ pub(crate) struct ReadyFrame {
     noise: Vec<f32>,
     /// Per-channel weight; empty for equal weighting.
     weight: Vec<f32>,
+    /// Whether `registered` holds one photosite sample per pixel (Bayer
+    /// drizzle) rather than every channel.
+    photosites: bool,
 }
 
 impl PreparedFrame {
@@ -1265,6 +1357,7 @@ pub(crate) fn prepare_frame(
     options: &StackOptions,
     reference_noise: &[f32],
     frame: LinearImage,
+    cfa: Option<BayerLayout>,
 ) -> Result<PreparedFrame> {
     if reference.channels != frame.channels {
         return Ok(PreparedFrame::Rejected(
@@ -1369,6 +1462,28 @@ pub(crate) fn prepare_frame(
             FrameRejectionReason::Normalization(message),
         ));
     }
+    // Bayer drizzle measures overlap and normalization on the interpolated
+    // frame above, which samples every channel evenly, then integrates the
+    // photosites themselves with the same normalization.
+    let photosites = cfa.filter(|_| options.cfa_integration == CfaIntegration::BayerDrizzle);
+    if let Some(layout) = photosites {
+        registered = crate::registration::resample_region_photosites(
+            &frame,
+            reference.width,
+            reference.height,
+            ReferenceRegion {
+                x: 0,
+                y: 0,
+                width: reference.width,
+                height: reference.height,
+            },
+            registration.transform,
+            layout,
+        )?;
+        if !matches!(options.normalization, NormalizationMode::None) {
+            normalization.apply(&mut registered)?;
+        }
+    }
     // Noise is read from the calibrated frame before resampling. Bilinear
     // resampling averages neighbouring pixels by an amount that depends on
     // each frame's sub-pixel shift, which would bias the weights.
@@ -1420,6 +1535,7 @@ pub(crate) fn prepare_frame(
         source: None,
         noise,
         weight,
+        photosites: photosites.is_some(),
     })))
 }
 
@@ -1464,13 +1580,20 @@ impl IntegrationHalf<'_> {
             source,
             noise,
             weight,
+            photosites,
         } = *ready;
         let weights = (!weight.is_empty()).then_some(weight.as_slice());
 
         let (would_accept, _) =
             self.accumulator
                 .classify(&registered.data, self.options.rejection, weights);
-        let integrated_fraction = would_accept as f32 / registered.sample_count() as f32;
+        // A photosite frame offers one sample per pixel, not one per channel.
+        let offered = if photosites {
+            registered.pixel_count()
+        } else {
+            registered.sample_count()
+        };
+        let integrated_fraction = would_accept as f32 / offered as f32;
         if integrated_fraction < self.options.acceptance.minimum_integrated_fraction {
             return self.reject(FrameRejectionReason::InsufficientIntegratedSamples {
                 measured: integrated_fraction,
@@ -1732,6 +1855,56 @@ impl Accumulator {
             *m2 = finalized_variance(*m2, count);
         }
         (self.mean, self.m2, self.count, self.rejected)
+    }
+}
+
+/// Fill each channel of a Bayer-drizzled mean that no frame reached at a
+/// pixel, where some other channel was reached, with the mean of the same
+/// channel's covered samples within one pixel, or else within two. Coverage
+/// is left at zero, so the gaps stay visible in the coverage map. Gaps are
+/// rare once frames have drifted a few pixels, so the fills are collected
+/// and then written.
+pub(crate) fn fill_photosite_gaps(
+    mean: &mut [f32],
+    coverage: &[u32],
+    width: usize,
+    channels: usize,
+) {
+    if channels != 3 || width == 0 {
+        return;
+    }
+    let height = mean.len() / (width * channels);
+    let read: &[f32] = mean;
+    let fills = (0..height)
+        .into_par_iter()
+        .flat_map_iter(|y| {
+            (0..width).flat_map(move |x| {
+                let pixel = (y * width + x) * channels;
+                let reached = (0..channels).any(|channel| coverage[pixel + channel] > 0);
+                (0..channels).filter_map(move |channel| {
+                    let index = pixel + channel;
+                    if !reached || coverage[index] > 0 {
+                        return None;
+                    }
+                    (1..=2_usize).find_map(|radius| {
+                        let (mut sum, mut count) = (0.0_f64, 0_u32);
+                        for ny in y.saturating_sub(radius)..(y + radius + 1).min(height) {
+                            for nx in x.saturating_sub(radius)..(x + radius + 1).min(width) {
+                                let neighbour = (ny * width + nx) * channels + channel;
+                                if coverage[neighbour] > 0 && read[neighbour].is_finite() {
+                                    sum += f64::from(read[neighbour]);
+                                    count += 1;
+                                }
+                            }
+                        }
+                        (count > 0).then(|| (index, (sum / f64::from(count)) as f32))
+                    })
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    for (index, value) in fills {
+        mean[index] = value;
     }
 }
 
@@ -2228,6 +2401,168 @@ mod tests {
             "the defect must be gone from the integration: {}",
             snapshot.image.data[hot]
         );
+    }
+
+    /// An RGGB mosaic of a colored star field moved by `(dx, dy)`: each
+    /// photosite records its own channel of the continuous scene.
+    fn bayer_star_field(width: usize, height: usize, dx: f32, dy: f32) -> LinearImage {
+        const SKY: [f32; 3] = [400.0, 300.0, 200.0];
+        const COLOR: [f32; 3] = [1.0, 0.8, 0.6];
+        let stars = [
+            (21.7_f32, 18.4_f32),
+            (71.3, 28.1),
+            (132.2, 34.8),
+            (43.1, 49.7),
+            (103.4, 58.3),
+            (24.8, 72.2),
+            (82.7, 76.5),
+            (141.1, 87.8),
+            (54.4, 96.2),
+            (116.8, 104.1),
+            (33.2, 110.0),
+            (91.5, 116.4),
+        ];
+        let layout = BayerLayout {
+            pattern: seiza_fits::BayerPattern::Rggb,
+            x_offset: 0,
+            y_offset: 0,
+        };
+        let data = (0..width * height)
+            .map(|index| {
+                let (x, y) = (index % width, index / width);
+                let channel = layout.channel_at(x, y);
+                let mut value = SKY[channel];
+                for (star, (star_x, star_y)) in stars.iter().enumerate() {
+                    let rx = x as f32 - star_x - dx;
+                    let ry = y as f32 - star_y - dy;
+                    value += COLOR[channel]
+                        * (2_000.0 + star as f32 * 150.0)
+                        * (-(rx * rx + ry * ry) / 3.2).exp();
+                }
+                value
+            })
+            .collect();
+        LinearImage::new(width, height, 1, data).unwrap()
+    }
+
+    #[test]
+    fn bayer_drizzle_integrates_one_photosite_per_pixel_and_replays_the_same() {
+        let (width, height) = (160, 128);
+        let shifts = [
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (0.0, 1.0),
+            (1.0, 1.0),
+            (2.3, 0.6),
+            (0.4, 2.2),
+            (3.1, 3.3),
+            (1.6, 2.7),
+        ];
+        let directory = tempfile::tempdir().unwrap();
+        let bayer = [("BAYERPAT".to_string(), HeaderValue::String("RGGB".into()))];
+        let paths = shifts
+            .iter()
+            .enumerate()
+            .map(|(index, &(dx, dy))| {
+                let path = directory.path().join(format!("light-{index}.fits"));
+                crate::write_processed_image_fits_f32(
+                    &path,
+                    &bayer_star_field(width, height, dx, dy),
+                    &bayer,
+                    &[],
+                )
+                .unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+        let options = StackOptions {
+            normalization: NormalizationMode::None,
+            rejection: RejectionMode::None,
+            cfa_integration: CfaIntegration::BayerDrizzle,
+            ..StackOptions::default()
+        };
+        let mut stacker =
+            LiveStacker::open_fits(&paths[0], None, None, None, None, options).unwrap();
+        for path in &paths[1..] {
+            assert!(
+                matches!(
+                    stacker.push_fits(path).unwrap(),
+                    FrameDisposition::Accepted(_)
+                ),
+                "{}",
+                path.display()
+            );
+        }
+
+        // Every frame offers exactly one sample per pixel it covers, in that
+        // photosite's channel, so away from the edges the three channels'
+        // coverage sums to the frame count. Gaps are filled, and the sky
+        // keeps its color: nothing mixed the channels.
+        let check = |snapshot: &StackSnapshot| {
+            let mut sky = [Vec::new(), Vec::new(), Vec::new()];
+            for y in 8..height - 8 {
+                for x in 8..width - 8 {
+                    let pixel = (y * width + x) * 3;
+                    let covered: u32 = snapshot.coverage[pixel..pixel + 3].iter().sum();
+                    assert_eq!(covered as usize, shifts.len(), "({x}, {y})");
+                    for (channel, samples) in sky.iter_mut().enumerate() {
+                        let value = snapshot.image.data[pixel + channel];
+                        assert!(value.is_finite(), "({x}, {y}) channel {channel}");
+                        samples.push(value);
+                    }
+                }
+            }
+            for (channel, expected) in [400.0, 300.0, 200.0].into_iter().enumerate() {
+                let median = seiza_stats::median_in_place(&mut sky[channel]).unwrap();
+                assert!(
+                    (median - expected).abs() < 1.0,
+                    "channel {channel}: {median}"
+                );
+            }
+        };
+        check(&stacker.snapshot().unwrap());
+
+        let replayed = stacker
+            .reintegrate(&crate::BatchStackOptions::default(), |_, _, _| {})
+            .unwrap();
+        let mut sky = [Vec::new(), Vec::new(), Vec::new()];
+        for y in 8..height - 8 {
+            for x in 8..width - 8 {
+                for (channel, samples) in sky.iter_mut().enumerate() {
+                    let value = replayed.snapshot.image.data[(y * width + x) * 3 + channel];
+                    assert!(value.is_finite());
+                    samples.push(value);
+                }
+            }
+        }
+        for (channel, expected) in [400.0, 300.0, 200.0].into_iter().enumerate() {
+            let median = seiza_stats::median_in_place(&mut sky[channel]).unwrap();
+            assert!(
+                (median - expected).abs() < 1.0,
+                "replayed channel {channel}: {median}"
+            );
+        }
+    }
+
+    #[test]
+    fn photosite_gaps_fill_from_the_same_channel_and_keep_zero_coverage() {
+        // A 3x3 RGB image whose centre pixel has red and green but no blue.
+        let mut mean = vec![f32::NAN; 27];
+        let mut coverage = vec![0_u32; 27];
+        for pixel in 0..9 {
+            for channel in 0..3 {
+                if pixel == 4 && channel == 2 {
+                    continue;
+                }
+                mean[pixel * 3 + channel] = (channel as f32 + 1.0) * 100.0 + pixel as f32;
+                coverage[pixel * 3 + channel] = 1;
+            }
+        }
+        fill_photosite_gaps(&mut mean, &coverage, 3, 3);
+        let neighbours = (0..9).filter(|&pixel| pixel != 4).map(|p| 300.0 + p as f32);
+        let expected = neighbours.sum::<f32>() / 8.0;
+        assert!((mean[4 * 3 + 2] - expected).abs() < 1.0e-3);
+        assert_eq!(coverage[4 * 3 + 2], 0);
     }
 
     #[test]

@@ -530,7 +530,48 @@ pub fn resample_region_to_reference(
         reference_height,
         region,
         transform.inverse_map(),
+        Sampling::Bilinear,
     )
+}
+
+/// Map a debayered Bayer frame onto the reference grid without interpolating
+/// color: each output pixel takes, in the one channel it records, the sample
+/// of the source photosite nearest its position, and leaves the other two
+/// channels `NaN`. Debayering keeps each photosite's own sample exactly, so
+/// these are the raw sensor values. Integrating many frames that land on
+/// different photosites fills every channel without interpolation; this is
+/// Bayer drizzle with a one-pixel drop at the reference scale.
+pub fn resample_region_photosites(
+    source: &LinearImage,
+    reference_width: usize,
+    reference_height: usize,
+    region: ReferenceRegion,
+    transform: SimilarityTransform,
+    layout: crate::BayerLayout,
+) -> Result<LinearImage> {
+    transform.validate()?;
+    if source.channels != 3 {
+        return Err(Error::Registration(
+            "photosite sampling needs a debayered three-channel source".into(),
+        ));
+    }
+    resample_region_with_inverse(
+        source,
+        reference_width,
+        reference_height,
+        region,
+        transform.inverse_map(),
+        Sampling::NearestPhotosite(layout),
+    )
+}
+
+/// How a resampled sample is formed from the source.
+#[derive(Clone, Copy)]
+enum Sampling {
+    /// Bilinear interpolation of every channel.
+    Bilinear,
+    /// The nearest source photosite, in its own channel only.
+    NearestPhotosite(crate::BayerLayout),
 }
 
 /// Resample a source image through a general source-to-reference affine
@@ -571,6 +612,7 @@ pub fn resample_region_to_reference_affine(
         reference_height,
         region,
         transform.inverse_map(),
+        Sampling::Bilinear,
     )
 }
 
@@ -580,6 +622,7 @@ fn resample_region_with_inverse(
     reference_height: usize,
     region: ReferenceRegion,
     inverse: impl Fn(f64, f64) -> (f64, f64) + Sync,
+    sampling: Sampling,
 ) -> Result<LinearImage> {
     const COORDINATE_EPSILON: f64 = 1.0e-9;
     if reference_width == 0 || reference_height == 0 {
@@ -637,6 +680,14 @@ fn resample_region_with_inverse(
                 // to lie within the epsilon-expanded source grid.
                 let source_x = source_x.clamp(0.0, maximum_source_x);
                 let source_y = source_y.clamp(0.0, maximum_source_y);
+                if let Sampling::NearestPhotosite(layout) = sampling {
+                    let nearest_x = ((source_x + 0.5) as usize).min(source.width - 1);
+                    let nearest_y = ((source_y + 0.5) as usize).min(source.height - 1);
+                    let channel = layout.channel_at(nearest_x, nearest_y);
+                    output[channel] =
+                        source.data[(nearest_y * source.width + nearest_x) * channels + channel];
+                    continue;
+                }
                 // Both coordinates are non-negative here, so truncation is
                 // the floor, without a libm call on baseline x86-64.
                 let x0 = source_x as usize;

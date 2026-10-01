@@ -135,6 +135,30 @@ impl RegisteredFrameMapping {
         Ok(crop)
     }
 
+    /// [`Self::extract_region`] for Bayer drizzle: the nearest source
+    /// photosite per pixel, in its own channel, normalized the same way.
+    /// `source` is the debayered frame and `layout` the Bayer layout it was
+    /// debayered from.
+    pub fn extract_region_photosites(
+        &self,
+        source: &LinearImage,
+        region: ReferenceRegion,
+        layout: crate::BayerLayout,
+    ) -> Result<LinearImage> {
+        self.validate()?;
+        let mut crop = crate::resample_region_photosites(
+            source,
+            self.reference_width,
+            self.reference_height,
+            region,
+            self.transform,
+            layout,
+        )?;
+        self.normalization
+            .apply_region(&mut crop, region.x, region.y)?;
+        Ok(crop)
+    }
+
     /// Extract a region after a second registration stage. Global
     /// normalization commutes with the second resampling and keeps this path
     /// bounded. Local normalization uses the exact two-stage order.

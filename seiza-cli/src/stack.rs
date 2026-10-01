@@ -74,6 +74,13 @@ pub(crate) struct StackArgs {
     /// reference and warm-up frames, which online rejection cannot revisit.
     #[arg(long)]
     reintegrate: bool,
+    /// Integrate each Bayer frame's photosites without demosaicing: every
+    /// registered pixel takes the nearest photosite in its own color, and
+    /// the stack fills the colors in. Sharper colors when frames are
+    /// dithered by several pixels; lower SNR when they barely move.
+    /// Registration still uses the demosaiced frame
+    #[arg(long)]
+    bayer_drizzle: bool,
     /// Maximum registration residual for additive admission
     #[arg(long, default_value_t = 2.0)]
     max_registration_rms: f64,
@@ -130,6 +137,7 @@ struct ConfigurationReport {
     rejection_warmup: u32,
     rejection_minimum_sigma: f32,
     reintegrate: bool,
+    bayer_drizzle: bool,
     maximum_registration_rms_pixels: f64,
     maximum_scale_deviation: f64,
     maximum_rotation_degrees: f64,
@@ -283,6 +291,11 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
     let mut stack_options = StackOptions {
         normalization,
         rejection,
+        cfa_integration: if options.bayer_drizzle {
+            seiza_stacking::CfaIntegration::BayerDrizzle
+        } else {
+            seiza_stacking::CfaIntegration::Demosaic
+        },
         ..StackOptions::default()
     };
     stack_options.acceptance.maximum_registration_rms_pixels = options.max_registration_rms;
@@ -327,6 +340,7 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
         sigma_high: options.sigma_high,
         rejection_warmup: options.rejection_warmup,
         reintegrate: options.reintegrate,
+        bayer_drizzle: options.bayer_drizzle,
         rejection_minimum_sigma: match stack_options.rejection {
             RejectionMode::None => DeltaSigmaOptions::default().minimum_sigma,
             RejectionMode::DeltaSigma(options) => options.minimum_sigma,

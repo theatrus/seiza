@@ -402,6 +402,18 @@ star where it belongs: on a 98-frame M45 stack at 2.6px FWHM, bilinear
 interpolation left red and blue 0.42px apart and stars 3.1px wide, against
 0.15px and 2.6px. The two-pixel border keeps bilinear estimates.
 
+`StackOptions::cfa_integration` set to `CfaIntegration::BayerDrizzle` (the
+CLI's `--bayer-drizzle`) integrates photosites instead: each registered pixel
+takes only the nearest source photosite, in the one channel it records, and
+the stack fills the colors in from frames that land on different photosites.
+Registration and normalization still use the demosaiced frame, and
+reintegration replays the same sampling. Nothing is interpolated, but each
+channel sees a third to a quarter of the samples, so it pays only when frames
+are dithered by several pixels: on the M45 stack above, which drifted 10 to 20
+pixels in a night, it reached 2.61px FWHM but SNR 302 against 345 for
+demosaicing. A channel no frame reached at a pixel is filled from the same
+channel's neighbours in snapshots, with its coverage left at zero.
+
 Integrated flats are applied in the raw light frame's sampling before CFA
 debayering. Master darks and flats retain their Bayer pattern and origin
 offsets, and a known layout must match the light before calibration. A supplied

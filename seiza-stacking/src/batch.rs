@@ -152,28 +152,27 @@ pub fn integrate_registered_frames(
 
     // First estimate: every finite sample, and each pixel's extremes.
     let mut shape = None;
-    let mut first = Vec::<Moments>::new();
-    let mut extremes = Vec::<Extremes>::new();
+    let mut first = Vec::<FirstEstimate>::new();
     let mut digests = Vec::with_capacity(frame_count);
     for index in 0..frame_count {
         let image = load_unchanged(options, &mut load, BatchStackPass::Estimate, index, shape)?;
         if shape.is_none() {
             shape = Some((image.width, image.height, image.channels));
-            first.resize(image.sample_count(), Moments::default());
-            extremes.resize(image.sample_count(), Extremes::default());
+            first.resize(image.sample_count(), FirstEstimate::default());
         }
         digests.push(sample_digest(&image.data));
         first
             .par_iter_mut()
-            .zip(extremes.par_iter_mut())
             .zip(image.data.par_iter())
-            .for_each(|((moments, extremes), &sample)| {
+            .for_each(|(first, &sample)| {
                 if sample.is_finite() {
-                    *moments = moments.with(sample, 1.0);
-                    extremes.take(sample, 1.0);
+                    first.take(sample, 1.0);
                 }
             });
     }
+    first
+        .par_iter_mut()
+        .for_each(|first| first.finish(&rejection));
 
     // Second estimate: only the samples the first keeps.
     let mut kept = vec![Moments::default(); first.len()];
@@ -188,13 +187,9 @@ pub fn integrate_registered_frames(
         )?;
         kept.par_iter_mut()
             .zip(first.par_iter())
-            .zip(extremes.par_iter())
             .zip(image.data.par_iter())
-            .for_each(|(((kept, first), extremes), &sample)| {
-                if sample.is_finite()
-                    && !first_peers(*first, *extremes, sample, 1.0, &rejection)
-                        .rejects(sample, 1.0, &rejection)
-                {
+            .for_each(|((kept, first), &sample)| {
+                if sample.is_finite() && first.keeps(sample, 1.0, &rejection) {
                     *kept = kept.with(sample, 1.0);
                 }
             });
@@ -228,8 +223,7 @@ pub fn integrate_registered_frames(
                         return (0, 0);
                     }
                     if kept_peers(
-                        first[sample_index],
-                        extremes[sample_index],
+                        &first[sample_index],
                         kept[sample_index],
                         sample,
                         1.0,
@@ -302,32 +296,30 @@ fn integrate_weighted_frames(
     };
 
     let mut shape = None;
-    let mut first = Vec::<Moments>::new();
-    let mut extremes = Vec::<Extremes>::new();
+    let mut first = Vec::<FirstEstimate>::new();
     let mut digests = Vec::with_capacity(frame_count);
     for (index, weights) in frame_weights.iter().enumerate() {
         let image = load_unchanged(options, &mut load, BatchStackPass::Estimate, index, shape)?;
         validate_frame_weights(index, weights, image.channels)?;
         if shape.is_none() {
             shape = Some((image.width, image.height, image.channels));
-            first.resize(image.sample_count(), Moments::default());
-            extremes.resize(image.sample_count(), Extremes::default());
+            first.resize(image.sample_count(), FirstEstimate::default());
         }
         digests.push(sample_digest(&image.data));
         let channels = image.channels;
         first
             .par_iter_mut()
-            .zip(extremes.par_iter_mut())
             .zip(image.data.par_iter())
             .enumerate()
-            .for_each(|(sample_index, ((moments, extremes), &sample))| {
+            .for_each(|(sample_index, (first, &sample))| {
                 if sample.is_finite() {
-                    let weight = weight_at(index, sample_index, channels);
-                    *moments = moments.with(sample, weight);
-                    extremes.take(sample, weight);
+                    first.take(sample, weight_at(index, sample_index, channels));
                 }
             });
     }
+    first
+        .par_iter_mut()
+        .for_each(|first| first.finish(&rejection));
 
     let mut kept = vec![Moments::default(); first.len()];
     for (index, expected_digest) in digests.iter().enumerate() {
@@ -342,15 +334,11 @@ fn integrate_weighted_frames(
         let channels = image.channels;
         kept.par_iter_mut()
             .zip(first.par_iter())
-            .zip(extremes.par_iter())
             .zip(image.data.par_iter())
             .enumerate()
-            .for_each(|(sample_index, (((kept, first), extremes), &sample))| {
+            .for_each(|(sample_index, ((kept, first), &sample))| {
                 let weight = weight_at(index, sample_index, channels);
-                if sample.is_finite()
-                    && !first_peers(*first, *extremes, sample, weight, &rejection)
-                        .rejects(sample, weight, &rejection)
-                {
+                if sample.is_finite() && first.keeps(sample, weight, &rejection) {
                     *kept = kept.with(sample, weight);
                 }
             });
@@ -390,8 +378,7 @@ fn integrate_weighted_frames(
                     }
                     let weight = weight_at(index, sample_index, channels);
                     if kept_peers(
-                        first[sample_index],
-                        extremes[sample_index],
+                        &first[sample_index],
                         kept[sample_index],
                         sample,
                         weight,
@@ -490,14 +477,28 @@ fn validate_image(image: &LinearImage, shape: Option<(usize, usize, usize)>) -> 
     Ok(())
 }
 
+/// SHA-256 over the SHA-256 of each 1 Mi-sample chunk of little-endian
+/// samples, so the passes' change check runs on every core.
 fn sample_digest(samples: &[f32]) -> [u8; 32] {
+    const CHUNK: usize = 1 << 20;
+    let chunks = samples
+        .par_chunks(CHUNK)
+        .map(|chunk| {
+            let mut hash = Sha256::new();
+            let mut bytes = [0_u8; 4096];
+            for part in chunk.chunks(bytes.len() / 4) {
+                for (sample, output) in part.iter().zip(bytes.chunks_exact_mut(4)) {
+                    output.copy_from_slice(&sample.to_le_bytes());
+                }
+                hash.update(&bytes[..part.len() * 4]);
+            }
+            <[u8; 32]>::from(hash.finalize())
+        })
+        .collect::<Vec<_>>();
     let mut hash = Sha256::new();
-    let mut bytes = [0_u8; 4096];
-    for chunk in samples.chunks(bytes.len() / 4) {
-        for (sample, output) in chunk.iter().zip(bytes.chunks_exact_mut(4)) {
-            output.copy_from_slice(&sample.to_le_bytes());
-        }
-        hash.update(&bytes[..chunk.len() * 4]);
+    hash.update((samples.len() as u64).to_le_bytes());
+    for chunk in chunks {
+        hash.update(chunk);
     }
     hash.finalize().into()
 }
@@ -632,7 +633,12 @@ impl Moments {
         }
         let peers = f64::from(self.count);
         let mean = f64::from(self.mean);
-        let scale = ((1.0 / weight + 1.0 / weight_sum) / (1.0 + 1.0 / peers)).sqrt();
+        // Equal weights make the scale exactly 1; skip its divisions.
+        let scale = if weight == 1.0 && weight_sum == peers {
+            1.0
+        } else {
+            ((1.0 / weight + 1.0 / weight_sum) / (1.0 + 1.0 / peers)).sqrt()
+        };
         let sigma = ((f64::from(self.m2) / (peers - 1.0)).sqrt() * scale)
             .max(f64::from(rejection.minimum_sigma))
             .max(mean.abs() * PRECISION_STEPS * f64::from(f32::EPSILON));
@@ -723,36 +729,86 @@ impl Rejection {
     }
 }
 
-/// The largest and smallest sample a pixel has seen, with their weights.
+/// One pixel's first estimate. Pass 1 accumulates every sample's moments
+/// and the largest and smallest sample; [`Self::finish`] then takes those two
+/// out of the moments once the pixel has [`TRIMMED_FIRST_ESTIMATE`] samples
+/// and records the variance corrections, so later passes pay for at most one
+/// leave-one-out step per sample.
 #[derive(Clone, Copy, Debug)]
-struct Extremes {
+struct FirstEstimate {
+    moments: Moments,
     high: f32,
-    high_weight: f32,
     low: f32,
-    low_weight: f32,
+    /// Until [`Self::finish`], the weight of the largest sample; after it,
+    /// the variance correction for a candidate that is not an extreme.
+    high_weight_or_member_factor: f32,
+    /// Until [`Self::finish`], the weight of the smallest sample; after it,
+    /// the variance correction for a candidate that is one.
+    low_weight_or_extreme_factor: f32,
 }
 
-impl Default for Extremes {
+impl Default for FirstEstimate {
     fn default() -> Self {
         Self {
+            moments: Moments::default(),
             high: f32::NEG_INFINITY,
-            high_weight: 0.0,
             low: f32::INFINITY,
-            low_weight: 0.0,
+            high_weight_or_member_factor: 0.0,
+            low_weight_or_extreme_factor: 0.0,
         }
     }
 }
 
-impl Extremes {
+impl FirstEstimate {
     fn take(&mut self, value: f32, weight: f64) {
+        self.moments = self.moments.with(value, weight);
         if value > self.high {
             self.high = value;
-            self.high_weight = weight as f32;
+            self.high_weight_or_member_factor = weight as f32;
         }
         if value < self.low {
             self.low = value;
-            self.low_weight = weight as f32;
+            self.low_weight_or_extreme_factor = weight as f32;
         }
+    }
+
+    /// Trim the extremes and record the corrections. A pixel too shallow to
+    /// trim keeps every sample and marks its extremes `NaN`, which no sample
+    /// equals.
+    fn finish(&mut self, rejection: &Rejection) {
+        let count = self.moments.count;
+        if count < TRIMMED_FIRST_ESTIMATE {
+            self.high = f32::NAN;
+            self.low = f32::NAN;
+            self.high_weight_or_member_factor = 1.0;
+            self.low_weight_or_extreme_factor = 1.0;
+            return;
+        }
+        self.moments = self
+            .moments
+            .without(self.high, f64::from(self.high_weight_or_member_factor))
+            .without(self.low, f64::from(self.low_weight_or_extreme_factor));
+        self.high_weight_or_member_factor = rejection.trim_factor(count, true) as f32;
+        self.low_weight_or_extreme_factor = rejection.trim_factor(count, false) as f32;
+    }
+
+    /// A sample's peers in the first estimate: every other sample, less the
+    /// extremes, with the variance corrected for trimming Gaussian noise. A
+    /// sample that is itself an extreme is already out.
+    fn peers(&self, value: f32, weight: f64) -> Moments {
+        if value == self.high || value == self.low {
+            self.moments
+                .scaled(f64::from(self.low_weight_or_extreme_factor))
+        } else {
+            self.moments
+                .without(value, weight)
+                .scaled(f64::from(self.high_weight_or_member_factor))
+        }
+    }
+
+    /// Whether the first estimate keeps a sample.
+    fn keeps(&self, value: f32, weight: f64, rejection: &Rejection) -> bool {
+        !self.peers(value, weight).rejects(value, weight, rejection)
     }
 }
 
@@ -760,49 +816,20 @@ impl Extremes {
 /// Below this the correction for trimming is too large to trust.
 const TRIMMED_FIRST_ESTIMATE: u32 = 10;
 
-/// The first estimate's peers for one sample: every other sample, less the
-/// pixel's largest and smallest once it has [`TRIMMED_FIRST_ESTIMATE`], with
-/// the variance corrected for trimming Gaussian noise. A sample that is
-/// itself an extreme is already out.
-fn first_peers(
-    first: Moments,
-    extremes: Extremes,
-    value: f32,
-    weight: f64,
-    rejection: &Rejection,
-) -> Moments {
-    if first.count < TRIMMED_FIRST_ESTIMATE {
-        return first.without(value, weight);
-    }
-    let trimmed = first
-        .without(extremes.high, f64::from(extremes.high_weight))
-        .without(extremes.low, f64::from(extremes.low_weight));
-    if value == extremes.high || value == extremes.low {
-        trimmed.scaled(rejection.trim_factor(first.count, false))
-    } else {
-        trimmed
-            .without(value, weight)
-            .scaled(rejection.trim_factor(first.count, true))
-    }
-}
-
 /// The second estimate's peers for one sample: the kept moments, less the
 /// sample when the first estimate kept it, with the variance corrected for
 /// the clipping that chose them.
 fn kept_peers(
-    first: Moments,
-    extremes: Extremes,
+    first: &FirstEstimate,
     kept: Moments,
     value: f32,
     weight: f64,
     rejection: &Rejection,
 ) -> Moments {
-    let peers = if first_peers(first, extremes, value, weight, rejection)
-        .rejects(value, weight, rejection)
-    {
-        kept
-    } else {
+    let peers = if first.keeps(value, weight, rejection) {
         kept.without(value, weight)
+    } else {
+        kept
     };
     peers.scaled(1.0 / rejection.clipped_variance)
 }

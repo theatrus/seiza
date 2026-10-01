@@ -807,8 +807,8 @@ fn prepare_decoded(
             crate::FrameRejectionReason::Calibration(error.to_string()),
         ));
     }
-    let frame = match frame.into_prepared() {
-        Ok(frame) => frame,
+    let (frame, cfa) = match frame.into_prepared_with_layout() {
+        Ok(prepared) => prepared,
         Err(error) => {
             return Ok(PreparedFrame::Rejected(
                 crate::FrameRejectionReason::IncompatibleImage(error.to_string()),
@@ -821,6 +821,7 @@ fn prepare_decoded(
         half.options,
         half.reference_noise,
         frame.image,
+        cfa,
     )?
     .with_source(source))
 }

@@ -293,6 +293,62 @@ impl Ledger {
     }
 }
 
+/// Frames prepared ahead of the one a reintegration pass is integrating.
+const REPLAY_LOOKAHEAD: usize = 2;
+
+/// Calibration masters for replay. The current set is the stacker's own; an
+/// earlier set is loaded from its paths when first needed and kept with the
+/// one before it, so frames prepared ahead across a set boundary do not load
+/// either set twice.
+#[derive(Default)]
+struct MastersCache {
+    loaded: std::sync::Mutex<Vec<(u32, std::sync::Arc<CalibrationMasters>)>>,
+}
+
+/// Masters for one frame: borrowed from the stacker or shared from the cache.
+enum ReplayMasters<'a> {
+    Current(&'a CalibrationMasters),
+    Loaded(std::sync::Arc<CalibrationMasters>),
+}
+
+impl std::ops::Deref for ReplayMasters<'_> {
+    type Target = CalibrationMasters;
+
+    fn deref(&self) -> &CalibrationMasters {
+        match self {
+            Self::Current(masters) => masters,
+            Self::Loaded(masters) => masters,
+        }
+    }
+}
+
+impl MastersCache {
+    fn get<'a>(&self, stacker: &'a LiveStacker, calibration: u32) -> Result<ReplayMasters<'a>> {
+        if calibration == stacker.ledger.current_calibration() {
+            return Ok(ReplayMasters::Current(&stacker.calibration));
+        }
+        let mut loaded = self
+            .loaded
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some((_, masters)) = loaded.iter().find(|(set, _)| *set == calibration) {
+            return Ok(ReplayMasters::Loaded(std::sync::Arc::clone(masters)));
+        }
+        let masters = std::sync::Arc::new(
+            stacker.ledger.calibrations[calibration as usize]
+                .load()
+                .ok_or_else(|| {
+                    Error::Stack("calibration masters are no longer available".into())
+                })??,
+        );
+        if loaded.len() == 2 {
+            loaded.remove(0);
+        }
+        loaded.push((calibration, std::sync::Arc::clone(&masters)));
+        Ok(ReplayMasters::Loaded(masters))
+    }
+}
+
 impl LiveStacker {
     /// Why [`Self::reintegrate`] cannot replay this stack, or `None` when it
     /// can.
@@ -386,32 +442,55 @@ impl LiveStacker {
             };
             &weighted_options
         };
-        let current = ledger.current_calibration();
         let count = ledger.frames.len();
-        // Masters of earlier calibration sets, loaded once per switch.
-        let mut loaded: Option<(u32, CalibrationMasters)> = None;
-        let mut result = integrate_registered_frames(count, options, |pass, index| {
-            progress(pass, index, count);
-            let frame = &ledger.frames[index];
-            let masters = if frame.calibration == current {
-                &self.calibration
-            } else {
-                if loaded
-                    .as_ref()
-                    .is_none_or(|(generation, _)| *generation != frame.calibration)
-                {
-                    let masters = ledger.calibrations[frame.calibration as usize]
-                        .load()
-                        .ok_or_else(|| {
-                            Error::Stack("calibration masters are no longer available".into())
-                        })??;
-                    loaded = Some((frame.calibration, masters));
-                }
-                &loaded.as_ref().expect("loaded just above").1
+        let masters = MastersCache::default();
+        // Frames are requested in a fixed order: every frame for each pass in
+        // turn. Preparing the next few on their own threads while the batch
+        // integrates the current one overlaps reading, debayering and
+        // resampling with the rejection arithmetic, which leaves cores idle
+        // when they alternate. Each in-flight frame holds about one prepared
+        // image, so the lookahead stays small.
+        let order = [
+            BatchStackPass::Estimate,
+            BatchStackPass::Refine,
+            BatchStackPass::Integrate,
+        ]
+        .into_iter()
+        .flat_map(|pass| (0..count).map(move |index| (pass, index)))
+        .collect::<Vec<_>>();
+        let lookahead = std::thread::available_parallelism()
+            .map_or(1, |cores| (cores.get() / 6).clamp(1, REPLAY_LOOKAHEAD));
+        let mut result = std::thread::scope(|scope| {
+            let prepare = |index: usize| {
+                let frame = &ledger.frames[index];
+                let masters = masters.get(self, frame.calibration)?;
+                self.replay_frame(frame, &masters)
             };
-            self.replay_frame(frame, masters)
+            let mut in_flight = std::collections::VecDeque::new();
+            let mut next = 0;
+            integrate_registered_frames(count, options, |pass, index| {
+                progress(pass, index, count);
+                while next < order.len() && in_flight.len() < lookahead {
+                    let (_, frame_index) = order[next];
+                    in_flight.push_back((next, scope.spawn(move || prepare(frame_index))));
+                    next += 1;
+                }
+                match in_flight.pop_front() {
+                    Some((position, handle)) if order[position] == (pass, index) => handle
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+                    // A request out of the expected order is served directly.
+                    other => {
+                        if let Some(entry) = other {
+                            in_flight.push_front(entry);
+                        }
+                        prepare(index)
+                    }
+                }
+            })
         })?;
         result.snapshot.rejected_frames = self.rejected_frames;
+        self.fill_photosite_gaps(&mut result.snapshot.image.data, &result.snapshot.coverage);
         Ok(result)
     }
 
@@ -442,16 +521,23 @@ impl LiveStacker {
         if let Some(filter) = &self.options.cosmetic {
             crate::cosmetic::suppress_impulses(&mut frame.image, frame.bayer, filter)?;
         }
-        let frame = frame.into_prepared()?;
-        let image = admitted.mapping.extract_region(
-            &frame.image,
-            ReferenceRegion {
-                x: 0,
-                y: 0,
-                width: admitted.mapping.reference_width(),
-                height: admitted.mapping.reference_height(),
-            },
-        )?;
+        let (frame, cfa) = frame.into_prepared_with_layout()?;
+        let region = ReferenceRegion {
+            x: 0,
+            y: 0,
+            width: admitted.mapping.reference_width(),
+            height: admitted.mapping.reference_height(),
+        };
+        let image = match cfa
+            .filter(|_| self.options.cfa_integration == crate::CfaIntegration::BayerDrizzle)
+        {
+            Some(layout) => {
+                admitted
+                    .mapping
+                    .extract_region_photosites(&frame.image, region, layout)?
+            }
+            None => admitted.mapping.extract_region(&frame.image, region)?,
+        };
         if source.stamp.is_some() && SourceStamp::of(&source.path) != source.stamp {
             return Err(changed());
         }

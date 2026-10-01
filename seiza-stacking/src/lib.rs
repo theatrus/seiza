@@ -64,8 +64,8 @@ pub use pipeline::{
 };
 pub use registration::{
     AffineTransform, ReferenceRegion, Registrar, RegistrationOptions, RegistrationResult,
-    SimilarityTransform, resample_region_to_reference, resample_region_to_reference_affine,
-    resample_to_reference, resample_to_reference_affine,
+    SimilarityTransform, resample_region_photosites, resample_region_to_reference,
+    resample_region_to_reference_affine, resample_to_reference, resample_to_reference_affine,
 };
 pub use residual_flat::{
     RESIDUAL_FLAT_ALGORITHM_VERSION, ResidualFlatBuild, ResidualFlatDiagnostics,
@@ -73,9 +73,9 @@ pub use residual_flat::{
 };
 pub use snr::{SIGNAL_FRACTION, SnrSample, checkpoint_depths, frame_noise, measure_depth};
 pub use stack::{
-    DeltaSigmaOptions, FrameAcceptanceCriteria, FrameDiagnostics, FrameDisposition, FrameInputMode,
-    FrameRejectionReason, FrameWeighting, LiveStacker, RejectionMode, StackExportSnapshot,
-    StackOptions, StackSnapshot, StackView,
+    CfaIntegration, DeltaSigmaOptions, FrameAcceptanceCriteria, FrameDiagnostics, FrameDisposition,
+    FrameInputMode, FrameRejectionReason, FrameWeighting, LiveStacker, RejectionMode,
+    StackExportSnapshot, StackOptions, StackSnapshot, StackView,
 };
 
 use std::path::PathBuf;
