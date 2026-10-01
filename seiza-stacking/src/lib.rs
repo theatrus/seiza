@@ -63,9 +63,10 @@ pub use pipeline::{
     PoolPipelineMemory, PoolPipelineReport,
 };
 pub use registration::{
-    AffineTransform, ReferenceRegion, Registrar, RegistrationOptions, RegistrationResult,
-    SimilarityTransform, resample_region_photosites, resample_region_to_reference,
-    resample_region_to_reference_affine, resample_to_reference, resample_to_reference_affine,
+    AffineTransform, Interpolation, ReferenceRegion, Registrar, RegistrationOptions,
+    RegistrationResult, SimilarityTransform, resample_region_photosites,
+    resample_region_to_reference, resample_region_to_reference_affine,
+    resample_region_to_reference_with, resample_to_reference, resample_to_reference_affine,
 };
 pub use residual_flat::{
     RESIDUAL_FLAT_ALGORITHM_VERSION, ResidualFlatBuild, ResidualFlatDiagnostics,

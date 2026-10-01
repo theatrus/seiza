@@ -24,6 +24,12 @@ enum RejectionArg {
     DeltaSigma,
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum InterpolationArg {
+    Bilinear,
+    Lanczos3,
+}
+
 #[derive(Args)]
 pub(crate) struct StackArgs {
     /// FITS or XISF light frames, in acquisition order; first is the reference
@@ -81,6 +87,10 @@ pub(crate) struct StackArgs {
     /// Registration still uses the demosaiced frame
     #[arg(long)]
     bayer_drizzle: bool,
+    /// How registration resamples each frame: bilinear, or Lanczos-3 clamped
+    /// against ringing, which is sharper and slower
+    #[arg(long, value_enum, default_value = "bilinear")]
+    interpolation: InterpolationArg,
     /// Maximum registration residual for additive admission
     #[arg(long, default_value_t = 2.0)]
     max_registration_rms: f64,
@@ -138,6 +148,7 @@ struct ConfigurationReport {
     rejection_minimum_sigma: f32,
     reintegrate: bool,
     bayer_drizzle: bool,
+    interpolation: &'static str,
     maximum_registration_rms_pixels: f64,
     maximum_scale_deviation: f64,
     maximum_rotation_degrees: f64,
@@ -291,6 +302,10 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
     let mut stack_options = StackOptions {
         normalization,
         rejection,
+        interpolation: match options.interpolation {
+            InterpolationArg::Bilinear => seiza_stacking::Interpolation::Bilinear,
+            InterpolationArg::Lanczos3 => seiza_stacking::Interpolation::Lanczos3,
+        },
         cfa_integration: if options.bayer_drizzle {
             seiza_stacking::CfaIntegration::BayerDrizzle
         } else {
@@ -341,6 +356,10 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
         rejection_warmup: options.rejection_warmup,
         reintegrate: options.reintegrate,
         bayer_drizzle: options.bayer_drizzle,
+        interpolation: match options.interpolation {
+            InterpolationArg::Bilinear => "bilinear",
+            InterpolationArg::Lanczos3 => "lanczos3",
+        },
         rejection_minimum_sigma: match stack_options.rejection {
             RejectionMode::None => DeltaSigmaOptions::default().minimum_sigma,
             RejectionMode::DeltaSigma(options) => options.minimum_sigma,

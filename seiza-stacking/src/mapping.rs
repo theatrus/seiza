@@ -1,7 +1,6 @@
 use crate::{
     AffineTransform, Error, LinearImage, NormalizationMap, ReferenceRegion, Result,
-    SimilarityTransform, resample_region_to_reference, resample_region_to_reference_affine,
-    resample_to_reference,
+    SimilarityTransform, resample_region_to_reference_affine, resample_to_reference,
 };
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
@@ -122,13 +121,25 @@ impl RegisteredFrameMapping {
         source: &LinearImage,
         region: ReferenceRegion,
     ) -> Result<LinearImage> {
+        self.extract_region_with(source, region, crate::Interpolation::Bilinear)
+    }
+
+    /// [`Self::extract_region`] with the stack's interpolation, so a replay
+    /// resamples each frame as the live pass did.
+    pub fn extract_region_with(
+        &self,
+        source: &LinearImage,
+        region: ReferenceRegion,
+        interpolation: crate::Interpolation,
+    ) -> Result<LinearImage> {
         self.validate()?;
-        let mut crop = resample_region_to_reference(
+        let mut crop = crate::resample_region_to_reference_with(
             source,
             self.reference_width,
             self.reference_height,
             region,
             self.transform,
+            interpolation,
         )?;
         self.normalization
             .apply_region(&mut crop, region.x, region.y)?;
@@ -374,7 +385,8 @@ mod tests {
             resample_to_reference(&source, 32, 32, SimilarityTransform::IDENTITY).unwrap();
         normalization.apply(&mut intermediate).unwrap();
         let expected =
-            resample_region_to_reference(&intermediate, 32, 32, region, output_transform).unwrap();
+            crate::resample_region_to_reference(&intermediate, 32, 32, region, output_transform)
+                .unwrap();
 
         for (actual, expected) in actual.data.iter().zip(&expected.data) {
             if expected.is_nan() {

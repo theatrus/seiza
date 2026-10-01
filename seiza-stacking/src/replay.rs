@@ -536,7 +536,11 @@ impl LiveStacker {
                     .mapping
                     .extract_region_photosites(&frame.image, region, layout)?
             }
-            None => admitted.mapping.extract_region(&frame.image, region)?,
+            None => admitted.mapping.extract_region_with(
+                &frame.image,
+                region,
+                self.options.interpolation,
+            )?,
         };
         if source.stamp.is_some() && SourceStamp::of(&source.path) != source.stamp {
             return Err(changed());

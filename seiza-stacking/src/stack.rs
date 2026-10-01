@@ -2,7 +2,7 @@ use crate::{
     BayerLayout, CalibrationMasters, Error, FitsFrame, FrameMetadata, LinearImage,
     NormalizationMap, NormalizationMode, ReferenceRegion, RegisteredFrameMapping, Registrar,
     RegistrationOptions, Result, SimilarityTransform, context, path_identity,
-    paths_refer_to_same_file, resample_to_reference,
+    paths_refer_to_same_file,
 };
 use rayon::prelude::*;
 use seiza_fits::HeaderValue;
@@ -176,6 +176,11 @@ pub struct StackOptions {
     /// fingerprints and contexts keep their exact bytes.
     #[serde(default, skip_serializing_if = "CfaIntegration::is_demosaic")]
     pub cfa_integration: CfaIntegration,
+    /// How registration resamples each frame onto the reference grid. The
+    /// default, [`Interpolation::Bilinear`], is not serialized, so existing
+    /// options, fingerprints and contexts keep their exact bytes.
+    #[serde(default, skip_serializing_if = "crate::Interpolation::is_bilinear")]
+    pub interpolation: crate::Interpolation,
 }
 
 /// How a Bayer frame's colors reach the accumulator. Registration and
@@ -1405,11 +1410,18 @@ pub(crate) fn prepare_frame(
             maximum_degrees: criteria.maximum_rotation_degrees,
         }));
     }
-    let mut registered = resample_to_reference(
+    let mut registered = crate::resample_region_to_reference_with(
         &frame,
         reference.width,
         reference.height,
+        ReferenceRegion {
+            x: 0,
+            y: 0,
+            width: reference.width,
+            height: reference.height,
+        },
         registration.transform,
+        options.interpolation,
     )?;
     let finite_samples = registered
         .data
