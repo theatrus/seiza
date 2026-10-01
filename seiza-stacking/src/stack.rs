@@ -219,7 +219,11 @@ impl StackOptions {
     pub fn validate(&self) -> Result<()> {
         self.registration.validate()?;
         self.weighting.validate()?;
-        if matches!(self.normalization, NormalizationMode::Local { tile_size } if tile_size < 16) {
+        if matches!(
+            self.normalization,
+            NormalizationMode::Local { tile_size } | NormalizationMode::LocalBackground { tile_size }
+                if tile_size < 16
+        ) {
             return Err(Error::Stack(
                 "local normalization tile size must be at least 16 pixels".into(),
             ));

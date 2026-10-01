@@ -16,6 +16,9 @@ enum NormalizationArg {
     None,
     Global,
     Local,
+    /// The global gain, with local background offsets that remove the
+    /// seams frames' edges leave where their sky gradients differ
+    LocalBackground,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -29,6 +32,12 @@ enum RegistrationModelArg {
     Similarity,
     Affine,
     Quadratic,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum WeightingArg {
+    Equal,
+    InverseNoise,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -64,7 +73,7 @@ pub(crate) struct StackArgs {
     #[arg(long, requires = "dark")]
     dark_exposure_seconds: Option<f64>,
     /// Background normalization applied after registration
-    #[arg(long, value_enum, default_value = "global")]
+    #[arg(long, value_enum, default_value = "local-background")]
     normalization: NormalizationArg,
     /// Tile size for --normalization local
     #[arg(long, default_value_t = 256)]
@@ -94,9 +103,13 @@ pub(crate) struct StackArgs {
     /// Registration still uses the demosaiced frame
     #[arg(long)]
     bayer_drizzle: bool,
+    /// How much each frame counts: equally, or by the inverse of its noise
+    /// variance relative to the reference, so hazy frames count for less
+    #[arg(long, value_enum, default_value = "inverse-noise")]
+    weighting: WeightingArg,
     /// How registration resamples each frame: bilinear, or Lanczos-3 clamped
     /// against ringing, which is sharper and slower
-    #[arg(long, value_enum, default_value = "bilinear")]
+    #[arg(long, value_enum, default_value = "lanczos3")]
     interpolation: InterpolationArg,
     /// Geometry fitted to each frame after the similarity match: similarity
     /// (shift, rotation, scale), affine, or quadratic, which follows lens
@@ -161,6 +174,7 @@ struct ConfigurationReport {
     rejection_minimum_sigma: f32,
     reintegrate: bool,
     bayer_drizzle: bool,
+    weighting: &'static str,
     interpolation: &'static str,
     registration_model: &'static str,
     maximum_registration_rms_pixels: f64,
@@ -258,7 +272,11 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
     if !options.min_overlap.is_finite() || !(0.0..=1.0).contains(&options.min_overlap) {
         anyhow::bail!("--min-overlap must be between zero and one");
     }
-    if matches!(options.normalization, NormalizationArg::Local) && options.local_tile_size < 16 {
+    if matches!(
+        options.normalization,
+        NormalizationArg::Local | NormalizationArg::LocalBackground
+    ) && options.local_tile_size < 16
+    {
         anyhow::bail!("--local-tile-size must be at least 16 pixels");
     }
 
@@ -303,6 +321,9 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
         NormalizationArg::Local => NormalizationMode::Local {
             tile_size: options.local_tile_size,
         },
+        NormalizationArg::LocalBackground => NormalizationMode::LocalBackground {
+            tile_size: options.local_tile_size,
+        },
     };
     let rejection = match options.rejection {
         RejectionArg::None => RejectionMode::None,
@@ -319,6 +340,10 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
         interpolation: match options.interpolation {
             InterpolationArg::Bilinear => seiza_stacking::Interpolation::Bilinear,
             InterpolationArg::Lanczos3 => seiza_stacking::Interpolation::Lanczos3,
+        },
+        weighting: match options.weighting {
+            WeightingArg::Equal => seiza_stacking::FrameWeighting::Equal,
+            WeightingArg::InverseNoise => seiza_stacking::FrameWeighting::inverse_noise_variance(),
         },
         cfa_integration: if options.bayer_drizzle {
             seiza_stacking::CfaIntegration::BayerDrizzle
@@ -364,6 +389,7 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
             NormalizationArg::None => "none",
             NormalizationArg::Global => "global",
             NormalizationArg::Local => "local",
+            NormalizationArg::LocalBackground => "local-background",
         },
         local_tile_size: options.local_tile_size,
         rejection: match options.rejection {
@@ -379,6 +405,10 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
             RegistrationModelArg::Similarity => "similarity",
             RegistrationModelArg::Affine => "affine",
             RegistrationModelArg::Quadratic => "quadratic",
+        },
+        weighting: match options.weighting {
+            WeightingArg::Equal => "equal",
+            WeightingArg::InverseNoise => "inverse-noise",
         },
         interpolation: match options.interpolation {
             InterpolationArg::Bilinear => "bilinear",

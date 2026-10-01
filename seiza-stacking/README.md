@@ -11,7 +11,8 @@ The first release supports:
 - bounded-memory, two-pass construction of bias, dark, and flat masters;
 - bounded-drift star registration with translation/rotation/scale refinement,
   and optional affine or quadratic polynomial fits for lens distortion;
-- robust global or tiled local normalization;
+- robust global or tiled local normalization, or a global gain with local
+  background offsets that removes frame-edge seams;
 - online residual (delta-sigma) rejection with coverage and rejection maps;
 - three-pass completed-stack rejection which revisits early transient samples;
 - non-mutating frame admission gates for additive live stacks;
@@ -397,11 +398,37 @@ at 300ms, eleven workers finished in 1.58s against 1.89s for the derived six.
 Set `PipelineOptions::workers` when the frames are known to be remote, since
 this crate cannot tell a network mount from a local disk.
 
+## Bayer frames
+
 Bayer frames are demosaiced with Malvar, He and Cutler's gradient-corrected
 linear interpolation, which keeps each color's centroid of an undersampled
 star where it belongs: on a 98-frame M45 stack at 2.6px FWHM, bilinear
 interpolation left red and blue 0.42px apart and stars 3.1px wide, against
 0.15px and 2.6px. The two-pixel border keeps bilinear estimates.
+
+## Normalization and frame-edge seams
+
+Global normalization gives each frame one gain and one offset per channel. A
+frame whose sky gradient differs from the reference's then leaves a step in
+the stack wherever the set of frames covering a pixel changes, so a drifting
+or flipped session draws its frames' edges as faint straight streaks.
+`NormalizationMode::LocalBackground { tile_size }` (the CLI's
+`--normalization local-background`, its default) keeps the global gain, which
+follows transparency, and matches each tile's background to the reference's
+with a smoothed grid of offsets, filling tiles a frame does not cover from
+their neighbours. On the M45 stack it removed every edge seam (from six
+streaks to none) and raised SNR from 361 to 374. `Local`'s per-tile gains
+remove the seams too, but a tile of cloud, nebula or frame edge drives them
+far enough to reject the frame: it admitted 88 of 98 frames there.
+
+Frame weighting (`StackOptions::weighting`, the CLI's `--weighting
+inverse-noise`, its default) then counts hazy frames for less. Together with
+quadratic registration and Lanczos interpolation, the CLI's defaults stacked
+M45 in 86 s at 2.37px FWHM and SNR 452, against WBPP's 2.60px and 368 in
+about 28 minutes. The library's defaults stay global, equal, similarity and
+bilinear, so existing hosts and contexts are unchanged.
+
+## Registration
 
 Registration fits a similarity (shift, rotation, uniform scale) from the 200
 brightest stars by default. `RegistrationOptions::model` set to
@@ -439,6 +466,8 @@ are dithered by several pixels: on the M45 stack above, which drifted 10 to 20
 pixels in a night, it reached 2.61px FWHM but SNR 302 against 345 for
 demosaicing. A channel no frame reached at a pixel is filled from the same
 channel's neighbours in snapshots, with its coverage left at zero.
+
+## Calibration
 
 Integrated flats are applied in the raw light frame's sampling before CFA
 debayering. Master darks and flats retain their Bayer pattern and origin

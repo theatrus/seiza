@@ -19,6 +19,24 @@ pub enum NormalizationMode {
         /// Tile edge length in pixels; must be at least 16.
         tile_size: usize,
     },
+    /// One gain per channel for the whole frame, as [`Self::Global`] fits,
+    /// and a grid of background offsets interpolated across it.
+    ///
+    /// Frames whose sky gradient differs from the reference's leave a step
+    /// in the stack wherever the set of frames covering a pixel changes, so
+    /// a drifting or flipped session draws its frames' edges as faint
+    /// streaks. A per-tile offset matches each frame's background to the
+    /// reference's and removes them, without [`Self::Local`]'s per-tile
+    /// gains, which a tile of cloud, nebula or frame edge can drive far
+    /// enough to reject the frame. The gain is the global one, so it follows
+    /// transparency and frame weighting still sees each frame's noise. Each
+    /// tile's offset compares medians of the samples both frames cover;
+    /// tiles with too few are filled from their neighbours, and the grid is
+    /// smoothed over three tiles.
+    LocalBackground {
+        /// Tile edge length in pixels; must be at least 16.
+        tile_size: usize,
+    },
 }
 
 /// Per-channel gain and offset that map a source frame onto the reference
@@ -118,6 +136,14 @@ impl NormalizationMap {
                     map.offsets[channel] = offset;
                 }
                 Ok(map)
+            }
+            NormalizationMode::LocalBackground { tile_size } => {
+                if tile_size < 16 {
+                    return Err(Error::Normalization(
+                        "local normalization tile size must be at least 16 pixels".into(),
+                    ));
+                }
+                local_background(reference, source, tile_size)
             }
             NormalizationMode::Local { tile_size } => {
                 if tile_size < 16 {
@@ -392,6 +418,169 @@ fn bilinear(
     top * (1.0 - y) + bottom * y
 }
 
+/// [`NormalizationMode::LocalBackground`]: the global gain per channel and a
+/// smoothed grid of background offsets.
+///
+/// The gain is [`NormalizationMode::Global`]'s, from the whole frame's
+/// dispersion, which carries stars and nebulosity as well as noise and so
+/// follows transparency. A gain from each tile's dispersion would match the
+/// frames' sky noise instead, scaling a hazy frame to the reference's noise
+/// rather than its signal, which also hides the noise frame weighting reads.
+/// Each tile's offset then carries its gained source median onto the
+/// reference median.
+fn local_background(
+    reference: &LinearImage,
+    source: &LinearImage,
+    tile_size: usize,
+) -> Result<NormalizationMap> {
+    let channels = source.channels;
+    let globals = (0..channels)
+        .map(|channel| {
+            affine_for_region(
+                reference,
+                source,
+                channel,
+                0,
+                0,
+                source.width,
+                source.height,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let columns = source.width.div_ceil(tile_size);
+    let rows = source.height.div_ceil(tile_size);
+    let mut offsets = (0..columns * rows * channels)
+        .into_par_iter()
+        .map(|index| {
+            let channel = index % channels;
+            let cell = index / channels;
+            let (x, y) = ((cell % columns) * tile_size, (cell / columns) * tile_size);
+            tile_medians(
+                reference,
+                source,
+                channel,
+                x,
+                y,
+                tile_size.min(source.width - x),
+                tile_size.min(source.height - y),
+            )
+            .map(|(reference_median, source_median)| {
+                reference_median - globals[channel].0 * source_median
+            })
+            .filter(|offset| offset.is_finite())
+        })
+        .collect::<Vec<_>>();
+    for (channel, &(_, global_offset)) in globals.iter().enumerate() {
+        fill_and_smooth_offsets(
+            &mut offsets,
+            columns,
+            rows,
+            channels,
+            channel,
+            global_offset,
+        );
+    }
+    Ok(NormalizationMap {
+        schema_version: NORMALIZATION_MAP_SCHEMA_VERSION,
+        width: source.width,
+        height: source.height,
+        channels,
+        tile_size,
+        columns,
+        rows,
+        gains: (0..columns * rows)
+            .flat_map(|_| globals.iter().map(|&(gain, _)| gain))
+            .collect(),
+        offsets: offsets
+            .into_iter()
+            .map(|offset| offset.unwrap_or(0.0))
+            .collect(),
+    })
+}
+
+/// The medians of one region and channel in both frames, over samples both
+/// cover, or `None` when they share too few.
+fn tile_medians(
+    reference: &LinearImage,
+    source: &LinearImage,
+    channel: usize,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) -> Option<(f32, f32)> {
+    let stride = (width * height / 4_000).max(1);
+    let mut reference_values = Vec::new();
+    let mut source_values = Vec::new();
+    for sample_index in (0..width * height).step_by(stride) {
+        let index = ((y + sample_index / width) * source.width + x + sample_index % width)
+            * source.channels
+            + channel;
+        let (reference_value, source_value) = (reference.data[index], source.data[index]);
+        if reference_value.is_finite() && source_value.is_finite() {
+            reference_values.push(reference_value);
+            source_values.push(source_value);
+        }
+    }
+    if reference_values.len() < 64 {
+        return None;
+    }
+    Some((
+        median_in_place(&mut reference_values)?,
+        median_in_place(&mut source_values)?,
+    ))
+}
+
+/// Fill one channel's missing tile offsets from their neighbours, growing
+/// outward until every tile has one (or taking the global offset when none
+/// does), then average each over the 3x3 tiles around it.
+fn fill_and_smooth_offsets(
+    offsets: &mut [Option<f32>],
+    columns: usize,
+    rows: usize,
+    channels: usize,
+    channel: usize,
+    global_offset: f32,
+) {
+    let at = |column: usize, row: usize| (row * columns + column) * channels + channel;
+    if (0..rows).all(|row| (0..columns).all(|column| offsets[at(column, row)].is_none())) {
+        for row in 0..rows {
+            for column in 0..columns {
+                offsets[at(column, row)] = Some(global_offset);
+            }
+        }
+        return;
+    }
+    let neighbourhood = |values: &[Option<f32>], column: usize, row: usize| {
+        let (mut sum, mut count) = (0.0_f64, 0_u32);
+        for nr in row.saturating_sub(1)..(row + 2).min(rows) {
+            for nc in column.saturating_sub(1)..(column + 2).min(columns) {
+                if let Some(value) = values[at(nc, nr)] {
+                    sum += f64::from(value);
+                    count += 1;
+                }
+            }
+        }
+        (count > 0).then(|| (sum / f64::from(count)) as f32)
+    };
+    while (0..rows).any(|row| (0..columns).any(|column| offsets[at(column, row)].is_none())) {
+        let snapshot = offsets.to_vec();
+        for row in 0..rows {
+            for column in 0..columns {
+                if snapshot[at(column, row)].is_none() {
+                    offsets[at(column, row)] = neighbourhood(&snapshot, column, row);
+                }
+            }
+        }
+    }
+    let snapshot = offsets.to_vec();
+    for row in 0..rows {
+        for column in 0..columns {
+            offsets[at(column, row)] = neighbourhood(&snapshot, column, row);
+        }
+    }
+}
+
 /// `value * gain + offset` per channel on whole interleaved pixels, leaving
 /// non-finite samples alone. `mul_add` rounds once whether the CPU fuses it
 /// or libm does, so the dispatched builds agree with the baseline one exactly;
@@ -471,6 +660,106 @@ fn affine_for_region(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A frame whose sky gradient the reference lacks: a single offset leaves
+    /// the gradient, which draws a step wherever this frame's edge falls in
+    /// a stack; per-tile offsets remove it, with one gain for the frame.
+    #[test]
+    fn local_background_removes_a_gradient_with_one_gain() {
+        let (width, height) = (192, 128);
+        // Sky noise of about 20 from a sum of uniform draws, and a sparse
+        // lattice of stars.
+        let noise = (0..width * height)
+            .map(|index| {
+                let mut state = (index as u32).wrapping_mul(0x9e37_79b9) | 1;
+                (0..6)
+                    .map(|_| {
+                        state ^= state << 13;
+                        state ^= state >> 17;
+                        state ^= state << 5;
+                        (state % 1000) as f32 / 1000.0 - 0.5
+                    })
+                    .sum::<f32>()
+                    * 28.0
+            })
+            .collect::<Vec<_>>();
+        let scene = |index: usize| {
+            let (x, y) = (index % width, index / width);
+            1000.0 + noise[index] + if (x + 3 * y) % 41 == 0 { 400.0 } else { 0.0 }
+        };
+        let reference =
+            LinearImage::new(width, height, 1, (0..width * height).map(scene).collect()).unwrap();
+        let source = LinearImage::new(
+            width,
+            height,
+            1,
+            (0..width * height)
+                .map(|index| 0.8 * scene(index) + 30.0 + (index % width) as f32 * 0.15)
+                .collect(),
+        )
+        .unwrap();
+        let worst = |mode| {
+            let map = NormalizationMap::estimate(&reference, &source, mode).unwrap();
+            let mut normalized = source.clone();
+            map.apply(&mut normalized).unwrap();
+            // The largest error in the mean of each 16x16 block, away from
+            // the outermost tiles, where the smoothing has fewer neighbours:
+            // the background, not single samples' noise.
+            let mut worst = 0.0_f32;
+            for block_y in (32..height - 32).step_by(16) {
+                for block_x in (32..width - 32).step_by(16) {
+                    let mut sum = 0.0_f32;
+                    for y in block_y..block_y + 16 {
+                        for x in block_x..block_x + 16 {
+                            let index = y * width + x;
+                            sum += normalized.data[index] - reference.data[index];
+                        }
+                    }
+                    worst = worst.max((sum / 256.0).abs());
+                }
+            }
+            (map, worst)
+        };
+        let (_, global) = worst(NormalizationMode::Global);
+        let (map, local) = worst(NormalizationMode::LocalBackground { tile_size: 32 });
+        assert!(global > 6.0, "{global}");
+        assert!(local < 3.0, "{local}");
+        let (minimum, maximum) = map.gain_range();
+        assert_eq!(minimum, maximum, "one gain across the frame");
+        let global_map =
+            NormalizationMap::estimate(&reference, &source, NormalizationMode::Global).unwrap();
+        assert_eq!(map.gain_range(), global_map.gain_range(), "the global gain");
+    }
+
+    #[test]
+    fn local_background_fills_tiles_the_frame_does_not_cover() {
+        let (width, height) = (64, 64);
+        let reference = LinearImage::new(
+            width,
+            height,
+            1,
+            (0..width * height)
+                .map(|index| 500.0 + (index % 29) as f32)
+                .collect(),
+        )
+        .unwrap();
+        let mut source = reference.clone();
+        for (index, value) in source.data.iter_mut().enumerate() {
+            *value = if index % width < 20 {
+                f32::NAN
+            } else {
+                *value + 40.0
+            };
+        }
+        let map = NormalizationMap::estimate(
+            &reference,
+            &source,
+            NormalizationMode::LocalBackground { tile_size: 16 },
+        )
+        .unwrap();
+        map.validate().unwrap();
+        assert!(map.offsets.iter().all(|offset| (offset + 40.0).abs() < 1.0));
+    }
 
     #[test]
     fn global_normalization_recovers_affine_background() {
