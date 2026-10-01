@@ -25,6 +25,13 @@ enum RejectionArg {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum RegistrationModelArg {
+    Similarity,
+    Affine,
+    Quadratic,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 enum InterpolationArg {
     Bilinear,
     Lanczos3,
@@ -91,6 +98,12 @@ pub(crate) struct StackArgs {
     /// against ringing, which is sharper and slower
     #[arg(long, value_enum, default_value = "bilinear")]
     interpolation: InterpolationArg,
+    /// Geometry fitted to each frame after the similarity match: similarity
+    /// (shift, rotation, scale), affine, or quadratic, which follows lens
+    /// distortion, for example after a meridian flip turns it against the
+    /// sky. A frame with too few stars for its model keeps the similarity
+    #[arg(long, value_enum, default_value = "quadratic")]
+    registration_model: RegistrationModelArg,
     /// Maximum registration residual for additive admission
     #[arg(long, default_value_t = 2.0)]
     max_registration_rms: f64,
@@ -149,6 +162,7 @@ struct ConfigurationReport {
     reintegrate: bool,
     bayer_drizzle: bool,
     interpolation: &'static str,
+    registration_model: &'static str,
     maximum_registration_rms_pixels: f64,
     maximum_scale_deviation: f64,
     maximum_rotation_degrees: f64,
@@ -316,6 +330,11 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
     stack_options.acceptance.maximum_registration_rms_pixels = options.max_registration_rms;
     stack_options.acceptance.minimum_overlap_fraction = options.min_overlap;
     stack_options.registration.maximum_drift_pixels = options.max_registration_drift;
+    stack_options.registration.model = match options.registration_model {
+        RegistrationModelArg::Similarity => seiza_stacking::RegistrationModel::Similarity,
+        RegistrationModelArg::Affine => seiza_stacking::RegistrationModel::Affine,
+        RegistrationModelArg::Quadratic => seiza_stacking::RegistrationModel::Quadratic,
+    };
     stack_options.registration.maximum_drift_fraction = options.max_registration_drift_fraction;
 
     let mut images = options.images.iter();
@@ -356,6 +375,11 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
         rejection_warmup: options.rejection_warmup,
         reintegrate: options.reintegrate,
         bayer_drizzle: options.bayer_drizzle,
+        registration_model: match options.registration_model {
+            RegistrationModelArg::Similarity => "similarity",
+            RegistrationModelArg::Affine => "affine",
+            RegistrationModelArg::Quadratic => "quadratic",
+        },
         interpolation: match options.interpolation {
             InterpolationArg::Bilinear => "bilinear",
             InterpolationArg::Lanczos3 => "lanczos3",

@@ -226,6 +226,43 @@ impl Ledger {
             .collect()
     }
 
+    /// Whether any admitted frame carries a polynomial warp.
+    pub(crate) fn has_warps(&self) -> bool {
+        self.frames
+            .iter()
+            .any(|frame| frame.mapping.warp().is_some())
+    }
+
+    /// Each admitted frame's polynomial warp, which the ledger's own compact
+    /// encoding leaves out.
+    pub(crate) fn warps(&self) -> Vec<Option<crate::PolynomialWarp>> {
+        self.frames
+            .iter()
+            .map(|frame| frame.mapping.warp().cloned())
+            .collect()
+    }
+
+    /// Restore the warps a context saved beside the ledger, one per frame.
+    pub(crate) fn attach_warps(
+        &mut self,
+        warps: Vec<Option<crate::PolynomialWarp>>,
+    ) -> std::result::Result<(), String> {
+        if warps.len() != self.frames.len() {
+            return Err(format!(
+                "context holds {} frame warps for {} admitted frames",
+                warps.len(),
+                self.frames.len()
+            ));
+        }
+        for (frame, warp) in self.frames.iter_mut().zip(warps) {
+            frame
+                .mapping
+                .set_warp(warp)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
     /// Restore the weight records a weighted context saved beside the
     /// ledger, checking one record per frame, one value per channel, and
     /// weight 1 for the reference.

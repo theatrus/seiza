@@ -81,6 +81,11 @@ struct ContextMetadata {
     input_paths: Vec<String>,
     #[serde(default)]
     input_mode: FrameInputMode,
+    /// Whether a section of per-frame polynomial warps follows the ledger.
+    /// Readers that predate warps refuse the field rather than replay
+    /// without them.
+    #[serde(default, skip_serializing_if = "is_false")]
+    frame_warps: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -211,6 +216,16 @@ fn write_version(path: &Path, state: ContextWriteState<'_>, format_version: u32)
     } else {
         None
     };
+    let frame_warps = if format_version >= LEDGER_FORMAT_VERSION && state.ledger.has_warps() {
+        let bytes = postcard::to_stdvec(&state.ledger.warps())
+            .map_err(|error| context_write_error(path, error.to_string()))?;
+        if bytes.len() as u64 > MAXIMUM_LEDGER_BYTES {
+            return Err(context_write_error(path, "frame warps are too large"));
+        }
+        Some(bytes)
+    } else {
+        None
+    };
     let weight_records = if format_version >= WEIGHTED_FORMAT_VERSION {
         let bytes = postcard::to_stdvec(&state.ledger.weights())
             .map_err(|error| context_write_error(path, error.to_string()))?;
@@ -290,6 +305,12 @@ fn write_version(path: &Path, state: ContextWriteState<'_>, format_version: u32)
                 Some(records) => encoder
                     .write_all(&(records.len() as u64).to_le_bytes())
                     .and_then(|()| encoder.write_all(records)),
+                None => Ok(()),
+            })
+            .and_then(|()| match &frame_warps {
+                Some(warps) => encoder
+                    .write_all(&(warps.len() as u64).to_le_bytes())
+                    .and_then(|()| encoder.write_all(warps)),
                 None => Ok(()),
             })
             .map_err(|error| context_write_error(path, error.to_string()))?;
@@ -408,6 +429,15 @@ pub(crate) fn read(path: &Path) -> Result<RestoredContext> {
                 .map_err(|error| context_read_error(path, error.to_string()))?;
             ledger
                 .attach_weights(records, reference.channels)
+                .map_err(|message| context_read_error(path, message))?;
+        }
+        if metadata.frame_warps {
+            let bytes = read_section(&mut decoder, "frame warps")
+                .map_err(|message| context_read_error(path, message))?;
+            let warps: Vec<Option<crate::PolynomialWarp>> = postcard::from_bytes(&bytes)
+                .map_err(|error| context_read_error(path, error.to_string()))?;
+            ledger
+                .attach_warps(warps)
                 .map_err(|message| context_read_error(path, message))?;
         }
         Some(ledger)
@@ -537,6 +567,7 @@ impl ContextMetadata {
             rejected_frames: state.rejected_frames,
             input_paths,
             input_mode: state.input_mode,
+            frame_warps: schema_version >= LEDGER_FORMAT_VERSION && state.ledger.has_warps(),
         })
     }
 

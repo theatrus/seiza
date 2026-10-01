@@ -9,7 +9,8 @@ The first release supports:
 - mono, planar RGB, and Bayer FITS or XISF inputs in linear sensor units;
 - optional master bias, dark, and flat calibration;
 - bounded-memory, two-pass construction of bias, dark, and flat masters;
-- bounded-drift star registration with translation/rotation/scale refinement;
+- bounded-drift star registration with translation/rotation/scale refinement,
+  and optional affine or quadratic polynomial fits for lens distortion;
 - robust global or tiled local normalization;
 - online residual (delta-sigma) rejection with coverage and rejection maps;
 - three-pass completed-stack rejection which revisits early transient samples;
@@ -401,6 +402,22 @@ linear interpolation, which keeps each color's centroid of an undersampled
 star where it belongs: on a 98-frame M45 stack at 2.6px FWHM, bilinear
 interpolation left red and blue 0.42px apart and stars 3.1px wide, against
 0.15px and 2.6px. The two-pixel border keeps bilinear estimates.
+
+Registration fits a similarity (shift, rotation, uniform scale) from the 200
+brightest stars by default. `RegistrationOptions::model` set to
+`RegistrationModel::Affine` or `RegistrationModel::Quadratic` (the CLI's
+`--registration-model`, whose default is `quadratic`) then pairs up to 2 000
+stars through that similarity and fits a polynomial from reference to source
+coordinates, clipping outliers. A wide field's lens distortion turns against
+the sky after a meridian flip, which no similarity can follow: on the M45
+stack, at 173 mm, the median registration residual after the flip fell from
+0.56 to 0.18px, central star eccentricity from 0.39 to 0.31 (WBPP: 0.31), and
+SNR rose from 345 to 361, for about 4 s more over 98 frames. A frame with too
+few paired stars for its model keeps the similarity, which still drives the
+drift, scale and rotation gates. Each frame's warp is kept in its
+`RegisteredFrameMapping`, serialized as an optional `warp` field in JSON, and
+saved in live-stack contexts in a section of its own; reintegration resamples
+through it.
 
 Registration resamples each frame bilinearly by default.
 `StackOptions::interpolation` set to `Interpolation::Lanczos3` (the CLI's

@@ -1,20 +1,75 @@
 use crate::{
     AffineTransform, Error, LinearImage, NormalizationMap, ReferenceRegion, Result,
-    SimilarityTransform, resample_region_to_reference_affine, resample_to_reference,
+    SimilarityTransform, resample_region_to_reference_affine,
 };
-use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 const REGISTERED_FRAME_MAPPING_SCHEMA_VERSION: u32 = 1;
 
 /// Versioned processing provenance that maps one prepared source frame onto a
 /// stack reference grid.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+/// How one admitted frame maps onto the reference grid: its registration
+/// and normalization, enough to extract it again without registering it.
+///
+/// A polynomial warp, when registration fitted one, is serialized only by
+/// self-describing formats such as JSON, as an optional `warp` field. Compact
+/// binary formats keep the layout without it, so live-stack contexts written
+/// before warps existed still read; a context stores its frames' warps in a
+/// section of its own.
+#[derive(Clone, Debug, PartialEq)]
 pub struct RegisteredFrameMapping {
     schema_version: u32,
     reference_width: usize,
     reference_height: usize,
     transform: SimilarityTransform,
     normalization: NormalizationMap,
+    warp: Option<crate::PolynomialWarp>,
+}
+
+#[derive(Serialize)]
+struct RegisteredFrameMappingRef<'a> {
+    schema_version: u32,
+    reference_width: usize,
+    reference_height: usize,
+    transform: &'a SimilarityTransform,
+    normalization: &'a NormalizationMap,
+}
+
+#[derive(Serialize)]
+struct RegisteredFrameMappingWarpedRef<'a> {
+    schema_version: u32,
+    reference_width: usize,
+    reference_height: usize,
+    transform: &'a SimilarityTransform,
+    normalization: &'a NormalizationMap,
+    warp: &'a crate::PolynomialWarp,
+}
+
+impl Serialize for RegisteredFrameMapping {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match &self.warp {
+            Some(warp) if serializer.is_human_readable() => RegisteredFrameMappingWarpedRef {
+                schema_version: self.schema_version,
+                reference_width: self.reference_width,
+                reference_height: self.reference_height,
+                transform: &self.transform,
+                normalization: &self.normalization,
+                warp,
+            }
+            .serialize(serializer),
+            _ => RegisteredFrameMappingRef {
+                schema_version: self.schema_version,
+                reference_width: self.reference_width,
+                reference_height: self.reference_height,
+                transform: &self.transform,
+                normalization: &self.normalization,
+            }
+            .serialize(serializer),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -27,20 +82,46 @@ struct RegisteredFrameMappingWire {
     normalization: NormalizationMap,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegisteredFrameMappingReadableWire {
+    schema_version: u32,
+    reference_width: usize,
+    reference_height: usize,
+    transform: SimilarityTransform,
+    normalization: NormalizationMap,
+    #[serde(default)]
+    warp: Option<crate::PolynomialWarp>,
+}
+
 impl<'de> Deserialize<'de> for RegisteredFrameMapping {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let wire = RegisteredFrameMappingWire::deserialize(deserializer)?;
-        Self::from_parts(
+        let wire = if deserializer.is_human_readable() {
+            RegisteredFrameMappingReadableWire::deserialize(deserializer)?
+        } else {
+            let wire = RegisteredFrameMappingWire::deserialize(deserializer)?;
+            RegisteredFrameMappingReadableWire {
+                schema_version: wire.schema_version,
+                reference_width: wire.reference_width,
+                reference_height: wire.reference_height,
+                transform: wire.transform,
+                normalization: wire.normalization,
+                warp: None,
+            }
+        };
+        let mut mapping = Self::from_parts(
             wire.schema_version,
             wire.reference_width,
             wire.reference_height,
             wire.transform,
             wire.normalization,
         )
-        .map_err(D::Error::custom)
+        .map_err(D::Error::custom)?;
+        mapping.set_warp(wire.warp).map_err(D::Error::custom)?;
+        Ok(mapping)
     }
 }
 
@@ -69,6 +150,7 @@ impl RegisteredFrameMapping {
             reference_height: reference.height,
             transform: SimilarityTransform::IDENTITY,
             normalization: NormalizationMap::identity(reference),
+            warp: None,
         }
     }
 
@@ -85,9 +167,29 @@ impl RegisteredFrameMapping {
             reference_height,
             transform,
             normalization,
+            warp: None,
         };
         mapping.validate()?;
         Ok(mapping)
+    }
+
+    /// The polynomial warp registration fitted, if any. Extraction resamples
+    /// through it in place of [`Self::transform`].
+    pub fn warp(&self) -> Option<&crate::PolynomialWarp> {
+        self.warp.as_ref()
+    }
+
+    /// Attach or clear the polynomial warp, validating it.
+    pub fn set_warp(&mut self, warp: Option<crate::PolynomialWarp>) -> Result<()> {
+        if let Some(warp) = &warp {
+            warp.validate()?;
+        }
+        self.warp = warp;
+        Ok(())
+    }
+
+    fn geometry(&self) -> crate::registration::FrameGeometry<'_> {
+        crate::registration::FrameGeometry::of(self.transform, self.warp.as_ref())
     }
 
     /// Check the serialized mapping before it is used for pixel work.
@@ -104,6 +206,9 @@ impl RegisteredFrameMapping {
             ));
         }
         self.transform.validate()?;
+        if let Some(warp) = &self.warp {
+            warp.validate()?;
+        }
         self.normalization.validate()?;
         if self.normalization.width() != self.reference_width
             || self.normalization.height() != self.reference_height
@@ -133,13 +238,13 @@ impl RegisteredFrameMapping {
         interpolation: crate::Interpolation,
     ) -> Result<LinearImage> {
         self.validate()?;
-        let mut crop = crate::resample_region_to_reference_with(
+        let mut crop = crate::registration::resample_region_geometry(
             source,
             self.reference_width,
             self.reference_height,
             region,
-            self.transform,
-            interpolation,
+            self.geometry(),
+            interpolation.into(),
         )?;
         self.normalization
             .apply_region(&mut crop, region.x, region.y)?;
@@ -157,13 +262,13 @@ impl RegisteredFrameMapping {
         layout: crate::BayerLayout,
     ) -> Result<LinearImage> {
         self.validate()?;
-        let mut crop = crate::resample_region_photosites(
+        let mut crop = crate::registration::resample_region_geometry(
             source,
             self.reference_width,
             self.reference_height,
             region,
-            self.transform,
-            layout,
+            self.geometry(),
+            crate::registration::Sampling::NearestPhotosite(layout),
         )?;
         self.normalization
             .apply_region(&mut crop, region.x, region.y)?;
@@ -203,7 +308,7 @@ impl RegisteredFrameMapping {
     ) -> Result<LinearImage> {
         self.validate()?;
         reference_to_output.validate()?;
-        if self.normalization.is_global() {
+        if self.normalization.is_global() && self.warp.is_none() {
             let mut crop = resample_region_to_reference_affine(
                 source,
                 output_width,
@@ -215,11 +320,18 @@ impl RegisteredFrameMapping {
             return Ok(crop);
         }
 
-        let mut intermediate = resample_to_reference(
+        let mut intermediate = crate::registration::resample_region_geometry(
             source,
             self.reference_width,
             self.reference_height,
-            self.transform,
+            ReferenceRegion {
+                x: 0,
+                y: 0,
+                width: self.reference_width,
+                height: self.reference_height,
+            },
+            self.geometry(),
+            crate::registration::Sampling::Bilinear,
         )?;
         self.normalization.apply(&mut intermediate)?;
         resample_region_to_reference_affine(
@@ -250,6 +362,79 @@ impl RegisteredFrameMapping {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_carries_the_warp_and_compact_binary_leaves_it_out() {
+        let reference = crate::registration::test_star_field(false);
+        let source = crate::registration::test_star_field(true);
+        let registration = crate::Registrar::new(
+            &reference,
+            crate::RegistrationOptions {
+                model: crate::RegistrationModel::Quadratic,
+                ..crate::RegistrationOptions::default()
+            },
+        )
+        .unwrap()
+        .register(&source)
+        .unwrap();
+        let mut mapping = RegisteredFrameMapping::new(
+            reference.width,
+            reference.height,
+            registration.transform,
+            NormalizationMap::identity(&reference),
+        )
+        .unwrap();
+        mapping.set_warp(registration.warp.clone()).unwrap();
+        assert!(mapping.warp().is_some());
+
+        let json = serde_json::to_string(&mapping).unwrap();
+        assert!(json.contains("\"warp\""));
+        let from_json: RegisteredFrameMapping = serde_json::from_str(&json).unwrap();
+        assert_eq!(from_json.warp(), mapping.warp());
+
+        // Without a warp, JSON keeps the fields earlier releases wrote.
+        let plain = RegisteredFrameMapping::new(
+            reference.width,
+            reference.height,
+            registration.transform,
+            NormalizationMap::identity(&reference),
+        )
+        .unwrap();
+        assert!(!serde_json::to_string(&plain).unwrap().contains("warp"));
+
+        let bytes = postcard::to_stdvec(&mapping).unwrap();
+        assert_eq!(bytes, postcard::to_stdvec(&plain).unwrap());
+        let from_bytes: RegisteredFrameMapping = postcard::from_bytes(&bytes).unwrap();
+        assert!(from_bytes.warp().is_none());
+
+        // The warped extraction follows the distortion: the registered source
+        // matches the reference far better than through the similarity alone.
+        let region = ReferenceRegion {
+            x: 16,
+            y: 16,
+            width: reference.width - 32,
+            height: reference.height - 32,
+        };
+        let difference = |image: &LinearImage| {
+            let mut total = 0.0_f64;
+            for y in 0..region.height {
+                for x in 0..region.width {
+                    let sample = image.data[y * region.width + x];
+                    let expected = reference.data[(y + region.y) * reference.width + x + region.x];
+                    total += f64::from((sample - expected).abs());
+                }
+            }
+            total
+        };
+        let warped = mapping.extract_region(&source, region).unwrap();
+        let similar = plain.extract_region(&source, region).unwrap();
+        assert!(
+            difference(&warped) * 3.0 < difference(&similar),
+            "warped {} against similarity {}",
+            difference(&warped),
+            difference(&similar)
+        );
+    }
     use crate::NormalizationMode;
 
     #[test]
@@ -382,7 +567,7 @@ mod tests {
             .extract_region_after(&source, 32, 32, region, output_transform)
             .unwrap();
         let mut intermediate =
-            resample_to_reference(&source, 32, 32, SimilarityTransform::IDENTITY).unwrap();
+            crate::resample_to_reference(&source, 32, 32, SimilarityTransform::IDENTITY).unwrap();
         normalization.apply(&mut intermediate).unwrap();
         let expected =
             crate::resample_region_to_reference(&intermediate, 32, 32, region, output_transform)

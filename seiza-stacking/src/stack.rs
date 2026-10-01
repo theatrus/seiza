@@ -1410,18 +1410,21 @@ pub(crate) fn prepare_frame(
             maximum_degrees: criteria.maximum_rotation_degrees,
         }));
     }
-    let mut registered = crate::resample_region_to_reference_with(
+    let geometry =
+        crate::registration::FrameGeometry::of(registration.transform, registration.warp.as_ref());
+    let full_reference = ReferenceRegion {
+        x: 0,
+        y: 0,
+        width: reference.width,
+        height: reference.height,
+    };
+    let mut registered = crate::registration::resample_region_geometry(
         &frame,
         reference.width,
         reference.height,
-        ReferenceRegion {
-            x: 0,
-            y: 0,
-            width: reference.width,
-            height: reference.height,
-        },
-        registration.transform,
-        options.interpolation,
+        full_reference,
+        geometry,
+        options.interpolation.into(),
     )?;
     let finite_samples = registered
         .data
@@ -1479,18 +1482,13 @@ pub(crate) fn prepare_frame(
     // photosites themselves with the same normalization.
     let photosites = cfa.filter(|_| options.cfa_integration == CfaIntegration::BayerDrizzle);
     if let Some(layout) = photosites {
-        registered = crate::registration::resample_region_photosites(
+        registered = crate::registration::resample_region_geometry(
             &frame,
             reference.width,
             reference.height,
-            ReferenceRegion {
-                x: 0,
-                y: 0,
-                width: reference.width,
-                height: reference.height,
-            },
-            registration.transform,
-            layout,
+            full_reference,
+            geometry,
+            crate::registration::Sampling::NearestPhotosite(layout),
         )?;
         if !matches!(options.normalization, NormalizationMode::None) {
             normalization.apply(&mut registered)?;
@@ -1528,12 +1526,13 @@ pub(crate) fn prepare_frame(
     };
     let normalization_mean_gain = normalization.mean_gain();
     let normalization_mean_offset = normalization.mean_offset();
-    let mapping = crate::RegisteredFrameMapping::new(
+    let mut mapping = crate::RegisteredFrameMapping::new(
         reference.width,
         reference.height,
         registration.transform,
         normalization,
     )?;
+    mapping.set_warp(registration.warp.clone())?;
     Ok(PreparedFrame::Ready(Box::new(ReadyFrame {
         registered,
         transform: registration.transform,
@@ -2575,6 +2574,42 @@ mod tests {
         let expected = neighbours.sum::<f32>() / 8.0;
         assert!((mean[4 * 3 + 2] - expected).abs() < 1.0e-3);
         assert_eq!(coverage[4 * 3 + 2], 0);
+    }
+
+    #[test]
+    fn quadratic_registration_warps_survive_a_context_round_trip() {
+        let options = StackOptions {
+            normalization: NormalizationMode::None,
+            registration: RegistrationOptions {
+                model: crate::RegistrationModel::Quadratic,
+                ..RegistrationOptions::default()
+            },
+            ..StackOptions::default()
+        };
+        let mut stacker =
+            LiveStacker::from_linear(crate::registration::test_star_field(false), options).unwrap();
+        let FrameDisposition::Accepted(diagnostics) = stacker
+            .push_linear(crate::registration::test_star_field(true))
+            .unwrap()
+        else {
+            panic!("the distorted frame registers");
+        };
+        let warp = diagnostics
+            .mapping
+            .warp()
+            .cloned()
+            .expect("a quadratic warp");
+        assert!(diagnostics.registration_rms_pixels < 0.1);
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("warped.seiza-stack");
+        stacker.save_context(&path).unwrap();
+        let restored = LiveStacker::open_context(&path).unwrap();
+        assert_eq!(restored.ledger.warps(), vec![None, Some(warp)]);
+        assert_eq!(
+            restored.options.registration.model,
+            crate::RegistrationModel::Quadratic
+        );
     }
 
     #[test]
