@@ -1444,19 +1444,35 @@ pub(crate) fn prepare_frame(
             },
         ));
     }
-    let normalization =
-        match NormalizationMap::estimate(reference, &registered, options.normalization) {
-            Ok(normalization) => normalization,
-            Err(error) => {
-                let message = match error {
-                    Error::Normalization(message) => message,
-                    other => other.to_string(),
-                };
-                return Ok(PreparedFrame::Rejected(
-                    FrameRejectionReason::Normalization(message),
-                ));
-            }
-        };
+    let normalization = match NormalizationMap::estimate_with_gains(
+        reference,
+        &registered,
+        options.normalization,
+        matches!(
+            options.normalization,
+            NormalizationMode::LocalBackground { .. }
+        )
+        .then(|| {
+            crate::normalization::photometric_gains(
+                reference,
+                &registered,
+                &registrar.reference_star_positions(),
+            )
+        })
+        .flatten()
+        .as_deref(),
+    ) {
+        Ok(normalization) => normalization,
+        Err(error) => {
+            let message = match error {
+                Error::Normalization(message) => message,
+                other => other.to_string(),
+            };
+            return Ok(PreparedFrame::Rejected(
+                FrameRejectionReason::Normalization(message),
+            ));
+        }
+    };
     let (minimum_gain, maximum_gain) = normalization.gain_range();
     if minimum_gain < criteria.minimum_normalization_gain
         || maximum_gain > criteria.maximum_normalization_gain
@@ -2613,6 +2629,83 @@ mod tests {
         assert_eq!(
             restored.options.registration.model,
             crate::RegistrationModel::Quadratic
+        );
+    }
+
+    /// Local background normalization matches every frame's background to
+    /// the reference frame's, so a gradient only the reference has reaches
+    /// the whole online stack. Reintegration refits each frame's background
+    /// against an integration of the best frames, where it largely averages
+    /// out.
+    #[test]
+    fn reintegration_refits_backgrounds_against_an_integrated_reference() {
+        let directory = tempfile::tempdir().unwrap();
+        let field = crate::registration::test_star_field(false);
+        let width = field.width;
+        let paths = (0..10)
+            .map(|frame| {
+                let mut state = 0x9e37_79b9_u32.wrapping_mul(frame + 1) | 1;
+                let data = field
+                    .data
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value)| {
+                        state ^= state << 13;
+                        state ^= state >> 17;
+                        state ^= state << 5;
+                        let noise = (state % 2001) as f32 / 100.0 - 10.0;
+                        let gradient = if frame == 0 {
+                            (index % width) as f32 * 0.5
+                        } else {
+                            0.0
+                        };
+                        value + noise + gradient
+                    })
+                    .collect();
+                let path = directory.path().join(format!("light-{frame}.fits"));
+                crate::write_processed_image_fits_f32(
+                    &path,
+                    &LinearImage::new(width, field.height, 1, data).unwrap(),
+                    &[],
+                    &[],
+                )
+                .unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+        let options = StackOptions {
+            normalization: NormalizationMode::LocalBackground { tile_size: 64 },
+            ..StackOptions::default()
+        };
+        let mut stacker =
+            LiveStacker::open_fits(&paths[0], None, None, None, None, options).unwrap();
+        for path in &paths[1..] {
+            assert!(matches!(
+                stacker.push_fits(path).unwrap(),
+                FrameDisposition::Accepted(_)
+            ));
+        }
+        // Median of a column band, away from the outermost tiles.
+        let band = |image: &LinearImage, from: usize| {
+            let mut values = (40..image.height - 40)
+                .flat_map(|y| (from..from + 40).map(move |x| (x, y)))
+                .map(|(x, y)| image.data[y * image.width + x])
+                .collect::<Vec<_>>();
+            seiza_stats::median_in_place(&mut values).unwrap()
+        };
+        let slope = |image: &LinearImage| band(image, width - 120) - band(image, 80);
+        let online = slope(&stacker.snapshot().unwrap().image);
+        let replayed = stacker
+            .reintegrate(&crate::BatchStackOptions::default(), |_, _, _| {})
+            .unwrap();
+        let refit = slope(&replayed.snapshot.image);
+        assert!(
+            online > 150.0,
+            "the online stack carries the gradient: {online}"
+        );
+        assert!(
+            refit < 0.3 * online,
+            "reintegrated {refit} against online {online}"
         );
     }
 

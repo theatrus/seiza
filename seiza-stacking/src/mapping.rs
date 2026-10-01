@@ -173,6 +173,25 @@ impl RegisteredFrameMapping {
         Ok(mapping)
     }
 
+    /// The normalization this mapping applies.
+    pub fn normalization(&self) -> &NormalizationMap {
+        &self.normalization
+    }
+
+    /// This mapping with another normalization, which must cover the same
+    /// reference grid.
+    pub fn with_normalization(&self, normalization: NormalizationMap) -> Result<Self> {
+        let mut mapping = Self::from_parts(
+            self.schema_version,
+            self.reference_width,
+            self.reference_height,
+            self.transform,
+            normalization,
+        )?;
+        mapping.set_warp(self.warp.clone())?;
+        Ok(mapping)
+    }
+
     /// The polynomial warp registration fitted, if any. Extraction resamples
     /// through it in place of [`Self::transform`].
     pub fn warp(&self) -> Option<&crate::PolynomialWarp> {

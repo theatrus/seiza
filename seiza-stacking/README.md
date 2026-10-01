@@ -421,10 +421,36 @@ streaks to none) and raised SNR from 361 to 374. `Local`'s per-tile gains
 remove the seams too, but a tile of cloud, nebula or frame edge drives them
 far enough to reject the frame: it admitted 88 of 98 frames there.
 
+Under local background normalization the gain comes from star photometry:
+the median ratio of background-subtracted aperture fluxes at the reference's
+brightest unsaturated stars, per channel. A gain from the frames' dispersion,
+which global normalization still uses, also follows gradients and cloud,
+which inflate a hazy frame's dispersion; its gain then came out low, its
+noise was scaled down, and inverse-noise weighting gave the cloudiest M45
+frames the largest weights. Photometric gains rank them last.
+
+Matching every frame's background to one reference frame copies that frame's
+gradient, vignetting and banding into the whole stack. So reintegration
+refits each frame's background offsets against an integration of the twenty
+best frames (by weight, or else by lowest photometric gain), keeping each
+frame's gain, as WBPP integrates its best frames for local normalization. On
+M45, referenced to the first frame of the night, this cut the background
+ripple left after gradient removal from 0.16 to 0.12 of the nebula's
+brightness, against 0.11 for WBPP.
+
+`choose_reference` picks a better reference to begin with (the CLI's
+`--reference auto`, its default). It scores each frame on a half-resolution
+luminance by the median, over its brightest unsaturated stars, of
+sqrt(flux x peak) over the sky noise, which poor seeing, trailing, haze and
+twilight all lower, and among frames within 70% of the best score takes the
+flattest sky. On M45 it chose a frame from high in the sky, and the online
+stack's background ripple fell to 0.11 and its column banding to 0.06 (WBPP:
+0.11 and 0.07), bringing out the faint dust around the cluster.
+
 Frame weighting (`StackOptions::weighting`, the CLI's `--weighting
 inverse-noise`, its default) then counts hazy frames for less. Together with
 quadratic registration and Lanczos interpolation, the CLI's defaults stacked
-M45 in 86 s at 2.37px FWHM and SNR 452, against WBPP's 2.60px and 368 in
+M45 in 94 s at 2.42px FWHM and SNR 388, against WBPP's 2.60px and 368 in
 about 28 minutes. The library's defaults stay global, equal, similarity and
 bilinear, so existing hosts and contexts are unchanged.
 

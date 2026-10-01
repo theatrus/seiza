@@ -35,6 +35,12 @@ enum RegistrationModelArg {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum ReferenceArg {
+    Auto,
+    First,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 enum WeightingArg {
     Equal,
     InverseNoise,
@@ -48,9 +54,13 @@ enum InterpolationArg {
 
 #[derive(Args)]
 pub(crate) struct StackArgs {
-    /// FITS or XISF light frames, in acquisition order; first is the reference
+    /// FITS or XISF light frames, in acquisition order; see --reference
     #[arg(required = true, num_args = 2..)]
     images: Vec<PathBuf>,
+    /// Which frame is the reference: the clearest and sharpest by a quick
+    /// star count over every frame, or the first frame given
+    #[arg(long, value_enum, default_value = "auto")]
+    reference: ReferenceArg,
     /// Linear 32-bit floating-point FITS stack
     #[arg(short, long)]
     output: PathBuf,
@@ -201,6 +211,10 @@ struct DiagnosticReport {
     integrated_fraction: f32,
     accepted_samples: usize,
     rejected_samples: usize,
+    /// Per-channel weight relative to the reference; absent when frames
+    /// count equally.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    weight: Vec<f32>,
 }
 
 #[derive(Serialize)]
@@ -362,7 +376,25 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
     };
     stack_options.registration.maximum_drift_fraction = options.max_registration_drift_fraction;
 
-    let mut images = options.images.iter();
+    // The reference fixes the stack's grid and, under local background
+    // normalization, the background every frame is matched to; the first
+    // frame of a night is often low in the sky and in twilight.
+    let mut ordered = options.images.clone();
+    if matches!(options.reference, ReferenceArg::Auto) {
+        let (best, scores) = seiza_stacking::choose_reference(&ordered, 8)?;
+        let chosen = ordered.remove(best);
+        if let Some(score) = &scores[best] {
+            println!(
+                "chose      {} as reference: {} stars, median area {:.1}px, sky variation {:.1}",
+                chosen.display(),
+                score.stars,
+                score.median_star_area,
+                score.background_variation,
+            );
+        }
+        ordered.insert(0, chosen);
+    }
+    let mut images = ordered.iter();
     let reference_path = images.next().expect("clap requires at least two images");
     let reference_identity = report_path
         .as_ref()
@@ -501,6 +533,7 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
                             integrated_fraction: diagnostics.integrated_fraction,
                             accepted_samples: diagnostics.accepted_samples,
                             rejected_samples: diagnostics.rejected_samples,
+                            weight: diagnostics.weight.clone(),
                         }),
                     });
                 }

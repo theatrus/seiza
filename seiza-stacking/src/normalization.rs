@@ -39,6 +39,109 @@ pub enum NormalizationMode {
     },
 }
 
+impl NormalizationMap {
+    /// A one-tile map with this map's mean gain and offset per channel.
+    pub(crate) fn global_equivalent(&self) -> Self {
+        let tiles = (self.columns * self.rows) as f32;
+        let mean = |values: &[f32], channel: usize| {
+            values
+                .iter()
+                .skip(channel)
+                .step_by(self.channels)
+                .sum::<f32>()
+                / tiles
+        };
+        Self {
+            schema_version: NORMALIZATION_MAP_SCHEMA_VERSION,
+            width: self.width,
+            height: self.height,
+            channels: self.channels,
+            tile_size: self.width.max(self.height),
+            columns: 1,
+            rows: 1,
+            gains: (0..self.channels).map(|c| mean(&self.gains, c)).collect(),
+            offsets: (0..self.channels).map(|c| mean(&self.offsets, c)).collect(),
+        }
+    }
+
+    /// [`Self::estimate`], with per-channel gains measured elsewhere (from
+    /// star photometry) for [`NormalizationMode::LocalBackground`]. Other
+    /// modes, and a missing measurement, fit as [`Self::estimate`] does.
+    pub(crate) fn estimate_with_gains(
+        reference: &LinearImage,
+        source: &LinearImage,
+        mode: NormalizationMode,
+        gains: Option<&[f32]>,
+    ) -> Result<Self> {
+        match (mode, gains) {
+            (NormalizationMode::LocalBackground { tile_size }, Some(gains))
+                if gains.len() == source.channels && reference.dimensions_match(source) =>
+            {
+                if tile_size < 16 {
+                    return Err(Error::Normalization(
+                        "local normalization tile size must be at least 16 pixels".into(),
+                    ));
+                }
+                let globals = gains
+                    .iter()
+                    .enumerate()
+                    .map(|(channel, &gain)| {
+                        let (reference_median, source_median) = tile_medians(
+                            reference,
+                            source,
+                            channel,
+                            0,
+                            0,
+                            source.width,
+                            source.height,
+                        )
+                        .ok_or_else(|| {
+                            Error::Normalization(
+                                "too few overlapping finite pixels for normalization".into(),
+                            )
+                        })?;
+                        Ok((gain, reference_median - gain * source_median))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                local_background_with_gains(reference, source, tile_size, &globals)
+            }
+            _ => Self::estimate(reference, source, mode),
+        }
+    }
+
+    /// Fit [`NormalizationMode::LocalBackground`] offsets against `reference`
+    /// while keeping this map's per-channel gains, as fitted against the
+    /// stack's reference frame. A gain fitted against a reference of
+    /// another noise level, such as an integration of many frames, would
+    /// follow the noise rather than the signal.
+    pub(crate) fn refit_background(
+        &self,
+        reference: &LinearImage,
+        source: &LinearImage,
+        tile_size: usize,
+    ) -> Result<Self> {
+        if source.channels != self.channels {
+            return Err(Error::Normalization(
+                "normalization channel count does not match".into(),
+            ));
+        }
+        let tiles = (self.columns * self.rows) as f32;
+        let globals = (0..self.channels)
+            .map(|channel| {
+                let offset = self
+                    .offsets
+                    .iter()
+                    .skip(channel)
+                    .step_by(self.channels)
+                    .sum::<f32>()
+                    / tiles;
+                (self.channel_mean_gain(channel), offset)
+            })
+            .collect::<Vec<_>>();
+        local_background_with_gains(reference, source, tile_size, &globals)
+    }
+}
+
 /// Per-channel gain and offset that map a source frame onto the reference
 /// background, either globally or over a tile grid.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -447,6 +550,18 @@ fn local_background(
             )
         })
         .collect::<Result<Vec<_>>>()?;
+    local_background_with_gains(reference, source, tile_size, &globals)
+}
+
+/// Background offsets per tile for fixed per-channel gains, each paired with
+/// the global offset used where no tile of that channel can be measured.
+fn local_background_with_gains(
+    reference: &LinearImage,
+    source: &LinearImage,
+    tile_size: usize,
+    globals: &[(f32, f32)],
+) -> Result<NormalizationMap> {
+    let channels = source.channels;
     let columns = source.width.div_ceil(tile_size);
     let rows = source.height.div_ceil(tile_size);
     let mut offsets = (0..columns * rows * channels)
@@ -579,6 +694,104 @@ fn fill_and_smooth_offsets(
             offsets[at(column, row)] = neighbourhood(&snapshot, column, row);
         }
     }
+}
+
+/// Aperture radius, and the annulus that measures each star's local
+/// background, in pixels.
+const PHOTOMETRY_APERTURE: f64 = 5.0;
+const PHOTOMETRY_ANNULUS: (f64, f64) = (8.0, 12.0);
+/// Stars needed for a photometric gain.
+const PHOTOMETRY_MINIMUM_STARS: usize = 12;
+
+/// Per-channel gains that carry `source`'s star fluxes onto `reference`'s:
+/// the median ratio of background-subtracted aperture fluxes at `stars`,
+/// positions on the reference grid both images share.
+///
+/// A gain from star photometry follows transparency alone. One from the
+/// frames' dispersion also follows their gradients and cloud, which inflate
+/// a hazy frame's dispersion; that gain then comes out low, scaling the
+/// frame's noise down, so inverse-noise weighting gave cloudy frames the
+/// largest weights. Stars near saturation in the reference are skipped.
+/// `None` when fewer than [`PHOTOMETRY_MINIMUM_STARS`] measure cleanly in a
+/// channel.
+pub(crate) fn photometric_gains(
+    reference: &LinearImage,
+    source: &LinearImage,
+    stars: &[(f64, f64)],
+) -> Option<Vec<f32>> {
+    if !reference.dimensions_match(source) {
+        return None;
+    }
+    let channels = reference.channels;
+    let (width, height) = (reference.width, reference.height);
+    let outer = PHOTOMETRY_ANNULUS.1.ceil() as usize + 1;
+    (0..channels)
+        .map(|channel| {
+            let ceiling = reference
+                .data
+                .par_iter()
+                .skip(channel)
+                .step_by(channels)
+                .copied()
+                .filter(|value| value.is_finite())
+                .reduce(|| f32::MIN, f32::max);
+            let mut ratios = stars
+                .iter()
+                .filter_map(|&(x, y)| {
+                    let (cx, cy) = (x.round() as isize, y.round() as isize);
+                    if cx < outer as isize
+                        || cy < outer as isize
+                        || cx + outer as isize >= width as isize
+                        || cy + outer as isize >= height as isize
+                    {
+                        return None;
+                    }
+                    let (cx, cy) = (cx as usize, cy as usize);
+                    let mut reference_annulus = Vec::new();
+                    let mut source_annulus = Vec::new();
+                    let mut aperture = Vec::new();
+                    for py in cy - outer..=cy + outer {
+                        for px in cx - outer..=cx + outer {
+                            let distance = (px as f64 - x).hypot(py as f64 - y);
+                            let index = (py * width + px) * channels + channel;
+                            let (r, s) = (reference.data[index], source.data[index]);
+                            if !r.is_finite() || !s.is_finite() {
+                                return None;
+                            }
+                            if distance <= PHOTOMETRY_APERTURE {
+                                aperture.push((r, s));
+                            } else if (PHOTOMETRY_ANNULUS.0..=PHOTOMETRY_ANNULUS.1)
+                                .contains(&distance)
+                            {
+                                reference_annulus.push(r);
+                                source_annulus.push(s);
+                            }
+                        }
+                    }
+                    if aperture.iter().any(|&(r, _)| r >= 0.85 * ceiling) {
+                        return None;
+                    }
+                    let reference_sky = median_in_place(&mut reference_annulus)?;
+                    let source_sky = median_in_place(&mut source_annulus)?;
+                    let (reference_flux, source_flux) =
+                        aperture
+                            .iter()
+                            .fold((0.0_f64, 0.0_f64), |(rf, sf), &(r, s)| {
+                                (
+                                    rf + f64::from(r - reference_sky),
+                                    sf + f64::from(s - source_sky),
+                                )
+                            });
+                    (reference_flux > 0.0 && source_flux > 0.0)
+                        .then(|| (reference_flux / source_flux) as f32)
+                })
+                .collect::<Vec<_>>();
+            if ratios.len() < PHOTOMETRY_MINIMUM_STARS {
+                return None;
+            }
+            median_in_place(&mut ratios).filter(|gain| gain.is_finite() && *gain > 0.0)
+        })
+        .collect()
 }
 
 /// `value * gain + offset` per channel on whole interleaved pixels, leaving
@@ -729,6 +942,44 @@ mod tests {
         let global_map =
             NormalizationMap::estimate(&reference, &source, NormalizationMode::Global).unwrap();
         assert_eq!(map.gain_range(), global_map.gain_range(), "the global gain");
+    }
+
+    /// A frame with half the reference's star flux under a gradient and a
+    /// patch of cloud: star photometry recovers the gain of 2, where the
+    /// frames' dispersion, inflated by the cloud and gradient, does not.
+    #[test]
+    fn photometric_gain_follows_stars_not_cloud() {
+        let reference = crate::registration::test_star_field(false);
+        let (width, height) = (reference.width, reference.height);
+        let source = LinearImage::new(
+            width,
+            height,
+            1,
+            reference
+                .data
+                .iter()
+                .enumerate()
+                .map(|(index, &value)| {
+                    let (x, y) = ((index % width) as f32, (index / width) as f32);
+                    let cloud =
+                        300.0 * (-((x - 380.0).powi(2) + (y - 100.0).powi(2)) / 6000.0).exp();
+                    0.5 * value + 0.4 * x + cloud
+                })
+                .collect(),
+        )
+        .unwrap();
+        let stars = crate::Registrar::new(&reference, crate::RegistrationOptions::default())
+            .unwrap()
+            .reference_star_positions();
+        let gains = photometric_gains(&reference, &source, &stars).expect("enough stars");
+        assert!((gains[0] - 2.0).abs() < 0.05, "{gains:?}");
+        let dispersion =
+            NormalizationMap::estimate(&reference, &source, NormalizationMode::Global).unwrap();
+        assert!(
+            (dispersion.mean_gain() - 2.0).abs() > 0.2,
+            "the dispersion gain {} should be misled",
+            dispersion.mean_gain()
+        );
     }
 
     #[test]

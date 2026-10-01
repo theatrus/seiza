@@ -611,6 +611,14 @@ impl Registrar {
         })
     }
 
+    /// Positions of the reference frame's brightest stars, on its grid.
+    pub(crate) fn reference_star_positions(&self) -> Vec<(f64, f64)> {
+        self.reference_stars
+            .iter()
+            .map(|star| (star.x, star.y))
+            .collect()
+    }
+
     /// Find the best transform aligning `source` to the reference frame.
     pub fn register(&self, source: &LinearImage) -> Result<RegistrationResult> {
         let dense_source = detect(source, &self.options, self.options.dense_star_count());

@@ -17,6 +17,7 @@ mod normalization;
 mod orientation;
 mod paths;
 mod pipeline;
+mod reference;
 mod registration;
 mod replay;
 mod residual_flat;
@@ -62,6 +63,7 @@ pub use pipeline::{
     Continue, MAXIMUM_WORKERS, PipelineExecution, PipelineOptions, PipelineReport, PipelineTimings,
     PoolPipelineMemory, PoolPipelineReport,
 };
+pub use reference::{ReferenceScore, choose_reference, reference_score};
 pub use registration::{
     AffineTransform, Interpolation, PolynomialWarp, ReferenceRegion, Registrar, RegistrationModel,
     RegistrationOptions, RegistrationResult, SimilarityTransform, resample_region_photosites,

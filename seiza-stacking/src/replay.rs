@@ -15,6 +15,7 @@ use crate::{
     LinearImage, LiveStacker, ReferenceRegion, RegisteredFrameMapping, Result,
     integrate_registered_frames,
 };
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -330,6 +331,18 @@ impl Ledger {
     }
 }
 
+/// Frames averaged into the reference a spatially normalized replay matches
+/// backgrounds to; PixInsight's WBPP integrates its twenty best for local
+/// normalization.
+const NORMALIZATION_REFERENCE_FRAMES: usize = 20;
+
+/// The integrated background reference and each frame's normalization
+/// fitted against it, filled on first use.
+struct Renormalizer {
+    reference: LinearImage,
+    maps: std::sync::Mutex<Vec<Option<crate::NormalizationMap>>>,
+}
+
 /// Frames prepared ahead of the one a reintegration pass is integrating.
 const REPLAY_LOOKAHEAD: usize = 2;
 
@@ -481,6 +494,15 @@ impl LiveStacker {
         };
         let count = ledger.frames.len();
         let masters = MastersCache::default();
+        let renormalizer =
+            if let crate::NormalizationMode::LocalBackground { .. } = self.options.normalization {
+                Some(Renormalizer {
+                    reference: self.normalization_reference(&masters)?,
+                    maps: std::sync::Mutex::new(vec![None; count]),
+                })
+            } else {
+                None
+            };
         // Frames are requested in a fixed order: every frame for each pass in
         // turn. Preparing the next few on their own threads while the batch
         // integrates the current one overlaps reading, debayering and
@@ -501,7 +523,7 @@ impl LiveStacker {
             let prepare = |index: usize| {
                 let frame = &ledger.frames[index];
                 let masters = masters.get(self, frame.calibration)?;
-                self.replay_frame(frame, &masters)
+                self.replay_frame(frame, &masters, renormalizer.as_ref().map(|r| (r, index)))
             };
             let mut in_flight = std::collections::VecDeque::new();
             let mut next = 0;
@@ -531,11 +553,112 @@ impl LiveStacker {
         Ok(result)
     }
 
-    fn replay_frame(
+    /// The reference a spatially normalized replay matches backgrounds to:
+    /// the mean of the [`NORMALIZATION_REFERENCE_FRAMES`] best admitted
+    /// frames, each registered and scaled by its recorded gain with its mean
+    /// recorded offset. The best are those with the highest recorded weight
+    /// in a weighted stack, and otherwise the lowest photometric gain, the
+    /// most transparent frames; averaging frames chosen without regard to
+    /// quality copied a hazy frame's cloud into every frame.
+    ///
+    /// Local normalization against a single frame copies that frame's
+    /// large-scale background, its gradient, vignetting and banding, into
+    /// every frame of the stack. In the mean of frames taken at different
+    /// times and orientations those patterns largely cancel, as in the
+    /// integrated reference PixInsight's WBPP builds for local normalization.
+    fn normalization_reference(&self, masters: &MastersCache) -> Result<LinearImage> {
+        let frames = &self.ledger.frames;
+        // Higher is better: the recorded weight, or else the inverse of the
+        // photometric gain, which rises as haze dims a frame's stars.
+        let quality = |admitted: &AdmittedFrame| {
+            let weight = &admitted.weighting.weight;
+            if weight.is_empty() {
+                1.0 / admitted.mapping.normalization().mean_gain()
+            } else {
+                weight.iter().sum::<f32>() / weight.len() as f32
+            }
+        };
+        let mut ranked = (0..frames.len()).collect::<Vec<_>>();
+        ranked.sort_by(|&left, &right| quality(&frames[right]).total_cmp(&quality(&frames[left])));
+        ranked.truncate(NORMALIZATION_REFERENCE_FRAMES);
+        let samples = self.reference.sample_count();
+        let mut sum = vec![0.0_f32; samples];
+        let mut count = vec![0_u16; samples];
+        for index in ranked {
+            let admitted = &frames[index];
+            let masters = masters.get(self, admitted.calibration)?;
+            let raw =
+                self.replay_frame_unnormalized(admitted, &masters, crate::Interpolation::Bilinear)?;
+            // The frame's recorded gain and mean offset: its background stays
+            // its own, while its stars match the reference's.
+            let mut image = raw;
+            admitted
+                .mapping
+                .normalization()
+                .global_equivalent()
+                .apply_global(&mut image)?;
+            sum.par_iter_mut()
+                .zip(count.par_iter_mut())
+                .zip(image.data.par_iter())
+                .for_each(|((sum, count), &value)| {
+                    if value.is_finite() {
+                        *sum += value;
+                        *count += 1;
+                    }
+                });
+        }
+        let mean = sum
+            .into_par_iter()
+            .zip(count.into_par_iter())
+            .map(|(sum, count)| {
+                if count == 0 {
+                    f32::NAN
+                } else {
+                    sum / f32::from(count)
+                }
+            })
+            .collect();
+        let image = LinearImage::new(
+            self.reference.width,
+            self.reference.height,
+            self.reference.channels,
+            mean,
+        )?;
+        Ok(image)
+    }
+
+    /// Read, calibrate and prepare an admitted frame's source and carry it
+    /// onto the reference grid through its recorded registration, without
+    /// any normalization.
+    fn replay_frame_unnormalized(
         &self,
         admitted: &AdmittedFrame,
         masters: &CalibrationMasters,
+        interpolation: crate::Interpolation,
     ) -> Result<LinearImage> {
+        let (frame, _) = self.read_admitted(admitted, masters)?;
+        let identity = admitted
+            .mapping
+            .with_normalization(crate::NormalizationMap::identity(&self.reference))?;
+        identity.extract_region_with(&frame.image, self.full_region(admitted), interpolation)
+    }
+
+    fn full_region(&self, admitted: &AdmittedFrame) -> ReferenceRegion {
+        ReferenceRegion {
+            x: 0,
+            y: 0,
+            width: admitted.mapping.reference_width(),
+            height: admitted.mapping.reference_height(),
+        }
+    }
+
+    /// Read, calibrate, filter and debayer an admitted frame's source,
+    /// refusing a file that changed since it was stacked.
+    fn read_admitted(
+        &self,
+        admitted: &AdmittedFrame,
+        masters: &CalibrationMasters,
+    ) -> Result<(FitsFrame, Option<crate::BayerLayout>)> {
         let source = admitted
             .source
             .as_ref()
@@ -558,31 +681,91 @@ impl LiveStacker {
         if let Some(filter) = &self.options.cosmetic {
             crate::cosmetic::suppress_impulses(&mut frame.image, frame.bayer, filter)?;
         }
-        let (frame, cfa) = frame.into_prepared_with_layout()?;
-        let region = ReferenceRegion {
-            x: 0,
-            y: 0,
-            width: admitted.mapping.reference_width(),
-            height: admitted.mapping.reference_height(),
-        };
-        let image = match cfa
-            .filter(|_| self.options.cfa_integration == crate::CfaIntegration::BayerDrizzle)
-        {
+        let prepared = frame.into_prepared_with_layout()?;
+        if source.stamp.is_some() && SourceStamp::of(&source.path) != source.stamp {
+            return Err(changed());
+        }
+        Ok(prepared)
+    }
+
+    fn replay_frame(
+        &self,
+        admitted: &AdmittedFrame,
+        masters: &CalibrationMasters,
+        renormalize: Option<(&Renormalizer, usize)>,
+    ) -> Result<LinearImage> {
+        if let Some((renormalizer, index)) = renormalize {
+            return self.replay_frame_renormalized(admitted, masters, renormalizer, index);
+        }
+        let (frame, cfa) = self.read_admitted(admitted, masters)?;
+        let region = self.full_region(admitted);
+        match cfa.filter(|_| self.options.cfa_integration == crate::CfaIntegration::BayerDrizzle) {
             Some(layout) => {
                 admitted
                     .mapping
-                    .extract_region_photosites(&frame.image, region, layout)?
+                    .extract_region_photosites(&frame.image, region, layout)
             }
             None => admitted.mapping.extract_region_with(
                 &frame.image,
                 region,
                 self.options.interpolation,
-            )?,
-        };
-        if source.stamp.is_some() && SourceStamp::of(&source.path) != source.stamp {
-            return Err(changed());
+            ),
         }
-        Ok(image)
+    }
+
+    /// [`Self::replay_frame`] with the frame's background offsets fitted
+    /// again against the integrated reference, keeping its recorded gain. The fit runs on the
+    /// interpolated frame, which samples every channel evenly, and is cached
+    /// so every pass sees the same samples.
+    fn replay_frame_renormalized(
+        &self,
+        admitted: &AdmittedFrame,
+        masters: &CalibrationMasters,
+        renormalizer: &Renormalizer,
+        index: usize,
+    ) -> Result<LinearImage> {
+        let (frame, cfa) = self.read_admitted(admitted, masters)?;
+        let region = self.full_region(admitted);
+        let identity = admitted
+            .mapping
+            .with_normalization(crate::NormalizationMap::identity(&self.reference))?;
+        let mut interpolated =
+            identity.extract_region_with(&frame.image, region, self.options.interpolation)?;
+        let cached = renormalizer
+            .maps
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())[index]
+            .clone();
+        let map = match cached {
+            Some(map) => map,
+            None => {
+                let crate::NormalizationMode::LocalBackground { tile_size } =
+                    self.options.normalization
+                else {
+                    unreachable!("only local background normalization is refitted");
+                };
+                let map = admitted.mapping.normalization().refit_background(
+                    &renormalizer.reference,
+                    &interpolated,
+                    tile_size,
+                )?;
+                renormalizer
+                    .maps
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())[index] = Some(map.clone());
+                map
+            }
+        };
+        match cfa.filter(|_| self.options.cfa_integration == crate::CfaIntegration::BayerDrizzle) {
+            Some(layout) => admitted
+                .mapping
+                .with_normalization(map)?
+                .extract_region_photosites(&frame.image, region, layout),
+            None => {
+                map.apply(&mut interpolated)?;
+                Ok(interpolated)
+            }
+        }
     }
 }
 
