@@ -343,6 +343,42 @@ struct Renormalizer {
     maps: std::sync::Mutex<Vec<Option<crate::NormalizationMap>>>,
 }
 
+impl Renormalizer {
+    /// Frame `index`'s background offsets refitted against the integrated
+    /// reference on `interpolated`, its unnormalized registered image,
+    /// keeping its recorded gain; fitted once and then reused, so every pass
+    /// sees the same samples.
+    fn map_for(
+        &self,
+        stacker: &LiveStacker,
+        admitted: &AdmittedFrame,
+        index: usize,
+        interpolated: &LinearImage,
+    ) -> Result<crate::NormalizationMap> {
+        if let Some(map) = self
+            .maps
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())[index]
+            .clone()
+        {
+            return Ok(map);
+        }
+        let crate::NormalizationMode::LocalBackground { tile_size } = stacker.options.normalization
+        else {
+            unreachable!("only local background normalization is refitted");
+        };
+        let map = admitted.mapping.normalization().refit_background(
+            &self.reference,
+            interpolated,
+            tile_size,
+        )?;
+        self.maps
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())[index] = Some(map.clone());
+        Ok(map)
+    }
+}
+
 /// Frames prepared ahead of the one a reintegration pass is integrating.
 const REPLAY_LOOKAHEAD: usize = 2;
 
@@ -369,6 +405,118 @@ impl std::ops::Deref for ReplayMasters<'_> {
             Self::Current(masters) => masters,
             Self::Loaded(masters) => masters,
         }
+    }
+}
+
+/// Each admitted frame's prepared image, registered but not normalized,
+/// kept in a scratch file after it is first made, so replay's passes and
+/// its integrated reference read it back instead of reading, calibrating,
+/// demosaicing and resampling the source again. A frame whose file could
+/// not be written is prepared again when it is next needed.
+struct FrameCache {
+    directory: tempfile::TempDir,
+    slots: Vec<std::sync::Mutex<CacheSlot>>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum CacheSlot {
+    Empty,
+    Stored,
+    Unavailable,
+}
+
+impl FrameCache {
+    fn new(directory: Option<&Path>, frames: usize) -> Option<Self> {
+        let directory = match directory {
+            Some(directory) => tempfile::Builder::new()
+                .prefix(".seiza-reintegrate-")
+                .tempdir_in(directory),
+            None => tempfile::Builder::new()
+                .prefix("seiza-reintegrate-")
+                .tempdir(),
+        }
+        .ok()?;
+        Some(Self {
+            directory,
+            slots: (0..frames)
+                .map(|_| std::sync::Mutex::new(CacheSlot::Empty))
+                .collect(),
+        })
+    }
+
+    fn path(&self, index: usize) -> PathBuf {
+        self.directory.path().join(format!("frame-{index}.f32"))
+    }
+
+    /// The cached image of frame `index`, made with `prepare` the first
+    /// time. Holding the slot while preparing keeps two passes that reach
+    /// the same frame at once from preparing it twice.
+    fn get_or_prepare(
+        &self,
+        index: usize,
+        prepare: impl FnOnce() -> Result<LinearImage>,
+    ) -> Result<LinearImage> {
+        let mut slot = self.slots[index]
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if *slot == CacheSlot::Stored {
+            if let Some(image) = Self::read(&self.path(index)) {
+                return Ok(image);
+            }
+            *slot = CacheSlot::Unavailable;
+        }
+        let image = prepare()?;
+        if *slot == CacheSlot::Empty {
+            *slot = if Self::write(&self.path(index), &image).is_ok() {
+                CacheSlot::Stored
+            } else {
+                let _ = std::fs::remove_file(self.path(index));
+                CacheSlot::Unavailable
+            };
+        }
+        Ok(image)
+    }
+
+    fn write(path: &Path, image: &LinearImage) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut file = std::io::BufWriter::with_capacity(1 << 22, std::fs::File::create(path)?);
+        for dimension in [image.width, image.height, image.channels] {
+            file.write_all(&(dimension as u64).to_le_bytes())?;
+        }
+        let mut bytes = vec![0_u8; 1 << 20];
+        for chunk in image.data.chunks(bytes.len() / 4) {
+            for (sample, out) in chunk.iter().zip(bytes.chunks_exact_mut(4)) {
+                out.copy_from_slice(&sample.to_le_bytes());
+            }
+            file.write_all(&bytes[..chunk.len() * 4])?;
+        }
+        file.into_inner().map_err(|error| error.into_error())?;
+        Ok(())
+    }
+
+    fn read(path: &Path) -> Option<LinearImage> {
+        let bytes = std::fs::read(path).ok()?;
+        let dimension = |at: usize| {
+            u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?)
+                .try_into()
+                .ok()
+        };
+        let (width, height, channels): (usize, usize, usize) =
+            (dimension(0)?, dimension(8)?, dimension(16)?);
+        let samples = &bytes[24..];
+        if samples.len()
+            != width
+                .checked_mul(height)?
+                .checked_mul(channels)?
+                .checked_mul(4)?
+        {
+            return None;
+        }
+        let data = samples
+            .par_chunks_exact(4)
+            .map(|sample| f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]))
+            .collect();
+        LinearImage::new(width, height, channels, data).ok()
     }
 }
 
@@ -494,10 +642,15 @@ impl LiveStacker {
         };
         let count = ledger.frames.len();
         let masters = MastersCache::default();
+        // Bayer drizzle resamples photosites, which the cache does not hold.
+        let cache = (self.options.cfa_integration != crate::CfaIntegration::BayerDrizzle)
+            .then(|| FrameCache::new(options.scratch_directory.as_deref(), count))
+            .flatten();
+        let cache = cache.as_ref();
         let renormalizer =
             if let crate::NormalizationMode::LocalBackground { .. } = self.options.normalization {
                 Some(Renormalizer {
-                    reference: self.normalization_reference(&masters)?,
+                    reference: self.normalization_reference(&masters, cache)?,
                     maps: std::sync::Mutex::new(vec![None; count]),
                 })
             } else {
@@ -523,7 +676,7 @@ impl LiveStacker {
             let prepare = |index: usize| {
                 let frame = &ledger.frames[index];
                 let masters = masters.get(self, frame.calibration)?;
-                self.replay_frame(frame, &masters, renormalizer.as_ref().map(|r| (r, index)))
+                self.replay_frame(frame, &masters, index, renormalizer.as_ref(), cache)
             };
             let mut in_flight = std::collections::VecDeque::new();
             let mut next = 0;
@@ -566,7 +719,11 @@ impl LiveStacker {
     /// every frame of the stack. In the mean of frames taken at different
     /// times and orientations those patterns largely cancel, as in the
     /// integrated reference PixInsight's WBPP builds for local normalization.
-    fn normalization_reference(&self, masters: &MastersCache) -> Result<LinearImage> {
+    fn normalization_reference(
+        &self,
+        masters: &MastersCache,
+        cache: Option<&FrameCache>,
+    ) -> Result<LinearImage> {
         let frames = &self.ledger.frames;
         // Higher is better: the recorded weight, or else the inverse of the
         // photometric gain, which rises as haze dims a frame's stars.
@@ -587,8 +744,7 @@ impl LiveStacker {
         for index in ranked {
             let admitted = &frames[index];
             let masters = masters.get(self, admitted.calibration)?;
-            let raw =
-                self.replay_frame_unnormalized(admitted, &masters, crate::Interpolation::Bilinear)?;
+            let raw = self.prepared(index, admitted, &masters, cache)?;
             // The frame's recorded gain and mean offset: its background stays
             // its own, while its stars match the reference's.
             let mut image = raw;
@@ -688,29 +844,76 @@ impl LiveStacker {
         Ok(prepared)
     }
 
+    /// An admitted frame registered through its recorded mapping, not yet
+    /// normalized: from the cache when there is one, and made (then cached)
+    /// otherwise. A source file that changed since it was stacked is
+    /// refused either way.
+    fn prepared(
+        &self,
+        index: usize,
+        admitted: &AdmittedFrame,
+        masters: &CalibrationMasters,
+        cache: Option<&FrameCache>,
+    ) -> Result<LinearImage> {
+        let make = || self.replay_frame_unnormalized(admitted, masters, self.options.interpolation);
+        match cache {
+            Some(cache) => {
+                self.source_unchanged(admitted)?;
+                cache.get_or_prepare(index, make)
+            }
+            None => make(),
+        }
+    }
+
+    fn source_unchanged(&self, admitted: &AdmittedFrame) -> Result<()> {
+        let source = admitted
+            .source
+            .as_ref()
+            .ok_or_else(|| Error::Stack("an admitted frame has no source file".into()))?;
+        if source.stamp.is_some() && SourceStamp::of(&source.path) != source.stamp {
+            return Err(Error::Stack(format!(
+                "{} changed since it was stacked; rebuild the stack",
+                source.path.display()
+            )));
+        }
+        Ok(())
+    }
+
     fn replay_frame(
         &self,
         admitted: &AdmittedFrame,
         masters: &CalibrationMasters,
-        renormalize: Option<(&Renormalizer, usize)>,
+        index: usize,
+        renormalizer: Option<&Renormalizer>,
+        cache: Option<&FrameCache>,
     ) -> Result<LinearImage> {
-        if let Some((renormalizer, index)) = renormalize {
-            return self.replay_frame_renormalized(admitted, masters, renormalizer, index);
-        }
-        let (frame, cfa) = self.read_admitted(admitted, masters)?;
-        let region = self.full_region(admitted);
-        match cfa.filter(|_| self.options.cfa_integration == crate::CfaIntegration::BayerDrizzle) {
-            Some(layout) => {
-                admitted
-                    .mapping
-                    .extract_region_photosites(&frame.image, region, layout)
+        if self.options.cfa_integration == crate::CfaIntegration::BayerDrizzle {
+            if let Some(renormalizer) = renormalizer {
+                return self.replay_frame_renormalized(admitted, masters, renormalizer, index);
             }
-            None => admitted.mapping.extract_region_with(
-                &frame.image,
-                region,
-                self.options.interpolation,
-            ),
+            let (frame, cfa) = self.read_admitted(admitted, masters)?;
+            let region = self.full_region(admitted);
+            return match cfa {
+                Some(layout) => {
+                    admitted
+                        .mapping
+                        .extract_region_photosites(&frame.image, region, layout)
+                }
+                None => admitted.mapping.extract_region_with(
+                    &frame.image,
+                    region,
+                    self.options.interpolation,
+                ),
+            };
         }
+        let mut image = self.prepared(index, admitted, masters, cache)?;
+        match renormalizer {
+            Some(renormalizer) => renormalizer
+                .map_for(self, admitted, index, &image)?
+                .apply(&mut image)?,
+            None => admitted.mapping.normalization().apply(&mut image)?,
+        }
+        Ok(image)
     }
 
     /// [`Self::replay_frame`] with the frame's background offsets fitted
@@ -731,31 +934,7 @@ impl LiveStacker {
             .with_normalization(crate::NormalizationMap::identity(&self.reference))?;
         let mut interpolated =
             identity.extract_region_with(&frame.image, region, self.options.interpolation)?;
-        let cached = renormalizer
-            .maps
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())[index]
-            .clone();
-        let map = match cached {
-            Some(map) => map,
-            None => {
-                let crate::NormalizationMode::LocalBackground { tile_size } =
-                    self.options.normalization
-                else {
-                    unreachable!("only local background normalization is refitted");
-                };
-                let map = admitted.mapping.normalization().refit_background(
-                    &renormalizer.reference,
-                    &interpolated,
-                    tile_size,
-                )?;
-                renormalizer
-                    .maps
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner())[index] = Some(map.clone());
-                map
-            }
-        };
+        let map = renormalizer.map_for(self, admitted, index, &interpolated)?;
         match cfa.filter(|_| self.options.cfa_integration == crate::CfaIntegration::BayerDrizzle) {
             Some(layout) => admitted
                 .mapping

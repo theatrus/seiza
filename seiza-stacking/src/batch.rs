@@ -23,6 +23,13 @@ pub struct BatchStackOptions {
     /// relative to a frame of weight 1: `minimum_sigma` and the variance
     /// output then describe such a frame.
     pub frame_weights: Option<Vec<Vec<f32>>>,
+    /// Where [`crate::LiveStacker::reintegrate`] keeps each frame's prepared
+    /// image between passes, or `None` for the system temporary directory.
+    /// It needs about four bytes per output sample per admitted frame (29 GB
+    /// for 92 frames of a 26 MP colour sensor), so choose a disk with room:
+    /// where `/tmp` is held in memory, the system default may be too small.
+    /// Without room, reintegration prepares each frame again on every pass.
+    pub scratch_directory: Option<std::path::PathBuf>,
 }
 
 impl Default for BatchStackOptions {
@@ -32,6 +39,7 @@ impl Default for BatchStackOptions {
             minimum_sigma: 1.0e-6,
             cancel: None,
             frame_weights: None,
+            scratch_directory: None,
         }
     }
 }

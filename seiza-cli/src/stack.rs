@@ -113,6 +113,11 @@ pub(crate) struct StackArgs {
     /// reference and warm-up frames, which online rejection cannot revisit.
     #[arg(long)]
     reintegrate: bool,
+    /// Where --reintegrate keeps each frame's prepared image between its
+    /// passes (about four bytes per output sample per frame); defaults to the
+    /// output's directory
+    #[arg(long)]
+    scratch_directory: Option<PathBuf>,
     /// Integrate each Bayer frame's photosites without demosaicing: every
     /// registered pixel takes the nearest photosite in its own color, and
     /// the stack fills the colors in. Sharper colors when frames are
@@ -586,6 +591,22 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
                 low_sigma: options.sigma_low,
                 high_sigma: options.sigma_high,
             },
+            // Each frame's prepared image waits here between passes: about
+            // four bytes per output sample per frame, beside the output
+            // rather than in a temporary directory that may live in memory.
+            scratch_directory: Some(
+                options
+                    .scratch_directory
+                    .clone()
+                    .or_else(|| {
+                        options
+                            .output
+                            .parent()
+                            .filter(|parent| !parent.as_os_str().is_empty())
+                            .map(PathBuf::from)
+                    })
+                    .unwrap_or_else(|| PathBuf::from(".")),
+            ),
             ..seiza_stacking::BatchStackOptions::default()
         };
         let result = stacker.reintegrate(&batch, |pass, index, count| {

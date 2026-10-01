@@ -1007,6 +1007,39 @@ mod tests {
     }
 
     #[test]
+    fn reintegration_matches_with_and_without_the_frame_cache() {
+        let (directory, paths) = trailed_reference_set();
+        let mut stacker =
+            LiveStacker::open_fits(&paths[0], None, None, None, None, StackOptions::default())
+                .unwrap();
+        for path in &paths[1..] {
+            stacker.push_fits(path).unwrap();
+        }
+        let reintegrate = |scratch_directory: PathBuf| {
+            stacker
+                .reintegrate(
+                    &crate::BatchStackOptions {
+                        scratch_directory: Some(scratch_directory),
+                        ..crate::BatchStackOptions::default()
+                    },
+                    |_, _, _| {},
+                )
+                .unwrap()
+        };
+        let scratch = directory.path().join("scratch");
+        std::fs::create_dir(&scratch).unwrap();
+        let cached = reintegrate(scratch.clone());
+        // The cache cleans up after itself.
+        assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
+        // A directory that cannot hold the cache prepares every pass afresh.
+        let uncached = reintegrate(directory.path().join("missing"));
+        assert_eq!(
+            bits(&cached.snapshot.image.data),
+            bits(&uncached.snapshot.image.data)
+        );
+    }
+
+    #[test]
     fn reintegration_survives_a_saved_context_and_refuses_changed_sources() {
         let (directory, paths) = trailed_reference_set();
         let mut stacker =
