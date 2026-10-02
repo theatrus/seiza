@@ -588,6 +588,36 @@ SeizaLiveStacker *seiza_live_stacker_create(const float *reference,
                                             char **error_out);
 
 /*
+ Choose a reference from an ordered JSON array of FITS or XISF path strings.
+ Uses the native stacking reference scorer: among frames with nearly the
+ best star quality, choose the flattest background. This only reads inputs;
+ it does not calibrate, register, stack, or modify them.
+
+ Returns owned schema-1 JSON with `referenceIndex` (zero-based),
+ `referencePath` (exactly the input string at that index), and `scores`
+ (one entry per input in the original order). A score is null for an
+ unreadable or unscorable frame; otherwise it contains `stars`,
+ `medianStarArea`, `background`, `backgroundVariation`, and `score`.
+ `medianStarArea` is in half-resolution pixels, and background measurements
+ use the scorer's half-resolution luminance units, not display pixels.
+ See `seiza_stacking::ReferenceScore` for the native measurements.
+
+ `concurrency` bounds how many source frames are opened and scored at once;
+ 0 uses 1. The synchronous call has no cancellation callback and retains
+ no input pointers. It fails if the JSON is invalid or no frame can be
+ scored. Free the returned JSON, or an `error_out` string on failure, with
+ [`seiza_string_free`]. Relative paths are resolved by file reads against
+ the process working directory; the returned spelling is unchanged.
+
+ # Safety
+ `paths_json` must point to a valid NUL-terminated UTF-8 string. When
+ non-null, `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_stack_choose_reference_json(const char *paths_json,
+                                        size_t concurrency,
+                                        char **error_out);
+
+/*
  Opens a FITS or XISF reference and optional integrated bias, dark, and flat
  masters. A positive `dark_exposure_seconds` overrides the dark metadata; zero
  uses the metadata. Pass null or empty `options_json` for defaults; its

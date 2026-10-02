@@ -84,10 +84,21 @@ exposes the **superset** of what both apps need.
   `seiza_live_stacker_reintegrate` rereads every admitted frame and returns a
   new snapshot integrated with leave-one-out rejection, which removes trails
   from the reference and warm-up frames that online rejection kept. It
-  reports both passes through a progress callback, accepts a
+  reports all three passes through a progress callback, accepts a
   `SeizaCancelSignal`, and leaves the live stack unchanged;
   `reintegrationUnavailable` in the state JSON says when a stack cannot be
   replayed.
+- **Automatic stack reference** — `seiza_stack_choose_reference_json` scores
+  an ordered JSON array of FITS/XISF paths using the native stacking algorithm.
+  It chooses the flattest background among frames with nearly the best star
+  quality, without calibrating or modifying any source. Its owned schema-1
+  JSON returns `referenceIndex`, the unchanged input `referencePath`, and a
+  parallel `scores` array. Unreadable or unscorable inputs have null scores;
+  a batch with no scoreable frame fails the call. Each score contains `stars`,
+  `medianStarArea`, `background`, `backgroundVariation`, and `score`, measured
+  on half-resolution luminance. The concurrency argument bounds simultaneous
+  source reads/scoring; zero uses one. This synchronous call has no cancellation
+  callback. Free its result or error using `seiza_string_free`.
 - **Calibration orchestration** — `seiza_probe_frame_json` reads FITS/XISF
   metadata without decoding pixels, `seiza_calibration_plan_json` applies the
   core sensor/optics/exposure/temperature/proximity/coherence rules, and

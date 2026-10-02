@@ -537,6 +537,37 @@ struct StackPipelineResponse {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct StackReferenceResponse {
+    schema_version: u32,
+    reference_index: usize,
+    reference_path: String,
+    scores: Vec<Option<StackReferenceScoreResponse>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StackReferenceScoreResponse {
+    stars: usize,
+    median_star_area: f32,
+    background: f32,
+    background_variation: f32,
+    score: f32,
+}
+
+impl From<seiza_stacking::ReferenceScore> for StackReferenceScoreResponse {
+    fn from(score: seiza_stacking::ReferenceScore) -> Self {
+        Self {
+            stars: score.stars,
+            median_star_area: score.median_star_area,
+            background: score.background,
+            background_variation: score.background_variation,
+            score: score.score,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct StackDiagnosticsResponse {
     matched_stars: usize,
     registration_rms_pixels: f64,
@@ -1565,6 +1596,59 @@ pub unsafe extern "C" fn seiza_live_stacker_create(
         Ok(SeizaLiveStacker { stacker })
     })
     .map_or(ptr::null_mut(), |stacker| Box::into_raw(Box::new(stacker)))
+}
+
+#[unsafe(no_mangle)]
+/// Choose a reference from an ordered JSON array of FITS or XISF path strings.
+/// Uses the native stacking reference scorer: among frames with nearly the
+/// best star quality, choose the flattest background. This only reads inputs;
+/// it does not calibrate, register, stack, or modify them.
+///
+/// Returns owned schema-1 JSON with `referenceIndex` (zero-based),
+/// `referencePath` (exactly the input string at that index), and `scores`
+/// (one entry per input in the original order). A score is null for an
+/// unreadable or unscorable frame; otherwise it contains `stars`,
+/// `medianStarArea`, `background`, `backgroundVariation`, and `score`.
+/// `medianStarArea` is in half-resolution pixels, and background measurements
+/// use the scorer's half-resolution luminance units, not display pixels.
+/// See `seiza_stacking::ReferenceScore` for the native measurements.
+///
+/// `concurrency` bounds how many source frames are opened and scored at once;
+/// 0 uses 1. The synchronous call has no cancellation callback and retains
+/// no input pointers. It fails if the JSON is invalid or no frame can be
+/// scored. Free the returned JSON, or an `error_out` string on failure, with
+/// [`seiza_string_free`]. Relative paths are resolved by file reads against
+/// the process working directory; the returned spelling is unchanged.
+///
+/// # Safety
+/// `paths_json` must point to a valid NUL-terminated UTF-8 string. When
+/// non-null, `error_out` must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_stack_choose_reference_json(
+    paths_json: *const c_char,
+    concurrency: usize,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let paths_json = required_str(paths_json, "stack reference paths")?;
+        let paths: Vec<String> = serde_json::from_str(&paths_json).map_err(|error| {
+            format!("stack reference paths must be a JSON array of strings: {error}")
+        })?;
+        let native_paths = paths.iter().map(PathBuf::from).collect::<Vec<_>>();
+        let (reference_index, scores) =
+            seiza_stacking::choose_reference(&native_paths, concurrency)
+                .map_err(|error| error.to_string())?;
+        owned_json(&StackReferenceResponse {
+            schema_version: 1,
+            reference_index,
+            reference_path: paths[reference_index].clone(),
+            scores: scores
+                .into_iter()
+                .map(|score| score.map(StackReferenceScoreResponse::from))
+                .collect(),
+        })
+    })
+    .unwrap_or(ptr::null_mut())
 }
 
 #[unsafe(no_mangle)]
@@ -6431,6 +6515,125 @@ fn set_error(error_out: *mut *mut c_char, error: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stack_reference_cabi_preserves_order_scores_and_selected_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let image = LinearImage::new(320, 256, 1, stacking_star_field(320, 256)).unwrap();
+        let blank = LinearImage::new(320, 256, 1, vec![100.0; 320 * 256]).unwrap();
+        let first = directory.path().join("clear-星.fits");
+        let second = directory.path().join("other.xisf");
+        let unscorable = directory.path().join("blank.fits");
+        seiza_stacking::write_processed_image_fits_f32(&first, &image, &[], &[]).unwrap();
+        seiza_stacking::write_processed_image_fits_f32(&second, &image, &[], &[]).unwrap();
+        seiza_stacking::write_processed_image_fits_f32(&unscorable, &blank, &[], &[]).unwrap();
+        let paths = vec![
+            directory.path().join("missing.fits"),
+            first,
+            unscorable,
+            second,
+        ];
+        let (expected_index, expected_scores) =
+            seiza_stacking::choose_reference(&paths, 2).unwrap();
+        assert!(matches!(expected_index, 1 | 3));
+        let strings = paths
+            .iter()
+            .map(|path| path.to_str().unwrap())
+            .collect::<Vec<_>>();
+        let paths_json = CString::new(serde_json::to_string(&strings).unwrap()).unwrap();
+
+        // Reusing error_out clears it but never frees a previously owned error.
+        let old_error = CString::new("previous error").unwrap().into_raw();
+        let mut error = old_error;
+        let raw_response =
+            unsafe { seiza_stack_choose_reference_json(paths_json.as_ptr(), 2, &mut error) };
+        assert!(error.is_null());
+        assert!(!raw_response.is_null());
+        let response: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(raw_response) }.to_str().unwrap())
+                .unwrap();
+        assert_eq!(response["schemaVersion"], 1);
+        assert_eq!(response["referenceIndex"], expected_index);
+        assert_eq!(response["referencePath"], strings[expected_index]);
+        let scores = response["scores"].as_array().unwrap();
+        assert_eq!(scores.len(), paths.len());
+        for (actual, expected) in scores.iter().zip(expected_scores) {
+            match expected {
+                None => assert!(actual.is_null()),
+                Some(score) => {
+                    assert_eq!(actual["stars"], score.stars);
+                    for (key, expected) in [
+                        ("medianStarArea", score.median_star_area),
+                        ("background", score.background),
+                        ("backgroundVariation", score.background_variation),
+                        ("score", score.score),
+                    ] {
+                        assert_eq!(actual[key].as_f64().unwrap() as f32, expected, "{key}");
+                    }
+                }
+            }
+        }
+        assert!(scores[0].is_null());
+        assert!(scores[2].is_null());
+        unsafe {
+            seiza_string_free(raw_response);
+            seiza_string_free(old_error);
+        }
+        let sequential =
+            unsafe { seiza_stack_choose_reference_json(paths_json.as_ptr(), 0, ptr::null_mut()) };
+        assert!(!sequential.is_null());
+        let sequential_json: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(sequential) }.to_str().unwrap()).unwrap();
+        assert_eq!(sequential_json, response);
+        unsafe { seiza_string_free(sequential) };
+    }
+
+    #[test]
+    fn stack_reference_cabi_rejects_invalid_or_unscoreable_inputs() {
+        for (request, expected) in [
+            (None, "stack reference paths is required"),
+            (Some("not JSON"), "JSON array of strings"),
+            (Some("{}"), "JSON array of strings"),
+            (Some("[42]"), "JSON array of strings"),
+            (Some("[]"), "no frame could be scored"),
+            (
+                Some(r#"["missing-stack-reference.fits"]"#),
+                "no frame could be scored",
+            ),
+        ] {
+            let request = request.map(|request| CString::new(request).unwrap());
+            let mut error = ptr::null_mut();
+            let response = unsafe {
+                seiza_stack_choose_reference_json(
+                    request.as_ref().map_or(ptr::null(), |value| value.as_ptr()),
+                    0,
+                    &mut error,
+                )
+            };
+            assert!(response.is_null());
+            assert!(!error.is_null());
+            let message = unsafe { CStr::from_ptr(error) }.to_str().unwrap();
+            assert!(message.contains(expected), "{message}");
+            unsafe { seiza_string_free(error) };
+        }
+        let invalid_utf8 = [0xff_u8, 0];
+        let mut error = ptr::null_mut();
+        let response = unsafe {
+            seiza_stack_choose_reference_json(invalid_utf8.as_ptr().cast(), 0, &mut error)
+        };
+        assert!(response.is_null());
+        assert!(
+            unsafe { CStr::from_ptr(error) }
+                .to_str()
+                .unwrap()
+                .contains("not valid UTF-8")
+        );
+        unsafe { seiza_string_free(error) };
+        // Reporting an error is optional, as it is for other owned-JSON APIs.
+        assert!(
+            unsafe { seiza_stack_choose_reference_json(ptr::null(), 0, ptr::null_mut()) }.is_null()
+        );
+    }
 
     #[test]
     fn stack_options_json_chooses_the_demosaic() {
