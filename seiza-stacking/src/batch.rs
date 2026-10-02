@@ -119,7 +119,67 @@ pub struct BatchStackResult {
 pub fn integrate_registered_frames(
     frame_count: usize,
     options: &BatchStackOptions,
+    load: impl FnMut(BatchStackPass, usize) -> Result<LinearImage>,
+) -> Result<BatchStackResult> {
+    integrate_registered_frames_observed(frame_count, options, load, None)
+}
+
+/// What the final pass did with one registered sample.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SampleFate {
+    /// Not finite: the frame does not cover it.
+    Missing,
+    /// Finite and rejected.
+    Rejected,
+    /// Finite and averaged in.
+    Integrated,
+}
+
+impl SampleFate {
+    /// Finite and integrated sample counts.
+    fn counts(self) -> (usize, usize) {
+        match self {
+            Self::Missing => (0, 0),
+            Self::Rejected => (1, 0),
+            Self::Integrated => (1, 1),
+        }
+    }
+}
+
+/// What the final pass did with each sample of each frame, in loader index
+/// order.
+pub(crate) type RejectionObserver<'a> = &'a mut dyn FnMut(usize, Vec<SampleFate>) -> Result<()>;
+
+/// Count a frame's finite and integrated samples, handing their fates to
+/// `observe` when there is one. Without an observer the fates are only
+/// counted, never stored.
+fn settle_frame(
+    index: usize,
+    fates: impl IndexedParallelIterator<Item = SampleFate>,
+    observe: &mut Option<RejectionObserver<'_>>,
+) -> Result<(usize, usize)> {
+    let sum = |left: (usize, usize), right: (usize, usize)| (left.0 + right.0, left.1 + right.1);
+    match observe {
+        Some(observe) => {
+            let fates = fates.collect::<Vec<_>>();
+            let counts = fates
+                .par_iter()
+                .map(|fate| fate.counts())
+                .reduce(|| (0, 0), sum);
+            observe(index, fates)?;
+            Ok(counts)
+        }
+        None => Ok(fates.map(SampleFate::counts).reduce(|| (0, 0), sum)),
+    }
+}
+
+/// [`integrate_registered_frames`], also handing each frame's rejections to
+/// `observe` as the final pass integrates it.
+pub(crate) fn integrate_registered_frames_observed(
+    frame_count: usize,
+    options: &BatchStackOptions,
     mut load: impl FnMut(BatchStackPass, usize) -> Result<LinearImage>,
+    mut observe: Option<RejectionObserver<'_>>,
 ) -> Result<BatchStackResult> {
     if frame_count == 0 || frame_count > u32::MAX as usize {
         return Err(Error::Stack(
@@ -154,7 +214,7 @@ pub fn integrate_registered_frames(
         }
     }
     if options.frame_weights.is_some() {
-        return integrate_weighted_frames(frame_count, options, load);
+        return integrate_weighted_frames(frame_count, options, load, observe);
     }
     let rejection = Rejection::new(frame_count, options);
 
@@ -218,7 +278,7 @@ pub fn integrate_registered_frames(
             shape,
             expected_digest,
         )?;
-        let (finite_samples, integrated_samples) = integrated
+        let fates = integrated
             .par_iter_mut()
             .zip(variance.par_iter_mut())
             .zip(coverage.par_iter_mut())
@@ -228,7 +288,7 @@ pub fn integrate_registered_frames(
                 |(sample_index, (((integrated, variance), coverage), rejected))| {
                     let sample = image.data[sample_index];
                     if !sample.is_finite() {
-                        return (0, 0);
+                        return SampleFate::Missing;
                     }
                     if kept_peers(
                         &first[sample_index],
@@ -240,7 +300,7 @@ pub fn integrate_registered_frames(
                     .rejects(sample, 1.0, &rejection)
                     {
                         *rejected += 1;
-                        return (1, 0);
+                        return SampleFate::Rejected;
                     }
                     *coverage += 1;
                     let delta = f64::from(sample) - f64::from(*integrated);
@@ -248,13 +308,10 @@ pub fn integrate_registered_frames(
                     *variance =
                         (f64::from(*variance) + delta * (f64::from(sample) - next_mean)) as f32;
                     *integrated = next_mean as f32;
-                    (1, 1)
+                    SampleFate::Integrated
                 },
-            )
-            .reduce(
-                || (0, 0),
-                |left, right| (left.0 + right.0, left.1 + right.1),
             );
+        let (finite_samples, integrated_samples) = settle_frame(index, fates, &mut observe)?;
         frames.push(BatchFrameDiagnostics {
             finite_samples,
             integrated_samples,
@@ -293,6 +350,7 @@ fn integrate_weighted_frames(
     frame_count: usize,
     options: &BatchStackOptions,
     mut load: impl FnMut(BatchStackPass, usize) -> Result<LinearImage>,
+    mut observe: Option<RejectionObserver<'_>>,
 ) -> Result<BatchStackResult> {
     let frame_weights = options
         .frame_weights
@@ -368,7 +426,7 @@ fn integrate_weighted_frames(
             expected_digest,
         )?;
         let channels = image.channels;
-        let (finite_samples, integrated_samples) = integrated
+        let fates = integrated
             .par_iter_mut()
             .zip(variance.par_iter_mut())
             .zip(integrated_weight.par_iter_mut())
@@ -382,7 +440,7 @@ fn integrate_weighted_frames(
                 )| {
                     let sample = image.data[sample_index];
                     if !sample.is_finite() {
-                        return (0, 0);
+                        return SampleFate::Missing;
                     }
                     let weight = weight_at(index, sample_index, channels);
                     if kept_peers(
@@ -395,7 +453,7 @@ fn integrate_weighted_frames(
                     .rejects(sample, weight, &rejection)
                     {
                         *rejected += 1;
-                        return (1, 0);
+                        return SampleFate::Rejected;
                     }
                     *coverage += 1;
                     let next_weight = f64::from(*integrated_weight) + weight;
@@ -406,13 +464,10 @@ fn integrate_weighted_frames(
                         as f32;
                     *integrated = next_mean as f32;
                     *integrated_weight = next_weight as f32;
-                    (1, 1)
+                    SampleFate::Integrated
                 },
-            )
-            .reduce(
-                || (0, 0),
-                |left, right| (left.0 + right.0, left.1 + right.1),
             );
+        let (finite_samples, integrated_samples) = settle_frame(index, fates, &mut observe)?;
         frames.push(BatchFrameDiagnostics {
             finite_samples,
             integrated_samples,

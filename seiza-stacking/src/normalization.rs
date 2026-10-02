@@ -371,6 +371,27 @@ impl NormalizationMap {
         Ok(())
     }
 
+    /// Per-sample gains and offsets for drizzle, which reads them at
+    /// scattered positions: each column's and row's tile weights are worked
+    /// out once.
+    pub(crate) fn sampler(&self) -> CoefficientSampler<'_> {
+        let global = self.columns == 1 && self.rows == 1;
+        let weights = |count: usize, cells: usize| {
+            if global {
+                Vec::new()
+            } else {
+                (0..count)
+                    .map(|coordinate| axis_weights(coordinate, cells, self.tile_size))
+                    .collect()
+            }
+        };
+        CoefficientSampler {
+            map: self,
+            columns: weights(self.width, self.columns),
+            rows: weights(self.height, self.rows),
+        }
+    }
+
     /// Apply a one-tile global map to any image with the same channel count.
     /// This is useful after another geometric resampling because a constant
     /// per-channel affine transform does not depend on pixel coordinates.
@@ -487,6 +508,43 @@ impl NormalizationMap {
             (f32::INFINITY, f32::NEG_INFINITY),
             |(minimum, maximum), gain| (minimum.min(gain), maximum.max(gain)),
         )
+    }
+}
+
+/// See [`NormalizationMap::sampler`].
+pub(crate) struct CoefficientSampler<'a> {
+    map: &'a NormalizationMap,
+    columns: Vec<AxisWeights>,
+    rows: Vec<AxisWeights>,
+}
+
+impl CoefficientSampler<'_> {
+    /// The gain and offset [`NormalizationMap::apply`] gives sample
+    /// `(x, y, channel)`.
+    pub(crate) fn at(&self, x: usize, y: usize, channel: usize) -> (f32, f32) {
+        let map = self.map;
+        if self.columns.is_empty() {
+            return (map.gains[channel], map.offsets[channel]);
+        }
+        let (x_weights, y_weights) = (self.columns[x], self.rows[y]);
+        let at = |row: usize, column: usize| (row * map.columns + column) * map.channels + channel;
+        let corners = [
+            at(y_weights.low, x_weights.low),
+            at(y_weights.low, x_weights.high),
+            at(y_weights.high, x_weights.low),
+            at(y_weights.high, x_weights.high),
+        ];
+        let interpolate = |values: &[f32]| {
+            bilinear(
+                values[corners[0]],
+                values[corners[1]],
+                values[corners[2]],
+                values[corners[3]],
+                x_weights.fraction,
+                y_weights.fraction,
+            )
+        };
+        (interpolate(&map.gains), interpolate(&map.offsets))
     }
 }
 
@@ -1068,6 +1126,12 @@ mod tests {
             ]
         );
         assert!(map.apply_global(&mut crop).is_err());
+        // Drizzle reads the same coefficients one sample at a time.
+        let sampler = map.sampler();
+        for (x, y) in [(0, 0), (15, 16), (31, 7), (20, 31)] {
+            let (gain, offset) = sampler.at(x, y, 0);
+            assert_eq!(1.0_f32.mul_add(gain, offset), full.data[y * 32 + x]);
+        }
     }
 
     #[test]

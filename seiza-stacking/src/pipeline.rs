@@ -1006,6 +1006,140 @@ mod tests {
         );
     }
 
+    /// The intensity-weighted centroid of the brightest pixel's 7×7
+    /// neighbourhood above `background`, scaled back to reference pixels.
+    fn brightest_centroid(image: &crate::LinearImage, background: f32, scale: f64) -> (f64, f64) {
+        let (mut best, mut best_index) = (f32::NEG_INFINITY, 0);
+        for (index, &value) in image.data.iter().enumerate() {
+            if value.is_finite() && value > best {
+                (best, best_index) = (value, index);
+            }
+        }
+        let (cx, cy) = (best_index % image.width, best_index / image.width);
+        let radius = 3 * scale as usize;
+        let (mut sum, mut sx, mut sy) = (0.0, 0.0, 0.0);
+        for y in cy - radius..=cy + radius {
+            for x in cx - radius..=cx + radius {
+                let value = f64::from((image.data[y * image.width + x] - background).max(0.0));
+                sum += value;
+                sx += value * x as f64;
+                sy += value * y as f64;
+            }
+        }
+        // Output pixel k centres on reference coordinate (k + 0.5) / s - 0.5.
+        (
+            (sx / sum + 0.5) / scale - 0.5,
+            (sy / sum + 0.5) / scale - 0.5,
+        )
+    }
+
+    fn drizzle_stack() -> (tempfile::TempDir, LiveStacker) {
+        let (directory, paths) = trailed_reference_set();
+        let mut stacker =
+            LiveStacker::open_fits(&paths[0], None, None, None, None, StackOptions::default())
+                .unwrap();
+        for path in &paths[1..] {
+            stacker.push_fits(path).unwrap();
+        }
+        (directory, stacker)
+    }
+
+    #[test]
+    fn unit_scale_drizzle_matches_the_reintegration_and_rejects_the_trail() {
+        let (_directory, stacker) = drizzle_stack();
+        let (integrated, drizzled) = stacker
+            .reintegrate_drizzled(
+                &crate::BatchStackOptions::default(),
+                &crate::DrizzleOptions {
+                    scale: 1,
+                    drop_shrink: Some(1.0),
+                },
+                |_, _, _| {},
+            )
+            .unwrap();
+        let reference = &integrated.snapshot.image;
+        let image = &drizzled.image;
+        assert_eq!(
+            (image.width, image.height, image.channels),
+            (reference.width, reference.height, reference.channels)
+        );
+        // The frames move by whole pixels, so each full-size drop lands on
+        // one output pixel, as the registered sample does.
+        let mut differences = (8..reference.height - 8)
+            .flat_map(|y| (8..reference.width - 8).map(move |x| y * reference.width + x))
+            .map(|index| (image.data[index] - reference.data[index]).abs())
+            .collect::<Vec<_>>();
+        differences.sort_by(f32::total_cmp);
+        let median = differences[differences.len() / 2];
+        assert!(median < 0.5, "median difference {median}");
+        assert!(
+            trail_row_median(image) < 1100.0,
+            "the drizzle leaves out the samples the integration rejected"
+        );
+        let (x, y) = brightest_centroid(image, 1010.0, 1.0);
+        let (expected_x, expected_y) = brightest_centroid(reference, 1010.0, 1.0);
+        assert!((x - expected_x).abs() < 1.0e-3 && (y - expected_y).abs() < 1.0e-3);
+    }
+
+    #[test]
+    fn double_scale_drizzle_keeps_flux_and_star_positions() {
+        let (_directory, stacker) = drizzle_stack();
+        let (integrated, drizzled) = stacker
+            .reintegrate_drizzled(
+                &crate::BatchStackOptions::default(),
+                &crate::DrizzleOptions {
+                    scale: 2,
+                    ..crate::DrizzleOptions::default()
+                },
+                |_, _, _| {},
+            )
+            .unwrap();
+        let reference = &integrated.snapshot.image;
+        let image = &drizzled.image;
+        assert_eq!(drizzled.scale, 2);
+        assert_eq!(
+            (image.width, image.height),
+            (reference.width * 2, reference.height * 2)
+        );
+        // Surface brightness is kept: each reference pixel's four output
+        // pixels average to about its value.
+        let interior = |width: usize, height: usize, margin: usize| {
+            (margin..height - margin)
+                .flat_map(move |y| (margin..width - margin).map(move |x| (x, y)))
+        };
+        let mean = |values: &mut dyn Iterator<Item = f32>| {
+            let (sum, count) = values.fold((0.0_f64, 0_usize), |(sum, count), value| {
+                (sum + f64::from(value), count + 1)
+            });
+            sum / count as f64
+        };
+        let reference_mean = mean(
+            &mut interior(reference.width, reference.height, 8)
+                .map(|(x, y)| reference.data[y * reference.width + x]),
+        );
+        let drizzled_mean = mean(
+            &mut interior(image.width, image.height, 16)
+                .map(|(x, y)| image.data[y * image.width + x]),
+        );
+        assert!(
+            (drizzled_mean / reference_mean - 1.0).abs() < 0.002,
+            "{drizzled_mean} vs {reference_mean}"
+        );
+        let (x, y) = brightest_centroid(image, 1010.0, 2.0);
+        let (expected_x, expected_y) = brightest_centroid(reference, 1010.0, 1.0);
+        assert!(
+            (x - expected_x).abs() < 0.05 && (y - expected_y).abs() < 0.05,
+            "({x}, {y}) vs ({expected_x}, {expected_y})"
+        );
+        // The trail the integration rejected stays out at the finer scale.
+        let mut trail = image.data
+            [TRAIL_ROW * 2 * image.width + 40..TRAIL_ROW * 2 * image.width + 340]
+            .to_vec();
+        trail.sort_by(f32::total_cmp);
+        assert!(trail[trail.len() / 2] < 1100.0);
+        assert!(drizzled.weight.data.iter().all(|&weight| weight > 0.0));
+    }
+
     #[test]
     fn reintegration_matches_with_and_without_the_frame_cache() {
         let (directory, paths) = trailed_reference_set();

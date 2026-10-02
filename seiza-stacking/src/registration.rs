@@ -381,7 +381,7 @@ impl PolynomialWarp {
 
     /// Least-squares fit of `source = P(reference)` over point pairs, by the
     /// normal equations with partial pivoting. `None` when they are singular.
-    fn fit(order: u8, width: usize, height: usize, pairs: &[PointPair]) -> Option<Self> {
+    pub(crate) fn fit(order: u8, width: usize, height: usize, pairs: &[PointPair]) -> Option<Self> {
         let center_x = width as f64 * 0.5;
         let center_y = height as f64 * 0.5;
         let scale = width.max(height) as f64 * 0.5;

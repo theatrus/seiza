@@ -113,6 +113,19 @@ pub(crate) struct StackArgs {
     /// reference and warm-up frames, which online rejection cannot revisit.
     #[arg(long)]
     reintegrate: bool,
+    /// Drizzle the stack onto a grid this many times finer than the
+    /// reference (1 to 4), as PixInsight's DrizzleIntegration does after
+    /// ImageIntegration: implies --reintegrate, whose rejection decides which
+    /// pixels each frame drops. The output is the drizzled image, with the
+    /// reference WCS scaled to it. Bayer frames drizzle their photosites,
+    /// each into its own color, without demosaicing.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=4))]
+    drizzle: Option<u32>,
+    /// Each drizzle drop's side as a fraction of a source pixel; smaller
+    /// drops keep more detail and need more dithered frames to fill the
+    /// grid. Defaults to WBPP's: 0.9 for monochrome frames, 1.0 for Bayer
+    #[arg(long)]
+    drizzle_drop_shrink: Option<f32>,
     /// Where --reintegrate keeps each frame's prepared image between its
     /// passes (about four bytes per output sample per frame); defaults to the
     /// output's directory
@@ -200,6 +213,8 @@ struct ConfigurationReport {
     rejection_warmup: u32,
     rejection_minimum_sigma: f32,
     reintegrate: bool,
+    drizzle_scale: Option<u32>,
+    drizzle_drop_shrink: Option<f32>,
     bayer_drizzle: bool,
     weighting: &'static str,
     interpolation: &'static str,
@@ -257,6 +272,18 @@ struct StackReport {
 }
 
 pub(crate) fn run(options: StackArgs) -> Result<()> {
+    let drizzle = options
+        .drizzle
+        .map(|scale| {
+            let drizzle = seiza_stacking::DrizzleOptions {
+                scale,
+                drop_shrink: options.drizzle_drop_shrink,
+            };
+            drizzle.validate().map(|()| drizzle)
+        })
+        .transpose()?;
+    // The drizzle follows reintegration's rejection.
+    let reintegrate = options.reintegrate || drizzle.is_some();
     let report_path = options.report.clone();
     let preview_path = options.preview.clone();
     let mut path_roles = options
@@ -454,7 +481,9 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
         sigma_low: options.sigma_low,
         sigma_high: options.sigma_high,
         rejection_warmup: options.rejection_warmup,
-        reintegrate: options.reintegrate,
+        reintegrate,
+        drizzle_scale: options.drizzle,
+        drizzle_drop_shrink: options.drizzle.and(options.drizzle_drop_shrink),
         bayer_drizzle: options.bayer_drizzle,
         registration_model: match options.registration_model {
             RegistrationModelArg::Similarity => "similarity",
@@ -582,7 +611,8 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
     })?;
 
     let reference_headers = stacker.reference_headers().to_vec();
-    let mut snapshot = if options.reintegrate {
+    let mut drizzled = None;
+    let mut snapshot = if reintegrate {
         if let Some(reason) = stacker.reintegration_unavailable() {
             anyhow::bail!("cannot reintegrate: {reason}");
         }
@@ -609,16 +639,27 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
             ),
             ..seiza_stacking::BatchStackOptions::default()
         };
-        let result = stacker.reintegrate(&batch, |pass, index, count| {
+        let progress = |pass, index, count| {
             if index == 0 {
                 let what = match pass {
                     seiza_stacking::BatchStackPass::Estimate => "estimating",
                     seiza_stacking::BatchStackPass::Refine => "refining",
+                    seiza_stacking::BatchStackPass::Integrate if drizzle.is_some() => {
+                        "integrating and drizzling"
+                    }
                     seiza_stacking::BatchStackPass::Integrate => "integrating",
                 };
                 println!("reintegrate {what} {count} admitted frame(s)");
             }
-        })?;
+        };
+        let result = match &drizzle {
+            Some(drizzle) => {
+                let (result, image) = stacker.reintegrate_drizzled(&batch, drizzle, progress)?;
+                drizzled = Some(image);
+                result
+            }
+            None => stacker.reintegrate(&batch, progress)?,
+        };
         let rejected = result
             .snapshot
             .rejected_samples
@@ -631,16 +672,43 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
         stacker.into_snapshot()?
     };
     snapshot.rejected_frames = snapshot.rejected_frames.saturating_add(unreadable_frames);
-    seiza_stacking::write_fits_f32(&options.output, &snapshot, &reference_headers)?;
-    crate::common::wrote(
-        &options.output,
-        format_args!(
-            "{} accepted frame(s), {} rejected frame(s), linear f32",
-            snapshot.accepted_frames, snapshot.rejected_frames,
-        ),
-    );
+    match &drizzled {
+        Some(drizzled) => {
+            seiza_stacking::write_drizzle_fits_f32(
+                &options.output,
+                drizzled,
+                snapshot.accepted_frames,
+                snapshot.rejected_frames,
+                &reference_headers,
+            )?;
+            crate::common::wrote(
+                &options.output,
+                format_args!(
+                    "{} accepted frame(s), {} rejected frame(s), drizzled {}x ({}x{}), linear f32",
+                    snapshot.accepted_frames,
+                    snapshot.rejected_frames,
+                    drizzled.scale,
+                    drizzled.image.width,
+                    drizzled.image.height,
+                ),
+            );
+        }
+        None => {
+            seiza_stacking::write_fits_f32(&options.output, &snapshot, &reference_headers)?;
+            crate::common::wrote(
+                &options.output,
+                format_args!(
+                    "{} accepted frame(s), {} rejected frame(s), linear f32",
+                    snapshot.accepted_frames, snapshot.rejected_frames,
+                ),
+            );
+        }
+    }
     if let Some(preview) = preview_path.as_ref() {
-        write_preview(&snapshot.image, preview, PreviewTransfer::LinearLight)?;
+        let image = drizzled
+            .as_ref()
+            .map_or(&snapshot.image, |drizzled| &drizzled.image);
+        write_preview(image, preview, PreviewTransfer::LinearLight)?;
         crate::common::wrote(
             preview,
             format_args!("display stretch only (not used by the stack)"),

@@ -494,6 +494,29 @@ pub fn write_fits_f32(
     )
 }
 
+/// Write a drizzled stack as unstretched 32-bit floating point FITS, or as
+/// monolithic XISF when the path ends in `.xisf`, with the reference WCS
+/// carried to the drizzle grid by [`drizzle_reference_headers`].
+pub fn write_drizzle_fits_f32(
+    path: impl AsRef<Path>,
+    drizzle: &crate::DrizzleResult,
+    accepted_frames: u32,
+    rejected_frames: u32,
+    reference_headers: &[(String, HeaderValue)],
+) -> Result<()> {
+    let headers = drizzle_reference_headers(reference_headers, drizzle.scale);
+    let cards = [
+        integer_card("STACKCNT", accepted_frames as i64, "accepted input frames"),
+        integer_card("STACKREJ", rejected_frames as i64, "rejected input frames"),
+        integer_card(
+            "DRIZSCL",
+            i64::from(drizzle.scale),
+            "drizzle output pixels per reference pixel",
+        ),
+    ];
+    write_linear_image_fits_f32(path, &drizzle.image, &headers, &cards)
+}
+
 /// Write a compact immutable live-stack export as unstretched 32-bit floating
 /// point FITS, or as monolithic XISF when the path ends in `.xisf`.
 pub fn write_stack_export_fits_f32(
@@ -572,6 +595,54 @@ pub fn write_color_fits_f32(
     ));
     let headers = shift_reference_origin(reference_headers, region.x, region.y);
     write_linear_image_fits_f32(path, &composition.image, &headers, &cards)
+}
+
+/// A reference frame's headers for an image drizzled `scale` times finer,
+/// such as [`crate::DrizzleResult::image`]: the WCS keeps the same sky.
+///
+/// `CRPIX` moves to the finer grid, whose pixel edges fall at the
+/// reference's; `CD` and `CDELT` shrink by the scale; and each SIP
+/// coefficient of order `p + q` scales by `scale^(1 - p - q)`, since SIP
+/// maps pixel offsets to pixel offsets.
+pub fn drizzle_reference_headers(
+    headers: &[(String, HeaderValue)],
+    scale: u32,
+) -> Vec<(String, HeaderValue)> {
+    let scale = f64::from(scale);
+    let sip_order = |key: &str| {
+        let rest = ["AP_", "BP_", "A_", "B_"]
+            .iter()
+            .find_map(|prefix| key.strip_prefix(prefix))?;
+        let (p, q) = rest.split_once('_')?;
+        Some(p.parse::<i32>().ok()? + q.parse::<i32>().ok()?)
+    };
+    headers
+        .iter()
+        .map(|(key, value)| {
+            let factor = match key.as_str() {
+                "CRPIX1" | "CRPIX2" => {
+                    return match value.as_f64() {
+                        Some(pixel) if pixel.is_finite() => {
+                            (key.clone(), HeaderValue::Float((pixel - 0.5) * scale + 0.5))
+                        }
+                        _ => (key.clone(), value.clone()),
+                    };
+                }
+                "CDELT1" | "CDELT2" => 1.0 / scale,
+                key if key.starts_with("CD1_") || key.starts_with("CD2_") => 1.0 / scale,
+                key => match sip_order(key) {
+                    Some(order) => scale.powi(1 - order),
+                    None => return (key.to_owned(), value.clone()),
+                },
+            };
+            match value.as_f64() {
+                Some(number) if number.is_finite() => {
+                    (key.clone(), HeaderValue::Float(number * factor))
+                }
+                _ => (key.clone(), value.clone()),
+            }
+        })
+        .collect()
 }
 
 /// Move a reference frame's `CRPIX` to a crop's own pixel coordinates.
@@ -1038,6 +1109,40 @@ fn preserve_processed_key(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drizzled_headers_describe_the_same_sky_on_the_finer_grid() {
+        let headers = vec![
+            ("CRPIX1".to_owned(), HeaderValue::Float(100.5)),
+            ("CRPIX2".to_owned(), HeaderValue::Float(20.0)),
+            ("CD1_1".to_owned(), HeaderValue::Float(-2.0e-4)),
+            ("CDELT2".to_owned(), HeaderValue::Float(1.0e-4)),
+            ("A_ORDER".to_owned(), HeaderValue::Integer(2)),
+            ("A_2_0".to_owned(), HeaderValue::Float(4.0e-6)),
+            ("BP_0_1".to_owned(), HeaderValue::Float(1.0e-3)),
+            (
+                "CTYPE1".to_owned(),
+                HeaderValue::String("RA---TAN-SIP".into()),
+            ),
+        ];
+        let scaled = drizzle_reference_headers(&headers, 2);
+        let value = |key: &str| {
+            scaled
+                .iter()
+                .find(|(name, _)| name == key)
+                .and_then(|(_, value)| value.as_f64())
+        };
+        // FITS pixel edges fall at half-integers: the reference's edge at
+        // 100.5 is the finer grid's edge at 200.5.
+        assert_eq!(value("CRPIX1"), Some(200.5));
+        assert_eq!(value("CRPIX2"), Some(39.5));
+        assert_eq!(value("CD1_1"), Some(-1.0e-4));
+        assert_eq!(value("CDELT2"), Some(5.0e-5));
+        assert_eq!(value("A_2_0"), Some(2.0e-6));
+        assert_eq!(value("BP_0_1"), Some(1.0e-3));
+        assert_eq!(scaled[4], headers[4]);
+        assert_eq!(scaled[7], headers[7]);
+    }
     use seiza_fits::Pixels;
 
     fn headers(bitpix: i64) -> Vec<(String, HeaderValue)> {

@@ -8,6 +8,7 @@ mod color;
 mod context;
 mod cosmetic;
 mod crop;
+mod drizzle;
 mod external;
 mod fits;
 mod image;
@@ -39,14 +40,15 @@ pub use cosmetic::{ImpulseFilterOptions, suppress_impulses};
 pub use crop::{
     ChannelCoverage, ChannelSamples, ColorCrop, CropReport, covered_region, crop_report,
 };
+pub use drizzle::{DrizzleOptions, DrizzleResult};
 pub use external::{
     ExternalParameterKind, ExternalParameterValue, ExternalToolParameter, ExternalToolRequest,
     ExternalToolRun, ExternalToolSchema, ProcessedStackImage, RC_ASTRO_TOOLS, RcAstroCli,
 };
 pub use fits::{
-    FitsFrame, FrameCalibrationState, FrameMetadata, FrameSourceRole, write_color_fits_f32,
-    write_fits_f32, write_linear_image_fits_f32, write_master_fits_f32,
-    write_processed_image_fits_f32, write_stack_export_fits_f32,
+    FitsFrame, FrameCalibrationState, FrameMetadata, FrameSourceRole, drizzle_reference_headers,
+    write_color_fits_f32, write_drizzle_fits_f32, write_fits_f32, write_linear_image_fits_f32,
+    write_master_fits_f32, write_processed_image_fits_f32, write_stack_export_fits_f32,
 };
 pub use image::{BayerLayout, Demosaic, LinearImage};
 pub use mapping::RegisteredFrameMapping;

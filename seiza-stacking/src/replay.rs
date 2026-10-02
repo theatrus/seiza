@@ -10,10 +10,11 @@
 //! same calibration and preparation, and maps it through the recorded
 //! transform, so neither star detection nor registration runs a second time.
 
+use crate::batch::SampleFate;
+use crate::drizzle::{DrizzleAccumulator, DrizzleFrame, DrizzleOptions, DrizzleResult};
 use crate::{
     BatchStackOptions, BatchStackPass, BatchStackResult, CalibrationMasters, Error, FitsFrame,
     LinearImage, LiveStacker, ReferenceRegion, RegisteredFrameMapping, Result,
-    integrate_registered_frames,
 };
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -379,6 +380,16 @@ impl Renormalizer {
     }
 }
 
+/// One integrated frame waiting for the drizzle thread.
+struct DrizzleJob {
+    index: usize,
+    image: LinearImage,
+    layout: Option<crate::BayerLayout>,
+    normalization: crate::NormalizationMap,
+    fates: Vec<SampleFate>,
+    weight: Vec<f32>,
+}
+
 /// Frames prepared ahead of the one a reintegration pass is integrating.
 const REPLAY_LOOKAHEAD: usize = 2;
 
@@ -611,8 +622,41 @@ impl LiveStacker {
     pub fn reintegrate(
         &self,
         options: &BatchStackOptions,
-        mut progress: impl FnMut(BatchStackPass, usize, usize),
+        progress: impl FnMut(BatchStackPass, usize, usize),
     ) -> Result<BatchStackResult> {
+        Ok(self.replay(options, None, progress)?.0)
+    }
+
+    /// [`Self::reintegrate`], also drizzling every admitted frame onto a
+    /// grid `drizzle.scale` times the reference's.
+    ///
+    /// The drizzle runs alongside the final pass, so each frame is read once
+    /// more, from its source file, and calibrated but not debayered or
+    /// resampled. A source pixel whose registered sample the integration
+    /// rejected is left out, and every pixel is normalized and weighted as
+    /// the integration did its registered sample. A Bayer frame drizzles its
+    /// photosites, each into its own colour.
+    ///
+    /// The drizzle needs eight bytes per output sample on top of
+    /// reintegration's memory: 2.5 GB for a 26 MP colour frame at twice the
+    /// scale. Returns the reintegrated stack and the drizzled one.
+    pub fn reintegrate_drizzled(
+        &self,
+        options: &BatchStackOptions,
+        drizzle: &DrizzleOptions,
+        progress: impl FnMut(BatchStackPass, usize, usize),
+    ) -> Result<(BatchStackResult, DrizzleResult)> {
+        drizzle.validate()?;
+        let (result, drizzled) = self.replay(options, Some(drizzle), progress)?;
+        Ok((result, drizzled.expect("a drizzle was requested")))
+    }
+
+    fn replay(
+        &self,
+        options: &BatchStackOptions,
+        drizzle: Option<&DrizzleOptions>,
+        mut progress: impl FnMut(BatchStackPass, usize, usize),
+    ) -> Result<(BatchStackResult, Option<DrizzleResult>)> {
         if let Some(reason) = self.reintegration_unavailable() {
             return Err(Error::Stack(reason));
         }
@@ -656,6 +700,16 @@ impl LiveStacker {
             } else {
                 None
             };
+        let accumulator = drizzle
+            .map(|drizzle| {
+                DrizzleAccumulator::new(
+                    *drizzle,
+                    self.reference.width,
+                    self.reference.height,
+                    self.reference.channels,
+                )
+            })
+            .transpose()?;
         // Frames are requested in a fixed order: every frame for each pass in
         // turn. Preparing the next few on their own threads while the batch
         // integrates the current one overlaps reading, debayering and
@@ -672,38 +726,129 @@ impl LiveStacker {
         .collect::<Vec<_>>();
         let lookahead = std::thread::available_parallelism()
             .map_or(1, |cores| (cores.get() / 6).clamp(1, REPLAY_LOOKAHEAD));
-        let mut result = std::thread::scope(|scope| {
-            let prepare = |index: usize| {
+        // The calibrated source of the frame the final pass is integrating,
+        // read alongside its registered image for the drizzle.
+        let drizzle_source = std::cell::RefCell::new(None);
+        let (mut result, accumulator) = std::thread::scope(|scope| {
+            let prepare = |pass: BatchStackPass, index: usize| {
                 let frame = &ledger.frames[index];
                 let masters = masters.get(self, frame.calibration)?;
-                self.replay_frame(frame, &masters, index, renormalizer.as_ref(), cache)
+                let image =
+                    self.replay_frame(frame, &masters, index, renormalizer.as_ref(), cache)?;
+                let source = if drizzle.is_some() && pass == BatchStackPass::Integrate {
+                    Some(self.read_calibrated(frame, &masters)?)
+                } else {
+                    None
+                };
+                Ok::<_, Error>((image, source))
             };
             let mut in_flight = std::collections::VecDeque::new();
             let mut next = 0;
-            integrate_registered_frames(count, options, |pass, index| {
+            let load = |pass, index| {
                 progress(pass, index, count);
                 while next < order.len() && in_flight.len() < lookahead {
-                    let (_, frame_index) = order[next];
-                    in_flight.push_back((next, scope.spawn(move || prepare(frame_index))));
+                    let (frame_pass, frame_index) = order[next];
+                    in_flight
+                        .push_back((next, scope.spawn(move || prepare(frame_pass, frame_index))));
                     next += 1;
                 }
-                match in_flight.pop_front() {
-                    Some((position, handle)) if order[position] == (pass, index) => handle
-                        .join()
-                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
-                    // A request out of the expected order is served directly.
-                    other => {
-                        if let Some(entry) = other {
-                            in_flight.push_front(entry);
+                let (image, source) =
+                    match in_flight.pop_front() {
+                        Some((position, handle)) if order[position] == (pass, index) => handle
+                            .join()
+                            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?,
+                        // A request out of the expected order is served directly.
+                        other => {
+                            if let Some(entry) = other {
+                                in_flight.push_front(entry);
+                            }
+                            prepare(pass, index)?
                         }
-                        prepare(index)
-                    }
+                    };
+                *drizzle_source.borrow_mut() = source.map(|source| (index, source));
+                Ok(image)
+            };
+            // The drizzle runs on a thread of its own, a frame behind the
+            // integration, so dropping one frame overlaps integrating the
+            // next. The channel holds one frame, which bounds the memory.
+            let (jobs, worker) = match accumulator {
+                Some(mut accumulator) => {
+                    let (sender, receiver) = std::sync::mpsc::sync_channel::<DrizzleJob>(1);
+                    let worker = scope.spawn(move || {
+                        for job in receiver {
+                            accumulator.add(&DrizzleFrame {
+                                image: &job.image,
+                                layout: job.layout,
+                                mapping: &ledger.frames[job.index].mapping,
+                                normalization: &job.normalization,
+                                fates: &job.fates,
+                                weight: &job.weight,
+                            })?;
+                        }
+                        Ok::<_, Error>(accumulator)
+                    });
+                    (Some(sender), Some(worker))
                 }
-            })
+                None => (None, None),
+            };
+            let mut observe = |index: usize, fates: Vec<SampleFate>| -> Result<()> {
+                let Some(jobs) = &jobs else {
+                    return Ok(());
+                };
+                let frame = &ledger.frames[index];
+                let (image, layout) = match drizzle_source.borrow_mut().take() {
+                    Some((source_index, source)) if source_index == index => source,
+                    _ => self.read_calibrated(frame, &*masters.get(self, frame.calibration)?)?,
+                };
+                let normalization = match &renormalizer {
+                    Some(renormalizer) => renormalizer
+                        .maps
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())[index]
+                        .clone()
+                        .ok_or_else(|| {
+                            Error::Stack(
+                                "a frame reached the drizzle without its normalization".into(),
+                            )
+                        })?,
+                    None => frame.mapping.normalization().clone(),
+                };
+                let weight = match &options.frame_weights {
+                    Some(weights) => weights[index].clone(),
+                    None => vec![1.0; self.reference.channels],
+                };
+                // A closed channel means the drizzle failed; its error is
+                // reported when the worker is joined.
+                jobs.send(DrizzleJob {
+                    index,
+                    image,
+                    layout,
+                    normalization,
+                    fates,
+                    weight,
+                })
+                .map_err(|_| Error::Stack("the drizzle stopped early".into()))
+            };
+            let integrated = crate::batch::integrate_registered_frames_observed(
+                count,
+                options,
+                load,
+                drizzle.is_some().then_some(&mut observe as _),
+            );
+            drop(jobs);
+            let drizzled = worker
+                .map(|worker| {
+                    worker
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                })
+                .transpose()?;
+            Ok::<_, Error>((integrated?, drizzled))
         })?;
         result.snapshot.rejected_frames = self.rejected_frames;
         self.fill_photosite_gaps(&mut result.snapshot.image.data, &result.snapshot.coverage);
-        Ok(result)
+        let drizzled = accumulator.map(DrizzleAccumulator::finish).transpose()?;
+        Ok((result, drizzled))
     }
 
     /// The reference a spatially normalized replay matches backgrounds to:
@@ -808,13 +953,13 @@ impl LiveStacker {
         }
     }
 
-    /// Read, calibrate, filter and debayer an admitted frame's source,
-    /// refusing a file that changed since it was stacked.
-    fn read_admitted(
+    /// Read, calibrate and filter an admitted frame's source, refusing a
+    /// file that changed since it was stacked.
+    fn read_source(
         &self,
         admitted: &AdmittedFrame,
         masters: &CalibrationMasters,
-    ) -> Result<(FitsFrame, Option<crate::BayerLayout>)> {
+    ) -> Result<FitsFrame> {
         let source = admitted
             .source
             .as_ref()
@@ -837,11 +982,32 @@ impl LiveStacker {
         if let Some(filter) = &self.options.cosmetic {
             crate::cosmetic::suppress_impulses(&mut frame.image, frame.bayer, filter)?;
         }
-        let prepared = frame.into_prepared_with_layout(self.options.demosaic)?;
         if source.stamp.is_some() && SourceStamp::of(&source.path) != source.stamp {
             return Err(changed());
         }
-        Ok(prepared)
+        Ok(frame)
+    }
+
+    /// Read, calibrate, filter and debayer an admitted frame's source,
+    /// refusing a file that changed since it was stacked.
+    fn read_admitted(
+        &self,
+        admitted: &AdmittedFrame,
+        masters: &CalibrationMasters,
+    ) -> Result<(FitsFrame, Option<crate::BayerLayout>)> {
+        self.read_source(admitted, masters)?
+            .into_prepared_with_layout(self.options.demosaic)
+    }
+
+    /// An admitted frame's calibrated and filtered source pixels, not
+    /// debayered, with the Bayer layout of a colour sensor's mosaic.
+    fn read_calibrated(
+        &self,
+        admitted: &AdmittedFrame,
+        masters: &CalibrationMasters,
+    ) -> Result<(LinearImage, Option<crate::BayerLayout>)> {
+        let frame = self.read_source(admitted, masters)?;
+        Ok((frame.image, frame.bayer))
     }
 
     /// An admitted frame registered through its recorded mapping, not yet
