@@ -171,7 +171,8 @@ pub struct MasterBuildOptions {
     /// [`Error::Cancelled`] without writing anything.
     pub cancel: Option<CancelSignal>,
     /// Optional progress reports, one per input frame in each pass and one
-    /// per tile while a flat combines. See [`MasterProgress`].
+    /// per tile while a flat combines, plus one as each stage ends. See
+    /// [`MasterProgress`].
     pub progress: Option<MasterProgress>,
     /// Replace impulse pixels in the integrated master with their
     /// same-plane neighborhood median. A defective sensor pixel repeats in
@@ -1746,6 +1747,58 @@ mod tests {
             stage(MasterBuildStage::Read, 5),
             stage(MasterBuildStage::Reread, 3),
             stage(MasterBuildStage::Integrate, 3),
+        ]
+        .concat();
+        assert_eq!(*reports.lock().unwrap(), expected);
+    }
+
+    #[test]
+    fn a_frame_set_aside_while_reading_still_counts_as_a_step() {
+        let directory = tempfile::tempdir().unwrap();
+        let flat = |name: &str, angle: f64| {
+            let path = directory.path().join(name);
+            write_tagged_image(
+                &path,
+                vec![
+                    WriteHeaderCard::new("IMAGETYP", HeaderValue::String("FLAT".into())),
+                    WriteHeaderCard::new("FILTER", HeaderValue::String("R".into())),
+                    WriteHeaderCard::new("ROTATANG", HeaderValue::Float(angle)),
+                ],
+            );
+            path
+        };
+        let paths = vec![
+            flat("flat-0.fits", 101.99),
+            flat("stray.fits", 106.80),
+            flat("flat-1.fits", 101.99),
+        ];
+        let (options, reports) = recorded(MasterBuildOptions::default());
+        let master = build_master_from_fits(&paths, MasterFrameKind::Flat, &options).unwrap();
+        assert_eq!(master.skipped_inputs.len(), 1);
+        assert_eq!(
+            reports.lock().unwrap()[..4],
+            stage(MasterBuildStage::Read, 3)[..]
+        );
+    }
+
+    #[test]
+    fn a_dark_screen_that_keeps_every_frame_reads_nothing_again() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths: Vec<PathBuf> = (0..4)
+            .map(|index| {
+                let path = directory.path().join(format!("dark-{index}.fits"));
+                write_dark(&path, 503.0 + index as f32 * 0.5, 0.0);
+                path
+            })
+            .collect();
+        let (options, reports) = recorded(MasterBuildOptions {
+            dark_level_screening: Some(DarkLevelScreening::default()),
+            ..MasterBuildOptions::default()
+        });
+        build_master_from_fits(&paths, MasterFrameKind::Dark, &options).unwrap();
+        let expected = [
+            stage(MasterBuildStage::Read, 4),
+            stage(MasterBuildStage::Integrate, 4),
         ]
         .concat();
         assert_eq!(*reports.lock().unwrap(), expected);

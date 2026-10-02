@@ -415,10 +415,13 @@ fn load_bias(path: &Path) -> Result<FitsFrame> {
     Ok(frame)
 }
 
-/// One line as each stage starts, then its count on one line to stderr, so
-/// a long build shows it is moving without flooding a log.
+/// Build progress on stderr. On a terminal one line per stage counts up in
+/// place; in a pipe or log each stage writes one line when it ends, so the
+/// log is not filled with carriage returns.
 fn print_progress() -> MasterProgress {
-    MasterProgress::new(|progress| {
+    use std::io::IsTerminal;
+    let terminal = std::io::stderr().is_terminal();
+    MasterProgress::new(move |progress| {
         let what = match progress.stage {
             MasterBuildStage::Read => "reading",
             MasterBuildStage::Reread => "rereading kept darks",
@@ -431,13 +434,17 @@ fn print_progress() -> MasterProgress {
             "frame"
         };
         if progress.done < progress.total {
-            eprint!(
-                "\r{what}: {unit} {}/{}   ",
-                progress.done + 1,
-                progress.total
-            );
-        } else {
+            if terminal {
+                eprint!(
+                    "\r{what}: {unit} {}/{}   ",
+                    progress.done + 1,
+                    progress.total
+                );
+            }
+        } else if terminal {
             eprintln!("\r{what}: {} {unit}(s) done   ", progress.total);
+        } else {
+            eprintln!("{what}: {} {unit}(s) done", progress.total);
         }
     })
 }
