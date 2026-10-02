@@ -1598,7 +1598,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-satellites"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "directories",
  "fs2",
@@ -1615,7 +1615,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-stacking"
-version = "0.19.1"
+version = "0.20.0"
 dependencies = [
  "multiversion",
  "postcard",
