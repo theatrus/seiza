@@ -6085,6 +6085,7 @@ fn build_master_request(
         bias,
         dark,
         cancel: cancellation,
+        progress: None,
         defect_suppression,
         flat_star_masking: None,
         dark_level_screening: None,

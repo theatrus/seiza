@@ -167,6 +167,14 @@ frames and during flat scratch I/O/tile processing, and returns
 An interactive caller that builds masters inside a user-visible job needs that
 way out; batch callers leave it `None`.
 
+`MasterBuildOptions::progress` takes a `MasterProgress` callback that reports
+the stage and how many of its steps are done: `Read` (each input), `Reread`
+(the kept darks, only when the level screen set one aside), `Integrate` (each
+kept bias or dark again) and `Combine` (each flat scratch tile). Each stage
+reports before every step and once with `done == total` when it ends, so a
+host can show "reading frame 5 of 20" and a bar that does not claim the master
+is done while a flat still combines. `seiza master` prints these on stderr.
+
 For bias and dark masters, leave-one-out statistics let a single cosmic-ray
 outlier be rejected even in
 a small calibration set. Rereading keeps memory proportional to a handful of

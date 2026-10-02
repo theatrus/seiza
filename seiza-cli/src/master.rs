@@ -2,9 +2,9 @@ use crate::provenance::{FileIdentity, file_identity, validate_path_roles, write_
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use seiza_stacking::{
-    FitsFrame, FlatStarMaskingOptions, FlatStarMaskingStatistics, MasterBuildOptions, MasterDark,
-    MasterFrame, MasterFrameKind, MasterRejectionMethod, MasterRejectionOptions,
-    build_master_from_fits, write_master_fits_f32,
+    FitsFrame, FlatStarMaskingOptions, FlatStarMaskingStatistics, MasterBuildOptions,
+    MasterBuildStage, MasterDark, MasterFrame, MasterFrameKind, MasterProgress,
+    MasterRejectionMethod, MasterRejectionOptions, build_master_from_fits, write_master_fits_f32,
 };
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -259,6 +259,7 @@ fn build(
         bias,
         dark,
         cancel: None,
+        progress: Some(print_progress()),
         defect_suppression: None,
         flat_star_masking,
         dark_level_screening: None,
@@ -412,4 +413,31 @@ fn load_bias(path: &Path) -> Result<FitsFrame> {
     let frame = crate::common::open_frame(path, "master bias")?;
     frame.validate_master_kind("BIAS")?;
     Ok(frame)
+}
+
+/// One line as each stage starts, then its count on one line to stderr, so
+/// a long build shows it is moving without flooding a log.
+fn print_progress() -> MasterProgress {
+    MasterProgress::new(|progress| {
+        let what = match progress.stage {
+            MasterBuildStage::Read => "reading",
+            MasterBuildStage::Reread => "rereading kept darks",
+            MasterBuildStage::Integrate => "integrating",
+            MasterBuildStage::Combine => "combining tiles",
+        };
+        let unit = if progress.stage == MasterBuildStage::Combine {
+            "tile"
+        } else {
+            "frame"
+        };
+        if progress.done < progress.total {
+            eprint!(
+                "\r{what}: {unit} {}/{}   ",
+                progress.done + 1,
+                progress.total
+            );
+        } else {
+            eprintln!("\r{what}: {} {unit}(s) done   ", progress.total);
+        }
+    })
 }

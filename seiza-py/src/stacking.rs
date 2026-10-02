@@ -1267,6 +1267,7 @@ fn build_master(
             bias,
             dark,
             cancel: Some(signal),
+            progress: None,
             defect_suppression: None,
             flat_star_masking: None,
             dark_level_screening: None,

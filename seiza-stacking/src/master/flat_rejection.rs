@@ -1,4 +1,7 @@
-use super::{MasterBuildOptions, MasterInputStatistics, MasterRejectionOptions, check_cancelled};
+use super::{
+    MasterBuildOptions, MasterBuildStage, MasterInputStatistics, MasterRejectionOptions,
+    check_cancelled, report_progress,
+};
 use crate::{Error, Result};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -101,8 +104,10 @@ impl FlatScratch {
         let mut statistics = vec![0.0; self.frames];
         let mut insufficient_samples = 0_u64;
 
-        for start in (0..self.samples).step_by(tile_samples) {
+        let tiles = self.samples.div_ceil(tile_samples);
+        for (tile_index, start) in (0..self.samples).step_by(tile_samples).enumerate() {
             check_cancelled(options)?;
+            report_progress(options, MasterBuildStage::Combine, tile_index, tiles);
             let length = tile_samples.min(self.samples - start);
             // Read each normalized frame's tile once, transposing so all
             // temporal samples for one sensor pixel are contiguous.
@@ -189,6 +194,7 @@ impl FlatScratch {
                 masked_samples: result.masked_samples,
             });
         }
+        report_progress(options, MasterBuildStage::Combine, tiles, tiles);
         Ok(result)
     }
 }
@@ -439,6 +445,39 @@ mod tests {
         };
         assert!(error.to_string().contains("scratch storage"));
         assert_eq!(directory.path().read_dir().unwrap().count(), 0);
+    }
+
+    #[test]
+    fn combining_reports_each_tile_and_then_the_end() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut scratch = FlatScratch::new(Some(directory.path())).unwrap();
+        let reports = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let options = MasterBuildOptions {
+            progress: Some(crate::MasterProgress::new({
+                let reports = Arc::clone(&reports);
+                move |progress| reports.lock().unwrap().push(progress)
+            })),
+            ..MasterBuildOptions::default()
+        };
+        for offset in 0..3 {
+            let frame = (0..10)
+                .map(|index| 1.0 + (index + offset) as f32 * 0.01)
+                .collect::<Vec<_>>();
+            scratch.append(&frame, &options).unwrap();
+        }
+        let budget = 76;
+        let tiles = 10_usize.div_ceil(tile_samples(10, 3, budget).unwrap());
+        assert!(tiles > 1, "the budget must split the image");
+        scratch.integrate_with_budget(&options, budget).unwrap();
+        let reports = reports.lock().unwrap();
+        let expected = (0..=tiles)
+            .map(|done| super::super::MasterBuildProgress {
+                stage: MasterBuildStage::Combine,
+                done,
+                total: tiles,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(*reports, expected);
     }
 
     #[test]

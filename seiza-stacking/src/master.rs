@@ -4,7 +4,9 @@ use crate::{
     FrameSourceRole, LinearImage, MasterDark, Result, paths_refer_to_same_file,
 };
 use seiza_fits::HeaderValue;
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 mod flat_rejection;
 mod star_masking;
@@ -82,6 +84,76 @@ impl MasterRejectionMethod {
     }
 }
 
+/// Which part of a master build is running, in the order they run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MasterBuildStage {
+    /// Read each input once: calibrate it, check it matches the first, and
+    /// measure it. A flat is also normalized and written to scratch storage.
+    Read,
+    /// Read the darks the level screen kept once more, so the frames it set
+    /// aside do not pull the clipping centre. Runs only when the screen sets
+    /// a frame aside.
+    Reread,
+    /// Read each kept bias or dark again, rejecting outliers and averaging
+    /// the rest. Flats do not run this stage.
+    Integrate,
+    /// Combine a flat's scratch storage, one tile of pixels at a time. Only
+    /// flats run this stage.
+    Combine,
+}
+
+impl MasterBuildStage {
+    /// Stable lowercase name for logs and reports.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Reread => "reread",
+            Self::Integrate => "integrate",
+            Self::Combine => "combine",
+        }
+    }
+}
+
+/// Where a master build is: `done` of the `total` steps of `stage` are
+/// finished. A step is one input frame, or one tile in [`MasterBuildStage::Combine`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MasterBuildProgress {
+    /// The stage running.
+    pub stage: MasterBuildStage,
+    /// Steps of this stage finished.
+    pub done: usize,
+    /// Steps this stage takes.
+    pub total: usize,
+}
+
+/// Receives a master build's progress as it runs.
+///
+/// Each stage reports before each of its steps, with `done` counting the
+/// steps already finished, and once more when it ends with `done == total`.
+/// A frame set aside in [`MasterBuildStage::Read`] still counts as a step.
+/// The callback runs on the building thread, between steps, so it should
+/// return quickly.
+#[derive(Clone)]
+pub struct MasterProgress(Arc<dyn Fn(MasterBuildProgress) + Send + Sync>);
+
+impl MasterProgress {
+    /// Wrap a callback.
+    pub fn new(report: impl Fn(MasterBuildProgress) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(report))
+    }
+
+    /// Pass one report to the callback.
+    pub fn report(&self, progress: MasterBuildProgress) {
+        (self.0)(progress)
+    }
+}
+
+impl fmt::Debug for MasterProgress {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("MasterProgress")
+    }
+}
+
 /// Inputs and thresholds for building one calibration master.
 #[derive(Clone, Debug, Default)]
 pub struct MasterBuildOptions {
@@ -98,6 +170,9 @@ pub struct MasterBuildOptions {
     /// build checks this between input frames and returns
     /// [`Error::Cancelled`] without writing anything.
     pub cancel: Option<CancelSignal>,
+    /// Optional progress reports, one per input frame in each pass and one
+    /// per tile while a flat combines. See [`MasterProgress`].
+    pub progress: Option<MasterProgress>,
     /// Replace impulse pixels in the integrated master with their
     /// same-plane neighborhood median. A defective sensor pixel repeats in
     /// every input, so the across-frame clipping keeps it; only a spatial
@@ -365,8 +440,9 @@ fn build_master(
     let mut unknown_saturation_inputs = 0_usize;
     let mut levels: Vec<DarkLevel> = Vec::new();
 
-    for path in paths {
+    for (index, path) in paths.iter().enumerate() {
         check_cancelled(options)?;
+        report_progress(options, MasterBuildStage::Read, index, paths.len());
         let prepared = match prepare_input(
             path,
             kind,
@@ -417,6 +493,8 @@ fn build_master(
         }
     }
 
+    report_progress(options, MasterBuildStage::Read, paths.len(), paths.len());
+
     if let Some(screening) = options.dark_level_screening {
         let verdicts = screen_dark_levels(&levels, screening);
         let mut kept = Vec::with_capacity(accepted.len());
@@ -437,6 +515,7 @@ fn build_master(
             m2.fill(0.0);
             for (index, path) in accepted.iter().enumerate() {
                 check_cancelled(options)?;
+                report_progress(options, MasterBuildStage::Reread, index, accepted.len());
                 let prepared = prepare_input(
                     path,
                     kind,
@@ -455,6 +534,12 @@ fn build_master(
                     *m2 += delta * (value - *mean);
                 }
             }
+            report_progress(
+                options,
+                MasterBuildStage::Reread,
+                accepted.len(),
+                accepted.len(),
+            );
         }
     }
 
@@ -481,8 +566,13 @@ fn build_master(
     let mut rejected_samples = 0_u64;
     let count = accepted.len();
 
-    for path in accepted.iter().filter(|_| flat_scratch.is_none()) {
+    for (index, path) in accepted
+        .iter()
+        .filter(|_| flat_scratch.is_none())
+        .enumerate()
+    {
         check_cancelled(options)?;
+        report_progress(options, MasterBuildStage::Integrate, index, count);
         let prepared = prepare_input(
             path,
             kind,
@@ -513,6 +603,9 @@ fn build_master(
             rejected_samples: frame_rejected,
             masked_samples: 0,
         });
+    }
+    if flat_scratch.is_none() {
+        report_progress(options, MasterBuildStage::Integrate, count, count);
     }
 
     // Rejection can strike out every sample of a pixel (e.g. a hot pixel
@@ -608,6 +701,17 @@ fn build_master(
         reference_headers,
         skipped_inputs,
     })
+}
+
+fn report_progress(
+    options: &MasterBuildOptions,
+    stage: MasterBuildStage,
+    done: usize,
+    total: usize,
+) {
+    if let Some(progress) = &options.progress {
+        progress.report(MasterBuildProgress { stage, done, total });
+    }
 }
 
 /// Checked once per input frame in each pass. Reading and calibrating a frame
@@ -1576,6 +1680,99 @@ mod tests {
         assert!(matches!(error, Error::Cancelled));
         // Stopped in the first pass instead of reading every input twice.
         assert_eq!(checks.load(Ordering::Relaxed), 2);
+    }
+
+    fn recorded(
+        options: MasterBuildOptions,
+    ) -> (
+        MasterBuildOptions,
+        Arc<std::sync::Mutex<Vec<MasterBuildProgress>>>,
+    ) {
+        let reports = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let options = MasterBuildOptions {
+            progress: Some(MasterProgress::new({
+                let reports = Arc::clone(&reports);
+                move |progress| reports.lock().unwrap().push(progress)
+            })),
+            ..options
+        };
+        (options, reports)
+    }
+
+    fn stage(stage: MasterBuildStage, total: usize) -> Vec<MasterBuildProgress> {
+        (0..=total)
+            .map(|done| MasterBuildProgress { stage, done, total })
+            .collect()
+    }
+
+    #[test]
+    fn a_bias_reports_each_frame_of_both_passes() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = (0..3)
+            .map(|index| directory.path().join(format!("bias-{index}.fits")))
+            .collect::<Vec<_>>();
+        for path in &paths {
+            write_image(path, &[10.0, 20.0, 30.0, 40.0]);
+        }
+        let (options, reports) = recorded(MasterBuildOptions::default());
+        build_master_from_fits(&paths, MasterFrameKind::Bias, &options).unwrap();
+        let expected = [
+            stage(MasterBuildStage::Read, 3),
+            stage(MasterBuildStage::Integrate, 3),
+        ]
+        .concat();
+        assert_eq!(*reports.lock().unwrap(), expected);
+    }
+
+    #[test]
+    fn a_screened_dark_reports_the_reread_and_integrates_only_what_it_kept() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths: Vec<PathBuf> = [0.0, 0.5, 0.0, 40.0, 400.0]
+            .iter()
+            .enumerate()
+            .map(|(index, &leak)| {
+                let path = directory.path().join(format!("dark-{index}.fits"));
+                write_dark(&path, 503.0, leak);
+                path
+            })
+            .collect();
+        let (options, reports) = recorded(MasterBuildOptions {
+            dark_level_screening: Some(DarkLevelScreening::default()),
+            ..MasterBuildOptions::default()
+        });
+        let master = build_master_from_fits(&paths, MasterFrameKind::Dark, &options).unwrap();
+        assert_eq!(master.input_frames, 3);
+        let expected = [
+            stage(MasterBuildStage::Read, 5),
+            stage(MasterBuildStage::Reread, 3),
+            stage(MasterBuildStage::Integrate, 3),
+        ]
+        .concat();
+        assert_eq!(*reports.lock().unwrap(), expected);
+    }
+
+    #[test]
+    fn a_flat_reports_its_reads_and_then_the_combine() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = (0..3)
+            .map(|index| directory.path().join(format!("flat-{index}.fits")))
+            .collect::<Vec<_>>();
+        for (index, path) in paths.iter().enumerate() {
+            let level = 1000.0 + index as f32 * 10.0;
+            write_image(path, &[level, level * 1.01, level * 0.99, level]);
+        }
+        let (options, reports) = recorded(MasterBuildOptions::default());
+        build_master_from_fits(&paths, MasterFrameKind::Flat, &options).unwrap();
+        let reports = reports.lock().unwrap();
+        assert_eq!(reports[..4], stage(MasterBuildStage::Read, 3)[..]);
+        assert!(
+            reports[4..]
+                .iter()
+                .all(|progress| progress.stage == MasterBuildStage::Combine)
+        );
+        let last = reports.last().unwrap();
+        assert_eq!(last.done, last.total);
+        assert!(last.total >= 1);
     }
 
     #[test]

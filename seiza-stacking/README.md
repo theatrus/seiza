@@ -582,6 +582,12 @@ metadata/tallies. The scratch file is removed on success, cancellation, or
 failure. `build_master_from_fits_with_scratch` lets hosts choose an existing
 cache directory on their image volume; the original entry point uses OS temp.
 
+`MasterBuildOptions::progress` reports where a build is, as a
+`MasterBuildProgress { stage, done, total }`: each input frame of the `Read`,
+`Reread` and `Integrate` stages and each tile while a flat combines. A host
+building masters inside a visible job can show the frame being read and a bar
+that keeps moving; see `MasterProgress` for when reports arrive.
+
 `write_master_fits_f32` records the master kind, input count, actual rejection
 method (`REJMETH`: `MEDIAN_MAD`, `LEAVE_ONE_OUT`, or `NONE` for two inputs),
 thresholds, counts, and bias/dark/normalization state in the FITS header. Those

@@ -54,9 +54,9 @@ pub use image::{BayerLayout, Demosaic, LinearImage};
 pub use mapping::RegisteredFrameMapping;
 pub use master::{
     DarkLevel, DarkLevelScreening, FlatStarMaskingOptions, FlatStarMaskingStatistics,
-    MasterBuildOptions, MasterFrame, MasterFrameKind, MasterInputStatistics, MasterRejectionMethod,
-    MasterRejectionOptions, build_master_from_fits, build_master_from_fits_with_scratch,
-    screen_dark_levels,
+    MasterBuildOptions, MasterBuildProgress, MasterBuildStage, MasterFrame, MasterFrameKind,
+    MasterInputStatistics, MasterProgress, MasterRejectionMethod, MasterRejectionOptions,
+    build_master_from_fits, build_master_from_fits_with_scratch, screen_dark_levels,
 };
 pub use normalization::{NormalizationMap, NormalizationMode};
 pub use orientation::{SKY_ORIENTATION_NAME, SKY_ORIENTATION_VERSION, SkyOrientationPlan};
