@@ -261,6 +261,19 @@ network, since the library cannot tell a network mount from a local disk, and
 `normalized_full_scale=65535.0` when the set mixes PixInsight XISF frames with
 16-bit camera data.
 
+A stacker built from FITS or XISF paths can integrate its admitted frames again
+from their files, with leave-one-out rejection that removes trails the online
+pass kept, and can drizzle that integration onto a finer grid as WBPP's
+DrizzleIntegration does. Bayer frames drizzle each photosite into its own
+colour:
+
+```python
+replayed = stacker.reintegrate()            # StackSnapshot; the live stack is unchanged
+integrated, drizzled = stacker.reintegrate_drizzled(scale=2)
+drizzled.write_fits("drizzle-2x.fits")      # reference WCS scaled to the grid
+weights = drizzled.weight                   # drop area times frame weight
+```
+
 
 Checkpointing is non-consuming. Reopening preserves the original registration
 reference, calibration and options, online rejection statistics, coverage, and

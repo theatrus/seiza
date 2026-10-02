@@ -324,6 +324,17 @@ class StackSnapshot:
     coverage: npt.NDArray[np.uint32]
     rejected_samples: npt.NDArray[np.uint32]
 
+class DrizzleResult:
+    width: int
+    height: int
+    channels: int
+    scale: int
+    accepted_frames: int
+    rejected_frames: int
+    image: npt.NDArray[np.float32]
+    weight: npt.NDArray[np.float32]
+    def write_fits(self, path: str | Path) -> None: ...
+
 class LiveStacker:
     def __init__(
         self,
@@ -358,6 +369,22 @@ class LiveStacker:
     def push(self, image: npt.NDArray[np.float32]) -> FrameDisposition: ...
     def save_context(self, path: str | Path) -> None: ...
     def snapshot(self) -> StackSnapshot: ...
+    def reintegrate(
+        self,
+        *,
+        sigma_low: float = 3.0,
+        sigma_high: float = 3.0,
+        scratch_directory: str | Path | None = None,
+    ) -> StackSnapshot: ...
+    def reintegrate_drizzled(
+        self,
+        *,
+        scale: int = 1,
+        drop_shrink: float | None = None,
+        sigma_low: float = 3.0,
+        sigma_high: float = 3.0,
+        scratch_directory: str | Path | None = None,
+    ) -> tuple[StackSnapshot, DrizzleResult]: ...
     def finish(self, output: str | Path | None = None) -> StackSnapshot: ...
 
 class PipelineReport:

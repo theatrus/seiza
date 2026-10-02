@@ -87,7 +87,11 @@ exposes the **superset** of what both apps need.
   reports all three passes through a progress callback, accepts a
   `SeizaCancelSignal`, and leaves the live stack unchanged;
   `reintegrationUnavailable` in the state JSON says when a stack cannot be
-  replayed.
+  replayed. `seiza_live_stacker_reintegrate_drizzled` also drizzles the
+  frames onto a grid 1 to 4 times finer, as WBPP's DrizzleIntegration does,
+  and returns a `SeizaDrizzleResult` (image, weight, scale, and
+  `seiza_drizzle_result_write_fits` with the WCS scaled to the grid) along
+  with the reintegrated snapshot.
 - **Automatic stack reference** — `seiza_stack_choose_reference_json` scores
   an ordered JSON array of FITS/XISF paths using the native stacking algorithm.
   It chooses the flattest background among frames with nearly the best star

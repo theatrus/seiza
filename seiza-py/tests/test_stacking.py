@@ -353,3 +353,42 @@ def test_compatible_calibration_names_what_a_light_could_accept():
     # a rotation gap, and the match itself flips.
     wide = seiza.MatchTolerances(rotation_deg=5.0)
     assert seiza.optics_match(light, flat, wide)
+
+
+def test_reintegrate_and_drizzle_reject_a_reference_trail(tmp_path):
+    clean = synthetic_star_field()
+    paths = []
+    for index in range(6):
+        frame = clean + np.float32(index % 3) * 0.2
+        if index == 0:
+            frame = frame.copy()
+            frame[60, 10:150] += 5000.0
+        path = tmp_path / f"light-{index:03d}.fits"
+        fits.writeto(path, frame, overwrite=True)
+        paths.append(path)
+    stacker = seiza.LiveStacker(paths[0], options=no_adjustment_options())
+    for path in paths[1:]:
+        assert stacker.push_fits(path).accepted
+
+    assert stacker.snapshot().image[60, 80] - clean[60, 80] > 500.0
+    replayed = stacker.reintegrate(scratch_directory=tmp_path)
+    assert abs(replayed.image[60, 80] - clean[60, 80]) < 2.0
+
+    integrated, drizzled = stacker.reintegrate_drizzled(scale=2)
+    assert drizzled.scale == 2
+    assert drizzled.image.shape == (2 * clean.shape[0], 2 * clean.shape[1])
+    assert drizzled.weight.shape == drizzled.image.shape
+    assert drizzled.accepted_frames == 6
+    # Reference row 60 covers drizzled rows 120 and 121.
+    assert np.all(np.abs(drizzled.image[120:122, 160] - clean[60, 80]) < 50.0)
+    np.testing.assert_array_equal(integrated.image, replayed.image)
+
+    output = tmp_path / "drizzled.fits"
+    drizzled.write_fits(output)
+    with fits.open(output) as hdus:
+        assert hdus[0].data.shape == drizzled.image.shape
+        assert hdus[0].header["DRIZSCL"] == 2
+    with pytest.raises(ValueError, match="must not refer"):
+        drizzled.write_fits(paths[0])
+    with pytest.raises(ValueError, match="scale"):
+        stacker.reintegrate_drizzled(scale=5)

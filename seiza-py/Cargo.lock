@@ -1496,7 +1496,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "seiza"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "directories",
  "image",
@@ -1579,7 +1579,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-py"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "image",
  "numpy",
@@ -1588,6 +1588,7 @@ dependencies = [
  "seiza-background",
  "seiza-calibration",
  "seiza-deconvolution",
+ "seiza-fits",
  "seiza-imgproc",
  "seiza-satellites",
  "seiza-stacking",
@@ -1615,7 +1616,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-stacking"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "multiversion",
  "postcard",

@@ -6,7 +6,8 @@ use seiza_stacking::{
     CalibrationMasters, CancelSignal, DeltaSigmaOptions, Demosaic, FitsFrame, FrameDisposition,
     LinearImage, LiveStacker, MasterBuildOptions, MasterDark, MasterFrameKind,
     MasterRejectionOptions, NormalizationMode, PipelineOptions, PipelineReport, RejectionMode,
-    SnrSample, StackOptions, StackSnapshot, build_master_from_fits, checkpoint_depths,
+    BatchStackOptions, DrizzleOptions, DrizzleResult, SnrSample, StackOptions, StackSnapshot,
+    build_master_from_fits, checkpoint_depths, write_drizzle_fits_f32,
     measure_depth, path_identity, paths_refer_to_same_file, write_fits_f32, write_master_fits_f32,
 };
 use std::path::{Path, PathBuf};
@@ -497,6 +498,119 @@ impl PyStackSnapshot {
     }
 }
 
+/// A drizzled stack from :meth:`LiveStacker.reintegrate_drizzled`.
+#[pyclass(frozen, name = "DrizzleResult", module = "seiza")]
+pub(crate) struct PyDrizzleResult {
+    inner: DrizzleResult,
+    accepted_frames: u32,
+    rejected_frames: u32,
+    reference_headers: Vec<(String, seiza_fits::HeaderValue)>,
+    input_paths: Vec<PathBuf>,
+}
+
+#[pymethods]
+impl PyDrizzleResult {
+    #[getter]
+    fn width(&self) -> usize {
+        self.inner.image.width
+    }
+
+    #[getter]
+    fn height(&self) -> usize {
+        self.inner.image.height
+    }
+
+    #[getter]
+    fn channels(&self) -> usize {
+        self.inner.image.channels
+    }
+
+    /// Output pixels per reference pixel along each axis.
+    #[getter]
+    fn scale(&self) -> u32 {
+        self.inner.scale
+    }
+
+    #[getter]
+    fn accepted_frames(&self) -> u32 {
+        self.accepted_frames
+    }
+
+    #[getter]
+    fn rejected_frames(&self) -> u32 {
+        self.rejected_frames
+    }
+
+    /// Return a copy of the drizzled linear mean as a 2D mono or HWC RGB
+    /// array; samples no drop reached are NaN.
+    #[getter]
+    fn image<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
+        image_array(py, &self.inner.image)
+    }
+
+    /// Return a copy of the total weight behind each output sample: drop
+    /// area in output pixels times frame weight.
+    #[getter]
+    fn weight<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
+        image_array(py, &self.inner.weight)
+    }
+
+    /// Write the drizzled image as linear FITS (or XISF for a ``.xisf``
+    /// path), with the reference WCS scaled to the drizzle grid.
+    fn write_fits(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {
+        if self
+            .input_paths
+            .iter()
+            .any(|input| paths_refer_to_same_file(input, &path))
+        {
+            return Err(PyValueError::new_err(
+                "output path must not refer to a stack input or calibration master",
+            ));
+        }
+        py.allow_threads(|| {
+            write_drizzle_fits_f32(
+                path,
+                &self.inner,
+                self.accepted_frames,
+                self.rejected_frames,
+                &self.reference_headers,
+            )
+        })
+        .map_err(stack_error)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "DrizzleResult(shape={}x{}x{}, scale={}, accepted_frames={})",
+            self.width(),
+            self.height(),
+            self.channels(),
+            self.scale(),
+            self.accepted_frames,
+        )
+    }
+}
+
+fn batch_options(
+    sigma_low: f32,
+    sigma_high: f32,
+    scratch_directory: Option<PathBuf>,
+) -> PyResult<BatchStackOptions> {
+    for sigma in [sigma_low, sigma_high] {
+        if !(sigma.is_finite() && sigma > 0.0) {
+            return Err(PyValueError::new_err("rejection sigmas must be positive"));
+        }
+    }
+    Ok(BatchStackOptions {
+        rejection: MasterRejectionOptions {
+            low_sigma: sigma_low,
+            high_sigma: sigma_high,
+        },
+        scratch_directory,
+        ..BatchStackOptions::default()
+    })
+}
+
 #[pyclass(name = "LiveStacker", module = "seiza")]
 pub(crate) struct PyLiveStacker {
     inner: Option<LiveStacker>,
@@ -742,6 +856,78 @@ impl PyLiveStacker {
             .allow_threads(|| stacker.snapshot())
             .map_err(stack_error)?;
         Ok(PyStackSnapshot { inner: snapshot })
+    }
+
+    /// Integrate every admitted frame again with three-pass, leave-one-out
+    /// rejection, which removes trails in the reference and warm-up frames
+    /// that online rejection cannot revisit. Each frame is reread from its
+    /// source file; prepared frames wait in ``scratch_directory`` (the system
+    /// temporary directory by default) between passes. The live stack is
+    /// left as it was.
+    #[pyo3(signature = (*, sigma_low=3.0, sigma_high=3.0, scratch_directory=None))]
+    fn reintegrate(
+        &self,
+        py: Python<'_>,
+        sigma_low: f32,
+        sigma_high: f32,
+        scratch_directory: Option<PathBuf>,
+    ) -> PyResult<PyStackSnapshot> {
+        let stacker = self.active()?;
+        let options = batch_options(sigma_low, sigma_high, scratch_directory)?;
+        let result = py
+            .allow_threads(|| stacker.reintegrate(&options, |_, _, _| {}))
+            .map_err(stack_error)?;
+        Ok(PyStackSnapshot {
+            inner: result.snapshot,
+        })
+    }
+
+    /// :meth:`reintegrate`, also drizzling every admitted frame onto a grid
+    /// ``scale`` (1 to 4) times finer than the reference, as PixInsight's
+    /// DrizzleIntegration does. A pixel the integration rejected is left
+    /// out; Bayer frames drop each photosite into its own colour.
+    /// ``drop_shrink`` is each drop's side in source pixels, by default 0.9
+    /// for monochrome and 1.0 for Bayer frames. Returns the reintegrated
+    /// stack and the drizzled one.
+    #[pyo3(signature = (
+        *,
+        scale=1,
+        drop_shrink=None,
+        sigma_low=3.0,
+        sigma_high=3.0,
+        scratch_directory=None
+    ))]
+    fn reintegrate_drizzled(
+        &self,
+        py: Python<'_>,
+        scale: u32,
+        drop_shrink: Option<f32>,
+        sigma_low: f32,
+        sigma_high: f32,
+        scratch_directory: Option<PathBuf>,
+    ) -> PyResult<(PyStackSnapshot, PyDrizzleResult)> {
+        let stacker = self.active()?;
+        let options = batch_options(sigma_low, sigma_high, scratch_directory)?;
+        let drizzle = DrizzleOptions { scale, drop_shrink };
+        drizzle
+            .validate()
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let (result, drizzled) = py
+            .allow_threads(|| stacker.reintegrate_drizzled(&options, &drizzle, |_, _, _| {}))
+            .map_err(stack_error)?;
+        let drizzled = PyDrizzleResult {
+            inner: drizzled,
+            accepted_frames: result.snapshot.accepted_frames,
+            rejected_frames: result.snapshot.rejected_frames,
+            reference_headers: stacker.reference_headers().to_vec(),
+            input_paths: stacker.input_paths().to_vec(),
+        };
+        Ok((
+            PyStackSnapshot {
+                inner: result.snapshot,
+            },
+            drizzled,
+        ))
     }
 
     /// Consume the accumulator, optionally write a linear FITS file, and return its arrays.
@@ -1270,6 +1456,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PySnrSample>()?;
     module.add_function(wrap_pyfunction!(py_checkpoint_depths, module)?)?;
     module.add_class::<PyLiveStacker>()?;
+    module.add_class::<PyDrizzleResult>()?;
     module.add_class::<PyMasterResult>()?;
     module.add_function(wrap_pyfunction!(stack_fits, module)?)?;
     module.add_function(wrap_pyfunction!(build_bias, module)?)?;

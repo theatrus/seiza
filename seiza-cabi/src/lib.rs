@@ -505,6 +505,17 @@ pub struct SeizaStackSnapshot {
     input_paths: Vec<PathBuf>,
 }
 
+/// A drizzled stack from [`seiza_live_stacker_reintegrate_drizzled`]. Its
+/// image and weight pointers are borrowed until
+/// [`seiza_drizzle_result_free`] is called.
+pub struct SeizaDrizzleResult {
+    result: seiza_stacking::DrizzleResult,
+    accepted_frames: u32,
+    rejected_frames: u32,
+    reference_headers: Vec<(String, HeaderValue)>,
+    input_paths: Vec<PathBuf>,
+}
+
 /// A compact immutable live-stack result for non-destructive output. It owns
 /// only the finalized mean, reference headers, scalar frame counts, and the
 /// small source-path ledger. Release it with
@@ -2392,6 +2403,267 @@ pub unsafe extern "C" fn seiza_live_stacker_reintegrate(
     .map_or(ptr::null_mut(), |snapshot| {
         Box::into_raw(Box::new(snapshot))
     })
+}
+
+#[unsafe(no_mangle)]
+/// [`seiza_live_stacker_reintegrate`], also drizzling every admitted frame
+/// onto a grid `scale` (1 to 4) times finer than the reference, as
+/// PixInsight's DrizzleIntegration follows ImageIntegration.
+///
+/// During the final pass each frame is read once more from its source file
+/// and calibrated, but not debayered or resampled. Every source pixel,
+/// shrunk to a drop `drop_shrink` of a pixel on a side, is carried through
+/// the frame's recorded registration and spread over the output pixels it
+/// overlaps. A pixel whose registered sample the integration rejected is
+/// left out, and each is normalized and weighted as the integration did its
+/// sample. Bayer frames drop each photosite into its own colour. A
+/// `drop_shrink` of zero or less uses WBPP's defaults: 0.9 for monochrome
+/// frames and 1.0 for Bayer frames.
+///
+/// Returns the drizzled result, and stores the reintegrated stack in
+/// `*snapshot_out` when that is non-null; free each with its own `_free`
+/// function. On failure both are null. `low_sigma`, `high_sigma`, `cancel`,
+/// `progress` and `context` work as in [`seiza_live_stacker_reintegrate`];
+/// progress reports pass 2 for the combined integrating and drizzling pass.
+/// The drizzle adds about eight bytes per output sample to reintegration's
+/// memory.
+///
+/// # Safety
+/// As for [`seiza_live_stacker_reintegrate`]. When non-null, `snapshot_out`
+/// must point to writable storage for one pointer.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn seiza_live_stacker_reintegrate_drizzled(
+    stacker: *const SeizaLiveStacker,
+    low_sigma: f32,
+    high_sigma: f32,
+    scale: u32,
+    drop_shrink: f32,
+    cancel: *const SeizaCancelSignal,
+    progress: SeizaStackReintegrateProgressCallback,
+    context: *mut c_void,
+    snapshot_out: *mut *mut SeizaStackSnapshot,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaDrizzleResult {
+    clear_error(error_out);
+    if !snapshot_out.is_null() {
+        unsafe { *snapshot_out = ptr::null_mut() };
+    }
+    // Raw pointers are not UnwindSafe; the callback runs on this thread and
+    // the context's lifetime is the caller's promise.
+    let context = context as usize;
+    let snapshot_out = snapshot_out as usize;
+    ffi_result(error_out, || {
+        let stacker = unsafe { required_live_stacker(stacker)? };
+        let sigma = |value: f32| {
+            if value.is_finite() && value > 0.0 {
+                value
+            } else {
+                3.0
+            }
+        };
+        let options = seiza_stacking::BatchStackOptions {
+            rejection: seiza_stacking::MasterRejectionOptions {
+                low_sigma: sigma(low_sigma),
+                high_sigma: sigma(high_sigma),
+            },
+            cancel: unsafe { cancel.as_ref() }
+                .map(|signal| CancelSignal::from(Arc::clone(&signal.cancelled))),
+            ..seiza_stacking::BatchStackOptions::default()
+        };
+        let drizzle = seiza_stacking::DrizzleOptions {
+            scale,
+            drop_shrink: (drop_shrink.is_finite() && drop_shrink > 0.0).then_some(drop_shrink),
+        };
+        let (result, drizzled) = stacker
+            .stacker
+            .reintegrate_drizzled(&options, &drizzle, |pass, index, count| {
+                if let Some(callback) = progress {
+                    let pass = match pass {
+                        seiza_stacking::BatchStackPass::Estimate => 0,
+                        seiza_stacking::BatchStackPass::Refine => 1,
+                        seiza_stacking::BatchStackPass::Integrate => 2,
+                    };
+                    unsafe { callback(pass, index, count, context as *mut c_void) };
+                }
+            })
+            .map_err(|error| error.to_string())?;
+        let reference_headers = stacker.stacker.reference_headers().to_vec();
+        let input_paths = stacker.stacker.input_paths().to_vec();
+        let drizzled = SeizaDrizzleResult {
+            result: drizzled,
+            accepted_frames: result.snapshot.accepted_frames,
+            rejected_frames: result.snapshot.rejected_frames,
+            reference_headers: reference_headers.clone(),
+            input_paths: input_paths.clone(),
+        };
+        let snapshot_out = snapshot_out as *mut *mut SeizaStackSnapshot;
+        if !snapshot_out.is_null() {
+            let snapshot = SeizaStackSnapshot {
+                snapshot: result.snapshot,
+                reference_headers,
+                input_paths,
+            };
+            unsafe { *snapshot_out = Box::into_raw(Box::new(snapshot)) };
+        }
+        Ok(drizzled)
+    })
+    .map_or(ptr::null_mut(), |drizzled| {
+        Box::into_raw(Box::new(drizzled))
+    })
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `drizzle` must be null or a live `SeizaDrizzleResult` pointer.
+pub unsafe extern "C" fn seiza_drizzle_result_width(drizzle: *const SeizaDrizzleResult) -> usize {
+    unsafe { drizzle.as_ref().map_or(0, |value| value.result.image.width) }
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `drizzle` must be null or a live `SeizaDrizzleResult` pointer.
+pub unsafe extern "C" fn seiza_drizzle_result_height(drizzle: *const SeizaDrizzleResult) -> usize {
+    unsafe {
+        drizzle
+            .as_ref()
+            .map_or(0, |value| value.result.image.height)
+    }
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `drizzle` must be null or a live `SeizaDrizzleResult` pointer.
+pub unsafe extern "C" fn seiza_drizzle_result_channels(
+    drizzle: *const SeizaDrizzleResult,
+) -> usize {
+    unsafe {
+        drizzle
+            .as_ref()
+            .map_or(0, |value| value.result.image.channels)
+    }
+}
+
+#[unsafe(no_mangle)]
+/// Output pixels per reference pixel along each axis.
+///
+/// # Safety
+/// `drizzle` must be null or a live `SeizaDrizzleResult` pointer.
+pub unsafe extern "C" fn seiza_drizzle_result_scale(drizzle: *const SeizaDrizzleResult) -> u32 {
+    unsafe { drizzle.as_ref().map_or(0, |value| value.result.scale) }
+}
+
+#[unsafe(no_mangle)]
+/// Returns the sample count of the image and weight buffers.
+///
+/// # Safety
+/// `drizzle` must be null or a live `SeizaDrizzleResult` pointer.
+pub unsafe extern "C" fn seiza_drizzle_result_data_length(
+    drizzle: *const SeizaDrizzleResult,
+) -> usize {
+    unsafe {
+        drizzle
+            .as_ref()
+            .map_or(0, |value| value.result.image.sample_count())
+    }
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `drizzle` must be null or a live `SeizaDrizzleResult` pointer.
+pub unsafe extern "C" fn seiza_drizzle_result_accepted_frames(
+    drizzle: *const SeizaDrizzleResult,
+) -> u32 {
+    unsafe { drizzle.as_ref().map_or(0, |value| value.accepted_frames) }
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `drizzle` must be null or a live `SeizaDrizzleResult` pointer.
+pub unsafe extern "C" fn seiza_drizzle_result_rejected_frames(
+    drizzle: *const SeizaDrizzleResult,
+) -> u32 {
+    unsafe { drizzle.as_ref().map_or(0, |value| value.rejected_frames) }
+}
+
+#[unsafe(no_mangle)]
+/// Borrows the interleaved drizzled mean until the result is freed. Output
+/// samples no drop reached are `NaN`.
+///
+/// # Safety
+/// `drizzle` must be null or a live `SeizaDrizzleResult` pointer.
+pub unsafe extern "C" fn seiza_drizzle_result_image(
+    drizzle: *const SeizaDrizzleResult,
+) -> *const f32 {
+    unsafe {
+        drizzle
+            .as_ref()
+            .map_or(ptr::null(), |value| value.result.image.data.as_ptr())
+    }
+}
+
+#[unsafe(no_mangle)]
+/// Borrows the total weight behind each output sample (drop area in output
+/// pixels times frame weight) until the result is freed.
+///
+/// # Safety
+/// `drizzle` must be null or a live `SeizaDrizzleResult` pointer.
+pub unsafe extern "C" fn seiza_drizzle_result_weight(
+    drizzle: *const SeizaDrizzleResult,
+) -> *const f32 {
+    unsafe {
+        drizzle
+            .as_ref()
+            .map_or(ptr::null(), |value| value.result.weight.data.as_ptr())
+    }
+}
+
+#[unsafe(no_mangle)]
+/// Writes the drizzled image as an unstretched 32-bit floating-point FITS,
+/// or monolithic XISF for a `.xisf` path, with the reference WCS scaled to
+/// the drizzle grid.
+///
+/// # Safety
+/// `drizzle` must be a live `SeizaDrizzleResult` pointer. `path` must be a
+/// valid NUL-terminated string. When non-null, `error_out` must point to
+/// writable storage for one pointer.
+pub unsafe extern "C" fn seiza_drizzle_result_write_fits(
+    drizzle: *const SeizaDrizzleResult,
+    path: *const c_char,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let drizzle = unsafe { drizzle.as_ref() }.ok_or("drizzle result is required")?;
+        let path = required_path(path, "drizzle output path")?;
+        if drizzle
+            .input_paths
+            .iter()
+            .any(|input| paths_refer_to_same_file(input, &path))
+        {
+            return Err(
+                "drizzle output path must not refer to an input frame or calibration master".into(),
+            );
+        }
+        seiza_stacking::write_drizzle_fits_f32(
+            path,
+            &drizzle.result,
+            drizzle.accepted_frames,
+            drizzle.rejected_frames,
+            &drizzle.reference_headers,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .is_some()
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `drizzle` must be null or a live pointer returned by
+/// [`seiza_live_stacker_reintegrate_drizzled`] and must not already be freed.
+pub unsafe extern "C" fn seiza_drizzle_result_free(drizzle: *mut SeizaDrizzleResult) {
+    if !drizzle.is_null() {
+        unsafe { drop(Box::from_raw(drizzle)) };
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -7590,6 +7862,87 @@ mod tests {
             clean[sample]
         );
         assert_eq!(unsafe { seiza_stack_snapshot_accepted_frames(snapshot) }, 6);
+
+        // The drizzled replay rejects the same trail on a grid twice as
+        // fine, and hands back the reintegrated stack alongside.
+        let mut integrated = ptr::null_mut();
+        let drizzled = unsafe {
+            seiza_live_stacker_reintegrate_drizzled(
+                stacker,
+                0.0,
+                0.0,
+                2,
+                0.0,
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                &mut integrated,
+                &mut error,
+            )
+        };
+        assert!(!drizzled.is_null(), "{:?}", unsafe {
+            error.as_ref().map(|e| CStr::from_ptr(e))
+        });
+        assert!(!integrated.is_null());
+        unsafe {
+            assert_eq!(seiza_drizzle_result_scale(drizzled), 2);
+            assert_eq!(seiza_drizzle_result_width(drizzled), width * 2);
+            assert_eq!(seiza_drizzle_result_height(drizzled), height * 2);
+            assert_eq!(seiza_drizzle_result_channels(drizzled), 1);
+            assert_eq!(seiza_drizzle_result_accepted_frames(drizzled), 6);
+        }
+        let image = unsafe {
+            std::slice::from_raw_parts(
+                seiza_drizzle_result_image(drizzled),
+                seiza_drizzle_result_data_length(drizzled),
+            )
+        };
+        let weight = unsafe {
+            std::slice::from_raw_parts(
+                seiza_drizzle_result_weight(drizzled),
+                seiza_drizzle_result_data_length(drizzled),
+            )
+        };
+        // Reference row 60 covers output rows 120 and 121.
+        for row in [120, 121] {
+            let output = row * width * 2 + 160;
+            assert!(weight[output] > 0.0);
+            assert!(
+                (image[output] - clean[sample]).abs() < 50.0,
+                "the drizzle leaves the trail out: {} vs {}",
+                image[output],
+                clean[sample]
+            );
+        }
+        let integrated_image = unsafe {
+            std::slice::from_raw_parts(
+                seiza_stack_snapshot_image(integrated),
+                seiza_stack_snapshot_data_length(integrated),
+            )
+        };
+        assert_eq!(
+            integrated_image[sample].to_bits(),
+            replayed[sample].to_bits()
+        );
+        let output = directory.path().join("drizzled.fits");
+        let output_c = CString::new(output.to_str().unwrap()).unwrap();
+        assert!(unsafe {
+            seiza_drizzle_result_write_fits(drizzled, output_c.as_ptr(), &mut error)
+        });
+        let written = FitsFrame::open(&output).unwrap();
+        assert_eq!(
+            (written.image.width, written.image.height),
+            (width * 2, height * 2)
+        );
+        assert!(!unsafe {
+            seiza_drizzle_result_write_fits(drizzled, reference_c.as_ptr(), &mut error)
+        });
+        unsafe {
+            seiza_string_free(error);
+            error = ptr::null_mut();
+            seiza_drizzle_result_free(drizzled);
+            seiza_stack_snapshot_free(integrated);
+        }
 
         // A cancelled replay stops with an error rather than a snapshot.
         let cancel = seiza_cancel_signal_create();

@@ -173,6 +173,13 @@ typedef struct SeizaBackgroundModel SeizaBackgroundModel;
 typedef struct SeizaCancelSignal SeizaCancelSignal;
 
 /*
+ A drizzled stack from [`seiza_live_stacker_reintegrate_drizzled`]. Its
+ image and weight pointers are borrowed until
+ [`seiza_drizzle_result_free`] is called.
+ */
+typedef struct SeizaDrizzleResult SeizaDrizzleResult;
+
+/*
  An opaque incremental stacker. Release it with
  [`seiza_live_stacker_free`], or consume it with
  [`seiza_live_stacker_finish`].
@@ -955,6 +962,129 @@ SeizaStackSnapshot *seiza_live_stacker_reintegrate(const SeizaLiveStacker *stack
                                                    SeizaStackReintegrateProgressCallback progress,
                                                    void *context,
                                                    char **error_out);
+
+/*
+ [`seiza_live_stacker_reintegrate`], also drizzling every admitted frame
+ onto a grid `scale` (1 to 4) times finer than the reference, as
+ PixInsight's DrizzleIntegration follows ImageIntegration.
+
+ During the final pass each frame is read once more from its source file
+ and calibrated, but not debayered or resampled. Every source pixel,
+ shrunk to a drop `drop_shrink` of a pixel on a side, is carried through
+ the frame's recorded registration and spread over the output pixels it
+ overlaps. A pixel whose registered sample the integration rejected is
+ left out, and each is normalized and weighted as the integration did its
+ sample. Bayer frames drop each photosite into its own colour. A
+ `drop_shrink` of zero or less uses WBPP's defaults: 0.9 for monochrome
+ frames and 1.0 for Bayer frames.
+
+ Returns the drizzled result, and stores the reintegrated stack in
+ `*snapshot_out` when that is non-null; free each with its own `_free`
+ function. On failure both are null. `low_sigma`, `high_sigma`, `cancel`,
+ `progress` and `context` work as in [`seiza_live_stacker_reintegrate`];
+ progress reports pass 2 for the combined integrating and drizzling pass.
+ The drizzle adds about eight bytes per output sample to reintegration's
+ memory.
+
+ # Safety
+ As for [`seiza_live_stacker_reintegrate`]. When non-null, `snapshot_out`
+ must point to writable storage for one pointer.
+ */
+SeizaDrizzleResult *seiza_live_stacker_reintegrate_drizzled(const SeizaLiveStacker *stacker,
+                                                            float low_sigma,
+                                                            float high_sigma,
+                                                            uint32_t scale,
+                                                            float drop_shrink,
+                                                            const SeizaCancelSignal *cancel,
+                                                            SeizaStackReintegrateProgressCallback progress,
+                                                            void *context,
+                                                            SeizaStackSnapshot **snapshot_out,
+                                                            char **error_out);
+
+/*
+ # Safety
+ `drizzle` must be null or a live `SeizaDrizzleResult` pointer.
+ */
+size_t seiza_drizzle_result_width(const SeizaDrizzleResult *drizzle);
+
+/*
+ # Safety
+ `drizzle` must be null or a live `SeizaDrizzleResult` pointer.
+ */
+size_t seiza_drizzle_result_height(const SeizaDrizzleResult *drizzle);
+
+/*
+ # Safety
+ `drizzle` must be null or a live `SeizaDrizzleResult` pointer.
+ */
+size_t seiza_drizzle_result_channels(const SeizaDrizzleResult *drizzle);
+
+/*
+ Output pixels per reference pixel along each axis.
+
+ # Safety
+ `drizzle` must be null or a live `SeizaDrizzleResult` pointer.
+ */
+uint32_t seiza_drizzle_result_scale(const SeizaDrizzleResult *drizzle);
+
+/*
+ Returns the sample count of the image and weight buffers.
+
+ # Safety
+ `drizzle` must be null or a live `SeizaDrizzleResult` pointer.
+ */
+size_t seiza_drizzle_result_data_length(const SeizaDrizzleResult *drizzle);
+
+/*
+ # Safety
+ `drizzle` must be null or a live `SeizaDrizzleResult` pointer.
+ */
+uint32_t seiza_drizzle_result_accepted_frames(const SeizaDrizzleResult *drizzle);
+
+/*
+ # Safety
+ `drizzle` must be null or a live `SeizaDrizzleResult` pointer.
+ */
+uint32_t seiza_drizzle_result_rejected_frames(const SeizaDrizzleResult *drizzle);
+
+/*
+ Borrows the interleaved drizzled mean until the result is freed. Output
+ samples no drop reached are `NaN`.
+
+ # Safety
+ `drizzle` must be null or a live `SeizaDrizzleResult` pointer.
+ */
+const float *seiza_drizzle_result_image(const SeizaDrizzleResult *drizzle);
+
+/*
+ Borrows the total weight behind each output sample (drop area in output
+ pixels times frame weight) until the result is freed.
+
+ # Safety
+ `drizzle` must be null or a live `SeizaDrizzleResult` pointer.
+ */
+const float *seiza_drizzle_result_weight(const SeizaDrizzleResult *drizzle);
+
+/*
+ Writes the drizzled image as an unstretched 32-bit floating-point FITS,
+ or monolithic XISF for a `.xisf` path, with the reference WCS scaled to
+ the drizzle grid.
+
+ # Safety
+ `drizzle` must be a live `SeizaDrizzleResult` pointer. `path` must be a
+ valid NUL-terminated string. When non-null, `error_out` must point to
+ writable storage for one pointer.
+ */
+bool seiza_drizzle_result_write_fits(const SeizaDrizzleResult *drizzle,
+                                     const char *path,
+                                     char **error_out);
+
+/*
+ # Safety
+ `drizzle` must be null or a live pointer returned by
+ [`seiza_live_stacker_reintegrate_drizzled`] and must not already be freed.
+ */
+void seiza_drizzle_result_free(SeizaDrizzleResult *drizzle);
 
 /*
  Consumes a live stacker and moves its full-frame state into an immutable
