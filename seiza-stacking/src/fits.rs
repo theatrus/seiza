@@ -629,6 +629,8 @@ pub fn drizzle_reference_headers(
                     };
                 }
                 "CDELT1" | "CDELT2" => 1.0 / scale,
+                // The largest SIP correction, in pixels.
+                "A_DMAX" | "B_DMAX" => scale,
                 key if key.starts_with("CD1_") || key.starts_with("CD2_") => 1.0 / scale,
                 key => match sip_order(key) {
                     Some(order) => scale.powi(1 - order),
@@ -1118,6 +1120,7 @@ mod tests {
             ("CD1_1".to_owned(), HeaderValue::Float(-2.0e-4)),
             ("CDELT2".to_owned(), HeaderValue::Float(1.0e-4)),
             ("A_ORDER".to_owned(), HeaderValue::Integer(2)),
+            ("A_DMAX".to_owned(), HeaderValue::Float(1.5)),
             ("A_2_0".to_owned(), HeaderValue::Float(4.0e-6)),
             ("BP_0_1".to_owned(), HeaderValue::Float(1.0e-3)),
             (
@@ -1140,8 +1143,9 @@ mod tests {
         assert_eq!(value("CDELT2"), Some(5.0e-5));
         assert_eq!(value("A_2_0"), Some(2.0e-6));
         assert_eq!(value("BP_0_1"), Some(1.0e-3));
+        assert_eq!(value("A_DMAX"), Some(3.0));
         assert_eq!(scaled[4], headers[4]);
-        assert_eq!(scaled[7], headers[7]);
+        assert_eq!(scaled[8], headers[8]);
     }
     use seiza_fits::Pixels;
 

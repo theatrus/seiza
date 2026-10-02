@@ -10,6 +10,7 @@
 //! same calibration and preparation, and maps it through the recorded
 //! transform, so neither star detection nor registration runs a second time.
 
+use crate::CancelSignal;
 use crate::batch::SampleFate;
 use crate::drizzle::{DrizzleAccumulator, DrizzleFrame, DrizzleOptions, DrizzleResult};
 use crate::{
@@ -776,6 +777,15 @@ impl LiveStacker {
                     let (sender, receiver) = std::sync::mpsc::sync_channel::<DrizzleJob>(1);
                     let worker = scope.spawn(move || {
                         for job in receiver {
+                            // A cancelled integration stops at its next frame;
+                            // there is no use drizzling the ones queued here.
+                            if options
+                                .cancel
+                                .as_ref()
+                                .is_some_and(CancelSignal::is_cancelled)
+                            {
+                                return Err(Error::Cancelled);
+                            }
                             accumulator.add(&DrizzleFrame {
                                 image: &job.image,
                                 layout: job.layout,

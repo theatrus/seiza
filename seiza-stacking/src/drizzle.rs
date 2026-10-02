@@ -66,7 +66,8 @@ impl DrizzleOptions {
 #[derive(Clone, Debug)]
 pub struct DrizzleResult {
     /// The weighted mean of every drop over each output pixel; `NaN` where
-    /// no drop landed.
+    /// no drop landed, as can happen along the edges or, with too little
+    /// dithering, between a Bayer frame's photosites at a finer scale.
     pub image: LinearImage,
     /// The total weight behind each output sample: drop area in output
     /// pixels times frame weight, summed over frames.
@@ -216,9 +217,10 @@ struct BandContext<'a> {
     reference_height: usize,
 }
 
-/// The most output pixels a drop can touch along one axis: a drop is at
-/// most a pixel wide at four times the scale, plus a little for rotation.
-const SPAN: usize = 8;
+/// The most output pixels a drop can touch along one axis. At four times
+/// the scale a full drop turned 45 degrees spans about 5.7 output pixels,
+/// so this leaves room for frames at a different image scale and for warps.
+const SPAN: usize = 16;
 
 impl BandContext<'_> {
     /// Drizzle into output rows `top..top + TILE`, held in `sum` and
@@ -278,7 +280,10 @@ impl BandContext<'_> {
                     continue;
                 }
                 let (reference_x, reference_y) = (reference_x as usize, reference_y as usize);
-                let reference_index = (reference_y * self.reference_width + reference_x) * channels;
+                debug_assert!(
+                    max_x - min_x < (SPAN - 1) as f64 && max_y - min_y < (SPAN - 1) as f64,
+                    "a drop spans more output pixels than the overlap buffers hold"
+                );
                 let first_x = (min_x.max(tile_left).floor() as usize).max(left);
                 let last_x = (max_x.min(tile_right).ceil() as usize)
                     .min(right)
@@ -313,7 +318,7 @@ impl BandContext<'_> {
                     let value =
                         source.data[(y * source.width + x) * source.channels + source_channel];
                     if !value.is_finite()
-                        || self.frame.fates[reference_index + channel] == SampleFate::Rejected
+                        || self.fate(reference_x, reference_y, channel) == SampleFate::Rejected
                     {
                         continue;
                     }
@@ -343,6 +348,44 @@ impl BandContext<'_> {
                 }
             }
         }
+    }
+
+    /// What the integration did with the registered sample under a source
+    /// pixel's centre. Under Bayer drizzle a registered pixel holds only the
+    /// colour of its nearest photosite, so where the centre's pixel has no
+    /// sample in this colour, the nearest neighbour that has one carries this
+    /// photosite's sample.
+    fn fate(&self, x: usize, y: usize, channel: usize) -> SampleFate {
+        let at = |x: usize, y: usize| {
+            self.frame.fates[(y * self.reference_width + x) * self.channels + channel]
+        };
+        let fate = at(x, y);
+        if fate != SampleFate::Missing || self.frame.layout.is_none() {
+            return fate;
+        }
+        let neighbours = [
+            (1, 0),
+            (-1, 0),
+            (0, 1),
+            (0, -1),
+            (1, 1),
+            (-1, -1),
+            (1, -1),
+            (-1, 1),
+        ];
+        neighbours
+            .into_iter()
+            .filter_map(|(dx, dy)| {
+                let x = x
+                    .checked_add_signed(dx)
+                    .filter(|&x| x < self.reference_width)?;
+                let y = y
+                    .checked_add_signed(dy)
+                    .filter(|&y| y < self.reference_height)?;
+                Some(at(x, y))
+            })
+            .find(|&fate| fate != SampleFate::Missing)
+            .unwrap_or(SampleFate::Missing)
     }
 
     /// The source pixels whose drops can reach an output tile: the bounding

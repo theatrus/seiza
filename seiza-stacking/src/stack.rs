@@ -2481,6 +2481,94 @@ mod tests {
         LinearImage::new(width, height, 1, data).unwrap()
     }
 
+    /// Drizzling Bayer frames drops each photosite into its own colour, so
+    /// the sky keeps its colour, and a trail the integration rejected stays
+    /// out, whether the stack demosaiced or Bayer-drizzled its frames.
+    #[test]
+    fn drizzled_bayer_frames_keep_their_colours_and_reject_a_trail() {
+        let (width, height) = (160, 128);
+        let shifts = [
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (0.0, 1.0),
+            (1.0, 1.0),
+            (2.3, 0.6),
+            (0.4, 2.2),
+            (3.1, 3.3),
+            (1.6, 2.7),
+        ];
+        const TRAIL_ROW: usize = 60;
+        let directory = tempfile::tempdir().unwrap();
+        let bayer = [("BAYERPAT".to_string(), HeaderValue::String("RGGB".into()))];
+        let paths = shifts
+            .iter()
+            .enumerate()
+            .map(|(index, &(dx, dy))| {
+                let path = directory.path().join(format!("light-{index}.fits"));
+                let mut image = bayer_star_field(width, height, dx, dy);
+                if index == 3 {
+                    for y in TRAIL_ROW - 1..=TRAIL_ROW + 1 {
+                        for x in 10..width - 10 {
+                            image.data[y * width + x] += 20_000.0;
+                        }
+                    }
+                }
+                crate::write_processed_image_fits_f32(&path, &image, &bayer, &[]).unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+        for cfa_integration in [CfaIntegration::Demosaic, CfaIntegration::BayerDrizzle] {
+            let options = StackOptions {
+                normalization: NormalizationMode::None,
+                rejection: RejectionMode::None,
+                cfa_integration,
+                ..StackOptions::default()
+            };
+            let mut stacker =
+                LiveStacker::open_fits(&paths[0], None, None, None, None, options).unwrap();
+            for path in &paths[1..] {
+                stacker.push_fits(path).unwrap();
+            }
+            let (_, drizzled) = stacker
+                .reintegrate_drizzled(
+                    &crate::BatchStackOptions::default(),
+                    &crate::DrizzleOptions::default(),
+                    |_, _, _| {},
+                )
+                .unwrap();
+            let image = &drizzled.image;
+            assert_eq!(
+                (image.width, image.height, image.channels),
+                (width, height, 3)
+            );
+            let mut sky = [Vec::new(), Vec::new(), Vec::new()];
+            let mut trail = [Vec::new(), Vec::new(), Vec::new()];
+            for y in 8..height - 8 {
+                for x in 8..width - 8 {
+                    for channel in 0..3 {
+                        let value = image.data[(y * width + x) * 3 + channel];
+                        assert!(value.is_finite(), "{cfa_integration:?} ({x}, {y})");
+                        // Frame 3 moved by (1, 1): its trail lies a row higher on
+                        // the reference grid.
+                        if y.abs_diff(TRAIL_ROW - 1) <= 1 {
+                            trail[channel].push(value);
+                        } else {
+                            sky[channel].push(value);
+                        }
+                    }
+                }
+            }
+            for (channel, expected) in [400.0, 300.0, 200.0].into_iter().enumerate() {
+                let sky = seiza_stats::median_in_place(&mut sky[channel]).unwrap();
+                let trail = seiza_stats::median_in_place(&mut trail[channel]).unwrap();
+                assert!(
+                    (sky - expected).abs() < 2.0 && (trail - expected).abs() < 20.0,
+                    "{cfa_integration:?} channel {channel}: sky {sky}, trail {trail}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn bayer_drizzle_integrates_one_photosite_per_pixel_and_replays_the_same() {
         let (width, height) = (160, 128);

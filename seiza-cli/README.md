@@ -179,15 +179,22 @@ changed:
 | `--weighting equal\|inverse-noise` | `inverse-noise` | Weight each frame by the inverse of its noise variance relative to the reference, so hazy frames count for less. |
 | `--interpolation bilinear\|lanczos3` | `lanczos3` | Lanczos-3 resampling, with PixInsight-style clamping against ringing; sharper, at about twice the resampling cost. |
 | `--demosaic vng\|mhc\|bilinear` | `vng` | Bayer frames: VNG keeps each star's colour across its profile; MHC gives slightly sharper stars but rings around small ones; bilinear is fastest and softest. All three balance the mosaic's channels first. |
-| `--bayer-drizzle` | off | Integrate each Bayer frame's photosites without demosaicing; pays off on well-dithered data. |
+| `--bayer-drizzle` | off | Integrate each Bayer frame's photosites without demosaicing, on the reference grid; pays off on well-dithered data. Not the same as `--drizzle`. |
 | `--reintegrate` | off | After stacking, read every admitted frame three more times and integrate with leave-one-out rejection. This removes trails in the first frames, which online rejection cannot revisit, and refits each frame's background against an integration of the best twenty. |
 | `--scratch-directory <PATH>` | output's directory | Where `--reintegrate` keeps each prepared frame between passes, so it calibrates, demosaics and resamples each frame once instead of three times. It needs 4 bytes per pixel per channel for every frame, about 39 GB for 126 ASI2600MC frames, and deletes them when done; a frame that does not fit is prepared afresh each pass. |
+| `--drizzle 1\|2\|3\|4` | off | Drizzle the stack onto a grid this many times finer than the reference, as WBPP's DrizzleIntegration does. Turns on `--reintegrate`, whose rejection decides which pixels each frame drops. The output is the drizzled image with the reference WCS scaled to it. Bayer frames drop each photosite into its own colour, with no demosaicing. `2` recovers detail in undersampled, well-dithered data. |
+| `--drizzle-drop-shrink` | `0.9` mono, `1.0` Bayer | Each drop's side as a fraction of a source pixel. Smaller drops keep more detail and need more dithered frames to fill the grid. |
 | `--workers`, `--pipeline-memory-mib` | derived, `4096` | Frames read and prepared at once, and the memory for them. |
 
 On 126 one-shot-color frames of M45 (ASI2600MC, 173 mm, no calibration) the
 defaults stacked in 2 min 23 s at 2.7px FWHM with a 0.10px red-blue offset;
 the settings before these options took 3 min 16 s at 3.1px and 0.42px. Adding
-`--reintegrate` took 5 min 44 s.
+`--reintegrate` took 5 min 44 s, and `--drizzle 1` 6 min 58 s at 2.69px FWHM
+and an SNR of 356. After WBPP had registered the same frames, PixInsight's
+ImageIntegration and DrizzleIntegration took 6 min 54 s and 2 min 41 s for
+2.67px and 357. On 62 undersampled H-alpha frames (ASI2600MM, 300 mm),
+`--drizzle 2` took 1 min 23 s in all and gave 1.78px FWHM in reference pixels;
+WBPP's whole run with 2x drizzle took 7 min 5 s for 1.77px.
 
 Raw calibration sequences can be integrated into reusable masters first:
 

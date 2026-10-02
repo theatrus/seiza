@@ -124,7 +124,7 @@ pub(crate) struct StackArgs {
     /// Each drizzle drop's side as a fraction of a source pixel; smaller
     /// drops keep more detail and need more dithered frames to fill the
     /// grid. Defaults to WBPP's: 0.9 for monochrome frames, 1.0 for Bayer
-    #[arg(long)]
+    #[arg(long, requires = "drizzle")]
     drizzle_drop_shrink: Option<f32>,
     /// Where --reintegrate keeps each frame's prepared image between its
     /// passes (about four bytes per output sample per frame); defaults to the

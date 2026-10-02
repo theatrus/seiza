@@ -309,7 +309,8 @@ protocol, so your application code does not change.
 `seiza stack` calibrates and registers linear FITS or XISF light frames,
 normalizes their backgrounds, and integrates them with online delta-sigma
 rejection; `--reintegrate` adds a completed-stack pass that removes satellite
-trails and other transients. By default it picks the clearest, sharpest frame
+trails and other transients, and `--drizzle 2` drizzles that pass onto a grid
+twice as fine, for undersampled, dithered data. By default it picks the clearest, sharpest frame
 as the reference, fits a quadratic warp to follow lens distortion, matches each
 frame's background tile by tile so frame edges leave no seams, weights frames
 by their noise, and resamples with Lanczos-3. Differently sized or cropped
