@@ -2313,7 +2313,7 @@ pub type SeizaStackReintegrateProgressCallback =
     Option<unsafe extern "C" fn(u32, usize, usize, *mut c_void)>;
 
 #[unsafe(no_mangle)]
-/// Integrate every admitted frame again with two-pass, leave-one-out
+/// Integrate every admitted frame again with three-pass, leave-one-out
 /// rejection and return the result as a new snapshot.
 ///
 /// Online rejection cannot revisit the reference frame or the warm-up frames

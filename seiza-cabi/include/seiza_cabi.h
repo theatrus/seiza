@@ -921,7 +921,7 @@ SeizaStackExportSnapshot *seiza_live_stacker_export_snapshot(const SeizaLiveStac
                                                              char **error_out);
 
 /*
- Integrate every admitted frame again with two-pass, leave-one-out
+ Integrate every admitted frame again with three-pass, leave-one-out
  rejection and return the result as a new snapshot.
 
  Online rejection cannot revisit the reference frame or the warm-up frames

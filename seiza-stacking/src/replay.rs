@@ -588,7 +588,7 @@ impl LiveStacker {
         None
     }
 
-    /// Integrate every admitted frame again with two-pass, leave-one-out
+    /// Integrate every admitted frame again with three-pass, leave-one-out
     /// rejection, so a transient in the reference or a warm-up frame is
     /// rejected like any other.
     ///
