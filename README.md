@@ -236,6 +236,7 @@ seiza stack light-001.fits light-002.fits light-003.fits --output stack.fits \
   --preview stack.png --report stack-report.json
 seiza background stack.fits --output stack-bg.fits \
   --model-output background.fits --diagnostics background.json
+seiza color-calibrate stack-bg.fits --output stack-cc.fits --report colour.json
 seiza deconvolve stack-bg.fits --output stack-light-dc.fits \
   --psf-fwhm 3.1 --iterations 4 --amount 0.35
 ```

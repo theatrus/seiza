@@ -188,6 +188,25 @@ applied. The operation releases the GIL. Inspect identical stretches for noise,
 rings, saturated-star failures, and field-dependent PSF mismatch before using a
 stronger `iterations` or `amount`.
 
+## Photometric colour calibration
+
+`calibrate_color` fits per-channel gains for a linear RGB image from Gaia DR3
+star colours: each star's instrumental colour is fitted against Gaia BP−RP,
+and the gains render a star of the white reference's colour (the Sun's by
+default) neutral, with the sky neutralized too.
+
+```python
+import seiza
+from astropy.io import fits
+
+header = fits.getheader("stack.fits")
+wcs = seiza.Wcs.from_header(header)
+gaia = seiza.gaia_photometry_cone(56.75, 24.10, radius_deg=4.8)  # ESA archive; keep it
+calibration = seiza.calibrate_color(rgb, wcs, gaia)               # rgb: (h, w, 3) float32
+print(calibration.gains, calibration.red_fit, calibration.blue_fit)
+calibrated = calibration.apply(rgb)
+```
+
 ## Image stacking
 
 The wheel includes the same linear calibration, registration, normalization,

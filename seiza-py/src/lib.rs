@@ -5,6 +5,7 @@ mod arrays;
 mod background;
 mod calibration;
 mod color;
+mod color_calibration;
 mod deconvolution;
 mod imgproc;
 mod rc_astro;
@@ -244,6 +245,29 @@ impl PyWcs {
                 flipped,
             ),
         }
+    }
+
+    /// Read a TAN or TAN-SIP solution from FITS WCS keywords, such as an
+    /// astropy header or a plain dict; None when the keywords do not
+    /// describe one.
+    #[staticmethod]
+    fn from_header(header: &Bound<'_, pyo3::types::PyAny>) -> PyResult<Option<Self>> {
+        let lookup = |key: &str| -> Option<Bound<'_, pyo3::types::PyAny>> {
+            header.get_item(key).ok().filter(|value| !value.is_none())
+        };
+        Ok(SeizaWcs::from_fits_values(
+            |key| {
+                let value = lookup(key)?;
+                value.extract::<f64>().ok().or_else(|| {
+                    value
+                        .extract::<String>()
+                        .ok()
+                        .and_then(|text| text.trim().parse().ok())
+                })
+            },
+            |key| lookup(key)?.extract::<String>().ok(),
+        )
+        .map(|wcs| Self { wcs }))
     }
 
     #[getter]
@@ -742,6 +766,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solve_blind, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_catalogs, m)?)?;
     color::register(m)?;
+    color_calibration::register(m)?;
     deconvolution::register(m)?;
     imgproc::register(m)?;
     stacking::register(m)?;

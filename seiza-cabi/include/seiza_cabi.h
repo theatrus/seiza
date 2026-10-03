@@ -595,6 +595,77 @@ SeizaLiveStacker *seiza_live_stacker_create(const float *reference,
                                             char **error_out);
 
 /*
+ Fetch Gaia DR3 photometry within `radius_deg` of `(ra, dec)` (degrees)
+ down to G `max_mag` from the ESA Gaia archive, for
+ [`seiza_color_calibrate_json`].
+
+ Returns an owned JSON array of `{ra, dec, pmra, pmdec, g, bp, rp, ruwe}`
+ objects (J2016.0 positions; proper motions in mas/yr; absent values
+ null). The call blocks on the network, a wide field for up to several
+ minutes; cache the result. Free it, or an `error_out` string, with
+ [`seiza_string_free`].
+
+ # Safety
+ When non-null, `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_gaia_photometry_cone_json(double ra,
+                                      double dec,
+                                      double radius_deg,
+                                      float max_mag,
+                                      char **error_out);
+
+/*
+ Fit photometric colour calibration for an interleaved linear RGB image
+ against Gaia DR3 star colours.
+
+ `wcs_json` is a JSON object of the image's FITS WCS keywords (`CTYPE1`,
+ `CRVAL1`, `CRPIX1`, `CD1_1` or `CDELT1`, SIP terms, …) with numeric or
+ string values; `gaia_json` is an array of sources as
+ [`seiza_gaia_photometry_cone_json`] returns. `options_json` may be null
+ or an object with `whiteBpRp` (default 0.82, the Sun), `apertureRadius`
+ (pixels; default twice the measured FWHM), `neutralizeBackground`
+ (default true) and `observationEpoch` (a Julian year, for proper motion).
+
+ Returns owned schema-1 JSON with `gains` and `offsets` for R, G, B (apply
+ them with [`seiza_color_calibration_apply`]), each channel's
+ `background`, the `redFit` and `blueFit` lines of instrumental colour
+ against BP − RP, the `apertureRadius` and `apertureCorrection` used, and
+ star counts. The image is not changed. Free the result, or an
+ `error_out` string, with [`seiza_string_free`].
+
+ # Safety
+ `data` must point to `length` readable floats, `width * height * 3` of
+ them. The JSON arguments must be valid NUL-terminated UTF-8 strings, and
+ `options_json` may be null. When non-null, `error_out` must point to
+ writable storage for one pointer.
+ */
+char *seiza_color_calibrate_json(const float *data,
+                                 size_t length,
+                                 size_t width,
+                                 size_t height,
+                                 const char *wcs_json,
+                                 const char *gaia_json,
+                                 const char *options_json,
+                                 char **error_out);
+
+/*
+ Apply colour calibration gains and offsets, as
+ [`seiza_color_calibrate_json`] returns them, to an interleaved linear RGB
+ image in place: each finite sample becomes `sample * gain + offset` for
+ its channel.
+
+ # Safety
+ `data` must point to `length` writable floats, a multiple of three.
+ `gains` and `offsets` must each point to three readable floats. When
+ non-null, `error_out` must point to writable storage for one pointer.
+ */
+bool seiza_color_calibration_apply(float *data,
+                                   size_t length,
+                                   const float *gains,
+                                   const float *offsets,
+                                   char **error_out);
+
+/*
  Choose a reference from an ordered JSON array of FITS or XISF path strings.
  Uses the native stacking reference scorer: among frames with nearly the
  best star quality, choose the flattest background. This only reads inputs;

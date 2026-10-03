@@ -1609,6 +1609,267 @@ pub unsafe extern "C" fn seiza_live_stacker_create(
     .map_or(ptr::null_mut(), |stacker| Box::into_raw(Box::new(stacker)))
 }
 
+/// A Gaia DR3 source in the JSON [`seiza_gaia_photometry_cone_json`]
+/// returns and [`seiza_color_calibrate_json`] reads.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GaiaSourceJson {
+    ra: f64,
+    dec: f64,
+    #[serde(default)]
+    pmra: Option<f64>,
+    #[serde(default)]
+    pmdec: Option<f64>,
+    g: f32,
+    #[serde(default)]
+    bp: Option<f32>,
+    #[serde(default)]
+    rp: Option<f32>,
+    #[serde(default)]
+    ruwe: Option<f32>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+struct ColorCalibrationOptionsJson {
+    white_bp_rp: Option<f32>,
+    aperture_radius: Option<f64>,
+    neutralize_background: Option<bool>,
+    /// Julian year of the observation, for proper motion.
+    observation_epoch: Option<f64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ColorFitJson {
+    intercept: f64,
+    slope: f64,
+    scatter: f64,
+    stars: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ColorCalibrationJson {
+    schema_version: u32,
+    gains: [f32; 3],
+    offsets: [f32; 3],
+    background: [f32; 3],
+    red_fit: ColorFitJson,
+    blue_fit: ColorFitJson,
+    white_bp_rp: f32,
+    aperture_radius: f64,
+    aperture_correction: [f64; 3],
+    stars_offered: usize,
+    stars_measured: usize,
+}
+
+#[unsafe(no_mangle)]
+/// Fetch Gaia DR3 photometry within `radius_deg` of `(ra, dec)` (degrees)
+/// down to G `max_mag` from the ESA Gaia archive, for
+/// [`seiza_color_calibrate_json`].
+///
+/// Returns an owned JSON array of `{ra, dec, pmra, pmdec, g, bp, rp, ruwe}`
+/// objects (J2016.0 positions; proper motions in mas/yr; absent values
+/// null). The call blocks on the network, a wide field for up to several
+/// minutes; cache the result. Free it, or an `error_out` string, with
+/// [`seiza_string_free`].
+///
+/// # Safety
+/// When non-null, `error_out` must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_gaia_photometry_cone_json(
+    ra: f64,
+    dec: f64,
+    radius_deg: f64,
+    max_mag: f32,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let downloader =
+            seiza_sources::SourceDownloader::new().map_err(|error| error.to_string())?;
+        let stars = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?
+            .block_on(downloader.gaia_photometry_cone(ra, dec, radius_deg, max_mag))
+            .map_err(|error| error.to_string())?;
+        owned_json(
+            &stars
+                .into_iter()
+                .map(|star| GaiaSourceJson {
+                    ra: star.ra,
+                    dec: star.dec,
+                    pmra: star.pmra,
+                    pmdec: star.pmdec,
+                    g: star.g,
+                    bp: star.bp,
+                    rp: star.rp,
+                    ruwe: star.ruwe,
+                })
+                .collect::<Vec<_>>(),
+        )
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// Fit photometric colour calibration for an interleaved linear RGB image
+/// against Gaia DR3 star colours.
+///
+/// `wcs_json` is a JSON object of the image's FITS WCS keywords (`CTYPE1`,
+/// `CRVAL1`, `CRPIX1`, `CD1_1` or `CDELT1`, SIP terms, …) with numeric or
+/// string values; `gaia_json` is an array of sources as
+/// [`seiza_gaia_photometry_cone_json`] returns. `options_json` may be null
+/// or an object with `whiteBpRp` (default 0.82, the Sun), `apertureRadius`
+/// (pixels; default twice the measured FWHM), `neutralizeBackground`
+/// (default true) and `observationEpoch` (a Julian year, for proper motion).
+///
+/// Returns owned schema-1 JSON with `gains` and `offsets` for R, G, B (apply
+/// them with [`seiza_color_calibration_apply`]), each channel's
+/// `background`, the `redFit` and `blueFit` lines of instrumental colour
+/// against BP − RP, the `apertureRadius` and `apertureCorrection` used, and
+/// star counts. The image is not changed. Free the result, or an
+/// `error_out` string, with [`seiza_string_free`].
+///
+/// # Safety
+/// `data` must point to `length` readable floats, `width * height * 3` of
+/// them. The JSON arguments must be valid NUL-terminated UTF-8 strings, and
+/// `options_json` may be null. When non-null, `error_out` must point to
+/// writable storage for one pointer.
+pub unsafe extern "C" fn seiza_color_calibrate_json(
+    data: *const f32,
+    length: usize,
+    width: usize,
+    height: usize,
+    wcs_json: *const c_char,
+    gaia_json: *const c_char,
+    options_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let image = unsafe { linear_image_from_ffi(data, length, width, height, 3, "image")? };
+        let wcs: serde_json::Map<String, Value> =
+            serde_json::from_str(&required_str(wcs_json, "WCS keywords")?)
+                .map_err(|error| format!("WCS keywords must be a JSON object: {error}"))?;
+        let wcs = seiza::Wcs::from_fits_values(
+            |key| match wcs.get(key)? {
+                Value::Number(number) => number.as_f64(),
+                Value::String(text) => text.trim().parse().ok(),
+                _ => None,
+            },
+            |key| wcs.get(key)?.as_str().map(str::to_owned),
+        )
+        .ok_or("the WCS keywords do not describe a TAN projection")?;
+        let gaia: Vec<GaiaSourceJson> =
+            serde_json::from_str(&required_str(gaia_json, "Gaia sources")?)
+                .map_err(|error| format!("Gaia sources must be a JSON array: {error}"))?;
+        let options: ColorCalibrationOptionsJson = if options_json.is_null() {
+            ColorCalibrationOptionsJson::default()
+        } else {
+            serde_json::from_str(&required_str(options_json, "options")?)
+                .map_err(|error| format!("invalid colour calibration options: {error}"))?
+        };
+        let sources = gaia
+            .iter()
+            .map(|source| seiza_stacking::GaiaColorSource {
+                ra: source.ra,
+                dec: source.dec,
+                pmra: source.pmra,
+                pmdec: source.pmdec,
+                g: source.g,
+                bp_rp: source.bp.zip(source.rp).map(|(bp, rp)| bp - rp),
+                ruwe: source.ruwe,
+            })
+            .collect::<Vec<_>>();
+        let stars = seiza_stacking::place_gaia_sources(
+            &wcs,
+            width,
+            height,
+            options.observation_epoch,
+            &sources,
+        );
+        let defaults = seiza_stacking::ColorCalibrationOptions::default();
+        let calibration = seiza_stacking::calibrate_color(
+            &image,
+            &stars,
+            &seiza_stacking::ColorCalibrationOptions {
+                white_bp_rp: options.white_bp_rp.unwrap_or(defaults.white_bp_rp),
+                aperture_radius: options.aperture_radius,
+                neutralize_background: options
+                    .neutralize_background
+                    .unwrap_or(defaults.neutralize_background),
+                ..defaults
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let fit = |fit: &seiza_stacking::ColorFit| ColorFitJson {
+            intercept: fit.intercept,
+            slope: fit.slope,
+            scatter: fit.scatter,
+            stars: fit.stars,
+        };
+        owned_json(&ColorCalibrationJson {
+            schema_version: 1,
+            gains: calibration.gains,
+            offsets: calibration.offsets,
+            background: calibration.background,
+            red_fit: fit(&calibration.red_fit),
+            blue_fit: fit(&calibration.blue_fit),
+            white_bp_rp: calibration.white_bp_rp,
+            aperture_radius: calibration.aperture_radius,
+            aperture_correction: calibration.aperture_correction,
+            stars_offered: calibration.stars_offered,
+            stars_measured: calibration.stars_measured,
+        })
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// Apply colour calibration gains and offsets, as
+/// [`seiza_color_calibrate_json`] returns them, to an interleaved linear RGB
+/// image in place: each finite sample becomes `sample * gain + offset` for
+/// its channel.
+///
+/// # Safety
+/// `data` must point to `length` writable floats, a multiple of three.
+/// `gains` and `offsets` must each point to three readable floats. When
+/// non-null, `error_out` must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_color_calibration_apply(
+    data: *mut f32,
+    length: usize,
+    gains: *const f32,
+    offsets: *const f32,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        if data.is_null() || gains.is_null() || offsets.is_null() {
+            return Err("image, gains and offsets are required".into());
+        }
+        if length == 0 || !length.is_multiple_of(3) {
+            return Err("an RGB image has a nonzero multiple of three samples".into());
+        }
+        let gains = unsafe { std::slice::from_raw_parts(gains, 3) };
+        let offsets = unsafe { std::slice::from_raw_parts(offsets, 3) };
+        if gains.iter().chain(offsets).any(|value| !value.is_finite()) {
+            return Err("gains and offsets must be finite".into());
+        }
+        let data = unsafe { std::slice::from_raw_parts_mut(data, length) };
+        for pixel in data.chunks_exact_mut(3) {
+            for ((value, gain), offset) in pixel.iter_mut().zip(gains).zip(offsets) {
+                if value.is_finite() {
+                    *value = value.mul_add(*gain, *offset);
+                }
+            }
+        }
+        Ok(())
+    })
+    .is_some()
+}
+
 #[unsafe(no_mangle)]
 /// Choose a reference from an ordered JSON array of FITS or XISF path strings.
 /// Uses the native stacking reference scorer: among frames with nearly the
@@ -12042,5 +12303,118 @@ fi
             message.contains("invalid rc-astro request JSON"),
             "{message}"
         );
+    }
+
+    /// A camera that records a solar-coloured star at R/G 0.6 and B/G 1.4:
+    /// the C API fits gains of 1/0.6 and 1/1.4 from WCS keywords and Gaia
+    /// rows, and applies them.
+    #[test]
+    fn color_calibration_cabi_fits_and_applies_channel_gains() {
+        let (width, height) = (1200, 1000);
+        let wcs =
+            seiza::Wcs::from_center_scale_rotation((56.75, 24.1), (600.0, 500.0), 3.0, 10.0, false);
+        let sky = [120.0_f32, 100.0, 90.0];
+        let mut data = (0..width * height * 3)
+            .map(|index| sky[index % 3] + ((index * 7919) % 13) as f32 * 0.3)
+            .collect::<Vec<_>>();
+        let mut gaia = Vec::new();
+        for index in 0..140 {
+            let x = 30.0 + ((index * 7919) % 1140) as f64 + ((index % 7) as f64) * 0.13;
+            let y = 30.0 + ((index * 6271) % 940) as f64 + ((index % 5) as f64) * 0.17;
+            let bp_rp = 0.1 + ((index * 37) % 160) as f64 / 100.0;
+            let g = 9.0 + ((index * 13) % 40) as f64 / 10.0;
+            let (ra, dec) = wcs.pixel_to_world(x, y);
+            gaia.push(json!({
+                "ra": ra, "dec": dec, "g": g, "bp": g + 0.3, "rp": g + 0.3 - bp_rp, "ruwe": 1.0
+            }));
+            let flux = 2.0e5 * 10f64.powf(-0.4 * (g - 9.0));
+            let delta = bp_rp - 0.82;
+            let ratios = [
+                0.6 * 10f64.powf(0.2 * delta),
+                1.0,
+                1.4 * 10f64.powf(-0.32 * delta),
+            ];
+            for py in (y as usize).saturating_sub(10)..(y as usize + 11).min(height) {
+                for px in (x as usize).saturating_sub(10)..(x as usize + 11).min(width) {
+                    let r2 = (px as f64 - x).powi(2) + (py as f64 - y).powi(2);
+                    let profile = (-r2 / 4.5).exp() / (std::f64::consts::PI * 4.5);
+                    for (channel, ratio) in ratios.iter().enumerate() {
+                        data[(py * width + px) * 3 + channel] += (flux * ratio * profile) as f32;
+                    }
+                }
+            }
+        }
+        let keywords = wcs
+            .fits_header_cards()
+            .into_iter()
+            .map(|(key, value)| {
+                let value = match value {
+                    seiza::FitsCardValue::Text(text) => json!(text),
+                    seiza::FitsCardValue::Integer(number) => json!(number),
+                    seiza::FitsCardValue::Number(number) => json!(number),
+                };
+                (key, value)
+            })
+            .collect::<Map<_, _>>();
+        let wcs_c = CString::new(Value::Object(keywords).to_string()).unwrap();
+        let gaia_c = CString::new(Value::Array(gaia).to_string()).unwrap();
+        let mut error = ptr::null_mut();
+        let response = unsafe {
+            seiza_color_calibrate_json(
+                data.as_ptr(),
+                data.len(),
+                width,
+                height,
+                wcs_c.as_ptr(),
+                gaia_c.as_ptr(),
+                ptr::null(),
+                &mut error,
+            )
+        };
+        assert!(!response.is_null(), "{:?}", unsafe {
+            error.as_ref().map(|e| CStr::from_ptr(e))
+        });
+        let report: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(response) }.to_str().unwrap()).unwrap();
+        unsafe { seiza_string_free(response) };
+        assert_eq!(report["schemaVersion"], 1);
+        let triple = |key: &str| {
+            let values = report[key].as_array().unwrap();
+            [0, 1, 2].map(|channel| values[channel].as_f64().unwrap() as f32)
+        };
+        let (gains, offsets) = (triple("gains"), triple("offsets"));
+        assert!((gains[0] - 1.0 / 0.6).abs() < 0.03, "{gains:?}");
+        assert!((gains[2] - 1.0 / 1.4).abs() < 0.02, "{gains:?}");
+
+        let before = data[0..3].to_vec();
+        assert!(unsafe {
+            seiza_color_calibration_apply(
+                data.as_mut_ptr(),
+                data.len(),
+                gains.as_ptr(),
+                offsets.as_ptr(),
+                &mut error,
+            )
+        });
+        for channel in 0..3 {
+            let expected = before[channel].mul_add(gains[channel], offsets[channel]);
+            assert_eq!(data[channel], expected);
+        }
+        // Malformed input is refused rather than guessed at.
+        let bad = CString::new("{\"CTYPE1\": \"RA---SIN\"}").unwrap();
+        let refused = unsafe {
+            seiza_color_calibrate_json(
+                data.as_ptr(),
+                data.len(),
+                width,
+                height,
+                bad.as_ptr(),
+                gaia_c.as_ptr(),
+                ptr::null(),
+                &mut error,
+            )
+        };
+        assert!(refused.is_null() && !error.is_null());
+        unsafe { seiza_string_free(error) };
     }
 }
