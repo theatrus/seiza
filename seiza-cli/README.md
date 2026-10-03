@@ -140,12 +140,14 @@ the stars measure the camera's own response. Background neutralization then
 gives the sky the same level in every channel (`--no-background-neutralization`
 leaves it).
 
-On the 126-frame M45 stack (ASI2600MC, 173 mm) 7,600 stars measured cleanly,
-with 0.05–0.06 mag of scatter about the colour fits. PixInsight's SPCC, given
-the same image and a G2V white reference, chose gains within 3.3% in red and
-1.7% in blue. Seiza's aperture photometry keeps the same R/G ratio from 4 to
-36 px apertures, where SPCC's PSF fits capture a slightly different share of
-each channel.
+On the 126-frame M45 stack (ASI2600MC, 173 mm), about 1,670 isolated Gaia
+stars brighter than G 13 calibrated it, with 0.044 and 0.032 mag of scatter
+about the red and blue colour fits. PixInsight's SPCC, given the same image and
+a G2V white reference, chose a red gain 4.8% lower and a blue gain 3.2% higher.
+The colour model is not the cause: on the stars both tools measured, SPCC's
+filter-curve method and Seiza's BP−RP fit agree within 0.7% when given the same
+fluxes. The fluxes differ instead. For 60 isolated stars SPCC's PSF photometry
+reports R/G 0.712, while apertures from 4 to 36 px all give 0.667–0.697.
 
 ## Light deconvolution (experimental)
 
