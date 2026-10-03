@@ -216,8 +216,16 @@ fn gaia_field(
     radius: f64,
     max_mag: f32,
 ) -> Result<Vec<seiza_sources::GaiaPhotometry>> {
+    // A re-solved field moves its centre slightly: round the centre to
+    // 0.01 degrees and widen the radius past the rounding, so it finds the
+    // same cached field. The magnitude limit is kept exactly.
+    let center = (
+        (center.0 * 100.0).round() / 100.0,
+        (center.1 * 100.0).round() / 100.0,
+    );
+    let radius = ((radius + 0.01) / 0.05).ceil() * 0.05;
     let name = format!(
-        "gaia-dr3-{:.4}{:+.4}-r{:.4}-g{:.1}.csv",
+        "gaia-dr3-{:.2}{:+.2}-r{:.2}-g{}.csv",
         center.0, center.1, radius, max_mag
     );
     let path = cache.join(name);

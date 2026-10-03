@@ -689,8 +689,9 @@ impl SourceDownloader {
     }
 
     /// Gaia DR3 sources within `radius_deg` of `(ra, dec)` down to G
-    /// `max_mag`, with their BP and RP photometry, from the
-    /// ESA Gaia archive. At most [`GAIA_CONE_MAXREC`] stars come back.
+    /// `max_mag`, brightest first, with their BP and RP photometry, from the
+    /// ESA Gaia archive. A field holding [`GAIA_CONE_MAXREC`] stars or more
+    /// is refused rather than cut short: use a brighter limit.
     pub async fn gaia_photometry_cone(
         &self,
         ra: f64,
@@ -725,7 +726,7 @@ impl SourceDownloader {
             "SELECT ra, dec, pmra, pmdec, phot_g_mean_mag, phot_bp_mean_mag, \
              phot_rp_mean_mag, ruwe FROM gaiadr3.gaia_source \
              WHERE 1 = CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', {ra}, {dec}, {radius_deg})) \
-             AND phot_g_mean_mag <= {max_mag}"
+             AND phot_g_mean_mag <= {max_mag} ORDER BY phot_g_mean_mag"
         );
         // A wide field holds hundreds of thousands of stars, more than the
         // synchronous endpoint returns before it times out, so the query
@@ -759,26 +760,81 @@ impl SourceDownloader {
         // follows: the final URL is the job's.
         let job = submitted.url().to_string();
         if !job.starts_with(GAIA_TAP_ASYNC) || job.trim_end_matches('/') == GAIA_TAP_ASYNC {
-            return Err(Error::MalformedGaiaChunk);
+            return Err(Error::GaiaJobFailed(format!(
+                "was not queued: the archive answered from {job}"
+            )));
         }
+        let result = self.finish_gaia_job(&job).await;
+        // Finished jobs only take space on the archive; clean up either way.
+        let _ = self
+            .client
+            .post(&job)
+            .form(&[("ACTION", "DELETE")])
+            .send()
+            .await;
+        let body = result?;
+        let rows = body
+            .lines()
+            .skip(1)
+            .filter(|line| !line.trim().is_empty())
+            .count();
+        if rows as u64 >= GAIA_CONE_MAXREC {
+            return Err(Error::GaiaJobFailed(format!(
+                "returned its {GAIA_CONE_MAXREC}-star limit; use a brighter magnitude limit"
+            )));
+        }
+        // Check it parses before a caller caches it.
+        parse_gaia_photometry(&body)?;
+        Ok(body)
+    }
+
+    /// Poll a queued TAP job until it completes, and return its result.
+    async fn finish_gaia_job(&self, job: &str) -> Result<String> {
+        let http = |source| Error::Http {
+            url: job.into(),
+            source,
+        };
         let started = std::time::Instant::now();
         loop {
-            let phase = self
+            let response = self
                 .client
                 .get(format!("{job}/phase"))
                 .send()
                 .await
-                .map_err(http)?
-                .text()
-                .await
                 .map_err(http)?;
+            if !response.status().is_success() {
+                return Err(Error::HttpStatus {
+                    url: format!("{job}/phase"),
+                    status: response.status().as_u16(),
+                });
+            }
+            let phase = response.text().await.map_err(http)?;
             match phase.trim() {
                 "COMPLETED" => break,
-                "ERROR" | "ABORTED" => return Err(Error::GaiaJobFailed(phase.trim().into())),
-                _ if started.elapsed() > GAIA_JOB_TIMEOUT => {
-                    return Err(Error::GaiaJobFailed("timed out".into()));
+                "PENDING" | "QUEUED" | "EXECUTING" => {
+                    if started.elapsed() > GAIA_JOB_TIMEOUT {
+                        return Err(Error::GaiaJobFailed("timed out".into()));
+                    }
+                    tokio::time::sleep(Duration::from_secs(2)).await;
                 }
-                _ => tokio::time::sleep(Duration::from_secs(2)).await,
+                "ERROR" => {
+                    let reason = match self.client.get(format!("{job}/error")).send().await {
+                        Ok(response) => response.text().await.unwrap_or_default(),
+                        Err(_) => String::new(),
+                    };
+                    let reason = reason.trim();
+                    return Err(Error::GaiaJobFailed(if reason.is_empty() {
+                        "failed".into()
+                    } else {
+                        format!("failed: {}", reason.chars().take(500).collect::<String>())
+                    }));
+                }
+                other => {
+                    return Err(Error::GaiaJobFailed(format!(
+                        "stopped in phase {}",
+                        other.chars().take(40).collect::<String>()
+                    )));
+                }
             }
         }
         let response = self
@@ -793,10 +849,7 @@ impl SourceDownloader {
                 status: response.status().as_u16(),
             });
         }
-        let body = response.text().await.map_err(http)?;
-        // Check it parses before a caller caches it.
-        parse_gaia_photometry(&body)?;
-        Ok(body)
+        response.text().await.map_err(http)
     }
 
     async fn fetch_gaia_chunk(&self, query: &str, target: &Path) -> Result<u64> {

@@ -29,8 +29,9 @@ pub struct ColorReferenceStar {
     pub y: f64,
     /// Gaia G magnitude.
     pub g: f32,
-    /// Gaia BP − RP colour.
-    pub bp_rp: f32,
+    /// Gaia BP − RP colour, or `None` for a star that only counts as a
+    /// neighbour: one without a colour, or whose colour is unreliable.
+    pub bp_rp: Option<f32>,
 }
 
 impl ColorReferenceStar {
@@ -47,14 +48,40 @@ impl ColorReferenceStar {
         pmdec: Option<f64>,
         epoch: Option<f64>,
         g: f32,
-        bp_rp: f32,
+        bp_rp: Option<f32>,
     ) -> Option<Self> {
         let years = epoch.map_or(0.0, |epoch| epoch - 2016.0);
-        let dec_rad = dec.to_radians();
-        let ra = ra + pmra.unwrap_or(0.0) * years / 3.6e6 / dec_rad.cos().max(1e-6);
-        let dec = dec + pmdec.unwrap_or(0.0) * years / 3.6e6;
+        let (ra, dec) = propagate(ra, dec, pmra.unwrap_or(0.0), pmdec.unwrap_or(0.0), years);
         let (x, y) = wcs.world_to_pixel(ra, dec)?;
         Some(Self { x, y, g, bp_rp })
+    }
+}
+
+/// Move a position `years` along its proper motion (mas/yr, `pmra` times
+/// cos(dec)) on the sphere: along the great circle the motion starts on,
+/// which stays right near the poles where stepping RA would not.
+fn propagate(ra: f64, dec: f64, pmra: f64, pmdec: f64, years: f64) -> (f64, f64) {
+    let (sin_ra, cos_ra) = ra.to_radians().sin_cos();
+    let (sin_dec, cos_dec) = dec.to_radians().sin_cos();
+    let position = [cos_dec * cos_ra, cos_dec * sin_ra, sin_dec];
+    // Unit vectors towards increasing RA (east) and Dec (north).
+    let east = [-sin_ra, cos_ra, 0.0];
+    let north = [-sin_dec * cos_ra, -sin_dec * sin_ra, cos_dec];
+    let to_radians = years / 3.6e6 * std::f64::consts::PI / 180.0;
+    let (de, dn) = (pmra * to_radians, pmdec * to_radians);
+    let moved = [0, 1, 2].map(|axis| position[axis] + de * east[axis] + dn * north[axis]);
+    let norm = moved.iter().map(|value| value * value).sum::<f64>().sqrt();
+    let [x, y, z] = moved.map(|value| value / norm);
+    (
+        y.atan2(x).to_degrees().rem_euclid(360.0),
+        z.asin().to_degrees(),
+    )
+}
+
+impl ColorReferenceStar {
+    /// Whether this star can calibrate colour rather than only crowd others.
+    fn colour(&self) -> Option<f32> {
+        self.bp_rp
     }
 }
 
@@ -72,11 +99,11 @@ pub struct GaiaColorSource {
     pub ruwe: Option<f32>,
 }
 
-/// The sources usable for colour calibration, placed on a `width` ×
-/// `height` image observed at `epoch` (a Julian year; `None` keeps J2016.0)
-/// through its solution `wcs`. Sources without a BP − RP colour, with a RUWE
-/// of 1.4 or more (likely binaries or blends, whose colours mislead), or
-/// off the image are left out.
+/// Every source on a `width` × `height` image observed at `epoch` (a Julian
+/// year; `None` keeps J2016.0), placed through its solution `wcs`. Sources
+/// without a BP − RP colour, or with a RUWE of 1.4 or more (likely binaries
+/// or blends, whose colours mislead), keep no colour: they cannot calibrate,
+/// but still disqualify the calibrators they crowd.
 pub fn place_gaia_sources(
     wcs: &seiza::Wcs,
     width: usize,
@@ -86,7 +113,6 @@ pub fn place_gaia_sources(
 ) -> Vec<ColorReferenceStar> {
     sources
         .iter()
-        .filter(|source| source.ruwe.is_none_or(|ruwe| ruwe < 1.4))
         .filter_map(|source| {
             ColorReferenceStar::from_gaia(
                 wcs,
@@ -96,7 +122,10 @@ pub fn place_gaia_sources(
                 source.pmdec,
                 epoch,
                 source.g,
-                source.bp_rp.filter(|colour| colour.is_finite())?,
+                source
+                    .bp_rp
+                    .filter(|colour| colour.is_finite())
+                    .filter(|_| source.ruwe.is_none_or(|ruwe| ruwe < 1.4)),
             )
         })
         .filter(|star| {
@@ -124,6 +153,11 @@ pub struct ColorCalibrationOptions {
     pub minimum_stars: usize,
     /// Offset each channel so the sky's median is the same in all three.
     pub neutralize_background: bool,
+    /// The faintest G magnitude a calibrator may have. `None` makes it two
+    /// magnitudes brighter than the faintest star supplied, so that every
+    /// neighbour bright enough to disturb a calibrator's photometry is in
+    /// the catalogue and can disqualify it.
+    pub calibrator_max_g: Option<f32>,
 }
 
 impl Default for ColorCalibrationOptions {
@@ -135,6 +169,7 @@ impl Default for ColorCalibrationOptions {
             rejection_sigma: 3.0,
             minimum_stars: 20,
             neutralize_background: true,
+            calibrator_max_g: None,
         }
     }
 }
@@ -166,7 +201,7 @@ pub struct ColorStarMeasurement {
     pub y: f64,
     pub g: f32,
     pub bp_rp: f32,
-    /// Background-subtracted aperture fluxes in R, G, B.
+    /// Background-subtracted fluxes in R, G, B, aperture-corrected.
     pub flux: [f64; 3],
     /// Whether each fit (red, blue) kept the star.
     pub used: [bool; 2],
@@ -251,27 +286,35 @@ pub fn calibrate_color(
         return Err(Error::Color("invalid colour calibration options".into()));
     }
     let ceilings = channel_ceilings(image);
+    let fwhm = measure_fwhm(image, stars, &ceilings);
     let aperture_radius = match options.aperture_radius {
         Some(radius) => radius,
         None => {
-            2.0 * measure_fwhm(image, stars, &ceilings).ok_or_else(|| {
+            2.0 * fwhm.ok_or_else(|| {
                 Error::Color("too few clean catalogue stars to measure the image's FWHM".into())
             })?
         }
     }
     .max(2.0);
-    let geometry = ApertureGeometry::new(aperture_radius);
+    // A star's profile width, for telling a saturated flat top from a peak.
+    let sigma = fwhm.unwrap_or(aperture_radius / 2.0) / 2.3548;
+    let geometry = ApertureGeometry::new(aperture_radius, sigma);
+    let faintest = stars.iter().map(|star| star.g).fold(f32::MIN, f32::max);
+    let calibrator_max_g = options.calibrator_max_g.unwrap_or(faintest - 2.0);
+    // Every supplied star, coloured or not, counts as a neighbour.
     let isolated = isolated_stars(stars, geometry.outer);
     let measurements = isolated
         .par_iter()
-        .filter_map(|&star| {
+        .filter(|star| star.g <= calibrator_max_g)
+        .filter_map(|star| {
+            let bp_rp = star.colour()?;
             let (x, y) = refine_centroid(image, star.x, star.y, aperture_radius)?;
             let flux = measure(image, x, y, &geometry, &ceilings)?;
             Some(ColorStarMeasurement {
                 x,
                 y,
                 g: star.g,
-                bp_rp: star.bp_rp,
+                bp_rp,
                 flux,
                 used: [false; 2],
             })
@@ -370,7 +413,7 @@ fn aperture_correction(
     geometry: &ApertureGeometry,
     ceilings: &[f32; 3],
 ) -> [f64; 3] {
-    let large = ApertureGeometry::new(geometry.radius * 3.0);
+    let large = ApertureGeometry::new(geometry.radius * 3.0, geometry.sigma);
     let isolated = isolated_stars(stars, large.outer)
         .into_iter()
         .map(|star| ((star.x.round() as i64, star.y.round() as i64), star.g))
@@ -436,15 +479,18 @@ struct ApertureGeometry {
     radius: f64,
     inner: f64,
     outer: f64,
+    /// The stars' Gaussian sigma in pixels.
+    sigma: f64,
 }
 
 impl ApertureGeometry {
-    fn new(radius: f64) -> Self {
+    fn new(radius: f64, sigma: f64) -> Self {
         let inner = radius + 3.0;
         Self {
             radius,
             inner,
             outer: inner + radius.max(5.0),
+            sigma,
         }
     }
 }
@@ -546,6 +592,11 @@ fn luminance(image: &LinearImage, x: usize, y: usize) -> Option<f32> {
 /// Background-subtracted aperture flux in each channel, or `None` when any
 /// sample is missing, the star is saturated in a channel, or it is too
 /// faint to measure in one.
+///
+/// A saturated star is recognized by its flat top: more aperture pixels
+/// within 3% of its peak than a star of this width can have. A cut at a
+/// fraction of the image's maximum misses one after flat-fielding, which
+/// lifts the stars in a vignetted corner above clipped stars in the centre.
 fn measure(
     image: &LinearImage,
     x: f64,
@@ -554,22 +605,20 @@ fn measure(
     ceilings: &[f32; 3],
 ) -> Option<[f64; 3]> {
     let (x0, y0, x1, y1) = window(image, x, y, geometry.outer)?;
-    let mut flux = [0.0_f64; 3];
+    let mut aperture = [Vec::new(), Vec::new(), Vec::new()];
     let mut annulus = [Vec::new(), Vec::new(), Vec::new()];
-    let mut aperture_pixels = 0_usize;
     for py in y0..y1 {
         for px in x0..x1 {
             let distance = (px as f64 - x).hypot(py as f64 - y);
             let index = (py * image.width + px) * 3;
             let pixel = &image.data[index..index + 3];
             if distance <= geometry.radius {
-                aperture_pixels += 1;
                 for channel in 0..3 {
                     let value = pixel[channel];
                     if !value.is_finite() || value >= 0.85 * ceilings[channel] {
                         return None;
                     }
-                    flux[channel] += f64::from(value);
+                    aperture[channel].push(value);
                 }
             } else if (geometry.inner..=geometry.outer).contains(&distance) {
                 for channel in 0..3 {
@@ -580,6 +629,10 @@ fn measure(
             }
         }
     }
+    // A Gaussian peak stays within 3% of its top out to 0.247 sigma: about
+    // 0.19 sigma² pixels. Three times that, and at least four, is a plateau.
+    let plateau_limit = (0.57 * geometry.sigma * geometry.sigma).max(4.0);
+    let mut flux = [0.0_f64; 3];
     for channel in 0..3 {
         let samples = &mut annulus[channel];
         if samples.len() < 20 {
@@ -587,11 +640,23 @@ fn measure(
         }
         let sky = median_in_place(samples)?;
         let sigma = robust_sigma_in_place(samples, sky)?;
-        flux[channel] -= f64::from(sky) * aperture_pixels as f64;
+        let values = &aperture[channel];
+        let peak = values.iter().copied().fold(f32::MIN, f32::max) - sky;
+        let near_peak = values
+            .iter()
+            .filter(|&&value| value - sky >= 0.97 * peak)
+            .count();
+        if near_peak as f64 > plateau_limit {
+            return None;
+        }
+        flux[channel] = values
+            .iter()
+            .map(|&value| f64::from(value - sky))
+            .sum::<f64>();
         // Ask for a signal-to-noise ratio of at least 20 from the sky noise
-        // alone, which keeps each colour's error near 0.05 magnitudes.
-        let noise = f64::from(sigma) * (aperture_pixels as f64).sqrt();
-        // NaN noise fails this too.
+        // alone, which keeps each colour's error near 0.05 magnitudes. NaN
+        // noise fails this too.
+        let noise = f64::from(sigma) * (values.len() as f64).sqrt();
         if flux[channel].partial_cmp(&(20.0 * noise)) != Some(std::cmp::Ordering::Greater) {
             return None;
         }
@@ -600,7 +665,9 @@ fn measure(
 }
 
 /// The median FWHM, from luminance second moments, of up to 200 of the
-/// brightest catalogue stars that look clean.
+/// brightest catalogue stars that look clean. A first pass inside a 7 px
+/// radius is refined inside three times its result, so wide stars — an
+/// oversampled or drizzled stack's — are not truncated.
 fn measure_fwhm(
     image: &LinearImage,
     stars: &[ColorReferenceStar],
@@ -608,49 +675,72 @@ fn measure_fwhm(
 ) -> Option<f64> {
     let mut ordered = stars.to_vec();
     ordered.sort_by(|left, right| left.g.total_cmp(&right.g));
-    let isolated = isolated_stars(&ordered, 10.0);
     let ceiling = ceilings.iter().copied().fold(f32::MAX, f32::min);
-    let mut widths = isolated
-        .par_iter()
-        .take(1000)
-        .filter_map(|star| {
-            let (x, y) = refine_centroid(image, star.x, star.y, 6.0)?;
-            let (x0, y0, x1, y1) = window(image, x, y, 10.0)?;
-            let mut sky = Vec::new();
-            for py in y0..y1 {
-                for px in x0..x1 {
-                    if (px as f64 - x).hypot(py as f64 - y) > 7.0 {
-                        sky.push(luminance(image, px, py)?);
-                    }
-                }
-            }
-            let sky = median_in_place(&mut sky)?;
-            let (mut sum, mut second) = (0.0, 0.0);
-            for py in y0..y1 {
-                for px in x0..x1 {
-                    let distance = (px as f64 - x).hypot(py as f64 - y);
-                    if distance <= 7.0 {
-                        let value = luminance(image, px, py)?;
-                        if value >= 0.85 * ceiling {
-                            return None;
-                        }
-                        let value = f64::from((value - sky).max(0.0));
-                        sum += value;
-                        second += value * distance * distance;
-                    }
-                }
-            }
-            // For a Gaussian, the mean squared radius is 2σ².
-            (sum > 0.0).then(|| 2.3548 * (second / sum / 2.0).sqrt())
-        })
-        .filter(|width| width.is_finite() && *width > 0.5)
-        .collect::<Vec<_>>();
-    widths.truncate(200);
-    if widths.len() < 10 {
-        return None;
+    let mut radius = 7.0_f64;
+    let mut fwhm = None;
+    for _ in 0..3 {
+        let isolated = isolated_stars(&ordered, radius * 1.5);
+        let mut widths = isolated
+            .par_iter()
+            .take(1000)
+            .filter_map(|star| second_moment_fwhm(image, star.x, star.y, radius, ceiling))
+            .filter(|width| width.is_finite() && *width > 0.5)
+            .collect::<Vec<_>>();
+        widths.truncate(200);
+        if widths.len() < 10 {
+            return fwhm;
+        }
+        widths.sort_by(f64::total_cmp);
+        let width = widths[widths.len() / 2];
+        fwhm = Some(width);
+        let next = (3.0 * width).max(7.0);
+        if (next - radius).abs() < 1.0 {
+            break;
+        }
+        radius = next;
     }
-    widths.sort_by(f64::total_cmp);
-    Some(widths[widths.len() / 2])
+    fwhm
+}
+
+/// One star's FWHM from luminance second moments inside `radius`, with the
+/// sky from the ring out to 1.4 times it.
+fn second_moment_fwhm(
+    image: &LinearImage,
+    x: f64,
+    y: f64,
+    radius: f64,
+    ceiling: f32,
+) -> Option<f64> {
+    let (x, y) = refine_centroid(image, x, y, (radius * 0.8).max(4.0))?;
+    let reach = radius * 1.4;
+    let (x0, y0, x1, y1) = window(image, x, y, reach)?;
+    let mut sky = Vec::new();
+    for py in y0..y1 {
+        for px in x0..x1 {
+            let distance = (px as f64 - x).hypot(py as f64 - y);
+            if distance > radius && distance <= reach {
+                sky.push(luminance(image, px, py)?);
+            }
+        }
+    }
+    let sky = median_in_place(&mut sky)?;
+    let (mut sum, mut second) = (0.0, 0.0);
+    for py in y0..y1 {
+        for px in x0..x1 {
+            let distance = (px as f64 - x).hypot(py as f64 - y);
+            if distance <= radius {
+                let value = luminance(image, px, py)?;
+                if value >= 0.85 * ceiling {
+                    return None;
+                }
+                let value = f64::from((value - sky).max(0.0));
+                sum += value;
+                second += value * distance * distance;
+            }
+        }
+    }
+    // For a Gaussian, the mean squared radius is 2σ².
+    (sum > 0.0).then(|| 2.3548 * (second / sum / 2.0).sqrt())
 }
 
 /// Each channel's sky level: the median of the pixels whose luminance lies
@@ -697,9 +787,10 @@ fn robust_line(points: &[(usize, f64, f64)], sigma: f64) -> Option<(ColorFit, Ve
         .filter(|(_, x, y)| x.is_finite() && y.is_finite())
         .copied()
         .collect::<Vec<_>>();
+    let mut last = None;
     for _ in 0..10 {
         if kept.len() < 3 {
-            return None;
+            return last;
         }
         let n = kept.len() as f64;
         let (mean_x, mean_y) = kept
@@ -719,19 +810,23 @@ fn robust_line(points: &[(usize, f64, f64)], sigma: f64) -> Option<(ColorFit, Ve
             .collect::<Vec<_>>();
         let center = median_in_place(&mut residuals.clone())?;
         let scatter = f64::from(robust_sigma_in_place(&mut residuals, center)?);
+        let fit = ColorFit {
+            intercept,
+            slope,
+            scatter,
+            stars: kept.len(),
+        };
         let before = kept.len();
+        let fitted = kept.iter().map(|(index, _, _)| *index).collect::<Vec<_>>();
         kept.retain(|(_, x, y)| (y - intercept - slope * x).abs() <= sigma * scatter.max(1e-4));
+        // Rejection that keeps trimming a star or two a round has still
+        // converged in all that matters: keep the last fit.
+        last = Some((fit, fitted));
         if kept.len() == before {
-            let fit = ColorFit {
-                intercept,
-                slope,
-                scatter,
-                stars: kept.len(),
-            };
-            return Some((fit, kept.into_iter().map(|(index, _, _)| index).collect()));
+            break;
         }
     }
-    None
+    last
 }
 
 #[cfg(test)]
@@ -776,7 +871,12 @@ mod tests {
                     }
                 }
             }
-            stars.push(ColorReferenceStar { x, y, g, bp_rp });
+            stars.push(ColorReferenceStar {
+                x,
+                y,
+                g,
+                bp_rp: Some(bp_rp),
+            });
         }
         (LinearImage::new(width, height, 3, data).unwrap(), stars)
     }
@@ -819,14 +919,67 @@ mod tests {
             "{sky:?}"
         );
         // After calibration a solar-coloured star measures neutral.
-        let geometry = ApertureGeometry::new(calibration.aperture_radius);
+        let geometry = ApertureGeometry::new(calibration.aperture_radius, 1.5);
         let solar = stars
             .iter()
-            .filter(|star| (star.bp_rp - SOLAR_BP_RP).abs() < 0.05)
+            .filter(|star| (star.bp_rp.unwrap() - SOLAR_BP_RP).abs() < 0.05)
             .find_map(|star| measure(&image, star.x, star.y, &geometry, &[f32::MAX; 3]))
             .unwrap();
         assert!((solar[0] / solar[1] - 1.0).abs() < 0.03, "{solar:?}");
         assert!((solar[2] / solar[1] - 1.0).abs() < 0.03, "{solar:?}");
+    }
+
+    #[test]
+    fn a_flat_topped_star_is_saturated_even_below_the_image_maximum() {
+        let (mut image, stars) = field();
+        let geometry = ApertureGeometry::new(7.0, 1.5);
+        let ceilings = [f32::MAX; 3];
+        let star = stars[0];
+        assert!(measure(&image, star.x, star.y, &geometry, &ceilings).is_some());
+        // Clip the star flat, as a sensor's full well does, well below the
+        // brightest sample elsewhere in the image.
+        let (cx, cy) = (star.x.round() as usize, star.y.round() as usize);
+        let (width, _) = (image.width, image.height);
+        for py in cy - 10..=cy + 10 {
+            for px in cx - 10..=cx + 10 {
+                for channel in 0..3 {
+                    let value = &mut image.data[(py * width + px) * 3 + channel];
+                    *value = value.min(400.0);
+                }
+            }
+        }
+        assert!(measure(&image, star.x, star.y, &geometry, &ceilings).is_none());
+    }
+
+    #[test]
+    fn a_colourless_neighbour_still_disqualifies_a_calibrator() {
+        let calibrator = ColorReferenceStar {
+            x: 100.0,
+            y: 100.0,
+            g: 12.0,
+            bp_rp: Some(0.8),
+        };
+        let binary = ColorReferenceStar {
+            x: 108.0,
+            y: 100.0,
+            g: 11.0,
+            bp_rp: None,
+        };
+        assert!(isolated_stars(&[calibrator, binary], 17.0).is_empty());
+        assert_eq!(isolated_stars(&[calibrator], 17.0).len(), 1);
+    }
+
+    #[test]
+    fn proper_motion_stays_on_the_sphere_at_the_pole() {
+        // 10"/yr north for a century from 10" short of the north pole
+        // carries the star across it: 990" past, on the far meridian.
+        let (ra, dec) = propagate(30.0, 90.0 - 10.0 / 3600.0, 0.0, 10_000.0, 100.0);
+        assert!((dec - (90.0 - 990.0 / 3600.0)).abs() < 1e-5, "{dec}");
+        assert!((ra - 210.0).abs() < 1e-6, "{ra}");
+        // Far from the pole it matches the linear step.
+        let (ra, dec) = propagate(56.75, 24.1, 1000.0, 0.0, 10.0);
+        let expected = 56.75 + 10.0 / 3600.0 / 24.1_f64.to_radians().cos();
+        assert!((ra - expected).abs() < 1e-7 && (dec - 24.1).abs() < 1e-6);
     }
 
     #[test]
@@ -849,7 +1002,7 @@ mod tests {
             Some(1000.0),
             None,
             9.0,
-            0.8,
+            Some(0.8),
         )
         .unwrap();
         let at_2026 = ColorReferenceStar::from_gaia(
@@ -860,7 +1013,7 @@ mod tests {
             Some(1000.0),
             Some(2026.0),
             9.0,
-            0.8,
+            Some(0.8),
         )
         .unwrap();
         // 1"/yr north for ten years is ten 1" pixels.

@@ -134,8 +134,7 @@ impl PyColorCalibration {
         image: PyReadonlyArrayDyn<'_, f32>,
     ) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
         let mut image = linear_image(image)?;
-        self.inner
-            .apply(&mut image)
+        py.allow_threads(|| self.inner.apply(&mut image))
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
         image_array(py, &image)
     }
