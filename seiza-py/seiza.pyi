@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Sequence, Union
+from typing import Any, Callable, Mapping, Sequence, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -120,6 +120,8 @@ class BlindIndex:
     def pattern_count(self) -> int: ...
 
 class Wcs:
+    @staticmethod
+    def from_header(header: Mapping[str, Any]) -> Wcs | None: ...
     @staticmethod
     def from_center_scale_rotation(
         center: tuple[float, float],
@@ -716,3 +718,32 @@ def remove_structures(
     layers: int = 4,
     method: str = "filtered",
 ) -> npt.NDArray[np.float64]: ...
+
+SOLAR_BP_RP: float
+
+class ColorCalibration:
+    gains: tuple[float, float, float]
+    offsets: tuple[float, float, float]
+    background: tuple[float, float, float]
+    red_fit: dict[str, float]
+    blue_fit: dict[str, float]
+    white_bp_rp: float
+    aperture_radius: float
+    aperture_correction: tuple[float, float, float]
+    stars_offered: int
+    stars_measured: int
+    def apply(self, image: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]: ...
+
+def gaia_photometry_cone(
+    ra: float, dec: float, radius_deg: float, max_mag: float = 15.0
+) -> list[dict[str, float | None]]: ...
+def calibrate_color(
+    image: npt.NDArray[np.float32],
+    wcs: Wcs,
+    gaia: Sequence[Mapping[str, float | None]],
+    *,
+    epoch: float | None = None,
+    white_bp_rp: float = ...,
+    aperture_radius: float | None = None,
+    neutralize_background: bool = True,
+) -> ColorCalibration: ...

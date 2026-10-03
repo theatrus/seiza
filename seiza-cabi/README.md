@@ -92,6 +92,11 @@ exposes the **superset** of what both apps need.
   and returns a `SeizaDrizzleResult` (image, weight, scale, and
   `seiza_drizzle_result_write_fits` with the WCS scaled to the grid) along
   with the reintegrated snapshot.
+- **Photometric colour calibration** — `seiza_gaia_photometry_cone_json` fetches
+  Gaia DR3 photometry for a field, `seiza_color_calibrate_json` fits per-channel
+  gains and background offsets for an interleaved RGB buffer from its FITS WCS
+  keywords and those Gaia rows, and `seiza_color_calibration_apply` applies
+  them in place.
 - **Automatic stack reference** — `seiza_stack_choose_reference_json` scores
   an ordered JSON array of FITS/XISF paths using the native stacking algorithm.
   It chooses the flattest background among frames with nearly the best star

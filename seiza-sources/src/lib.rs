@@ -18,6 +18,8 @@ const OPENNGC: &str = "https://raw.githubusercontent.com/mattiaverga/OpenNGC/mas
 const OPENNGC_ARCHIVE: &str =
     "https://github.com/mattiaverga/OpenNGC/archive/refs/heads/master.tar.gz";
 const GAIA_TAP_SYNC: &str = "https://gea.esac.esa.int/tap-server/tap/sync";
+const GAIA_TAP_ASYNC: &str = "https://gea.esac.esa.int/tap-server/tap/async";
+const GAIA_JOB_TIMEOUT: Duration = Duration::from_secs(900);
 /// Gaia DR3 source_id encodes the HEALPix level-12 cell in the high bits.
 const GAIA_SOURCE_ID_MAX: u64 = 201_326_592 << 35;
 const GAIA_MAXREC: u64 = 3_000_000;
@@ -50,6 +52,14 @@ pub enum Error {
 
     #[error("Gaia TAP chunk response was malformed or truncated")]
     MalformedGaiaChunk,
+
+    #[error(
+        "Gaia cone search needs a finite centre, a radius in (0, 90] degrees, and a finite magnitude limit"
+    )]
+    InvalidGaiaCone,
+
+    #[error("Gaia archive query {0}")]
+    GaiaJobFailed(String),
 
     #[error("Gaia magnitude limit must be finite; got {0}")]
     InvalidGaiaMagnitude(f32),
@@ -110,6 +120,87 @@ pub enum SourceEvent {
 }
 
 type Reporter = Arc<dyn Fn(SourceEvent) + Send + Sync>;
+
+/// The most stars a Gaia cone search returns, brightest first.
+pub const GAIA_CONE_MAXREC: u64 = 200_000;
+
+/// One Gaia DR3 source from [`SourceDownloader::gaia_photometry_cone`]:
+/// its ICRS position at epoch J2016.0, proper motion, and mean photometry.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GaiaPhotometry {
+    /// Right ascension, degrees.
+    pub ra: f64,
+    /// Declination, degrees.
+    pub dec: f64,
+    /// Proper motion in right ascension times cos(dec), mas/yr.
+    pub pmra: Option<f64>,
+    /// Proper motion in declination, mas/yr.
+    pub pmdec: Option<f64>,
+    /// G-band mean magnitude.
+    pub g: f32,
+    /// BP mean magnitude.
+    pub bp: Option<f32>,
+    /// RP mean magnitude.
+    pub rp: Option<f32>,
+    /// Renormalized unit weight error; above about 1.4 the source is likely
+    /// a binary or otherwise poorly fitted.
+    pub ruwe: Option<f32>,
+}
+
+impl GaiaPhotometry {
+    /// The BP − RP colour, when both magnitudes are measured.
+    pub fn bp_rp(&self) -> Option<f32> {
+        Some(self.bp? - self.rp?)
+    }
+}
+
+/// Parse the CSV [`SourceDownloader::gaia_photometry_cone_csv`] returns.
+/// Rows with a missing position or G magnitude are skipped.
+pub fn parse_gaia_photometry(csv: &str) -> Result<Vec<GaiaPhotometry>> {
+    let mut lines = csv.lines();
+    let header = lines.next().ok_or(Error::MalformedGaiaChunk)?;
+    let columns = header.split(',').map(str::trim).collect::<Vec<_>>();
+    let column = |name: &str| {
+        columns
+            .iter()
+            .position(|column| *column == name)
+            .ok_or(Error::MalformedGaiaChunk)
+    };
+    let indices = [
+        column("ra")?,
+        column("dec")?,
+        column("pmra")?,
+        column("pmdec")?,
+        column("phot_g_mean_mag")?,
+        column("phot_bp_mean_mag")?,
+        column("phot_rp_mean_mag")?,
+        column("ruwe")?,
+    ];
+    let mut stars = Vec::new();
+    for line in lines.filter(|line| !line.trim().is_empty()) {
+        let fields = line.split(',').map(str::trim).collect::<Vec<_>>();
+        let value = |index: usize| {
+            fields
+                .get(indices[index])
+                .and_then(|field| field.parse::<f64>().ok())
+                .filter(|value| value.is_finite())
+        };
+        let (Some(ra), Some(dec), Some(g)) = (value(0), value(1), value(4)) else {
+            continue;
+        };
+        stars.push(GaiaPhotometry {
+            ra,
+            dec,
+            pmra: value(2),
+            pmdec: value(3),
+            g: g as f32,
+            bp: value(5).map(|value| value as f32),
+            rp: value(6).map(|value| value as f32),
+            ruwe: value(7).map(|value| value as f32),
+        });
+    }
+    Ok(stars)
+}
 
 /// Reusable asynchronous client for upstream astronomy sources.
 #[derive(Clone)]
@@ -597,6 +688,117 @@ impl SourceDownloader {
         transfer
     }
 
+    /// Gaia DR3 sources within `radius_deg` of `(ra, dec)` down to G
+    /// `max_mag`, with their BP and RP photometry, from the
+    /// ESA Gaia archive. At most [`GAIA_CONE_MAXREC`] stars come back.
+    pub async fn gaia_photometry_cone(
+        &self,
+        ra: f64,
+        dec: f64,
+        radius_deg: f64,
+        max_mag: f32,
+    ) -> Result<Vec<GaiaPhotometry>> {
+        parse_gaia_photometry(
+            &self
+                .gaia_photometry_cone_csv(ra, dec, radius_deg, max_mag)
+                .await?,
+        )
+    }
+
+    /// [`Self::gaia_photometry_cone`] as the archive's CSV, for a caller
+    /// that caches it; [`parse_gaia_photometry`] reads it.
+    pub async fn gaia_photometry_cone_csv(
+        &self,
+        ra: f64,
+        dec: f64,
+        radius_deg: f64,
+        max_mag: f32,
+    ) -> Result<String> {
+        if !ra.is_finite()
+            || !dec.is_finite()
+            || !(radius_deg.is_finite() && radius_deg > 0.0 && radius_deg <= 90.0)
+            || !max_mag.is_finite()
+        {
+            return Err(Error::InvalidGaiaCone);
+        }
+        let query = format!(
+            "SELECT ra, dec, pmra, pmdec, phot_g_mean_mag, phot_bp_mean_mag, \
+             phot_rp_mean_mag, ruwe FROM gaiadr3.gaia_source \
+             WHERE 1 = CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', {ra}, {dec}, {radius_deg})) \
+             AND phot_g_mean_mag <= {max_mag}"
+        );
+        // A wide field holds hundreds of thousands of stars, more than the
+        // synchronous endpoint returns before it times out, so the query
+        // runs as an asynchronous job: submit, poll, then fetch.
+        let form = [
+            ("REQUEST", "doQuery".to_string()),
+            ("LANG", "ADQL".to_string()),
+            ("FORMAT", "csv".to_string()),
+            ("MAXREC", GAIA_CONE_MAXREC.to_string()),
+            ("PHASE", "RUN".to_string()),
+            ("QUERY", query),
+        ];
+        let http = |source| Error::Http {
+            url: GAIA_TAP_ASYNC.into(),
+            source,
+        };
+        let submitted = self
+            .client
+            .post(GAIA_TAP_ASYNC)
+            .form(&form)
+            .send()
+            .await
+            .map_err(http)?;
+        if !submitted.status().is_success() {
+            return Err(Error::HttpStatus {
+                url: GAIA_TAP_ASYNC.into(),
+                status: submitted.status().as_u16(),
+            });
+        }
+        // The archive answers with a redirect to the job, which the client
+        // follows: the final URL is the job's.
+        let job = submitted.url().to_string();
+        if !job.starts_with(GAIA_TAP_ASYNC) || job.trim_end_matches('/') == GAIA_TAP_ASYNC {
+            return Err(Error::MalformedGaiaChunk);
+        }
+        let started = std::time::Instant::now();
+        loop {
+            let phase = self
+                .client
+                .get(format!("{job}/phase"))
+                .send()
+                .await
+                .map_err(http)?
+                .text()
+                .await
+                .map_err(http)?;
+            match phase.trim() {
+                "COMPLETED" => break,
+                "ERROR" | "ABORTED" => return Err(Error::GaiaJobFailed(phase.trim().into())),
+                _ if started.elapsed() > GAIA_JOB_TIMEOUT => {
+                    return Err(Error::GaiaJobFailed("timed out".into()));
+                }
+                _ => tokio::time::sleep(Duration::from_secs(2)).await,
+            }
+        }
+        let response = self
+            .client
+            .get(format!("{job}/results/result"))
+            .send()
+            .await
+            .map_err(http)?;
+        if !response.status().is_success() {
+            return Err(Error::HttpStatus {
+                url: format!("{job}/results/result"),
+                status: response.status().as_u16(),
+            });
+        }
+        let body = response.text().await.map_err(http)?;
+        // Check it parses before a caller caches it.
+        parse_gaia_photometry(&body)?;
+        Ok(body)
+    }
+
     async fn fetch_gaia_chunk(&self, query: &str, target: &Path) -> Result<u64> {
         let form = [
             ("REQUEST", "doQuery".to_string()),
@@ -877,6 +1079,20 @@ fn io(action: &'static str, path: impl Into<PathBuf>, source: std::io::Error) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gaia_photometry_rows_parse_with_missing_colours() {
+        let csv = "ra,dec,pmra,pmdec,phot_g_mean_mag,phot_bp_mean_mag,phot_rp_mean_mag,ruwe\n\
+                   56.75,24.11,19.9,-45.5,2.86,2.84,2.89,1.1\n\
+                   56.80,24.20,,,12.5,,,\n\
+                   ,24.3,1,1,13,13,12,1\n";
+        let stars = parse_gaia_photometry(csv).unwrap();
+        assert_eq!(stars.len(), 2);
+        assert!((stars[0].bp_rp().unwrap() + 0.05).abs() < 1e-6);
+        assert_eq!(stars[1].pmra, None);
+        assert_eq!(stars[1].bp_rp(), None);
+        assert!(parse_gaia_photometry("ra,dec\n1,2\n").is_err());
+    }
 
     #[tokio::test]
     async fn gaia_completion_check_reads_only_boundaries() {

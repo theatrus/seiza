@@ -5,6 +5,7 @@ mod batch;
 mod calibration;
 mod cancel;
 mod color;
+mod color_calibration;
 mod context;
 mod cosmetic;
 mod crop;
@@ -35,6 +36,10 @@ pub use color::{
     ColorComposition, ColorNormalization, ColorOptions, ColorTransfer, ForaxxOptions,
     NarrowbandMatrix, NarrowbandMix, NarrowbandPalette, combine_lrgb, combine_narrowband,
     combine_narrowband_matrix, combine_rgb, combine_super_lrgb, combine_super_rgb,
+};
+pub use color_calibration::{
+    ColorCalibration, ColorCalibrationOptions, ColorFit, ColorReferenceStar, ColorStarMeasurement,
+    GaiaColorSource, SOLAR_BP_RP, calibrate_color, place_gaia_sources,
 };
 pub use cosmetic::{ImpulseFilterOptions, suppress_impulses};
 pub use crop::{

@@ -267,6 +267,105 @@ impl Wcs {
         cards
     }
 
+    /// Read a TAN or TAN-SIP solution from FITS WCS keywords, the inverse of
+    /// [`Self::fits_header_cards`]. `number` looks up a numeric card and
+    /// `text` a string card by keyword.
+    ///
+    /// The linear part may be a `CD` matrix, or `CDELT` with a `PC` matrix
+    /// or a `CROTA2` angle. `None` when the projection is not TAN, a required
+    /// card is missing, or the matrix is singular. SIP terms of the forward
+    /// and inverse polynomials are read up to their own `*_ORDER`; a header
+    /// with forward terms but no inverse ones maps world to pixel without
+    /// the distortion correction.
+    pub fn from_fits_values(
+        number: impl Fn(&str) -> Option<f64>,
+        text: impl Fn(&str) -> Option<String>,
+    ) -> Option<Self> {
+        let ctype1 = text("CTYPE1")?;
+        let ctype2 = text("CTYPE2")?;
+        if !ctype1.trim().starts_with("RA---TAN") || !ctype2.trim().starts_with("DEC--TAN") {
+            return None;
+        }
+        let crval = (number("CRVAL1")?, number("CRVAL2")?);
+        let crpix = (number("CRPIX1")? - 1.0, number("CRPIX2")? - 1.0);
+        let cd = match (
+            number("CD1_1"),
+            number("CD1_2"),
+            number("CD2_1"),
+            number("CD2_2"),
+        ) {
+            (None, None, None, None) => {
+                let (cdelt1, cdelt2) = (number("CDELT1")?, number("CDELT2")?);
+                let pc = match (
+                    number("PC1_1"),
+                    number("PC1_2"),
+                    number("PC2_1"),
+                    number("PC2_2"),
+                ) {
+                    (None, None, None, None) => {
+                        let (sin, cos) = number("CROTA2").unwrap_or(0.0).to_radians().sin_cos();
+                        [[cos, -sin * cdelt2 / cdelt1], [sin * cdelt1 / cdelt2, cos]]
+                    }
+                    (pc11, pc12, pc21, pc22) => [
+                        [pc11.unwrap_or(1.0), pc12.unwrap_or(0.0)],
+                        [pc21.unwrap_or(0.0), pc22.unwrap_or(1.0)],
+                    ],
+                };
+                [
+                    [cdelt1 * pc[0][0], cdelt1 * pc[0][1]],
+                    [cdelt2 * pc[1][0], cdelt2 * pc[1][1]],
+                ]
+            }
+            (cd11, cd12, cd21, cd22) => [
+                [cd11.unwrap_or(0.0), cd12.unwrap_or(0.0)],
+                [cd21.unwrap_or(0.0), cd22.unwrap_or(0.0)],
+            ],
+        };
+        let det = cd[0][0] * cd[1][1] - cd[0][1] * cd[1][0];
+        if !det.is_finite() || det == 0.0 || !crval.0.is_finite() || !crval.1.is_finite() {
+            return None;
+        }
+        let order_of = |key: &str| {
+            number(key)
+                .filter(|order| order.is_finite() && *order >= 0.0 && *order <= 9.0)
+                .map(|order| order as u8)
+        };
+        let forward_order = ctype1
+            .contains("-SIP")
+            .then(|| order_of("A_ORDER").max(order_of("B_ORDER")))
+            .flatten()
+            .unwrap_or(0);
+        let sip = (forward_order >= 2).then(|| {
+            let inverse_order = order_of("AP_ORDER").max(order_of("BP_ORDER")).unwrap_or(0);
+            let order = forward_order.max(inverse_order);
+            let read = |prefix: &str, terms: Vec<(u8, u8)>, limit: u8| {
+                terms
+                    .into_iter()
+                    .map(|(p, q)| {
+                        if p + q > limit {
+                            0.0
+                        } else {
+                            number(&format!("{prefix}_{p}_{q}")).unwrap_or(0.0)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            };
+            Sip {
+                order,
+                a: read("A", Sip::forward_terms(order), forward_order),
+                b: read("B", Sip::forward_terms(order), forward_order),
+                ap: read("AP", Sip::inverse_terms(order), inverse_order),
+                bp: read("BP", Sip::inverse_terms(order), inverse_order),
+            }
+        });
+        Some(Self {
+            crval,
+            crpix,
+            cd,
+            sip,
+        })
+    }
+
     /// Sky footprint of an image of the given dimensions: the RA/Dec of the
     /// four corners, clockwise from (0, 0).
     pub fn footprint(&self, width: u32, height: u32) -> [(f64, f64); 4] {
@@ -386,6 +485,74 @@ mod tests {
         // within a small fraction of the applied distortion.
         assert!((x - 200.0).abs() < 0.01, "{x}");
         assert!((y - 300.0).abs() < 0.01, "{y}");
+    }
+
+    #[test]
+    fn header_cards_read_back_into_the_same_solution() {
+        let mut wcs =
+            Wcs::from_center_scale_rotation((150.0, 35.0), (1000.0, 800.0), 2.0, 15.0, true);
+        let a = 1e-6;
+        wcs.sip = Some(Sip {
+            order: 2,
+            a: vec![a, 0.0, a],
+            b: vec![0.0, a, 0.0],
+            ap: vec![0.0, 0.0, -a, 0.0, 0.0, -a],
+            bp: vec![0.0, 0.0, 0.0, 0.0, -a, 0.0],
+        });
+        let cards = wcs.fits_header_cards();
+        let number = |key: &str| {
+            cards
+                .iter()
+                .find(|(name, _)| name == key)
+                .and_then(|(_, value)| match value {
+                    FitsCardValue::Number(number) => Some(*number),
+                    FitsCardValue::Integer(number) => Some(f64::from(*number)),
+                    FitsCardValue::Text(_) => None,
+                })
+        };
+        let text = |key: &str| {
+            cards
+                .iter()
+                .find(|(name, _)| name == key)
+                .and_then(|(_, value)| match value {
+                    FitsCardValue::Text(text) => Some((*text).to_owned()),
+                    _ => None,
+                })
+        };
+        assert_eq!(Wcs::from_fits_values(number, text), Some(wcs.clone()));
+
+        // CDELT with CROTA2 describes the same linear part as a CD matrix.
+        let plain = Wcs::from_center_scale_rotation((10.0, -20.0), (5.0, 7.0), 3.0, 30.0, false);
+        let scale = 3.0 / 3600.0;
+        let values = [
+            ("CRVAL1", 10.0),
+            ("CRVAL2", -20.0),
+            ("CRPIX1", 6.0),
+            ("CRPIX2", 8.0),
+            ("CDELT1", -scale),
+            ("CDELT2", -scale),
+            ("CROTA2", 30.0),
+        ];
+        let from_cdelt = Wcs::from_fits_values(
+            |key| {
+                values
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| *value)
+            },
+            |key| match key {
+                "CTYPE1" => Some("RA---TAN".to_owned()),
+                "CTYPE2" => Some("DEC--TAN".to_owned()),
+                _ => None,
+            },
+        )
+        .unwrap();
+        for (x, y) in [(0.0, 0.0), (100.0, -40.0)] {
+            let (expected, actual) = (plain.pixel_to_world(x, y), from_cdelt.pixel_to_world(x, y));
+            assert_close(expected.0, actual.0, 1e-9);
+            assert_close(expected.1, actual.1, 1e-9);
+        }
+        assert!(Wcs::from_fits_values(|_| Some(1.0), |_| Some("RA---SIN".to_owned())).is_none());
     }
 
     #[test]

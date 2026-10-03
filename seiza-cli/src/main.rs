@@ -18,6 +18,7 @@ mod astap;
 mod background;
 mod build_data;
 mod color;
+mod color_calibrate;
 mod common;
 mod deconvolution;
 mod master;
@@ -576,6 +577,8 @@ enum Command {
     Stretch(stretch_command::StretchArgs),
     /// Estimate and remove a smooth background gradient from linear FITS
     Background(background::BackgroundArgs),
+    /// Calibrate a linear RGB image's colour against Gaia DR3 star colours
+    ColorCalibrate(color_calibrate::ColorCalibrateArgs),
     /// Experimentally restore mild blur in a linear FITS using a measured PSF
     Deconvolve(deconvolution::DeconvolutionArgs),
     /// Register and incrementally stack linear FITS light frames
@@ -1310,6 +1313,7 @@ fn main() -> Result<()> {
         Command::FitsInfo { image, stretch } => fits_info(&image, stretch.as_deref()),
         Command::Stretch(options) => stretch_command::run(options),
         Command::Background(options) => background::run(options),
+        Command::ColorCalibrate(options) => color_calibrate::run(options),
         Command::Deconvolve(options) => deconvolution::run(options),
         Command::Stack(options) => stack::run(options),
         Command::Color(options) => color::run(options),
@@ -2439,7 +2443,7 @@ fn resolve_acquisition_jd(image: &std::path::Path, time: Option<&str>) -> Result
 }
 
 /// "2025-10-12T08:30:00(.frac)(Z)" to a Julian date.
-fn parse_iso_jd(text: &str) -> Option<f64> {
+pub(crate) fn parse_iso_jd(text: &str) -> Option<f64> {
     let text = text.trim().trim_end_matches('Z');
     let (date, clock) = match text.split_once('T') {
         Some((d, t)) => (d, t),
