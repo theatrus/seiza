@@ -132,26 +132,27 @@ impl FitsFrame {
     /// Read and decode a FITS or XISF file into a linear frame.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let (image, bounds) =
-            if seiza_xisf::is_xisf_path(path) || seiza_xisf::is_xisf_header_path(path) {
-                // Only the pixels and the declared bounds are needed, so skip
-                // loading thumbnails and other blocks the metadata locates.
-                let options = seiza_xisf::ReadOptions { metadata: false };
-                let read =
-                    seiza_xisf::read_image_with_options(path, 0, &options).map_err(|source| {
-                        Error::XisfRead {
-                            path: path.to_path_buf(),
-                            source,
-                        }
-                    })?;
-                (read.image, read.info.bounds)
-            } else {
-                let image = FitsImage::open(path).map_err(|source| Error::FitsRead {
+        let (image, bounds) = if seiza_xisf::is_xisf_path(path)
+            || seiza_xisf::is_xisf_header_path(path)
+        {
+            // The metadata carries the astrometric solution, which a
+            // PixInsight file keeps as properties rather than WCS cards.
+            let read =
+                seiza_xisf::read_image_with_options(path, 0, &seiza_xisf::ReadOptions::default())
+                    .map_err(|source| Error::XisfRead {
                     path: path.to_path_buf(),
                     source,
                 })?;
-                (image, None)
-            };
+            let mut image = read.image;
+            add_xisf_solution_wcs(&mut image.headers, &read.metadata);
+            (image, read.info.bounds)
+        } else {
+            let image = FitsImage::open(path).map_err(|source| Error::FitsRead {
+                path: path.to_path_buf(),
+                source,
+            })?;
+            (image, None)
+        };
         let mut frame = Self::from_fits(image, Some(path.to_path_buf()))?;
         frame.bounds = bounds;
         Ok(frame)
@@ -292,6 +293,62 @@ impl FitsFrame {
             self.image = self.image.debayer_with(layout, demosaic)?;
         }
         Ok((self, layout))
+    }
+}
+
+/// FITS WCS cards for an XISF image's astrometric solution, when its
+/// headers carry no WCS of their own. PixInsight keeps a solution only as
+/// `AstrometricSolution` properties and drops the cards when it saves.
+///
+/// XISF image coordinates put the top-left corner of the first stored row
+/// at (0, 0), so a pixel's centre is at index + 0.5, and rows are read in
+/// stored order: `CRPIX` is the reference image point plus 0.5 and `CD` is
+/// the linear transformation unchanged. Only a gnomonic solution in the WCS
+/// default orientation (reference at native (0, 90), pole at native
+/// longitude 180) and ICRS is carried over; its projective and distortion
+/// layers, which have no TAN-SIP equivalent, are left out, so positions far
+/// from the centre of a distorted field are approximate.
+fn add_xisf_solution_wcs(
+    headers: &mut Vec<(String, HeaderValue)>,
+    metadata: &seiza_xisf::XisfMetadata,
+) {
+    if headers
+        .iter()
+        .any(|(key, _)| matches!(key.as_str(), "CTYPE1" | "CTYPE2" | "CRVAL1" | "CRVAL2"))
+    {
+        return;
+    }
+    let Ok(Some(solution)) = metadata.astrometric_solution() else {
+        return;
+    };
+    let projection = &solution.projection;
+    let pole_default = projection
+        .celestial_pole_native
+        .is_none_or(|pole| (pole[0] - 180.0).abs() < 1e-9);
+    if projection.system != seiza_xisf::ProjectionSystem::Gnomonic
+        || projection.reference_native != [0.0, 90.0]
+        || !pole_default
+        || projection.celestial_reference_system != "ICRS"
+    {
+        return;
+    }
+    let [ra, dec] = projection.reference_celestial;
+    let [x, y] = projection.reference_image;
+    let [[cd11, cd12], [cd21, cd22]] = projection.linear;
+    for (key, value) in [
+        ("CTYPE1", HeaderValue::String("RA---TAN".into())),
+        ("CTYPE2", HeaderValue::String("DEC--TAN".into())),
+        ("CRVAL1", HeaderValue::Float(ra)),
+        ("CRVAL2", HeaderValue::Float(dec)),
+        ("CRPIX1", HeaderValue::Float(x + 0.5)),
+        ("CRPIX2", HeaderValue::Float(y + 0.5)),
+        ("CD1_1", HeaderValue::Float(cd11)),
+        ("CD1_2", HeaderValue::Float(cd12)),
+        ("CD2_1", HeaderValue::Float(cd21)),
+        ("CD2_2", HeaderValue::Float(cd22)),
+        ("RADESYS", HeaderValue::String("ICRS".into())),
+    ] {
+        headers.push((key.to_owned(), value));
     }
 }
 
@@ -1111,6 +1168,104 @@ fn preserve_processed_key(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A PixInsight-style XISF keeps its solution only as properties;
+    /// opening it yields the equivalent FITS WCS cards.
+    #[test]
+    fn an_xisf_solution_without_wcs_cards_becomes_wcs_cards() {
+        let hex = |values: &[f64]| {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let property = |id: &str, kind: &str, dimensions: &str, values: &[f64]| {
+            format!(
+                "<Property id=\"AstrometricSolution:{id}\" type=\"{kind}\" {dimensions} location=\"inline:hex\">{}</Property>",
+                hex(values)
+            )
+        };
+        let pixels = [1.0_f32, 2.0, 3.0, 4.0]
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        let header = |offset: usize| {
+            format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                 <xisf version=\"1.0\" xmlns=\"http://www.pixinsight.com/xisf\">\
+                 <Image geometry=\"2:2:1\" sampleFormat=\"Float32\" bounds=\"0:1\" colorSpace=\"Gray\" location=\"attachment:{offset}:16\">\
+                 <FITSKeyword name=\"A_ORDER\" value=\"2\" comment=\"\"/>\
+                 <Property id=\"AstrometricSolution:Version\" type=\"String\">1.0</Property>\
+                 <Property id=\"AstrometricSolution:ProjectionSystem\" type=\"String\">Gnomonic</Property>\
+                 {}{}{}\
+                 </Image></xisf>",
+                property(
+                    "ReferenceCelestialCoordinates",
+                    "F64Vector",
+                    "length=\"2\"",
+                    &[56.7, 24.1]
+                ),
+                property(
+                    "ReferenceImageCoordinates",
+                    "F64Vector",
+                    "length=\"2\"",
+                    &[1.0, 0.75]
+                ),
+                property(
+                    "LinearTransformationMatrix",
+                    "F64Matrix",
+                    "rows=\"2\" columns=\"2\"",
+                    &[3.8e-5, 1.24e-3, -1.24e-3, 3.8e-5]
+                ),
+            )
+        };
+        // The data offset is part of the header, so settle it first.
+        let mut offset = 4096;
+        let mut xml = header(offset);
+        while 16 + xml.len() > offset {
+            offset *= 2;
+            xml = header(offset);
+        }
+        let mut bytes = b"XISF0100".to_vec();
+        bytes.extend((xml.len() as u32).to_le_bytes());
+        bytes.extend([0_u8; 4]);
+        bytes.extend(xml.as_bytes());
+        bytes.resize(offset, 0);
+        bytes.extend(&pixels);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("solved.xisf");
+        std::fs::write(&path, bytes).unwrap();
+
+        let frame = FitsFrame::open(&path).unwrap();
+        let value = |key: &str| {
+            frame
+                .headers
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(
+            value("CTYPE1").and_then(|v| v.as_str().map(str::to_owned)),
+            Some("RA---TAN".to_owned())
+        );
+        assert_eq!(value("CRPIX1").and_then(|v| v.as_f64()), Some(1.5));
+        assert_eq!(value("CRPIX2").and_then(|v| v.as_f64()), Some(1.25));
+        assert_eq!(value("CRVAL1").and_then(|v| v.as_f64()), Some(56.7));
+        assert_eq!(value("CD1_2").and_then(|v| v.as_f64()), Some(1.24e-3));
+        assert_eq!(value("CD2_1").and_then(|v| v.as_f64()), Some(-1.24e-3));
+        // Rows stay in stored order, which the solution describes.
+        assert_eq!(frame.image.data, vec![1.0, 2.0, 3.0, 4.0]);
+        let wcs = seiza::Wcs::from_fits_values(
+            |key| value(key).and_then(|v| v.as_f64()),
+            |key| value(key).and_then(|v| v.as_str().map(str::to_owned)),
+        )
+        .unwrap();
+        // The reference image point (1.0, 0.75) is pixel (0.5, 0.25) in
+        // zero-based pixel-centre coordinates.
+        let (ra, dec) = wcs.pixel_to_world(0.5, 0.25);
+        assert!((ra - 56.7).abs() < 1e-9 && (dec - 24.1).abs() < 1e-9);
+    }
 
     #[test]
     fn drizzled_headers_describe_the_same_sky_on_the_finer_grid() {

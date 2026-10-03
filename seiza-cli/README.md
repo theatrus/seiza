@@ -129,8 +129,11 @@ Calibrate a linear RGB stack's colour against Gaia DR3 star colours:
 seiza color-calibrate stack.fits --output stack-cc.fits --report colour.json
 ```
 
-The image needs an astrometric solution in its headers; `seiza stack` keeps
-the reference frame's. Seiza reads Gaia DR3 photometry from an offline catalog
+The image needs an astrometric solution: FITS WCS cards, which `seiza stack`
+keeps from the reference frame, or the `AstrometricSolution` properties
+PixInsight writes into XISF files. A PixInsight solution's distortion layers
+have no TAN-SIP equivalent and are left out, which moves stars near the corners
+of a distorted field by a few pixels; the photometry finds them anyway. Seiza reads Gaia DR3 photometry from an offline catalog
 when one is installed (`stars-gaia-photometry.bin` in a catalog directory, or
 `--gaia-catalog`). Otherwise it fetches the field from ESA's Gaia archive, or
 from GAVO's mirror when ESA's fails, and caches it (`--gaia-cache`); a CSV you
