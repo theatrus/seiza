@@ -301,8 +301,11 @@ pub fn calibrate_color(
     let geometry = ApertureGeometry::new(aperture_radius, sigma);
     let faintest = stars.iter().map(|star| star.g).fold(f32::MIN, f32::max);
     let calibrator_max_g = options.calibrator_max_g.unwrap_or(faintest - 2.0);
-    // Every supplied star, coloured or not, counts as a neighbour.
-    let isolated = isolated_stars(stars, geometry.outer);
+    // Every supplied star, coloured or not, counts as a neighbour when its
+    // light reaches into the aperture: within the aperture radius plus
+    // three of its sigmas. The sky annulus takes a median, which a
+    // neighbour or two there does not move.
+    let isolated = isolated_stars(stars, geometry.reach());
     let measurements = isolated
         .par_iter()
         .filter(|star| star.g <= calibrator_max_g)
@@ -324,7 +327,7 @@ pub fn calibrate_color(
     // Colour changes a star's profile: optics, seeing and demosaicing all
     // spread red light further than green, so a fixed aperture misses a
     // different share of each channel. Bright, isolated stars measured in
-    // an aperture three times larger say how much each channel misses.
+    // an aperture twice as large say how much each channel misses.
     let aperture_correction =
         aperture_correction(image, stars, &measurements, &geometry, &ceilings);
     for measurement in &mut measurements {
@@ -403,7 +406,7 @@ pub fn calibrate_color(
 
 /// Per-channel factors that scale fluxes in `geometry`'s aperture to the
 /// total, from up to 100 of the brightest measured stars with no catalogue
-/// neighbour within a three-times-larger aperture's annulus. Normalized to
+/// neighbour reaching a twice-as-large aperture. Normalized to
 /// green, since only the channels' ratios matter; all ones when too few
 /// stars qualify.
 fn aperture_correction(
@@ -413,8 +416,8 @@ fn aperture_correction(
     geometry: &ApertureGeometry,
     ceilings: &[f32; 3],
 ) -> [f64; 3] {
-    let large = ApertureGeometry::new(geometry.radius * 3.0, geometry.sigma);
-    let isolated = isolated_stars(stars, large.outer)
+    let large = ApertureGeometry::new(geometry.radius * 2.0, geometry.sigma);
+    let isolated = isolated_stars(stars, large.reach())
         .into_iter()
         .map(|star| ((star.x.round() as i64, star.y.round() as i64), star.g))
         .collect::<std::collections::HashMap<_, _>>();
@@ -484,6 +487,12 @@ struct ApertureGeometry {
 }
 
 impl ApertureGeometry {
+    /// How near a neighbour's centre may come before its light, out to three
+    /// sigmas, falls inside the aperture.
+    fn reach(&self) -> f64 {
+        self.radius + 3.0 * self.sigma
+    }
+
     fn new(radius: f64, sigma: f64) -> Self {
         let inner = radius + 3.0;
         Self {
