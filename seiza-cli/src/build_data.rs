@@ -3871,6 +3871,75 @@ fn validated_tle_digest(path: &Path) -> Result<(u64, String)> {
     file_digest(path)
 }
 
+/// Build a colour-calibration catalog from Gaia DR3 photometry chunks
+/// (download-data gaia-photometry): positions proper-motion corrected to
+/// `epoch`, G, BP − RP, and a flag on sources with RUWE ≥ 1.4.
+pub fn build_gaia_photometry(
+    input: &Path,
+    output: &Path,
+    epoch: f64,
+    max_mag: f32,
+    bands: u32,
+) -> Result<()> {
+    let mut parts: Vec<_> = std::fs::read_dir(input)
+        .with_context(|| format!("cannot read {}", input.display()))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("gaiaphot-") && name.ends_with(".csv"))
+        })
+        .collect();
+    parts.sort();
+    if parts.is_empty() {
+        bail!(
+            "no gaiaphot-*.csv files in {}; run download-data gaia-photometry first",
+            input.display()
+        );
+    }
+    let mut builder = seiza::catalog::PhotometryCatalogBuilder::new(
+        bands,
+        epoch,
+        "Gaia DR3 (ESA/Gaia/DPAC, CC BY-SA 3.0 IGO); G, BP-RP, RUWE",
+    );
+    let years = epoch - 2016.0;
+    let mut too_faint = 0u64;
+    for part in &parts {
+        let csv = std::fs::read_to_string(part)
+            .with_context(|| format!("cannot read {}", part.display()))?;
+        let stars = seiza_sources::parse_gaia_photometry(&csv)
+            .with_context(|| format!("{} is not a Gaia photometry chunk", part.display()))?;
+        for star in stars {
+            if star.g > max_mag {
+                too_faint += 1;
+                continue;
+            }
+            let (ra, dec) = seiza::catalog::propagate_proper_motion(
+                star.ra,
+                star.dec,
+                star.pmra.unwrap_or(0.0),
+                star.pmdec.unwrap_or(0.0),
+                years,
+            );
+            builder.add(seiza::catalog::PhotometricStar {
+                ra,
+                dec,
+                g: star.g,
+                bp_rp: star.bp_rp(),
+                reliable: star.ruwe.is_none_or(|ruwe| ruwe < 1.4),
+            });
+        }
+    }
+    let count = builder.star_count();
+    builder.write_to(output)?;
+    println!(
+        "{count} stars written to {} (epoch {epoch}, {too_faint} fainter than {max_mag})",
+        output.display()
+    );
+    Ok(())
+}
+
 /// Build star tiles from Gaia DR3 TAP CSV chunks (download-data gaia).
 /// Positions are epoch J2016.0; proper motions are applied to `epoch`.
 pub fn build_gaia(input: &Path, output: &Path, epoch: f64, max_mag: f32, bands: u32) -> Result<()> {

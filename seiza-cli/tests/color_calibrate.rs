@@ -73,30 +73,62 @@ fn color_calibrate_cli_recovers_channel_gains_from_a_gaia_csv() {
     )
     .unwrap();
 
-    let result = Command::new(env!("CARGO_BIN_EXE_seiza"))
-        .args([
-            "color-calibrate",
-            input.to_str().unwrap(),
-            "--output",
-            output.to_str().unwrap(),
-            "--report",
-            report.to_str().unwrap(),
-            "--gaia-csv",
-            gaia.to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let report: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
-    let gains = report["gains"].as_array().unwrap();
-    let gain = |channel: usize| gains[channel].as_f64().unwrap();
-    assert!((gain(0) - 1.0 / 0.6).abs() < 0.03, "{gains:?}");
-    assert!((gain(2) - 1.0 / 1.4).abs() < 0.02, "{gains:?}");
+    let run = |args: &[&str]| {
+        let result = Command::new(env!("CARGO_BIN_EXE_seiza"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    };
+    let check_gains = |report: &std::path::Path| {
+        let report: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(report).unwrap()).unwrap();
+        let gains = report["gains"].as_array().unwrap();
+        let gain = |channel: usize| gains[channel].as_f64().unwrap();
+        assert!((gain(0) - 1.0 / 0.6).abs() < 0.03, "{gains:?}");
+        assert!((gain(2) - 1.0 / 1.4).abs() < 0.02, "{gains:?}");
+    };
+    run(&[
+        "color-calibrate",
+        input.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+        "--report",
+        report.to_str().unwrap(),
+        "--gaia-csv",
+        gaia.to_str().unwrap(),
+    ]);
+    check_gains(&report);
+
+    // The same stars as an offline photometry catalog give the same gains.
+    let chunks = directory.path().join("chunks");
+    std::fs::create_dir(&chunks).unwrap();
+    std::fs::copy(&gaia, chunks.join("gaiaphot-0000.csv")).unwrap();
+    let catalog = directory.path().join("stars-gaia-photometry.bin");
+    run(&[
+        "build-data",
+        "gaia-photometry",
+        "--input",
+        chunks.to_str().unwrap(),
+        "--output",
+        catalog.to_str().unwrap(),
+    ]);
+    let offline_report = directory.path().join("offline.json");
+    run(&[
+        "color-calibrate",
+        input.to_str().unwrap(),
+        "--output",
+        directory.path().join("offline.fits").to_str().unwrap(),
+        "--report",
+        offline_report.to_str().unwrap(),
+        "--gaia-catalog",
+        catalog.to_str().unwrap(),
+    ]);
+    check_gains(&offline_report);
     let written = FitsImage::open(&output).unwrap();
     let header = |key: &str| {
         written

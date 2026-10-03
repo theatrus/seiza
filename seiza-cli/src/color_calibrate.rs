@@ -37,8 +37,14 @@ pub(crate) struct ColorCalibrateArgs {
     /// Read Gaia DR3 photometry from this CSV instead of the ESA archive:
     /// columns ra, dec, pmra, pmdec, phot_g_mean_mag, phot_bp_mean_mag,
     /// phot_rp_mean_mag and ruwe, as the archive returns them
-    #[arg(long)]
+    #[arg(long, conflicts_with = "gaia_catalog")]
     gaia_csv: Option<PathBuf>,
+    /// Offline Gaia photometry catalog, or a directory holding
+    /// stars-gaia-photometry.bin (built by `seiza build-data
+    /// gaia-photometry`). Seiza's catalog directories are searched when
+    /// omitted, and the ESA archive is queried when none is found
+    #[arg(long)]
+    gaia_catalog: Option<PathBuf>,
 }
 
 pub(crate) fn run(args: ColorCalibrateArgs) -> Result<()> {
@@ -89,6 +95,14 @@ pub(crate) fn run(args: ColorCalibrateArgs) -> Result<()> {
     })
     .fold(0.0_f64, f64::max)
         * 1.02;
+    let catalog = if args.gaia_csv.is_some() {
+        None
+    } else {
+        seiza::data_paths::gaia_photometry(args.gaia_catalog.as_deref())?
+    };
+    // A local catalog's positions are already at its epoch: no proper
+    // motion remains to apply.
+    let mut epoch = epoch;
     let gaia = match &args.gaia_csv {
         Some(path) => {
             let csv = std::fs::read_to_string(path)
@@ -99,6 +113,7 @@ pub(crate) fn run(args: ColorCalibrateArgs) -> Result<()> {
                 .filter(|star| star.g <= args.gaia_max_mag)
                 .collect()
         }
+        None if catalog.is_some() => Vec::new(),
         None => {
             let cache = args.gaia_cache.clone().unwrap_or_else(default_gaia_cache);
             gaia_field(&cache, center, radius, args.gaia_max_mag)?
@@ -116,6 +131,33 @@ pub(crate) fn run(args: ColorCalibrateArgs) -> Result<()> {
             ruwe: star.ruwe,
         })
         .collect::<Vec<_>>();
+    let sources = match &catalog {
+        Some(path) => {
+            let catalog = seiza::catalog::PhotometryCatalog::open(path)
+                .with_context(|| format!("could not open {}", path.display()))?;
+            println!(
+                "Gaia photometry from {} (epoch {})",
+                path.display(),
+                catalog.epoch()
+            );
+            epoch = None;
+            catalog
+                .cone_search(center.0, center.1, radius, args.gaia_max_mag)
+                .into_iter()
+                .map(|star| GaiaColorSource {
+                    ra: star.ra,
+                    dec: star.dec,
+                    pmra: None,
+                    pmdec: None,
+                    g: star.g,
+                    // An unreliable colour still marks a neighbour.
+                    bp_rp: star.bp_rp.filter(|_| star.reliable),
+                    ruwe: None,
+                })
+                .collect()
+        }
+        None => sources,
+    };
     let stars = place_gaia_sources(&wcs, width, height, epoch, &sources);
     println!(
         "{} Gaia DR3 stars with BP-RP colours in the field (G <= {})",

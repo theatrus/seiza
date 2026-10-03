@@ -51,31 +51,16 @@ impl ColorReferenceStar {
         bp_rp: Option<f32>,
     ) -> Option<Self> {
         let years = epoch.map_or(0.0, |epoch| epoch - 2016.0);
-        let (ra, dec) = propagate(ra, dec, pmra.unwrap_or(0.0), pmdec.unwrap_or(0.0), years);
+        let (ra, dec) = seiza::catalog::propagate_proper_motion(
+            ra,
+            dec,
+            pmra.unwrap_or(0.0),
+            pmdec.unwrap_or(0.0),
+            years,
+        );
         let (x, y) = wcs.world_to_pixel(ra, dec)?;
         Some(Self { x, y, g, bp_rp })
     }
-}
-
-/// Move a position `years` along its proper motion (mas/yr, `pmra` times
-/// cos(dec)) on the sphere: along the great circle the motion starts on,
-/// which stays right near the poles where stepping RA would not.
-fn propagate(ra: f64, dec: f64, pmra: f64, pmdec: f64, years: f64) -> (f64, f64) {
-    let (sin_ra, cos_ra) = ra.to_radians().sin_cos();
-    let (sin_dec, cos_dec) = dec.to_radians().sin_cos();
-    let position = [cos_dec * cos_ra, cos_dec * sin_ra, sin_dec];
-    // Unit vectors towards increasing RA (east) and Dec (north).
-    let east = [-sin_ra, cos_ra, 0.0];
-    let north = [-sin_dec * cos_ra, -sin_dec * sin_ra, cos_dec];
-    let to_radians = years / 3.6e6 * std::f64::consts::PI / 180.0;
-    let (de, dn) = (pmra * to_radians, pmdec * to_radians);
-    let moved = [0, 1, 2].map(|axis| position[axis] + de * east[axis] + dn * north[axis]);
-    let norm = moved.iter().map(|value| value * value).sum::<f64>().sqrt();
-    let [x, y, z] = moved.map(|value| value / norm);
-    (
-        y.atan2(x).to_degrees().rem_euclid(360.0),
-        z.asin().to_degrees(),
-    )
 }
 
 impl ColorReferenceStar {
@@ -976,19 +961,6 @@ mod tests {
         };
         assert!(isolated_stars(&[calibrator, binary], 17.0).is_empty());
         assert_eq!(isolated_stars(&[calibrator], 17.0).len(), 1);
-    }
-
-    #[test]
-    fn proper_motion_stays_on_the_sphere_at_the_pole() {
-        // 10"/yr north for a century from 10" short of the north pole
-        // carries the star across it: 990" past, on the far meridian.
-        let (ra, dec) = propagate(30.0, 90.0 - 10.0 / 3600.0, 0.0, 10_000.0, 100.0);
-        assert!((dec - (90.0 - 990.0 / 3600.0)).abs() < 1e-5, "{dec}");
-        assert!((ra - 210.0).abs() < 1e-6, "{ra}");
-        // Far from the pole it matches the linear step.
-        let (ra, dec) = propagate(56.75, 24.1, 1000.0, 0.0, 10.0);
-        let expected = 56.75 + 10.0 / 3600.0 / 24.1_f64.to_radians().cos();
-        assert!((ra - expected).abs() < 1e-7 && (dec - 24.1).abs() < 1e-6);
     }
 
     #[test]

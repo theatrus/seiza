@@ -38,8 +38,8 @@ const MAG_OFFSET: f32 = 3.0;
 
 /// Sky-to-tile geometry shared by the builder and the reader.
 #[derive(Debug, Clone)]
-struct Grid {
-    n_bands: u32,
+pub(super) struct Grid {
+    pub(super) n_bands: u32,
     /// Number of RA bins in each band
     bins: Vec<u32>,
     /// Flat tile index of the first bin of each band
@@ -47,7 +47,7 @@ struct Grid {
 }
 
 impl Grid {
-    fn new(n_bands: u32) -> Self {
+    pub(super) fn new(n_bands: u32) -> Self {
         assert!(n_bands >= 1);
         let band_height = 180.0 / n_bands as f64;
         let mut bins = Vec::with_capacity(n_bands as usize);
@@ -68,7 +68,7 @@ impl Grid {
         }
     }
 
-    fn n_tiles(&self) -> u32 {
+    pub(super) fn n_tiles(&self) -> u32 {
         self.offsets[self.n_bands as usize - 1] + self.bins[self.n_bands as usize - 1]
     }
 
@@ -77,7 +77,7 @@ impl Grid {
         band.clamp(0, self.n_bands as i64 - 1) as u32
     }
 
-    fn tile_of(&self, ra: f64, dec: f64) -> u32 {
+    pub(super) fn tile_of(&self, ra: f64, dec: f64) -> u32 {
         let band = self.band_of(dec);
         let n = self.bins[band as usize];
         let ra = ra.rem_euclid(360.0);
@@ -86,7 +86,7 @@ impl Grid {
     }
 
     /// Tiles intersecting a cone (a covering superset).
-    fn cone_tiles(&self, ra: f64, dec: f64, radius_deg: f64) -> Vec<u32> {
+    pub(super) fn cone_tiles(&self, ra: f64, dec: f64, radius_deg: f64) -> Vec<u32> {
         let band_height = 180.0 / self.n_bands as f64;
         let dec_lo = (dec - radius_deg).max(-90.0);
         let dec_hi = (dec + radius_deg).min(90.0);
@@ -129,27 +129,27 @@ impl Grid {
     }
 }
 
-fn pack_ra(ra: f64) -> u32 {
+pub(super) fn pack_ra(ra: f64) -> u32 {
     ((ra.rem_euclid(360.0) / 360.0) * u32::MAX as f64) as u32
 }
 
-fn unpack_ra(q: u32) -> f64 {
+pub(super) fn unpack_ra(q: u32) -> f64 {
     q as f64 / u32::MAX as f64 * 360.0
 }
 
-fn pack_dec(dec: f64) -> u32 {
+pub(super) fn pack_dec(dec: f64) -> u32 {
     (((dec + 90.0) / 180.0).clamp(0.0, 1.0) * u32::MAX as f64) as u32
 }
 
-fn unpack_dec(q: u32) -> f64 {
+pub(super) fn unpack_dec(q: u32) -> f64 {
     q as f64 / u32::MAX as f64 * 180.0 - 90.0
 }
 
-fn pack_mag(mag: f32) -> u16 {
+pub(super) fn pack_mag(mag: f32) -> u16 {
     (((mag + MAG_OFFSET) * 1000.0).clamp(0.0, u16::MAX as f32)) as u16
 }
 
-fn unpack_mag(q: u16) -> f32 {
+pub(super) fn unpack_mag(q: u16) -> f32 {
     q as f32 / 1000.0 - MAG_OFFSET
 }
 

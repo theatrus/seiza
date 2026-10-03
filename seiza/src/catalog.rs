@@ -6,8 +6,12 @@
 //! [`MemoryCatalog`] provides the same interface from an in-memory list for
 //! tests and synthetic solves.
 
+pub mod photometry;
 pub mod tiles;
 
+pub use photometry::{
+    PhotometricStar, PhotometryCatalog, PhotometryCatalogBuilder, propagate_proper_motion,
+};
 pub use tiles::{TileCatalog, TileSetBuilder};
 
 /// A reference star position, ICRS degrees.

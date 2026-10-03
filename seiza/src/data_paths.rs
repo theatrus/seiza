@@ -83,6 +83,28 @@ pub fn star_data(arg: Option<&Path>) -> Result<PathBuf, DataPathError> {
     )
 }
 
+/// Gaia DR3 photometry catalog for colour calibration
+/// (`stars-gaia-photometry.bin`, built by `seiza build-data
+/// gaia-photometry`). Optional: `Ok(None)` means none is installed, and
+/// colour calibration queries the ESA archive instead.
+pub fn gaia_photometry(arg: Option<&Path>) -> Result<Option<PathBuf>, DataPathError> {
+    let result = resolve(
+        arg,
+        "Gaia photometry catalog",
+        Some("SEIZA_GAIA_PHOTOMETRY"),
+        Some("gaia_photometry"),
+        &["stars-gaia-photometry.bin"],
+        None,
+    );
+    match arg {
+        Some(_) => result.map(Some),
+        None => match result {
+            Err(DataPathError::NoDefault { .. }) => Ok(None),
+            other => other.map(Some),
+        },
+    }
+}
+
 /// Prebuilt blind pattern index. Optional: `Ok(None)` means "none found,
 /// build in memory"; an explicitly given path that resolves to nothing is
 /// an error.
