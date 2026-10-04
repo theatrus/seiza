@@ -13,6 +13,7 @@
 #
 # ARCHIVE=gavo fetches from the GAVO mirror in Heidelberg instead of ESA's
 # archive, for when ESA's is slow or down; both carry the same columns.
+# ARCHIVE=any alternates between them, round by round.
 #
 # Install the result by copying stars-gaia-photometry.bin into a Seiza catalog
 # directory, or pass it to `seiza color-calibrate --gaia-catalog`.
@@ -28,8 +29,12 @@ echo "$(date -u +%FT%TZ) downloading Gaia DR3 photometry to G <= $max_mag from $
 # Finished chunks are kept, so a round that gives up on one chunk (the
 # archives have bad minutes) resumes where it stopped after a pause.
 for round in $(seq 1 "${ROUNDS:-20}"); do
+  source=$archive
+  if [ "$archive" = any ]; then
+    if [ $((round % 2)) -eq 1 ]; then source=esa; else source=gavo; fi
+  fi
   if "$seiza" download-data gaia-photometry --output "$work/chunks" --max-mag "$max_mag" \
-    --archive "$archive"; then
+    --archive "$source"; then
     break
   fi
   if [ "$round" -eq "${ROUNDS:-20}" ]; then
