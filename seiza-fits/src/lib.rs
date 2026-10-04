@@ -82,13 +82,29 @@ pub struct FitsImage {
     pub headers: Vec<(String, HeaderValue)>,
 }
 
-/// Parse header cards block by block until END. Returns the cards and the
+/// A FITS header with its commentary cards kept.
+///
+/// [`read_header`] keeps only valued cards. The `HISTORY` and `COMMENT`
+/// cards it skips are where processing software records what it did to a
+/// frame, so a caller asking "was this calibrated?" needs them too.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FitsHeader {
+    /// Valued cards in file order (keyword, value), as [`read_header`]
+    /// returns them.
+    pub cards: Vec<(String, HeaderValue)>,
+    /// The text of each `HISTORY` card in file order, trimmed.
+    pub history: Vec<String>,
+    /// The text of each `COMMENT` card in file order, trimmed.
+    pub comments: Vec<String>,
+}
+
+/// Parse header cards block by block until END. Returns the header and the
 /// byte offset where the data section begins.
-fn parse_headers(data: &[u8]) -> Result<(Vec<(String, HeaderValue)>, usize), FitsError> {
+fn parse_headers(data: &[u8]) -> Result<(FitsHeader, usize), FitsError> {
     if data.len() < BLOCK || &data[0..6] != b"SIMPLE" {
         return Err(FitsError::NotFits);
     }
-    let mut headers = Vec::new();
+    let mut header = FitsHeader::default();
     let mut data_start = None;
     'blocks: for block in 0.. {
         let start = block * BLOCK;
@@ -104,17 +120,21 @@ fn parse_headers(data: &[u8]) -> Result<(Vec<(String, HeaderValue)>, usize), Fit
                 data_start = Some((block + 1) * BLOCK);
                 break 'blocks;
             }
-            if keyword.is_empty() || keyword == "COMMENT" || keyword == "HISTORY" {
-                continue;
-            }
-            if card[8] == b'=' {
-                let raw = String::from_utf8_lossy(&card[10..]);
-                headers.push((keyword, parse_header_value(&raw)));
+            let commentary = || String::from_utf8_lossy(&card[8..]).trim().to_string();
+            match keyword.as_str() {
+                "" => continue,
+                "HISTORY" => header.history.push(commentary()),
+                "COMMENT" => header.comments.push(commentary()),
+                _ if card[8] == b'=' => {
+                    let raw = String::from_utf8_lossy(&card[10..]);
+                    header.cards.push((keyword, parse_header_value(&raw)));
+                }
+                _ => {}
             }
         }
     }
     let data_start = data_start.ok_or_else(|| FitsError::Malformed("missing END card".into()))?;
-    Ok((headers, data_start))
+    Ok((header, data_start))
 }
 
 /// Read complete FITS header blocks and leave the reader at the first byte of
@@ -122,7 +142,7 @@ fn parse_headers(data: &[u8]) -> Result<(Vec<(String, HeaderValue)>, usize), Fit
 fn read_headers_from(
     reader: &mut impl Read,
     short_first_block_is_not_fits: bool,
-) -> Result<(Vec<(String, HeaderValue)>, usize), FitsError> {
+) -> Result<(FitsHeader, usize), FitsError> {
     let mut data = Vec::new();
     loop {
         let start = data.len();
@@ -153,8 +173,14 @@ fn read_headers_from(
 /// Read only the header cards of a FITS file, without touching the pixel
 /// data — cheap metadata probes on large files.
 pub fn read_header(path: &Path) -> Result<Vec<(String, HeaderValue)>, FitsError> {
+    read_header_with_commentary(path).map(|header| header.cards)
+}
+
+/// Read a FITS file's header cards together with its `HISTORY` and
+/// `COMMENT` text, without touching the pixel data.
+pub fn read_header_with_commentary(path: &Path) -> Result<FitsHeader, FitsError> {
     let mut file = std::fs::File::open(path)?;
-    read_headers_from(&mut file, false).map(|(headers, _)| headers)
+    read_headers_from(&mut file, false).map(|(header, _)| header)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -382,7 +408,8 @@ impl FitsImage {
         reader: &mut impl Read,
         available_bytes: Option<u64>,
     ) -> Result<FitsImage, FitsError> {
-        let (headers, data_start) = read_headers_from(reader, true)?;
+        let (header, data_start) = read_headers_from(reader, true)?;
+        let headers = header.cards;
         let spec = ImageSpec::from_headers(&headers)?;
         if let Some(available_bytes) = available_bytes {
             let data_end = (data_start as u64)
@@ -947,9 +974,39 @@ mod io_tests {
     fn header_only_reader_does_not_require_or_touch_pixels() {
         let bytes = image_bytes(16, &[1000, 1000], &[], &[], false);
         let mut reader = std::io::Cursor::new(bytes);
-        let (headers, _) = read_headers_from(&mut reader, false).unwrap();
+        let (header, _) = read_headers_from(&mut reader, false).unwrap();
         assert_eq!(reader.position() as usize, BLOCK);
-        assert!(headers.iter().any(|(key, _)| key == "NAXIS1"));
+        assert!(header.cards.iter().any(|(key, _)| key == "NAXIS1"));
+    }
+
+    #[test]
+    fn commentary_cards_are_kept_beside_the_valued_cards() {
+        let card = |text: &str| format!("{text:<80}");
+        let mut header = [
+            "SIMPLE  =                    T",
+            "BITPIX  =                  -32",
+            "NAXIS   =                    0",
+            "HISTORY Calibration: dark master-dark.fit",
+            "COMMENT   written by a test",
+            "HISTORY Registration: shift 1.5 -2.0",
+            "IMAGETYP= 'LIGHT'",
+            "END",
+        ]
+        .map(card)
+        .concat()
+        .into_bytes();
+        header.resize(BLOCK, b' ');
+        let (header, _) = read_headers_from(&mut std::io::Cursor::new(header), false).unwrap();
+        assert_eq!(
+            header.history,
+            [
+                "Calibration: dark master-dark.fit",
+                "Registration: shift 1.5 -2.0"
+            ]
+        );
+        assert_eq!(header.comments, ["written by a test"]);
+        let keywords: Vec<&str> = header.cards.iter().map(|(key, _)| key.as_str()).collect();
+        assert_eq!(keywords, ["SIMPLE", "BITPIX", "NAXIS", "IMAGETYP"]);
     }
 
     #[test]
