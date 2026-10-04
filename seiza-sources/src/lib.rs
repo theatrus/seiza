@@ -49,6 +49,16 @@ impl GaiaArchive {
             Self::Gavo => "gaia.dr3lite",
         }
     }
+
+    /// How many source_id ranges each bulk chunk is fetched in. GAVO stops a
+    /// synchronous query after about 25 s, which a whole chunk near the
+    /// galactic plane exceeds.
+    fn chunk_pieces(self) -> u64 {
+        match self {
+            Self::Esa => 1,
+            Self::Gavo => 32,
+        }
+    }
 }
 const GAIA_JOB_TIMEOUT: Duration = Duration::from_secs(900);
 /// Gaia DR3 source_id encodes the HEALPix level-12 cell in the high bits.
@@ -593,49 +603,98 @@ impl SourceDownloader {
             } else {
                 GAIA_SOURCE_ID_MAX / chunks * (chunk + 1) - 1
             };
-            let query = format!(
-                "SELECT {columns} FROM {table} \
-                 WHERE phot_g_mean_mag <= {max_mag} AND source_id BETWEEN {lo} AND {hi}",
-                table = archive.table()
-            );
-
-            let mut attempts = 0u32;
-            loop {
-                attempts += 1;
-                match self.fetch_gaia_chunk(&query, &target, archive).await {
-                    Ok(rows) => {
-                        if rows >= GAIA_MAXREC {
-                            return Err(Error::GaiaRowCap {
-                                chunk,
-                                limit: GAIA_MAXREC,
-                                suggested_chunks: chunks.saturating_mul(4).min(GAIA_SOURCE_ID_MAX),
-                            });
-                        }
-                        completed += 1;
-                        (self.reporter)(SourceEvent::GaiaChunkComplete {
-                            chunk,
-                            rows,
-                            completed,
-                            total: chunks,
-                        });
-                        break;
-                    }
-                    Err(error) if attempts < 4 => {
-                        let delay = Duration::from_secs(5 * attempts as u64);
-                        (self.reporter)(SourceEvent::Retry {
-                            label: format!("Gaia chunk {chunk:04}"),
-                            attempt: attempts,
-                            delay,
-                            error: error.to_string(),
-                        });
-                        tokio::time::sleep(delay).await;
-                    }
-                    Err(error) => return Err(error),
+            let pieces = archive.chunk_pieces().min(hi - lo + 1);
+            let mut rows = 0u64;
+            let mut piece_paths = Vec::new();
+            for piece in 0..pieces {
+                let span = (hi - lo + 1) / pieces;
+                let piece_lo = lo + span * piece;
+                let piece_hi = if piece + 1 == pieces {
+                    hi
+                } else {
+                    piece_lo + span - 1
+                };
+                let piece_target = if pieces == 1 {
+                    target.clone()
+                } else {
+                    piece_path(&target, piece)
+                };
+                piece_paths.push(piece_target.clone());
+                rows += self
+                    .fetch_gaia_range(
+                        columns,
+                        max_mag,
+                        (piece_lo, piece_hi),
+                        &piece_target,
+                        archive,
+                        &format!("Gaia chunk {chunk:04}"),
+                    )
+                    .await?;
+            }
+            if pieces > 1 {
+                join_gaia_pieces(&piece_paths, &target).await?;
+            } else {
+                // Another archive may have left pieces of this chunk behind.
+                for piece in 0..GaiaArchive::Gavo.chunk_pieces() {
+                    let _ = tokio::fs::remove_file(piece_path(&target, piece)).await;
                 }
             }
+            if rows >= GAIA_MAXREC {
+                return Err(Error::GaiaRowCap {
+                    chunk,
+                    limit: GAIA_MAXREC,
+                    suggested_chunks: chunks.saturating_mul(4).min(GAIA_SOURCE_ID_MAX),
+                });
+            }
+            completed += 1;
+            (self.reporter)(SourceEvent::GaiaChunkComplete {
+                chunk,
+                rows,
+                completed,
+                total: chunks,
+            });
         }
         self.ready("Gaia", output);
         Ok(())
+    }
+
+    /// Fetch one source_id range into `target`, retrying, unless an earlier
+    /// run already finished it. Returns the row count.
+    async fn fetch_gaia_range(
+        &self,
+        columns: &str,
+        max_mag: f32,
+        (lo, hi): (u64, u64),
+        target: &Path,
+        archive: GaiaArchive,
+        label: &str,
+    ) -> Result<u64> {
+        if chunk_complete(target).await? {
+            return count_rows(target).await;
+        }
+        let query = format!(
+            "SELECT {columns} FROM {table} \
+             WHERE phot_g_mean_mag <= {max_mag} AND source_id BETWEEN {lo} AND {hi}",
+            table = archive.table()
+        );
+        let mut attempts = 0u32;
+        loop {
+            attempts += 1;
+            match self.fetch_gaia_chunk(&query, target, archive).await {
+                Ok(rows) => return Ok(rows),
+                Err(error) if attempts < 4 => {
+                    let delay = Duration::from_secs(5 * attempts as u64);
+                    (self.reporter)(SourceEvent::Retry {
+                        label: label.to_owned(),
+                        attempt: attempts,
+                        delay,
+                        error: error.to_string(),
+                    });
+                    tokio::time::sleep(delay).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     /// Minor Planet Center comet/asteroid elements plus JPL SBDB historical
@@ -1190,6 +1249,59 @@ async fn verify_file(path: &Path, verify: Verify) -> Result<bool> {
     }
 }
 
+/// Where one source_id range of a chunk fetched in pieces is kept. The name
+/// does not end in `.csv`, so a catalog build never reads it.
+fn piece_path(target: &Path, piece: u64) -> PathBuf {
+    let mut name = target.as_os_str().to_owned();
+    name.push(format!(".piece{piece:02}"));
+    PathBuf::from(name)
+}
+
+/// Rows in a finished CSV chunk, not counting its header.
+async fn count_rows(path: &Path) -> Result<u64> {
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|source| io("read", path, source))?;
+    Ok(bytes.iter().filter(|&&byte| byte == b'\n').count() as u64 - 1)
+}
+
+/// Concatenate finished piece files under the first one's header into
+/// `target`, then remove the pieces.
+async fn join_gaia_pieces(pieces: &[PathBuf], target: &Path) -> Result<()> {
+    let temp = partial_path(target);
+    let mut output = tokio::fs::File::create(&temp)
+        .await
+        .map_err(|source| io("create", &temp, source))?;
+    for (index, piece) in pieces.iter().enumerate() {
+        let bytes = tokio::fs::read(piece)
+            .await
+            .map_err(|source| io("read", piece, source))?;
+        let body = if index == 0 {
+            &bytes[..]
+        } else {
+            let header_end = bytes
+                .iter()
+                .position(|&byte| byte == b'\n')
+                .ok_or(Error::MalformedGaiaChunk)?;
+            &bytes[header_end + 1..]
+        };
+        output
+            .write_all(body)
+            .await
+            .map_err(|source| io("write", &temp, source))?;
+    }
+    output
+        .sync_all()
+        .await
+        .map_err(|source| io("sync", &temp, source))?;
+    drop(output);
+    replace_file(&temp, target).await?;
+    for piece in pieces {
+        let _ = tokio::fs::remove_file(piece).await;
+    }
+    Ok(())
+}
+
 async fn chunk_complete(path: &Path) -> Result<bool> {
     let mut input = match tokio::fs::File::open(path).await {
         Ok(input) => input,
@@ -1279,6 +1391,35 @@ mod tests {
             .unwrap();
         assert!(chunk_complete(&complete).await.unwrap());
         assert!(!chunk_complete(&truncated).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn gaia_pieces_join_under_one_header() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("gaiaphot-0007.csv");
+        let pieces = [
+            (piece_path(&target, 0), &b"ra,dec\n1,2\n3,4\n"[..]),
+            (piece_path(&target, 1), &b"ra,dec\n"[..]),
+            (piece_path(&target, 2), &b"ra,dec\n5,6\n"[..]),
+        ];
+        for (path, bytes) in &pieces {
+            tokio::fs::write(path, bytes).await.unwrap();
+        }
+        assert_eq!(
+            pieces[1].0.file_name().unwrap(),
+            "gaiaphot-0007.csv.piece01"
+        );
+        let paths = pieces
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
+        join_gaia_pieces(&paths, &target).await.unwrap();
+        assert_eq!(
+            tokio::fs::read(&target).await.unwrap(),
+            b"ra,dec\n1,2\n3,4\n5,6\n"
+        );
+        assert_eq!(count_rows(&target).await.unwrap(), 3);
+        assert!(paths.iter().all(|path| !path.exists()));
     }
 
     #[tokio::test]
