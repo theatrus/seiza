@@ -861,9 +861,17 @@ impl SourceDownloader {
             });
         }
         // The archive answers with a redirect to the job, which the client
-        // follows: the final URL is the job's.
+        // follows: the final URL is the job's. Archives may keep jobs under
+        // another path (GAVO's are under /__system__/tap/run/async/), so the
+        // job must be on the archive's host, and somewhere other than where
+        // the query was submitted.
         let job = submitted.url().to_string();
-        if !job.starts_with(archive.async_url()) || job.trim_end_matches('/') == archive.async_url()
+        let host = |url: &str| {
+            url.split_once("://")
+                .map(|(_, rest)| rest.split('/').next().unwrap_or_default().to_owned())
+        };
+        if host(&job) != host(archive.async_url())
+            || job.trim_end_matches('/') == archive.async_url()
         {
             return Err(Error::GaiaJobFailed(format!(
                 "was not queued: the archive answered from {job}"
