@@ -51,6 +51,45 @@ fn gaia_photometry_cone(
         .collect()
 }
 
+/// Read Gaia DR3 photometry within `radius_deg` of `(ra, dec)` (degrees)
+/// down to G `max_mag` from an offline catalog (`stars-gaia-photometry.bin`,
+/// from :func:`fetch_catalogs`).
+///
+/// Returns dicts like :func:`gaia_photometry_cone`'s, but with positions
+/// already at the catalog's epoch, so `pmra` and `pmdec` are None, and the
+/// colour as `bp_rp` (None when Gaia's is missing or its astrometry is
+/// unreliable).
+#[pyfunction]
+#[pyo3(signature = (path, ra, dec, radius_deg, max_mag=15.0))]
+fn gaia_photometry_catalog_cone(
+    py: Python<'_>,
+    path: std::path::PathBuf,
+    ra: f64,
+    dec: f64,
+    radius_deg: f64,
+    max_mag: f32,
+) -> PyResult<Vec<Py<PyDict>>> {
+    let stars = py
+        .allow_threads(|| {
+            let catalog = seiza::catalog::PhotometryCatalog::open(&path)?;
+            Ok::<_, std::io::Error>(catalog.cone_search(ra, dec, radius_deg, max_mag))
+        })
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    stars
+        .into_iter()
+        .map(|star| {
+            let row = PyDict::new(py);
+            row.set_item("ra", star.ra)?;
+            row.set_item("dec", star.dec)?;
+            row.set_item("pmra", py.None())?;
+            row.set_item("pmdec", py.None())?;
+            row.set_item("g", star.g)?;
+            row.set_item("bp_rp", star.bp_rp.filter(|_| star.reliable))?;
+            Ok(row.unbind())
+        })
+        .collect()
+}
+
 /// Photometric colour calibration fitted by :func:`calibrate_color`.
 #[pyclass(frozen, name = "ColorCalibration", module = "seiza")]
 pub(crate) struct PyColorCalibration {
@@ -153,7 +192,8 @@ impl PyColorCalibration {
 /// image against Gaia DR3 star colours.
 ///
 /// `wcs` is the image's astrometric solution, and `gaia` a list of dicts as
-/// :func:`gaia_photometry_cone` returns. `epoch` is the observation's Julian
+/// :func:`gaia_photometry_cone` or :func:`gaia_photometry_catalog_cone`
+/// returns; a `bp_rp` value is used in place of `bp` and `rp`. `epoch` is the observation's Julian
 /// year, for proper motion. The fit renders a star of Gaia BP - RP
 /// `white_bp_rp` (the Sun's by default) neutral; use the result's
 /// :meth:`ColorCalibration.apply` to calibrate the image.
@@ -194,14 +234,22 @@ fn calibrate_color(
                     PyValueError::new_err(format!("every Gaia row needs a {key} value"))
                 })
             };
-            let (bp, rp) = (number(row, "bp")?, number(row, "rp")?);
+            let bp_rp = match row.get_item("bp_rp")? {
+                Some(value) => (!value.is_none())
+                    .then(|| value.extract::<f64>())
+                    .transpose()?,
+                None => {
+                    let (bp, rp) = (number(row, "bp")?, number(row, "rp")?);
+                    bp.zip(rp).map(|(bp, rp)| bp - rp)
+                }
+            };
             Ok(GaiaColorSource {
                 ra: required("ra")?,
                 dec: required("dec")?,
                 pmra: number(row, "pmra")?,
                 pmdec: number(row, "pmdec")?,
                 g: required("g")? as f32,
-                bp_rp: bp.zip(rp).map(|(bp, rp)| (bp - rp) as f32),
+                bp_rp: bp_rp.map(|value| value as f32),
                 ruwe: number(row, "ruwe")?.map(|ruwe| ruwe as f32),
             })
         })
@@ -225,6 +273,7 @@ fn calibrate_color(
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyColorCalibration>()?;
     module.add_function(wrap_pyfunction!(gaia_photometry_cone, module)?)?;
+    module.add_function(wrap_pyfunction!(gaia_photometry_catalog_cone, module)?)?;
     module.add_function(wrap_pyfunction!(calibrate_color, module)?)?;
     module.add("SOLAR_BP_RP", SOLAR_BP_RP)?;
     Ok(())

@@ -24,11 +24,14 @@ pub const REQUIRED_V2_FILES: &[&str] = REQUIRED_BUNDLE_FILES;
 /// A known artifact in the current hosted bundle.
 ///
 /// Not every variant is part of the coherent [`REQUIRED_BUNDLE_FILES`] set:
-/// [`Dataset::StarsDeepGaia20`] is an optional, very large deep catalog that
-/// hosts alongside the bundle but is fetched only on explicit request.
+/// [`Dataset::StarsDeepGaia20`] is an optional, very large deep catalog, and
+/// [`Dataset::GaiaPhotometry`] holds Gaia DR3 colours for photometric colour
+/// calibration. Both host alongside the bundle but are fetched only on
+/// explicit request.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Dataset {
     BlindGaia16,
+    GaiaPhotometry,
     MinorBodies,
     Objects,
     StarsDeepGaia17,
@@ -43,6 +46,7 @@ impl Dataset {
     pub const fn file_name(self) -> &'static str {
         match self {
             Self::BlindGaia16 => "blind-gaia16.idx",
+            Self::GaiaPhotometry => "stars-gaia-photometry.bin",
             Self::MinorBodies => "minor-bodies.bin",
             Self::Objects => "objects.bin",
             Self::StarsDeepGaia17 => "stars-deep-gaia17.bin",
@@ -122,6 +126,12 @@ impl CatalogSet {
         Self::annotation()
             .with(Dataset::StarsDeepGaia20)
             .with(Dataset::BlindGaia16)
+    }
+
+    /// The optional Gaia DR3 photometry catalog (G≤15) that colour
+    /// calibration reads instead of querying the Gaia archive.
+    pub fn gaia_photometry() -> Self {
+        Self::dataset(Dataset::GaiaPhotometry)
     }
 
     /// Build a selection from hosted filenames. An empty iterator retains the
@@ -654,6 +664,35 @@ mod tests {
         assert!(set.contains(Dataset::Objects.file_name()));
         assert!(!set.contains(Dataset::StarsDeepGaia17.file_name()));
         assert!(!set.contains(Dataset::StarsDeepGaia20.file_name()));
+    }
+
+    #[test]
+    fn optional_gaia_photometry_is_hostable_but_not_required() {
+        let name = Dataset::GaiaPhotometry.file_name();
+        assert!(!REQUIRED_BUNDLE_FILES.contains(&name));
+        let mut manifest = manifest();
+        let sha256 = hash('e');
+        manifest.files.push(ManifestFile {
+            key: Some(format!("artifacts/{sha256}/{name}")),
+            bytes: 7,
+            sha256,
+            name: name.to_string(),
+        });
+        manifest.validate().unwrap();
+        let plan = manifest
+            .plan(&CatalogSet::gaia_photometry())
+            .unwrap()
+            .into_iter()
+            .map(|file| file.name)
+            .collect::<Vec<_>>();
+        assert_eq!(plan, [name]);
+        assert!(
+            !manifest
+                .plan(&CatalogSet::all())
+                .unwrap()
+                .iter()
+                .any(|file| file.name == name)
+        );
     }
 
     #[test]

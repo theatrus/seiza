@@ -219,6 +219,7 @@ enum CatalogSetupPreset {
     StandardBlind = 0,
     DeepestBlind = 1,
     All = 2,
+    GaiaPhotometry = 3,
 }
 
 impl CatalogSetupPreset {
@@ -227,6 +228,7 @@ impl CatalogSetupPreset {
             0 => Ok(Self::StandardBlind),
             1 => Ok(Self::DeepestBlind),
             2 => Ok(Self::All),
+            3 => Ok(Self::GaiaPhotometry),
             _ => Err(format!("unsupported catalog setup preset: {value}")),
         }
     }
@@ -257,7 +259,9 @@ impl CatalogSetupPreset {
                 Dataset::StarsDeepGaia17,
                 Dataset::StarsDeepGaia20,
                 Dataset::BlindGaia16,
+                Dataset::GaiaPhotometry,
             ],
+            Self::GaiaPhotometry => &[Dataset::GaiaPhotometry],
         }
     }
 
@@ -3231,7 +3235,8 @@ pub unsafe extern "C" fn seiza_catalog_status_json(
 /// Downloads and installs a solver-ready Seiza catalog preset.
 ///
 /// Preset `0` is the standard G≤17 blind-solving package, `1` is the optional
-/// G≤20 package, and `2` installs every published catalog. The call is
+/// G≤20 package, `2` installs every published catalog, and `3` installs only
+/// the Gaia photometry catalog that colour calibration reads. The call is
 /// synchronous and must run off the UI thread. Progress JSON is valid only for
 /// the duration of each callback.
 ///
@@ -10741,6 +10746,16 @@ mod tests {
         let deepest = CatalogSetupPreset::DeepestBlind.datasets();
         assert!(deepest.contains(&Dataset::StarsDeepGaia20));
         assert!(!deepest.contains(&Dataset::StarsDeepGaia17));
+
+        assert_eq!(
+            CatalogSetupPreset::from_raw(3).unwrap().datasets(),
+            [Dataset::GaiaPhotometry]
+        );
+        assert!(
+            CatalogSetupPreset::All
+                .datasets()
+                .contains(&Dataset::GaiaPhotometry)
+        );
 
         let all = CatalogSetupPreset::All.datasets();
         assert!(all.len() > standard.len());

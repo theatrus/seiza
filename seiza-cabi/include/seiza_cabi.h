@@ -1308,7 +1308,8 @@ char *seiza_catalog_status_json(const char *catalog_directory, char **error_out)
  Downloads and installs a solver-ready Seiza catalog preset.
 
  Preset `0` is the standard G≤17 blind-solving package, `1` is the optional
- G≤20 package, and `2` installs every published catalog. The call is
+ G≤20 package, `2` installs every published catalog, and `3` installs only
+ the Gaia photometry catalog that colour calibration reads. The call is
  synchronous and must run off the UI thread. Progress JSON is valid only for
  the duration of each callback.
 

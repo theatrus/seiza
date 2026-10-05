@@ -151,7 +151,8 @@ exposes the **superset** of what both apps need.
   upgrade changes the output for identical inputs.
 - **Plate solving** — `seiza_solve_image_json`.
 - **Catalog setup** — `seiza_catalog_status_json` and `seiza_catalog_setup`
-  (with a progress callback). The install path delegates to
+  (with a progress callback). Preset `3` installs only the Gaia photometry
+  catalog that colour calibration reads. The install path delegates to
   `seiza-download`'s `materialize_with`; the shim carries no download logic.
 - **Memory** — `seiza_core_version`, `seiza_string_free`.
 

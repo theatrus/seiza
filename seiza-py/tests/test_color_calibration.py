@@ -65,3 +65,19 @@ def test_calibrate_color_refuses_a_mono_image_and_too_few_stars():
         seiza.calibrate_color(image[..., 0].copy(), wcs, gaia)
     with pytest.raises(ValueError):
         seiza.calibrate_color(image, wcs, gaia[:5])
+
+
+def test_calibrate_color_takes_a_bp_rp_colour_as_the_offline_catalog_gives():
+    image, wcs, gaia = synthetic_field()
+    offline = [
+        {"ra": row["ra"], "dec": row["dec"], "pmra": None, "pmdec": None,
+         "g": row["g"], "bp_rp": row["bp"] - row["rp"]}
+        for row in gaia
+    ]
+    online = seiza.calibrate_color(image, wcs, gaia).gains
+    assert seiza.calibrate_color(image, wcs, offline).gains == pytest.approx(online)
+
+
+def test_gaia_photometry_catalog_cone_reports_a_missing_catalog(tmp_path):
+    with pytest.raises(ValueError):
+        seiza.gaia_photometry_catalog_cone(tmp_path / "absent.bin", 56.75, 24.1, 1.0)

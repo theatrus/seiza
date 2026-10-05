@@ -737,6 +737,13 @@ class ColorCalibration:
 def gaia_photometry_cone(
     ra: float, dec: float, radius_deg: float, max_mag: float = 15.0
 ) -> list[dict[str, float | None]]: ...
+def gaia_photometry_catalog_cone(
+    path: str | Path,
+    ra: float,
+    dec: float,
+    radius_deg: float,
+    max_mag: float = 15.0,
+) -> list[dict[str, float | None]]: ...
 def calibrate_color(
     image: npt.NDArray[np.float32],
     wcs: Wcs,

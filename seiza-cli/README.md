@@ -155,7 +155,15 @@ fluxes. The fluxes differ instead. For 60 isolated stars SPCC's PSF photometry
 reports R/G 0.712, while apertures from 4 to 36 px all give 0.667–0.697.
 
 The offline catalog is built from Gaia DR3 itself (CC BY-SA 3.0 IGO), not from
-PixInsight's databases. `scripts/build-gaia-photometry.sh` downloads G, BP, RP
+PixInsight's databases. Seiza hosts a prebuilt copy (about 460 MB, downloaded zstd-compressed) that is
+not part of the standard bundle; install it with setup or by name:
+
+```
+seiza setup --preset solver-lite --gaia-photometry
+seiza download-data prebuilt --output data --file stars-gaia-photometry.bin
+```
+
+To build it yourself, `scripts/build-gaia-photometry.sh` downloads G, BP, RP
 and RUWE for every source to G 15 in 768 resumable chunks and builds the
 catalog, about 470 MB; it takes a few hours and can run unattended. Copy the
 result into Seiza's catalog directory (`$SEIZA_CATALOG_DIR`, or
@@ -450,6 +458,8 @@ seiza download-data prebuilt --output data --file objects.bin --file transients.
 # for deep blind solving.
 seiza download-data prebuilt --output data \
   --file stars-deep-gaia20.bin --file blind-gaia16.idx
+# The optional Gaia photometry catalog for colour calibration is explicit too.
+seiza download-data prebuilt --output data --file stars-gaia-photometry.bin
 ```
 
 The other `download-data` subcommands acquire upstream source material for

@@ -202,6 +202,9 @@ from astropy.io import fits
 header = fits.getheader("stack.fits")
 wcs = seiza.Wcs.from_header(header)
 gaia = seiza.gaia_photometry_cone(56.75, 24.10, radius_deg=4.8)  # ESA archive; keep it
+# Or offline, from the hosted catalog (about 460 MB, fetched once):
+path = seiza.fetch_catalogs(["stars-gaia-photometry.bin"])["stars-gaia-photometry.bin"]
+gaia = seiza.gaia_photometry_catalog_cone(path, 56.75, 24.10, radius_deg=4.8)
 calibration = seiza.calibrate_color(rgb, wcs, gaia)               # rgb: (h, w, 3) float32
 print(calibration.gains, calibration.red_fit, calibration.blue_fit)
 calibrated = calibration.apply(rgb)

@@ -15,6 +15,10 @@ pub(crate) struct SetupArgs {
     /// Catalog package to install without prompting for a selection
     #[arg(long, value_enum)]
     preset: Option<SetupPreset>,
+    /// Also install the Gaia DR3 photometry catalog (~460 MB) that
+    /// `seiza color-calibrate` uses offline
+    #[arg(long)]
+    gaia_photometry: bool,
     /// Directory that receives the selected files (defaults to SEIZA_CATALOG_DIR when set)
     #[arg(long)]
     output: Option<PathBuf>,
@@ -98,6 +102,7 @@ impl SetupPreset {
                 Dataset::StarsDeepGaia17,
                 Dataset::StarsDeepGaia20,
                 Dataset::BlindGaia16,
+                Dataset::GaiaPhotometry,
             ],
         };
         datasets
@@ -121,7 +126,7 @@ impl SetupPreset {
                 "Faintest deep solving (large, ~9 GB): objects + Solar System + transients + G≤20 Gaia catalog + blind index"
             }
             Self::All => {
-                "Development and offline use: every published catalog, including the large G≤20 deep catalog (slower, ~9 GB extra)"
+                "Development and offline use: every published catalog, including the large G≤20 deep catalog (slower, ~9 GB extra) and Gaia photometry for colour calibration"
             }
         }
     }
@@ -179,7 +184,16 @@ fn run_setup(args: SetupArgs) -> Result<()> {
             }
         };
 
+        let mut files = preset.files();
+        let photometry = Dataset::GaiaPhotometry.file_name().to_string();
+        if args.gaia_photometry && !files.contains(&photometry) {
+            files.push(photometry);
+        }
+
         println!("Selection : {}", preset.description());
+        if args.gaia_photometry && preset != SetupPreset::All {
+            println!("          + Gaia photometry for colour calibration");
+        }
         println!("Directory : {}", output.display());
         println!("Downloads are SHA-256 verified and safe to retry.\n");
 
@@ -197,7 +211,7 @@ fn run_setup(args: SetupArgs) -> Result<()> {
             }
         }
 
-        crate::run_prebuilt_download(output.clone(), preset.files())?;
+        crate::run_prebuilt_download(output.clone(), files)?;
         println!("\nSuccess! Catalog setup is complete.");
         println!("Catalogs are ready in {}.", output.display());
         println!("Seiza's ASTAP-compatible solver mode will discover them automatically.");
@@ -261,6 +275,9 @@ fn elevated_parameters(args: &SetupArgs) -> Vec<u16> {
     if let Some(preset) = args.preset {
         arguments.push(OsString::from("--preset"));
         arguments.push(OsString::from(preset.cli_name()));
+    }
+    if args.gaia_photometry {
+        arguments.push(OsString::from("--gaia-photometry"));
     }
     if args.yes {
         arguments.push(OsString::from("--yes"));

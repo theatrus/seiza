@@ -650,8 +650,9 @@ fn solve_blind(
 
 fn dataset_by_file_name(name: &str) -> PyResult<seiza::downloads::Dataset> {
     use seiza::downloads::Dataset;
-    const ALL: [Dataset; 9] = [
+    const ALL: [Dataset; 10] = [
         Dataset::BlindGaia16,
+        Dataset::GaiaPhotometry,
         Dataset::MinorBodies,
         Dataset::Objects,
         Dataset::StarsDeepGaia17,
