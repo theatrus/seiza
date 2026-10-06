@@ -973,13 +973,27 @@ impl ObjectCatalog {
         wcs: &Wcs,
         dimensions: (u32, u32),
     ) -> Result<Vec<PlacedObject>, ObjectQueryError> {
+        let mut placed = self.query_footprint(wcs, dimensions, &ObjectQuery::default())?;
+        placed.sort_by(|a, b| b.semi_major_px.total_cmp(&a.semi_major_px));
+        Ok(placed)
+    }
+
+    /// Objects matching `query` whose extent intersects a solved image, with
+    /// pixel geometry, in the query's sort order. The limit applies before
+    /// projection, so fewer objects may come back.
+    pub fn query_footprint(
+        &self,
+        wcs: &Wcs,
+        dimensions: (u32, u32),
+        query: &ObjectQuery,
+    ) -> Result<Vec<PlacedObject>, ObjectQueryError> {
         let (width, height) = (dimensions.0 as f64, dimensions.1 as f64);
         let scale = wcs.scale_arcsec_per_px();
         let region = SkyRegion::Polygon {
             vertices: wcs.footprint(dimensions.0, dimensions.1).to_vec(),
         };
-        let mut placed: Vec<PlacedObject> = self
-            .query_region(&region, &ObjectQuery::default())?
+        let placed: Vec<PlacedObject> = self
+            .query_region(&region, query)?
             .into_iter()
             .filter_map(|hit| {
                 let o = hit.object;
@@ -1009,7 +1023,6 @@ impl ObjectCatalog {
                 })
             })
             .collect();
-        placed.sort_by(|a, b| b.semi_major_px.total_cmp(&a.semi_major_px));
         Ok(placed)
     }
 }

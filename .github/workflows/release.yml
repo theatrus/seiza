@@ -147,7 +147,7 @@ jobs:
           # portable zip carries its own copy so unpacking is enough. Copied
           # after signing, so the copy carries the same signature.
           Copy-Item target/release/seiza.exe target/release/astap.exe -Force
-          Compress-Archive -Path target/release/seiza.exe, target/release/astap.exe, README.md, LICENSE -DestinationPath "dist/seiza-cli-$version-windows-x86_64.zip"
+          Compress-Archive -Path target/release/seiza.exe, target/release/astap.exe, README.md, LICENSE, seiza-cli/fonts/LICENSE-Inter.txt -DestinationPath "dist/seiza-cli-$version-windows-x86_64.zip"
           dotnet build packaging/windows/seiza.wixproj -c Release -p:SeizaVersion=$version
           # Hand the absolute paths to the later steps. The signing action is
           # not a shell and cannot work the version out for itself, and this

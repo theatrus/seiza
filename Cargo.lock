@@ -2358,6 +2358,7 @@ dependencies = [
 name = "seiza-cli"
 version = "0.21.0"
 dependencies = [
+ "ab_glyph",
  "anyhow",
  "chrono",
  "clap",

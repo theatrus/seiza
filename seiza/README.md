@@ -41,6 +41,15 @@ astrophotography, in Rust.
   `object_details`, `catalog_records`, `geometries`, `relations`, and
   `capabilities`, without touching normal query paths. Legacy `SEIZAOB1` and
   `SEIZAOB3` files remain readable.
+- **Constellation figures** — `seiza::constellations` embeds stick figures
+  for all 88 IAU constellations (697 Bright Star Catalogue stars, positions
+  at epoch 2025.5), their names, and a label point for each.
+  `project_figures` turns them into pixel polylines through a `Wcs`,
+  following great circles, skipping sky behind the tangent plane, and
+  clipping to the image so lines run to its edge. It returns pixels only, so
+  any renderer can draw them. `StarIdentifierCatalog::names_in_cone` finds
+  named stars in a field, and `ObjectCatalog::query_footprint` places
+  filtered, sorted objects in a solved image.
 - **Catalog path resolution** — `seiza::data_paths` finds catalog files the
   same way the CLI does. Give a resolver a file and it uses that file. Give
   it a directory and it picks the right file inside (the deepest star
@@ -76,3 +85,8 @@ focused crate when a native host does not need plate solving.
 ## License
 
 Apache-2.0
+
+The embedded constellation figures are the Constellation Lines dataset by Marc
+van der Sluys (2005-2023), hemel.waarnemen.com. DOI: 10.5281/zenodo.10397192.
+Licensed under CC BY 4.0; show `seiza::constellations::ATTRIBUTION` wherever
+the figures appear. See `data/constellation-lines/README.md`.

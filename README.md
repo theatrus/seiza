@@ -143,6 +143,7 @@ below, and **—** means that surface does not expose the feature.
 | WCS and SIP solution output | ✓ | ✓ | ✓ |
 | Pixel/world transforms and FITS WCS cards | ✓ | ✓ | — |
 | Solve-time star, deep-sky, transient, and Solar System annotations | ✓ | — | ✓ |
+| Constellation figures projected through a WCS | ✓ | — | — |
 | Verified catalog download and setup | ✓ | ✓ | ✓ |
 | FITS, XISF, and raster decoding and rendering | ✓ | — | ✓ |
 | Parameterized display stretching | ✓ | ✓ | ✓ |
@@ -228,6 +229,7 @@ seiza solve-blind image.jpg --data data --min-scale 0.5 --max-scale 15
 seiza solve image.fits --data data --scale 1.26 --objects data
 seiza solve integration.xisf --data data --scale 1.26 --objects data
 seiza solve image.fits --data data --scale 1.26 --satellites-celestrak --annotate tracks.png
+seiza solve-blind phone.jpg --data data --sip-order 2 --sky-map sky-map.png --sky-map-foreground
 seiza catalog object --data data "Andromeda Galaxy"
 seiza catalog objects --data data --ra 10.6848 --dec 41.2691 --radius 3 --format json
 seiza catalog star --data data "TYC 5949-2777-1" --format json
@@ -657,6 +659,12 @@ seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-
 - **Satellite track prediction** — single-exposure tracks from current or
   historical OMM/TLE element sets, with annotated overlays, in
   `seiza-satellites`.
+- **Sky maps** — `--sky-map` on `solve` and `solve-blind` draws constellation
+  figures, IAU-named stars, and deep-sky objects over the solved image, with
+  a title bar and solve statistics
+  ([example](docs/images/phone/phone-sky-map.jpg)). `--sky-map-foreground`
+  leaves out marks on the ground in a photo with a horizon. The figures,
+  built into `seiza::constellations`, need no download.
 - **Packages & CI** — crates.io releases, a guided
   [Windows MSI installer](packaging/windows/README.md), Fedora RPMs and
   Ubuntu debs on GitHub releases, and an integration suite that solves real
@@ -774,3 +782,10 @@ change, not a breaking one.
 ## License
 
 Apache-2.0
+
+The constellation figures embedded in `seiza` are the Constellation Lines
+dataset by Marc van der Sluys (2005-2023), hemel.waarnemen.com. DOI:
+10.5281/zenodo.10397192. Licensed under CC BY 4.0
+([details](seiza/data/constellation-lines/README.md)). The sky map's labels
+use the Inter typeface, licensed under the SIL Open Font License 1.1
+([details](seiza-cli/fonts/README.md)).

@@ -50,6 +50,7 @@ anyhow = "1"
 async-compression = { version = "0.4.42", features = ["tokio", "zstd"] }
 clap = { version = "4", features = ["derive"] }
 imageproc = "0.27"
+ab_glyph = "0.2.32"
 flate2 = "1"
 tar = "0.4"
 fs2 = "0.4"

@@ -44,6 +44,11 @@ seiza image-info phone.jpg
 seiza solve-blind phone.jpg --data data --sip-order 2 \
   --annotate solved.png --wcs solved.wcs
 
+# A labelled chart: constellation figures, named stars, deep-sky objects,
+# with marks on the ground below the horizon left out
+seiza solve-blind phone.jpg --data data --sip-order 2 --sky-map sky-map.png \
+  --sky-map-foreground
+
 # Annotate detections or list objects in a solved field
 seiza detect image.jpg --annotate out.png
 seiza solve image.jpg --data data ... --objects data
@@ -139,6 +144,46 @@ Blind-solved in 2.02s:
 catalog stars (red). Fields wider than 10° across the diagonal, such as phone
 and camera-lens frames, get small markers and up to 600 catalog stars;
 narrower telescope fields get larger markers and 300 stars.
+
+### Sky map
+
+`--sky-map <out.png>` on `solve` and `solve-blind` writes a chart of the
+solved image (EXIF-oriented, as loaded) for sharing. FITS and XISF images
+get an automatic display stretch, in colour when the file has colour:
+
+- constellation stick figures (light blue) and constellation names;
+- stars with IAU proper names down to magnitude 4.5 (gold), plus figure
+  stars of magnitude 3 or brighter without one, by Bayer designation
+  ("Gamma Cas", "Eta Cen"); the brightest 28 get labels;
+- the 14 most prominent deep-sky objects (cyan), with common names,
+  catalog ellipses for large ones, and "(edge)" when only the extent
+  reaches the frame;
+- a title bar, and a footer with matched stars, SIP order, pixel scale, RMS,
+  field centre and the line-data credit.
+
+Labels go where they overlap nothing placed before them, brightest stars
+first, and are dropped when nowhere fits. `--sky-map-width` sets the width,
+from 640 to 12000 pixels (default 2100).
+
+`--sky-map-foreground` is for a photo with a horizon, trees or buildings in
+it: marks below the lowest detected stars that a catalog star confirms are
+left out, and figure lines fade there. It looks only at fields over 10°
+across, and only where the stars stop well short of the bottom of the frame
+across several neighbouring columns, so a frame with stars everywhere loses
+nothing. A named star the image shows is kept even below that line. The
+footer says when marks were left out.
+
+Star names come from the star-identifier sidecar and objects from
+`objects.bin`, found next to `--data` or in the standard places (`solve
+--objects` picks the object file); without them the map still has the
+figures. Catalog marks show where things are, not that they were detected.
+
+![Sky map of the phone frame](../docs/images/phone/phone-sky-map.jpg)
+
+The figures are the Constellation Lines dataset by Marc van der Sluys
+(2005-2023), hemel.waarnemen.com. DOI: 10.5281/zenodo.10397192. Licensed under
+CC BY 4.0. Labels use the Inter typeface (SIL Open Font License 1.1, see
+[`fonts/`](fonts/README.md)).
 
 EXIF Orientation is distinct from camera pointing. GPSImgDirection and its
 magnetic/true-north reference are reported but do not seed the solver; the
