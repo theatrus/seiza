@@ -143,7 +143,10 @@ Blind-solved in 2.02s:
 `--annotate` on `solve` and `solve-blind` circles detected stars (green) and
 catalog stars (red). Fields wider than 10° across the diagonal, such as phone
 and camera-lens frames, get small markers and up to 600 catalog stars;
-narrower telescope fields get larger markers and 300 stars.
+narrower telescope fields get larger markers and 300 stars. Annotated
+images, like sky maps, are pictures to look at: FITS and XISF input is drawn
+from an automatic display stretch, in colour when the file has colour,
+whatever `--detection-backend` the solve used.
 
 ### Sky map
 

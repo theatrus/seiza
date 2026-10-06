@@ -2150,7 +2150,7 @@ fn detect(
     }
 
     if let Some(out) = annotate {
-        let mut canvas = img.to_rgb8();
+        let mut canvas = display_photo(path, &img)?.into_owned();
         for star in &stars {
             let radius = (star.area as f32).sqrt().max(6.0) as i32 + 4;
             imageproc::drawing::draw_hollow_circle_mut(
@@ -3177,7 +3177,7 @@ fn solve_command(
     };
 
     if let Some(out) = annotate {
-        let mut canvas = img.to_rgb8();
+        let mut canvas = display_photo(path, &img)?.into_owned();
         draw_star_overlay(&mut canvas, invocation.stars(), &catalog, wcs, dims);
         for p in &placed {
             let (semi_major_px, semi_minor_px, angle_deg) = object_outline(p);
@@ -3261,7 +3261,7 @@ impl SkyMapRequest<'_> {
         } else {
             None
         };
-        let photo = sky_map_photo(image_path, invocation.image)?;
+        let photo = display_photo(image_path, invocation.image)?;
         let summary = sky_map::SolveSummary {
             name: image_path
                 .file_stem()
@@ -3320,11 +3320,11 @@ fn sky_map_foreground(
     }))
 }
 
-/// The pixels a sky map is drawn on. Rasters are used as loaded. FITS and
-/// XISF get an automatic display stretch whatever the detection backend,
-/// in colour when the file has colour (RGB planes, or a CFA mosaic,
-/// debayered).
-fn sky_map_photo<'a>(
+/// The pixels an annotated image or sky map is drawn on. Rasters are used
+/// as loaded. FITS and XISF get an automatic display stretch whatever the
+/// detection backend, in colour when the file has colour (RGB planes, or a
+/// CFA mosaic, debayered): the output is a picture to look at, never data.
+fn display_photo<'a>(
     path: &std::path::Path,
     image: &'a LoadedImage,
 ) -> Result<std::borrow::Cow<'a, image::RgbImage>> {
@@ -3854,7 +3854,7 @@ fn solve_blind_command(
         println!("WCS written to {} (EXIF-oriented pixels)", path.display());
     }
     if let Some(path) = options.annotate {
-        let mut canvas = img.to_rgb8();
+        let mut canvas = display_photo(path, &img)?.into_owned();
         draw_star_overlay(&mut canvas, invocation.stars(), &catalog, wcs, dims);
         canvas
             .save(path)
@@ -4136,7 +4136,7 @@ mod cli_tests {
         assert!(star[0] > star[1] + 50 && star[0] > star[2] + 50, "{star:?}");
         for backend in [DetectBackend::U8, DetectBackend::F32] {
             let loaded = load_image(&path, backend).unwrap();
-            let shown = sky_map_photo(&path, &loaded).unwrap();
+            let shown = display_photo(&path, &loaded).unwrap();
             assert_eq!(shown.as_ref(), &photo);
         }
     }
