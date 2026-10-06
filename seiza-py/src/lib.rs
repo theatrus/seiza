@@ -749,6 +749,40 @@ mod tests {
     }
 }
 
+/// Read the EXIF fields of a JPEG, TIFF, HEIF, PNG or WebP file that help a
+/// plate solve: capture time (UTC, from the original time and its offset or
+/// from the GPS stamps), GPS position, and the 35 mm-equivalent focal
+/// length. Missing or damaged EXIF gives empty fields and `warnings`, never
+/// an error.
+///
+/// Pass the decoded image's `width` and `height` (after applying its EXIF
+/// orientation, as `PIL.ImageOps.exif_transpose` does) to also get
+/// `scale_hint` and `scale_ranges`: the pixel-scale ranges, in arcseconds
+/// per pixel, to try in order with :func:`solve_blind`.
+#[pyfunction]
+#[pyo3(signature = (path, width=None, height=None))]
+fn read_photo_metadata(
+    py: Python<'_>,
+    path: PathBuf,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> PyResult<PyObject> {
+    use seiza::raster::{PhotoMetadata, ScaleSearch};
+    let metadata = PhotoMetadata::read(&path);
+    let mut value = serde_json::to_value(&metadata)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    if let (Some(width), Some(height)) = (width, height) {
+        let search = ScaleSearch::new(&metadata, (width, height), None, None)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        value["scale_hint"] = serde_json::to_value(metadata.scale_hint((width, height)))
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        value["scale_ranges"] = serde_json::to_value(search.ranges)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    }
+    let json = py.import("json")?;
+    Ok(json.call_method1("loads", (value.to_string(),))?.unbind())
+}
+
 #[pymodule]
 #[pyo3(name = "seiza")]
 fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -766,6 +800,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solve, m)?)?;
     m.add_function(wrap_pyfunction!(solve_blind, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_catalogs, m)?)?;
+    m.add_function(wrap_pyfunction!(read_photo_metadata, m)?)?;
     color::register(m)?;
     color_calibration::register(m)?;
     deconvolution::register(m)?;

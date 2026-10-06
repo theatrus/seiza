@@ -5,6 +5,7 @@ use seiza::catalog::{StarCatalog, TileCatalog};
 use seiza::data_paths;
 use seiza::minor_bodies::MinorBodyCatalog;
 use seiza::objects::{ObjectCatalog, ObjectKind, ObjectQuery, ObjectSort, SkyRegion};
+use seiza::raster::{self, PhotoMetadata, ScaleSearch};
 use seiza::solve::{SolveHint, solve};
 use seiza::star_ids::{StarIdentifierCatalog, StarLookupMatch};
 use seiza::{DetectBackend, DetectConfig, DetectedStar};
@@ -24,7 +25,6 @@ mod deconvolution;
 mod master;
 mod preview;
 mod provenance;
-mod raster;
 mod setup;
 mod solve_field;
 mod stack;
@@ -183,7 +183,7 @@ pub(crate) fn load_image(path: &std::path::Path, backend: DetectBackend) -> Resu
             buffer,
         )));
     }
-    raster::open(path)
+    raster::open_oriented(path)
         .map(|image| LoadedImage::Dynamic(image.pixels))
         .with_context(|| format!("failed to open {}", path.display()))
 }
@@ -1123,8 +1123,14 @@ fn main() -> Result<()> {
         Command::Setup(args) => setup::run(args),
         Command::InstallSolveField { dir } => solve_field::install_layout(&dir),
         Command::ImageInfo { image } => {
-            let loaded = raster::open(&image)?;
-            let metadata = raster::read_metadata(&image);
+            anyhow::ensure!(
+                !is_astronomy_image_path(&image),
+                "image-info describes JPEG, PNG and TIFF files; {} is FITS or XISF, whose headers carry this instead",
+                image.display()
+            );
+            let loaded = raster::open_oriented(&image)
+                .with_context(|| format!("failed to open {}", image.display()))?;
+            let metadata = PhotoMetadata::read(&image);
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -2535,7 +2541,7 @@ fn resolve_acquisition_jd(image: &std::path::Path, time: Option<&str>) -> Result
                         .and_then(|(_, v)| v.as_str().map(str::to_string))
                 })
             } else {
-                raster::read_metadata(image).capture_time_utc
+                PhotoMetadata::read(image).capture_time_utc
             }
         }
     };
@@ -2599,7 +2605,7 @@ fn resolve_single_exposure(
             explicit_start.is_some() && explicit_duration.is_some(),
             "raster satellite tracks require explicit --time and --exposure-seconds for one continuous exposure; JPEG EXIF does not establish a shutter interval"
         );
-        let metadata = raster::read_metadata(image);
+        let metadata = PhotoMetadata::read(image);
         let use_gps = explicit_latitude.is_none() && explicit_longitude.is_none();
         return resolve_single_exposure_from_headers(
             &[],
@@ -3097,30 +3103,7 @@ fn solve_command(
 
     if let Some(out) = annotate {
         let mut canvas = img.to_rgb8();
-        for star in invocation.stars() {
-            imageproc::drawing::draw_hollow_circle_mut(
-                &mut canvas,
-                (star.x.round() as i32, star.y.round() as i32),
-                10,
-                image::Rgb([64, 255, 64]),
-            );
-        }
-        let fov = (dims.0 as f64).hypot(dims.1 as f64) / 2.0 * wcs.scale_arcsec_per_px() / 3600.0;
-        for cat_star in catalog.cone_search(ra, dec, fov, 300) {
-            if let Some((x, y)) = wcs.world_to_pixel(cat_star.ra, cat_star.dec)
-                && x >= 0.0
-                && y >= 0.0
-                && x < dims.0 as f64
-                && y < dims.1 as f64
-            {
-                imageproc::drawing::draw_hollow_circle_mut(
-                    &mut canvas,
-                    (x.round() as i32, y.round() as i32),
-                    6,
-                    image::Rgb([255, 64, 64]),
-                );
-            }
-        }
+        draw_star_overlay(&mut canvas, invocation.stars(), &catalog, wcs, dims);
         for p in &placed {
             // An asymmetric extent with an unknown position angle must not be
             // drawn at a guessed orientation; fall back to the conservative
@@ -3376,6 +3359,103 @@ struct SolveBlindOptions<'a> {
     wcs_path: Option<&'a std::path::Path>,
 }
 
+/// Try each pixel-scale range in turn until one solves, so a narrow EXIF
+/// range that misses (a crop, an eyepiece) falls back to the wide one.
+fn solve_over_ranges<T>(
+    ranges: &[(f64, f64)],
+    mut solve: impl FnMut((f64, f64)) -> std::result::Result<T, seiza::Error>,
+) -> std::result::Result<T, seiza::Error> {
+    let mut last = None;
+    for (attempt, &range) in ranges.iter().enumerate() {
+        if attempt > 0 {
+            eprintln!(
+                "no solution in the EXIF focal-length range; retrying {:.3}–{:.3}\"/px",
+                range.0, range.1
+            );
+        }
+        match solve(range) {
+            Err(seiza::Error::Solve(message)) => last = Some(seiza::Error::Solve(message)),
+            other => return other,
+        }
+    }
+    Err(last.unwrap_or_else(|| seiza::Error::Solve("no pixel-scale range to search".into())))
+}
+
+/// Marker sizes for the star overlay on an annotated solve.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct StarOverlayStyle {
+    detected_radius: i32,
+    catalog_radius: i32,
+    catalog_limit: usize,
+    detected_color: image::Rgb<u8>,
+    catalog_color: image::Rgb<u8>,
+}
+
+impl StarOverlayStyle {
+    /// Fields wider than this many degrees across the diagonal (a phone or
+    /// camera lens rather than a telescope) get the wide-field style.
+    const WIDE_FIELD_DIAGONAL_DEG: f64 = 10.0;
+
+    /// Small, dense markers for wide fields, where stars are a few pixels
+    /// apart and more catalog stars fit; larger, sparser ones otherwise.
+    fn for_field(diagonal_deg: f64) -> Self {
+        if diagonal_deg > Self::WIDE_FIELD_DIAGONAL_DEG {
+            Self {
+                detected_radius: 6,
+                catalog_radius: 4,
+                catalog_limit: 600,
+                detected_color: image::Rgb([0, 255, 0]),
+                catalog_color: image::Rgb([255, 0, 0]),
+            }
+        } else {
+            Self {
+                detected_radius: 10,
+                catalog_radius: 6,
+                catalog_limit: 300,
+                detected_color: image::Rgb([64, 255, 64]),
+                catalog_color: image::Rgb([255, 64, 64]),
+            }
+        }
+    }
+}
+
+/// Circle the detected stars and the catalog stars the solution places on
+/// the image, choosing marker sizes by the field's width.
+fn draw_star_overlay(
+    canvas: &mut image::RgbImage,
+    detected: &[DetectedStar],
+    catalog: &dyn StarCatalog,
+    wcs: &seiza::Wcs,
+    dims: (u32, u32),
+) {
+    let diagonal_deg = (dims.0 as f64).hypot(dims.1 as f64) * wcs.scale_arcsec_per_px() / 3600.0;
+    let style = StarOverlayStyle::for_field(diagonal_deg);
+    for star in detected {
+        imageproc::drawing::draw_hollow_circle_mut(
+            canvas,
+            (star.x.round() as i32, star.y.round() as i32),
+            style.detected_radius,
+            style.detected_color,
+        );
+    }
+    let (ra, dec) = wcs.pixel_to_world(dims.0 as f64 / 2.0, dims.1 as f64 / 2.0);
+    for star in catalog.cone_search(ra, dec, diagonal_deg / 2.0, style.catalog_limit) {
+        if let Some((x, y)) = wcs.world_to_pixel(star.ra, star.dec)
+            && x >= 0.0
+            && y >= 0.0
+            && x < dims.0 as f64
+            && y < dims.1 as f64
+        {
+            imageproc::drawing::draw_hollow_circle_mut(
+                canvas,
+                (x.round() as i32, y.round() as i32),
+                style.catalog_radius,
+                style.catalog_color,
+            );
+        }
+    }
+}
+
 fn solve_blind_command(
     path: &std::path::Path,
     data: &std::path::Path,
@@ -3385,18 +3465,20 @@ fn solve_blind_command(
 
     let img = load_image(path, options.detection_backend)?;
     let dims = img.dimensions();
-    let metadata = raster::read_metadata(path);
+    let metadata = if is_astronomy_image_path(path) {
+        PhotoMetadata::default()
+    } else {
+        PhotoMetadata::read(path)
+    };
     for warning in &metadata.warnings {
         eprintln!("warning: {warning}");
     }
-    let (min_scale, max_scale) =
-        raster::scale_bounds(&metadata, dims, options.min_scale, options.max_scale)?;
+    let search = ScaleSearch::new(&metadata, dims, options.min_scale, options.max_scale)?;
+    let (min_scale, max_scale) = search.ranges[0];
     println!(
         "pixel-scale search: {min_scale:.3}–{max_scale:.3}\"/px{}",
-        if metadata.scale_hint(dims).is_some()
-            && (options.min_scale.is_none() || options.max_scale.is_none())
-        {
-            " (JPEG equivalent focal length; explicit bounds override)"
+        if search.from_exif {
+            " (EXIF equivalent focal length; explicit bounds override)"
         } else {
             ""
         }
@@ -3457,13 +3539,17 @@ fn solve_blind_command(
 
     let started = std::time::Instant::now();
     let solution = invocation.solve_with_pass(|stars, pass| {
-        let attempt_params = blind_params_for_detection_pass(
+        let mut attempt_params = blind_params_for_detection_pass(
             &params,
             can_retry_f32,
             options.detection_fallback_hypotheses,
             pass,
         );
-        solve_blind(stars, &catalog, &index, &attempt_params, dims)
+        solve_over_ranges(&search.ranges, |(min, max)| {
+            attempt_params.min_scale_arcsec_px = min;
+            attempt_params.max_scale_arcsec_px = max;
+            solve_blind(stars, &catalog, &index, &attempt_params, dims)
+        })
     })?;
     let wcs = &solution.wcs;
     let (ra, dec) = wcs.pixel_to_world(dims.0 as f64 / 2.0, dims.1 as f64 / 2.0);
@@ -3484,31 +3570,7 @@ fn solve_blind_command(
     }
     if let Some(path) = options.annotate {
         let mut canvas = img.to_rgb8();
-        for star in invocation.stars() {
-            imageproc::drawing::draw_hollow_circle_mut(
-                &mut canvas,
-                (star.x.round() as i32, star.y.round() as i32),
-                6,
-                image::Rgb([0, 255, 0]),
-            );
-        }
-        let radius =
-            (dims.0 as f64).hypot(dims.1 as f64) / 2.0 * wcs.scale_arcsec_per_px() / 3600.0;
-        for star in catalog.cone_search(ra, dec, radius, 600) {
-            if let Some((x, y)) = wcs.world_to_pixel(star.ra, star.dec)
-                && x >= 0.0
-                && y >= 0.0
-                && x < dims.0 as f64
-                && y < dims.1 as f64
-            {
-                imageproc::drawing::draw_hollow_circle_mut(
-                    &mut canvas,
-                    (x.round() as i32, y.round() as i32),
-                    4,
-                    image::Rgb([255, 0, 0]),
-                );
-            }
-        }
+        draw_star_overlay(&mut canvas, invocation.stars(), &catalog, wcs, dims);
         canvas
             .save(path)
             .with_context(|| format!("failed to write {}", path.display()))?;
@@ -3572,9 +3634,11 @@ fn build_blind_index_command(
 mod cli_tests {
     use super::*;
 
+    use seiza::raster::test_support as exif_jpeg;
+
     fn jpeg_metadata_fixture(dir: &std::path::Path) -> PathBuf {
-        use exif::{Tag, Value};
-        use raster::tests::field;
+        use exif_jpeg::field;
+        use exif_jpeg::{Tag, Value};
         let ascii = |tag, text: &str| field(tag, Value::Ascii(vec![text.as_bytes().to_vec()]));
         let coords =
             |degrees| Value::Rational(vec![(degrees, 1).into(), (0, 1).into(), (0, 1).into()]);
@@ -3582,7 +3646,7 @@ mod cli_tests {
         let image = image::DynamicImage::new_rgb8(32, 24);
         std::fs::write(
             &path,
-            raster::tests::jpeg_with_exif(
+            exif_jpeg::jpeg_with_exif(
                 &image,
                 &[
                     ascii(Tag::DateTimeOriginal, "2026:10:03 19:08:11"),
@@ -3600,6 +3664,67 @@ mod cli_tests {
         )
         .unwrap();
         path
+    }
+
+    #[test]
+    fn a_narrow_range_that_misses_falls_back_to_the_wide_one() {
+        let ranges = [(37.0, 148.0), (0.1, 148.0)];
+        let mut tried = Vec::new();
+        let solved = solve_over_ranges(&ranges, |range| {
+            tried.push(range);
+            if range.0 < 5.0 {
+                Ok("solved")
+            } else {
+                Err(seiza::Error::Solve("no match".into()))
+            }
+        });
+        assert_eq!(solved.unwrap(), "solved");
+        assert_eq!(tried, ranges);
+
+        // The first range that solves ends the search.
+        let mut calls = 0;
+        assert!(
+            solve_over_ranges(&ranges, |_| {
+                calls += 1;
+                Ok(())
+            })
+            .is_ok()
+        );
+        assert_eq!(calls, 1);
+
+        // Only a solve miss moves on; other errors stop at once.
+        let mut calls = 0;
+        let error = solve_over_ranges(&ranges, |_| -> std::result::Result<(), _> {
+            calls += 1;
+            Err(seiza::Error::Catalog("broken".into()))
+        });
+        assert!(matches!(error, Err(seiza::Error::Catalog(_))));
+        assert_eq!(calls, 1);
+
+        // Every range missing reports the last miss.
+        assert!(matches!(
+            solve_over_ranges(&ranges, |_| -> std::result::Result<(), _> {
+                Err(seiza::Error::Solve("no match".into()))
+            }),
+            Err(seiza::Error::Solve(_))
+        ));
+    }
+
+    #[test]
+    fn wide_fields_get_small_dense_overlay_markers() {
+        let phone = StarOverlayStyle::for_field(90.0);
+        let telescope = StarOverlayStyle::for_field(1.5);
+        assert_eq!((phone.detected_radius, phone.catalog_radius), (6, 4));
+        assert_eq!(phone.catalog_limit, 600);
+        assert_eq!(
+            (telescope.detected_radius, telescope.catalog_radius),
+            (10, 6)
+        );
+        assert_eq!(telescope.catalog_limit, 300);
+        assert_eq!(
+            StarOverlayStyle::for_field(StarOverlayStyle::WIDE_FIELD_DIAGONAL_DEG),
+            telescope
+        );
     }
 
     #[test]
@@ -3672,7 +3797,7 @@ mod cli_tests {
 
     #[test]
     fn jpeg_orientation_is_shared_by_detection_and_annotation_pixels() {
-        use exif::{Tag, Value};
+        use exif_jpeg::{Tag, Value};
         let dir = tempfile::tempdir().unwrap();
         let source = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(160, 120, |x, y| {
             let signal = [(40.2, 35.7), (105.5, 80.3), (125.2, 28.4)]
@@ -3690,12 +3815,9 @@ mod cli_tests {
         let raw_path = dir.path().join("normal.jpg");
         std::fs::write(
             &raw_path,
-            raster::tests::jpeg_with_exif(
+            exif_jpeg::jpeg_with_exif(
                 &source,
-                &[raster::tests::field(
-                    Tag::Orientation,
-                    Value::Short(vec![1]),
-                )],
+                &[exif_jpeg::field(Tag::Orientation, Value::Short(vec![1]))],
             ),
         )
         .unwrap();
@@ -3714,9 +3836,9 @@ mod cli_tests {
             let path = dir.path().join(format!("o{orientation}.jpg"));
             std::fs::write(
                 &path,
-                raster::tests::jpeg_with_exif(
+                exif_jpeg::jpeg_with_exif(
                     &source,
-                    &[raster::tests::field(
+                    &[exif_jpeg::field(
                         Tag::Orientation,
                         Value::Short(vec![orientation]),
                     )],

@@ -16,6 +16,7 @@ pub mod minor_bodies;
 mod object_catalog_v3;
 mod object_catalog_v4;
 pub mod objects;
+pub mod raster;
 pub mod solve;
 pub mod star_ids;
 pub mod wcs;

@@ -744,6 +744,9 @@ def gaia_photometry_catalog_cone(
     radius_deg: float,
     max_mag: float = 15.0,
 ) -> list[dict[str, float | None]]: ...
+def read_photo_metadata(
+    path: str | Path, width: int | None = None, height: int | None = None
+) -> dict[str, Any]: ...
 def calibrate_color(
     image: npt.NDArray[np.float32],
     wcs: Wcs,

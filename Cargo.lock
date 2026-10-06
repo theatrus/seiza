@@ -2290,8 +2290,10 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 name = "seiza"
 version = "0.20.0"
 dependencies = [
+ "chrono",
  "directories",
  "image",
+ "kamadak-exif",
  "memmap2",
  "multiversion",
  "postcard",
@@ -2364,7 +2366,6 @@ dependencies = [
  "font8x8",
  "image",
  "imageproc",
- "kamadak-exif",
  "rayon",
  "seiza",
  "seiza-background",

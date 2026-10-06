@@ -13,10 +13,14 @@ categories = ["science", "multimedia::images"]
 
 [features]
 downloads = ["dep:seiza-download"]
+# EXIF JPEG fixture builders for other crates' tests; not a public API.
+test-support = []
 
 [dependencies]
 directories.workspace = true
 image.workspace = true
+chrono.workspace = true
+kamadak-exif.workspace = true
 thiserror.workspace = true
 seiza-download = { workspace = true, optional = true }
 seiza-calibration.workspace = true
