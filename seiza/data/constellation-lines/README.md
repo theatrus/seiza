@@ -20,9 +20,12 @@ hemel.waarnemen.com. DOI: 10.5281/zenodo.10397192. Licensed under CC BY 4.0.
 
 Each data line is one polyline of Bright Star Catalogue (HR) numbers:
 `abbr, count, hr, hr, ...`. A blank abbreviation continues the previous
-constellation (Crux), and Serpens has a line for each of its two parts. Lines
-may retrace themselves; `seiza` joins consecutive stars and keeps each
-segment once.
+constellation (Crux). Serpens has two lines, one for its tail (Cauda) and
+one for its head (Caput); the head's line ends at ν Ser (HR 6446) in the
+tail, so one segment bridges about 24° across Ophiuchus. Lines may retrace
+themselves; `seiza` joins consecutive stars and keeps each segment once.
+`seiza` names Serpens at both parts, since the mean of all its stars falls
+inside Ophiuchus.
 
 ## `line-stars.tsv`
 

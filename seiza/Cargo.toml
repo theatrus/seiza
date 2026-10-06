@@ -4,7 +4,9 @@ description = "Star detection, WCS fitting, and near-field plate solving for ast
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+# Apache-2.0 for the code; the embedded constellation figures
+# (data/constellation-lines) are CC BY 4.0.
+license = "Apache-2.0 AND CC-BY-4.0"
 repository.workspace = true
 authors.workspace = true
 readme = "README.md"

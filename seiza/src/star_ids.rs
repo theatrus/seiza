@@ -971,6 +971,11 @@ impl StarIdentifierCatalog {
     /// IAU proper names in a field. Results are sorted brightest first
     /// (unknown magnitudes last).
     ///
+    /// Each designation is its own record, so without filters one star
+    /// appears several times ("Vega", "Alp Lyr", "HR 7001", WDS pairs...);
+    /// group by [`NamedStar::stable_id`] to get one entry per star.
+    /// Positions are at the sidecar's [`Self::epoch`].
+    ///
     /// The sidecar has no positional index, so this scans the name section
     /// (40 bytes per record), testing catalog, kind and position before
     /// decoding any string.
@@ -983,6 +988,11 @@ impl StarIdentifierCatalog {
     ) -> io::Result<Vec<NamedStar<'_>>> {
         if !radius_deg.is_finite() || radius_deg < 0.0 {
             return Err(invalid_input("cone radius must be finite and non-negative"));
+        }
+        if !center.0.is_finite() || !center.1.is_finite() || !(-90.0..=90.0).contains(&center.1) {
+            return Err(invalid_input(
+                "cone centre must be finite with a declination in [-90, 90]",
+            ));
         }
         let (sin_dec0, cos_dec0) = center.1.to_radians().sin_cos();
         let ra0 = center.0.to_radians();
