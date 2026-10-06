@@ -229,7 +229,7 @@ seiza solve-blind image.jpg --data data --min-scale 0.5 --max-scale 15
 seiza solve image.fits --data data --scale 1.26 --objects data
 seiza solve integration.xisf --data data --scale 1.26 --objects data
 seiza solve image.fits --data data --scale 1.26 --satellites-celestrak --annotate tracks.png
-seiza solve-blind phone.jpg --data data --sip-order 2 --sky-map sky-map.png
+seiza solve-blind phone.jpg --data data --sip-order 2 --sky-map sky-map.png --sky-map-foreground
 seiza catalog object --data data "Andromeda Galaxy"
 seiza catalog objects --data data --ra 10.6848 --dec 41.2691 --radius 3 --format json
 seiza catalog star --data data "TYC 5949-2777-1" --format json
@@ -662,8 +662,9 @@ seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-
 - **Sky maps** — `--sky-map` on `solve` and `solve-blind` draws constellation
   figures, IAU-named stars, and deep-sky objects over the solved image, with
   a title bar and solve statistics
-  ([example](docs/images/phone/phone-sky-map.jpg)). The figures, built into
-  `seiza::constellations`, need no download.
+  ([example](docs/images/phone/phone-sky-map.jpg)). `--sky-map-foreground`
+  leaves out marks on the ground in a photo with a horizon. The figures,
+  built into `seiza::constellations`, need no download.
 - **Packages & CI** — crates.io releases, a guided
   [Windows MSI installer](packaging/windows/README.md), Fedora RPMs and
   Ubuntu debs on GitHub releases, and an integration suite that solves real
