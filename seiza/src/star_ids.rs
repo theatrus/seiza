@@ -966,6 +966,51 @@ impl StarIdentifierCatalog {
         Ok(matches)
     }
 
+    /// Textual designations within `radius_deg` of `center` (ICRS degrees),
+    /// optionally limited to one source catalog and one kind, such as the
+    /// IAU proper names in a field. Results are sorted brightest first
+    /// (unknown magnitudes last).
+    ///
+    /// The sidecar has no positional index, so this scans the name section
+    /// (40 bytes per record), testing catalog, kind and position before
+    /// decoding any string.
+    pub fn names_in_cone(
+        &self,
+        center: (f64, f64),
+        radius_deg: f64,
+        catalog: Option<StarNameCatalog>,
+        kind: Option<StarNameKind>,
+    ) -> io::Result<Vec<NamedStar<'_>>> {
+        if !radius_deg.is_finite() || radius_deg < 0.0 {
+            return Err(invalid_input("cone radius must be finite and non-negative"));
+        }
+        let (sin_dec0, cos_dec0) = center.1.to_radians().sin_cos();
+        let ra0 = center.0.to_radians();
+        let min_cos = radius_deg.min(180.0).to_radians().cos();
+        let mut matches = Vec::new();
+        for index in 0..self.name_count {
+            let entry = self.packed_name_entry(index);
+            if catalog.is_some_and(|catalog| catalog as u8 != entry.catalog)
+                || kind.is_some_and(|kind| kind as u8 != entry.kind)
+            {
+                continue;
+            }
+            let (sin_dec, cos_dec) = unpack_dec(entry.dec).to_radians().sin_cos();
+            let cos_sep = sin_dec0 * sin_dec
+                + cos_dec0 * cos_dec * (unpack_ra(entry.ra).to_radians() - ra0).cos();
+            if cos_sep >= min_cos {
+                matches.push(self.named_star(entry)?);
+            }
+        }
+        matches.sort_by(|a, b| {
+            a.mag
+                .unwrap_or(f32::INFINITY)
+                .total_cmp(&b.mag.unwrap_or(f32::INFINITY))
+                .then_with(|| a.designation.cmp(b.designation))
+        });
+        Ok(matches)
+    }
+
     /// Resolve either a typed numeric identifier or a textual designation.
     pub fn lookup_query(&self, query: &str) -> io::Result<Vec<StarLookupMatch<'_>>> {
         if let Ok(identifier) = query.parse::<StarIdentifier>() {
@@ -1255,6 +1300,41 @@ mod tests {
         let completion = catalog.search_names("v", 5).unwrap();
         assert_eq!(completion.len(), 1);
         assert_eq!(completion[0].designation, "Vega");
+        let near_vega = catalog
+            .names_in_cone((279.0, 39.0), 2.0, None, None)
+            .unwrap()
+            .iter()
+            .map(|star| star.designation)
+            .collect::<Vec<_>>();
+        assert_eq!(near_vega, vec!["Vega", "STF 2382 AB"]);
+        let proper = catalog
+            .names_in_cone(
+                (279.0, 39.0),
+                2.0,
+                Some(StarNameCatalog::IauCatalogOfStarNames),
+                Some(StarNameKind::ProperName),
+            )
+            .unwrap();
+        assert_eq!(proper.len(), 1);
+        assert_eq!(proper[0].designation, "Vega");
+        assert!(
+            catalog
+                .names_in_cone((100.0, -30.0), 5.0, None, None)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            catalog
+                .names_in_cone((0.0, 0.0), 180.0, None, None)
+                .unwrap()
+                .len()
+                == 3
+        );
+        assert!(
+            catalog
+                .names_in_cone((0.0, 0.0), f64::NAN, None, None)
+                .is_err()
+        );
         assert!(matches!(
             catalog.lookup_query("Vega").unwrap().as_slice(),
             [StarLookupMatch::Name(NamedStar {
