@@ -8,7 +8,7 @@ with Inter, embedded in the binary.
   `extras/ttf/Inter-Regular.ttf` and `Inter-SemiBold.ttf`).
 - Licence: SIL Open Font License 1.1, full text in
   [`LICENSE-Inter.txt`](LICENSE-Inter.txt). Inter declares no Reserved Font
-  Name.
+  Name. The Windows zip and MSI, the RPM and the deb all ship that file.
 - Modified: subset to Basic Latin, Latin-1, Latin Extended-A, Greek, general
   punctuation, primes, arrows and the minus sign, with hinting and OpenType
   layout features removed, using

@@ -31,6 +31,9 @@
           </File>
           <File Id="SeizaReadme" Source="$(var.RepoRoot)README.md" />
           <File Id="SeizaLicense" Source="$(var.RepoRoot)LICENSE" />
+          <!-- The sky map embeds the Inter font, whose SIL Open Font
+               License must ship with the program. -->
+          <File Id="SeizaFontLicense" Source="$(var.RepoRoot)seiza-cli\fonts\LICENSE-Inter.txt" />
           <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />
           <RegistryValue
               Root="HKMU"

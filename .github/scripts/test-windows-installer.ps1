@@ -21,6 +21,7 @@ else {
 }
 $installedBinary = Join-Path $installDirectory "seiza.exe"
 $installedAstapBinary = Join-Path $installDirectory "astap.exe"
+$installedFontLicense = Join-Path $installDirectory "LICENSE-Inter.txt"
 $machineCatalogDirectory = Join-Path $env:ProgramData "Seiza\catalogs"
 $programMenuDirectory = if ($Scope -eq "perMachine") {
     Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\Seiza CLI"
@@ -100,6 +101,9 @@ try {
     }
     if (-not (Test-Path -LiteralPath $installedAstapBinary)) {
         throw "ASTAP-compatible copy not found at $installedAstapBinary"
+    }
+    if (-not (Test-Path -LiteralPath $installedFontLicense -PathType Leaf)) {
+        throw "Font licence not found at $installedFontLicense"
     }
     if (-not (Test-Path -LiteralPath $catalogSetupShortcut -PathType Leaf)) {
         throw "Catalog setup shortcut not found at $catalogSetupShortcut"

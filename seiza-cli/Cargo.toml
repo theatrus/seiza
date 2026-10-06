@@ -4,7 +4,9 @@ description = "Command-line interface for seiza: star detection, plate solving, 
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+# Apache-2.0 for the code, OFL-1.1 for the embedded Inter font, and
+# CC-BY-4.0 for the constellation figures the binary carries from seiza.
+license = "Apache-2.0 AND OFL-1.1 AND CC-BY-4.0"
 repository.workspace = true
 authors.workspace = true
 readme = "README.md"
