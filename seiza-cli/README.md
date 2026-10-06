@@ -113,6 +113,28 @@ searches, and a hint bound that conflicts with an explicit one is dropped.
 Without this metadata the previous 0.1–20 arcsec/px defaults apply. SIP
 remains opt-in; compare residuals with and without it.
 
+An iPhone main-camera frame (24 mm equivalent, from
+[#210](https://github.com/theatrus/seiza/pull/210)) solved blind at
+71″/px, with detections in green and Gaia stars in red:
+
+![Phone photo solved blind](../docs/images/phone/phone-solve.jpg)
+
+The same frame cropped to its central 1344×1008 pixels makes the
+focal-length estimate three times too coarse; the first search misses and
+the wide retry solves it at 72″/px:
+
+```
+pixel-scale search: 110.669–442.677"/px (EXIF equivalent focal length; explicit bounds override)
+600 stars detected in 1344x1008 image
+no solution in the EXIF focal-length range; retrying 0.100–442.677"/px
+Blind-solved in 2.02s:
+  center     : 03h 19m 42.05s +70° 56′ 13.5″  (49.92521°, 70.93708°)
+  pixel scale: 72.0169"/px
+  quality    : 106 stars matched, RMS 116.265"
+```
+
+![Cropped phone photo solved after the wide retry](../docs/images/phone/phone-crop-solve.jpg)
+
 `--annotate` on `solve` and `solve-blind` circles detected stars (green) and
 catalog stars (red). Fields wider than 10° across the diagonal, such as phone
 and camera-lens frames, get small markers and up to 600 catalog stars;
