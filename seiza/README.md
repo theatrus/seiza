@@ -22,6 +22,12 @@ astrophotography, in Rust.
   Under 2 seconds per wide-field image including building the whole-sky
   index from a 2.5M-star catalog; a 61 MP FITS frame goes from file open
   to hinted solution in 0.7 s.
+- **Phone and camera photos** — `seiza::raster` opens JPEG, PNG and TIFF
+  files (or upload bytes) upright by applying the EXIF Orientation tag, so
+  every reader shares one pixel frame. `PhotoMetadata` reads the capture
+  time, GPS position and 35 mm-equivalent focal length, and `ScaleSearch`
+  turns the focal length into pixel-scale ranges for a blind solve, with a
+  wide fallback for crops and eyepiece shots.
 - **Star catalogs** — compact memory-mappable tile formats with cone
   search; builders for Tycho-2, Gaia DR3 (via TAP), and ASTAP databases.
 - **Object catalogs** — NGC/IC/Messier, Sharpless, Barnard, UGC, LDN, LBN,

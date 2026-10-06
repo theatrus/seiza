@@ -80,29 +80,43 @@ custom-built catalogs or unusual layouts.
 ### JPEG metadata and pixel coordinates
 
 Raster inputs are decoded and EXIF Orientation is applied once, including
-mirrors and the four transforms that swap width and height. Detection,
-local solving, annotations and exported WCS use the same oriented pixels.
+mirrors and the four transforms that swap width and height. Every command
+that reads a JPEG, PNG or TIFF does this, including the ASTAP and
+`solve-field` drop-ins and the JSON-RPC worker, and so do the C API and the
+desktop apps built on it: detection, solving, annotations, previews and
+exported WCS all use the same upright pixels.
 WCS pixel coordinates in the library are zero-based; the FITS WCS export
 uses FITS' one-based CRPIX convention. Apply the source Orientation before
 overlaying an exported WCS on the original JPEG. Annotated PNGs contain
 already-oriented pixels and must not be rotated a second time.
 
 `image-info` emits JSON containing original/oriented dimensions, the applied
-transform and optional JPEG EXIF fields: camera, acquisition timestamp,
+transform and optional EXIF fields: camera, acquisition timestamp,
 subseconds, timezone offset, GPS position/altitude, heading and focal length.
-Subseconds retain leading zeros. UTC acquisition time is available only
-when DateTimeOriginal has OffsetTimeOriginal; a missing timezone is never
-guessed from GPS or the machine's timezone. An explicit `solve --time`
+It recognizes the file type from its content, not its name, and declines
+FITS and XISF, whose headers carry this instead. Subseconds retain leading
+zeros. The UTC acquisition time comes from DateTimeOriginal with
+OffsetTimeOriginal, or else from the GPS date and time stamps, which are UTC
+by definition (`capture_time_source` says which); the machine's timezone is
+never assumed. An explicit `solve --time`
 overrides the EXIF acquisition hint used for minor bodies. Missing/malformed
 EXIF fields remain optional and do not prevent a stellar solve.
 
 When `solve-blind` scale bounds are omitted and a valid 35mm-equivalent focal
 length is present, the CLI estimates central angular scale from the decoded
-image diagonal and searches between half and twice that estimate. This is a
-broad prior, not a measured field of view: cropping, aspect ratio and lens
-correction affect it. Each explicit `--min-scale` / `--max-scale` overrides
-its corresponding bound. Without this metadata the previous 0.1–20 arcsec/px
-defaults apply. SIP remains opt-in; compare residuals with and without it.
+image diagonal and first searches between half and twice that estimate. The
+estimate assumes the image is the camera's whole frame, so a crop or a phone
+held to an eyepiece can fall outside it; when that first search finds
+nothing, `solve-blind` searches again from 0.1"/px up to the estimate's
+coarse end. Each explicit `--min-scale` / `--max-scale` holds in both
+searches, and a hint bound that conflicts with an explicit one is dropped.
+Without this metadata the previous 0.1–20 arcsec/px defaults apply. SIP
+remains opt-in; compare residuals with and without it.
+
+`--annotate` on `solve` and `solve-blind` circles detected stars (green) and
+catalog stars (red). Fields wider than 10° across the diagonal, such as phone
+and camera-lens frames, get small markers and up to 600 catalog stars;
+narrower telescope fields get larger markers and 300 stars.
 
 EXIF Orientation is distinct from camera pointing. GPSImgDirection and its
 magnetic/true-north reference are reported but do not seed the solver; the

@@ -118,6 +118,26 @@ catalog = seiza.StarCatalog.open(paths["stars-deep-gaia20.bin"])
 index = seiza.BlindIndex.open(paths["blind-gaia16.idx"])
 ```
 
+For phone and camera photos, `read_photo_metadata` reads the EXIF capture
+time, GPS position and focal length. Given the upright image's size (after
+`PIL.ImageOps.exif_transpose`), it also returns `scale_ranges` to try in
+order, the first from the focal length and the last a wide fallback:
+
+```python
+from PIL import Image, ImageOps
+
+image = ImageOps.exif_transpose(Image.open("phone.jpg"))
+info = seiza.read_photo_metadata("phone.jpg", *image.size)
+for min_scale, max_scale in info["scale_ranges"]:
+    try:
+        solution = seiza.solve_blind(stars, catalog, index, *image.size,
+                                     min_scale_arcsec_px=min_scale,
+                                     max_scale_arcsec_px=max_scale)
+        break
+    except seiza.SolveError:
+        continue
+```
+
 ## FITS WCS output
 
 Solutions convert directly to FITS WCS keywords (1-indexed `CRPIX`, TAN or

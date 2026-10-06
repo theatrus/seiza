@@ -44,6 +44,7 @@ pyo3 = { version = "0.25", features = ["abi3-py39"] }
 numpy = "0.25"
 image = { version = "0.25", default-features = false }
 tokio = { version = "1", features = ["rt"] }
+serde_json = "1"
 
 [profile.release]
 lto = true

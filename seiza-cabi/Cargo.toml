@@ -34,4 +34,5 @@ tokio = { workspace = true, features = ["net"] }
 cbindgen = "0.29"
 
 [dev-dependencies]
+seiza = { workspace = true, features = ["test-support"] }
 tempfile = "3"

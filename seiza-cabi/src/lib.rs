@@ -3755,13 +3755,13 @@ pub unsafe extern "C" fn seiza_solve_image_json(
                 let stars = detect_stars_luma_f32(&luma, width, height, &detection_config);
                 (width, height, stars, None, capture_time)
             } else {
-                let image = image::open(&path)
-                    .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
+                let image = open_raster(&path)?;
                 let width = image.width();
                 let height = image.height();
                 let stars = detect_stars(&image, &detection_config);
                 let fallback = is_converted_8bit_color(&image).then_some(image);
-                (width, height, stars, fallback, None)
+                let capture_time = seiza::raster::PhotoMetadata::read(&path).capture_time_utc;
+                (width, height, stars, fallback, capture_time)
             };
         let acquisition_jd = capture_time.as_deref().and_then(parse_iso_jd);
 
@@ -4333,8 +4333,7 @@ fn render_path(
         let (image, format) = open_astronomy_image(path)?;
         render_astronomy_image(image, format, params, max_dimension, rgb_stretch_mode)
     } else {
-        let image = image::open(path)
-            .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
+        let image = open_raster(path)?;
         render_raster(image, raster_format(path), max_dimension)
     }
 }
@@ -4349,10 +4348,17 @@ fn render_path16(
         let (image, format) = open_astronomy_image(path)?;
         render_astronomy_image16(image, format, params, max_dimension, rgb_stretch_mode)
     } else {
-        let image = image::open(path)
-            .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
+        let image = open_raster(path)?;
         render_raster16(image, raster_format(path), max_dimension)
     }
+}
+
+/// Opens a JPEG, PNG or TIFF upright, applying its EXIF orientation, so
+/// solving, rendering and overlays share the frame the CLI uses.
+fn open_raster(path: &Path) -> Result<image::DynamicImage, String> {
+    seiza::raster::open_oriented(path)
+        .map(|raster| raster.pixels)
+        .map_err(|error| format!("failed to open {}: {error}", path.display()))
 }
 
 /// Classifies a FITS image as planar RGB, Bayer-mosaicked, or mono for the
@@ -9971,6 +9977,29 @@ mod tests {
             seiza_string_free(disposition_json);
             seiza_live_stacker_free(stacker);
         }
+    }
+
+    #[test]
+    fn phone_jpegs_render_upright_in_8_and_16_bits() {
+        use seiza::raster::test_support::{Tag, Value, field, jpeg_with_exif};
+        let directory = tempfile::tempdir().unwrap();
+        // Stored 40×30; orientation 6 means the viewer turns it to 30×40.
+        let path = directory.path().join("phone.jpg");
+        std::fs::write(
+            &path,
+            jpeg_with_exif(
+                &image::DynamicImage::new_rgb8(40, 30),
+                &[field(Tag::Orientation, Value::Short(vec![6]))],
+            ),
+        )
+        .unwrap();
+        let image = render_path(&path, &StretchParams::default(), 0, RgbStretchMode::Auto).unwrap();
+        assert_eq!((image.width, image.height), (30, 40));
+        let image16 =
+            render_path16(&path, &StretchParams::default(), 0, RgbStretchMode::Auto).unwrap();
+        assert_eq!((image16.width, image16.height), (30, 40));
+        let raster = open_raster(&path).unwrap();
+        assert_eq!((raster.width(), raster.height()), (30, 40));
     }
 
     #[test]
