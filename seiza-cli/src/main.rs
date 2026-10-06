@@ -3320,16 +3320,81 @@ fn sky_map_foreground(
     }))
 }
 
-/// The pixels a sky map is drawn on, borrowed when they are already RGB.
+/// The pixels a sky map is drawn on. Rasters are used as loaded. FITS and
+/// XISF get an automatic display stretch whatever the detection backend,
+/// in colour when the file has colour (RGB planes, or a CFA mosaic,
+/// debayered).
 fn sky_map_photo<'a>(
-    _path: &std::path::Path,
+    path: &std::path::Path,
     image: &'a LoadedImage,
 ) -> Result<std::borrow::Cow<'a, image::RgbImage>> {
     use std::borrow::Cow;
+    if is_astronomy_image_path(path) {
+        let photo = display_image(path)?;
+        anyhow::ensure!(
+            photo.dimensions() == image.dimensions(),
+            "{}: display image is {:?}, detection image {:?}",
+            path.display(),
+            photo.dimensions(),
+            image.dimensions()
+        );
+        return Ok(Cow::Owned(photo));
+    }
     Ok(match image {
         LoadedImage::Dynamic(image::DynamicImage::ImageRgb8(rgb)) => Cow::Borrowed(rgb),
         other => Cow::Owned(other.to_rgb8()),
     })
+}
+
+/// A FITS or XISF file as an 8-bit RGB picture: the samples mapped to
+/// unit range by robust percentiles, then the median/MAD auto-MTF stretch,
+/// per channel for colour so an unbalanced sky comes out neutral.
+fn display_image(path: &std::path::Path) -> Result<image::RgbImage> {
+    use seiza_stretch::{
+        ColorStrategy, SampleDomain, SampleNormalization, StretchConfig, StretchModel,
+        StretchParams,
+    };
+    let frame = common::open_frame(path, "image")?;
+    let (width, height) = (frame.image.width, frame.image.height);
+    let (mut samples, channels) = match frame.bayer {
+        Some(layout) => (
+            seiza_fits::debayer_rgb_f32(
+                &frame.image.data,
+                width,
+                height,
+                layout.pattern,
+                layout.x_offset,
+                layout.y_offset,
+            )
+            .data,
+            3,
+        ),
+        None => (frame.image.data, frame.image.channels),
+    };
+    SampleDomain::PhysicalLinear {
+        normalization: SampleNormalization::default(),
+    }
+    .resolve(&samples, channels)?
+    .apply_in_place(&mut samples, channels)?;
+    let pixels = StretchConfig {
+        model: StretchModel::AutoMtf(StretchParams::default()),
+        color_strategy: if channels == 3 {
+            ColorStrategy::Unlinked
+        } else {
+            ColorStrategy::Linked
+        },
+        max_analysis_samples: preview::MAXIMUM_SAMPLES,
+    }
+    .resolve_for(&samples, channels)?
+    .apply_u8(&samples, channels)?;
+    drop(samples);
+    let rgb = if channels == 3 {
+        pixels
+    } else {
+        pixels.into_iter().flat_map(|value| [value; 3]).collect()
+    };
+    image::RgbImage::from_raw(width as u32, height as u32, rgb)
+        .ok_or_else(|| anyhow::anyhow!("{}: display image size mismatch", path.display()))
 }
 
 fn draw_satellite_track(canvas: &mut image::RgbImage, track: &SatelliteTrack) {
@@ -4028,6 +4093,52 @@ mod cli_tests {
         assert!((points[0].0 - 100.0).abs() < 1e-9 && (points[0].1 - 90.0).abs() < 1e-9);
         assert!((points[8].0 - points[0].0).abs() < 1e-9);
         assert!((points[2].0 - 90.0).abs() < 1e-9 && (points[2].1 - 50.0).abs() < 1e-9);
+    }
+
+    /// A colour FITS with a green sky comes out in colour on a neutral sky,
+    /// whatever the detection backend.
+    #[test]
+    fn colour_fits_gets_a_neutral_colour_display_stretch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("colour.fits");
+        let (width, height) = (64usize, 48usize);
+        let mut pixels = Vec::with_capacity(width * height * 3);
+        for y in 0..height {
+            for x in 0..width {
+                // A green pedestal with a little texture, and one red star.
+                let noise = ((x * 7 + y * 13) % 11) as f32;
+                let star = if (x as i64 - 20).abs() < 2 && (y as i64 - 30).abs() < 2 {
+                    4000.0
+                } else {
+                    0.0
+                };
+                pixels.extend_from_slice(&[
+                    1000.0 + noise * 3.0 + star,
+                    3000.0 + noise * 3.0,
+                    1500.0 + noise * 3.0,
+                ]);
+            }
+        }
+        seiza_fits::write_f32_image(
+            &path,
+            width,
+            height,
+            seiza_fits::F32ImageData::RgbInterleaved(&pixels),
+            &[],
+        )
+        .unwrap();
+        let photo = display_image(&path).unwrap();
+        assert_eq!(photo.dimensions(), (width as u32, height as u32));
+        let sky = photo.get_pixel(50, 10);
+        let spread = sky.0.iter().max().unwrap() - sky.0.iter().min().unwrap();
+        assert!(sky[1] > 20 && spread < 25, "{sky:?}");
+        let star = photo.get_pixel(20, 30);
+        assert!(star[0] > star[1] + 50 && star[0] > star[2] + 50, "{star:?}");
+        for backend in [DetectBackend::U8, DetectBackend::F32] {
+            let loaded = load_image(&path, backend).unwrap();
+            let shown = sky_map_photo(&path, &loaded).unwrap();
+            assert_eq!(shown.as_ref(), &photo);
+        }
     }
 
     #[test]
