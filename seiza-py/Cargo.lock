@@ -1506,7 +1506,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "seiza"
-version = "0.19.2"
+version = "0.20.0"
 dependencies = [
  "directories",
  "image",
@@ -1556,7 +1556,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-download"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-compression",
  "directories",
@@ -1589,7 +1589,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-py"
-version = "0.19.2"
+version = "0.20.0"
 dependencies = [
  "image",
  "numpy",
@@ -1610,7 +1610,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-satellites"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "directories",
  "fs2",
@@ -1627,7 +1627,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-sources"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "flate2",
  "futures-util",
@@ -1639,7 +1639,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-stacking"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "multiversion",
  "postcard",
