@@ -1,11 +1,15 @@
 fn main() {
-    // Windows gives the main thread a 1 MB stack, and clap plus the large
-    // command dispatch in an unoptimized build overflow it at startup. Ask
-    // the MSVC linker for the 8 MB Linux and macOS give by default.
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
-        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
-    {
-        println!("cargo:rustc-link-arg-bins=/STACK:8388608");
+    // Windows gives the main thread a 1 MB stack. In an unoptimized build,
+    // the `augment_subcommands` clap derives for the command enum builds
+    // every subcommand's arguments in a single stack frame, over 600 KB, and
+    // overflows it at startup. Ask the linker for the 8 MB Linux and macOS
+    // give by default.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        match std::env::var("CARGO_CFG_TARGET_ENV").as_deref() {
+            Ok("msvc") => println!("cargo:rustc-link-arg-bins=/STACK:8388608"),
+            Ok("gnu") => println!("cargo:rustc-link-arg-bins=-Wl,--stack,8388608"),
+            _ => {}
+        }
     }
 
     // N.I.N.A. reads the Windows FileVersion to gate ASTAP capabilities
