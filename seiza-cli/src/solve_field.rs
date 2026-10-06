@@ -695,7 +695,7 @@ fn data_bytes(cards: &[(String, String)]) -> Result<usize> {
 /// Write the header-only FITS file astrometry.net calls `.wcs`: the WCS
 /// keywords of the solution and no data unit. wcslib consumers (Siril,
 /// astropy) read the solution, including SIP, straight from the header.
-fn write_wcs_file(path: &Path, wcs: &seiza::Wcs) -> Result<()> {
+pub(crate) fn write_wcs_file(path: &Path, wcs: &seiza::Wcs) -> Result<()> {
     let mut header = String::new();
     let mut push = |keyword: &str, value: String| {
         header.push_str(&format!("{keyword:<8}= {value:>20}"));

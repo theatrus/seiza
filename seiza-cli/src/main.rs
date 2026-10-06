@@ -24,6 +24,7 @@ mod deconvolution;
 mod master;
 mod preview;
 mod provenance;
+mod raster;
 mod setup;
 mod solve_field;
 mod stack;
@@ -182,8 +183,8 @@ pub(crate) fn load_image(path: &std::path::Path, backend: DetectBackend) -> Resu
             buffer,
         )));
     }
-    image::open(path)
-        .map(LoadedImage::Dynamic)
+    raster::open(path)
+        .map(|image| LoadedImage::Dynamic(image.pixels))
         .with_context(|| format!("failed to open {}", path.display()))
 }
 
@@ -363,6 +364,11 @@ impl From<DetectionBackendArg> for DetectBackend {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Inspect JPEG EXIF metadata and display-oriented raster dimensions as JSON
+    ImageInfo {
+        /// Raster image file (JPEG, PNG, TIFF)
+        image: PathBuf,
+    },
     /// Guided installation of published star and object catalogs
     Setup(setup::SetupArgs),
     /// Detect stars in an image and print their positions
@@ -501,11 +507,13 @@ enum Command {
         #[arg(long)]
         index: Option<PathBuf>,
         /// Minimum plausible pixel scale, arcseconds per pixel
-        #[arg(long, default_value_t = 0.1)]
-        min_scale: f64,
+        /// (default: JPEG equivalent-focal-length estimate, otherwise 0.1)
+        #[arg(long)]
+        min_scale: Option<f64>,
         /// Maximum plausible pixel scale, arcseconds per pixel
-        #[arg(long, default_value_t = 20.0)]
-        max_scale: f64,
+        /// (default: JPEG equivalent-focal-length estimate, otherwise 20)
+        #[arg(long)]
+        max_scale: Option<f64>,
         /// Catalog magnitude limit used to build the blind pattern index.
         /// Use 16 with the deep Gaia catalog for small, fine-scale fields.
         #[arg(long, default_value_t = 12.7)]
@@ -528,6 +536,12 @@ enum Command {
         /// Ignore detections within this many pixels of the image edges
         #[arg(long, default_value_t = 0)]
         ignore_border: u32,
+        /// Write EXIF-oriented pixels with detections and projected catalog stars
+        #[arg(long)]
+        annotate: Option<PathBuf>,
+        /// Write a FITS WCS header for the EXIF-oriented pixel coordinates
+        #[arg(long)]
+        wcs: Option<PathBuf>,
     },
     /// Install the astrometry.net drop-in layout for Siril: copies of this
     /// binary named solve-field and bin/bash(.exe), plus the tmp directory
@@ -1108,6 +1122,19 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Setup(args) => setup::run(args),
         Command::InstallSolveField { dir } => solve_field::install_layout(&dir),
+        Command::ImageInfo { image } => {
+            let loaded = raster::open(&image)?;
+            let metadata = raster::read_metadata(&image);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "coordinates": loaded.coordinates,
+                    "scale_hint": metadata.scale_hint(loaded.coordinates.oriented_dimensions),
+                    "metadata": metadata,
+                }))?
+            );
+            Ok(())
+        }
         Command::Detect {
             image,
             sigma,
@@ -1316,6 +1343,8 @@ fn main() -> Result<()> {
             sip_order,
             sigma,
             ignore_border,
+            annotate,
+            wcs,
         } => {
             let data = with_data_flag_hint(data_paths::star_data(data.as_deref()))?;
             let index = data_paths::blind_index(index.as_deref())?;
@@ -1335,6 +1364,8 @@ fn main() -> Result<()> {
                     detection_backend,
                     detection_fallback,
                     detection_fallback_hypotheses,
+                    annotate: annotate.as_deref(),
+                    wcs_path: wcs.as_deref(),
                 },
             )
         }
@@ -2490,7 +2521,8 @@ fn csv_optional(value: Option<f32>) -> String {
 
 #[allow(clippy::too_many_arguments)]
 /// Acquisition time as a JD: an explicit ISO 8601 argument wins, else a
-/// FITS-compatible DATE-OBS header. `None` when neither is available.
+/// FITS-compatible DATE-OBS header or timezone-qualified JPEG EXIF timestamp.
+/// `None` when neither is available; EXIF is an acquisition hint, not a shutter boundary.
 fn resolve_acquisition_jd(image: &std::path::Path, time: Option<&str>) -> Result<Option<f64>> {
     let text = match time {
         Some(text) => Some(text.to_string()),
@@ -2503,7 +2535,7 @@ fn resolve_acquisition_jd(image: &std::path::Path, time: Option<&str>) -> Result
                         .and_then(|(_, v)| v.as_str().map(str::to_string))
                 })
             } else {
-                None
+                raster::read_metadata(image).capture_time_utc
             }
         }
     };
@@ -2515,6 +2547,12 @@ fn resolve_acquisition_jd(image: &std::path::Path, time: Option<&str>) -> Result
 
 /// "2025-10-12T08:30:00(.frac)(Z)" to a Julian date.
 pub(crate) fn parse_iso_jd(text: &str) -> Option<f64> {
+    if let Ok(time) = chrono::DateTime::parse_from_rfc3339(text.trim()) {
+        return Some(
+            2440587.5
+                + (time.timestamp() as f64 + time.timestamp_subsec_nanos() as f64 / 1e9) / 86400.0,
+        );
+    }
     let text = text.trim().trim_end_matches('Z');
     let (date, clock) = match text.split_once('T') {
         Some((d, t)) => (d, t),
@@ -2554,13 +2592,34 @@ fn resolve_single_exposure(
     explicit_longitude: Option<f64>,
     explicit_altitude: Option<f64>,
 ) -> Result<SingleExposure> {
-    let headers = if is_astronomy_image_path(image) {
-        read_astronomy_headers(image).with_context(|| {
-            format!("failed to read FITS/XISF metadata from {}", image.display())
-        })?
-    } else {
-        Vec::new()
-    };
+    if !is_astronomy_image_path(image) {
+        // A phone JPEG may be a multi-frame composite. Never silently turn
+        // its DateTimeOriginal + ExposureTime into a SingleExposure.
+        anyhow::ensure!(
+            explicit_start.is_some() && explicit_duration.is_some(),
+            "raster satellite tracks require explicit --time and --exposure-seconds for one continuous exposure; JPEG EXIF does not establish a shutter interval"
+        );
+        let metadata = raster::read_metadata(image);
+        let use_gps = explicit_latitude.is_none() && explicit_longitude.is_none();
+        return resolve_single_exposure_from_headers(
+            &[],
+            explicit_start,
+            explicit_duration,
+            if use_gps {
+                metadata.gps_latitude_deg
+            } else {
+                explicit_latitude
+            },
+            if use_gps {
+                metadata.gps_longitude_deg
+            } else {
+                explicit_longitude
+            },
+            explicit_altitude,
+        );
+    }
+    let headers = read_astronomy_headers(image)
+        .with_context(|| format!("failed to read FITS/XISF metadata from {}", image.display()))?;
     resolve_single_exposure_from_headers(
         &headers,
         explicit_start,
@@ -3302,8 +3361,8 @@ fn dms(dec: f64) -> String {
 
 struct SolveBlindOptions<'a> {
     index_path: Option<&'a std::path::Path>,
-    min_scale: f64,
-    max_scale: f64,
+    min_scale: Option<f64>,
+    max_scale: Option<f64>,
     index_mag_limit: f32,
     max_hypotheses: usize,
     max_coarse_hypotheses: usize,
@@ -3313,6 +3372,8 @@ struct SolveBlindOptions<'a> {
     detection_backend: DetectBackend,
     detection_fallback: DetectionFallback,
     detection_fallback_hypotheses: usize,
+    annotate: Option<&'a std::path::Path>,
+    wcs_path: Option<&'a std::path::Path>,
 }
 
 fn solve_blind_command(
@@ -3324,6 +3385,22 @@ fn solve_blind_command(
 
     let img = load_image(path, options.detection_backend)?;
     let dims = img.dimensions();
+    let metadata = raster::read_metadata(path);
+    for warning in &metadata.warnings {
+        eprintln!("warning: {warning}");
+    }
+    let (min_scale, max_scale) =
+        raster::scale_bounds(&metadata, dims, options.min_scale, options.max_scale)?;
+    println!(
+        "pixel-scale search: {min_scale:.3}–{max_scale:.3}\"/px{}",
+        if metadata.scale_hint(dims).is_some()
+            && (options.min_scale.is_none() || options.max_scale.is_none())
+        {
+            " (JPEG equivalent focal length; explicit bounds override)"
+        } else {
+            ""
+        }
+    );
     let config = DetectConfig {
         backend: options.detection_backend,
         sigma: options.sigma,
@@ -3344,8 +3421,8 @@ fn solve_blind_command(
     let catalog =
         TileCatalog::open(data).with_context(|| format!("failed to open {}", data.display()))?;
     let mut params = BlindParams {
-        min_scale_arcsec_px: options.min_scale,
-        max_scale_arcsec_px: options.max_scale,
+        min_scale_arcsec_px: min_scale,
+        max_scale_arcsec_px: max_scale,
         index_mag_limit: options.index_mag_limit,
         max_hypotheses: options.max_hypotheses,
         max_coarse_hypotheses: options.max_coarse_hypotheses,
@@ -3401,6 +3478,42 @@ fn solve_blind_command(
         "  quality    : {} stars matched, RMS {:.3}\"",
         solution.matched_stars, solution.rms_arcsec
     );
+    if let Some(path) = options.wcs_path {
+        solve_field::write_wcs_file(path, wcs)?;
+        println!("WCS written to {} (EXIF-oriented pixels)", path.display());
+    }
+    if let Some(path) = options.annotate {
+        let mut canvas = img.to_rgb8();
+        for star in invocation.stars() {
+            imageproc::drawing::draw_hollow_circle_mut(
+                &mut canvas,
+                (star.x.round() as i32, star.y.round() as i32),
+                6,
+                image::Rgb([0, 255, 0]),
+            );
+        }
+        let radius =
+            (dims.0 as f64).hypot(dims.1 as f64) / 2.0 * wcs.scale_arcsec_per_px() / 3600.0;
+        for star in catalog.cone_search(ra, dec, radius, 600) {
+            if let Some((x, y)) = wcs.world_to_pixel(star.ra, star.dec)
+                && x >= 0.0
+                && y >= 0.0
+                && x < dims.0 as f64
+                && y < dims.1 as f64
+            {
+                imageproc::drawing::draw_hollow_circle_mut(
+                    &mut canvas,
+                    (x.round() as i32, y.round() as i32),
+                    4,
+                    image::Rgb([255, 0, 0]),
+                );
+            }
+        }
+        canvas
+            .save(path)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        println!("annotated image written to {}", path.display());
+    }
     Ok(())
 }
 
@@ -3458,6 +3571,186 @@ fn build_blind_index_command(
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+
+    fn jpeg_metadata_fixture(dir: &std::path::Path) -> PathBuf {
+        use exif::{Tag, Value};
+        use raster::tests::field;
+        let ascii = |tag, text: &str| field(tag, Value::Ascii(vec![text.as_bytes().to_vec()]));
+        let coords =
+            |degrees| Value::Rational(vec![(degrees, 1).into(), (0, 1).into(), (0, 1).into()]);
+        let path = dir.join("phone.jpg");
+        let image = image::DynamicImage::new_rgb8(32, 24);
+        std::fs::write(
+            &path,
+            raster::tests::jpeg_with_exif(
+                &image,
+                &[
+                    ascii(Tag::DateTimeOriginal, "2026:10:03 19:08:11"),
+                    ascii(Tag::SubSecTimeOriginal, "026"),
+                    ascii(Tag::OffsetTimeOriginal, "-07:00"),
+                    field(Tag::ExposureTime, Value::Rational(vec![(16, 1).into()])),
+                    field(Tag::GPSLatitude, coords(32)),
+                    ascii(Tag::GPSLatitudeRef, "N"),
+                    field(Tag::GPSLongitude, coords(110)),
+                    ascii(Tag::GPSLongitudeRef, "W"),
+                    field(Tag::GPSAltitude, Value::Rational(vec![(2000, 1).into()])),
+                    field(Tag::GPSAltitudeRef, Value::Byte(vec![0])),
+                ],
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn jpeg_acquisition_time_is_utc_and_explicit_time_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = jpeg_metadata_fixture(dir.path());
+        let expected = parse_iso_jd("2026-10-04T02:08:11.026Z").unwrap();
+        assert_eq!(resolve_acquisition_jd(&path, None).unwrap(), Some(expected));
+        let override_time = "2026-10-04T03:00:00-07:00";
+        assert_eq!(
+            resolve_acquisition_jd(&path, Some(override_time)).unwrap(),
+            parse_iso_jd("2026-10-04T10:00:00Z")
+        );
+    }
+
+    #[test]
+    fn jpeg_gps_is_optional_and_does_not_turn_a_stack_into_one_exposure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = jpeg_metadata_fixture(dir.path());
+        assert!(
+            resolve_single_exposure(&path, None, None, None, None, None)
+                .unwrap_err()
+                .to_string()
+                .contains("one continuous exposure")
+        );
+        assert!(
+            resolve_single_exposure(&path, Some("2026-10-04T02:08:11Z"), None, None, None, None)
+                .is_err()
+        );
+        let exposure = resolve_single_exposure(
+            &path,
+            Some("2026-10-04T02:08:11Z"),
+            Some(8.0),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(exposure.duration_seconds(), 8.0);
+        // Sea-level EXIF altitude must not become ellipsoid height.
+        assert_eq!(
+            exposure.observer,
+            ObserverLocation::geodetic(32.0, -110.0, 0.0).unwrap()
+        );
+        let explicit = resolve_single_exposure(
+            &path,
+            Some("2026-10-04T02:08:11Z"),
+            Some(8.0),
+            Some(-20.0),
+            Some(80.0),
+            Some(123.0),
+        )
+        .unwrap();
+        assert_eq!(
+            explicit.observer,
+            ObserverLocation::geodetic(-20.0, 80.0, 123.0).unwrap()
+        );
+        assert!(
+            resolve_single_exposure(
+                &path,
+                Some("2026-10-04T02:08:11Z"),
+                Some(8.0),
+                Some(20.0),
+                None,
+                None
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn jpeg_orientation_is_shared_by_detection_and_annotation_pixels() {
+        use exif::{Tag, Value};
+        let dir = tempfile::tempdir().unwrap();
+        let source = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(160, 120, |x, y| {
+            let signal = [(40.2, 35.7), (105.5, 80.3), (125.2, 28.4)]
+                .iter()
+                .map(|&(sx, sy)| {
+                    200.0_f64 * (-((x as f64 - sx).powi(2) + (y as f64 - sy).powi(2)) / 4.0).exp()
+                })
+                .sum::<f64>();
+            image::Rgb([(8.0 + signal).min(255.0) as u8; 3])
+        }));
+        let config = DetectConfig {
+            sigma: 4.0,
+            ..Default::default()
+        };
+        let raw_path = dir.path().join("normal.jpg");
+        std::fs::write(
+            &raw_path,
+            raster::tests::jpeg_with_exif(
+                &source,
+                &[raster::tests::field(
+                    Tag::Orientation,
+                    Value::Short(vec![1]),
+                )],
+            ),
+        )
+        .unwrap();
+        let baseline = load_image(&raw_path, DetectBackend::Auto)
+            .unwrap()
+            .detect_stars(&config)
+            .into_iter()
+            .filter(|s| {
+                [(40.2, 35.7), (105.5, 80.3), (125.2, 28.4)]
+                    .iter()
+                    .any(|&(x, y)| (s.x - x).hypot(s.y - y) < 1.0)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(baseline.len(), 3);
+        for orientation in 1..=8 {
+            let path = dir.path().join(format!("o{orientation}.jpg"));
+            std::fs::write(
+                &path,
+                raster::tests::jpeg_with_exif(
+                    &source,
+                    &[raster::tests::field(
+                        Tag::Orientation,
+                        Value::Short(vec![orientation]),
+                    )],
+                ),
+            )
+            .unwrap();
+            let loaded = load_image(&path, DetectBackend::Auto).unwrap();
+            assert_eq!(loaded.to_rgb8().dimensions(), loaded.dimensions());
+            for backend in [DetectBackend::U8, DetectBackend::F32] {
+                let detected = loaded.detect_stars(&DetectConfig {
+                    backend,
+                    ..config.clone()
+                });
+                for star in &baseline {
+                    let (x, y) = (star.x, star.y);
+                    let (nx, ny) = match orientation {
+                        1 => (x, y),
+                        2 => (159.0 - x, y),
+                        3 => (159.0 - x, 119.0 - y),
+                        4 => (x, 119.0 - y),
+                        5 => (y, x),
+                        6 => (119.0 - y, x),
+                        7 => (119.0 - y, 159.0 - x),
+                        8 => (y, 159.0 - x),
+                        _ => unreachable!(),
+                    };
+                    assert!(
+                        detected.iter().any(|s| (s.x - nx).hypot(s.y - ny) < 0.15),
+                        "orientation {orientation}, backend {backend:?}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn stack_requires_multiple_lights_and_linear_output() {

@@ -39,6 +39,11 @@ seiza solve light.fits --scale 1.45
 # the deepest catalog and the blind index automatically.
 seiza solve-blind image.jpg --data data --min-scale 0.5 --max-scale 15
 
+# JPEG: inspect EXIF and solve a wide field without a pointing hint.
+seiza image-info phone.jpg
+seiza solve-blind phone.jpg --data data --sip-order 2 \
+  --annotate solved.png --wcs solved.wcs
+
 # Annotate detections or list objects in a solved field
 seiza detect image.jpg --annotate out.png
 seiza solve image.jpg --data data ... --objects data
@@ -71,6 +76,49 @@ seiza catalog star --data data "RR L" --prefix --limit 10
 
 Explicit file paths still work everywhere a directory is shown, for
 custom-built catalogs or unusual layouts.
+
+### JPEG metadata and pixel coordinates
+
+Raster inputs are decoded and EXIF Orientation is applied once, including
+mirrors and the four transforms that swap width and height. Detection,
+local solving, annotations and exported WCS use the same oriented pixels.
+WCS pixel coordinates in the library are zero-based; the FITS WCS export
+uses FITS' one-based CRPIX convention. Apply the source Orientation before
+overlaying an exported WCS on the original JPEG. Annotated PNGs contain
+already-oriented pixels and must not be rotated a second time.
+
+`image-info` emits JSON containing original/oriented dimensions, the applied
+transform and optional JPEG EXIF fields: camera, acquisition timestamp,
+subseconds, timezone offset, GPS position/altitude, heading and focal length.
+Subseconds retain leading zeros. UTC acquisition time is available only
+when DateTimeOriginal has OffsetTimeOriginal; a missing timezone is never
+guessed from GPS or the machine's timezone. An explicit `solve --time`
+overrides the EXIF acquisition hint used for minor bodies. Missing/malformed
+EXIF fields remain optional and do not prevent a stellar solve.
+
+When `solve-blind` scale bounds are omitted and a valid 35mm-equivalent focal
+length is present, the CLI estimates central angular scale from the decoded
+image diagonal and searches between half and twice that estimate. This is a
+broad prior, not a measured field of view: cropping, aspect ratio and lens
+correction affect it. Each explicit `--min-scale` / `--max-scale` overrides
+its corresponding bound. Without this metadata the previous 0.1–20 arcsec/px
+defaults apply. SIP remains opt-in; compare residuals with and without it.
+
+EXIF Orientation is distinct from camera pointing. GPSImgDirection and its
+magnetic/true-north reference are reported but do not seed the solver; the
+stellar WCS determines pointing and rotation. HEIF and RAW/DNG decoding and
+multi-frame timing are not supported by this JPEG metadata path.
+
+JPEG DateTimeOriginal and ExposureTime **do not establish a continuous
+exposure**. In particular, phone Night Sight/Night mode can combine many
+frames. Satellite overlays therefore still require explicit `--time` and
+`--exposure-seconds` describing one actual exposure; never pass a stack's
+total integration. JPEG GPS latitude/longitude can supply the observer
+position when both explicit coordinates are absent. Explicit coordinates
+take priority as a pair. EXIF GPS altitude is reported with its original
+reference and is not treated as ellipsoid height: supply
+`--observer-alt-m` when that height is known (otherwise the existing zero
+height default applies).
 
 Star detection defaults to `--detection-backend auto`: decoded 8-bit images
 (including color JPEGs) and MTF-compressed FITS use the compact u8 pipeline,
