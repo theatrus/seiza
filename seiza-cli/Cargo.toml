@@ -31,6 +31,7 @@ anyhow.workspace = true
 clap.workspace = true
 image = { workspace = true, features = ["png", "jpeg", "tiff"] }
 imageproc.workspace = true
+ab_glyph.workspace = true
 flate2.workspace = true
 serde_json.workspace = true
 serde.workspace = true
@@ -56,6 +57,7 @@ assets = [
     { source = "target/release/seiza", dest = "/usr/bin/seiza", mode = "755" },
     { source = "README.md", dest = "/usr/share/doc/seiza-cli/README.md", mode = "644", doc = true },
     { source = "LICENSE", dest = "/usr/share/licenses/seiza-cli/LICENSE", mode = "644" },
+    { source = "fonts/LICENSE-Inter.txt", dest = "/usr/share/licenses/seiza-cli/LICENSE-Inter.txt", mode = "644" },
 ]
 
 [package.metadata.deb]
@@ -65,6 +67,7 @@ section = "science"
 assets = [
     ["target/release/seiza", "usr/bin/", "755"],
     ["README.md", "usr/share/doc/seiza-cli/", "644"],
+    ["fonts/LICENSE-Inter.txt", "usr/share/doc/seiza-cli/", "644"],
 ]
 
 [target.'cfg(windows)'.build-dependencies]

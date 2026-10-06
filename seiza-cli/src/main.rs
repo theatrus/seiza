@@ -26,6 +26,7 @@ mod master;
 mod preview;
 mod provenance;
 mod setup;
+mod sky_map;
 mod solve_field;
 mod stack;
 mod stretch_command;
@@ -427,6 +428,15 @@ enum Command {
         /// (cyan) on the annotated copy
         #[arg(long)]
         objects: Option<PathBuf>,
+        /// Write a labelled sky map (PNG or JPEG): constellation figures,
+        /// IAU-named stars, and deep-sky objects drawn through the solution
+        /// under a title bar and solve statistics. Star names and objects
+        /// come from the catalogs next to --data or in the standard places
+        #[arg(long)]
+        sky_map: Option<PathBuf>,
+        /// Sky map width, pixels
+        #[arg(long, default_value_t = sky_map::DEFAULT_WIDTH)]
+        sky_map_width: u32,
         /// Minor-body element file (comets + asteroids); positions are
         /// propagated to the acquisition time
         #[arg(long)]
@@ -542,6 +552,15 @@ enum Command {
         /// Write a FITS WCS header for the EXIF-oriented pixel coordinates
         #[arg(long)]
         wcs: Option<PathBuf>,
+        /// Write a labelled sky map (PNG or JPEG): constellation figures,
+        /// IAU-named stars, and deep-sky objects drawn through the solution
+        /// under a title bar and solve statistics. Star names and objects
+        /// come from the catalogs next to --data or in the standard places
+        #[arg(long)]
+        sky_map: Option<PathBuf>,
+        /// Sky map width, pixels
+        #[arg(long, default_value_t = sky_map::DEFAULT_WIDTH)]
+        sky_map_width: u32,
     },
     /// Install the astrometry.net drop-in layout for Siril: copies of this
     /// binary named solve-field and bin/bash(.exe), plus the tmp directory
@@ -1166,6 +1185,8 @@ fn main() -> Result<()> {
             ignore_border,
             annotate,
             objects,
+            sky_map,
+            sky_map_width,
             minor_bodies,
             satellites,
             satellites_celestrak,
@@ -1242,6 +1263,9 @@ fn main() -> Result<()> {
                 detection_fallback,
                 annotate.as_deref(),
                 objects.as_deref(),
+                sky_map
+                    .as_deref()
+                    .map(|path| SkyMapRequest::new(path, sky_map_width)),
                 minor_bodies.as_deref(),
                 acquisition_jd,
                 satellite_request,
@@ -1351,6 +1375,8 @@ fn main() -> Result<()> {
             ignore_border,
             annotate,
             wcs,
+            sky_map,
+            sky_map_width,
         } => {
             let data = with_data_flag_hint(data_paths::star_data(data.as_deref()))?;
             let index = data_paths::blind_index(index.as_deref())?;
@@ -1372,6 +1398,9 @@ fn main() -> Result<()> {
                     detection_fallback_hypotheses,
                     annotate: annotate.as_deref(),
                     wcs_path: wcs.as_deref(),
+                    sky_map: sky_map
+                        .as_deref()
+                        .map(|path| SkyMapRequest::new(path, sky_map_width)),
                 },
             )
         }
@@ -2866,6 +2895,7 @@ fn solve_command(
     detection_fallback: DetectionFallback,
     annotate: Option<&std::path::Path>,
     objects: Option<&std::path::Path>,
+    sky_map: Option<SkyMapRequest<'_>>,
     minor_bodies: Option<&std::path::Path>,
     acquisition_jd: Option<f64>,
     satellite_request: Option<SatelliteSolveRequest>,
@@ -3146,7 +3176,98 @@ fn solve_command(
             .with_context(|| format!("failed to write {}", out.display()))?;
         println!("annotated image written to {}", out.display());
     }
+    if let Some(request) = sky_map {
+        request.write(
+            path,
+            &img,
+            &catalog,
+            data,
+            objects,
+            wcs,
+            solution.matched_stars,
+            solution.rms_arcsec,
+        )?;
+    }
     Ok(())
+}
+
+/// Detections used to find the foreground in a `--sky-map`.
+const SKY_MAP_DETECTIONS: usize = 600;
+
+/// Where and how wide to write a `--sky-map`.
+#[derive(Clone, Copy)]
+struct SkyMapRequest<'a> {
+    path: &'a std::path::Path,
+    width: u32,
+}
+
+impl<'a> SkyMapRequest<'a> {
+    fn new(path: &'a std::path::Path, width: u32) -> Self {
+        Self { path, width }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write(
+        self,
+        image_path: &std::path::Path,
+        image: &LoadedImage,
+        star_catalog: &dyn StarCatalog,
+        data: &std::path::Path,
+        objects: Option<&std::path::Path>,
+        wcs: &seiza::Wcs,
+        matched_stars: usize,
+        rms_arcsec: f64,
+    ) -> Result<()> {
+        let catalogs = sky_map::SkyMapCatalogs::resolve(Some(data), objects);
+        // Detections outline the sky in a photo with foreground. Detect
+        // afresh with one budget so hinted and blind maps agree, and keep
+        // only detections a catalog star confirms: a lit foreground yields
+        // plenty of false ones.
+        let detected = image.detect_stars(&DetectConfig {
+            max_stars: SKY_MAP_DETECTIONS,
+            ..DetectConfig::default()
+        });
+        let dims = image.dimensions();
+        let scale = wcs.scale_arcsec_per_px();
+        let diagonal_deg = (dims.0 as f64).hypot(dims.1 as f64) * scale / 3600.0;
+        let (ra, dec) = wcs.pixel_to_world(dims.0 as f64 / 2.0, dims.1 as f64 / 2.0);
+        let catalog_px = star_catalog
+            .cone_search(
+                ra,
+                dec,
+                diagonal_deg / 2.0 + 0.5,
+                10 * detected.len().max(100),
+            )
+            .into_iter()
+            .filter_map(|star| wcs.world_to_pixel(star.ra, star.dec))
+            .collect::<Vec<_>>();
+        let detected = sky_map::confirmed_detections(
+            &detected
+                .iter()
+                .map(|star| (star.x, star.y))
+                .collect::<Vec<_>>(),
+            &catalog_px,
+            // Distortion fits are weakest at the corners.
+            (3.0 * rms_arcsec / scale).clamp(4.0, 10.0),
+        );
+        let summary = sky_map::SolveSummary {
+            name: image_path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            matched_stars,
+            rms_arcsec,
+        };
+        sky_map::write(
+            self.path,
+            &image.to_rgb8(),
+            wcs,
+            &catalogs,
+            &detected,
+            &summary,
+            self.width,
+        )
+    }
 }
 
 fn draw_satellite_track(canvas: &mut image::RgbImage, track: &SatelliteTrack) {
@@ -3357,6 +3478,7 @@ struct SolveBlindOptions<'a> {
     detection_fallback_hypotheses: usize,
     annotate: Option<&'a std::path::Path>,
     wcs_path: Option<&'a std::path::Path>,
+    sky_map: Option<SkyMapRequest<'a>>,
 }
 
 /// Try each pixel-scale range in turn until one solves, so a narrow EXIF
@@ -3575,6 +3697,18 @@ fn solve_blind_command(
             .save(path)
             .with_context(|| format!("failed to write {}", path.display()))?;
         println!("annotated image written to {}", path.display());
+    }
+    if let Some(request) = options.sky_map {
+        request.write(
+            path,
+            &img,
+            &catalog,
+            data,
+            None,
+            wcs,
+            solution.matched_stars,
+            solution.rms_arcsec,
+        )?;
     }
     Ok(())
 }
