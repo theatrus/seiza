@@ -267,6 +267,27 @@ impl<'a> SolveInvocation<'a> {
         }
     }
 
+    /// Detections made with a budget of at least `max_stars`, from the
+    /// representation that solved: the solve's own when its budget was
+    /// that large, otherwise fresh ones.
+    pub(crate) fn detections_with_budget(
+        &self,
+        max_stars: usize,
+    ) -> Result<std::borrow::Cow<'_, [DetectedStar]>> {
+        if self.config.max_stars >= max_stars {
+            return Ok(std::borrow::Cow::Borrowed(self.stars()));
+        }
+        let config = DetectConfig {
+            max_stars,
+            ..self.config.clone()
+        };
+        Ok(std::borrow::Cow::Owned(if self.active_f32 {
+            redetect_f32(self.path, self.image, &config)?
+        } else {
+            self.image.detect_stars(&config)
+        }))
+    }
+
     pub(crate) fn solve<T>(
         &mut self,
         mut solver: impl FnMut(&[DetectedStar]) -> std::result::Result<T, seiza::Error>,
@@ -434,9 +455,18 @@ enum Command {
         /// come from the catalogs next to --data or in the standard places
         #[arg(long)]
         sky_map: Option<PathBuf>,
-        /// Sky map width, pixels
-        #[arg(long, default_value_t = sky_map::DEFAULT_WIDTH)]
+        /// Sky map width, pixels (640 to 12000)
+        #[arg(
+            long,
+            default_value_t = sky_map::DEFAULT_WIDTH,
+            value_parser = clap::value_parser!(u32)
+                .range(sky_map::MIN_WIDTH as i64..=sky_map::MAX_WIDTH as i64)
+        )]
         sky_map_width: u32,
+        /// Hide sky-map marks below the lowest detected stars, for photos
+        /// with a horizon or foreground
+        #[arg(long, requires = "sky_map")]
+        sky_map_foreground: bool,
         /// Minor-body element file (comets + asteroids); positions are
         /// propagated to the acquisition time
         #[arg(long)]
@@ -558,9 +588,18 @@ enum Command {
         /// come from the catalogs next to --data or in the standard places
         #[arg(long)]
         sky_map: Option<PathBuf>,
-        /// Sky map width, pixels
-        #[arg(long, default_value_t = sky_map::DEFAULT_WIDTH)]
+        /// Sky map width, pixels (640 to 12000)
+        #[arg(
+            long,
+            default_value_t = sky_map::DEFAULT_WIDTH,
+            value_parser = clap::value_parser!(u32)
+                .range(sky_map::MIN_WIDTH as i64..=sky_map::MAX_WIDTH as i64)
+        )]
         sky_map_width: u32,
+        /// Hide sky-map marks below the lowest detected stars, for photos
+        /// with a horizon or foreground
+        #[arg(long, requires = "sky_map")]
+        sky_map_foreground: bool,
     },
     /// Install the astrometry.net drop-in layout for Siril: copies of this
     /// binary named solve-field and bin/bash(.exe), plus the tmp directory
@@ -1187,6 +1226,7 @@ fn main() -> Result<()> {
             objects,
             sky_map,
             sky_map_width,
+            sky_map_foreground,
             minor_bodies,
             satellites,
             satellites_celestrak,
@@ -1263,9 +1303,11 @@ fn main() -> Result<()> {
                 detection_fallback,
                 annotate.as_deref(),
                 objects.as_deref(),
-                sky_map
-                    .as_deref()
-                    .map(|path| SkyMapRequest::new(path, sky_map_width)),
+                sky_map.as_deref().map(|path| SkyMapRequest {
+                    path,
+                    width: sky_map_width,
+                    foreground: sky_map_foreground,
+                }),
                 minor_bodies.as_deref(),
                 acquisition_jd,
                 satellite_request,
@@ -1377,6 +1419,7 @@ fn main() -> Result<()> {
             wcs,
             sky_map,
             sky_map_width,
+            sky_map_foreground,
         } => {
             let data = with_data_flag_hint(data_paths::star_data(data.as_deref()))?;
             let index = data_paths::blind_index(index.as_deref())?;
@@ -1398,9 +1441,11 @@ fn main() -> Result<()> {
                     detection_fallback_hypotheses,
                     annotate: annotate.as_deref(),
                     wcs_path: wcs.as_deref(),
-                    sky_map: sky_map
-                        .as_deref()
-                        .map(|path| SkyMapRequest::new(path, sky_map_width)),
+                    sky_map: sky_map.as_deref().map(|path| SkyMapRequest {
+                        path,
+                        width: sky_map_width,
+                        foreground: sky_map_foreground,
+                    }),
                 },
             )
         }
@@ -3135,17 +3180,11 @@ fn solve_command(
         let mut canvas = img.to_rgb8();
         draw_star_overlay(&mut canvas, invocation.stars(), &catalog, wcs, dims);
         for p in &placed {
-            // An asymmetric extent with an unknown position angle must not be
-            // drawn at a guessed orientation; fall back to the conservative
-            // major-axis circle.
-            let (semi_minor_px, angle_deg) = match p.angle_deg {
-                Some(angle) => (p.semi_minor_px, angle),
-                None => (p.semi_major_px, 0.0),
-            };
+            let (semi_major_px, semi_minor_px, angle_deg) = object_outline(p);
             draw_rotated_ellipse(
                 &mut canvas,
                 (p.x, p.y),
-                p.semi_major_px.max(12.0),
+                semi_major_px.max(12.0),
                 semi_minor_px.max(12.0),
                 angle_deg,
                 image::Rgb([64, 220, 255]),
@@ -3179,7 +3218,7 @@ fn solve_command(
     if let Some(request) = sky_map {
         request.write(
             path,
-            &img,
+            &invocation,
             &catalog,
             data,
             objects,
@@ -3191,26 +3230,24 @@ fn solve_command(
     Ok(())
 }
 
-/// Detections used to find the foreground in a `--sky-map`.
+/// Detections used to find the foreground for `--sky-map-foreground`.
 const SKY_MAP_DETECTIONS: usize = 600;
 
-/// Where and how wide to write a `--sky-map`.
+/// Where and how wide to write a `--sky-map`, and whether to hide marks
+/// on the foreground.
 #[derive(Clone, Copy)]
 struct SkyMapRequest<'a> {
     path: &'a std::path::Path,
     width: u32,
+    foreground: bool,
 }
 
-impl<'a> SkyMapRequest<'a> {
-    fn new(path: &'a std::path::Path, width: u32) -> Self {
-        Self { path, width }
-    }
-
+impl SkyMapRequest<'_> {
     #[allow(clippy::too_many_arguments)]
     fn write(
         self,
         image_path: &std::path::Path,
-        image: &LoadedImage,
+        invocation: &SolveInvocation<'_>,
         star_catalog: &dyn StarCatalog,
         data: &std::path::Path,
         objects: Option<&std::path::Path>,
@@ -3219,37 +3256,12 @@ impl<'a> SkyMapRequest<'a> {
         rms_arcsec: f64,
     ) -> Result<()> {
         let catalogs = sky_map::SkyMapCatalogs::resolve(Some(data), objects);
-        // Detections outline the sky in a photo with foreground. Detect
-        // afresh with one budget so hinted and blind maps agree, and keep
-        // only detections a catalog star confirms: a lit foreground yields
-        // plenty of false ones.
-        let detected = image.detect_stars(&DetectConfig {
-            max_stars: SKY_MAP_DETECTIONS,
-            ..DetectConfig::default()
-        });
-        let dims = image.dimensions();
-        let scale = wcs.scale_arcsec_per_px();
-        let diagonal_deg = (dims.0 as f64).hypot(dims.1 as f64) * scale / 3600.0;
-        let (ra, dec) = wcs.pixel_to_world(dims.0 as f64 / 2.0, dims.1 as f64 / 2.0);
-        let catalog_px = star_catalog
-            .cone_search(
-                ra,
-                dec,
-                diagonal_deg / 2.0 + 0.5,
-                10 * detected.len().max(100),
-            )
-            .into_iter()
-            .filter_map(|star| wcs.world_to_pixel(star.ra, star.dec))
-            .collect::<Vec<_>>();
-        let detected = sky_map::confirmed_detections(
-            &detected
-                .iter()
-                .map(|star| (star.x, star.y))
-                .collect::<Vec<_>>(),
-            &catalog_px,
-            // Distortion fits are weakest at the corners.
-            (3.0 * rms_arcsec / scale).clamp(4.0, 10.0),
-        );
+        let foreground = if self.foreground {
+            sky_map_foreground(invocation, star_catalog, wcs, rms_arcsec)?
+        } else {
+            None
+        };
+        let photo = sky_map_photo(image_path, invocation.image)?;
         let summary = sky_map::SolveSummary {
             name: image_path
                 .file_stem()
@@ -3260,14 +3272,64 @@ impl<'a> SkyMapRequest<'a> {
         };
         sky_map::write(
             self.path,
-            &image.to_rgb8(),
+            &photo,
             wcs,
             &catalogs,
-            &detected,
+            foreground.as_ref(),
             &summary,
             self.width,
         )
     }
+}
+
+/// Detections a catalog star confirms, which outline the sky for
+/// `--sky-map-foreground`. `None` for a field too narrow to hold a horizon.
+fn sky_map_foreground(
+    invocation: &SolveInvocation<'_>,
+    star_catalog: &dyn StarCatalog,
+    wcs: &seiza::Wcs,
+    rms_arcsec: f64,
+) -> Result<Option<sky_map::Foreground>> {
+    let dims = invocation.image.dimensions();
+    let diagonal = field_diagonal_deg(wcs, dims);
+    if diagonal <= WIDE_FIELD_DIAGONAL_DEG {
+        eprintln!(
+            "sky map: --sky-map-foreground looks for a horizon only in fields over \
+             {WIDE_FIELD_DIAGONAL_DEG:.0}° across; this one is {diagonal:.1}°, so nothing is hidden"
+        );
+        return Ok(None);
+    }
+    // Hinted and blind solves outline the sky from the same detection
+    // budget. A lit foreground yields plenty of false detections, so only
+    // those a catalog star confirms count.
+    let detected = invocation.detections_with_budget(SKY_MAP_DETECTIONS)?;
+    let catalog_px = catalog_stars_in_image(star_catalog, wcs, dims, 10 * detected.len().max(100));
+    // Distortion fits are weakest at the corners.
+    let tolerance = (3.0 * rms_arcsec / wcs.scale_arcsec_per_px()).clamp(4.0, 10.0);
+    let detections = sky_map::confirmed_detections(
+        &detected
+            .iter()
+            .map(|star| (star.x, star.y))
+            .collect::<Vec<_>>(),
+        &catalog_px,
+        tolerance,
+    );
+    Ok(Some(sky_map::Foreground {
+        detections,
+        tolerance,
+    }))
+}
+
+/// The pixels a sky map is drawn on, borrowed when they are already RGB.
+fn sky_map_photo<'a>(
+    _path: &std::path::Path,
+    image: &'a LoadedImage,
+) -> Result<std::borrow::Cow<'a, image::RgbImage>> {
+    use std::borrow::Cow;
+    Ok(match image {
+        LoadedImage::Dynamic(image::DynamicImage::ImageRgb8(rgb)) => Cow::Borrowed(rgb),
+        other => Cow::Owned(other.to_rgb8()),
+    })
 }
 
 fn draw_satellite_track(canvas: &mut image::RgbImage, track: &SatelliteTrack) {
@@ -3431,19 +3493,68 @@ fn draw_rotated_ellipse(
     angle_deg: f64,
     color: image::Rgb<u8>,
 ) {
+    let points = ellipse_points(center, semi_major, semi_minor, angle_deg, 72)
+        .map(|(x, y)| (x as f32, y as f32))
+        .collect::<Vec<_>>();
+    for pair in points.windows(2) {
+        imageproc::drawing::draw_line_segment_mut(canvas, pair[0], pair[1], color);
+    }
+}
+
+/// `segments + 1` points around an ellipse whose major axis lies
+/// `angle_deg` from +x, the last repeating the first.
+pub(crate) fn ellipse_points(
+    center: (f64, f64),
+    semi_major: f64,
+    semi_minor: f64,
+    angle_deg: f64,
+    segments: usize,
+) -> impl Iterator<Item = (f64, f64)> {
     let (sin_r, cos_r) = angle_deg.to_radians().sin_cos();
-    let segments = 72;
-    let point = |i: usize| -> (f32, f32) {
+    (0..=segments).map(move |i| {
         let t = i as f64 / segments as f64 * std::f64::consts::TAU;
         let (lx, ly) = (semi_major * t.cos(), semi_minor * t.sin());
         (
-            (center.0 + lx * cos_r - ly * sin_r) as f32,
-            (center.1 + lx * sin_r + ly * cos_r) as f32,
+            center.0 + lx * cos_r - ly * sin_r,
+            center.1 + lx * sin_r + ly * cos_r,
         )
-    };
-    for i in 0..segments {
-        imageproc::drawing::draw_line_segment_mut(canvas, point(i), point(i + 1), color);
+    })
+}
+
+/// The ellipse to draw for a placed object, as (semi-major, semi-minor,
+/// angle): an asymmetric extent without a position angle must not be drawn
+/// at a guessed orientation, so it becomes a circle of the major axis.
+pub(crate) fn object_outline(placed: &seiza::objects::PlacedObject) -> (f64, f64, f64) {
+    match placed.angle_deg {
+        Some(angle) => (placed.semi_major_px, placed.semi_minor_px, angle),
+        None => (placed.semi_major_px, placed.semi_major_px, 0.0),
     }
+}
+
+/// Fields wider than this many degrees across the diagonal come from a
+/// phone or camera lens rather than a telescope.
+const WIDE_FIELD_DIAGONAL_DEG: f64 = 10.0;
+
+/// The image diagonal in degrees, from the pixel scale.
+pub(crate) fn field_diagonal_deg(wcs: &seiza::Wcs, dims: (u32, u32)) -> f64 {
+    (dims.0 as f64).hypot(dims.1 as f64) * wcs.scale_arcsec_per_px() / 3600.0
+}
+
+/// Pixel positions of the brightest `limit` catalog stars within half the
+/// field diagonal of its centre that land in the image.
+fn catalog_stars_in_image(
+    catalog: &dyn StarCatalog,
+    wcs: &seiza::Wcs,
+    dims: (u32, u32),
+    limit: usize,
+) -> Vec<(f64, f64)> {
+    let (ra, dec) = wcs.pixel_to_world(dims.0 as f64 / 2.0, dims.1 as f64 / 2.0);
+    catalog
+        .cone_search(ra, dec, field_diagonal_deg(wcs, dims) / 2.0, limit)
+        .into_iter()
+        .filter_map(|star| wcs.world_to_pixel(star.ra, star.dec))
+        .filter(|&(x, y)| x >= 0.0 && y >= 0.0 && x < dims.0 as f64 && y < dims.1 as f64)
+        .collect()
 }
 
 fn hms(ra: f64) -> String {
@@ -3514,14 +3625,10 @@ struct StarOverlayStyle {
 }
 
 impl StarOverlayStyle {
-    /// Fields wider than this many degrees across the diagonal (a phone or
-    /// camera lens rather than a telescope) get the wide-field style.
-    const WIDE_FIELD_DIAGONAL_DEG: f64 = 10.0;
-
     /// Small, dense markers for wide fields, where stars are a few pixels
     /// apart and more catalog stars fit; larger, sparser ones otherwise.
     fn for_field(diagonal_deg: f64) -> Self {
-        if diagonal_deg > Self::WIDE_FIELD_DIAGONAL_DEG {
+        if diagonal_deg > WIDE_FIELD_DIAGONAL_DEG {
             Self {
                 detected_radius: 6,
                 catalog_radius: 4,
@@ -3550,8 +3657,7 @@ fn draw_star_overlay(
     wcs: &seiza::Wcs,
     dims: (u32, u32),
 ) {
-    let diagonal_deg = (dims.0 as f64).hypot(dims.1 as f64) * wcs.scale_arcsec_per_px() / 3600.0;
-    let style = StarOverlayStyle::for_field(diagonal_deg);
+    let style = StarOverlayStyle::for_field(field_diagonal_deg(wcs, dims));
     for star in detected {
         imageproc::drawing::draw_hollow_circle_mut(
             canvas,
@@ -3560,21 +3666,13 @@ fn draw_star_overlay(
             style.detected_color,
         );
     }
-    let (ra, dec) = wcs.pixel_to_world(dims.0 as f64 / 2.0, dims.1 as f64 / 2.0);
-    for star in catalog.cone_search(ra, dec, diagonal_deg / 2.0, style.catalog_limit) {
-        if let Some((x, y)) = wcs.world_to_pixel(star.ra, star.dec)
-            && x >= 0.0
-            && y >= 0.0
-            && x < dims.0 as f64
-            && y < dims.1 as f64
-        {
-            imageproc::drawing::draw_hollow_circle_mut(
-                canvas,
-                (x.round() as i32, y.round() as i32),
-                style.catalog_radius,
-                style.catalog_color,
-            );
-        }
+    for (x, y) in catalog_stars_in_image(catalog, wcs, dims, style.catalog_limit) {
+        imageproc::drawing::draw_hollow_circle_mut(
+            canvas,
+            (x.round() as i32, y.round() as i32),
+            style.catalog_radius,
+            style.catalog_color,
+        );
     }
 }
 
@@ -3701,7 +3799,7 @@ fn solve_blind_command(
     if let Some(request) = options.sky_map {
         request.write(
             path,
-            &img,
+            &invocation,
             &catalog,
             data,
             None,
@@ -3856,9 +3954,80 @@ mod cli_tests {
         );
         assert_eq!(telescope.catalog_limit, 300);
         assert_eq!(
-            StarOverlayStyle::for_field(StarOverlayStyle::WIDE_FIELD_DIAGONAL_DEG),
+            StarOverlayStyle::for_field(WIDE_FIELD_DIAGONAL_DEG),
             telescope
         );
+    }
+
+    #[test]
+    fn sky_map_flags_are_checked_before_any_solve() {
+        let solve = |extra: &[&str]| {
+            let mut args = vec!["seiza", "solve", "image.jpg", "--scale", "71"];
+            args.extend_from_slice(extra);
+            Cli::try_parse_from(args)
+        };
+        assert!(solve(&["--sky-map", "map.png", "--sky-map-width", "639"]).is_err());
+        assert!(solve(&["--sky-map", "map.png", "--sky-map-width", "12001"]).is_err());
+        assert!(solve(&["--sky-map", "map.png", "--sky-map-width", "640"]).is_ok());
+        assert!(solve(&["--sky-map-foreground"]).is_err());
+        let blind = Cli::try_parse_from([
+            "seiza",
+            "solve-blind",
+            "image.jpg",
+            "--sky-map",
+            "map.png",
+            "--sky-map-foreground",
+        ])
+        .unwrap();
+        assert!(matches!(
+            blind.command,
+            Command::SolveBlind {
+                sky_map_foreground: true,
+                sky_map_width: sky_map::DEFAULT_WIDTH,
+                ..
+            }
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "seiza",
+                "solve-blind",
+                "image.jpg",
+                "--sky-map-width",
+                "100"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn unoriented_extents_are_drawn_as_major_axis_circles() {
+        let placed = |angle_deg| seiza::objects::PlacedObject {
+            object: seiza::objects::SkyObject {
+                kind: ObjectKind::Galaxy,
+                ra: 10.0,
+                dec: 41.0,
+                mag: None,
+                major_arcmin: Some(20.0),
+                minor_arcmin: Some(5.0),
+                position_angle_deg: None,
+                name: "test".into(),
+                common_name: String::new(),
+                metadata: Default::default(),
+            },
+            x: 100.0,
+            y: 50.0,
+            semi_major_px: 40.0,
+            semi_minor_px: 10.0,
+            angle_deg,
+        };
+        assert_eq!(object_outline(&placed(Some(30.0))), (40.0, 10.0, 30.0));
+        assert_eq!(object_outline(&placed(None)), (40.0, 40.0, 0.0));
+        let points = ellipse_points((100.0, 50.0), 40.0, 10.0, 90.0, 8).collect::<Vec<_>>();
+        assert_eq!(points.len(), 9);
+        // The major axis turned to +y; the outline closes on itself.
+        assert!((points[0].0 - 100.0).abs() < 1e-9 && (points[0].1 - 90.0).abs() < 1e-9);
+        assert!((points[8].0 - points[0].0).abs() < 1e-9);
+        assert!((points[2].0 - 90.0).abs() < 1e-9 && (points[2].1 - 50.0).abs() < 1e-9);
     }
 
     #[test]

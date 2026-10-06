@@ -8,11 +8,14 @@
 //! Gathering ([`collect`]) works in source-image pixels and is separate
 //! from drawing ([`render`]) so either can be tested alone.
 
+use std::collections::HashSet;
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont, point};
 use anyhow::{Context, Result};
 use image::{Rgb, RgbImage};
+use rayon::prelude::*;
 use seiza::Wcs;
 use seiza::constellations::{self, ProjectedFigure};
 use seiza::data_paths;
@@ -24,8 +27,8 @@ const SEMIBOLD_TTF: &[u8] = include_bytes!("../fonts/Inter-SemiBold.ttf");
 
 /// Default output width, pixels.
 pub(crate) const DEFAULT_WIDTH: u32 = 2100;
-const MIN_WIDTH: u32 = 640;
-const MAX_WIDTH: u32 = 12_000;
+pub(crate) const MIN_WIDTH: u32 = 640;
+pub(crate) const MAX_WIDTH: u32 = 12_000;
 
 /// IAU-named stars fainter than this are left unlabelled.
 const STAR_MAG_LIMIT: f32 = 4.5;
@@ -43,6 +46,34 @@ const DSO_KINDS: [ObjectKind; 8] = [
     ObjectKind::HiiRegion,
     ObjectKind::SupernovaRemnant,
     ObjectKind::ClusterWithNebula,
+];
+
+/// Greek letters as the Bright Star Catalogue abbreviates them, and in full.
+const GREEK_LETTERS: [(&str, &str); 24] = [
+    ("Alp", "Alpha"),
+    ("Bet", "Beta"),
+    ("Gam", "Gamma"),
+    ("Del", "Delta"),
+    ("Eps", "Epsilon"),
+    ("Zet", "Zeta"),
+    ("Eta", "Eta"),
+    ("The", "Theta"),
+    ("Iot", "Iota"),
+    ("Kap", "Kappa"),
+    ("Lam", "Lambda"),
+    ("Mu", "Mu"),
+    ("Nu", "Nu"),
+    ("Xi", "Xi"),
+    ("Omi", "Omicron"),
+    ("Pi", "Pi"),
+    ("Rho", "Rho"),
+    ("Sig", "Sigma"),
+    ("Tau", "Tau"),
+    ("Ups", "Upsilon"),
+    ("Phi", "Phi"),
+    ("Chi", "Chi"),
+    ("Psi", "Psi"),
+    ("Ome", "Omega"),
 ];
 
 const BACKGROUND: Rgb<u8> = Rgb([13, 19, 27]);
@@ -86,8 +117,8 @@ impl SkyMapCatalogs {
             Ok(path) => ObjectCatalog::open(&path)
                 .map_err(|error| eprintln!("sky map: {}: {error}", path.display()))
                 .ok(),
-            Err(error) => {
-                eprintln!("sky map: {error}; deep-sky objects are left out");
+            Err(_) => {
+                report_missing("objects.bin", "deep-sky objects", dir.as_deref());
                 None
             }
         };
@@ -97,13 +128,22 @@ impl SkyMapCatalogs {
             Ok(path) => StarIdentifierCatalog::open(&path)
                 .map_err(|error| eprintln!("sky map: {}: {error}", path.display()))
                 .ok(),
-            Err(error) => {
-                eprintln!("sky map: {error}; star names are left out");
+            Err(_) => {
+                report_missing("stars-lite-tycho2.ids.bin", "star names", dir.as_deref());
                 None
             }
         };
         Self { objects, star_ids }
     }
+}
+
+/// Say which file is missing, where it was looked for, and how to get it.
+fn report_missing(file: &str, labels: &str, dir: Option<&Path>) {
+    let target = dir.map_or_else(|| "<dir>".to_string(), |dir| dir.display().to_string());
+    eprintln!(
+        "sky map: no {file} next to --data or in the standard catalog locations, so {labels} \
+         are left out; `seiza download-data prebuilt --output {target} --file {file}` fetches it"
+    );
 }
 
 /// Solve statistics for the footer.
@@ -129,10 +169,10 @@ pub(crate) struct ObjectMark {
     pub label: String,
     pub x: f64,
     pub y: f64,
+    /// The ellipse to draw; see [`crate::object_outline`].
     pub semi_major_px: f64,
     pub semi_minor_px: f64,
-    /// `None` draws a circle of the major axis.
-    pub angle_deg: Option<f64>,
+    pub angle_deg: f64,
 }
 
 /// Everything the map labels, in source-image pixels.
@@ -141,8 +181,29 @@ pub(crate) struct Annotations {
     pub figures: Vec<ProjectedFigure>,
     pub stars: Vec<StarMark>,
     pub objects: Vec<ObjectMark>,
-    /// Foreground limit, when the detections show one.
+    /// Foreground limit, when asked for and the detections show one.
     pub sky_floor: Option<SkyFloor>,
+    /// Marks the map would show but the floor left out.
+    pub hidden: usize,
+}
+
+/// What `--sky-map-foreground` works from: detections a catalog star
+/// confirms, which outline the sky in a photo with foreground.
+pub(crate) struct Foreground {
+    /// Image pixels.
+    pub detections: Vec<(f64, f64)>,
+    /// How far a detection may sit from its catalog star, pixels.
+    pub tolerance: f64,
+}
+
+impl Foreground {
+    /// A star the image shows is kept even below the floor: a bright star
+    /// in haze just above the horizon is still sky.
+    fn seen(&self, x: f64, y: f64) -> bool {
+        self.detections
+            .iter()
+            .any(|&(dx, dy)| (dx - x).hypot(dy - y) <= self.tolerance)
+    }
 }
 
 /// Detections with a catalog star within `tolerance` pixels. Bright edges
@@ -165,8 +226,13 @@ pub(crate) fn confirmed_detections(
 }
 
 /// Where the sky ends in a photo with foreground: below the lowest
-/// detected star of each column band (plus a margin) there is ground, a
-/// tree, or a building, and catalog marks there only add clutter.
+/// detected stars of a run of column bands (plus a margin) there is
+/// ground, a tree, or a building, and catalog marks there only add clutter.
+///
+/// A band counts only when the strip under its lowest stars is too wide
+/// and too empty to be chance for stars spread over the whole frame, and
+/// only in a run of several such bands, so a frame with stars everywhere
+/// has no floor.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SkyFloor {
     width: f64,
@@ -178,14 +244,24 @@ impl SkyFloor {
     const BANDS: usize = 20;
     /// Fewer detections than this cannot outline the sky.
     const MIN_STARS: usize = 60;
-    /// A band and its neighbours need this many stars to set a floor.
-    const MIN_BAND_STARS: usize = 5;
-    /// Lowest stars of a band neighbourhood ignored as possible chance
-    /// matches on the foreground.
-    const SKIPPED_LOWEST: usize = 2;
+    /// Lowest stars of a band neighbourhood that may be chance matches on
+    /// the foreground.
+    const MAX_SKIPPED: usize = 2;
+    /// An empty strip narrower than this fraction of the height is not
+    /// foreground: detection thins out at the frame edge anyway.
+    const MIN_STRIP: f64 = 0.1;
+    /// How likely the strip may be for stars spread evenly down the band.
+    const MAX_CHANCE: f64 = 1e-3;
+    /// How much less likely by chance leaving out a low star must make
+    /// the strip before that star counts as a match on the foreground.
+    const SKIP_FACTOR: f64 = 100.0;
+    /// Consecutive bands that must show the strip.
+    const MIN_RUN: usize = 5;
+    /// Space left under the lowest stars, as a fraction of the height.
+    const MARGIN: f64 = 0.02;
 
-    /// `None` when stars reach the bottom of the frame everywhere, which is
-    /// the normal case for a telescope image.
+    /// `None` unless the detections leave a clear strip along the bottom
+    /// of several neighbouring bands; a telescope image has none.
     pub(crate) fn from_detections(detected: &[(f64, f64)], dims: (u32, u32)) -> Option<Self> {
         let (width, height) = (dims.0 as f64, dims.1 as f64);
         if detected.len() < Self::MIN_STARS || width <= 0.0 || height <= 0.0 {
@@ -198,48 +274,70 @@ impl SkyFloor {
                 bands[band].push(y);
             }
         }
-        let margin = height * 0.02;
-        let floors = (0..Self::BANDS)
+        // The top of the clear strip under each band and its neighbours,
+        // when there is one. The neighbours keep one sparse band from
+        // cutting into the sky; an end band borrows both from the inside,
+        // so it weighs as many stars as any other. The lowest star or two
+        // may be chance matches on the foreground, so the strip may hold
+        // that many: the lowest star counts unless leaving it out makes
+        // the strip far less likely by chance, as a lone match deep in the
+        // ground does.
+        let mut strips = (0..Self::BANDS)
             .map(|band| {
-                // A band and its neighbours, so one sparse band does not cut
-                // into the sky. The third-lowest star, so a chance match or two
-                // on the foreground do not lower the floor; too few stars
-                // near means no evidence.
-                let mut ys = (band.saturating_sub(1)..=(band + 1).min(Self::BANDS - 1))
+                let first = band.saturating_sub(1).min(Self::BANDS - 3);
+                let mut ys = (first..first + 3)
                     .flat_map(|index| bands[index].iter().copied())
                     .collect::<Vec<_>>();
-                if ys.len() < Self::MIN_BAND_STARS {
-                    return height;
-                }
                 ys.sort_by(|a, b| b.total_cmp(a));
-                (ys[Self::SKIPPED_LOWEST] + margin).min(height)
+                let candidates = (0..=Self::MAX_SKIPPED)
+                    .take_while(|&below| below < ys.len())
+                    .filter_map(|below| {
+                        let strip = (height - ys[below]) / height;
+                        (strip >= Self::MIN_STRIP)
+                            .then(|| (binomial_cdf(below, ys.len(), strip), ys[below]))
+                    })
+                    .collect::<Vec<_>>();
+                let least = candidates
+                    .iter()
+                    .map(|&(chance, _)| chance)
+                    .fold(f64::INFINITY, f64::min);
+                candidates
+                    .into_iter()
+                    .find(|&(chance, _)| {
+                        chance < Self::MAX_CHANCE && chance <= least * Self::SKIP_FACTOR
+                    })
+                    .map(|(_, top)| top)
             })
             .collect::<Vec<_>>();
-        // Few stars show low in a hazy sky, so a band's lowest star can sit
-        // far above the horizon. A horizon rarely dips between two higher
-        // stretches, so fill such valleys up to the lower of the highest
-        // floors on either side.
-        let mut floors = floors;
-        let left = floors
-            .iter()
-            .scan(0.0f64, |high, &floor| {
-                *high = high.max(floor);
-                Some(*high)
-            })
-            .collect::<Vec<_>>();
-        let mut right = floors
-            .iter()
-            .rev()
-            .scan(0.0f64, |high, &floor| {
-                *high = high.max(floor);
-                Some(*high)
-            })
-            .collect::<Vec<_>>();
-        right.reverse();
-        for (index, floor) in floors.iter_mut().enumerate() {
-            *floor = left[index].min(right[index]);
+        let mut start = 0;
+        while start < Self::BANDS {
+            if strips[start].is_none() {
+                start += 1;
+                continue;
+            }
+            let end = (start..Self::BANDS)
+                .find(|&index| strips[index].is_none())
+                .unwrap_or(Self::BANDS);
+            if end - start < Self::MIN_RUN {
+                strips[start..end].fill(None);
+            }
+            start = end;
         }
-        if floors.iter().all(|&floor| floor >= height * 0.95) {
+        // Fill valleys among the bands that show a strip; a band without
+        // one has no evidence of foreground, so no cut.
+        let margin = height * Self::MARGIN;
+        let known = strips
+            .iter()
+            .enumerate()
+            .filter_map(|(band, strip)| strip.map(|y| (band, (y + margin).min(height))))
+            .collect::<Vec<_>>();
+        let mut filled = known.iter().map(|&(_, floor)| floor).collect::<Vec<_>>();
+        fill_valleys(&mut filled);
+        let mut floors = vec![height; Self::BANDS];
+        for (&(band, _), floor) in known.iter().zip(filled) {
+            floors[band] = floor;
+        }
+        if floors.iter().all(|&floor| floor >= height) {
             return None;
         }
         Some(Self { width, floors })
@@ -260,20 +358,83 @@ impl SkyFloor {
     }
 }
 
+/// Few stars show low in a hazy sky, so a band's lowest star can sit far
+/// above the horizon. A horizon rarely rises between two lower stretches,
+/// so such a floor drops to the higher of the deepest floors on its two
+/// sides. The ends are mirrored, so an end band is judged against its
+/// neighbour like any other.
+fn fill_valleys(floors: &mut [f64]) {
+    let count = floors.len();
+    if count < 2 {
+        return;
+    }
+    let padded = std::iter::once(floors[1])
+        .chain(floors.iter().copied())
+        .chain(std::iter::once(floors[count - 2]))
+        .collect::<Vec<_>>();
+    let running_max = |values: &mut dyn Iterator<Item = f64>| {
+        values
+            .scan(f64::NEG_INFINITY, |high, floor| {
+                *high = high.max(floor);
+                Some(*high)
+            })
+            .collect::<Vec<_>>()
+    };
+    let left = running_max(&mut padded.iter().copied());
+    let mut right = running_max(&mut padded.iter().rev().copied());
+    right.reverse();
+    for (index, floor) in floors.iter_mut().enumerate() {
+        *floor = left[index + 1].min(right[index + 1]);
+    }
+}
+
+/// P(X <= k) for X ~ Binomial(n, p): how likely at most `k` of `n` evenly
+/// spread stars fall in a strip covering fraction `p` of the height.
+fn binomial_cdf(k: usize, n: usize, p: f64) -> f64 {
+    if p <= 0.0 {
+        return 1.0;
+    }
+    if p >= 1.0 {
+        return if k >= n { 1.0 } else { 0.0 };
+    }
+    let q = 1.0 - p;
+    let mut term = q.powi(n as i32);
+    let mut sum = term;
+    for i in 0..k.min(n) {
+        term *= (n - i) as f64 / (i + 1) as f64 * p / q;
+        sum += term;
+    }
+    sum.min(1.0)
+}
+
 fn inside(dims: (u32, u32), x: f64, y: f64) -> bool {
     x >= 0.0 && y >= 0.0 && x < dims.0 as f64 && y < dims.1 as f64
 }
 
+/// The first `limit` marks `shown` accepts, and how many of the first
+/// `limit` it turned away: the marks a map without the floor would show
+/// but this one does not.
+fn first_shown<T>(marks: Vec<T>, limit: usize, shown: impl Fn(&T) -> bool) -> (Vec<T>, usize) {
+    let hidden = marks.iter().take(limit).filter(|mark| !shown(mark)).count();
+    let kept = marks
+        .into_iter()
+        .filter(|mark| shown(mark))
+        .take(limit)
+        .collect();
+    (kept, hidden)
+}
+
 /// Project the constellation figures and look up the named stars and
-/// deep-sky objects in the field. `detected` (image pixels) outlines the
-/// sky in a photo with foreground; see [`SkyFloor`].
+/// deep-sky objects in the field. With `foreground`, marks below the sky
+/// it outlines are left out; see [`SkyFloor`].
 pub(crate) fn collect(
     wcs: &Wcs,
     dims: (u32, u32),
     catalogs: &SkyMapCatalogs,
-    detected: &[(f64, f64)],
+    foreground: Option<&Foreground>,
 ) -> Annotations {
-    let sky_floor = SkyFloor::from_detections(detected, dims);
+    let sky_floor =
+        foreground.and_then(|foreground| SkyFloor::from_detections(&foreground.detections, dims));
     let in_sky = |x: f64, y: f64| sky_floor.as_ref().is_none_or(|floor| floor.is_sky(x, y));
     let figures = constellations::project_figures(wcs, dims);
     let stars = catalogs
@@ -296,48 +457,47 @@ pub(crate) fn collect(
             })
         })
         .unwrap_or_default();
+    let (stars, hidden_stars) = first_shown(stars, MAX_STARS, |star| {
+        in_sky(star.x, star.y) || foreground.is_some_and(|f| f.seen(star.x, star.y))
+    });
+    // An object centred outside the frame is judged where its extent
+    // enters it.
+    let (width, height) = (dims.0 as f64, dims.1 as f64);
+    let (objects, hidden_objects) = first_shown(objects, MAX_OBJECTS, |object| {
+        in_sky(
+            object.x.clamp(0.0, width - 1.0),
+            object.y.clamp(0.0, height - 1.0),
+        )
+    });
     Annotations {
         figures,
-        stars: stars
-            .into_iter()
-            .filter(|star| in_sky(star.x, star.y))
-            .collect(),
-        objects: objects
-            .into_iter()
-            .filter(|object| in_sky(object.x.clamp(0.0, dims.0 as f64), object.y))
-            .collect(),
+        stars,
+        objects,
         sky_floor,
+        hidden: hidden_stars + hidden_objects,
     }
 }
 
+/// Labelled stars in the image, brightest first: IAU proper names, then
+/// bright figure stars without one by Bayer designation.
 fn named_stars(
     catalog: &StarIdentifierCatalog,
     wcs: &Wcs,
     dims: (u32, u32),
 ) -> std::io::Result<Vec<StarMark>> {
     let center = wcs.pixel_to_world(dims.0 as f64 / 2.0, dims.1 as f64 / 2.0);
-    let radius = wcs
-        .footprint(dims.0, dims.1)
-        .iter()
-        .map(|&corner| constellations::separation_deg(center, corner))
-        .fold(0.0, f64::max)
-        + 0.5;
-    let mut seen = std::collections::HashSet::new();
+    let radius = crate::field_diagonal_deg(wcs, dims) / 2.0 + 0.5;
+    let mut named = HashSet::new();
     let mut marks = Vec::new();
-    let mut place = |name: &str, stable_id: &str, ra: f64, dec: f64, mag: Option<f32>| {
-        if marks.len() >= MAX_STARS || seen.contains(stable_id) {
+    let mut place = |name: String, stable_id: &str, ra: f64, dec: f64, mag: Option<f32>| {
+        if named.contains(stable_id) {
             return;
         }
+        named.insert(stable_id.to_string());
         if let Some((x, y)) = wcs.world_to_pixel(ra, dec)
             && inside(dims, x, y)
         {
-            seen.insert(stable_id.to_string());
-            marks.push(StarMark {
-                name: name.to_string(),
-                x,
-                y,
-                mag,
-            });
+            marks.push(StarMark { name, x, y, mag });
         }
     };
     for star in catalog.names_in_cone(
@@ -348,7 +508,7 @@ fn named_stars(
     )? {
         if star.mag.is_some_and(|mag| mag <= STAR_MAG_LIMIT) {
             place(
-                star.designation,
+                star.designation.to_string(),
                 star.stable_id,
                 star.ra,
                 star.dec,
@@ -356,43 +516,21 @@ fn named_stars(
             );
         }
     }
-    // Bright figure stars without a proper name: label them "Gamma Cas".
     let figure_stars = constellations::line_stars()
         .map(|star| format!("hr:{}", star.hr))
-        .collect::<std::collections::HashSet<_>>();
-    let mut bayer = catalog
-        .names_in_cone(
-            center,
-            radius,
-            Some(StarNameCatalog::BrightStarCatalog),
-            Some(StarNameKind::BayerFlamsteed),
-        )?
-        .into_iter()
-        .filter(|star| {
-            star.mag.is_some_and(|mag| mag <= BAYER_MAG_LIMIT)
-                && figure_stars.contains(star.stable_id)
-                && star
-                    .designation
-                    .split_whitespace()
-                    .next()
-                    .is_some_and(|word| word.len() > 3 && word.chars().all(char::is_alphabetic))
-        })
-        .collect::<Vec<_>>();
-    // Prefer the spelled-out Greek letter ("Gamma Cas" over "Gam Cas").
-    bayer.sort_by(|a, b| {
-        a.mag
-            .unwrap_or(f32::INFINITY)
-            .total_cmp(&b.mag.unwrap_or(f32::INFINITY))
-            .then_with(|| b.designation.len().cmp(&a.designation.len()))
-    });
-    for star in bayer {
-        place(
-            star.designation,
-            star.stable_id,
-            star.ra,
-            star.dec,
-            star.mag,
-        );
+        .collect::<HashSet<_>>();
+    for star in catalog.names_in_cone(
+        center,
+        radius,
+        Some(StarNameCatalog::BrightStarCatalog),
+        Some(StarNameKind::BayerFlamsteed),
+    )? {
+        if star.mag.is_some_and(|mag| mag <= BAYER_MAG_LIMIT)
+            && figure_stars.contains(star.stable_id)
+            && let Some(name) = bayer_name(star.designation)
+        {
+            place(name, star.stable_id, star.ra, star.dec, star.mag);
+        }
     }
     marks.sort_by(|a, b| {
         a.mag
@@ -402,6 +540,27 @@ fn named_stars(
     Ok(marks)
 }
 
+/// A Bayer designation with its Greek letter spelled out: "Gam Cas" and
+/// "Gamma Cas" give "Gamma Cas", "Alp1 Cen" gives "Alpha1 Cen". `None` for
+/// a Flamsteed number or anything else.
+fn bayer_name(designation: &str) -> Option<String> {
+    let (letter, constellation) = designation.trim().split_once(' ')?;
+    let constellation = constellation.trim();
+    constellations::constellation_name(constellation)?;
+    let split = letter
+        .find(|c: char| c.is_ascii_digit())
+        .unwrap_or(letter.len());
+    let (greek, component) = letter.split_at(split);
+    if !component.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let (_, full) = GREEK_LETTERS.iter().find(|(short, full)| {
+        greek.eq_ignore_ascii_case(short) || greek.eq_ignore_ascii_case(full)
+    })?;
+    Some(format!("{full}{component} {constellation}"))
+}
+
+/// Deep-sky objects whose extent reaches the image, most prominent first.
 fn deep_sky_objects(
     catalog: &ObjectCatalog,
     wcs: &Wcs,
@@ -410,47 +569,46 @@ fn deep_sky_objects(
     let query = ObjectQuery {
         kinds: DSO_KINDS.to_vec(),
         sort: ObjectSort::Prominence,
-        limit: Some(MAX_OBJECTS * 3),
         ..ObjectQuery::default()
     };
-    let mut marks = Vec::new();
-    for placed in catalog.query_footprint(wcs, dims, &query)? {
-        if marks.len() >= MAX_OBJECTS {
-            break;
-        }
-        let object = &placed.object;
-        let mut label = if object.common_name.is_empty() || object.common_name == object.name {
-            object.name.clone()
-        } else {
-            format!("{} / {}", object.name, object.common_name)
-        };
-        if !inside(dims, placed.x, placed.y) {
-            label.push_str(" (edge)");
-        }
-        marks.push(ObjectMark {
-            label,
-            x: placed.x,
-            y: placed.y,
-            semi_major_px: placed.semi_major_px,
-            semi_minor_px: placed.semi_minor_px,
-            angle_deg: placed.angle_deg,
-        });
-    }
-    Ok(marks)
+    Ok(catalog
+        .query_footprint(wcs, dims, &query)?
+        .into_iter()
+        .map(|placed| {
+            let object = &placed.object;
+            let mut label = if object.common_name.is_empty() || object.common_name == object.name {
+                object.name.clone()
+            } else {
+                format!("{} / {}", object.name, object.common_name)
+            };
+            if !inside(dims, placed.x, placed.y) {
+                label.push_str(" (edge)");
+            }
+            let (semi_major_px, semi_minor_px, angle_deg) = crate::object_outline(&placed);
+            ObjectMark {
+                label,
+                x: placed.x,
+                y: placed.y,
+                semi_major_px,
+                semi_minor_px,
+                angle_deg,
+            }
+        })
+        .collect())
 }
 
-/// Load, label, and write a sky map.
+/// Label, draw and write a sky map.
 pub(crate) fn write(
     path: &Path,
-    image: &RgbImage,
+    photo: &RgbImage,
     wcs: &Wcs,
     catalogs: &SkyMapCatalogs,
-    detected: &[(f64, f64)],
+    foreground: Option<&Foreground>,
     summary: &SolveSummary,
     width: u32,
 ) -> Result<()> {
-    let annotations = collect(wcs, image.dimensions(), catalogs, detected);
-    let map = render(image, wcs, &annotations, summary, width)?;
+    let annotations = collect(wcs, photo.dimensions(), catalogs, foreground);
+    let map = render(photo, wcs, &annotations, summary, width)?;
     map.save(path)
         .with_context(|| format!("failed to write {}", path.display()))?;
     println!(
@@ -496,6 +654,18 @@ impl Rect {
 
     fn nearest_point(&self, x: f64, y: f64) -> (f64, f64) {
         (x.clamp(self.x0, self.x1), y.clamp(self.y0, self.y1))
+    }
+
+    /// Shrunk by `by` on every side; a box too small for that collapses
+    /// to its centre.
+    fn inset(&self, by: f64) -> Rect {
+        let (cx, cy) = ((self.x0 + self.x1) / 2.0, (self.y0 + self.y1) / 2.0);
+        Rect {
+            x0: (self.x0 + by).min(cx),
+            y0: (self.y0 + by).min(cy),
+            x1: (self.x1 - by).max(cx),
+            y1: (self.y1 - by).max(cy),
+        }
     }
 }
 
@@ -563,9 +733,11 @@ impl LabelPlacer {
     }
 }
 
-/// Coverage mask for one colour layer, composited once so overlapping
-/// strokes never double-blend.
+/// Coverage mask for one colour layer over a `width` x `height` area whose
+/// top-left pixel is `origin` in the target image, composited once so
+/// overlapping strokes never double-blend.
 struct Mask {
+    origin: (i64, i64),
     width: usize,
     height: usize,
     coverage: Vec<f32>,
@@ -573,23 +745,37 @@ struct Mask {
 
 impl Mask {
     fn new(width: u32, height: u32) -> Self {
+        Self::at((0, 0), width as usize, height as usize)
+    }
+
+    fn at(origin: (i64, i64), width: usize, height: usize) -> Self {
         Self {
-            width: width as usize,
-            height: height as usize,
-            coverage: vec![0.0; width as usize * height as usize],
+            origin,
+            width,
+            height,
+            coverage: vec![0.0; width * height],
         }
     }
 
-    fn set(&mut self, x: i64, y: i64, value: f32, clip: &Rect) {
-        if (x as f64) < clip.x0
-            || (y as f64) < clip.y0
-            || (x as f64) >= clip.x1
-            || (y as f64) >= clip.y1
-            || x < 0
-            || y < 0
-            || x as usize >= self.width
-            || y as usize >= self.height
-        {
+    /// The columns and rows of the mask, in target pixels, that a box from
+    /// `(x0, y0)` to `(x1, y1)` touches.
+    fn span(
+        &self,
+        x0: f64,
+        y0: f64,
+        x1: f64,
+        y1: f64,
+    ) -> (RangeInclusive<i64>, RangeInclusive<i64>) {
+        let (ox, oy) = self.origin;
+        (
+            (x0.floor() as i64).max(ox)..=(x1.ceil() as i64).min(ox + self.width as i64 - 1),
+            (y0.floor() as i64).max(oy)..=(y1.ceil() as i64).min(oy + self.height as i64 - 1),
+        )
+    }
+
+    fn set(&mut self, x: i64, y: i64, value: f32) {
+        let (x, y) = (x - self.origin.0, y - self.origin.1);
+        if x < 0 || y < 0 || x as usize >= self.width || y as usize >= self.height {
             return;
         }
         let cell = &mut self.coverage[y as usize * self.width + x as usize];
@@ -597,17 +783,19 @@ impl Mask {
     }
 
     /// An anti-aliased line of `width` pixels.
-    fn stroke(&mut self, p: (f64, f64), q: (f64, f64), width: f64, clip: &Rect) {
+    fn stroke(&mut self, p: (f64, f64), q: (f64, f64), width: f64) {
         let half = width / 2.0;
         let reach = half + 1.0;
-        let x0 = (p.0.min(q.0) - reach).floor() as i64;
-        let x1 = (p.0.max(q.0) + reach).ceil() as i64;
-        let y0 = (p.1.min(q.1) - reach).floor() as i64;
-        let y1 = (p.1.max(q.1) + reach).ceil() as i64;
+        let (columns, rows) = self.span(
+            p.0.min(q.0) - reach,
+            p.1.min(q.1) - reach,
+            p.0.max(q.0) + reach,
+            p.1.max(q.1) + reach,
+        );
         let (dx, dy) = (q.0 - p.0, q.1 - p.1);
         let length_sq = dx * dx + dy * dy;
-        for y in y0.max(0)..=y1.min(self.height as i64 - 1) {
-            for x in x0.max(0)..=x1.min(self.width as i64 - 1) {
+        for y in rows {
+            for x in columns.clone() {
                 let (cx, cy) = (x as f64 + 0.5, y as f64 + 0.5);
                 let t = if length_sq > 0.0 {
                     (((cx - p.0) * dx + (cy - p.1) * dy) / length_sq).clamp(0.0, 1.0)
@@ -617,34 +805,40 @@ impl Mask {
                 let distance = (cx - (p.0 + t * dx)).hypot(cy - (p.1 + t * dy));
                 let value = (half + 0.5 - distance) as f32;
                 if value > 0.0 {
-                    self.set(x, y, value, clip);
+                    self.set(x, y, value);
                 }
             }
         }
     }
 
-    fn polyline(&mut self, points: &[(f64, f64)], width: f64, clip: &Rect) {
+    fn polyline(&mut self, points: &[(f64, f64)], width: f64) {
         for pair in points.windows(2) {
-            self.stroke(pair[0], pair[1], width, clip);
+            self.stroke(pair[0], pair[1], width);
         }
     }
 
     /// A ring of `radius` and line `width`; a radius of zero fills a disc.
-    fn ring(&mut self, center: (f64, f64), radius: f64, width: f64, clip: &Rect) {
+    fn ring(&mut self, center: (f64, f64), radius: f64, width: f64) {
         let reach = radius + width / 2.0 + 1.0;
-        for y in (center.1 - reach).floor() as i64..=(center.1 + reach).ceil() as i64 {
-            for x in (center.0 - reach).floor() as i64..=(center.0 + reach).ceil() as i64 {
+        let (columns, rows) = self.span(
+            center.0 - reach,
+            center.1 - reach,
+            center.0 + reach,
+            center.1 + reach,
+        );
+        for y in rows {
+            for x in columns.clone() {
                 let distance = (x as f64 + 0.5 - center.0).hypot(y as f64 + 0.5 - center.1);
                 let value = (width / 2.0 + 0.5 - (distance - radius).abs()) as f32;
                 if value > 0.0 {
-                    self.set(x, y, value, clip);
+                    self.set(x, y, value);
                 }
             }
         }
     }
 
-    fn disc(&mut self, center: (f64, f64), radius: f64, clip: &Rect) {
-        self.ring(center, radius / 2.0, radius, clip);
+    fn disc(&mut self, center: (f64, f64), radius: f64) {
+        self.ring(center, radius / 2.0, radius);
     }
 
     fn ellipse(
@@ -654,48 +848,36 @@ impl Mask {
         semi_minor: f64,
         angle_deg: f64,
         width: f64,
-        clip: &Rect,
     ) {
-        let (sin_r, cos_r) = angle_deg.to_radians().sin_cos();
         let segments = ((semi_major * 0.5) as usize).clamp(48, 720);
-        let points = (0..=segments)
-            .map(|i| {
-                let t = i as f64 / segments as f64 * std::f64::consts::TAU;
-                let (lx, ly) = (semi_major * t.cos(), semi_minor * t.sin());
-                (
-                    center.0 + lx * cos_r - ly * sin_r,
-                    center.1 + lx * sin_r + ly * cos_r,
-                )
-            })
+        let points = crate::ellipse_points(center, semi_major, semi_minor, angle_deg, segments)
             .collect::<Vec<_>>();
-        self.polyline(&points, width, clip);
+        self.polyline(&points, width);
     }
 
-    /// Fade coverage to nothing over `fade` pixels above `floor(x)`, inside
-    /// `frame`.
-    fn fade_below(&mut self, frame: &Rect, fade: f64, floor: impl Fn(f64) -> f64) {
-        let (x0, x1) = (
-            frame.x0.max(0.0) as usize,
-            (frame.x1 as usize).min(self.width),
-        );
-        for x in x0..x1 {
-            let limit = floor(x as f64 + 0.5);
+    /// Fade coverage to nothing over `fade` pixels above `floor(x)`.
+    /// Returns whether anything drawn was dimmed.
+    fn fade_below(&mut self, fade: f64, floor: impl Fn(f64) -> f64) -> bool {
+        let mut dimmed = false;
+        for x in 0..self.width {
+            let limit = floor((self.origin.0 + x as i64) as f64 + 0.5) - self.origin.1 as f64;
             let start = ((limit - fade).max(0.0) as usize).min(self.height);
             for y in start..self.height {
                 let factor = ((limit - (y as f64 + 0.5)) / fade).clamp(0.0, 1.0) as f32;
-                self.coverage[y * self.width + x] *= factor;
+                let cell = &mut self.coverage[y * self.width + x];
+                if *cell > 0.0 && factor < 1.0 {
+                    dimmed = true;
+                    *cell *= factor;
+                }
             }
         }
+        dimmed
     }
 
     /// Spread the mask by `radius` pixels with a soft edge, for a halo.
     fn dilated(&self, radius: f64) -> Mask {
         let r = radius.ceil() as i64;
-        let mut out = Mask {
-            width: self.width,
-            height: self.height,
-            coverage: vec![0.0; self.coverage.len()],
-        };
+        let mut out = Mask::at(self.origin, self.width, self.height);
         let offsets = (-r..=r)
             .flat_map(|dy| (-r..=r).map(move |dx| (dx, dy)))
             .filter_map(|(dx, dy)| {
@@ -723,13 +905,18 @@ impl Mask {
     }
 
     fn composite(&self, canvas: &mut RgbImage, color: Rgb<u8>, alpha: f32) {
+        let (canvas_width, canvas_height) = canvas.dimensions();
         for (index, &value) in self.coverage.iter().enumerate() {
             if value <= 0.0 {
                 continue;
             }
+            let x = self.origin.0 + (index % self.width) as i64;
+            let y = self.origin.1 + (index / self.width) as i64;
+            if x < 0 || y < 0 || x >= canvas_width as i64 || y >= canvas_height as i64 {
+                continue;
+            }
             let a = value * alpha;
-            let (x, y) = ((index % self.width) as u32, (index / self.width) as u32);
-            let pixel = canvas.get_pixel_mut(x, y);
+            let pixel = canvas.get_pixel_mut(x as u32, y as u32);
             for channel in 0..3 {
                 let blended = pixel[channel] as f32 * (1.0 - a) + color[channel] as f32 * a;
                 pixel[channel] = blended.round().clamp(0.0, 255.0) as u8;
@@ -769,6 +956,27 @@ fn measure(font: &FontRef<'_>, size: f64, tracking: f64, text: &str) -> (f64, f6
     (width, (scaled.ascent() - scaled.descent()) as f64)
 }
 
+/// Break `text` at spaces into lines no wider than `max_width`. A word
+/// wider than that gets a line of its own.
+fn wrap(font: &FontRef<'_>, size: f64, text: &str, max_width: f64) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split(' ') {
+        let candidate = if line.is_empty() {
+            word.to_string()
+        } else {
+            format!("{line} {word}")
+        };
+        if line.is_empty() || measure(font, size, 0.0, &candidate).0 <= max_width {
+            line = candidate;
+        } else {
+            lines.push(std::mem::replace(&mut line, word.to_string()));
+        }
+    }
+    lines.push(line);
+    lines
+}
+
 /// Draw `text` with its top-left corner at `(x, y)` into a mask.
 fn draw_text(
     mask: &mut Mask,
@@ -780,7 +988,6 @@ fn draw_text(
 ) {
     let scale = PxScale::from(size as f32);
     let scaled = font.as_scaled(scale);
-    let everywhere = Rect::new(0.0, 0.0, mask.width as f64, mask.height as f64);
     let baseline = y as f32 + scaled.ascent();
     let mut caret = x as f32;
     let mut previous = None;
@@ -799,17 +1006,69 @@ fn draw_text(
                     bounds.min.x as i64 + gx as i64,
                     bounds.min.y as i64 + gy as i64,
                     coverage,
-                    &everywhere,
                 );
             });
         }
     }
 }
 
+/// Draw one line of text straight onto the canvas.
+#[allow(clippy::too_many_arguments)]
+fn draw_line(
+    canvas: &mut RgbImage,
+    font: &FontRef<'_>,
+    size: f64,
+    tracking: f64,
+    (x, y): (f64, f64),
+    color: Rgb<u8>,
+    text: &str,
+) {
+    let (width, height) = measure(font, size, tracking, text);
+    // Glyphs may reach a pixel or two past their advance.
+    let slack = (size * 0.25).ceil() as i64;
+    let origin = (x.floor() as i64 - slack, y.floor() as i64 - slack);
+    let mut mask = Mask::at(
+        origin,
+        width.ceil() as usize + 2 * slack as usize,
+        height.ceil() as usize + 2 * slack as usize,
+    );
+    draw_text(&mut mask, font, size, tracking, (x, y), text);
+    mask.composite(canvas, color, 1.0);
+}
+
+/// Footer text: solve statistics, the caveat (with the foreground note
+/// when the floor left something out), and the figure credit.
+fn footer_text(
+    wcs: &Wcs,
+    summary: &SolveSummary,
+    dims: (u32, u32),
+    foreground_cut: bool,
+) -> [String; 3] {
+    let scale = wcs.scale_arcsec_per_px();
+    let (ra, dec) = wcs.pixel_to_world(dims.0 as f64 / 2.0, dims.1 as f64 / 2.0);
+    let mut stats = vec![format!("{} matched stars", summary.matched_stars)];
+    if let Some(sip) = &wcs.sip {
+        stats.push(format!("SIP order {}", sip.order));
+    }
+    stats.push(format!("{scale:.4} arcsec/px"));
+    stats.push(format!("RMS {:.2} px", summary.rms_arcsec / scale));
+    stats.push(format!("center RA {ra:.3}°  Dec {dec:+.3}°"));
+    let caveat = if foreground_cut {
+        "Catalog marks do not establish object detection. Marks below the lowest detected stars (foreground) are left out."
+    } else {
+        "Catalog marks do not establish object detection."
+    };
+    [
+        stats.join("  |  "),
+        caveat.to_string(),
+        format!("Figures: {}", constellations::ATTRIBUTION),
+    ]
+}
+
 /// Lay the image out under a title bar and over a footer, then draw the
 /// figures, markers, and labels.
 pub(crate) fn render(
-    image: &RgbImage,
+    photo: &RgbImage,
     wcs: &Wcs,
     annotations: &Annotations,
     summary: &SolveSummary,
@@ -822,47 +1081,189 @@ pub(crate) fn render(
     let u = width as f64 / 1400.0;
     let pad = (21.0 * u).round();
     let header = (100.0 * u).round();
-    let footer = (92.0 * u).round();
-    let (source_width, source_height) = image.dimensions();
+    let (source_width, source_height) = photo.dimensions();
     let scale = (width as f64 - 2.0 * pad) / source_width as f64;
-    let image_width = (source_width as f64 * scale).round() as u32;
-    let image_height = ((source_height as f64 * scale).round() as u32).max(1);
-    let height = header as u32 + image_height + footer as u32;
+    let view_width = ((source_width as f64 * scale).round() as u32).max(1);
+    let view_height = ((source_height as f64 * scale).round() as u32).max(1);
+    let mut view = resize(photo, view_width, view_height);
+    let foreground_cut =
+        draw_annotations(&mut view, &fonts, annotations, u, scale) || annotations.hidden > 0;
+
+    // The footer wraps any line wider than the image.
+    let text_width = width as f64 - 2.0 * pad;
+    let [stats, caveat, credit] = footer_text(wcs, summary, photo.dimensions(), foreground_cut);
+    let footer_lines = [
+        (&fonts.regular, 15.0 * u, TITLE, stats, 26.0 * u),
+        (&fonts.regular, 13.5 * u, MUTED, caveat, 22.0 * u),
+        (&fonts.regular, 11.5 * u, DIM, credit, 16.0 * u),
+    ]
+    .into_iter()
+    .flat_map(|(font, size, color, text, advance)| {
+        wrap(font, size, &text, text_width)
+            .into_iter()
+            .map(move |line| (font, size, color, line, advance))
+    })
+    .collect::<Vec<_>>();
+    let footer_top = 14.0 * u;
+    let footer =
+        (footer_top + footer_lines.iter().map(|line| line.4).sum::<f64>() + 14.0 * u).round();
+    let height = header as u32 + view_height + footer as u32;
 
     let mut canvas = RgbImage::from_pixel(width, height, BACKGROUND);
-    let photo = image::imageops::resize(
-        image,
-        image_width,
-        image_height,
-        image::imageops::FilterType::CatmullRom,
+    image::imageops::replace(&mut canvas, &view, pad as i64, header as i64);
+    let brand = format!("SEIZA  /  {}", summary.name);
+    let projection = if wcs.sip.is_some() { "TAN/SIP" } else { "TAN" };
+    let subtitle = format!(
+        "Constellation figures, named stars and deep-sky positions from the solved {projection} WCS"
     );
-    image::imageops::replace(&mut canvas, &photo, pad as i64, header as i64);
-    let frame = Rect::new(pad, header, image_width as f64, image_height as f64);
-    let to_canvas = |(x, y): (f64, f64)| (pad + x * scale, header + y * scale);
+    for (font, size, tracking, y, color, text) in [
+        (
+            &fonts.semibold,
+            16.0 * u,
+            0.6 * u,
+            0.12,
+            BRAND,
+            brand.as_str(),
+        ),
+        (
+            &fonts.semibold,
+            26.0 * u,
+            0.0,
+            0.33,
+            TITLE,
+            "Catalog sky map",
+        ),
+        (
+            &fonts.regular,
+            14.0 * u,
+            0.0,
+            0.70,
+            MUTED,
+            subtitle.as_str(),
+        ),
+    ] {
+        draw_line(
+            &mut canvas,
+            font,
+            size,
+            tracking,
+            (pad, header * y),
+            color,
+            text,
+        );
+    }
+    let mut y = header + view_height as f64 + footer_top;
+    for (font, size, color, line, advance) in &footer_lines {
+        draw_line(&mut canvas, font, *size, 0.0, (pad, y), *color, line);
+        y += advance;
+    }
+    Ok(canvas)
+}
+
+/// Catmull-Rom resampling with rows in parallel: the filter
+/// `image::imageops::resize` applies with `CatmullRom`, which runs on one
+/// thread and was most of the map's cost for a phone frame.
+fn resize(source: &RgbImage, width: u32, height: u32) -> RgbImage {
+    let (source_width, source_height) = source.dimensions();
+    let columns = resample_weights(source_width, width);
+    let rows = resample_weights(source_height, height);
+    let (in_stride, out_stride) = (source_width as usize * 3, width as usize * 3);
+    // Every source row to the new width, then every output row from those.
+    let mut wide = vec![0f32; source_height as usize * out_stride];
+    wide.par_chunks_mut(out_stride)
+        .zip(source.as_raw().par_chunks(in_stride))
+        .for_each(|(out, row)| {
+            for ((start, taps), pixel) in columns.iter().zip(out.chunks_exact_mut(3)) {
+                for (offset, &weight) in taps.iter().enumerate() {
+                    let input = &row[(start + offset) * 3..][..3];
+                    for channel in 0..3 {
+                        pixel[channel] += weight * input[channel] as f32;
+                    }
+                }
+            }
+        });
+    let mut pixels = vec![0u8; height as usize * out_stride];
+    pixels
+        .par_chunks_mut(out_stride)
+        .zip(rows.par_iter())
+        .for_each(|(out, (start, taps))| {
+            for (index, value) in out.iter_mut().enumerate() {
+                let sum = taps
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, &weight)| weight * wide[(start + offset) * out_stride + index])
+                    .sum::<f32>();
+                *value = sum.round().clamp(0.0, 255.0) as u8;
+            }
+        });
+    RgbImage::from_raw(width, height, pixels).expect("resampled buffer matches its size")
+}
+
+/// For each of `target` output samples, the first of `source` input samples
+/// it reads and the normalized Catmull-Rom weights, widened when shrinking.
+fn resample_weights(source: u32, target: u32) -> Vec<(usize, Vec<f32>)> {
+    let ratio = source as f64 / target as f64;
+    let spread = ratio.max(1.0);
+    let support = 2.0 * spread;
+    (0..target)
+        .map(|index| {
+            let center = (index as f64 + 0.5) * ratio;
+            let left = ((center - support).floor().max(0.0) as usize).min(source as usize - 1);
+            let right = ((center + support).ceil() as usize).clamp(left + 1, source as usize);
+            let taps = (left..right)
+                .map(|input| catmull_rom((input as f64 + 0.5 - center) / spread))
+                .collect::<Vec<_>>();
+            let total = taps.iter().sum::<f64>();
+            (
+                left,
+                taps.iter().map(|weight| (weight / total) as f32).collect(),
+            )
+        })
+        .collect()
+}
+
+fn catmull_rom(x: f64) -> f64 {
+    let x = x.abs();
+    if x < 1.0 {
+        (1.5 * x - 2.5) * x * x + 1.0
+    } else if x < 2.0 {
+        ((-0.5 * x + 2.5) * x - 4.0) * x + 2.0
+    } else {
+        0.0
+    }
+}
+
+/// Draw the figures, markers and labels onto the resized image. Returns
+/// whether the sky floor dimmed a line or dropped a name.
+fn draw_annotations(
+    view: &mut RgbImage,
+    fonts: &Fonts<'_>,
+    annotations: &Annotations,
+    u: f64,
+    scale: f64,
+) -> bool {
+    let (width, height) = view.dimensions();
+    let frame = Rect::new(0.0, 0.0, width as f64, height as f64);
+    // Source pixel centres sit at integers; the view's pixel i spans
+    // [i, i + 1].
+    let to_view = |(x, y): (f64, f64)| ((x + 0.5) * scale, (y + 0.5) * scale);
+    let mut cut = false;
 
     let mut lines = Mask::new(width, height);
     let mut gold = Mask::new(width, height);
     let mut cyan = Mask::new(width, height);
     let mut names = Mask::new(width, height);
-    let mut placer = LabelPlacer::new(Rect {
-        x0: frame.x0 + 4.0 * u,
-        y0: frame.y0 + 4.0 * u,
-        x1: frame.x1 - 4.0 * u,
-        y1: frame.y1 - 4.0 * u,
-    });
+    let mut placer = LabelPlacer::new(frame.inset(4.0 * u));
 
     // Constellation figures.
     for figure in &annotations.figures {
         for polyline in &figure.polylines {
-            let points = polyline.iter().copied().map(to_canvas).collect::<Vec<_>>();
-            lines.polyline(&points, 1.6 * u, &frame);
+            let points = polyline.iter().copied().map(to_view).collect::<Vec<_>>();
+            lines.polyline(&points, 1.6 * u);
         }
     }
-
     if let Some(floor) = &annotations.sky_floor {
-        lines.fade_below(&frame, 30.0 * u, |cx| {
-            header + floor.y_at((cx - pad) / scale) * scale
-        });
+        cut |= lines.fade_below(30.0 * u, |x| (floor.y_at(x / scale - 0.5) + 0.5) * scale);
     }
 
     // Markers first, reserved so no label covers one.
@@ -870,39 +1271,33 @@ pub(crate) fn render(
     let stars = annotations
         .stars
         .iter()
-        .map(|star| (star, to_canvas((star.x, star.y))))
+        .map(|star| (star, to_view((star.x, star.y))))
         .collect::<Vec<_>>();
     for &(_, (x, y)) in &stars {
-        gold.ring((x, y), star_radius, 1.5 * u, &frame);
+        gold.ring((x, y), star_radius, 1.5 * u);
         placer.reserve(Rect::around(x, y, star_radius + 2.0 * u));
     }
     let objects = annotations
         .objects
         .iter()
         .map(|object| {
-            let (x, y) = to_canvas((object.x, object.y));
-            let major = object.semi_major_px * scale;
-            let minor = match object.angle_deg {
-                Some(_) => object.semi_minor_px * scale,
-                None => major,
-            };
-            (object, (x, y), major, minor)
+            let (x, y) = to_view((object.x, object.y));
+            (object, (x, y), object.semi_major_px * scale)
         })
         .collect::<Vec<_>>();
-    for &(object, (x, y), major, minor) in &objects {
+    for &(object, (x, y), major) in &objects {
         if major >= 7.0 * u {
             cyan.ellipse(
                 (x, y),
                 major,
-                minor.max(3.0 * u),
-                object.angle_deg.unwrap_or(0.0),
+                (object.semi_minor_px * scale).max(3.0 * u),
+                object.angle_deg,
                 1.5 * u,
-                &frame,
             );
         } else {
-            cyan.ring((x, y), 5.0 * u, 1.4 * u, &frame);
+            cyan.ring((x, y), 5.0 * u, 1.4 * u);
         }
-        cyan.disc((x, y), 2.4 * u, &frame);
+        cyan.disc((x, y), 2.4 * u);
         if frame.contains(&Rect::around(x, y, 0.0)) {
             placer.reserve(Rect::around(x, y, (6.0 * u).max(major.min(9.0 * u))));
         }
@@ -920,7 +1315,6 @@ pub(crate) fn render(
                 (x + ux * (radius + 1.5 * u), y + uy * (radius + 1.5 * u)),
                 (tx - ux * 2.0 * u, ty - uy * 2.0 * u),
                 1.1 * u,
-                &frame,
             );
         }
     };
@@ -938,13 +1332,11 @@ pub(crate) fn render(
             );
         }
     }
-    for &(object, (x, y), major, _) in &objects {
+    // Object labels anchor inside the frame, a little in from its edge.
+    let anchors = frame.inset(8.0 * u);
+    for &(object, (x, y), major) in &objects {
         let (w, h) = measure(&fonts.semibold, label_size, 0.0, &object.label);
-        let (ax, ay) = frame.nearest_point(x, y);
-        let (ax, ay) = (
-            ax.clamp(frame.x0 + 8.0 * u, frame.x1 - 8.0 * u),
-            ay.clamp(frame.y0 + 8.0 * u, frame.y1 - 8.0 * u),
-        );
+        let (ax, ay) = anchors.nearest_point(x, y);
         let radius = if major >= 7.0 * u {
             major.min(18.0 * u)
         } else {
@@ -972,27 +1364,20 @@ pub(crate) fn render(
     let name_size = 13.0 * u;
     let tracking = 1.2 * u;
     for figure in &annotations.figures {
-        let text = figure.name.to_uppercase();
-        let (w, h) = measure(&fonts.regular, name_size, tracking, &text);
-        // The sky anchor when it is in the frame, else the middle of the
-        // longest visible piece.
-        let anchor = figure.label.map(to_canvas).or_else(|| {
-            figure
-                .polylines
-                .iter()
-                .max_by(|a, b| polyline_length(a).total_cmp(&polyline_length(b)))
-                .map(|line| to_canvas(line[line.len() / 2]))
-        });
-        let Some((x, y)) = anchor else { continue };
-        if let Some(floor) = &annotations.sky_floor
-            && !floor.is_sky((x - pad) / scale, (y - header) / scale)
-        {
-            continue;
-        }
+        let Some(anchor) = figure.label else { continue };
         // A sliver of a figure at the frame edge does not earn a name.
         if figure.visible_length_px() * scale < 40.0 * u {
             continue;
         }
+        if let Some(floor) = &annotations.sky_floor
+            && !floor.is_sky(anchor.0, anchor.1)
+        {
+            cut = true;
+            continue;
+        }
+        let text = figure.name.to_uppercase();
+        let (w, h) = measure(&fonts.regular, name_size, tracking, &text);
+        let (x, y) = to_view(anchor);
         if let Some(rect) = placer.place(x, y, w, h, 2.0 * u) {
             draw_text(
                 &mut names,
@@ -1012,134 +1397,12 @@ pub(crate) fn render(
             *cell = cell.max(value);
         }
     }
-    halo.dilated(1.6 * u).composite(&mut canvas, SHADOW, 0.55);
-    lines.composite(&mut canvas, FIGURE_LINE, 0.72);
-    names.composite(&mut canvas, FIGURE_NAME, 0.92);
-    cyan.composite(&mut canvas, OBJECT_CYAN, 1.0);
-    gold.composite(&mut canvas, STAR_GOLD, 1.0);
-
-    draw_chrome(
-        &mut canvas,
-        &fonts,
-        u,
-        pad,
-        header,
-        frame.y1,
-        wcs,
-        summary,
-        image.dimensions(),
-        annotations.sky_floor.is_some(),
-    );
-    Ok(canvas)
-}
-
-fn polyline_length(points: &[(f64, f64)]) -> f64 {
-    points
-        .windows(2)
-        .map(|pair| (pair[1].0 - pair[0].0).hypot(pair[1].1 - pair[0].1))
-        .sum()
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_chrome(
-    canvas: &mut RgbImage,
-    fonts: &Fonts<'_>,
-    u: f64,
-    pad: f64,
-    header: f64,
-    image_bottom: f64,
-    wcs: &Wcs,
-    summary: &SolveSummary,
-    dims: (u32, u32),
-    foreground: bool,
-) {
-    let (width, height) = canvas.dimensions();
-    let text = |canvas: &mut RgbImage,
-                font: &FontRef<'_>,
-                size: f64,
-                tracking: f64,
-                at: (f64, f64),
-                color: Rgb<u8>,
-                content: &str| {
-        let mut mask = Mask::new(width, height);
-        draw_text(&mut mask, font, size, tracking, at, content);
-        mask.composite(canvas, color, 1.0);
-    };
-    let brand = format!("SEIZA  /  {}", summary.name);
-    text(
-        canvas,
-        &fonts.semibold,
-        16.0 * u,
-        0.6 * u,
-        (pad, header * 0.12),
-        BRAND,
-        &brand,
-    );
-    text(
-        canvas,
-        &fonts.semibold,
-        26.0 * u,
-        0.0,
-        (pad, header * 0.33),
-        TITLE,
-        "Catalog sky map",
-    );
-    let projection = if wcs.sip.is_some() { "TAN/SIP" } else { "TAN" };
-    text(
-        canvas,
-        &fonts.regular,
-        14.0 * u,
-        0.0,
-        (pad, header * 0.70),
-        MUTED,
-        &format!(
-            "Constellation figures, named stars and deep-sky positions from the solved {projection} WCS"
-        ),
-    );
-
-    let scale = wcs.scale_arcsec_per_px();
-    let (ra, dec) = wcs.pixel_to_world(dims.0 as f64 / 2.0, dims.1 as f64 / 2.0);
-    let mut stats = vec![format!("{} matched stars", summary.matched_stars)];
-    if let Some(sip) = &wcs.sip {
-        stats.push(format!("SIP order {}", sip.order));
-    }
-    stats.push(format!("{scale:.4} arcsec/px"));
-    stats.push(format!("RMS {:.2} px", summary.rms_arcsec / scale));
-    stats.push(format!("center RA {ra:.3}°  Dec {dec:+.3}°"));
-    let mut y = image_bottom + 14.0 * u;
-    text(
-        canvas,
-        &fonts.regular,
-        15.0 * u,
-        0.0,
-        (pad, y),
-        TITLE,
-        &stats.join("  |  "),
-    );
-    y += 26.0 * u;
-    text(
-        canvas,
-        &fonts.regular,
-        13.5 * u,
-        0.0,
-        (pad, y),
-        MUTED,
-        if foreground {
-            "Catalog marks do not establish object detection. Marks below the lowest detected stars (foreground) are left out."
-        } else {
-            "Catalog marks do not establish object detection."
-        },
-    );
-    y += 22.0 * u;
-    text(
-        canvas,
-        &fonts.regular,
-        11.5 * u,
-        0.0,
-        (pad, y),
-        DIM,
-        &format!("Figures: {}", constellations::ATTRIBUTION),
-    );
+    halo.dilated(1.6 * u).composite(view, SHADOW, 0.55);
+    lines.composite(view, FIGURE_LINE, 0.72);
+    names.composite(view, FIGURE_NAME, 0.92);
+    cyan.composite(view, OBJECT_CYAN, 1.0);
+    gold.composite(view, STAR_GOLD, 1.0);
+    cut
 }
 
 #[cfg(test)]
@@ -1169,36 +1432,51 @@ mod tests {
         }
     }
 
+    fn add_name(
+        builder: &mut StarIdentifierCatalogBuilder,
+        catalog: StarNameCatalog,
+        kind: StarNameKind,
+        designation: &str,
+        hr: u32,
+        mag: f32,
+    ) {
+        let star = constellations::line_star(hr).unwrap();
+        builder
+            .add_name(
+                catalog,
+                kind,
+                designation,
+                &format!("hr:{hr}"),
+                "",
+                star.ra,
+                star.dec,
+                Some(mag),
+            )
+            .unwrap();
+    }
+
     fn catalogs(dir: &Path) -> SkyMapCatalogs {
         let path = dir.join("stars.ids.bin");
         let mut builder = StarIdentifierCatalogBuilder::new(2025.5, "test");
-        let schedar = constellations::line_star(168).unwrap();
-        let gamma = constellations::line_star(264).unwrap();
-        builder
-            .add_name(
-                StarNameCatalog::IauCatalogOfStarNames,
-                StarNameKind::ProperName,
-                "Schedar",
-                "hr:168",
-                "",
-                schedar.ra,
-                schedar.dec,
-                Some(2.24),
-            )
-            .unwrap();
+        add_name(
+            &mut builder,
+            StarNameCatalog::IauCatalogOfStarNames,
+            StarNameKind::ProperName,
+            "Schedar",
+            168,
+            2.24,
+        );
+        // The sidecar spells most Bayer letters two ways and adds the
+        // Flamsteed number.
         for designation in ["Gam Cas", "Gamma Cas", "27 Cas"] {
-            builder
-                .add_name(
-                    StarNameCatalog::BrightStarCatalog,
-                    StarNameKind::BayerFlamsteed,
-                    designation,
-                    "hr:264",
-                    "",
-                    gamma.ra,
-                    gamma.dec,
-                    Some(2.47),
-                )
-                .unwrap();
+            add_name(
+                &mut builder,
+                StarNameCatalog::BrightStarCatalog,
+                StarNameKind::BayerFlamsteed,
+                designation,
+                264,
+                2.47,
+            );
         }
         // Too faint for a label.
         builder
@@ -1228,7 +1506,7 @@ mod tests {
     fn collect_finds_figures_names_and_objects() {
         let dir = tempfile::tempdir().unwrap();
         let (wcs, dims) = cassiopeia();
-        let annotations = collect(&wcs, dims, &catalogs(dir.path()), &[]);
+        let annotations = collect(&wcs, dims, &catalogs(dir.path()), None);
         assert!(annotations.figures.iter().any(|f| f.abbr == "Cas"));
         let names = annotations
             .stars
@@ -1244,21 +1522,116 @@ mod tests {
         assert!(labels.contains(&"NGC 457 / Owl Cluster"));
         assert!(labels.contains(&"NGC 869"));
         assert!(!labels.iter().any(|label| label.starts_with("NGC 9999")));
+        assert!(annotations.sky_floor.is_none());
+        assert_eq!(annotations.hidden, 0);
     }
 
     #[test]
     fn collect_without_catalogs_still_draws_figures() {
         let (wcs, dims) = cassiopeia();
-        let annotations = collect(&wcs, dims, &SkyMapCatalogs::default(), &[]);
+        let annotations = collect(&wcs, dims, &SkyMapCatalogs::default(), None);
         assert!(!annotations.figures.is_empty());
         assert!(annotations.stars.is_empty() && annotations.objects.is_empty());
+    }
+
+    #[test]
+    fn bayer_names_spell_out_every_greek_letter() {
+        assert_eq!(bayer_name("Gam Cas").as_deref(), Some("Gamma Cas"));
+        assert_eq!(bayer_name("Gamma Cas").as_deref(), Some("Gamma Cas"));
+        assert_eq!(bayer_name("Alp1 Cen").as_deref(), Some("Alpha1 Cen"));
+        assert_eq!(bayer_name("Omi2 CMa").as_deref(), Some("Omicron2 CMa"));
+        // The short letters are names in their own right.
+        for (designation, name) in [
+            ("Eta Cen", "Eta Cen"),
+            ("Mu Vel", "Mu Vel"),
+            ("Pi Pup", "Pi Pup"),
+            ("Tau Pup", "Tau Pup"),
+            ("Rho Pup", "Rho Pup"),
+            ("Chi Car", "Chi Car"),
+            ("Psi UMa", "Psi UMa"),
+            ("Phi Sgr", "Phi Sgr"),
+            ("Nu Pup", "Nu Pup"),
+            ("Xi Pup", "Xi Pup"),
+        ] {
+            assert_eq!(
+                bayer_name(designation).as_deref(),
+                Some(name),
+                "{designation}"
+            );
+        }
+        assert_eq!(bayer_name("27 Cas"), None);
+        assert_eq!(bayer_name("Gam Xyz"), None);
+        assert_eq!(bayer_name("Gamma"), None);
+        assert_eq!(bayer_name("Gam1a Cas"), None);
+    }
+
+    /// A Scorpius-Centaurus frame: bright Bayer figure stars rank with the
+    /// proper names by magnitude, and short Greek names are labelled.
+    #[test]
+    fn bright_bayer_stars_outrank_faint_proper_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stars.ids.bin");
+        let mut builder = StarIdentifierCatalogBuilder::new(2025.5, "test");
+        // Eta Cen (HR 5440), Alpha Lup (HR 5469), Kappa Sco (HR 6580).
+        for (designation, hr, mag) in [
+            ("Eta Cen", 5440, 2.31),
+            ("Alp Lup", 5469, 2.30),
+            ("Alpha Lup", 5469, 2.30),
+            ("Kap Sco", 6580, 2.41),
+        ] {
+            add_name(
+                &mut builder,
+                StarNameCatalog::BrightStarCatalog,
+                StarNameKind::BayerFlamsteed,
+                designation,
+                hr,
+                mag,
+            );
+        }
+        // More faint proper names than the label budget, all near the
+        // field centre.
+        let center = constellations::line_star(5469).unwrap();
+        for index in 0..40 {
+            builder
+                .add_name(
+                    StarNameCatalog::IauCatalogOfStarNames,
+                    StarNameKind::ProperName,
+                    &format!("Faint {index}"),
+                    &format!("hip:{}", 900_000 + index),
+                    "",
+                    center.ra + (index % 8) as f64 * 0.7 - 2.5,
+                    center.dec + (index / 8) as f64 * 0.7 - 1.5,
+                    Some(4.0 + index as f32 * 0.01),
+                )
+                .unwrap();
+        }
+        builder.write_to(&path).unwrap();
+        let catalogs = SkyMapCatalogs {
+            objects: None,
+            star_ids: Some(StarIdentifierCatalog::open(&path).unwrap()),
+        };
+        let wcs = Wcs::from_center_scale_rotation(
+            (center.ra, center.dec),
+            (2000.0, 1500.0),
+            90.0,
+            0.0,
+            false,
+        );
+        let annotations = collect(&wcs, (4000, 3000), &catalogs, None);
+        let names = annotations
+            .stars
+            .iter()
+            .map(|star| star.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names.len(), MAX_STARS);
+        assert_eq!(&names[..3], ["Alpha Lup", "Eta Cen", "Kappa Sco"]);
     }
 
     #[test]
     fn render_lays_out_header_photo_and_footer() {
         let dir = tempfile::tempdir().unwrap();
         let (wcs, dims) = cassiopeia();
-        let annotations = collect(&wcs, dims, &catalogs(dir.path()), &[]);
+        let annotations = collect(&wcs, dims, &catalogs(dir.path()), None);
         let photo = RgbImage::from_pixel(dims.0, dims.1, Rgb([30, 30, 30]));
         let summary = SolveSummary {
             name: "synthetic".into(),
@@ -1276,6 +1649,12 @@ mod tests {
             .filter(|&(x, y)| *map.get_pixel(x, y) != BACKGROUND)
             .count();
         assert!(title_pixels > 500, "{title_pixels}");
+        // The credit line is drawn at the bottom of the footer.
+        let credit_pixels = (1119 + 60..1211)
+            .flat_map(|y| (0..1400).map(move |x| (x, y)))
+            .filter(|&(x, y)| *map.get_pixel(x, y) != BACKGROUND)
+            .count();
+        assert!(credit_pixels > 500, "{credit_pixels}");
         // Cassiopeia's Schedar-Gamma segment midpoint carries line colour.
         let schedar = constellations::line_star(168).unwrap();
         let gamma = constellations::line_star(264).unwrap();
@@ -1283,23 +1662,61 @@ mod tests {
         let b = wcs.world_to_pixel(gamma.ra, gamma.dec).unwrap();
         let scale = 1358.0 / 1600.0;
         let (mx, my) = (
-            21.0 + (a.0 + b.0) / 2.0 * scale,
-            100.0 + (a.1 + b.1) / 2.0 * scale,
+            21.0 + ((a.0 + b.0) / 2.0 + 0.5) * scale,
+            100.0 + ((a.1 + b.1) / 2.0 + 0.5) * scale,
         );
         // The brightest blue in a 3x3 neighbourhood (the line is anti-aliased).
         let pixel = (-1..=1)
             .flat_map(|dy| (-1..=1).map(move |dx| (dx, dy)))
-            .map(|(dx, dy)| {
-                *map.get_pixel(
-                    (mx.round() as i64 + dx) as u32,
-                    (my.round() as i64 + dy) as u32,
-                )
-            })
+            .map(|(dx, dy)| *map.get_pixel((mx as i64 + dx) as u32, (my as i64 + dy) as u32))
             .max_by_key(|pixel| pixel[2])
             .unwrap();
         assert!(pixel[2] > 150 && pixel[2] > pixel[0] + 40, "{pixel:?}");
         // The width is bounded.
         assert!(render(&photo, &wcs, &annotations, &summary, 100).is_err());
+        // A frame far wider than tall still renders, labels and all.
+        let strip = RgbImage::from_pixel(9000, 60, Rgb([30, 30, 30]));
+        let annotations = Annotations {
+            objects: vec![ObjectMark {
+                label: "NGC 1".into(),
+                x: 4500.0,
+                y: 30.0,
+                semi_major_px: 10.0,
+                semi_minor_px: 10.0,
+                angle_deg: 0.0,
+            }],
+            ..Annotations::default()
+        };
+        let map = render(&strip, &wcs, &annotations, &summary, 700).unwrap();
+        assert_eq!(map.width(), 700);
+    }
+
+    #[test]
+    fn footer_wraps_and_notes_the_foreground_only_when_cut() {
+        let (wcs, dims) = cassiopeia();
+        let summary = SolveSummary {
+            name: "synthetic".into(),
+            matched_stars: 42,
+            rms_arcsec: 90.0,
+        };
+        let [stats, caveat, credit] = footer_text(&wcs, &summary, dims, false);
+        assert!(stats.starts_with("42 matched stars"));
+        assert!(!caveat.contains("foreground"));
+        assert!(credit.contains(constellations::ATTRIBUTION));
+        let [_, caveat, _] = footer_text(&wcs, &summary, dims, true);
+        assert!(caveat.contains("(foreground) are left out"));
+        let fonts = Fonts::load().unwrap();
+        // The credit fits one line at the default size and wraps, losing
+        // nothing, when narrower.
+        assert_eq!(wrap(&fonts.regular, 11.5, &credit, 1358.0).len(), 1);
+        let lines = wrap(&fonts.regular, 11.5, &credit, 300.0);
+        assert!(lines.len() > 2, "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| measure(&fonts.regular, 11.5, 0.0, line).0 <= 300.0)
+        );
+        assert_eq!(lines.join(" "), credit);
     }
 
     #[test]
@@ -1319,6 +1736,9 @@ mod tests {
         // Nothing fits in a box smaller than the label.
         let mut placer = LabelPlacer::new(Rect::new(0.0, 0.0, 40.0, 10.0));
         assert!(placer.place(20.0, 5.0, 60.0, 14.0, 4.0).is_none());
+        // Insetting a box too small for it leaves its centre.
+        let inset = Rect::new(0.0, 0.0, 100.0, 10.0).inset(8.0);
+        assert_eq!(inset, Rect::new(8.0, 5.0, 84.0, 0.0));
     }
 
     #[test]
@@ -1330,6 +1750,78 @@ mod tests {
             vec![(10.0, 10.0)]
         );
         assert_eq!(confirmed_detections(&detected, &catalog, 4.0).len(), 2);
+    }
+
+    /// A small deterministic generator, so the statistics tests are stable.
+    struct Random(u64);
+
+    impl Random {
+        fn next(&mut self) -> f64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 >> 11) as f64 / (1u64 << 53) as f64
+        }
+    }
+
+    #[test]
+    fn evenly_spread_stars_never_make_a_floor() {
+        let dims = (4000, 3000);
+        for count in [60, 100, 150, 300, 450, 600] {
+            for seed in 1..=60u64 {
+                let mut random = Random(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                let stars = (0..count)
+                    .map(|_| (random.next() * 4000.0, random.next() * 3000.0))
+                    .collect::<Vec<_>>();
+                assert!(
+                    SkyFloor::from_detections(&stars, dims).is_none(),
+                    "{count} stars, seed {seed}"
+                );
+            }
+        }
+    }
+
+    /// A phone frame: stars down to a ragged horizon, lowest at the left
+    /// edge, a rock in the middle and a tree on the right, plus a few
+    /// chance matches on the ground.
+    #[test]
+    fn a_ragged_horizon_makes_a_floor_that_keeps_the_sky() {
+        let dims = (4000, 3000);
+        let horizon = |x: f64| {
+            if x < 800.0 {
+                2550.0 - x * 0.3
+            } else if x < 2600.0 {
+                2200.0 + 60.0 * (x / 150.0).sin()
+            } else {
+                2200.0 - (x - 2600.0) * 0.15
+            }
+        };
+        for seed in 1..=20u64 {
+            let mut random = Random(seed.wrapping_mul(0x2545_F491_4F6C_DD1D));
+            let mut stars = Vec::new();
+            while stars.len() < 450 {
+                let (x, y) = (random.next() * 4000.0, random.next() * 3000.0);
+                if y < horizon(x) {
+                    stars.push((x, y));
+                }
+            }
+            let sky = stars.clone();
+            stars.extend([(900.0, 2900.0), (2100.0, 2700.0), (3300.0, 2950.0)]);
+            let floor = SkyFloor::from_detections(&stars, dims).expect("a floor");
+            // Every star of the real sky is kept, including those near the
+            // horizon at the left edge, where it reaches lowest.
+            for &(x, y) in &sky {
+                assert!(
+                    floor.is_sky(x, y),
+                    "seed {seed}: ({x:.0}, {y:.0}) under the floor at {:.0}",
+                    floor.y_at(x)
+                );
+            }
+            // The ground is cut across the frame.
+            for x in [100.0, 1500.0, 2000.0, 3900.0] {
+                assert!(!floor.is_sky(x, 2950.0), "seed {seed}: x {x}");
+            }
+        }
     }
 
     #[test]
@@ -1354,32 +1846,138 @@ mod tests {
             let x = (i * 37 % 2000) as f64;
             let y = (i * 53 % 1000) as f64;
             let sparse = (800.0..1200.0).contains(&x);
-            if (sparse && y < 200.0) || (!sparse && y < 900.0) {
+            if (sparse && y < 200.0) || (!sparse && y < 700.0) {
                 valley.push((x, y));
             }
         }
         let floor = SkyFloor::from_detections(&valley, dims).unwrap();
-        assert!(floor.y_at(1000.0) > 850.0, "{}", floor.y_at(1000.0));
+        assert!(floor.y_at(1000.0) > 650.0, "{}", floor.y_at(1000.0));
+        assert!(!floor.is_sky(1000.0, 900.0));
+        // A high edge band is lowered to its neighbour, like any other.
+        let mut edge = Vec::new();
+        for i in 0..600 {
+            let x = (i * 37 % 2000) as f64;
+            let y = (i * 53 % 1000) as f64;
+            if (x < 100.0 && y < 300.0) || (x >= 100.0 && y < 700.0) {
+                edge.push((x, y));
+            }
+        }
+        let floor = SkyFloor::from_detections(&edge, dims).unwrap();
+        assert!(floor.is_sky(20.0, 650.0), "{}", floor.y_at(20.0));
         // Stars everywhere: no floor. Too few stars: no floor.
         let everywhere = (0..2000)
             .map(|i| ((i * 37 % 2000) as f64, (i * 53 % 997) as f64))
             .collect::<Vec<_>>();
         assert!(SkyFloor::from_detections(&everywhere, dims).is_none());
         assert!(SkyFloor::from_detections(&stars[..20], dims).is_none());
+        // A clear strip only a band or two wide is no floor.
+        let notch = (0..800)
+            .map(|i| ((i * 37 % 2000) as f64, (i * 53 % 1000) as f64))
+            .filter(|&(x, y)| !(300.0..450.0).contains(&x) || y < 400.0)
+            .collect::<Vec<_>>();
+        assert!(SkyFloor::from_detections(&notch, dims).is_none());
+        // Bands with no stars at all are no evidence either way.
+        let left_only = (0..400)
+            .map(|i| ((i * 37 % 800) as f64, (i * 53 % 1000) as f64))
+            .collect::<Vec<_>>();
+        assert!(SkyFloor::from_detections(&left_only, dims).is_none());
     }
 
     #[test]
-    fn foreground_marks_are_left_out() {
+    fn binomial_tail() {
+        assert!((binomial_cdf(0, 10, 0.5) - 0.5f64.powi(10)).abs() < 1e-15);
+        assert!((binomial_cdf(1, 3, 0.5) - 0.5).abs() < 1e-12);
+        assert!((binomial_cdf(2, 2, 0.3) - 1.0).abs() < 1e-12);
+        assert_eq!(binomial_cdf(0, 5, 0.0), 1.0);
+        assert_eq!(binomial_cdf(0, 5, 1.0), 0.0);
+    }
+
+    #[test]
+    fn foreground_marks_are_left_out_unless_the_image_shows_them() {
         let dir = tempfile::tempdir().unwrap();
-        let (wcs, dims) = cassiopeia();
-        // Detections only in the top tenth of the frame.
-        let detected = (0..200)
-            .map(|i| ((i * 8) as f64, (i % 12) as f64 * 10.0))
+        // Schedar near the bottom of the frame, in the foreground.
+        let schedar = constellations::line_star(168).unwrap();
+        let dims = (1600, 1200);
+        let wcs = Wcs::from_center_scale_rotation(
+            (schedar.ra, schedar.dec),
+            (800.0, 1130.0),
+            72.0,
+            0.0,
+            false,
+        );
+        let (sx, sy) = wcs.world_to_pixel(schedar.ra, schedar.dec).unwrap();
+        // Detections fill the top 40%, plus a chance match on the ground.
+        let mut detections = (0..300)
+            .map(|i| ((i * 37 % 1600) as f64, (i * 53 % 480) as f64))
             .collect::<Vec<_>>();
-        let annotations = collect(&wcs, dims, &catalogs(dir.path()), &detected);
-        assert!(annotations.sky_floor.is_some());
-        assert!(annotations.stars.is_empty() && annotations.objects.is_empty());
+        detections.push((sx + 30.0, 1190.0));
+        let mut foreground = Foreground {
+            detections,
+            tolerance: 4.0,
+        };
+        let catalogs = catalogs(dir.path());
+        let annotations = collect(&wcs, dims, &catalogs, Some(&foreground));
+        let floor = annotations.sky_floor.as_ref().expect("a floor");
+        assert!(!floor.is_sky(sx, sy));
+        assert!(annotations.stars.iter().all(|star| star.name != "Schedar"));
+        assert!(annotations.hidden > 0);
         assert!(!annotations.figures.is_empty(), "lines fade, not vanish");
+        // Detected in haze just above the horizon: kept.
+        foreground.detections.push((sx + 1.0, sy - 1.0));
+        let annotations = collect(&wcs, dims, &catalogs, Some(&foreground));
+        assert!(annotations.stars.iter().any(|star| star.name == "Schedar"));
+    }
+
+    #[test]
+    fn objects_centred_below_the_frame_are_judged_at_its_edge() {
+        let (wcs, dims) = cassiopeia();
+        // Stars down to the bottom on the right half, a strip on the left.
+        let detections = (0..800)
+            .map(|i| ((i * 37 % 1600) as f64, (i * 53 % 1200) as f64))
+            .filter(|&(x, y)| x >= 800.0 || y < 700.0)
+            .collect::<Vec<_>>();
+        let floor = SkyFloor::from_detections(&detections, dims).expect("a floor");
+        assert!(floor.is_sky(1400.0, 1199.0) && !floor.is_sky(200.0, 1199.0));
+        // An object centred below the right half, its extent in the frame.
+        let below = wcs.pixel_to_world(1400.0, 1260.0);
+        let catalogs = SkyMapCatalogs {
+            objects: Some(ObjectCatalog::new(vec![object(
+                "NGC 1", "", below.0, below.1, 300.0,
+            )])),
+            star_ids: None,
+        };
+        let foreground = Foreground {
+            detections,
+            tolerance: 4.0,
+        };
+        let annotations = collect(&wcs, dims, &catalogs, Some(&foreground));
+        assert_eq!(annotations.objects.len(), 1, "{:?}", annotations.objects);
+        assert_eq!(annotations.objects[0].label, "NGC 1 (edge)");
+    }
+
+    #[test]
+    fn resize_matches_the_image_crate() {
+        let mut random = Random(7);
+        let source = RgbImage::from_fn(301, 157, |_, _| {
+            Rgb([0, 1, 2].map(|_| (random.next() * 255.0) as u8))
+        });
+        for (width, height) in [(150, 78), (97, 51), (301, 157), (640, 330)] {
+            let ours = resize(&source, width, height);
+            let theirs = image::imageops::resize(
+                &source,
+                width,
+                height,
+                image::imageops::FilterType::CatmullRom,
+            );
+            let worst = ours
+                .as_raw()
+                .iter()
+                .zip(theirs.as_raw())
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap();
+            assert!(worst <= 1, "{width}x{height}: off by {worst}");
+        }
     }
 
     #[test]
@@ -1393,5 +1991,17 @@ mod tests {
         let mut mask = Mask::new(120, 40);
         draw_text(&mut mask, &fonts.semibold, 20.0, 0.0, (2.0, 2.0), "Polaris");
         assert!(mask.coverage.iter().filter(|&&c| c > 0.5).count() > 100);
+        // A mask placed elsewhere takes the same text at its own origin.
+        let mut moved = Mask::at((500, 300), 120, 40);
+        draw_text(
+            &mut moved,
+            &fonts.semibold,
+            20.0,
+            0.0,
+            (502.0, 302.0),
+            "Polaris",
+        );
+        let ink = |mask: &Mask| mask.coverage.iter().sum::<f32>();
+        assert!((ink(&moved) - ink(&mask)).abs() < 0.01 * ink(&mask));
     }
 }
