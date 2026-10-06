@@ -25,12 +25,13 @@ pub use writer::{
     F32ImageData, WriteHeaderCard, update_header_in_place, write_f32_image, write_f32_image_to,
 };
 
+use fitsio_pure::hdu::{Hdu, HduInfo};
+use fitsio_pure::image::ImageData;
+use fitsio_pure::stream::FitsReader;
 use std::io::Read;
 use std::path::Path;
 
 const BLOCK: usize = 2880;
-const CARD: usize = 80;
-const PIXEL_CHUNK_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug)]
 pub enum FitsError {
@@ -98,76 +99,54 @@ pub struct FitsHeader {
     pub comments: Vec<String>,
 }
 
-/// Parse header cards block by block until END. Returns the header and the
-/// byte offset where the data section begins.
-fn parse_headers(data: &[u8]) -> Result<(FitsHeader, usize), FitsError> {
-    if data.len() < BLOCK || &data[0..6] != b"SIMPLE" {
-        return Err(FitsError::NotFits);
-    }
-    let mut header = FitsHeader::default();
-    let mut data_start = None;
-    'blocks: for block in 0.. {
-        let start = block * BLOCK;
-        let Some(block_data) = data.get(start..start + BLOCK) else {
-            return Err(FitsError::Malformed("header runs past EOF".into()));
-        };
-        for card in block_data.chunks_exact(CARD) {
-            let keyword = std::str::from_utf8(&card[0..8])
-                .map_err(|_| FitsError::Malformed("non-ASCII keyword".into()))?
-                .trim_end()
-                .to_string();
-            if keyword == "END" {
-                data_start = Some((block + 1) * BLOCK);
-                break 'blocks;
-            }
-            let commentary = || String::from_utf8_lossy(&card[8..]).trim().to_string();
-            match keyword.as_str() {
-                "" => continue,
-                "HISTORY" => header.history.push(commentary()),
-                "COMMENT" => header.comments.push(commentary()),
-                _ if card[8] == b'=' => {
-                    let raw = String::from_utf8_lossy(&card[10..]);
-                    header.cards.push((keyword, parse_header_value(&raw)));
-                }
+impl FitsHeader {
+    fn from_cards(cards: &[fitsio_pure::header::Card]) -> Self {
+        let mut header = Self::default();
+        for card in cards {
+            let commentary = || card.comment.as_deref().unwrap_or("").trim().to_string();
+            match (card.keyword_str(), &card.value) {
+                ("HISTORY", _) => header.history.push(commentary()),
+                ("COMMENT", _) => header.comments.push(commentary()),
+                (keyword, Some(value)) => header
+                    .cards
+                    .push((keyword.to_string(), header::header_value(value))),
                 _ => {}
             }
         }
+        header
     }
-    let data_start = data_start.ok_or_else(|| FitsError::Malformed("missing END card".into()))?;
-    Ok((header, data_start))
 }
 
-/// Read complete FITS header blocks and leave the reader at the first byte of
-/// the primary data unit. Only the normally small header is retained.
-fn read_headers_from(
-    reader: &mut impl Read,
-    short_first_block_is_not_fits: bool,
-) -> Result<(FitsHeader, usize), FitsError> {
-    let mut data = Vec::new();
-    loop {
-        let start = data.len();
-        data.resize(start + BLOCK, 0);
-        if let Err(error) = reader.read_exact(&mut data[start..]) {
-            return Err(match error.kind() {
-                std::io::ErrorKind::UnexpectedEof
-                    if start == 0 && short_first_block_is_not_fits =>
-                {
-                    FitsError::NotFits
-                }
-                std::io::ErrorKind::UnexpectedEof => {
-                    FitsError::Malformed("header runs past EOF".into())
-                }
-                _ => FitsError::Io(error),
-            });
-        }
-        if data[start..]
-            .chunks_exact(CARD)
-            .any(|card| card.starts_with(b"END") && card[3] == b' ')
-        {
-            break;
-        }
+pub(crate) fn header_error(error: fitsio_pure::Error) -> FitsError {
+    match error {
+        fitsio_pure::Error::UnexpectedEof => FitsError::Malformed("header runs past EOF".into()),
+        fitsio_pure::Error::InvalidHeader("first HDU must be primary") => FitsError::NotFits,
+        fitsio_pure::Error::Io(error) => FitsError::Io(error),
+        other => FitsError::Malformed(other.to_string()),
     }
-    parse_headers(&data)
+}
+
+fn data_error(error: fitsio_pure::Error) -> FitsError {
+    match error {
+        fitsio_pure::Error::UnexpectedEof => FitsError::Malformed("data runs past EOF".into()),
+        fitsio_pure::Error::Io(error) => FitsError::Io(error),
+        other => FitsError::Malformed(other.to_string()),
+    }
+}
+
+/// Read the primary header and leave `stream` at the first byte of the
+/// primary data unit. Only the header blocks are read.
+fn read_primary_hdu<R: Read>(stream: &mut FitsReader<R>) -> Result<Hdu, FitsError> {
+    stream
+        .next_hdu()
+        .map_err(header_error)?
+        .cloned()
+        .ok_or(FitsError::NotFits)
+}
+
+fn read_headers_from(reader: impl Read) -> Result<FitsHeader, FitsError> {
+    let hdu = read_primary_hdu(&mut FitsReader::new(reader))?;
+    Ok(FitsHeader::from_cards(&hdu.cards))
 }
 
 /// Read only the header cards of a FITS file, without touching the pixel
@@ -179,8 +158,7 @@ pub fn read_header(path: &Path) -> Result<Vec<(String, HeaderValue)>, FitsError>
 /// Read a FITS file's header cards together with its `HISTORY` and
 /// `COMMENT` text, without touching the pixel data.
 pub fn read_header_with_commentary(path: &Path) -> Result<FitsHeader, FitsError> {
-    let mut file = std::fs::File::open(path)?;
-    read_headers_from(&mut file, false).map(|(header, _)| header)
+    read_headers_from(std::fs::File::open(path)?)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -195,13 +173,7 @@ struct ImageSpec {
 }
 
 impl ImageSpec {
-    fn from_headers(headers: &[(String, HeaderValue)]) -> Result<Self, FitsError> {
-        let header_i64 = |key: &str| -> Option<i64> {
-            headers
-                .iter()
-                .find(|(k, _)| k == key)
-                .and_then(|(_, v)| v.as_i64())
-        };
+    fn from_hdu(info: &HduInfo, headers: &[(String, HeaderValue)]) -> Result<Self, FitsError> {
         let header_f64 = |key: &str| -> Option<f64> {
             headers
                 .iter()
@@ -209,33 +181,22 @@ impl ImageSpec {
                 .and_then(|(_, v)| v.as_f64())
         };
 
-        let bitpix =
-            header_i64("BITPIX").ok_or_else(|| FitsError::Malformed("missing BITPIX".into()))?;
+        let HduInfo::Primary { bitpix, naxes } = info else {
+            return Err(FitsError::Unsupported("random groups".into()));
+        };
+        let bitpix = *bitpix;
         if !matches!(bitpix, 8 | 16 | 32 | -32 | -64) {
             return Err(FitsError::Unsupported(format!("BITPIX {bitpix}")));
         }
-        let naxis = header_i64("NAXIS").unwrap_or(0);
-        if naxis < 2 {
+        let &[width, height, ref rest @ ..] = naxes.as_slice() else {
             return Err(FitsError::Unsupported(format!(
-                "NAXIS {naxis} (need a 2D image)"
+                "NAXIS {} (need a 2D image)",
+                naxes.len()
             )));
-        }
-        let width = header_i64("NAXIS1")
-            .and_then(|value| usize::try_from(value).ok())
-            .ok_or_else(|| FitsError::Malformed("missing or invalid NAXIS1".into()))?;
-        let height = header_i64("NAXIS2")
-            .and_then(|value| usize::try_from(value).ok())
-            .ok_or_else(|| FitsError::Malformed("missing or invalid NAXIS2".into()))?;
+        };
         // Planar color cubes (Siril and friends write RGB as NAXIS3 = 3);
         // planes beyond the third are ignored.
-        let planes = if naxis >= 3 {
-            header_i64("NAXIS3")
-                .and_then(|value| usize::try_from(value).ok())
-                .unwrap_or(1)
-                .clamp(1, 3)
-        } else {
-            1
-        };
+        let planes = rest.first().copied().unwrap_or(1).clamp(1, 3);
         let count = width
             .checked_mul(height)
             .and_then(|value| value.checked_mul(planes))
@@ -254,137 +215,59 @@ impl ImageSpec {
             bscale: header_f64("BSCALE").unwrap_or(1.0),
         })
     }
-
-    fn payload_bytes(self) -> u64 {
-        let bytes_per_pixel = match self.bitpix {
-            8 => 1,
-            16 => 2,
-            32 | -32 => 4,
-            -64 => 8,
-            _ => unreachable!("ImageSpec validates BITPIX"),
-        };
-        self.count as u64 * bytes_per_pixel
-    }
 }
 
-fn read_payload_exact(reader: &mut impl Read, buffer: &mut [u8]) -> Result<(), FitsError> {
-    reader.read_exact(buffer).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::UnexpectedEof {
-            FitsError::Malformed("data runs past EOF".into())
-        } else {
-            FitsError::Io(error)
+/// Decode the primary data unit in fitsio-pure's bounded chunks. Planes past
+/// the third are decoded and then dropped.
+fn decode_pixels<R: Read>(
+    stream: &mut FitsReader<R>,
+    hdu: &Hdu,
+    spec: ImageSpec,
+) -> Result<Pixels, FitsError> {
+    // The near-universal camera convention: unsigned data stored as i16 with
+    // BZERO 32768. Fold BZERO in while staying u16.
+    let offset = spec.bzero as i64;
+    let unsigned_u16 = spec.bscale == 1.0 && (offset == 32768 || offset == 0);
+    if spec.bitpix == 16 && !unsigned_u16 {
+        let mut out = vec![0.0f32; hdu.data_len / 2];
+        stream.read_image_into_f32(&mut out).map_err(data_error)?;
+        out.truncate(spec.count);
+        for value in &mut out {
+            *value = (spec.bzero + spec.bscale * *value as f64) as f32;
         }
-    })
-}
-
-fn read_payload_chunks(
-    reader: &mut impl Read,
-    count: usize,
-    bytes_per_pixel: usize,
-    mut decode: impl FnMut(&[u8]),
-) -> Result<(), FitsError> {
-    let samples_per_chunk = (PIXEL_CHUNK_BYTES / bytes_per_pixel).max(1);
-    let mut buffer = vec![0; count.min(samples_per_chunk) * bytes_per_pixel];
-    let mut remaining = count;
-    while remaining != 0 {
-        let samples = remaining.min(samples_per_chunk);
-        let bytes = samples * bytes_per_pixel;
-        read_payload_exact(reader, &mut buffer[..bytes])?;
-        decode(&buffer[..bytes]);
-        remaining -= samples;
+        return Ok(Pixels::F32(out));
     }
-    Ok(())
-}
-
-fn allocate_pixel_vec<T>(count: usize) -> Result<Vec<T>, FitsError> {
-    // Reserve the final address range fallibly, but initialize elements only
-    // after their raw chunk has been read. A truncated stream therefore
-    // cannot force the declared buffer's pages to be touched up front.
-    let mut out = Vec::new();
-    out.try_reserve_exact(count)
-        .map_err(|_| FitsError::Malformed("pixel buffer allocation failed".into()))?;
-    Ok(out)
-}
-
-#[multiversion::multiversion(targets("x86_64+avx2", "x86_64+sse4.1", "aarch64+neon"))]
-fn fold_be_u16(raw: &[u8], flip: u16, out: &mut Vec<u16>) {
-    if flip != 0 {
-        out.extend(
-            raw.chunks_exact(2)
-                .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]) ^ 0x8000),
-        );
-    } else {
-        out.extend(
-            raw.chunks_exact(2)
-                .map(|chunk| i16::from_be_bytes([chunk[0], chunk[1]]).max(0) as u16),
-        );
-    }
-}
-
-fn decode_pixels(reader: &mut impl Read, spec: ImageSpec) -> Result<Pixels, FitsError> {
-    match spec.bitpix {
-        8 => {
-            let mut out = allocate_pixel_vec(spec.count)?;
-            read_payload_chunks(reader, spec.count, 1, |raw| out.extend_from_slice(raw))?;
-            Ok(Pixels::U8(out))
+    let take = |data: ImageData| match data {
+        ImageData::U8(mut out) => {
+            out.truncate(spec.count);
+            Pixels::U8(out)
         }
-        16 => {
-            // The near-universal camera convention: unsigned data stored as
-            // i16 with BZERO 32768. Fold BZERO in while staying u16.
-            let offset = spec.bzero as i64;
-            if spec.bscale == 1.0 && (offset == 32768 || offset == 0) {
-                // Adding 32768 to an i16 is a sign-bit flip on the raw bits:
-                // byteswap + XOR. With no offset, negatives clamp to zero,
-                // matching the previous general decode behavior.
-                let flip = if offset == 32768 { 0x8000 } else { 0 };
-                let mut out = allocate_pixel_vec(spec.count)?;
-                read_payload_chunks(reader, spec.count, 2, |raw| {
-                    fold_be_u16(raw, flip, &mut out)
-                })?;
-                Ok(Pixels::U16(out))
+        // Adding 32768 to an i16 is a sign-bit flip on the raw bits. With no
+        // offset, negatives clamp to zero.
+        ImageData::I16(mut out) => {
+            out.truncate(spec.count);
+            if offset == 32768 {
+                out.iter_mut().for_each(|value| *value ^= i16::MIN);
             } else {
-                let mut out = allocate_pixel_vec(spec.count)?;
-                read_payload_chunks(reader, spec.count, 2, |raw| {
-                    out.extend(raw.chunks_exact(2).map(|chunk| {
-                        let value = i16::from_be_bytes([chunk[0], chunk[1]]) as f64;
-                        (spec.bzero + spec.bscale * value) as f32
-                    }));
-                })?;
-                Ok(Pixels::F32(out))
+                out.iter_mut().for_each(|value| *value = (*value).max(0));
             }
+            Pixels::U16(out.into_iter().map(|value| value as u16).collect())
         }
-        32 => {
-            let mut out = allocate_pixel_vec(spec.count)?;
-            read_payload_chunks(reader, spec.count, 4, |raw| {
-                out.extend(
-                    raw.chunks_exact(4)
-                        .map(|chunk| i32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])),
-                );
-            })?;
-            Ok(Pixels::I32(out))
+        ImageData::I32(mut out) => {
+            out.truncate(spec.count);
+            Pixels::I32(out)
         }
-        -32 => {
-            let mut out = allocate_pixel_vec(spec.count)?;
-            read_payload_chunks(reader, spec.count, 4, |raw| {
-                out.extend(
-                    raw.chunks_exact(4)
-                        .map(|chunk| f32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])),
-                );
-            })?;
-            Ok(Pixels::F32(out))
+        ImageData::F32(mut out) => {
+            out.truncate(spec.count);
+            Pixels::F32(out)
         }
-        -64 => {
-            let mut out = allocate_pixel_vec(spec.count)?;
-            read_payload_chunks(reader, spec.count, 8, |raw| {
-                out.extend(
-                    raw.chunks_exact(8)
-                        .map(|chunk| f64::from_be_bytes(chunk.try_into().unwrap())),
-                );
-            })?;
-            Ok(Pixels::F64(out))
+        ImageData::F64(mut out) => {
+            out.truncate(spec.count);
+            Pixels::F64(out)
         }
-        _ => unreachable!("ImageSpec validates BITPIX"),
-    }
+        ImageData::I64(_) => unreachable!("ImageSpec validates BITPIX"),
+    };
+    stream.read_image().map(take).map_err(data_error)
 }
 
 impl FitsImage {
@@ -392,34 +275,37 @@ impl FitsImage {
     /// header, the final typed pixel vector, and a fixed-size conversion
     /// buffer. FITS data-unit padding and trailing HDUs are not read.
     pub fn open(path: &Path) -> Result<FitsImage, FitsError> {
-        let mut file = std::fs::File::open(path)?;
-        Self::read_from(&mut file, None)
+        let file = std::fs::File::open(path)?;
+        let len = file.metadata()?.len();
+        Self::read_from(file, Some(len))
     }
 
     /// Decode an in-memory FITS image through the same bounded conversion
     /// pipeline used by [`Self::open`]. The caller retains ownership of the
     /// input slice, so this entry point does not reduce its memory footprint.
     pub fn from_bytes(data: &[u8]) -> Result<FitsImage, FitsError> {
-        let mut reader = std::io::Cursor::new(data);
-        Self::read_from(&mut reader, Some(data.len() as u64))
+        Self::read_from(data, Some(data.len() as u64))
     }
 
-    fn read_from(
-        reader: &mut impl Read,
-        available_bytes: Option<u64>,
-    ) -> Result<FitsImage, FitsError> {
-        let (header, data_start) = read_headers_from(reader, true)?;
-        let headers = header.cards;
-        let spec = ImageSpec::from_headers(&headers)?;
+    fn read_from(reader: impl Read, available_bytes: Option<u64>) -> Result<FitsImage, FitsError> {
+        if available_bytes.is_some_and(|len| len < BLOCK as u64) {
+            return Err(FitsError::NotFits);
+        }
+        let mut stream = FitsReader::new(reader);
+        let hdu = read_primary_hdu(&mut stream)?;
+        let headers = FitsHeader::from_cards(&hdu.cards).cards;
+        let spec = ImageSpec::from_hdu(&hdu.info, &headers)?;
+        // Dimension metadata is checked against a known input length before
+        // the declared pixel vector is allocated.
         if let Some(available_bytes) = available_bytes {
-            let data_end = (data_start as u64)
-                .checked_add(spec.payload_bytes())
+            let data_end = (hdu.data_start as u64)
+                .checked_add(hdu.data_len as u64)
                 .ok_or_else(|| FitsError::Malformed("implausible dimensions".into()))?;
             if data_end > available_bytes {
                 return Err(FitsError::Malformed("data runs past EOF".into()));
             }
         }
-        let pixels = decode_pixels(reader, spec)?;
+        let pixels = decode_pixels(&mut stream, &hdu, spec)?;
         Ok(FitsImage {
             width: spec.width,
             height: spec.height,
@@ -685,6 +571,10 @@ fn scale_to_f32(values: impl Iterator<Item = f64> + Clone) -> Vec<f32> {
 mod io_tests {
     use super::*;
 
+    const CARD: usize = 80;
+    /// fitsio-pure decodes the data unit in chunks of this size.
+    const CHUNK_BYTES: usize = 1024 * 1024;
+
     fn value_card(keyword: &str, value: &str) -> [u8; CARD] {
         assert!(keyword.len() <= 8);
         assert!(value.len() <= CARD - 10);
@@ -849,7 +739,7 @@ mod io_tests {
 
     #[test]
     fn streamed_decode_handles_a_partial_final_chunk() {
-        let count = PIXEL_CHUNK_BYTES / 2 + 7;
+        let count = CHUNK_BYTES / 2 + 7;
         let payload: Vec<_> = (0..count)
             .flat_map(|index| ((index as u16) ^ 0x8000).to_be_bytes())
             .collect();
@@ -878,7 +768,7 @@ mod io_tests {
             Err(FitsError::NotFits)
         ));
         assert!(matches!(
-            read_headers_from(&mut std::io::Cursor::new(&short_header), false),
+            read_headers_from(short_header.as_slice()),
             Err(FitsError::Malformed(message)) if message == "header runs past EOF"
         ));
 
@@ -974,7 +864,7 @@ mod io_tests {
     fn header_only_reader_does_not_require_or_touch_pixels() {
         let bytes = image_bytes(16, &[1000, 1000], &[], &[], false);
         let mut reader = std::io::Cursor::new(bytes);
-        let (header, _) = read_headers_from(&mut reader, false).unwrap();
+        let header = read_headers_from(&mut reader).unwrap();
         assert_eq!(reader.position() as usize, BLOCK);
         assert!(header.cards.iter().any(|(key, _)| key == "NAXIS1"));
     }
@@ -996,7 +886,7 @@ mod io_tests {
         .concat()
         .into_bytes();
         header.resize(BLOCK, b' ');
-        let (header, _) = read_headers_from(&mut std::io::Cursor::new(header), false).unwrap();
+        let header = read_headers_from(header.as_slice()).unwrap();
         assert_eq!(
             header.history,
             [

@@ -9,8 +9,9 @@ one linear-image API without coupling operations to the source container.
 
 - Reads 8/16/32-bit integer and 32/64-bit float FITS images, applying
   BZERO/BSCALE (the common `BITPIX 16` + `BZERO 32768` unsigned camera
-  layout is folded directly into the big-endian decode).
-- Streams full-image opens directly into the final typed pixel vector using a
+  layout stays `u16`, converted in place with a sign-bit flip).
+- Streams full-image opens directly into the final typed pixel vector using
+  [fitsio-pure](https://crates.io/crates/fitsio-pure)'s `FitsReader` and its
   fixed 1 MiB conversion buffer; it does not retain a second whole-file copy.
 - Planar RGB (`NAXIS3`) support and OSC debayering from `BAYERPAT`,
   `XBAYROFF`/`YBAYROFF`, and `ROWORDER` (`TOP-DOWN` or `BOTTOM-UP`).

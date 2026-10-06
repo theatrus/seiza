@@ -1,5 +1,7 @@
 //! FITS header card value parsing.
 
+use fitsio_pure::value::Value;
+
 /// A typed FITS header value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HeaderValue {
@@ -48,45 +50,28 @@ impl HeaderValue {
 /// Parse the value part of a header card (everything after `= `),
 /// handling quoted strings with `''` escapes, trailing `/ comment`s,
 /// logicals, integers, and floats (including FORTRAN `D` exponents).
+/// Anything else, including an undefined value, is kept as `Raw` text.
 pub fn parse_header_value(raw: &str) -> HeaderValue {
-    let trimmed = raw.trim_start();
-
-    // Quoted string: find the closing quote, honoring '' escapes
-    if let Some(rest) = trimmed.strip_prefix('\'') {
-        let mut value = String::new();
-        let mut chars = rest.chars().peekable();
-        while let Some(c) = chars.next() {
-            if c == '\'' {
-                if chars.peek() == Some(&'\'') {
-                    chars.next();
-                    value.push('\'');
-                } else {
-                    break;
-                }
-            } else {
-                value.push(c);
-            }
+    match fitsio_pure::value::parse_value(raw.trim_start().as_bytes()) {
+        Some((value, _)) if !matches!(value, Value::ComplexInt(..) | Value::ComplexFloat(..)) => {
+            header_value(&value)
         }
-        return HeaderValue::String(value.trim_end().to_string());
+        _ => HeaderValue::Raw(raw.split('/').next().unwrap_or("").trim().to_string()),
     }
+}
 
-    // Strip the comment
-    let value = trimmed.split('/').next().unwrap_or("").trim();
+/// Convert a value parsed by fitsio-pure. Complex values are kept as `Raw`
+/// text and an undefined value as `Raw("")`.
+pub(crate) fn header_value(value: &Value) -> HeaderValue {
     match value {
-        "T" => return HeaderValue::Logical(true),
-        "F" => return HeaderValue::Logical(false),
-        "" => return HeaderValue::Raw(String::new()),
-        _ => {}
+        Value::Logical(v) => HeaderValue::Logical(*v),
+        Value::Integer(v) => HeaderValue::Integer(*v),
+        Value::Float(v) => HeaderValue::Float(*v),
+        Value::String(v) => HeaderValue::String(v.clone()),
+        Value::ComplexInt(re, im) => HeaderValue::Raw(format!("({re}, {im})")),
+        Value::ComplexFloat(re, im) => HeaderValue::Raw(format!("({re}, {im})")),
+        Value::Undefined => HeaderValue::Raw(String::new()),
     }
-    if let Ok(v) = value.parse::<i64>() {
-        return HeaderValue::Integer(v);
-    }
-    // FORTRAN-style exponents use D instead of E
-    let normalized = value.replace(['D', 'd'], "E");
-    if let Ok(v) = normalized.parse::<f64>() {
-        return HeaderValue::Float(v);
-    }
-    HeaderValue::Raw(value.to_string())
 }
 
 #[cfg(test)]

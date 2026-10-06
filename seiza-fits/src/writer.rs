@@ -1,11 +1,11 @@
 use crate::{FitsError, HeaderValue};
+use fitsio_pure::header::Card;
+use fitsio_pure::image_writer::ImageWriter;
+use fitsio_pure::io::AtomicFile;
+use fitsio_pure::value::Value;
 use std::collections::HashSet;
-use std::io::{BufWriter, Write};
+use std::io::Write;
 use std::path::Path;
-
-const BLOCK: usize = 2880;
-const CARD: usize = 80;
-const PIXEL_CHUNK_BYTES: usize = 1024 * 1024;
 
 /// Borrowed linear samples for a primary-HDU 32-bit floating-point image.
 #[derive(Clone, Copy, Debug)]
@@ -82,32 +82,9 @@ pub fn write_f32_image(
     headers: &[WriteHeaderCard],
 ) -> Result<(), FitsError> {
     validate_image(width, height, pixels, headers)?;
-    let path = path.as_ref();
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let prefix = format!(
-        ".{}.",
-        path.file_name().unwrap_or_default().to_string_lossy()
-    );
-    let mut builder = tempfile::Builder::new();
-    builder.prefix(&prefix);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let permissions = std::fs::metadata(path)
-            .map(|metadata| metadata.permissions())
-            .unwrap_or_else(|_| std::fs::Permissions::from_mode(0o666));
-        builder.permissions(permissions);
-    }
-    let mut temporary = builder.tempfile_in(parent)?;
-    let mut writer = BufWriter::new(temporary.as_file_mut());
-    write_f32_image_to(&mut writer, width, height, pixels, headers)?;
-    writer.flush()?;
-    drop(writer);
-    temporary.as_file().sync_all()?;
-    temporary.persist(path).map_err(|error| error.error)?;
+    let mut file = AtomicFile::new(path)?;
+    write_f32_image_to(&mut file, width, height, pixels, headers)?;
+    file.commit()?;
     Ok(())
 }
 
@@ -116,7 +93,7 @@ pub fn write_f32_image(
 /// The caller owns flushing and durability. Prefer [`write_f32_image`] for an
 /// atomic on-disk file.
 pub fn write_f32_image_to(
-    mut writer: impl Write,
+    writer: impl Write,
     width: usize,
     height: usize,
     pixels: F32ImageData<'_>,
@@ -124,67 +101,62 @@ pub fn write_f32_image_to(
 ) -> Result<(), FitsError> {
     validate_image(width, height, pixels, headers)?;
     let planes = pixels.planes();
+    let structural = |keyword: &str, value: &HeaderValue, comment: &str| -> Card {
+        card(keyword, value, comment).expect("structural cards are valid")
+    };
     let mut cards = vec![
-        encode_card(
+        structural(
             "SIMPLE",
             &HeaderValue::Logical(true),
             "conforms to FITS standard",
-        )?,
-        encode_card(
+        ),
+        structural(
             "BITPIX",
             &HeaderValue::Integer(-32),
             "32-bit IEEE floating point",
-        )?,
-        encode_card(
+        ),
+        structural(
             "NAXIS",
             &HeaderValue::Integer(if planes == 3 { 3 } else { 2 }),
             "",
-        )?,
-        encode_card("NAXIS1", &HeaderValue::Integer(width as i64), "")?,
-        encode_card("NAXIS2", &HeaderValue::Integer(height as i64), "")?,
+        ),
+        structural("NAXIS1", &HeaderValue::Integer(width as i64), ""),
+        structural("NAXIS2", &HeaderValue::Integer(height as i64), ""),
     ];
     if planes == 3 {
-        cards.push(encode_card(
-            "NAXIS3",
-            &HeaderValue::Integer(3),
-            "RGB planes",
-        )?);
+        cards.push(structural("NAXIS3", &HeaderValue::Integer(3), "RGB planes"));
     }
-    cards.push(encode_card(
+    cards.push(structural(
         "EXTEND",
         &HeaderValue::Logical(true),
         "extensions may be present",
-    )?);
+    ));
     for header in headers {
-        cards.push(encode_card(
-            header.keyword(),
-            header.value(),
-            header.comment(),
-        )?);
+        cards.push(card(header.keyword(), header.value(), header.comment())?);
     }
-    cards.push(format!("{:<CARD$}", "END"));
-    write_block_padded(&mut writer, cards.concat().as_bytes(), b' ')?;
 
-    let mut byte_buffer = Vec::with_capacity(PIXEL_CHUNK_BYTES);
+    let mut image = ImageWriter::new(writer, &cards).map_err(write_error)?;
     match pixels {
         F32ImageData::Mono(samples) | F32ImageData::RgbPlanar(samples) => {
-            write_float_values(&mut writer, samples.iter().copied(), &mut byte_buffer)?;
+            image.write_samples(samples).map_err(write_error)?;
         }
         F32ImageData::RgbInterleaved(samples) => {
-            let pixel_count = width * height;
             for channel in 0..3 {
-                write_float_values(
-                    &mut writer,
-                    (0..pixel_count).map(|index| samples[index * 3 + channel]),
-                    &mut byte_buffer,
-                )?;
+                image
+                    .write_iter(samples.iter().skip(channel).step_by(3).copied())
+                    .map_err(write_error)?;
             }
         }
     }
-    let byte_len = std::mem::size_of_val(pixels.samples());
-    let padding = (BLOCK - byte_len % BLOCK) % BLOCK;
-    writer.write_all(&vec![0; padding])?;
+    image.finish().map_err(write_error)?;
     Ok(())
+}
+
+fn write_error(error: fitsio_pure::Error) -> FitsError {
+    match error {
+        fitsio_pure::Error::Io(error) => FitsError::Io(error),
+        other => FitsError::Malformed(other.to_string()),
+    }
 }
 
 fn validate_image(
@@ -225,7 +197,7 @@ fn validate_image(
                 header.keyword()
             )));
         }
-        encode_card(header.keyword(), header.value(), header.comment())?;
+        card(header.keyword(), header.value(), header.comment())?;
     }
     Ok(())
 }
@@ -266,7 +238,9 @@ fn is_structural_keyword(keyword: &str) -> bool {
         )
 }
 
-fn encode_card(keyword: &str, value: &HeaderValue, comment: &str) -> Result<String, FitsError> {
+/// Build a validated single card. fitsio-pure formats it, truncating the
+/// comment to fit.
+fn card(keyword: &str, value: &HeaderValue, comment: &str) -> Result<Card, FitsError> {
     validate_keyword(keyword)?;
     if !comment.is_ascii() {
         return Err(FitsError::Malformed(format!(
@@ -274,22 +248,22 @@ fn encode_card(keyword: &str, value: &HeaderValue, comment: &str) -> Result<Stri
         )));
     }
     let value = match value {
-        HeaderValue::Logical(value) => {
-            if *value {
-                "T".into()
-            } else {
-                "F".into()
-            }
-        }
-        HeaderValue::Integer(value) => value.to_string(),
-        HeaderValue::Float(value) if value.is_finite() => format!("{value:.12E}"),
+        HeaderValue::Logical(value) => Value::Logical(*value),
+        HeaderValue::Integer(value) => Value::Integer(*value),
+        HeaderValue::Float(value) if value.is_finite() => Value::Float(*value),
         HeaderValue::Float(_) => {
             return Err(FitsError::Malformed(format!(
                 "non-finite FITS header {keyword}"
             )));
         }
         HeaderValue::String(value) if value.is_ascii() => {
-            format!("'{}'", value.replace('\'', "''"))
+            // A value field holds 70 bytes, quotes included.
+            if value.len() + value.matches('\'').count() + 2 > 70 {
+                return Err(FitsError::Malformed(format!(
+                    "FITS header {keyword} does not fit in one card"
+                )));
+            }
+            Value::String(value.clone())
         }
         HeaderValue::String(_) => {
             return Err(FitsError::Malformed(format!(
@@ -297,26 +271,20 @@ fn encode_card(keyword: &str, value: &HeaderValue, comment: &str) -> Result<Stri
             )));
         }
         // An empty raw value is a valid FITS undefined value, not an empty string.
-        HeaderValue::Raw(value) if value.is_ascii() => value.clone(),
-        HeaderValue::Raw(_) => {
-            return Err(FitsError::Malformed(format!(
-                "non-ASCII raw FITS header {keyword}"
-            )));
-        }
+        HeaderValue::Raw(value) if value.trim().is_empty() => Value::Undefined,
+        HeaderValue::Raw(value) => fitsio_pure::value::parse_value(value.as_bytes())
+            .map(|(value, _)| value)
+            .ok_or_else(|| {
+                FitsError::Malformed(format!("raw FITS header {keyword} is not a FITS value"))
+            })?,
     };
-    let base = format!("{keyword:<8}= {value:>20}");
-    if base.len() > CARD {
-        return Err(FitsError::Malformed(format!(
-            "FITS header {keyword} does not fit in one card"
-        )));
-    }
-    let mut text = base;
-    if !comment.is_empty() && text.len() + 3 < CARD {
-        text.push_str(" / ");
-        let remaining = CARD - text.len();
-        text.push_str(&comment[..comment.len().min(remaining)]);
-    }
-    Ok(format!("{text:<CARD$}"))
+    let mut name = [b' '; 8];
+    name[..keyword.len()].copy_from_slice(keyword.as_bytes());
+    Ok(Card {
+        keyword: name,
+        value: Some(value),
+        comment: (!comment.is_empty()).then(|| comment.to_string()),
+    })
 }
 
 /// Update or insert a FITS header keyword in place without modifying or
@@ -340,123 +308,18 @@ pub fn update_header_in_place(
             "cannot modify structural FITS card {keyword} in place"
         )));
     }
-    let encoded_card = encode_card(keyword, value, comment.unwrap_or(""))?;
-    assert_eq!(encoded_card.len(), CARD);
-
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .map_err(FitsError::Io)?;
-
-    let mut block = [0u8; BLOCK];
-    let key_bytes = keyword.as_bytes();
-
-    let mut block_idx: u64 = 0;
-    let mut end_card_location: Option<(u64, usize)> = None;
-
-    loop {
-        use std::io::{Read, Seek, SeekFrom, Write};
-        let start_pos = block_idx * BLOCK as u64;
-        file.seek(SeekFrom::Start(start_pos))
-            .map_err(FitsError::Io)?;
-
-        if let Err(error) = file.read_exact(&mut block) {
-            if error.kind() == std::io::ErrorKind::UnexpectedEof {
-                if block_idx == 0 {
-                    return Err(FitsError::NotFits);
-                }
-                return Err(FitsError::Malformed("missing END card".into()));
-            }
-            return Err(FitsError::Io(error));
-        }
-
-        if block_idx == 0 && &block[0..6] != b"SIMPLE" {
-            return Err(FitsError::NotFits);
-        }
-
-        for (card_idx, card) in block.chunks_exact(CARD).enumerate() {
-            let card_kw = card[0..8].trim_ascii_end();
-            if card_kw.eq_ignore_ascii_case(key_bytes) && card[8] == b'=' {
-                let target_offset = start_pos + (card_idx * CARD) as u64;
-                file.seek(SeekFrom::Start(target_offset))
-                    .map_err(FitsError::Io)?;
-                file.write_all(encoded_card.as_bytes())
-                    .map_err(FitsError::Io)?;
-                file.flush().map_err(FitsError::Io)?;
-                return Ok(true);
-            }
-
-            if card.starts_with(b"END") && (card.len() <= 3 || card[3] == b' ') {
-                end_card_location = Some((block_idx, card_idx));
-                break;
-            }
-        }
-
-        if end_card_location.is_some() {
-            break;
-        }
-
-        block_idx += 1;
-    }
-
-    let Some((end_block, end_card_idx)) = end_card_location else {
-        return Err(FitsError::Malformed("missing END card".into()));
-    };
-
-    if end_card_idx + 1 < BLOCK / CARD {
-        use std::io::{Seek, SeekFrom, Write};
-        let insert_offset = end_block * BLOCK as u64 + (end_card_idx * CARD) as u64;
-        let new_end_offset = insert_offset + CARD as u64;
-
-        file.seek(SeekFrom::Start(insert_offset))
-            .map_err(FitsError::Io)?;
-        file.write_all(encoded_card.as_bytes())
-            .map_err(FitsError::Io)?;
-
-        let end_card_str = format!("{:<80}", "END");
-        file.seek(SeekFrom::Start(new_end_offset))
-            .map_err(FitsError::Io)?;
-        file.write_all(end_card_str.as_bytes())
-            .map_err(FitsError::Io)?;
-        file.flush().map_err(FitsError::Io)?;
-        Ok(true)
-    } else {
-        Err(FitsError::Malformed(
-            "header block is full; inserting new keyword requires allocating new header block"
-                .into(),
-        ))
-    }
-}
-
-fn write_float_values(
-    writer: &mut impl Write,
-    values: impl Iterator<Item = f32>,
-    buffer: &mut Vec<u8>,
-) -> std::io::Result<()> {
-    buffer.clear();
-    for value in values {
-        buffer.extend_from_slice(&value.to_be_bytes());
-        if buffer.len() >= PIXEL_CHUNK_BYTES {
-            writer.write_all(buffer)?;
-            buffer.clear();
-        }
-    }
-    writer.write_all(buffer)?;
-    buffer.clear();
-    Ok(())
-}
-
-fn write_block_padded(writer: &mut impl Write, bytes: &[u8], padding: u8) -> std::io::Result<()> {
-    writer.write_all(bytes)?;
-    let count = (BLOCK - bytes.len() % BLOCK) % BLOCK;
-    writer.write_all(&vec![padding; count])
+    let card = card(keyword, value, comment.unwrap_or(""))?;
+    fitsio_pure::edit::update_card_in_file(path, 0, &card).map_err(crate::header_error)?;
+    Ok(true)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{FitsImage, Pixels};
+
+    const BLOCK: usize = 2880;
+    const CARD: usize = 80;
 
     #[test]
     fn atomic_mono_writer_round_trips_pixels_and_headers() {
