@@ -44,6 +44,9 @@ seiza image-info phone.jpg
 seiza solve-blind phone.jpg --data data --sip-order 2 \
   --annotate solved.png --wcs solved.wcs
 
+# A labelled chart: constellation figures, named stars, deep-sky objects
+seiza solve-blind phone.jpg --data data --sip-order 2 --sky-map sky-map.png
+
 # Annotate detections or list objects in a solved field
 seiza detect image.jpg --annotate out.png
 seiza solve image.jpg --data data ... --objects data
@@ -139,6 +142,36 @@ Blind-solved in 2.02s:
 catalog stars (red). Fields wider than 10° across the diagonal, such as phone
 and camera-lens frames, get small markers and up to 600 catalog stars;
 narrower telescope fields get larger markers and 300 stars.
+
+### Sky map
+
+`--sky-map <out.png>` on `solve` and `solve-blind` writes a chart of the
+solved image (EXIF-oriented, as loaded) for sharing:
+
+- constellation stick figures (light blue) and constellation names;
+- stars with IAU proper names down to magnitude 4.5 (gold), plus bright
+  figure stars without one, by Bayer designation ("Gamma Cas");
+- deep-sky objects by catalog prominence (cyan), with common names, catalog
+  ellipses for large ones, and "(edge)" when only the extent reaches the
+  frame;
+- a title bar, and a footer with matched stars, SIP order, pixel scale, RMS,
+  field centre and the line-data credit.
+
+Labels go where they overlap nothing placed before them, brightest stars
+first, and are dropped when nowhere fits. In a photo with foreground, marks
+below the lowest catalog-confirmed detected stars are left out and figure
+lines fade there. `--sky-map-width` sets the width (default 2100 pixels).
+Star names come from the star-identifier sidecar and objects from
+`objects.bin`, found next to `--data` or in the standard places (`solve
+--objects` picks the object file); without them the map still has the
+figures. Catalog marks show where things are, not that they were detected.
+
+![Sky map of the phone frame](../docs/images/phone/phone-sky-map.jpg)
+
+The figures are the Constellation Lines dataset by Marc van der Sluys
+(2005-2023), hemel.waarnemen.com. DOI: 10.5281/zenodo.10397192. Licensed under
+CC BY 4.0. Labels use the Inter typeface (SIL Open Font License 1.1, see
+[`fonts/`](fonts/README.md)).
 
 EXIF Orientation is distinct from camera pointing. GPSImgDirection and its
 magnetic/true-north reference are reported but do not seed the solver; the
