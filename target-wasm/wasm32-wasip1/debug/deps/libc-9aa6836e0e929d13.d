@@ -1,0 +1,12 @@
+/home/atrus/repos/seiza/target-wasm/wasm32-wasip1/debug/deps/libc-9aa6836e0e929d13.d: /home/atrus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.186/src/lib.rs /home/atrus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.186/src/macros.rs /home/atrus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.186/src/new/mod.rs /home/atrus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.186/src/new/common/mod.rs /home/atrus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.186/src/new/wasi/mod.rs /home/atrus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.186/src/primitives.rs /home/atrus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.186/src/wasi/mod.rs /home/atrus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.186/src/types.rs
+
+/home/atrus/repos/seiza/target-wasm/wasm32-wasip1/debug/deps/liblibc-9aa6836e0e929d13.rmeta: /home/atrus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.186/src/lib.rs /home/atrus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.186/src/macros.rs /home/atrus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.186/src/new/mod.rs /home/atrus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.186/src/new/common/mod.rs /home/atrus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.186/src/new/wasi/mod.rs /home/atrus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.186/src/primitives.rs /home/atrus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.186/src/wasi/mod.rs /home/atrus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.186/src/types.rs
+
+/home/atrus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.186/src/lib.rs:
+/home/atrus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.186/src/macros.rs:
+/home/atrus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.186/src/new/mod.rs:
+/home/atrus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.186/src/new/common/mod.rs:
+/home/atrus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.186/src/new/wasi/mod.rs:
+/home/atrus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.186/src/primitives.rs:
+/home/atrus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.186/src/wasi/mod.rs:
+/home/atrus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.186/src/types.rs:

@@ -125,9 +125,24 @@ fn parse_headers(data: &[u8]) -> Result<(FitsHeader, usize), FitsError> {
                 "" => continue,
                 "HISTORY" => header.history.push(commentary()),
                 "COMMENT" => header.comments.push(commentary()),
+                // The value starts after the `=` in column 9. The standard
+                // puts a space in column 10, but some writers omit it
+                // (`EXPTIME =30.5`), and cfitsio reads those too.
                 _ if card[8] == b'=' => {
-                    let raw = String::from_utf8_lossy(&card[10..]);
+                    let raw = String::from_utf8_lossy(&card[9..]);
                     header.cards.push((keyword, parse_header_value(&raw)));
+                }
+                // The long-string convention: a string value ending in `&`
+                // continues in the next `CONTINUE` card's string.
+                "CONTINUE" => {
+                    if let Some((_, HeaderValue::String(value))) = header.cards.last_mut()
+                        && value.ends_with('&')
+                        && let HeaderValue::String(more) =
+                            parse_header_value(&String::from_utf8_lossy(&card[8..]))
+                    {
+                        value.pop();
+                        value.push_str(&more);
+                    }
                 }
                 _ => {}
             }
@@ -219,6 +234,13 @@ impl ImageSpec {
             return Err(FitsError::Unsupported(format!(
                 "NAXIS {naxis} (need a 2D image)"
             )));
+        }
+        if header_i64("NAXIS1") == Some(0)
+            && headers
+                .iter()
+                .any(|(key, value)| key == "GROUPS" && value.as_bool() == Some(true))
+        {
+            return Err(FitsError::Unsupported("random groups".into()));
         }
         let width = header_i64("NAXIS1")
             .and_then(|value| usize::try_from(value).ok())
@@ -725,6 +747,76 @@ mod io_tests {
             bytes.resize(bytes.len().next_multiple_of(BLOCK), 0);
         }
         bytes
+    }
+
+    /// A header of literal 80-column cards (padded) for an 8-bit 2x2 image.
+    fn literal_header_image(cards: &[&str]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for card in [
+            "SIMPLE  = T",
+            "BITPIX  = 8",
+            "NAXIS   = 2",
+            "NAXIS1  = 2",
+            "NAXIS2  = 2",
+        ]
+        .iter()
+        .chain(cards)
+        .chain(&["END"])
+        {
+            bytes.extend_from_slice(format!("{card:<80}").as_bytes());
+        }
+        bytes.resize(bytes.len().next_multiple_of(BLOCK), b' ');
+        bytes.resize(bytes.len() + BLOCK, 0);
+        bytes
+    }
+
+    #[test]
+    fn values_without_a_space_after_the_equals_sign_read_whole() {
+        // The standard wants "= " in columns 9-10; reading from column 11
+        // turned EXPTIME =30.5 into 0.5 and kept a stray quote.
+        let image = FitsImage::from_bytes(&literal_header_image(&[
+            "EXPTIME =30.5 / seconds",
+            "CTYPE1  ='RA---TAN'",
+            "GAIN    = 100",
+        ]))
+        .unwrap();
+        assert_eq!(image.header_f64("EXPTIME"), Some(30.5));
+        assert_eq!(image.header_str("CTYPE1"), Some("RA---TAN"));
+        assert_eq!(image.header("GAIN"), Some(&HeaderValue::Integer(100)));
+    }
+
+    #[test]
+    fn long_strings_continue_across_cards() {
+        let image = FitsImage::from_bytes(&literal_header_image(&[
+            "OBJECT  = 'NGC 7000 North America &'",
+            "CONTINUE  'and Pelican &'",
+            "CONTINUE  'Nebulae' / continued",
+            "FILTER  = 'Ha&'",
+            "TELESCOP= 'unrelated'",
+            "CONTINUE  'orphan'",
+        ]))
+        .unwrap();
+        assert_eq!(
+            image.header_str("OBJECT"),
+            Some("NGC 7000 North America and Pelican Nebulae")
+        );
+        // A trailing & with no CONTINUE card is part of the value, and a
+        // CONTINUE after a value without & is ignored.
+        assert_eq!(image.header_str("FILTER"), Some("Ha&"));
+        assert_eq!(image.header_str("TELESCOP"), Some("unrelated"));
+    }
+
+    #[test]
+    fn random_groups_are_named_as_unsupported() {
+        let mut cards = literal_header_image(&["GROUPS  = T", "PCOUNT  = 0", "GCOUNT  = 1"]);
+        // NAXIS1 = 0 marks random groups.
+        let naxis1 = 3 * CARD;
+        cards[naxis1..naxis1 + CARD].copy_from_slice(format!("{:<80}", "NAXIS1  = 0").as_bytes());
+        let error = FitsImage::from_bytes(&cards).unwrap_err();
+        assert!(
+            matches!(error, FitsError::Unsupported(ref what) if what == "random groups"),
+            "{error}"
+        );
     }
 
     fn unsigned_u16_payload(values: &[u16]) -> Vec<u8> {
