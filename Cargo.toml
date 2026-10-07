@@ -59,7 +59,9 @@ directories = "6"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "gzip"] }
 serde = { version = "1", features = ["derive"] }
 ureq = { version = "3", features = ["json", "multipart"] }
-serde_json = "1"
+# float_roundtrip parses every f64 back exactly, so persisted predictions
+# and API payloads survive a JSON round trip unchanged.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 csv = "1"
 toml = "1"
 postcard = { version = "1", features = ["use-std"] }

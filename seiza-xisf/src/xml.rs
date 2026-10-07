@@ -128,9 +128,9 @@ pub(crate) fn parse_tree(xml: &[u8]) -> Result<XisfElement, XisfError> {
             .read_event_into(&mut buffer)
             .map_err(|error| XisfError::Malformed(format!("invalid XML header: {error}")))?
         {
-            Event::Start(start) => stack.push(element(&reader, &start)?),
+            Event::Start(start) => stack.push(element(&start)?),
             Event::Empty(start) => {
-                let element = element(&reader, &start)?;
+                let element = element(&start)?;
                 finish(element, &mut stack);
             }
             Event::End(_) => {
@@ -138,18 +138,16 @@ pub(crate) fn parse_tree(xml: &[u8]) -> Result<XisfElement, XisfError> {
                     finish(element, &mut stack);
                 }
             }
+            // The reader has already checked the text is UTF-8; like the
+            // previous decode(), into_inner() leaves line ends as written.
             Event::Text(text) => {
-                let text = text
-                    .decode()
-                    .map_err(|error| XisfError::Malformed(format!("invalid XML text: {error}")))?;
+                let text = text.into_inner();
                 if let Some(element) = stack.last_mut() {
                     element.text.push_str(&text);
                 }
             }
             Event::CData(text) => {
-                let text = text
-                    .decode()
-                    .map_err(|error| XisfError::Malformed(format!("invalid XML text: {error}")))?;
+                let text = text.into_inner();
                 if let Some(element) = stack.last_mut() {
                     element.text.push_str(&text);
                 }
@@ -164,7 +162,7 @@ pub(crate) fn parse_tree(xml: &[u8]) -> Result<XisfElement, XisfError> {
                 {
                     Some(character) => character.to_string(),
                     None => {
-                        let name = reference.decode().map_err(|error| invalid(&error))?;
+                        let name = reference.into_inner();
                         quick_xml::escape::resolve_predefined_entity(&name)
                             .ok_or_else(|| {
                                 XisfError::Malformed(format!("undefined XML entity &{name};"))
@@ -194,18 +192,16 @@ pub(crate) fn parse_tree(xml: &[u8]) -> Result<XisfElement, XisfError> {
     Ok(root)
 }
 
-fn element(reader: &Reader<&[u8]>, start: &BytesStart<'_>) -> Result<XisfElement, XisfError> {
-    let name = std::str::from_utf8(start.name().as_ref())
-        .map_err(|_| XisfError::Malformed("non-UTF-8 XML element name".into()))?
-        .to_string();
+// quick-xml checks names are UTF-8 while reading.
+fn element(start: &BytesStart<'_>) -> Result<XisfElement, XisfError> {
+    let name = start.name().as_ref().to_string();
     let mut attributes = BTreeMap::new();
     for attribute in start.attributes() {
         let attribute = attribute
             .map_err(|error| XisfError::Malformed(format!("invalid XML attribute: {error}")))?;
-        let key = std::str::from_utf8(attribute.key.as_ref())
-            .map_err(|_| XisfError::Malformed("non-UTF-8 XML attribute name".into()))?;
+        let key: &str = attribute.key.as_ref();
         let value = attribute
-            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+            .normalized_value(XmlVersion::Implicit1_0)
             .map_err(|error| XisfError::Malformed(format!("invalid XML attribute: {error}")))?;
         attributes.insert(key.to_string(), value.into_owned());
     }
