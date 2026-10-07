@@ -75,9 +75,6 @@ zstd = "0.14.0"
 rayon = "1"
 nalgebra = { version = "0.35", default-features = false, features = ["std"] }
 rustc-hash = { version = "2" }
-# 1.6 renamed `blend` to `select`; `seiza/src/detect.rs` calls the new name,
-# so an older 1.x would resolve and then fail to compile.
-wide = "1.6"
 multiversion = "0.9"
 quick-xml = "0.42"
 lz4_flex = "0.14"
