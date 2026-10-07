@@ -302,6 +302,82 @@ fn vng_neighbourhoods() -> [Vec<(isize, isize)>; 8] {
     })
 }
 
+/// Index of a (row, column) offset in a pixel's 5x5 window.
+fn vng_cell(row: isize, column: isize) -> u8 {
+    ((row + 2) * 5 + column + 2) as u8
+}
+
+/// A direction's neighbours as window cells and colours.
+#[derive(Clone, Copy, Default)]
+struct VngTaps {
+    cells: [(u8, u8); 6],
+    len: usize,
+}
+
+/// Each direction's [`VngTaps`] per Bayer phase.
+type VngTapTables = [[VngTaps; 8]; 4];
+
+/// Each direction's gradient pairs as window cells.
+type VngGradientPairs = [[(u8, u8); 4]; 8];
+
+/// Each direction's neighbours per Bayer phase (column parity, row parity)
+/// of the raw coordinates, and its gradient pairs as window cells, the last
+/// two counting half.
+fn vng_tables(layout: BayerLayout) -> (VngTapTables, VngGradientPairs) {
+    let neighbourhoods = vng_neighbourhoods();
+    // `channel_at` applies the pattern's origin offsets itself.
+    let tables = std::array::from_fn(|phase| {
+        let (px, py) = ((phase & 1) as isize, (phase >> 1) as isize);
+        let channel = |row: isize, column: isize| {
+            layout.channel_at(
+                (px + column).rem_euclid(2) as usize,
+                (py + row).rem_euclid(2) as usize,
+            ) as u8
+        };
+        std::array::from_fn(|direction| {
+            let mut taps = VngTaps::default();
+            for (slot, &(row, column)) in taps.cells.iter_mut().zip(&neighbourhoods[direction]) {
+                *slot = (vng_cell(row, column), channel(row, column));
+            }
+            taps.len = neighbourhoods[direction].len().min(6);
+            taps
+        })
+    });
+    let gradient_pairs = VNG_DIRECTIONS.map(|(dr, dc)| {
+        let (pr, pc) = (dc, -dr);
+        [
+            (vng_cell(dr, dc), vng_cell(-dr, -dc)),
+            (vng_cell(2 * dr, 2 * dc), vng_cell(0, 0)),
+            (vng_cell(pr + dr, pc + dc), vng_cell(pr - dr, pc - dc)),
+            (vng_cell(-pr + dr, -pc + dc), vng_cell(-pr - dr, -pc - dc)),
+        ]
+    });
+    (tables, gradient_pairs)
+}
+
+/// Pixels [`vng_rows`] estimates at once: same-colour pixels two apart.
+const VNG_LANES: usize = 8;
+
+/// `sum / count` in every lane. A direction counts one to four samples of a
+/// colour, and dividing by a power of two gives exactly what multiplying by
+/// its reciprocal does, so only a count of three needs a division.
+#[inline(always)]
+fn vng_mean(sum: &[f32; VNG_LANES], count: u32) -> [f32; VNG_LANES] {
+    let mut mean = [0.0_f32; VNG_LANES];
+    if count.is_power_of_two() {
+        let reciprocal = 1.0 / count as f32;
+        for (mean, &sum) in mean.iter_mut().zip(sum) {
+            *mean = sum * reciprocal;
+        }
+    } else {
+        let count = count as f32;
+        for (mean, &sum) in mean.iter_mut().zip(sum) {
+            *mean = sum / count;
+        }
+    }
+    mean
+}
+
 /// Overwrite the interpolated samples of pixels at least two from every edge
 /// with variable-number-of-gradients estimates (Chang, Cheung and Pang,
 /// 1999), the method PixInsight uses by default.
@@ -316,6 +392,19 @@ fn vng_neighbourhoods() -> [Vec<(isize, isize)>; 8] {
 /// across a steep edge, a star a few pixels wide keeps its colour profile:
 /// Malvar-He-Cutler's linear correction, tried first, rang around such
 /// stars, leaving red 1.5 to 2 times the star's colour two pixels out.
+///
+/// The pixels of one row and column parity share a Bayer phase, so they
+/// share every table, and [`VNG_LANES`] of them run side by side as vector
+/// lanes: each row of the window is split into its even and odd columns, so
+/// a window cell of eight such pixels is eight adjacent samples. Every lane
+/// works out every direction and keeps or drops its result by selection
+/// rather than a branch, adding the kept ones in direction order, so each
+/// pixel goes through the same operations in the same order as it would
+/// alone and the output is bit-identical. The row loops live in this
+/// multiversioned function itself, with an AVX2 clone that runs all eight
+/// lanes in one vector; a closure handed to rayon would not inherit the
+/// clone's target features.
+#[multiversion::multiversion(targets("x86_64+avx2"))]
 fn vng_rows(
     mosaic: &[f32],
     width: usize,
@@ -324,108 +413,144 @@ fn vng_rows(
     first_row: usize,
     out: &mut [f32],
 ) {
+    const LANES: usize = VNG_LANES;
     if width < 5 || height < 5 {
         return;
     }
-    /// Index of a (row, column) offset in a pixel's 5x5 window.
-    fn cell(row: isize, column: isize) -> u8 {
-        ((row + 2) * 5 + column + 2) as u8
-    }
-    /// A direction's neighbours as window cells and colours.
-    #[derive(Clone, Copy, Default)]
-    struct Taps {
-        cells: [(u8, u8); 6],
-        len: usize,
-    }
-    let neighbourhoods = vng_neighbourhoods();
-    // Per Bayer phase (column parity, row parity) of the raw coordinates;
-    // `channel_at` applies the pattern's origin offsets itself.
-    let tables: [[Taps; 8]; 4] = std::array::from_fn(|phase| {
-        let (px, py) = ((phase & 1) as isize, (phase >> 1) as isize);
-        let channel = |row: isize, column: isize| {
-            layout.channel_at(
-                (px + column).rem_euclid(2) as usize,
-                (py + row).rem_euclid(2) as usize,
-            ) as u8
-        };
-        std::array::from_fn(|direction| {
-            let mut taps = Taps::default();
-            for (slot, &(row, column)) in taps.cells.iter_mut().zip(&neighbourhoods[direction]) {
-                *slot = (cell(row, column), channel(row, column));
-            }
-            taps.len = neighbourhoods[direction].len().min(6);
-            taps
-        })
-    });
-    // Gradient pairs per direction as window cells; the last two count half.
-    let gradient_pairs: [[(u8, u8); 4]; 8] = VNG_DIRECTIONS.map(|(dr, dc)| {
-        let (pr, pc) = (dc, -dr);
-        [
-            (cell(dr, dc), cell(-dr, -dc)),
-            (cell(2 * dr, 2 * dc), cell(0, 0)),
-            (cell(pr + dr, pc + dc), cell(pr - dr, pc - dc)),
-            (cell(-pr + dr, -pc + dc), cell(-pr - dr, -pc - dc)),
-        ]
-    });
+    let (tables, gradient_pairs) = vng_tables(layout);
+    // The window's five rows, each as its even and then its odd columns,
+    // padded so a full vector can be read past the last pixel.
+    let stride = width / 2 + 1 + LANES;
+    let mut planes = vec![0.0_f32; 10 * stride];
     for (band_row, out_row) in out.chunks_exact_mut(width * 3).enumerate() {
         let y = first_row + band_row;
         if y < 2 || y + 2 >= height {
             continue;
         }
-        let rows: [&[f32]; 5] = std::array::from_fn(|row| {
+        for row in 0..5 {
             let start = (y + row - 2) * width;
-            &mosaic[start..start + width]
-        });
-        for x in 2..width - 2 {
-            let mut window = [0.0_f32; 25];
-            for (row, values) in rows.iter().enumerate() {
-                window[row * 5..row * 5 + 5].copy_from_slice(&values[x - 2..x + 3]);
+            let source = &mosaic[start..start + width];
+            let (even, odd) = planes[2 * row * stride..(2 * row + 2) * stride].split_at_mut(stride);
+            for (index, pair) in source.chunks_exact(2).enumerate() {
+                even[index] = pair[0];
+                odd[index] = pair[1];
             }
-            let at = |cell: u8| window[cell as usize];
-            let mut gradients = [0.0_f32; 8];
-            for (gradient, pairs) in gradients.iter_mut().zip(&gradient_pairs) {
-                *gradient = (at(pairs[0].0) - at(pairs[0].1)).abs()
-                    + (at(pairs[1].0) - at(pairs[1].1)).abs()
-                    + 0.5
-                        * ((at(pairs[2].0) - at(pairs[2].1)).abs()
-                            + (at(pairs[3].0) - at(pairs[3].1)).abs());
+            if width % 2 == 1 {
+                even[width / 2] = source[width - 1];
             }
-            let minimum = gradients.iter().copied().fold(f32::INFINITY, f32::min);
-            let maximum = gradients.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let threshold = 1.5 * minimum + 0.5 * (maximum - minimum);
-            let phase = (x & 1) | ((y & 1) << 1);
-            let own = layout.channel_at(x, y);
-            let center = window[12];
-            let mut differences = [0.0_f32; 3];
-            let mut used = 0_u32;
-            for (&gradient, taps) in gradients.iter().zip(&tables[phase]) {
-                if gradient > threshold {
-                    continue;
-                }
-                let mut sums = [0.0_f32; 3];
+        }
+        for parity in 0..2 {
+            let phase = parity | ((y & 1) << 1);
+            let own = layout.channel_at(parity, y);
+            let taps_by_direction = &tables[phase];
+            // Each direction's neighbour count per colour; a direction
+            // missing a colour never counts.
+            let counts_by_direction = taps_by_direction.map(|taps| {
                 let mut counts = [0_u32; 3];
-                sums[own] += center;
                 counts[own] += 1;
-                for &(cell, channel) in &taps.cells[..taps.len] {
-                    sums[channel as usize] += at(cell);
+                for &(_, channel) in &taps.cells[..taps.len] {
                     counts[channel as usize] += 1;
                 }
-                if counts.iter().all(|&count| count > 0) {
-                    let own_mean = sums[own] / counts[own] as f32;
-                    for channel in 0..3 {
-                        differences[channel] += sums[channel] / counts[channel] as f32 - own_mean;
+                counts
+            });
+            let mut x = 2 + parity;
+            while x < width - 2 {
+                let lanes = (width - 2 - x).div_ceil(2).min(LANES);
+                let mut window = [[0.0_f32; LANES]; 25];
+                for row in 0..5 {
+                    for column in 0..5 {
+                        let plane = 2 * row + ((parity + column) & 1);
+                        let start = plane * stride + ((x + column - 2) >> 1);
+                        window[row * 5 + column].copy_from_slice(&planes[start..start + LANES]);
                     }
-                    used += 1;
                 }
-            }
-            if used == 0 {
-                continue;
-            }
-            let pixel = &mut out_row[x * 3..x * 3 + 3];
-            for (channel, value) in pixel.iter_mut().enumerate() {
-                if channel != own {
-                    *value = center + differences[channel] / used as f32;
+                let mut gradients = [[0.0_f32; LANES]; 8];
+                for (gradient, pairs) in gradients.iter_mut().zip(&gradient_pairs) {
+                    let (a0, b0) = (&window[pairs[0].0 as usize], &window[pairs[0].1 as usize]);
+                    let (a1, b1) = (&window[pairs[1].0 as usize], &window[pairs[1].1 as usize]);
+                    let (a2, b2) = (&window[pairs[2].0 as usize], &window[pairs[2].1 as usize]);
+                    let (a3, b3) = (&window[pairs[3].0 as usize], &window[pairs[3].1 as usize]);
+                    for lane in 0..LANES {
+                        gradient[lane] = (a0[lane] - b0[lane]).abs()
+                            + (a1[lane] - b1[lane]).abs()
+                            + 0.5 * ((a2[lane] - b2[lane]).abs() + (a3[lane] - b3[lane]).abs());
+                    }
                 }
+                let mut minimum = [f32::INFINITY; LANES];
+                let mut maximum = [f32::NEG_INFINITY; LANES];
+                for gradient in &gradients {
+                    for lane in 0..LANES {
+                        minimum[lane] = minimum[lane].min(gradient[lane]);
+                        maximum[lane] = maximum[lane].max(gradient[lane]);
+                    }
+                }
+                let mut threshold = [0.0_f32; LANES];
+                for lane in 0..LANES {
+                    threshold[lane] = 1.5 * minimum[lane] + 0.5 * (maximum[lane] - minimum[lane]);
+                }
+                let center = window[12];
+                let mut differences = [[0.0_f32; LANES]; 3];
+                let mut used = [0_u32; LANES];
+                for ((gradient, taps), counts) in gradients
+                    .iter()
+                    .zip(taps_by_direction)
+                    .zip(&counts_by_direction)
+                {
+                    if counts.contains(&0) {
+                        continue;
+                    }
+                    // A comparison with NaN fails, so a NaN gradient or
+                    // threshold keeps the direction, as in the per-pixel loop.
+                    let mut dropped = [false; LANES];
+                    for lane in 0..LANES {
+                        dropped[lane] = gradient[lane] > threshold[lane];
+                    }
+                    let mut sums = [[0.0_f32; LANES]; 3];
+                    for lane in 0..LANES {
+                        sums[own][lane] += center[lane];
+                    }
+                    for &(cell, channel) in &taps.cells[..taps.len] {
+                        let values = &window[cell as usize];
+                        let sum = &mut sums[channel as usize];
+                        for lane in 0..LANES {
+                            sum[lane] += values[lane];
+                        }
+                    }
+                    let own_mean = vng_mean(&sums[own], counts[own]);
+                    // The pixel's own channel is never estimated, so its
+                    // difference is not formed.
+                    for channel in 0..3 {
+                        if channel == own {
+                            continue;
+                        }
+                        let mean = vng_mean(&sums[channel], counts[channel]);
+                        let difference = &mut differences[channel];
+                        for lane in 0..LANES {
+                            let next = difference[lane] + (mean[lane] - own_mean[lane]);
+                            difference[lane] = if dropped[lane] {
+                                difference[lane]
+                            } else {
+                                next
+                            };
+                        }
+                    }
+                    for lane in 0..LANES {
+                        used[lane] += u32::from(!dropped[lane]);
+                    }
+                }
+                for lane in 0..lanes {
+                    if used[lane] == 0 {
+                        continue;
+                    }
+                    let pixel_x = x + 2 * lane;
+                    let pixel = &mut out_row[pixel_x * 3..pixel_x * 3 + 3];
+                    for (channel, value) in pixel.iter_mut().enumerate() {
+                        if channel != own {
+                            *value = center[lane] + differences[channel][lane] / used[lane] as f32;
+                        }
+                    }
+                }
+                x += 2 * LANES;
             }
         }
     }
@@ -485,6 +610,125 @@ pub(crate) fn rec709_luma(red: f32, green: f32, blue: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `vng_rows` as it was before same-colour pixels ran as vector lanes:
+    /// one pixel at a time, skipping the directions it drops.
+    fn vng_rows_per_pixel(
+        mosaic: &[f32],
+        width: usize,
+        height: usize,
+        layout: BayerLayout,
+        first_row: usize,
+        out: &mut [f32],
+    ) {
+        if width < 5 || height < 5 {
+            return;
+        }
+        /// Index of a (row, column) offset in a pixel's 5x5 window.
+        fn cell(row: isize, column: isize) -> u8 {
+            ((row + 2) * 5 + column + 2) as u8
+        }
+        /// A direction's neighbours as window cells and colours.
+        #[derive(Clone, Copy, Default)]
+        struct Taps {
+            cells: [(u8, u8); 6],
+            len: usize,
+        }
+        let neighbourhoods = vng_neighbourhoods();
+        // Per Bayer phase (column parity, row parity) of the raw coordinates;
+        // `channel_at` applies the pattern's origin offsets itself.
+        let tables: [[Taps; 8]; 4] = std::array::from_fn(|phase| {
+            let (px, py) = ((phase & 1) as isize, (phase >> 1) as isize);
+            let channel = |row: isize, column: isize| {
+                layout.channel_at(
+                    (px + column).rem_euclid(2) as usize,
+                    (py + row).rem_euclid(2) as usize,
+                ) as u8
+            };
+            std::array::from_fn(|direction| {
+                let mut taps = Taps::default();
+                for (slot, &(row, column)) in taps.cells.iter_mut().zip(&neighbourhoods[direction])
+                {
+                    *slot = (cell(row, column), channel(row, column));
+                }
+                taps.len = neighbourhoods[direction].len().min(6);
+                taps
+            })
+        });
+        // Gradient pairs per direction as window cells; the last two count half.
+        let gradient_pairs: [[(u8, u8); 4]; 8] = VNG_DIRECTIONS.map(|(dr, dc)| {
+            let (pr, pc) = (dc, -dr);
+            [
+                (cell(dr, dc), cell(-dr, -dc)),
+                (cell(2 * dr, 2 * dc), cell(0, 0)),
+                (cell(pr + dr, pc + dc), cell(pr - dr, pc - dc)),
+                (cell(-pr + dr, -pc + dc), cell(-pr - dr, -pc - dc)),
+            ]
+        });
+        for (band_row, out_row) in out.chunks_exact_mut(width * 3).enumerate() {
+            let y = first_row + band_row;
+            if y < 2 || y + 2 >= height {
+                continue;
+            }
+            let rows: [&[f32]; 5] = std::array::from_fn(|row| {
+                let start = (y + row - 2) * width;
+                &mosaic[start..start + width]
+            });
+            for x in 2..width - 2 {
+                let mut window = [0.0_f32; 25];
+                for (row, values) in rows.iter().enumerate() {
+                    window[row * 5..row * 5 + 5].copy_from_slice(&values[x - 2..x + 3]);
+                }
+                let at = |cell: u8| window[cell as usize];
+                let mut gradients = [0.0_f32; 8];
+                for (gradient, pairs) in gradients.iter_mut().zip(&gradient_pairs) {
+                    *gradient = (at(pairs[0].0) - at(pairs[0].1)).abs()
+                        + (at(pairs[1].0) - at(pairs[1].1)).abs()
+                        + 0.5
+                            * ((at(pairs[2].0) - at(pairs[2].1)).abs()
+                                + (at(pairs[3].0) - at(pairs[3].1)).abs());
+                }
+                let minimum = gradients.iter().copied().fold(f32::INFINITY, f32::min);
+                let maximum = gradients.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let threshold = 1.5 * minimum + 0.5 * (maximum - minimum);
+                let phase = (x & 1) | ((y & 1) << 1);
+                let own = layout.channel_at(x, y);
+                let center = window[12];
+                let mut differences = [0.0_f32; 3];
+                let mut used = 0_u32;
+                for (&gradient, taps) in gradients.iter().zip(&tables[phase]) {
+                    if gradient > threshold {
+                        continue;
+                    }
+                    let mut sums = [0.0_f32; 3];
+                    let mut counts = [0_u32; 3];
+                    sums[own] += center;
+                    counts[own] += 1;
+                    for &(cell, channel) in &taps.cells[..taps.len] {
+                        sums[channel as usize] += at(cell);
+                        counts[channel as usize] += 1;
+                    }
+                    if counts.iter().all(|&count| count > 0) {
+                        let own_mean = sums[own] / counts[own] as f32;
+                        for channel in 0..3 {
+                            differences[channel] +=
+                                sums[channel] / counts[channel] as f32 - own_mean;
+                        }
+                        used += 1;
+                    }
+                }
+                if used == 0 {
+                    continue;
+                }
+                let pixel = &mut out_row[x * 3..x * 3 + 3];
+                for (channel, value) in pixel.iter_mut().enumerate() {
+                    if channel != own {
+                        *value = center + differences[channel] / used as f32;
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn crop_copies_the_requested_region() {
@@ -571,6 +815,81 @@ mod tests {
             pattern: BayerPattern::Rggb,
             x_offset: 0,
             y_offset: 0,
+        }
+    }
+
+    #[test]
+    fn vng_lanes_match_the_per_pixel_vng_bit_for_bit() {
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let patterns = [
+            BayerPattern::Rggb,
+            BayerPattern::Bggr,
+            BayerPattern::Grbg,
+            BayerPattern::Gbrg,
+        ];
+        // Odd and even widths, rows shorter than one vector of lanes and
+        // ones ending in a partial vector; smooth sky with bright spikes,
+        // steps, and non-finite and signed-zero samples.
+        for (width, height) in [(5, 5), (6, 5), (7, 9), (16, 7), (17, 12), (37, 11), (40, 9)] {
+            for (index, pattern) in patterns.into_iter().enumerate() {
+                let layout = BayerLayout {
+                    pattern,
+                    x_offset: index & 1,
+                    y_offset: index >> 1,
+                };
+                let mosaic = (0..width * height)
+                    .map(|pixel| match next() % 53 {
+                        0 => f32::NAN,
+                        1 => f32::INFINITY,
+                        2 => -0.0,
+                        3..=8 => 3000.0 + (next() % 9000) as f32,
+                        _ => {
+                            let step = if pixel % width > width / 2 {
+                                400.0
+                            } else {
+                                0.0
+                            };
+                            100.0 + step + (next() >> 40) as f32 / (1 << 20) as f32
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let start = (0..width * height * 3)
+                    .map(|_| (next() >> 40) as f32)
+                    .collect::<Vec<_>>();
+                // The whole frame as one band, and bands of three rows.
+                for band_rows in [height, 3] {
+                    let mut got = start.clone();
+                    let mut expected = start.clone();
+                    for (band, (got, expected)) in got
+                        .chunks_mut(width * 3 * band_rows)
+                        .zip(expected.chunks_mut(width * 3 * band_rows))
+                        .enumerate()
+                    {
+                        let first_row = band * band_rows;
+                        vng_rows(&mosaic, width, height, layout, first_row, got);
+                        vng_rows_per_pixel(&mosaic, width, height, layout, first_row, expected);
+                    }
+                    // Bit for bit, except that a NaN may differ in sign
+                    // where a window holds both an infinite and a NaN
+                    // sample: inf - inf gives -NaN on x86, and where it
+                    // meets the +NaN sample in an addition x86 passes on the
+                    // first operand's, which the compiler may order either
+                    // way (the unoptimized and AVX2 builds differ here).
+                    for (sample, (a, b)) in got.iter().zip(&expected).enumerate() {
+                        assert!(
+                            a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()),
+                            "{pattern:?} {width}x{height}, {band_rows}-row bands, sample {sample}: \
+                             {a} vs {b}"
+                        );
+                    }
+                }
+            }
         }
     }
 
