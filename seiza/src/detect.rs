@@ -462,10 +462,8 @@ fn threshold_excess_u8(
 }
 
 /// `max(pixel - background, 0)` where the excess clears the sigma
-/// threshold, else 0 — vectorized per tile-row segment (the background
-/// and threshold are constant within one). Multiversioned so release
-/// binaries built for baseline x86-64 still dispatch AVX2 at runtime.
-#[multiversion::multiversion(targets("x86_64+avx2+fma", "x86_64+sse4.1", "aarch64+neon"))]
+/// threshold, else 0. Rows run in parallel; each row's tile segments go
+/// through [`threshold_row`].
 fn threshold_excess(
     pixels: &[f32],
     width: u32,
@@ -476,7 +474,6 @@ fn threshold_excess(
     sigma: f32,
 ) -> Vec<f32> {
     use rayon::prelude::*;
-    use wide::f32x8;
 
     let tiles_x = width.div_ceil(tile_size);
     let mut excess = vec![0.0f32; pixels.len()];
@@ -485,34 +482,52 @@ fn threshold_excess(
         .enumerate()
         .for_each(|(y, output)| {
             let ty = y as u32 / tile_size;
-            let input = &pixels[y * width as usize..(y + 1) * width as usize];
-            for tx in 0..tiles_x {
-                let x0 = (tx * tile_size) as usize;
-                let x1 = (((tx + 1) * tile_size).min(width)) as usize;
-                let tile = (ty * tiles_x + tx) as usize;
-                let bg = f32x8::splat(background[tile]);
-                let threshold = f32x8::splat(sigma * noise[tile]);
-
-                let seg = &input[x0..x1];
-                let out = &mut output[x0..x1];
-                let mut chunks = seg.chunks_exact(8);
-                let mut out_chunks = out.chunks_exact_mut(8);
-                for (chunk, out_chunk) in (&mut chunks).zip(&mut out_chunks) {
-                    let value = f32x8::from(<[f32; 8]>::try_from(chunk).unwrap()) - bg;
-                    let keep = value.simd_gt(threshold);
-                    out_chunk.copy_from_slice(&keep.select(value, f32x8::ZERO).to_array());
-                }
-                let done = seg.len() - chunks.remainder().len();
-                for (value, out_value) in chunks.remainder().iter().zip(&mut out[done..]) {
-                    let v = value - background[tile];
-                    if v > sigma * noise[tile] {
-                        *out_value = v;
-                    }
-                }
-            }
+            let tiles = (ty * tiles_x) as usize..((ty + 1) * tiles_x) as usize;
+            threshold_row(
+                &pixels[y * width as usize..(y + 1) * width as usize],
+                output,
+                tile_size as usize,
+                &background[tiles.clone()],
+                &noise[tiles],
+                sigma,
+            );
         });
     debug_assert_eq!(excess.len(), width as usize * height as usize);
     excess
+}
+
+/// One row of [`threshold_excess`]: the background and threshold are
+/// constant within each `tile_size` segment.
+///
+/// Plain loops the compiler vectorizes for each dispatched target. The
+/// multiversioned function must do the work itself: a closure it hands to
+/// rayon is compiled once without the clone's target features, and `wide`
+/// picks its SIMD width when the crate is built, not at run time. Baseline
+/// x86-64 (SSE2) already vectorizes the compare-and-select 4 wide, so only
+/// AVX2 earns a clone; on aarch64 NEON is the baseline and the default
+/// build uses it.
+#[multiversion::multiversion(targets("x86_64+avx2"))]
+fn threshold_row(
+    input: &[f32],
+    output: &mut [f32],
+    tile_size: usize,
+    background: &[f32],
+    noise: &[f32],
+    sigma: f32,
+) {
+    for (((seg, out), &bg), &noise) in input
+        .chunks(tile_size)
+        .zip(output.chunks_mut(tile_size))
+        .zip(background)
+        .zip(noise)
+    {
+        let threshold = sigma * noise;
+        for (out, &value) in out.iter_mut().zip(seg) {
+            let excess = value - bg;
+            // NaN fails the comparison and becomes 0.
+            *out = if excess > threshold { excess } else { 0.0 };
+        }
+    }
 }
 
 /// Ratio of the principal axes of the flux distribution (≥ 1).
@@ -527,6 +542,35 @@ fn elongation(mxx: f64, myy: f64, mxy: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn threshold_rows_match_a_scalar_reference_on_every_dispatch() {
+        // A ragged last tile, NaNs and values on the threshold.
+        let (width, height, tile) = (37u32, 5u32, 8u32);
+        let tiles_x = width.div_ceil(tile);
+        let tiles = (tiles_x * height.div_ceil(tile)) as usize;
+        let background = (0..tiles).map(|t| 10.0 + t as f32).collect::<Vec<_>>();
+        let noise = (0..tiles).map(|t| 1.0 + 0.5 * t as f32).collect::<Vec<_>>();
+        let pixels = (0..width * height)
+            .map(|i| match i % 11 {
+                3 => f32::NAN,
+                _ => (i * 7 % 23) as f32,
+            })
+            .collect::<Vec<_>>();
+        let sigma = 1.5;
+        let got = threshold_excess(&pixels, width, height, tile, &background, &noise, sigma);
+        for (i, (&value, &out)) in pixels.iter().zip(&got).enumerate() {
+            let (x, y) = (i as u32 % width, i as u32 / width);
+            let t = ((y / tile) * tiles_x + x / tile) as usize;
+            let excess = value - background[t];
+            let expected = if excess > sigma * noise[t] {
+                excess
+            } else {
+                0.0
+            };
+            assert_eq!(out.to_bits(), expected.to_bits(), "pixel {i}");
+        }
+    }
     use image::{DynamicImage, ImageBuffer, Luma, Rgb};
 
     /// Deterministic synthetic star field: Gaussian spots + mild noise
