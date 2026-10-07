@@ -66,6 +66,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2.9.2
       - name: Test release dependency-chain guard
         run: python3 .github/scripts/test_check_release_version_chain.py
@@ -74,6 +75,10 @@ jobs:
         run: python3 .github/scripts/check_release_version_chain.py "${{ github.event.pull_request.base.sha }}"
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # seiza-fits reads and writes FITS in browsers and WASI runtimes
+      # (FitsImage::from_bytes, write_f32_image_to); keep it building there.
+      - name: Check seiza-fits builds for wasm
+        run: cargo check -p seiza-fits --target wasm32-unknown-unknown
       # seiza-cabi's build script regenerates its C header with cbindgen. Fail
       # if a source change was not committed alongside a regenerated header.
       - name: Verify seiza-cabi C header is in sync

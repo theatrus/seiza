@@ -1,4 +1,7 @@
 target/
+# Any alternate CARGO_TARGET_DIR kept beside the sources (target-wasm,
+# target-msrv, ...).
+/target*/
 dist/
 packaging/windows/obj/
 .venv/

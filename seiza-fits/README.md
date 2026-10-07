@@ -60,6 +60,15 @@ seiza_fits::write_f32_image(
 )?;
 ```
 
+## WebAssembly
+
+`seiza-fits` builds for `wasm32-unknown-unknown` and WASI (CI checks the
+former). Without a filesystem, as in a browser, decode an upload with
+`FitsImage::from_bytes` and encode with `write_f32_image_to` into a
+`Vec<u8>`; the path-based functions return an I/O error there. Under WASI
+the path functions, including the atomic `write_f32_image`, work on the
+directories the runtime grants.
+
 ## License
 
 Apache-2.0
