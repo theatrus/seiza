@@ -768,9 +768,7 @@ impl ElementRecord {
 
     fn epoch(&self) -> UtcTimestamp {
         let instant = match self {
-            Self::Omm(omm) => omm
-                .epoch_instant()
-                .expect("OMM epoch was validated while opening the catalog"),
+            Self::Omm(omm) => omm.epoch,
             Self::Tle(tle) => tle.epoch,
         };
         UtcTimestamp(instant.as_unixtime())
@@ -830,12 +828,8 @@ impl SatelliteCatalog {
             source_name: source.clone(),
             message: error.to_string(),
         })?;
-        for omm in &omms {
-            omm.epoch_instant().map_err(|error| Error::Elements {
-                source_name: source.clone(),
-                message: format!("invalid OMM epoch {:?}: {error}", omm.epoch),
-            })?;
-        }
+        // satkit parses EPOCH while deserializing, so a malformed epoch has
+        // already failed above.
         Self::from_records(
             omms.into_iter()
                 .map(|omm| ElementRecord::Omm(Box::new(omm)))
