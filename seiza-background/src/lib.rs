@@ -681,8 +681,8 @@ impl BackgroundFit {
             .enumerate()
             .for_each_init(
                 || rows.buffer(),
-                |background, (y, row)| {
-                    rows.row(y, background);
+                |buffer, (y, row)| {
+                    let background = rows.row(y, buffer);
                     for (x, pixel) in row.chunks_exact_mut(self.channels).enumerate() {
                         for (channel, sample) in pixel.iter_mut().enumerate() {
                             *sample = background[channel * self.width + x] as f32;
@@ -751,8 +751,8 @@ impl BackgroundFit {
             }
             (0..self.height).into_par_iter().try_for_each_init(
                 || rows.buffer(),
-                |background, y| -> Result<()> {
-                    rows.row(y, background);
+                |buffer, y| -> Result<()> {
+                    let background = rows.row(y, buffer);
                     for x in 0..self.width {
                         for channel in 0..self.channels {
                             let background = background[channel * self.width + x];
@@ -774,8 +774,8 @@ impl BackgroundFit {
             .enumerate()
             .for_each_init(
                 || rows.buffer(),
-                |background, (y, row)| {
-                    rows.row(y, background);
+                |buffer, (y, row)| {
+                    let background = rows.row(y, buffer);
                     for x in 0..self.width {
                         for channel in 0..self.channels {
                             let value = &mut row[x * self.channels + channel];
@@ -1903,22 +1903,30 @@ impl<'a> RowEvaluator<'a> {
         }
     }
 
-    /// A buffer for one row of [`Self::row`].
-    fn buffer(&self) -> Vec<f64> {
-        vec![0.0; self.width * self.channels]
+    /// Buffers for one row of [`Self::row`].
+    fn buffer(&self) -> RowBuffer {
+        RowBuffer {
+            background: vec![0.0; self.width * self.channels],
+            kernel: match self.model {
+                FittedModel::Polynomial { .. } => Vec::new(),
+                FittedModel::RadialBasis { .. } => vec![0.0; self.width],
+            },
+        }
     }
 
     /// The model along row `y`, one channel after another:
     /// `background[channel * width + x]`.
-    fn row(&self, y: usize, background: &mut [f64]) {
+    fn row<'b>(&self, y: usize, buffer: &'b mut RowBuffer) -> &'b [f64] {
         let y_coordinate = normalized_coordinate(y, self.height);
-        let channels = background.chunks_exact_mut(self.width);
+        let background = &mut buffer.background;
         match self.model {
             FittedModel::Polynomial {
                 degree,
                 coefficients,
             } => {
-                for (background, coefficients) in channels.zip(coefficients) {
+                for (background, coefficients) in
+                    background.chunks_exact_mut(self.width).zip(coefficients)
+                {
                     polynomial_row(
                         background,
                         coefficients,
@@ -1928,15 +1936,28 @@ impl<'a> RowEvaluator<'a> {
                     );
                 }
             }
-            FittedModel::RadialBasis { .. } => {
-                for (channel, background) in channels.enumerate() {
-                    for (value, &x) in background.iter_mut().zip(&self.columns) {
-                        *value = evaluate_model_normalized(self.model, x, y_coordinate, channel);
-                    }
-                }
-            }
+            FittedModel::RadialBasis {
+                centers,
+                coefficients,
+                ..
+            } => radial_basis_row(
+                background,
+                &mut buffer.kernel,
+                &self.columns,
+                y_coordinate,
+                centers,
+                coefficients,
+            ),
         }
+        background
     }
+}
+
+/// Per-thread buffers for [`RowEvaluator::row`].
+struct RowBuffer {
+    background: Vec<f64>,
+    /// A radial-basis kernel value per column.
+    kernel: Vec<f64>,
 }
 
 /// One channel of a polynomial along a row: [`evaluate_coefficients`] at
@@ -1967,6 +1988,47 @@ fn polynomial_row(
                 *value += coefficient * x_factor * y_factor;
             }
             index += 1;
+        }
+    }
+}
+
+/// Every channel of a thin-plate radial-basis surface along a row.
+///
+/// Each center's kernel, logarithm and all, is computed once per pixel and
+/// shared by the channels; the per-pixel evaluation computed it again for
+/// each channel. Per sample, the weighted kernels still add to `-0.0` in
+/// center order, as `Iterator::sum` does there, and then the affine terms in
+/// the same order, so the values match it bit for bit.
+///
+/// The AVX2 clone, about 1.5 times as fast, also has FMA, so the kernel's
+/// `mul_add` becomes one instruction instead of a libm call; a fused
+/// multiply-add rounds once either way, so the result is the same.
+#[multiversion::multiversion(targets("x86_64+avx2+fma"))]
+fn radial_basis_row(
+    background: &mut [f64],
+    kernel: &mut [f64],
+    columns: &[f64],
+    y: f64,
+    centers: &[[f64; 2]],
+    coefficients: &[Vec<f64>],
+) {
+    let width = columns.len();
+    background.fill(-0.0);
+    for (index, &center) in centers.iter().enumerate() {
+        for (value, &x) in kernel.iter_mut().zip(columns) {
+            *value = thin_plate_distance([x, y], center);
+        }
+        for (sums, weights) in background.chunks_exact_mut(width).zip(coefficients) {
+            let weight = weights[index];
+            for (sum, &value) in sums.iter_mut().zip(&*kernel) {
+                *sum += weight * value;
+            }
+        }
+    }
+    for (sums, weights) in background.chunks_exact_mut(width).zip(coefficients) {
+        let affine = &weights[centers.len()..];
+        for (sum, &x) in sums.iter_mut().zip(columns) {
+            *sum = *sum + affine[0] + affine[1] * x + affine[2] * y;
         }
     }
 }
@@ -2881,9 +2943,9 @@ mod tests {
                     fit.validate().unwrap();
                     let label = format!("{} {width}x{height}x{channels}", fit.model.family_name());
                     let rows = RowEvaluator::new(&fit);
-                    let mut background = rows.buffer();
+                    let mut buffer = rows.buffer();
                     for y in 0..height {
-                        rows.row(y, &mut background);
+                        let background = rows.row(y, &mut buffer);
                         for x in 0..width {
                             for channel in 0..channels {
                                 let expected = value_per_pixel(&fit, x, y, channel);
