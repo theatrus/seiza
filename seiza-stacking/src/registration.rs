@@ -1070,7 +1070,6 @@ fn resample_region_with_inverse(
     inverse: impl Fn(f64, f64) -> (f64, f64) + Sync,
     sampling: Sampling,
 ) -> Result<LinearImage> {
-    const COORDINATE_EPSILON: f64 = 1.0e-9;
     if reference_width == 0 || reference_height == 0 {
         return Err(Error::Registration(
             "resampling reference dimensions must be non-zero".into(),
@@ -1105,93 +1104,147 @@ fn resample_region_with_inverse(
         .checked_mul(channels)
         .ok_or_else(|| Error::Registration("resampling row dimensions overflow".into()))?;
     let mut data = vec![f32::NAN; sample_count];
-    let maximum_source_x = (source.width - 1) as f64;
-    let maximum_source_y = (source.height - 1) as f64;
     data.par_chunks_mut(row_samples)
         .enumerate()
         .for_each(|(y, output_row)| {
-            for (x, output) in output_row.chunks_exact_mut(channels).enumerate() {
-                let reference_x = region.x + x;
-                let reference_y = region.y + y;
-                let (source_x, source_y) = inverse(reference_x as f64, reference_y as f64);
-                if source_x < -COORDINATE_EPSILON
-                    || source_y < -COORDINATE_EPSILON
-                    || source_x > maximum_source_x + COORDINATE_EPSILON
-                    || source_y > maximum_source_y + COORDINATE_EPSILON
+            resample_row(
+                source,
+                region.x,
+                region.y + y,
+                &inverse,
+                sampling,
+                output_row,
+            );
+        });
+    LinearImage::new(region.width, region.height, channels, data)
+}
+
+/// One output row of [`resample_region_with_inverse`]: reference row
+/// `reference_y` from column `first_x` on.
+///
+/// An RGB pixel's Lanczos taps run four wide, which baseline SSE2 holds in
+/// one register; an AVX2 build of this loop measured only 1-4% faster, so
+/// it has none.
+fn resample_row<F>(
+    source: &LinearImage,
+    first_x: usize,
+    reference_y: usize,
+    inverse: &F,
+    sampling: Sampling,
+    output_row: &mut [f32],
+) where
+    F: Fn(f64, f64) -> (f64, f64),
+{
+    const COORDINATE_EPSILON: f64 = 1.0e-9;
+    let channels = source.channels;
+    let maximum_source_x = (source.width - 1) as f64;
+    let maximum_source_y = (source.height - 1) as f64;
+    for (x, output) in output_row.chunks_exact_mut(channels).enumerate() {
+        let reference_x = first_x + x;
+        let (source_x, source_y) = inverse(reference_x as f64, reference_y as f64);
+        if source_x < -COORDINATE_EPSILON
+            || source_y < -COORDINATE_EPSILON
+            || source_x > maximum_source_x + COORDINATE_EPSILON
+            || source_y > maximum_source_y + COORDINATE_EPSILON
+        {
+            continue;
+        }
+        // Exact quarter- and half-turns accumulate tiny trigonometric
+        // error at the boundary. Clamp only coordinates already proven
+        // to lie within the epsilon-expanded source grid.
+        let source_x = source_x.clamp(0.0, maximum_source_x);
+        let source_y = source_y.clamp(0.0, maximum_source_y);
+        if let Sampling::NearestPhotosite(layout) = sampling {
+            let nearest_x = ((source_x + 0.5) as usize).min(source.width - 1);
+            let nearest_y = ((source_y + 0.5) as usize).min(source.height - 1);
+            let channel = layout.channel_at(nearest_x, nearest_y);
+            output[channel] =
+                source.data[(nearest_y * source.width + nearest_x) * channels + channel];
+            continue;
+        }
+        // Both coordinates are non-negative here, so truncation is
+        // the floor, without a libm call on baseline x86-64.
+        let x0 = source_x as usize;
+        let y0 = source_y as usize;
+        let x1 = (x0 + 1).min(source.width - 1);
+        let y1 = (y0 + 1).min(source.height - 1);
+        let tx = (source_x - x0 as f64) as f32;
+        let ty = (source_y - y0 as f64) as f32;
+        let bilinear = |channel: usize| {
+            let sample =
+                |x: usize, y: usize| source.data[(y * source.width + x) * channels + channel];
+            let values = [
+                sample(x0, y0),
+                sample(x1, y0),
+                sample(x0, y1),
+                sample(x1, y1),
+            ];
+            values.iter().all(|value| value.is_finite()).then(|| {
+                let top = values[0] * (1.0 - tx) + values[1] * tx;
+                let bottom = values[2] * (1.0 - tx) + values[3] * tx;
+                top * (1.0 - ty) + bottom * ty
+            })
+        };
+        let lanczos_window = matches!(sampling, Sampling::Lanczos3)
+            && x0 >= 2
+            && y0 >= 2
+            && x0 + 3 < source.width
+            && y0 + 3 < source.height;
+        if lanczos_window {
+            let (weights_x, weights_y) = (lanczos3_weights(tx), lanczos3_weights(ty));
+            // An RGB pixel's taps run as the lanes of one four-wide vector,
+            // the fourth lane reading the next pixel's red and going unused.
+            // That needs one sample past the window's last pixel, which only
+            // the image's last pixel lacks.
+            let last_tap = ((y0 + 3) * source.width + x0 + 3) * channels;
+            if channels == 3 && last_tap + 4 <= source.data.len() {
+                let mut rows = [[0.0_f32; 4]; 6];
+                for (row, value) in rows.iter_mut().enumerate() {
+                    let start = ((y0 + row - 2) * source.width + x0 - 2) * channels;
+                    let window = &source.data[start..start + 19];
+                    let taps: [[f32; 4]; 6] = std::array::from_fn(|column| {
+                        let tap = &window[column * 3..column * 3 + 4];
+                        [tap[0], tap[1], tap[2], tap[3]]
+                    });
+                    *value = clamped_lanczos_lanes(&weights_x, &taps);
+                }
+                // A non-finite tap carries through to the result.
+                let values = clamped_lanczos_lanes(&weights_y, &rows);
+                for ((channel, output_sample), &value) in output.iter_mut().enumerate().zip(&values)
                 {
-                    continue;
-                }
-                // Exact quarter- and half-turns accumulate tiny trigonometric
-                // error at the boundary. Clamp only coordinates already proven
-                // to lie within the epsilon-expanded source grid.
-                let source_x = source_x.clamp(0.0, maximum_source_x);
-                let source_y = source_y.clamp(0.0, maximum_source_y);
-                if let Sampling::NearestPhotosite(layout) = sampling {
-                    let nearest_x = ((source_x + 0.5) as usize).min(source.width - 1);
-                    let nearest_y = ((source_y + 0.5) as usize).min(source.height - 1);
-                    let channel = layout.channel_at(nearest_x, nearest_y);
-                    output[channel] =
-                        source.data[(nearest_y * source.width + nearest_x) * channels + channel];
-                    continue;
-                }
-                // Both coordinates are non-negative here, so truncation is
-                // the floor, without a libm call on baseline x86-64.
-                let x0 = source_x as usize;
-                let y0 = source_y as usize;
-                let x1 = (x0 + 1).min(source.width - 1);
-                let y1 = (y0 + 1).min(source.height - 1);
-                let tx = (source_x - x0 as f64) as f32;
-                let ty = (source_y - y0 as f64) as f32;
-                let bilinear = |channel: usize| {
-                    let sample = |x: usize, y: usize| {
-                        source.data[(y * source.width + x) * channels + channel]
-                    };
-                    let values = [
-                        sample(x0, y0),
-                        sample(x1, y0),
-                        sample(x0, y1),
-                        sample(x1, y1),
-                    ];
-                    values.iter().all(|value| value.is_finite()).then(|| {
-                        let top = values[0] * (1.0 - tx) + values[1] * tx;
-                        let bottom = values[2] * (1.0 - tx) + values[3] * tx;
-                        top * (1.0 - ty) + bottom * ty
-                    })
-                };
-                let lanczos_window = matches!(sampling, Sampling::Lanczos3)
-                    && x0 >= 2
-                    && y0 >= 2
-                    && x0 + 3 < source.width
-                    && y0 + 3 < source.height;
-                if lanczos_window {
-                    let (weights_x, weights_y) = (lanczos3_weights(tx), lanczos3_weights(ty));
-                    for (channel, output_sample) in output.iter_mut().enumerate() {
-                        let mut rows = [0.0_f32; 6];
-                        for (row, value) in rows.iter_mut().enumerate() {
-                            let start = ((y0 + row - 2) * source.width + x0 - 2) * channels;
-                            let taps: [f32; 6] = std::array::from_fn(|column| {
-                                source.data[start + column * channels + channel]
-                            });
-                            *value = clamped_lanczos(&weights_x, &taps);
-                        }
-                        // A non-finite tap carries through to the result.
-                        let value = clamped_lanczos(&weights_y, &rows);
-                        if value.is_finite() {
-                            *output_sample = value;
-                        } else if let Some(value) = bilinear(channel) {
-                            *output_sample = value;
-                        }
-                    }
-                    continue;
-                }
-                for (channel, output_sample) in output.iter_mut().enumerate() {
-                    if let Some(value) = bilinear(channel) {
+                    if value.is_finite() {
+                        *output_sample = value;
+                    } else if let Some(value) = bilinear(channel) {
                         *output_sample = value;
                     }
                 }
+                continue;
             }
-        });
-    LinearImage::new(region.width, region.height, channels, data)
+            for (channel, output_sample) in output.iter_mut().enumerate() {
+                let mut rows = [0.0_f32; 6];
+                for (row, value) in rows.iter_mut().enumerate() {
+                    let start = ((y0 + row - 2) * source.width + x0 - 2) * channels;
+                    let taps: [f32; 6] = std::array::from_fn(|column| {
+                        source.data[start + column * channels + channel]
+                    });
+                    *value = clamped_lanczos(&weights_x, &taps);
+                }
+                // A non-finite tap carries through to the result.
+                let value = clamped_lanczos(&weights_y, &rows);
+                if value.is_finite() {
+                    *output_sample = value;
+                } else if let Some(value) = bilinear(channel) {
+                    *output_sample = value;
+                }
+            }
+            continue;
+        }
+        for (channel, output_sample) in output.iter_mut().enumerate() {
+            if let Some(value) = bilinear(channel) {
+                *output_sample = value;
+            }
+        }
+    }
 }
 
 /// The share of the positive lobes' contribution the negative lobes may
@@ -1216,6 +1269,32 @@ fn clamped_lanczos(weights: &[f32; 6], taps: &[f32; 6]) -> f32 {
     } else {
         positive + negative
     }
+}
+
+/// [`clamped_lanczos`] on four lanes at once: lane `k` of the result is
+/// `clamped_lanczos(weights, taps[..][k])`, from the same operations in the
+/// same order, so each lane matches it bit for bit. Both branches are formed
+/// and one is selected per lane, which the compiler turns into vector
+/// arithmetic and a blend.
+#[inline(always)]
+fn clamped_lanczos_lanes(weights: &[f32; 6], taps: &[[f32; 4]; 6]) -> [f32; 4] {
+    let denominator = weights[0] + weights[2] + weights[3] + weights[5];
+    let mut result = [0.0_f32; 4];
+    for (lane, result) in result.iter_mut().enumerate() {
+        let positive = weights[0] * taps[0][lane]
+            + weights[2] * taps[2][lane]
+            + weights[3] * taps[3][lane]
+            + weights[5] * taps[5][lane];
+        let negative = weights[1] * taps[1][lane] + weights[4] * taps[4][lane];
+        let clamped = positive / denominator;
+        let full = positive + negative;
+        *result = if negative.abs() > LANCZOS_CLAMPING * positive.abs() {
+            clamped
+        } else {
+            full
+        };
+    }
+    result
 }
 
 /// Steps per pixel in the Lanczos-3 weight table.
@@ -2209,5 +2288,218 @@ mod tests {
         assert_eq!(nearest, 1);
         assert!((distance_squared - 2.4_f64.powi(2)).abs() < 1.0e-12);
         assert_eq!(index.nearest_within(2.5, 20.0, &reference, 2.5), None);
+    }
+
+    /// The resampling row loop as it was before an RGB pixel's channels ran
+    /// as vector lanes: each channel filtered on its own.
+    fn resample_per_channel(
+        source: &LinearImage,
+        region: ReferenceRegion,
+        inverse: impl Fn(f64, f64) -> (f64, f64),
+        sampling: Sampling,
+    ) -> Vec<f32> {
+        const COORDINATE_EPSILON: f64 = 1.0e-9;
+        let channels = source.channels;
+        let mut data = vec![f32::NAN; region.width * region.height * channels];
+        let maximum_source_x = (source.width - 1) as f64;
+        let maximum_source_y = (source.height - 1) as f64;
+        for (y, output_row) in data.chunks_mut(region.width * channels).enumerate() {
+            for (x, output) in output_row.chunks_exact_mut(channels).enumerate() {
+                let (source_x, source_y) = inverse((region.x + x) as f64, (region.y + y) as f64);
+                if source_x < -COORDINATE_EPSILON
+                    || source_y < -COORDINATE_EPSILON
+                    || source_x > maximum_source_x + COORDINATE_EPSILON
+                    || source_y > maximum_source_y + COORDINATE_EPSILON
+                {
+                    continue;
+                }
+                let source_x = source_x.clamp(0.0, maximum_source_x);
+                let source_y = source_y.clamp(0.0, maximum_source_y);
+                if let Sampling::NearestPhotosite(layout) = sampling {
+                    let nearest_x = ((source_x + 0.5) as usize).min(source.width - 1);
+                    let nearest_y = ((source_y + 0.5) as usize).min(source.height - 1);
+                    let channel = layout.channel_at(nearest_x, nearest_y);
+                    output[channel] =
+                        source.data[(nearest_y * source.width + nearest_x) * channels + channel];
+                    continue;
+                }
+                let x0 = source_x as usize;
+                let y0 = source_y as usize;
+                let x1 = (x0 + 1).min(source.width - 1);
+                let y1 = (y0 + 1).min(source.height - 1);
+                let tx = (source_x - x0 as f64) as f32;
+                let ty = (source_y - y0 as f64) as f32;
+                let bilinear = |channel: usize| {
+                    let sample = |x: usize, y: usize| {
+                        source.data[(y * source.width + x) * channels + channel]
+                    };
+                    let values = [
+                        sample(x0, y0),
+                        sample(x1, y0),
+                        sample(x0, y1),
+                        sample(x1, y1),
+                    ];
+                    values.iter().all(|value| value.is_finite()).then(|| {
+                        let top = values[0] * (1.0 - tx) + values[1] * tx;
+                        let bottom = values[2] * (1.0 - tx) + values[3] * tx;
+                        top * (1.0 - ty) + bottom * ty
+                    })
+                };
+                let lanczos_window = matches!(sampling, Sampling::Lanczos3)
+                    && x0 >= 2
+                    && y0 >= 2
+                    && x0 + 3 < source.width
+                    && y0 + 3 < source.height;
+                if lanczos_window {
+                    let (weights_x, weights_y) = (lanczos3_weights(tx), lanczos3_weights(ty));
+                    for (channel, output_sample) in output.iter_mut().enumerate() {
+                        let mut rows = [0.0_f32; 6];
+                        for (row, value) in rows.iter_mut().enumerate() {
+                            let start = ((y0 + row - 2) * source.width + x0 - 2) * channels;
+                            let taps: [f32; 6] = std::array::from_fn(|column| {
+                                source.data[start + column * channels + channel]
+                            });
+                            *value = clamped_lanczos(&weights_x, &taps);
+                        }
+                        let value = clamped_lanczos(&weights_y, &rows);
+                        if value.is_finite() {
+                            *output_sample = value;
+                        } else if let Some(value) = bilinear(channel) {
+                            *output_sample = value;
+                        }
+                    }
+                    continue;
+                }
+                for (channel, output_sample) in output.iter_mut().enumerate() {
+                    if let Some(value) = bilinear(channel) {
+                        *output_sample = value;
+                    }
+                }
+            }
+        }
+        data
+    }
+
+    #[test]
+    fn resampling_matches_per_channel_filtering_bit_for_bit() {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let warp = PolynomialWarp {
+            order: 2,
+            center_x: 15.0,
+            center_y: 9.0,
+            scale: 16.0,
+            x: vec![15.3, 16.1, 0.4, 0.3, -0.2, 0.1],
+            y: vec![8.6, -0.3, 15.8, 0.1, 0.25, -0.15],
+        };
+        let similarities = [
+            SimilarityTransform::IDENTITY,
+            shift(2.0, 1.0),
+            shift(-0.37, 0.61),
+            SimilarityTransform {
+                scale: 1.03,
+                rotation_radians: 0.31,
+                translation_x: 1.3,
+                translation_y: -0.7,
+            },
+            SimilarityTransform {
+                scale: 1.0,
+                rotation_radians: std::f64::consts::PI,
+                translation_x: 30.0,
+                translation_y: 16.0,
+            },
+        ];
+        let layout = crate::BayerLayout {
+            pattern: seiza_fits::BayerPattern::Grbg,
+            x_offset: 1,
+            y_offset: 0,
+        };
+        // Sizes too small for any Lanczos window, and ones whose last pixel
+        // has a window ending on the image's last sample; noise with bright
+        // spikes that trip the clamping, and non-finite samples.
+        for (width, height) in [(1, 1), (3, 3), (6, 6), (7, 5), (9, 8), (31, 17)] {
+            for channels in [1, 3] {
+                let data = (0..width * height * channels)
+                    .map(|_| match next() % 41 {
+                        0 => f32::NAN,
+                        1 => f32::INFINITY,
+                        2 => -0.0,
+                        3..=6 => 50.0 + (next() % 1000) as f32,
+                        _ => (next() >> 40) as f32 / (1 << 24) as f32,
+                    })
+                    .collect::<Vec<_>>();
+                let source = LinearImage::new(width, height, channels, data).unwrap();
+                let regions = [
+                    ReferenceRegion {
+                        x: 0,
+                        y: 0,
+                        width,
+                        height,
+                    },
+                    ReferenceRegion {
+                        x: width / 3,
+                        y: height / 2,
+                        width: width - width / 3,
+                        height: height - height / 2,
+                    },
+                ];
+                let mut samplings = vec![Sampling::Lanczos3, Sampling::Bilinear];
+                if channels == 3 {
+                    samplings.push(Sampling::NearestPhotosite(layout));
+                }
+                for region in regions {
+                    for &sampling in &samplings {
+                        let check = |label: &str, got: LinearImage, expected: Vec<f32>| {
+                            for (index, (a, b)) in got.data.iter().zip(&expected).enumerate() {
+                                assert_eq!(
+                                    a.to_bits(),
+                                    b.to_bits(),
+                                    "{label} {width}x{height}x{channels} {region:?} sample {index}"
+                                );
+                            }
+                        };
+                        for transform in similarities {
+                            let got = resample_region_with_inverse(
+                                &source,
+                                width,
+                                height,
+                                region,
+                                transform.inverse_map(),
+                                sampling,
+                            )
+                            .unwrap();
+                            let expected = resample_per_channel(
+                                &source,
+                                region,
+                                transform.inverse_map(),
+                                sampling,
+                            );
+                            check(&format!("{transform:?}"), got, expected);
+                        }
+                        let got = resample_region_with_inverse(
+                            &source,
+                            width,
+                            height,
+                            region,
+                            |x, y| warp.apply(x, y),
+                            sampling,
+                        )
+                        .unwrap();
+                        let expected = resample_per_channel(
+                            &source,
+                            region,
+                            |x, y| warp.apply(x, y),
+                            sampling,
+                        );
+                        check("warp", got, expected);
+                    }
+                }
+            }
+        }
     }
 }
