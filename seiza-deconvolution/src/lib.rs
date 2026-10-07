@@ -459,18 +459,9 @@ impl<'a> SeparableConvolver<'a> {
 
         scratch
             .par_chunks_mut(self.width)
-            .enumerate()
-            .for_each(|(y, row)| {
-                for (x, output) in row.iter_mut().enumerate() {
-                    let indices =
-                        &self.horizontal_indices[x * kernel_length..(x + 1) * kernel_length];
-                    *output = self
-                        .kernel
-                        .iter()
-                        .zip(indices)
-                        .map(|(&weight, &source_x)| weight * input[y * self.width + source_x])
-                        .sum();
-                }
+            .zip(input.par_chunks(self.width))
+            .for_each(|(row, source)| {
+                convolve_row(source, row, self.kernel, &self.horizontal_indices);
             });
 
         output
@@ -478,15 +469,62 @@ impl<'a> SeparableConvolver<'a> {
             .enumerate()
             .for_each(|(y, row)| {
                 let y_indices = &self.vertical_indices[y * kernel_length..(y + 1) * kernel_length];
-                for (x, output) in row.iter_mut().enumerate() {
-                    *output = self
-                        .kernel
-                        .iter()
-                        .zip(y_indices)
-                        .map(|(&weight, &source_y)| weight * scratch[source_y * self.width + x])
-                        .sum();
-                }
+                convolve_columns(scratch, row, self.kernel, y_indices);
             });
+    }
+}
+
+/// One row of the horizontal pass: `row[x]` is the kernel-weighted sum of
+/// `source` around `x`, reflected at the ends through `indices`.
+///
+/// Each output adds its taps in kernel order to `-0.0`, as `Iterator::sum`
+/// does, so every sample matches a per-pixel sum bit for bit. Away from the
+/// ends no tap reflects, so there the loop runs tap by tap over the whole
+/// span, and the additions vectorize across pixels instead of running one
+/// pixel's taps in sequence. The dispatched build only widens the vectors;
+/// the multiversioned function holds the loops itself, since a closure handed
+/// to rayon would not inherit its target features.
+#[multiversion::multiversion(targets("x86_64+avx2"))]
+fn convolve_row(source: &[f32], row: &mut [f32], kernel: &[f32], indices: &[usize]) {
+    let width = row.len();
+    let taps = kernel.len();
+    let radius = taps / 2;
+    let reflected = |x: usize| -> f32 {
+        kernel
+            .iter()
+            .zip(&indices[x * taps..(x + 1) * taps])
+            .map(|(&weight, &source_x)| weight * source[source_x])
+            .sum()
+    };
+    if width <= 2 * radius {
+        for (x, output) in row.iter_mut().enumerate() {
+            *output = reflected(x);
+        }
+        return;
+    }
+    for x in (0..radius).chain(width - radius..width) {
+        row[x] = reflected(x);
+    }
+    let interior = &mut row[radius..width - radius];
+    interior.fill(-0.0);
+    for (tap, &weight) in kernel.iter().enumerate() {
+        for (sum, &value) in interior.iter_mut().zip(&source[tap..]) {
+            *sum += weight * value;
+        }
+    }
+}
+
+/// One row of the vertical pass: the kernel-weighted sum of the scratch rows
+/// `rows`, added row by row in kernel order to `-0.0` as in [`convolve_row`].
+#[multiversion::multiversion(targets("x86_64+avx2"))]
+fn convolve_columns(scratch: &[f32], row: &mut [f32], kernel: &[f32], rows: &[usize]) {
+    let width = row.len();
+    row.fill(-0.0);
+    for (&weight, &source_y) in kernel.iter().zip(rows) {
+        let source = &scratch[source_y * width..(source_y + 1) * width];
+        for (sum, &value) in row.iter_mut().zip(source) {
+            *sum += weight * value;
+        }
     }
 }
 
@@ -695,5 +733,104 @@ mod tests {
             .filter(|sample| sample.is_finite())
             .sum::<f32>();
         assert!((output_flux - input_flux).abs() < 1.0e-4);
+    }
+
+    /// `SeparableConvolver::convolve_into` as it was before its tap loops
+    /// moved outside the pixel loops: each output sums its own taps.
+    fn convolve_into_per_pixel(convolver: &SeparableConvolver<'_>, input: &[f32]) -> Vec<f32> {
+        let (width, kernel) = (convolver.width, convolver.kernel);
+        let kernel_length = kernel.len();
+        let mut scratch = vec![0.0; input.len()];
+        let mut output = vec![0.0; input.len()];
+        for (y, row) in scratch.chunks_mut(width).enumerate() {
+            for (x, output) in row.iter_mut().enumerate() {
+                let indices =
+                    &convolver.horizontal_indices[x * kernel_length..(x + 1) * kernel_length];
+                *output = kernel
+                    .iter()
+                    .zip(indices)
+                    .map(|(&weight, &source_x)| weight * input[y * width + source_x])
+                    .sum();
+            }
+        }
+        for (y, row) in output.chunks_mut(width).enumerate() {
+            let y_indices = &convolver.vertical_indices[y * kernel_length..(y + 1) * kernel_length];
+            for (x, output) in row.iter_mut().enumerate() {
+                *output = kernel
+                    .iter()
+                    .zip(y_indices)
+                    .map(|(&weight, &source_y)| weight * scratch[source_y * width + x])
+                    .sum();
+            }
+        }
+        output
+    }
+
+    #[test]
+    fn convolution_matches_the_per_pixel_sums_bit_for_bit() {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        // Images narrower and shorter than the kernel, odd sizes, and NaN,
+        // infinite and signed-zero samples.
+        let sizes = [
+            (1, 1),
+            (1, 9),
+            (2, 3),
+            (5, 4),
+            (7, 7),
+            (8, 13),
+            (33, 6),
+            (67, 21),
+        ];
+        for (width, height) in sizes {
+            for fwhm in [0.5_f32, 1.5, 2.8, 6.0] {
+                let kernel = gaussian_kernel(fwhm);
+                let convolver = SeparableConvolver::new(width, height, &kernel);
+                let input = (0..width * height)
+                    .map(|_| match next() % 29 {
+                        0 => f32::NAN,
+                        1 => f32::INFINITY,
+                        2 => -0.0,
+                        3 => 0.0,
+                        _ => (next() >> 40) as f32 / (1 << 22) as f32 - 1.0,
+                    })
+                    .collect::<Vec<_>>();
+                let mut output = vec![0.0; input.len()];
+                let mut scratch = vec![0.0; input.len()];
+                convolver.convolve_into(&input, &mut output, &mut scratch);
+                let expected = convolve_into_per_pixel(&convolver, &input);
+                for (index, (got, want)) in output.iter().zip(&expected).enumerate() {
+                    assert_eq!(
+                        got.to_bits(),
+                        want.to_bits(),
+                        "{width}x{height}, FWHM {fwhm}, sample {index}: {got} vs {want}"
+                    );
+                }
+            }
+        }
+        // An all-negative-zero image stays -0.0, as a sum from -0.0 keeps it.
+        let kernel = gaussian_kernel(2.0);
+        let convolver = SeparableConvolver::new(9, 9, &kernel);
+        let input = vec![-0.0_f32; 81];
+        let mut output = vec![0.0; 81];
+        let mut scratch = vec![0.0; 81];
+        convolver.convolve_into(&input, &mut output, &mut scratch);
+        let expected = convolve_into_per_pixel(&convolver, &input);
+        assert!(
+            output
+                .iter()
+                .zip(&expected)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+        );
+        assert!(
+            output
+                .iter()
+                .all(|value| value.to_bits() == (-0.0_f32).to_bits())
+        );
     }
 }

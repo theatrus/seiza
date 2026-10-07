@@ -2515,6 +2515,7 @@ dependencies = [
 name = "seiza-deconvolution"
 version = "0.1.0"
 dependencies = [
+ "multiversion",
  "rayon",
  "serde",
  "thiserror",
