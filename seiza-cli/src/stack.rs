@@ -107,10 +107,11 @@ pub(crate) struct StackArgs {
     /// Accepted observations before online rejection begins
     #[arg(long, default_value_t = 5)]
     rejection_warmup: u32,
-    /// After stacking, read every admitted frame three more times and integrate
-    /// them with leave-one-out rejection at --sigma-low and --sigma-high.
-    /// This removes satellite trails and other transients from the
-    /// reference and warm-up frames, which online rejection cannot revisit.
+    /// After stacking, read every admitted frame back and integrate them again
+    /// with three-pass, leave-one-out rejection at --sigma-low and
+    /// --sigma-high. This removes satellite trails and other transients from
+    /// the reference and warm-up frames, which online rejection cannot
+    /// revisit.
     #[arg(long)]
     reintegrate: bool,
     /// Drizzle the stack onto a grid this many times finer than the
@@ -180,7 +181,8 @@ pub(crate) struct StackArgs {
     /// --pipeline-memory-mib and the machine's cores
     #[arg(long, value_parser = clap::value_parser!(usize))]
     workers: Option<usize>,
-    /// Memory for frames prepared ahead of integration, in MiB
+    /// Memory for frames prepared ahead of integration, and for the bands of
+    /// rows of every frame --reintegrate reads back at once, in MiB
     #[arg(long, default_value_t = 4096)]
     pipeline_memory_mib: usize,
 }
@@ -673,6 +675,7 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
             // For any frame the live pass could not keep.
             scratch_directory: Some(scratch_directory),
             cancel: Some(crate::interrupt::cancel_signal()),
+            band_memory_bytes: options.pipeline_memory_mib.saturating_mul(1024 * 1024),
             ..seiza_stacking::BatchStackOptions::default()
         };
         let progress = |pass, index, count| {

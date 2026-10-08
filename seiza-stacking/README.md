@@ -26,9 +26,14 @@ Live delta-sigma rejection cannot remove trails admitted during its warm-up.
 `LiveStacker::reintegrate` fixes that for a live stack. The stacker keeps a
 ledger of every admitted frame: its source file, the calibration masters that
 applied, and the registration and normalization mapping the live pass chose.
-Reintegration reads each frame three more times, prepares it exactly as the live
-pass did, and integrates it with leave-one-out rejection, leaving the live
-stack unchanged. Star detection and registration do not run again. A source
+Reintegration prepares each frame exactly as the live pass did, keeps it in a
+scratch file (or reads the one `LiveStacker::retain_frames_for_reintegration`
+kept during the live pass), and integrates it with leave-one-out rejection,
+leaving the live stack unchanged. The three passes read the scratch files a
+band of rows at a time and run on one band of every frame before the next, so
+each file is read once for them and each pixel's statistics stay in the
+processor's caches; the result is bit-for-bit that of reading every frame whole
+on each pass. Star detection and registration do not run again. A source
 file that changed since it was stacked is refused, and
 `LiveStacker::reintegration_unavailable` says why a stack cannot be replayed:
 frames pushed as pixels, frames calibrated with in-memory masters that were
@@ -63,9 +68,11 @@ configured rate. Three or more large outliers at one pixel can still mask one
 another. Normalized frames have equal weight unless
 `BatchStackOptions::frame_weights` supplies weights (see below), and
 `BatchStackOptions::minimum_sigma` is in their physical sample units.
-Memory stays proportional to the output image (about 64 bytes per sample plus
-one loaded input), and each frame is loaded three times. Changed shapes or sample
-digests abort the result.
+Through `integrate_registered_frames` memory stays proportional to the output
+image (about 40 bytes per sample, 44 weighted, plus one loaded input and one
+bit per sample per frame), and each frame is loaded three times. Changed shapes
+or sample checksums abort the result. Reintegration from scratch files needs
+16 bytes per sample (20 weighted) plus `BatchStackOptions::band_memory_bytes`.
 
 ## Frame weighting
 

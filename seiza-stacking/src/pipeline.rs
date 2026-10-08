@@ -977,11 +977,29 @@ mod tests {
         let trail_sample = TRAIL_ROW * replayed.snapshot.image.width + 100;
         assert_eq!(replayed.snapshot.rejected_samples[trail_sample], 1);
         assert_eq!(replayed.snapshot.accepted_frames, 8);
-        assert_eq!(
-            reads.len(),
-            24,
-            "each admitted frame is read on all three passes"
-        );
+        // Each frame is read whole once, to fit its normalization and keep
+        // it in the cache, then in bands, with the frame indices spread
+        // over the bands.
+        let expected = [
+            crate::BatchStackPass::Estimate,
+            crate::BatchStackPass::Integrate,
+        ]
+        .into_iter()
+        .flat_map(|pass| (0..8).map(move |index| (pass, index, 8)))
+        .collect::<Vec<_>>();
+        assert_eq!(reads, expected);
+        // The whole-frame passes read every frame on each of the three.
+        let mut reads = Vec::new();
+        let (whole_frames, _) = stacker
+            .replay_with(
+                &crate::BatchStackOptions::default(),
+                None,
+                |pass, index, count| reads.push((pass, index, count)),
+                false,
+            )
+            .unwrap();
+        assert_same_stack(&whole_frames, &replayed);
+        assert_eq!(reads.len(), 24);
         assert_eq!(reads[0], (crate::BatchStackPass::Estimate, 0, 8));
         assert_eq!(reads[8], (crate::BatchStackPass::Refine, 0, 8));
         assert_eq!(reads[16], (crate::BatchStackPass::Integrate, 0, 8));
@@ -1400,6 +1418,76 @@ mod tests {
             drop(retained);
             drop(sequential);
             assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
+        }
+    }
+
+    /// Reading the scratch files in bands gives what reading every frame
+    /// whole on each pass gives, with and without a drizzle, equally and
+    /// inversely weighted, normalized as recorded or refitted, whatever the
+    /// band height.
+    #[test]
+    fn banded_replay_matches_the_whole_frame_passes_bit_for_bit() {
+        let mut command_line = command_line_options();
+        command_line.normalization = crate::NormalizationMode::LocalBackground { tile_size: 32 };
+        for options in [StackOptions::default(), command_line] {
+            let (directory, paths) = trailed_reference_set();
+            let scratch = directory.path().join("scratch");
+            std::fs::create_dir(&scratch).unwrap();
+            let mut stacker =
+                LiveStacker::open_fits(&paths[0], None, None, None, None, options.clone()).unwrap();
+            stacker
+                .retain_frames_for_reintegration(Some(&scratch))
+                .unwrap();
+            let report = stacker
+                .push_fits_pipelined(&paths[1..], &concurrent(3), |_, _| Continue::Yes)
+                .unwrap();
+            assert_eq!(report.integrated, 7);
+            let drizzle = crate::DrizzleOptions {
+                scale: 2,
+                ..crate::DrizzleOptions::default()
+            };
+            let whole = crate::BatchStackOptions::default();
+            let (expected, _) = stacker
+                .replay_with(&whole, None, |_, _, _| {}, false)
+                .unwrap();
+            let (expected_integrated, expected_drizzled) = stacker
+                .replay_with(&whole, Some(&drizzle), |_, _, _| {}, false)
+                .unwrap();
+            let expected_drizzled = expected_drizzled.unwrap();
+            assert_same_stack(&expected_integrated, &expected);
+            // Two bands of 8 frames of 192 pixels: one row, 7 rows, all.
+            for rows in [1, 7, 160] {
+                let banded = crate::BatchStackOptions {
+                    band_memory_bytes: 2 * 8 * 192 * 4 * rows,
+                    ..crate::BatchStackOptions::default()
+                };
+                let mut passes = Vec::new();
+                let replayed = without_reading(&paths, || {
+                    stacker
+                        .reintegrate(&banded, |pass, _, _| passes.push(pass))
+                        .unwrap()
+                });
+                assert_same_stack(&replayed, &expected);
+                // The bands ran: no frame was read for a pass of its own.
+                assert!(!passes.contains(&crate::BatchStackPass::Refine));
+                assert_eq!(replayed.frames.len(), expected.frames.len());
+                for (left, right) in replayed.frames.iter().zip(&expected.frames) {
+                    assert_eq!(left.finite_samples, right.finite_samples);
+                    assert_eq!(left.integrated_samples, right.integrated_samples);
+                }
+                let (integrated, drizzled) = stacker
+                    .reintegrate_drizzled(&banded, &drizzle, |_, _, _| {})
+                    .unwrap();
+                assert_same_stack(&integrated, &expected);
+                assert_eq!(
+                    bits(&drizzled.image.data),
+                    bits(&expected_drizzled.image.data)
+                );
+                assert_eq!(
+                    bits(&drizzled.weight.data),
+                    bits(&expected_drizzled.weight.data)
+                );
+            }
         }
     }
 

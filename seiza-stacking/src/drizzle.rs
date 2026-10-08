@@ -14,7 +14,7 @@
 //! pixel whose registered sample the integration rejected is left out, and
 //! each pixel is normalized with its frame's map at the registered position.
 
-use crate::batch::SampleFate;
+use crate::batch::{PackedFates, SampleFate};
 use crate::image::BayerLayout;
 use crate::normalization::CoefficientSampler;
 use crate::registration::PolynomialWarp;
@@ -108,7 +108,7 @@ pub(crate) struct DrizzleFrame<'a> {
     pub(crate) normalization: &'a NormalizationMap,
     /// What the integration did with each registered sample of this frame,
     /// on the reference grid.
-    pub(crate) fates: &'a [SampleFate],
+    pub(crate) fates: &'a PackedFates,
     /// Per-channel frame weight.
     pub(crate) weight: &'a [f32],
 }
@@ -357,7 +357,9 @@ impl BandContext<'_> {
     /// photosite's sample.
     fn fate(&self, x: usize, y: usize, channel: usize) -> SampleFate {
         let at = |x: usize, y: usize| {
-            self.frame.fates[(y * self.reference_width + x) * self.channels + channel]
+            self.frame
+                .fates
+                .get((y * self.reference_width + x) * self.channels + channel)
         };
         let fate = at(x, y);
         if fate != SampleFate::Missing || self.frame.layout.is_none() {

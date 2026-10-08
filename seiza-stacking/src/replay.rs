@@ -14,8 +14,9 @@
 //! prepares nothing.
 
 use crate::CancelSignal;
-use crate::batch::SampleFate;
+use crate::batch::PackedFates;
 use crate::drizzle::{DrizzleAccumulator, DrizzleFrame, DrizzleOptions, DrizzleResult};
+use crate::normalization::{RowCoefficients, RowNormalizer};
 use crate::{
     BatchStackOptions, BatchStackPass, BatchStackResult, CalibrationMasters, Error, FitsFrame,
     LinearImage, LiveStacker, ReferenceRegion, RegisteredFrameMapping, Result,
@@ -384,18 +385,36 @@ impl Renormalizer {
     }
 }
 
+/// Each sample's mean from its sum and count, `NaN` where nothing counted.
+fn mean(sum: Vec<f32>, count: Vec<u16>) -> Vec<f32> {
+    sum.into_par_iter()
+        .zip(count.into_par_iter())
+        .map(|(sum, count)| {
+            if count == 0 {
+                f32::NAN
+            } else {
+                sum / f32::from(count)
+            }
+        })
+        .collect()
+}
+
 /// One integrated frame waiting for the drizzle thread.
 struct DrizzleJob {
     index: usize,
     image: LinearImage,
     layout: Option<crate::BayerLayout>,
     normalization: crate::NormalizationMap,
-    fates: Vec<SampleFate>,
+    fates: PackedFates,
     weight: Vec<f32>,
 }
 
 /// Frames prepared ahead of the one a reintegration pass is integrating.
 const REPLAY_LOOKAHEAD: usize = 2;
+
+/// The most frames a banded reintegration reads whole at once, to fit their
+/// normalization before the bands.
+const WHOLE_FRAME_READS: usize = 4;
 
 /// [`REPLAY_LOOKAHEAD`], or fewer on a machine with few cores.
 fn replay_lookahead() -> usize {
@@ -554,6 +573,14 @@ impl FrameCache {
         })
     }
 
+    /// Whether frame `index`'s file is kept.
+    fn stored(&self, index: usize) -> bool {
+        *self.slots[index]
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            == CacheSlot::Stored
+    }
+
     /// Where preparation threads stage frames.
     pub(crate) fn files(&self) -> &CacheFiles {
         &self.files
@@ -576,19 +603,21 @@ impl FrameCache {
         self.files.path(index)
     }
 
-    /// The cached image of frame `index`, made with `prepare` the first
-    /// time. Holding the slot while preparing keeps two passes that reach
-    /// the same frame at once from preparing it twice.
+    /// The cached image of frame `index`, read into `buffer` when it is
+    /// big enough, and made with `prepare` the first time. Holding the slot
+    /// while preparing keeps two passes that reach the same frame at once
+    /// from preparing it twice.
     fn get_or_prepare(
         &self,
         index: usize,
+        buffer: Vec<f32>,
         prepare: impl FnOnce() -> Result<LinearImage>,
     ) -> Result<LinearImage> {
         let mut slot = self.slots[index]
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         if *slot == CacheSlot::Stored {
-            if let Some(image) = Self::read(&self.path(index)) {
+            if let Some(image) = Self::read(&self.path(index), buffer) {
                 return Ok(image);
             }
             *slot = CacheSlot::Unavailable;
@@ -629,8 +658,9 @@ impl FrameCache {
     }
 
     /// Read an image [`Self::write`] wrote, a megabyte at a time, so reading
-    /// holds no second copy of it.
-    fn read(path: &Path) -> Option<LinearImage> {
+    /// holds no second copy of it, into `buffer`: one of the same size is
+    /// reused as it is, saving the cost of mapping fresh memory.
+    fn read(path: &Path, buffer: Vec<f32>) -> Option<LinearImage> {
         use std::io::Read;
         let mut file = std::fs::File::open(path).ok()?;
         let mut header = [0_u8; 24];
@@ -646,7 +676,8 @@ impl FrameCache {
         if file.metadata().ok()?.len() != length {
             return None;
         }
-        let mut data = vec![0.0_f32; samples];
+        let mut data = buffer;
+        data.resize(samples, 0.0);
         let mut bytes = vec![0_u8; 1 << 20];
         for chunk in data.chunks_mut(bytes.len() / 4) {
             let raw = &mut bytes[..chunk.len() * 4];
@@ -656,6 +687,449 @@ impl FrameCache {
             }
         }
         LinearImage::new(width, height, channels, data).ok()
+    }
+
+    /// Fill `band`, whole rows of an image of `shape`, with rows `top..`
+    /// of frame `index`'s file, normalizing them with `normalizer` as each
+    /// megabyte arrives, while it is still in the processor's cache.
+    fn read_band(
+        &self,
+        index: usize,
+        shape: (usize, usize, usize),
+        top: usize,
+        band: &mut [f32],
+        normalizer: &RowNormalizer<'_>,
+    ) -> Result<()> {
+        use std::io::{Read, Seek};
+        let path = self.path(index);
+        let failed = |reason: String| {
+            Error::Stack(format!(
+                "cannot read admitted frame {} back from {}: {reason}",
+                index + 1,
+                path.display()
+            ))
+        };
+        let (width, height, channels) = shape;
+        let row_samples = width * channels;
+        let row_bytes = row_samples * 4;
+        let mut file = std::fs::File::open(&path).map_err(|error| failed(error.to_string()))?;
+        let mut header = [0_u8; 24];
+        file.read_exact(&mut header)
+            .map_err(|error| failed(error.to_string()))?;
+        let dimension =
+            |at: usize| u64::from_le_bytes(header[at..at + 8].try_into().expect("eight bytes"));
+        let length = file
+            .metadata()
+            .map_err(|error| failed(error.to_string()))?
+            .len();
+        if [dimension(0), dimension(8), dimension(16)]
+            != [width as u64, height as u64, channels as u64]
+            || length != (header.len() + height * row_bytes) as u64
+            || !band.len().is_multiple_of(row_samples)
+            || top + band.len() / row_samples > height
+        {
+            return Err(failed("it does not match the stack's shape".into()));
+        }
+        file.seek(std::io::SeekFrom::Start(
+            (header.len() + top * row_bytes) as u64,
+        ))
+        .map_err(|error| failed(error.to_string()))?;
+        let rows_per_read = ((1 << 20) / row_bytes).max(1);
+        let mut bytes = vec![0_u8; rows_per_read * row_bytes];
+        let mut coefficients = RowCoefficients::default();
+        for (read, rows) in band.chunks_mut(rows_per_read * row_samples).enumerate() {
+            let raw = &mut bytes[..rows.len() * 4];
+            file.read_exact(raw)
+                .map_err(|error| failed(error.to_string()))?;
+            for (sample, raw) in rows.iter_mut().zip(raw.chunks_exact(4)) {
+                *sample = f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+            }
+            normalizer.apply(&mut coefficients, rows, top + read * rows_per_read);
+        }
+        Ok(())
+    }
+}
+
+/// What one reintegration shares between its steps.
+struct Replay<'a> {
+    stacker: &'a LiveStacker,
+    options: &'a BatchStackOptions,
+    masters: &'a MastersCache,
+    renormalizer: Option<&'a Renormalizer>,
+}
+
+/// Each frame's band of rows from its scratch file, normalized as it is
+/// read.
+struct CacheBands<'a> {
+    cache: &'a FrameCache,
+    shape: (usize, usize, usize),
+    /// The admitted frame each band source index reads.
+    frames: Vec<usize>,
+    normalizers: Vec<RowNormalizer<'a>>,
+}
+
+impl crate::batch::BandSource for CacheBands<'_> {
+    fn read(&self, index: usize, top: usize, band: &mut [f32]) -> Result<()> {
+        self.cache.read_band(
+            self.frames[index],
+            self.shape,
+            top,
+            band,
+            &self.normalizers[index],
+        )
+    }
+}
+
+impl Replay<'_> {
+    /// Each frame's weights, one per channel.
+    fn frame_weights(&self, index: usize) -> Vec<f32> {
+        match &self.options.frame_weights {
+            Some(weights) => weights[index].clone(),
+            None => vec![1.0; self.stacker.reference.channels],
+        }
+    }
+
+    /// The map that normalizes frame `index`: refitted against the
+    /// integrated reference, or as the live pass recorded it.
+    fn normalization(&self, index: usize) -> Result<crate::NormalizationMap> {
+        match self.renormalizer {
+            Some(renormalizer) => renormalizer
+                .maps
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())[index]
+                .clone()
+                .ok_or_else(|| Error::Stack("a frame's normalization was never fitted".into())),
+            None => Ok(self.stacker.ledger.frames[index]
+                .mapping
+                .normalization()
+                .clone()),
+        }
+    }
+
+    /// Integrate every frame from its scratch file, a band of rows at a
+    /// time, or `None` when some frame could not be kept there, which the
+    /// whole-frame passes handle by preparing it again.
+    ///
+    /// Each frame is read once in full first if its normalization must be
+    /// fitted again or it is not in the cache yet, then once more in bands.
+    /// A drizzle follows, frame by frame, from the fates the integration
+    /// recorded.
+    #[allow(clippy::type_complexity)]
+    fn bands(
+        &self,
+        cache: &FrameCache,
+        drizzle: Option<&DrizzleOptions>,
+        progress: &mut impl FnMut(BatchStackPass, usize, usize),
+    ) -> Result<Option<(BatchStackResult, Option<DrizzleResult>)>> {
+        let stacker = self.stacker;
+        let frames = &stacker.ledger.frames;
+        let count = frames.len();
+        let stored = |index: usize| cache.stored(index);
+        for frame in frames {
+            stacker.source_unchanged(frame)?;
+        }
+        // Fit each frame's normalization, and keep any frame the cache does
+        // not hold yet. A frame's file is read in one piece for this, mostly
+        // on one core, so several are read at once, as many as half the
+        // band memory holds, from the replay's lookahead to four; their
+        // buffers are reused, saving the cost of mapping fresh memory.
+        let pending = (0..count)
+            .filter(|&index| self.renormalizer.is_some() || !stored(index))
+            .collect::<Vec<_>>();
+        let frame_bytes = stacker.reference.sample_count() * std::mem::size_of::<f32>();
+        let lookahead = (self.options.band_memory_bytes / 2 / frame_bytes.max(1))
+            .clamp(replay_lookahead(), WHOLE_FRAME_READS);
+        let buffers = std::sync::Mutex::new(Vec::<Vec<f32>>::new());
+        std::thread::scope(|scope| {
+            let prepare = |index: usize| {
+                let admitted = &frames[index];
+                let masters = self.masters.get(stacker, admitted.calibration)?;
+                let buffer = buffers
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .pop()
+                    .unwrap_or_default();
+                let image =
+                    stacker.prepared_into(index, admitted, &masters, Some(cache), buffer)?;
+                if let Some(renormalizer) = self.renormalizer {
+                    renormalizer.map_for(stacker, admitted, index, &image)?;
+                }
+                buffers
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .push(image.data);
+                Ok::<_, Error>(())
+            };
+            let mut pending = pending.into_iter();
+            let mut in_flight = std::collections::VecDeque::new();
+            loop {
+                crate::batch::check_cancelled(self.options)?;
+                while in_flight.len() < lookahead
+                    && let Some(index) = pending.next()
+                {
+                    progress(BatchStackPass::Estimate, index, count);
+                    in_flight.push_back(scope.spawn(move || prepare(index)));
+                }
+                let Some(handle) = in_flight.pop_front() else {
+                    return Ok::<_, Error>(());
+                };
+                handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
+            }
+        })?;
+        drop(buffers);
+        if !(0..count).all(stored) {
+            return Ok(None);
+        }
+
+        let maps = (0..count)
+            .map(|index| self.normalization(index))
+            .collect::<Result<Vec<_>>>()?;
+        let reference = &stacker.reference;
+        let source = CacheBands {
+            cache,
+            shape: (reference.width, reference.height, reference.channels),
+            frames: (0..count).collect(),
+            normalizers: maps
+                .iter()
+                .map(|map| RowNormalizer::new(map, 0, reference.width))
+                .collect(),
+        };
+        // The frame indices are spread over the bands, and the drizzle's
+        // frames, so that they follow the work done.
+        let mut reported = 0;
+        let mut report = |unit: usize, units: usize| {
+            let until = ((unit + 1) * count).div_ceil(units).min(count);
+            while reported < until {
+                progress(BatchStackPass::Integrate, reported, count);
+                reported += 1;
+            }
+        };
+        let drizzle_frames = if drizzle.is_some() { count } else { 0 };
+        let mut total_units = 0;
+        let (result, fates) = crate::batch::integrate_bands(
+            source.shape,
+            count,
+            self.options,
+            &source,
+            drizzle.is_some(),
+            &mut |band, bands| {
+                total_units = bands + drizzle_frames;
+                report(band, total_units);
+            },
+        )?;
+        drop(source);
+        let Some((drizzle, mut fates)) = drizzle.zip(fates) else {
+            return Ok(Some((result, None)));
+        };
+
+        // Drizzle each frame in turn, reading the next frames' calibrated
+        // sources on threads of their own.
+        let mut accumulator = DrizzleAccumulator::new(
+            *drizzle,
+            reference.width,
+            reference.height,
+            reference.channels,
+        )?;
+        let bands = total_units - count;
+        std::thread::scope(|scope| {
+            let read = |index: usize| {
+                let admitted = &frames[index];
+                let masters = self.masters.get(stacker, admitted.calibration)?;
+                stacker.read_calibrated(admitted, &masters)
+            };
+            let mut next = 0;
+            let mut in_flight = std::collections::VecDeque::new();
+            for index in 0..count {
+                crate::batch::check_cancelled(self.options)?;
+                while next < count && in_flight.len() < lookahead {
+                    let frame = next;
+                    in_flight.push_back(scope.spawn(move || read(frame)));
+                    next += 1;
+                }
+                let (image, layout) = in_flight
+                    .pop_front()
+                    .expect("the frame being drizzled was read ahead")
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
+                report(bands + index, total_units);
+                let fates = std::mem::take(&mut fates[index]);
+                accumulator.add(&DrizzleFrame {
+                    image: &image,
+                    layout,
+                    mapping: &frames[index].mapping,
+                    normalization: &maps[index],
+                    fates: &fates,
+                    weight: &self.frame_weights(index),
+                })?;
+            }
+            Ok::<_, Error>(())
+        })?;
+        crate::batch::check_cancelled(self.options)?;
+        Ok(Some((result, Some(accumulator.finish()?))))
+    }
+
+    /// Integrate every frame with the whole-frame passes, reading each one
+    /// once per pass: from the cache when it holds the frame, and otherwise
+    /// from its source. A drizzle runs on a thread of its own, a frame behind
+    /// the final pass.
+    fn frames(
+        &self,
+        cache: Option<&FrameCache>,
+        drizzle: Option<&DrizzleOptions>,
+        progress: &mut impl FnMut(BatchStackPass, usize, usize),
+    ) -> Result<(BatchStackResult, Option<DrizzleResult>)> {
+        let stacker = self.stacker;
+        let ledger = &stacker.ledger;
+        let count = ledger.frames.len();
+        let options = self.options;
+        let masters = self.masters;
+        let renormalizer = self.renormalizer;
+        let accumulator = drizzle
+            .map(|drizzle| {
+                DrizzleAccumulator::new(
+                    *drizzle,
+                    stacker.reference.width,
+                    stacker.reference.height,
+                    stacker.reference.channels,
+                )
+            })
+            .transpose()?;
+        // Frames are requested in a fixed order: every frame for each pass in
+        // turn. Preparing the next few on their own threads while the batch
+        // integrates the current one overlaps reading, debayering and
+        // resampling with the rejection arithmetic, which leaves cores idle
+        // when they alternate. Each in-flight frame holds about one prepared
+        // image, so the lookahead stays small.
+        let order = [
+            BatchStackPass::Estimate,
+            BatchStackPass::Refine,
+            BatchStackPass::Integrate,
+        ]
+        .into_iter()
+        .flat_map(|pass| (0..count).map(move |index| (pass, index)))
+        .collect::<Vec<_>>();
+        let lookahead = replay_lookahead();
+        // The calibrated source of the frame the final pass is integrating,
+        // read alongside its registered image for the drizzle.
+        let drizzle_source = std::cell::RefCell::new(None);
+        let (result, accumulator) = std::thread::scope(|scope| {
+            let prepare = |pass: BatchStackPass, index: usize| {
+                let frame = &ledger.frames[index];
+                let masters = masters.get(stacker, frame.calibration)?;
+                let image = stacker.replay_frame(frame, &masters, index, renormalizer, cache)?;
+                let source = if drizzle.is_some() && pass == BatchStackPass::Integrate {
+                    Some(stacker.read_calibrated(frame, &masters)?)
+                } else {
+                    None
+                };
+                Ok::<_, Error>((image, source))
+            };
+            let mut in_flight = std::collections::VecDeque::new();
+            let mut next = 0;
+            let load = |pass, index| {
+                progress(pass, index, count);
+                while next < order.len() && in_flight.len() < lookahead {
+                    let (frame_pass, frame_index) = order[next];
+                    in_flight
+                        .push_back((next, scope.spawn(move || prepare(frame_pass, frame_index))));
+                    next += 1;
+                }
+                let (image, source) =
+                    match in_flight.pop_front() {
+                        Some((position, handle)) if order[position] == (pass, index) => handle
+                            .join()
+                            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?,
+                        // A request out of the expected order is served directly.
+                        other => {
+                            if let Some(entry) = other {
+                                in_flight.push_front(entry);
+                            }
+                            prepare(pass, index)?
+                        }
+                    };
+                *drizzle_source.borrow_mut() = source.map(|source| (index, source));
+                Ok(image)
+            };
+            // The drizzle runs on a thread of its own, a frame behind the
+            // integration, so dropping one frame overlaps integrating the
+            // next. The channel holds one frame, which bounds the memory.
+            let (jobs, worker) = match accumulator {
+                Some(mut accumulator) => {
+                    let (sender, receiver) = std::sync::mpsc::sync_channel::<DrizzleJob>(1);
+                    let worker = scope.spawn(move || {
+                        for job in receiver {
+                            // A cancelled integration stops at its next frame;
+                            // there is no use drizzling the ones queued here.
+                            if options
+                                .cancel
+                                .as_ref()
+                                .is_some_and(CancelSignal::is_cancelled)
+                            {
+                                return Err(Error::Cancelled);
+                            }
+                            accumulator.add(&DrizzleFrame {
+                                image: &job.image,
+                                layout: job.layout,
+                                mapping: &ledger.frames[job.index].mapping,
+                                normalization: &job.normalization,
+                                fates: &job.fates,
+                                weight: &job.weight,
+                            })?;
+                        }
+                        Ok::<_, Error>(accumulator)
+                    });
+                    (Some(sender), Some(worker))
+                }
+                None => (None, None),
+            };
+            let mut observe = |index: usize, fates: PackedFates| -> Result<()> {
+                let Some(jobs) = &jobs else {
+                    return Ok(());
+                };
+                let frame = &ledger.frames[index];
+                let (image, layout) = match drizzle_source.borrow_mut().take() {
+                    Some((source_index, source)) if source_index == index => source,
+                    _ => stacker
+                        .read_calibrated(frame, &*masters.get(stacker, frame.calibration)?)?,
+                };
+                let normalization = match renormalizer {
+                    Some(_) => self.normalization(index).map_err(|_| {
+                        Error::Stack("a frame reached the drizzle without its normalization".into())
+                    })?,
+                    None => frame.mapping.normalization().clone(),
+                };
+                // A closed channel means the drizzle failed; its error is
+                // reported when the worker is joined.
+                jobs.send(DrizzleJob {
+                    index,
+                    image,
+                    layout,
+                    normalization,
+                    fates,
+                    weight: self.frame_weights(index),
+                })
+                .map_err(|_| Error::Stack("the drizzle stopped early".into()))
+            };
+            let integrated = crate::batch::integrate_registered_frames_observed(
+                count,
+                options,
+                load,
+                drizzle.is_some().then_some(&mut observe as _),
+            );
+            drop(jobs);
+            let drizzled = worker
+                .map(|worker| {
+                    worker
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                })
+                .transpose()?;
+            Ok::<_, Error>((integrated?, drizzled))
+        })?;
+        let drizzled = accumulator.map(DrizzleAccumulator::finish).transpose()?;
+        Ok((result, drizzled))
     }
 }
 
@@ -733,7 +1207,7 @@ impl LiveStacker {
         // through its identity mapping, as a replay would after preparing it
         // again.
         let reference = &self.ledger.frames[0];
-        cache.get_or_prepare(0, || {
+        cache.get_or_prepare(0, Vec::new(), || {
             self.register_unnormalized(reference, &self.reference, self.options.interpolation)
         })?;
         self.frame_cache = Some(cache);
@@ -788,15 +1262,31 @@ impl LiveStacker {
     /// the live pass prepared it: the same declared-range rescale,
     /// calibration masters, cosmetic filter, debayering, and the recorded
     /// registration and normalization mapping. The prepared image waits in
-    /// [`BatchStackOptions::scratch_directory`] for the later passes, and a
-    /// frame [`Self::retain_frames_for_reintegration`] kept is not read at
-    /// all. Star detection and registration do not run again, and no
-    /// admission decision is revisited: every admitted frame takes part. A
-    /// source file that changed since it was stacked is refused.
+    /// [`BatchStackOptions::scratch_directory`] for the passes, and a frame
+    /// [`Self::retain_frames_for_reintegration`] kept is not read at all.
+    /// Star detection and registration do not run again, and no admission
+    /// decision is revisited: every admitted frame takes part. A source file
+    /// that changed since it was stacked is refused.
     ///
-    /// The live stack is left as it was. `progress` receives the pass, the
-    /// zero-based frame index, and the frame count before each read. See
-    /// [`integrate_registered_frames`] for the rejection and its memory use.
+    /// The passes read the scratch files a band of rows at a time and run
+    /// all three on one band of every frame before the next (see
+    /// [`BatchStackOptions::band_memory_bytes`]), so each file is read once
+    /// for them, or twice when a stack normalized with
+    /// [`crate::NormalizationMode::LocalBackground`] first reads every frame
+    /// whole to fit its background offsets again. The result is exactly that
+    /// of [`crate::integrate_registered_frames`], whose rejection this is. Memory
+    /// is 16 bytes per output sample (20 for a weighted stack) plus the
+    /// bands. Where a frame cannot be kept in a scratch file, as under Bayer
+    /// drizzle, every frame is instead read whole on each of the three
+    /// passes, with the memory [`crate::integrate_registered_frames`] describes.
+    ///
+    /// The live stack is left as it was. `progress` receives the pass, a
+    /// zero-based frame index and the frame count: [`BatchStackPass::Estimate`]
+    /// for each frame as it is read whole, then
+    /// [`BatchStackPass::Integrate`] for the frame indices in turn, spread
+    /// over the bands so that they follow the work done. When frames are
+    /// read whole for each pass, it hears each pass and frame before the
+    /// read.
     ///
     /// A weighted stack replays each frame with the weight the live pass
     /// recorded, so noise is not measured again. It fills
@@ -813,16 +1303,18 @@ impl LiveStacker {
     /// [`Self::reintegrate`], also drizzling every admitted frame onto a
     /// grid `drizzle.scale` times the reference's.
     ///
-    /// The drizzle runs alongside the final pass, so each frame is read once
-    /// more, from its source file, and calibrated but not debayered or
-    /// resampled. A source pixel whose registered sample the integration
-    /// rejected is left out, and every pixel is normalized and weighted as
-    /// the integration did its registered sample. A Bayer frame drizzles its
+    /// The drizzle follows the integration, so each frame is read once more,
+    /// from its source file, and calibrated but not debayered or resampled.
+    /// A source pixel whose registered sample the integration rejected is
+    /// left out, and every pixel is normalized and weighted as the
+    /// integration did its registered sample. A Bayer frame drizzles its
     /// photosites, each into its own colour.
     ///
     /// The drizzle needs eight bytes per output sample on top of
-    /// reintegration's memory: 2.5 GB for a 26 MP colour frame at twice the
-    /// scale. Returns the reintegrated stack and the drizzled one.
+    /// reintegration's memory, 2.5 GB for a 26 MP colour frame at twice the
+    /// scale, and the integration keeps every sample's fate for it, a quarter
+    /// of a byte per sample per frame. Returns the reintegrated stack and the
+    /// drizzled one.
     pub fn reintegrate_drizzled(
         &self,
         options: &BatchStackOptions,
@@ -838,7 +1330,19 @@ impl LiveStacker {
         &self,
         options: &BatchStackOptions,
         drizzle: Option<&DrizzleOptions>,
+        progress: impl FnMut(BatchStackPass, usize, usize),
+    ) -> Result<(BatchStackResult, Option<DrizzleResult>)> {
+        self.replay_with(options, drizzle, progress, true)
+    }
+
+    /// [`Self::replay`], reading cached frames in bands when `banded`, and
+    /// otherwise a whole frame for each pass.
+    pub(crate) fn replay_with(
+        &self,
+        options: &BatchStackOptions,
+        drizzle: Option<&DrizzleOptions>,
         mut progress: impl FnMut(BatchStackPass, usize, usize),
+        banded: bool,
     ) -> Result<(BatchStackResult, Option<DrizzleResult>)> {
         if let Some(reason) = self.reintegration_unavailable() {
             return Err(Error::Stack(reason));
@@ -888,168 +1392,28 @@ impl LiveStacker {
         let renormalizer =
             if let crate::NormalizationMode::LocalBackground { .. } = self.options.normalization {
                 Some(Renormalizer {
-                    reference: self.normalization_reference(&masters, cache)?,
+                    reference: self.normalization_reference(&masters, cache, options)?,
                     maps: std::sync::Mutex::new(vec![None; count]),
                 })
             } else {
                 None
             };
-        let accumulator = drizzle
-            .map(|drizzle| {
-                DrizzleAccumulator::new(
-                    *drizzle,
-                    self.reference.width,
-                    self.reference.height,
-                    self.reference.channels,
-                )
-            })
-            .transpose()?;
-        // Frames are requested in a fixed order: every frame for each pass in
-        // turn. Preparing the next few on their own threads while the batch
-        // integrates the current one overlaps reading, debayering and
-        // resampling with the rejection arithmetic, which leaves cores idle
-        // when they alternate. Each in-flight frame holds about one prepared
-        // image, so the lookahead stays small.
-        let order = [
-            BatchStackPass::Estimate,
-            BatchStackPass::Refine,
-            BatchStackPass::Integrate,
-        ]
-        .into_iter()
-        .flat_map(|pass| (0..count).map(move |index| (pass, index)))
-        .collect::<Vec<_>>();
-        let lookahead = replay_lookahead();
-        // The calibrated source of the frame the final pass is integrating,
-        // read alongside its registered image for the drizzle.
-        let drizzle_source = std::cell::RefCell::new(None);
-        let (mut result, accumulator) = std::thread::scope(|scope| {
-            let prepare = |pass: BatchStackPass, index: usize| {
-                let frame = &ledger.frames[index];
-                let masters = masters.get(self, frame.calibration)?;
-                let image =
-                    self.replay_frame(frame, &masters, index, renormalizer.as_ref(), cache)?;
-                let source = if drizzle.is_some() && pass == BatchStackPass::Integrate {
-                    Some(self.read_calibrated(frame, &masters)?)
-                } else {
-                    None
-                };
-                Ok::<_, Error>((image, source))
-            };
-            let mut in_flight = std::collections::VecDeque::new();
-            let mut next = 0;
-            let load = |pass, index| {
-                progress(pass, index, count);
-                while next < order.len() && in_flight.len() < lookahead {
-                    let (frame_pass, frame_index) = order[next];
-                    in_flight
-                        .push_back((next, scope.spawn(move || prepare(frame_pass, frame_index))));
-                    next += 1;
-                }
-                let (image, source) =
-                    match in_flight.pop_front() {
-                        Some((position, handle)) if order[position] == (pass, index) => handle
-                            .join()
-                            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?,
-                        // A request out of the expected order is served directly.
-                        other => {
-                            if let Some(entry) = other {
-                                in_flight.push_front(entry);
-                            }
-                            prepare(pass, index)?
-                        }
-                    };
-                *drizzle_source.borrow_mut() = source.map(|source| (index, source));
-                Ok(image)
-            };
-            // The drizzle runs on a thread of its own, a frame behind the
-            // integration, so dropping one frame overlaps integrating the
-            // next. The channel holds one frame, which bounds the memory.
-            let (jobs, worker) = match accumulator {
-                Some(mut accumulator) => {
-                    let (sender, receiver) = std::sync::mpsc::sync_channel::<DrizzleJob>(1);
-                    let worker = scope.spawn(move || {
-                        for job in receiver {
-                            // A cancelled integration stops at its next frame;
-                            // there is no use drizzling the ones queued here.
-                            if options
-                                .cancel
-                                .as_ref()
-                                .is_some_and(CancelSignal::is_cancelled)
-                            {
-                                return Err(Error::Cancelled);
-                            }
-                            accumulator.add(&DrizzleFrame {
-                                image: &job.image,
-                                layout: job.layout,
-                                mapping: &ledger.frames[job.index].mapping,
-                                normalization: &job.normalization,
-                                fates: &job.fates,
-                                weight: &job.weight,
-                            })?;
-                        }
-                        Ok::<_, Error>(accumulator)
-                    });
-                    (Some(sender), Some(worker))
-                }
-                None => (None, None),
-            };
-            let mut observe = |index: usize, fates: Vec<SampleFate>| -> Result<()> {
-                let Some(jobs) = &jobs else {
-                    return Ok(());
-                };
-                let frame = &ledger.frames[index];
-                let (image, layout) = match drizzle_source.borrow_mut().take() {
-                    Some((source_index, source)) if source_index == index => source,
-                    _ => self.read_calibrated(frame, &*masters.get(self, frame.calibration)?)?,
-                };
-                let normalization = match &renormalizer {
-                    Some(renormalizer) => renormalizer
-                        .maps
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner())[index]
-                        .clone()
-                        .ok_or_else(|| {
-                            Error::Stack(
-                                "a frame reached the drizzle without its normalization".into(),
-                            )
-                        })?,
-                    None => frame.mapping.normalization().clone(),
-                };
-                let weight = match &options.frame_weights {
-                    Some(weights) => weights[index].clone(),
-                    None => vec![1.0; self.reference.channels],
-                };
-                // A closed channel means the drizzle failed; its error is
-                // reported when the worker is joined.
-                jobs.send(DrizzleJob {
-                    index,
-                    image,
-                    layout,
-                    normalization,
-                    fates,
-                    weight,
-                })
-                .map_err(|_| Error::Stack("the drizzle stopped early".into()))
-            };
-            let integrated = crate::batch::integrate_registered_frames_observed(
-                count,
-                options,
-                load,
-                drizzle.is_some().then_some(&mut observe as _),
-            );
-            drop(jobs);
-            let drizzled = worker
-                .map(|worker| {
-                    worker
-                        .join()
-                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-                })
-                .transpose()?;
-            Ok::<_, Error>((integrated?, drizzled))
-        })?;
+        let replay = Replay {
+            stacker: self,
+            options,
+            masters: &masters,
+            renormalizer: renormalizer.as_ref(),
+        };
+        let banded_result = match cache.filter(|_| banded) {
+            Some(cache) => replay.bands(cache, drizzle, &mut progress)?,
+            None => None,
+        };
+        let (mut result, drizzled) = match banded_result {
+            Some(result) => result,
+            None => replay.frames(cache, drizzle, &mut progress)?,
+        };
         result.snapshot.rejected_frames = self.rejected_frames;
         self.fill_photosite_gaps(&mut result.snapshot.image.data, &result.snapshot.coverage);
-        let drizzled = accumulator.map(DrizzleAccumulator::finish).transpose()?;
         Ok((result, drizzled))
     }
 
@@ -1070,6 +1434,7 @@ impl LiveStacker {
         &self,
         masters: &MastersCache,
         cache: Option<&FrameCache>,
+        options: &BatchStackOptions,
     ) -> Result<LinearImage> {
         let frames = &self.ledger.frames;
         // Higher is better: the recorded weight, or else the inverse of the
@@ -1088,6 +1453,66 @@ impl LiveStacker {
         let samples = self.reference.sample_count();
         let mut sum = vec![0.0_f32; samples];
         let mut count = vec![0_u16; samples];
+        // Frames kept in scratch files are read a band at a time and summed
+        // in the same ranked order, without a whole frame in memory.
+        if let Some(cache) = cache.filter(|cache| ranked.iter().all(|&index| cache.stored(index))) {
+            for &index in &ranked {
+                self.source_unchanged(&frames[index])?;
+            }
+            let maps = ranked
+                .iter()
+                .map(|&index| frames[index].mapping.normalization().global_equivalent())
+                .collect::<Vec<_>>();
+            let reference = &self.reference;
+            let shape = (reference.width, reference.height, reference.channels);
+            let source = CacheBands {
+                cache,
+                shape,
+                frames: ranked.clone(),
+                normalizers: maps
+                    .iter()
+                    .map(|map| RowNormalizer::new(map, 0, reference.width))
+                    .collect(),
+            };
+            const CHUNK: usize = 1 << 14;
+            crate::batch::for_each_band(
+                shape,
+                ranked.len(),
+                crate::batch::band_rows(shape, ranked.len(), options.band_memory_bytes),
+                &source,
+                options.cancel.as_ref(),
+                |_, top, frames| {
+                    let start = top * reference.width * reference.channels;
+                    let end = start + frames[0].len();
+                    sum[start..end]
+                        .par_chunks_mut(CHUNK)
+                        .zip(count[start..end].par_chunks_mut(CHUNK))
+                        .enumerate()
+                        .for_each(|(chunk, (sum, count))| {
+                            let (at, len) = (chunk * CHUNK, sum.len());
+                            for frame in frames {
+                                for ((sum, count), &value) in sum
+                                    .iter_mut()
+                                    .zip(count.iter_mut())
+                                    .zip(&frame[at..at + len])
+                                {
+                                    if value.is_finite() {
+                                        *sum += value;
+                                        *count += 1;
+                                    }
+                                }
+                            }
+                        });
+                    Ok(())
+                },
+            )?;
+            return LinearImage::new(
+                reference.width,
+                reference.height,
+                reference.channels,
+                mean(sum, count),
+            );
+        }
         let prepare = |index: usize| {
             let admitted = &frames[index];
             let masters = masters.get(self, admitted.calibration)?;
@@ -1130,22 +1555,11 @@ impl LiveStacker {
                     });
             }
         })?;
-        let mean = sum
-            .into_par_iter()
-            .zip(count.into_par_iter())
-            .map(|(sum, count)| {
-                if count == 0 {
-                    f32::NAN
-                } else {
-                    sum / f32::from(count)
-                }
-            })
-            .collect();
         let image = LinearImage::new(
             self.reference.width,
             self.reference.height,
             self.reference.channels,
-            mean,
+            mean(sum, count),
         )?;
         Ok(image)
     }
@@ -1255,11 +1669,23 @@ impl LiveStacker {
         masters: &CalibrationMasters,
         cache: Option<&FrameCache>,
     ) -> Result<LinearImage> {
+        self.prepared_into(index, admitted, masters, cache, Vec::new())
+    }
+
+    /// [`Self::prepared`], reading a cached frame into `buffer`.
+    fn prepared_into(
+        &self,
+        index: usize,
+        admitted: &AdmittedFrame,
+        masters: &CalibrationMasters,
+        cache: Option<&FrameCache>,
+        buffer: Vec<f32>,
+    ) -> Result<LinearImage> {
         let make = || self.replay_frame_unnormalized(admitted, masters, self.options.interpolation);
         match cache {
             Some(cache) => {
                 self.source_unchanged(admitted)?;
-                cache.get_or_prepare(index, make)
+                cache.get_or_prepare(index, buffer, make)
             }
             None => make(),
         }
@@ -1396,13 +1822,17 @@ mod tests {
             .unwrap();
         assert_eq!(normalized.data[0].to_bits(), 0);
         let kept = cache
-            .get_or_prepare(0, || panic!("frame 0 was kept"))
+            .get_or_prepare(0, Vec::new(), || panic!("frame 0 was kept"))
             .unwrap();
         assert_eq!(bits(&kept), bits(&normalized));
         // A frame admitted without a file is prepared once, then read back.
-        cache.get_or_prepare(1, || Ok(normalized.clone())).unwrap();
+        cache
+            .get_or_prepare(1, Vec::new(), || Ok(normalized.clone()))
+            .unwrap();
         let read = cache
-            .get_or_prepare(1, || panic!("frame 1 was kept when first prepared"))
+            .get_or_prepare(1, vec![7.0; 4], || {
+                panic!("frame 1 was kept when first prepared")
+            })
             .unwrap();
         assert_eq!(bits(&read), bits(&normalized));
         assert_eq!(files(), ["frame-0.f32", "frame-1.f32"]);

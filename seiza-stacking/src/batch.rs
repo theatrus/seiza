@@ -2,8 +2,11 @@ use crate::{CancelSignal, Error, LinearImage, MasterRejectionOptions, Result, St
 use rayon::prelude::*;
 use statrs::distribution::{Continuous, ContinuousCDF, Normal, StudentsT};
 
+mod bands;
 #[cfg(test)]
 mod reference;
+
+pub(crate) use bands::{BandSource, band_rows, for_each_band, integrate_bands};
 
 /// Rejection options for a completed stack of registered, normalized frames.
 #[derive(Clone, Debug)]
@@ -34,7 +37,23 @@ pub struct BatchStackOptions {
     /// A stack told to [`crate::LiveStacker::retain_frames_for_reintegration`]
     /// keeps its frames in the directory given there instead.
     pub scratch_directory: Option<std::path::PathBuf>,
+    /// Memory for frames [`crate::LiveStacker::reintegrate`] reads back from
+    /// its scratch files, in bytes.
+    ///
+    /// Reintegration reads every frame's scratch file in bands of rows and
+    /// runs all three passes on one band of every frame before it reads the
+    /// next, so each file is read once rather than three times and the
+    /// per-pixel statistics stay in the processor's caches. It holds two
+    /// bands of every frame, one being integrated and one being read: within
+    /// half this memory each, at most 128 MiB each, and never less than a
+    /// row. A stack whose frames are read whole first, to fit their
+    /// normalization again, reads as many at once as half this memory holds,
+    /// from two to four. The result does not depend on it.
+    pub band_memory_bytes: usize,
 }
+
+/// Bytes of frame bands reintegration holds by default.
+const DEFAULT_BAND_MEMORY_BYTES: usize = 1024 * 1024 * 1024;
 
 impl Default for BatchStackOptions {
     fn default() -> Self {
@@ -44,6 +63,7 @@ impl Default for BatchStackOptions {
             cancel: None,
             frame_weights: None,
             scratch_directory: None,
+            band_memory_bytes: DEFAULT_BAND_MEMORY_BYTES,
         }
     }
 }
@@ -140,9 +160,71 @@ pub(crate) enum SampleFate {
     Integrated,
 }
 
+impl SampleFate {
+    /// Two bits per fate in [`PackedFates`]; a missing sample sets none.
+    const BITS: usize = 2;
+    const PER_WORD: usize = 64 / Self::BITS;
+
+    fn code(self) -> u64 {
+        match self {
+            Self::Missing => 0,
+            Self::Rejected => 1,
+            Self::Integrated => 2,
+        }
+    }
+}
+
+/// What the final pass did with every sample of one frame, two bits each:
+/// a quarter of a byte per sample, so a whole stack's fates can wait in
+/// memory for the drizzle.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PackedFates {
+    words: Vec<u64>,
+    len: usize,
+}
+
+impl PackedFates {
+    /// All missing, for `len` samples.
+    fn missing(len: usize) -> Self {
+        Self {
+            words: vec![0; len.div_ceil(SampleFate::PER_WORD)],
+            len,
+        }
+    }
+
+    /// Sample count.
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    /// The fate of sample `index`.
+    pub(crate) fn get(&self, index: usize) -> SampleFate {
+        let word = self.words[index / SampleFate::PER_WORD];
+        match word >> (index % SampleFate::PER_WORD * SampleFate::BITS) & 3 {
+            0 => SampleFate::Missing,
+            1 => SampleFate::Rejected,
+            _ => SampleFate::Integrated,
+        }
+    }
+
+    /// Every fate in order.
+    #[cfg(test)]
+    pub(crate) fn to_vec(&self) -> Vec<SampleFate> {
+        (0..self.len).map(|index| self.get(index)).collect()
+    }
+}
+
+/// Set fate `fate` for sample `at` in `words`, which start at sample 0 and
+/// hold missing (zero) fates there so far.
+#[inline]
+fn pack_fate(words: &mut [u64], at: usize, fate: SampleFate) {
+    words[at / SampleFate::PER_WORD] |=
+        fate.code() << (at % SampleFate::PER_WORD * SampleFate::BITS);
+}
+
 /// What the final pass did with each sample of each frame, in loader index
 /// order.
-pub(crate) type RejectionObserver<'a> = &'a mut dyn FnMut(usize, Vec<SampleFate>) -> Result<()>;
+pub(crate) type RejectionObserver<'a> = &'a mut dyn FnMut(usize, PackedFates) -> Result<()>;
 
 /// Pixels in the run of samples one task takes through a pass: a multiple
 /// of 64, so a run of keep bits starts on a word whatever the channel count.
@@ -294,18 +376,18 @@ fn integrate_frames<const C: usize, const WEIGHTED: bool>(
             |left: (usize, usize), right: (usize, usize)| (left.0 + right.0, left.1 + right.1);
         let (finite_samples, integrated_samples) = match &mut observe {
             Some(observe) => {
-                let mut fates = vec![SampleFate::Missing; samples];
+                let mut fates = PackedFates::missing(samples);
                 let counts = chunks
-                    .zip(fates.par_chunks_mut(chunk))
-                    .map(|((((output, kept), samples), keep), fates)| {
+                    .zip(fates.words.par_chunks_mut(chunk / SampleFate::PER_WORD))
+                    .map(|((((mut output, kept), samples), keep), fates)| {
                         integrate_chunk::<C, WEIGHTED>(
-                            output,
+                            &mut output,
                             kept,
                             samples,
                             keep,
                             weights,
                             &rejection,
-                            |at, fate| fates[at] = fate,
+                            |at, fate| pack_fate(fates, at, fate),
                         )
                     })
                     .reduce(|| (0, 0), sum);
@@ -313,9 +395,9 @@ fn integrate_frames<const C: usize, const WEIGHTED: bool>(
                 counts
             }
             None => chunks
-                .map(|(((output, kept), samples), keep)| {
+                .map(|(((mut output, kept), samples), keep)| {
                     integrate_chunk::<C, WEIGHTED>(
-                        output,
+                        &mut output,
                         kept,
                         samples,
                         keep,
@@ -527,7 +609,7 @@ pub(crate) fn refine_chunk<const C: usize>(
 /// counts.
 #[inline]
 pub(crate) fn integrate_chunk<const C: usize, const WEIGHTED: bool>(
-    output: OutputChunk<'_>,
+    output: &mut OutputChunk<'_>,
     kept: &[Moments],
     samples: &[f32],
     keep: &[u64],
@@ -1134,6 +1216,9 @@ mod tests {
             (12, 3, 61, 47),
             (25, 1, 37, 29),
             (25, 3, 41, 31),
+            // Wide enough for several tiles in a band of one row.
+            (4, 3, 1501, 9),
+            (11, 1, 2333, 5),
         ] {
             let frames = synthetic_frames(width, height, channels, depth, depth as u64 * 31 + 7);
             cases.push((frames.clone(), BatchStackOptions::default()));
@@ -1165,8 +1250,8 @@ mod tests {
         for (frames, options) in reference_cases() {
             let (expected, expected_fates) = reference::integrate(&frames, &options);
             let mut fates = vec![Vec::new(); frames.len()];
-            let mut observe = |index: usize, frame_fates: Vec<SampleFate>| {
-                fates[index] = frame_fates;
+            let mut observe = |index: usize, frame_fates: PackedFates| {
+                fates[index] = frame_fates.to_vec();
                 Ok(())
             };
             let actual = integrate_registered_frames_observed(
@@ -1183,6 +1268,118 @@ mod tests {
             .unwrap();
             assert_same_result(&unobserved, &fates, &expected, &expected_fates);
         }
+    }
+
+    /// Frames held in memory, read a band at a time.
+    struct MemoryBands<'a>(&'a [LinearImage]);
+
+    impl BandSource for MemoryBands<'_> {
+        fn read(&self, index: usize, top: usize, band: &mut [f32]) -> Result<()> {
+            let image = &self.0[index];
+            let start = top * image.width * image.channels;
+            band.copy_from_slice(&image.data[start..start + band.len()]);
+            Ok(())
+        }
+    }
+
+    /// The bytes of band memory that give bands of `rows` rows.
+    fn band_memory(frames: &[LinearImage], rows: usize) -> usize {
+        let image = &frames[0];
+        2 * frames.len() * image.width * image.channels * 4 * rows
+    }
+
+    #[test]
+    fn band_passes_match_the_original_bit_for_bit() {
+        for (frames, options) in reference_cases() {
+            let (expected, expected_fates) = reference::integrate(&frames, &options);
+            let image = &frames[0];
+            let shape = (image.width, image.height, image.channels);
+            for rows in [1, 2, 7, image.height] {
+                let options = BatchStackOptions {
+                    band_memory_bytes: band_memory(&frames, rows),
+                    ..options.clone()
+                };
+                let mut bands_seen = Vec::new();
+                let (actual, fates) = integrate_bands(
+                    shape,
+                    frames.len(),
+                    &options,
+                    &MemoryBands(&frames),
+                    true,
+                    &mut |band, bands| bands_seen.push((band, bands)),
+                )
+                .unwrap();
+                let bands = image.height.div_ceil(rows);
+                assert_eq!(
+                    bands_seen,
+                    (0..bands).map(|band| (band, bands)).collect::<Vec<_>>()
+                );
+                let fates = fates
+                    .unwrap()
+                    .iter()
+                    .map(PackedFates::to_vec)
+                    .collect::<Vec<_>>();
+                assert_same_result(&actual, &fates, &expected, &expected_fates);
+                let (unrecorded, no_fates) = integrate_bands(
+                    shape,
+                    frames.len(),
+                    &options,
+                    &MemoryBands(&frames),
+                    false,
+                    &mut |_, _| {},
+                )
+                .unwrap();
+                assert!(no_fates.is_none());
+                assert_same_result(&unrecorded, &fates, &expected, &expected_fates);
+            }
+        }
+    }
+
+    #[test]
+    fn band_passes_stop_when_cancelled_or_a_read_fails() {
+        let frames = synthetic_frames(41, 31, 3, 12, 5);
+        let flag = Arc::new(AtomicBool::new(false));
+        let options = BatchStackOptions {
+            cancel: Some(Arc::clone(&flag).into()),
+            band_memory_bytes: band_memory(&frames, 4),
+            ..BatchStackOptions::default()
+        };
+        let result = integrate_bands(
+            (41, 31, 3),
+            frames.len(),
+            &options,
+            &MemoryBands(&frames),
+            true,
+            &mut |band, _| {
+                if band == 2 {
+                    flag.store(true, Ordering::Relaxed);
+                }
+            },
+        );
+        assert!(matches!(result, Err(Error::Cancelled)));
+
+        struct Failing<'a>(MemoryBands<'a>);
+        impl BandSource for Failing<'_> {
+            fn read(&self, index: usize, top: usize, band: &mut [f32]) -> Result<()> {
+                if index == 3 && top > 10 {
+                    return Err(Error::Stack("scratch file vanished".into()));
+                }
+                self.0.read(index, top, band)
+            }
+        }
+        let error = integrate_bands(
+            (41, 31, 3),
+            frames.len(),
+            &BatchStackOptions {
+                band_memory_bytes: band_memory(&frames, 4),
+                ..BatchStackOptions::default()
+            },
+            &Failing(MemoryBands(&frames)),
+            false,
+            &mut |_, _| {},
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("scratch file vanished"));
     }
 
     #[test]
