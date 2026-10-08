@@ -128,6 +128,27 @@ pub fn blind_index(arg: Option<&Path>) -> Result<Option<PathBuf>, DataPathError>
     }
 }
 
+/// The blind index to use with the star catalog at `star_data`: an
+/// explicit `arg` or `SEIZA_BLIND_INDEX` first, then a `blind-gaia16.idx`
+/// (or other `.idx`) in the catalog's own directory, then the usual default
+/// locations. Catalogs and their index ship together, so a catalog found in
+/// a directory finds the index beside it instead of building one in memory.
+pub fn blind_index_beside(
+    arg: Option<&Path>,
+    star_data: &Path,
+) -> Result<Option<PathBuf>, DataPathError> {
+    let env_set = std::env::var_os("SEIZA_BLIND_INDEX").is_some_and(|value| !value.is_empty());
+    if arg.is_none()
+        && !env_set
+        && let Some(beside) = star_data
+            .parent()
+            .and_then(|dir| find_in_dir(dir, &["blind-gaia16.idx"], Some("idx")))
+    {
+        return Ok(Some(beside));
+    }
+    blind_index(arg)
+}
+
 pub fn objects(arg: Option<&Path>) -> Result<PathBuf, DataPathError> {
     resolve(arg, "object catalog", None, None, &["objects.bin"], None)
 }
@@ -316,6 +337,29 @@ fn dirs_data_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_catalog_finds_the_blind_index_beside_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let stars = dir.path().join("stars-deep-gaia17.bin");
+        std::fs::write(&stars, b"stars").unwrap();
+        // No index beside the catalog: the usual resolution (none here).
+        if std::env::var_os("SEIZA_BLIND_INDEX").is_none() {
+            let without = blind_index_beside(None, &stars).unwrap();
+            assert!(without.is_none_or(|path| !path.starts_with(dir.path())));
+            let index = dir.path().join("blind-gaia16.idx");
+            std::fs::write(&index, b"index").unwrap();
+            assert_eq!(blind_index_beside(None, &stars).unwrap(), Some(index));
+        }
+        // An explicit index always wins.
+        let other = tempfile::tempdir().unwrap();
+        let explicit = other.path().join("custom.idx");
+        std::fs::write(&explicit, b"index").unwrap();
+        assert_eq!(
+            blind_index_beside(Some(&explicit), &stars).unwrap(),
+            Some(explicit)
+        );
+    }
 
     #[test]
     fn catalog_search_starts_with_setup_directory() {

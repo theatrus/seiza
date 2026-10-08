@@ -3813,11 +3813,13 @@ pub unsafe extern "C" fn seiza_solve_image_json(
 
         let star_path = seiza::data_paths::star_data(catalog_directory.as_deref())
             .map_err(|error| error.to_string())?;
-        let index_path = seiza::data_paths::blind_index(catalog_directory.as_deref())
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| {
-                "no blind index found; install a complete Seiza catalog bundle first".to_string()
-            })?;
+        let index_path =
+            seiza::data_paths::blind_index_beside(catalog_directory.as_deref(), &star_path)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| {
+                    "no blind index found; install a complete Seiza catalog bundle first"
+                        .to_string()
+                })?;
         let catalog = TileCatalog::open(&star_path)
             .map_err(|error| format!("failed to open {}: {error}", star_path.display()))?;
         let index = BlindIndex::open(&index_path)
@@ -5753,8 +5755,13 @@ fn catalog_status(catalog_directory: Option<&Path>) -> CatalogStatusResponse {
     let directory = catalog_directory
         .map(Path::to_path_buf)
         .unwrap_or_else(seiza::data_paths::default_catalog_dir);
-    let star_catalog = component_status(seiza::data_paths::star_data(catalog_directory));
-    let blind_index = optional_component_status(seiza::data_paths::blind_index(catalog_directory));
+    let star_data = seiza::data_paths::star_data(catalog_directory);
+    // The index that ships with the catalog sits beside it.
+    let blind_index = optional_component_status(match &star_data {
+        Ok(star_path) => seiza::data_paths::blind_index_beside(catalog_directory, star_path),
+        Err(_) => seiza::data_paths::blind_index(catalog_directory),
+    });
+    let star_catalog = component_status(star_data);
     let objects = component_status(seiza::data_paths::objects(catalog_directory));
     let transients = component_status(seiza::data_paths::transients(catalog_directory));
     let minor_bodies = component_status(seiza::data_paths::minor_bodies(catalog_directory));

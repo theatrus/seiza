@@ -1423,7 +1423,7 @@ fn main() -> Result<()> {
             sky_map_foreground,
         } => {
             let data = with_data_flag_hint(data_paths::star_data(data.as_deref()))?;
-            let index = data_paths::blind_index(index.as_deref())?;
+            let index = data_paths::blind_index_beside(index.as_deref(), &data)?;
             solve_blind_command(
                 &image,
                 &data,
@@ -1463,10 +1463,13 @@ fn main() -> Result<()> {
                 Some(_) => None,
                 None => Some(with_data_flag_hint(data_paths::star_data(data.as_deref()))?),
             };
-            let index = index
-                .map(|path| data_paths::blind_index(Some(&path)))
-                .transpose()?
-                .flatten();
+            let index = match &data {
+                Some(data) => data_paths::blind_index_beside(index.as_deref(), data)?,
+                None => index
+                    .map(|path| data_paths::blind_index(Some(&path)))
+                    .transpose()?
+                    .flatten(),
+            };
             worker::run(worker::WorkerOptions {
                 data_path: data.as_deref(),
                 index_path: index.as_deref(),
