@@ -1653,6 +1653,7 @@ name = "seiza-fits"
 version = "0.2.6"
 dependencies = [
  "multiversion",
+ "rayon",
  "seiza-stretch",
  "tempfile",
 ]

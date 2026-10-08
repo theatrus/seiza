@@ -9,6 +9,8 @@
 //! in the 3×3 neighborhood — bilinear interpolation, adequate for star
 //! detection and display.
 
+use rayon::prelude::*;
+
 /// The stored row direction declared by the FITS `ROWORDER` keyword.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowOrder {
@@ -152,7 +154,8 @@ impl RgbImage16 {
     /// Collapse to luminance as `(R + 2G + B) / 4`.
     pub fn to_luma_u16(&self) -> Vec<u16> {
         self.data
-            .chunks_exact(3)
+            .par_chunks_exact(3)
+            .with_min_len(1 << 14)
             .map(|px| ((px[0] as u32 + 2 * px[1] as u32 + px[2] as u32) / 4) as u16)
             .collect()
     }
@@ -222,7 +225,12 @@ pub fn debayer_rgb_f32_rows(
     );
 }
 
-fn debayer_interleaved<T: DebayerSample>(
+/// Rows one rayon task debayers in [`debayer_interleaved`].
+const BAND_ROWS: usize = 32;
+
+/// Each output row depends only on the mosaic, so bands of rows debayer in
+/// parallel into exactly the samples one pass over the image gives.
+fn debayer_interleaved<T: DebayerSample + Send + Sync>(
     mosaic: &[T],
     width: usize,
     height: usize,
@@ -230,10 +238,25 @@ fn debayer_interleaved<T: DebayerSample>(
     x_offset: usize,
     y_offset: usize,
 ) -> Vec<T> {
+    assert_eq!(mosaic.len(), width * height);
     let mut data = vec![T::default(); width * height * 3];
-    debayer_rows(
-        mosaic, width, height, pattern, x_offset, y_offset, 0, &mut data,
-    );
+    if width == 0 {
+        return data;
+    }
+    data.par_chunks_mut(width * 3 * BAND_ROWS)
+        .enumerate()
+        .for_each(|(band, rows)| {
+            debayer_rows(
+                mosaic,
+                width,
+                height,
+                pattern,
+                x_offset,
+                y_offset,
+                band * BAND_ROWS,
+                rows,
+            );
+        });
     data
 }
 
@@ -489,6 +512,71 @@ mod tests {
             }
         }
         data
+    }
+
+    #[test]
+    fn parallel_bands_match_one_serial_pass() {
+        let mut state = 0x2545_f491_u32;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state
+        };
+        // Heights that end the bands part way, and odd widths.
+        for (width, height) in [(0, 0), (1, 40), (5, 70), (33, 97), (64, 65)] {
+            let integers = (0..width * height)
+                .map(|_| next() as u16)
+                .collect::<Vec<_>>();
+            let floats = (0..width * height)
+                .map(|_| match next() % 23 {
+                    0 => f32::NAN,
+                    1 => f32::INFINITY,
+                    2 => -0.0,
+                    _ => (next() % 65_536) as f32 * 0.37 + 0.1,
+                })
+                .collect::<Vec<_>>();
+            for pattern in [BayerPattern::Rggb, BayerPattern::Gbrg] {
+                for (x_offset, y_offset) in [(0, 0), (1, 1)] {
+                    let mut serial = vec![0_u16; width * height * 3];
+                    debayer_rows(
+                        &integers,
+                        width,
+                        height,
+                        pattern,
+                        x_offset,
+                        y_offset,
+                        0,
+                        &mut serial,
+                    );
+                    let rgb = debayer_rgb16(&integers, width, height, pattern, x_offset, y_offset);
+                    assert_eq!(rgb.data, serial, "{width}x{height} {pattern:?}");
+                    let luma = serial
+                        .chunks_exact(3)
+                        .map(|px| ((px[0] as u32 + 2 * px[1] as u32 + px[2] as u32) / 4) as u16)
+                        .collect::<Vec<_>>();
+                    assert_eq!(rgb.to_luma_u16(), luma, "{width}x{height} {pattern:?}");
+
+                    let mut serial = vec![0.0_f32; width * height * 3];
+                    debayer_rows(
+                        &floats,
+                        width,
+                        height,
+                        pattern,
+                        x_offset,
+                        y_offset,
+                        0,
+                        &mut serial,
+                    );
+                    let rgb = debayer_rgb_f32(&floats, width, height, pattern, x_offset, y_offset);
+                    assert_eq!(
+                        rgb.data.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        serial.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        "{width}x{height} {pattern:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

@@ -848,7 +848,8 @@ impl ResolvedGhs {
         self.params
     }
 
-    fn map(self, value: f64) -> f64 {
+    #[inline(always)]
+    fn map(&self, value: f64) -> f64 {
         let x =
             ((value - self.params.black) / (self.params.white - self.params.black)).clamp(0.0, 1.0);
         let raw = if x < self.params.protect_shadows {
@@ -874,21 +875,50 @@ impl ResolvedGhs {
 
 impl ResolvedCurve {
     pub fn map(self, value: f32) -> f32 {
+        CurveMapper::new(self).map(value)
+    }
+}
+
+/// A [`ResolvedCurve`] ready to map many samples: `asinh(strength)`, which
+/// normalizes the asinh curve and depends only on the curve, is worked out
+/// once instead of once per sample. It is the same value either way, so
+/// every sample maps to the same bits.
+#[derive(Clone, Copy, Debug)]
+struct CurveMapper {
+    curve: ResolvedCurve,
+    /// `asinh(strength)` for an asinh curve, unused otherwise.
+    asinh_strength: f32,
+}
+
+impl CurveMapper {
+    fn new(curve: ResolvedCurve) -> Self {
+        let asinh_strength = match curve {
+            ResolvedCurve::Asinh { strength, .. } => strength.asinh(),
+            _ => 0.0,
+        };
+        Self {
+            curve,
+            asinh_strength,
+        }
+    }
+
+    #[inline(always)]
+    fn map(self, value: f32) -> f32 {
         if !value.is_finite() {
             return 0.0;
         }
-        let mapped = match self {
-            Self::Identity => f64::from(value),
-            Self::Linear { black, white } => (f64::from(value) - black) / (white - black),
-            Self::Asinh {
+        let mapped = match self.curve {
+            ResolvedCurve::Identity => f64::from(value),
+            ResolvedCurve::Linear { black, white } => (f64::from(value) - black) / (white - black),
+            ResolvedCurve::Asinh {
                 black,
                 white,
                 strength,
             } => {
                 let linear = ((value - black) / (white - black)).max(0.0);
-                f64::from((strength * linear).asinh() / strength.asinh())
+                f64::from((strength * linear).asinh() / self.asinh_strength)
             }
-            Self::Mtf {
+            ResolvedCurve::Mtf {
                 shadows,
                 midtone,
                 highlights,
@@ -896,9 +926,32 @@ impl ResolvedCurve {
                 let input = 1.0 - f64::from(highlights) + f64::from(value - shadows);
                 midtones_transfer_function(midtone, input)
             }
-            Self::Ghs(ghs) => ghs.map(f64::from(value)),
+            ResolvedCurve::Ghs(ghs) => ghs.map(f64::from(value)),
         };
         mapped.clamp(0.0, 1.0) as f32
+    }
+
+    /// Map `input` into `output` through `convert`, with one loop per kind
+    /// of curve so that no sample branches on the kind.
+    fn map_into<T, F>(self, input: &[f32], output: &mut [T], convert: F)
+    where
+        F: Fn(f32) -> T + Copy,
+    {
+        #[inline(always)]
+        fn run<T>(input: &[f32], output: &mut [T], map: impl Fn(f32) -> T) {
+            for (output, &value) in output.iter_mut().zip(input) {
+                *output = map(value);
+            }
+        }
+        // Each arm repeats the call, but the curve's kind is known inside it,
+        // so the inlined `map` keeps only that kind's operations.
+        match self.curve {
+            ResolvedCurve::Identity => run(input, output, |value| convert(self.map(value))),
+            ResolvedCurve::Linear { .. } => run(input, output, |value| convert(self.map(value))),
+            ResolvedCurve::Asinh { .. } => run(input, output, |value| convert(self.map(value))),
+            ResolvedCurve::Mtf { .. } => run(input, output, |value| convert(self.map(value))),
+            ResolvedCurve::Ghs(_) => run(input, output, |value| convert(self.map(value))),
+        }
     }
 }
 
@@ -960,25 +1013,43 @@ impl StretchPlan {
 
     fn apply_mapped<T, F>(&self, data: &[f32], channel_count: usize, convert: F) -> Result<Vec<T>>
     where
-        T: Send,
+        T: Copy + Default + Send,
         F: Fn(f32) -> T + Copy + Send + Sync,
     {
         self.validate_input(data, channel_count)?;
-        let output = match self.color_strategy {
-            ColorStrategy::Linked => data
-                .par_iter()
-                .map(|value| convert(self.curves[0].map(*value)))
-                .collect(),
-            ColorStrategy::Unlinked => data
-                .par_iter()
-                .enumerate()
-                .map(|(index, value)| convert(self.curves[index % channel_count].map(*value)))
-                .collect(),
-            ColorStrategy::LuminancePreserving => data
-                .par_chunks_exact(3)
-                .flat_map_iter(|pixel| self.map_luminance_pixel(pixel).map(convert))
-                .collect(),
-        };
+        let mappers = self
+            .curves
+            .iter()
+            .copied()
+            .map(CurveMapper::new)
+            .collect::<Vec<_>>();
+        let mut output = vec![T::default(); data.len()];
+        // Whole pixels per task, so each chunk starts on a first channel.
+        let chunk = channel_count * MAP_CHUNK_PIXELS;
+        let chunks = output.par_chunks_mut(chunk).zip(data.par_chunks(chunk));
+        match self.color_strategy {
+            ColorStrategy::Linked => {
+                chunks.for_each(|(output, input)| mappers[0].map_into(input, output, convert))
+            }
+            ColorStrategy::Unlinked => chunks.for_each(|(output, input)| {
+                for (output, input) in output
+                    .chunks_exact_mut(channel_count)
+                    .zip(input.chunks_exact(channel_count))
+                {
+                    for ((output, &value), mapper) in output.iter_mut().zip(input).zip(&mappers) {
+                        *output = convert(mapper.map(value));
+                    }
+                }
+            }),
+            ColorStrategy::LuminancePreserving => chunks.for_each(|(output, input)| {
+                for (output, pixel) in output.chunks_exact_mut(3).zip(input.chunks_exact(3)) {
+                    let mapped = map_luminance_pixel(mappers[0], pixel);
+                    for (output, value) in output.iter_mut().zip(mapped) {
+                        *output = convert(value);
+                    }
+                }
+            }),
+        }
         Ok(output)
     }
 
@@ -993,29 +1064,34 @@ impl StretchPlan {
         }
         Ok(())
     }
+}
 
-    fn map_luminance_pixel(&self, pixel: &[f32]) -> [f32; 3] {
-        if pixel.iter().any(|value| !value.is_finite()) {
-            return [0.0; 3];
+/// Pixels one rayon task maps in [`StretchPlan`]'s whole-image application.
+const MAP_CHUNK_PIXELS: usize = 1 << 14;
+
+/// Stretch an RGB pixel's Rec.709 luminance and scale its channels by the
+/// same factor, keeping them in gamut.
+fn map_luminance_pixel(curve: CurveMapper, pixel: &[f32]) -> [f32; 3] {
+    if pixel.iter().any(|value| !value.is_finite()) {
+        return [0.0; 3];
+    }
+    let luminance = (LUMA_RED * f64::from(pixel[0])
+        + LUMA_GREEN * f64::from(pixel[1])
+        + LUMA_BLUE * f64::from(pixel[2])) as f32;
+    let target = curve.map(luminance);
+    if luminance > 1.0e-8 {
+        let mut scale = target / luminance;
+        let maximum = pixel.iter().copied().fold(0.0_f32, f32::max);
+        if maximum * scale > 1.0 {
+            scale = 1.0 / maximum;
         }
-        let luminance = (LUMA_RED * f64::from(pixel[0])
-            + LUMA_GREEN * f64::from(pixel[1])
-            + LUMA_BLUE * f64::from(pixel[2])) as f32;
-        let target = self.curves[0].map(luminance);
-        if luminance > 1.0e-8 {
-            let mut scale = target / luminance;
-            let maximum = pixel.iter().copied().fold(0.0_f32, f32::max);
-            if maximum * scale > 1.0 {
-                scale = 1.0 / maximum;
-            }
-            [
-                (pixel[0] * scale).clamp(0.0, 1.0),
-                (pixel[1] * scale).clamp(0.0, 1.0),
-                (pixel[2] * scale).clamp(0.0, 1.0),
-            ]
-        } else {
-            [target; 3]
-        }
+        [
+            (pixel[0] * scale).clamp(0.0, 1.0),
+            (pixel[1] * scale).clamp(0.0, 1.0),
+            (pixel[2] * scale).clamp(0.0, 1.0),
+        ]
+    } else {
+        [target; 3]
     }
 }
 
@@ -1263,12 +1339,24 @@ fn validate_mtf(shadows: f64, midtone: f64, highlights: f64) -> Result<()> {
 // Quantizes like the legacy u16 LUT's `* 255.0 + 0.5` (identical for the
 // clamped non-negative domain); the LUT keeps its own form because it is
 // frozen for byte-for-byte preview compatibility.
+//
+// Both round half away from zero as `f32::round` does, without its libm call
+// on x86-64's SSE2 baseline. The scaled value is never below zero, so the
+// cast truncates it to its whole part, the subtraction leaves the fraction
+// exactly, and a fraction of a half or more rounds up. NaN casts to 0 both
+// ways.
+#[inline(always)]
 fn to_u8(value: f32) -> u8 {
-    (value.clamp(0.0, 1.0) * 255.0).round() as u8
+    let scaled = value.clamp(0.0, 1.0) * 255.0;
+    let whole = scaled as u8;
+    whole + u8::from(scaled - f32::from(whole) >= 0.5)
 }
 
+#[inline(always)]
 fn to_u16(value: f32) -> u16 {
-    (value.clamp(0.0, 1.0) * f32::from(u16::MAX)).round() as u16
+    let scaled = value.clamp(0.0, 1.0) * f32::from(u16::MAX);
+    let whole = scaled as u16;
+    whole + u16::from(scaled - f32::from(whole) >= 0.5)
 }
 
 /// The PixInsight/N.I.N.A. midtones transfer function.
@@ -1294,15 +1382,44 @@ pub struct Statistics {
     pub count: usize,
 }
 
+/// Samples one rayon task counts or maps in the `u16` statistics and LUTs.
+const U16_CHUNK: usize = 1 << 18;
+
 pub fn statistics_u16(data: &[u16]) -> Statistics {
-    let mut histogram = vec![0u32; 65_536];
-    let mut sum = 0u64;
-    let mut sum_sq = 0u128;
-    for &value in data {
-        histogram[value as usize] += 1;
-        sum += u64::from(value);
-        sum_sq += u128::from(value) * u128::from(value);
-    }
+    // Chunks count into histograms of their own, merged by adding counts.
+    // The sums come from the merged histogram: every sample is in it once,
+    // and integer sums do not depend on their order.
+    let histogram = data
+        .par_chunks(U16_CHUNK)
+        .fold(
+            || vec![0u32; 65_536],
+            |mut histogram, chunk| {
+                for &value in chunk {
+                    histogram[usize::from(value)] += 1;
+                }
+                histogram
+            },
+        )
+        .reduce(
+            || vec![0u32; 65_536],
+            |mut histogram, other| {
+                for (count, other) in histogram.iter_mut().zip(&other) {
+                    *count += other;
+                }
+                histogram
+            },
+        );
+    let (sum, sum_sq) =
+        histogram
+            .iter()
+            .enumerate()
+            .fold((0u64, 0u128), |(sum, sum_sq), (value, &samples)| {
+                let value = value as u64;
+                (
+                    sum + value * u64::from(samples),
+                    sum_sq + u128::from(value * value) * u128::from(samples),
+                )
+            });
     let count = data.len();
     if count == 0 {
         return Statistics {
@@ -1365,7 +1482,10 @@ pub fn statistics_u16(data: &[u16]) -> Statistics {
 /// bits, so `stretch_u16_to_u8` is always `stretch_u16_to_u16 >> 8`.
 pub fn stretch_u16_to_u8(data: &[u16], stats: &Statistics, params: &StretchParams) -> Vec<u8> {
     let map = stretch_u16_map(stats, params);
-    data.iter().map(|value| map[usize::from(*value)]).collect()
+    data.par_iter()
+        .with_min_len(U16_CHUNK)
+        .map(|value| map[usize::from(*value)])
+        .collect()
 }
 
 /// Stretch `u16` data directly to `u16` through a 65,536-entry LUT, retaining
@@ -1383,7 +1503,10 @@ pub fn stretch_u16_to_u16(data: &[u16], stats: &Statistics, params: &StretchPara
             denormalize_u16(stretched)
         })
         .collect::<Vec<_>>();
-    data.iter().map(|value| map[usize::from(*value)]).collect()
+    data.par_iter()
+        .with_min_len(U16_CHUNK)
+        .map(|value| map[usize::from(*value)])
+        .collect()
 }
 
 fn stretch_u16_map(stats: &Statistics, params: &StretchParams) -> Vec<u8> {
@@ -1750,6 +1873,268 @@ mod tests {
             .apply(&physical, 1)
             .unwrap();
         assert_eq!(stack.apply_u8(&mapped, 1).unwrap().data, [26, 51]);
+    }
+
+    /// `ResolvedCurve::map` as it was before `asinh(strength)` was worked
+    /// out once per curve.
+    fn previous_map(curve: ResolvedCurve, value: f32) -> f32 {
+        if !value.is_finite() {
+            return 0.0;
+        }
+        let mapped = match curve {
+            ResolvedCurve::Identity => f64::from(value),
+            ResolvedCurve::Linear { black, white } => (f64::from(value) - black) / (white - black),
+            ResolvedCurve::Asinh {
+                black,
+                white,
+                strength,
+            } => {
+                let linear = ((value - black) / (white - black)).max(0.0);
+                f64::from((strength * linear).asinh() / strength.asinh())
+            }
+            ResolvedCurve::Mtf {
+                shadows,
+                midtone,
+                highlights,
+            } => {
+                let input = 1.0 - f64::from(highlights) + f64::from(value - shadows);
+                midtones_transfer_function(midtone, input)
+            }
+            ResolvedCurve::Ghs(ghs) => ghs.map(f64::from(value)),
+        };
+        mapped.clamp(0.0, 1.0) as f32
+    }
+
+    fn previous_to_u8(value: f32) -> u8 {
+        (value.clamp(0.0, 1.0) * 255.0).round() as u8
+    }
+
+    fn previous_to_u16(value: f32) -> u16 {
+        (value.clamp(0.0, 1.0) * f32::from(u16::MAX)).round() as u16
+    }
+
+    /// `StretchPlan::apply_mapped` as it was: every sample through the
+    /// plan's curves one at a time.
+    fn previous_apply<T>(plan: &StretchPlan, data: &[f32], convert: impl Fn(f32) -> T) -> Vec<T> {
+        let channels = plan.channels;
+        match plan.color_strategy {
+            ColorStrategy::Linked => data
+                .iter()
+                .map(|value| convert(previous_map(plan.curves[0], *value)))
+                .collect(),
+            ColorStrategy::Unlinked => data
+                .iter()
+                .enumerate()
+                .map(|(index, value)| convert(previous_map(plan.curves[index % channels], *value)))
+                .collect(),
+            ColorStrategy::LuminancePreserving => data
+                .chunks_exact(3)
+                .flat_map(|pixel| {
+                    let mapped = if pixel.iter().any(|value| !value.is_finite()) {
+                        [0.0; 3]
+                    } else {
+                        let luminance = (LUMA_RED * f64::from(pixel[0])
+                            + LUMA_GREEN * f64::from(pixel[1])
+                            + LUMA_BLUE * f64::from(pixel[2]))
+                            as f32;
+                        let target = previous_map(plan.curves[0], luminance);
+                        if luminance > 1.0e-8 {
+                            let mut scale = target / luminance;
+                            let maximum = pixel.iter().copied().fold(0.0_f32, f32::max);
+                            if maximum * scale > 1.0 {
+                                scale = 1.0 / maximum;
+                            }
+                            [
+                                (pixel[0] * scale).clamp(0.0, 1.0),
+                                (pixel[1] * scale).clamp(0.0, 1.0),
+                                (pixel[2] * scale).clamp(0.0, 1.0),
+                            ]
+                        } else {
+                            [target; 3]
+                        }
+                    };
+                    mapped.map(&convert)
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn rounding_without_libm_matches_f32_round() {
+        let mut state = 0xbb67_ae85_84ca_a73b_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut values = vec![
+            f32::NAN,
+            -f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            0.0,
+            -0.0,
+            f32::MIN_POSITIVE,
+            1.0e-40,
+            1.0,
+            1.0 + f32::EPSILON,
+            f32::MAX,
+            -1.0,
+        ];
+        // Every value whose scaled form lies within a few steps of a whole
+        // number or a half, where rounding is decided.
+        for scale in [255.0_f32, 65_535.0] {
+            for step in 0..=(2 * scale as u32) {
+                let center = step as f32 / 2.0 / scale;
+                let mut below = center;
+                let mut above = center;
+                for _ in 0..4 {
+                    below = below.next_down();
+                    above = above.next_up();
+                    values.extend([below, above]);
+                }
+                values.push(center);
+            }
+        }
+        values.extend((0..200_000).map(|_| f32::from_bits(next() as u32)));
+        values.extend((0..200_000).map(|_| (next() >> 40) as f32 / (1 << 24) as f32));
+        for value in values {
+            assert_eq!(to_u8(value), previous_to_u8(value), "{value:e}");
+            assert_eq!(to_u16(value), previous_to_u16(value), "{value:e}");
+        }
+    }
+
+    /// Every one of the 2^32 inputs; run with `--release --ignored`.
+    #[test]
+    #[ignore]
+    fn rounding_without_libm_matches_f32_round_for_every_input() {
+        let mismatches = (0..=u32::MAX)
+            .into_par_iter()
+            .filter(|&bits| {
+                let value = f32::from_bits(bits);
+                to_u8(value) != previous_to_u8(value) || to_u16(value) != previous_to_u16(value)
+            })
+            .count();
+        assert_eq!(mismatches, 0);
+    }
+
+    #[test]
+    fn plans_map_every_sample_as_before() {
+        let mut state = 0x3c6e_f372_fe94_f82b_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let curves = [
+            ResolvedCurve::Identity,
+            ResolvedCurve::Linear {
+                black: 0.02,
+                white: 0.8,
+            },
+            ResolvedCurve::Linear {
+                black: -0.5,
+                white: 3.0e9,
+            },
+            ResolvedCurve::Asinh {
+                black: 0.01,
+                white: 0.9,
+                strength: 10.0,
+            },
+            ResolvedCurve::Asinh {
+                black: 0.1,
+                white: 0.2,
+                strength: 500.0,
+            },
+            ResolvedCurve::Mtf {
+                shadows: 0.05,
+                midtone: 0.12,
+                highlights: 0.97,
+            },
+            StretchModel::Ghs(GhsParams {
+                stretch_factor: 5.0,
+                local_intensity: 2.0,
+                symmetry_point: 0.1,
+                protect_shadows: 0.02,
+                protect_highlights: 0.9,
+                black: 0.0,
+                white: 1.0,
+            })
+            .resolve_explicit()
+            .unwrap(),
+            StretchModel::Ghs(GhsParams {
+                stretch_factor: 3.0,
+                local_intensity: -1.0,
+                symmetry_point: 0.3,
+                protect_shadows: 0.0,
+                protect_highlights: 1.0,
+                black: 0.0,
+                white: 1.0,
+            })
+            .resolve_explicit()
+            .unwrap(),
+        ];
+        let sample = |next: &mut dyn FnMut() -> u64| match next() % 50 {
+            0 => f32::NAN,
+            1 => f32::INFINITY,
+            2 => f32::NEG_INFINITY,
+            3 => -0.0,
+            4 => 0.0,
+            5 => -0.25,
+            6 => 7.0,
+            7 => 1.0e-9,
+            _ => (next() >> 40) as f32 / (1 << 24) as f32,
+        };
+        // Empty, single-pixel, and chunk-crossing images.
+        for pixels in [0, 1, 5, MAP_CHUNK_PIXELS + 7] {
+            for (index, &curve) in curves.iter().enumerate() {
+                let other = curves[(index + 3) % curves.len()];
+                let third = curves[(index + 5) % curves.len()];
+                let plans = [
+                    StretchPlan::from_resolved(1, ColorStrategy::Linked, vec![curve]).unwrap(),
+                    StretchPlan::from_resolved(3, ColorStrategy::Linked, vec![curve]).unwrap(),
+                    StretchPlan::from_resolved(
+                        3,
+                        ColorStrategy::Unlinked,
+                        vec![curve, other, third],
+                    )
+                    .unwrap(),
+                    StretchPlan::from_resolved(3, ColorStrategy::LuminancePreserving, vec![curve])
+                        .unwrap(),
+                ];
+                for plan in plans {
+                    let data = (0..pixels * plan.channels)
+                        .map(|_| sample(&mut next))
+                        .collect::<Vec<_>>();
+                    let label = format!("{curve:?} {:?} {pixels}", plan.color_strategy);
+                    let f32s = plan.apply_f32(&data, plan.channels).unwrap();
+                    let expected = previous_apply(&plan, &data, |value| value);
+                    assert_eq!(f32s.len(), expected.len(), "{label}");
+                    for (got, expected) in f32s.iter().zip(&expected) {
+                        assert_eq!(got.to_bits(), expected.to_bits(), "{label}");
+                    }
+                    assert_eq!(
+                        plan.apply_u8(&data, plan.channels).unwrap(),
+                        previous_apply(&plan, &data, previous_to_u8),
+                        "{label}"
+                    );
+                    assert_eq!(
+                        plan.apply_u16(&data, plan.channels).unwrap(),
+                        previous_apply(&plan, &data, previous_to_u16),
+                        "{label}"
+                    );
+                    for &value in data.iter().take(64) {
+                        assert_eq!(
+                            curve.map(value).to_bits(),
+                            previous_map(curve, value).to_bits(),
+                            "{label}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -2130,6 +2515,82 @@ mod tests {
         assert!((f64::from(sorted[sorted.len() / 2]) - 0.2 * 255.0).abs() < 16.0);
         assert!(output[0] > 200);
         assert!(sorted[100] < 60);
+    }
+
+    /// `statistics_u16`'s counting and sums as they were before they ran on
+    /// rayon: one histogram and running sums over every sample in turn.
+    fn previous_histogram_sums(data: &[u16]) -> (Vec<u32>, u64, u128) {
+        let mut histogram = vec![0u32; 65_536];
+        let mut sum = 0u64;
+        let mut sum_sq = 0u128;
+        for &value in data {
+            histogram[value as usize] += 1;
+            sum += u64::from(value);
+            sum_sq += u128::from(value) * u128::from(value);
+        }
+        (histogram, sum, sum_sq)
+    }
+
+    /// The `u16` stretches as they were before they ran on rayon.
+    fn previous_stretches(
+        data: &[u16],
+        stats: &Statistics,
+        params: &StretchParams,
+    ) -> (Vec<u8>, Vec<u16>) {
+        let map = stretch_u16_map(stats, params);
+        let narrow = data.iter().map(|value| map[usize::from(*value)]).collect();
+        let (shadows, midtone, highlights) = stretch_u16_curve(stats, params);
+        let map = (0..65_536)
+            .map(|value| {
+                let input = 1.0 - highlights + value as f64 / 65_535.0 - shadows;
+                denormalize_u16(midtones_transfer_function(midtone, input))
+            })
+            .collect::<Vec<_>>();
+        let wide = data.iter().map(|value| map[usize::from(*value)]).collect();
+        (narrow, wide)
+    }
+
+    #[test]
+    fn parallel_u16_statistics_and_stretches_match_the_serial_ones() {
+        let mut state = 0x6a09_e667_f3bc_c908_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for count in [0, 1, 2, 3, 1000, U16_CHUNK, 2 * U16_CHUNK + 5] {
+            for spread in [1_u64, 300, 65_536] {
+                let data = (0..count)
+                    .map(|_| (next() % spread) as u16 + if spread == 1 { 65_535 } else { 0 })
+                    .collect::<Vec<_>>();
+                let statistics = statistics_u16(&data);
+                // The rest of the statistics comes from these, as before.
+                let (histogram, sum, sum_sq) = previous_histogram_sums(&data);
+                assert_eq!(statistics.count, count);
+                if count > 0 {
+                    let mean = sum as f64 / count as f64;
+                    let variance = (sum_sq as f64 / count as f64 - mean * mean).max(0.0);
+                    assert_eq!(
+                        statistics.mean.to_bits(),
+                        mean.to_bits(),
+                        "{count} {spread}"
+                    );
+                    assert_eq!(
+                        statistics.std_dev.to_bits(),
+                        variance.sqrt().to_bits(),
+                        "{count} {spread}"
+                    );
+                    let min = histogram.iter().position(|count| *count > 0).unwrap() as u16;
+                    let max = histogram.iter().rposition(|count| *count > 0).unwrap() as u16;
+                    assert_eq!((statistics.min, statistics.max), (min, max));
+                }
+                let params = StretchParams::default();
+                let (narrow, wide) = previous_stretches(&data, &statistics, &params);
+                assert_eq!(stretch_u16_to_u8(&data, &statistics, &params), narrow);
+                assert_eq!(stretch_u16_to_u16(&data, &statistics, &params), wide);
+            }
+        }
     }
 
     #[test]

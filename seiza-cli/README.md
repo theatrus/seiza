@@ -376,14 +376,16 @@ changed:
 | `--workers`, `--pipeline-memory-mib` | derived, `4096` | Frames read and prepared at once, and the memory for them; the memory also bounds the bands of rows of every frame `--reintegrate` reads back at once. |
 
 On 126 one-shot-color frames of M45 (ASI2600MC, 173 mm, no calibration) the
-defaults stacked in 2 min 23 s at 2.7px FWHM with a 0.10px red-blue offset;
-the settings before these options took 3 min 16 s at 3.1px and 0.42px. Adding
-`--reintegrate` took 5 min 44 s, and `--drizzle 1` 6 min 58 s at 2.69px FWHM
+defaults stacked in 1 min 17 s at 2.7px FWHM with a 0.10px red-blue offset;
+the settings before these options gave 3.1px and 0.42px. Adding
+`--reintegrate` took 2 min 10 s, and `--drizzle 1` 3 min 24 s at 2.69px FWHM
 and an SNR of 356. After WBPP had registered the same frames, PixInsight's
 ImageIntegration and DrizzleIntegration took 6 min 54 s and 2 min 41 s for
 2.67px and 357. On 62 undersampled H-alpha frames (ASI2600MM, 300 mm),
-`--drizzle 2` took 1 min 23 s in all and gave 1.78px FWHM in reference pixels;
-WBPP's whole run with 2x drizzle took 7 min 5 s for 1.77px.
+`--drizzle 2` took 44 s in all and gave 1.78px FWHM in reference pixels;
+WBPP's whole run with 2x drizzle took 7 min 5 s for 1.77px. Seiza's times are
+from an i5-1340P laptop (4 performance and 8 efficiency cores, 16 threads,
+32 GB) in October 2026.
 
 Raw calibration sequences can be integrated into reusable masters first:
 
