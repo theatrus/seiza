@@ -2863,7 +2863,7 @@ mod tests {
                 .flat_map(|index| {
                     let samples =
                         matches!(normalization, NormalizationMode::LocalBackground { .. })
-                            .then(|| format!("frame-{index}.fit"));
+                            .then(|| format!("frame-{index}.samples"));
                     std::iter::once(format!("frame-{index}.f32")).chain(samples)
                 })
                 .collect::<Vec<_>>();

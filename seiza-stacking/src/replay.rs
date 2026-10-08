@@ -571,7 +571,7 @@ impl CacheFiles {
     }
 
     fn samples_path(&self, index: usize) -> PathBuf {
-        self.directory.path().join(format!("frame-{index}.fit"))
+        self.directory.path().join(format!("frame-{index}.samples"))
     }
 
     /// The samples of `fitted`, a frame's registered, unnormalized and
@@ -606,7 +606,7 @@ impl CacheFiles {
         };
         FrameCache::write_image(frame.path.as_deref()?, image, keep_zeros).ok()?;
         if let Some(samples) = samples {
-            let path = staged("fit");
+            let path = staged("samples");
             if FrameCache::write_samples(&path, &samples).is_ok() {
                 frame.samples = Some(path);
             } else {
@@ -2212,7 +2212,7 @@ mod tests {
         admissions.admit(Some(admitted));
         admissions.admit(None);
         admissions.admit(None);
-        assert_eq!(files(), ["frame-0.f32", "frame-0.fit"]);
+        assert_eq!(files(), ["frame-0.f32", "frame-0.samples"]);
         // The identity normalization a replay applies turns only a negative
         // zero positive; the file holds what it would have made.
         let mut normalized = image.clone();
@@ -2252,7 +2252,12 @@ mod tests {
         );
         assert_eq!(
             files(),
-            ["frame-0.f32", "frame-0.fit", "frame-1.f32", "frame-1.fit"]
+            [
+                "frame-0.f32",
+                "frame-0.samples",
+                "frame-1.f32",
+                "frame-1.samples"
+            ]
         );
         // A Bayer-drizzled frame's photosites are kept as they are, negative
         // zero and all, without samples when it has none to give.

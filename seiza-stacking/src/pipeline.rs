@@ -1292,7 +1292,7 @@ mod tests {
     pub(super) fn retained_files(scratch: &Path) -> Vec<String> {
         let (samples, images) = kept_files(scratch);
         for name in &samples {
-            let image = name.replace(".fit", ".f32");
+            let image = name.replace(".samples", ".f32");
             assert!(images.contains(&image), "{name} is kept without {image}");
         }
         images
@@ -1317,7 +1317,9 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .collect::<Vec<_>>();
         names.sort();
-        names.into_iter().partition(|name| name.ends_with(".fit"))
+        names
+            .into_iter()
+            .partition(|name| name.ends_with(".samples"))
     }
 
     /// The names of the files kept for these admitted frames, sorted.
@@ -1392,7 +1394,7 @@ mod tests {
             assert_eq!(retained_files(&scratch), frame_files(0..8));
             let samples = match options.normalization {
                 crate::NormalizationMode::LocalBackground { .. } => (0..8)
-                    .map(|index| format!("frame-{index}.fit"))
+                    .map(|index| format!("frame-{index}.samples"))
                     .collect::<Vec<_>>(),
                 _ => Vec::new(),
             };
