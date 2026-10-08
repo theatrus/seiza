@@ -1604,6 +1604,7 @@ dependencies = [
 name = "seiza-background"
 version = "0.3.0"
 dependencies = [
+ "multiversion",
  "rayon",
  "seiza-stats",
  "serde",
@@ -1624,6 +1625,7 @@ dependencies = [
 name = "seiza-deconvolution"
 version = "0.1.0"
 dependencies = [
+ "multiversion",
  "rayon",
  "serde",
  "thiserror",

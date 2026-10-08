@@ -12,6 +12,7 @@ keywords = ["astronomy", "astrophotography", "image", "background"]
 categories = ["science", "multimedia::images"]
 
 [dependencies]
+multiversion.workspace = true
 rayon.workspace = true
 seiza-stats.workspace = true
 serde.workspace = true

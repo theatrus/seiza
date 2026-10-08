@@ -12,6 +12,7 @@ keywords = ["astronomy", "astrophotography", "deconvolution", "image-processing"
 categories = ["science", "multimedia::images"]
 
 [dependencies]
+multiversion.workspace = true
 rayon.workspace = true
 serde.workspace = true
 thiserror.workspace = true
