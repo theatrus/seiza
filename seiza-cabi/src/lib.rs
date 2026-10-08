@@ -2618,12 +2618,16 @@ pub unsafe extern "C" fn seiza_live_stacker_retain_frames_for_reintegration(
     .is_some()
 }
 
-/// Progress callback for [`seiza_live_stacker_reintegrate`]: the pass, in
-/// the order the three run (0 while estimating statistics, 1 while refining
-/// them without the samples the estimate rejects, 2 while integrating), the
-/// zero-based frame index, the admitted-frame count, and the caller's context
-/// pointer. Called on the thread that made the call, before each frame is
-/// read.
+/// Progress callback for [`seiza_live_stacker_reintegrate`]: the pass (0
+/// while estimating statistics, 1 while refining them without the samples
+/// the estimate rejects, 2 while integrating), the zero-based frame index,
+/// the admitted-frame count, and the caller's context pointer. Called on the
+/// thread that made the call. Frames kept in scratch files are read in bands
+/// of rows, all three passes running on each band in turn: the callback
+/// hears pass 0 for each frame read whole first (to fit its background
+/// normalization again), then pass 2 for the frame indices in turn, spread
+/// over the bands. Frames read whole for each pass are announced per pass
+/// and frame before each read.
 pub type SeizaStackReintegrateProgressCallback =
     Option<unsafe extern "C" fn(u32, usize, usize, *mut c_void)>;
 
@@ -2633,20 +2637,23 @@ pub type SeizaStackReintegrateProgressCallback =
 ///
 /// Online rejection cannot revisit the reference frame or the warm-up frames
 /// it admitted before it had statistics, so a satellite or aircraft trail in
-/// one of them stays in the live mean. This reads each admitted frame three
-/// more times from its source file, prepares it exactly as the live pass did
-/// (the same calibration masters, cosmetic filter, debayering, and recorded
-/// registration and normalization), and rejects samples more than
-/// `low_sigma` below or `high_sigma` above the other frames. A value of zero
-/// or less uses the default of 3. Star detection and registration do not run
-/// again, and every admitted frame takes part.
+/// one of them stays in the live mean. This reads each admitted frame again,
+/// from the scratch file kept for it or else its source file, prepared
+/// exactly as the live pass did (the same calibration masters, cosmetic
+/// filter, debayering, and recorded registration and normalization), and
+/// rejects samples more than `low_sigma` below or `high_sigma` above the
+/// other frames. A value of zero or less uses the default of 3. Star
+/// detection and registration do not run again, and every admitted frame
+/// takes part.
 ///
 /// The live stacker is not changed and may keep integrating afterwards. The
 /// stack must be replayable: `reintegrationUnavailable` in
 /// [`seiza_live_stacker_state_json`] says why not when it is not, and this
 /// call fails with the same message. A source file changed since it was
-/// stacked also fails the call. Memory use is about 64 bytes per output
-/// sample plus one frame, independent of the frame count.
+/// stacked also fails the call. Memory use is about 20 bytes per output
+/// sample plus the bands of frames being read, at most 256 MiB, independent
+/// of the frame count; up to four frames are held whole at once while their
+/// normalization is fitted.
 ///
 /// # Safety
 /// `stacker` must be a live `SeizaLiveStacker` pointer, externally
@@ -8255,9 +8262,13 @@ mod tests {
         assert!(!snapshot.is_null(), "{:?}", unsafe {
             error.as_ref().map(|e| CStr::from_ptr(e))
         });
-        assert_eq!(reads.len(), 18);
-        assert_eq!(reads[6], (1, 0, 6));
-        assert_eq!(reads[12], (2, 0, 6));
+        // Each frame is prepared whole and kept in a scratch file (pass 0),
+        // then the three passes run on bands of every frame (pass 2).
+        let expected = [0, 2]
+            .into_iter()
+            .flat_map(|pass| (0..6).map(move |index| (pass, index, 6)))
+            .collect::<Vec<_>>();
+        assert_eq!(reads, expected);
         let sample = trail_row * width + 80;
         let replayed = unsafe {
             std::slice::from_raw_parts(
