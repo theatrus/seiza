@@ -442,58 +442,63 @@ fn build_master(
     let mut unknown_saturation_inputs = 0_usize;
     let mut levels: Vec<DarkLevel> = Vec::new();
 
-    for (index, path) in paths.iter().enumerate() {
-        check_cancelled(options)?;
-        report_progress(options, MasterBuildStage::Read, index, paths.len());
-        let prepared = match prepare_input(
-            path,
-            kind,
-            options,
-            &calibration,
-            reference_signature.as_ref(),
-            dark_exposure,
-        ) {
-            Ok(prepared) => prepared,
-            // Only a metadata disagreement is survivable. An unreadable file
-            // or a failed calibration is a real fault and still stops here.
-            Err(Error::Calibration(reason)) if reference_signature.is_some() => {
-                skipped_inputs.push(SkippedInput {
-                    path: path.clone(),
-                    reason,
-                });
+    with_read_ahead(paths, |frames| -> Result<()> {
+        for (index, path) in paths.iter().enumerate() {
+            check_cancelled(options)?;
+            report_progress(options, MasterBuildStage::Read, index, paths.len());
+            let prepared = match prepare_input(
+                path,
+                frames.next(),
+                kind,
+                options,
+                &calibration,
+                reference_signature.as_ref(),
+                dark_exposure,
+            ) {
+                Ok(prepared) => prepared,
+                // Only a metadata disagreement is survivable. An unreadable
+                // file or a failed calibration is a real fault and still
+                // stops here.
+                Err(Error::Calibration(reason)) if reference_signature.is_some() => {
+                    skipped_inputs.push(SkippedInput {
+                        path: path.clone(),
+                        reason,
+                    });
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if accepted.is_empty() {
+                reference_headers = prepared.headers.clone();
+                reference_bayer = prepared.bayer;
+                reference_signature = Some(InputSignature::from_frame(&prepared, kind));
+                if kind == MasterFrameKind::Dark {
+                    dark_exposure = prepared.effective_exposure;
+                }
+                if flat_scratch.is_none() {
+                    mean.resize(prepared.image.sample_count(), 0.0);
+                    m2.resize(prepared.image.sample_count(), 0.0);
+                }
+            }
+            accepted.push(path);
+            if options.dark_level_screening.is_some() {
+                levels.push(DarkLevel::measure(&prepared.image.data));
+            }
+            unmasked_saturation_samples += prepared.unmasked_saturation_samples;
+            unknown_saturation_inputs += usize::from(prepared.unknown_saturation);
+            if let Some(scratch) = &mut flat_scratch {
+                scratch.append(&prepared.image.data, options)?;
                 continue;
             }
-            Err(error) => return Err(error),
-        };
-        if accepted.is_empty() {
-            reference_headers = prepared.headers.clone();
-            reference_bayer = prepared.bayer;
-            reference_signature = Some(InputSignature::from_frame(&prepared, kind));
-            if kind == MasterFrameKind::Dark {
-                dark_exposure = prepared.effective_exposure;
-            }
-            if flat_scratch.is_none() {
-                mean.resize(prepared.image.sample_count(), 0.0);
-                m2.resize(prepared.image.sample_count(), 0.0);
-            }
+            accumulate_frame(
+                &mut mean,
+                &mut m2,
+                &prepared.image.data,
+                accepted.len() as f32,
+            );
         }
-        accepted.push(path);
-        if options.dark_level_screening.is_some() {
-            levels.push(DarkLevel::measure(&prepared.image.data));
-        }
-        unmasked_saturation_samples += prepared.unmasked_saturation_samples;
-        unknown_saturation_inputs += usize::from(prepared.unknown_saturation);
-        if let Some(scratch) = &mut flat_scratch {
-            scratch.append(&prepared.image.data, options)?;
-            continue;
-        }
-        accumulate_frame(
-            &mut mean,
-            &mut m2,
-            &prepared.image.data,
-            accepted.len() as f32,
-        );
-    }
+        Ok(())
+    })?;
 
     report_progress(options, MasterBuildStage::Read, paths.len(), paths.len());
 
@@ -515,22 +520,26 @@ fn build_master(
             accepted = kept;
             mean.fill(0.0);
             m2.fill(0.0);
-            for (index, path) in accepted.iter().enumerate() {
-                check_cancelled(options)?;
-                report_progress(options, MasterBuildStage::Reread, index, accepted.len());
-                let prepared = prepare_input(
-                    path,
-                    kind,
-                    options,
-                    &calibration,
-                    reference_signature.as_ref(),
-                    dark_exposure,
-                )?;
-                if index == 0 {
-                    reference_headers = prepared.headers.clone();
+            with_read_ahead(&accepted, |frames| -> Result<()> {
+                for (index, path) in accepted.iter().enumerate() {
+                    check_cancelled(options)?;
+                    report_progress(options, MasterBuildStage::Reread, index, accepted.len());
+                    let prepared = prepare_input(
+                        path,
+                        frames.next(),
+                        kind,
+                        options,
+                        &calibration,
+                        reference_signature.as_ref(),
+                        dark_exposure,
+                    )?;
+                    if index == 0 {
+                        reference_headers = prepared.headers.clone();
+                    }
+                    accumulate_frame(&mut mean, &mut m2, &prepared.image.data, (index + 1) as f32);
                 }
-                accumulate_frame(&mut mean, &mut m2, &prepared.image.data, (index + 1) as f32);
-            }
+                Ok(())
+            })?;
             report_progress(
                 options,
                 MasterBuildStage::Reread,
@@ -563,39 +572,39 @@ fn build_master(
     let mut rejected_samples = 0_u64;
     let count = accepted.len();
 
-    for (index, path) in accepted
-        .iter()
-        .filter(|_| flat_scratch.is_none())
-        .enumerate()
-    {
-        check_cancelled(options)?;
-        report_progress(options, MasterBuildStage::Integrate, index, count);
-        let prepared = prepare_input(
-            path,
-            kind,
-            options,
-            &calibration,
-            reference_signature.as_ref(),
-            dark_exposure,
-        )?;
-        let (frame_accepted, frame_rejected) = integrate_frame(
-            &mut integrated,
-            &mut accepted_counts,
-            &prepared.image.data,
-            &mean,
-            &m2,
-            count,
-            options.rejection,
-        )?;
-        accepted_samples = accepted_samples.saturating_add(frame_accepted);
-        rejected_samples = rejected_samples.saturating_add(frame_rejected);
-        input_statistics.push(MasterInputStatistics {
-            accepted_samples: frame_accepted,
-            rejected_samples: frame_rejected,
-            masked_samples: 0,
-        });
-    }
     if flat_scratch.is_none() {
+        with_read_ahead(&accepted, |frames| -> Result<()> {
+            for (index, path) in accepted.iter().enumerate() {
+                check_cancelled(options)?;
+                report_progress(options, MasterBuildStage::Integrate, index, count);
+                let prepared = prepare_input(
+                    path,
+                    frames.next(),
+                    kind,
+                    options,
+                    &calibration,
+                    reference_signature.as_ref(),
+                    dark_exposure,
+                )?;
+                let (frame_accepted, frame_rejected) = integrate_frame(
+                    &mut integrated,
+                    &mut accepted_counts,
+                    &prepared.image.data,
+                    &mean,
+                    &m2,
+                    count,
+                    options.rejection,
+                )?;
+                accepted_samples = accepted_samples.saturating_add(frame_accepted);
+                rejected_samples = rejected_samples.saturating_add(frame_rejected);
+                input_statistics.push(MasterInputStatistics {
+                    accepted_samples: frame_accepted,
+                    rejected_samples: frame_rejected,
+                    masked_samples: 0,
+                });
+            }
+            Ok(())
+        })?;
         report_progress(options, MasterBuildStage::Integrate, count, count);
     }
 
@@ -697,6 +706,55 @@ fn report_progress(
     if let Some(progress) = &options.progress {
         progress.report(MasterBuildProgress { stage, done, total });
     }
+}
+
+/// Frames handed to a build pass in path order by [`with_read_ahead`].
+struct ReadAhead {
+    frames: std::sync::mpsc::Receiver<Result<FitsFrame>>,
+}
+
+impl ReadAhead {
+    /// The next path's frame, or why it could not be read. A pass takes
+    /// at most one per path, in order.
+    fn next(&self) -> Result<FitsFrame> {
+        self.frames
+            .recv()
+            .expect("the frame reader stops only after the last path")
+    }
+}
+
+/// Run a pass over `paths` while a helper thread reads each next frame.
+///
+/// Decoding a frame runs on one thread, so it can overlap the parallel work
+/// a pass does with the frame before: the helper reads one frame ahead and
+/// waits with it until the pass takes it, so at most two frames are held at
+/// once. Only reading moves to the helper. Cancellation checks, progress
+/// reports, validation and calibration stay on the calling thread, so a
+/// host's callbacks never run on another thread, and frames are combined in
+/// the same order as before, so the master is bit-identical. A pass that
+/// stops early (an error or a cancellation) drops its frames; the helper
+/// then finishes at most the read it is in and stops, and this returns once
+/// it has.
+fn with_read_ahead<P, T>(paths: &[P], pass: impl FnOnce(&ReadAhead) -> T) -> T
+where
+    P: AsRef<Path> + Sync,
+{
+    // A rendezvous channel: the helper blocks with its frame until the pass
+    // asks for it.
+    let (sender, frames) = std::sync::mpsc::sync_channel(0);
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            for path in paths {
+                if sender.send(FitsFrame::open(path.as_ref())).is_err() {
+                    // The pass stopped taking frames.
+                    return;
+                }
+            }
+        });
+        // `frames` is dropped when the pass returns, before the scope waits
+        // for the helper, so a helper blocked on a frame sees it and stops.
+        pass(&ReadAhead { frames })
+    })
 }
 
 /// Checked once per input frame in each pass. Reading and calibrating a frame
@@ -804,15 +862,17 @@ struct PreparedInput {
     unknown_saturation: bool,
 }
 
+/// Validate and calibrate the frame read from `path`.
 fn prepare_input(
     path: &Path,
+    frame: Result<FitsFrame>,
     kind: MasterFrameKind,
     options: &MasterBuildOptions,
     calibration: &CalibrationMasters,
     reference: Option<&InputSignature>,
     dark_exposure: Option<f64>,
 ) -> Result<PreparedInput> {
-    let mut frame = FitsFrame::open(path)?;
+    let mut frame = frame?;
     let metadata = frame.metadata();
     validate_raw_master_input(&metadata, kind, path)?;
     if let Some(reference) = reference {
@@ -2010,6 +2070,103 @@ mod tests {
         ]
         .concat();
         assert_eq!(*reports.lock().unwrap(), expected);
+    }
+
+    /// Frames are read a frame ahead on a helper thread, but a host's
+    /// callbacks must still run only on the thread that called the build,
+    /// in every pass: reading, the dark screen's reread, and integration.
+    #[test]
+    fn callbacks_run_only_on_the_building_thread() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths: Vec<PathBuf> = [0.0, 0.5, 0.0, 40.0, 400.0]
+            .iter()
+            .enumerate()
+            .map(|(index, &leak)| {
+                let path = directory.path().join(format!("dark-{index}.fits"));
+                write_dark(&path, 503.0, leak);
+                path
+            })
+            .collect();
+        let threads = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = {
+            let threads = Arc::clone(&threads);
+            move || threads.lock().unwrap().push(std::thread::current().id())
+        };
+        let options = MasterBuildOptions {
+            cancel: Some(CancelSignal::new({
+                let record = record.clone();
+                move || {
+                    record();
+                    false
+                }
+            })),
+            progress: Some(MasterProgress::new(move |_| record())),
+            ..MasterBuildOptions::default()
+        };
+        for kind in [
+            MasterFrameKind::Dark,
+            MasterFrameKind::Bias,
+            MasterFrameKind::Flat,
+        ] {
+            let options = MasterBuildOptions {
+                dark_level_screening: (kind == MasterFrameKind::Dark)
+                    .then(DarkLevelScreening::default),
+                ..options.clone()
+            };
+            threads.lock().unwrap().clear();
+            build_master_from_fits(&paths, kind, &options).unwrap();
+            let threads = threads.lock().unwrap();
+            assert!(threads.len() > paths.len(), "{kind:?}");
+            assert!(
+                threads
+                    .iter()
+                    .all(|thread| *thread == std::thread::current().id()),
+                "{kind:?}"
+            );
+        }
+    }
+
+    /// Reading ahead must not change which frame fails, or keep a build
+    /// that stopped waiting on its reader.
+    #[test]
+    fn a_build_stops_at_an_unreadable_frame_or_a_late_cancel() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let directory = tempfile::tempdir().unwrap();
+        let paths = (0..4)
+            .map(|index| directory.path().join(format!("bias-{index}.fits")))
+            .collect::<Vec<_>>();
+        for path in &paths {
+            write_image(path, &[10.0, 20.0, 30.0, 40.0]);
+        }
+        let truncated = directory.path().join("truncated.fits");
+        let bytes = std::fs::read(&paths[0]).unwrap();
+        std::fs::write(&truncated, &bytes[..bytes.len() / 2]).unwrap();
+        let mut broken = paths.clone();
+        broken.insert(2, truncated.clone());
+        let (options, reports) = recorded(MasterBuildOptions::default());
+        match build_master_from_fits(&broken, MasterFrameKind::Bias, &options) {
+            Err(Error::FitsRead { path, .. }) => assert_eq!(path, truncated),
+            other => panic!("expected a read error, got {other:?}"),
+        }
+        assert_eq!(
+            *reports.lock().unwrap(),
+            stage(MasterBuildStage::Read, 5)[..3]
+        );
+
+        // Cancel partway through the second pass, with its reader running.
+        let checks = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&checks);
+        let allowed = paths.len() + 1;
+        let options = MasterBuildOptions {
+            cancel: Some(CancelSignal::new(move || {
+                counter.fetch_add(1, Ordering::Relaxed) >= allowed
+            })),
+            ..MasterBuildOptions::default()
+        };
+        let error = build_master_from_fits(&paths, MasterFrameKind::Bias, &options).unwrap_err();
+        assert!(matches!(error, Error::Cancelled));
+        assert_eq!(checks.load(Ordering::Relaxed), paths.len() + 2);
     }
 
     #[test]
