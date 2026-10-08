@@ -7,9 +7,14 @@ The companion [`seiza-xisf`](../seiza-xisf/README.md) reader returns this
 crate's decoded `FitsImage` representation, so downstream processing can share
 one linear-image API without coupling operations to the source container.
 
-- Reads 8/16/32-bit integer and 32/64-bit float FITS images, applying
+- Reads 8/16/32/64-bit integer and 32/64-bit float FITS images, applying
   BZERO/BSCALE (the common `BITPIX 16` + `BZERO 32768` unsigned camera
-  layout is folded directly into the big-endian decode).
+  layout is folded directly into the big-endian decode). Signed 16-bit data
+  with negative samples decodes to `f32`, and 64-bit integers to `f64`.
+  Integer samples equal to `BLANK` become NaN in physical values.
+- When the primary HDU holds no data, reads the first image extension. Its
+  header comes first, followed by the primary's metadata cards, as in the
+  `INHERIT` convention, so WCS and observation keywords are both found.
 - Streams full-image opens directly into the final typed pixel vector using a
   fixed 1 MiB conversion buffer; it does not retain a second whole-file copy.
 - Planar RGB (`NAXIS3`) support and OSC debayering from `BAYERPAT`,
@@ -19,9 +24,12 @@ one linear-image API without coupling operations to the source container.
   Direct Bayer-engine callers can use `BayerPattern::in_row_order` before
   either the integer or linear floating-point debayer function.
 - Typed header access (logicals, integers, floats, strings, FORTRAN `D`
-  exponents, quote escapes).
+  exponents, quote escapes, `CONTINUE` long strings, and ESO `HIERARCH`
+  keywords, named without the prefix as astropy and cfitsio name them).
 - Writes primary-HDU mono, interleaved RGB, or planar RGB linear `f32` images,
-  with typed non-structural headers and FITS block padding.
+  with typed non-structural headers and FITS block padding. Keywords longer
+  than eight characters or holding spaces become `HIERARCH` cards, and long
+  strings continue across `CONTINUE` cards.
 - Preserves undefined header values as `HeaderValue::Raw(String::new())`,
   distinct from quoted empty strings. Writers retain the keyword with a blank
   value field, including optional comments.

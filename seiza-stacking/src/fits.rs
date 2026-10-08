@@ -1062,7 +1062,14 @@ fn has_output_wcs(cards: &[WriteHeaderCard]) -> bool {
         .all(|required| cards.iter().any(|card| card.keyword() == *required))
 }
 
+/// Whether a reference card belongs to its WCS. WCS keywords are standard
+/// eight-column ones, so a longer `HIERARCH` keyword that shares a prefix
+/// such as `A_` is not one.
 fn preserve_wcs_key(key: &str) -> bool {
+    key.len() <= 8 && is_wcs_keyword(key)
+}
+
+fn is_wcs_keyword(key: &str) -> bool {
     matches!(
         key,
         "CRPIX1"
@@ -1706,6 +1713,31 @@ mod tests {
         assert!(decoded.header("CDELT1").is_none());
         assert!(decoded.header("CDELT2").is_none());
         assert!(decoded.header("CROTA2").is_none());
+    }
+
+    #[test]
+    fn hierarch_reference_cards_are_not_mistaken_for_wcs() {
+        let directory = tempfile::tempdir().unwrap();
+        let image = LinearImage::new(2, 2, 1, vec![1.0; 4]).unwrap();
+        let reference_headers = vec![
+            ("CRPIX1".into(), HeaderValue::Float(1.0)),
+            ("CRPIX2".into(), HeaderValue::Float(1.0)),
+            ("CRVAL1".into(), HeaderValue::Float(120.0)),
+            ("CRVAL2".into(), HeaderValue::Float(30.0)),
+            ("CTYPE1".into(), HeaderValue::String("RA---TAN".into())),
+            ("CTYPE2".into(), HeaderValue::String("DEC--TAN".into())),
+            ("A_ORDER".into(), HeaderValue::Integer(2)),
+            ("A_ESO DET CHIP".into(), HeaderValue::Integer(3)),
+        ];
+        // XISF keeps FITS keywords to eight characters, so a copied
+        // HIERARCH card would fail the whole write.
+        for name in ["processed.fits", "processed.xisf"] {
+            let path = directory.path().join(name);
+            write_processed_image_fits_f32(&path, &image, &reference_headers, &[]).unwrap();
+        }
+        let decoded = FitsImage::open(&directory.path().join("processed.fits")).unwrap();
+        assert_eq!(decoded.header("A_ORDER"), Some(&HeaderValue::Integer(2)));
+        assert!(decoded.header("A_ESO DET CHIP").is_none());
     }
 
     #[test]

@@ -16,8 +16,8 @@
 //!
 //! Sample values pass through unchanged: decoding never applies the XISF
 //! `bounds` attribute, keeping linear data linear, and preserved FITS scaling
-//! keywords (`BZERO`/`BSCALE`) are dropped because XISF samples are already
-//! physical.
+//! keywords (`BZERO`/`BSCALE`/`BLANK`) are dropped because XISF samples are
+//! already physical.
 //!
 //! Bounds still matter, because PixInsight writes floating-point images
 //! normalized to `0:1` and nothing in the samples says so. [`read_image`]
@@ -1584,10 +1584,12 @@ fn element_block_bytes(
 
 /// Whether a preserved FITS keyword describes storage scaling or geometry
 /// that the XISF XML already resolved. Passing these through would make
-/// FITS-side consumers re-apply scaling to already-physical samples.
+/// FITS-side consumers re-apply scaling to already-physical samples, or
+/// read a sample that equals a stale `BLANK` as undefined.
 fn structural_fits_keyword(keyword: &str) -> bool {
     keyword.eq_ignore_ascii_case("BZERO")
         || keyword.eq_ignore_ascii_case("BSCALE")
+        || keyword.eq_ignore_ascii_case("BLANK")
         || keyword.eq_ignore_ascii_case("BITPIX")
         || keyword.eq_ignore_ascii_case("SIMPLE")
         || keyword.eq_ignore_ascii_case("END")
@@ -2697,6 +2699,7 @@ mod tests {
             "colorSpace=\"Gray\"",
             "<FITSKeyword name=\"BZERO\" value=\"32768\"/>\
              <FITSKeyword name=\"BSCALE\" value=\"2\"/>\
+             <FITSKeyword name=\"BLANK\" value=\"0\"/>\
              <FITSKeyword name=\"NAXIS1\" value=\"999\"/>\
              <FITSKeyword name=\"COMMENT\"/>\
              <FITSKeyword name=\"EXPTIME\" value=\"300\"/>",
@@ -2704,6 +2707,7 @@ mod tests {
         let image = from_bytes(&monolithic(xml, &[&raw])).unwrap();
         assert!(image.header("BZERO").is_none());
         assert!(image.header("BSCALE").is_none());
+        assert!(image.header("BLANK").is_none());
         // The synthesized geometry card wins over the preserved keyword.
         assert_eq!(image.header("NAXIS1"), Some(&HeaderValue::Integer(2)));
         assert!(image.header("COMMENT").is_some());

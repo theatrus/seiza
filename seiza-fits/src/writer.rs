@@ -230,14 +230,22 @@ fn validate_image(
     Ok(())
 }
 
+/// Whether a keyword is written with the ESO `HIERARCH` convention: one too
+/// long for the eight-column keyword field, or holding a space.
+fn is_long_keyword(keyword: &str) -> bool {
+    keyword.len() > 8 || keyword.contains(' ')
+}
+
 fn validate_keyword(keyword: &str) -> Result<(), FitsError> {
-    if keyword.is_empty()
-        || keyword.len() > 8
-        || !keyword.is_ascii()
-        || !keyword
-            .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || b"_-".contains(&byte))
-    {
+    let valid = if is_long_keyword(keyword) {
+        crate::is_hierarch_keyword(keyword)
+    } else {
+        !keyword.is_empty()
+            && keyword.bytes().all(|byte| {
+                byte.is_ascii_uppercase() || byte.is_ascii_digit() || b"_-".contains(&byte)
+            })
+    };
+    if !valid {
         return Err(FitsError::Malformed(format!(
             "invalid FITS keyword {keyword:?}"
         )));
@@ -253,6 +261,7 @@ fn is_structural_keyword(keyword: &str) -> bool {
         || matches!(
             keyword,
             "SIMPLE"
+                | "XTENSION"
                 | "BITPIX"
                 | "EXTEND"
                 | "END"
@@ -266,6 +275,9 @@ fn is_structural_keyword(keyword: &str) -> bool {
         )
 }
 
+/// Encode one header card, or, for a string too long for one card, a run of
+/// cards under the long-string convention. Keywords that do not fit the
+/// standard eight columns get a `HIERARCH` card.
 fn encode_card(keyword: &str, value: &HeaderValue, comment: &str) -> Result<String, FitsError> {
     validate_keyword(keyword)?;
     if !comment.is_ascii() {
@@ -273,6 +285,10 @@ fn encode_card(keyword: &str, value: &HeaderValue, comment: &str) -> Result<Stri
             "FITS comment for {keyword} is not ASCII"
         )));
     }
+    let string = match value {
+        HeaderValue::String(string) => Some(string),
+        _ => None,
+    };
     let value = match value {
         HeaderValue::Logical(value) => {
             if *value {
@@ -304,19 +320,69 @@ fn encode_card(keyword: &str, value: &HeaderValue, comment: &str) -> Result<Stri
             )));
         }
     };
-    let base = format!("{keyword:<8}= {value:>20}");
-    if base.len() > CARD {
-        return Err(FitsError::Malformed(format!(
-            "FITS header {keyword} does not fit in one card"
-        )));
+    let prefix = if is_long_keyword(keyword) {
+        format!("HIERARCH {keyword} = ")
+    } else {
+        format!("{keyword:<8}= ")
+    };
+    let mut text = format!("{prefix}{value:>20}");
+    if text.len() > CARD && prefix.len() + value.len() <= CARD {
+        // A long HIERARCH keyword leaves no room to right-align the value.
+        text = format!("{prefix}{value}");
     }
-    let mut text = base;
+    if text.len() > CARD {
+        return match string {
+            Some(string) => encode_long_string(keyword, &prefix, string, comment),
+            None => Err(FitsError::Malformed(format!(
+                "FITS header {keyword} does not fit in one card"
+            ))),
+        };
+    }
+    Ok(with_comment(text, comment))
+}
+
+/// Pad a card's text to 80 columns, with as much of `comment` as fits.
+fn with_comment(mut text: String, comment: &str) -> String {
     if !comment.is_empty() && text.len() + 3 < CARD {
         text.push_str(" / ");
         let remaining = CARD - text.len();
         text.push_str(&comment[..comment.len().min(remaining)]);
     }
-    Ok(format!("{text:<CARD$}"))
+    format!("{text:<CARD$}")
+}
+
+/// Split a string value across `CONTINUE` cards, the long-string convention
+/// the reader joins: every part but the last ends in `&`. A doubled quote
+/// stays within one part, and the comment goes on the last card.
+fn encode_long_string(
+    keyword: &str,
+    prefix: &str,
+    value: &str,
+    comment: &str,
+) -> Result<String, FitsError> {
+    let mut cards = String::new();
+    let mut lead = prefix.to_string();
+    let mut part = String::new();
+    for character in value.chars() {
+        let length = if character == '\'' { 2 } else { 1 };
+        // Room for the opening quote, the `&` and the closing quote.
+        if lead.len() + part.len() + length + 3 > CARD {
+            if part.is_empty() {
+                return Err(FitsError::Malformed(format!(
+                    "FITS header {keyword} does not fit in one card"
+                )));
+            }
+            cards.push_str(&format!("{:<CARD$}", format!("{lead}'{part}&'")));
+            lead = "CONTINUE  ".into();
+            part.clear();
+        }
+        part.push(character);
+        if character == '\'' {
+            part.push('\'');
+        }
+    }
+    cards.push_str(&with_comment(format!("{lead}'{part}'"), comment));
+    Ok(cards)
 }
 
 /// Update or insert a FITS header keyword in place without modifying or
@@ -324,10 +390,17 @@ fn encode_card(keyword: &str, value: &HeaderValue, comment: &str) -> Result<Stri
 ///
 /// If the keyword already exists in the header, its 80-byte card is overwritten
 /// in place. If the keyword does not exist and the header block containing
-/// `END` has spare card slots, the new card is inserted before `END`.
+/// `END` has spare card slots, the new card is inserted before `END`. A
+/// keyword too long for the standard eight columns, or holding a space, is
+/// written as a `HIERARCH` card.
+///
+/// The header changed is that of the HDU [`crate::FitsImage::open`] reads:
+/// the primary, or, when the primary holds no data, the image extension.
+/// Reading the file again then finds the new value first.
 ///
 /// Modifying structural cards (`SIMPLE`, `BITPIX`, `NAXIS*`, `END`, etc.) is
-/// rejected with an error to prevent corrupting the file layout.
+/// rejected with an error to prevent corrupting the file layout, and so is a
+/// value too long for one card.
 pub fn update_header_in_place(
     path: &Path,
     keyword: &str,
@@ -341,43 +414,38 @@ pub fn update_header_in_place(
         )));
     }
     let encoded_card = encode_card(keyword, value, comment.unwrap_or(""))?;
-    assert_eq!(encoded_card.len(), CARD);
+    if encoded_card.len() != CARD {
+        return Err(FitsError::Malformed(format!(
+            "FITS header {keyword} does not fit in one card"
+        )));
+    }
 
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(path)
         .map_err(FitsError::Io)?;
+    let header_start = crate::image_header_offset(&mut file)?;
 
     let mut block = [0u8; BLOCK];
-    let key_bytes = keyword.as_bytes();
-
     let mut block_idx: u64 = 0;
     let mut end_card_location: Option<(u64, usize)> = None;
 
     loop {
         use std::io::{Read, Seek, SeekFrom, Write};
-        let start_pos = block_idx * BLOCK as u64;
+        let start_pos = header_start + block_idx * BLOCK as u64;
         file.seek(SeekFrom::Start(start_pos))
             .map_err(FitsError::Io)?;
 
         if let Err(error) = file.read_exact(&mut block) {
             if error.kind() == std::io::ErrorKind::UnexpectedEof {
-                if block_idx == 0 {
-                    return Err(FitsError::NotFits);
-                }
                 return Err(FitsError::Malformed("missing END card".into()));
             }
             return Err(FitsError::Io(error));
         }
 
-        if block_idx == 0 && &block[0..6] != b"SIMPLE" {
-            return Err(FitsError::NotFits);
-        }
-
         for (card_idx, card) in block.chunks_exact(CARD).enumerate() {
-            let card_kw = card[0..8].trim_ascii_end();
-            if card_kw.eq_ignore_ascii_case(key_bytes) && card[8] == b'=' {
+            if card_keyword(card).is_some_and(|found| found.eq_ignore_ascii_case(keyword)) {
                 let target_offset = start_pos + (card_idx * CARD) as u64;
                 file.seek(SeekFrom::Start(target_offset))
                     .map_err(FitsError::Io)?;
@@ -406,7 +474,7 @@ pub fn update_header_in_place(
 
     if end_card_idx + 1 < BLOCK / CARD {
         use std::io::{Seek, SeekFrom, Write};
-        let insert_offset = end_block * BLOCK as u64 + (end_card_idx * CARD) as u64;
+        let insert_offset = header_start + end_block * BLOCK as u64 + (end_card_idx * CARD) as u64;
         let new_end_offset = insert_offset + CARD as u64;
 
         file.seek(SeekFrom::Start(insert_offset))
@@ -427,6 +495,17 @@ pub fn update_header_in_place(
                 .into(),
         ))
     }
+}
+
+/// The keyword of a valued card as the reader names it, `HIERARCH` cards
+/// included.
+fn card_keyword(card: &[u8]) -> Option<&str> {
+    let card = std::str::from_utf8(card).ok()?;
+    if card.as_bytes()[8] == b'=' {
+        return Some(card[..8].trim_end());
+    }
+    let (keyword, _) = card.strip_prefix("HIERARCH ")?.split_once('=')?;
+    Some(keyword.trim())
 }
 
 fn write_float_values(
@@ -591,10 +670,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("preserved.fits");
         std::fs::write(&path, b"previous complete output").unwrap();
-        let invalid = [WriteHeaderCard::new(
-            "TOOLONGKEY",
-            HeaderValue::Logical(true),
-        )];
+        let invalid = [WriteHeaderCard::new("BAD=KEY", HeaderValue::Logical(true))];
         assert!(write_f32_image(&path, 1, 1, F32ImageData::Mono(&[1.0]), &invalid,).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"previous complete output");
     }
@@ -660,5 +736,146 @@ mod tests {
         assert!(
             update_header_in_place(&path, "END", &HeaderValue::String("".into()), None).is_err()
         );
+    }
+
+    fn header_cards(encoded: &[u8]) -> Vec<String> {
+        let end = encoded
+            .chunks_exact(CARD)
+            .position(|card| card.starts_with(b"END "))
+            .unwrap();
+        encoded[..end * CARD]
+            .chunks_exact(CARD)
+            .map(|card| String::from_utf8(card.to_vec()).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn long_keywords_round_trip_as_hierarch_cards() {
+        let long_text = format!("{}'quoted'{}", "a".repeat(60), "b".repeat(70));
+        let headers = [
+            WriteHeaderCard::new("LBTO LUCI DET ITIME", HeaderValue::Float(0.139764))
+                .with_comment("[s] integration time"),
+            WriteHeaderCard::new("FOCALLENGTH", HeaderValue::Integer(530)),
+            WriteHeaderCard::new("ESO OBS NAME", HeaderValue::String(long_text.clone()))
+                .with_comment("continued"),
+            WriteHeaderCard::new("OBJECT", HeaderValue::String("short".into())),
+            WriteHeaderCard::new(
+                format!("ESO {}", "K".repeat(56)),
+                HeaderValue::String("v".into()),
+            ),
+        ];
+        let mut encoded = Vec::new();
+        write_f32_image_to(&mut encoded, 1, 1, F32ImageData::Mono(&[1.0]), &headers).unwrap();
+        let cards = header_cards(&encoded);
+        assert!(cards.iter().any(|card| {
+            card.starts_with("HIERARCH LBTO LUCI DET ITIME = ")
+                && card.trim_end().ends_with("E-1 / [s] integration time")
+        }));
+        assert!(
+            cards
+                .iter()
+                .any(|card| card.starts_with("HIERARCH FOCALLENGTH = "))
+        );
+        assert!(cards.iter().any(|card| card.starts_with("CONTINUE  '")));
+        assert!(cards.iter().any(|card| card.starts_with("OBJECT  = ")));
+
+        let decoded = FitsImage::from_bytes(&encoded).unwrap();
+        for header in &headers {
+            assert_eq!(decoded.header(header.keyword()), Some(header.value()));
+        }
+        assert_eq!(decoded.header_str("ESO OBS NAME"), Some(long_text.as_str()));
+    }
+
+    #[test]
+    fn long_strings_split_without_breaking_quotes() {
+        // A quote at every position crosses each card boundary once.
+        for length in [68, 69, 70, 135, 136, 137, 300] {
+            for quote_at in [0, 64, 65, 66, 67, 68, 131, 132, 133] {
+                let mut text: String = (0..length)
+                    .map(|index| char::from(b'A' + (index % 26) as u8))
+                    .collect();
+                if quote_at < length {
+                    text.replace_range(quote_at..quote_at + 1, "'");
+                }
+                let encoded =
+                    encode_card("LONGSTR", &HeaderValue::String(text.clone()), "note").unwrap();
+                assert_eq!(encoded.len() % CARD, 0);
+                let mut file = [
+                    "SIMPLE  =                    T",
+                    "BITPIX  =                    8",
+                    "NAXIS   =                    2",
+                    "NAXIS1  =                    1",
+                    "NAXIS2  =                    1",
+                ]
+                .map(|text| format!("{text:<80}"))
+                .concat();
+                file.push_str(&encoded);
+                file.push_str(&format!("{:<80}", "END"));
+                let mut file = file.into_bytes();
+                file.resize(file.len().next_multiple_of(BLOCK) + BLOCK, b' ');
+                let header = FitsImage::from_bytes(&file).unwrap();
+                assert_eq!(
+                    header.header_str("LONGSTR"),
+                    Some(text.as_str()),
+                    "{length} {quote_at}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn keywords_that_cannot_round_trip_are_rejected() {
+        for keyword in [
+            "lower",
+            "BAD=KEY",
+            "QUOTE'S KEY",
+            "SLASH/KEY LONG",
+            " LEADING SPACE",
+            "TRAILING SPACE ",
+            "NON\u{00e9}ASCII KEY",
+            "TAB\tKEY LONG",
+        ] {
+            let headers = [WriteHeaderCard::new(keyword, HeaderValue::Integer(1))];
+            let mut output = Vec::new();
+            assert!(
+                write_f32_image_to(&mut output, 1, 1, F32ImageData::Mono(&[1.0]), &headers)
+                    .is_err(),
+                "{keyword:?}"
+            );
+        }
+        // A keyword that leaves no room for its value.
+        let crowded = "K".repeat(67);
+        assert!(encode_card(&crowded, &HeaderValue::Integer(12345), "").is_err());
+        assert!(encode_card(&crowded, &HeaderValue::String("x".repeat(10)), "").is_err());
+        assert!(encode_card(&crowded, &HeaderValue::Integer(1), "").is_ok());
+    }
+
+    #[test]
+    fn in_place_updates_handle_hierarch_cards() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("hierarch.fits");
+        let headers = [WriteHeaderCard::new("ESO DET DIT", HeaderValue::Float(1.0))];
+        write_f32_image(&path, 1, 1, F32ImageData::Mono(&[1.0]), &headers).unwrap();
+        let before = std::fs::metadata(&path).unwrap().len();
+
+        update_header_in_place(&path, "ESO DET DIT", &HeaderValue::Float(2.5), None).unwrap();
+        update_header_in_place(&path, "ESO DET NDIT", &HeaderValue::Integer(4), None).unwrap();
+        let image = FitsImage::open(&path).unwrap();
+        assert_eq!(image.header("ESO DET DIT"), Some(&HeaderValue::Float(2.5)));
+        assert_eq!(image.header("ESO DET NDIT"), Some(&HeaderValue::Integer(4)));
+        assert_eq!(
+            image
+                .headers
+                .iter()
+                .filter(|(key, _)| key == "ESO DET DIT")
+                .count(),
+            1
+        );
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), before);
+
+        // A value that needs CONTINUE cards cannot be written in place.
+        let long = HeaderValue::String("x".repeat(100));
+        assert!(update_header_in_place(&path, "OBJECT", &long, None).is_err());
+        assert!(update_header_in_place(&path, "BAD=KEY", &HeaderValue::Integer(1), None).is_err());
     }
 }
