@@ -863,10 +863,12 @@ impl PyLiveStacker {
     /// read it back instead of calibrating, demosaicing and resampling the
     /// frame's source again; the result is the same either way. Call it
     /// before pushing frames. The files take about four bytes per output
-    /// sample per admitted frame, in a new directory inside
-    /// ``scratch_directory`` (the system temporary directory by default) that
-    /// is removed when the stacker is finished or freed. A stack that cannot
-    /// be reintegrated, or that integrates Bayer photosites, keeps nothing.
+    /// sample per admitted frame, a sixteenth more under local background
+    /// normalization, in a new directory inside ``scratch_directory`` (the
+    /// system temporary directory by default) that is removed when the
+    /// stacker is finished or freed. A stack that integrates Bayer photosites
+    /// keeps each frame's photosites. A stack that cannot be reintegrated
+    /// keeps nothing.
     #[pyo3(signature = (*, scratch_directory=None))]
     fn retain_frames_for_reintegration(
         &mut self,

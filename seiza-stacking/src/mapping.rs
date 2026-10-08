@@ -270,6 +270,25 @@ impl RegisteredFrameMapping {
         Ok(crop)
     }
 
+    /// [`Self::extract_region_with`]'s resampling alone, sampling as
+    /// `sampling` says, with no normalization.
+    pub(crate) fn resample_region(
+        &self,
+        source: &LinearImage,
+        region: ReferenceRegion,
+        sampling: crate::registration::Sampling,
+    ) -> Result<LinearImage> {
+        self.validate()?;
+        crate::registration::resample_region_geometry(
+            source,
+            self.reference_width,
+            self.reference_height,
+            region,
+            self.geometry(),
+            sampling,
+        )
+    }
+
     /// [`Self::extract_region`] for Bayer drizzle: the nearest source
     /// photosite per pixel, in its own channel, normalized the same way.
     /// `source` is the debayered frame and `layout` the Bayer layout it was
