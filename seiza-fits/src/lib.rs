@@ -2,7 +2,8 @@
 //!
 //! Scope: single-image FITS files as written by capture software
 //! (N.I.N.A., SGP, ASIAIR, ...) — the primary HDU with a 2D image in
-//! BITPIX 8/16/32/-32/-64. 16-bit data stays `u16` end to end (no float
+//! BITPIX 8/16/32/64/-32/-64, or, when the primary holds no data, the first
+//! image extension. 16-bit data stays `u16` end to end (no float
 //! inflation), statistics come from histograms rather than sorts, and the
 //! midtone-transfer-function autostretch matches N.I.N.A.'s. The writer emits
 //! primary-HDU mono or RGB float images with validated typed headers and
@@ -26,7 +27,7 @@ pub use writer::{
 };
 
 use rayon::prelude::*;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 const BLOCK: usize = 2880;
@@ -61,17 +62,30 @@ impl From<std::io::Error> for FitsError {
 }
 
 /// Pixel data in its native representation.
+///
+/// The integer variants hold stored values and cannot mark a blank
+/// (undefined) sample: one equal to the header's `BLANK` keeps its stored
+/// value here, and [`FitsImage::into_physical_f32`] turns it into NaN. Where
+/// decoding already produced floats, blank samples are NaN.
 #[derive(Debug, Clone)]
 pub enum Pixels {
+    /// BITPIX 8 as stored; `BZERO` and `BSCALE` are not applied.
     U8(Vec<u8>),
-    /// BITPIX 16 with BZERO applied (the unsigned camera convention)
+    /// BITPIX 16 with `BSCALE` 1 and `BZERO` folded in: either the unsigned
+    /// camera convention, `BZERO` 32768, or no `BZERO` when no sample is
+    /// negative.
     U16(Vec<u16>),
+    /// BITPIX 32 as stored; `BZERO` and `BSCALE` are not applied.
     I32(Vec<i32>),
+    /// BITPIX -32 as stored, or BITPIX 16 that needs signed or scaled values,
+    /// already in physical units.
     F32(Vec<f32>),
+    /// BITPIX -64 as stored, or BITPIX 64 already in physical units. An
+    /// integer beyond 2^53 does not fit an `f64` exactly and is rounded.
     F64(Vec<f64>),
 }
 
-/// A decoded FITS image: primary-HDU pixels plus the parsed header cards.
+/// A decoded FITS image: pixels plus the parsed header cards.
 #[derive(Debug, Clone)]
 pub struct FitsImage {
     pub width: usize,
@@ -79,7 +93,9 @@ pub struct FitsImage {
     /// Color planes: 1 for mono/CFA, 3 for planar RGB (NAXIS3 = 3)
     pub planes: usize,
     pub pixels: Pixels,
-    /// Header cards in file order (keyword, value)
+    /// Header cards in file order (keyword, value). For an image read from
+    /// an extension, the extension's cards come first, then the primary
+    /// header's; see [`read_header`].
     pub headers: Vec<(String, HeaderValue)>,
 }
 
@@ -99,12 +115,18 @@ pub struct FitsHeader {
     pub comments: Vec<String>,
 }
 
-/// Parse header cards block by block until END. Returns the header and the
-/// byte offset where the data section begins.
+/// Parse a primary header block by block until END. Returns the header and
+/// the byte offset where the data section begins.
 fn parse_headers(data: &[u8]) -> Result<(FitsHeader, usize), FitsError> {
     if data.len() < BLOCK || &data[0..6] != b"SIMPLE" {
         return Err(FitsError::NotFits);
     }
+    parse_header_cards(data)
+}
+
+/// Parse header cards block by block until END. Returns the header and the
+/// byte offset, from the start of `data`, where the data section begins.
+fn parse_header_cards(data: &[u8]) -> Result<(FitsHeader, usize), FitsError> {
     let mut header = FitsHeader::default();
     let mut data_start = None;
     'blocks: for block in 0.. {
@@ -145,12 +167,44 @@ fn parse_headers(data: &[u8]) -> Result<(FitsHeader, usize), FitsError> {
                         value.push_str(&more);
                     }
                 }
+                // The ESO convention for keywords longer than eight
+                // characters or holding spaces:
+                // `HIERARCH ESO DET DIT = 1.5 / comment` names `ESO DET DIT`.
+                "HIERARCH" => {
+                    let text = String::from_utf8_lossy(&card[8..]);
+                    if let Some((keyword, value)) = text.split_once('=')
+                        && is_hierarch_keyword(keyword.trim())
+                    {
+                        header
+                            .cards
+                            .push((keyword.trim().to_string(), parse_header_value(value)));
+                    }
+                }
                 _ => {}
             }
         }
     }
     let data_start = data_start.ok_or_else(|| FitsError::Malformed("missing END card".into()))?;
     Ok((header, data_start))
+}
+
+/// Whether `keyword` can be written as a `HIERARCH` card and read back
+/// unchanged: printable ASCII without `=`, `'` or `/`, which would end it
+/// early, and without spaces at either end, which a reader trims.
+pub(crate) fn is_hierarch_keyword(keyword: &str) -> bool {
+    !keyword.is_empty()
+        && !keyword.starts_with(' ')
+        && !keyword.ends_with(' ')
+        && keyword
+            .bytes()
+            .all(|byte| (b' '..=b'~').contains(&byte) && !b"='/".contains(&byte))
+}
+
+/// Whether a header block holds the END card.
+fn holds_end_card(block: &[u8]) -> bool {
+    block
+        .chunks_exact(CARD)
+        .any(|card| card.starts_with(b"END") && card[3] == b' ')
 }
 
 /// Read complete FITS header blocks and leave the reader at the first byte of
@@ -176,27 +230,263 @@ fn read_headers_from(
                 _ => FitsError::Io(error),
             });
         }
-        if data[start..]
-            .chunks_exact(CARD)
-            .any(|card| card.starts_with(b"END") && card[3] == b' ')
-        {
+        // Stop at a first block that is not FITS rather than read the
+        // whole file looking for an END card.
+        if start == 0 && !data.starts_with(b"SIMPLE") {
+            return Err(FitsError::NotFits);
+        }
+        if holds_end_card(&data[start..]) {
             break;
         }
     }
     parse_headers(&data)
 }
 
+/// Read an extension's header blocks and leave the reader at the first byte
+/// of its data unit. Returns the header and its length in bytes, or `None`
+/// when no complete, well-formed extension header starts here.
+fn read_extension_header(reader: &mut impl Read) -> Result<Option<(FitsHeader, u64)>, FitsError> {
+    let mut data = Vec::new();
+    loop {
+        let start = data.len();
+        data.resize(start + BLOCK, 0);
+        match reader.read_exact(&mut data[start..]) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(error) => return Err(FitsError::Io(error)),
+        }
+        if start == 0 && !data.starts_with(b"XTENSION") {
+            return Ok(None);
+        }
+        if holds_end_card(&data[start..]) {
+            break;
+        }
+    }
+    Ok(parse_header_cards(&data)
+        .ok()
+        .map(|(header, length)| (header, length as u64)))
+}
+
+fn card_i64(cards: &[(String, HeaderValue)], key: &str) -> Option<i64> {
+    cards
+        .iter()
+        .find(|(k, _)| k == key)
+        .and_then(|(_, v)| v.as_i64())
+}
+
+/// Random groups mark themselves with `NAXIS1 = 0` and `GROUPS = T`.
+fn is_random_groups(cards: &[(String, HeaderValue)]) -> bool {
+    card_i64(cards, "NAXIS1") == Some(0)
+        && cards
+            .iter()
+            .any(|(key, value)| key == "GROUPS" && value.as_bool() == Some(true))
+}
+
+/// The lengths of axes 1 to `NAXIS`, or `None` when one is missing or
+/// negative.
+fn axis_lengths(cards: &[(String, HeaderValue)]) -> Option<Vec<u64>> {
+    let naxis = card_i64(cards, "NAXIS").unwrap_or(0).clamp(0, 999);
+    (1..=naxis)
+        .map(|axis| {
+            card_i64(cards, &format!("NAXIS{axis}")).and_then(|length| u64::try_from(length).ok())
+        })
+        .collect()
+}
+
+/// Whether a primary header declares no data array: `NAXIS` 0 or an axis of
+/// length 0, short of random groups.
+fn declares_no_data(cards: &[(String, HeaderValue)]) -> bool {
+    !is_random_groups(cards)
+        && axis_lengths(cards).is_some_and(|axes| axes.is_empty() || axes.contains(&0))
+}
+
+/// Whether an extension header is an image extension with two or more axes,
+/// none of them empty.
+fn holds_image(cards: &[(String, HeaderValue)]) -> bool {
+    cards
+        .iter()
+        .find(|(key, _)| key == "XTENSION")
+        .and_then(|(_, value)| value.as_str())
+        == Some("IMAGE")
+        && axis_lengths(cards).is_some_and(|axes| axes.len() >= 2 && !axes.contains(&0))
+}
+
+/// The length of an HDU's data unit without its padding:
+/// `|BITPIX| / 8 × GCOUNT × (PCOUNT + NAXIS1 × … × NAXISn)`, with `NAXIS1`
+/// left out of the product for random groups.
+fn data_unit_bytes(cards: &[(String, HeaderValue)]) -> Option<u64> {
+    let axes = axis_lengths(cards)?;
+    if axes.is_empty() {
+        return Some(0);
+    }
+    let skip = usize::from(is_random_groups(cards));
+    let elements = axes[skip..]
+        .iter()
+        .try_fold(1_u64, |product, &length| product.checked_mul(length))?;
+    let bytes = card_i64(cards, "BITPIX")?.unsigned_abs() / 8;
+    let pcount = u64::try_from(card_i64(cards, "PCOUNT").unwrap_or(0)).ok()?;
+    let gcount = u64::try_from(card_i64(cards, "GCOUNT").unwrap_or(1)).ok()?;
+    pcount
+        .checked_add(elements)?
+        .checked_mul(gcount)?
+        .checked_mul(bytes)
+}
+
+/// Cards that describe the primary HDU's own data array, or its place in the
+/// file, and so would mislead if read as the extension image's.
+fn describes_primary_data(keyword: &str) -> bool {
+    keyword.starts_with("NAXIS")
+        || matches!(
+            keyword,
+            "SIMPLE"
+                | "EXTEND"
+                | "BITPIX"
+                | "PCOUNT"
+                | "GCOUNT"
+                | "GROUPS"
+                | "BZERO"
+                | "BSCALE"
+                | "BLANK"
+                | "CHECKSUM"
+                | "DATASUM"
+        )
+}
+
+/// An image extension's header followed by the primary header's cards, as
+/// in the `INHERIT` convention: a lookup finds the extension's own values
+/// (its WCS, its scaling) first and still sees file-wide metadata such as
+/// `DATE-OBS` that the primary holds.
+///
+/// The extension's `XTENSION`, `PCOUNT` and `GCOUNT` are left out, and so
+/// are the primary's cards that describe its own (empty) data array and
+/// those the extension already has. An extension with `INHERIT = F` gets
+/// nothing from the primary.
+fn inherit_primary(extension: FitsHeader, primary: FitsHeader) -> FitsHeader {
+    let inherit = card_value(&extension.cards, "INHERIT").and_then(HeaderValue::as_bool);
+    let mut header = FitsHeader {
+        cards: extension
+            .cards
+            .into_iter()
+            .filter(|(key, _)| !matches!(key.as_str(), "XTENSION" | "PCOUNT" | "GCOUNT"))
+            .collect(),
+        history: extension.history,
+        comments: extension.comments,
+    };
+    if inherit == Some(false) {
+        return header;
+    }
+    let own: std::collections::HashSet<String> =
+        header.cards.iter().map(|(key, _)| key.clone()).collect();
+    header.cards.extend(
+        primary
+            .cards
+            .into_iter()
+            .filter(|(key, _)| !describes_primary_data(key) && !own.contains(key)),
+    );
+    header.history.extend(primary.history);
+    header.comments.extend(primary.comments);
+    header
+}
+
+fn card_value<'a>(cards: &'a [(String, HeaderValue)], key: &str) -> Option<&'a HeaderValue> {
+    cards.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+}
+
+/// The header of the HDU whose image this crate reads, and where that HDU's
+/// header and data start in the file.
+struct ImageHdu {
+    header: FitsHeader,
+    header_start: u64,
+    data_start: u64,
+}
+
+/// Find the HDU whose image this crate reads and leave the reader at the
+/// first byte of its data.
+///
+/// That is the primary HDU, unless its header declares no data. Then it is
+/// the first image extension with two or more axes, its header combined
+/// with the primary's as [`inherit_primary`] describes. Tables are skipped.
+/// When no such extension follows, or the search meets anything but a
+/// well-formed extension header, the primary is returned, so callers report
+/// on it as they did before extensions were read.
+fn locate_image<R: Read + Seek>(
+    reader: &mut R,
+    short_first_block_is_not_fits: bool,
+) -> Result<ImageHdu, FitsError> {
+    let (primary, data_start) = read_headers_from(reader, short_first_block_is_not_fits)?;
+    let data_start = data_start as u64;
+    if !declares_no_data(&primary.cards) {
+        return Ok(ImageHdu {
+            header: primary,
+            header_start: 0,
+            data_start,
+        });
+    }
+    // A primary that declares no data has an empty data unit.
+    let mut offset = data_start;
+    loop {
+        reader.seek(SeekFrom::Start(offset))?;
+        let Some((extension, header_bytes)) = read_extension_header(reader)? else {
+            break;
+        };
+        let extension_data = offset + header_bytes;
+        if holds_image(&extension.cards) {
+            return Ok(ImageHdu {
+                header: inherit_primary(extension, primary),
+                header_start: offset,
+                data_start: extension_data,
+            });
+        }
+        let Some(next) = data_unit_bytes(&extension.cards)
+            .and_then(|bytes| bytes.checked_next_multiple_of(BLOCK as u64))
+            .and_then(|bytes| extension_data.checked_add(bytes))
+        else {
+            break;
+        };
+        offset = next;
+    }
+    reader.seek(SeekFrom::Start(data_start))?;
+    Ok(ImageHdu {
+        header: primary,
+        header_start: 0,
+        data_start,
+    })
+}
+
 /// Read only the header cards of a FITS file, without touching the pixel
 /// data — cheap metadata probes on large files.
+///
+/// When the primary HDU holds no data and an image extension follows, these
+/// are the extension's cards, then the primary's, as [`FitsImage::open`]
+/// reads them: the extension's `XTENSION`, `PCOUNT` and `GCOUNT` and the
+/// primary's structural and scaling cards are left out, and a primary card
+/// whose keyword the extension also has gives way to it. An extension with
+/// `INHERIT = F` keeps the primary's cards out.
 pub fn read_header(path: &Path) -> Result<Vec<(String, HeaderValue)>, FitsError> {
     read_header_with_commentary(path).map(|header| header.cards)
 }
 
 /// Read a FITS file's header cards together with its `HISTORY` and
-/// `COMMENT` text, without touching the pixel data.
+/// `COMMENT` text, without touching the pixel data. The cards are those of
+/// [`read_header`], and the commentary is combined the same way.
 pub fn read_header_with_commentary(path: &Path) -> Result<FitsHeader, FitsError> {
     let mut file = std::fs::File::open(path)?;
-    read_headers_from(&mut file, false).map(|(header, _)| header)
+    locate_image(&mut file, false).map(|hdu| hdu.header)
+}
+
+/// Where the header of the HDU that [`FitsImage::open`] reads starts.
+pub(crate) fn image_header_offset<R: Read + Seek>(reader: &mut R) -> Result<u64, FitsError> {
+    locate_image(reader, true).map(|hdu| hdu.header_start)
+}
+
+/// The `BLANK` card of integer data. The standard defines it for integer
+/// BITPIX only, with an integer value; astropy and cfitsio both ignore one
+/// written as a float, such as `-32768.0`, and so does this crate.
+fn integer_blank(cards: &[(String, HeaderValue)], bitpix: i64) -> Option<i64> {
+    match card_value(cards, "BLANK") {
+        Some(HeaderValue::Integer(blank)) if bitpix > 0 => Some(*blank),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -208,6 +498,8 @@ struct ImageSpec {
     bitpix: i64,
     bzero: f64,
     bscale: f64,
+    /// The stored value of an undefined sample, for integer data.
+    blank: Option<i64>,
 }
 
 impl ImageSpec {
@@ -227,7 +519,7 @@ impl ImageSpec {
 
         let bitpix =
             header_i64("BITPIX").ok_or_else(|| FitsError::Malformed("missing BITPIX".into()))?;
-        if !matches!(bitpix, 8 | 16 | 32 | -32 | -64) {
+        if !matches!(bitpix, 8 | 16 | 32 | 64 | -32 | -64) {
             return Err(FitsError::Unsupported(format!("BITPIX {bitpix}")));
         }
         let naxis = header_i64("NAXIS").unwrap_or(0);
@@ -275,6 +567,7 @@ impl ImageSpec {
             bitpix,
             bzero: header_f64("BZERO").unwrap_or(0.0),
             bscale: header_f64("BSCALE").unwrap_or(1.0),
+            blank: integer_blank(headers, bitpix),
         })
     }
 
@@ -283,7 +576,7 @@ impl ImageSpec {
             8 => 1,
             16 => 2,
             32 | -32 => 4,
-            -64 => 8,
+            64 | -64 => 8,
             _ => unreachable!("ImageSpec validates BITPIX"),
         };
         self.count as u64 * bytes_per_pixel
@@ -331,17 +624,25 @@ fn allocate_pixel_vec<T>(count: usize) -> Result<Vec<T>, FitsError> {
 
 #[multiversion::multiversion(targets("x86_64+avx2", "x86_64+sse4.1", "aarch64+neon"))]
 fn fold_be_u16(raw: &[u8], flip: u16, out: &mut Vec<u16>) {
-    if flip != 0 {
-        out.extend(
-            raw.chunks_exact(2)
-                .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]) ^ 0x8000),
-        );
-    } else {
-        out.extend(
-            raw.chunks_exact(2)
-                .map(|chunk| i16::from_be_bytes([chunk[0], chunk[1]]).max(0) as u16),
-        );
-    }
+    out.extend(
+        raw.chunks_exact(2)
+            .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]) ^ flip),
+    );
+}
+
+/// Signed 16-bit samples, given as their raw bits, as physical values with
+/// blank samples as NaN.
+fn signed_u16_bits_to_f32(bits: &[u16], blank: Option<i64>) -> Result<Vec<f32>, FitsError> {
+    let mut out = allocate_pixel_vec(bits.len())?;
+    out.extend(bits.iter().map(|&bits| {
+        let stored = bits as i16;
+        if blank == Some(i64::from(stored)) {
+            f32::NAN
+        } else {
+            f32::from(stored)
+        }
+    }));
+    Ok(out)
 }
 
 fn decode_pixels(reader: &mut impl Read, spec: ImageSpec) -> Result<Pixels, FitsError> {
@@ -357,24 +658,49 @@ fn decode_pixels(reader: &mut impl Read, spec: ImageSpec) -> Result<Pixels, Fits
             let offset = spec.bzero as i64;
             if spec.bscale == 1.0 && (offset == 32768 || offset == 0) {
                 // Adding 32768 to an i16 is a sign-bit flip on the raw bits:
-                // byteswap + XOR. With no offset, negatives clamp to zero,
-                // matching the previous general decode behavior.
+                // byteswap + XOR. With no offset the raw bits pass through,
+                // which is the value unless the sample is negative.
                 let flip = if offset == 32768 { 0x8000 } else { 0 };
                 let mut out = allocate_pixel_vec(spec.count)?;
                 read_payload_chunks(reader, spec.count, 2, |raw| {
                     fold_be_u16(raw, flip, &mut out)
                 })?;
+                if flip == 0 && out.iter().any(|&bits| bits & 0x8000 != 0) {
+                    return signed_u16_bits_to_f32(&out, spec.blank).map(Pixels::F32);
+                }
                 Ok(Pixels::U16(out))
             } else {
                 let mut out = allocate_pixel_vec(spec.count)?;
                 read_payload_chunks(reader, spec.count, 2, |raw| {
                     out.extend(raw.chunks_exact(2).map(|chunk| {
-                        let value = i16::from_be_bytes([chunk[0], chunk[1]]) as f64;
-                        (spec.bzero + spec.bscale * value) as f32
+                        let stored = i16::from_be_bytes([chunk[0], chunk[1]]);
+                        if spec.blank == Some(i64::from(stored)) {
+                            return f32::NAN;
+                        }
+                        (spec.bzero + spec.bscale * f64::from(stored)) as f32
                     }));
                 })?;
                 Ok(Pixels::F32(out))
             }
+        }
+        64 => {
+            let mut out = allocate_pixel_vec(spec.count)?;
+            // BZERO 2^63 is the unsigned convention, the 64-bit kin of
+            // BZERO 32768: flipping the sign bit gives the u64 exactly.
+            let unsigned = spec.bscale == 1.0 && spec.bzero == 9_223_372_036_854_775_808.0;
+            read_payload_chunks(reader, spec.count, 8, |raw| {
+                out.extend(raw.chunks_exact(8).map(|chunk| {
+                    let stored = i64::from_be_bytes(chunk.try_into().unwrap());
+                    if spec.blank == Some(stored) {
+                        f64::NAN
+                    } else if unsigned {
+                        ((stored as u64) ^ (1 << 63)) as f64
+                    } else {
+                        spec.bzero + spec.bscale * stored as f64
+                    }
+                }));
+            })?;
+            Ok(Pixels::F64(out))
         }
         32 => {
             let mut out = allocate_pixel_vec(spec.count)?;
@@ -411,9 +737,12 @@ fn decode_pixels(reader: &mut impl Read, spec: ImageSpec) -> Result<Pixels, Fits
 }
 
 impl FitsImage {
-    /// Open and decode the primary image while retaining only the parsed
-    /// header, the final typed pixel vector, and a fixed-size conversion
-    /// buffer. FITS data-unit padding and trailing HDUs are not read.
+    /// Open and decode the image while retaining only the parsed header, the
+    /// final typed pixel vector, and a fixed-size conversion buffer. FITS
+    /// data-unit padding and trailing HDUs are not read.
+    ///
+    /// The image is the primary HDU's, or, when the primary holds no data,
+    /// the first image extension's, with the headers [`read_header`] gives.
     pub fn open(path: &Path) -> Result<FitsImage, FitsError> {
         let mut file = std::fs::File::open(path)?;
         Self::read_from(&mut file, None)
@@ -427,15 +756,17 @@ impl FitsImage {
         Self::read_from(&mut reader, Some(data.len() as u64))
     }
 
-    fn read_from(
-        reader: &mut impl Read,
+    fn read_from<R: Read + Seek>(
+        reader: &mut R,
         available_bytes: Option<u64>,
     ) -> Result<FitsImage, FitsError> {
-        let (header, data_start) = read_headers_from(reader, true)?;
+        let ImageHdu {
+            header, data_start, ..
+        } = locate_image(reader, true)?;
         let headers = header.cards;
         let spec = ImageSpec::from_headers(&headers)?;
         if let Some(available_bytes) = available_bytes {
-            let data_end = (data_start as u64)
+            let data_end = data_start
                 .checked_add(spec.payload_bytes())
                 .ok_or_else(|| FitsError::Malformed("implausible dimensions".into()))?;
             if data_end > available_bytes {
@@ -465,11 +796,13 @@ impl FitsImage {
     }
 
     /// Consume the image and return its pixels in physical units
-    /// (`BZERO + BSCALE * stored`) as f32, still in plane order.
+    /// (`BZERO + BSCALE * stored`) as f32, still in plane order. Integer
+    /// samples equal to the header's `BLANK` are undefined and become NaN.
     ///
-    /// Two cases skip the header scaling because decoding already applied
-    /// it: U16 pixels carry the standard unsigned-camera BZERO, and a
-    /// BITPIX=16 image with unusual scaling decodes straight to F32.
+    /// Three cases skip the header scaling because decoding already applied
+    /// it: U16 pixels carry the standard unsigned-camera BZERO, a BITPIX=16
+    /// image with negative samples or unusual scaling decodes straight to
+    /// F32, and a BITPIX=64 image decodes straight to F64.
     pub fn into_physical_f32(self) -> Vec<f32> {
         let bitpix = self
             .header("BITPIX")
@@ -477,21 +810,48 @@ impl FitsImage {
             .unwrap_or(0);
         let bzero = self.header_f64("BZERO").unwrap_or(0.0);
         let bscale = self.header_f64("BSCALE").unwrap_or(1.0);
+        let blank = self.blank();
+        let physical = |stored: i64, value: f64| {
+            if blank == Some(stored) {
+                f32::NAN
+            } else {
+                (bzero + bscale * value) as f32
+            }
+        };
         match self.pixels {
             Pixels::U8(values) => values
                 .into_iter()
-                .map(|value| (bzero + bscale * f64::from(value)) as f32)
+                .map(|value| physical(i64::from(value), f64::from(value)))
                 .collect(),
-            Pixels::U16(values) => values.into_iter().map(f32::from).collect(),
+            // Decoding folded BZERO in, so it folds into BLANK too.
+            Pixels::U16(values) => match blank
+                .and_then(|blank| blank.checked_add(bzero as i64))
+                .and_then(|blank| u16::try_from(blank).ok())
+            {
+                None => values.into_iter().map(f32::from).collect(),
+                Some(blank) => values
+                    .into_iter()
+                    .map(|value| {
+                        if value == blank {
+                            f32::NAN
+                        } else {
+                            f32::from(value)
+                        }
+                    })
+                    .collect(),
+            },
             Pixels::I32(values) => values
                 .into_iter()
-                .map(|value| (bzero + bscale * f64::from(value)) as f32)
+                .map(|value| physical(i64::from(value), f64::from(value)))
                 .collect(),
             Pixels::F32(values) if bitpix == 16 => values,
             Pixels::F32(values) => values
                 .into_iter()
                 .map(|value| (bzero + bscale * f64::from(value)) as f32)
                 .collect(),
+            Pixels::F64(values) if bitpix == 64 => {
+                values.into_iter().map(|value| value as f32).collect()
+            }
             Pixels::F64(values) => values
                 .into_iter()
                 .map(|value| (bzero + bscale * value) as f32)
@@ -499,9 +859,20 @@ impl FitsImage {
         }
     }
 
+    /// The stored value that marks an undefined sample: the `BLANK` card of
+    /// an integer image.
+    fn blank(&self) -> Option<i64> {
+        let bitpix = self.header("BITPIX").and_then(HeaderValue::as_i64)?;
+        integer_blank(&self.headers, bitpix)
+    }
+
     /// Pixels as u16, converting float/i32 data by min-max scaling.
     /// Planar RGB collapses to luminance; the mono u16 case is a borrow —
     /// no copy, no conversion.
+    ///
+    /// NaN, and an i32 sample equal to `BLANK`, stays out of the scaling
+    /// range and maps to 0. A u8 or u16 sample equal to `BLANK` keeps its
+    /// stored value, as nothing here rescales those.
     pub fn to_u16(&self) -> std::borrow::Cow<'_, [u16]> {
         if self.planes == 3 {
             let full = self.planes_u16();
@@ -560,7 +931,10 @@ impl FitsImage {
             Pixels::U8(data) => {
                 std::borrow::Cow::Owned(data.iter().map(|&v| (v as u16) << 8).collect())
             }
-            Pixels::I32(data) => scale_to_u16(data, |v| v as f64),
+            Pixels::I32(data) => match self.i32_blank() {
+                None => scale_to_u16(data, |v| v as f64),
+                Some(blank) => scale_to_u16(data, move |v| blank_as_nan(v, blank)),
+            },
             Pixels::F32(data) => scale_to_u16(data, |v| v as f64),
             Pixels::F64(data) => scale_to_u16(data, |v| v),
         }
@@ -670,10 +1044,27 @@ impl FitsImage {
                 .iter()
                 .map(|&value| value as f32 / u16::MAX as f32)
                 .collect(),
-            Pixels::I32(data) => scale_to_f32(data.iter().map(|&value| value as f64)),
+            Pixels::I32(data) => match self.i32_blank() {
+                None => scale_to_f32(data.iter().map(|&value| value as f64)),
+                Some(blank) => scale_to_f32(data.iter().map(|&value| blank_as_nan(value, blank))),
+            },
             Pixels::F32(data) => scale_to_f32(data.iter().map(|&value| value as f64)),
             Pixels::F64(data) => scale_to_f32(data.iter().copied()),
         }
+    }
+
+    /// [`Self::blank`] for i32 pixels, when an i32 can equal it.
+    fn i32_blank(&self) -> Option<i32> {
+        self.blank().and_then(|blank| i32::try_from(blank).ok())
+    }
+}
+
+/// An i32 sample as f64, NaN when it is the blank value.
+fn blank_as_nan(value: i32, blank: i32) -> f64 {
+    if value == blank {
+        f64::NAN
+    } else {
+        f64::from(value)
     }
 }
 
@@ -1323,5 +1714,574 @@ mod io_tests {
         std::fs::remove_file(path).unwrap();
         assert_eq!((image.width, image.height, image.planes), (2, 2, 1));
         assert!(matches!(image.pixels, Pixels::U16(ref values) if values == &[100, 200, 300, 400]));
+    }
+}
+
+#[cfg(test)]
+mod hdu_tests {
+    use super::*;
+
+    /// A valued card, `KEYWORD = value`, with the value right-aligned.
+    fn card(keyword: &str, value: &str) -> String {
+        format!("{keyword:<8}= {value:>20}")
+    }
+
+    /// One HDU: the cards and END, padded to a block, then the payload,
+    /// padded with zeros.
+    fn hdu(cards: &[String], payload: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for text in cards.iter().map(String::as_str).chain(["END"]) {
+            assert!(text.len() <= CARD, "{text}");
+            bytes.extend_from_slice(format!("{text:<80}").as_bytes());
+        }
+        bytes.resize(bytes.len().next_multiple_of(BLOCK), b' ');
+        bytes.extend_from_slice(payload);
+        bytes.resize(bytes.len().next_multiple_of(BLOCK), 0);
+        bytes
+    }
+
+    fn primary(bitpix: i64, axes: &[usize], extra: &[String]) -> Vec<String> {
+        let mut cards = vec![
+            card("SIMPLE", "T"),
+            card("BITPIX", &bitpix.to_string()),
+            card("NAXIS", &axes.len().to_string()),
+        ];
+        for (index, length) in axes.iter().enumerate() {
+            cards.push(card(&format!("NAXIS{}", index + 1), &length.to_string()));
+        }
+        cards.extend_from_slice(extra);
+        cards
+    }
+
+    fn extension(kind: &str, bitpix: i64, axes: &[usize], extra: &[String]) -> Vec<String> {
+        let mut cards = primary(bitpix, axes, &[]);
+        cards[0] = format!("XTENSION= '{kind:<8}'");
+        cards.push(card("PCOUNT", "0"));
+        cards.push(card("GCOUNT", "1"));
+        cards.extend_from_slice(extra);
+        cards
+    }
+
+    fn be<T: Copy, const N: usize>(values: &[T], to_bytes: fn(T) -> [u8; N]) -> Vec<u8> {
+        values.iter().flat_map(|&value| to_bytes(value)).collect()
+    }
+
+    /// Samples compared bit for bit, so NaN equals NaN.
+    fn assert_samples(actual: &[f32], expected: &[f32]) {
+        let bits = |values: &[f32]| {
+            values
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bits(actual), bits(expected), "{actual:?} vs {expected:?}");
+    }
+
+    fn keywords(image: &FitsImage) -> Vec<&str> {
+        image.headers.iter().map(|(key, _)| key.as_str()).collect()
+    }
+
+    #[test]
+    fn signed_16_bit_samples_keep_their_sign() {
+        // A HiPS tile: BITPIX 16 with no BZERO and samples below zero, which
+        // used to clamp to 0.
+        let stored = [-2788_i16, -1, 0, 1, 32767, -32768];
+        let file = hdu(&primary(16, &[3, 2], &[]), &be(&stored, i16::to_be_bytes));
+        let image = FitsImage::from_bytes(&file).unwrap();
+        assert!(
+            matches!(image.pixels, Pixels::F32(ref values) if *values == stored.map(f32::from))
+        );
+        // The u16 view scales the full signed range.
+        assert_eq!(image.to_u16()[..2], [29_980, 32_767]);
+        assert_samples(&image.into_physical_f32(), &stored.map(f32::from));
+
+        // Without a negative sample the data stays u16, as before; an
+        // explicit BZERO 0 and BSCALE 1 change nothing.
+        for extra in [vec![], vec![card("BZERO", "0"), card("BSCALE", "1")]] {
+            let stored = [0_i16, 1, 32767];
+            let file = hdu(
+                &primary(16, &[3, 1], &extra),
+                &be(&stored, i16::to_be_bytes),
+            );
+            let image = FitsImage::from_bytes(&file).unwrap();
+            assert!(matches!(image.pixels, Pixels::U16(ref values) if values == &[0, 1, 32767]));
+        }
+    }
+
+    #[test]
+    fn blank_samples_become_nan_in_physical_values() {
+        let nan = f32::NAN;
+        let blank = |value: &str| card("BLANK", value);
+        let decode = |cards: Vec<String>, payload: Vec<u8>| {
+            FitsImage::from_bytes(&hdu(&cards, &payload)).unwrap()
+        };
+
+        // u8 storage keeps the stored blank; scaling skips it.
+        let image = decode(
+            primary(
+                8,
+                &[3, 1],
+                &[blank("255"), card("BZERO", "1"), card("BSCALE", "2")],
+            ),
+            vec![0, 255, 7],
+        );
+        assert!(matches!(image.pixels, Pixels::U8(ref values) if values == &[0, 255, 7]));
+        assert_samples(&image.into_physical_f32(), &[1.0, nan, 15.0]);
+
+        // The camera convention folds BZERO into the stored blank as well:
+        // stored -32768 is u16 0.
+        let image = decode(
+            primary(16, &[3, 1], &[card("BZERO", "32768"), blank("-32768")]),
+            be(&[-32768_i16, 0, 100], i16::to_be_bytes),
+        );
+        assert!(matches!(image.pixels, Pixels::U16(ref values) if values == &[0, 32768, 32868]));
+        assert_samples(&image.into_physical_f32(), &[nan, 32768.0, 32868.0]);
+
+        // Signed and scaled 16-bit data decode to floats with NaN blanks.
+        let image = decode(
+            primary(16, &[3, 1], &[blank("-32768")]),
+            be(&[-32768_i16, -5, 5], i16::to_be_bytes),
+        );
+        assert!(matches!(image.pixels, Pixels::F32(_)));
+        assert_samples(&image.into_physical_f32(), &[nan, -5.0, 5.0]);
+        // A HiPS writer gives BLANK as a float, which astropy and cfitsio
+        // both ignore.
+        let image = decode(
+            primary(16, &[3, 1], &[blank("-32768.0")]),
+            be(&[-32768_i16, -5, 5], i16::to_be_bytes),
+        );
+        assert_samples(&image.into_physical_f32(), &[-32768.0, -5.0, 5.0]);
+        let image = decode(
+            primary(
+                16,
+                &[3, 1],
+                &[card("BZERO", "10"), card("BSCALE", "2"), blank("-1")],
+            ),
+            be(&[-1_i16, 0, 2], i16::to_be_bytes),
+        );
+        assert_samples(&image.into_physical_f32(), &[nan, 10.0, 14.0]);
+
+        // i32 storage keeps the blank, but the u16 view leaves it out of the
+        // scaling range rather than let it squeeze the real samples.
+        let image = decode(
+            primary(32, &[3, 1], &[blank("-2147483648")]),
+            be(&[i32::MIN, 10, 20], i32::to_be_bytes),
+        );
+        assert!(matches!(image.pixels, Pixels::I32(ref values) if values == &[i32::MIN, 10, 20]));
+        assert_eq!(*image.to_u16(), [0, 0, 65535]);
+        assert_eq!(image.to_luma_f32(), [0.0, 0.0, 1.0]);
+        assert_samples(&image.into_physical_f32(), &[nan, 10.0, 20.0]);
+
+        let image = decode(
+            primary(64, &[2, 1], &[blank("7")]),
+            be(&[7_i64, 8], i64::to_be_bytes),
+        );
+        assert_samples(&image.into_physical_f32(), &[nan, 8.0]);
+
+        // The standard defines BLANK for integer data only.
+        let image = decode(
+            primary(-32, &[2, 1], &[blank("0")]),
+            be(&[0.0_f32, 1.0], f32::to_be_bytes),
+        );
+        assert_samples(&image.into_physical_f32(), &[0.0, 1.0]);
+    }
+
+    #[test]
+    fn reads_64_bit_integers() {
+        let stored = [-3_i64, 0, 5, 1 << 53, i64::MAX, i64::MIN];
+        let file = hdu(&primary(64, &[3, 2], &[]), &be(&stored, i64::to_be_bytes));
+        let image = FitsImage::from_bytes(&file).unwrap();
+        let expected = stored.map(|value| value as f64);
+        assert!(matches!(image.pixels, Pixels::F64(ref values) if *values == expected));
+        assert_samples(
+            &image.into_physical_f32(),
+            &expected.map(|value| value as f32),
+        );
+
+        // BZERO 2^63 stores unsigned values; the sign-bit flip is exact.
+        let unsigned = [card("BZERO", "9223372036854775808")];
+        let file = hdu(
+            &primary(64, &[3, 1], &unsigned),
+            &be(&[i64::MIN, -1, i64::MAX], i64::to_be_bytes),
+        );
+        let image = FitsImage::from_bytes(&file).unwrap();
+        let expected = [0.0, (i64::MAX as u64) as f64, u64::MAX as f64];
+        assert!(matches!(image.pixels, Pixels::F64(ref values) if *values == expected));
+
+        // Other scaling applies as written, and a cube keeps its planes.
+        let scaled = [card("BZERO", "10"), card("BSCALE", "0.5")];
+        let file = hdu(
+            &primary(64, &[1, 1, 3], &scaled),
+            &be(&[-4_i64, 0, 4], i64::to_be_bytes),
+        );
+        let image = FitsImage::from_bytes(&file).unwrap();
+        assert_eq!((image.width, image.height, image.planes), (1, 1, 3));
+        assert_samples(&image.into_physical_f32(), &[8.0, 10.0, 12.0]);
+
+        let file = hdu(
+            &primary(64, &[2, 1], &[]),
+            &be(&[1_i64, 2], i64::to_be_bytes),
+        );
+        assert!(matches!(
+            FitsImage::from_bytes(&file[..BLOCK + 8]),
+            Err(FitsError::Malformed(message)) if message == "data runs past EOF"
+        ));
+    }
+
+    #[test]
+    fn hierarch_cards_name_their_full_keyword() {
+        let cards = primary(
+            8,
+            &[1, 1],
+            &[
+                "HIERARCH LBTO LUCI DET ITIME = 0.139764 / [s] integration time".into(),
+                "HIERARCH ESO OBS NAME = 'night one &'".into(),
+                "CONTINUE  'and two' / continued".into(),
+                "HIERARCH ESO TPL ID= 'a=b' / value holds an equals sign".into(),
+                "HIERARCH GAIN = 3".into(),
+                "HIERARCH Mixed  Case = T".into(),
+                "HIERARCH no value / a=b".into(),
+                "HIERARCH = 1".into(),
+                card("HIERARCH", "5"),
+            ],
+        );
+        let image = FitsImage::from_bytes(&hdu(&cards, &[0])).unwrap();
+        assert_eq!(
+            image.header("LBTO LUCI DET ITIME"),
+            Some(&HeaderValue::Float(0.139764))
+        );
+        assert_eq!(image.header_str("ESO OBS NAME"), Some("night one and two"));
+        assert_eq!(image.header_str("ESO TPL ID"), Some("a=b"));
+        assert_eq!(image.header("GAIN"), Some(&HeaderValue::Integer(3)));
+        assert_eq!(
+            image.header("Mixed  Case"),
+            Some(&HeaderValue::Logical(true))
+        );
+        // A card named HIERARCH with `=` in column 9 is an ordinary card.
+        assert_eq!(image.header("HIERARCH"), Some(&HeaderValue::Integer(5)));
+        assert_eq!(keywords(&image).len(), 5 + 6);
+    }
+
+    #[test]
+    fn an_empty_primary_hands_over_to_the_first_image_extension() {
+        // Shaped like fitsio-pure's test0.fits: a primary with BZERO 32768
+        // but no data, then an unscaled 16-bit image extension.
+        let mut file = hdu(
+            &primary(
+                16,
+                &[],
+                &[
+                    card("EXTEND", "T"),
+                    card("BZERO", "32768"),
+                    card("BSCALE", "1"),
+                    card("CHECKSUM", "'0000'"),
+                    card("OBJECT", "'from the primary'"),
+                    card("DATE-OBS", "'2024-05-01T00:00:00'"),
+                    card("TELESCOP", "'scope'"),
+                    "HISTORY primary history".into(),
+                ],
+            ),
+            &[],
+        );
+        // A table with a heap, which the search must step over whole.
+        file.extend(hdu(
+            &extension(
+                "BINTABLE",
+                8,
+                &[4, 3],
+                &[card("TFIELDS", "1"), card("TFORM1", "'1J'")],
+            )
+            .into_iter()
+            .map(|text| {
+                if text.starts_with("PCOUNT") {
+                    card("PCOUNT", "2900")
+                } else {
+                    text
+                }
+            })
+            .collect::<Vec<_>>(),
+            &[7; 12 + 2900],
+        ));
+        // A one-axis image does not count.
+        file.extend(hdu(&extension("IMAGE", 8, &[4], &[]), &[1, 2, 3, 4]));
+        file.extend(hdu(
+            &extension(
+                "IMAGE",
+                16,
+                &[3, 1],
+                &[
+                    card("INHERIT", "T"),
+                    card("OBJECT", "'from the extension'"),
+                    card("CRPIX1", "1.5"),
+                    "HISTORY extension history".into(),
+                ],
+            ),
+            &be(&[-5_i16, 0, 7], i16::to_be_bytes),
+        ));
+        // Only the first image extension is read.
+        file.extend(hdu(&extension("IMAGE", 8, &[1, 1], &[]), &[9]));
+
+        let image = FitsImage::from_bytes(&file).unwrap();
+        assert_eq!((image.width, image.height, image.planes), (3, 1, 1));
+        assert_eq!(
+            keywords(&image),
+            [
+                "BITPIX", "NAXIS", "NAXIS1", "NAXIS2", "INHERIT", "OBJECT", "CRPIX1", "DATE-OBS",
+                "TELESCOP",
+            ]
+        );
+        assert_eq!(image.header_str("OBJECT"), Some("from the extension"));
+        assert_eq!(image.header_str("TELESCOP"), Some("scope"));
+        // The primary's BZERO describes its own empty array, not this one.
+        assert_samples(&image.into_physical_f32(), &[-5.0, 0.0, 7.0]);
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("extension.fits");
+        std::fs::write(&path, &file).unwrap();
+        let opened = FitsImage::open(&path).unwrap();
+        let header = read_header_with_commentary(&path).unwrap();
+        assert_eq!(header.cards, opened.headers);
+        assert_eq!(read_header(&path).unwrap(), opened.headers);
+        assert_eq!(header.history, ["extension history", "primary history"]);
+    }
+
+    #[test]
+    fn an_extension_with_inherit_false_stands_alone() {
+        let mut file = hdu(&primary(8, &[], &[card("DATE-OBS", "'2024-05-01'")]), &[]);
+        file.extend(hdu(
+            &extension("IMAGE", 8, &[1, 1], &[card("INHERIT", "F")]),
+            &[3],
+        ));
+        let image = FitsImage::from_bytes(&file).unwrap();
+        assert_eq!(
+            keywords(&image),
+            ["BITPIX", "NAXIS", "NAXIS1", "NAXIS2", "INHERIT"]
+        );
+        assert!(matches!(image.pixels, Pixels::U8(ref values) if values == &[3]));
+    }
+
+    #[test]
+    fn files_without_an_image_extension_read_as_before() {
+        let empty = hdu(&primary(8, &[], &[card("OBJECT", "'x'")]), &[]);
+        let table = hdu(&extension("BINTABLE", 8, &[4, 1], &[]), &[0; 4]);
+        let mut garbage = vec![b'x'; BLOCK];
+        garbage[..8].copy_from_slice(b"XTENSION");
+        let image_header = hdu(&extension("IMAGE", 16, &[1000, 1000], &[]), &[]);
+        let cases = [
+            [empty.clone(), table.clone()].concat(),
+            [empty.clone(), vec![b' '; 100]].concat(),
+            [empty.clone(), table, vec![b'?'; BLOCK]].concat(),
+            // An extension header with no END card ends the search.
+            [empty.clone(), garbage].concat(),
+            // So does one cut short.
+            [empty.clone(), image_header[..BLOCK / 2].to_vec()].concat(),
+        ];
+        for (index, file) in cases.iter().enumerate() {
+            let error = FitsImage::from_bytes(file).unwrap_err();
+            assert!(
+                matches!(error, FitsError::Unsupported(ref what) if what == "NAXIS 0 (need a 2D image)"),
+                "case {index}: {error}"
+            );
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("table.fits");
+        std::fs::write(&path, &cases[0]).unwrap();
+        let cards = read_header(&path).unwrap();
+        assert_eq!(cards.len(), 4);
+        assert_eq!(cards[3].0, "OBJECT");
+
+        // An image extension whose data is cut short is an error of its own.
+        let truncated = [empty, image_header].concat();
+        assert!(matches!(
+            FitsImage::from_bytes(&truncated),
+            Err(FitsError::Malformed(message)) if message == "data runs past EOF"
+        ));
+    }
+
+    #[test]
+    fn header_updates_reach_the_extension_image() {
+        let mut file = hdu(
+            &primary(8, &[], &[card("OBJECT", "'old'"), card("OBSERVER", "'me'")]),
+            &[],
+        );
+        file.extend(hdu(&extension("IMAGE", 8, &[2, 1], &[]), &[1, 2]));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("update.fits");
+        std::fs::write(&path, &file).unwrap();
+
+        // OBJECT lives in the primary only; the new value goes to the
+        // extension and is found first.
+        update_header_in_place(&path, "OBJECT", &HeaderValue::String("new".into()), None).unwrap();
+        update_header_in_place(&path, "OBJECT", &HeaderValue::String("newer".into()), None)
+            .unwrap();
+        let image = FitsImage::open(&path).unwrap();
+        assert_eq!(image.header_str("OBJECT"), Some("newer"));
+        assert_eq!(image.header_str("OBSERVER"), Some("me"));
+        assert_eq!(
+            image
+                .headers
+                .iter()
+                .filter(|(key, _)| key == "OBJECT")
+                .count(),
+            1
+        );
+        assert!(matches!(image.pixels, Pixels::U8(ref values) if values == &[1, 2]));
+        let written = std::fs::read(&path).unwrap();
+        assert_eq!(written[..BLOCK], file[..BLOCK], "the primary is untouched");
+        assert_eq!(written.len(), file.len());
+
+        for structural in ["XTENSION", "PCOUNT", "NAXIS2"] {
+            assert!(
+                update_header_in_place(&path, structural, &HeaderValue::Integer(1), None).is_err()
+            );
+        }
+    }
+
+    /// One synthetic file for each kind of corpus file that used to fail,
+    /// named after its model in OrbitalCommons' fits-test-cases.
+    #[test]
+    fn corpus_like_files_decode() {
+        let empty_primary = |bitpix: i64, extra: &[String]| hdu(&primary(bitpix, &[], extra), &[]);
+        // Name, file, (width, height, planes), physical samples, and a
+        // keyword the header must hold.
+        type Case = (
+            &'static str,
+            Vec<u8>,
+            (usize, usize, usize),
+            Vec<f32>,
+            &'static str,
+        );
+        let cases: Vec<Case> = vec![
+            (
+                "hipsgen/Npix140.fits: signed 16-bit HiPS tile",
+                hdu(
+                    &primary(16, &[2, 2], &[card("BLANK", "-32768")]),
+                    &be(&[-2788_i16, -32768, 0, 140], i16::to_be_bytes),
+                ),
+                (2, 2, 1),
+                vec![-2788.0, f32::NAN, 0.0, 140.0],
+                "BLANK",
+            ),
+            (
+                "cfitsio/iter_image.fit: ESO HIERARCH cards",
+                hdu(
+                    &primary(
+                        16,
+                        &[2, 1],
+                        &[
+                            card("BZERO", "32768"),
+                            "HIERARCH LBTO LUCI DET ITIME = 0.139764 / [s]".into(),
+                        ],
+                    ),
+                    &be(&[i16::MIN, 0], i16::to_be_bytes),
+                ),
+                (2, 1, 1),
+                vec![0.0, 32768.0],
+                "LBTO LUCI DET ITIME",
+            ),
+            (
+                "rust-fitsio/cube.fits: 64-bit integer cube",
+                hdu(
+                    &primary(64, &[1, 2, 2], &[]),
+                    &be(&[0_i64, 1, 2, 3], i64::to_be_bytes),
+                ),
+                (1, 2, 2),
+                vec![0.0, 1.0, 2.0, 3.0],
+                "NAXIS3",
+            ),
+            (
+                "meter-sim/mixed_types_u8_i32_f32.fits: image extensions after an empty primary",
+                [
+                    empty_primary(8, &[card("EXTEND", "T")]),
+                    hdu(&extension("IMAGE", 8, &[2, 1], &[]), &[0, 255]),
+                    hdu(
+                        &extension("IMAGE", -32, &[1, 1], &[]),
+                        &be(&[1.5_f32], f32::to_be_bytes),
+                    ),
+                ]
+                .concat(),
+                (2, 1, 1),
+                vec![0.0, 255.0],
+                "NAXIS2",
+            ),
+            (
+                "meter-sim/roundtrip_f64_multi_hdu.fits: 64-bit float extension",
+                [
+                    empty_primary(8, &[]),
+                    hdu(
+                        &extension("IMAGE", -64, &[1, 2], &[]),
+                        &be(&[0.25_f64, -0.5], f64::to_be_bytes),
+                    ),
+                ]
+                .concat(),
+                (1, 2, 1),
+                vec![0.25, -0.5],
+                "NAXIS2",
+            ),
+            (
+                "nasa-samples/HST_NICMOS.fits: INHERIT = T extension with its own WCS",
+                [
+                    empty_primary(16, &[card("TELESCOP", "'HST'")]),
+                    hdu(
+                        &extension(
+                            "IMAGE",
+                            -32,
+                            &[2, 1],
+                            &[card("INHERIT", "T"), card("CRVAL1", "182.63")],
+                        ),
+                        &be(&[-1.0_f32, 2730.9], f32::to_be_bytes),
+                    ),
+                ]
+                .concat(),
+                (2, 1, 1),
+                vec![-1.0, 2730.9],
+                "TELESCOP",
+            ),
+            (
+                "nasa-samples/EUVE.fits: INHERIT = F, BZERO 0, tables after",
+                [
+                    empty_primary(8, &[card("TELESCOP", "'EUVE'")]),
+                    hdu(
+                        &extension(
+                            "IMAGE",
+                            16,
+                            &[2, 1],
+                            &[
+                                card("INHERIT", "F"),
+                                card("BZERO", "0.0"),
+                                card("BSCALE", "1.0"),
+                            ],
+                        ),
+                        &be(&[-3_i16, 4], i16::to_be_bytes),
+                    ),
+                    hdu(&extension("BINTABLE", 8, &[16, 3], &[]), &[0; 48]),
+                ]
+                .concat(),
+                (2, 1, 1),
+                vec![-3.0, 4.0],
+                "INHERIT",
+            ),
+            (
+                "mwa/1297526432_gpubox_ch117.fits: i32 visibilities extension",
+                [
+                    empty_primary(8, &[card("TIME", "1297526432")]),
+                    hdu(
+                        &extension("IMAGE", 32, &[2, 2], &[]),
+                        &be(&[-7_i32, 8, 9, 10], i32::to_be_bytes),
+                    ),
+                ]
+                .concat(),
+                (2, 2, 1),
+                vec![-7.0, 8.0, 9.0, 10.0],
+                "TIME",
+            ),
+        ];
+        for (name, file, shape, physical, keyword) in cases {
+            let image =
+                FitsImage::from_bytes(&file).unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!((image.width, image.height, image.planes), shape, "{name}");
+            assert!(image.header(keyword).is_some(), "{name}: {keyword}");
+            assert_samples(&image.into_physical_f32(), &physical);
+        }
     }
 }
