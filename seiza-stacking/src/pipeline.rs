@@ -1455,10 +1455,17 @@ mod tests {
                 .unwrap();
             let expected_drizzled = expected_drizzled.unwrap();
             assert_same_stack(&expected_integrated, &expected);
-            // Two bands of 8 frames of 192 pixels: one row, 7 rows, all.
-            for rows in [1, 7, 160] {
+            // Two bands of 8 frames of 192 pixels: one row, 7 rows, all; and
+            // with the default memory, which also drizzles four frames at
+            // once, where the others drizzle one or two.
+            let default_memory = crate::BatchStackOptions::default().band_memory_bytes;
+            for band_memory_bytes in [1, 7, 160]
+                .map(|rows| 2 * 8 * 192 * 4 * rows)
+                .into_iter()
+                .chain([default_memory])
+            {
                 let banded = crate::BatchStackOptions {
-                    band_memory_bytes: 2 * 8 * 192 * 4 * rows,
+                    band_memory_bytes,
                     ..crate::BatchStackOptions::default()
                 };
                 let mut passes = Vec::new();

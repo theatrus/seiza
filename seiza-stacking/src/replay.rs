@@ -416,6 +416,9 @@ const REPLAY_LOOKAHEAD: usize = 2;
 /// normalization before the bands.
 const WHOLE_FRAME_READS: usize = 4;
 
+/// The most frames a banded reintegration drizzles together.
+const DRIZZLE_FRAMES: usize = 4;
+
 /// [`REPLAY_LOOKAHEAD`], or fewer on a machine with few cores.
 fn replay_lookahead() -> usize {
     std::thread::available_parallelism()
@@ -924,8 +927,10 @@ impl Replay<'_> {
             return Ok(Some((result, None)));
         };
 
-        // Drizzle each frame in turn, reading the next frames' calibrated
-        // sources on threads of their own.
+        // Drizzle the frames a few at a time, every output tile taking each
+        // of them in turn, so the tile's sums stay in the processor's cache
+        // between them, while the next frames' calibrated sources are read
+        // on threads of their own.
         let mut accumulator = DrizzleAccumulator::new(
             *drizzle,
             reference.width,
@@ -933,6 +938,8 @@ impl Replay<'_> {
             reference.channels,
         )?;
         let bands = total_units - count;
+        let together =
+            DRIZZLE_FRAMES.min((self.options.band_memory_bytes / 2 / frame_bytes.max(1)).max(1));
         std::thread::scope(|scope| {
             let read = |index: usize| {
                 let admitted = &frames[index];
@@ -941,28 +948,48 @@ impl Replay<'_> {
             };
             let mut next = 0;
             let mut in_flight = std::collections::VecDeque::new();
-            for index in 0..count {
+            let mut first = 0;
+            while first < count {
                 crate::batch::check_cancelled(self.options)?;
-                while next < count && in_flight.len() < lookahead {
+                let last = (first + together).min(count);
+                // These frames, and as many after them as the lookahead
+                // allows, which are read while these are drizzled.
+                while next < count.min(last + lookahead) {
                     let frame = next;
                     in_flight.push_back(scope.spawn(move || read(frame)));
                     next += 1;
                 }
-                let (image, layout) = in_flight
-                    .pop_front()
-                    .expect("the frame being drizzled was read ahead")
-                    .join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
-                report(bands + index, total_units);
-                let fates = std::mem::take(&mut fates[index]);
-                accumulator.add(&DrizzleFrame {
-                    image: &image,
-                    layout,
-                    mapping: &frames[index].mapping,
-                    normalization: &maps[index],
-                    fates: &fates,
-                    weight: &self.frame_weights(index),
-                })?;
+                let sources = (first..last)
+                    .map(|index| {
+                        let source = in_flight
+                            .pop_front()
+                            .expect("the frame being drizzled was read ahead")
+                            .join()
+                            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                        report(bands + index, total_units);
+                        source
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let fates = (first..last)
+                    .map(|index| std::mem::take(&mut fates[index]))
+                    .collect::<Vec<_>>();
+                let weights = (first..last)
+                    .map(|index| self.frame_weights(index))
+                    .collect::<Vec<_>>();
+                let batch = (first..last)
+                    .zip(&sources)
+                    .zip(fates.iter().zip(&weights))
+                    .map(|((index, (image, layout)), (fates, weight))| DrizzleFrame {
+                        image,
+                        layout: *layout,
+                        mapping: &frames[index].mapping,
+                        normalization: &maps[index],
+                        fates,
+                        weight,
+                    })
+                    .collect::<Vec<_>>();
+                accumulator.add_frames(&batch)?;
+                first = last;
             }
             Ok::<_, Error>(())
         })?;
@@ -1313,8 +1340,11 @@ impl LiveStacker {
     /// The drizzle needs eight bytes per output sample on top of
     /// reintegration's memory, 2.5 GB for a 26 MP colour frame at twice the
     /// scale, and the integration keeps every sample's fate for it, a quarter
-    /// of a byte per sample per frame. Returns the reintegrated stack and the
-    /// drizzled one.
+    /// of a byte per sample per frame. When the frames were integrated band
+    /// by band, up to four frames' calibrated sources, within half of
+    /// [`BatchStackOptions::band_memory_bytes`], are drizzled together, each
+    /// output tile taking them in turn. Returns the reintegrated stack and
+    /// the drizzled one.
     pub fn reintegrate_drizzled(
         &self,
         options: &BatchStackOptions,

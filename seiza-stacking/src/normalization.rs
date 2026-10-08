@@ -630,6 +630,7 @@ pub(crate) struct CoefficientSampler<'a> {
 impl CoefficientSampler<'_> {
     /// The gain and offset [`NormalizationMap::apply`] gives sample
     /// `(x, y, channel)`.
+    #[inline(always)]
     pub(crate) fn at(&self, x: usize, y: usize, channel: usize) -> (f32, f32) {
         let map = self.map;
         if self.columns.is_empty() {
@@ -675,6 +676,7 @@ fn axis_weights(coordinate: usize, cells: usize, tile_size: usize) -> AxisWeight
     }
 }
 
+#[inline]
 fn bilinear(
     top_left: f32,
     top_right: f32,

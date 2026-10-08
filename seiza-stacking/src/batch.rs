@@ -198,6 +198,7 @@ impl PackedFates {
     }
 
     /// The fate of sample `index`.
+    #[inline]
     pub(crate) fn get(&self, index: usize) -> SampleFate {
         let word = self.words[index / SampleFate::PER_WORD];
         match word >> (index % SampleFate::PER_WORD * SampleFate::BITS) & 3 {
@@ -211,6 +212,16 @@ impl PackedFates {
     #[cfg(test)]
     pub(crate) fn to_vec(&self) -> Vec<SampleFate> {
         (0..self.len).map(|index| self.get(index)).collect()
+    }
+
+    /// Packed `fates`.
+    #[cfg(test)]
+    pub(crate) fn from_fates(fates: &[SampleFate]) -> Self {
+        let mut packed = Self::missing(fates.len());
+        for (at, &fate) in fates.iter().enumerate() {
+            pack_fate(&mut packed.words, at, fate);
+        }
+        packed
     }
 }
 

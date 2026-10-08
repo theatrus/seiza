@@ -121,6 +121,10 @@ impl DrizzleAccumulator {
         channels: usize,
     ) -> Result<Self> {
         options.validate()?;
+        // As the integration the drizzle follows requires.
+        if !matches!(channels, 1 | 3) {
+            return Err(Error::Stack("a drizzle needs one or three channels".into()));
+        }
         let scale = options.scale as usize;
         let width = reference_width * scale;
         let height = reference_height * scale;
@@ -142,50 +146,78 @@ impl DrizzleAccumulator {
 
     /// Drop every unrejected pixel of one frame onto the output grid.
     pub(crate) fn add(&mut self, frame: &DrizzleFrame<'_>) -> Result<()> {
-        let source = frame.image;
+        self.add_frames(std::slice::from_ref(frame))
+    }
+
+    /// Drop every unrejected pixel of each frame in turn onto the output
+    /// grid, as [`Self::add`] would one frame after another, to the bit.
+    ///
+    /// Each output tile takes every frame before the next tile, so its sums
+    /// stay in the core's cache rather than streaming the whole grid, eight
+    /// bytes per output sample, through memory once per frame.
+    pub(crate) fn add_frames(&mut self, frames: &[DrizzleFrame<'_>]) -> Result<()> {
         let channels = self.channels;
-        let expected_channels = if frame.layout.is_some() { 1 } else { channels };
-        if source.channels != expected_channels
-            || (frame.layout.is_some() && channels != 3)
-            || frame.weight.len() != channels
-            || frame.normalization.channels() != channels
-            || frame.normalization.width() != self.reference_width
-            || frame.normalization.height() != self.reference_height
-            || frame.fates.len() != self.reference_width * self.reference_height * channels
-        {
-            return Err(Error::Stack(
-                "drizzle frame does not match the integration's shape".into(),
-            ));
-        }
-        let shrink = self
-            .options
-            .drop_shrink
-            .unwrap_or(if frame.layout.is_some() { 1.0 } else { 0.9 });
         let scale = f64::from(self.options.scale);
-        let map = ForwardMap::new(
-            frame.mapping,
-            source.width,
-            source.height,
-            f64::from(shrink) * 0.5 * scale,
-        )?;
-        let context = BandContext {
-            frame,
-            map: &map,
-            inverse: &InverseMap::new(frame.mapping),
-            normalization: frame.normalization.sampler(),
-            scale,
-            width: self.width,
-            height: self.height,
-            channels,
-            reference_width: self.reference_width,
-            reference_height: self.reference_height,
-        };
+        let maps = frames
+            .iter()
+            .map(|frame| {
+                let source = frame.image;
+                let expected_channels = if frame.layout.is_some() { 1 } else { channels };
+                if source.channels != expected_channels
+                    || (frame.layout.is_some() && channels != 3)
+                    || frame.weight.len() != channels
+                    || frame.normalization.channels() != channels
+                    || frame.normalization.width() != self.reference_width
+                    || frame.normalization.height() != self.reference_height
+                    || frame.fates.len() != self.reference_width * self.reference_height * channels
+                {
+                    return Err(Error::Stack(
+                        "drizzle frame does not match the integration's shape".into(),
+                    ));
+                }
+                let shrink = self
+                    .options
+                    .drop_shrink
+                    .unwrap_or(if frame.layout.is_some() { 1.0 } else { 0.9 });
+                Ok((
+                    ForwardMap::new(
+                        frame.mapping,
+                        source.width,
+                        source.height,
+                        f64::from(shrink) * 0.5 * scale,
+                    )?,
+                    InverseMap::new(frame.mapping),
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let contexts = frames
+            .iter()
+            .zip(&maps)
+            .map(|(frame, (map, inverse))| BandContext {
+                frame,
+                cfa: frame.layout.map(|layout| {
+                    [0, 1].map(|row| [0, 1].map(|column| layout.channel_at(column, row)))
+                }),
+                map,
+                inverse,
+                normalization: frame.normalization.sampler(),
+                scale,
+                width: self.width,
+                height: self.height,
+                channels,
+                reference_width: self.reference_width,
+                reference_height: self.reference_height,
+            })
+            .collect::<Vec<_>>();
+        if contexts.is_empty() {
+            return Ok(());
+        }
         let band_samples = self.width * channels * TILE;
         self.sum
             .par_chunks_mut(band_samples)
             .zip(self.weight.par_chunks_mut(band_samples))
             .enumerate()
-            .for_each(|(band, (sum, weight))| context.band(band * TILE, sum, weight));
+            .for_each(|(band, (sum, weight))| drizzle_band(&contexts, band * TILE, sum, weight));
         Ok(())
     }
 
@@ -206,6 +238,9 @@ impl DrizzleAccumulator {
 
 struct BandContext<'a> {
     frame: &'a DrizzleFrame<'a>,
+    /// A Bayer frame's channel at each photosite of its repeating 2x2
+    /// cell, by row and column.
+    cfa: Option<[[usize; 2]; 2]>,
     map: &'a ForwardMap,
     inverse: &'a InverseMap<'a>,
     normalization: CoefficientSampler<'a>,
@@ -222,19 +257,39 @@ struct BandContext<'a> {
 /// so this leaves room for frames at a different image scale and for warps.
 const SPAN: usize = 16;
 
-impl BandContext<'_> {
-    /// Drizzle into output rows `top..top + TILE`, held in `sum` and
-    /// `weight`, one tile of columns at a time.
-    fn band(&self, top: usize, sum: &mut [f32], weight: &mut [f32]) {
-        let bottom = (top + TILE).min(self.height);
-        let mut left = 0;
-        while left < self.width {
-            let right = (left + TILE).min(self.width);
-            self.tile(top, bottom, left, right, sum, weight);
-            left = right;
+/// Drizzle every frame into output rows `top..top + TILE`, held in `sum`
+/// and `weight`, one tile of columns at a time, each tile taking the frames
+/// in order.
+///
+/// Built for processors with SSE4.1, and with AVX2 and FMA, too, where the
+/// rounding and fused multiply-add the drops need are single instructions
+/// rather than calls into the maths library; each gives the same result to
+/// the bit.
+#[multiversion::multiversion(targets("x86_64+avx2+fma", "x86_64+sse4.1"))]
+fn drizzle_band(frames: &[BandContext<'_>], top: usize, sum: &mut [f32], weight: &mut [f32]) {
+    let (width, height) = (frames[0].width, frames[0].height);
+    let bottom = (top + TILE).min(height);
+    let mut left = 0;
+    while left < width {
+        let right = (left + TILE).min(width);
+        for frame in frames {
+            frame.tile(top, bottom, left, right, sum, weight);
         }
+        left = right;
     }
+}
 
+/// One channel a source pixel drops into: its normalized value, and the
+/// frame's weight in that channel.
+#[derive(Clone, Copy, Default)]
+struct ChannelDrop {
+    channel: usize,
+    value: f32,
+    frame_weight: f32,
+}
+
+impl BandContext<'_> {
+    #[inline(always)]
     fn tile(
         &self,
         top: usize,
@@ -254,6 +309,11 @@ impl BandContext<'_> {
         let (tile_top, tile_bottom) = (top as f64, bottom as f64);
         let mut x_overlaps = [0.0_f64; SPAN];
         let mut y_overlaps = [0.0_f64; SPAN];
+        // A parallelogram's overlap with each output pixel it can reach, by
+        // row and then column.
+        let mut areas = [[0.0_f64; SPAN]; SPAN];
+        // The channels a source pixel drops into, at most three.
+        let mut drops = [ChannelDrop::default(); 3];
         for y in y0..y1 {
             for x in x0..x1 {
                 let (center, shape) = self.map.at(x, y);
@@ -280,6 +340,35 @@ impl BandContext<'_> {
                     continue;
                 }
                 let (reference_x, reference_y) = (reference_x as usize, reference_y as usize);
+                let mut count = 0;
+                match self.cfa {
+                    // A Bayer photosite drops into its own colour only.
+                    Some(cfa) => {
+                        let channel = cfa[y & 1][x & 1];
+                        let value = source.data[y * source.width + x];
+                        if let Some(drop) =
+                            self.channel_drop(reference_x, reference_y, channel, value)
+                        {
+                            drops[0] = drop;
+                            count = 1;
+                        }
+                    }
+                    None => {
+                        let pixel = (y * source.width + x) * channels;
+                        for channel in 0..channels {
+                            let value = source.data[pixel + channel];
+                            if let Some(drop) =
+                                self.channel_drop(reference_x, reference_y, channel, value)
+                            {
+                                drops[count] = drop;
+                                count += 1;
+                            }
+                        }
+                    }
+                }
+                if count == 0 {
+                    continue;
+                }
                 debug_assert!(
                     max_x - min_x < (SPAN - 1) as f64 && max_y - min_y < (SPAN - 1) as f64,
                     "a drop spans more output pixels than the overlap buffers hold"
@@ -292,56 +381,38 @@ impl BandContext<'_> {
                 let last_y = (max_y.min(tile_bottom).ceil() as usize)
                     .min(bottom)
                     .min(first_y + SPAN);
-                if let Some((half_width, half_height)) = shape.rectangle {
-                    // A rectangle's overlap with a pixel is the product of its
-                    // overlaps along each axis.
-                    for (overlap, pixel) in x_overlaps.iter_mut().zip(first_x..last_x) {
-                        *overlap = interval_overlap(output_x, half_width, pixel as f64);
+                match shape.rectangle {
+                    // A rectangle's overlap with a pixel is the product of
+                    // its overlaps along each axis.
+                    Some((half_width, half_height)) => {
+                        for (overlap, pixel) in x_overlaps.iter_mut().zip(first_x..last_x) {
+                            *overlap = interval_overlap(output_x, half_width, pixel as f64);
+                        }
+                        for (overlap, pixel) in y_overlaps.iter_mut().zip(first_y..last_y) {
+                            *overlap = interval_overlap(output_y, half_height, pixel as f64);
+                        }
                     }
-                    for (overlap, pixel) in y_overlaps.iter_mut().zip(first_y..last_y) {
-                        *overlap = interval_overlap(output_y, half_height, pixel as f64);
-                    }
+                    None => parallelogram_overlaps(
+                        &shape.corners(output_x, output_y),
+                        first_x..last_x,
+                        first_y..last_y,
+                        &mut areas,
+                    ),
                 }
-                let channel_range = match self.frame.layout {
-                    Some(layout) => {
-                        let channel = layout.channel_at(x, y);
-                        channel..channel + 1
-                    }
-                    None => 0..channels,
-                };
-                for channel in channel_range {
-                    let source_channel = if self.frame.layout.is_some() {
-                        0
-                    } else {
-                        channel
-                    };
-                    let value =
-                        source.data[(y * source.width + x) * source.channels + source_channel];
-                    if !value.is_finite()
-                        || self.fate(reference_x, reference_y, channel) == SampleFate::Rejected
-                    {
-                        continue;
-                    }
-                    let (gain, offset) = self.normalization.at(reference_x, reference_y, channel);
-                    let value = value.mul_add(gain, offset);
-                    let frame_weight = self.frame.weight[channel];
+                for drop in &drops[..count] {
                     for (row_offset, output_y_index) in (first_y..last_y).enumerate() {
                         let row = (output_y_index - top) * row_samples;
                         for (column_offset, output_x_index) in (first_x..last_x).enumerate() {
                             let area = match shape.rectangle {
                                 Some(_) => x_overlaps[column_offset] * y_overlaps[row_offset],
-                                None => clipped_area(
-                                    &shape.corners(output_x, output_y),
-                                    output_x_index as f64,
-                                    output_y_index as f64,
-                                ),
+                                None => areas[row_offset][column_offset],
                             };
                             if area <= 0.0 {
                                 continue;
                             }
-                            let drop_weight = area as f32 * frame_weight;
-                            let index = row + output_x_index * channels + channel;
-                            sum[index] += drop_weight * value;
+                            let drop_weight = area as f32 * drop.frame_weight;
+                            let index = row + output_x_index * channels + drop.channel;
+                            sum[index] += drop_weight * drop.value;
                             weight[index] += drop_weight;
                         }
                     }
@@ -350,11 +421,28 @@ impl BandContext<'_> {
         }
     }
 
+    /// A source pixel's `value` in `channel`, normalized as the integration
+    /// normalized the registered sample at `(x, y)` it falls on, unless it
+    /// is not finite or the integration rejected that sample.
+    #[inline(always)]
+    fn channel_drop(&self, x: usize, y: usize, channel: usize, value: f32) -> Option<ChannelDrop> {
+        if !value.is_finite() || self.fate(x, y, channel) == SampleFate::Rejected {
+            return None;
+        }
+        let (gain, offset) = self.normalization.at(x, y, channel);
+        Some(ChannelDrop {
+            channel,
+            value: value.mul_add(gain, offset),
+            frame_weight: self.frame.weight[channel],
+        })
+    }
+
     /// What the integration did with the registered sample under a source
     /// pixel's centre. Under Bayer drizzle a registered pixel holds only the
     /// colour of its nearest photosite, so where the centre's pixel has no
     /// sample in this colour, the nearest neighbour that has one carries this
     /// photosite's sample.
+    #[inline(always)]
     fn fate(&self, x: usize, y: usize, channel: usize) -> SampleFate {
         let at = |x: usize, y: usize| {
             self.frame
@@ -394,6 +482,7 @@ impl BandContext<'_> {
     /// box of the tile's outline mapped back to the source, with a margin
     /// for the drop size and the warp's curvature between the sampled
     /// points.
+    #[inline(always)]
     fn source_bounds(
         &self,
         top: usize,
@@ -432,6 +521,7 @@ impl BandContext<'_> {
 }
 
 /// The length of `[center - half, center + half]` inside `[pixel, pixel + 1]`.
+#[inline(always)]
 fn interval_overlap(center: f64, half: f64, pixel: f64) -> f64 {
     ((center + half).min(pixel + 1.0) - (center - half).max(pixel)).max(0.0)
 }
@@ -484,6 +574,7 @@ impl DropShape {
         }
     }
 
+    #[inline(always)]
     fn bounds(&self, x: f64, y: f64) -> (f64, f64, f64, f64) {
         let (half_width, half_height) = self.extent;
         (
@@ -494,6 +585,7 @@ impl DropShape {
         )
     }
 
+    #[inline(always)]
     fn corners(&self, x: f64, y: f64) -> [(f64, f64); 4] {
         let (u, v) = (self.u, self.v);
         [
@@ -518,74 +610,177 @@ impl DropShape {
     }
 }
 
-/// The area of a convex quadrilateral inside the unit square at `(x, y)`,
-/// by clipping it against the square's four edges.
-fn clipped_area(corners: &[(f64, f64); 4], x: f64, y: f64) -> f64 {
-    let mut polygon = [(0.0, 0.0); 8];
-    let mut count = 4;
-    polygon[..4].copy_from_slice(corners);
-    let mut scratch = [(0.0, 0.0); 8];
-    // Each edge keeps the side where `inside` holds and cuts crossing
-    // segments where `cut` says.
-    for edge in 0..4 {
-        let inside = |point: (f64, f64)| match edge {
-            0 => point.0 >= x,
-            1 => point.0 <= x + 1.0,
-            2 => point.1 >= y,
-            _ => point.1 <= y + 1.0,
-        };
-        let cut = |from: (f64, f64), to: (f64, f64)| {
-            let fraction = match edge {
-                0 => (x - from.0) / (to.0 - from.0),
-                1 => (x + 1.0 - from.0) / (to.0 - from.0),
-                2 => (y - from.1) / (to.1 - from.1),
-                _ => (y + 1.0 - from.1) / (to.1 - from.1),
+/// The area of a convex quadrilateral inside each unit square at
+/// `(x, y)` for `x` in `columns` and `y` in `rows`, into
+/// `areas[y - rows.start][x - columns.start]`, by clipping it against each
+/// square's four edges: left, right, top and bottom, in that order.
+///
+/// The left and right edges are shared by a column of squares, so the
+/// quadrilateral is clipped to each column once, then to each square of it.
+/// Every square sees the same arithmetic as a clip against its own four
+/// edges in turn.
+#[inline(always)]
+fn parallelogram_overlaps(
+    corners: &[(f64, f64); 4],
+    columns: std::ops::Range<usize>,
+    rows: std::ops::Range<usize>,
+    areas: &mut [[f64; SPAN]; SPAN],
+) {
+    let corners = Polygon::of(corners);
+    let mut left = Polygon::default();
+    let mut column = Polygon::default();
+    let mut top = Polygon::default();
+    let mut square = Polygon::default();
+    for (column_offset, x) in columns.enumerate() {
+        let x = x as f64;
+        let kept = corners.clip::<false, false>(x, &mut left)
+            && left.clip::<false, true>(x + 1.0, &mut column);
+        for (row_offset, y) in rows.clone().enumerate() {
+            areas[row_offset][column_offset] = if kept {
+                column.square_area(y as f64, &mut top, &mut square)
+            } else {
+                0.0
             };
-            (
-                from.0 + (to.0 - from.0) * fraction,
-                from.1 + (to.1 - from.1) * fraction,
-            )
+        }
+    }
+}
+
+/// Room for a clipped polygon: a quadrilateral clipped to a square has at
+/// most eight vertices. A power of two, so that masking an index keeps it
+/// in bounds.
+const CLIPPED: usize = 16;
+
+/// The vertices of a convex polygon, coordinates apart.
+#[derive(Clone, Copy)]
+struct Polygon {
+    x: [f64; CLIPPED],
+    y: [f64; CLIPPED],
+    count: usize,
+}
+
+impl Default for Polygon {
+    fn default() -> Self {
+        Self {
+            x: [0.0; CLIPPED],
+            y: [0.0; CLIPPED],
+            count: 0,
+        }
+    }
+}
+
+impl Polygon {
+    fn of(corners: &[(f64, f64); 4]) -> Self {
+        let mut polygon = Self::default();
+        for (index, &(x, y)) in corners.iter().enumerate() {
+            polygon.x[index] = x;
+            polygon.y[index] = y;
+        }
+        polygon.count = 4;
+        polygon
+    }
+
+    /// This polygon, already clipped to a column of unit squares, clipped
+    /// to the square at row `y`, top edge first, and its area there.
+    #[inline(always)]
+    fn square_area(&self, y: f64, top: &mut Polygon, square: &mut Polygon) -> f64 {
+        if self.clip::<true, false>(y, top) && top.clip::<true, true>(y + 1.0, square) {
+            square.area()
+        } else {
+            0.0
+        }
+    }
+
+    /// Keep the part of this convex polygon on one side of an axis-aligned
+    /// line in `clipped`, reporting whether three vertices or more are left:
+    /// the side of `x = at`, or of `y = at` when `ROWS`, below `at` when
+    /// `UPPER` and above it otherwise.
+    ///
+    /// Sutherland and Hodgman's way, one vertex after another: each adds
+    /// the cut on its way in from the one before, if it crossed the line,
+    /// and then itself, if it is inside.
+    #[inline(always)]
+    fn clip<const ROWS: bool, const UPPER: bool>(&self, at: f64, clipped: &mut Polygon) -> bool {
+        let count = self.count;
+        debug_assert!((3..=8).contains(&count));
+        let inside = |x: f64, y: f64| {
+            let coordinate = if ROWS { y } else { x };
+            if UPPER {
+                coordinate <= at
+            } else {
+                coordinate >= at
+            }
         };
         let mut next = 0;
+        let last = (count - 1) % CLIPPED;
+        let (mut previous_x, mut previous_y) = (self.x[last], self.y[last]);
+        let mut previous_inside = inside(previous_x, previous_y);
         for index in 0..count {
-            let current = polygon[index];
-            let previous = polygon[(index + count - 1) % count];
-            match (inside(previous), inside(current)) {
-                (true, true) => {
-                    scratch[next] = current;
-                    next += 1;
-                }
-                (true, false) => {
-                    scratch[next] = cut(previous, current);
-                    next += 1;
-                }
-                (false, true) => {
-                    scratch[next] = cut(previous, current);
-                    scratch[next + 1] = current;
-                    next += 2;
-                }
-                (false, false) => {}
+            let (x, y) = (self.x[index % CLIPPED], self.y[index % CLIPPED]);
+            let current_inside = inside(x, y);
+            if previous_inside != current_inside {
+                let fraction = if ROWS {
+                    (at - previous_y) / (y - previous_y)
+                } else {
+                    (at - previous_x) / (x - previous_x)
+                };
+                clipped.x[next % CLIPPED] = previous_x + (x - previous_x) * fraction;
+                clipped.y[next % CLIPPED] = previous_y + (y - previous_y) * fraction;
+                next += 1;
             }
+            if current_inside {
+                clipped.x[next % CLIPPED] = x;
+                clipped.y[next % CLIPPED] = y;
+                next += 1;
+            }
+            (previous_x, previous_y, previous_inside) = (x, y, current_inside);
         }
-        count = next;
-        if count < 3 {
-            return 0.0;
+        // A convex polygon gains at most a vertex a clip, so a clipped
+        // quadrilateral keeps at most eight.
+        assert!(
+            next <= 8,
+            "a clipped quadrilateral has at most eight vertices"
+        );
+        clipped.count = next;
+        next >= 3
+    }
+
+    /// The area, by the shoelace formula.
+    #[inline(always)]
+    fn area(&self) -> f64 {
+        let (x, y) = (&self.x, &self.y);
+        let last = (self.count - 1) % CLIPPED;
+        let mut twice_area = 0.0;
+        for index in 0..last {
+            twice_area += x[index] * y[index + 1] - x[index + 1] * y[index];
         }
-        polygon[..count].copy_from_slice(&scratch[..count]);
+        twice_area += x[last] * y[0] - x[0] * y[last];
+        twice_area.abs() * 0.5
     }
-    let mut twice_area = 0.0;
-    for index in 0..count {
-        let (x0, y0) = polygon[index];
-        let (x1, y1) = polygon[(index + 1) % count];
-        twice_area += x0 * y1 - x1 * y0;
+}
+
+/// The area of a convex quadrilateral inside the unit square at `(x, y)`,
+/// clipped as [`parallelogram_overlaps`] clips it.
+#[cfg(test)]
+fn clipped_area(corners: &[(f64, f64); 4], x: f64, y: f64) -> f64 {
+    let corners = Polygon::of(corners);
+    let (mut left, mut column) = (Polygon::default(), Polygon::default());
+    if corners.clip::<false, false>(x, &mut left) && left.clip::<false, true>(x + 1.0, &mut column)
+    {
+        column.square_area(y, &mut Polygon::default(), &mut Polygon::default())
+    } else {
+        0.0
     }
-    twice_area.abs() * 0.5
 }
 
 /// Reference positions of source pixels, and the drop shape each takes.
 enum ForwardMap {
+    /// A similarity's rotation and scale as the cosine and sine terms
+    /// [`crate::SimilarityTransform::apply`] works out for every point,
+    /// worked out once.
     Similarity {
-        transform: crate::SimilarityTransform,
+        cosine: f64,
+        sine: f64,
+        translation: (f64, f64),
         shape: DropShape,
     },
     /// A warped frame's map, solved at grid nodes and interpolated between,
@@ -611,7 +806,9 @@ impl ForwardMap {
             let cosine = transform.rotation_radians.cos() * transform.scale;
             let sine = transform.rotation_radians.sin() * transform.scale;
             return Ok(Self::Similarity {
-                transform,
+                cosine,
+                sine,
+                translation: (transform.translation_x, transform.translation_y),
                 shape: DropShape::new([cosine, -sine, sine, cosine], half),
             });
         };
@@ -654,9 +851,24 @@ impl ForwardMap {
         })
     }
 
+    #[inline(always)]
     fn at(&self, x: usize, y: usize) -> ((f64, f64), &DropShape) {
         match self {
-            Self::Similarity { transform, shape } => (transform.apply(x as f64, y as f64), shape),
+            Self::Similarity {
+                cosine,
+                sine,
+                translation,
+                shape,
+            } => {
+                let (x, y) = (x as f64, y as f64);
+                (
+                    (
+                        cosine * x - sine * y + translation.0,
+                        sine * x + cosine * y + translation.1,
+                    ),
+                    shape,
+                )
+            }
             Self::Grid {
                 columns,
                 nodes,
@@ -723,6 +935,7 @@ impl<'a> InverseMap<'a> {
         }
     }
 
+    #[inline(always)]
     fn apply(&self, x: f64, y: f64) -> (f64, f64) {
         match self {
             Self::Similarity(transform) => transform.inverse_apply(x, y),
@@ -732,8 +945,344 @@ impl<'a> InverseMap<'a> {
 }
 
 #[cfg(test)]
+mod reference;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A deterministic stream of numbers in `[0, 1)`.
+    struct Noise(u64);
+
+    impl Noise {
+        fn next(&mut self) -> f64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 >> 11) as f64 / (1_u64 << 53) as f64
+        }
+    }
+
+    /// A local normalization map of random gains and offsets.
+    fn local_map(
+        width: usize,
+        height: usize,
+        channels: usize,
+        tile_size: usize,
+        noise: &mut Noise,
+    ) -> NormalizationMap {
+        let (columns, rows) = (width.div_ceil(tile_size), height.div_ceil(tile_size));
+        let cells = columns * rows * channels;
+        let gains = (0..cells)
+            .map(|_| 0.8 + 0.4 * noise.next() as f32)
+            .collect::<Vec<_>>();
+        let offsets = (0..cells)
+            .map(|_| 20.0 * noise.next() as f32 - 10.0)
+            .collect::<Vec<_>>();
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "width": width,
+            "height": height,
+            "channels": channels,
+            "tile_size": tile_size,
+            "columns": columns,
+            "rows": rows,
+            "gains": gains,
+            "offsets": offsets,
+        }))
+        .unwrap()
+    }
+
+    /// One frame's inputs to a drizzle.
+    struct Inputs {
+        image: LinearImage,
+        layout: Option<BayerLayout>,
+        mapping: RegisteredFrameMapping,
+        normalization: NormalizationMap,
+        fates: PackedFates,
+        weight: Vec<f32>,
+    }
+
+    impl Inputs {
+        fn frame(&self) -> DrizzleFrame<'_> {
+            DrizzleFrame {
+                image: &self.image,
+                layout: self.layout,
+                mapping: &self.mapping,
+                normalization: &self.normalization,
+                fates: &self.fates,
+                weight: &self.weight,
+            }
+        }
+    }
+
+    /// A frame of `width` by `height` source pixels, the reference's size,
+    /// carried onto it by `transform` and, when `warped`, a radial lens
+    /// term, with some samples not finite and a quarter of them rejected.
+    #[allow(clippy::too_many_arguments)]
+    fn inputs(
+        width: usize,
+        height: usize,
+        channels: usize,
+        bayer: bool,
+        transform: crate::SimilarityTransform,
+        warped: bool,
+        tile_size: usize,
+        noise: &mut Noise,
+    ) -> Inputs {
+        let source_channels = if bayer { 1 } else { channels };
+        let data = (0..width * height * source_channels)
+            .map(|_| match noise.next() {
+                draw if draw < 0.02 => f32::NAN,
+                draw if draw < 0.025 => f32::INFINITY,
+                draw if draw < 0.03 => -0.0,
+                _ => 100.0 + 900.0 * noise.next() as f32,
+            })
+            .collect();
+        let image = LinearImage::new(width, height, source_channels, data).unwrap();
+        let layout = bayer.then_some(BayerLayout {
+            pattern: seiza_fits::BayerPattern::Gbrg,
+            x_offset: 1,
+            y_offset: 0,
+        });
+        let identity = NormalizationMap::identity(
+            &LinearImage::new(
+                width,
+                height,
+                channels,
+                vec![0.0; width * height * channels],
+            )
+            .unwrap(),
+        );
+        let mut mapping = RegisteredFrameMapping::new(width, height, transform, identity).unwrap();
+        if warped {
+            let (center_x, center_y) = (width as f64 / 2.0, height as f64 / 2.0);
+            // Three pixels at the corners.
+            let strength = 3.0 / center_x.hypot(center_y).powi(3);
+            let pairs = (0..=12)
+                .flat_map(|row| {
+                    (0..=12).map(move |column| {
+                        (
+                            column as f64 * width as f64 / 12.0,
+                            row as f64 * height as f64 / 12.0,
+                        )
+                    })
+                })
+                .map(|(x, y)| {
+                    let (source_x, source_y) = transform.inverse_apply(x, y);
+                    let radius = ((x - center_x).powi(2) + (y - center_y).powi(2)) * strength;
+                    (
+                        (x, y),
+                        (
+                            source_x + (x - center_x) * radius,
+                            source_y + (y - center_y) * radius,
+                        ),
+                    )
+                })
+                .collect::<Vec<_>>();
+            mapping
+                .set_warp(Some(PolynomialWarp::fit(2, width, height, &pairs).unwrap()))
+                .unwrap();
+        }
+        let fates = (0..width * height * channels)
+            .map(|_| match noise.next() {
+                draw if draw < 0.1 => SampleFate::Missing,
+                draw if draw < 0.35 => SampleFate::Rejected,
+                _ => SampleFate::Integrated,
+            })
+            .collect::<Vec<_>>();
+        Inputs {
+            image,
+            layout,
+            mapping,
+            normalization: local_map(width, height, channels, tile_size, noise),
+            fates: PackedFates::from_fates(&fates),
+            weight: (0..channels).map(|_| 0.5 + noise.next() as f32).collect(),
+        }
+    }
+
+    fn bits(values: &[f32]) -> Vec<u32> {
+        values.iter().map(|value| value.to_bits()).collect()
+    }
+
+    /// Drizzle `frames` one at a time with the reference, one at a time
+    /// with [`DrizzleAccumulator::add`], and all at once, and check the
+    /// three agree to the bit.
+    fn assert_matches_reference(
+        options: DrizzleOptions,
+        width: usize,
+        height: usize,
+        channels: usize,
+        frames: &[Inputs],
+    ) {
+        let accumulator = || DrizzleAccumulator::new(options, width, height, channels).unwrap();
+        let mut expected = accumulator();
+        for frame in frames {
+            reference::add(&mut expected, &frame.frame()).unwrap();
+        }
+        let mut each = accumulator();
+        for frame in frames {
+            each.add(&frame.frame()).unwrap();
+        }
+        let mut together = accumulator();
+        together
+            .add_frames(&frames.iter().map(Inputs::frame).collect::<Vec<_>>())
+            .unwrap();
+        assert!(expected.weight.iter().any(|&weight| weight > 0.0));
+        for actual in [&each, &together] {
+            assert!(
+                bits(&actual.sum) == bits(&expected.sum),
+                "{options:?}: sums differ"
+            );
+            assert!(
+                bits(&actual.weight) == bits(&expected.weight),
+                "{options:?}: weights differ"
+            );
+        }
+        let (expected, together) = (expected.finish().unwrap(), together.finish().unwrap());
+        assert!(bits(&together.image.data) == bits(&expected.image.data));
+    }
+
+    fn turned(
+        degrees: f64,
+        scale: f64,
+        translation_x: f64,
+        translation_y: f64,
+    ) -> crate::SimilarityTransform {
+        crate::SimilarityTransform {
+            scale,
+            rotation_radians: degrees.to_radians(),
+            translation_x,
+            translation_y,
+        }
+    }
+
+    #[test]
+    fn bayer_frames_drizzle_as_the_reference_does() {
+        let (width, height) = (150, 110);
+        let mut noise = Noise(0x2545_f491_4f6c_dd1d);
+        // Nearly square to the reference, so drops are rectangles; then
+        // turned by a meridian flip and a little more, so drops are
+        // parallelograms; then a quarter turn. Some frames are warped, and
+        // every frame hangs over an edge.
+        let frames = [
+            (turned(0.05, 1.0, 3.7, -2.2), false),
+            (turned(-0.2, 1.0, -6.1, 4.4), true),
+            (turned(179.2, 1.0, 152.3, 105.6), true),
+            (turned(180.8, 1.0, 145.0, 111.9), false),
+            (turned(90.3, 1.0, 130.0, -12.0), true),
+        ]
+        .map(|(transform, warped)| {
+            inputs(width, height, 3, true, transform, warped, 32, &mut noise)
+        });
+        for scale in 1..=4 {
+            for drop_shrink in [None, Some(0.55)] {
+                let options = DrizzleOptions { scale, drop_shrink };
+                assert_matches_reference(options, width, height, 3, &frames);
+            }
+        }
+    }
+
+    #[test]
+    fn colour_and_monochrome_frames_drizzle_as_the_reference_does() {
+        let (width, height) = (131, 97);
+        let mut noise = Noise(0x9e37_79b9_7f4a_7c15);
+        for channels in [1, 3] {
+            let frames = [
+                (turned(0.0, 1.0, 0.0, 0.0), false),
+                (turned(23.0, 1.0, 30.0, -20.0), false),
+                (turned(-37.0, 1.04, -15.0, 60.0), true),
+                (turned(179.4, 0.97, 128.0, 99.0), true),
+                (turned(-90.0, 1.0, 1.5, 130.5), false),
+            ]
+            .map(|(transform, warped)| {
+                inputs(
+                    width, height, channels, false, transform, warped, 16, &mut noise,
+                )
+            });
+            for scale in [1, 2, 3] {
+                for drop_shrink in [None, Some(1.0), Some(0.3)] {
+                    let options = DrizzleOptions { scale, drop_shrink };
+                    assert_matches_reference(options, width, height, channels, &frames);
+                }
+            }
+        }
+    }
+
+    /// Drizzle a full-size frame of a 26-megapixel colour sensor at twice
+    /// the scale with the reference and the reworked accumulation, and
+    /// report how long each takes. Run with
+    /// `cargo test --release -p seiza-stacking drizzle_timing -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a timing run on a full-size frame"]
+    fn drizzle_timing() {
+        let (width, height) = (6248, 4176);
+        let mut noise = Noise(0x1234_5678_9abc_def1);
+        let frames = [
+            (turned(0.05, 1.0, 3.7, -2.2), true),
+            (turned(179.2, 1.0, 6250.3, 4180.6), true),
+        ]
+        .map(|(transform, warped)| {
+            inputs(width, height, 3, true, transform, warped, 256, &mut noise)
+        });
+        let options = DrizzleOptions {
+            scale: 2,
+            drop_shrink: None,
+        };
+        let accumulator = || DrizzleAccumulator::new(options, width, height, 3).unwrap();
+        let median = |mut times: Vec<std::time::Duration>| {
+            times.sort();
+            times[times.len() / 2]
+        };
+        let timed = |add: &mut dyn FnMut(&mut DrizzleAccumulator)| {
+            let mut sums = accumulator();
+            // Fault the sums' pages in first, as an earlier frame has in a
+            // real drizzle.
+            sums.sum.fill(0.0);
+            sums.weight.fill(0.0);
+            let start = std::time::Instant::now();
+            add(&mut sums);
+            (start.elapsed(), sums)
+        };
+        for (name, frame) in ["straight", "flipped"].iter().zip(&frames) {
+            let (mut before, mut after) = (Vec::new(), Vec::new());
+            for _ in 0..3 {
+                let (time, expected) =
+                    timed(&mut |sums| reference::add(sums, &frame.frame()).unwrap());
+                before.push(time);
+                let (time, actual) = timed(&mut |sums| sums.add(&frame.frame()).unwrap());
+                after.push(time);
+                assert!(bits(&actual.sum) == bits(&expected.sum));
+                assert!(bits(&actual.weight) == bits(&expected.weight));
+            }
+            println!(
+                "{name}: reference {:?}, reworked {:?}",
+                median(before),
+                median(after)
+            );
+        }
+        let batch = (0..4)
+            .map(|index| frames[index % 2].frame())
+            .collect::<Vec<_>>();
+        let (mut before, mut after) = (Vec::new(), Vec::new());
+        for _ in 0..3 {
+            let (time, expected) = timed(&mut |sums| {
+                for frame in &batch {
+                    sums.add(frame).unwrap();
+                }
+            });
+            before.push(time);
+            let (time, actual) = timed(&mut |sums| sums.add_frames(&batch).unwrap());
+            after.push(time);
+            assert!(bits(&actual.sum) == bits(&expected.sum));
+            assert!(bits(&actual.weight) == bits(&expected.weight));
+        }
+        println!(
+            "four frames: one at a time {:?}, together {:?}",
+            median(before),
+            median(after)
+        );
+    }
 
     #[test]
     fn clipped_area_matches_known_overlaps() {
