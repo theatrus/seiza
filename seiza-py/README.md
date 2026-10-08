@@ -535,6 +535,9 @@ maturin develop && python -m pytest tests/ -q
 ## Notes
 
 - Solving and detection release the GIL; other Python threads keep running.
+- Parallel work runs in Rayon's global pool, which by default has a thread
+  for every core. To cap it, set `RAYON_NUM_THREADS` before the first call
+  into `seiza`, for example in the environment that starts Python.
 - Catalog files are memory-mapped and SHA-256 verified at download time;
   `fetch_catalogs` caches under the platform cache directory (override with
   `cache_dir=` or `SEIZA_CACHE_DIR`).

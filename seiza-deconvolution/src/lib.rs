@@ -6,6 +6,13 @@
 //! defaults use a small iteration count plus partial blending to reduce noise
 //! amplification and ringing. This is a classical restoration experiment, not
 //! a learned image model and not a substitute for a spatially varying PSF.
+//!
+//! # Threads
+//!
+//! Each iteration splits the image across the Rayon pool of the calling
+//! thread, or the global pool when that thread belongs to none. To hold it
+//! to a number of cores, call it inside a pool that size with
+//! `pool.install(..)`. The crate starts no threads of its own.
 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};

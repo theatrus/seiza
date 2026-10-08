@@ -551,6 +551,21 @@ Bearer authentication uses `--server-token` or `SEIZA_SERVER_TOKEN`. See the
 [versioned wire contract](https://github.com/theatrus/seiza/blob/main/docs/design/worker-protocol.md)
 for request and response details.
 
+## Threads
+
+`seiza` uses every core. To leave some for other work, cap it with
+`RAYON_NUM_THREADS`:
+
+```
+RAYON_NUM_THREADS=4 seiza stack lights/*.fits --output stack.fits --reintegrate
+```
+
+The cap sizes the pool that does the parallel part of detection, solving,
+stacking, reintegration and master building. Stacking and reintegration
+also prepare a few frames at once on threads of their own, whose serial
+steps run beside that pool. Unless `--workers` says otherwise, stacking uses
+half as many of them as the cap, and at most six.
+
 ## Use with N.I.N.A.
 
 seiza speaks ASTAP's CLI contract: set N.I.N.A.'s plate solver to ASTAP

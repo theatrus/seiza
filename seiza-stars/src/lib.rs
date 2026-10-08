@@ -25,6 +25,13 @@
 //! here moved verbatim from its previous home and is validated against real
 //! frames, not only unit fixtures — treat any "cleanup" that reorders a
 //! reduction as a behavior change and prove otherwise on a corpus.
+//!
+//! # Threads
+//!
+//! The detectors split large images across the Rayon pool of the calling
+//! thread, or the global pool when that thread belongs to none. To hold them
+//! to a number of cores, call them inside a pool that size with
+//! `pool.install(..)`. The crate starts no threads of its own.
 
 pub mod accord_imaging;
 pub mod debug;

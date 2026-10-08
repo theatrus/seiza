@@ -178,7 +178,8 @@ pub(crate) struct StackArgs {
     #[arg(long, default_value_t = 0.60)]
     min_overlap: f32,
     /// Frames read and prepared at once. By default this follows
-    /// --pipeline-memory-mib and the machine's cores
+    /// --pipeline-memory-mib and the threads RAYON_NUM_THREADS allows, or
+    /// the machine's cores
     #[arg(long, value_parser = clap::value_parser!(usize))]
     workers: Option<usize>,
     /// Memory for frames prepared ahead of integration, and for the bands of
