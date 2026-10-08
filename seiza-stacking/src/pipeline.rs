@@ -1286,9 +1286,27 @@ mod tests {
         options
     }
 
-    /// The files in the one directory a stack retaining frames made inside
-    /// `scratch`, sorted.
+    /// The frame images kept in the one directory a stack retaining frames
+    /// made inside `scratch`, sorted. Each file of background samples there
+    /// must lie beside its frame's image.
     pub(super) fn retained_files(scratch: &Path) -> Vec<String> {
+        let (samples, images) = kept_files(scratch);
+        for name in &samples {
+            let image = name.replace(".fit", ".f32");
+            assert!(images.contains(&image), "{name} is kept without {image}");
+        }
+        images
+    }
+
+    /// The files of background samples kept in `scratch`'s one directory,
+    /// sorted.
+    pub(super) fn retained_samples(scratch: &Path) -> Vec<String> {
+        kept_files(scratch).0
+    }
+
+    /// The files of background samples, and the others, in `scratch`'s one
+    /// directory, each sorted.
+    fn kept_files(scratch: &Path) -> (Vec<String>, Vec<String>) {
         let directories = std::fs::read_dir(scratch)
             .unwrap()
             .map(|entry| entry.unwrap().path())
@@ -1299,7 +1317,7 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .collect::<Vec<_>>();
         names.sort();
-        names
+        names.into_iter().partition(|name| name.ends_with(".fit"))
     }
 
     /// The names of the files kept for these admitted frames, sorted.
@@ -1368,8 +1386,17 @@ mod tests {
             let retained = stack(true);
             let fresh = stack(false);
             // A file for every admitted frame, the reference's too, and none
-            // left from frames waiting to learn whether they were admitted.
+            // left from frames waiting to learn whether they were admitted;
+            // under local background normalization, with the samples its
+            // fit reads beside each.
             assert_eq!(retained_files(&scratch), frame_files(0..8));
+            let samples = match options.normalization {
+                crate::NormalizationMode::LocalBackground { .. } => (0..8)
+                    .map(|index| format!("frame-{index}.fit"))
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            };
+            assert_eq!(retained_samples(&scratch), samples);
 
             let batch = crate::BatchStackOptions::default();
             let expected = fresh.reintegrate(&batch, |_, _, _| {}).unwrap();

@@ -114,6 +114,11 @@ impl NormalizationMap {
     /// stack's reference frame. A gain fitted against a reference of
     /// another noise level, such as an integration of many frames, would
     /// follow the noise rather than the signal.
+    ///
+    /// Reintegration fits from the samples alone, with
+    /// [`Self::refit_background_samples`]; this whole-image form stays as
+    /// its test reference.
+    #[cfg(test)]
     pub(crate) fn refit_background(
         &self,
         reference: &LinearImage,
@@ -125,8 +130,45 @@ impl NormalizationMap {
                 "normalization channel count does not match".into(),
             ));
         }
+        local_background_with_gains(reference, source, tile_size, &self.background_globals())
+    }
+
+    /// [`Self::refit_background`] from the samples `layout` says the fit
+    /// reads, of the reference and of the source, rather than from whole
+    /// images; the same fit, to the bit.
+    pub(crate) fn refit_background_samples(
+        &self,
+        layout: &BackgroundSamples,
+        reference: &[f32],
+        source: &[f32],
+    ) -> Result<Self> {
+        if layout.channels != self.channels
+            || reference.len() != layout.len()
+            || source.len() != layout.len()
+        {
+            return Err(Error::Normalization(
+                "background samples do not match the normalization".into(),
+            ));
+        }
+        Ok(local_background_from(
+            (layout.width, layout.height, layout.channels),
+            layout.tile_size,
+            &self.background_globals(),
+            |cell, channel, _| {
+                let samples = layout.block(cell, channel);
+                sample_medians(
+                    reference[samples.clone()].iter().copied(),
+                    source[samples].iter().copied(),
+                )
+            },
+        ))
+    }
+
+    /// Each channel's gain, and its mean offset over the tiles, which a
+    /// background refit keeps.
+    fn background_globals(&self) -> Vec<(f32, f32)> {
         let tiles = (self.columns * self.rows) as f32;
-        let globals = (0..self.channels)
+        (0..self.channels)
             .map(|channel| {
                 let offset = self
                     .offsets
@@ -137,9 +179,132 @@ impl NormalizationMap {
                     / tiles;
                 (self.channel_mean_gain(channel), offset)
             })
-            .collect::<Vec<_>>();
-        local_background_with_gains(reference, source, tile_size, &globals)
+            .collect()
     }
+}
+
+/// The samples [`NormalizationMode::LocalBackground`]'s fit reads from an
+/// image of one shape: in each tile, in the order of the map's offsets,
+/// every channel at an evenly spaced subset of the tile's pixels, about one
+/// in sixteen of a full tile's, as [`tile_medians`] picks them.
+///
+/// A reintegration keeps each frame's samples beside its registered image,
+/// and fits the frame's background from them rather than from the whole
+/// image.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct BackgroundSamples {
+    width: usize,
+    height: usize,
+    channels: usize,
+    tile_size: usize,
+    columns: usize,
+    /// Where each tile's and channel's samples start, and where the last
+    /// ends.
+    starts: Vec<usize>,
+}
+
+impl BackgroundSamples {
+    /// The layout for images of `width` by `height` pixels of `channels`
+    /// channels fitted in tiles of `tile_size` pixels.
+    pub(crate) fn new(width: usize, height: usize, channels: usize, tile_size: usize) -> Self {
+        let columns = width.div_ceil(tile_size);
+        let rows = height.div_ceil(tile_size);
+        let mut starts = Vec::with_capacity(columns * rows * channels + 1);
+        let mut start = 0;
+        for cell in 0..columns * rows {
+            let (_, _, tile_width, tile_height) = tile(cell, columns, width, height, tile_size);
+            let count = tile_sample_pixels(width, 0, 0, tile_width, tile_height).len();
+            for _ in 0..channels {
+                starts.push(start);
+                start += count;
+            }
+        }
+        starts.push(start);
+        Self {
+            width,
+            height,
+            channels,
+            tile_size,
+            columns,
+            starts,
+        }
+    }
+
+    /// The layout an image of `image`'s shape is fitted with.
+    pub(crate) fn for_image(image: &LinearImage, tile_size: usize) -> Self {
+        Self::new(image.width, image.height, image.channels, tile_size)
+    }
+
+    /// Samples per image.
+    pub(crate) fn len(&self) -> usize {
+        self.starts[self.starts.len() - 1]
+    }
+
+    /// Where tile `cell`'s samples of `channel` lie.
+    fn block(&self, cell: usize, channel: usize) -> std::ops::Range<usize> {
+        let at = cell * self.channels + channel;
+        self.starts[at]..self.starts[at + 1]
+    }
+
+    /// The channel of every sample, in order, block by block: a tile's
+    /// samples of channel 0, then of channel 1, and so on.
+    pub(crate) fn channels(&self) -> impl Iterator<Item = (usize, std::ops::Range<usize>)> + '_ {
+        self.starts
+            .windows(2)
+            .enumerate()
+            .map(|(at, bounds)| (at % self.channels, bounds[0]..bounds[1]))
+    }
+
+    /// `image`'s samples, as they are.
+    pub(crate) fn of(&self, image: &LinearImage) -> Result<Vec<f32>> {
+        if (image.width, image.height, image.channels) != (self.width, self.height, self.channels) {
+            return Err(Error::Normalization(
+                "image does not match its background sample layout".into(),
+            ));
+        }
+        let mut samples = Vec::with_capacity(self.len());
+        let rows = self.height.div_ceil(self.tile_size);
+        for cell in 0..self.columns * rows {
+            let (x, y, width, height) =
+                tile(cell, self.columns, self.width, self.height, self.tile_size);
+            for channel in 0..self.channels {
+                samples.extend(
+                    tile_sample_pixels(self.width, x, y, width, height)
+                        .map(|pixel| image.data[pixel * self.channels + channel]),
+                );
+            }
+        }
+        Ok(samples)
+    }
+}
+
+/// Tile `cell`'s position and size, counting tiles row by row, `columns`
+/// to a row, over an image of `width` by `height`.
+fn tile(
+    cell: usize,
+    columns: usize,
+    width: usize,
+    height: usize,
+    tile_size: usize,
+) -> (usize, usize, usize, usize) {
+    let (x, y) = ((cell % columns) * tile_size, (cell / columns) * tile_size);
+    (x, y, tile_size.min(width - x), tile_size.min(height - y))
+}
+
+/// The pixels [`tile_medians`] reads in the region at `(x, y)` of `width`
+/// by `height` of an image `image_width` wide: every `stride`-th pixel in
+/// row-major order, for about four thousand.
+fn tile_sample_pixels(
+    image_width: usize,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) -> impl ExactSizeIterator<Item = usize> {
+    let stride = (width * height / 4_000).max(1);
+    (0..width * height)
+        .step_by(stride)
+        .map(move |sample| (y + sample / width) * image_width + x + sample % width)
 }
 
 /// Per-channel gain and offset that map a source frame onto the reference
@@ -381,6 +546,34 @@ impl NormalizationMap {
             .data
             .par_chunks_mut(channels * 4096)
             .for_each(|pixels| apply_affine(pixels, &self.gains, &self.offsets));
+        Ok(())
+    }
+
+    /// [`Self::apply_global`] on the samples `layout` takes of an image
+    /// with this map's channels: the same arithmetic on each.
+    pub(crate) fn apply_global_samples(
+        &self,
+        layout: &BackgroundSamples,
+        samples: &mut [f32],
+    ) -> Result<()> {
+        self.validate()?;
+        if self.columns != 1 || self.rows != 1 {
+            return Err(Error::Normalization(
+                "normalization map is not global".into(),
+            ));
+        }
+        if layout.channels != self.channels || samples.len() != layout.len() {
+            return Err(Error::Normalization(
+                "background samples do not match the normalization".into(),
+            ));
+        }
+        for (channel, block) in layout.channels() {
+            apply_affine(
+                &mut samples[block],
+                &self.gains[channel..=channel],
+                &self.offsets[channel..=channel],
+            );
+        }
         Ok(())
     }
 
@@ -730,28 +923,39 @@ fn local_background_with_gains(
     tile_size: usize,
     globals: &[(f32, f32)],
 ) -> Result<NormalizationMap> {
-    let channels = source.channels;
-    let columns = source.width.div_ceil(tile_size);
-    let rows = source.height.div_ceil(tile_size);
+    Ok(local_background_from(
+        (source.width, source.height, source.channels),
+        tile_size,
+        globals,
+        |_, channel, (x, y, width, height)| {
+            tile_medians(reference, source, channel, x, y, width, height)
+        },
+    ))
+}
+
+/// [`local_background_with_gains`] over an image of `shape` (width, height,
+/// channels), with `medians` giving the reference's and the source's
+/// medians in a tile, by its index, channel and region, when they share
+/// enough samples.
+fn local_background_from(
+    shape: (usize, usize, usize),
+    tile_size: usize,
+    globals: &[(f32, f32)],
+    medians: impl Fn(usize, usize, (usize, usize, usize, usize)) -> Option<(f32, f32)> + Sync,
+) -> NormalizationMap {
+    let (width, height, channels) = shape;
+    let columns = width.div_ceil(tile_size);
+    let rows = height.div_ceil(tile_size);
     let mut offsets = (0..columns * rows * channels)
         .into_par_iter()
         .map(|index| {
             let channel = index % channels;
             let cell = index / channels;
-            let (x, y) = ((cell % columns) * tile_size, (cell / columns) * tile_size);
-            tile_medians(
-                reference,
-                source,
-                channel,
-                x,
-                y,
-                tile_size.min(source.width - x),
-                tile_size.min(source.height - y),
-            )
-            .map(|(reference_median, source_median)| {
-                reference_median - globals[channel].0 * source_median
-            })
-            .filter(|offset| offset.is_finite())
+            medians(cell, channel, tile(cell, columns, width, height, tile_size))
+                .map(|(reference_median, source_median)| {
+                    reference_median - globals[channel].0 * source_median
+                })
+                .filter(|offset| offset.is_finite())
         })
         .collect::<Vec<_>>();
     for (channel, &(_, global_offset)) in globals.iter().enumerate() {
@@ -764,10 +968,10 @@ fn local_background_with_gains(
             global_offset,
         );
     }
-    Ok(NormalizationMap {
+    NormalizationMap {
         schema_version: NORMALIZATION_MAP_SCHEMA_VERSION,
-        width: source.width,
-        height: source.height,
+        width,
+        height,
         channels,
         tile_size,
         columns,
@@ -779,7 +983,7 @@ fn local_background_with_gains(
             .into_iter()
             .map(|offset| offset.unwrap_or(0.0))
             .collect(),
-    })
+    }
 }
 
 /// The medians of one region and channel in both frames, over samples both
@@ -793,14 +997,25 @@ fn tile_medians(
     width: usize,
     height: usize,
 ) -> Option<(f32, f32)> {
-    let stride = (width * height / 4_000).max(1);
+    let indices = || {
+        tile_sample_pixels(source.width, x, y, width, height)
+            .map(move |pixel| pixel * source.channels + channel)
+    };
+    sample_medians(
+        indices().map(|index| reference.data[index]),
+        indices().map(|index| source.data[index]),
+    )
+}
+
+/// The medians of paired reference and source samples, over the pairs
+/// both have finite, or `None` when fewer than 64 are.
+fn sample_medians(
+    reference: impl Iterator<Item = f32>,
+    source: impl Iterator<Item = f32>,
+) -> Option<(f32, f32)> {
     let mut reference_values = Vec::new();
     let mut source_values = Vec::new();
-    for sample_index in (0..width * height).step_by(stride) {
-        let index = ((y + sample_index / width) * source.width + x + sample_index % width)
-            * source.channels
-            + channel;
-        let (reference_value, source_value) = (reference.data[index], source.data[index]);
+    for (reference_value, source_value) in reference.zip(source) {
         if reference_value.is_finite() && source_value.is_finite() {
             reference_values.push(reference_value);
             source_values.push(source_value);
@@ -1042,6 +1257,73 @@ fn affine_for_region(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Refitting a frame's background from its samples alone matches the
+    /// refit from whole images to the bit, for one and three channels, over
+    /// tiles cut short at the edges, with samples missing, a tile with too
+    /// few to fit, and negative zeros; and the global map applied to the
+    /// samples matches it applied to the image.
+    #[test]
+    fn background_refits_from_samples_alone_as_from_whole_images() {
+        let mut state = 0x2545_f491_u32;
+        let mut draw = move || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            (state % 10_000) as f32 / 10_000.0
+        };
+        for (channels, tile_size) in [(1, 16), (3, 32), (3, 40)] {
+            let (width, height) = (151, 97);
+            let image = |draw: &mut dyn FnMut() -> f32, level: f32| {
+                let data = (0..width * height * channels)
+                    .map(|index| {
+                        let (x, y) = (index / channels % width, index / channels / width);
+                        match draw() {
+                            // A corner tile left almost empty.
+                            _ if x < 9 && y < 9 => f32::NAN,
+                            chance if chance < 0.05 => f32::NAN,
+                            chance if chance < 0.06 => -0.0,
+                            chance => level + 40.0 * chance + x as f32 * 0.2,
+                        }
+                    })
+                    .collect();
+                LinearImage::new(width, height, channels, data).unwrap()
+            };
+            let reference = image(&mut draw, 1000.0);
+            let source = image(&mut draw, 700.0);
+            let recorded =
+                NormalizationMap::estimate(&reference, &source, NormalizationMode::Global).unwrap();
+            let expected = recorded
+                .refit_background(&reference, &source, tile_size)
+                .unwrap();
+            let layout = BackgroundSamples::for_image(&source, tile_size);
+            let refitted = recorded
+                .refit_background_samples(
+                    &layout,
+                    &layout.of(&reference).unwrap(),
+                    &layout.of(&source).unwrap(),
+                )
+                .unwrap();
+            let bits = |values: &[f32]| {
+                values
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(refitted.offsets.len(), expected.offsets.len());
+            assert_eq!(bits(&refitted.offsets), bits(&expected.offsets));
+            assert_eq!(bits(&refitted.gains), bits(&expected.gains));
+            assert_eq!(refitted, expected);
+
+            let mut whole = source.clone();
+            recorded.apply_global(&mut whole).unwrap();
+            let mut samples = layout.of(&source).unwrap();
+            recorded
+                .apply_global_samples(&layout, &mut samples)
+                .unwrap();
+            assert_eq!(bits(&samples), bits(&layout.of(&whole).unwrap()));
+        }
+    }
 
     /// A frame whose sky gradient the reference lacks: a single offset leaves
     /// the gradient, which draws a step wherever this frame's edge falls in
