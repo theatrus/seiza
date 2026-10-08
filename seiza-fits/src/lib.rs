@@ -25,6 +25,7 @@ pub use writer::{
     F32ImageData, WriteHeaderCard, update_header_in_place, write_f32_image, write_f32_image_to,
 };
 
+use rayon::prelude::*;
 use std::io::Read;
 use std::path::Path;
 
@@ -505,13 +506,21 @@ impl FitsImage {
         if self.planes == 3 {
             let full = self.planes_u16();
             let n = self.width * self.height;
-            return std::borrow::Cow::Owned(
-                (0..n)
-                    .map(|i| {
-                        ((full[i] as u32 + full[n + i] as u32 + full[2 * n + i] as u32) / 3) as u16
-                    })
-                    .collect(),
-            );
+            let (red, rest) = full.split_at(n);
+            let (green, blue) = rest.split_at(n);
+            let mut luma = vec![0_u16; n];
+            luma.par_chunks_mut(PARALLEL_CHUNK)
+                .zip(red.par_chunks(PARALLEL_CHUNK))
+                .zip(green.par_chunks(PARALLEL_CHUNK))
+                .zip(blue.par_chunks(PARALLEL_CHUNK))
+                .for_each(|(((luma, red), green), blue)| {
+                    for (((luma, &red), &green), &blue) in
+                        luma.iter_mut().zip(red).zip(green).zip(blue)
+                    {
+                        *luma = ((red as u32 + green as u32 + blue as u32) / 3) as u16;
+                    }
+                });
+            return std::borrow::Cow::Owned(luma);
         }
         self.planes_u16()
     }
@@ -523,12 +532,20 @@ impl FitsImage {
         }
         let full = self.planes_u16();
         let n = self.width * self.height;
+        let (red, rest) = full.split_at(n);
+        let (green, blue) = rest.split_at(n);
         let mut data = vec![0u16; n * 3];
-        for i in 0..n {
-            data[i * 3] = full[i];
-            data[i * 3 + 1] = full[n + i];
-            data[i * 3 + 2] = full[2 * n + i];
-        }
+        data.par_chunks_mut(PARALLEL_CHUNK * 3)
+            .zip(red.par_chunks(PARALLEL_CHUNK))
+            .zip(green.par_chunks(PARALLEL_CHUNK))
+            .zip(blue.par_chunks(PARALLEL_CHUNK))
+            .for_each(|(((data, red), green), blue)| {
+                for (((pixel, &red), &green), &blue) in
+                    data.chunks_exact_mut(3).zip(red).zip(green).zip(blue)
+                {
+                    pixel.copy_from_slice(&[red, green, blue]);
+                }
+            });
         Some(RgbImage16 {
             width: self.width,
             height: self.height,
@@ -543,9 +560,9 @@ impl FitsImage {
             Pixels::U8(data) => {
                 std::borrow::Cow::Owned(data.iter().map(|&v| (v as u16) << 8).collect())
             }
-            Pixels::I32(data) => scale_to_u16(data.iter().map(|&v| v as f64)),
-            Pixels::F32(data) => scale_to_u16(data.iter().map(|&v| v as f64)),
-            Pixels::F64(data) => scale_to_u16(data.iter().copied()),
+            Pixels::I32(data) => scale_to_u16(data, |v| v as f64),
+            Pixels::F32(data) => scale_to_u16(data, |v| v as f64),
+            Pixels::F64(data) => scale_to_u16(data, |v| v),
         }
     }
 
@@ -660,20 +677,76 @@ impl FitsImage {
     }
 }
 
-fn scale_to_u16(values: impl Iterator<Item = f64> + Clone) -> std::borrow::Cow<'static, [u16]> {
-    let (mut min, mut max) = (f64::INFINITY, f64::NEG_INFINITY);
-    for v in values.clone() {
-        if v.is_finite() {
-            min = min.min(v);
-            max = max.max(v);
+/// Samples one rayon task takes in the whole-image conversions.
+const PARALLEL_CHUNK: usize = 1 << 16;
+
+/// The least and greatest finite sample, `(inf, -inf)` when none is.
+///
+/// Four running extremes, one per lane of every four samples, so the
+/// comparisons run as vectors; any order finds the same extremes.
+fn finite_range<T: Copy>(values: &[T], to_f64: impl Fn(T) -> f64) -> (f64, f64) {
+    const LANES: usize = 4;
+    let mut min = [f64::INFINITY; LANES];
+    let mut max = [f64::NEG_INFINITY; LANES];
+    let mut chunks = values.chunks_exact(LANES);
+    for chunk in &mut chunks {
+        for lane in 0..LANES {
+            let v = to_f64(chunk[lane]);
+            let finite = v.is_finite();
+            min[lane] = if finite && v < min[lane] {
+                v
+            } else {
+                min[lane]
+            };
+            max[lane] = if finite && v > max[lane] {
+                v
+            } else {
+                max[lane]
+            };
         }
     }
-    let span = (max - min).max(1e-12);
-    std::borrow::Cow::Owned(
-        values
-            .map(|v| (((v - min) / span).clamp(0.0, 1.0) * 65535.0) as u16)
-            .collect(),
+    for &v in chunks.remainder() {
+        let v = to_f64(v);
+        if v.is_finite() {
+            min[0] = min[0].min(v);
+            max[0] = max[0].max(v);
+        }
+    }
+    (
+        min.into_iter().fold(f64::INFINITY, f64::min),
+        max.into_iter().fold(f64::NEG_INFINITY, f64::max),
     )
+}
+
+/// Min-max scale samples, as `f64`, onto the full `u16` range. Non-finite
+/// samples are left out of the range; NaN maps to 0 and infinities clamp.
+///
+/// Chunks find their finite range and scale in parallel. The least and
+/// greatest finite value do not depend on the order they are searched in,
+/// save which zero wins when both signs are present, and that changes no
+/// output: it can change only the sign of a zero `v - min` or `max - min`,
+/// which the conversion to `u16` and the span's floor drop.
+fn scale_to_u16<T: Copy + Sync>(
+    values: &[T],
+    to_f64: impl Fn(T) -> f64 + Copy + Sync,
+) -> std::borrow::Cow<'static, [u16]> {
+    let (min, max) = values
+        .par_chunks(PARALLEL_CHUNK)
+        .map(|chunk| finite_range(chunk, to_f64))
+        .reduce(
+            || (f64::INFINITY, f64::NEG_INFINITY),
+            |(min_a, max_a), (min_b, max_b)| (min_a.min(min_b), max_a.max(max_b)),
+        );
+    let span = (max - min).max(1e-12);
+    let mut out = vec![0_u16; values.len()];
+    out.par_chunks_mut(PARALLEL_CHUNK)
+        .zip(values.par_chunks(PARALLEL_CHUNK))
+        .for_each(|(out, values)| {
+            for (out, &v) in out.iter_mut().zip(values) {
+                *out = (((to_f64(v) - min) / span).clamp(0.0, 1.0) * 65535.0) as u16;
+            }
+        });
+    std::borrow::Cow::Owned(out)
 }
 
 fn scale_to_f32(values: impl Iterator<Item = f64> + Clone) -> Vec<f32> {
@@ -701,6 +774,139 @@ fn scale_to_f32(values: impl Iterator<Item = f64> + Clone) -> Vec<f32> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod conversion_tests {
+    use super::*;
+
+    /// The serial conversions as they were before they ran on rayon.
+    fn previous_scale_to_u16(values: impl Iterator<Item = f64> + Clone) -> Vec<u16> {
+        let (mut min, mut max) = (f64::INFINITY, f64::NEG_INFINITY);
+        for v in values.clone() {
+            if v.is_finite() {
+                min = min.min(v);
+                max = max.max(v);
+            }
+        }
+        let span = (max - min).max(1e-12);
+        values
+            .map(|v| (((v - min) / span).clamp(0.0, 1.0) * 65535.0) as u16)
+            .collect()
+    }
+
+    fn previous_planes_u16(image: &FitsImage) -> Vec<u16> {
+        match &image.pixels {
+            Pixels::U16(data) => data.clone(),
+            Pixels::U8(data) => data.iter().map(|&v| (v as u16) << 8).collect(),
+            Pixels::I32(data) => previous_scale_to_u16(data.iter().map(|&v| v as f64)),
+            Pixels::F32(data) => previous_scale_to_u16(data.iter().map(|&v| v as f64)),
+            Pixels::F64(data) => previous_scale_to_u16(data.iter().copied()),
+        }
+    }
+
+    fn previous_to_u16(image: &FitsImage) -> Vec<u16> {
+        let full = previous_planes_u16(image);
+        if image.planes != 3 {
+            return full;
+        }
+        let n = image.width * image.height;
+        (0..n)
+            .map(|i| ((full[i] as u32 + full[n + i] as u32 + full[2 * n + i] as u32) / 3) as u16)
+            .collect()
+    }
+
+    fn previous_rgb_planes(image: &FitsImage) -> Vec<u16> {
+        let full = previous_planes_u16(image);
+        let n = image.width * image.height;
+        let mut data = vec![0u16; n * 3];
+        for i in 0..n {
+            data[i * 3] = full[i];
+            data[i * 3 + 1] = full[n + i];
+            data[i * 3 + 2] = full[2 * n + i];
+        }
+        data
+    }
+
+    #[test]
+    fn parallel_u16_conversions_match_the_serial_ones() {
+        let mut state = 0x853c_49e6_748f_ea9b_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        // Empty, single-sample, and chunk-crossing sizes, mono and RGB.
+        let shapes = [
+            (0, 0, 1),
+            (1, 1, 1),
+            (1, 1, 3),
+            (7, 3, 3),
+            (300, 219, 1),
+            (512, 256, 3),
+            (PARALLEL_CHUNK + 3, 2, 1),
+            (PARALLEL_CHUNK / 2 + 5, 3, 3),
+        ];
+        for (width, height, planes) in shapes {
+            let count = width * height * planes;
+            // Finite values of both signs and zeros of both signs, with NaN
+            // and infinities; some sets hold nothing finite, some only zeros.
+            for kind in 0..5 {
+                let mut sample = || -> f64 {
+                    match (kind, next() % 41) {
+                        (3, 0) => f64::NAN,
+                        (3, _) => f64::INFINITY,
+                        (4, roll) => {
+                            if roll % 2 == 0 {
+                                0.0
+                            } else {
+                                -0.0
+                            }
+                        }
+                        (_, 0) => f64::NAN,
+                        (_, 1) => f64::INFINITY,
+                        (_, 2) => f64::NEG_INFINITY,
+                        (_, 3) => -0.0,
+                        (_, 4) => 0.0,
+                        (2, _) => 3.0e38 * ((next() >> 11) as f64 / (1u64 << 53) as f64 - 0.5),
+                        _ => (next() >> 11) as f64 / (1u64 << 53) as f64 * 70_000.0 - 2_000.0,
+                    }
+                };
+                let f64s = (0..count).map(|_| sample()).collect::<Vec<_>>();
+                let pixel_sets = [
+                    Pixels::F64(f64s.clone()),
+                    Pixels::F32(f64s.iter().map(|&v| v as f32).collect()),
+                    Pixels::I32(
+                        f64s.iter()
+                            .map(|&v| if v.is_finite() { v as i32 } else { i32::MIN })
+                            .collect(),
+                    ),
+                    Pixels::U8((0..count).map(|_| next() as u8).collect()),
+                    Pixels::U16((0..count).map(|_| next() as u16).collect()),
+                ];
+                for pixels in pixel_sets {
+                    let image = FitsImage {
+                        width,
+                        height,
+                        planes,
+                        pixels,
+                        headers: Vec::new(),
+                    };
+                    let label = format!("{width}x{height}x{planes} kind {kind}");
+                    assert_eq!(*image.planes_u16(), previous_planes_u16(&image), "{label}");
+                    assert_eq!(*image.to_u16(), previous_to_u16(&image), "{label}");
+                    if planes == 3 {
+                        assert_eq!(
+                            image.rgb_planes().unwrap().data,
+                            previous_rgb_planes(&image),
+                            "{label}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

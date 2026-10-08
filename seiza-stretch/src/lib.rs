@@ -1382,15 +1382,44 @@ pub struct Statistics {
     pub count: usize,
 }
 
+/// Samples one rayon task counts or maps in the `u16` statistics and LUTs.
+const U16_CHUNK: usize = 1 << 18;
+
 pub fn statistics_u16(data: &[u16]) -> Statistics {
-    let mut histogram = vec![0u32; 65_536];
-    let mut sum = 0u64;
-    let mut sum_sq = 0u128;
-    for &value in data {
-        histogram[value as usize] += 1;
-        sum += u64::from(value);
-        sum_sq += u128::from(value) * u128::from(value);
-    }
+    // Chunks count into histograms of their own, merged by adding counts.
+    // The sums come from the merged histogram: every sample is in it once,
+    // and integer sums do not depend on their order.
+    let histogram = data
+        .par_chunks(U16_CHUNK)
+        .fold(
+            || vec![0u32; 65_536],
+            |mut histogram, chunk| {
+                for &value in chunk {
+                    histogram[usize::from(value)] += 1;
+                }
+                histogram
+            },
+        )
+        .reduce(
+            || vec![0u32; 65_536],
+            |mut histogram, other| {
+                for (count, other) in histogram.iter_mut().zip(&other) {
+                    *count += other;
+                }
+                histogram
+            },
+        );
+    let (sum, sum_sq) =
+        histogram
+            .iter()
+            .enumerate()
+            .fold((0u64, 0u128), |(sum, sum_sq), (value, &samples)| {
+                let value = value as u64;
+                (
+                    sum + value * u64::from(samples),
+                    sum_sq + u128::from(value * value) * u128::from(samples),
+                )
+            });
     let count = data.len();
     if count == 0 {
         return Statistics {
@@ -1453,7 +1482,10 @@ pub fn statistics_u16(data: &[u16]) -> Statistics {
 /// bits, so `stretch_u16_to_u8` is always `stretch_u16_to_u16 >> 8`.
 pub fn stretch_u16_to_u8(data: &[u16], stats: &Statistics, params: &StretchParams) -> Vec<u8> {
     let map = stretch_u16_map(stats, params);
-    data.iter().map(|value| map[usize::from(*value)]).collect()
+    data.par_iter()
+        .with_min_len(U16_CHUNK)
+        .map(|value| map[usize::from(*value)])
+        .collect()
 }
 
 /// Stretch `u16` data directly to `u16` through a 65,536-entry LUT, retaining
@@ -1471,7 +1503,10 @@ pub fn stretch_u16_to_u16(data: &[u16], stats: &Statistics, params: &StretchPara
             denormalize_u16(stretched)
         })
         .collect::<Vec<_>>();
-    data.iter().map(|value| map[usize::from(*value)]).collect()
+    data.par_iter()
+        .with_min_len(U16_CHUNK)
+        .map(|value| map[usize::from(*value)])
+        .collect()
 }
 
 fn stretch_u16_map(stats: &Statistics, params: &StretchParams) -> Vec<u8> {
@@ -2480,6 +2515,82 @@ mod tests {
         assert!((f64::from(sorted[sorted.len() / 2]) - 0.2 * 255.0).abs() < 16.0);
         assert!(output[0] > 200);
         assert!(sorted[100] < 60);
+    }
+
+    /// `statistics_u16`'s counting and sums as they were before they ran on
+    /// rayon: one histogram and running sums over every sample in turn.
+    fn previous_histogram_sums(data: &[u16]) -> (Vec<u32>, u64, u128) {
+        let mut histogram = vec![0u32; 65_536];
+        let mut sum = 0u64;
+        let mut sum_sq = 0u128;
+        for &value in data {
+            histogram[value as usize] += 1;
+            sum += u64::from(value);
+            sum_sq += u128::from(value) * u128::from(value);
+        }
+        (histogram, sum, sum_sq)
+    }
+
+    /// The `u16` stretches as they were before they ran on rayon.
+    fn previous_stretches(
+        data: &[u16],
+        stats: &Statistics,
+        params: &StretchParams,
+    ) -> (Vec<u8>, Vec<u16>) {
+        let map = stretch_u16_map(stats, params);
+        let narrow = data.iter().map(|value| map[usize::from(*value)]).collect();
+        let (shadows, midtone, highlights) = stretch_u16_curve(stats, params);
+        let map = (0..65_536)
+            .map(|value| {
+                let input = 1.0 - highlights + value as f64 / 65_535.0 - shadows;
+                denormalize_u16(midtones_transfer_function(midtone, input))
+            })
+            .collect::<Vec<_>>();
+        let wide = data.iter().map(|value| map[usize::from(*value)]).collect();
+        (narrow, wide)
+    }
+
+    #[test]
+    fn parallel_u16_statistics_and_stretches_match_the_serial_ones() {
+        let mut state = 0x6a09_e667_f3bc_c908_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for count in [0, 1, 2, 3, 1000, U16_CHUNK, 2 * U16_CHUNK + 5] {
+            for spread in [1_u64, 300, 65_536] {
+                let data = (0..count)
+                    .map(|_| (next() % spread) as u16 + if spread == 1 { 65_535 } else { 0 })
+                    .collect::<Vec<_>>();
+                let statistics = statistics_u16(&data);
+                // The rest of the statistics comes from these, as before.
+                let (histogram, sum, sum_sq) = previous_histogram_sums(&data);
+                assert_eq!(statistics.count, count);
+                if count > 0 {
+                    let mean = sum as f64 / count as f64;
+                    let variance = (sum_sq as f64 / count as f64 - mean * mean).max(0.0);
+                    assert_eq!(
+                        statistics.mean.to_bits(),
+                        mean.to_bits(),
+                        "{count} {spread}"
+                    );
+                    assert_eq!(
+                        statistics.std_dev.to_bits(),
+                        variance.sqrt().to_bits(),
+                        "{count} {spread}"
+                    );
+                    let min = histogram.iter().position(|count| *count > 0).unwrap() as u16;
+                    let max = histogram.iter().rposition(|count| *count > 0).unwrap() as u16;
+                    assert_eq!((statistics.min, statistics.max), (min, max));
+                }
+                let params = StretchParams::default();
+                let (narrow, wide) = previous_stretches(&data, &statistics, &params);
+                assert_eq!(stretch_u16_to_u8(&data, &statistics, &params), narrow);
+                assert_eq!(stretch_u16_to_u16(&data, &statistics, &params), wide);
+            }
+        }
     }
 
     #[test]
