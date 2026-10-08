@@ -396,7 +396,9 @@ fn encode_long_string(
 ///
 /// The header changed is that of the HDU [`crate::FitsImage::open`] reads:
 /// the primary, or, when the primary holds no data, the image extension.
-/// Reading the file again then finds the new value first.
+/// Reading the file again then finds the new value first. For a
+/// tile-compressed image that is its table's header, where the table and
+/// compression keywords are refused too.
 ///
 /// Modifying structural cards (`SIMPLE`, `BITPIX`, `NAXIS*`, `END`, etc.) is
 /// rejected with an error to prevent corrupting the file layout, and so is a
@@ -425,7 +427,12 @@ pub fn update_header_in_place(
         .write(true)
         .open(path)
         .map_err(FitsError::Io)?;
-    let header_start = crate::image_header_offset(&mut file)?;
+    let (header_start, compressed) = crate::image_header_offset(&mut file)?;
+    if compressed && crate::compressed::is_reserved_keyword(keyword) {
+        return Err(FitsError::Malformed(format!(
+            "cannot modify {keyword} of a tile-compressed image in place"
+        )));
+    }
 
     let mut block = [0u8; BLOCK];
     let mut block_idx: u64 = 0;

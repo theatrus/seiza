@@ -12,6 +12,7 @@ keywords = ["astronomy", "astrophotography", "fits", "image"]
 categories = ["science", "multimedia::images", "parser-implementations"]
 
 [dependencies]
+flate2.workspace = true
 multiversion = "0.9"
 rayon.workspace = true
 seiza-stretch.workspace = true
