@@ -250,10 +250,14 @@ When masters are active, every decoded reference and pushed path is checked
 before pixel calibration. Known calibration-frame roles, integrated masters,
 and inputs already marked bias/dark/flat-corrected are refused. Shared
 `seiza-calibration` matching verifies sensor/readout compatibility for every
-master, dark temperature, and flat optics. Bias-isolated dark current may be
-scaled by exposure; a dark that still contains its pedestal must have the same
-known positive exposure as the light. With no masters, preprocessed lights
-remain valid inputs.
+master, dark temperature, and flat optics. Two recorded readings must agree; a
+reading the master never recorded, such as a dark without `CCD-TEMP`, does not
+refuse the light. `CalibrationMasters::from_fits_frames` and `from_fits_paths`
+keep each master's header signature; `CalibrationMasters::new` sees only
+pixels, so it can check little more than geometry. Bias-isolated dark current
+may be scaled by exposure; a dark that still contains its pedestal must have
+the same known positive exposure as the light. With no masters, preprocessed
+lights remain valid inputs.
 
 Darks that caught stray light, such as dawn through an open roof, look like
 ordinary darks in their headers. `MasterBuildOptions::dark_level_screening`

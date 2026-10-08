@@ -463,9 +463,12 @@ JSON report retain the full measured rotation.
 `--flat` accepts an integrated master flat in the light frame's raw sampling.
 For legacy masters, `--bias` removes the flat's pedestal before normalization.
 Masters built by `seiza master` carry FITS calibration-state headers, so a
-bias-subtracted dark or calibrated flat is not subtracted twice. Planar RGB
-flats are normalized independently per channel. CFA flats remain one-channel
-and are applied before debayering. See the
+bias-subtracted dark or calibrated flat is not subtracted twice. Each light is
+checked against what the masters' headers record: gain, offset, binning, the
+dark's sensor temperature (`CCD-TEMP` or `SET-TEMP`) and the flat's filter and
+optics. A master dark that records no temperature is used with a warning.
+Planar RGB flats are normalized independently per channel. CFA flats remain
+one-channel and are applied before debayering. See the
 [stacking design](https://github.com/theatrus/seiza/blob/main/docs/design/image-stacking.md)
 for the live API, rejection semantics, and PSF Guard integration boundary.
 

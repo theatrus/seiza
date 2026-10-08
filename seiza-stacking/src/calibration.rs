@@ -116,9 +116,27 @@ impl CalibrationMasters {
         flat: Option<&Path>,
         dark_exposure_seconds: Option<f64>,
     ) -> Result<Self> {
+        Self::from_fits_frames(
+            bias.map(FitsFrame::open).transpose()?,
+            dark.map(FitsFrame::open).transpose()?,
+            flat.map(FitsFrame::open).transpose()?,
+            dark_exposure_seconds,
+        )
+    }
+
+    /// Prepare integrated calibration masters already decoded from files.
+    ///
+    /// Unlike [`Self::new`], which sees only pixels, this keeps each master's
+    /// header signature — sensor temperature, gain, offset, filter and the
+    /// rest — so every light is checked against what the master recorded.
+    /// A supplied dark exposure overrides its FITS metadata.
+    pub fn from_fits_frames(
+        bias: Option<FitsFrame>,
+        dark: Option<FitsFrame>,
+        flat: Option<FitsFrame>,
+        dark_exposure_seconds: Option<f64>,
+    ) -> Result<Self> {
         let bias = bias
-            .map(FitsFrame::open)
-            .transpose()?
             .map(|frame| {
                 frame.validate_master_kind("BIAS")?;
                 let signature = frame.metadata().signature;
@@ -126,8 +144,6 @@ impl CalibrationMasters {
             })
             .transpose()?;
         let dark = dark
-            .map(FitsFrame::open)
-            .transpose()?
             .map(|frame| {
                 let mut signature = frame.metadata().signature;
                 signature.exposure_seconds = dark_exposure_seconds.or(frame.exposure_seconds);
@@ -138,8 +154,6 @@ impl CalibrationMasters {
             })
             .transpose()?;
         let flat = flat
-            .map(FitsFrame::open)
-            .transpose()?
             .map(|frame| {
                 let signature = frame.metadata().signature;
                 Ok::<_, Error>((MasterFlat::from_fits_frame(frame)?, signature))
@@ -158,6 +172,12 @@ impl CalibrationMasters {
 
     /// Prepare masters for use: validate metadata, check matching dimensions,
     /// isolate dark current, and normalize the flat response.
+    ///
+    /// Pixels carry no acquisition metadata, so each master's signature holds
+    /// only its geometry, the dark's exposure, and any CFA layout. A master
+    /// read from a file belongs in [`Self::from_fits_frames`] or
+    /// [`Self::from_fits_paths`], which keep its temperature, gain, offset,
+    /// and optics for checking against every light.
     pub fn new(
         bias: Option<LinearImage>,
         dark: Option<MasterDark>,
@@ -426,7 +446,7 @@ impl CalibrationMasters {
         {
             let reason = if !sensor_consistent(light, dark) {
                 Some(seiza_calibration::describe_sensor_mismatch(light, dark))
-            } else if !temperature_matches(light, dark, tolerances) {
+            } else if !dark_temperature_consistent(light, dark, tolerances) {
                 Some(seiza_calibration::describe_value(
                     "temperature",
                     light.camera_temp_c,
@@ -485,6 +505,11 @@ impl CalibrationMasters {
     /// every light against masters written before the writer preserved
     /// optics metadata, which is how two filters of a real archive stopped
     /// stacking while the other five worked.
+    ///
+    /// The dark's sensor temperature follows the same rule: a master dark
+    /// that recorded none is kept. The exposure of a dark that still holds
+    /// its bias pedestal is the exception: it must be known on both sides,
+    /// because such a dark cannot be scaled.
     pub fn validate_light_signature(&self, light: &FrameSignature) -> Result<()> {
         let tolerances = MatchTolerances::default();
         for (kind, active, signature) in [
@@ -516,7 +541,7 @@ impl CalibrationMasters {
             }
         }
         if let Some(dark) = &self.dark_signature {
-            if !temperature_matches(light, dark, &tolerances) {
+            if !dark_temperature_consistent(light, dark, &tolerances) {
                 return Err(Error::Calibration(format!(
                     "master dark temperature does not match the light frame: {}",
                     seiza_calibration::describe_value(
@@ -647,6 +672,23 @@ impl CalibrationMasters {
         }
         Ok(())
     }
+}
+
+/// Whether a loaded master dark's sensor temperature agrees with a light's.
+///
+/// Consistency, not candidacy, for the reason
+/// [`CalibrationMasters::validate_light_signature`] gives: two recorded
+/// temperatures must agree within the dark tolerance, and a master that never
+/// recorded one proves nothing either way. `temperature_matches` alone is the
+/// selection rule, which passes over a silent candidate; applied to a master
+/// the user already chose, it refused every light that recorded CCD-TEMP.
+fn dark_temperature_consistent(
+    light: &FrameSignature,
+    dark: &FrameSignature,
+    tolerances: &MatchTolerances,
+) -> bool {
+    dark.camera_temp_c.is_none_or(|value| !value.is_finite())
+        || temperature_matches(light, dark, tolerances)
 }
 
 fn image_signature(
@@ -1053,6 +1095,112 @@ mod tests {
                 .to_string()
                 .contains("optical configuration")
         );
+    }
+
+    #[test]
+    fn masters_decoded_from_files_keep_their_header_signature() {
+        // `seiza stack --dark` built its masters from pixels alone, so a
+        // master dark that recorded CCD-TEMP = -10 refused every light at
+        // -10C with "master did not record one". Decoded frames must keep
+        // what the master's headers say.
+        let directory = tempfile::tempdir().unwrap();
+        let dark_path = directory.path().join("master-dark.fits");
+        crate::write_processed_image_fits_f32(
+            &dark_path,
+            &mono(&[14.0; 4]),
+            &[],
+            &[
+                WriteHeaderCard::new("SEIZAMST", HeaderValue::String("DARK".into())),
+                WriteHeaderCard::new("EXPTIME", HeaderValue::Float(60.0)),
+                WriteHeaderCard::new("CCD-TEMP", HeaderValue::Float(-10.0)),
+                WriteHeaderCard::new("GAIN", HeaderValue::Integer(100)),
+            ],
+        )
+        .unwrap();
+        let calibration = CalibrationMasters::from_fits_frames(
+            None,
+            Some(FitsFrame::open(&dark_path).unwrap()),
+            None,
+            None,
+        )
+        .unwrap();
+        let signature = calibration.dark_signature.as_ref().unwrap();
+        assert_eq!(signature.camera_temp_c, Some(-10.0));
+        assert_eq!(signature.gain, Some(100));
+        assert_eq!(signature.exposure_seconds, Some(60.0));
+
+        let cold = |temperature: f64, gain: i64| {
+            light(
+                Some(60.0),
+                vec![
+                    ("CCD-TEMP".into(), HeaderValue::Float(temperature)),
+                    ("SET-TEMP".into(), HeaderValue::Float(temperature)),
+                    ("GAIN".into(), HeaderValue::Integer(gain)),
+                ],
+            )
+        };
+        calibration
+            .validate_light_frame(&cold(-10.0, 100))
+            .expect("a light at the master's temperature is accepted");
+        let warm = calibration
+            .validate_light_frame(&cold(0.0, 100))
+            .unwrap_err()
+            .to_string();
+        assert!(warm.contains("temperature light=0C"), "{warm}");
+        let wrong_gain = calibration
+            .validate_light_frame(&cold(-10.0, 200))
+            .unwrap_err()
+            .to_string();
+        assert!(wrong_gain.contains("sensor or readout"), "{wrong_gain}");
+
+        // The path loader is the same rule over the same frames.
+        let from_path =
+            CalibrationMasters::from_fits_paths(None, Some(&dark_path), None, None).unwrap();
+        assert_eq!(from_path.dark_signature, calibration.dark_signature);
+    }
+
+    #[test]
+    fn a_master_dark_that_recorded_no_temperature_still_calibrates_a_cooled_light() {
+        // Consistency, not candidacy: a dark master the user chose that never
+        // wrote down its temperature cannot disagree with the light's.
+        let calibration = CalibrationMasters::new(
+            None,
+            Some(MasterDark {
+                image: mono(&[14.0; 4]),
+                exposure_seconds: Some(60.0),
+                bias_subtracted: false,
+                bayer: None,
+            }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            calibration.dark_signature.as_ref().unwrap().camera_temp_c,
+            None
+        );
+        let cooled = light(
+            Some(60.0),
+            vec![("CCD-TEMP".into(), HeaderValue::Float(-10.0))],
+        );
+        calibration
+            .validate_light_frame(&cooled)
+            .expect("an unrecorded temperature is not a disagreement");
+        let (kept, dropped) = calibration.compatible_for_light(&cooled.metadata().signature);
+        assert!(kept.has_dark(), "auto mode keeps it too");
+        assert!(dropped.is_empty(), "{dropped:?}");
+
+        // A non-finite reading is no reading.
+        let mut nan = calibration.clone();
+        nan.dark_signature.as_mut().unwrap().camera_temp_c = Some(f64::NAN);
+        nan.validate_light_frame(&cooled).unwrap();
+
+        // Two recorded temperatures that disagree still refuse, in both modes.
+        let mut warm = calibration.clone();
+        warm.dark_signature.as_mut().unwrap().camera_temp_c = Some(0.0);
+        assert!(warm.validate_light_frame(&cooled).is_err());
+        let (kept, dropped) = warm.compatible_for_light(&cooled.metadata().signature);
+        assert!(!kept.has_dark());
+        assert!(dropped[0].contains("dark set aside"), "{dropped:?}");
     }
 
     #[test]

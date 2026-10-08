@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use rayon::prelude::*;
 use seiza_stacking::{
-    CalibrationMasters, DeltaSigmaOptions, FitsFrame, FrameDisposition, MasterDark, MasterFlat,
-    NormalizationMode, RegistrationOptions, RejectionMode, StackOptions,
+    CalibrationMasters, DeltaSigmaOptions, FitsFrame, FrameDisposition, NormalizationMode,
+    RegistrationOptions, RejectionMode, StackOptions,
 };
 use seiza_stacking::{Continue, PipelineOptions};
 use serde::Serialize;
@@ -278,6 +278,15 @@ fn stop_interrupted() -> ! {
     std::process::exit(crate::interrupt::INTERRUPTED_EXIT_CODE);
 }
 
+/// The sensor temperature a frame recorded (CCD-TEMP, else SET-TEMP).
+fn known_temperature(frame: &FitsFrame) -> Option<f64> {
+    frame
+        .metadata()
+        .signature
+        .camera_temp_c
+        .filter(|value| value.is_finite())
+}
+
 pub(crate) fn run(options: StackArgs) -> Result<()> {
     let drizzle = options
         .drizzle
@@ -361,25 +370,17 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
             })
         })
         .transpose()?;
-    let bias = load_master(options.bias.as_ref())?
-        .map(|frame| {
-            frame.validate_master_kind("BIAS")?;
-            Ok::<_, seiza_stacking::Error>(frame.image)
-        })
-        .transpose()?;
-    let dark = load_master(options.dark.as_ref())?
-        .map(|frame| {
-            let exposure_seconds = options.dark_exposure_seconds.or(frame.exposure_seconds);
-            if let Some(report) = &mut calibration_report {
-                report.dark_exposure_seconds = exposure_seconds;
-            }
-            MasterDark::from_fits_frame(frame, exposure_seconds)
-        })
-        .transpose()?;
-    let flat = load_master(options.flat.as_ref())?
-        .map(MasterFlat::from_fits_frame)
-        .transpose()?;
-    let calibration = CalibrationMasters::new(bias, dark, flat)?;
+    let bias = load_master(options.bias.as_ref())?;
+    let dark = load_master(options.dark.as_ref())?;
+    let flat = load_master(options.flat.as_ref())?;
+    if let (Some(report), Some(dark)) = (&mut calibration_report, &dark) {
+        report.dark_exposure_seconds = options.dark_exposure_seconds.or(dark.exposure_seconds);
+    }
+    let dark_records_temperature = dark.as_ref().map(|dark| known_temperature(dark).is_some());
+    // From the decoded frames, not their pixels: each master's headers say
+    // what it was shot at, and every light is checked against that.
+    let calibration =
+        CalibrationMasters::from_fits_frames(bias, dark, flat, options.dark_exposure_seconds)?;
 
     let normalization = match options.normalization {
         NormalizationArg::None => NormalizationMode::None,
@@ -458,6 +459,16 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
         .map(|_| file_identity(reference_path))
         .transpose()?;
     let reference = crate::common::open_frame(reference_path, "reference frame")?;
+    // A dark master that never recorded its temperature is used, since
+    // nothing says it is wrong, but nothing says it is right either.
+    if dark_records_temperature == Some(false)
+        && let Some(temperature) = known_temperature(&reference)
+    {
+        eprintln!(
+            "warning: the master dark records no sensor temperature, so it cannot be checked against the lights ({temperature}C in {})",
+            reference_path.display()
+        );
+    }
     let effective_maximum_drift_pixels = stack_options
         .registration
         .effective_maximum_drift_pixels(reference.image.width, reference.image.height);
