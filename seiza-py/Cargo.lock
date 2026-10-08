@@ -1652,6 +1652,7 @@ dependencies = [
 name = "seiza-fits"
 version = "0.2.7"
 dependencies = [
+ "flate2",
  "multiversion",
  "rayon",
  "seiza-stretch",

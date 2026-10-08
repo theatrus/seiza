@@ -3,13 +3,15 @@
 //! Scope: single-image FITS files as written by capture software
 //! (N.I.N.A., SGP, ASIAIR, ...) — the primary HDU with a 2D image in
 //! BITPIX 8/16/32/64/-32/-64, or, when the primary holds no data, the first
-//! image extension. 16-bit data stays `u16` end to end (no float
+//! image extension, tile-compressed ones included. 16-bit data stays `u16`
+//! end to end (no float
 //! inflation), statistics come from histograms rather than sorts, and the
 //! midtone-transfer-function autostretch matches N.I.N.A.'s. The writer emits
 //! primary-HDU mono or RGB float images with validated typed headers and
 //! atomic on-disk publication.
 
 mod bayer;
+mod compressed;
 mod header;
 mod writer;
 
@@ -398,14 +400,17 @@ struct ImageHdu {
     header: FitsHeader,
     header_start: u64,
     data_start: u64,
+    /// For a tile-compressed image, the cards of the table that holds it.
+    table: Option<Vec<(String, HeaderValue)>>,
 }
 
 /// Find the HDU whose image this crate reads and leave the reader at the
 /// first byte of its data.
 ///
 /// That is the primary HDU, unless its header declares no data. Then it is
-/// the first image extension with two or more axes, its header combined
-/// with the primary's as [`inherit_primary`] describes. Tables are skipped.
+/// the first image extension with two or more axes, plain or tile
+/// compressed, its header combined with the primary's as
+/// [`inherit_primary`] describes. Other tables are skipped.
 /// When no such extension follows, or the search meets anything but a
 /// well-formed extension header, the primary is returned, so callers report
 /// on it as they did before extensions were read.
@@ -420,6 +425,7 @@ fn locate_image<R: Read + Seek>(
             header: primary,
             header_start: 0,
             data_start,
+            table: None,
         });
     }
     // A primary that declares no data has an empty data unit.
@@ -435,6 +441,16 @@ fn locate_image<R: Read + Seek>(
                 header: inherit_primary(extension, primary),
                 header_start: offset,
                 data_start: extension_data,
+                table: None,
+            });
+        }
+        if compressed::holds_compressed_image(&extension.cards) {
+            let table = extension.cards.clone();
+            return Ok(ImageHdu {
+                header: inherit_primary(compressed::image_header(extension), primary),
+                header_start: offset,
+                data_start: extension_data,
+                table: Some(table),
             });
         }
         let Some(next) = data_unit_bytes(&extension.cards)
@@ -450,6 +466,7 @@ fn locate_image<R: Read + Seek>(
         header: primary,
         header_start: 0,
         data_start,
+        table: None,
     })
 }
 
@@ -461,7 +478,9 @@ fn locate_image<R: Read + Seek>(
 /// reads them: the extension's `XTENSION`, `PCOUNT` and `GCOUNT` and the
 /// primary's structural and scaling cards are left out, and a primary card
 /// whose keyword the extension also has gives way to it. An extension with
-/// `INHERIT = F` keeps the primary's cards out.
+/// `INHERIT = F` keeps the primary's cards out. A tile-compressed image's
+/// cards are those of the image it holds, rebuilt from its table's `Z`
+/// keywords as the FITS standard and astropy rebuild them.
 pub fn read_header(path: &Path) -> Result<Vec<(String, HeaderValue)>, FitsError> {
     read_header_with_commentary(path).map(|header| header.cards)
 }
@@ -474,9 +493,12 @@ pub fn read_header_with_commentary(path: &Path) -> Result<FitsHeader, FitsError>
     locate_image(&mut file, false).map(|hdu| hdu.header)
 }
 
-/// Where the header of the HDU that [`FitsImage::open`] reads starts.
-pub(crate) fn image_header_offset<R: Read + Seek>(reader: &mut R) -> Result<u64, FitsError> {
-    locate_image(reader, true).map(|hdu| hdu.header_start)
+/// Where the header of the HDU that [`FitsImage::open`] reads starts, and
+/// whether that HDU is a tile-compressed image's table.
+pub(crate) fn image_header_offset<R: Read + Seek>(
+    reader: &mut R,
+) -> Result<(u64, bool), FitsError> {
+    locate_image(reader, true).map(|hdu| (hdu.header_start, hdu.table.is_some()))
 }
 
 /// The `BLANK` card of integer data. The standard defines it for integer
@@ -761,19 +783,40 @@ impl FitsImage {
         available_bytes: Option<u64>,
     ) -> Result<FitsImage, FitsError> {
         let ImageHdu {
-            header, data_start, ..
+            header,
+            data_start,
+            table,
+            ..
         } = locate_image(reader, true)?;
         let headers = header.cards;
         let spec = ImageSpec::from_headers(&headers)?;
+        let data_bytes = match &table {
+            Some(cards) => compressed::table_bytes(cards)
+                .ok_or_else(|| FitsError::Malformed("implausible table size".into()))?,
+            None => spec.payload_bytes(),
+        };
         if let Some(available_bytes) = available_bytes {
             let data_end = data_start
-                .checked_add(spec.payload_bytes())
+                .checked_add(data_bytes)
                 .ok_or_else(|| FitsError::Malformed("implausible dimensions".into()))?;
             if data_end > available_bytes {
                 return Err(FitsError::Malformed("data runs past EOF".into()));
             }
         }
-        let pixels = decode_pixels(reader, spec)?;
+        let pixels = match table {
+            // Decompression rebuilds the uncompressed data unit, which then
+            // decodes like any other.
+            Some(cards) => {
+                let shape = compressed::Shape {
+                    width: spec.width,
+                    height: spec.height,
+                    planes: spec.planes,
+                };
+                let data = compressed::decompress(reader, &cards, &shape, spec.blank)?;
+                decode_pixels(&mut data.as_slice(), spec)?
+            }
+            None => decode_pixels(reader, spec)?,
+        };
         Ok(FitsImage {
             width: spec.width,
             height: spec.height,

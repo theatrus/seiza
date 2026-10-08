@@ -15,6 +15,11 @@ one linear-image API without coupling operations to the source container.
 - When the primary HDU holds no data, reads the first image extension. Its
   header comes first, followed by the primary's metadata cards, as in the
   `INHERIT` convention, so WCS and observation keywords are both found.
+- Reads tile-compressed images (`fpack`, cfitsio's `ZIMAGE` tables) packed
+  with `RICE_1`, `GZIP_1`, `GZIP_2`, `PLIO_1` or `NOCOMPRESS`, including
+  quantized floating-point data with or without subtractive dithering. The
+  output matches cfitsio and astropy bit for bit. `HCOMPRESS_1` is reported
+  as unsupported. Decompression is pure Rust, so it works in WebAssembly too.
 - Streams full-image opens directly into the final typed pixel vector using a
   fixed 1 MiB conversion buffer; it does not retain a second whole-file copy.
 - Planar RGB (`NAXIS3`) support and OSC debayering from `BAYERPAT`,
