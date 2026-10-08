@@ -29,6 +29,8 @@ pub struct BatchStackOptions {
     /// for 92 frames of a 26 MP colour sensor), so choose a disk with room:
     /// where `/tmp` is held in memory, the system default may be too small.
     /// Without room, reintegration prepares each frame again on every pass.
+    /// A stack told to [`crate::LiveStacker::retain_frames_for_reintegration`]
+    /// keeps its frames in the directory given there instead.
     pub scratch_directory: Option<std::path::PathBuf>,
 }
 

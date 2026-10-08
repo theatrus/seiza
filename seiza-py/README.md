@@ -316,6 +316,12 @@ drizzled.write_fits("drizzle-2x.fits")      # reference WCS scaled to the grid
 weights = drizzled.weight                   # drop area times frame weight
 ```
 
+Each of those reads every frame from its file and prepares it again. Calling
+`stacker.retain_frames_for_reintegration(scratch_directory=...)` before pushing
+frames keeps each admitted frame's registered image on disk as it is stacked,
+about four bytes per pixel per channel for each frame, so a reintegration reads
+that instead and gives the same result sooner.
+
 
 Checkpointing is non-consuming. Reopening preserves the original registration
 reference, calibration and options, online rejection statistics, coverage, and

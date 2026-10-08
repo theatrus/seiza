@@ -527,6 +527,9 @@ pub struct LiveStacker {
     input_mode: FrameInputMode,
     configuration_fingerprint: String,
     pub(crate) ledger: crate::replay::Ledger,
+    /// Each admitted frame's registered image, kept on disk for a later
+    /// reintegration; see [`Self::retain_frames_for_reintegration`].
+    pub(crate) frame_cache: Option<crate::replay::FrameCache>,
 }
 
 impl LiveStacker {
@@ -666,6 +669,7 @@ impl LiveStacker {
             input_mode,
             configuration_fingerprint,
             ledger,
+            frame_cache: None,
         })
     }
 
@@ -754,6 +758,7 @@ impl LiveStacker {
             ledger: restored
                 .ledger
                 .unwrap_or_else(crate::replay::Ledger::legacy),
+            frame_cache: None,
         })
     }
 
@@ -951,6 +956,11 @@ impl LiveStacker {
                 return Ok(self.reject(FrameRejectionReason::IncompatibleImage(error.to_string())));
             }
         };
+        let cache = self
+            .frame_cache
+            .as_ref()
+            .filter(|_| source.is_some())
+            .map(crate::replay::FrameCache::files);
         let prepared = prepare_frame(
             &self.reference,
             &self.registrar,
@@ -958,6 +968,7 @@ impl LiveStacker {
             &self.reference_noise,
             frame.image,
             cfa,
+            cache,
         )?
         .with_source(source);
         Ok(self.integrate_prepared(prepared))
@@ -1004,12 +1015,14 @@ impl LiveStacker {
     /// Register, normalize, and try to integrate an already-prepared linear
     /// frame, applying every admission gate.
     pub fn push_linear(&mut self, frame: LinearImage) -> Result<FrameDisposition> {
+        // A frame with no source file cannot be replayed, so none is kept.
         let prepared = prepare_frame(
             &self.reference,
             &self.registrar,
             &self.options,
             &self.reference_noise,
             frame,
+            None,
             None,
         )?;
         Ok(self.integrate_prepared(prepared))
@@ -1022,6 +1035,13 @@ impl LiveStacker {
     /// thread integrates. The borrow checker enforces the split that makes the
     /// concurrency sound, rather than a comment promising it.
     pub(crate) fn split_for_pipeline(&mut self) -> (PreparationHalf<'_>, IntegrationHalf<'_>) {
+        let (cache_files, cache_admissions) = match self.frame_cache.as_mut() {
+            Some(cache) => {
+                let (files, admissions) = cache.split();
+                (Some(files), Some(admissions))
+            }
+            None => (None, None),
+        };
         (
             PreparationHalf {
                 reference: &self.reference,
@@ -1029,6 +1049,7 @@ impl LiveStacker {
                 calibration: &self.calibration,
                 options: &self.options,
                 reference_noise: &self.reference_noise,
+                frame_cache: cache_files,
             },
             IntegrationHalf {
                 accumulator: &mut self.accumulator,
@@ -1037,6 +1058,7 @@ impl LiveStacker {
                 rejected_frames: &mut self.rejected_frames,
                 input_paths: &mut self.input_paths,
                 ledger: &mut self.ledger,
+                frame_cache: cache_admissions,
             },
         )
     }
@@ -1346,6 +1368,9 @@ pub(crate) struct ReadyFrame {
     /// Whether `registered` holds one photosite sample per pixel (Bayer
     /// drizzle) rather than every channel.
     photosites: bool,
+    /// The registered image before normalization, written for a later
+    /// reintegration when the stack keeps frames for one.
+    staged: Option<crate::replay::StagedFrame>,
 }
 
 impl PreparedFrame {
@@ -1365,6 +1390,10 @@ impl PreparedFrame {
 /// options, so it reaches the same verdict whatever else is in flight. That is
 /// what lets the pipeline prepare frames out of order and still match a
 /// sequential run exactly.
+///
+/// With `cache`, the registered image is written there before it is
+/// normalized, which is the image a reintegration would otherwise make again
+/// from the source; see [`LiveStacker::retain_frames_for_reintegration`].
 pub(crate) fn prepare_frame(
     reference: &LinearImage,
     registrar: &Registrar,
@@ -1372,6 +1401,7 @@ pub(crate) fn prepare_frame(
     reference_noise: &[f32],
     frame: LinearImage,
     cfa: Option<BayerLayout>,
+    cache: Option<&crate::replay::CacheFiles>,
 ) -> Result<PreparedFrame> {
     if reference.channels != frame.channels {
         return Ok(PreparedFrame::Rejected(
@@ -1491,6 +1521,9 @@ pub(crate) fn prepare_frame(
             },
         ));
     }
+    // Written before normalization changes it, and deleted again if a later
+    // gate turns the frame away.
+    let staged = cache.and_then(|cache| cache.stage(&registered));
     if !matches!(options.normalization, NormalizationMode::None)
         && let Err(error) = normalization.apply(&mut registered)
     {
@@ -1572,6 +1605,7 @@ pub(crate) fn prepare_frame(
         noise,
         weight,
         photosites: photosites.is_some(),
+        staged,
     })))
 }
 
@@ -1582,6 +1616,9 @@ pub(crate) struct PreparationHalf<'a> {
     pub(crate) calibration: &'a CalibrationMasters,
     pub(crate) options: &'a StackOptions,
     pub(crate) reference_noise: &'a [f32],
+    /// Where a stack kept for reintegration writes each frame's registered
+    /// image.
+    pub(crate) frame_cache: Option<&'a crate::replay::CacheFiles>,
 }
 
 /// The mutable half of a stack: the accumulator and the run's tallies.
@@ -1592,6 +1629,7 @@ pub(crate) struct IntegrationHalf<'a> {
     rejected_frames: &'a mut u32,
     input_paths: &'a mut Vec<PathBuf>,
     ledger: &'a mut crate::replay::Ledger,
+    frame_cache: Option<crate::replay::CacheAdmissions<'a>>,
 }
 
 impl IntegrationHalf<'_> {
@@ -1617,6 +1655,7 @@ impl IntegrationHalf<'_> {
             noise,
             weight,
             photosites,
+            staged,
         } = *ready;
         let weights = (!weight.is_empty()).then_some(weight.as_slice());
 
@@ -1648,6 +1687,9 @@ impl IntegrationHalf<'_> {
                 weight: weight.clone(),
             },
         );
+        if let Some(cache) = &mut self.frame_cache {
+            cache.admit(staged);
+        }
         FrameDisposition::Accepted(FrameDiagnostics {
             transform,
             matched_stars,
@@ -2666,6 +2708,121 @@ mod tests {
                 "replayed channel {channel}: {median}"
             );
         }
+    }
+
+    #[test]
+    fn retained_bayer_frames_replay_bit_identically() {
+        let bits = |values: &[f32]| {
+            values
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        };
+        let (width, height) = (160, 128);
+        let shifts = [
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (0.0, 1.0),
+            (1.0, 1.0),
+            (2.3, 0.6),
+            (0.4, 2.2),
+            (3.1, 3.3),
+            (1.6, 2.7),
+        ];
+        let directory = tempfile::tempdir().unwrap();
+        let bayer = [("BAYERPAT".to_string(), HeaderValue::String("RGGB".into()))];
+        let paths = shifts
+            .iter()
+            .enumerate()
+            .map(|(index, &(dx, dy))| {
+                let mut image = bayer_star_field(width, height, dx, dy);
+                let mut state = 0x9e37_79b9_u32.wrapping_mul(index as u32 + 1) | 1;
+                for value in &mut image.data {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    *value += (state % 2001) as f32 / 100.0 - 10.0;
+                }
+                let path = directory.path().join(format!("light-{index}.fits"));
+                crate::write_processed_image_fits_f32(&path, &image, &bayer, &[]).unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+        let scratch = directory.path().join("scratch");
+        std::fs::create_dir(&scratch).unwrap();
+        let stack = |options: &StackOptions, retain: bool| {
+            let mut stacker =
+                LiveStacker::open_fits(&paths[0], None, None, None, None, options.clone()).unwrap();
+            if retain {
+                stacker
+                    .retain_frames_for_reintegration(Some(&scratch))
+                    .unwrap();
+            }
+            for path in &paths[1..] {
+                assert!(matches!(
+                    stacker.push_fits(path).unwrap(),
+                    FrameDisposition::Accepted(_)
+                ));
+            }
+            stacker
+        };
+        // Demosaiced, resampled with Lanczos-3, weighted, and refitted to an
+        // integrated background, as the command line does.
+        let options = StackOptions {
+            normalization: NormalizationMode::LocalBackground { tile_size: 32 },
+            interpolation: crate::Interpolation::Lanczos3,
+            weighting: FrameWeighting::inverse_noise_variance(),
+            ..StackOptions::default()
+        };
+        let retained = stack(&options, true);
+        let fresh = stack(&options, false);
+        let batch = crate::BatchStackOptions::default();
+        let drizzle = crate::DrizzleOptions::default();
+        let (integrated, drizzled) = retained
+            .reintegrate_drizzled(&batch, &drizzle, |_, _, _| {})
+            .unwrap();
+        let (expected, expected_drizzled) = fresh
+            .reintegrate_drizzled(&batch, &drizzle, |_, _, _| {})
+            .unwrap();
+        assert_eq!(
+            bits(&integrated.snapshot.image.data),
+            bits(&expected.snapshot.image.data)
+        );
+        assert_eq!(
+            bits(&integrated.snapshot.variance.data),
+            bits(&expected.snapshot.variance.data)
+        );
+        assert_eq!(integrated.snapshot.coverage, expected.snapshot.coverage);
+        assert_eq!(
+            integrated.snapshot.rejected_samples,
+            expected.snapshot.rejected_samples
+        );
+        assert_eq!(
+            bits(&drizzled.image.data),
+            bits(&expected_drizzled.image.data)
+        );
+        assert_eq!(
+            bits(&drizzled.weight.data),
+            bits(&expected_drizzled.weight.data)
+        );
+        drop(retained);
+        assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
+
+        // Bayer drizzle replays photosites, which are not kept.
+        let photosites = StackOptions {
+            cfa_integration: CfaIntegration::BayerDrizzle,
+            ..options
+        };
+        let retained = stack(&photosites, true);
+        assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
+        let replayed = retained.reintegrate(&batch, |_, _, _| {}).unwrap();
+        let expected = stack(&photosites, false)
+            .reintegrate(&batch, |_, _, _| {})
+            .unwrap();
+        assert_eq!(
+            bits(&replayed.snapshot.image.data),
+            bits(&expected.snapshot.image.data)
+        );
     }
 
     #[test]

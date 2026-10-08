@@ -999,6 +999,33 @@ SeizaStackExportSnapshot *seiza_live_stacker_export_snapshot(const SeizaLiveStac
                                                              char **error_out);
 
 /*
+ Keep each frame this stack admits from now on in a scratch file,
+ registered but not normalized, so [`seiza_live_stacker_reintegrate`] and
+ [`seiza_live_stacker_reintegrate_drizzled`] read it back instead of
+ calibrating, demosaicing and resampling the frame's source again. The
+ result is bit-identical either way.
+
+ Call this before pushing frames to a stack that will be reintegrated. The
+ files take about four bytes per output sample per admitted frame (313 MB
+ for each frame of a 26 MP colour sensor), in a new directory inside
+ `scratch_directory`, or the system temporary directory when that is null
+ or empty. Freeing or finishing the stacker removes the directory. Frames
+ admitted before the call, such as those of a stack reopened from a saved
+ context, are prepared from their sources when replayed. A second call
+ keeps the first directory. A stack that cannot be reintegrated, or that
+ integrates Bayer photosites, keeps nothing and the call succeeds.
+
+ # Safety
+ `stacker` must be a live `SeizaLiveStacker` pointer, externally
+ synchronized with every other operation on it. `scratch_directory` must
+ be null or a valid NUL-terminated path. When non-null, `error_out` must
+ point to writable storage for one pointer.
+ */
+bool seiza_live_stacker_retain_frames_for_reintegration(SeizaLiveStacker *stacker,
+                                                        const char *scratch_directory,
+                                                        char **error_out);
+
+/*
  Integrate every admitted frame again with three-pass, leave-one-out
  rejection and return the result as a new snapshot.
 

@@ -87,7 +87,11 @@ exposes the **superset** of what both apps need.
   reports all three passes through a progress callback, accepts a
   `SeizaCancelSignal`, and leaves the live stack unchanged;
   `reintegrationUnavailable` in the state JSON says when a stack cannot be
-  replayed. `seiza_live_stacker_reintegrate_drizzled` also drizzles the
+  replayed. Calling `seiza_live_stacker_retain_frames_for_reintegration`
+  before pushing frames keeps each admitted frame's registered image in a
+  scratch directory as it is stacked, so reintegration reads it back instead
+  of preparing the frame again, with the same result.
+  `seiza_live_stacker_reintegrate_drizzled` also drizzles the
   frames onto a grid 1 to 4 times finer, as WBPP's DrizzleIntegration does,
   and returns a `SeizaDrizzleResult` (image, weight, scale, and
   `seiza_drizzle_result_write_fits` with the WCS scaled to the grid) along

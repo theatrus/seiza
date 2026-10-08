@@ -822,6 +822,7 @@ fn prepare_decoded(
         half.reference_noise,
         frame.image,
         cfa,
+        half.frame_cache.filter(|_| source.is_some()),
     )?
     .with_source(source))
 }
@@ -1251,6 +1252,234 @@ mod tests {
         )
         .unwrap();
         assert!(pixels.reintegration_unavailable().is_some());
+    }
+
+    /// Options like the command line's defaults, which take every path a
+    /// replay can: Lanczos-3, a quadratic warp, inverse-noise weights, and
+    /// backgrounds refitted against an integrated reference.
+    fn command_line_options() -> StackOptions {
+        let mut options = StackOptions {
+            normalization: crate::NormalizationMode::LocalBackground { tile_size: 64 },
+            interpolation: crate::Interpolation::Lanczos3,
+            weighting: crate::FrameWeighting::inverse_noise_variance(),
+            ..StackOptions::default()
+        };
+        options.registration.model = crate::RegistrationModel::Quadratic;
+        options
+    }
+
+    /// The files in the one directory a stack retaining frames made inside
+    /// `scratch`, sorted.
+    pub(super) fn retained_files(scratch: &Path) -> Vec<String> {
+        let directories = std::fs::read_dir(scratch)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(directories.len(), 1, "{directories:?}");
+        let mut names = std::fs::read_dir(&directories[0])
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    /// The names of the files kept for these admitted frames, sorted.
+    pub(super) fn frame_files(frames: impl IntoIterator<Item = usize>) -> Vec<String> {
+        let mut names = frames
+            .into_iter()
+            .map(|index| format!("frame-{index}.f32"))
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    /// Run `work` with `paths` unreadable where permissions can stop a read,
+    /// so a replay that opened a source would fail. Root, and systems
+    /// without Unix permissions, run it as it is.
+    pub(super) fn without_reading<T>(paths: &[PathBuf], work: impl FnOnce() -> T) -> T {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let set = |mode| {
+                for path in paths {
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+                }
+            };
+            set(0o000);
+            let result = work();
+            set(0o644);
+            result
+        }
+        #[cfg(not(unix))]
+        work()
+    }
+
+    pub(super) fn assert_same_stack(
+        left: &crate::BatchStackResult,
+        right: &crate::BatchStackResult,
+    ) {
+        let (left, right) = (&left.snapshot, &right.snapshot);
+        assert_eq!(bits(&left.image.data), bits(&right.image.data));
+        assert_eq!(bits(&left.variance.data), bits(&right.variance.data));
+        assert_eq!(left.coverage, right.coverage);
+        assert_eq!(left.rejected_samples, right.rejected_samples);
+    }
+
+    #[test]
+    fn retained_frames_replay_bit_identically_without_reading_sources() {
+        for options in [StackOptions::default(), command_line_options()] {
+            let (directory, paths) = trailed_reference_set();
+            let scratch = directory.path().join("scratch");
+            std::fs::create_dir(&scratch).unwrap();
+            let stack = |retain: bool| {
+                let mut stacker =
+                    LiveStacker::open_fits(&paths[0], None, None, None, None, options.clone())
+                        .unwrap();
+                if retain {
+                    stacker
+                        .retain_frames_for_reintegration(Some(&scratch))
+                        .unwrap();
+                }
+                let report = stacker
+                    .push_fits_pipelined(&paths[1..], &concurrent(3), |_, _| Continue::Yes)
+                    .unwrap();
+                assert_eq!(report.integrated, 7);
+                stacker
+            };
+            let retained = stack(true);
+            let fresh = stack(false);
+            // A file for every admitted frame, the reference's too, and none
+            // left from frames waiting to learn whether they were admitted.
+            assert_eq!(retained_files(&scratch), frame_files(0..8));
+
+            let batch = crate::BatchStackOptions::default();
+            let expected = fresh.reintegrate(&batch, |_, _, _| {}).unwrap();
+            let replayed = without_reading(&paths, || {
+                retained.reintegrate(&batch, |_, _, _| {}).unwrap()
+            });
+            assert_same_stack(&replayed, &expected);
+
+            // The drizzle still reads each calibrated source in its final pass.
+            let drizzle = crate::DrizzleOptions {
+                scale: 2,
+                ..crate::DrizzleOptions::default()
+            };
+            let (integrated, drizzled) = retained
+                .reintegrate_drizzled(&batch, &drizzle, |_, _, _| {})
+                .unwrap();
+            let (expected_integrated, expected_drizzled) = fresh
+                .reintegrate_drizzled(&batch, &drizzle, |_, _, _| {})
+                .unwrap();
+            assert_same_stack(&integrated, &expected_integrated);
+            assert_same_stack(&integrated, &expected);
+            assert_eq!(
+                bits(&drizzled.image.data),
+                bits(&expected_drizzled.image.data)
+            );
+            assert_eq!(
+                bits(&drizzled.weight.data),
+                bits(&expected_drizzled.weight.data)
+            );
+
+            // Frames pushed one at a time are kept the same way.
+            let mut sequential =
+                LiveStacker::open_fits(&paths[0], None, None, None, None, options.clone()).unwrap();
+            sequential
+                .retain_frames_for_reintegration(Some(&scratch))
+                .unwrap();
+            for path in &paths[1..] {
+                sequential.push_fits(path).unwrap();
+            }
+            let replayed = without_reading(&paths, || {
+                sequential.reintegrate(&batch, |_, _, _| {}).unwrap()
+            });
+            assert_same_stack(&replayed, &expected);
+
+            // Dropping a stacker removes its files.
+            drop(retained);
+            drop(sequential);
+            assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn frames_turned_away_after_registration_leave_no_retained_file() {
+        let (directory, paths) = frame_set(5);
+        let scratch = directory.path().join("scratch");
+        std::fs::create_dir(&scratch).unwrap();
+        // Every frame moved against the reference leaves an empty border, so
+        // none integrates all of its samples: each is turned away after its
+        // registered image was written.
+        let mut options = StackOptions::default();
+        options.acceptance.minimum_integrated_fraction = 1.0;
+        let mut stacker =
+            LiveStacker::open_fits(&paths[0], None, None, None, None, options).unwrap();
+        stacker
+            .retain_frames_for_reintegration(Some(&scratch))
+            .unwrap();
+        let mut reasons = Vec::new();
+        let report = stacker
+            .push_fits_pipelined(&paths[1..], &concurrent(2), |_, outcome| {
+                if let Ok(FrameDisposition::Rejected(reason)) = outcome {
+                    reasons.push(reason);
+                }
+                Continue::Yes
+            })
+            .unwrap();
+        assert_eq!(report.rejected, 4);
+        assert!(
+            reasons.iter().all(|reason| matches!(
+                reason,
+                crate::FrameRejectionReason::InsufficientIntegratedSamples { .. }
+            )),
+            "{reasons:?}"
+        );
+        assert_eq!(retained_files(&scratch), frame_files([0]));
+    }
+
+    #[test]
+    fn a_resumed_stack_retains_later_frames_and_replays_the_same() {
+        let (directory, paths) = trailed_reference_set();
+        let scratch = directory.path().join("scratch");
+        std::fs::create_dir(&scratch).unwrap();
+        let open = || {
+            LiveStacker::open_fits(&paths[0], None, None, None, None, command_line_options())
+                .unwrap()
+        };
+        let mut first = open();
+        for path in &paths[1..4] {
+            first.push_fits(path).unwrap();
+        }
+        let context = directory.path().join("stack.seiza-stack");
+        first.save_context(&context).unwrap();
+        let mut resumed = LiveStacker::open_context(&context).unwrap();
+        resumed
+            .retain_frames_for_reintegration(Some(&scratch))
+            .unwrap();
+        let report = resumed
+            .push_fits_pipelined(&paths[4..], &concurrent(2), |_, _| Continue::Yes)
+            .unwrap();
+        assert_eq!(report.integrated, 4);
+        // The reference, prepared in the context, and the frames pushed
+        // since; the three admitted before the checkpoint are not kept.
+        assert_eq!(retained_files(&scratch), frame_files([0, 4, 5, 6, 7]));
+
+        let mut whole = open();
+        for path in &paths[1..] {
+            whole.push_fits(path).unwrap();
+        }
+        let batch = crate::BatchStackOptions::default();
+        let expected = whole.reintegrate(&batch, |_, _, _| {}).unwrap();
+        let replayed = resumed.reintegrate(&batch, |_, _, _| {}).unwrap();
+        assert_same_stack(&replayed, &expected);
+        // The replay kept the frames it had to prepare, so the next one reads
+        // every frame from the scratch directory.
+        assert_eq!(retained_files(&scratch), frame_files(0..8));
+        let again = without_reading(&paths, || {
+            resumed.reintegrate(&batch, |_, _, _| {}).unwrap()
+        });
+        assert_same_stack(&again, &expected);
     }
 
     /// Options that force the channel handoff whatever the host's core count.
