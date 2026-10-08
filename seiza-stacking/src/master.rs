@@ -3,6 +3,7 @@ use crate::{
     BayerLayout, CalibrationMasters, CancelSignal, Error, FitsFrame, FrameMetadata,
     FrameSourceRole, LinearImage, MasterDark, Result, paths_refer_to_same_file,
 };
+use rayon::prelude::*;
 use seiza_fits::HeaderValue;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -486,12 +487,12 @@ fn build_master(
             scratch.append(&prepared.image.data, options)?;
             continue;
         }
-        let count = accepted.len() as f32;
-        for ((mean, m2), value) in mean.iter_mut().zip(&mut m2).zip(prepared.image.data) {
-            let delta = value - *mean;
-            *mean += delta / count;
-            *m2 += delta * (value - *mean);
-        }
+        accumulate_frame(
+            &mut mean,
+            &mut m2,
+            &prepared.image.data,
+            accepted.len() as f32,
+        );
     }
 
     report_progress(options, MasterBuildStage::Read, paths.len(), paths.len());
@@ -528,12 +529,7 @@ fn build_master(
                 if index == 0 {
                     reference_headers = prepared.headers.clone();
                 }
-                let count = (index + 1) as f32;
-                for ((mean, m2), value) in mean.iter_mut().zip(&mut m2).zip(prepared.image.data) {
-                    let delta = value - *mean;
-                    *mean += delta / count;
-                    *m2 += delta * (value - *mean);
-                }
+                accumulate_frame(&mut mean, &mut m2, &prepared.image.data, (index + 1) as f32);
             }
             report_progress(
                 options,
@@ -582,21 +578,15 @@ fn build_master(
             reference_signature.as_ref(),
             dark_exposure,
         )?;
-        let mut frame_accepted = 0_u64;
-        let mut frame_rejected = 0_u64;
-        for index in 0..integrated.len() {
-            let value = prepared.image.data[index];
-            if rejects_sample(value, mean[index], m2[index], count, options.rejection) {
-                frame_rejected += 1;
-                continue;
-            }
-            let sample_count = accepted_counts[index]
-                .checked_add(1)
-                .ok_or_else(|| Error::Calibration("too many calibration frames".into()))?;
-            accepted_counts[index] = sample_count;
-            integrated[index] += (value - integrated[index]) / sample_count as f32;
-            frame_accepted += 1;
-        }
+        let (frame_accepted, frame_rejected) = integrate_frame(
+            &mut integrated,
+            &mut accepted_counts,
+            &prepared.image.data,
+            &mean,
+            &m2,
+            count,
+            options.rejection,
+        )?;
         accepted_samples = accepted_samples.saturating_add(frame_accepted);
         rejected_samples = rejected_samples.saturating_add(frame_rejected);
         input_statistics.push(MasterInputStatistics {
@@ -613,13 +603,7 @@ fn build_master(
     // flickering across all frames). Fall back to the unclipped running mean
     // so the master stays finite instead of seeding NaN into every
     // calibrated light; the count is surfaced for diagnostics.
-    let mut fallback_pixels = 0_u64;
-    for (index, (value, count)) in integrated.iter_mut().zip(accepted_counts).enumerate() {
-        if count == 0 {
-            *value = mean[index];
-            fallback_pixels += 1;
-        }
-    }
+    let mut fallback_pixels = fall_back_to_mean(&mut integrated, &accepted_counts, &mean);
     let mut masked_samples = 0;
     let mut flat_star_masking = None;
     if let Some(scratch) = flat_scratch {
@@ -872,7 +856,7 @@ fn prepare_input(
         .map(|masking| star_masking::saturation_seeds(&frame, masking, options))
         .transpose()?;
     calibration.apply(&mut frame.image, effective_exposure, frame.bayer)?;
-    if frame.image.data.iter().any(|value| !value.is_finite()) {
+    if has_non_finite(&frame.image.data) {
         return Err(Error::Calibration(format!(
             "{} contains non-finite samples after calibration",
             path.display()
@@ -897,9 +881,7 @@ fn prepare_input(
             }
         })?;
     }
-    if options.flat_star_masking.is_none()
-        && frame.image.data.iter().any(|value| !value.is_finite())
-    {
+    if options.flat_star_masking.is_none() && has_non_finite(&frame.image.data) {
         return Err(Error::Calibration(format!(
             "{} contains non-finite samples after calibration",
             path.display()
@@ -1135,6 +1117,107 @@ impl std::fmt::Display for ComparableHeader {
     }
 }
 
+/// Pixels one rayon task takes in the per-pixel master loops.
+///
+/// No pixel reads another and each sees its frames in the same order, so any
+/// split gives the serial loop's results bit for bit; the size only keeps the
+/// scheduling cost small next to the work.
+const PIXEL_CHUNK: usize = 16 * 1024;
+
+/// Whether any sample is NaN or infinite. Each chunk is scanned in full,
+/// which lets the scan vectorize; no further chunks start once one finds a
+/// bad sample.
+fn has_non_finite(samples: &[f32]) -> bool {
+    samples.par_chunks(PIXEL_CHUNK).any(|chunk| {
+        chunk
+            .iter()
+            .fold(false, |found, value| found | !value.is_finite())
+    })
+}
+
+/// Fold one frame into each pixel's running mean and sum of squared
+/// deviations (Welford). `count` is the number of frames folded so far,
+/// this one included.
+fn accumulate_frame(mean: &mut [f32], m2: &mut [f32], values: &[f32], count: f32) {
+    debug_assert!(mean.len() == m2.len() && mean.len() == values.len());
+    mean.par_chunks_mut(PIXEL_CHUNK)
+        .zip(m2.par_chunks_mut(PIXEL_CHUNK))
+        .zip(values.par_chunks(PIXEL_CHUNK))
+        .for_each(|((mean, m2), values)| {
+            for ((mean, m2), &value) in mean.iter_mut().zip(m2).zip(values) {
+                let delta = value - *mean;
+                *mean += delta / count;
+                *m2 += delta * (value - *mean);
+            }
+        });
+}
+
+/// Clip one frame against each pixel's leave-one-out statistics from the
+/// first pass and fold the samples it keeps into the running clipped mean.
+/// Returns how many samples the frame kept and how many it lost.
+fn integrate_frame(
+    integrated: &mut [f32],
+    accepted_counts: &mut [u32],
+    values: &[f32],
+    mean: &[f32],
+    m2: &[f32],
+    count: usize,
+    rejection: MasterRejectionOptions,
+) -> Result<(u64, u64)> {
+    debug_assert!(
+        [accepted_counts.len(), values.len(), mean.len(), m2.len()]
+            .iter()
+            .all(|&length| length == integrated.len())
+    );
+    integrated
+        .par_chunks_mut(PIXEL_CHUNK)
+        .zip(accepted_counts.par_chunks_mut(PIXEL_CHUNK))
+        .zip(values.par_chunks(PIXEL_CHUNK))
+        .zip(mean.par_chunks(PIXEL_CHUNK).zip(m2.par_chunks(PIXEL_CHUNK)))
+        .map(|(((integrated, counts), values), (mean, m2))| {
+            let mut accepted = 0_u64;
+            let mut rejected = 0_u64;
+            for index in 0..integrated.len() {
+                let value = values[index];
+                if rejects_sample(value, mean[index], m2[index], count, rejection) {
+                    rejected += 1;
+                    continue;
+                }
+                let sample_count = counts[index]
+                    .checked_add(1)
+                    .ok_or_else(|| Error::Calibration("too many calibration frames".into()))?;
+                counts[index] = sample_count;
+                integrated[index] += (value - integrated[index]) / sample_count as f32;
+                accepted += 1;
+            }
+            Ok((accepted, rejected))
+        })
+        .try_reduce(
+            || (0, 0),
+            |left, right| Ok((left.0 + right.0, left.1 + right.1)),
+        )
+}
+
+/// Give every pixel whose samples were all clipped its unclipped mean, and
+/// count them.
+fn fall_back_to_mean(integrated: &mut [f32], accepted_counts: &[u32], mean: &[f32]) -> u64 {
+    integrated
+        .par_chunks_mut(PIXEL_CHUNK)
+        .zip(accepted_counts.par_chunks(PIXEL_CHUNK))
+        .zip(mean.par_chunks(PIXEL_CHUNK))
+        .map(|((integrated, counts), mean)| {
+            let mut fallback = 0_u64;
+            for ((value, count), mean) in integrated.iter_mut().zip(counts).zip(mean) {
+                if *count == 0 {
+                    *value = *mean;
+                    fallback += 1;
+                }
+            }
+            fallback
+        })
+        .sum()
+}
+
 fn rejects_sample(
     value: f32,
     mean: f32,
@@ -1168,6 +1251,183 @@ mod tests {
         StackSnapshot, write_fits_f32, write_master_fits_f32, write_processed_image_fits_f32,
     };
     use seiza_fits::WriteHeaderCard;
+
+    /// The bias/dark loops as they ran on one thread before the per-pixel
+    /// work moved onto rayon, kept to show the parallel kernels change no bit.
+    mod serial {
+        use super::super::{MasterRejectionOptions, rejects_sample};
+        use crate::{Error, Result};
+
+        pub fn accumulate(mean: &mut [f32], m2: &mut [f32], values: Vec<f32>, count: f32) {
+            for ((mean, m2), value) in mean.iter_mut().zip(m2.iter_mut()).zip(values) {
+                let delta = value - *mean;
+                *mean += delta / count;
+                *m2 += delta * (value - *mean);
+            }
+        }
+
+        pub fn integrate(
+            integrated: &mut [f32],
+            accepted_counts: &mut [u32],
+            values: &[f32],
+            mean: &[f32],
+            m2: &[f32],
+            count: usize,
+            rejection: MasterRejectionOptions,
+        ) -> Result<(u64, u64)> {
+            let mut frame_accepted = 0_u64;
+            let mut frame_rejected = 0_u64;
+            for index in 0..integrated.len() {
+                let value = values[index];
+                if rejects_sample(value, mean[index], m2[index], count, rejection) {
+                    frame_rejected += 1;
+                    continue;
+                }
+                let sample_count = accepted_counts[index]
+                    .checked_add(1)
+                    .ok_or_else(|| Error::Calibration("too many calibration frames".into()))?;
+                accepted_counts[index] = sample_count;
+                integrated[index] += (value - integrated[index]) / sample_count as f32;
+                frame_accepted += 1;
+            }
+            Ok((frame_accepted, frame_rejected))
+        }
+
+        pub fn fall_back(integrated: &mut [f32], accepted_counts: &[u32], mean: &[f32]) -> u64 {
+            let mut fallback_pixels = 0_u64;
+            for (index, (value, count)) in integrated.iter_mut().zip(accepted_counts).enumerate() {
+                if *count == 0 {
+                    *value = mean[index];
+                    fallback_pixels += 1;
+                }
+            }
+            fallback_pixels
+        }
+    }
+
+    /// Frames with sensor noise, hot pixels, transient outliers, flat
+    /// stretches whose leave-one-out sigma is zero, and a pixel no frame
+    /// agrees on — every branch of the two-pass leave-one-out integration.
+    fn noisy_dark_frames(frames: usize, pixels: usize) -> Vec<Vec<f32>> {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / (1_u64 << 24) as f32
+        };
+        (0..frames)
+            .map(|frame| {
+                (0..pixels)
+                    .map(|pixel| {
+                        let noise = next() * 6.0 - 3.0;
+                        match pixel % 101 {
+                            // Identical in every frame: zero sigma.
+                            0 => 812.5,
+                            // A transient in one frame.
+                            1 if frame == 2 => 4000.0 + noise,
+                            // Each frame wildly different.
+                            2 => frame as f32 * 1.0e4 + noise,
+                            // Hot pixel.
+                            3 => 9000.0 + noise,
+                            _ => 800.0 + (pixel % 7) as f32 + noise,
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn parallel_bias_and_dark_loops_match_the_serial_loops_bit_for_bit() {
+        // Uneven chunks: the split must not matter, including at the seams.
+        let pixels = 3 * PIXEL_CHUNK + 123;
+        for (frames, sigma) in [(2, 3.0), (3, 3.0), (7, 3.0), (7, 0.2), (12, 1.0)] {
+            let inputs = noisy_dark_frames(frames, pixels);
+            let rejection = MasterRejectionOptions {
+                low_sigma: sigma,
+                high_sigma: sigma,
+            };
+
+            let (mut mean, mut m2) = (vec![0.0; pixels], vec![0.0; pixels]);
+            let (mut serial_mean, mut serial_m2) = (vec![0.0; pixels], vec![0.0; pixels]);
+            for (index, values) in inputs.iter().enumerate() {
+                let count = (index + 1) as f32;
+                accumulate_frame(&mut mean, &mut m2, values, count);
+                serial::accumulate(&mut serial_mean, &mut serial_m2, values.clone(), count);
+            }
+            let bits = |values: &[f32]| {
+                values
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(bits(&mean), bits(&serial_mean));
+            assert_eq!(bits(&m2), bits(&serial_m2));
+
+            let (mut integrated, mut counts) = (vec![0.0; pixels], vec![0_u32; pixels]);
+            let (mut serial_integrated, mut serial_counts) =
+                (vec![0.0; pixels], vec![0_u32; pixels]);
+            let mut rejected = 0;
+            for values in &inputs {
+                let tally = integrate_frame(
+                    &mut integrated,
+                    &mut counts,
+                    values,
+                    &mean,
+                    &m2,
+                    frames,
+                    rejection,
+                )
+                .unwrap();
+                let serial_tally = serial::integrate(
+                    &mut serial_integrated,
+                    &mut serial_counts,
+                    values,
+                    &mean,
+                    &m2,
+                    frames,
+                    rejection,
+                )
+                .unwrap();
+                assert_eq!(tally, serial_tally);
+                rejected += tally.1;
+            }
+            assert_eq!(counts, serial_counts);
+            let fallback = fall_back_to_mean(&mut integrated, &counts, &mean);
+            let serial_fallback = serial::fall_back(&mut serial_integrated, &serial_counts, &mean);
+            assert_eq!(fallback, serial_fallback);
+            assert_eq!(bits(&integrated), bits(&serial_integrated));
+            // The inputs reach the branches they were built for.
+            if frames >= 3 {
+                assert!(
+                    rejected > 0,
+                    "{frames} frames at {sigma} sigma rejected nothing"
+                );
+            }
+            if sigma < 1.0 {
+                assert!(
+                    fallback > 0,
+                    "{frames} frames at {sigma} sigma never fell back"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn non_finite_samples_are_found_in_any_chunk() {
+        let mut samples = vec![1.0_f32; 2 * PIXEL_CHUNK + 5];
+        assert!(!has_non_finite(&samples));
+        for (index, value) in [
+            (0, f32::NAN),
+            (PIXEL_CHUNK, f32::INFINITY),
+            (2 * PIXEL_CHUNK + 4, f32::NEG_INFINITY),
+        ] {
+            samples[index] = value;
+            assert!(has_non_finite(&samples), "{value} at {index}");
+            samples[index] = 1.0;
+        }
+    }
 
     fn write_image(path: &std::path::Path, values: &[f32]) {
         write_sized_image(path, 2, 2, values);

@@ -677,9 +677,14 @@ pub(crate) fn normalize_flat_response(flat: &mut LinearImage) -> Result<()> {
                 "flat master channel {channel} has no positive finite response"
             ))
         })?;
-        for pixel in flat.data.chunks_exact_mut(flat.channels) {
-            pixel[channel] /= normal;
-        }
+        let channels = flat.channels;
+        flat.data
+            .par_chunks_mut(channels * 16 * 1024)
+            .for_each(|pixels| {
+                for pixel in pixels.chunks_exact_mut(channels) {
+                    pixel[channel] /= normal;
+                }
+            });
     }
     Ok(())
 }
@@ -698,8 +703,8 @@ fn robust_positive_median(data: impl ExactSizeIterator<Item = f32>) -> Option<f3
         .step_by(stride)
         .filter(|value| value.is_finite() && *value > 0.0)
         .collect::<Vec<_>>();
-    values.sort_unstable_by(f32::total_cmp);
-    seiza_stats::median_of_sorted(&values)
+    // Selection finds the same middle values a sort would, bit for bit.
+    seiza_stats::median_in_place(&mut values)
 }
 
 #[cfg(test)]
@@ -1160,5 +1165,57 @@ mod tests {
                 .apply(&mut mono(&[100.0; 4]), None, Some(bggr))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn parallel_flat_normalization_matches_the_serial_sort_bit_for_bit() {
+        // The loop as it ran before: a full sort for the median, then one
+        // thread dividing every pixel.
+        fn serial(flat: &mut LinearImage) {
+            for channel in 0..flat.channels {
+                let stride = (flat.data.len() / flat.channels / 200_000).max(1);
+                let mut values = flat
+                    .data
+                    .iter()
+                    .skip(channel)
+                    .step_by(flat.channels)
+                    .step_by(stride)
+                    .copied()
+                    .filter(|value| value.is_finite() && *value > 0.0)
+                    .collect::<Vec<_>>();
+                values.sort_unstable_by(f32::total_cmp);
+                let normal = seiza_stats::median_of_sorted(&values).unwrap();
+                for pixel in flat.data.chunks_exact_mut(flat.channels) {
+                    pixel[channel] /= normal;
+                }
+            }
+        }
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        for (width, channels) in [(301, 1), (300, 3), (1301, 1)] {
+            let data = (0..width * 311 * channels)
+                .map(|index| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    match index % 97 {
+                        0 => f32::NAN,
+                        1 => -1.0,
+                        _ => 1000.0 + (state >> 40) as f32 / 4096.0,
+                    }
+                })
+                .collect::<Vec<_>>();
+            let mut actual = LinearImage::new(width, 311, channels, data).unwrap();
+            let mut expected = actual.clone();
+            normalize_flat_response(&mut actual).unwrap();
+            serial(&mut expected);
+            let bits = |image: &LinearImage| {
+                image
+                    .data
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(bits(&actual), bits(&expected));
+        }
     }
 }
