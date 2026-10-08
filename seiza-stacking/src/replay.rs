@@ -9,6 +9,9 @@
 //! chose. [`LiveStacker::reintegrate`] reads each frame again, repeats the
 //! same calibration and preparation, and maps it through the recorded
 //! transform, so neither star detection nor registration runs a second time.
+//! A stack told to [`LiveStacker::retain_frames_for_reintegration`] keeps
+//! each frame's registered image from the live pass instead, so the replay
+//! prepares nothing.
 
 use crate::CancelSignal;
 use crate::batch::SampleFate;
@@ -394,6 +397,12 @@ struct DrizzleJob {
 /// Frames prepared ahead of the one a reintegration pass is integrating.
 const REPLAY_LOOKAHEAD: usize = 2;
 
+/// [`REPLAY_LOOKAHEAD`], or fewer on a machine with few cores.
+fn replay_lookahead() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, |cores| (cores.get() / 6).clamp(1, REPLAY_LOOKAHEAD))
+}
+
 /// Calibration masters for replay. The current set is the stacker's own; an
 /// earlier set is loaded from its paths when first needed and kept with the
 /// one before it, so frames prepared ahead across a set boundary do not load
@@ -421,13 +430,26 @@ impl std::ops::Deref for ReplayMasters<'_> {
 }
 
 /// Each admitted frame's prepared image, registered but not normalized,
-/// kept in a scratch file after it is first made, so replay's passes and
-/// its integrated reference read it back instead of reading, calibrating,
-/// demosaicing and resampling the source again. A frame whose file could
-/// not be written is prepared again when it is next needed.
-struct FrameCache {
-    directory: tempfile::TempDir,
+/// kept in a scratch file so replay's passes and its integrated reference
+/// read it back instead of reading, calibrating, demosaicing and resampling
+/// the source again.
+///
+/// A replay makes one for itself and fills it as it first prepares each
+/// frame. A stack told to [`LiveStacker::retain_frames_for_reintegration`]
+/// keeps one beside the live pass, which writes each frame's file while it
+/// has the registered image in hand, so the replay prepares nothing. A frame
+/// whose file could not be written is prepared again when it is next needed.
+pub(crate) struct FrameCache {
+    files: CacheFiles,
     slots: Vec<std::sync::Mutex<CacheSlot>>,
+}
+
+/// The directory a [`FrameCache`] keeps its files in, which frames being
+/// prepared on other threads write into.
+pub(crate) struct CacheFiles {
+    directory: tempfile::TempDir,
+    /// Names the files of frames written before their admission is decided.
+    staged: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -437,8 +459,79 @@ enum CacheSlot {
     Unavailable,
 }
 
+/// A frame's registered image, written while the frame waits to learn
+/// whether it is admitted. Dropping it, as a rejection, an error or a
+/// cancelled run does, deletes the file.
+pub(crate) struct StagedFrame {
+    path: Option<PathBuf>,
+}
+
+impl StagedFrame {
+    /// Move the file to `target`, reporting whether it is there.
+    fn commit(mut self, target: &Path) -> bool {
+        let Some(path) = self.path.take() else {
+            return false;
+        };
+        if std::fs::rename(&path, target).is_ok() {
+            true
+        } else {
+            let _ = std::fs::remove_file(path);
+            false
+        }
+    }
+}
+
+impl Drop for StagedFrame {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+impl CacheFiles {
+    fn path(&self, index: usize) -> PathBuf {
+        self.directory.path().join(format!("frame-{index}.f32"))
+    }
+
+    /// Write a frame's registered, unnormalized image before its admission
+    /// is decided, or `None` when the file could not be written.
+    pub(crate) fn stage(&self, image: &LinearImage) -> Option<StagedFrame> {
+        let number = self
+            .staged
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = self.directory.path().join(format!("staged-{number}.f32"));
+        // Owning the path from here on deletes a partial file on failure.
+        let staged = StagedFrame { path: Some(path) };
+        FrameCache::write(staged.path.as_deref()?, image).ok()?;
+        Some(staged)
+    }
+}
+
+/// The part of a [`FrameCache`] the integration side of a live pass changes:
+/// one slot for each frame it admits.
+pub(crate) struct CacheAdmissions<'a> {
+    files: &'a CacheFiles,
+    slots: &'a mut Vec<std::sync::Mutex<CacheSlot>>,
+}
+
+impl CacheAdmissions<'_> {
+    /// Give the frame just admitted its slot, keeping the file its
+    /// preparation staged, if any.
+    pub(crate) fn admit(&mut self, staged: Option<StagedFrame>) {
+        let index = self.slots.len();
+        let stored = staged.is_some_and(|staged| staged.commit(&self.files.path(index)));
+        let slot = if stored {
+            CacheSlot::Stored
+        } else {
+            CacheSlot::Empty
+        };
+        self.slots.push(std::sync::Mutex::new(slot));
+    }
+}
+
 impl FrameCache {
-    fn new(directory: Option<&Path>, frames: usize) -> Option<Self> {
+    fn new(directory: Option<&Path>, frames: usize) -> std::io::Result<Self> {
         let directory = match directory {
             Some(directory) => tempfile::Builder::new()
                 .prefix(".seiza-reintegrate-")
@@ -446,18 +539,38 @@ impl FrameCache {
             None => tempfile::Builder::new()
                 .prefix("seiza-reintegrate-")
                 .tempdir(),
-        }
-        .ok()?;
-        Some(Self {
-            directory,
+        }?;
+        Ok(Self {
+            files: CacheFiles {
+                directory,
+                staged: std::sync::atomic::AtomicU64::new(0),
+            },
             slots: (0..frames)
                 .map(|_| std::sync::Mutex::new(CacheSlot::Empty))
                 .collect(),
         })
     }
 
+    /// Where preparation threads stage frames.
+    pub(crate) fn files(&self) -> &CacheFiles {
+        &self.files
+    }
+
+    /// The files, for preparation threads to stage frames in, and the slots,
+    /// for the integration thread to admit them to.
+    pub(crate) fn split(&mut self) -> (&CacheFiles, CacheAdmissions<'_>) {
+        let files = &self.files;
+        (
+            files,
+            CacheAdmissions {
+                files,
+                slots: &mut self.slots,
+            },
+        )
+    }
+
     fn path(&self, index: usize) -> PathBuf {
-        self.directory.path().join(format!("frame-{index}.f32"))
+        self.files.path(index)
     }
 
     /// The cached image of frame `index`, made with `prepare` the first
@@ -489,6 +602,11 @@ impl FrameCache {
         Ok(image)
     }
 
+    /// Write `image` as replay keeps it: registered, and passed through the
+    /// identity normalization, which leaves every sample as it is except a
+    /// negative zero, which `mul_add(1, 0)` turns positive. The live pass
+    /// writes its registered image before any normalization, so making the
+    /// same change here keeps its files bit-identical to a replay's own.
     fn write(path: &Path, image: &LinearImage) -> std::io::Result<()> {
         use std::io::Write;
         let mut file = std::io::BufWriter::with_capacity(1 << 22, std::fs::File::create(path)?);
@@ -497,7 +615,8 @@ impl FrameCache {
         }
         let mut bytes = vec![0_u8; 1 << 20];
         for chunk in image.data.chunks(bytes.len() / 4) {
-            for (sample, out) in chunk.iter().zip(bytes.chunks_exact_mut(4)) {
+            for (&sample, out) in chunk.iter().zip(bytes.chunks_exact_mut(4)) {
+                let sample = if sample == 0.0 { 0.0_f32 } else { sample };
                 out.copy_from_slice(&sample.to_le_bytes());
             }
             file.write_all(&bytes[..chunk.len() * 4])?;
@@ -506,28 +625,33 @@ impl FrameCache {
         Ok(())
     }
 
+    /// Read an image [`Self::write`] wrote, a megabyte at a time, so reading
+    /// holds no second copy of it.
     fn read(path: &Path) -> Option<LinearImage> {
-        let bytes = std::fs::read(path).ok()?;
-        let dimension = |at: usize| {
-            u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?)
+        use std::io::Read;
+        let mut file = std::fs::File::open(path).ok()?;
+        let mut header = [0_u8; 24];
+        file.read_exact(&mut header).ok()?;
+        let dimension = |at: usize| -> Option<usize> {
+            u64::from_le_bytes(header[at..at + 8].try_into().ok()?)
                 .try_into()
                 .ok()
         };
-        let (width, height, channels): (usize, usize, usize) =
-            (dimension(0)?, dimension(8)?, dimension(16)?);
-        let samples = &bytes[24..];
-        if samples.len()
-            != width
-                .checked_mul(height)?
-                .checked_mul(channels)?
-                .checked_mul(4)?
-        {
+        let (width, height, channels) = (dimension(0)?, dimension(8)?, dimension(16)?);
+        let samples = width.checked_mul(height)?.checked_mul(channels)?;
+        let length = u64::try_from(samples.checked_mul(4)?.checked_add(header.len())?).ok()?;
+        if file.metadata().ok()?.len() != length {
             return None;
         }
-        let data = samples
-            .par_chunks_exact(4)
-            .map(|sample| f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]))
-            .collect();
+        let mut data = vec![0.0_f32; samples];
+        let mut bytes = vec![0_u8; 1 << 20];
+        for chunk in data.chunks_mut(bytes.len() / 4) {
+            let raw = &mut bytes[..chunk.len() * 4];
+            file.read_exact(raw).ok()?;
+            for (sample, raw) in chunk.iter_mut().zip(raw.chunks_exact(4)) {
+                *sample = f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+            }
+        }
         LinearImage::new(width, height, channels, data).ok()
     }
 }
@@ -560,6 +684,59 @@ impl MastersCache {
 }
 
 impl LiveStacker {
+    /// Keep each frame this stack admits from now on in a scratch file,
+    /// registered but not normalized, so [`Self::reintegrate`] and
+    /// [`Self::reintegrate_drizzled`] read it back instead of reading,
+    /// calibrating, demosaicing and resampling the frame's source again.
+    /// The result is bit-identical either way.
+    ///
+    /// Call this before pushing frames to a stack that will be reintegrated.
+    /// The threads preparing frames write each file while they hold the
+    /// registered image, and a frame that is turned away has its file
+    /// deleted. The reference is written now. Frames admitted before the
+    /// call, such as those of a stack reopened from a saved context, are
+    /// prepared from their sources when replayed, as they are without it.
+    ///
+    /// The files take about four bytes per output sample per admitted frame,
+    /// 313 MB for each frame of a 26 MP colour sensor: the space a
+    /// reintegration's own scratch files take, held from now until the
+    /// stacker is dropped rather than only while it replays. They go in a new
+    /// directory inside `scratch_directory`, or the system temporary
+    /// directory, which a replay then uses in place of
+    /// [`BatchStackOptions::scratch_directory`]. Dropping the stacker removes
+    /// it. A frame whose file cannot be written is prepared again when it is
+    /// replayed.
+    ///
+    /// Calling this again keeps the directory already made. A stack that
+    /// cannot be reintegrated (see [`Self::reintegration_unavailable`]) or
+    /// that integrates Bayer photosites keeps nothing.
+    pub fn retain_frames_for_reintegration(
+        &mut self,
+        scratch_directory: Option<&Path>,
+    ) -> Result<()> {
+        if self.frame_cache.is_some()
+            || self.options.cfa_integration == crate::CfaIntegration::BayerDrizzle
+            || self.reintegration_unavailable().is_some()
+        {
+            return Ok(());
+        }
+        let cache =
+            FrameCache::new(scratch_directory, self.ledger.frames.len()).map_err(|error| {
+                Error::Stack(format!(
+                    "cannot make a directory for frames kept for reintegration: {error}"
+                ))
+            })?;
+        // The reference was prepared from its source already; carry it
+        // through its identity mapping, as a replay would after preparing it
+        // again.
+        let reference = &self.ledger.frames[0];
+        cache.get_or_prepare(0, || {
+            self.register_unnormalized(reference, &self.reference, self.options.interpolation)
+        })?;
+        self.frame_cache = Some(cache);
+        Ok(())
+    }
+
     /// Why [`Self::reintegrate`] cannot replay this stack, or `None` when it
     /// can.
     ///
@@ -604,13 +781,15 @@ impl LiveStacker {
     /// rejection, so a transient in the reference or a warm-up frame is
     /// rejected like any other.
     ///
-    /// Each frame is read three times, from the file it came from, and prepared
-    /// exactly as the live pass prepared it: the same declared-range
-    /// rescale, calibration masters, cosmetic filter, debayering, and the
-    /// recorded registration and normalization mapping. Star detection and
-    /// registration do not run again, and no admission decision is revisited:
-    /// every admitted frame takes part. A source file that changed since it
-    /// was stacked is refused.
+    /// Each frame is read from the file it came from and prepared exactly as
+    /// the live pass prepared it: the same declared-range rescale,
+    /// calibration masters, cosmetic filter, debayering, and the recorded
+    /// registration and normalization mapping. The prepared image waits in
+    /// [`BatchStackOptions::scratch_directory`] for the later passes, and a
+    /// frame [`Self::retain_frames_for_reintegration`] kept is not read at
+    /// all. Star detection and registration do not run again, and no
+    /// admission decision is revisited: every admitted frame takes part. A
+    /// source file that changed since it was stacked is refused.
     ///
     /// The live stack is left as it was. `progress` receives the pass, the
     /// zero-based frame index, and the frame count before each read. See
@@ -687,11 +866,22 @@ impl LiveStacker {
         };
         let count = ledger.frames.len();
         let masters = MastersCache::default();
-        // Bayer drizzle resamples photosites, which the cache does not hold.
-        let cache = (self.options.cfa_integration != crate::CfaIntegration::BayerDrizzle)
-            .then(|| FrameCache::new(options.scratch_directory.as_deref(), count))
-            .flatten();
-        let cache = cache.as_ref();
+        // The frames the live pass kept, when it was asked to; otherwise a
+        // cache of this replay's own. Bayer drizzle resamples photosites,
+        // which neither holds.
+        let own_cache;
+        let cache = if self.options.cfa_integration == crate::CfaIntegration::BayerDrizzle {
+            None
+        } else if let Some(retained) = self
+            .frame_cache
+            .as_ref()
+            .filter(|retained| retained.slots.len() == count)
+        {
+            Some(retained)
+        } else {
+            own_cache = FrameCache::new(options.scratch_directory.as_deref(), count).ok();
+            own_cache.as_ref()
+        };
         let renormalizer =
             if let crate::NormalizationMode::LocalBackground { .. } = self.options.normalization {
                 Some(Renormalizer {
@@ -725,8 +915,7 @@ impl LiveStacker {
         .into_iter()
         .flat_map(|pass| (0..count).map(move |index| (pass, index)))
         .collect::<Vec<_>>();
-        let lookahead = std::thread::available_parallelism()
-            .map_or(1, |cores| (cores.get() / 6).clamp(1, REPLAY_LOOKAHEAD));
+        let lookahead = replay_lookahead();
         // The calibrated source of the frame the final pass is integrating,
         // read alongside its registered image for the drizzle.
         let drizzle_source = std::cell::RefCell::new(None);
@@ -896,28 +1085,48 @@ impl LiveStacker {
         let samples = self.reference.sample_count();
         let mut sum = vec![0.0_f32; samples];
         let mut count = vec![0_u16; samples];
-        for index in ranked {
+        let prepare = |index: usize| {
             let admitted = &frames[index];
             let masters = masters.get(self, admitted.calibration)?;
-            let raw = self.prepared(index, admitted, &masters, cache)?;
+            let mut image = self.prepared(index, admitted, &masters, cache)?;
             // The frame's recorded gain and mean offset: its background stays
             // its own, while its stars match the reference's.
-            let mut image = raw;
             admitted
                 .mapping
                 .normalization()
                 .global_equivalent()
                 .apply_global(&mut image)?;
-            sum.par_iter_mut()
-                .zip(count.par_iter_mut())
-                .zip(image.data.par_iter())
-                .for_each(|((sum, count), &value)| {
-                    if value.is_finite() {
-                        *sum += value;
-                        *count += 1;
-                    }
-                });
-        }
+            Ok::<_, Error>(image)
+        };
+        // The next frames are read, or prepared, on threads of their own
+        // while this one is summed; the sum keeps the ranked order.
+        let lookahead = replay_lookahead();
+        std::thread::scope(|scope| {
+            let mut ranked = ranked.into_iter();
+            let mut in_flight = std::collections::VecDeque::new();
+            loop {
+                while in_flight.len() < lookahead
+                    && let Some(index) = ranked.next()
+                {
+                    in_flight.push_back(scope.spawn(move || prepare(index)));
+                }
+                let Some(handle) = in_flight.pop_front() else {
+                    return Ok::<_, Error>(());
+                };
+                let image = handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
+                sum.par_iter_mut()
+                    .zip(count.par_iter_mut())
+                    .zip(image.data.par_iter())
+                    .for_each(|((sum, count), &value)| {
+                        if value.is_finite() {
+                            *sum += value;
+                            *count += 1;
+                        }
+                    });
+            }
+        })?;
         let mean = sum
             .into_par_iter()
             .zip(count.into_par_iter())
@@ -948,10 +1157,22 @@ impl LiveStacker {
         interpolation: crate::Interpolation,
     ) -> Result<LinearImage> {
         let (frame, _) = self.read_admitted(admitted, masters)?;
+        self.register_unnormalized(admitted, &frame.image, interpolation)
+    }
+
+    /// Carry an admitted frame's prepared source onto the reference grid
+    /// through its recorded registration, applying the identity in place of
+    /// its normalization.
+    fn register_unnormalized(
+        &self,
+        admitted: &AdmittedFrame,
+        prepared: &LinearImage,
+        interpolation: crate::Interpolation,
+    ) -> Result<LinearImage> {
         let identity = admitted
             .mapping
             .with_normalization(crate::NormalizationMap::identity(&self.reference))?;
-        identity.extract_region_with(&frame.image, self.full_region(admitted), interpolation)
+        identity.extract_region_with(prepared, self.full_region(admitted), interpolation)
     }
 
     fn full_region(&self, admitted: &AdmittedFrame) -> ReferenceRegion {
@@ -1133,6 +1354,55 @@ mod tests {
             noise: vec![noise],
             weight: vec![weight],
         }
+    }
+
+    #[test]
+    fn kept_frames_read_back_as_replay_makes_them_and_staged_files_go_with_their_frames() {
+        let bits = |image: &LinearImage| {
+            image
+                .data
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let mut cache = FrameCache::new(Some(directory.path()), 0).unwrap();
+        let kept_in = cache.files.directory.path().to_path_buf();
+        let files = || {
+            let mut names = std::fs::read_dir(&kept_in)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+        let payload = f32::from_bits(0x7fc0_1234);
+        let image = LinearImage::new(2, 2, 1, vec![-0.0, 0.0, payload, -1.5e-40]).unwrap();
+        let (staging, mut admissions) = cache.split();
+        let turned_away = staging.stage(&image).unwrap();
+        let admitted = staging.stage(&image).unwrap();
+        drop(turned_away);
+        admissions.admit(Some(admitted));
+        admissions.admit(None);
+        assert_eq!(files(), ["frame-0.f32"]);
+        // The identity normalization a replay applies turns only a negative
+        // zero positive; the file holds what it would have made.
+        let mut normalized = image.clone();
+        crate::NormalizationMap::identity(&image)
+            .apply(&mut normalized)
+            .unwrap();
+        assert_eq!(normalized.data[0].to_bits(), 0);
+        let kept = cache
+            .get_or_prepare(0, || panic!("frame 0 was kept"))
+            .unwrap();
+        assert_eq!(bits(&kept), bits(&normalized));
+        // A frame admitted without a file is prepared once, then read back.
+        cache.get_or_prepare(1, || Ok(normalized.clone())).unwrap();
+        let read = cache
+            .get_or_prepare(1, || panic!("frame 1 was kept when first prepared"))
+            .unwrap();
+        assert_eq!(bits(&read), bits(&normalized));
+        assert_eq!(files(), ["frame-0.f32", "frame-1.f32"]);
     }
 
     #[test]

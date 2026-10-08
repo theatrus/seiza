@@ -858,12 +858,35 @@ impl PyLiveStacker {
         Ok(PyStackSnapshot { inner: snapshot })
     }
 
+    /// Keep each frame admitted from now on in a scratch file, registered but
+    /// not normalized, so :meth:`reintegrate` and :meth:`reintegrate_drizzled`
+    /// read it back instead of calibrating, demosaicing and resampling the
+    /// frame's source again; the result is the same either way. Call it
+    /// before pushing frames. The files take about four bytes per output
+    /// sample per admitted frame, in a new directory inside
+    /// ``scratch_directory`` (the system temporary directory by default) that
+    /// is removed when the stacker is finished or freed. A stack that cannot
+    /// be reintegrated, or that integrates Bayer photosites, keeps nothing.
+    #[pyo3(signature = (*, scratch_directory=None))]
+    fn retain_frames_for_reintegration(
+        &mut self,
+        py: Python<'_>,
+        scratch_directory: Option<PathBuf>,
+    ) -> PyResult<()> {
+        py.allow_threads(|| {
+            self.active_mut()?
+                .retain_frames_for_reintegration(scratch_directory.as_deref())
+        })
+        .map_err(stack_error)
+    }
+
     /// Integrate every admitted frame again with three-pass, leave-one-out
     /// rejection, which removes trails in the reference and warm-up frames
     /// that online rejection cannot revisit. Each frame is reread from its
-    /// source file; prepared frames wait in ``scratch_directory`` (the system
-    /// temporary directory by default) between passes. The live stack is
-    /// left as it was.
+    /// source file, unless :meth:`retain_frames_for_reintegration` kept it;
+    /// prepared frames wait in ``scratch_directory`` (the system temporary
+    /// directory by default) between passes. The live stack is left as it
+    /// was.
     #[pyo3(signature = (*, sigma_low=3.0, sigma_high=3.0, scratch_directory=None))]
     fn reintegrate(
         &self,

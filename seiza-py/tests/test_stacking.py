@@ -392,3 +392,39 @@ def test_reintegrate_and_drizzle_reject_a_reference_trail(tmp_path):
         drizzled.write_fits(paths[0])
     with pytest.raises(ValueError, match="scale"):
         stacker.reintegrate_drizzled(scale=5)
+
+
+def test_retained_frames_reintegrate_identically(tmp_path):
+    clean = synthetic_star_field()
+    paths = []
+    for index in range(6):
+        frame = clean + np.float32(index % 3) * 0.2
+        if index == 0:
+            frame = frame.copy()
+            frame[60, 10:150] += 5000.0
+        path = tmp_path / f"light-{index:03d}.fits"
+        fits.writeto(path, frame, overwrite=True)
+        paths.append(path)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+
+    def stack(retain):
+        stacker = seiza.LiveStacker(paths[0], options=no_adjustment_options())
+        if retain:
+            stacker.retain_frames_for_reintegration(scratch_directory=scratch)
+        for path in paths[1:]:
+            assert stacker.push_fits(path).accepted
+        return stacker
+
+    retained = stack(True)
+    assert len(list(scratch.iterdir())) == 1
+    fresh = stack(False)
+    np.testing.assert_array_equal(
+        retained.reintegrate().image, fresh.reintegrate().image
+    )
+    _, retained_drizzle = retained.reintegrate_drizzled(scale=2)
+    _, fresh_drizzle = fresh.reintegrate_drizzled(scale=2)
+    np.testing.assert_array_equal(retained_drizzle.image, fresh_drizzle.image)
+    np.testing.assert_array_equal(retained_drizzle.weight, fresh_drizzle.weight)
+    retained.finish()
+    assert list(scratch.iterdir()) == []

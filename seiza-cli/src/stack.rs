@@ -126,8 +126,9 @@ pub(crate) struct StackArgs {
     /// grid. Defaults to WBPP's: 0.9 for monochrome frames, 1.0 for Bayer
     #[arg(long, requires = "drizzle")]
     drizzle_drop_shrink: Option<f32>,
-    /// Where --reintegrate keeps each frame's prepared image between its
-    /// passes (about four bytes per output sample per frame); defaults to the
+    /// Where --reintegrate keeps each admitted frame's registered image,
+    /// written as the frame is stacked and read back by each of its passes
+    /// (about four bytes per output sample per frame); defaults to the
     /// output's directory
     #[arg(long)]
     scratch_directory: Option<PathBuf>,
@@ -523,6 +524,22 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
                 reference_path.display()
             )
         })?;
+    // Each admitted frame's registered image waits here for reintegration:
+    // about four bytes per output sample per frame, beside the output rather
+    // than in a temporary directory that may live in memory. The live pass
+    // writes it, so reintegration need not prepare the frame again.
+    let scratch_directory = options.scratch_directory.clone().unwrap_or_else(|| {
+        options
+            .output
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map_or_else(|| PathBuf::from("."), PathBuf::from)
+    });
+    if reintegrate
+        && let Err(error) = stacker.retain_frames_for_reintegration(Some(&scratch_directory))
+    {
+        eprintln!("warning: {error}; reintegration will prepare each frame again");
+    }
     println!(
         "reference  {} ({:.1}px registration drift limit)",
         reference_path.display(),
@@ -621,22 +638,8 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
                 low_sigma: options.sigma_low,
                 high_sigma: options.sigma_high,
             },
-            // Each frame's prepared image waits here between passes: about
-            // four bytes per output sample per frame, beside the output
-            // rather than in a temporary directory that may live in memory.
-            scratch_directory: Some(
-                options
-                    .scratch_directory
-                    .clone()
-                    .or_else(|| {
-                        options
-                            .output
-                            .parent()
-                            .filter(|parent| !parent.as_os_str().is_empty())
-                            .map(PathBuf::from)
-                    })
-                    .unwrap_or_else(|| PathBuf::from(".")),
-            ),
+            // For any frame the live pass could not keep.
+            scratch_directory: Some(scratch_directory),
             ..seiza_stacking::BatchStackOptions::default()
         };
         let progress = |pass, index, count| {
@@ -660,6 +663,8 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
             }
             None => stacker.reintegrate(&batch, progress)?,
         };
+        // Free the frames' scratch files before writing the outputs.
+        drop(stacker);
         let rejected = result
             .snapshot
             .rejected_samples

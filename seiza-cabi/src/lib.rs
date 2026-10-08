@@ -2579,6 +2579,45 @@ pub unsafe extern "C" fn seiza_live_stacker_export_snapshot(
     })
 }
 
+#[unsafe(no_mangle)]
+/// Keep each frame this stack admits from now on in a scratch file,
+/// registered but not normalized, so [`seiza_live_stacker_reintegrate`] and
+/// [`seiza_live_stacker_reintegrate_drizzled`] read it back instead of
+/// calibrating, demosaicing and resampling the frame's source again. The
+/// result is bit-identical either way.
+///
+/// Call this before pushing frames to a stack that will be reintegrated. The
+/// files take about four bytes per output sample per admitted frame (313 MB
+/// for each frame of a 26 MP colour sensor), in a new directory inside
+/// `scratch_directory`, or the system temporary directory when that is null
+/// or empty. Freeing or finishing the stacker removes the directory. Frames
+/// admitted before the call, such as those of a stack reopened from a saved
+/// context, are prepared from their sources when replayed. A second call
+/// keeps the first directory. A stack that cannot be reintegrated, or that
+/// integrates Bayer photosites, keeps nothing and the call succeeds.
+///
+/// # Safety
+/// `stacker` must be a live `SeizaLiveStacker` pointer, externally
+/// synchronized with every other operation on it. `scratch_directory` must
+/// be null or a valid NUL-terminated path. When non-null, `error_out` must
+/// point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_live_stacker_retain_frames_for_reintegration(
+    stacker: *mut SeizaLiveStacker,
+    scratch_directory: *const c_char,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let scratch_directory = optional_path(scratch_directory)?;
+        let stacker = unsafe { required_live_stacker_mut(stacker)? };
+        stacker
+            .stacker
+            .retain_frames_for_reintegration(scratch_directory.as_deref())
+            .map_err(|error| error.to_string())
+    })
+    .is_some()
+}
+
 /// Progress callback for [`seiza_live_stacker_reintegrate`]: the pass, in
 /// the order the three run (0 while estimating statistics, 1 while refining
 /// them without the samples the estimate rejects, 2 while integrating), the
@@ -8008,6 +8047,114 @@ mod tests {
             seiza_stack_snapshot_free(snapshot);
             seiza_live_stacker_free(stacker);
         }
+    }
+
+    #[test]
+    fn retained_frames_reintegrate_identically_through_the_cabi() {
+        let (width, height) = (160, 128);
+        let clean = stacking_star_field(width, height);
+        let directory = tempfile::tempdir().unwrap();
+        let paths = (0..6)
+            .map(|index| {
+                let path = directory.path().join(format!("light-{index:03}.fits"));
+                let noisy = clean
+                    .iter()
+                    .enumerate()
+                    .map(|(sample, value)| value + ((sample * 7 + index * 13) % 5) as f32 * 0.1)
+                    .collect::<Vec<_>>();
+                seiza_stacking::write_processed_image_fits_f32(
+                    &path,
+                    &LinearImage::new(width, height, 1, noisy).unwrap(),
+                    &[],
+                    &[],
+                )
+                .unwrap();
+                path.to_str().unwrap().to_owned()
+            })
+            .collect::<Vec<_>>();
+        let scratch = directory.path().join("scratch");
+        std::fs::create_dir(&scratch).unwrap();
+        let scratch_c = CString::new(scratch.to_str().unwrap()).unwrap();
+        let reference_c = CString::new(paths[0].as_str()).unwrap();
+        let others_c = CString::new(serde_json::to_string(&paths[1..]).unwrap()).unwrap();
+        let config = no_adjustment_stack_options();
+        let mut error = ptr::null_mut();
+        let replay = |retain: bool| {
+            let mut error = ptr::null_mut();
+            let stacker = unsafe {
+                seiza_live_stacker_open_fits(
+                    reference_c.as_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    0.0,
+                    config.as_ptr(),
+                    &mut error,
+                )
+            };
+            assert!(!stacker.is_null());
+            if retain {
+                assert!(unsafe {
+                    seiza_live_stacker_retain_frames_for_reintegration(
+                        stacker,
+                        scratch_c.as_ptr(),
+                        &mut error,
+                    )
+                });
+            }
+            let response = unsafe {
+                seiza_live_stacker_push_fits_pipelined_json(
+                    stacker,
+                    others_c.as_ptr(),
+                    2,
+                    0,
+                    0.0,
+                    &mut error,
+                )
+            };
+            assert!(!response.is_null());
+            unsafe { seiza_string_free(response) };
+            let snapshot = unsafe {
+                seiza_live_stacker_reintegrate(
+                    stacker,
+                    0.0,
+                    0.0,
+                    ptr::null(),
+                    None,
+                    ptr::null_mut(),
+                    &mut error,
+                )
+            };
+            assert!(!snapshot.is_null());
+            let image = unsafe {
+                std::slice::from_raw_parts(
+                    seiza_stack_snapshot_image(snapshot),
+                    seiza_stack_snapshot_data_length(snapshot),
+                )
+            }
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>();
+            unsafe { seiza_stack_snapshot_free(snapshot) };
+            (stacker, image)
+        };
+        let (retained, kept) = replay(true);
+        assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 1);
+        let (fresh, expected) = replay(false);
+        assert_eq!(kept, expected);
+        unsafe {
+            seiza_live_stacker_free(retained);
+            seiza_live_stacker_free(fresh);
+        }
+        assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
+        assert!(!unsafe {
+            seiza_live_stacker_retain_frames_for_reintegration(
+                ptr::null_mut(),
+                ptr::null(),
+                &mut error,
+            )
+        });
+        unsafe { seiza_string_free(error) };
     }
 
     #[test]
