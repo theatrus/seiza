@@ -117,63 +117,152 @@ impl LinearImage {
         // ASI2600MC green ran about twice red). So the mosaic is balanced to
         // green by the channels' medians first and each channel scaled back
         // after. Every photosite keeps its own sample exactly.
-        let balance = channel_balance(&self.data, self.width, self.height, layout);
-        let balanced = self
-            .data
-            .par_chunks(self.width.max(1))
+        let (width, height) = (self.width, self.height);
+        let balance = channel_balance(&self.data, width, height, layout);
+        let mut balanced = vec![0.0_f32; self.data.len()];
+        let mut rgb = vec![0.0_f32; self.data.len() * 3];
+        if width == 0 {
+            return Self::new(width, height, 3, rgb);
+        }
+        balanced
+            .par_chunks_mut(width)
+            .zip(self.data.par_chunks(width))
             .enumerate()
-            .flat_map_iter(|(y, row)| {
-                row.iter()
-                    .enumerate()
-                    .map(move |(x, &value)| value * balance[layout.channel_at(x, y)])
-            })
-            .collect::<Vec<_>>();
+            .for_each(|(y, (out, row))| balance_row(row, out, balance, layout, y));
+        // VNG and MHC estimate both missing colours of every pixel two or
+        // more from each edge (VNG always keeps its smoothest direction), and
+        // each pixel's own colour is put back from its sample at the end, so
+        // they need bilinear estimates only on the two-pixel border.
+        let interior = demosaic != Demosaic::Bilinear && width >= 5 && height >= 5;
         // Rows depend only on the mosaic, so bands of them debayer in
         // parallel with the same samples a single pass produces.
         const BAND_ROWS: usize = 32;
-        let mut rgb = vec![0.0_f32; self.data.len() * 3];
-        let row_samples = self.width * 3;
-        if row_samples > 0 {
-            rgb.par_chunks_mut(row_samples * BAND_ROWS)
-                .enumerate()
-                .for_each(|(band, rows)| {
-                    let first_row = band * BAND_ROWS;
-                    debayer_rgb_f32_rows(
-                        &balanced,
-                        self.width,
-                        self.height,
-                        layout.pattern,
-                        layout.x_offset,
-                        layout.y_offset,
-                        first_row,
-                        rows,
-                    );
-                    match demosaic {
-                        Demosaic::Vng => {
-                            vng_rows(&balanced, self.width, self.height, layout, first_row, rows)
-                        }
-                        Demosaic::Mhc => malvar_he_cutler_rows(
+        let row_samples = width * 3;
+        rgb.par_chunks_mut(row_samples * BAND_ROWS)
+            .enumerate()
+            .for_each(|(band, rows)| {
+                let first_row = band * BAND_ROWS;
+                for (band_row, out_row) in rows.chunks_exact_mut(row_samples).enumerate() {
+                    let y = first_row + band_row;
+                    if interior && (2..height - 2).contains(&y) {
+                        bilinear_row_ends(&balanced, width, layout, y, out_row);
+                    } else {
+                        debayer_rgb_f32_rows(
                             &balanced,
-                            self.width,
-                            self.height,
-                            layout,
-                            first_row,
-                            rows,
-                        ),
-                        Demosaic::Bilinear => {}
+                            width,
+                            height,
+                            layout.pattern,
+                            layout.x_offset,
+                            layout.y_offset,
+                            y,
+                            out_row,
+                        );
                     }
-                    for (band_row, out_row) in rows.chunks_exact_mut(row_samples).enumerate() {
-                        let y = first_row + band_row;
-                        for (x, pixel) in out_row.chunks_exact_mut(3).enumerate() {
-                            for (channel, value) in pixel.iter_mut().enumerate() {
-                                *value /= balance[channel];
-                            }
-                            pixel[layout.channel_at(x, y)] = self.data[y * self.width + x];
-                        }
+                }
+                match demosaic {
+                    Demosaic::Vng => vng_rows(&balanced, width, height, layout, first_row, rows),
+                    Demosaic::Mhc => {
+                        malvar_he_cutler_rows(&balanced, width, height, layout, first_row, rows)
                     }
-                });
+                    Demosaic::Bilinear => {}
+                }
+                for (band_row, out_row) in rows.chunks_exact_mut(row_samples).enumerate() {
+                    let y = first_row + band_row;
+                    let source = &self.data[y * width..(y + 1) * width];
+                    unbalance_row(source, out_row, balance, layout, y);
+                }
+            });
+        Self::new(width, height, 3, rgb)
+    }
+}
+
+/// Bring a mosaic row's photosites to green's level: `out[x] = row[x] *
+/// balance[colour at (x, y)]`. A row's colours alternate, so the factors
+/// repeat every two samples and the products are taken eight at a time.
+fn balance_row(row: &[f32], out: &mut [f32], balance: [f32; 3], layout: BayerLayout, y: usize) {
+    let factors: [f32; 8] = std::array::from_fn(|x| balance[layout.channel_at(x, y)]);
+    let mut outs = out.chunks_exact_mut(8);
+    let mut values = row.chunks_exact(8);
+    for (out, values) in (&mut outs).zip(&mut values) {
+        for ((out, &value), &factor) in out.iter_mut().zip(values).zip(&factors) {
+            *out = value * factor;
         }
-        Self::new(self.width, self.height, 3, rgb)
+    }
+    for ((out, &value), &factor) in outs
+        .into_remainder()
+        .iter_mut()
+        .zip(values.remainder())
+        .zip(&factors)
+    {
+        *out = value * factor;
+    }
+}
+
+/// Bilinear estimates for the two pixels at each end of row `y`, which VNG
+/// and MHC leave alone. Each depends only on its 3x3 neighbourhood, so it is
+/// the middle row of a window three columns wide and three rows high,
+/// debayered with the pattern's origin moved to match; the window ends where
+/// the image does, so every estimate sums the same samples in the same order.
+/// Needs `2 <= y < height - 2` and a width of at least five.
+fn bilinear_row_ends(
+    mosaic: &[f32],
+    width: usize,
+    layout: BayerLayout,
+    y: usize,
+    out_row: &mut [f32],
+) {
+    for (first_column, pixels, target) in [(0, 0..2, 0..2), (width - 3, 1..3, width - 2..width)] {
+        let mut window = [0.0_f32; 9];
+        for (row, window_row) in window.chunks_exact_mut(3).enumerate() {
+            let start = (y + row - 1) * width + first_column;
+            window_row.copy_from_slice(&mosaic[start..start + 3]);
+        }
+        let mut rgb = [0.0_f32; 9];
+        debayer_rgb_f32_rows(
+            &window,
+            3,
+            3,
+            layout.pattern,
+            layout.x_offset + first_column,
+            layout.y_offset + y - 1,
+            1,
+            &mut rgb,
+        );
+        out_row[target.start * 3..target.end * 3]
+            .copy_from_slice(&rgb[pixels.start * 3..pixels.end * 3]);
+    }
+}
+
+/// Undo [`balance_row`] on a demosaiced row: divide every sample by its
+/// channel's factor, then put back each photosite's own sample exactly. The
+/// factors repeat every three samples, so the divisions run twelve (four
+/// pixels) at a time.
+fn unbalance_row(
+    source: &[f32],
+    out_row: &mut [f32],
+    balance: [f32; 3],
+    layout: BayerLayout,
+    y: usize,
+) {
+    let divisors: [f32; 12] = std::array::from_fn(|sample| balance[sample % 3]);
+    let mut chunks = out_row.chunks_exact_mut(12);
+    for chunk in &mut chunks {
+        for (value, divisor) in chunk.iter_mut().zip(&divisors) {
+            *value /= divisor;
+        }
+    }
+    for (value, divisor) in chunks.into_remainder().iter_mut().zip(&divisors) {
+        *value /= divisor;
+    }
+    let own = [layout.channel_at(0, y), layout.channel_at(1, y)];
+    let mut pairs = out_row.chunks_exact_mut(6);
+    let mut samples = source.chunks_exact(2);
+    for (pair, samples) in (&mut pairs).zip(&mut samples) {
+        pair[own[0]] = samples[0];
+        pair[3 + own[1]] = samples[1];
+    }
+    if let [sample] = samples.remainder() {
+        pairs.into_remainder()[own[0]] = *sample;
     }
 }
 
@@ -885,6 +974,140 @@ mod tests {
                         assert!(
                             a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()),
                             "{pattern:?} {width}x{height}, {band_rows}-row bands, sample {sample}: \
+                             {a} vs {b}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// `debayer_with` as it was before it skipped the bilinear estimates VNG
+    /// and MHC overwrite: every pixel bilinear first, balanced and scaled
+    /// back one sample at a time.
+    fn debayer_with_reference(
+        image: &LinearImage,
+        layout: BayerLayout,
+        demosaic: Demosaic,
+    ) -> Vec<f32> {
+        let (width, height) = (image.width, image.height);
+        let balance = channel_balance(&image.data, width, height, layout);
+        let balanced = image
+            .data
+            .chunks(width)
+            .enumerate()
+            .flat_map(|(y, row)| {
+                row.iter()
+                    .enumerate()
+                    .map(move |(x, &value)| value * balance[layout.channel_at(x, y)])
+            })
+            .collect::<Vec<_>>();
+        const BAND_ROWS: usize = 32;
+        let mut rgb = vec![0.0_f32; image.data.len() * 3];
+        let row_samples = width * 3;
+        for (band, rows) in rgb.chunks_mut(row_samples * BAND_ROWS).enumerate() {
+            let first_row = band * BAND_ROWS;
+            debayer_rgb_f32_rows(
+                &balanced,
+                width,
+                height,
+                layout.pattern,
+                layout.x_offset,
+                layout.y_offset,
+                first_row,
+                rows,
+            );
+            match demosaic {
+                Demosaic::Vng => vng_rows(&balanced, width, height, layout, first_row, rows),
+                Demosaic::Mhc => {
+                    malvar_he_cutler_rows(&balanced, width, height, layout, first_row, rows)
+                }
+                Demosaic::Bilinear => {}
+            }
+            for (band_row, out_row) in rows.chunks_exact_mut(row_samples).enumerate() {
+                let y = first_row + band_row;
+                for (x, pixel) in out_row.chunks_exact_mut(3).enumerate() {
+                    for (channel, value) in pixel.iter_mut().enumerate() {
+                        *value /= balance[channel];
+                    }
+                    pixel[layout.channel_at(x, y)] = image.data[y * width + x];
+                }
+            }
+        }
+        rgb
+    }
+
+    #[test]
+    fn debayering_matches_the_previous_debayer_bit_for_bit() {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let patterns = [
+            BayerPattern::Rggb,
+            BayerPattern::Bggr,
+            BayerPattern::Grbg,
+            BayerPattern::Gbrg,
+        ];
+        // Sizes below the five pixels VNG and MHC need, odd and even
+        // widths, and heights that end bands of 32 rows part way.
+        let sizes = [
+            (1, 1),
+            (2, 3),
+            (4, 4),
+            (4, 9),
+            (9, 4),
+            (5, 5),
+            (6, 5),
+            (7, 9),
+            (13, 33),
+            (17, 64),
+            (24, 70),
+            (31, 97),
+        ];
+        for (width, height) in sizes {
+            for (index, pattern) in patterns.into_iter().enumerate() {
+                let layout = BayerLayout {
+                    pattern,
+                    x_offset: index & 1,
+                    y_offset: (index >> 1) + 2 * (width % 2),
+                };
+                // Sky with stars and steps, with non-finite and signed-zero
+                // samples; most frames scale red and blue so the balance is
+                // not one.
+                let red_scale = [1.0, 0.5, 1.7][next() as usize % 3];
+                let data = (0..width * height)
+                    .map(|pixel| {
+                        let scale = if layout.channel_at(pixel % width, pixel / width) == 1 {
+                            1.0
+                        } else {
+                            red_scale
+                        };
+                        let value = match next() % 61 {
+                            0 => f32::NAN,
+                            1 => f32::INFINITY,
+                            2 => f32::NEG_INFINITY,
+                            3 => -0.0,
+                            4 => 0.0,
+                            5..=9 => 3000.0 + (next() % 60_000) as f32,
+                            _ => 100.0 + (next() >> 40) as f32 / (1 << 20) as f32,
+                        };
+                        value * scale
+                    })
+                    .collect::<Vec<_>>();
+                let image = LinearImage::new(width, height, 1, data).unwrap();
+                for demosaic in [Demosaic::Vng, Demosaic::Mhc, Demosaic::Bilinear] {
+                    let expected = debayer_with_reference(&image, layout, demosaic);
+                    let got = image.clone().debayer_with(layout, demosaic).unwrap();
+                    assert_eq!(got.channels, 3);
+                    for (sample, (a, b)) in got.data.iter().zip(&expected).enumerate() {
+                        assert_eq!(
+                            a.to_bits(),
+                            b.to_bits(),
+                            "{pattern:?} {demosaic:?} {width}x{height}, sample {sample}: \
                              {a} vs {b}"
                         );
                     }
