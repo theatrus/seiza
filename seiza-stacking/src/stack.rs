@@ -530,6 +530,9 @@ pub struct LiveStacker {
     /// Each admitted frame's registered image, kept on disk for a later
     /// reintegration; see [`Self::retain_frames_for_reintegration`].
     pub(crate) frame_cache: Option<crate::replay::FrameCache>,
+    /// The Bayer layout the reference was demosaiced from, when this stack
+    /// prepared it; a stack reopened from a context does not know it.
+    pub(crate) reference_cfa: Option<BayerLayout>,
 }
 
 impl LiveStacker {
@@ -670,6 +673,7 @@ impl LiveStacker {
             configuration_fingerprint,
             ledger,
             frame_cache: None,
+            reference_cfa,
         })
     }
 
@@ -759,6 +763,7 @@ impl LiveStacker {
                 .ledger
                 .unwrap_or_else(crate::replay::Ledger::legacy),
             frame_cache: None,
+            reference_cfa: None,
         })
     }
 
@@ -1521,9 +1526,25 @@ pub(crate) fn prepare_frame(
             },
         ));
     }
+    // Bayer drizzle measures overlap and normalization on the interpolated
+    // frame above, which samples every channel evenly, then integrates the
+    // photosites themselves with the same normalization.
+    let photosites = cfa.filter(|_| options.cfa_integration == CfaIntegration::BayerDrizzle);
     // Written before normalization changes it, and deleted again if a later
-    // gate turns the frame away.
-    let staged = cache.and_then(|cache| cache.stage(&registered));
+    // gate turns the frame away. Under Bayer drizzle the photosites are kept
+    // instead, below, with the samples of this image a background fit reads.
+    let (mut staged, background) = match (cache, photosites) {
+        (Some(cache), None) => (
+            cache.stage(
+                &registered,
+                cache.background_samples(&registered),
+                crate::replay::keeps_zeros(options, cfa),
+            ),
+            None,
+        ),
+        (Some(cache), Some(_)) => (None, cache.background_samples(&registered)),
+        (None, _) => (None, None),
+    };
     if !matches!(options.normalization, NormalizationMode::None)
         && let Err(error) = normalization.apply(&mut registered)
     {
@@ -1535,10 +1556,6 @@ pub(crate) fn prepare_frame(
             FrameRejectionReason::Normalization(message),
         ));
     }
-    // Bayer drizzle measures overlap and normalization on the interpolated
-    // frame above, which samples every channel evenly, then integrates the
-    // photosites themselves with the same normalization.
-    let photosites = cfa.filter(|_| options.cfa_integration == CfaIntegration::BayerDrizzle);
     if let Some(layout) = photosites {
         registered = crate::registration::resample_region_geometry(
             &frame,
@@ -1548,6 +1565,13 @@ pub(crate) fn prepare_frame(
             geometry,
             crate::registration::Sampling::NearestPhotosite(layout),
         )?;
+        staged = cache.and_then(|cache| {
+            cache.stage(
+                &registered,
+                background,
+                crate::replay::keeps_zeros(options, cfa),
+            )
+        });
         if !matches!(options.normalization, NormalizationMode::None) {
             normalization.apply(&mut registered)?;
         }
@@ -2808,21 +2832,78 @@ mod tests {
         drop(retained);
         assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
 
-        // Bayer drizzle replays photosites, which are not kept.
-        let photosites = StackOptions {
-            cfa_integration: CfaIntegration::BayerDrizzle,
-            ..options
-        };
-        let retained = stack(&photosites, true);
-        assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
-        let replayed = retained.reintegrate(&batch, |_, _, _| {}).unwrap();
-        let expected = stack(&photosites, false)
-            .reintegrate(&batch, |_, _, _| {})
-            .unwrap();
-        assert_eq!(
-            bits(&replayed.snapshot.image.data),
-            bits(&expected.snapshot.image.data)
-        );
+        // Bayer drizzle keeps each frame's photosites, and under local
+        // background normalization the samples of its interpolated image
+        // that the background fit reads, and replays them in bands: to the
+        // bit what the whole-frame passes make from the sources, whether the
+        // backgrounds are fitted again, the recorded maps are used, or there
+        // are none.
+        for normalization in [
+            NormalizationMode::LocalBackground { tile_size: 32 },
+            NormalizationMode::Global,
+            NormalizationMode::None,
+        ] {
+            let photosites = StackOptions {
+                cfa_integration: CfaIntegration::BayerDrizzle,
+                normalization,
+                ..options.clone()
+            };
+            let retained = stack(&photosites, true);
+            let directories = std::fs::read_dir(&scratch)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect::<Vec<_>>();
+            assert_eq!(directories.len(), 1);
+            let mut kept = std::fs::read_dir(&directories[0])
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect::<Vec<_>>();
+            kept.sort();
+            let mut expected_files = (0..shifts.len())
+                .flat_map(|index| {
+                    let samples =
+                        matches!(normalization, NormalizationMode::LocalBackground { .. })
+                            .then(|| format!("frame-{index}.fit"));
+                    std::iter::once(format!("frame-{index}.f32")).chain(samples)
+                })
+                .collect::<Vec<_>>();
+            expected_files.sort();
+            assert_eq!(kept, expected_files, "{normalization:?}");
+            let fresh = stack(&photosites, false);
+            let (whole, whole_drizzled) = fresh
+                .replay_with(&batch, Some(&drizzle), |_, _, _| {}, false)
+                .unwrap();
+            let whole_drizzled = whole_drizzled.unwrap();
+            for stacker in [&retained, &fresh] {
+                let mut passes = Vec::new();
+                let (replayed, drizzled) = stacker
+                    .reintegrate_drizzled(&batch, &drizzle, |pass, _, _| passes.push(pass))
+                    .unwrap();
+                // The bands ran: no frame was read for a pass of its own.
+                assert!(!passes.contains(&crate::BatchStackPass::Refine));
+                assert_eq!(
+                    bits(&replayed.snapshot.image.data),
+                    bits(&whole.snapshot.image.data),
+                    "{normalization:?}"
+                );
+                assert_eq!(
+                    bits(&replayed.snapshot.variance.data),
+                    bits(&whole.snapshot.variance.data)
+                );
+                assert_eq!(replayed.snapshot.coverage, whole.snapshot.coverage);
+                assert_eq!(
+                    replayed.snapshot.rejected_samples,
+                    whole.snapshot.rejected_samples
+                );
+                assert_eq!(bits(&drizzled.image.data), bits(&whole_drizzled.image.data));
+                assert_eq!(
+                    bits(&drizzled.weight.data),
+                    bits(&whole_drizzled.weight.data)
+                );
+            }
+            drop(retained);
+            assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
+        }
     }
 
     #[test]

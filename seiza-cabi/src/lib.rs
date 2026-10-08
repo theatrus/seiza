@@ -2588,13 +2588,15 @@ pub unsafe extern "C" fn seiza_live_stacker_export_snapshot(
 ///
 /// Call this before pushing frames to a stack that will be reintegrated. The
 /// files take about four bytes per output sample per admitted frame (313 MB
-/// for each frame of a 26 MP colour sensor), in a new directory inside
+/// for each frame of a 26 MP colour sensor), and a sixteenth as much again
+/// under local background normalization, in a new directory inside
 /// `scratch_directory`, or the system temporary directory when that is null
 /// or empty. Freeing or finishing the stacker removes the directory. Frames
 /// admitted before the call, such as those of a stack reopened from a saved
-/// context, are prepared from their sources when replayed. A second call
-/// keeps the first directory. A stack that cannot be reintegrated, or that
-/// integrates Bayer photosites, keeps nothing and the call succeeds.
+/// context, are prepared from their sources when replayed. A stack that
+/// integrates Bayer photosites keeps each frame's photosites. A second call
+/// keeps the first directory. A stack that cannot be reintegrated keeps
+/// nothing and the call succeeds.
 ///
 /// # Safety
 /// `stacker` must be a live `SeizaLiveStacker` pointer, externally
