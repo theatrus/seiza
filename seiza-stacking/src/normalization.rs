@@ -325,48 +325,17 @@ impl NormalizationMap {
         if self.columns == 1 && self.rows == 1 {
             return self.apply_global(image);
         }
-
-        let x_weights = (0..image.width)
-            .map(|x| axis_weights(origin_x + x, self.columns, self.tile_size))
-            .collect::<Vec<_>>();
+        let rows = RowNormalizer::new(self, origin_x, image.width);
+        // Rows are taken in blocks, so each task works out a tile row's
+        // horizontal interpolation once for every row it normalizes.
+        const BLOCK_ROWS: usize = 64;
         let row_samples = image.width * image.channels;
         image
             .data
-            .par_chunks_mut(row_samples)
+            .par_chunks_mut(row_samples * BLOCK_ROWS)
             .enumerate()
-            .for_each(|(y, row)| {
-                let y_weights = axis_weights(origin_y + y, self.rows, self.tile_size);
-                for (x, pixel) in row.chunks_exact_mut(self.channels).enumerate() {
-                    let x_weights = x_weights[x];
-                    let top_left = (y_weights.low * self.columns + x_weights.low) * self.channels;
-                    let top_right = (y_weights.low * self.columns + x_weights.high) * self.channels;
-                    let bottom_left =
-                        (y_weights.high * self.columns + x_weights.low) * self.channels;
-                    let bottom_right =
-                        (y_weights.high * self.columns + x_weights.high) * self.channels;
-                    for (channel, value) in pixel.iter_mut().enumerate() {
-                        if !value.is_finite() {
-                            continue;
-                        }
-                        let gain = bilinear(
-                            self.gains[top_left + channel],
-                            self.gains[top_right + channel],
-                            self.gains[bottom_left + channel],
-                            self.gains[bottom_right + channel],
-                            x_weights.fraction,
-                            y_weights.fraction,
-                        );
-                        let offset = bilinear(
-                            self.offsets[top_left + channel],
-                            self.offsets[top_right + channel],
-                            self.offsets[bottom_left + channel],
-                            self.offsets[bottom_right + channel],
-                            x_weights.fraction,
-                            y_weights.fraction,
-                        );
-                        *value = value.mul_add(gain, offset);
-                    }
-                }
+            .for_each_init(RowCoefficients::default, |coefficients, (block, data)| {
+                rows.apply(coefficients, data, origin_y + block * BLOCK_ROWS);
             });
         Ok(())
     }
@@ -508,6 +477,146 @@ impl NormalizationMap {
             (f32::INFINITY, f32::NEG_INFINITY),
             |(minimum, maximum), gain| (minimum.min(gain), maximum.max(gain)),
         )
+    }
+}
+
+/// Applies a map to whole rows of an image or a crop of it, a run of rows
+/// at a time, giving every sample exactly what [`NormalizationMap::apply`]
+/// gives it.
+///
+/// Each sample's gain and offset are interpolated bilinearly between the
+/// four tiles around it. Every row between two tile centres shares those
+/// tiles, so the interpolation across columns is worked out once for such a
+/// run of rows ([`RowCoefficients`]); each row then needs only the
+/// interpolation down the column, with the same arithmetic in the same
+/// order as [`bilinear`].
+pub(crate) struct RowNormalizer<'a> {
+    map: &'a NormalizationMap,
+    /// The tile weights of each column, empty for a one-tile map.
+    columns: Vec<AxisWeights>,
+}
+
+/// One task's interpolation across columns for the rows between two tile
+/// centres: the gains and offsets along the tile row above and below.
+#[derive(Default)]
+pub(crate) struct RowCoefficients {
+    /// The tile rows above and below that the vectors hold.
+    tile_rows: Option<(usize, usize)>,
+    top_gain: Vec<f32>,
+    bottom_gain: Vec<f32>,
+    top_offset: Vec<f32>,
+    bottom_offset: Vec<f32>,
+}
+
+impl<'a> RowNormalizer<'a> {
+    /// A normalizer for rows `width` pixels wide starting at column
+    /// `origin_x` of the grid `map` was fitted on.
+    pub(crate) fn new(map: &'a NormalizationMap, origin_x: usize, width: usize) -> Self {
+        let columns = if map.columns == 1 && map.rows == 1 {
+            Vec::new()
+        } else {
+            (0..width)
+                .map(|x| axis_weights(origin_x + x, map.columns, map.tile_size))
+                .collect()
+        };
+        Self { map, columns }
+    }
+
+    /// Normalize `data`, whole rows of interleaved samples, the first of
+    /// which is row `first_row` of the fitted grid. Non-finite samples are
+    /// left as they are.
+    pub(crate) fn apply(
+        &self,
+        coefficients: &mut RowCoefficients,
+        data: &mut [f32],
+        first_row: usize,
+    ) {
+        let map = self.map;
+        if self.columns.is_empty() {
+            apply_affine(data, &map.gains, &map.offsets);
+            return;
+        }
+        let channels = map.channels;
+        let row_samples = self.columns.len() * channels;
+        for (offset, row) in data.chunks_exact_mut(row_samples).enumerate() {
+            let rows = axis_weights(first_row + offset, map.rows, map.tile_size);
+            if coefficients.tile_rows != Some((rows.low, rows.high)) {
+                coefficients.fill(map, &self.columns, rows.low, rows.high);
+            }
+            apply_interpolated(
+                row,
+                &coefficients.top_gain,
+                &coefficients.bottom_gain,
+                &coefficients.top_offset,
+                &coefficients.bottom_offset,
+                rows.fraction,
+            );
+        }
+    }
+}
+
+impl RowCoefficients {
+    /// Interpolate tile rows `top` and `bottom` across every column, as the
+    /// first two lines of [`bilinear`] do.
+    fn fill(&mut self, map: &NormalizationMap, columns: &[AxisWeights], top: usize, bottom: usize) {
+        let channels = map.channels;
+        let samples = columns.len() * channels;
+        for vector in [
+            &mut self.top_gain,
+            &mut self.bottom_gain,
+            &mut self.top_offset,
+            &mut self.bottom_offset,
+        ] {
+            vector.resize(samples, 0.0);
+        }
+        let (top, bottom) = (top * map.columns, bottom * map.columns);
+        for (x, weights) in columns.iter().enumerate() {
+            let (left, right) = (1.0 - weights.fraction, weights.fraction);
+            for channel in 0..channels {
+                let at = x * channels + channel;
+                let corner = |row: usize, column: usize| (row + column) * channels + channel;
+                let (top_left, top_right) = (corner(top, weights.low), corner(top, weights.high));
+                let (bottom_left, bottom_right) =
+                    (corner(bottom, weights.low), corner(bottom, weights.high));
+                self.top_gain[at] = map.gains[top_left] * left + map.gains[top_right] * right;
+                self.bottom_gain[at] =
+                    map.gains[bottom_left] * left + map.gains[bottom_right] * right;
+                self.top_offset[at] = map.offsets[top_left] * left + map.offsets[top_right] * right;
+                self.bottom_offset[at] =
+                    map.offsets[bottom_left] * left + map.offsets[bottom_right] * right;
+            }
+        }
+        self.tile_rows = Some((top / map.columns, bottom / map.columns));
+    }
+}
+
+/// `value * gain + offset` on one row, with each gain and offset
+/// interpolated down the column from the tile rows above and below, as the
+/// last line of [`bilinear`] does. Non-finite samples are left alone.
+/// `mul_add` rounds once however it is computed, so the dispatched builds
+/// match the baseline one.
+#[multiversion::multiversion(targets("x86_64+avx2+fma", "aarch64+neon"))]
+fn apply_interpolated(
+    row: &mut [f32],
+    top_gain: &[f32],
+    bottom_gain: &[f32],
+    top_offset: &[f32],
+    bottom_offset: &[f32],
+    fraction: f32,
+) {
+    let above = 1.0 - fraction;
+    for ((((value, &top_gain), &bottom_gain), &top_offset), &bottom_offset) in row
+        .iter_mut()
+        .zip(top_gain)
+        .zip(bottom_gain)
+        .zip(top_offset)
+        .zip(bottom_offset)
+    {
+        let gain = top_gain * above + bottom_gain * fraction;
+        let offset = top_offset * above + bottom_offset * fraction;
+        if value.is_finite() {
+            *value = value.mul_add(gain, offset);
+        }
     }
 }
 
@@ -1096,6 +1205,96 @@ mod tests {
         map.apply(&mut normalized).unwrap();
         assert!((map.mean_gain() - 0.5).abs() < 1.0e-5);
         assert!((normalized.data[100] - reference.data[100]).abs() < 1.0e-3);
+    }
+
+    /// The row normalizer must give every sample what the per-sample
+    /// bilinear interpolation gives it: whole images, crops, and runs of
+    /// rows taken in any grouping.
+    #[test]
+    fn row_normalizer_matches_per_sample_interpolation_bit_for_bit() {
+        let (width, height, channels, tile_size): (usize, usize, usize, usize) = (83, 61, 3, 16);
+        let (columns, rows) = (width.div_ceil(tile_size), height.div_ceil(tile_size));
+        let coefficient =
+            |index: usize, scale: f32| ((index * 37 % 101) as f32 / 101.0 - 0.5) * scale;
+        let map = NormalizationMap {
+            schema_version: NORMALIZATION_MAP_SCHEMA_VERSION,
+            width,
+            height,
+            channels,
+            tile_size,
+            columns,
+            rows,
+            gains: (0..columns * rows * channels)
+                .map(|index| 1.0 + coefficient(index, 0.3))
+                .collect(),
+            offsets: (0..columns * rows * channels)
+                .map(|index| coefficient(index + 5, 700.0))
+                .collect(),
+        };
+        let source = LinearImage::new(
+            width,
+            height,
+            channels,
+            (0..width * height * channels)
+                .map(|index| match index % 97 {
+                    0 => f32::NAN,
+                    1 => f32::INFINITY,
+                    _ => 1000.0 + (index * 7919 % 4093) as f32 * 1.37,
+                })
+                .collect(),
+        )
+        .unwrap();
+        let sampler = map.sampler();
+        let expected = source
+            .data
+            .iter()
+            .enumerate()
+            .map(|(index, &value)| {
+                let (pixel, channel) = (index / channels, index % channels);
+                let (gain, offset) = sampler.at(pixel % width, pixel / width, channel);
+                if value.is_finite() {
+                    value.mul_add(gain, offset)
+                } else {
+                    value
+                }
+            })
+            .map(f32::to_bits)
+            .collect::<Vec<_>>();
+        let bits = |data: &[f32]| data.iter().map(|value| value.to_bits()).collect::<Vec<_>>();
+        let mut whole = source.clone();
+        map.apply(&mut whole).unwrap();
+        assert_eq!(bits(&whole.data), expected);
+        let row_samples = width * channels;
+        for run in [1, 5, 16, 17, height] {
+            let normalizer = RowNormalizer::new(&map, 0, width);
+            let mut coefficients = RowCoefficients::default();
+            let mut data = source.data.clone();
+            for (index, rows) in data.chunks_mut(row_samples * run).enumerate() {
+                normalizer.apply(&mut coefficients, rows, index * run);
+            }
+            assert_eq!(bits(&data), expected, "runs of {run} rows");
+        }
+        let (x, y, crop_width, crop_height) = (13, 9, 40, 30);
+        let mut crop = LinearImage::new(
+            crop_width,
+            crop_height,
+            channels,
+            (0..crop_height)
+                .flat_map(|row| {
+                    let start = ((y + row) * width + x) * channels;
+                    source.data[start..start + crop_width * channels].to_vec()
+                })
+                .collect(),
+        )
+        .unwrap();
+        map.apply_region(&mut crop, x, y).unwrap();
+        for row in 0..crop_height {
+            let start = ((y + row) * width + x) * channels;
+            assert_eq!(
+                bits(&crop.data[row * crop_width * channels..(row + 1) * crop_width * channels]),
+                expected[start..start + crop_width * channels]
+            );
+        }
     }
 
     #[test]

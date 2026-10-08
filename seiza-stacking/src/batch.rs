@@ -1,7 +1,9 @@
 use crate::{CancelSignal, Error, LinearImage, MasterRejectionOptions, Result, StackSnapshot};
 use rayon::prelude::*;
-use sha2::{Digest, Sha256};
 use statrs::distribution::{Continuous, ContinuousCDF, Normal, StudentsT};
+
+#[cfg(test)]
+mod reference;
 
 /// Rejection options for a completed stack of registered, normalized frames.
 #[derive(Clone, Debug)]
@@ -103,15 +105,16 @@ pub struct BatchStackResult {
 /// is not a median/MAD estimator.
 ///
 /// The loader must return the same calibrated, registered, normalized image
-/// for an index on every pass. Shapes and sample digests are checked before
-/// accumulation. The caller owns registration, whole-frame admission, and
-/// source provenance; no registration, normalization, or frame-level quality
-/// decisions are repeated here. All supplied frames count as admitted.
+/// for an index on every pass. Shapes and sample checksums are checked
+/// before accumulation. The caller owns registration, whole-frame admission,
+/// and source provenance; no registration, normalization, or frame-level
+/// quality decisions are repeated here. All supplied frames count as
+/// admitted.
 ///
-/// Memory is proportional to the output dimensions, not the number of frames:
-/// approximately 64 bytes per sample (68 with frame weights) plus one loaded
-/// input and small per-frame digests. Drop any online accumulator before
-/// calling this when memory is tight.
+/// Memory is approximately 40 bytes per sample (44 with frame weights) plus
+/// one loaded input, and one bit per sample per frame for the second pass's
+/// decisions, which the third reuses rather than working out again. Drop any
+/// online accumulator before calling this when memory is tight.
 ///
 /// With [`BatchStackOptions::frame_weights`] every pass uses West's weighted
 /// mean and variance. A candidate is compared to the weighted mean of the
@@ -137,43 +140,13 @@ pub(crate) enum SampleFate {
     Integrated,
 }
 
-impl SampleFate {
-    /// Finite and integrated sample counts.
-    fn counts(self) -> (usize, usize) {
-        match self {
-            Self::Missing => (0, 0),
-            Self::Rejected => (1, 0),
-            Self::Integrated => (1, 1),
-        }
-    }
-}
-
 /// What the final pass did with each sample of each frame, in loader index
 /// order.
 pub(crate) type RejectionObserver<'a> = &'a mut dyn FnMut(usize, Vec<SampleFate>) -> Result<()>;
 
-/// Count a frame's finite and integrated samples, handing their fates to
-/// `observe` when there is one. Without an observer the fates are only
-/// counted, never stored.
-fn settle_frame(
-    index: usize,
-    fates: impl IndexedParallelIterator<Item = SampleFate>,
-    observe: &mut Option<RejectionObserver<'_>>,
-) -> Result<(usize, usize)> {
-    let sum = |left: (usize, usize), right: (usize, usize)| (left.0 + right.0, left.1 + right.1);
-    match observe {
-        Some(observe) => {
-            let fates = fates.collect::<Vec<_>>();
-            let counts = fates
-                .par_iter()
-                .map(|fate| fate.counts())
-                .reduce(|| (0, 0), sum);
-            observe(index, fates)?;
-            Ok(counts)
-        }
-        None => Ok(fates.map(SampleFate::counts).reduce(|| (0, 0), sum)),
-    }
-}
+/// Pixels in the run of samples one task takes through a pass: a multiple
+/// of 64, so a run of keep bits starts on a word whatever the channel count.
+const CHUNK_PIXELS: usize = 1024;
 
 /// [`integrate_registered_frames`], also handing each frame's rejections to
 /// `observe` as the final pass integrates it.
@@ -181,8 +154,28 @@ pub(crate) fn integrate_registered_frames_observed(
     frame_count: usize,
     options: &BatchStackOptions,
     mut load: impl FnMut(BatchStackPass, usize) -> Result<LinearImage>,
-    mut observe: Option<RejectionObserver<'_>>,
+    observe: Option<RejectionObserver<'_>>,
 ) -> Result<BatchStackResult> {
+    validate_options(frame_count, options)?;
+    let first_image = load_unchanged(options, &mut load, BatchStackPass::Estimate, 0, None)?;
+    match (&options.frame_weights, first_image.channels) {
+        (None, _) => {
+            let weights = vec![ChannelWeights::<1>::unit(); frame_count];
+            integrate_frames::<1, false>(options, &weights, first_image, load, observe)
+        }
+        (Some(frame_weights), 1) => {
+            let weights = ChannelWeights::<1>::for_frames(frame_weights)?;
+            integrate_frames::<1, true>(options, &weights, first_image, load, observe)
+        }
+        (Some(frame_weights), _) => {
+            let weights = ChannelWeights::<3>::for_frames(frame_weights)?;
+            integrate_frames::<3, true>(options, &weights, first_image, load, observe)
+        }
+    }
+}
+
+/// Check the frame count, the rejection options and any frame weights.
+pub(crate) fn validate_options(frame_count: usize, options: &BatchStackOptions) -> Result<()> {
     if frame_count == 0 || frame_count > u32::MAX as usize {
         return Err(Error::Stack(
             "batch stack frame count must fit a nonzero u32".into(),
@@ -215,291 +208,383 @@ pub(crate) fn integrate_registered_frames_observed(
             ));
         }
     }
-    if options.frame_weights.is_some() {
-        return integrate_weighted_frames(frame_count, options, load, observe);
-    }
-    let rejection = Rejection::new(frame_count, options);
-
-    // First estimate: every finite sample, and each pixel's extremes.
-    let mut shape = None;
-    let mut first = Vec::<FirstEstimate>::new();
-    let mut digests = Vec::with_capacity(frame_count);
-    for index in 0..frame_count {
-        let image = load_unchanged(options, &mut load, BatchStackPass::Estimate, index, shape)?;
-        if shape.is_none() {
-            shape = Some((image.width, image.height, image.channels));
-            first.resize(image.sample_count(), FirstEstimate::default());
-        }
-        digests.push(sample_digest(&image.data));
-        first
-            .par_iter_mut()
-            .zip(image.data.par_iter())
-            .for_each(|(first, &sample)| {
-                if sample.is_finite() {
-                    first.take(sample, 1.0);
-                }
-            });
-    }
-    first
-        .par_iter_mut()
-        .for_each(|first| first.finish(&rejection));
-
-    // Second estimate: only the samples the first keeps.
-    let mut kept = vec![Moments::default(); first.len()];
-    for (index, expected_digest) in digests.iter().enumerate() {
-        let image = load_matching(
-            options,
-            &mut load,
-            BatchStackPass::Refine,
-            index,
-            shape,
-            expected_digest,
-        )?;
-        kept.par_iter_mut()
-            .zip(first.par_iter())
-            .zip(image.data.par_iter())
-            .for_each(|((kept, first), &sample)| {
-                if sample.is_finite() && first.keeps(sample, 1.0, &rejection) {
-                    *kept = kept.with(sample, 1.0);
-                }
-            });
-    }
-
-    // Integrate the samples the second estimate keeps.
-    let mut integrated = vec![0.0_f32; first.len()];
-    let mut variance = vec![0.0_f32; first.len()];
-    let mut coverage = vec![0_u32; first.len()];
-    let mut rejected = vec![0_u32; first.len()];
-    let mut frames = Vec::with_capacity(frame_count);
-    for (index, expected_digest) in digests.iter().enumerate() {
-        let image = load_matching(
-            options,
-            &mut load,
-            BatchStackPass::Integrate,
-            index,
-            shape,
-            expected_digest,
-        )?;
-        let fates = integrated
-            .par_iter_mut()
-            .zip(variance.par_iter_mut())
-            .zip(coverage.par_iter_mut())
-            .zip(rejected.par_iter_mut())
-            .enumerate()
-            .map(
-                |(sample_index, (((integrated, variance), coverage), rejected))| {
-                    let sample = image.data[sample_index];
-                    if !sample.is_finite() {
-                        return SampleFate::Missing;
-                    }
-                    if kept_peers(
-                        &first[sample_index],
-                        kept[sample_index],
-                        sample,
-                        1.0,
-                        &rejection,
-                    )
-                    .rejects(sample, 1.0, &rejection)
-                    {
-                        *rejected += 1;
-                        return SampleFate::Rejected;
-                    }
-                    *coverage += 1;
-                    let delta = f64::from(sample) - f64::from(*integrated);
-                    let next_mean = f64::from(*integrated) + delta / f64::from(*coverage);
-                    *variance =
-                        (f64::from(*variance) + delta * (f64::from(sample) - next_mean)) as f32;
-                    *integrated = next_mean as f32;
-                    SampleFate::Integrated
-                },
-            );
-        let (finite_samples, integrated_samples) = settle_frame(index, fates, &mut observe)?;
-        frames.push(BatchFrameDiagnostics {
-            finite_samples,
-            integrated_samples,
-        });
-    }
-    check_cancelled(options)?;
-    for ((integrated, variance), &coverage) in
-        integrated.iter_mut().zip(&mut variance).zip(&coverage)
-    {
-        if coverage == 0 {
-            *integrated = f32::NAN;
-        }
-        *variance = if coverage > 1 {
-            (*variance / (coverage - 1) as f32).max(0.0)
-        } else {
-            0.0
-        };
-    }
-    let (width, height, channels) = shape.expect("at least one frame was read");
-    Ok(BatchStackResult {
-        snapshot: StackSnapshot {
-            image: LinearImage::new(width, height, channels, integrated)?,
-            variance: LinearImage::new(width, height, channels, variance)?,
-            coverage,
-            rejected_samples: rejected,
-            accepted_frames: frame_count as u32,
-            rejected_frames: 0,
-        },
-        frames,
-    })
+    Ok(())
 }
 
-/// The weighted form of [`integrate_registered_frames`]: the same three
-/// passes, with West's weighted moments and a weighted integration.
-fn integrate_weighted_frames(
-    frame_count: usize,
+/// The three passes, one whole frame at a time, over frames of `C` channels
+/// (or any channel count when every weight is 1 and `C` is 1). `WEIGHTED`
+/// chooses West's weighted integration over Welford's.
+fn integrate_frames<const C: usize, const WEIGHTED: bool>(
     options: &BatchStackOptions,
+    weights: &[ChannelWeights<C>],
+    first_image: LinearImage,
     mut load: impl FnMut(BatchStackPass, usize) -> Result<LinearImage>,
     mut observe: Option<RejectionObserver<'_>>,
 ) -> Result<BatchStackResult> {
-    let frame_weights = options
-        .frame_weights
-        .as_deref()
-        .expect("weighted integration needs frame weights");
+    let frame_count = weights.len();
     let rejection = Rejection::new(frame_count, options);
-    let weight_at = |index: usize, sample_index: usize, channels: usize| {
-        f64::from(frame_weights[index][sample_index % channels])
-    };
+    let (width, height, channels) = (first_image.width, first_image.height, first_image.channels);
+    let shape = Some((width, height, channels));
+    let samples = first_image.sample_count();
+    let chunk = CHUNK_PIXELS * C;
 
-    let mut shape = None;
-    let mut first = Vec::<FirstEstimate>::new();
-    let mut digests = Vec::with_capacity(frame_count);
-    for (index, weights) in frame_weights.iter().enumerate() {
-        let image = load_unchanged(options, &mut load, BatchStackPass::Estimate, index, shape)?;
-        validate_frame_weights(index, weights, image.channels)?;
-        if shape.is_none() {
-            shape = Some((image.width, image.height, image.channels));
-            first.resize(image.sample_count(), FirstEstimate::default());
-        }
-        digests.push(sample_digest(&image.data));
-        let channels = image.channels;
+    // First estimate: every finite sample, and each pixel's extremes.
+    let mut first = vec![FirstEstimate::default(); samples];
+    let mut checksums = Vec::with_capacity(frame_count);
+    let mut first_image = Some(first_image);
+    for (index, weights) in weights.iter().enumerate() {
+        let image = match first_image.take() {
+            Some(image) => image,
+            None => load_unchanged(options, &mut load, BatchStackPass::Estimate, index, shape)?,
+        };
+        checksums.push(sample_checksum(&image.data));
         first
-            .par_iter_mut()
-            .zip(image.data.par_iter())
-            .enumerate()
-            .for_each(|(sample_index, (first, &sample))| {
-                if sample.is_finite() {
-                    first.take(sample, weight_at(index, sample_index, channels));
-                }
-            });
+            .par_chunks_mut(chunk)
+            .zip(image.data.par_chunks(chunk))
+            .for_each(|(first, samples)| estimate_chunk(first, samples, weights));
     }
     first
-        .par_iter_mut()
-        .for_each(|first| first.finish(&rejection));
+        .par_chunks_mut(chunk)
+        .for_each(|first| first.iter_mut().for_each(|first| first.finish(&rejection)));
 
-    let mut kept = vec![Moments::default(); first.len()];
-    for (index, expected_digest) in digests.iter().enumerate() {
+    // Second estimate: only the samples the first keeps, noting which
+    // those were so the final pass need not judge them again.
+    let mut kept = vec![Moments::default(); samples];
+    let mut keep = Vec::with_capacity(frame_count);
+    for (index, (weights, &checksum)) in weights.iter().zip(&checksums).enumerate() {
         let image = load_matching(
             options,
             &mut load,
             BatchStackPass::Refine,
             index,
             shape,
-            expected_digest,
+            checksum,
         )?;
-        let channels = image.channels;
-        kept.par_iter_mut()
-            .zip(first.par_iter())
-            .zip(image.data.par_iter())
-            .enumerate()
-            .for_each(|(sample_index, ((kept, first), &sample))| {
-                let weight = weight_at(index, sample_index, channels);
-                if sample.is_finite() && first.keeps(sample, weight, &rejection) {
-                    *kept = kept.with(sample, weight);
-                }
+        let mut bits = vec![0_u64; samples.div_ceil(64)];
+        kept.par_chunks_mut(chunk)
+            .zip(first.par_chunks(chunk))
+            .zip(image.data.par_chunks(chunk))
+            .zip(bits.par_chunks_mut(chunk / 64))
+            .for_each(|(((kept, first), samples), bits)| {
+                refine_chunk(kept, first, samples, weights, &rejection, bits);
             });
+        keep.push(bits);
     }
+    drop(first);
 
-    let mut integrated = vec![0.0_f32; first.len()];
-    let mut variance = vec![0.0_f32; first.len()];
-    let mut integrated_weight = vec![0.0_f32; first.len()];
-    let mut coverage = vec![0_u32; first.len()];
-    let mut rejected = vec![0_u32; first.len()];
+    // Integrate the samples the second estimate keeps.
+    let mut outputs = Outputs::new(samples, WEIGHTED);
     let mut frames = Vec::with_capacity(frame_count);
-    for (index, expected_digest) in digests.iter().enumerate() {
+    for (index, (weights, &checksum)) in weights.iter().zip(&checksums).enumerate() {
         let image = load_matching(
             options,
             &mut load,
             BatchStackPass::Integrate,
             index,
             shape,
-            expected_digest,
+            checksum,
         )?;
-        let channels = image.channels;
-        let fates = integrated
-            .par_iter_mut()
-            .zip(variance.par_iter_mut())
-            .zip(integrated_weight.par_iter_mut())
-            .zip(coverage.par_iter_mut())
-            .zip(rejected.par_iter_mut())
-            .enumerate()
-            .map(
-                |(
-                    sample_index,
-                    ((((integrated, variance), integrated_weight), coverage), rejected),
-                )| {
-                    let sample = image.data[sample_index];
-                    if !sample.is_finite() {
-                        return SampleFate::Missing;
-                    }
-                    let weight = weight_at(index, sample_index, channels);
-                    if kept_peers(
-                        &first[sample_index],
-                        kept[sample_index],
-                        sample,
-                        weight,
+        let keep = std::mem::take(&mut keep[index]);
+        let chunks = outputs
+            .chunks_mut(0..samples, chunk)
+            .zip(kept.par_chunks(chunk))
+            .zip(image.data.par_chunks(chunk))
+            .zip(keep.par_chunks(chunk / 64));
+        let sum =
+            |left: (usize, usize), right: (usize, usize)| (left.0 + right.0, left.1 + right.1);
+        let (finite_samples, integrated_samples) = match &mut observe {
+            Some(observe) => {
+                let mut fates = vec![SampleFate::Missing; samples];
+                let counts = chunks
+                    .zip(fates.par_chunks_mut(chunk))
+                    .map(|((((output, kept), samples), keep), fates)| {
+                        integrate_chunk::<C, WEIGHTED>(
+                            output,
+                            kept,
+                            samples,
+                            keep,
+                            weights,
+                            &rejection,
+                            |at, fate| fates[at] = fate,
+                        )
+                    })
+                    .reduce(|| (0, 0), sum);
+                observe(index, fates)?;
+                counts
+            }
+            None => chunks
+                .map(|(((output, kept), samples), keep)| {
+                    integrate_chunk::<C, WEIGHTED>(
+                        output,
+                        kept,
+                        samples,
+                        keep,
+                        weights,
                         &rejection,
+                        |_, _| {},
                     )
-                    .rejects(sample, weight, &rejection)
-                    {
-                        *rejected += 1;
-                        return SampleFate::Rejected;
-                    }
-                    *coverage += 1;
-                    let next_weight = f64::from(*integrated_weight) + weight;
-                    let weighted_delta = (f64::from(sample) - f64::from(*integrated)) * weight;
-                    let next_mean = f64::from(*integrated) + weighted_delta / next_weight;
-                    *variance = (f64::from(*variance)
-                        + weighted_delta * (f64::from(sample) - next_mean))
-                        as f32;
-                    *integrated = next_mean as f32;
-                    *integrated_weight = next_weight as f32;
-                    SampleFate::Integrated
-                },
-            );
-        let (finite_samples, integrated_samples) = settle_frame(index, fates, &mut observe)?;
+                })
+                .reduce(|| (0, 0), sum),
+        };
         frames.push(BatchFrameDiagnostics {
             finite_samples,
             integrated_samples,
         });
     }
     check_cancelled(options)?;
-    for ((integrated, variance), &coverage) in
-        integrated.iter_mut().zip(&mut variance).zip(&coverage)
-    {
-        if coverage == 0 {
-            *integrated = f32::NAN;
+    outputs.finish(width, height, channels, frame_count, frames)
+}
+
+/// One frame's weight, and its reciprocal, in each of `C` channels.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ChannelWeights<const C: usize> {
+    weight: [f64; C],
+    inverse: [f64; C],
+}
+
+impl<const C: usize> ChannelWeights<C> {
+    /// Weight 1 in every channel.
+    pub(crate) fn unit() -> Self {
+        Self {
+            weight: [1.0; C],
+            inverse: [1.0; C],
         }
-        *variance = if coverage > 1 {
-            (*variance / (coverage - 1) as f32).max(0.0)
-        } else {
-            0.0
-        };
     }
-    let (width, height, channels) = shape.expect("at least one frame was read");
-    Ok(BatchStackResult {
-        snapshot: StackSnapshot {
-            image: LinearImage::new(width, height, channels, integrated)?,
-            variance: LinearImage::new(width, height, channels, variance)?,
+
+    /// Each frame's weights, checking one per channel.
+    pub(crate) fn for_frames(frame_weights: &[Vec<f32>]) -> Result<Vec<Self>> {
+        frame_weights
+            .iter()
+            .enumerate()
+            .map(|(index, weights)| {
+                validate_frame_weights(index, weights, C)?;
+                let weight = std::array::from_fn(|channel| f64::from(weights[channel]));
+                Ok(Self {
+                    weight,
+                    inverse: weight.map(|weight| 1.0 / weight),
+                })
+            })
+            .collect()
+    }
+}
+
+/// The integration's per-sample output: the running mean, the sum of
+/// squared deviations, the integrated weight (weighted stacks only), and
+/// the integrated and rejected sample counts.
+pub(crate) struct Outputs {
+    mean: Vec<f32>,
+    variance: Vec<f32>,
+    weight: Vec<f32>,
+    coverage: Vec<u32>,
+    rejected: Vec<u32>,
+}
+
+/// The outputs for one run of samples.
+pub(crate) struct OutputChunk<'a> {
+    mean: &'a mut [f32],
+    variance: &'a mut [f32],
+    /// Empty unless the stack is weighted.
+    weight: &'a mut [f32],
+    coverage: &'a mut [u32],
+    rejected: &'a mut [u32],
+}
+
+impl Outputs {
+    pub(crate) fn new(samples: usize, weighted: bool) -> Self {
+        Self {
+            mean: vec![0.0; samples],
+            variance: vec![0.0; samples],
+            weight: if weighted {
+                vec![0.0; samples]
+            } else {
+                Vec::new()
+            },
+            coverage: vec![0; samples],
+            rejected: vec![0; samples],
+        }
+    }
+
+    /// The outputs for `range`, in runs of `size` samples.
+    pub(crate) fn chunks_mut(
+        &mut self,
+        range: std::ops::Range<usize>,
+        size: usize,
+    ) -> impl IndexedParallelIterator<Item = OutputChunk<'_>> {
+        let runs = range.len().div_ceil(size);
+        let weight = if self.weight.is_empty() {
+            rayon::iter::Either::Left((0..runs).into_par_iter().map(|_| &mut [][..]))
+        } else {
+            rayon::iter::Either::Right(self.weight[range.clone()].par_chunks_mut(size))
+        };
+        self.mean[range.clone()]
+            .par_chunks_mut(size)
+            .zip(self.variance[range.clone()].par_chunks_mut(size))
+            .zip(weight)
+            .zip(self.coverage[range.clone()].par_chunks_mut(size))
+            .zip(self.rejected[range].par_chunks_mut(size))
+            .map(
+                |((((mean, variance), weight), coverage), rejected)| OutputChunk {
+                    mean,
+                    variance,
+                    weight,
+                    coverage,
+                    rejected,
+                },
+            )
+    }
+
+    /// The final mean and variance, with `NaN` where nothing was integrated.
+    pub(crate) fn finish(
+        self,
+        width: usize,
+        height: usize,
+        channels: usize,
+        frame_count: usize,
+        frames: Vec<BatchFrameDiagnostics>,
+    ) -> Result<BatchStackResult> {
+        let Self {
+            mut mean,
+            mut variance,
             coverage,
-            rejected_samples: rejected,
-            accepted_frames: frame_count as u32,
-            rejected_frames: 0,
-        },
-        frames,
-    })
+            rejected,
+            ..
+        } = self;
+        for ((integrated, variance), &coverage) in mean.iter_mut().zip(&mut variance).zip(&coverage)
+        {
+            if coverage == 0 {
+                *integrated = f32::NAN;
+            }
+            *variance = if coverage > 1 {
+                (*variance / (coverage - 1) as f32).max(0.0)
+            } else {
+                0.0
+            };
+        }
+        Ok(BatchStackResult {
+            snapshot: StackSnapshot {
+                image: LinearImage::new(width, height, channels, mean)?,
+                variance: LinearImage::new(width, height, channels, variance)?,
+                coverage,
+                rejected_samples: rejected,
+                accepted_frames: frame_count as u32,
+                rejected_frames: 0,
+            },
+            frames,
+        })
+    }
+}
+
+/// Pass 1 over a run of one frame's samples, which starts on a pixel of `C`
+/// channels.
+#[inline]
+pub(crate) fn estimate_chunk<const C: usize>(
+    first: &mut [FirstEstimate],
+    samples: &[f32],
+    weights: &ChannelWeights<C>,
+) {
+    for (first, samples) in first.chunks_exact_mut(C).zip(samples.chunks_exact(C)) {
+        for channel in 0..C {
+            let sample = samples[channel];
+            if sample.is_finite() {
+                first[channel].take(sample, weights.weight[channel]);
+            }
+        }
+    }
+}
+
+/// Pass 2 over a run of one frame's samples, setting the bit in `keep`
+/// (zeroed, one per sample) of each sample the first estimate keeps.
+#[inline]
+pub(crate) fn refine_chunk<const C: usize>(
+    kept: &mut [Moments],
+    first: &[FirstEstimate],
+    samples: &[f32],
+    weights: &ChannelWeights<C>,
+    rejection: &Rejection,
+    keep: &mut [u64],
+) {
+    for (pixel, ((kept, first), samples)) in kept
+        .chunks_exact_mut(C)
+        .zip(first.chunks_exact(C))
+        .zip(samples.chunks_exact(C))
+        .enumerate()
+    {
+        for channel in 0..C {
+            let sample = samples[channel];
+            let (weight, inverse) = (weights.weight[channel], weights.inverse[channel]);
+            if sample.is_finite() && first[channel].keeps(sample, weight, inverse, rejection) {
+                kept[channel] = kept[channel].with(sample, weight);
+                let at = pixel * C + channel;
+                keep[at / 64] |= 1 << (at % 64);
+            }
+        }
+    }
+}
+
+/// Pass 3 over a run of one frame's samples: reject each against the
+/// second estimate's other samples and integrate the rest, handing each
+/// sample's fate to `record` and returning the run's finite and integrated
+/// counts.
+#[inline]
+pub(crate) fn integrate_chunk<const C: usize, const WEIGHTED: bool>(
+    output: OutputChunk<'_>,
+    kept: &[Moments],
+    samples: &[f32],
+    keep: &[u64],
+    weights: &ChannelWeights<C>,
+    rejection: &Rejection,
+    mut record: impl FnMut(usize, SampleFate),
+) -> (usize, usize) {
+    let (mut finite, mut integrated) = (0, 0);
+    for pixel in 0..samples.len() / C {
+        for channel in 0..C {
+            let at = pixel * C + channel;
+            let sample = samples[at];
+            let fate = if sample.is_finite() {
+                finite += 1;
+                let (weight, inverse) = (weights.weight[channel], weights.inverse[channel]);
+                let peers = if keep[at / 64] >> (at % 64) & 1 != 0 {
+                    kept[at].without(sample, weight)
+                } else {
+                    kept[at]
+                };
+                if peers
+                    .scaled(rejection.clipped_correction)
+                    .rejects(sample, weight, inverse, rejection)
+                {
+                    output.rejected[at] += 1;
+                    SampleFate::Rejected
+                } else {
+                    integrated += 1;
+                    output.coverage[at] += 1;
+                    let mean = &mut output.mean[at];
+                    let variance = &mut output.variance[at];
+                    if WEIGHTED {
+                        let integrated_weight = &mut output.weight[at];
+                        let next_weight = f64::from(*integrated_weight) + weight;
+                        let weighted_delta = (f64::from(sample) - f64::from(*mean)) * weight;
+                        let next_mean = f64::from(*mean) + weighted_delta / next_weight;
+                        *variance = (f64::from(*variance)
+                            + weighted_delta * (f64::from(sample) - next_mean))
+                            as f32;
+                        *mean = next_mean as f32;
+                        *integrated_weight = next_weight as f32;
+                    } else {
+                        let delta = f64::from(sample) - f64::from(*mean);
+                        let next_mean = f64::from(*mean) + delta / f64::from(output.coverage[at]);
+                        *variance =
+                            (f64::from(*variance) + delta * (f64::from(sample) - next_mean)) as f32;
+                        *mean = next_mean as f32;
+                    }
+                    SampleFate::Integrated
+                }
+            } else {
+                SampleFate::Missing
+            };
+            record(at, fate);
+        }
+    }
+    (finite, integrated)
 }
 
 fn validate_frame_weights(index: usize, weights: &[f32], channels: usize) -> Result<()> {
@@ -512,7 +597,7 @@ fn validate_frame_weights(index: usize, weights: &[f32], channels: usize) -> Res
     Ok(())
 }
 
-fn check_cancelled(options: &BatchStackOptions) -> Result<()> {
+pub(crate) fn check_cancelled(options: &BatchStackOptions) -> Result<()> {
     if options
         .cancel
         .as_ref()
@@ -542,30 +627,36 @@ fn validate_image(image: &LinearImage, shape: Option<(usize, usize, usize)>) -> 
     Ok(())
 }
 
-/// SHA-256 over the SHA-256 of each 1 Mi-sample chunk of little-endian
-/// samples, so the passes' change check runs on every core.
-fn sample_digest(samples: &[f32]) -> [u8; 32] {
-    const CHUNK: usize = 1 << 20;
-    let chunks = samples
+/// A checksum of every sample's bits and position, so a later pass can
+/// tell that the loader handed it the samples the first pass saw. It
+/// guards against a loader that changes its answer, not against tampering,
+/// so it is a sum of mixed values rather than a cryptographic digest: it
+/// runs at memory speed, and any single changed sample changes it.
+fn sample_checksum(samples: &[f32]) -> u64 {
+    const CHUNK: usize = 1 << 16;
+    samples
         .par_chunks(CHUNK)
-        .map(|chunk| {
-            let mut hash = Sha256::new();
-            let mut bytes = [0_u8; 4096];
-            for part in chunk.chunks(bytes.len() / 4) {
-                for (sample, output) in part.iter().zip(bytes.chunks_exact_mut(4)) {
-                    output.copy_from_slice(&sample.to_le_bytes());
-                }
-                hash.update(&bytes[..part.len() * 4]);
-            }
-            <[u8; 32]>::from(hash.finalize())
+        .enumerate()
+        .map(|(chunk, part)| {
+            let sum = part
+                .iter()
+                .zip(0_u32..)
+                .fold(0_u32, |sum, (sample, index)| {
+                    sum.wrapping_add(mix(sample.to_bits() ^ index.wrapping_mul(0x9e37_79b9)))
+                });
+            (u64::from(sum) | (chunk as u64) << 32).wrapping_mul(0x9e37_79b9_7f4a_7c15)
         })
-        .collect::<Vec<_>>();
-    let mut hash = Sha256::new();
-    hash.update((samples.len() as u64).to_le_bytes());
-    for chunk in chunks {
-        hash.update(chunk);
-    }
-    hash.finalize().into()
+        .reduce(|| 0, u64::wrapping_add)
+        ^ samples.len() as u64
+}
+
+/// MurmurHash3's finalizer: a bijection that spreads every input bit.
+fn mix(mut value: u32) -> u32 {
+    value ^= value >> 16;
+    value = value.wrapping_mul(0x85eb_ca6b);
+    value ^= value >> 13;
+    value = value.wrapping_mul(0xc2b2_ae35);
+    value ^ value >> 16
 }
 
 fn rejection_thresholds(frame_count: usize, options: &BatchStackOptions) -> Vec<(f64, f64)> {
@@ -615,10 +706,10 @@ fn load_matching(
     pass: BatchStackPass,
     index: usize,
     shape: Option<(usize, usize, usize)>,
-    expected_digest: &[u8; 32],
+    expected_checksum: u64,
 ) -> Result<LinearImage> {
     let image = load_unchanged(options, load, pass, index, shape)?;
-    if sample_digest(&image.data) != *expected_digest {
+    if sample_checksum(&image.data) != expected_checksum {
         return Err(Error::Stack(format!(
             "registered frame {index} changed between batch passes"
         )));
@@ -631,7 +722,7 @@ fn load_matching(
 /// double precision. With every weight 1 they are Welford's: `weight_sum`
 /// equals `count`.
 #[derive(Clone, Copy, Debug, Default)]
-struct Moments {
+pub(crate) struct Moments {
     mean: f32,
     m2: f32,
     weight_sum: f32,
@@ -640,6 +731,7 @@ struct Moments {
 
 impl Moments {
     /// These moments with one more sample of weight `weight`.
+    #[inline]
     fn with(self, value: f32, weight: f64) -> Self {
         let (mean, m2) = (f64::from(self.mean), f64::from(self.m2));
         let weight_sum = f64::from(self.weight_sum) + weight;
@@ -655,6 +747,7 @@ impl Moments {
     }
 
     /// These moments with one sample of weight `weight` taken back out.
+    #[inline]
     fn without(self, value: f32, weight: f64) -> Self {
         let weight_sum = f64::from(self.weight_sum) - weight;
         if self.count <= 1 || weight_sum.is_nan() || weight_sum <= 0.0 {
@@ -673,6 +766,7 @@ impl Moments {
 
     /// The same moments with `m2` scaled by `factor`, correcting a variance
     /// estimate known to run low.
+    #[inline]
     fn scaled(self, factor: f64) -> Self {
         Self {
             m2: (f64::from(self.m2) * factor) as f32,
@@ -690,8 +784,10 @@ impl Moments {
     /// the two, which is exactly 1 when every weight is 1. Sigma never falls
     /// below the configured floor, nor below a few steps of single precision
     /// at the mean, since the samples themselves carry no finer distinction.
-    /// Fewer than two peers reject nothing.
-    fn rejects(self, value: f32, weight: f64, rejection: &Rejection) -> bool {
+    /// Fewer than two peers reject nothing. `inverse_weight` is
+    /// `1 / weight`, worked out once per frame.
+    #[inline]
+    fn rejects(self, value: f32, weight: f64, inverse_weight: f64, rejection: &Rejection) -> bool {
         let weight_sum = f64::from(self.weight_sum);
         if self.count < 2 || weight_sum.is_nan() || weight_sum <= 0.0 {
             return false;
@@ -702,7 +798,8 @@ impl Moments {
         let scale = if weight == 1.0 && weight_sum == peers {
             1.0
         } else {
-            ((1.0 / weight + 1.0 / weight_sum) / (1.0 + 1.0 / peers)).sqrt()
+            ((inverse_weight + 1.0 / weight_sum) / rejection.peer_factor[self.count as usize])
+                .sqrt()
         };
         let sigma = ((f64::from(self.m2) / (peers - 1.0)).sqrt() * scale)
             .max(f64::from(rejection.minimum_sigma))
@@ -720,20 +817,24 @@ const PRECISION_STEPS: f64 = 8.0;
 /// What every pass needs to judge a sample: the prediction limits by depth,
 /// the noise floor, and the corrections for the two estimates' known low
 /// variance.
-struct Rejection {
+pub(crate) struct Rejection {
     thresholds: Vec<(f64, f64)>,
+    /// By a peer count `n`: `1 + 1/n`, the unweighted factor the Student-t
+    /// thresholds carry, worked out once rather than per sample.
+    peer_factor: Vec<f64>,
     minimum_sigma: f32,
     /// By a pixel's sample count `n`: `E[z^2]` of the largest of `n`
     /// standard normal samples, which the trimmed first estimate leaves out
     /// along with the smallest.
     expected_extreme_square: Vec<f64>,
-    /// The variance of a standard normal clipped at the configured sigmas,
-    /// which is what the kept moments of Gaussian noise estimate.
-    clipped_variance: f64,
+    /// One over the variance of a standard normal clipped at the configured
+    /// sigmas, which is what the kept moments of Gaussian noise estimate:
+    /// the factor that scales them back up.
+    clipped_correction: f64,
 }
 
 impl Rejection {
-    fn new(frame_count: usize, options: &BatchStackOptions) -> Self {
+    pub(crate) fn new(frame_count: usize, options: &BatchStackOptions) -> Self {
         let normal = Normal::new(0.0, 1.0).expect("valid standard normal parameters");
         let (low, high) = (
             f64::from(options.rejection.low_sigma),
@@ -768,11 +869,15 @@ impl Rejection {
                     .sum()
             })
             .collect();
+        let clipped_variance = clipped_variance.clamp(0.05, 1.0);
         Self {
             thresholds: rejection_thresholds(frame_count, options),
+            peer_factor: (0..=frame_count)
+                .map(|count| 1.0 + 1.0 / count as f64)
+                .collect(),
             minimum_sigma: options.minimum_sigma,
             expected_extreme_square,
-            clipped_variance: clipped_variance.clamp(0.05, 1.0),
+            clipped_correction: 1.0 / clipped_variance,
         }
     }
 
@@ -800,7 +905,7 @@ impl Rejection {
 /// and records the variance corrections, so later passes pay for at most one
 /// leave-one-out step per sample.
 #[derive(Clone, Copy, Debug)]
-struct FirstEstimate {
+pub(crate) struct FirstEstimate {
     moments: Moments,
     high: f32,
     low: f32,
@@ -825,6 +930,7 @@ impl Default for FirstEstimate {
 }
 
 impl FirstEstimate {
+    #[inline]
     fn take(&mut self, value: f32, weight: f64) {
         self.moments = self.moments.with(value, weight);
         if value > self.high {
@@ -860,6 +966,7 @@ impl FirstEstimate {
     /// A sample's peers in the first estimate: every other sample, less the
     /// extremes, with the variance corrected for trimming Gaussian noise. A
     /// sample that is itself an extreme is already out.
+    #[inline]
     fn peers(&self, value: f32, weight: f64) -> Moments {
         if value == self.high || value == self.low {
             self.moments
@@ -872,32 +979,17 @@ impl FirstEstimate {
     }
 
     /// Whether the first estimate keeps a sample.
-    fn keeps(&self, value: f32, weight: f64, rejection: &Rejection) -> bool {
-        !self.peers(value, weight).rejects(value, weight, rejection)
+    #[inline]
+    fn keeps(&self, value: f32, weight: f64, inverse_weight: f64, rejection: &Rejection) -> bool {
+        !self
+            .peers(value, weight)
+            .rejects(value, weight, inverse_weight, rejection)
     }
 }
 
 /// Samples a pixel needs before the first estimate leaves its extremes out.
 /// Below this the correction for trimming is too large to trust.
 const TRIMMED_FIRST_ESTIMATE: u32 = 10;
-
-/// The second estimate's peers for one sample: the kept moments, less the
-/// sample when the first estimate kept it, with the variance corrected for
-/// the clipping that chose them.
-fn kept_peers(
-    first: &FirstEstimate,
-    kept: Moments,
-    value: f32,
-    weight: f64,
-    rejection: &Rejection,
-) -> Moments {
-    let peers = if first.keeps(value, weight, rejection) {
-        kept.without(value, weight)
-    } else {
-        kept
-    };
-    peers.scaled(1.0 / rejection.clipped_variance)
-}
 
 #[cfg(test)]
 mod tests {
@@ -923,6 +1015,176 @@ mod tests {
     /// in one frame, and four hazy frames 1 600 to 9 300 above it. The trail
     /// and the three largest hazy samples must go, and the pixel must land
     /// within the stack's own noise of the sky.
+    /// Deterministic test frames: sky with noise, quantized in places so
+    /// samples tie with a pixel's extremes, a few bright and dark outliers
+    /// (so rejection is heavy), uncovered borders and scattered `NaN` and
+    /// infinite samples.
+    pub(crate) fn synthetic_frames(
+        width: usize,
+        height: usize,
+        channels: usize,
+        depth: usize,
+        seed: u64,
+    ) -> Vec<LinearImage> {
+        let mut state = seed | 1;
+        let mut uniform = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        (0..depth)
+            .map(|frame| {
+                let shift = frame % 4;
+                let data = (0..width * height * channels)
+                    .map(|sample| {
+                        let pixel = sample / channels;
+                        let (x, y) = (pixel % width, pixel / width);
+                        if x < shift || y + shift >= height {
+                            return f32::NAN;
+                        }
+                        let roll = uniform();
+                        if roll < 0.02 {
+                            return f32::NAN;
+                        }
+                        if roll < 0.022 {
+                            return f32::INFINITY;
+                        }
+                        let noise = (uniform() + uniform() + uniform() - 1.5) * 40.0;
+                        let mut value = 1000.0 + 300.0 * (sample % 7) as f64 + noise;
+                        if roll > 0.95 {
+                            value += (uniform() - 0.3) * 30_000.0;
+                        }
+                        if pixel.is_multiple_of(5) {
+                            value = value.round();
+                        }
+                        value as f32
+                    })
+                    .collect();
+                LinearImage::new(width, height, channels, data).unwrap()
+            })
+            .collect()
+    }
+
+    fn bits(values: &[f32]) -> Vec<u32> {
+        values.iter().map(|value| value.to_bits()).collect()
+    }
+
+    /// Every output, every frame's counts and every sample's fate must be
+    /// the reference's bit for bit.
+    pub(crate) fn assert_same_result(
+        actual: &BatchStackResult,
+        actual_fates: &[Vec<SampleFate>],
+        expected: &BatchStackResult,
+        expected_fates: &[Vec<SampleFate>],
+    ) {
+        let (actual_snapshot, expected_snapshot) = (&actual.snapshot, &expected.snapshot);
+        assert_eq!(
+            bits(&actual_snapshot.image.data),
+            bits(&expected_snapshot.image.data)
+        );
+        assert_eq!(
+            bits(&actual_snapshot.variance.data),
+            bits(&expected_snapshot.variance.data)
+        );
+        assert_eq!(actual_snapshot.coverage, expected_snapshot.coverage);
+        assert_eq!(
+            actual_snapshot.rejected_samples,
+            expected_snapshot.rejected_samples
+        );
+        assert_eq!(
+            actual_snapshot.accepted_frames,
+            expected_snapshot.accepted_frames
+        );
+        for (actual, expected) in actual.frames.iter().zip(&expected.frames) {
+            assert_eq!(actual.finite_samples, expected.finite_samples);
+            assert_eq!(actual.integrated_samples, expected.integrated_samples);
+        }
+        assert_eq!(actual.frames.len(), expected.frames.len());
+        assert_eq!(actual_fates, expected_fates);
+    }
+
+    /// Weights from a fixed pattern, one per channel, with the first frame
+    /// at 1 as a replay's reference is.
+    pub(crate) fn pattern_weights(depth: usize, channels: usize) -> Vec<Vec<f32>> {
+        (0..depth)
+            .map(|frame| {
+                (0..channels)
+                    .map(|channel| {
+                        if frame == 0 {
+                            1.0
+                        } else {
+                            0.35 + ((frame * 7 + channel * 3) % 11) as f32 * 0.13
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The test cases: depths either side of the trimmed first estimate,
+    /// mono and colour, equal and unequal weights.
+    pub(crate) fn reference_cases() -> Vec<(Vec<LinearImage>, BatchStackOptions)> {
+        let mut cases = Vec::new();
+        for (depth, channels, width, height) in [
+            (3, 1, 61, 47),
+            (5, 3, 23, 19),
+            (9, 3, 61, 47),
+            (10, 1, 64, 33),
+            (12, 3, 61, 47),
+            (25, 1, 37, 29),
+            (25, 3, 41, 31),
+        ] {
+            let frames = synthetic_frames(width, height, channels, depth, depth as u64 * 31 + 7);
+            cases.push((frames.clone(), BatchStackOptions::default()));
+            cases.push((
+                frames.clone(),
+                BatchStackOptions {
+                    frame_weights: Some(pattern_weights(depth, channels)),
+                    rejection: MasterRejectionOptions {
+                        low_sigma: 2.5,
+                        high_sigma: 3.5,
+                    },
+                    ..BatchStackOptions::default()
+                },
+            ));
+            cases.push((
+                frames,
+                BatchStackOptions {
+                    frame_weights: Some(vec![vec![1.0; channels]; depth]),
+                    minimum_sigma: 5.0,
+                    ..BatchStackOptions::default()
+                },
+            ));
+        }
+        cases
+    }
+
+    #[test]
+    fn whole_frame_passes_match_the_original_bit_for_bit() {
+        for (frames, options) in reference_cases() {
+            let (expected, expected_fates) = reference::integrate(&frames, &options);
+            let mut fates = vec![Vec::new(); frames.len()];
+            let mut observe = |index: usize, frame_fates: Vec<SampleFate>| {
+                fates[index] = frame_fates;
+                Ok(())
+            };
+            let actual = integrate_registered_frames_observed(
+                frames.len(),
+                &options,
+                |_, index| Ok(frames[index].clone()),
+                Some(&mut observe),
+            )
+            .unwrap();
+            assert_same_result(&actual, &fates, &expected, &expected_fates);
+            let unobserved = integrate_registered_frames(frames.len(), &options, |_, index| {
+                Ok(frames[index].clone())
+            })
+            .unwrap();
+            assert_same_result(&unobserved, &fates, &expected, &expected_fates);
+        }
+    }
+
     #[test]
     fn one_large_outlier_does_not_mask_moderate_ones() {
         let sky = 16_800.0;
