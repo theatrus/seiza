@@ -272,6 +272,12 @@ struct StackReport {
     rejected_frames: u32,
 }
 
+/// End a run stopped by Ctrl-C or SIGTERM once its scratch files are gone.
+fn stop_interrupted() -> ! {
+    eprintln!("interrupted: stopped and removed scratch files");
+    std::process::exit(crate::interrupt::INTERRUPTED_EXIT_CODE);
+}
+
 pub(crate) fn run(options: StackArgs) -> Result<()> {
     let drizzle = options
         .drizzle
@@ -535,6 +541,12 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
             .filter(|parent| !parent.as_os_str().is_empty())
             .map_or_else(|| PathBuf::from("."), PathBuf::from)
     });
+    if reintegrate {
+        // An interrupted run removes its scratch files, and a run left here
+        // by a killed process has its files removed now.
+        crate::interrupt::install();
+        crate::interrupt::watch_scratch_parent(&scratch_directory);
+    }
     if reintegrate
         && let Err(error) = stacker.retain_frames_for_reintegration(Some(&scratch_directory))
     {
@@ -624,8 +636,17 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
                 }
             }
         }
-        Continue::Yes
+        if crate::interrupt::interrupted() {
+            Continue::No
+        } else {
+            Continue::Yes
+        }
     })?;
+    if crate::interrupt::interrupted() {
+        // Dropping the stacker removes its scratch directory.
+        drop(stacker);
+        stop_interrupted();
+    }
 
     let reference_headers = stacker.reference_headers().to_vec();
     let mut drizzled = None;
@@ -640,6 +661,7 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
             },
             // For any frame the live pass could not keep.
             scratch_directory: Some(scratch_directory),
+            cancel: Some(crate::interrupt::cancel_signal()),
             ..seiza_stacking::BatchStackOptions::default()
         };
         let progress = |pass, index, count| {
@@ -655,14 +677,21 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
                 println!("reintegrate {what} {count} admitted frame(s)");
             }
         };
-        let result = match &drizzle {
-            Some(drizzle) => {
-                let (result, image) = stacker.reintegrate_drizzled(&batch, drizzle, progress)?;
-                drizzled = Some(image);
-                result
-            }
-            None => stacker.reintegrate(&batch, progress)?,
-        };
+        let result =
+            match &drizzle {
+                Some(drizzle) => stacker.reintegrate_drizzled(&batch, drizzle, progress).map(
+                    |(result, image)| {
+                        drizzled = Some(image);
+                        result
+                    },
+                ),
+                None => stacker.reintegrate(&batch, progress),
+            };
+        if crate::interrupt::interrupted() {
+            drop(stacker);
+            stop_interrupted();
+        }
+        let result = result?;
         // Free the frames' scratch files before writing the outputs.
         drop(stacker);
         let rejected = result

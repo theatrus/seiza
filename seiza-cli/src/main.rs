@@ -22,6 +22,7 @@ mod color;
 mod color_calibrate;
 mod common;
 mod deconvolution;
+mod interrupt;
 mod master;
 mod preview;
 mod provenance;

@@ -532,12 +532,15 @@ impl CacheAdmissions<'_> {
 
 impl FrameCache {
     fn new(directory: Option<&Path>, frames: usize) -> std::io::Result<Self> {
+        // The owning process ID in the name lets a later run recognise, and
+        // remove, a directory left behind by a process that was killed.
+        let pid = std::process::id();
         let directory = match directory {
             Some(directory) => tempfile::Builder::new()
-                .prefix(".seiza-reintegrate-")
+                .prefix(&format!(".seiza-reintegrate-{pid}-"))
                 .tempdir_in(directory),
             None => tempfile::Builder::new()
-                .prefix("seiza-reintegrate-")
+                .prefix(&format!("seiza-reintegrate-{pid}-"))
                 .tempdir(),
         }?;
         Ok(Self {

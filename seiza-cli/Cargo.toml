@@ -18,6 +18,7 @@ name = "seiza"
 path = "src/main.rs"
 
 [dependencies]
+ctrlc = { version = "3", features = ["termination"] }
 seiza.workspace = true
 seiza-background.workspace = true
 seiza-deconvolution.workspace = true
@@ -50,8 +51,11 @@ chrono.workspace = true
 [dev-dependencies]
 seiza = { workspace = true, features = ["test-support"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [package.metadata.generate-rpm]
 summary = "Star detection, plate solving, and astro dataset tools"
