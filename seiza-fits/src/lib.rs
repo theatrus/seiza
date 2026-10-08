@@ -479,6 +479,16 @@ pub(crate) fn image_header_offset<R: Read + Seek>(reader: &mut R) -> Result<u64,
     locate_image(reader, true).map(|hdu| hdu.header_start)
 }
 
+/// The `BLANK` card of integer data. The standard defines it for integer
+/// BITPIX only, with an integer value; astropy and cfitsio both ignore one
+/// written as a float, such as `-32768.0`, and so does this crate.
+fn integer_blank(cards: &[(String, HeaderValue)], bitpix: i64) -> Option<i64> {
+    match card_value(cards, "BLANK") {
+        Some(HeaderValue::Integer(blank)) if bitpix > 0 => Some(*blank),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ImageSpec {
     width: usize,
@@ -557,8 +567,7 @@ impl ImageSpec {
             bitpix,
             bzero: header_f64("BZERO").unwrap_or(0.0),
             bscale: header_f64("BSCALE").unwrap_or(1.0),
-            // The standard defines BLANK for integer data only.
-            blank: header_i64("BLANK").filter(|_| bitpix > 0),
+            blank: integer_blank(headers, bitpix),
         })
     }
 
@@ -854,9 +863,7 @@ impl FitsImage {
     /// an integer image.
     fn blank(&self) -> Option<i64> {
         let bitpix = self.header("BITPIX").and_then(HeaderValue::as_i64)?;
-        self.header("BLANK")
-            .and_then(HeaderValue::as_i64)
-            .filter(|_| bitpix > 0)
+        integer_blank(&self.headers, bitpix)
     }
 
     /// Pixels as u16, converting float/i32 data by min-max scaling.
@@ -1831,15 +1838,19 @@ mod hdu_tests {
         assert_samples(&image.into_physical_f32(), &[nan, 32768.0, 32868.0]);
 
         // Signed and scaled 16-bit data decode to floats with NaN blanks.
-        // HiPS writers give BLANK as a float, which cfitsio accepts too.
-        for blank_text in ["-32768", "-32768.0"] {
-            let image = decode(
-                primary(16, &[3, 1], &[blank(blank_text)]),
-                be(&[-32768_i16, -5, 5], i16::to_be_bytes),
-            );
-            assert!(matches!(image.pixels, Pixels::F32(_)));
-            assert_samples(&image.into_physical_f32(), &[nan, -5.0, 5.0]);
-        }
+        let image = decode(
+            primary(16, &[3, 1], &[blank("-32768")]),
+            be(&[-32768_i16, -5, 5], i16::to_be_bytes),
+        );
+        assert!(matches!(image.pixels, Pixels::F32(_)));
+        assert_samples(&image.into_physical_f32(), &[nan, -5.0, 5.0]);
+        // A HiPS writer gives BLANK as a float, which astropy and cfitsio
+        // both ignore.
+        let image = decode(
+            primary(16, &[3, 1], &[blank("-32768.0")]),
+            be(&[-32768_i16, -5, 5], i16::to_be_bytes),
+        );
+        assert_samples(&image.into_physical_f32(), &[-32768.0, -5.0, 5.0]);
         let image = decode(
             primary(
                 16,
@@ -2144,7 +2155,7 @@ mod hdu_tests {
             (
                 "hipsgen/Npix140.fits: signed 16-bit HiPS tile",
                 hdu(
-                    &primary(16, &[2, 2], &[card("BLANK", "-32768.0")]),
+                    &primary(16, &[2, 2], &[card("BLANK", "-32768")]),
                     &be(&[-2788_i16, -32768, 0, 140], i16::to_be_bytes),
                 ),
                 (2, 2, 1),
