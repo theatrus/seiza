@@ -9,6 +9,14 @@
 //! midtone-transfer-function autostretch matches N.I.N.A.'s. The writer emits
 //! primary-HDU mono or RGB float images with validated typed headers and
 //! atomic on-disk publication.
+//!
+//! # Threads
+//!
+//! Debayering, scaling and stretching split large images across the Rayon
+//! pool of the calling thread, or the global pool when that thread belongs
+//! to none. To hold them to a number of cores, call them inside a pool that
+//! size, as in `pool.install(|| image.debayer())`. Reading and writing run on
+//! the calling thread, and the crate starts no threads of its own.
 
 mod bayer;
 mod compressed;

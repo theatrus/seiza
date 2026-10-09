@@ -1,4 +1,11 @@
 //! Robust background and gradient modelling for linear astrophotography images.
+//!
+//! # Threads
+//!
+//! Rendering and applying a model split the image across the Rayon pool of
+//! the calling thread, or the global pool when that thread belongs to none.
+//! To hold them to a number of cores, call them inside a pool that size with
+//! `pool.install(..)`. The crate starts no threads of its own.
 
 use rayon::prelude::*;
 use seiza_stats::{median_f64 as median, median_in_place, robust_sigma_in_place};

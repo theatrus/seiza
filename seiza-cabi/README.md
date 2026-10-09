@@ -581,6 +581,19 @@ The full C declarations, plus the memory-ownership contract (which returns are
 owned vs. borrowed, and which `seiza_*_free` to call), live in
 [`include/seiza_cabi.h`](include/seiza_cabi.h).
 
+## Threads
+
+Calls do their parallel work in Rayon's global pool, which by default has a
+thread for every core. To cap it, set `RAYON_NUM_THREADS` in the process
+environment before the first call into the library; the pool reads it once,
+when it starts. Stacking and reintegration also prepare a few frames at
+once on threads of their own, whose serial steps run beside that pool.
+
+There is no C function to set a thread count. A Rust caller bounds Seiza by
+running it inside a Rayon pool, which cannot be passed across the C ABI, and
+every call from a host thread already shares the one global pool that the
+environment variable sizes.
+
 ## The C header is generated
 
 `include/seiza_cabi.h` is generated from the Rust source by

@@ -7,6 +7,16 @@
 //!
 //! Solving is *seeded*: it expects an approximate center (RA/Dec hint) and an
 //! approximate pixel scale. Blind solving is out of scope for now.
+//!
+//! # Threads
+//!
+//! Detection, solving and building a blind index split their work across
+//! the Rayon pool of the calling thread, or the global pool when that thread
+//! belongs to none. To hold them to a number of cores, call them inside a
+//! pool that size with `pool.install(..)`. The crate starts no threads of its
+//! own. A blind solve checks as many candidate fields at once as the pool
+//! has threads, so pools of different sizes can settle on different, equally
+//! valid solutions.
 
 pub mod blind;
 pub mod catalog;

@@ -26,6 +26,14 @@
 //!
 //! All functions operate on plain slices in row-major order; there is no
 //! image type to construct.
+//!
+//! # Threads
+//!
+//! With the `parallel` feature, the blur, domain transform and wavelet
+//! filters split large images across the Rayon pool of the calling thread,
+//! or the global pool when that thread belongs to none. To hold them to a
+//! number of cores, call them inside a pool that size with
+//! `pool.install(..)`. The crate starts no threads of its own.
 
 pub mod blur;
 pub mod border;

@@ -4,6 +4,14 @@
 //! [`StretchAnalysis`] into deterministic [`StretchPlan`] values. This keeps
 //! image-dependent parameter selection separate from curve application and
 //! permits interactive callers to reuse analysis across parameter changes.
+//!
+//! # Threads
+//!
+//! Analysis and curve application split large images across the Rayon pool
+//! of the calling thread, or the global pool when that thread belongs to
+//! none. To hold them to a number of cores, call them inside a pool that
+//! size, as in `pool.install(|| plan.apply_u16(&samples, 3))`. The crate
+//! starts no threads of its own.
 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};

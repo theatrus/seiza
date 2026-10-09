@@ -1,5 +1,46 @@
 //! Linear calibration, local registration, normalization, and incremental
 //! image stacking for astrophotography.
+//!
+//! # Threads
+//!
+//! Each call does its parallel work in the Rayon pool of the thread that
+//! makes it, or in the global pool when that thread belongs to none. To
+//! hold stacking to a number of cores, build a pool that size and make the
+//! calls inside it:
+//!
+//! ```no_run
+//! # fn main() -> seiza_stacking::Result<()> {
+//! use seiza_stacking::{LiveStacker, StackOptions};
+//!
+//! let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+//! let mut stacker = pool.install(|| {
+//!     LiveStacker::open_fits("light-1.fits", None, None, None, None, StackOptions::default())
+//! })?;
+//! pool.install(|| stacker.push_fits("light-2.fits"))?;
+//! # Ok(()) }
+//! ```
+//!
+//! A [`LiveStacker`] keeps no threads between calls, so wrap each call that
+//! does work, not only the first. A caller that never installs a pool can
+//! size the global one with the `RAYON_NUM_THREADS` environment variable.
+//!
+//! Some calls start work on helper threads of their own, so its serial
+//! parts overlap the caller's parallel work. Reintegration prepares the next
+//! frames and reads the next bands while it integrates this one, and
+//! drizzles a frame behind; [`LiveStacker::push_fits_pipelined`] prepares
+//! several frames at once. Called from a thread in no pool, the helpers do
+//! that work themselves, and its Rayon work goes to the global pool. Called
+//! inside a pool, reintegration's helpers only read the files the work will
+//! open and hand the work to that pool, which bounds it, and
+//! `push_fits_pipelined` prepares one frame at a time on the calling thread.
+//! [`LiveStacker::push_fits_pipelined_with_pool`] reads and decodes frames
+//! on threads of its own and prepares them in the pool it is given; call it
+//! from outside that pool.
+//!
+//! A few threads only read or wait, and run no Rayon work:
+//! [`build_master_from_fits`] reads the next frame on one while it combines
+//! this one, and [`RcAstroCli`] reads an external program's output on two.
+//! That program picks its own threads.
 
 mod batch;
 mod calibration;
@@ -25,6 +66,7 @@ mod replay;
 mod residual_flat;
 mod snr;
 mod stack;
+mod tasks;
 
 pub use batch::{
     BatchFrameDiagnostics, BatchStackOptions, BatchStackPass, BatchStackResult,

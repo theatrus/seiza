@@ -72,7 +72,8 @@ statrs = { version = "0.19.1", default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["fs", "io-util", "macros", "rt", "time"] }
 tokio-util = { version = "0.7.18", features = ["io"] }
 zstd = "0.14.0"
-rayon = "1"
+# 1.7 adds `yield_now`, which seiza-stacking waits with.
+rayon = "1.7"
 nalgebra = { version = "0.35", default-features = false, features = ["std"] }
 rustc-hash = { version = "2" }
 multiversion = "0.9"

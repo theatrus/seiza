@@ -1346,6 +1346,61 @@ mod tests {
         }
     }
 
+    /// The next band is read while this one is integrated, and the reads
+    /// must stay in the pool the caller runs in, however small.
+    #[test]
+    fn band_reads_stay_in_the_callers_pool() {
+        struct Watched<'a> {
+            frames: MemoryBands<'a>,
+            pool: &'a rayon::ThreadPool,
+            threads: std::sync::Mutex<std::collections::HashSet<std::thread::ThreadId>>,
+        }
+        impl BandSource for Watched<'_> {
+            fn read(&self, index: usize, top: usize, band: &mut [f32]) -> Result<()> {
+                assert!(
+                    self.pool.current_thread_index().is_some(),
+                    "a band was read outside the caller's pool"
+                );
+                self.threads
+                    .lock()
+                    .unwrap()
+                    .insert(std::thread::current().id());
+                self.frames.read(index, top, band)
+            }
+        }
+        let (frames, options) = reference_cases().swap_remove(6);
+        let (expected, expected_fates) = reference::integrate(&frames, &options);
+        let image = &frames[0];
+        let shape = (image.width, image.height, image.channels);
+        let options = BatchStackOptions {
+            band_memory_bytes: band_memory(&frames, 2),
+            ..options
+        };
+        for threads in [1, 2] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let source = Watched {
+                frames: MemoryBands(&frames),
+                pool: &pool,
+                threads: Default::default(),
+            };
+            let (actual, fates) = pool
+                .install(|| {
+                    integrate_bands(shape, frames.len(), &options, &source, true, &mut |_, _| {})
+                })
+                .unwrap();
+            let fates = fates
+                .unwrap()
+                .iter()
+                .map(PackedFates::to_vec)
+                .collect::<Vec<_>>();
+            assert_same_result(&actual, &fates, &expected, &expected_fates);
+            assert!(source.threads.lock().unwrap().len() <= threads);
+        }
+    }
+
     #[test]
     fn band_passes_stop_when_cancelled_or_a_read_fails() {
         let frames = synthetic_frames(41, 31, 3, 12, 5);

@@ -710,3 +710,15 @@ fn callback_can_hold_non_send_coordinator_state() {
     assert_eq!(report.frames.integrated, count.get());
     assert_eq!(count.get(), 2);
 }
+
+#[test]
+fn derived_worker_counts_follow_the_callers_pool() {
+    let options = PipelineOptions::default();
+    for (threads, workers) in [(1, 1), (2, 1), (4, 2), (16, 6)] {
+        assert_eq!(
+            pool(threads).install(|| options.resolve_workers(1)),
+            workers,
+            "{threads}"
+        );
+    }
+}

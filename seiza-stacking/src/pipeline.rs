@@ -64,7 +64,7 @@ pub struct PipelineOptions {
     /// caller knows what scale its other frames are on.
     pub normalized_full_scale: Option<f32>,
     /// Threads preparing frames, or `None` to derive one from the budget and
-    /// the machine's parallelism.
+    /// the threads of the current Rayon pool.
     ///
     /// Each worker reads its own frame before registering it, so this is the
     /// read concurrency as well as the compute concurrency. The derived
@@ -137,11 +137,9 @@ impl PipelineOptions {
         } else {
             self.max_in_flight_bytes / frame_bytes.saturating_mul(2)
         };
-        let parallelism = std::thread::available_parallelism()
-            .map(|value| value.get())
-            .unwrap_or(1);
-        // Half the cores, since each worker's own work is already parallel.
-        (parallelism / 2)
+        // Half the pool's threads, since each worker's own work is already
+        // parallel and runs in that pool.
+        (rayon::current_num_threads() / 2)
             .clamp(1, MAXIMUM_DERIVED_WORKERS)
             .min(affordable.max(1))
             .max(1)
@@ -347,6 +345,12 @@ impl LiveStacker {
     /// the caller's pool to be the one preparation submits to, which cannot be
     /// told apart through Rayon's API, and a caller who installed a pool did
     /// so to reserve cores that spawning outside it would quietly undo.
+    /// [`Self::push_fits_pipelined_with_pool`] overlaps frames in a pool the
+    /// caller names.
+    ///
+    /// From any other thread, the workers prepare frames themselves and their
+    /// Rayon work goes to the global pool, which `RAYON_NUM_THREADS` sizes;
+    /// the derived worker count is half that pool's threads.
     pub fn push_fits_pipelined(
         &mut self,
         paths: &[PathBuf],
