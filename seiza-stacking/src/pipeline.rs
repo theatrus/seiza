@@ -339,18 +339,15 @@ impl LiveStacker {
     ///
     /// # Rayon
     ///
-    /// Running from inside a Rayon pool thread — including under
-    /// `pool.install(..)` — prepares frames sequentially on the calling
-    /// thread. This is deliberately conservative: the deadlock it avoids needs
-    /// the caller's pool to be the one preparation submits to, which cannot be
-    /// told apart through Rayon's API, and a caller who installed a pool did
-    /// so to reserve cores that spawning outside it would quietly undo.
-    /// [`Self::push_fits_pipelined_with_pool`] overlaps frames in a pool the
-    /// caller names.
+    /// From a thread in no pool, the workers prepare frames themselves and
+    /// their Rayon work goes to the global pool, which `RAYON_NUM_THREADS`
+    /// sizes; the derived worker count is half that pool's threads.
     ///
-    /// From any other thread, the workers prepare frames themselves and their
-    /// Rayon work goes to the global pool, which `RAYON_NUM_THREADS` sizes;
-    /// the derived worker count is half that pool's threads.
+    /// From inside a pool, including under `pool.install(..)`, each frame is
+    /// read and prepared as a task in that pool, as many at once as the
+    /// workers would be, while a helper thread reads the file ahead; the
+    /// calling thread integrates them in order and helps the pool while it
+    /// waits, so the pool bounds all of it. See [`crate::tasks`].
     pub fn push_fits_pipelined(
         &mut self,
         paths: &[PathBuf],
@@ -494,6 +491,19 @@ impl LiveStacker {
         // Resolve the budget before path metadata I/O, and settle duplicates
         // before workers start so neither path opens a frame it will discard.
         let plan = self.plan_batch(paths);
+        if compute.0.is_none() && rayon::current_thread_index().is_some() {
+            let mut report = self.run_in_current_pool(
+                paths,
+                &plan,
+                options.normalized_full_scale,
+                workers,
+                read,
+                prepare,
+                &mut on_frame,
+            );
+            report.timings.elapsed = started.elapsed();
+            return Ok(report);
+        }
         // Preparation submits Rayon work; blocking a pool thread while waiting
         // for it can starve the pool of the threads that would do it.
         if rayon::current_thread_index().is_some() {
@@ -631,6 +641,89 @@ impl LiveStacker {
                 }
             })
             .collect()
+    }
+
+    /// [`Self::push_fits_pipelined`] on a pool thread: `workers` frames are
+    /// read and prepared at once as tasks in the current pool and integrated
+    /// in order on this thread, reporting through the same callback and
+    /// refusing the same paths at the same point.
+    #[allow(clippy::too_many_arguments)]
+    fn run_in_current_pool(
+        &mut self,
+        paths: &[PathBuf],
+        plan: &[Planned],
+        normalized_full_scale: Option<f32>,
+        workers: usize,
+        read: &(impl Fn(&Path) -> Result<FitsFrame> + Sync),
+        prepare: &(
+             impl Fn(FitsFrame, &crate::stack::PreparationHalf<'_>, Option<f32>) -> Result<PreparedFrame>
+             + Sync
+         ),
+        on_frame: &mut impl FnMut(&Path, Result<FrameDisposition>) -> Continue,
+    ) -> PoolPipelineReport {
+        let (preparation, mut integration) = self.split_for_pipeline();
+        let preparation = &preparation;
+        let mut report = PoolPipelineReport {
+            workers,
+            estimated_in_flight_bytes: PoolPipelineMemory::for_reference(
+                preparation.reference.pixel_count(),
+                preparation.reference.sample_count(),
+            )
+            .in_flight_bytes(workers),
+            ..PoolPipelineReport::default()
+        };
+        crate::tasks::ahead(|ahead| {
+            std::thread::scope(|scope| {
+                let mut in_flight = std::collections::VecDeque::new();
+                let mut next = 0;
+                for (index, path) in paths.iter().enumerate() {
+                    while next < paths.len() && in_flight.len() < workers {
+                        let item = next;
+                        let started = match plan[item] {
+                            Planned::Duplicate => None,
+                            Planned::Prepare(_) => Some(ahead.spawn(
+                                scope,
+                                || vec![paths[item].clone()],
+                                move || {
+                                    let (frame, reading) = timed(|| read(&paths[item]));
+                                    let (prepared, preparing) = timed(|| {
+                                        frame.and_then(|frame| {
+                                            prepare(frame, preparation, normalized_full_scale)
+                                        })
+                                    });
+                                    (prepared, reading, preparing)
+                                },
+                            )),
+                        };
+                        in_flight.push_back(started);
+                        next += 1;
+                    }
+                    let started = in_flight
+                        .pop_front()
+                        .expect("every path is started before it is integrated");
+                    let outcome = match (&plan[index], started) {
+                        (Planned::Prepare(identity), Some(started)) => {
+                            let (prepared, reading, preparing) = ahead.join(started);
+                            report.timings.read_decode += reading;
+                            report.timings.preparation += preparing;
+                            prepared.map(|prepared| {
+                                let (disposition, elapsed) =
+                                    timed(|| integration.integrate(prepared));
+                                report.timings.integration += elapsed;
+                                integration.record_input_identity(identity.clone());
+                                disposition
+                            })
+                        }
+                        _ => Err(duplicate_error(path)),
+                    };
+                    report.frames.count(&outcome);
+                    if on_frame(path, outcome) == Continue::No {
+                        break;
+                    }
+                }
+            })
+        });
+        report
     }
 
     /// The fallback taken on a Rayon pool thread, reporting through the same

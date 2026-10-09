@@ -24,18 +24,16 @@
 //! does work, not only the first. A caller that never installs a pool can
 //! size the global one with the `RAYON_NUM_THREADS` environment variable.
 //!
-//! Some calls start work on helper threads of their own, so its serial
-//! parts overlap the caller's parallel work. Reintegration prepares the next
-//! frames and reads the next bands while it integrates this one, and
-//! drizzles a frame behind; [`LiveStacker::push_fits_pipelined`] prepares
-//! several frames at once. Called from a thread in no pool, the helpers do
-//! that work themselves, and its Rayon work goes to the global pool. Called
-//! inside a pool, reintegration's helpers only read the files the work will
-//! open and hand the work to that pool, which bounds it, and
-//! `push_fits_pipelined` prepares one frame at a time on the calling thread.
-//! [`LiveStacker::push_fits_pipelined_with_pool`] reads and decodes frames
-//! on threads of its own and prepares them in the pool it is given; call it
-//! from outside that pool.
+//! Some calls work ahead: [`LiveStacker::push_fits_pipelined`] prepares
+//! several frames at once, and reintegration prepares the next frames and
+//! reads the next bands while it integrates this one, and drizzles a frame
+//! behind. Called from a thread in no pool, threads of the call's own do
+//! that work, so its serial parts overlap the parallel work, and its Rayon
+//! work goes to the global pool. Called inside a pool, the work runs as
+//! tasks in that pool, which bounds it; helper threads only read the files
+//! it will open. [`LiveStacker::push_fits_pipelined_with_pool`] reads and
+//! decodes frames on threads of its own and prepares them in the pool it is
+//! given; call it from outside that pool.
 //!
 //! A few threads only read or wait, and run no Rayon work:
 //! [`build_master_from_fits`] reads the next frame on one while it combines

@@ -95,10 +95,10 @@ pub(crate) fn band_rows(shape: (usize, usize, usize), frame_count: usize, memory
 
 /// Read every frame of `shape` from `source` a band of `rows` rows at a
 /// time, handing each band's samples, one slice per frame, to `each` with
-/// the band's index and first row, in order. A thread reads the next band
-/// while `each` works on this one, so two bands of every frame are held.
-/// From a pool thread the reads run in that pool, and the thread only waits
-/// for them; see [`crate::tasks`].
+/// the band's index and first row, in order. The next band is read while
+/// `each` works on this one, so two bands of every frame are held: on a
+/// thread of its own, or from a pool thread as a task in that pool; see
+/// [`crate::tasks`].
 pub(crate) fn for_each_band(
     shape: (usize, usize, usize),
     frame_count: usize,
@@ -112,44 +112,33 @@ pub(crate) fn for_each_band(
     let bands = height.div_ceil(rows);
     let band_samples = |band: usize| rows.min(height - band * rows) * row_samples;
     let cancelled = || cancel.is_some_and(CancelSignal::is_cancelled);
+    let read = |band: usize, mut frames: Vec<Vec<f32>>| {
+        if cancelled() {
+            return Err(Error::Cancelled);
+        }
+        frames
+            .par_iter_mut()
+            .enumerate()
+            .try_for_each(|(index, buffer)| {
+                source.read(index, band * rows, &mut buffer[..band_samples(band)])
+            })?;
+        Ok(frames)
+    };
+    let buffers = || vec![vec![0.0_f32; rows * row_samples]; frame_count];
     crate::tasks::ahead(|ahead| {
         std::thread::scope(|scope| {
-            let (requests, reader_requests) = std::sync::mpsc::channel::<(usize, Vec<Vec<f32>>)>();
-            let (filled_sender, filled) =
-                std::sync::mpsc::channel::<Result<(usize, Vec<Vec<f32>>)>>();
-            scope.spawn(move || {
-                for (band, mut frames) in reader_requests {
-                    let read = if cancelled() {
-                        Err(Error::Cancelled)
-                    } else {
-                        let read;
-                        (read, frames) = ahead.run(move || {
-                            let read = frames.par_iter_mut().enumerate().try_for_each(
-                                |(index, buffer)| {
-                                    source.read(
-                                        index,
-                                        band * rows,
-                                        &mut buffer[..band_samples(band)],
-                                    )
-                                },
-                            );
-                            (read, frames)
-                        });
-                        read
-                    };
-                    if filled_sender.send(read.map(|()| (band, frames))).is_err() {
-                        break;
-                    }
-                }
-            });
-            for band in 0..bands.min(2) {
-                let _ = requests.send((band, vec![vec![0.0_f32; rows * row_samples]; frame_count]));
-            }
+            let mut reading = Some(ahead.spawn(scope, Vec::new, move || read(0, buffers())));
+            let mut spare = None;
             for band in 0..bands {
-                let (read_band, frames) = ahead
-                    .recv(&filled)
-                    .map_err(|_| Error::Stack("the band reader stopped early".into()))??;
-                debug_assert_eq!(read_band, band);
+                let frames = ahead.join(
+                    reading
+                        .take()
+                        .expect("each band is read before it is needed"),
+                )?;
+                if band + 1 < bands {
+                    let next = spare.take().unwrap_or_else(buffers);
+                    reading = Some(ahead.spawn(scope, Vec::new, move || read(band + 1, next)));
+                }
                 if cancelled() {
                     return Err(Error::Cancelled);
                 }
@@ -159,9 +148,7 @@ pub(crate) fn for_each_band(
                     .collect::<Vec<_>>();
                 each(band, band * rows, &samples)?;
                 drop(samples);
-                if band + 2 < bands {
-                    let _ = requests.send((band + 2, frames));
-                }
+                spare = Some(frames);
             }
             Ok(())
         })

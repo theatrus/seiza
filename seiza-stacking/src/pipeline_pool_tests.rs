@@ -722,3 +722,52 @@ fn derived_worker_counts_follow_the_callers_pool() {
         );
     }
 }
+
+#[test]
+fn the_older_call_inside_a_pool_prepares_frames_side_by_side_there() {
+    let (_directory, paths) = frame_set(5);
+    for threads in [1, 3] {
+        let pool = pool(threads);
+        let mut expected = stacker_from(&paths[0]);
+        for path in &paths[1..] {
+            pool.install(|| expected.push_fits(path)).unwrap();
+        }
+        let mut actual = stacker_from(&paths[0]);
+        let report = pool
+            .install(|| {
+                actual.push_fits_pipelined(&paths[1..], &concurrent(3), |_, outcome| {
+                    outcome.unwrap();
+                    Continue::Yes
+                })
+            })
+            .unwrap();
+        assert_eq!(report.integrated, 4);
+        assert_same_stack(&actual, &expected);
+    }
+    // The two preparations wait for each other, so they must run at once,
+    // and both in the pool.
+    let pool = pool(3);
+    let met = Barrier::new(2);
+    let mut actual = stacker_from(&paths[0]);
+    let report = pool
+        .install(|| {
+            actual.run_pipeline(
+                &paths[1..3],
+                &concurrent(2),
+                ComputePool(None),
+                &|path| FitsFrame::open(path),
+                &|frame, half, scale| {
+                    assert!(pool.current_thread_index().is_some());
+                    met.wait();
+                    prepare_decoded(frame, half, scale)
+                },
+                |_, outcome| {
+                    outcome.unwrap();
+                    Continue::Yes
+                },
+            )
+        })
+        .unwrap();
+    assert_eq!(report.frames.integrated, 2);
+    assert_eq!(report.workers, 2);
+}
