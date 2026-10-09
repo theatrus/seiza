@@ -1114,6 +1114,8 @@ impl Replay<'_> {
                         && let Some(index) = pending.next()
                     {
                         progress(BatchStackPass::Estimate, index, count);
+                        // A frame fitted from its background samples reads
+                        // only their small file, so nothing is read ahead.
                         let fitted_from_samples =
                             self.renormalizer.is_some() && cache.sampled(index);
                         if !fitted_from_samples {
@@ -1121,7 +1123,13 @@ impl Replay<'_> {
                         }
                         in_flight.push_back(ahead.spawn(
                             scope,
-                            move || stacker.replay_files(index, &frames[index], Some(cache)),
+                            move || {
+                                if fitted_from_samples {
+                                    Vec::new()
+                                } else {
+                                    stacker.replay_files(index, &frames[index], Some(cache))
+                                }
+                            },
                             move || prepare(index),
                         ));
                     }
@@ -1426,7 +1434,7 @@ impl Replay<'_> {
                     drizzle.is_some().then_some(&mut observe as _),
                 );
                 drop(jobs);
-                let drizzled = worker.map(|worker| ahead.join(worker)).transpose()?;
+                let drizzled = worker.map(|worker| ahead.join_helper(worker)).transpose()?;
                 Ok::<_, Error>((integrated?, drizzled))
             })
         })?;
