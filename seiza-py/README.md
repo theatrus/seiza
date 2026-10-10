@@ -492,6 +492,40 @@ CLI's `--no-` negation, overriding a true default. A child completely
 silent for ten minutes is killed; a first run downloads ML models, which
 `rc-astro download-models` handles ahead of time.
 
+## Parallax fly-through videos
+
+Make the video `seiza parallax-video` makes, from a starless image, its
+stars and a plate solution: the stars fly at their Gaia distances as the
+camera moves toward a point of the nebula. `rc_astro_split_stars` splits a
+stretched image with StarXTerminator, and `solve_blind` gives the WCS.
+
+```python
+import seiza
+
+starless, stars = seiza.rc_astro_split_stars(image)   # float32 (h, w, 3), 0 to 1
+video = seiza.ParallaxVideo(
+    starless, stars, solution.wcs,
+    focus=(5997, 2351), start="whole", dolly=0.8, seconds=16, size="4k",
+    overlay=True, watermark=True,
+    progress=lambda event: print(event.get("message", "")),
+)
+print(video.summary["background_distance_pc"], video.frame_count)
+
+first = video.frame(0)                  # uint8 (height, width, 3)
+for frame in video:                     # every frame in order, e.g. for PyAV
+    container_stream_encode(frame)
+video.render(lambda frame, index: encoder.write(frame), format="bgra")
+video.write("iris.mp4")                 # through ffmpeg; encoder="png" for frames
+```
+
+Images may be paths (PNG, JPEG or TIFF) or arrays, float32 from 0 to 1 or
+uint8; 16-bit files make the best videos, as 8 bits flatten bright star
+cores and band smooth nebula. Options are the command's, in snake case,
+with frame sizes such as `"720p"`, `"1080p"`, `"4k"` or `"1080p-portrait"`.
+Distances come from the star distance file when installed, or the archives
+unless `online=False`. `render` stops when its callback returns `False`;
+Ctrl-C or `cancel` stop `render` and `write`.
+
 ## Predicted satellite tracks
 
 After a solve, predict which satellites crossed the image while the shutter

@@ -8,6 +8,7 @@ mod color;
 mod color_calibration;
 mod deconvolution;
 mod imgproc;
+mod parallax;
 mod rc_astro;
 mod satellites;
 mod stacking;
@@ -810,6 +811,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     stacking::register(m)?;
     stars::register(m)?;
     rc_astro::register(m)?;
+    parallax::register(m)?;
     calibration::register(m)?;
     stretch::register(m)?;
     m.add("SolveError", m.py().get_type::<SolveError>())?;
