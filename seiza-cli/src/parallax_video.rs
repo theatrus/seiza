@@ -622,32 +622,13 @@ fn split(
 /// Split a stretched image with StarXTerminator into its starless image
 /// and an unscreened stars image.
 fn star_x_terminator(image: &Rgb32FImage) -> Result<(Rgb32FImage, Rgb32FImage)> {
-    use seiza_stacking::{ExternalParameterValue, ExternalToolRequest, LinearImage, RcAstroCli};
+    use seiza_stacking::{LinearImage, RcAstroCli};
     let cli = match std::env::var_os("SEIZA_RC_ASTRO") {
         Some(path) if !path.is_empty() => RcAstroCli::with_executable(PathBuf::from(path)),
         _ => RcAstroCli::locate().context(
             "StarXTerminator's rc-astro CLI was not found on PATH (or set SEIZA_RC_ASTRO); \
              pass --starless and --stars instead",
         )?,
-    };
-    let schema = cli.tool_schema("sxt")?;
-    if !schema.licensed {
-        bail!(
-            "StarXTerminator is not licensed on this machine ({}); activate it, or pass \
-             --starless and --stars",
-            schema
-                .license_message
-                .as_deref()
-                .unwrap_or("no license message")
-        );
-    }
-    let request = ExternalToolRequest {
-        tool: "sxt".into(),
-        parameters: vec![
-            ("stars".into(), ExternalParameterValue::Bool(true)),
-            ("unscreen".into(), ExternalParameterValue::Bool(true)),
-        ],
-        device: None,
     };
     let linear = LinearImage::new(
         image.width() as usize,
@@ -656,16 +637,17 @@ fn star_x_terminator(image: &Rgb32FImage) -> Result<(Rgb32FImage, Rgb32FImage)> 
         image.as_raw().clone(),
     )?;
     let mut last = -1;
-    let processed = cli.process_image(&schema, &request, &linear, &[], None, &mut |fraction| {
-        let percent = (fraction * 100.0) as i32;
-        if percent / 10 != last / 10 {
-            println!("StarXTerminator {percent}%");
-            last = percent;
-        }
-    })?;
-    let stars = processed
-        .stars
-        .context("StarXTerminator wrote no stars image")?;
+    let (starless, stars) = cli
+        .split_stars(&linear, None, &mut |fraction| {
+            let percent = (fraction * 100.0) as i32;
+            if percent / 10 != last / 10 {
+                println!("StarXTerminator {percent}%");
+                last = percent;
+            }
+        })
+        .context(
+            "StarXTerminator could not split the image; pass --starless and --stars instead",
+        )?;
     let to_display = |image: LinearImage| {
         let data = image
             .data
@@ -675,7 +657,7 @@ fn star_x_terminator(image: &Rgb32FImage) -> Result<(Rgb32FImage, Rgb32FImage)> 
         Rgb32FImage::from_raw(image.width as u32, image.height as u32, data)
             .expect("an RGB image of its own size")
     };
-    Ok((to_display(processed.image), to_display(stars)))
+    Ok((to_display(starless), to_display(stars)))
 }
 
 fn solve(args: &ParallaxVideoArgs, path: &Path) -> Result<Wcs> {
