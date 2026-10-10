@@ -386,7 +386,9 @@ The camera flies `--dolly` of the way to the target (default 0.4) toward
 comes from moving it, so near stars slide across far ones as they would.
 `--start focus` (the default) opens on the widest view centred on the focus
 point and flies straight at it; `--start whole` opens on the whole image and
-moves sideways as it flies in, until the focus point is ahead. `--truck`
+moves sideways as it flies in, until the focus point is ahead. `--pan F` has
+it turn for that fraction of the way instead, which sweeps the far star field
+with the nebula. `--truck`
 swings the camera sideways and back (`--truck-angle` sets the direction),
 reduced if the far stars would slide off the image, and `--zoom-end`
 lengthens the lens over the shot. `--seconds`, `--fps` and `--size` set the

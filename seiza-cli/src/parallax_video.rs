@@ -69,6 +69,13 @@ pub(crate) struct ParallaxVideoArgs {
     /// enlarges every depth alike
     #[arg(long, default_value_t = 1.0)]
     zoom_end: f64,
+    /// How much of its way to the focus point the camera turns rather than
+    /// moves, 0 to 1 (reduced if the far stars would slide off the image).
+    /// Turning sweeps the distant star field along with the nebula: a little
+    /// keeps the target nearer the centre early on, much of it looks like the
+    /// sky spinning
+    #[arg(long, default_value_t = 0.0)]
+    pan: f64,
     /// Direction of the sideways travel, degrees anticlockwise from the
     /// image's rightward axis
     #[arg(long, default_value_t = 0.0)]
@@ -326,6 +333,7 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
             StartArg::Focus => Start::Focus,
             StartArg::Whole => Start::Whole,
         },
+        pan: args.pan,
         zoom: args.zoom,
         zoom_end: args.zoom_end,
         width: args.size.0,
@@ -341,6 +349,12 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
     };
 
     let (shot, fitted) = shot.fitted(&scene);
+    if shot.pan < args.pan {
+        println!(
+            "pan reduced to {:.2} so the far stars stay inside the image",
+            shot.pan
+        );
+    }
     if shot.lead < 1.0 {
         println!(
             "sideways travel toward the focus point comes later (lead {:.2}) so the far stars \
@@ -386,6 +400,9 @@ fn check_shot(args: &ParallaxVideoArgs) -> Result<()> {
     }
     if !(0.0..1.0).contains(&args.dolly) {
         bail!("--dolly must be at least 0 and below 1");
+    }
+    if !(0.0..=1.0).contains(&args.pan) {
+        bail!("--pan must be from 0 to 1");
     }
     if !(1.0..).contains(&args.zoom_end) {
         bail!("--zoom-end must be at least 1");

@@ -75,6 +75,12 @@ pub struct Shot {
     /// the frame's centre in step with the shot, at 0 mostly at the end.
     /// [`Self::fitted`] lowers it if a far layer's edge would show.
     pub lead: f64,
+    /// How much of its way to the focus point the camera turns rather than
+    /// moves, 0 to 1. Turning sweeps every depth alike, the distant star
+    /// field with the nebula, so a little keeps the target nearer the centre
+    /// early on and much of it looks like the sky spinning.
+    /// [`Self::fitted`] lowers it if a far layer's edge would show.
+    pub pan: f64,
     /// Output frame size, pixels.
     pub width: usize,
     pub height: usize,
@@ -103,6 +109,7 @@ impl Default for Shot {
             zoom: 1.0,
             zoom_end: 1.0,
             lead: 1.0,
+            pan: 0.0,
             width: 1920,
             height: 1080,
             frames: 240,
@@ -263,34 +270,40 @@ impl Shot {
         // The background's distance from the camera, as a fraction of its
         // distance from where the image was taken.
         let near = 1.0 - dolly * progress;
-        // The camera never turns: its lens keeps the angle that framed the
-        // opening view, and it reaches the focus point by moving. The
-        // background point at the centre of the frame goes from the opening
-        // view's centre to the focus point, and the focus point's place in
-        // the frame closes on the centre in step with the shot's progress
-        // (`lead` 1) or, as a straight line from where the image was taken
-        // would have it, mostly at the end (`lead` 0). A truck swings the
-        // camera sideways and back.
+        // The background point at the centre of the frame goes from the
+        // opening view's centre to the focus point, and the focus point's
+        // place in the frame closes on the centre in step with the shot's
+        // progress (`lead` 1) or, as a straight line from where the image
+        // was taken would have it, mostly at the end (`lead` 0). The lens
+        // keeps the angle that framed the opening view, and the camera moves
+        // sideways to bring that point to the centre, or turns for `pan` of
+        // the way. A truck swings it sideways and back.
         let lead = self.lead.clamp(0.0, 1.0);
+        let pan = self.pan.clamp(0.0, 1.0);
         let remaining = (1.0 - progress) * (lead + (1.0 - lead) / near);
         let swing = 4.0 * progress * (1.0 - progress);
-        let across = |focus: f64, opening: f64, centre: f64, truck: f64| {
+        // Per axis: the camera's sideways place, parsecs, and its lens angle
+        // as image pixels at the image's focal length.
+        let axis = |focus: f64, opening: f64, centre: f64, truck: f64| {
             let aimed = focus - (focus - opening) * remaining * near;
-            (aimed - centre - (opening - centre) * near) * distance / scene.focal_px
-                + truck * distance * swing
+            // Where the opening angle meets the background from here, and
+            // how far the centre of the frame still has to go.
+            let to_go = aimed - (centre + (opening - centre) * near);
+            let across = (1.0 - pan) * to_go * distance / scene.focal_px + truck * distance * swing;
+            let angle = opening - centre + pan * to_go / near;
+            (across, angle)
         };
+        let (across_x, angle_x) = axis(self.focus.0, opening.0, centre.0, self.truck.0);
+        let (across_y, angle_y) = axis(self.focus.1, opening.1, centre.1, self.truck.1);
         View {
             centre,
             focal_px: scene.focal_px,
-            across: (
-                across(self.focus.0, opening.0, centre.0, self.truck.0),
-                across(self.focus.1, opening.1, centre.1, self.truck.1),
-            ),
+            across: (across_x, across_y),
             along,
             focal_out,
             focus_shift: (
-                focal_out * (opening.0 - centre.0) / scene.focal_px,
-                focal_out * (opening.1 - centre.1) / scene.focal_px,
+                focal_out * angle_x / scene.focal_px,
+                focal_out * angle_y / scene.focal_px,
             ),
             out_centre: (
                 (self.width as f64 - 1.0) / 2.0,
@@ -301,8 +314,9 @@ impl Shot {
 
     /// This shot made to keep every layer's edge out of view, and the
     /// factor its truck was scaled by. The camera's sideways travel toward
-    /// the focus point comes as early as `lead` allows, and its truck swings
-    /// as wide as the image allows: moving sideways slides layers at
+    /// the focus point comes as early as `lead` allows, it turns as much of
+    /// the way as `pan` allows, and its truck swings as wide as the image
+    /// allows: moving sideways slides layers at
     /// different depths against each other, and the far ones would uncover
     /// ground the image never showed. Moving along a straight line from
     /// where the image was taken never does.
@@ -327,14 +341,28 @@ impl Shot {
             }
             low
         };
+        // The sideways travel first, then turning, then the truck: each
+        // takes what room the ones before it leave.
         let lead = largest(&|factor| Self {
             lead: self.lead * factor,
+            pan: 0.0,
             truck: (0.0, 0.0),
             ..*self
         });
         let led = Self {
             lead: self.lead * lead,
+            pan: 0.0,
+            truck: (0.0, 0.0),
             ..*self
+        };
+        let pan = largest(&|factor| Self {
+            pan: self.pan * factor,
+            ..led
+        });
+        let led = Self {
+            pan: self.pan * pan,
+            truck: self.truck,
+            ..led
         };
         let factor = largest(&|factor| Self {
             truck: (self.truck.0 * factor, self.truck.1 * factor),
@@ -656,6 +684,33 @@ mod tests {
             last.project(150.0, 150.0, 50.0).unwrap(),
         );
         assert!((a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_pan_turns_part_of_the_way_and_still_ends_on_the_focus() {
+        let scene = scene_with(&[]);
+        let shot = Shot {
+            focus: (320.0, 60.0),
+            dolly: 0.5,
+            truck: (0.0, 0.0),
+            start: Start::Whole,
+            pan: 0.3,
+            width: 200,
+            height: 150,
+            frames: 10,
+            ..Shot::default()
+        };
+        let angle = |view: &View| view.focus_shift.0 / view.focal_out;
+        let (first, last) = (shot.view(&scene, 0), shot.view(&scene, 9));
+        // The lens turns toward the focus point, and the camera moves less.
+        assert!(angle(&last) > angle(&first));
+        let unpanned = Shot { pan: 0.0, ..shot }.view(&scene, 9);
+        assert!(last.across.0.abs() < unpanned.across.0.abs());
+        let (x, y, _) = last.project(320.0, 60.0, 400.0).unwrap();
+        assert!(
+            (x - 99.5).abs() < 1e-6 && (y - 74.5).abs() < 1e-6,
+            "({x}, {y})"
+        );
     }
 
     #[test]
