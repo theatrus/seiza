@@ -145,6 +145,16 @@ pub(crate) struct ParallaxVideoArgs {
     /// its pace between stops, so it never quite stops; 0 comes to rest
     #[arg(long, default_value_t = 0.2)]
     tour_glide: f64,
+    /// Show each tour stop's title, low in the frame, while the camera
+    /// drifts through the stop, fading in and out: a planned tour titles
+    /// each target with its name, and a stop's title= sets or changes it
+    #[arg(long)]
+    tour_titles: bool,
+    /// End the tour where it began so the video loops: the last frame leads
+    /// into the first. A last stop at the first's view is added unless the
+    /// tour already ends there
+    #[arg(long = "loop")]
+    tour_loop: bool,
     /// Frames per second
     #[arg(long, default_value_t = 30)]
     fps: u32,
@@ -390,7 +400,8 @@ fn write_plan(args: &ParallaxVideoArgs, path: &Path) -> Result<()> {
     let mut text = format!(
         "# A tour of {} planned by seiza parallax-video. Each line is a stop as\n\
          # --stop takes it; drop, move or change lines, then pass this file with\n\
-         # --tour-file. The nebula's distance is taken at the focus line.\n\
+         # --tour-file. A stop's title shows with --tour-titles. The nebula's\n\
+         # distance is taken at the focus line.\n\
          focus {:.0},{:.0}  # {}\n",
         solve_path.display(),
         plan.focus.0,
@@ -400,7 +411,10 @@ fn write_plan(args: &ParallaxVideoArgs, path: &Path) -> Result<()> {
     for planned in &plan.stops {
         let line = seiza_parallax::format_stop(&planned.stop);
         match &planned.name {
-            Some(name) => text.push_str(&format!("{line}  # {name}\n")),
+            Some(name) if planned.stop.title.as_deref() != Some(name) => {
+                text.push_str(&format!("{line}  # {name}\n"))
+            }
+            Some(_) => text.push_str(&format!("{line}\n")),
             None if planned.stop.focus.is_some() => {
                 text.push_str(&format!("{line}  # pulling back on the way\n"))
             }
@@ -413,6 +427,25 @@ fn write_plan(args: &ParallaxVideoArgs, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// `line` up to a `#` outside double quotes.
+fn uncommented(line: &str) -> &str {
+    let mut quoted = false;
+    let mut escaped = false;
+    for (at, c) in line.char_indices() {
+        match c {
+            '\\' if quoted && !escaped => {
+                escaped = true;
+                continue;
+            }
+            '"' if !escaped => quoted = !quoted,
+            '#' if !quoted => return &line[..at],
+            _ => {}
+        }
+        escaped = false;
+    }
+    line
+}
+
 /// A tour file's stops, and its focus line if any.
 type TourFile = (Vec<seiza_parallax::TourStop>, Option<(f64, f64)>);
 
@@ -422,7 +455,7 @@ fn read_tour(path: &Path) -> Result<TourFile> {
         .with_context(|| format!("failed to read {}", path.display()))?;
     let (mut stops, mut focus) = (Vec::new(), None);
     for (number, line) in text.lines().enumerate() {
-        let line = line.split('#').next().unwrap_or("").trim();
+        let line = uncommented(line).trim();
         if line.is_empty() {
             continue;
         }
@@ -498,6 +531,8 @@ fn options(args: &ParallaxVideoArgs, file: Option<TourFile>) -> ParallaxOptions 
             },
             auto_tour: args.auto_tour.map(|_| auto_tour(args)),
             tour_glide: args.tour_glide,
+            tour_titles: args.tour_titles,
+            tour_loop: args.tour_loop,
             size: args.size,
             seconds: args.seconds,
             fps: args.fps,
@@ -752,5 +787,17 @@ mod tests {
     fn points_parse() {
         assert_eq!(parse_point("10.5, 20"), Ok((10.5, 20.0)));
         assert!(parse_point("10").is_err());
+    }
+
+    #[test]
+    fn a_tour_line_ends_at_a_hash_outside_quotes() {
+        assert_eq!(uncommented("whole hold=1  # the opening"), "whole hold=1  ");
+        let quoted = r#"10,20 title="Sh2-170 #2 \"east\"" hold=1 # note"#;
+        assert_eq!(
+            uncommented(quoted),
+            r#"10,20 title="Sh2-170 #2 \"east\"" hold=1 "#
+        );
+        let stop = seiza_parallax::parse_stop(uncommented(quoted)).unwrap();
+        assert_eq!(stop.title.as_deref(), Some(r#"Sh2-170 #2 "east""#));
     }
 }

@@ -142,12 +142,43 @@ def test_a_tour_plan_comes_back_editable_and_goes_back_in(tmp_path):
     made, _ = video(
         tmp_path,
         tour=[
-            {"name": None, "focus": None, "hold": 1.0},
-            {"name": "NGC 9001", "focus": (150.0, 110.0), "dolly": 0.5, "travel": 1.0, "hold": 1.0},
-            {"name": None, "focus": None, "travel": 1.0},
+            {"name": None, "focus": None, "hold": 1.0, "title": None},
+            {
+                "name": "NGC 9001",
+                "focus": (150.0, 110.0),
+                "dolly": 0.5,
+                "travel": 1.0,
+                "hold": 1.0,
+                "title": "NGC 9001",
+            },
+            {"name": None, "focus": None, "travel": 1.0, "title": None},
         ],
     )
     assert made.frame_count == 20
+
+
+def test_a_titled_tour_shows_its_title_and_a_looped_one_ends_where_it_began(tmp_path):
+    stops = [
+        "whole hold=1",
+        {"focus": (150.0, 110.0), "dolly": 0.5, "travel": 1.0, "hold": 2.0, "title": "Here"},
+        "200,60 dolly=0.3 travel=1",
+    ]
+    plain, _ = video(tmp_path, tour=stops)
+    titled, _ = video(tmp_path, tour=stops, tour_titles=True)
+    # Holding at the titled stop, from second 2 to 4: the title is drawn
+    # low on the left.
+    at = 3 * plain.fps
+    changed = np.abs(titled.frame(at).astype(int) - plain.frame(at).astype(int)).sum(axis=-1) > 0
+    rows, columns = np.nonzero(changed)
+    assert rows.size and rows.min() > 120 // 2 and columns.max() < 160 * 0.75
+    # Looped, the tour gains a last stop back at the whole image and the
+    # frame after the last is the first.
+    looped, _ = video(tmp_path, tour=stops, tour_loop=True)
+    assert looped.frame_count > plain.frame_count
+    first, last = looped.frame(0).astype(int), looped.frame(looped.frame_count - 1).astype(int)
+    assert np.abs(first - last).mean() < 2.0
+    with pytest.raises(ValueError, match="need a tour"):
+        video(tmp_path, tour_loop=True)
 
 
 def test_a_reconfigured_video_shares_the_scene(tmp_path):

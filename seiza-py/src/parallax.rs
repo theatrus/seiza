@@ -56,10 +56,12 @@ fn auto_tour_argument(value: &Bound<'_, PyAny>) -> PyResult<Option<seiza_paralla
 /// Plan a tour of the catalogued objects in a `width` × `height` image
 /// whose sky `wcs` gives, for frames of `size`, to edit before making the
 /// video: every target worth a visit (or the `targets` most worth it),
-/// visited in a short round from the whole image and back, staying `hold`
-/// seconds at each and turning and panning as much as `motion` says.
-/// Returns a dict: `tour`, the stops as dicts (`name`, `focus`, `dolly`,
-/// `zoom`, `rotate_deg`, `pan`, `travel`, `hold`), and `focus` with
+/// visited in a short round from the whole image and back to a final
+/// drift, staying `hold` seconds at each and turning and panning as much
+/// as `motion` says. Returns a dict: `tour`, the stops as dicts (`name`,
+/// `focus`, `dolly`, `zoom`, `rotate_deg`, `pan`, `travel`, `hold`,
+/// `spin_deg`, `push`, and `title`, the target's name, which
+/// `tour_titles=True` shows), and `focus` with
 /// `focus_name`, the target most worth a visit, where the nebula's distance
 /// is best taken. Drop, move or change stops, then pass `tour=plan["tour"],
 /// distance_focus=plan["focus"]` to `ParallaxVideo`.
@@ -110,6 +112,7 @@ pub(crate) fn plan_parallax_tour<'py>(
             stop.set_item("hold", planned.stop.hold)?;
             stop.set_item("spin_deg", planned.stop.spin_deg)?;
             stop.set_item("push", planned.stop.push)?;
+            stop.set_item("title", &planned.stop.title)?;
             Ok(stop)
         })
         .collect::<PyResult<Vec<_>>>()?;
@@ -312,6 +315,8 @@ fn options(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ParallaxOptions> {
             "growth_limit" => options.video.growth_limit = value.extract()?,
             "auto_tour" => options.video.auto_tour = auto_tour_argument(&value)?,
             "tour_glide" => options.video.tour_glide = value.extract()?,
+            "tour_titles" => options.video.tour_titles = value.extract()?,
+            "tour_loop" => options.video.tour_loop = value.extract()?,
             "tour" => {
                 options.video.tour = value
                     .try_iter()?
@@ -335,6 +340,11 @@ fn options(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ParallaxOptions> {
                                 "hold" => parsed.hold = value.extract()?,
                                 "spin_deg" => parsed.spin_deg = value.extract()?,
                                 "push" => parsed.push = value.extract()?,
+                                "title" => {
+                                    parsed.title = value
+                                        .extract::<Option<String>>()?
+                                        .filter(|title| !title.is_empty())
+                                }
                                 // A plan's name for the stop's target.
                                 "name" => {}
                                 other => {

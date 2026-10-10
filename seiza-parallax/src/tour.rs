@@ -196,7 +196,8 @@ pub struct PlannedStop {
 
 /// A tour of `targets` in a `width` × `height` image filmed at
 /// `frame` (output pixels): from the whole image, to each target in a
-/// short round, and back to the whole image.
+/// short round, and back to the whole image for a final drift three times
+/// a target's hold. Each target's stop is titled with its name.
 pub fn plan(
     targets: &[Target],
     (width, height): (usize, usize),
@@ -249,17 +250,17 @@ pub fn plan(
     let mut prominent: Vec<usize> = (0..targets.len()).collect();
     prominent.sort_by(|&a, &b| targets[b].prominence.total_cmp(&targets[a].prominence));
     let starring = |index: usize| prominent.iter().take(3).any(|&top| top == index);
-    let whole_view = |travel: f64| PlannedStop {
+    let whole_view = |travel: f64, hold: f64| PlannedStop {
         stop: TourStop {
             focus: None,
             travel,
-            hold: auto.hold,
+            hold,
             ..TourStop::default()
         },
         name: None,
     };
 
-    let mut stops = vec![whole_view(0.0)];
+    let mut stops = vec![whole_view(0.0, auto.hold)];
     let mut here = (centre, 0.0);
     for (step, &index) in order.iter().enumerate() {
         let target = &targets[index];
@@ -293,6 +294,7 @@ pub fn plan(
                 pan,
                 travel,
                 hold,
+                title: Some(target.name.clone()),
                 ..TourStop::default()
             },
             name: Some(target.name.clone()),
@@ -320,7 +322,11 @@ pub fn plan(
         here = (place, dolly);
     }
     let home = (here.0.0 - centre.0).hypot(here.0.1 - centre.1) / (2.0 * half.1);
-    stops.push(whole_view((4.0 + 2.0 * home).clamp(4.0, 8.0)));
+    // A slower, longer final drift on the whole image.
+    stops.push(whole_view(
+        (4.0 + 2.0 * home).clamp(4.0, 8.0),
+        auto.hold * 3.0,
+    ));
     stops
 }
 
@@ -347,7 +353,7 @@ mod tests {
             target("d", 250.0, 180.0, 40.0, 0.6),
         ];
         let planned = plan(&targets, (1000, 800), (1920, 1080), &AutoTour::default());
-        let stops: Vec<TourStop> = planned.iter().map(|planned| planned.stop).collect();
+        let stops: Vec<TourStop> = planned.iter().map(|planned| planned.stop.clone()).collect();
         assert!(stops.first().unwrap().focus.is_none() && stops.last().unwrap().focus.is_none());
         // Every target once, in a round that does not cross itself: the
         // corners are taken in turn, not a then b then c then d.
@@ -373,6 +379,7 @@ mod tests {
                 .find(|planned| planned.name.as_deref() == Some(name))
                 .unwrap()
                 .stop
+                .clone()
         };
         assert!(at("c").dolly < at("b").dolly);
         let (x, y) = at("d").focus.unwrap();
@@ -464,7 +471,8 @@ mod tests {
             .iter()
             .find(|stop| stop.name.as_deref() == Some("arc"))
             .unwrap()
-            .stop;
+            .stop
+            .clone();
         let near = 1.0 - arc.dolly;
         let (_, y) = arc.focus.unwrap();
         // The target's centre inside the middle four fifths of the frame's

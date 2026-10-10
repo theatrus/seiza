@@ -57,14 +57,15 @@ pub enum Error {
 }
 
 /// A stop on a tour, as the options give it.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TourStop {
     /// The image point the camera centres, or the image's centre if
     /// `None`.
     pub focus: Option<(f64, f64)>,
     /// Fraction of the way to the nebula the camera has flown, 0 to below 1.
     pub dolly: f64,
-    /// The lens's magnification over the opening view's.
+    /// The lens's magnification over the widest view of the first stop's
+    /// place.
     pub zoom: f64,
     /// The frame's turn, degrees anticlockwise.
     pub rotate_deg: f64,
@@ -79,6 +80,9 @@ pub struct TourStop {
     /// How much of its remaining way to the nebula the camera flies on
     /// while it holds here, 0 to below 1.
     pub push: f64,
+    /// The title shown while the camera drifts through here, with
+    /// [`VideoOptions::tour_titles`]: a planned tour names its target.
+    pub title: Option<String>,
 }
 
 impl Default for TourStop {
@@ -93,18 +97,21 @@ impl Default for TourStop {
             hold: 0.0,
             spin_deg: 0.0,
             push: 0.0,
+            title: None,
         }
     }
 }
 
 /// A [`TourStop`] written `X,Y` or `whole` (the image's centre), then any
 /// of `dolly=`, `zoom=`, `rotate=` (degrees), `pan=`, `travel=` and
-/// `hold=` (seconds), `spin=` (degrees turned while holding) and `push=`
-/// (the share of the remaining way flown in while holding),
+/// `hold=` (seconds), `spin=` (degrees turned while holding), `push=`
+/// (the share of the remaining way flown in while holding) and `title=`,
 /// separated by spaces: `2700,3400 dolly=0.85 rotate=-20 travel=6
-/// hold=1.5`.
+/// hold=1.5 title="Sh2-170"`. A value in double quotes may hold spaces,
+/// and `\"` or `\\` within them a quote or backslash.
 pub fn parse_stop(text: &str) -> Result<TourStop, String> {
-    let mut parts = text.split_whitespace();
+    let parts = words(text)?;
+    let mut parts = parts.iter().map(String::as_str);
     let place = parts
         .next()
         .ok_or_else(|| "a stop needs a place, X,Y or whole".to_string())?;
@@ -128,6 +135,10 @@ pub fn parse_stop(text: &str) -> Result<TourStop, String> {
         let (key, value) = part
             .split_once('=')
             .ok_or_else(|| format!("expected key=value in a stop; got {part}"))?;
+        if key == "title" {
+            stop.title = (!value.is_empty()).then(|| value.to_string());
+            continue;
+        }
         let value: f64 = value.parse().map_err(|error| format!("{part}: {error}"))?;
         match key {
             "dolly" => stop.dolly = value,
@@ -140,13 +151,54 @@ pub fn parse_stop(text: &str) -> Result<TourStop, String> {
             "push" => stop.push = value,
             other => {
                 return Err(format!(
-                    "a stop takes dolly, zoom, rotate, pan, travel, hold, spin and push; got \
-                     {other}"
+                    "a stop takes dolly, zoom, rotate, pan, travel, hold, spin, push and \
+                     title; got {other}"
                 ));
             }
         }
     }
     Ok(stop)
+}
+
+/// `text` split at spaces, but not those within double quotes, which go.
+fn words(text: &str) -> Result<Vec<String>, String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let (mut quoted, mut started) = (false, false);
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                started = true;
+            }
+            '\\' if quoted => match chars.next() {
+                Some(next @ ('"' | '\\')) => word.push(next),
+                Some(next) => {
+                    word.push('\\');
+                    word.push(next);
+                }
+                None => word.push('\\'),
+            },
+            c if c.is_whitespace() && !quoted => {
+                if started {
+                    words.push(std::mem::take(&mut word));
+                    started = false;
+                }
+            }
+            c => {
+                word.push(c);
+                started = true;
+            }
+        }
+    }
+    if quoted {
+        return Err(format!("a stop has an unclosed quote: {text}"));
+    }
+    if started {
+        words.push(word);
+    }
+    Ok(words)
 }
 
 /// What preparing a video's scene takes beyond its images and plate
@@ -291,6 +343,16 @@ pub struct VideoOptions {
     /// How fast a tour moves on through a stop it holds at, as a share of
     /// its pace between stops, so it never quite stops; 0 comes to rest.
     pub tour_glide: f64,
+    /// Show each tour stop's title low in the frame while the camera
+    /// drifts through the stop, fading in and out.
+    pub tour_titles: bool,
+    /// End the tour where it began, so the video loops: the last frame
+    /// leads into the first. The tour gains a last stop at the first's
+    /// view unless it ends there, and turns back to the first's frame by
+    /// the nearest whole turns, spins included. The camera drifts through
+    /// the join at half a glide's pace; the first and last stops' pushes
+    /// go unused.
+    pub tour_loop: bool,
     /// Frame size, even sides.
     pub size: (usize, usize),
     pub seconds: f64,
@@ -325,6 +387,8 @@ impl Default for VideoOptions {
             tour: Vec::new(),
             auto_tour: None,
             tour_glide: 0.2,
+            tour_titles: false,
+            tour_loop: false,
             size: (1920, 1080),
             seconds: 8.0,
             fps: 30,
@@ -408,10 +472,23 @@ impl VideoOptions {
         if self.tour_glide.is_nan() || self.tour_glide < 0.0 {
             return invalid("a tour's glide must be at least 0");
         }
+        if (self.tour_titles || self.tour_loop) && self.tour.is_empty() && self.auto_tour.is_none()
+        {
+            return invalid("tour titles and a looping tour need a tour");
+        }
         if !self.tour.is_empty() && self.seconds() <= 0.0 {
             return invalid("a tour must take some time");
         }
         Ok(())
+    }
+
+    /// The tour's stops, ending at the first's view when the tour loops.
+    pub fn stops(&self) -> Vec<TourStop> {
+        if self.tour_loop {
+            close_loop(&self.tour)
+        } else {
+            self.tour.clone()
+        }
     }
 
     /// The video's length, seconds: the tour's, if there is one.
@@ -419,7 +496,7 @@ impl VideoOptions {
         if self.tour.is_empty() {
             return self.seconds;
         }
-        self.tour
+        self.stops()
             .iter()
             .enumerate()
             .map(|(index, stop)| if index > 0 { stop.travel } else { 0.0 } + stop.hold)
@@ -904,7 +981,7 @@ impl Parallax {
             growth_limit: video.growth_limit,
             fade_from: video.fade_from,
             tour: video
-                .tour
+                .stops()
                 .iter()
                 .map(|stop| Stop {
                     focus: stop.focus.unwrap_or(centre),
@@ -919,6 +996,7 @@ impl Parallax {
                 })
                 .collect(),
             glide: video.tour_glide,
+            looped: video.tour_loop,
             ..Shot::default()
         };
         if !asked.tour.is_empty() {
@@ -962,11 +1040,20 @@ impl Parallax {
             )));
             marks.extend(catalogued.iter().cloned());
         }
-        let overlay = if marks.is_empty() && video.watermark.is_none() {
+        let titles: Vec<Option<String>> = if video.tour_titles {
+            video.stops().into_iter().map(|stop| stop.title).collect()
+        } else {
+            Vec::new()
+        };
+        let overlay = if marks.is_empty()
+            && video.watermark.is_none()
+            && titles.iter().all(Option::is_none)
+        {
             None
         } else {
             let mut overlay = Overlay::new(
                 marks,
+                titles,
                 video.watermark.clone(),
                 video.overlay_density,
                 prepared.wcs.scale_arcsec_per_px(),
@@ -1147,7 +1234,10 @@ pub struct PlannedTour {
 impl PlannedTour {
     /// The stops alone, for [`ParallaxOptions::tour`].
     pub fn tour(&self) -> Vec<TourStop> {
-        self.stops.iter().map(|planned| planned.stop).collect()
+        self.stops
+            .iter()
+            .map(|planned| planned.stop.clone())
+            .collect()
     }
 }
 
@@ -1155,8 +1245,8 @@ impl PlannedTour {
 /// whose sky `wcs` gives, as `auto` asks, for frames of `frame` output
 /// pixels, from the object catalog at `objects` or the standard places.
 /// The plan is the caller's to edit, dropping, moving or changing stops,
-/// before passing its stops as [`ParallaxOptions::tour`] and its `focus`
-/// as [`ParallaxOptions::focus`].
+/// before passing its stops as [`VideoOptions::tour`] and its `focus` as
+/// [`SceneOptions::distance_focus`].
 pub fn plan_tour(
     wcs: &Wcs,
     (width, height): (u32, u32),
@@ -1186,6 +1276,58 @@ pub fn plan_tour(
     })
 }
 
+/// `tour` ending where it begins, for a video that loops: a last stop at
+/// the first's view, unless the last is already there, turned back to the
+/// first's frame by the nearest whole turns, spins included. An added last
+/// stop comes the tour's mean travel after the one before and holds three
+/// times as long as the first, at least three seconds: the final drift.
+fn close_loop(tour: &[TourStop]) -> Vec<TourStop> {
+    let mut closed = tour.to_vec();
+    let Some(first) = tour.first() else {
+        return closed;
+    };
+    let last = tour.last().expect("a first stop is a last");
+    let home = tour.len() >= 2
+        && last.focus == first.focus
+        && last.dolly == first.dolly
+        && last.zoom == first.zoom
+        && last.pan == first.pan;
+    if !home {
+        let travels: Vec<f64> = tour.iter().skip(1).map(|stop| stop.travel).collect();
+        let travel = if travels.is_empty() {
+            TourStop::default().travel
+        } else {
+            travels.iter().sum::<f64>() / travels.len() as f64
+        };
+        closed.push(TourStop {
+            travel,
+            hold: (first.hold * 3.0).max(3.0),
+            spin_deg: 0.0,
+            push: 0.0,
+            ..first.clone()
+        });
+    }
+    // The turn the tour ends on, spins included, comes back to the first
+    // stop's by whole turns: as few as may be from the turn the last stop
+    // asked, or from the stop before an added one.
+    let spun: f64 = closed
+        .iter()
+        .filter(|stop| stop.hold > 0.0)
+        .map(|stop| stop.spin_deg)
+        .sum();
+    let count = closed.len();
+    let near = if home {
+        closed[count - 1].rotate_deg
+    } else {
+        closed[count - 2].rotate_deg
+    };
+    let back = first.rotate_deg - spun;
+    let closing = &mut closed[count - 1];
+    closing.rotate_deg = back + ((near - back) / 360.0).round() * 360.0;
+    closing.push = 0.0;
+    closed
+}
+
 /// A stop written as [`parse_stop`] reads it.
 pub fn format_stop(stop: &TourStop) -> String {
     let mut text = match stop.focus {
@@ -1208,6 +1350,10 @@ pub fn format_stop(stop: &TourStop) -> String {
             let value = value.trim_end_matches('0').trim_end_matches('.');
             text.push_str(&format!(" {key}={value}"));
         }
+    }
+    if let Some(title) = &stop.title {
+        let quoted = title.replace('\\', "\\\\").replace('"', "\\\"");
+        text.push_str(&format!(" title=\"{quoted}\""));
     }
     text
 }
@@ -1524,12 +1670,68 @@ mod tests {
                 hold: 1.5,
                 spin_deg: 360.0,
                 push: 0.25,
+                title: Some(r#"Sh2-170, the "core" \ centre"#.into()),
             },
         ] {
             let text = format_stop(&stop);
             assert_eq!(parse_stop(&text).unwrap(), stop, "{text}");
         }
         assert_eq!(format_stop(&TourStop::default()), "whole travel=5");
+        let titled = parse_stop("whole hold=2 title=Plain").unwrap();
+        assert_eq!(titled.title.as_deref(), Some("Plain"));
+        let spaced = parse_stop(r#"10,20 title="NGC 7822 \"east\"" hold=1"#).unwrap();
+        assert_eq!(spaced.title.as_deref(), Some(r#"NGC 7822 "east""#));
+        assert_eq!(spaced.hold, 1.0);
+        assert!(parse_stop(r#"whole title="open"#).is_err());
+    }
+
+    #[test]
+    fn a_looping_tour_ends_at_its_first_view_and_frame() {
+        let stops = |text: &[&str]| -> Vec<TourStop> {
+            text.iter().map(|stop| parse_stop(stop).unwrap()).collect()
+        };
+        // Ending elsewhere, it gains a last stop at the first's view, the
+        // tour's mean travel on, with a long final drift; a half-turn spin
+        // is made up to a whole turn by the nearest way round.
+        let tour = stops(&[
+            "whole hold=1.5 title=Start",
+            "100,100 dolly=0.5 travel=4 hold=4 spin=180 push=0.2",
+            "300,200 dolly=0.3 rotate=30 travel=6",
+        ]);
+        let closed = close_loop(&tour);
+        assert_eq!(closed.len(), 4);
+        let last = &closed[3];
+        assert_eq!((last.focus, last.dolly, last.zoom), (None, 0.0, 1.0));
+        assert_eq!((last.travel, last.hold), (5.0, 4.5));
+        assert_eq!(last.title.as_deref(), Some("Start"));
+        assert_eq!(last.rotate_deg, 180.0);
+        assert_eq!((last.rotate_deg + 180.0) % 360.0, 0.0);
+        // A whole-turn spin needs no unwinding.
+        let mut spun = tour.clone();
+        spun[1].spin_deg = -360.0;
+        assert_eq!(close_loop(&spun)[3].rotate_deg, 0.0);
+        // Ending at the first's view already, it gains nothing.
+        let home = stops(&[
+            "whole hold=1",
+            "100,100 dolly=0.5 travel=4 hold=1",
+            "whole travel=5 hold=4",
+        ]);
+        assert_eq!(close_loop(&home), home);
+        // The video's length counts the added stop.
+        let video = VideoOptions {
+            tour,
+            tour_loop: true,
+            ..VideoOptions::default()
+        };
+        assert_eq!(video.seconds(), 1.5 + 8.0 + 6.0 + 9.5);
+        assert!(
+            VideoOptions {
+                tour_loop: true,
+                ..VideoOptions::default()
+            }
+            .check()
+            .is_err()
+        );
     }
 
     #[test]

@@ -414,16 +414,21 @@ it must. The camera never quite stops: it moves on through a stop it holds
 at at a fifth of its pace between stops (`--tour-glide`, 0 to come to rest).
 A stop's `spin=DEG` turns the frame while it holds there, and `push=P` flies
 on in by that share of the remaining way, which with a spin turns the near
-stars in a spiral past the far ones. `--auto-tour [N]` plans a tour itself from the catalogued objects
+stars in a spiral past the far ones. The last stop's hold is a final drift
+that slows to rest. `--loop` ends the tour where it began instead, adding a
+last stop at the first's view unless the tour ends there, so the last frame
+leads into the first and the video loops. A stop's `title="TEXT"` names it,
+and `--tour-titles` shows each title low in the frame while the camera
+drifts through its stop, fading in and out. `--auto-tour [N]` plans a tour itself from the catalogued objects
 in the field: every one worth a visit (the well-known catalogues, and
 broad regions that are large, bright or named), up to twelve, or the N
 most worth it, visited in a short round
-from the whole image and back, each framed to its size, with turns that
+from the whole image and back to a final drift three times as long, each framed to its size, with turns that
 alternate in direction and a little pan; a long way between two targets
 pulls back on the way. `--tour-hold` sets the seconds at each target and
 `--tour-motion` how much it turns and pans (0 for none, 2 for twice the
 default). To edit a planned tour first, `--plan-tour FILE` writes the plan,
-one `--stop` a line with each target's name in a comment, and a `focus
+one `--stop` a line, each target's titled with its name, and a `focus
 X,Y` line for the distance focus, and stops; remove, move or change lines,
 then render it with `--tour-file FILE`. `--seconds`, `--fps` and `--size` set the
 video (`--size` takes `720p`, `1080p`, the default, `1440p` or `4k`, any of

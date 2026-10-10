@@ -2073,11 +2073,16 @@ char *seiza_rc_astro_process_file_json(const char *request_json,
  `pan`, `zoom`, `zoomEnd`, `rotateDegrees` `[first, last]`, `easing`
  ("inOut", "linear"), `quality` ("standard", "high"), `growthLimit`,
  `fadeFrom`, `tour` (stops `[{focus, dolly, zoom, rotateDegrees, pan,
- travel, hold, spinDegrees, push}]`, gliding through held stops at
- `tourGlide` of the pace between them), the first the opening view, which replace the single
- move and set the length; [`seiza_parallax_plan_tour_json`] plans
+ travel, hold, spinDegrees, push, title}]`, gliding through held stops
+ at `tourGlide` of the pace between them, the first the opening view and
+ the last's hold a final drift that slows to rest, which replace the
+ single move and set the length; [`seiza_parallax_plan_tour_json`] plans
  one), `autoTour` (`{targets, hold, motion}`: plan a tour of the
- catalogued objects and render it), `size` ("720p", "1080p", "1440p", "4k", each with
+ catalogued objects and render it), `tourTitles` (show each stop's
+ title low in the frame while the camera drifts through it, fading in
+ and out), `tourLoop` (end where the tour began, adding a last stop at
+ the first's view unless it ends there, so the last frame leads into the
+ first), `size` ("720p", "1080p", "1440p", "4k", each with
  "-portrait", or "WIDTHxHEIGHT"), `seconds`, `fps`, `overlay`,
  `overlayDensity`, `labels` (`[{x, y, radius, text}]`), `labelColor`
  ("#RRGGBB") and `watermark` (true, or the text). An unknown field is an
@@ -2111,9 +2116,10 @@ SeizaParallax *seiza_parallax_prepare_json(const char *request_json,
  catalog; and `autoTour` (`{targets, hold, motion}`, each optional) how
  to plan. Returns JSON, released with `seiza_string_free`:
  `{"focus": [x, y], "focusName", "seconds", "tour": [{name, focus,
- dolly, zoom, rotateDegrees, pan, travel, hold}]}`. Its `tour`, with any
- stops dropped, moved or changed, and its `focus` go back into a prepare
- request as they are. Null with `error_out` set on failure; `events`
+ dolly, zoom, rotateDegrees, pan, travel, hold, spinDegrees, push,
+ title}]}`, each target's stop titled with its name. Its `tour`, with any
+ stops or titles dropped, moved or changed, goes back into a prepare
+ request as it is, and its `focus` as `distanceFocus`. Null with `error_out` set on failure; `events`
  (nullable) hears the solve.
 
  # Safety
@@ -2135,7 +2141,7 @@ char *seiza_parallax_plan_tour_json(const char *request_json,
  [`seiza_parallax_prepare_json`] but for the scene's: the single move
  (`focus`, `start`, `dolly`, `truck`, `truckAngleDegrees`, `pan`, `zoom`,
  `zoomEnd`, `rotateDegrees`, `easing`), a tour (`tour`, `autoTour`,
- `tourGlide`), the output (`size`, `seconds`, `fps`, `quality`,
+ `tourGlide`, `tourTitles`, `tourLoop`), the output (`size`, `seconds`, `fps`, `quality`,
  `growthLimit`, `fadeFrom`) and the labels (`overlay`, `overlayDensity`,
  `labels`, `labelColor`, `watermark`). Fields left out take their
  defaults, not the first video's. Turns are taken as given, unwrapped:

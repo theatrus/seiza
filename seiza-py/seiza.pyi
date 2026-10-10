@@ -579,6 +579,8 @@ class ParallaxVideo:
         tour: Sequence[str | Mapping[str, Any]] = (),
         auto_tour: bool | int | Mapping[str, Any] | None = None,
         tour_glide: float = 0.2,
+        tour_titles: bool = False,
+        tour_loop: bool = False,
         size: str | tuple[int, int] = "1080p",
         seconds: float = 8.0,
         fps: int = 30,

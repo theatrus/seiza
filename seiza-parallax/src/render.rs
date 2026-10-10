@@ -75,7 +75,8 @@ pub struct Stop {
     /// The fraction of the way to the background plane the camera has
     /// flown, 0 to below 1.
     pub dolly: f64,
-    /// The lens's magnification over the opening view's.
+    /// The lens's magnification over the widest view of the first stop's
+    /// place (as [`Shot::zoom`] narrows it).
     pub zoom: f64,
     /// The frame's turn about its centre, radians anticlockwise.
     pub rotation: f64,
@@ -161,6 +162,11 @@ pub struct Shot {
     /// How fast a tour moves on through a stop it holds at, as a share of
     /// its pace between stops: it never quite stops. At 0 it comes to rest.
     pub glide: f64,
+    /// A tour that loops: its last stop shows its first stop's view, the
+    /// frame after the last is the first, and the camera drifts through
+    /// that join at one steady pace. Unlooped, the last stop's hold is a
+    /// final drift that slows to rest.
+    pub looped: bool,
     /// Output frame size, pixels.
     pub width: usize,
     pub height: usize,
@@ -194,6 +200,7 @@ impl Default for Shot {
             rotation: (0.0, 0.0),
             tour: Vec::new(),
             glide: 0.2,
+            looped: false,
             width: 1920,
             height: 1080,
             frames: 240,
@@ -386,13 +393,21 @@ impl Shot {
         })
     }
 
-    /// The camera at frame `frame` of `scene`.
-    pub fn view(&self, scene: &Scene, frame: usize) -> View {
-        let t = if self.frames > 1 {
+    /// How far through the shot frame `frame` is, 0 to 1. A looped tour's
+    /// last frame comes a frame before the end, which is the first again.
+    pub fn progress(&self, frame: usize) -> f64 {
+        if self.looped && self.tour.len() >= 2 {
+            frame as f64 / self.frames.max(1) as f64
+        } else if self.frames > 1 {
             frame as f64 / (self.frames - 1) as f64
         } else {
             0.0
-        };
+        }
+    }
+
+    /// The camera at frame `frame` of `scene`.
+    pub fn view(&self, scene: &Scene, frame: usize) -> View {
+        let t = self.progress(frame);
         if self.tour.len() >= 2 {
             return self.tour_view(scene, t);
         }
@@ -434,7 +449,8 @@ impl Shot {
         let first = self.tour[0];
         let footprint =
             self.widest_footprint(first.focus, scene.width(), scene.height()) / self.zoom.max(1.0);
-        let [x, y, log_near, log_zoom, turn, pan] = tour_state(&self.tour, self.glide, t);
+        let [x, y, log_near, log_zoom, turn, pan] =
+            tour_state(&self.tour, self.glide, self.looped, t);
         self.place(
             scene,
             (first.focus, footprint),
@@ -443,7 +459,7 @@ impl Shot {
                 near: log_near.exp().clamp(0.01, 1.0),
                 pan,
                 swing: (0.0, 0.0),
-                magnification: log_zoom.exp() / first.zoom.max(1e-6),
+                magnification: log_zoom.exp(),
                 turn,
             },
         )
@@ -497,6 +513,12 @@ impl Shot {
             ),
             turn: (cos, sin),
         }
+    }
+
+    /// When the camera reaches each stop of the tour and leaves it,
+    /// seconds from the start.
+    pub fn stop_times(&self) -> Vec<(f64, f64)> {
+        tour_times(&self.tour)
     }
 
     /// A tour's length in seconds.
@@ -704,7 +726,7 @@ impl Shot {
                 if shot.inside(scene, &shot.view(scene, frame), depths) {
                     continue;
                 }
-                let now = frame as f64 / (shot.frames - 1).max(1) as f64 * total;
+                let now = shot.progress(frame) * total;
                 let next = times
                     .iter()
                     .position(|&(arrive, _)| arrive >= now)
@@ -719,6 +741,12 @@ impl Shot {
                     next
                 };
                 bump[index] = true;
+            }
+            // A looped tour's first and last stops are one view.
+            if shot.looped {
+                let last = bump.len() - 1;
+                let either = bump[0] || bump[last];
+                (bump[0], bump[last]) = (either, either);
             }
             if !bump.contains(&true) {
                 return Some(shot);
@@ -844,12 +872,15 @@ fn stop_state(stop: &Stop) -> [f64; 6] {
 /// a stop it holds at at `glide` of its pace between stops, centred on the
 /// stop, plus any push and spin the stop asks for; it passes the others at
 /// full pace. Between them it follows a smooth curve whose speed meets
-/// those at either end, so it never jerks.
-fn tour_state(tour: &[Stop], glide: f64, t: f64) -> [f64; 6] {
+/// those at either end, so it never jerks. The last stop's hold is a final
+/// drift that slows to rest, unless the tour is `looped`: then the last
+/// stop is the first again, and the camera drifts through the join at one
+/// pace.
+fn tour_state(tour: &[Stop], glide: f64, looped: bool, t: f64) -> [f64; 6] {
     let times = tour_times(tour);
     let total = times.last().map_or(0.0, |&(_, leave)| leave);
     let now = t.clamp(0.0, 1.0) * total;
-    let mut state = tour_path(tour, &times, glide, now);
+    let mut state = tour_path(tour, &times, glide, looped, now);
     state[4] += tour_spin(tour, &times, now);
     state
 }
@@ -883,50 +914,99 @@ fn tour_spin(tour: &[Stop], times: &[(f64, f64)], now: f64) -> f64 {
     turn
 }
 
+/// The share of the glide's pace a looped tour drifts through its join at.
+const JOIN_DRIFT: f64 = 0.5;
+
 /// The camera's state `now` seconds into `tour`, but for its spins.
-fn tour_path(tour: &[Stop], times: &[(f64, f64)], glide: f64, now: f64) -> [f64; 6] {
+fn tour_path(tour: &[Stop], times: &[(f64, f64)], glide: f64, looped: bool, now: f64) -> [f64; 6] {
     let last = tour.len() - 1;
+    let total = times[last].1;
     let states: Vec<[f64; 6]> = tour.iter().map(stop_state).collect();
+    // A looped tour joins its last stop to its first, which shows the same
+    // view turned by whole turns (less the spins, which tour_spin adds).
+    let join = looped && last >= 2;
     // The pace through each stop, per second: Catmull-Rom's, from the
-    // stops either side (or one side at the ends).
+    // stops either side (or one side at the ends, or across the join).
     let through = |index: usize| -> [f64; 6] {
+        if join && (index == 0 || index == last) {
+            let span = (total - times[last - 1].1 + times[1].0).max(1e-9);
+            return std::array::from_fn(|k| {
+                let before = states[last - 1][k] - (states[last][k] - states[0][k]);
+                (states[1][k] - before) / span
+            });
+        }
         let (before, after) = (index.saturating_sub(1), (index + 1).min(last));
         let span = (times[after].0 - times[before].1).max(1e-9);
         std::array::from_fn(|k| (states[after][k] - states[before][k]) / span)
     };
-    // Where the camera is as it reaches and leaves each stop, and its pace
-    // there.
+    // No turning or panning on the way through a view near the whole
+    // image, which has no room for it.
+    let roomy = |index: usize, mut rate: [f64; 6]| {
+        let room = ((1.0 - states[index][2].exp()) / 0.5).clamp(0.0, 1.0);
+        rate[4] *= room;
+        rate[5] *= room;
+        rate
+    };
+    // The drift through the join, slower than a glide, and never further
+    // back than the whole image: the camera's distance only holds there.
+    let join_drift = join.then(|| {
+        let mut drift = roomy(
+            0,
+            through(0).map(|value| value * glide.max(0.0) * JOIN_DRIFT),
+        );
+        let longest = tour[0].hold.max(tour[last].hold).max(1e-9);
+        let room = (-states[0][2]).max(0.0) / longest;
+        drift[2] = drift[2].clamp(-room, room);
+        drift
+    });
+    // Where the camera is as it reaches and leaves each stop, its pace
+    // there, and its drift and push while it holds.
     let mut reach = Vec::with_capacity(tour.len());
     let mut leave = Vec::with_capacity(tour.len());
     let mut pace = Vec::with_capacity(tour.len());
+    let mut drifts = Vec::with_capacity(tour.len());
+    let mut pushes = Vec::with_capacity(tour.len());
     for (index, stop) in tour.iter().enumerate() {
         let hold = stop.hold.max(0.0);
+        let end_stop = index == 0 || index == last;
+        let joined = join_drift.filter(|_| end_stop);
         if hold <= 0.0 {
-            let rate = if index == 0 || index == last {
-                [0.0; 6]
-            } else {
-                through(index)
+            let rate = match joined {
+                Some(drift) => drift,
+                None if end_stop => [0.0; 6],
+                None => through(index),
             };
             reach.push(states[index]);
             leave.push(states[index]);
             pace.push(rate);
+            drifts.push([0.0; 6]);
+            pushes.push(0.0);
             continue;
         }
         // The slow glide on through the stop, centred on it (but the first
         // starts there and the last ends there), and the push in from the
         // stop's own nearness.
-        let mut glide = through(index).map(|value| value * glide.max(0.0));
-        // No turning or panning on the way through a view near the whole
-        // image, which has no room for it.
-        let room = ((1.0 - states[index][2].exp()) / 0.5).clamp(0.0, 1.0);
-        glide[4] *= room;
-        glide[5] *= room;
+        let mut drift = match joined {
+            Some(drift) => drift,
+            None => roomy(index, through(index).map(|value| value * glide.max(0.0))),
+        };
         // A spin turns about the stop itself, its motion the spin and any
         // push (tour_spin adds the spin).
-        if stop.spin != 0.0 {
-            glide = [0.0; 6];
+        if stop.spin != 0.0 && joined.is_none() {
+            drift = [0.0; 6];
         }
-        let push = (1.0 - stop.push.clamp(0.0, 0.95)).ln() / hold;
+        let push = if joined.is_some() {
+            0.0
+        } else {
+            (1.0 - stop.push.clamp(0.0, 0.95)).ln() / hold
+        };
+        // An unlooped tour's last hold slows to rest, covering half the way
+        // a steady drift would.
+        let covered = if index == last && !join {
+            hold / 2.0
+        } else {
+            hold
+        };
         let before = if index == 0 {
             0.0
         } else if index == last {
@@ -934,22 +1014,35 @@ fn tour_path(tour: &[Stop], times: &[(f64, f64)], glide: f64, now: f64) -> [f64;
         } else {
             0.5
         };
-        let start: [f64; 6] = std::array::from_fn(|k| states[index][k] - glide[k] * hold * before);
-        let mut end: [f64; 6] = std::array::from_fn(|k| start[k] + glide[k] * hold);
+        let start: [f64; 6] =
+            std::array::from_fn(|k| states[index][k] - drift[k] * covered * before);
+        let mut end: [f64; 6] = std::array::from_fn(|k| start[k] + drift[k] * covered);
         end[2] += push * hold;
-        let mut rate = glide;
+        let mut rate = drift;
         rate[2] += push;
         reach.push(start);
         leave.push(end);
         pace.push(rate);
+        drifts.push(drift);
+        pushes.push(push);
     }
     for index in 0..=last {
         let (arrive, depart) = times[index];
         if now <= depart || index == last {
             if now >= arrive || index == 0 {
-                // Moving on through the stop at its slow pace.
-                let held = (now - arrive).max(0.0);
-                return std::array::from_fn(|k| reach[index][k] + pace[index][k] * held);
+                // Moving on through the stop at its slow pace, slowing to
+                // rest through an unlooped tour's last.
+                let held = (now - arrive).clamp(0.0, depart - arrive);
+                let hold = depart - arrive;
+                let moved = if index == last && !join && hold > 0.0 {
+                    held - held * held / (2.0 * hold)
+                } else {
+                    held
+                };
+                let mut state: [f64; 6] =
+                    std::array::from_fn(|k| reach[index][k] + drifts[index][k] * moved);
+                state[2] += pushes[index] * held;
+                return state;
             }
             // On the way here from the stop before.
             let from = times[index - 1].1;
@@ -2204,7 +2297,7 @@ mod tour_tests {
             frames: 121,
             ..Shot::default()
         };
-        let turn = |frame: usize| tour_state(&shot.tour, 0.0, frame as f64 / 120.0)[4];
+        let turn = |frame: usize| tour_state(&shot.tour, 0.0, false, frame as f64 / 120.0)[4];
         // It starts turning a second before the camera arrives, as it
         // slows, and is done a second after it leaves.
         assert_eq!(turn(10), 0.0);
@@ -2262,12 +2355,84 @@ mod tour_tests {
             },
         ];
         // Eight seconds; the hold runs from second 2 to second 6.
-        let left = |seconds: f64| tour_state(&tour, 0.0, seconds / 8.0)[2].exp();
+        let left = |seconds: f64| tour_state(&tour, 0.0, false, seconds / 8.0)[2].exp();
         assert!((left(2.0) - 0.4).abs() < 1e-9);
         assert!((left(6.0) - 0.2).abs() < 1e-9);
         // Evenly on a log scale, so each second takes the same share.
         let (a, b) = (left(3.0) / left(2.0), left(5.0) / left(4.0));
         assert!((a - b).abs() < 1e-9 && a < 1.0);
+    }
+
+    #[test]
+    fn a_looped_tour_drifts_through_its_join_into_its_first_frame() {
+        let scene = scene();
+        let mut shot = tour();
+        shot.glide = 0.2;
+        shot.looped = true;
+        shot.tour[0].hold = 2.0;
+        shot.tour[3].hold = 3.0;
+        // 2 + 3 + 1 + 2 + 3 + 3 = 14 seconds, at ten frames a second.
+        shot.frames = 140;
+        let state = |t: f64| tour_state(&shot.tour, shot.glide, true, t);
+        // The frame after the last is the first.
+        assert_eq!(shot.progress(shot.frames), 1.0);
+        let (first, end) = (state(0.0), state(1.0));
+        for k in 0..6 {
+            assert!((first[k] - end[k]).abs() < 1e-9, "{k}: {first:?} {end:?}");
+        }
+        // The step into the join matches the step out of it: the camera
+        // neither stops nor jumps there.
+        let step = 1.0 / shot.frames as f64;
+        let into: [f64; 6] = std::array::from_fn(|k| state(1.0)[k] - state(1.0 - step)[k]);
+        let out: [f64; 6] = std::array::from_fn(|k| state(step)[k] - state(0.0)[k]);
+        assert!(into[0].hypot(into[1]) > 0.1, "{into:?}");
+        for k in 0..6 {
+            assert!((into[k] - out[k]).abs() < 1e-9, "{k}: {into:?} {out:?}");
+        }
+        // Never further back than the whole image.
+        for frame in 0..shot.frames {
+            assert!(state(shot.progress(frame))[2] <= 1e-12);
+        }
+        // Fitted, the join's two stops zoom in together, so its views still
+        // meet.
+        let (fitted, _) = shot.fitted(&scene);
+        let depths = fitted.guarded_depths(&scene);
+        assert!((0..fitted.frames).all(|frame| fitted.inside(
+            &scene,
+            &fitted.view(&scene, frame),
+            &depths
+        )));
+        assert_eq!(fitted.tour[0].zoom, fitted.tour[3].zoom);
+        let (a, b) = (fitted.view(&scene, 0), fitted.view(&scene, fitted.frames));
+        assert_eq!(
+            a.project(100.0, 100.0, 900.0),
+            b.project(100.0, 100.0, 900.0)
+        );
+    }
+
+    #[test]
+    fn an_unlooped_tour_slows_to_rest_through_its_last_hold() {
+        let mut shot = tour();
+        shot.glide = 0.2;
+        shot.tour[3].hold = 4.0;
+        // 1 + 3 + 1 + 2 + 3 + 4 = 14 seconds; the last hold from second 10.
+        let total = 14.0;
+        let at = |seconds: f64| tour_state(&shot.tour, shot.glide, false, seconds / total);
+        let pace = |seconds: f64| {
+            let (a, b) = (at(seconds), at(seconds + 0.01));
+            (b[0] - a[0]).hypot(b[1] - a[1]) / 0.01
+        };
+        // It ends at the last stop, and slows all the way there, to rest.
+        let end = at(total);
+        assert!((end[0] - 299.5).abs() < 1e-9 && (end[1] - 199.5).abs() < 1e-9);
+        assert!(pace(10.0) > 1.0);
+        assert!(pace(total - 0.01) < 0.01 * pace(10.0));
+        let mut last = f64::INFINITY;
+        for step in 0..40 {
+            let now = pace(10.0 + step as f64 * 0.1);
+            assert!(now <= last + 1e-9);
+            last = now;
+        }
     }
 
     #[test]

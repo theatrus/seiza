@@ -531,7 +531,12 @@ video = seiza.ParallaxVideo(starless, stars, solution.wcs, size="1080p-portrait"
                             tour=stops, distance_focus=plan["focus"])
 ```
 
-`auto_tour=True` plans and renders in one go.
+`auto_tour=True` plans and renders in one go. Each planned stop's
+`title` is its target's name; `tour_titles=True` shows it low in the frame
+while the camera drifts through the stop, fading in and out, so change or
+drop titles as you would stops. A tour ends on a longer final drift that
+slows to rest; `tour_loop=True` instead ends where it began, so the last
+frame leads into the first and the video loops.
 
 `distance_focus` is where the nebula's distance is measured; `focus` only
 aims the camera, so moving it never changes the scene's depth. To film the

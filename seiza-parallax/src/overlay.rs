@@ -1,6 +1,6 @@
 //! Labels over a parallax video: the catalogued objects in the field, each
 //! moving with the layer that shows it and fading as it leaves the view,
-//! the caller's own labels, and a watermark.
+//! the caller's own labels, a tour's titles, and a watermark.
 //!
 //! The marks follow Seiza's image overlays (`@seiza/astro-overlay`): the same
 //! catalog colours, labels and prominence ranking, a catalogued extent or
@@ -30,6 +30,11 @@ const MOST_WITHIN: usize = 3;
 
 /// Seconds a mark takes to fade in or out.
 const FADE_SECONDS: f64 = 0.5;
+
+/// Most seconds a tour title takes to fade in or out, and to come before
+/// the camera reaches its stop or stay after it leaves.
+const TITLE_FADE: f64 = 0.8;
+const TITLE_EARLY: f64 = 0.5;
 
 const STAR_GOLD: Rgb<u8> = Rgb([0xff, 0xd4, 0x79]);
 const ENCOMPASSING: Rgb<u8> = Rgb([0xae, 0xe8, 0xff]);
@@ -339,6 +344,8 @@ pub(crate) fn sharpless(name: &str) -> bool {
 /// The marks over a shot, and how much of each every frame shows.
 pub(crate) struct Overlay {
     marks: Vec<Mark>,
+    /// Each tour stop's title, if it has one and titles are shown.
+    titles: Vec<Option<String>>,
     fonts: Fonts<'static>,
     watermark: Option<String>,
     density: f64,
@@ -353,11 +360,14 @@ pub(crate) struct Overlay {
     /// its "Field within" caption.
     shown: Vec<Vec<f32>>,
     within: Vec<Vec<f32>>,
+    /// Per frame, the stops whose titles show and how much.
+    titled: Vec<Vec<(usize, f32)>>,
 }
 
 impl Overlay {
     pub(crate) fn new(
         marks: Vec<Mark>,
+        titles: Vec<Option<String>>,
         watermark: Option<String>,
         density: f64,
         arcsec_per_px: f64,
@@ -372,6 +382,7 @@ impl Overlay {
             .collect();
         Ok(Self {
             marks,
+            titles,
             fonts,
             watermark,
             density: density.clamp(0.0, 1.0),
@@ -381,6 +392,7 @@ impl Overlay {
             widths,
             shown: Vec::new(),
             within: Vec::new(),
+            titled: Vec::new(),
         })
     }
 
@@ -402,6 +414,18 @@ impl Overlay {
         let radius = (FADE_SECONDS * fps / 2.0).round() as usize;
         self.shown = smoothed(&shown, radius);
         self.within = smoothed(&within, radius);
+        let times = shot.stop_times();
+        let total = times.last().map_or(0.0, |&(_, leave)| leave);
+        let titled: Vec<bool> = self.titles.iter().map(Option::is_some).collect();
+        self.titled = if titled.contains(&true) && titled.len() == times.len() {
+            (0..shot.frames)
+                .map(|frame| {
+                    title_shares(&times, &titled, shot.looped, shot.progress(frame) * total)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
     }
 
     /// How much of each mark `view` should show before fading in time, and
@@ -623,11 +647,59 @@ impl Overlay {
                 self.caption(canvas, (size, baseline), size, &text, ENCOMPASSING, alpha);
             }
         }
+        for &(index, alpha) in self.titled.get(frame).map_or(&[][..], Vec::as_slice) {
+            if let Some(title) = &self.titles[index] {
+                self.title(canvas, title, alpha);
+            }
+        }
         if let Some(watermark) = &self.watermark {
             let small = size * 0.8;
             let (text_width, _) = measure(&self.fonts.regular, small, 0.0, watermark);
             let place = (width - size - text_width, height - size);
             self.caption(canvas, place, small, watermark, WATERMARK, 0.8);
+        }
+    }
+
+    /// A tour stop's title, low on the left of the frame under a short
+    /// rule, at `alpha`; it rises a little into place as it fades in.
+    fn title(&self, canvas: &mut RgbImage, text: &str, alpha: f32) {
+        let (width, height) = (canvas.width() as f64, canvas.height() as f64);
+        let size = (width.min(height) / 20.0).max(20.0);
+        let x = (width.min(height) * 0.07).round();
+        let baseline = height * 0.86 + (1.0 - alpha as f64) * size * 0.25;
+        let font = &self.fonts.semibold;
+        let tracking = size * 0.01;
+        let (text_width, _) = measure(font, size, tracking, text);
+        let rule = baseline - size * 1.2;
+        let rule_width = size * 1.4;
+        let halo = (size * 0.06).max(1.5);
+        // Room for the halo beyond the mask's own padding.
+        let spare = halo * 2.0;
+        let bounds = Bounds::around(&[
+            (x - spare, rule - size * 0.1 - spare),
+            (
+                x + text_width.max(rule_width) + spare,
+                baseline + size * 0.3 + spare,
+            ),
+        ]);
+        let (Some(mut underline), Some(mut lettering)) =
+            (self.mask(bounds, canvas), self.mask(bounds, canvas))
+        else {
+            return;
+        };
+        underline.polyline(&[(x, rule), (x + rule_width, rule)], (size * 0.06).max(1.5));
+        let ascent = font.as_scaled(PxScale::from(size as f32)).ascent() as f64;
+        draw_text(
+            &mut lettering,
+            font,
+            size,
+            tracking,
+            (x, baseline - ascent),
+            text,
+        );
+        for (mask, color) in [(&underline, ENCOMPASSING), (&lettering, WATERMARK)] {
+            mask.dilated(halo).composite(canvas, HALO, 0.6 * alpha);
+            mask.composite(canvas, color, alpha);
         }
     }
 
@@ -697,6 +769,60 @@ impl Overlay {
             .composite(canvas, HALO, 0.75 * alpha);
         mask.composite(canvas, color, alpha);
     }
+}
+
+/// How much of each titled stop's title shows `now` seconds into a tour
+/// that reaches and leaves its stops at `times`: from a little before the
+/// camera reaches the stop to a little after it leaves, fading in and out.
+/// A looped tour's first and last stops are one, its title showing across
+/// the join without fading there.
+fn title_shares(
+    times: &[(f64, f64)],
+    titled: &[bool],
+    looped: bool,
+    now: f64,
+) -> Vec<(usize, f32)> {
+    let last = times.len() - 1;
+    let total = times[last].1;
+    let join = looped && last >= 2;
+    let window = |index: usize| {
+        let (arrive, depart) = times[index];
+        let early = if index > 0 {
+            ((arrive - times[index - 1].1) / 3.0).min(TITLE_EARLY)
+        } else {
+            0.0
+        };
+        let late = if index < last {
+            ((times[index + 1].0 - depart) / 3.0).min(TITLE_EARLY)
+        } else {
+            0.0
+        };
+        (arrive - early, depart + late)
+    };
+    let smooth = |x: f64| {
+        let x = x.clamp(0.0, 1.0);
+        x * x * (3.0 - 2.0 * x)
+    };
+    let mut shares = Vec::new();
+    for (index, &titled) in titled.iter().enumerate() {
+        if !titled || (join && index == last) {
+            continue;
+        }
+        let (mut from, to) = window(index);
+        if join && index == 0 {
+            from = window(last).0 - total;
+        }
+        let fade = ((to - from) / 3.0).clamp(1e-9, TITLE_FADE);
+        let at = |when: f64| smooth((when - from) / fade).min(smooth((to - when) / fade));
+        let mut share = at(now);
+        if join && index == 0 {
+            share = share.max(at(now - total));
+        }
+        if share >= 1.0 / 255.0 {
+            shares.push((index, share as f32));
+        }
+    }
+    shares
 }
 
 /// A marker's lines, output pixels.
@@ -912,7 +1038,7 @@ mod tests {
             mark("edge", 60.0, 150.0, 3.0),
             mark("core", 199.5, 149.5, 80.0),
         ];
-        let mut overlay = Overlay::new(marks, None, 1.0, 1.0, (200, 150)).unwrap();
+        let mut overlay = Overlay::new(marks, Vec::new(), None, 1.0, 1.0, (200, 150)).unwrap();
         overlay.plan(&shot, &scene, 10.0);
         let (first, last) = (&overlay.shown[0], &overlay.shown[39]);
         assert!(first[0] > 0.9 && first[1] > 0.9, "{first:?}");
@@ -942,7 +1068,7 @@ mod tests {
             .iter()
             .map(|&radius| mark(&format!("r{radius}"), 199.5, 149.5, radius))
             .collect();
-        let overlay = Overlay::new(marks, None, 1.0, 1.0, (200, 150)).unwrap();
+        let overlay = Overlay::new(marks, Vec::new(), None, 1.0, 1.0, (200, 150)).unwrap();
         let (_, within) = overlay.wanted(&shot, &shot.view(&scene, 0));
         let named: Vec<bool> = within.iter().map(|&value| value > 0.0).collect();
         assert_eq!(named, [true, true, false, true, false]);
@@ -967,7 +1093,7 @@ mod tests {
             mark("big", 200.0, 150.0, 8.0),
             mark("small", 202.0, 150.0, 2.0),
         ];
-        let overlay = Overlay::new(marks.clone(), None, 1.0, 10.0, (200, 150)).unwrap();
+        let overlay = Overlay::new(marks.clone(), Vec::new(), None, 1.0, 10.0, (200, 150)).unwrap();
         let (show, _) = overlay.wanted(&shot, &view);
         assert!(show[0] > 0.0 && show[1] == 0.0, "{show:?}");
         // Spread out, with density 0 only the four most prominent show,
@@ -985,7 +1111,7 @@ mod tests {
         let mut custom = mark("mine", 200.0, 260.0, 0.0);
         custom.object = None;
         marks.push(custom);
-        let overlay = Overlay::new(marks, None, 0.0, 10.0, (200, 150)).unwrap();
+        let overlay = Overlay::new(marks, Vec::new(), None, 0.0, 10.0, (200, 150)).unwrap();
         let (show, _) = overlay.wanted(&shot, &view);
         let shown: Vec<bool> = show.iter().map(|&value| value > 0.0).collect();
         assert_eq!(
@@ -993,5 +1119,98 @@ mod tests {
             [true, true, true, true, false, false, true],
             "{show:?}"
         );
+    }
+
+    #[test]
+    fn a_title_shows_while_the_camera_drifts_through_its_stop() {
+        // Holding at the second stop from second 4 to 6, three seconds'
+        // travel either side.
+        let times = [(0.0, 1.0), (4.0, 6.0), (9.0, 12.0)];
+        let titled = [false, true, false];
+        let share = |now: f64| {
+            title_shares(&times, &titled, false, now)
+                .first()
+                .map_or(0.0, |&(index, share)| {
+                    assert_eq!(index, 1);
+                    share
+                })
+        };
+        // It comes half a second before the camera arrives, fully shows
+        // while it drifts through, and is gone half a second after it
+        // leaves.
+        assert_eq!(share(3.4), 0.0);
+        assert!(share(3.8) > 0.0 && share(3.8) < 1.0);
+        assert_eq!(share(5.0), 1.0);
+        assert!(share(6.3) > 0.0 && share(6.3) < 1.0);
+        assert_eq!(share(6.6), 0.0);
+        let mut last = 0.0;
+        for step in 0..=10 {
+            let now = share(3.5 + step as f64 * 0.08);
+            assert!(now >= last);
+            last = now;
+        }
+        // A looped tour's first stop is its last: its title shows across
+        // the join and fades only either side of it.
+        let looped = [(0.0, 2.0), (5.0, 6.0), (9.0, 12.0)];
+        let shares = |now: f64| title_shares(&looped, &[true, false, true], true, now);
+        assert_eq!(shares(0.0), [(0, 1.0)]);
+        assert_eq!(shares(11.9), [(0, 1.0)]);
+        assert!(shares(8.6)[0].1 < 1.0 && shares(2.3)[0].1 < 1.0);
+        assert!(shares(4.0).is_empty() && shares(7.0).is_empty());
+    }
+
+    #[test]
+    fn a_title_is_drawn_low_on_the_left() {
+        let scene = scene();
+        let shot = Shot {
+            tour: vec![
+                crate::Stop {
+                    focus: (100.0, 75.0),
+                    hold: 2.0,
+                    ..crate::Stop::default()
+                },
+                crate::Stop {
+                    focus: (100.0, 75.0),
+                    dolly: 0.3,
+                    travel: 2.0,
+                    ..crate::Stop::default()
+                },
+            ],
+            width: 320,
+            height: 240,
+            frames: 41,
+            ..Shot::default()
+        };
+        let mut overlay = Overlay::new(
+            Vec::new(),
+            vec![Some("NGC 7822".into()), None],
+            None,
+            1.0,
+            1.0,
+            (320, 240),
+        )
+        .unwrap();
+        overlay.plan(&shot, &scene, 10.0);
+        // It fades in from the opening frame, shows fully a second in, and
+        // is gone by the end.
+        assert!(overlay.titled[0].is_empty());
+        assert_eq!(overlay.titled[10], [(0, 1.0)]);
+        assert!(overlay.titled[40].is_empty());
+        let mut canvas = RgbImage::new(320, 240);
+        overlay.draw(10, &shot.view(&scene, 10), &mut canvas);
+        let lit: Vec<(u32, u32)> = canvas
+            .enumerate_pixels()
+            .filter(|(_, _, pixel)| pixel[0] > 128)
+            .map(|(x, y, _)| (x, y))
+            .collect();
+        assert!(!lit.is_empty());
+        assert!(
+            lit.iter().all(|&(x, y)| x < 200 && y > 150),
+            "{:?}",
+            lit.first()
+        );
+        let mut later = RgbImage::new(320, 240);
+        overlay.draw(40, &shot.view(&scene, 40), &mut later);
+        assert!(later.pixels().all(|pixel| pixel[0] == 0));
     }
 }

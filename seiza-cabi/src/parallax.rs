@@ -174,6 +174,11 @@ struct VideoRequest {
     /// How fast a tour moves on through a stop it holds at, as a share of
     /// its pace between stops; 0 comes to rest.
     tour_glide: Option<f64>,
+    /// Show each stop's title low in the frame as the camera drifts
+    /// through it.
+    tour_titles: Option<bool>,
+    /// End the tour where it began, so the video loops.
+    tour_loop: Option<bool>,
     /// "720p", "1080p", "1440p" or "4k", each with "-portrait" for the tall
     /// form, or "WIDTHxHEIGHT".
     size: Option<String>,
@@ -266,6 +271,8 @@ struct StopRequest {
     hold: Option<f64>,
     spin_degrees: Option<f64>,
     push: Option<f64>,
+    /// Shown while the camera drifts through the stop, with `tourTitles`.
+    title: Option<String>,
 }
 
 /// How to plan a tour: how many targets (every one worth a visit if
@@ -556,11 +563,14 @@ fn video_options(request: &VideoRequest) -> Result<VideoOptions, String> {
                     hold: stop.hold.unwrap_or(base.hold),
                     spin_deg: stop.spin_degrees.unwrap_or(base.spin_deg),
                     push: stop.push.unwrap_or(base.push),
+                    title: stop.title.clone().filter(|title| !title.is_empty()),
                 }
             })
             .collect(),
         auto_tour: request.auto_tour.as_ref().map(AutoTourRequest::auto_tour),
         tour_glide: request.tour_glide.unwrap_or(defaults.tour_glide),
+        tour_titles: request.tour_titles.unwrap_or(defaults.tour_titles),
+        tour_loop: request.tour_loop.unwrap_or(defaults.tour_loop),
         size: match &request.size {
             Some(size) => seiza_parallax::parse_frame_size(size)?,
             None => defaults.size,
@@ -686,11 +696,16 @@ fn split(
 /// `pan`, `zoom`, `zoomEnd`, `rotateDegrees` `[first, last]`, `easing`
 /// ("inOut", "linear"), `quality` ("standard", "high"), `growthLimit`,
 /// `fadeFrom`, `tour` (stops `[{focus, dolly, zoom, rotateDegrees, pan,
-/// travel, hold, spinDegrees, push}]`, gliding through held stops at
-/// `tourGlide` of the pace between them), the first the opening view, which replace the single
-/// move and set the length; [`seiza_parallax_plan_tour_json`] plans
+/// travel, hold, spinDegrees, push, title}]`, gliding through held stops
+/// at `tourGlide` of the pace between them, the first the opening view and
+/// the last's hold a final drift that slows to rest, which replace the
+/// single move and set the length; [`seiza_parallax_plan_tour_json`] plans
 /// one), `autoTour` (`{targets, hold, motion}`: plan a tour of the
-/// catalogued objects and render it), `size` ("720p", "1080p", "1440p", "4k", each with
+/// catalogued objects and render it), `tourTitles` (show each stop's
+/// title low in the frame while the camera drifts through it, fading in
+/// and out), `tourLoop` (end where the tour began, adding a last stop at
+/// the first's view unless it ends there, so the last frame leads into the
+/// first), `size` ("720p", "1080p", "1440p", "4k", each with
 /// "-portrait", or "WIDTHxHEIGHT"), `seconds`, `fps`, `overlay`,
 /// `overlayDensity`, `labels` (`[{x, y, radius, text}]`), `labelColor`
 /// ("#RRGGBB") and `watermark` (true, or the text). An unknown field is an
@@ -797,6 +812,7 @@ struct PlannedStopResponse {
     hold: f64,
     spin_degrees: f64,
     push: f64,
+    title: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -817,9 +833,10 @@ struct PlannedTourResponse {
 /// catalog; and `autoTour` (`{targets, hold, motion}`, each optional) how
 /// to plan. Returns JSON, released with `seiza_string_free`:
 /// `{"focus": [x, y], "focusName", "seconds", "tour": [{name, focus,
-/// dolly, zoom, rotateDegrees, pan, travel, hold}]}`. Its `tour`, with any
-/// stops dropped, moved or changed, and its `focus` go back into a prepare
-/// request as they are. Null with `error_out` set on failure; `events`
+/// dolly, zoom, rotateDegrees, pan, travel, hold, spinDegrees, push,
+/// title}]}`, each target's stop titled with its name. Its `tour`, with any
+/// stops or titles dropped, moved or changed, goes back into a prepare
+/// request as it is, and its `focus` as `distanceFocus`. Null with `error_out` set on failure; `events`
 /// (nullable) hears the solve.
 ///
 /// # Safety
@@ -886,6 +903,7 @@ pub unsafe extern "C" fn seiza_parallax_plan_tour_json(
                     hold: planned.stop.hold,
                     spin_degrees: planned.stop.spin_deg,
                     push: planned.stop.push,
+                    title: planned.stop.title.clone(),
                 })
                 .collect(),
         })
@@ -901,7 +919,7 @@ pub unsafe extern "C" fn seiza_parallax_plan_tour_json(
 /// [`seiza_parallax_prepare_json`] but for the scene's: the single move
 /// (`focus`, `start`, `dolly`, `truck`, `truckAngleDegrees`, `pan`, `zoom`,
 /// `zoomEnd`, `rotateDegrees`, `easing`), a tour (`tour`, `autoTour`,
-/// `tourGlide`), the output (`size`, `seconds`, `fps`, `quality`,
+/// `tourGlide`, `tourTitles`, `tourLoop`), the output (`size`, `seconds`, `fps`, `quality`,
 /// `growthLimit`, `fadeFrom`) and the labels (`overlay`, `overlayDensity`,
 /// `labels`, `labelColor`, `watermark`). Fields left out take their
 /// defaults, not the first video's. Turns are taken as given, unwrapped:
@@ -1643,15 +1661,27 @@ mod tests {
         assert_eq!(names.len(), 2, "{names:?}");
         assert!(names.contains(&"NGC 9001") && names.contains(&"IC 9002"));
         assert_eq!(plan["focusName"], "NGC 9001");
-        // Drop the second target and make the video from what is left.
-        let kept: Vec<&serde_json::Value> = tour
+        // Each target's stop is titled with its name.
+        for stop in tour {
+            assert_eq!(stop["title"], stop["name"]);
+        }
+        // Drop the second target, retitle the first, and make a looping,
+        // titled video from what is left.
+        let kept: Vec<serde_json::Value> = tour
             .iter()
             .filter(|stop| stop["name"] != "IC 9002")
+            .cloned()
+            .map(|mut stop| {
+                if stop["name"] == "NGC 9001" {
+                    stop["title"] = "The first".into();
+                }
+                stop
+            })
             .collect();
         let edited = self::request(
             directory.path(),
             &format!(
-                "\"tour\": {}, \"focus\": {}",
+                "\"tour\": {}, \"distanceFocus\": {}, \"tourTitles\": true, \"tourLoop\": true",
                 serde_json::to_string(&kept).unwrap(),
                 plan["focus"]
             ),
