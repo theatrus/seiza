@@ -29,7 +29,9 @@ pub mod scene;
 pub use dust::Dust;
 #[cfg(feature = "openh264")]
 pub use encode::OpenH264Sink;
-pub use encode::{FfmpegSink, FrameSink, PngSequence, VideoSettings};
+pub use encode::{
+    FRAME_SIZES, FfmpegSink, FrameSink, PngSequence, VideoSettings, parse_frame_size,
+};
 pub use lift::{Extent, lift_object};
 pub use light::{LightImage, Pyramid};
 pub use render::{Easing, Quality, Shot, Start, View};

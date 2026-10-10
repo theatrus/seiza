@@ -106,8 +106,10 @@ pub(crate) struct ParallaxVideoArgs {
     /// Frames per second
     #[arg(long, default_value_t = 30)]
     fps: u32,
-    /// Frame size, `WIDTHxHEIGHT`, even numbers
-    #[arg(long, default_value = "1920x1080", value_parser = parse_size)]
+    /// Frame size: `720p`, `1080p`, `1440p` or `4k`, any of them with
+    /// `-portrait` for vertical video (`1080p-portrait` is 1080x1920), or
+    /// `WIDTHxHEIGHT` in even numbers
+    #[arg(long, default_value = "1080p", value_parser = seiza_parallax::parse_frame_size)]
     size: (usize, usize),
     /// How the camera speeds up and slows down
     #[arg(long, value_enum, default_value_t = EasingArg::InOut)]
@@ -253,22 +255,6 @@ fn parse_point(text: &str) -> std::result::Result<(f64, f64), String> {
             .map_err(|error| format!("{part}: {error}"))
     };
     Ok((number(x)?, number(y)?))
-}
-
-fn parse_size(text: &str) -> std::result::Result<(usize, usize), String> {
-    let (width, height) = text
-        .split_once(['x', 'X'])
-        .ok_or_else(|| format!("expected WIDTHxHEIGHT; got {text}"))?;
-    let number = |part: &str| {
-        part.trim()
-            .parse::<usize>()
-            .map_err(|error| format!("{part}: {error}"))
-    };
-    let size = (number(width)?, number(height)?);
-    if size.0 < 16 || size.1 < 16 || size.0 % 2 != 0 || size.1 % 2 != 0 {
-        return Err(format!("{text}: sides must be even and at least 16"));
-    }
-    Ok(size)
 }
 
 /// Open a stretched raster with values 0 to 1, in its EXIF orientation.
@@ -1338,10 +1324,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sizes_and_points_parse() {
-        assert_eq!(parse_size("1920x1080"), Ok((1920, 1080)));
-        assert!(parse_size("1921x1080").is_err());
-        assert!(parse_size("8x8").is_err());
+    fn points_parse() {
         assert_eq!(parse_point("10.5, 20"), Ok((10.5, 20.0)));
         assert!(parse_point("10").is_err());
     }

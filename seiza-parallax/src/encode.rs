@@ -50,6 +50,52 @@ pub trait FrameSink {
     fn finish(self: Box<Self>) -> Result<()>;
 }
 
+/// Common frame sizes by name, landscape; add `-portrait` to a name for
+/// the same size on end.
+pub const FRAME_SIZES: [(&str, (usize, usize)); 5] = [
+    ("720p", (1280, 720)),
+    ("1080p", (1920, 1080)),
+    ("1440p", (2560, 1440)),
+    ("4k", (3840, 2160)),
+    ("2160p", (3840, 2160)),
+];
+
+/// A frame size: a name from [`FRAME_SIZES`] such as `1080p` or `4k`, the
+/// same with `-portrait` for its tall form (`1080p-portrait` is 1080 wide
+/// and 1920 high), or `WIDTHxHEIGHT`. Sides must be even, as H.264 needs,
+/// and at least 16.
+pub fn parse_frame_size(text: &str) -> std::result::Result<(usize, usize), String> {
+    let lower = text.trim().to_ascii_lowercase();
+    let (name, portrait) = match lower.strip_suffix("-portrait") {
+        Some(name) => (name, true),
+        None => (lower.as_str(), false),
+    };
+    if let Some(&(_, (width, height))) = FRAME_SIZES.iter().find(|(known, _)| *known == name) {
+        return Ok(if portrait {
+            (height, width)
+        } else {
+            (width, height)
+        });
+    }
+    let names: Vec<&str> = FRAME_SIZES.iter().map(|(name, _)| *name).collect();
+    let (width, height) = lower.split_once('x').ok_or_else(|| {
+        format!(
+            "expected WIDTHxHEIGHT or one of {} (with -portrait for tall); got {text}",
+            names.join(", ")
+        )
+    })?;
+    let number = |part: &str| {
+        part.trim()
+            .parse::<usize>()
+            .map_err(|error| format!("{part}: {error}"))
+    };
+    let size = (number(width)?, number(height)?);
+    if size.0 < 16 || size.1 < 16 || size.0 % 2 != 0 || size.1 % 2 != 0 {
+        return Err(format!("{text}: sides must be even and at least 16"));
+    }
+    Ok(size)
+}
+
 /// Video settings shared by the encoders.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VideoSettings {
@@ -384,6 +430,18 @@ mod openh264_sink {
 
     #[cfg(test)]
     mod tests {
+        #[test]
+        fn frame_sizes_parse_by_name_and_by_sides() {
+            assert_eq!(super::parse_frame_size("1080p"), Ok((1920, 1080)));
+            assert_eq!(super::parse_frame_size("4K"), Ok((3840, 2160)));
+            assert_eq!(super::parse_frame_size("720p-portrait"), Ok((720, 1280)));
+            assert_eq!(super::parse_frame_size("1920x1080"), Ok((1920, 1080)));
+            assert_eq!(super::parse_frame_size("1080X1350"), Ok((1080, 1350)));
+            for bad in ["1921x1080", "8x8", "8k", "1080p-sideways", "big"] {
+                assert!(super::parse_frame_size(bad).is_err(), "{bad}");
+            }
+        }
+
         use super::*;
 
         #[test]
