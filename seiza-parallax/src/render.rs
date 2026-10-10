@@ -4,8 +4,10 @@
 //! The image is treated as a pinhole view from Earth with its optical axis
 //! through the image centre: a pixel `Δ` pixels off centre at distance `d`
 //! sits at `Δ · d / f` across, where `f` is the image's focal length in
-//! pixels. The camera never turns: its lens keeps the angle that framed the
-//! first frame, and every change of view comes from moving it. It flies
+//! pixels. The camera never turns aside: its lens keeps the angle that
+//! framed the first frame, and every change of view comes from moving it,
+//! save that it may roll about its line of sight, which turns the frame and
+//! every depth in it alike. It flies
 //! `dolly` of the way to the background plane and moves sideways until the
 //! focus point is ahead of it, at the centre of the frame. Started on the
 //! focus point it simply flies along the line of sight to it, and every
@@ -82,6 +84,11 @@ pub struct Shot {
     /// early on and much of it looks like the sky spinning.
     /// [`Self::fitted`] lowers it if a far layer's edge would show.
     pub pan: f64,
+    /// The frame's turn about its centre at the first and last frames,
+    /// radians anticlockwise, reached as the camera moves. A turned frame
+    /// needs more of the image than a square one, so [`Self::fitted`] zooms
+    /// the first frame in until every frame fits.
+    pub rotation: (f64, f64),
     /// Output frame size, pixels.
     pub width: usize,
     pub height: usize,
@@ -111,6 +118,7 @@ impl Default for Shot {
             zoom_end: 1.0,
             lead: 1.0,
             pan: 0.0,
+            rotation: (0.0, 0.0),
             width: 1920,
             height: 1080,
             frames: 240,
@@ -137,6 +145,27 @@ struct View {
     focus_shift: (f64, f64),
     /// Output centre, pixels.
     out_centre: (f64, f64),
+    /// Cosine and sine of the frame's turn about its centre, anticlockwise.
+    turn: (f64, f64),
+}
+
+/// Which point of a plane each output pixel shows: output pixel
+/// `(column, row)` shows image point `origin + column · across + row · down`.
+#[derive(Clone, Copy, Debug)]
+struct PlaneMap {
+    origin: (f64, f64),
+    across: (f64, f64),
+    down: (f64, f64),
+}
+
+impl PlaneMap {
+    #[inline]
+    fn at(&self, column: f64, row: f64) -> (f64, f64) {
+        (
+            self.origin.0 + column * self.across.0 + row * self.down.0,
+            self.origin.1 + column * self.across.1 + row * self.down.1,
+        )
+    }
 }
 
 impl View {
@@ -144,25 +173,33 @@ impl View {
     fn unproject(&self, u: f64, v: f64, distance: f64) -> (f64, f64) {
         let depth = distance - self.along;
         let scale = self.focal_out * distance / (self.focal_px * depth);
-        let back = |out: f64, out_centre: f64, across: f64, shift: f64, centre: f64| {
-            centre + (out - out_centre + self.focal_out * across / depth + shift) / scale
+        // Turn the frame back first.
+        let (cos, sin) = self.turn;
+        let (du, dv) = (u - self.out_centre.0, v - self.out_centre.1);
+        let (du, dv) = (cos * du - sin * dv, sin * du + cos * dv);
+        let back = |out: f64, across: f64, shift: f64, centre: f64| {
+            centre + (out + self.focal_out * across / depth + shift) / scale
         };
         (
-            back(
-                u,
-                self.out_centre.0,
-                self.across.0,
-                self.focus_shift.0,
-                self.centre.0,
-            ),
-            back(
-                v,
-                self.out_centre.1,
-                self.across.1,
-                self.focus_shift.1,
-                self.centre.1,
-            ),
+            back(du, self.across.0, self.focus_shift.0, self.centre.0),
+            back(dv, self.across.1, self.focus_shift.1, self.centre.1),
         )
+    }
+
+    /// The plane at `distance` as the frame shows it, or `None` when it is
+    /// behind the camera.
+    fn plane_map(&self, distance: f64) -> Option<PlaneMap> {
+        if distance - self.along <= distance * 1e-3 {
+            return None;
+        }
+        let origin = self.unproject(0.0, 0.0, distance);
+        let right = self.unproject(1.0, 0.0, distance);
+        let below = self.unproject(0.0, 1.0, distance);
+        Some(PlaneMap {
+            origin,
+            across: (right.0 - origin.0, right.1 - origin.1),
+            down: (below.0 - origin.0, below.1 - origin.1),
+        })
     }
 
     /// Output position of image pixel `(x, y)` at `distance`, and output
@@ -176,9 +213,12 @@ impl View {
         let offset = |delta: f64, across: f64, shift: f64| {
             scale * delta - self.focal_out * across / depth - shift
         };
+        let du = offset(x - self.centre.0, self.across.0, self.focus_shift.0);
+        let dv = offset(y - self.centre.1, self.across.1, self.focus_shift.1);
+        let (cos, sin) = self.turn;
         Some((
-            self.out_centre.0 + offset(x - self.centre.0, self.across.0, self.focus_shift.0),
-            self.out_centre.1 + offset(y - self.centre.1, self.across.1, self.focus_shift.1),
+            self.out_centre.0 + cos * du + sin * dv,
+            self.out_centre.1 - sin * du + cos * dv,
             scale,
         ))
     }
@@ -296,6 +336,8 @@ impl Shot {
         };
         let (across_x, angle_x) = axis(self.focus.0, opening.0, centre.0, self.truck.0);
         let (across_y, angle_y) = axis(self.focus.1, opening.1, centre.1, self.truck.1);
+        let (sin, cos) =
+            (self.rotation.0 + (self.rotation.1 - self.rotation.0) * progress).sin_cos();
         View {
             centre,
             focal_px: scene.focal_px,
@@ -310,11 +352,13 @@ impl Shot {
                 (self.width as f64 - 1.0) / 2.0,
                 (self.height as f64 - 1.0) / 2.0,
             ),
+            turn: (cos, sin),
         }
     }
 
     /// This shot made to keep every layer's edge out of view, and the
-    /// factor its truck was scaled by. The camera's sideways travel toward
+    /// factor its truck was scaled by. A turning frame's first frame zooms
+    /// in as far as it must. The camera's sideways travel toward
     /// the focus point comes as early as `lead` allows, it turns as much of
     /// the way as `pan` allows, and its truck swings as wide as the image
     /// allows: moving sideways slides layers at
@@ -342,19 +386,41 @@ impl Shot {
             }
             low
         };
-        // The sideways travel first, then turning, then the truck: each
+        // A turned frame reaches past a square one's corners, so the first
+        // frame zooms in until flying straight in, turning, fits.
+        let straight = |zoom: f64| Self {
+            zoom,
+            lead: 0.0,
+            pan: 0.0,
+            truck: (0.0, 0.0),
+            ..*self
+        };
+        let mut zoom = self.zoom;
+        if self.rotation != (0.0, 0.0) && !fits(&straight(zoom)) {
+            let base = self.zoom.max(1.0);
+            let (mut low, mut high) = (base, base * 2.0);
+            while !fits(&straight(high)) && high < base * 64.0 {
+                (low, high) = (high, high * 2.0);
+            }
+            for _ in 0..30 {
+                let middle = (low + high) / 2.0;
+                if fits(&straight(middle)) {
+                    high = middle;
+                } else {
+                    low = middle;
+                }
+            }
+            zoom = high;
+        }
+        // Then the sideways travel, then turning, then the truck: each
         // takes what room the ones before it leave.
         let lead = largest(&|factor| Self {
             lead: self.lead * factor,
-            pan: 0.0,
-            truck: (0.0, 0.0),
-            ..*self
+            ..straight(zoom)
         });
         let led = Self {
             lead: self.lead * lead,
-            pan: 0.0,
-            truck: (0.0, 0.0),
-            ..*self
+            ..straight(zoom)
         };
         let pan = largest(&|factor| Self {
             pan: self.pan * factor,
@@ -422,56 +488,40 @@ fn draw_plane(
     distance: f64,
     dust: Option<(&Dust, f64)>,
 ) {
-    // Invert `project` at the plane's distance, where it is affine.
-    let Some((x0, y0, scale)) = view.project(view.centre.0, view.centre.1, distance) else {
+    let Some(map) = view.plane_map(distance) else {
         return;
     };
-    // And at the dust's.
-    let dust = dust.and_then(|(dust, at)| {
-        view.project(view.centre.0, view.centre.1, at)
-            .map(|front| (dust, front))
-    });
-    let (level, level_scale) = image.level_for((1.0 / scale) as f32);
+    let dust = dust.and_then(|(dust, at)| view.plane_map(at).map(|front| (dust, front)));
+    let footprint = map.across.0.hypot(map.across.1);
+    let (level, level_scale) = image.level_for(footprint as f32);
     let width = out.width;
     out.pixels
         .par_chunks_mut(width)
         .enumerate()
         .for_each(|(row, pixels)| {
-            plane_row(
-                pixels,
-                row,
-                view.centre,
-                (x0, y0, scale),
-                (level, level_scale),
-                dust,
-            );
+            plane_row(pixels, row, map, (level, level_scale), dust);
         });
 }
 
-/// One row of [`draw_plane`]: output row `row` shows the plane, whose
-/// image point `centre` lands at output `(x0, y0)` at `scale` output
-/// pixels per image pixel, sampled from `level` of scale `level_scale`.
-/// Built for wider vector units too, and picked at run time; it must do the
-/// work itself, as a closure it handed on would be built without them.
+/// One row of [`draw_plane`]: output row `row` shows the plane as `map`
+/// has it, sampled from `level` of scale `level_scale`, and the dust as
+/// its map has it. Built for wider vector units too, and picked at run
+/// time; it must do the work itself, as a closure it handed on would be
+/// built without them.
 #[multiversion::multiversion(targets("x86_64+avx2+fma", "x86_64+sse4.1"))]
 fn plane_row(
     pixels: &mut [[f32; 3]],
     row: usize,
-    centre: (f64, f64),
-    (x0, y0, scale): (f64, f64, f64),
+    map: PlaneMap,
     (level, level_scale): (&LightImage, f32),
-    dust: Option<(&Dust, (f64, f64, f64))>,
+    dust: Option<(&Dust, PlaneMap)>,
 ) {
-    let y = centre.1 + (row as f64 - y0) / scale;
+    let row = row as f64;
     for (column, pixel) in pixels.iter_mut().enumerate() {
-        let x = centre.0 + (column as f64 - x0) / scale;
+        let (x, y) = map.at(column as f64, row);
         let mut light = Pyramid::sample_level(level, level_scale, x as f32, y as f32);
-        if let Some((dust, (dx0, dy0, dust_scale))) = dust {
-            let now = (
-                centre.0 + (column as f64 - dx0) / dust_scale,
-                centre.1 + (row as f64 - dy0) / dust_scale,
-            );
-            let change = dust.change((x, y), now);
+        if let Some((dust, front)) = dust {
+            let change = dust.change((x, y), front.at(column as f64, row));
             light = light.map(|value| value * change);
         }
         for channel in 0..3 {
@@ -490,9 +540,41 @@ struct Placed<'a> {
     scale: f64,
     /// Light multiplier.
     gain: f32,
-    /// Output rows it covers.
+    /// Cosine and sine of the frame's turn, which turns the sprite too.
+    turn: (f64, f64),
+    /// Output columns and rows it covers.
+    left: f64,
+    right: f64,
     top: f64,
     bottom: f64,
+}
+
+/// The least and greatest of `k · a` and `k · b`.
+#[inline]
+fn spread(k: f64, a: f64, b: f64) -> (f64, f64) {
+    let (a, b) = (k * a, k * b);
+    (a.min(b), a.max(b))
+}
+
+/// The indices `k` below `count` for which `start + k · step` lies from
+/// `low` to `high`.
+#[inline]
+fn within(start: f64, step: f64, (low, high): (f64, f64), count: usize) -> std::ops::Range<usize> {
+    if step == 0.0 {
+        return if (low..=high).contains(&start) {
+            0..count
+        } else {
+            0..0
+        };
+    }
+    let (a, b) = ((low - start) / step, (high - start) / step);
+    let first = a.min(b).ceil().max(0.0);
+    let last = (a.max(b).floor() + 1.0).min(count as f64);
+    if first < last {
+        first as usize..last as usize
+    } else {
+        0..0
+    }
 }
 
 fn draw_sprites(out: &mut LightImage, scene: &Scene, view: &View, shot: &Shot) {
@@ -525,18 +607,18 @@ fn draw_sprites(out: &mut LightImage, scene: &Scene, view: &View, shot: &Shot) {
                 _ => 1.0,
             };
             let gain = (grown.powf(shot.brightening) * fade) as f32 * dimming;
-            // Sprite pixel (i, j) sits at image (left + i, top + j).
-            let reach_left = (sprite.x - sprite.left as f64 + 1.0) * size;
-            let reach_right =
-                (sprite.left as f64 + sprite.image.width as f64 - sprite.x + 1.0) * size;
-            let reach_up = (sprite.y - sprite.top as f64 + 1.0) * size;
-            let reach_down =
-                (sprite.top as f64 + sprite.image.height as f64 - sprite.y + 1.0) * size;
-            if x + reach_right < 0.0
-                || x - reach_left > width
-                || y + reach_down < 0.0
-                || y - reach_up > height
-            {
+            // Sprite pixel (i, j) sits at image (left + i, top + j), and
+            // its corners from the centroid, in output pixels unturned, at:
+            let west = (sprite.left as f64 - 1.0 - sprite.x) * size;
+            let east = (sprite.left as f64 + sprite.image.width as f64 + 1.0 - sprite.x) * size;
+            let north = (sprite.top as f64 - 1.0 - sprite.y) * size;
+            let south = (sprite.top as f64 + sprite.image.height as f64 + 1.0 - sprite.y) * size;
+            let (cos, sin) = view.turn;
+            let (across, down) = (spread(cos, west, east), spread(sin, north, south));
+            let (left, right) = (x + across.0 + down.0, x + across.1 + down.1);
+            let (across, down) = (spread(-sin, west, east), spread(cos, north, south));
+            let (top, bottom) = (y + across.0 + down.0, y + across.1 + down.1);
+            if right < 0.0 || left > width || bottom < 0.0 || top > height {
                 return None;
             }
             Some(Placed {
@@ -545,8 +627,11 @@ fn draw_sprites(out: &mut LightImage, scene: &Scene, view: &View, shot: &Shot) {
                 y,
                 scale: size,
                 gain,
-                top: y - reach_up,
-                bottom: y + reach_down,
+                turn: view.turn,
+                left,
+                right,
+                top,
+                bottom,
             })
         })
         .collect();
@@ -606,20 +691,21 @@ fn sample_sprite(
     placed: &Placed,
 ) {
     let sprite = placed.sprite;
-    let left = (placed.x - (sprite.x - sprite.left as f64 + 1.0) * placed.scale)
-        .floor()
-        .max(0.0) as usize;
-    let right = ((placed.x
-        + (sprite.left as f64 + sprite.image.width as f64 - sprite.x + 1.0) * placed.scale)
-        .ceil()
-        .max(0.0) as usize)
-        .min(width);
+    let left = placed.left.floor().max(0.0) as usize;
+    let right = (placed.right.ceil().max(0.0) as usize).min(width);
     let top = (placed.top.floor().max(first as f64) as usize).max(first);
     let bottom = (placed.bottom.ceil().max(0.0) as usize).min(first + rows);
+    // Output pixel (column, row) shows sprite pixel (sx, sy), turned back:
+    // a step along the row moves it by `(cos, sin) / scale`.
+    let (cos, sin) = placed.turn;
+    let (step_x, step_y) = (cos / placed.scale, sin / placed.scale);
     for row in top..bottom {
-        let sy = (row as f64 - placed.y) / placed.scale + sprite.y - sprite.top as f64;
+        let (du, dv) = (left as f64 - placed.x, row as f64 - placed.y);
+        let start_x = (cos * du - sin * dv) / placed.scale + sprite.x - sprite.left as f64;
+        let start_y = (sin * du + cos * dv) / placed.scale + sprite.y - sprite.top as f64;
         for column in left..right {
-            let sx = (column as f64 - placed.x) / placed.scale + sprite.x - sprite.left as f64;
+            let k = (column - left) as f64;
+            let (sx, sy) = (start_x + k * step_x, start_y + k * step_y);
             let light = sprite.image.sample(sx as f32, sy as f32);
             let pixel = &mut pixels[(row - first) * width + column];
             for channel in 0..3 {
@@ -646,21 +732,36 @@ fn splat_sprite(pixels: &mut [[f32; 3]], width: usize, first: usize, rows: usize
     let offset = (step - 1.0) / 2.0;
     let scale = placed.scale * step;
     let area = (scale * scale) as f32 * placed.gain;
-    let row_of =
-        |y: f64| ((y - placed.y) / placed.scale + sprite.y - sprite.top as f64 - offset) / step;
-    let low = floor64(row_of(first as f64 - 1.0)).max(0) as usize;
-    let high = ((floor64(row_of((first + rows) as f64)) + 2).max(0) as usize).min(image.height);
-    for j in low..high {
-        let y = placed.y + (sprite.top as f64 + j as f64 * step + offset - sprite.y) * placed.scale;
-        let fy = floor64(y);
-        let ty = (y - fy as f64) as f32;
-        for i in 0..image.width {
+    // Halved pixel (i, j) lands at output `start + i · along + j · down`.
+    let (cos, sin) = placed.turn;
+    let west = (sprite.left as f64 + offset - sprite.x) * placed.scale;
+    let north = (sprite.top as f64 + offset - sprite.y) * placed.scale;
+    let start = (
+        placed.x + cos * west + sin * north,
+        placed.y - sin * west + cos * north,
+    );
+    let (along, down) = ((cos * scale, -sin * scale), (sin * scale, cos * scale));
+    // A pixel lands on the rows either side of it, so those from just
+    // above the band to its end; and the rows of halved pixels some of
+    // whose pixels land there.
+    let band = (first as f64 - 1.0, (first + rows) as f64);
+    let reach = spread(along.1, 0.0, image.width as f64 - 1.0);
+    let lines = within(
+        start.1,
+        down.1,
+        (band.0 - reach.1, band.1 - reach.0),
+        image.height,
+    );
+    for j in lines {
+        let line = (start.0 + j as f64 * down.0, start.1 + j as f64 * down.1);
+        for i in within(line.1, along.1, band, image.width) {
             let light = image.at(i, j);
             if light == [0.0; 3] {
                 continue;
             }
-            let x = placed.x
-                + (sprite.left as f64 + i as f64 * step + offset - sprite.x) * placed.scale;
+            let (x, y) = (line.0 + i as f64 * along.0, line.1 + i as f64 * along.1);
+            let fy = floor64(y);
+            let ty = (y - fy as f64) as f32;
             let fx = floor64(x);
             let tx = (x - fx as f64) as f32;
             for (dy, wy) in [(0, 1.0 - ty), (1, ty)] {
@@ -812,37 +913,169 @@ mod tests {
         let total: f32 = image.pixels.iter().map(|pixel| pixel[0]).sum();
         let sprite = Sprite::new(100, 200, image, 120.0, 220.0, 50.0);
         let scale = 0.2;
-        let placed = Placed {
-            sprite: &sprite,
-            x: 30.3,
-            y: 15.6,
-            scale,
-            gain: 1.0,
-            top: 15.6 - 21.0 * scale,
-            bottom: 15.6 + 21.0 * scale,
+        // Unturned, and turned so its square reaches furthest into the
+        // bands either side.
+        for angle in [0.0_f64, 0.7] {
+            let (sin, cos) = angle.sin_cos();
+            let reach = 21.0 * scale * (cos + sin);
+            let placed = Placed {
+                sprite: &sprite,
+                x: 30.3,
+                y: 15.6,
+                scale,
+                gain: 1.0,
+                turn: (cos, sin),
+                left: 30.3 - reach,
+                right: 30.3 + reach,
+                top: 15.6 - reach,
+                bottom: 15.6 + reach,
+            };
+            let width = 64;
+            let mut out = vec![[0.0_f32; 3]; width * 32];
+            for (band, pixels) in out.chunks_mut(width * BAND_ROWS).enumerate() {
+                let rows = pixels.len() / width;
+                splat_sprite(pixels, width, band * BAND_ROWS, rows, &placed);
+            }
+            let drawn: f32 = out.iter().map(|pixel| pixel[0]).sum();
+            let expected = total * (scale * scale) as f32;
+            assert!(
+                (drawn / expected - 1.0).abs() < 0.01,
+                "{angle}: {drawn} of {expected}"
+            );
+            let (mut cx, mut cy) = (0.0_f64, 0.0_f64);
+            for (index, pixel) in out.iter().enumerate() {
+                cx += (index % width) as f64 * pixel[0] as f64;
+                cy += (index / width) as f64 * pixel[0] as f64;
+            }
+            let (cx, cy) = (cx / drawn as f64, cy / drawn as f64);
+            assert!(
+                (cx - 30.3).abs() < 0.1 && (cy - 15.6).abs() < 0.1,
+                "{angle}: ({cx}, {cy})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_turned_star_turns_its_shape_with_the_frame() {
+        // A star twice as long across as down, drawn by sampling and by
+        // spreading, turned a quarter: it lies twice as long down.
+        let mut image = LightImage::new(41, 41);
+        for (index, pixel) in image.pixels.iter_mut().enumerate() {
+            let (x, y) = ((index % 41) as f64 - 20.0, (index / 41) as f64 - 20.0);
+            *pixel = [(-(x * x / 4.0 + y * y) / 8.0).exp() as f32; 3];
+        }
+        let sprite = Sprite::new(0, 0, image, 20.0, 20.0, 50.0);
+        let (sin, cos) = std::f64::consts::FRAC_PI_2.sin_cos();
+        // Spread at 0.8, sampled at 1.5.
+        for scale in [0.8, 1.5] {
+            let reach = 21.0 * scale * (cos.abs() + sin.abs());
+            let placed = Placed {
+                sprite: &sprite,
+                x: 40.0,
+                y: 40.0,
+                scale,
+                gain: 1.0,
+                turn: (cos, sin),
+                left: 40.0 - reach,
+                right: 40.0 + reach,
+                top: 40.0 - reach,
+                bottom: 40.0 + reach,
+            };
+            let width = 80;
+            let mut out = vec![[0.0_f32; 3]; width * 80];
+            for (band, pixels) in out.chunks_mut(width * BAND_ROWS).enumerate() {
+                draw_band(
+                    pixels,
+                    width,
+                    band * BAND_ROWS,
+                    std::slice::from_ref(&placed),
+                    &[0],
+                );
+            }
+            let (mut across, mut down, mut total) = (0.0_f64, 0.0_f64, 0.0_f64);
+            for (index, pixel) in out.iter().enumerate() {
+                let (x, y) = ((index % width) as f64 - 40.0, (index / width) as f64 - 40.0);
+                let light = pixel[0] as f64;
+                across += x * x * light;
+                down += y * y * light;
+                total += light;
+            }
+            let ratio = (down / total).sqrt() / (across / total).sqrt();
+            assert!((ratio - 2.0).abs() < 0.15, "scale {scale}: {ratio}");
+        }
+    }
+
+    #[test]
+    fn a_turning_frame_turns_every_depth_about_its_centre() {
+        let scene = scene_with(&[]);
+        let shot = Shot {
+            focus: (199.5, 149.5),
+            dolly: 0.0,
+            truck: (0.0, 0.0),
+            rotation: (0.0, std::f64::consts::FRAC_PI_2),
+            width: 200,
+            height: 150,
+            frames: 2,
+            easing: Easing::Linear,
+            ..Shot::default()
         };
-        let width = 64;
-        let mut out = vec![[0.0_f32; 3]; width * 32];
-        for (band, pixels) in out.chunks_mut(width * BAND_ROWS).enumerate() {
-            let rows = pixels.len() / width;
-            splat_sprite(pixels, width, band * BAND_ROWS, rows, &placed);
+        let (first, last) = (shot.view(&scene, 0), shot.view(&scene, 1));
+        // A point right of the focus point, at any depth, ends a quarter
+        // turn anticlockwise: above the centre, as far from it.
+        for distance in [50.0, 400.0, 5000.0] {
+            let (x0, y0, _) = first.project(219.5, 149.5, distance).unwrap();
+            let (x1, y1, _) = last.project(219.5, 149.5, distance).unwrap();
+            assert!((y0 - 74.5).abs() < 1e-9 && x0 > 99.5, "({x0}, {y0})");
+            assert!((x1 - 99.5).abs() < 1e-9, "({x1}, {y1})");
+            assert!(((74.5 - y1) - (x0 - 99.5)).abs() < 1e-9, "({x1}, {y1})");
+            // And the frame shows it there.
+            let (x, y) = last.unproject(x1, y1, distance);
+            assert!((x - 219.5).abs() < 1e-9 && (y - 149.5).abs() < 1e-9);
         }
-        let drawn: f32 = out.iter().map(|pixel| pixel[0]).sum();
-        let expected = total * (scale * scale) as f32;
-        assert!(
-            (drawn / expected - 1.0).abs() < 0.01,
-            "{drawn} of {expected}"
-        );
-        let (mut cx, mut cy) = (0.0_f64, 0.0_f64);
-        for (index, pixel) in out.iter().enumerate() {
-            cx += (index % width) as f64 * pixel[0] as f64;
-            cy += (index / width) as f64 * pixel[0] as f64;
+    }
+
+    #[test]
+    fn a_turning_shot_zooms_in_to_stay_inside_the_image() {
+        let scene = scene_with(&[]);
+        let shot = Shot {
+            focus: (199.5, 149.5),
+            dolly: 0.3,
+            truck: (0.0, 0.0),
+            rotation: (0.0, std::f64::consts::FRAC_PI_4),
+            width: 200,
+            height: 150,
+            frames: 20,
+            ..Shot::default()
+        };
+        let depths = shot.guarded_depths(&scene);
+        assert!(!(0..shot.frames).all(|frame| shot.inside(
+            &scene,
+            &shot.view(&scene, frame),
+            &depths
+        )));
+        let (fitted, _) = shot.fitted(&scene);
+        assert!(fitted.zoom > 1.0, "{}", fitted.zoom);
+        for frame in 0..fitted.frames {
+            let view = fitted.view(&scene, frame);
+            assert!(fitted.inside(&scene, &view, &depths), "frame {frame}");
         }
-        let (cx, cy) = (cx / drawn as f64, cy / drawn as f64);
-        assert!(
-            (cx - 30.3).abs() < 0.1 && (cy - 15.6).abs() < 0.1,
-            "({cx}, {cy})"
-        );
+        // No further in than it must: a little less and a frame shows past
+        // the image.
+        let wider = Shot {
+            zoom: fitted.zoom * 0.99,
+            ..fitted
+        };
+        assert!(!(0..wider.frames).all(|frame| wider.inside(
+            &scene,
+            &wider.view(&scene, frame),
+            &depths
+        )));
+        // An unturned shot is left as it was.
+        let still = Shot {
+            rotation: (0.0, 0.0),
+            ..shot
+        };
+        assert_eq!(still.fitted(&scene).0.zoom, 1.0);
     }
 
     #[test]

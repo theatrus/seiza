@@ -35,7 +35,9 @@ both, matching stars to Gaia DR3 for their Bailer-Jones distances.
   hue as they brighten.
 - **The camera:** `Shot` dollies toward the background plane, optionally
   trucks sideways (reduced by `Shot::fitted` so no layer slides off the image),
-  and can lengthen its lens. Stars stay points: they keep their first-frame
+  can lengthen its lens, and can roll the frame about its centre from one
+  angle to another (`Shot::fitted` zooms the first frame in to keep the turned
+  frame inside the image). Stars stay points: they keep their first-frame
   size and only swell and brighten as the camera nears them, fading out as it
   passes.
 - **Output:** frames go to `ffmpeg` (libx264, or libopenh264 when that is the

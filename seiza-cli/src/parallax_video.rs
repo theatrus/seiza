@@ -80,6 +80,16 @@ pub(crate) struct ParallaxVideoArgs {
     /// image's rightward axis
     #[arg(long, default_value_t = 0.0)]
     truck_angle: f64,
+    /// The first frame's turn about its centre, degrees anticlockwise. The
+    /// frame turns from this to --rotate-end as the camera moves, turning
+    /// every depth alike; a turned frame needs more of the image, so the
+    /// first frame zooms in as far as it must
+    #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+    rotate: f64,
+    /// The last frame's turn about its centre, degrees anticlockwise
+    /// (default: --rotate, a steady tilt)
+    #[arg(long, allow_hyphen_values = true)]
+    rotate_end: Option<f64>,
     /// What the first frame shows: `focus`, the widest view centred on the
     /// focus point, or `whole`, the widest view of the whole image, the aim
     /// then moving to the focus point as the camera flies in
@@ -422,6 +432,10 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
             StartArg::Whole => Start::Whole,
         },
         pan: args.pan,
+        rotation: (
+            args.rotate.to_radians(),
+            args.rotate_end.unwrap_or(args.rotate).to_radians(),
+        ),
         zoom: args.zoom,
         zoom_end: args.zoom_end,
         width: args.size.0,
@@ -437,6 +451,12 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
     };
 
     let (shot, fitted) = shot.fitted(&scene);
+    if shot.zoom > args.zoom.max(1.0) {
+        println!(
+            "first frame zoomed in to {:.2} so the turned frame stays inside the image",
+            shot.zoom
+        );
+    }
     if shot.pan < args.pan {
         println!(
             "pan reduced to {:.2} so the far stars stay inside the image",
@@ -494,6 +514,9 @@ fn check_shot(args: &ParallaxVideoArgs) -> Result<()> {
     }
     if args.dust_opacity.is_nan() || args.dust_opacity < 0.0 {
         bail!("--dust-opacity must be at least 0");
+    }
+    if !args.rotate.is_finite() || args.rotate_end.is_some_and(|angle| !angle.is_finite()) {
+        bail!("--rotate and --rotate-end must be numbers of degrees");
     }
     if !(1.0..).contains(&args.zoom_end) {
         bail!("--zoom-end must be at least 1");
