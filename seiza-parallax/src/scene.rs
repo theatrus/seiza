@@ -10,7 +10,8 @@ pub struct Star {
     /// Centroid in image pixels, pixel-centre coordinates.
     pub x: f64,
     pub y: f64,
-    /// Distance in parsecs, or `None` to keep it on the background plane.
+    /// Distance in parsecs, or `None` to make it part of the background
+    /// plane.
     pub distance_pc: Option<f64>,
 }
 
@@ -44,6 +45,11 @@ pub struct CutOptions {
     pub max_stars: Option<usize>,
     /// What becomes of the stars past `max_stars`.
     pub small_stars: SmallStars,
+    /// A star within this fraction of the background's distance is part of
+    /// it, and grows with it rather than staying a point: most often the
+    /// star lighting a reflection nebula, whose light the star image took
+    /// from bright nebula and which only looks right over the same patch.
+    pub embedded: f64,
 }
 
 impl Default for CutOptions {
@@ -54,6 +60,7 @@ impl Default for CutOptions {
             max_radius: 200,
             max_stars: None,
             small_stars: SmallStars::Drop,
+            embedded: 0.02,
         }
     }
 }
@@ -165,7 +172,7 @@ impl Scene {
                 flying_claims
             });
 
-        let sprites: Vec<Sprite> = footprints[..flying]
+        let mut sprites: Vec<Sprite> = footprints[..flying]
             .par_iter()
             .zip(&stars)
             .zip(&peaks)
@@ -216,8 +223,26 @@ impl Scene {
                 })
                 .collect(),
         };
+        // Stars at the background's distance become part of it.
+        let mut background = starless.clone();
+        sprites.retain(|sprite| {
+            let embedded = (sprite.distance_pc - background_distance_pc).abs()
+                <= options.embedded * background_distance_pc;
+            if embedded {
+                for y in 0..sprite.image.height {
+                    for x in 0..sprite.image.width {
+                        let index = (sprite.top + y) * width + sprite.left + x;
+                        let light = sprite.image.at(x, y);
+                        for (target, light) in background.pixels[index].iter_mut().zip(light) {
+                            *target += light;
+                        }
+                    }
+                }
+            }
+            !embedded
+        });
         Self {
-            background: Pyramid::new(starless.clone()),
+            background: Pyramid::new(background),
             leftover: Pyramid::new(leftover),
             sprites,
             background_distance_pc,
@@ -430,7 +455,7 @@ mod tests {
             &starless,
             &light,
             &stars,
-            136.0,
+            410.0,
             900.0,
             500.0,
             &CutOptions::default(),
@@ -458,7 +483,7 @@ mod tests {
             &starless,
             &light,
             &stars,
-            130.0,
+            400.0,
             900.0,
             500.0,
             &CutOptions::default(),
@@ -482,7 +507,7 @@ mod tests {
         let stars = [(31.4, 23.4), (0.0, 0.0)].map(|(x, y)| Star {
             x,
             y,
-            distance_pc: None,
+            distance_pc: Some(50.0),
         });
         let scene = Scene::new(
             &starless,
@@ -524,11 +549,13 @@ mod tests {
             1000.0,
             &CutOptions::default(),
         );
-        assert_eq!(scene.sprites.len(), 3);
         assert_eq!(
-            scene.sprites[1].distance_pc, 400.0,
-            "no distance keeps it on the background"
+            scene.sprites.len(),
+            2,
+            "the star with no distance joins the background"
         );
+        let background = scene.background.base().at(31, 21);
+        assert!(background[0] > 0.1 + 0.5, "{background:?}");
 
         let rebuilt = rebuilt(&scene);
         for (index, (rebuilt, (base, stars))) in rebuilt
@@ -547,7 +574,7 @@ mod tests {
         }
         // A bright star's footprint reaches further than a faint one's.
         let size = |sprite: &Sprite| sprite.image.width;
-        assert!(size(&scene.sprites[0]) > size(&scene.sprites[2]));
+        assert!(size(&scene.sprites[0]) > size(&scene.sprites[1]));
     }
 
     /// The background, leftover and sprites of `scene` added back together.

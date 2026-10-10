@@ -4,12 +4,13 @@
 //! The image is treated as a pinhole view from Earth with its optical axis
 //! through the image centre: a pixel `Δ` pixels off centre at distance `d`
 //! sits at `Δ · d / f` across, where `f` is the image's focal length in
-//! pixels. The camera moves `dolly` of the way toward the background plane
-//! and `truck` of its distance sideways, and shifts its lens so the focus
-//! point stays at the centre of the frame. The background plane then only
-//! grows about the focus point, so its edges never come into view, while a
-//! star nearer than the plane slides against the truck and one beyond it
-//! drifts with it.
+//! pixels. The camera flies `dolly` of the way to the background plane along
+//! the line of sight to the focus point, moves `truck` of the plane's
+//! distance sideways, and shifts its lens so the focus point stays at the
+//! centre of the frame. Without a truck every depth then only grows about
+//! the focus point, so no layer's edges come into view; with one, a star
+//! nearer than the plane slides against the truck and one beyond it drifts
+//! with it.
 
 use crate::light::{LightImage, Pyramid};
 use crate::scene::{Scene, Sprite};
@@ -183,9 +184,17 @@ impl Shot {
         let footprint = self.widest_footprint(scene.width(), scene.height()) / self.zoom.max(1.0);
         let focal_out = scene.focal_px / footprint * self.zoom_end.max(1.0).powf(progress);
         let along = self.dolly.clamp(0.0, 0.99) * distance * progress;
+        // The camera flies along the line of sight to the focus point, so
+        // the focus point at every depth stays in line ahead of it. Flying
+        // along the image's axis instead would slide the depths across each
+        // other toward an off-centre focus, and uncover the far layers' edges.
+        let toward = (
+            (self.focus.0 - centre.0) / scene.focal_px,
+            (self.focus.1 - centre.1) / scene.focal_px,
+        );
         let across = (
-            self.truck.0 * distance * progress,
-            self.truck.1 * distance * progress,
+            toward.0 * along + self.truck.0 * distance * progress,
+            toward.1 * along + self.truck.1 * distance * progress,
         );
         let mut view = View {
             centre,
@@ -591,6 +600,48 @@ mod tests {
         // Halfway to the plane, everything on it is twice the size.
         assert!((end.2 / start.2 - 2.0).abs() < 1e-9);
         assert!(((end.0 - 99.5) / (start.0 - 99.5) - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn dollying_toward_an_off_centre_focus_slides_no_depth() {
+        let scene = scene_with(&[]);
+        let shot = Shot {
+            focus: (320.0, 60.0),
+            dolly: 0.8,
+            truck: (0.0, 0.0),
+            width: 200,
+            height: 150,
+            frames: 2,
+            easing: Easing::Linear,
+            ..Shot::default()
+        };
+        let (start, end) = (shot.view(&scene, 0), shot.view(&scene, 1));
+        // The focus point stays at the centre at every depth, nearer than
+        // the plane or far beyond it.
+        for distance in [350.0, 400.0, 1200.0, 5000.0] {
+            for view in [&start, &end] {
+                let (x, y, _) = view.project(320.0, 60.0, distance).unwrap();
+                assert!(
+                    (x - 99.5).abs() < 1e-6 && (y - 74.5).abs() < 1e-6,
+                    "{distance} pc: ({x}, {y})"
+                );
+            }
+        }
+        // So a far layer only grows about it, and the frame's corners stay
+        // inside the image there as on the plane.
+        for distance in [400.0, 1200.0] {
+            for (u, v) in [(0.0, 0.0), (199.0, 0.0), (0.0, 149.0), (199.0, 149.0)] {
+                let (x, y) = end.unproject(u, v, distance);
+                let (x0, y0) = start.unproject(u, v, distance);
+                assert!(
+                    (0.0..400.0).contains(&x) && (0.0..300.0).contains(&y),
+                    "{distance} pc: ({u}, {v}) shows ({x}, {y})"
+                );
+                // Nearer the focus point than in the first frame.
+                assert!((x - 320.0).abs() <= (x0 - 320.0).abs() + 1e-9);
+                assert!((y - 60.0).abs() <= (y0 - 60.0).abs() + 1e-9);
+            }
+        }
     }
 
     #[test]

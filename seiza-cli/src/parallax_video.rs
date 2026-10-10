@@ -338,7 +338,7 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
     };
 
     let (shot, fitted) = shot.fitted(&scene);
-    if fitted < 1.0 {
+    if fitted < 1.0 && args.truck != 0.0 {
         println!(
             "truck reduced to {:.4} of the distance so the far stars stay inside the image",
             args.truck * fitted
@@ -705,7 +705,7 @@ fn gaia_field(
         })
         .context("Gaia archive query failed")?;
     bodies.extend(fetched);
-    let csv = merge_csv(&bodies);
+    let csv = seiza_sources::merge_csv(&bodies);
     let stars = seiza_sources::parse_gaia_distances(&csv)?;
     if std::fs::create_dir_all(&cache).is_ok() {
         let partial = path.with_extension("csv.partial");
@@ -744,30 +744,6 @@ fn cones(wcs: &Wcs, width: usize, height: usize) -> Vec<(f64, f64, f64)> {
         }
     }
     cones
-}
-
-/// One CSV from several with the same header, each row once: overlapping
-/// cones return the same sources.
-fn merge_csv(bodies: &[String]) -> String {
-    let mut merged = String::new();
-    let mut seen = std::collections::HashSet::new();
-    for body in bodies {
-        let mut lines = body.lines();
-        let Some(header) = lines.next() else {
-            continue;
-        };
-        if merged.is_empty() {
-            merged.push_str(header);
-            merged.push('\n');
-        }
-        for line in lines.filter(|line| !line.trim().is_empty()) {
-            if seen.insert(line.to_owned()) {
-                merged.push_str(line);
-                merged.push('\n');
-            }
-        }
-    }
-    merged
 }
 
 /// Hipparcos stars in the field, or none when VizieR does not answer: they
@@ -1086,8 +1062,6 @@ mod tests {
             );
         }
         assert!(cones.iter().all(|cone| cone.2 < 1.3));
-        let merged = merge_csv(&["a,b\n1,2\n3,4\n".into(), "a,b\n3,4\n5,6\n".into()]);
-        assert_eq!(merged, "a,b\n1,2\n3,4\n5,6\n");
     }
 
     #[test]

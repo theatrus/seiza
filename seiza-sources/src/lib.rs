@@ -190,6 +190,55 @@ fn gaia_distance_query(
     )
 }
 
+/// How many times over [`SourceDownloader::gaia_distance_cone_csv`] splits a
+/// cone the synchronous endpoints fail on before it queues a job.
+const GAIA_CONE_SPLITS: u32 = 2;
+
+/// Four cones that together cover the cone of `radius_deg` about
+/// `(ra, dec)`: centred on the corners of a square half the radius out,
+/// each `1/sqrt(2)` of the radius, with a little to spare.
+fn quarter_cones(ra: f64, dec: f64, radius_deg: f64) -> [(f64, f64, f64); 4] {
+    let offset = (radius_deg / 2.0).to_radians();
+    let radius = radius_deg * std::f64::consts::FRAC_1_SQRT_2 * 1.02;
+    [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)].map(|(sx, sy)| {
+        // The square's corners on the tangent plane at the centre, taken
+        // back to the sphere, so the pieces stay true near the poles.
+        let (xi, eta) = (sx * offset, sy * offset);
+        let (sin_dec, cos_dec) = dec.to_radians().sin_cos();
+        let piece_dec = ((sin_dec + eta * cos_dec) / (1.0 + xi * xi + eta * eta).sqrt()).asin();
+        let piece_ra = ra.to_radians() + xi.atan2(cos_dec - eta * sin_dec);
+        (
+            piece_ra.to_degrees().rem_euclid(360.0),
+            piece_dec.to_degrees(),
+            radius,
+        )
+    })
+}
+
+/// One CSV from several with the same header, each row once: overlapping
+/// cones return the same sources.
+pub fn merge_csv(bodies: &[String]) -> String {
+    let mut merged = String::new();
+    let mut seen = std::collections::HashSet::new();
+    for body in bodies {
+        let mut lines = body.lines();
+        let Some(header) = lines.next() else {
+            continue;
+        };
+        if merged.is_empty() {
+            merged.push_str(header);
+            merged.push('\n');
+        }
+        for line in lines.filter(|line| !line.trim().is_empty()) {
+            if seen.insert(line.to_owned()) {
+                merged.push_str(line);
+                merged.push('\n');
+            }
+        }
+    }
+    merged
+}
+
 /// VizieR's synchronous TAP endpoint.
 const VIZIER_TAP_SYNC: &str = "https://tapvizier.cds.unistra.fr/TAPVizieR/tap/sync";
 
@@ -1389,13 +1438,13 @@ impl SourceDownloader {
         let query = |archive| gaia_distance_query(archive, ra, dec, radius_deg, max_mag);
         // Each archive's synchronous endpoint answers a cone in seconds; a
         // queued job can wait many minutes to start. So both archives are
-        // asked directly before either queue.
-        for archive in [GaiaArchive::Esa, GaiaArchive::Gavo] {
-            if let Ok(body) = self.gaia_cone_sync(archive, &query(archive)).await
-                && parse_gaia_distances(&body).is_ok()
-            {
-                return Ok(body);
-            }
+        // asked directly, for the cone or for it in pieces, before either
+        // queue.
+        if let Some(body) = self
+            .gaia_distance_sync(ra, dec, radius_deg, max_mag, GAIA_CONE_SPLITS)
+            .await
+        {
+            return Ok(body);
         }
         let queued = |archive: GaiaArchive| async move {
             let body = self.gaia_cone_job(archive, query(archive)).await?;
@@ -1414,6 +1463,39 @@ impl SourceDownloader {
                 queued(GaiaArchive::Gavo).await.map_err(|_| esa)
             }
         }
+    }
+
+    /// The cone from either archive's synchronous endpoint, or `None`. When
+    /// both fail on it the cone is asked for in four smaller cones that
+    /// cover it, `splits` times over at most: ESA timed out on a 0.8° cone
+    /// it answers within seconds elsewhere, and GAVO answered the same field
+    /// as a 0.4° cone in two seconds.
+    fn gaia_distance_sync(
+        &self,
+        ra: f64,
+        dec: f64,
+        radius_deg: f64,
+        max_mag: f32,
+        splits: u32,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + '_>> {
+        Box::pin(async move {
+            for archive in [GaiaArchive::Esa, GaiaArchive::Gavo] {
+                let query = gaia_distance_query(archive, ra, dec, radius_deg, max_mag);
+                if let Ok(body) = self.gaia_cone_sync(archive, &query).await
+                    && parse_gaia_distances(&body).is_ok()
+                {
+                    return Some(body);
+                }
+            }
+            if splits == 0 {
+                return None;
+            }
+            let [a, b, c, d] = quarter_cones(ra, dec, radius_deg).map(|(ra, dec, radius)| {
+                self.gaia_distance_sync(ra, dec, radius, max_mag, splits - 1)
+            });
+            let (a, b, c, d) = tokio::join!(a, b, c, d);
+            Some(merge_csv(&[a?, b?, c?, d?]))
+        })
     }
 
     /// [`Self::gaia_distance_cone_csv`] from one archive.
@@ -2100,6 +2182,51 @@ mod tests {
         assert_eq!(star(10.0, 1.0).best_distance(), Some(100.0));
         assert_eq!(star(1.0, 0.5).best_distance(), None);
         assert_eq!(star(-1.0, 0.1).best_distance(), None);
+    }
+
+    #[test]
+    fn quarter_cones_cover_the_cone() {
+        // Near the pole too, where right ascension squeezes together.
+        for (ra, dec) in [(315.0, 67.8), (10.0, 89.5), (180.0, -30.0)] {
+            let radius = 0.8;
+            let pieces = quarter_cones(ra, dec, radius);
+            let separation = |(ra1, dec1): (f64, f64), (ra2, dec2): (f64, f64)| {
+                let (ra1, dec1, ra2, dec2) = (
+                    ra1.to_radians(),
+                    dec1.to_radians(),
+                    ra2.to_radians(),
+                    dec2.to_radians(),
+                );
+                let cos = dec1.sin() * dec2.sin() + dec1.cos() * dec2.cos() * (ra1 - ra2).cos();
+                cos.clamp(-1.0, 1.0).acos().to_degrees()
+            };
+            for step in 0..64 {
+                for fraction in [0.3, 0.7, 1.0] {
+                    // A point on the cone, by walking out from the centre
+                    // along a bearing on the tangent plane.
+                    let bearing = step as f64 / 64.0 * std::f64::consts::TAU;
+                    let distance = (radius * fraction).to_radians();
+                    let (xi, eta) = (distance * bearing.sin(), distance * bearing.cos());
+                    let (sin_dec, cos_dec) = dec.to_radians().sin_cos();
+                    let point_dec =
+                        ((sin_dec + eta * cos_dec) / (1.0 + xi * xi + eta * eta).sqrt()).asin();
+                    let point_ra = ra.to_radians() + xi.atan2(cos_dec - eta * sin_dec);
+                    let point = (point_ra.to_degrees(), point_dec.to_degrees());
+                    assert!(
+                        pieces
+                            .iter()
+                            .any(|&(pra, pdec, pr)| separation((pra, pdec), point) <= pr),
+                        "({ra}, {dec}): {point:?} is outside every piece {pieces:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn overlapping_csv_rows_merge_once() {
+        let merged = merge_csv(&["a,b\n1,2\n3,4\n".into(), "a,b\n3,4\n5,6\n".into()]);
+        assert_eq!(merged, "a,b\n1,2\n3,4\n5,6\n");
     }
 
     #[test]
