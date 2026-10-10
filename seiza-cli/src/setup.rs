@@ -22,6 +22,10 @@ pub(crate) struct SetupArgs {
     /// Also install distances to deep-sky objects (object-distances.bin)
     #[arg(long)]
     object_distances: bool,
+    /// Also install distances to Gaia and Hipparcos stars
+    /// (star-distances.bin) that `seiza parallax-video` uses offline
+    #[arg(long)]
+    star_distances: bool,
     /// Directory that receives the selected files (defaults to SEIZA_CATALOG_DIR when set)
     #[arg(long)]
     output: Option<PathBuf>,
@@ -107,6 +111,7 @@ impl SetupPreset {
                 Dataset::BlindGaia16,
                 Dataset::GaiaPhotometry,
                 Dataset::ObjectDistances,
+                Dataset::StarDistances,
             ],
         };
         datasets
@@ -192,6 +197,7 @@ fn run_setup(args: SetupArgs) -> Result<()> {
         for (wanted, dataset) in [
             (args.gaia_photometry, Dataset::GaiaPhotometry),
             (args.object_distances, Dataset::ObjectDistances),
+            (args.star_distances, Dataset::StarDistances),
         ] {
             let name = dataset.file_name().to_string();
             if wanted && !files.contains(&name) {
@@ -205,6 +211,9 @@ fn run_setup(args: SetupArgs) -> Result<()> {
         }
         if args.object_distances && preset != SetupPreset::All {
             println!("          + distances to deep-sky objects");
+        }
+        if args.star_distances && preset != SetupPreset::All {
+            println!("          + distances to Gaia and Hipparcos stars");
         }
         println!("Directory : {}", output.display());
         println!("Downloads are SHA-256 verified and safe to retry.\n");
@@ -293,6 +302,9 @@ fn elevated_parameters(args: &SetupArgs) -> Vec<u16> {
     }
     if args.object_distances {
         arguments.push(OsString::from("--object-distances"));
+    }
+    if args.star_distances {
+        arguments.push(OsString::from("--star-distances"));
     }
     if args.yes {
         arguments.push(OsString::from("--yes"));

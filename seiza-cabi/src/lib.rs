@@ -261,6 +261,7 @@ impl CatalogSetupPreset {
                 Dataset::BlindGaia16,
                 Dataset::GaiaPhotometry,
                 Dataset::ObjectDistances,
+                Dataset::StarDistances,
             ],
             Self::GaiaPhotometry => &[Dataset::GaiaPhotometry],
         }
@@ -10957,6 +10958,11 @@ mod tests {
             CatalogSetupPreset::All
                 .datasets()
                 .contains(&Dataset::ObjectDistances)
+        );
+        assert!(
+            CatalogSetupPreset::All
+                .datasets()
+                .contains(&Dataset::StarDistances)
         );
 
         let all = CatalogSetupPreset::All.datasets();
