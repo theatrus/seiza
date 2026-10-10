@@ -860,6 +860,11 @@ fn tour_state(tour: &[Stop], glide: f64, t: f64) -> [f64; 6] {
         let room = ((1.0 - states[index][2].exp()) / 0.5).clamp(0.0, 1.0);
         glide[4] *= room;
         glide[5] *= room;
+        // A spin turns about the stop itself, its motion the spin and any
+        // push.
+        if stop.spin != 0.0 {
+            glide = [0.0; 6];
+        }
         let push = (1.0 - stop.push.clamp(0.0, 0.95)).ln() / hold;
         let before = if index == 0 {
             0.0
