@@ -132,3 +132,20 @@ def test_a_tour_sets_the_length_and_takes_strings_or_dicts(tmp_path):
     with pytest.raises(ValueError, match="unknown tour stop field"):
         video(tmp_path, tour=["whole", {"dolli": 0.5}])
 
+
+def test_a_tour_plan_comes_back_editable_and_goes_back_in(tmp_path):
+    # With no object catalog there is nothing to tour.
+    _, _, wcs = field()
+    with pytest.raises(RuntimeError, match="object catalog|catalogued objects"):
+        seiza.plan_parallax_tour(320, 240, wcs, objects=str(tmp_path / "no-objects.bin"))
+    # A plan's stops, names and all, are accepted as a tour.
+    made, _ = video(
+        tmp_path,
+        tour=[
+            {"name": None, "focus": None, "hold": 1.0},
+            {"name": "NGC 9001", "focus": (150.0, 110.0), "dolly": 0.5, "travel": 1.0, "hold": 1.0},
+            {"name": None, "focus": None, "travel": 1.0},
+        ],
+    )
+    assert made.frame_count == 20
+

@@ -2069,7 +2069,9 @@ char *seiza_rc_astro_process_file_json(const char *request_json,
  ("inOut", "linear"), `quality` ("standard", "high"), `growthLimit`,
  `fadeFrom`, `tour` (stops `[{focus, dolly, zoom, rotateDegrees, pan,
  travel, hold}]`, the first the opening view, which replace the single
- move and set the length), `size` ("720p", "1080p", "1440p", "4k", each with
+ move and set the length; [`seiza_parallax_plan_tour_json`] plans
+ one), `autoTour` (`{targets, hold, motion}`: plan a tour of the
+ catalogued objects and render it), `size` ("720p", "1080p", "1440p", "4k", each with
  "-portrait", or "WIDTHxHEIGHT"), `seconds`, `fps`, `overlay`,
  `overlayDensity`, `labels` (`[{x, y, radius, text}]`), `labelColor`
  ("#RRGGBB") and `watermark` (true, or the text). An unknown field is an
@@ -2093,6 +2095,30 @@ SeizaParallax *seiza_parallax_prepare_json(const char *request_json,
                                            SeizaParallaxEventCallback events,
                                            void *context,
                                            char **error_out);
+
+/*
+ Plan a tour of the catalogued objects in an image, for the caller to
+ edit before making the video. The request is
+ [`seiza_parallax_prepare_json`]'s: the image (`image`, else `stars` or
+ `starless`) gives the size, and is blind-solved without `wcs`; `size`
+ is the video's frame; `objects` or `catalogDirectory` the object
+ catalog; and `autoTour` (`{targets, hold, motion}`, each optional) how
+ to plan. Returns JSON, released with `seiza_string_free`:
+ `{"focus": [x, y], "focusName", "seconds", "tour": [{name, focus,
+ dolly, zoom, rotateDegrees, pan, travel, hold}]}`. Its `tour`, with any
+ stops dropped, moved or changed, and its `focus` go back into a prepare
+ request as they are. Null with `error_out` set on failure; `events`
+ (nullable) hears the solve.
+
+ # Safety
+
+ `request_json` must be a NUL-terminated UTF-8 string. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_parallax_plan_tour_json(const char *request_json,
+                                    SeizaParallaxEventCallback events,
+                                    void *context,
+                                    char **error_out);
 
 /*
  What preparing the video found, as JSON: its frame count, frame rate

@@ -518,6 +518,21 @@ video.render(lambda frame, index: encoder.write(frame), format="bgra")
 video.write("iris.mp4")                 # through ffmpeg; encoder="png" for frames
 ```
 
+A tour visits several places: `tour=` takes stops, each a `--stop` string
+or a dict. `seiza.plan_parallax_tour(width, height, wcs, size=...)` plans
+one from the catalogued objects in the field and returns it for editing:
+
+```python
+plan = seiza.plan_parallax_tour(width, height, solution.wcs, size="1080p-portrait")
+for stop in plan["tour"]:
+    print(stop["name"], stop["focus"], stop["dolly"])
+stops = [stop for stop in plan["tour"] if stop["name"] != "LDN 1267"]
+video = seiza.ParallaxVideo(starless, stars, solution.wcs, size="1080p-portrait",
+                            tour=stops, focus=plan["focus"])
+```
+
+`auto_tour=True` plans and renders in one go.
+
 Images may be paths (PNG, JPEG or TIFF) or arrays, float32 from 0 to 1 or
 uint8; 16-bit files make the best videos, as 8 bits flatten bright star
 cores and band smooth nebula. Options are the command's, in snake case,

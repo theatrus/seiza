@@ -117,6 +117,9 @@ struct ParallaxRequest {
     /// A tour of stops instead of the single move.
     #[serde(default)]
     tour: Vec<StopRequest>,
+    /// Plan a tour of the catalogued objects in the field when `tour` is
+    /// empty: `{targets, hold, motion}`, each optional.
+    auto_tour: Option<AutoTourRequest>,
     /// "720p", "1080p", "1440p" or "4k", each with "-portrait" for the tall
     /// form, or "WIDTHxHEIGHT".
     size: Option<String>,
@@ -148,6 +151,10 @@ struct LabelRequest {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StopRequest {
+    /// The target the stop visits, as a plan names it; not used.
+    #[serde(default)]
+    #[allow(dead_code)]
+    name: Option<String>,
     focus: Option<[f64; 2]>,
     dolly: Option<f64>,
     zoom: Option<f64>,
@@ -155,6 +162,27 @@ struct StopRequest {
     pan: Option<f64>,
     travel: Option<f64>,
     hold: Option<f64>,
+}
+
+/// How to plan a tour: how many targets (every one worth a visit if
+/// absent), the seconds at each, and how much it turns and pans.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutoTourRequest {
+    targets: Option<usize>,
+    hold: Option<f64>,
+    motion: Option<f64>,
+}
+
+impl AutoTourRequest {
+    fn auto_tour(&self) -> seiza_parallax::AutoTour {
+        let defaults = seiza_parallax::AutoTour::default();
+        seiza_parallax::AutoTour {
+            targets: self.targets,
+            hold: self.hold.unwrap_or(defaults.hold),
+            motion: self.motion.unwrap_or(defaults.motion),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -354,6 +382,7 @@ fn options(request: &ParallaxRequest) -> Result<ParallaxOptions, String> {
                 }
             })
             .collect(),
+        auto_tour: request.auto_tour.as_ref().map(AutoTourRequest::auto_tour),
         size: match &request.size {
             Some(size) => seiza_parallax::parse_frame_size(size)?,
             None => defaults.size,
@@ -479,7 +508,9 @@ fn split(
 /// ("inOut", "linear"), `quality` ("standard", "high"), `growthLimit`,
 /// `fadeFrom`, `tour` (stops `[{focus, dolly, zoom, rotateDegrees, pan,
 /// travel, hold}]`, the first the opening view, which replace the single
-/// move and set the length), `size` ("720p", "1080p", "1440p", "4k", each with
+/// move and set the length; [`seiza_parallax_plan_tour_json`] plans
+/// one), `autoTour` (`{targets, hold, motion}`: plan a tour of the
+/// catalogued objects and render it), `size` ("720p", "1080p", "1440p", "4k", each with
 /// "-portrait", or "WIDTHxHEIGHT"), `seconds`, `fps`, `overlay`,
 /// `overlayDensity`, `labels` (`[{x, y, radius, text}]`), `labelColor`
 /// ("#RRGGBB") and `watermark` (true, or the text). An unknown field is an
@@ -519,39 +550,152 @@ pub unsafe extern "C" fn seiza_parallax_prepare_json(
             .map(|signal| seiza_stacking::CancelSignal::from(signal.cancelled.clone()));
         let (starless, stars, solve_path) =
             split(&request, cancellation.as_ref(), events, context)?;
-        let wcs = match &request.wcs {
-            Some(wcs) => wcs.wcs(),
-            None => {
-                let minimum = request.minimum_scale_arcsec_per_pixel.unwrap_or(0.1);
-                let maximum = request.maximum_scale_arcsec_per_pixel.unwrap_or(1000.0);
-                let solved = blind_solve_path(
-                    &solve_path,
-                    request.catalog_directory.as_deref(),
-                    minimum,
-                    maximum,
-                    2,
-                )?;
-                let wcs = solved.solution.wcs;
-                send(
-                    events,
-                    context,
-                    serde_json::json!({
-                        "kind": "note",
-                        "message": format!(
-                            "solved: {:.3}\"/px, {} stars matched",
-                            wcs.scale_arcsec_per_px(),
-                            solved.solution.matched_stars
-                        ),
-                    }),
-                );
-                wcs
-            }
-        };
+        let wcs = solution(&request, &solve_path, events, context)?;
         let video = Parallax::prepare(&starless, &stars, &wcs, &options, &mut |event| {
             send(events, context, event_json(event));
         })
         .map_err(|error| error.to_string())?;
         Ok(Box::into_raw(Box::new(SeizaParallax { video, wcs })))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+/// The request's WCS, or a blind solve of the image at `solve_path`
+/// against the catalogs in `catalogDirectory`.
+fn solution(
+    request: &ParallaxRequest,
+    solve_path: &Path,
+    events: SeizaParallaxEventCallback,
+    context: usize,
+) -> Result<Wcs, String> {
+    if let Some(wcs) = &request.wcs {
+        return Ok(wcs.wcs());
+    }
+    let minimum = request.minimum_scale_arcsec_per_pixel.unwrap_or(0.1);
+    let maximum = request.maximum_scale_arcsec_per_pixel.unwrap_or(1000.0);
+    let solved = blind_solve_path(
+        solve_path,
+        request.catalog_directory.as_deref(),
+        minimum,
+        maximum,
+        2,
+    )?;
+    let wcs = solved.solution.wcs;
+    send(
+        events,
+        context,
+        serde_json::json!({
+            "kind": "note",
+            "message": format!(
+                "solved: {:.3}\"/px, {} stars matched",
+                wcs.scale_arcsec_per_px(),
+                solved.solution.matched_stars
+            ),
+        }),
+    );
+    Ok(wcs)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlannedStopResponse {
+    name: Option<String>,
+    focus: Option<[f64; 2]>,
+    dolly: f64,
+    zoom: f64,
+    rotate_degrees: f64,
+    pan: f64,
+    travel: f64,
+    hold: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlannedTourResponse {
+    schema_version: u32,
+    focus: [f64; 2],
+    focus_name: String,
+    seconds: f64,
+    tour: Vec<PlannedStopResponse>,
+}
+
+/// Plan a tour of the catalogued objects in an image, for the caller to
+/// edit before making the video. The request is
+/// [`seiza_parallax_prepare_json`]'s: the image (`image`, else `stars` or
+/// `starless`) gives the size, and is blind-solved without `wcs`; `size`
+/// is the video's frame; `objects` or `catalogDirectory` the object
+/// catalog; and `autoTour` (`{targets, hold, motion}`, each optional) how
+/// to plan. Returns JSON, released with `seiza_string_free`:
+/// `{"focus": [x, y], "focusName", "seconds", "tour": [{name, focus,
+/// dolly, zoom, rotateDegrees, pan, travel, hold}]}`. Its `tour`, with any
+/// stops dropped, moved or changed, and its `focus` go back into a prepare
+/// request as they are. Null with `error_out` set on failure; `events`
+/// (nullable) hears the solve.
+///
+/// # Safety
+///
+/// `request_json` must be a NUL-terminated UTF-8 string. When non-null,
+/// `error_out` must point to writable storage for one pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_parallax_plan_tour_json(
+    request_json: *const c_char,
+    events: SeizaParallaxEventCallback,
+    context: *mut c_void,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    let context = context as usize;
+    ffi_result(error_out, || {
+        let request_json = required_str(request_json, "parallax request JSON")?;
+        let request: ParallaxRequest = serde_json::from_str(&request_json)
+            .map_err(|error| format!("invalid parallax request JSON: {error}"))?;
+        let options = options(&request)?;
+        let path = request
+            .image
+            .clone()
+            .or_else(|| request.stars.clone())
+            .or_else(|| request.starless.clone())
+            .ok_or("give the image to plan a tour of")?;
+        let dimensions = open_display(&path)?.dimensions();
+        let wcs = solution(&request, &path, events, context)?;
+        let auto = request
+            .auto_tour
+            .as_ref()
+            .map(AutoTourRequest::auto_tour)
+            .unwrap_or_default();
+        let plan = seiza_parallax::plan_tour(
+            &wcs,
+            dimensions,
+            options.objects.as_deref(),
+            options.size,
+            &auto,
+        )
+        .map_err(|error| error.to_string())?;
+        let seconds = ParallaxOptions {
+            tour: plan.tour(),
+            ..ParallaxOptions::default()
+        }
+        .seconds();
+        owned_json(&PlannedTourResponse {
+            schema_version: 1,
+            focus: [plan.focus.0, plan.focus.1],
+            focus_name: plan.focus_name.clone(),
+            seconds,
+            tour: plan
+                .stops
+                .iter()
+                .map(|planned| PlannedStopResponse {
+                    name: planned.name.clone(),
+                    focus: planned.stop.focus.map(|(x, y)| [x, y]),
+                    dolly: planned.stop.dolly,
+                    zoom: planned.stop.zoom,
+                    rotate_degrees: planned.stop.rotate_deg,
+                    pan: planned.stop.pan,
+                    travel: planned.stop.travel,
+                    hold: planned.stop.hold,
+                })
+                .collect(),
+        })
     })
     .unwrap_or(ptr::null_mut())
 }
@@ -1175,6 +1319,96 @@ mod tests {
         unsafe { seiza_string_free(summary) };
         assert_eq!(parsed["frames"], 20);
         unsafe { seiza_parallax_free(toured) };
+    }
+
+    #[test]
+    fn a_planned_tour_names_its_stops_and_goes_back_into_a_request() {
+        let directory = tempfile::tempdir().unwrap();
+        // Two catalogued objects in the test field, written beside the
+        // other catalogs.
+        let wcs = Wcs::from_center_scale_rotation((56.75, 24.12), (160.0, 120.0), 2.0, 0.0, false);
+        let object = |name: &str, x: f64, y: f64, major: f32| {
+            let (ra, dec) = wcs.pixel_to_world(x, y);
+            seiza::objects::SkyObject {
+                kind: seiza::objects::ObjectKind::Nebula,
+                ra,
+                dec,
+                mag: None,
+                major_arcmin: Some(major),
+                minor_arcmin: None,
+                position_angle_deg: None,
+                name: name.into(),
+                common_name: String::new(),
+                metadata: Default::default(),
+            }
+        };
+        seiza::objects::ObjectCatalog::new(vec![
+            object("NGC 9001", 100.0, 80.0, 1.0),
+            object("IC 9002", 230.0, 170.0, 0.8),
+        ])
+        .write_to(&directory.path().join("objects.bin"))
+        .unwrap();
+        let request = self::request(directory.path(), "\"autoTour\": {\"hold\": 1.0}");
+        let mut error = ptr::null_mut();
+        let planned = unsafe {
+            seiza_parallax_plan_tour_json(request.as_ptr(), None, ptr::null_mut(), &mut error)
+        };
+        assert!(!planned.is_null(), "{}", take_error(error));
+        let plan: serde_json::Value =
+            serde_json::from_str(&unsafe { CStr::from_ptr(planned) }.to_string_lossy()).unwrap();
+        unsafe { seiza_string_free(planned) };
+        let tour = plan["tour"].as_array().unwrap();
+        assert!(
+            tour.first().unwrap()["focus"].is_null() && tour.last().unwrap()["focus"].is_null()
+        );
+        let names: Vec<&str> = tour
+            .iter()
+            .filter_map(|stop| stop["name"].as_str())
+            .collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert!(names.contains(&"NGC 9001") && names.contains(&"IC 9002"));
+        assert_eq!(plan["focusName"], "NGC 9001");
+        // Drop the second target and make the video from what is left.
+        let kept: Vec<&serde_json::Value> = tour
+            .iter()
+            .filter(|stop| stop["name"] != "IC 9002")
+            .collect();
+        let edited = self::request(
+            directory.path(),
+            &format!(
+                "\"tour\": {}, \"focus\": {}",
+                serde_json::to_string(&kept).unwrap(),
+                plan["focus"]
+            ),
+        );
+        let video = unsafe {
+            seiza_parallax_prepare_json(
+                edited.as_ptr(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(!video.is_null(), "{}", take_error(error));
+        let summary = unsafe { seiza_parallax_summary_json(video, &mut error) };
+        let parsed: serde_json::Value =
+            serde_json::from_str(&unsafe { CStr::from_ptr(summary) }.to_string_lossy()).unwrap();
+        unsafe { seiza_string_free(summary) };
+        let seconds: f64 = kept
+            .iter()
+            .enumerate()
+            .map(|(index, stop)| {
+                stop["hold"].as_f64().unwrap()
+                    + if index > 0 {
+                        stop["travel"].as_f64().unwrap()
+                    } else {
+                        0.0
+                    }
+            })
+            .sum();
+        assert_eq!(parsed["frames"], (seconds * 5.0).round() as u64);
+        unsafe { seiza_parallax_free(video) };
     }
 
     #[test]

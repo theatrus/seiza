@@ -20,7 +20,102 @@ use std::sync::{Arc, Mutex};
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyParallaxVideo>()?;
     module.add_class::<PyParallaxFrames>()?;
+    module.add_function(wrap_pyfunction!(plan_parallax_tour, module)?)?;
     Ok(())
+}
+
+/// How to plan a tour, from `auto_tour=`: True for every target worth a
+/// visit, a number for that many, or a dict of `targets`, `hold` and
+/// `motion`.
+fn auto_tour_argument(value: &Bound<'_, PyAny>) -> PyResult<Option<seiza_parallax::AutoTour>> {
+    let mut auto = seiza_parallax::AutoTour::default();
+    if let Ok(flag) = value.extract::<bool>() {
+        return Ok(flag.then_some(auto));
+    }
+    if let Ok(count) = value.extract::<usize>() {
+        auto.targets = Some(count);
+        return Ok(Some(auto));
+    }
+    let dict = value.downcast::<PyDict>()?;
+    for (key, value) in dict.iter() {
+        let key: String = key.extract()?;
+        match key.as_str() {
+            "targets" => auto.targets = value.extract()?,
+            "hold" => auto.hold = value.extract()?,
+            "motion" => auto.motion = value.extract()?,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown auto_tour field {other:?}"
+                )));
+            }
+        }
+    }
+    Ok(Some(auto))
+}
+
+/// Plan a tour of the catalogued objects in a `width` × `height` image
+/// whose sky `wcs` gives, for frames of `size`, to edit before making the
+/// video: every target worth a visit (or the `targets` most worth it),
+/// visited in a short round from the whole image and back, staying `hold`
+/// seconds at each and turning and panning as much as `motion` says.
+/// Returns a dict: `tour`, the stops as dicts (`name`, `focus`, `dolly`,
+/// `zoom`, `rotate_deg`, `pan`, `travel`, `hold`), and `focus` with
+/// `focus_name`, the target most worth a visit, where the nebula's distance
+/// is best taken. Drop, move or change stops, then pass `tour=plan["tour"],
+/// focus=plan["focus"]` to `ParallaxVideo`.
+#[pyfunction]
+#[pyo3(signature = (width, height, wcs, *, objects=None, size=None, targets=None, hold=1.5, motion=1.0))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn plan_parallax_tour<'py>(
+    py: Python<'py>,
+    width: u32,
+    height: u32,
+    wcs: &Bound<'py, PyWcs>,
+    objects: Option<PathBuf>,
+    size: Option<&Bound<'py, PyAny>>,
+    targets: Option<usize>,
+    hold: f64,
+    motion: f64,
+) -> PyResult<Bound<'py, PyDict>> {
+    let frame = match size {
+        None => ParallaxOptions::default().size,
+        Some(size) => match size.extract::<String>() {
+            Ok(text) => seiza_parallax::parse_frame_size(&text).map_err(PyValueError::new_err)?,
+            Err(_) => size.extract()?,
+        },
+    };
+    let wcs = wcs.get().wcs.clone();
+    let auto = seiza_parallax::AutoTour {
+        targets,
+        hold,
+        motion,
+    };
+    let plan = py
+        .allow_threads(|| {
+            seiza_parallax::plan_tour(&wcs, (width, height), objects.as_deref(), frame, &auto)
+        })
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    let stops = plan
+        .stops
+        .iter()
+        .map(|planned| {
+            let stop = PyDict::new(py);
+            stop.set_item("name", &planned.name)?;
+            stop.set_item("focus", planned.stop.focus)?;
+            stop.set_item("dolly", planned.stop.dolly)?;
+            stop.set_item("zoom", planned.stop.zoom)?;
+            stop.set_item("rotate_deg", planned.stop.rotate_deg)?;
+            stop.set_item("pan", planned.stop.pan)?;
+            stop.set_item("travel", planned.stop.travel)?;
+            stop.set_item("hold", planned.stop.hold)?;
+            Ok(stop)
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    let result = PyDict::new(py);
+    result.set_item("tour", stops)?;
+    result.set_item("focus", plan.focus)?;
+    result.set_item("focus_name", &plan.focus_name)?;
+    Ok(result)
 }
 
 /// A prepared parallax video: the stars of a starless image and its stars
@@ -41,7 +136,10 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
 /// `growth_limit`, `fade_from`, `tour` (stops, each a string as `seiza
 /// parallax-video --stop` takes, "X,Y dolly=0.8 rotate=-10 travel=6
 /// hold=1" or "whole ...", or a dict of `focus`, `dolly`, `zoom`,
-/// `rotate_deg`, `pan`, `travel` and `hold`), `size` ("720p", "1080p", "1440p", "4k",
+/// `rotate_deg`, `pan`, `travel` and `hold`, as `plan_parallax_tour`
+/// gives them), `auto_tour` (True, a count, or a dict of `targets`,
+/// `hold` and `motion`: plan a tour of the catalogued objects and render
+/// it), `size` ("720p", "1080p", "1440p", "4k",
 /// each with "-portrait", "WIDTHxHEIGHT", or (width, height)), `seconds`,
 /// `fps`, `overlay`, `overlay_density`, `labels` ((x, y, text) or (x, y,
 /// radius, text) tuples), `label_color` ("#RRGGBB") and `watermark` (True,
@@ -190,6 +288,7 @@ fn options(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ParallaxOptions> {
                 )?
             }
             "growth_limit" => options.growth_limit = value.extract()?,
+            "auto_tour" => options.auto_tour = auto_tour_argument(&value)?,
             "tour" => {
                 options.tour = value
                     .try_iter()?
@@ -211,6 +310,8 @@ fn options(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ParallaxOptions> {
                                 "pan" => parsed.pan = value.extract()?,
                                 "travel" => parsed.travel = value.extract()?,
                                 "hold" => parsed.hold = value.extract()?,
+                                // A plan's name for the stop's target.
+                                "name" => {}
                                 other => {
                                     return Err(PyValueError::new_err(format!(
                                         "unknown tour stop field {other:?}"

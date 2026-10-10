@@ -522,6 +522,18 @@ def rc_astro_split_stars(
     cancel: Callable[[], bool] | None = None,
 ) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]: ...
 
+def plan_parallax_tour(
+    width: int,
+    height: int,
+    wcs: Wcs,
+    *,
+    objects: str | Path | None = None,
+    size: str | tuple[int, int] | None = None,
+    targets: int | None = None,
+    hold: float = 1.5,
+    motion: float = 1.0,
+) -> dict[str, Any]: ...
+
 ParallaxImage = Union[str, Path, npt.NDArray[np.float32], npt.NDArray[np.uint8]]
 
 class ParallaxFrames:
@@ -563,6 +575,7 @@ class ParallaxVideo:
         growth_limit: float = 4.0,
         fade_from: float = 6.0,
         tour: Sequence[str | Mapping[str, Any]] = (),
+        auto_tour: bool | int | Mapping[str, Any] | None = None,
         size: str | tuple[int, int] = "1080p",
         seconds: float = 8.0,
         fps: int = 30,
