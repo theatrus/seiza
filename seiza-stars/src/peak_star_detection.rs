@@ -1,16 +1,20 @@
-//! Finding the stars in a star image.
+//! Star detection in a star-only image, as local peaks.
 //!
-//! A star image holds nothing but stars on an almost black, almost noiseless
-//! ground, so a threshold joins a crowded cluster's halos into one region.
-//! Each star is instead a local peak of the lightly smoothed light: crowded
-//! stars stay apart, and a saturated core, flat on top, is one star.
+//! A star image (a star mask, or StarXTerminator's stars image) holds
+//! nothing but stars on an almost black, almost noiseless ground, so a
+//! threshold joins a crowded cluster's halos into one region. Each star is
+//! instead a local peak of the lightly smoothed light: crowded stars stay
+//! apart, and a saturated core, flat on top, is one star.
+//!
+//! This finds where stars are and how much light each holds, for cutting
+//! them out or matching them to a catalog; it does not measure their shape
+//! for grading as the other detectors here do.
 
-use crate::light::LightImage;
 use rayon::prelude::*;
 
-/// A star found in a star image.
+/// A star found as a peak.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct FoundStar {
+pub struct PeakStar {
     /// Light-weighted centroid, image pixels.
     pub x: f64,
     pub y: f64,
@@ -21,19 +25,25 @@ pub struct FoundStar {
     pub area: u32,
 }
 
-/// Stars in `light`, brightest first. A peak must stand `sigma` noise
-/// levels above the background, outside the core of a stronger star.
-pub fn find_stars(light: &LightImage, sigma: f32) -> Vec<FoundStar> {
-    let (width, height) = (light.width, light.height);
+/// Stars in `light`, one linear brightness value per pixel in rows of
+/// `width`, brightest first. For a colour image, pass each pixel's channels
+/// summed. A peak must stand `sigma` noise levels above the background, and
+/// at least 0.02 above it, outside the core of a stronger star.
+///
+/// # Panics
+///
+/// If `light` is not `width * height` values.
+pub fn find_peak_stars(light: &[f32], width: usize, height: usize, sigma: f32) -> Vec<PeakStar> {
+    assert_eq!(
+        light.len(),
+        width * height,
+        "light must be width * height values"
+    );
     if width < 5 || height < 5 {
         return Vec::new();
     }
-    let sum: Vec<f32> = light
-        .pixels
-        .par_iter()
-        .map(|pixel| pixel[0] + pixel[1] + pixel[2])
-        .collect();
-    let smooth = binomial(&sum, width, height);
+    let sum = light;
+    let smooth = binomial(sum, width, height);
     let (background, noise) = median_and_noise(&smooth);
     let threshold = background + (sigma * noise).max(0.02);
 
@@ -75,7 +85,7 @@ pub fn find_stars(light: &LightImage, sigma: f32) -> Vec<FoundStar> {
     let cell = |x: f64, y: f64| ((x / CELL).floor() as i64, (y / CELL).floor() as i64);
     let mut grid: std::collections::HashMap<(i64, i64), Vec<usize>> =
         std::collections::HashMap::new();
-    let mut found: Vec<FoundStar> = Vec::new();
+    let mut found: Vec<PeakStar> = Vec::new();
     let mut cores: Vec<f64> = Vec::new();
     let mut widest = 2.0_f64;
     for &(x, y, peak) in &peaks {
@@ -101,7 +111,7 @@ pub fn find_stars(light: &LightImage, sigma: f32) -> Vec<FoundStar> {
         if inside {
             continue;
         }
-        let star = measure(&sum, width, height, x, y, peak, base);
+        let star = measure(sum, width, height, x, y, peak, base);
         let core = (star.area as f64 / std::f64::consts::PI).sqrt() + 2.0;
         widest = widest.max(core);
         grid.entry(cell(star.x, star.y))
@@ -151,7 +161,7 @@ fn measure(
     y: usize,
     peak: f32,
     base: f32,
-) -> FoundStar {
+) -> PeakStar {
     let half = base + (peak - base) / 2.0;
     let ring_median = |(cx, cy): (usize, usize), radius: usize| -> f32 {
         let steps = (radius * 8).max(8);
@@ -207,12 +217,49 @@ fn measure(
         radius = core(centre);
     }
     let area = (std::f64::consts::PI * (radius as f64 + 0.5).powi(2)).round() as u32;
-    FoundStar {
+    PeakStar {
         x: position.0,
         y: position.1,
         flux: total,
         area: area.max(1),
     }
+}
+
+/// `stars`, brightest first, with those inside a brighter star's saturated
+/// core folded into it: a flat-topped core can show more than one peak.
+/// Stars in the halo beyond it stay stars of their own.
+pub fn fold_core_fragments(stars: Vec<PeakStar>) -> Vec<PeakStar> {
+    let reach = |star: &PeakStar| 1.5 * (star.area as f64 / std::f64::consts::PI).sqrt() + 1.0;
+    let mut kept: Vec<PeakStar> = Vec::with_capacity(stars.len());
+    let mut grid: std::collections::HashMap<(i64, i64), Vec<usize>> =
+        std::collections::HashMap::new();
+    const CELL: f64 = 32.0;
+    let cell = |x: f64, y: f64| ((x / CELL).floor() as i64, (y / CELL).floor() as i64);
+    // The largest reach among kept stars bounds how far to look.
+    let mut widest = 0.0_f64;
+    for star in stars {
+        let span = (widest / CELL).ceil() as i64;
+        let (cx, cy) = cell(star.x, star.y);
+        let inside = (cy - span..=cy + span).any(|row| {
+            (cx - span..=cx + span).any(|column| {
+                grid.get(&(column, row)).is_some_and(|indices| {
+                    indices.iter().any(|&index| {
+                        let brighter = &kept[index];
+                        (brighter.x - star.x).hypot(brighter.y - star.y) <= reach(brighter)
+                    })
+                })
+            })
+        });
+        if inside {
+            continue;
+        }
+        widest = widest.max(reach(&star));
+        grid.entry(cell(star.x, star.y))
+            .or_default()
+            .push(kept.len());
+        kept.push(star);
+    }
+    kept
 }
 
 /// A 3x3 binomial blur: (1 2 1) across, then down.
@@ -256,9 +303,10 @@ fn median_and_noise(values: &[f32]) -> (f32, f32) {
 mod tests {
     use super::*;
 
-    fn field(width: usize, height: usize, stars: &[(f64, f64, f32, f64)]) -> LightImage {
-        let mut image = LightImage::new(width, height);
-        for (index, pixel) in image.pixels.iter_mut().enumerate() {
+    /// Brightness summed over three equal channels.
+    fn field(width: usize, height: usize, stars: &[(f64, f64, f32, f64)]) -> Vec<f32> {
+        let mut image = vec![0.0_f32; width * height];
+        for (index, pixel) in image.iter_mut().enumerate() {
             let (x, y) = ((index % width) as f64, (index / width) as f64);
             let mut light = 0.003 * ((index * 7919 % 13) as f32 / 13.0);
             for &(sx, sy, peak, spread) in stars {
@@ -267,7 +315,7 @@ mod tests {
             }
             // Saturated cores flatten at the display maximum's light.
             let light = light.min(3.0);
-            *pixel = [light; 3];
+            *pixel = 3.0 * light;
         }
         image
     }
@@ -289,7 +337,7 @@ mod tests {
                 (101.0, 20.0, 1.0, 1.2),
             ],
         );
-        let found = find_stars(&image, 5.0);
+        let found = find_peak_stars(&image, 400, 300, 5.0);
         let near = |x: f64, y: f64| {
             found
                 .iter()
@@ -304,5 +352,20 @@ mod tests {
         // The saturated star comes first and has the largest core.
         assert!((found[0].x - 40.0).abs() < 1.0 && (found[0].y - 50.0).abs() < 1.0);
         assert!(found[0].area > found.iter().skip(1).map(|star| star.area).max().unwrap());
+    }
+
+    #[test]
+    fn peaks_in_a_saturated_core_fold_into_it() {
+        let star = |x: f64, y: f64, flux: f64, area: u32| PeakStar { x, y, flux, area };
+        // A saturated core of area 314 (radius 10) reaches 16 pixels: a
+        // second peak on it folds in, a star in the halo beyond does not.
+        let folded = fold_core_fragments(vec![
+            star(100.0, 100.0, 1e6, 314),
+            star(108.0, 100.0, 1e3, 4),
+            star(120.0, 100.0, 1e3, 4),
+            star(150.0, 100.0, 1e3, 4),
+        ]);
+        let places: Vec<(f64, f64)> = folded.iter().map(|star| (star.x, star.y)).collect();
+        assert_eq!(places, vec![(100.0, 100.0), (120.0, 100.0), (150.0, 100.0)]);
     }
 }

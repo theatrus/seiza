@@ -10,12 +10,13 @@
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 use image::Rgb32FImage;
-use seiza::{DetectConfig, DetectedStar, Wcs};
+use seiza::{DetectConfig, Wcs};
 use seiza_parallax::{
     CutOptions, Easing, FfmpegSink, FrameSink, LightImage, PngSequence, Scene, Shot, SmallStars,
     Star, VideoSettings,
 };
 use seiza_sources::{GaiaDistance, HipparcosStar};
+use seiza_stars::PeakStar;
 use std::path::{Path, PathBuf};
 
 #[derive(Args)]
@@ -225,7 +226,8 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
     let focal_px = 206_264.806_247 / scale;
 
     let stars_light = LightImage::from_display(&stars);
-    let detections = merge_fragments(detect(&stars_light));
+    let detections =
+        seiza_stars::fold_core_fragments(seiza_parallax::find_stars(&stars_light, 5.0));
     println!("{} stars found in the stars image", detections.len());
     let gaia = gaia_field(&args, &wcs, width, height)?;
     let hipparcos = hipparcos_field(&wcs, width, height);
@@ -543,58 +545,6 @@ fn solve(args: &ParallaxVideoArgs, path: &Path) -> Result<Wcs> {
     Ok(solution.wcs)
 }
 
-/// Stars in the stars image, brightest first, as the local peaks of its
-/// light (see [`seiza_parallax::find_stars`]).
-fn detect(stars: &LightImage) -> Vec<DetectedStar> {
-    seiza_parallax::find_stars(stars, 5.0)
-        .into_iter()
-        .map(|star| DetectedStar {
-            x: star.x,
-            y: star.y,
-            flux: star.flux,
-            peak: 0.0,
-            area: star.area,
-        })
-        .collect()
-}
-
-/// Detections with those inside a brighter star's saturated core folded into
-/// it: a flat-topped core can show more than one peak. Stars in the halo
-/// beyond it stay stars of their own. `detections` come brightest first.
-fn merge_fragments(detections: Vec<DetectedStar>) -> Vec<DetectedStar> {
-    let reach = |star: &DetectedStar| 1.5 * (star.area as f64 / std::f64::consts::PI).sqrt() + 1.0;
-    let mut kept: Vec<DetectedStar> = Vec::with_capacity(detections.len());
-    let mut grid: std::collections::HashMap<(i64, i64), Vec<usize>> =
-        std::collections::HashMap::new();
-    const CELL: f64 = 32.0;
-    let cell = |x: f64, y: f64| ((x / CELL).floor() as i64, (y / CELL).floor() as i64);
-    // The largest reach among kept stars bounds how far to look.
-    let mut widest = 0.0_f64;
-    for star in detections {
-        let span = (widest / CELL).ceil() as i64;
-        let (cx, cy) = cell(star.x, star.y);
-        let inside = (cy - span..=cy + span).any(|row| {
-            (cx - span..=cx + span).any(|column| {
-                grid.get(&(column, row)).is_some_and(|indices| {
-                    indices.iter().any(|&index| {
-                        let brighter: &DetectedStar = &kept[index];
-                        (brighter.x - star.x).hypot(brighter.y - star.y) <= reach(brighter)
-                    })
-                })
-            })
-        });
-        if inside {
-            continue;
-        }
-        widest = widest.max(reach(&star));
-        grid.entry(cell(star.x, star.y))
-            .or_default()
-            .push(kept.len());
-        kept.push(star);
-    }
-    kept
-}
-
 /// The sky circle around the image and its centre.
 fn field(wcs: &Wcs, width: usize, height: usize) -> ((f64, f64), f64) {
     let centre = wcs.pixel_to_world(width as f64 / 2.0, height as f64 / 2.0);
@@ -777,7 +727,7 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
 /// Gaia's brightest stars have no parallax; a Hipparcos star at the same
 /// place gives theirs.
 fn match_distances(
-    detections: &[DetectedStar],
+    detections: &[PeakStar],
     gaia: &[GaiaDistance],
     hipparcos: &[HipparcosStar],
     wcs: &Wcs,
@@ -1065,27 +1015,6 @@ mod tests {
     }
 
     #[test]
-    fn peaks_in_a_saturated_core_fold_into_it() {
-        let star = |x: f64, y: f64, flux: f64, area: u32| DetectedStar {
-            x,
-            y,
-            flux,
-            peak: 1.0,
-            area,
-        };
-        // A saturated core of area 314 (radius 10) reaches 16 pixels: a
-        // second peak on it folds in, a star in the halo beyond does not.
-        let merged = merge_fragments(vec![
-            star(100.0, 100.0, 1e6, 314),
-            star(108.0, 100.0, 1e3, 4),
-            star(120.0, 100.0, 1e3, 4),
-            star(150.0, 100.0, 1e3, 4),
-        ]);
-        let places: Vec<(f64, f64)> = merged.iter().map(|star| (star.x, star.y)).collect();
-        assert_eq!(places, vec![(100.0, 100.0), (120.0, 100.0), (150.0, 100.0)]);
-    }
-
-    #[test]
     fn detections_take_the_nearest_unused_gaia_star() {
         let wcs = Wcs::from_center_scale_rotation((56.75, 24.12), (500.0, 500.0), 2.0, 0.0, false);
         let place = |dx: f64, dy: f64| wcs.pixel_to_world(500.0 + dx, 500.0 + dy);
@@ -1114,11 +1043,10 @@ mod tests {
             parallax_error: Some(0.5),
             hp_mag: Some(3.0),
         }];
-        let detection = |x: f64, y: f64| DetectedStar {
+        let detection = |x: f64, y: f64| PeakStar {
             x: 500.0 + x,
             y: 500.0 + y,
             flux: 100.0,
-            peak: 1.0,
             area: 9,
         };
         let detections = [

@@ -20,6 +20,7 @@ openh264 = ["dep:openh264", "dep:mp4"]
 [dependencies]
 image.workspace = true
 rayon.workspace = true
+seiza-stars.workspace = true
 thiserror.workspace = true
 openh264 = { version = "0.9", optional = true }
 mp4 = { version = "0.14", optional = true }

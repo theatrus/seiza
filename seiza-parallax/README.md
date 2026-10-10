@@ -11,7 +11,8 @@ The crate takes the images and the stars' distances as inputs; it does not
 solve images or query catalogs. `seiza parallax-video` in `seiza-cli` does
 both, matching stars to Gaia DR3 for their Bailer-Jones distances.
 
-- **Finding stars:** `find_stars` takes each local peak of a star image that
+- **Finding stars:** `find_stars` runs `seiza-stars`' peak detector
+  (`find_peak_stars`) on a star image's light, taking each local peak that
   rises clearly above its own surroundings. Crowded stars stay apart, a
   saturated core is one star, and a ripple on a bright star's halo is not a
   star.

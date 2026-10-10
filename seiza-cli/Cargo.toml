@@ -31,6 +31,7 @@ seiza-parallax.workspace = true
 seiza-stacking.workspace = true
 seiza-stretch.workspace = true
 seiza-sources.workspace = true
+seiza-stars.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 image = { workspace = true, features = ["png", "jpeg", "tiff"] }

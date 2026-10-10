@@ -20,7 +20,6 @@
 //! ```
 
 pub mod encode;
-pub mod find;
 pub mod light;
 pub mod render;
 pub mod scene;
@@ -28,7 +27,21 @@ pub mod scene;
 #[cfg(feature = "openh264")]
 pub use encode::OpenH264Sink;
 pub use encode::{FfmpegSink, FrameSink, PngSequence, VideoSettings};
-pub use find::{FoundStar, find_stars};
 pub use light::{LightImage, Pyramid};
 pub use render::{Easing, Shot};
 pub use scene::{CutOptions, Scene, SmallStars, Sprite, Star};
+pub use seiza_stars::PeakStar;
+
+use rayon::prelude::*;
+
+/// Stars in a star image, brightest first, as the peaks of its light summed
+/// over channels: [`seiza_stars::find_peak_stars`]. A peak must stand
+/// `sigma` noise levels above the background.
+pub fn find_stars(stars: &LightImage, sigma: f32) -> Vec<PeakStar> {
+    let sum: Vec<f32> = stars
+        .pixels
+        .par_iter()
+        .map(|pixel| pixel[0] + pixel[1] + pixel[2])
+        .collect();
+    seiza_stars::find_peak_stars(&sum, stars.width, stars.height, sigma)
+}

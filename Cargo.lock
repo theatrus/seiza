@@ -2553,6 +2553,7 @@ dependencies = [
  "seiza-satellites",
  "seiza-sources",
  "seiza-stacking",
+ "seiza-stars",
  "seiza-stretch",
  "seiza-xisf",
  "serde",
@@ -2623,6 +2624,7 @@ dependencies = [
  "mp4",
  "openh264",
  "rayon",
+ "seiza-stars",
  "tempfile",
  "thiserror 2.0.21",
 ]
