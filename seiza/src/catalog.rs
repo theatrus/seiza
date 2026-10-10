@@ -12,8 +12,8 @@ pub mod photometry;
 pub mod tiles;
 
 pub use distances::{
-    DistanceBasis, DistanceEntry, DistanceMethod, DistanceSource, KindDistance, ObjectDistance,
-    ObjectDistances, ObjectDistancesBuilder,
+    CatalogMismatch, DistanceBasis, DistanceEntry, DistanceMethod, DistanceSource, KindDistance,
+    ObjectAtPixel, ObjectDistance, ObjectDistances, ObjectDistancesBuilder, typical_distance,
 };
 pub use photometry::{
     PhotometricStar, PhotometryCatalog, PhotometryCatalogBuilder, propagate_proper_motion,

@@ -630,6 +630,16 @@ impl MappedObjectCatalog {
         self.canonical.len()
     }
 
+    /// The SHA-256 the directory records for the canonical section. Opening
+    /// does not recompute it; [`Self::validate`] does.
+    pub(crate) fn canonical_checksum(&self) -> [u8; 32] {
+        self.sections
+            .iter()
+            .find(|section| section.kind == CANONICAL_V3)
+            .map(|section| section.checksum)
+            .expect("open requires a canonical section")
+    }
+
     pub(crate) fn object(&self, index: usize) -> io::Result<SkyObject> {
         self.canonical.object(index)
     }

@@ -1934,8 +1934,10 @@ fn catalog_distance(args: CatalogDistanceArgs) -> Result<()> {
         "no object distance file found; pass --distances, or run: \
              seiza download-data prebuilt --output <dir> --file object-distances.bin",
     )?;
-    let distances = ObjectDistances::open(&path)
-        .with_context(|| format!("failed to open {}", path.display()))?;
+    // Refuses a distance file built for another objects.bin: its IDs would
+    // name other objects, or none, and every answer would be a guess.
+    let distances = ObjectDistances::open(&path, &catalog)
+        .with_context(|| format!("cannot use {} with {}", path.display(), data.display()))?;
     let matches = catalog.lookup_name(&args.query)?;
     if matches.is_empty() {
         anyhow::bail!("no object named {:?} in {}", args.query, data.display());
@@ -1972,19 +1974,16 @@ fn catalog_distance(args: CatalogDistanceArgs) -> Result<()> {
                         ),
                     },
                 );
-                let default = distances
-                    .kind_default(object.kind)
-                    .filter(|_| distance.basis == DistanceBasis::KindDefault);
                 println!(
                     "  basis     {}{}",
                     distance.basis.as_str(),
-                    match (distance.via, default) {
-                        (Some(via), _) => format!(" (from {via})"),
-                        (None, Some(default)) => format!(
-                            " (median and 16th-84th percentiles of {} measured)",
-                            default.objects
+                    match distance.via {
+                        Some(via) => format!(" (from {via})"),
+                        None if distance.basis == DistanceBasis::KindDefault => format!(
+                            " (no source measures it; typical {} distance)",
+                            object.kind.as_str()
                         ),
-                        (None, None) => String::new(),
+                        None => String::new(),
                     },
                 );
                 println!("  method    {}", distance.method.as_str());
@@ -2766,11 +2765,16 @@ fn catalog_validate(path: &std::path::Path) -> Result<()> {
             format!("minor-body catalog: {} bodies", catalog.len())
         }
         b"SEIZADS1" => {
-            let distances = seiza::catalog::distances::ObjectDistances::open(path)?;
+            let distances = seiza::catalog::distances::ObjectDistances::open_unpaired(path)?;
+            let fingerprint = distances.catalog_fingerprint();
             format!(
-                "object distances: {} objects from {} sources",
+                "object distances: {} objects from {} sources, for object catalog {}",
                 distances.len(),
-                distances.sources().len()
+                distances.sources().len(),
+                fingerprint
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
             )
         }
         _ => anyhow::bail!("{} is not a recognized seiza catalog", path.display()),

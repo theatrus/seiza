@@ -243,9 +243,13 @@ publication. An object no source measures may borrow a distance: from the
 galaxy it lies in (a cluster in the Large Magellanic Cloud), from a nebula or
 remnant that contains it (the Veil's filaments), or for a dark cloud from the
 nearest molecular-cloud sightline. The output says which. With no entry at
-all, the command reports the median distance of measured objects of the same
-kind, marked `kind-default`. The file is released under the ODbL 1.0 because
-it is built from SIMBAD.
+all, the command reports a typical distance for the object's kind, marked
+`kind-default`. The file records the fingerprint of the `objects.bin` it was
+built from, and the command refuses any other: object IDs change between
+catalog builds, so a mismatched pair would answer for the wrong objects. The
+file is released under the ODbL 1.0 because it is built from SIMBAD.
+Applications find the object at a pixel of a solved image, with its distance,
+through `ObjectDistances::object_at_pixel` in the `seiza` crate.
 
 ## Background extraction
 

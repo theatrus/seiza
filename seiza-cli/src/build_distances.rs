@@ -10,8 +10,8 @@
 use crate::build_data::designation_key;
 use anyhow::{Context, Result, bail};
 use seiza::catalog::distances::{
-    DistanceBasis, DistanceEntry, DistanceMethod, DistanceSource, KindDistance,
-    ObjectDistancesBuilder,
+    DistanceBasis, DistanceEntry, DistanceMethod, DistanceSource, ObjectDistancesBuilder,
+    typical_distance,
 };
 use seiza::objects::{ObjectCatalog, ObjectKind, SkyObject};
 use std::collections::{BTreeMap, HashMap};
@@ -1410,7 +1410,7 @@ pub fn build_object_distances(input: &Path, objects: &Path, output: &Path) -> Re
     redshifts(&mut sources, input)?;
     let measured = sources.best;
 
-    let mut builder = ObjectDistancesBuilder::new(NOTICE);
+    let mut builder = ObjectDistancesBuilder::new(NOTICE, catalog.fingerprint()?);
     let mut source_index = HashMap::new();
     for source in source_list() {
         let key = source.key.clone();
@@ -1458,29 +1458,6 @@ pub fn build_object_distances(input: &Path, objects: &Path, output: &Path) -> Re
         });
     }
 
-    let mut measured_by_kind = BTreeMap::<u8, (ObjectKind, Vec<f64>)>::new();
-    for (&position, candidate) in &measured {
-        let kind = objects[position].kind;
-        measured_by_kind
-            .entry(kind as u8)
-            .or_insert_with(|| (kind, Vec::new()))
-            .1
-            .push(candidate.distance_pc);
-    }
-    for (kind, mut distances) in measured_by_kind.into_values() {
-        if distances.len() < 5 {
-            continue;
-        }
-        distances.sort_by(f64::total_cmp);
-        builder.set_kind_default(KindDistance {
-            kind,
-            objects: distances.len() as u32,
-            distance_pc: percentile(&distances, 0.5),
-            lower_pc: percentile(&distances, 0.16),
-            upper_pc: percentile(&distances, 0.84),
-        });
-    }
-
     let entries = builder.len();
     builder.write_to(output)?;
     println!("{entries} object distances written to {}", output.display());
@@ -1492,6 +1469,35 @@ pub fn build_object_distances(input: &Path, objects: &Path, output: &Path) -> Re
         println!(
             "{kind:<18} {:>9} {:>9} {:>9} {:>9} {:>9}",
             counts[0], counts[1], counts[2], counts[3], counts[4]
+        );
+    }
+    // The figures behind seiza's typical_distance, to compare after a
+    // rebuild.
+    let mut measured_by_kind = BTreeMap::<u8, (ObjectKind, Vec<f64>)>::new();
+    for (&position, candidate) in &measured {
+        let kind = objects[position].kind;
+        measured_by_kind
+            .entry(kind as u8)
+            .or_insert_with(|| (kind, Vec::new()))
+            .1
+            .push(candidate.distance_pc);
+    }
+    println!(
+        "{:<18} {:>9} {:>12} {:>12} {:>12}   typical_distance",
+        "kind", "measured", "p16 pc", "median pc", "p84 pc"
+    );
+    for (kind, mut distances) in measured_by_kind.into_values() {
+        distances.sort_by(f64::total_cmp);
+        let typical = typical_distance(kind)
+            .map(|typical| format!("{:.0}", typical.distance_pc))
+            .unwrap_or_else(|| "-".into());
+        println!(
+            "{:<18} {:>9} {:>12.0} {:>12.0} {:>12.0}   {typical}",
+            kind.as_str(),
+            distances.len(),
+            percentile(&distances, 0.16),
+            percentile(&distances, 0.5),
+            percentile(&distances, 0.84),
         );
     }
     let mut chosen = BTreeMap::<Tier, usize>::new();
