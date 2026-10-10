@@ -38,7 +38,10 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
 /// `dust`, `dust_opacity`, `start` ("focus", "whole"), `dolly`, `truck`,
 /// `truck_angle_deg`, `pan`, `zoom`, `zoom_end`, `rotate_deg` (first,
 /// last), `easing` ("in_out", "linear"), `quality` ("standard", "high"),
-/// `growth_limit`, `fade_from`, `size` ("720p", "1080p", "1440p", "4k",
+/// `growth_limit`, `fade_from`, `tour` (stops, each a string as `seiza
+/// parallax-video --stop` takes, "X,Y dolly=0.8 rotate=-10 travel=6
+/// hold=1" or "whole ...", or a dict of `focus`, `dolly`, `zoom`,
+/// `rotate_deg`, `pan`, `travel` and `hold`), `size` ("720p", "1080p", "1440p", "4k",
 /// each with "-portrait", "WIDTHxHEIGHT", or (width, height)), `seconds`,
 /// `fps`, `overlay`, `overlay_density`, `labels` ((x, y, text) or (x, y,
 /// radius, text) tuples), `label_color` ("#RRGGBB") and `watermark` (True,
@@ -187,6 +190,38 @@ fn options(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ParallaxOptions> {
                 )?
             }
             "growth_limit" => options.growth_limit = value.extract()?,
+            "tour" => {
+                options.tour = value
+                    .try_iter()?
+                    .map(|stop| {
+                        let stop = stop?;
+                        if let Ok(text) = stop.extract::<String>() {
+                            return seiza_parallax::parse_stop(&text)
+                                .map_err(PyValueError::new_err);
+                        }
+                        let stop = stop.downcast::<PyDict>()?;
+                        let mut parsed = seiza_parallax::TourStop::default();
+                        for (key, value) in stop.iter() {
+                            let key: String = key.extract()?;
+                            match key.as_str() {
+                                "focus" => parsed.focus = value.extract()?,
+                                "dolly" => parsed.dolly = value.extract()?,
+                                "zoom" => parsed.zoom = value.extract()?,
+                                "rotate_deg" => parsed.rotate_deg = value.extract()?,
+                                "pan" => parsed.pan = value.extract()?,
+                                "travel" => parsed.travel = value.extract()?,
+                                "hold" => parsed.hold = value.extract()?,
+                                other => {
+                                    return Err(PyValueError::new_err(format!(
+                                        "unknown tour stop field {other:?}"
+                                    )));
+                                }
+                            }
+                        }
+                        Ok(parsed)
+                    })
+                    .collect::<PyResult<_>>()?
+            }
             "fade_from" => options.fade_from = value.extract()?,
             "size" => {
                 options.size = match value.extract::<String>() {

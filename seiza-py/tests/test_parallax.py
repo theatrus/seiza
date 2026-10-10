@@ -117,3 +117,18 @@ def test_bad_options_are_refused(tmp_path, options, message):
     starless, stars, wcs = field()
     with pytest.raises(ValueError, match=message):
         seiza.ParallaxVideo(starless, stars, wcs, online=False, **options)
+
+
+def test_a_tour_sets_the_length_and_takes_strings_or_dicts(tmp_path):
+    made, _ = video(
+        tmp_path,
+        tour=[
+            "whole hold=1",
+            {"focus": (150.0, 110.0), "dolly": 0.5, "rotate_deg": 10.0, "travel": 1.0, "hold": 1.0},
+            "whole travel=1",
+        ],
+    )
+    assert made.frame_count == 20
+    with pytest.raises(ValueError, match="unknown tour stop field"):
+        video(tmp_path, tour=["whole", {"dolli": 0.5}])
+

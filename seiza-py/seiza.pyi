@@ -562,6 +562,7 @@ class ParallaxVideo:
         quality: str = "standard",
         growth_limit: float = 4.0,
         fade_from: float = 6.0,
+        tour: Sequence[str | Mapping[str, Any]] = (),
         size: str | tuple[int, int] = "1080p",
         seconds: float = 8.0,
         fps: int = 30,

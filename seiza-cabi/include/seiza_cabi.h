@@ -2067,7 +2067,9 @@ char *seiza_rc_astro_process_file_json(const char *request_json,
  `start` ("focus", "whole"), `dolly`, `truck`, `truckAngleDegrees`,
  `pan`, `zoom`, `zoomEnd`, `rotateDegrees` `[first, last]`, `easing`
  ("inOut", "linear"), `quality` ("standard", "high"), `growthLimit`,
- `fadeFrom`, `size` ("720p", "1080p", "1440p", "4k", each with
+ `fadeFrom`, `tour` (stops `[{focus, dolly, zoom, rotateDegrees, pan,
+ travel, hold}]`, the first the opening view, which replace the single
+ move and set the length), `size` ("720p", "1080p", "1440p", "4k", each with
  "-portrait", or "WIDTHxHEIGHT"), `seconds`, `fps`, `overlay`,
  `overlayDensity`, `labels` (`[{x, y, radius, text}]`), `labelColor`
  ("#RRGGBB") and `watermark` (true, or the text). An unknown field is an

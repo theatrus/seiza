@@ -114,6 +114,9 @@ struct ParallaxRequest {
     quality: Option<String>,
     growth_limit: Option<f64>,
     fade_from: Option<f64>,
+    /// A tour of stops instead of the single move.
+    #[serde(default)]
+    tour: Vec<StopRequest>,
     /// "720p", "1080p", "1440p" or "4k", each with "-portrait" for the tall
     /// form, or "WIDTHxHEIGHT".
     size: Option<String>,
@@ -137,6 +140,21 @@ struct LabelRequest {
     #[serde(default)]
     radius: f64,
     text: String,
+}
+
+/// A stop on a tour: `focus` `[x, y]` (absent for the image's centre),
+/// `dolly`, `zoom`, `rotateDegrees`, `pan`, and `travel` and `hold` in
+/// seconds.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StopRequest {
+    focus: Option<[f64; 2]>,
+    dolly: Option<f64>,
+    zoom: Option<f64>,
+    rotate_degrees: Option<f64>,
+    pan: Option<f64>,
+    travel: Option<f64>,
+    hold: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -320,6 +338,22 @@ fn options(request: &ParallaxRequest) -> Result<ParallaxOptions, String> {
         )?,
         growth_limit: request.growth_limit.unwrap_or(defaults.growth_limit),
         fade_from: request.fade_from.unwrap_or(defaults.fade_from),
+        tour: request
+            .tour
+            .iter()
+            .map(|stop| {
+                let base = seiza_parallax::TourStop::default();
+                seiza_parallax::TourStop {
+                    focus: stop.focus.map(|[x, y]| (x, y)),
+                    dolly: stop.dolly.unwrap_or(base.dolly),
+                    zoom: stop.zoom.unwrap_or(base.zoom),
+                    rotate_deg: stop.rotate_degrees.unwrap_or(base.rotate_deg),
+                    pan: stop.pan.unwrap_or(base.pan),
+                    travel: stop.travel.unwrap_or(base.travel),
+                    hold: stop.hold.unwrap_or(base.hold),
+                }
+            })
+            .collect(),
         size: match &request.size {
             Some(size) => seiza_parallax::parse_frame_size(size)?,
             None => defaults.size,
@@ -443,7 +477,9 @@ fn split(
 /// `start` ("focus", "whole"), `dolly`, `truck`, `truckAngleDegrees`,
 /// `pan`, `zoom`, `zoomEnd`, `rotateDegrees` `[first, last]`, `easing`
 /// ("inOut", "linear"), `quality` ("standard", "high"), `growthLimit`,
-/// `fadeFrom`, `size` ("720p", "1080p", "1440p", "4k", each with
+/// `fadeFrom`, `tour` (stops `[{focus, dolly, zoom, rotateDegrees, pan,
+/// travel, hold}]`, the first the opening view, which replace the single
+/// move and set the length), `size` ("720p", "1080p", "1440p", "4k", each with
 /// "-portrait", or "WIDTHxHEIGHT"), `seconds`, `fps`, `overlay`,
 /// `overlayDensity`, `labels` (`[{x, y, radius, text}]`), `labelColor`
 /// ("#RRGGBB") and `watermark` (true, or the text). An unknown field is an
@@ -1116,6 +1152,29 @@ mod tests {
         );
         assert_eq!(std::fs::read_dir(&frames).unwrap().count(), 5);
         unsafe { seiza_parallax_free(video) };
+
+        // A tour of three stops sets the length: 1 + 1 + 1 + 1 seconds at
+        // 5 frames a second.
+        let tour = self::request(
+            directory.path(),
+            "\"tour\": [{\"hold\": 1}, {\"focus\": [150, 110], \"dolly\": 0.5, \"rotateDegrees\": 10, \"travel\": 1, \"hold\": 1}, {\"travel\": 1}]",
+        );
+        let toured = unsafe {
+            seiza_parallax_prepare_json(
+                tour.as_ptr(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(!toured.is_null(), "{}", take_error(error));
+        let summary = unsafe { seiza_parallax_summary_json(toured, &mut error) };
+        let parsed: serde_json::Value =
+            serde_json::from_str(&unsafe { CStr::from_ptr(summary) }.to_string_lossy()).unwrap();
+        unsafe { seiza_string_free(summary) };
+        assert_eq!(parsed["frames"], 20);
+        unsafe { seiza_parallax_free(toured) };
     }
 
     #[test]
@@ -1126,6 +1185,8 @@ mod tests {
             ("\"start\": \"middle\"", "start must be one of"),
             ("\"size\": \"8k\"", "expected WIDTHxHEIGHT"),
             ("\"dolly\": 1.5", "dolly"),
+            ("\"tour\": [{\"dolly\": 0.5}]", "at least two stops"),
+            ("\"tour\": [{}, {\"dolli\": 0.5}]", "unknown field"),
         ] {
             let request = request(directory.path(), extra);
             let mut error = ptr::null_mut();
