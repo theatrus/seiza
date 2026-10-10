@@ -39,10 +39,18 @@ pub(crate) struct ParallaxVideoArgs {
     #[arg(long, value_parser = parse_point)]
     focus: Option<(f64, f64)>,
     /// Distance to the nebula or galaxy behind the stars, in parsecs
-    /// (default: the median Gaia distance of the stars near the focus
-    /// point)
+    /// (default: the distance of the catalogued object at the focus point,
+    /// else the median Gaia distance of the stars near it)
     #[arg(long)]
     distance: Option<f64>,
+    /// Object catalog file or directory, for finding the target (default:
+    /// standard catalog locations)
+    #[arg(long)]
+    objects: Option<PathBuf>,
+    /// Object distance file or directory (default: beside the object
+    /// catalog, then the standard catalog locations)
+    #[arg(long)]
+    distances: Option<PathBuf>,
     /// Distance for stars without one, in parsecs (default: the median of
     /// the matched stars' distances, and never nearer than the nebula)
     #[arg(long)]
@@ -121,6 +129,11 @@ pub(crate) struct ParallaxVideoArgs {
     /// output
     #[arg(long)]
     keep_split: bool,
+    /// Write the scene's layers to this directory as PNG files: the
+    /// background, the star light no star took, and the stars cut out,
+    /// marked by their distance
+    #[arg(long)]
+    debug_layers: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -196,7 +209,8 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
     let scale = wcs.scale_arcsec_per_px();
     let focal_px = 206_264.806_247 / scale;
 
-    let detections = merge_fragments(detect(&stars));
+    let stars_light = LightImage::from_display(&stars);
+    let detections = merge_fragments(detect(&stars_light));
     println!("{} stars found in the stars image", detections.len());
     let gaia = gaia_field(&args, &wcs, width, height)?;
     let hipparcos = hipparcos_field(&wcs, width, height);
@@ -215,15 +229,26 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
     }
     let distance = match args.distance {
         Some(distance) => distance,
-        None => {
-            let distance = median_distance_near(&matched, focus, width, height).context(
-                "no Gaia distances near the focus point to place the background at; pass --distance",
-            )?;
-            println!(
-                "background at {distance:.0} pc, the median distance of the stars near the focus point (set it with --distance)"
-            );
-            distance
-        }
+        None => match target_distance(&args, &wcs, (width, height), focus) {
+            Ok(Some((name, distance, basis))) => {
+                println!("background at {distance:.0} pc, the distance of {name} ({basis})");
+                distance
+            }
+            found => {
+                if let Err(error) = found {
+                    eprintln!("warning: no object distance: {error:#}");
+                }
+                let distance = median_distance_near(&matched, focus, width, height).context(
+                    "no catalogued object or Gaia distances near the focus point to place the \
+                     background at; pass --distance",
+                )?;
+                println!(
+                    "background at {distance:.0} pc, the median distance of the stars near the \
+                     focus point (no catalogued object there; set it with --distance)"
+                );
+                distance
+            }
+        },
     };
 
     // Most stars too faint to match are field stars well beyond a nearby
@@ -244,15 +269,18 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
         .collect();
 
     let starless = LightImage::from_display(&starless);
-    let stars_light = LightImage::from_display(&stars);
     let scene = Scene::new(
         &starless,
         &stars_light,
         &placed,
         distance,
+        unmatched,
         focal_px,
         &CutOptions::default(),
     );
+    if let Some(directory) = &args.debug_layers {
+        write_layers(directory, &scene)?;
+    }
     let (sin, cos) = args.truck_angle.to_radians().sin_cos();
     let frames = ((args.seconds * args.fps as f64).round() as usize).max(2);
     let shot = Shot {
@@ -483,22 +511,19 @@ fn solve(args: &ParallaxVideoArgs, path: &Path) -> Result<Wcs> {
     Ok(solution.wcs)
 }
 
-/// Stars in the stars image, brightest first.
-fn detect(stars: &Rgb32FImage) -> Vec<DetectedStar> {
-    let luma: Vec<f32> = stars
-        .as_raw()
-        .chunks_exact(3)
-        .map(|pixel| (pixel[0] + pixel[1] + pixel[2]) / 3.0)
-        .collect();
-    let config = DetectConfig {
-        backend: seiza::DetectBackend::F32,
-        sigma: 5.0,
-        max_stars: 50_000,
-        ..Default::default()
-    };
-    let mut found = seiza::detect_stars_luma_f32(&luma, stars.width(), stars.height(), &config);
-    found.sort_by(|a, b| b.flux.total_cmp(&a.flux));
-    found
+/// Stars in the stars image, brightest first, as the local peaks of its
+/// light (see [`seiza_parallax::find_stars`]).
+fn detect(stars: &LightImage) -> Vec<DetectedStar> {
+    seiza_parallax::find_stars(stars, 5.0)
+        .into_iter()
+        .map(|star| DetectedStar {
+            x: star.x,
+            y: star.y,
+            flux: star.flux,
+            peak: 0.0,
+            area: star.area,
+        })
+        .collect()
 }
 
 /// Detections with the pieces of bright stars folded into them. A saturated
@@ -744,16 +769,22 @@ fn match_distances(
         // place; a faint one's should not.
         let footprint = (detection.area as f64 / std::f64::consts::PI).sqrt();
         let reach = (2.0_f64).max(2.0 / scale_arcsec) + footprint * 0.25;
-        let nearest = grid
+        let candidates = grid
             .near(detection.x, detection.y, reach)
             .filter(|index| !used[*index])
             .map(|index| {
                 let (x, y) = projected[index];
                 (index, (x - detection.x).hypot(y - detection.y))
             })
-            .filter(|(_, distance)| *distance <= reach)
-            .min_by(|a, b| a.1.total_cmp(&b.1));
-        let distance_pc = nearest.and_then(|(index, _)| {
+            .filter(|(_, distance)| *distance <= reach);
+        // A large, saturated star is the brightest catalog star under it; a
+        // fainter neighbour may lie nearer its centroid.
+        let chosen = if footprint >= 4.0 {
+            candidates.min_by(|a, b| gaia[a.0].g.total_cmp(&gaia[b.0].g))
+        } else {
+            candidates.min_by(|a, b| a.1.total_cmp(&b.1))
+        };
+        let gaia_distance = chosen.and_then(|(index, _)| {
             used[index] = true;
             found += 1;
             let star = &gaia[index];
@@ -763,6 +794,22 @@ fn match_distances(
                     .filter(|hip| separation((hip.ra, hip.dec), (star.ra, star.dec)) * 3600.0 < 5.0)
                     .find_map(HipparcosStar::distance)
             })
+        });
+        // Gaia lists no parallax, or no position at all, for some of the
+        // brightest stars; Hipparcos measured them.
+        let distance_pc = gaia_distance.or_else(|| {
+            if footprint < 4.0 {
+                return None;
+            }
+            hipparcos
+                .iter()
+                .filter_map(|hip| {
+                    let (x, y) = wcs.world_to_pixel(hip.ra, hip.dec)?;
+                    let offset = (x - detection.x).hypot(y - detection.y);
+                    (offset <= reach).then_some((offset, hip))
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .and_then(|(_, hip)| hip.distance())
         });
         stars.push(Star {
             x: detection.x,
@@ -806,6 +853,87 @@ impl Grid {
             .flatten()
             .copied()
     }
+}
+
+/// Write `scene`'s layers as PNG files, for checking how the stars were cut.
+fn write_layers(directory: &Path, scene: &Scene) -> Result<()> {
+    std::fs::create_dir_all(directory)
+        .with_context(|| format!("failed to create {}", directory.display()))?;
+    let save = |name: &str, image: &LightImage| -> Result<()> {
+        let path = directory.join(name);
+        image
+            .to_display_rgb8()
+            .save(&path)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        println!("wrote {}", path.display());
+        Ok(())
+    };
+    save("background.png", scene.background.base())?;
+    save("leftover.png", scene.leftover.base())?;
+    // Every sprite at its place, tinted by distance: red nearer than the
+    // background, green near it, blue beyond.
+    let mut sprites = LightImage::new(scene.width(), scene.height());
+    for sprite in &scene.sprites {
+        let ratio = sprite.distance_pc / scene.background_distance_pc;
+        let tint = if ratio < 0.8 {
+            [1.0, 0.25, 0.25]
+        } else if ratio <= 1.25 {
+            [0.25, 1.0, 0.25]
+        } else {
+            [0.35, 0.5, 1.0]
+        };
+        for y in 0..sprite.image.height {
+            for x in 0..sprite.image.width {
+                let light = sprite.image.pixels[y * sprite.image.width + x];
+                let level = light[0].max(light[1]).max(light[2]);
+                let pixel = &mut sprites.pixels[(sprite.top + y) * sprites.width + sprite.left + x];
+                for channel in 0..3 {
+                    pixel[channel] += level * tint[channel];
+                }
+            }
+        }
+    }
+    save("sprites.png", &sprites)
+}
+
+/// The catalogued object at the focus point, its distance and how that
+/// distance was found, or `None` without an object catalog, a distance file
+/// or an object there.
+fn target_distance(
+    args: &ParallaxVideoArgs,
+    wcs: &Wcs,
+    (width, height): (usize, usize),
+    focus: (f64, f64),
+) -> Result<Option<(String, f64, &'static str)>> {
+    let Ok(objects_path) = seiza::data_paths::objects(args.objects.as_deref()) else {
+        return Ok(None);
+    };
+    let Some(distances_path) =
+        seiza::data_paths::object_distances_beside(args.distances.as_deref(), &objects_path)?
+    else {
+        return Ok(None);
+    };
+    let catalog = seiza::objects::ObjectCatalog::open(&objects_path)
+        .with_context(|| format!("failed to open {}", objects_path.display()))?;
+    let distances = seiza::catalog::ObjectDistances::open(&distances_path, &catalog)
+        .with_context(|| format!("failed to open {}", distances_path.display()))?;
+    // Search a twentieth of the image's diagonal past the nearest edge.
+    let reach = (width as f64).hypot(height as f64) / 20.0;
+    let Some(found) = distances
+        .object_at_pixel(&catalog, wcs, (width as u32, height as u32), focus, reach)
+        .map_err(|error| anyhow::anyhow!("{error}"))?
+    else {
+        return Ok(None);
+    };
+    let object = &found.placed.object;
+    let name = if object.common_name.is_empty() {
+        object.name.clone()
+    } else {
+        format!("{} ({})", object.name, object.common_name)
+    };
+    Ok(found
+        .distance()
+        .map(|distance| (name, distance.distance_pc, distance.basis.as_str())))
 }
 
 /// The median distance of the stars within a fifth of the image's

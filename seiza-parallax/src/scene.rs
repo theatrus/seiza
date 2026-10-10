@@ -53,19 +53,27 @@ impl Default for CutOptions {
 /// Everything a frame is rendered from.
 #[derive(Clone, Debug)]
 pub struct Scene {
-    /// The starless image plus whatever star light no sprite took, on the
-    /// background plane.
+    /// The starless image, on the background plane.
     pub background: Pyramid,
+    /// Star light no sprite took: stars too faint to find, and the edges of
+    /// halos. Most of it belongs to the field's distant stars, so it is a
+    /// plane of its own at their distance rather than part of the
+    /// background, where it would grow with a nearby nebula.
+    pub leftover: Pyramid,
     pub sprites: Vec<Sprite>,
     /// Distance of the background plane, parsecs.
     pub background_distance_pc: f64,
+    /// Distance of the leftover star light, parsecs.
+    pub leftover_distance_pc: f64,
     /// The image's focal length in pixels: one radian across the field is
     /// this many pixels.
     pub focal_px: f64,
 }
 
 impl Scene {
-    /// Cut `stars` out of `star_light` and lay the rest over `starless`.
+    /// Cut `stars` out of `star_light`, keeping `starless` as the background
+    /// plane at `background_distance_pc` and the light no star took as a
+    /// plane at `leftover_distance_pc`.
     ///
     /// Each star takes a soft round footprint. Where footprints overlap the
     /// light is shared out in proportion to their weights, and the weights
@@ -76,6 +84,7 @@ impl Scene {
         star_light: &LightImage,
         stars: &[Star],
         background_distance_pc: f64,
+        leftover_distance_pc: f64,
         focal_px: f64,
         options: &CutOptions,
     ) -> Self {
@@ -130,24 +139,25 @@ impl Scene {
             })
             .collect();
 
-        let background = LightImage {
+        let leftover = LightImage {
             width,
             height,
-            pixels: starless
+            pixels: star_light
                 .pixels
                 .par_iter()
-                .zip(star_light.pixels.par_iter())
                 .zip(total.par_iter())
-                .map(|((base, stars), taken)| {
+                .map(|(stars, taken)| {
                     let left = 1.0 - taken.min(1.0);
-                    [0, 1, 2].map(|channel| base[channel] + stars[channel] * left)
+                    stars.map(|value| value * left)
                 })
                 .collect(),
         };
         Self {
-            background: Pyramid::new(background),
+            background: Pyramid::new(starless.clone()),
+            leftover: Pyramid::new(leftover),
             sprites,
             background_distance_pc,
+            leftover_distance_pc,
             focal_px,
         }
     }
@@ -223,7 +233,8 @@ impl Footprint {
 }
 
 /// Indices of the footprints whose centres lie outside every earlier (so
-/// brighter) kept footprint.
+/// brighter) kept footprint. A halo reaches its footprint's outer edge, and
+/// the pieces of it found as stars lie anywhere inside.
 fn outside_brighter(footprints: &[Footprint]) -> Vec<usize> {
     const CELL: f64 = 64.0;
     let cell = |x: f64, y: f64| ((x / CELL).floor() as i64, (y / CELL).floor() as i64);
@@ -239,7 +250,7 @@ fn outside_brighter(footprints: &[Footprint]) -> Vec<usize> {
                 grid.get(&(column, row)).is_some_and(|indices| {
                     indices.iter().any(|&other| {
                         let brighter: &Footprint = &footprints[other];
-                        (brighter.x - footprint.x).hypot(brighter.y - footprint.y) < brighter.inner
+                        (brighter.x - footprint.x).hypot(brighter.y - footprint.y) < brighter.outer
                     })
                 })
             })
@@ -247,7 +258,7 @@ fn outside_brighter(footprints: &[Footprint]) -> Vec<usize> {
         if inside {
             continue;
         }
-        widest = widest.max(footprint.inner);
+        widest = widest.max(footprint.outer);
         grid.entry(cell(footprint.x, footprint.y))
             .or_default()
             .push(index);
@@ -332,6 +343,7 @@ mod tests {
             &light,
             &stars,
             136.0,
+            900.0,
             500.0,
             &CutOptions::default(),
         );
@@ -353,6 +365,7 @@ mod tests {
             &light,
             &stars,
             100.0,
+            900.0,
             500.0,
             &CutOptions::default(),
         );
@@ -383,6 +396,7 @@ mod tests {
             &stars_light,
             &stars,
             400.0,
+            900.0,
             1000.0,
             &CutOptions::default(),
         );
@@ -393,6 +407,11 @@ mod tests {
         );
 
         let mut rebuilt = scene.background.base().clone();
+        for (rebuilt, leftover) in rebuilt.pixels.iter_mut().zip(&scene.leftover.base().pixels) {
+            for channel in 0..3 {
+                rebuilt[channel] += leftover[channel];
+            }
+        }
         for sprite in &scene.sprites {
             for y in 0..sprite.image.height {
                 for x in 0..sprite.image.width {

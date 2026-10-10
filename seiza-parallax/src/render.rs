@@ -219,7 +219,7 @@ impl Shot {
             .map(|sprite| sprite.distance_pc)
             .collect();
         far.sort_by(f64::total_cmp);
-        let mut depths = vec![scene.background_distance_pc];
+        let mut depths = vec![scene.background_distance_pc, scene.leftover_distance_pc];
         depths.extend(self.hold_pc);
         if let Some(&distance) = far.get(far.len() * 9 / 10) {
             depths.push(distance.max(scene.background_distance_pc));
@@ -271,12 +271,13 @@ impl Shot {
     pub fn render(&self, scene: &Scene, frame: usize) -> LightImage {
         let view = self.view(scene, frame);
         let mut out = LightImage::new(self.width, self.height);
-        draw_background(
+        draw_plane(
             &mut out,
             &scene.background,
             &view,
             scene.background_distance_pc,
         );
+        draw_plane(&mut out, &scene.leftover, &view, scene.leftover_distance_pc);
         draw_sprites(&mut out, scene, &view, self);
         out
     }
@@ -285,12 +286,13 @@ impl Shot {
 /// Rows each parallel band of the frame covers.
 const BAND_ROWS: usize = 16;
 
-fn draw_background(out: &mut LightImage, background: &Pyramid, view: &View, distance: f64) {
-    // Invert `project` at the background distance, where it is affine.
-    let (x0, y0, scale) = view
-        .project(view.centre.0, view.centre.1, distance)
-        .expect("the camera stops short of the background plane");
-    let (level, level_scale) = background.level_for((1.0 / scale) as f32);
+/// Add the light of the plane `image` at `distance` to `out`.
+fn draw_plane(out: &mut LightImage, image: &Pyramid, view: &View, distance: f64) {
+    // Invert `project` at the plane's distance, where it is affine.
+    let Some((x0, y0, scale)) = view.project(view.centre.0, view.centre.1, distance) else {
+        return;
+    };
+    let (level, level_scale) = image.level_for((1.0 / scale) as f32);
     let width = out.width;
     out.pixels
         .par_chunks_mut(width)
@@ -299,7 +301,10 @@ fn draw_background(out: &mut LightImage, background: &Pyramid, view: &View, dist
             let y = view.centre.1 + (row as f64 - y0) / scale;
             for (column, pixel) in pixels.iter_mut().enumerate() {
                 let x = view.centre.0 + (column as f64 - x0) / scale;
-                *pixel = Pyramid::sample_level(level, level_scale, x as f32, y as f32);
+                let light = Pyramid::sample_level(level, level_scale, x as f32, y as f32);
+                for channel in 0..3 {
+                    pixel[channel] += light[channel];
+                }
             }
         });
 }
@@ -484,6 +489,7 @@ mod tests {
             &starless,
             &star_light,
             stars,
+            400.0,
             400.0,
             2000.0,
             &CutOptions::default(),
