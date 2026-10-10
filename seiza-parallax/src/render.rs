@@ -87,8 +87,11 @@ pub struct Stop {
     pub travel: f64,
     pub hold: f64,
     /// How far the frame turns while the camera holds here, radians
-    /// anticlockwise, easing in and out. Later stops' turns count from the
-    /// frame as it is left, so a whole turn does not unwind on the way on.
+    /// anticlockwise. It eases in over the last second of the way here, as
+    /// the camera slows, and out over the first second of the way on, as it
+    /// gathers pace, so the view never stands still. Later stops' turns
+    /// count from the frame as it is left, so a whole turn does not unwind
+    /// on the way on.
     pub spin: f64,
     /// How much of its remaining way to the nebula the camera flies on
     /// while it holds here, 0 to below 1: a slow push in, which with a
@@ -846,21 +849,44 @@ fn tour_state(tour: &[Stop], glide: f64, t: f64) -> [f64; 6] {
     let times = tour_times(tour);
     let total = times.last().map_or(0.0, |&(_, leave)| leave);
     let now = t.clamp(0.0, 1.0) * total;
+    let mut state = tour_path(tour, &times, glide, now);
+    state[4] += tour_spin(tour, &times, now);
+    state
+}
+
+/// The turn the stops' spins have added by `now` seconds into `tour`. Each
+/// spin runs from up to a second before the camera reaches its stop to up
+/// to a second after it leaves (at most half the way either side), so it
+/// gathers pace as the camera slows on arrival and loses it as the camera
+/// gathers pace again.
+fn tour_spin(tour: &[Stop], times: &[(f64, f64)], now: f64) -> f64 {
     let last = tour.len() - 1;
-    // Each stop as asked, its turn counted from the frame the spins before
-    // it left.
-    let mut spun = 0.0;
-    let states: Vec<[f64; 6]> = tour
-        .iter()
-        .map(|stop| {
-            let mut state = stop_state(stop);
-            state[4] += spun;
-            if stop.hold > 0.0 {
-                spun += stop.spin;
-            }
-            state
-        })
-        .collect();
+    let mut turn = 0.0;
+    for (index, stop) in tour.iter().enumerate() {
+        if stop.spin == 0.0 || stop.hold <= 0.0 {
+            continue;
+        }
+        let (arrive, depart) = times[index];
+        let before = if index == 0 {
+            0.0
+        } else {
+            ((arrive - times[index - 1].1) / 2.0).min(1.0)
+        };
+        let after = if index == last {
+            0.0
+        } else {
+            ((times[index + 1].0 - depart) / 2.0).min(1.0)
+        };
+        let from = arrive - before;
+        turn += stop.spin * spin_share(now - from, depart + after - from);
+    }
+    turn
+}
+
+/// The camera's state `now` seconds into `tour`, but for its spins.
+fn tour_path(tour: &[Stop], times: &[(f64, f64)], glide: f64, now: f64) -> [f64; 6] {
+    let last = tour.len() - 1;
+    let states: Vec<[f64; 6]> = tour.iter().map(stop_state).collect();
     // The pace through each stop, per second: Catmull-Rom's, from the
     // stops either side (or one side at the ends).
     let through = |index: usize| -> [f64; 6] {
@@ -896,7 +922,7 @@ fn tour_state(tour: &[Stop], glide: f64, t: f64) -> [f64; 6] {
         glide[4] *= room;
         glide[5] *= room;
         // A spin turns about the stop itself, its motion the spin and any
-        // push.
+        // push (tour_spin adds the spin).
         if stop.spin != 0.0 {
             glide = [0.0; 6];
         }
@@ -913,7 +939,6 @@ fn tour_state(tour: &[Stop], glide: f64, t: f64) -> [f64; 6] {
         end[2] += push * hold;
         let mut rate = glide;
         rate[2] += push;
-        end[4] += stop.spin;
         reach.push(start);
         leave.push(end);
         pace.push(rate);
@@ -922,15 +947,9 @@ fn tour_state(tour: &[Stop], glide: f64, t: f64) -> [f64; 6] {
         let (arrive, depart) = times[index];
         if now <= depart || index == last {
             if now >= arrive || index == 0 {
-                // Moving on through the stop at its slow pace, and
-                // spinning as it asks.
+                // Moving on through the stop at its slow pace.
                 let held = (now - arrive).max(0.0);
-                let mut state: [f64; 6] =
-                    std::array::from_fn(|k| reach[index][k] + pace[index][k] * held);
-                if depart > arrive {
-                    state[4] += tour[index].spin * spin_share(held, depart - arrive);
-                }
-                return state;
+                return std::array::from_fn(|k| reach[index][k] + pace[index][k] * held);
             }
             // On the way here from the stop before.
             let from = times[index - 1].1;
@@ -2186,16 +2205,69 @@ mod tour_tests {
             ..Shot::default()
         };
         let turn = |frame: usize| tour_state(&shot.tour, 0.0, frame as f64 / 120.0)[4];
-        assert_eq!(turn(20), 0.0);
+        // It starts turning a second before the camera arrives, as it
+        // slows, and is done a second after it leaves.
+        assert_eq!(turn(10), 0.0);
+        assert!(turn(20) > 0.0);
         assert!(
             (turn(60) - std::f64::consts::PI).abs() < 1e-9,
             "{}",
             turn(60)
         );
-        assert!((turn(100) - std::f64::consts::TAU).abs() < 1e-9);
+        assert!(turn(100) < std::f64::consts::TAU);
+        assert!((turn(110) - std::f64::consts::TAU).abs() < 1e-9);
         assert!((turn(120) - std::f64::consts::TAU).abs() < 1e-9);
+        // Once under way, the view never slows: the spin gathers pace as
+        // the camera slows on arrival, and loses it as the camera leaves.
+        // (Without the overlap it came to rest at either end of the hold.)
+        let motion = |frame: usize| {
+            let (a, b) = (shot.view(&scene, frame), shot.view(&scene, frame + 1));
+            let (x0, y0, _) = a.project(250.0, 150.0, 900.0).unwrap();
+            let (x1, y1, _) = b.project(250.0, 150.0, 900.0).unwrap();
+            (x1 - x0).hypot(y1 - y0)
+        };
+        let under_way = motion(8);
+        for frame in 8..=111 {
+            assert!(
+                motion(frame) > 0.9 * under_way,
+                "frame {frame}: {} against {under_way}",
+                motion(frame)
+            );
+        }
         let view = shot.view(&scene, 120);
         assert!(view.turn().abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_push_flies_on_in_through_the_hold_at_an_even_pace() {
+        // Half the remaining way over a four-second hold, from 0.6 of the
+        // way to 0.8, with no glide.
+        let tour = vec![
+            Stop {
+                focus: (299.5, 199.5),
+                ..Stop::default()
+            },
+            Stop {
+                focus: (299.5, 199.5),
+                dolly: 0.6,
+                travel: 2.0,
+                hold: 4.0,
+                push: 0.5,
+                ..Stop::default()
+            },
+            Stop {
+                focus: (299.5, 199.5),
+                travel: 2.0,
+                ..Stop::default()
+            },
+        ];
+        // Eight seconds; the hold runs from second 2 to second 6.
+        let left = |seconds: f64| tour_state(&tour, 0.0, seconds / 8.0)[2].exp();
+        assert!((left(2.0) - 0.4).abs() < 1e-9);
+        assert!((left(6.0) - 0.2).abs() < 1e-9);
+        // Evenly on a log scale, so each second takes the same share.
+        let (a, b) = (left(3.0) / left(2.0), left(5.0) / left(4.0));
+        assert!((a - b).abs() < 1e-9 && a < 1.0);
     }
 
     #[test]
