@@ -211,11 +211,16 @@ impl Footprint {
         (pixel[0] + pixel[1] + pixel[2]).max(1e-6)
     }
 
+    /// The radius of the star's bright core, the width of its profile.
+    fn core(&self) -> f64 {
+        (self.inner / 3.0).max(1.0)
+    }
+
     /// The light this star would put at `(x, y)`: a Moffat-like profile of
-    /// its peak, as wide as a third of its inner radius. A bright star's
-    /// footprint, and so its profile, reaches far into its halo.
+    /// its peak, as wide as its core. A bright star's footprint, and so its
+    /// profile, reaches far into its halo.
     fn model(&self, x: usize, y: usize, peak: f32) -> f32 {
-        let scale = (self.inner / 3.0).max(1.0);
+        let scale = self.core();
         let r2 = ((x as f64 - self.x).powi(2) + (y as f64 - self.y).powi(2)) / (scale * scale);
         peak * (1.0 / (1.0 + r2)).powi(2) as f32
     }
@@ -270,9 +275,10 @@ impl Footprint {
     }
 }
 
-/// Indices of the footprints whose centres lie outside every earlier (so
-/// brighter) kept footprint. A halo reaches its footprint's outer edge, and
-/// the pieces of it found as stars lie anywhere inside.
+/// Indices of the footprints whose centres lie outside the core of every
+/// earlier (so brighter) kept star. Only a bright star's core swallows what
+/// lies in it; a star in its halo travels on its own, and the halo's light
+/// stays with the bright star by the shares the profiles set.
 fn outside_brighter(footprints: &[Footprint]) -> Vec<usize> {
     const CELL: f64 = 64.0;
     let cell = |x: f64, y: f64| ((x / CELL).floor() as i64, (y / CELL).floor() as i64);
@@ -288,7 +294,7 @@ fn outside_brighter(footprints: &[Footprint]) -> Vec<usize> {
                 grid.get(&(column, row)).is_some_and(|indices| {
                     indices.iter().any(|&other| {
                         let brighter: &Footprint = &footprints[other];
-                        (brighter.x - footprint.x).hypot(brighter.y - footprint.y) < brighter.outer
+                        (brighter.x - footprint.x).hypot(brighter.y - footprint.y) < brighter.core()
                     })
                 })
             })
@@ -296,7 +302,7 @@ fn outside_brighter(footprints: &[Footprint]) -> Vec<usize> {
         if inside {
             continue;
         }
-        widest = widest.max(footprint.outer);
+        widest = widest.max(footprint.core());
         grid.entry(cell(footprint.x, footprint.y))
             .or_default()
             .push(index);
@@ -370,11 +376,12 @@ mod tests {
     }
 
     #[test]
-    fn a_fainter_star_inside_a_brighter_footprint_joins_it() {
-        // A bright star and a piece of its halo, found as a star of its own.
-        let light = gaussian_stars(64, 48, &[(30.0, 24.0, 8.0), (33.0, 24.0, 0.2)]);
+    fn a_second_peak_in_a_bright_core_joins_it() {
+        // A bright star and a second peak on its core, found as a star of
+        // its own.
+        let light = gaussian_stars(64, 48, &[(30.0, 24.0, 8.0), (31.0, 24.0, 0.2)]);
         let starless = LightImage::new(64, 48);
-        let stars = [(30.0, 24.0, Some(136.0)), (33.0, 24.0, Some(2000.0))]
+        let stars = [(30.0, 24.0, Some(136.0)), (31.0, 24.0, Some(2000.0))]
             .map(|(x, y, distance_pc)| Star { x, y, distance_pc });
         let scene = Scene::new(
             &starless,

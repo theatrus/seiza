@@ -526,13 +526,11 @@ fn detect(stars: &LightImage) -> Vec<DetectedStar> {
         .collect()
 }
 
-/// Detections with the pieces of bright stars folded into them. A saturated
-/// star's halo and spikes are found as many fainter detections; matched to
-/// different Gaia stars they would fly apart. A detection within a brighter
-/// one's reach is part of it: its light goes to the brighter star's sprite.
-/// `detections` come brightest first.
+/// Detections with those inside a brighter star's saturated core folded into
+/// it: a flat-topped core can show more than one peak. Stars in the halo
+/// beyond it stay stars of their own. `detections` come brightest first.
 fn merge_fragments(detections: Vec<DetectedStar>) -> Vec<DetectedStar> {
-    let reach = |star: &DetectedStar| 3.0 * (star.area as f64 / std::f64::consts::PI).sqrt() + 2.0;
+    let reach = |star: &DetectedStar| 1.5 * (star.area as f64 / std::f64::consts::PI).sqrt() + 1.0;
     let mut kept: Vec<DetectedStar> = Vec::with_capacity(detections.len());
     let mut grid: std::collections::HashMap<(i64, i64), Vec<usize>> =
         std::collections::HashMap::new();
@@ -1037,7 +1035,7 @@ mod tests {
     }
 
     #[test]
-    fn fragments_of_a_bright_star_fold_into_it() {
+    fn peaks_in_a_saturated_core_fold_into_it() {
         let star = |x: f64, y: f64, flux: f64, area: u32| DetectedStar {
             x,
             y,
@@ -1045,15 +1043,16 @@ mod tests {
             peak: 1.0,
             area,
         };
-        // A saturated star of area 314 (radius 10): reach 32 pixels.
+        // A saturated core of area 314 (radius 10) reaches 16 pixels: a
+        // second peak on it folds in, a star in the halo beyond does not.
         let merged = merge_fragments(vec![
             star(100.0, 100.0, 1e6, 314),
+            star(108.0, 100.0, 1e3, 4),
             star(120.0, 100.0, 1e3, 4),
-            star(100.0, 131.0, 1e3, 4),
             star(150.0, 100.0, 1e3, 4),
         ]);
         let places: Vec<(f64, f64)> = merged.iter().map(|star| (star.x, star.y)).collect();
-        assert_eq!(places, vec![(100.0, 100.0), (150.0, 100.0)]);
+        assert_eq!(places, vec![(100.0, 100.0), (120.0, 100.0), (150.0, 100.0)]);
     }
 
     #[test]
