@@ -27,6 +27,58 @@ pub struct Sprite {
     pub x: f64,
     pub y: f64,
     pub distance_pc: f64,
+    /// `image` halved again and again, made when the sprite is first drawn
+    /// smaller than its pixels.
+    pub(crate) smaller: std::sync::OnceLock<Vec<LightImage>>,
+}
+
+impl Sprite {
+    /// The sprite's light from `image` cut out at `(left, top)`, its
+    /// centroid `(x, y)` and its distance.
+    pub fn new(
+        left: usize,
+        top: usize,
+        image: LightImage,
+        x: f64,
+        y: f64,
+        distance_pc: f64,
+    ) -> Self {
+        Self {
+            left,
+            top,
+            image,
+            x,
+            y,
+            distance_pc,
+            smaller: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// `image` halved `level` times, or as many times as it halves, and how
+    /// many times that is.
+    pub(crate) fn level(&self, level: usize) -> (&LightImage, usize) {
+        if level == 0 {
+            return (&self.image, 0);
+        }
+        let smaller = self.smaller.get_or_init(|| {
+            let mut levels: Vec<LightImage> = Vec::new();
+            loop {
+                let last = levels.last().unwrap_or(&self.image);
+                if last.width <= 1 && last.height <= 1 {
+                    break;
+                }
+                let next = last.halved_serial();
+                levels.push(next);
+            }
+            levels
+        });
+        let level = level.min(smaller.len());
+        if level == 0 {
+            (&self.image, 0)
+        } else {
+            (&smaller[level - 1], level)
+        }
+    }
 }
 
 /// How [`Scene::new`] cuts stars out.
@@ -204,14 +256,14 @@ impl Scene {
                     image.pixels[(y - top) * image.width + (x - left)] =
                         light.map(|value| value * share);
                 });
-                Sprite {
+                Sprite::new(
                     left,
                     top,
                     image,
-                    x: star.x,
-                    y: star.y,
-                    distance_pc: star.distance_pc.unwrap_or(background_distance_pc),
-                }
+                    star.x,
+                    star.y,
+                    star.distance_pc.unwrap_or(background_distance_pc),
+                )
             })
             .collect();
 

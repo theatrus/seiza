@@ -14,7 +14,7 @@
 //! from a moving car the near trees race by and the hills barely move.
 
 use crate::dust::Dust;
-use crate::light::{LightImage, Pyramid};
+use crate::light::{LightImage, Pyramid, floor64};
 use crate::scene::{Scene, Sprite};
 use rayon::prelude::*;
 
@@ -526,16 +526,32 @@ fn draw_sprites(out: &mut LightImage, scene: &Scene, view: &View, shot: &Shot) {
             })
         })
         .collect();
+    // Which sprites each band of rows holds, so a band need not look
+    // through them all.
+    let bands = out.height.div_ceil(BAND_ROWS);
+    let mut by_band: Vec<Vec<u32>> = vec![Vec::new(); bands];
+    for (index, placed) in placed.iter().enumerate() {
+        let first = (placed.top.max(0.0) as usize / BAND_ROWS).min(bands - 1);
+        let last = (placed.bottom.max(0.0) as usize / BAND_ROWS).min(bands - 1);
+        for band in &mut by_band[first..=last] {
+            band.push(index as u32);
+        }
+    }
     let out_width = out.width;
     out.pixels
         .par_chunks_mut(out_width * BAND_ROWS)
+        .zip(by_band.par_iter())
         .enumerate()
-        .for_each(|(band, pixels)| {
+        .for_each(|(band, (pixels, indices))| {
             let first = band * BAND_ROWS;
             let rows = pixels.len() / out_width;
-            for placed in placed.iter().filter(|placed| {
-                placed.bottom >= first as f64 && placed.top < (first + rows) as f64
-            }) {
+            for placed in indices
+                .iter()
+                .map(|&index| &placed[index as usize])
+                .filter(|placed| {
+                    placed.bottom >= first as f64 && placed.top < (first + rows) as f64
+                })
+            {
                 if placed.scale >= 1.0 {
                     sample_sprite(pixels, out_width, first, rows, placed);
                 } else {
@@ -580,27 +596,44 @@ fn sample_sprite(
 
 /// Draw a sprite smaller than its pixels by spreading each pixel's light
 /// over the output pixels it lands between, so a shrunk star keeps its
-/// total light instead of flickering.
+/// total light instead of flickering. It spreads the halving of the sprite
+/// whose pixels come nearest an output pixel without passing it, which
+/// keeps that light with a fraction of the work, and only the rows that
+/// land in this band.
 fn splat_sprite(pixels: &mut [[f32; 3]], width: usize, first: usize, rows: usize, placed: &Placed) {
     let sprite = placed.sprite;
-    let area = (placed.scale * placed.scale) as f32 * placed.gain;
-    for j in 0..sprite.image.height {
-        let y = placed.y + (sprite.top as f64 + j as f64 - sprite.y) * placed.scale;
-        for i in 0..sprite.image.width {
-            let light = sprite.image.at(i, j);
+    let wanted = floor64((1.0 / placed.scale).log2()).max(0) as usize;
+    let (image, level) = sprite.level(wanted);
+    let step = (1_usize << level) as f64;
+    // A halved pixel holds the mean of `step` × `step` pixels and is
+    // centred on them.
+    let offset = (step - 1.0) / 2.0;
+    let scale = placed.scale * step;
+    let area = (scale * scale) as f32 * placed.gain;
+    let row_of =
+        |y: f64| ((y - placed.y) / placed.scale + sprite.y - sprite.top as f64 - offset) / step;
+    let low = floor64(row_of(first as f64 - 1.0)).max(0) as usize;
+    let high = ((floor64(row_of((first + rows) as f64)) + 2).max(0) as usize).min(image.height);
+    for j in low..high {
+        let y = placed.y + (sprite.top as f64 + j as f64 * step + offset - sprite.y) * placed.scale;
+        let fy = floor64(y);
+        let ty = (y - fy as f64) as f32;
+        for i in 0..image.width {
+            let light = image.at(i, j);
             if light == [0.0; 3] {
                 continue;
             }
-            let x = placed.x + (sprite.left as f64 + i as f64 - sprite.x) * placed.scale;
-            let (fx, fy) = (x.floor(), y.floor());
-            let (tx, ty) = ((x - fx) as f32, (y - fy) as f32);
+            let x = placed.x
+                + (sprite.left as f64 + i as f64 * step + offset - sprite.x) * placed.scale;
+            let fx = floor64(x);
+            let tx = (x - fx as f64) as f32;
             for (dy, wy) in [(0, 1.0 - ty), (1, ty)] {
-                let row = fy as isize + dy;
+                let row = fy + dy;
                 if row < first as isize || row >= (first + rows) as isize {
                     continue;
                 }
                 for (dx, wx) in [(0, 1.0 - tx), (1, tx)] {
-                    let column = fx as isize + dx;
+                    let column = fx + dx;
                     if column < 0 || column >= width as isize {
                         continue;
                     }
@@ -729,6 +762,51 @@ mod tests {
             last.project(150.0, 150.0, 50.0).unwrap(),
         );
         assert!((a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_shrunk_star_keeps_its_light_and_place_in_every_band() {
+        // A 41-pixel star drawn at a fifth of its size, so from a halving,
+        // straddling two bands.
+        let mut image = LightImage::new(41, 41);
+        for (index, pixel) in image.pixels.iter_mut().enumerate() {
+            let (x, y) = ((index % 41) as f64 - 20.0, (index / 41) as f64 - 20.0);
+            *pixel = [(-(x * x + y * y) / 40.0).exp() as f32; 3];
+        }
+        let total: f32 = image.pixels.iter().map(|pixel| pixel[0]).sum();
+        let sprite = Sprite::new(100, 200, image, 120.0, 220.0, 50.0);
+        let scale = 0.2;
+        let placed = Placed {
+            sprite: &sprite,
+            x: 30.3,
+            y: 15.6,
+            scale,
+            gain: 1.0,
+            top: 15.6 - 21.0 * scale,
+            bottom: 15.6 + 21.0 * scale,
+        };
+        let width = 64;
+        let mut out = vec![[0.0_f32; 3]; width * 32];
+        for (band, pixels) in out.chunks_mut(width * BAND_ROWS).enumerate() {
+            let rows = pixels.len() / width;
+            splat_sprite(pixels, width, band * BAND_ROWS, rows, &placed);
+        }
+        let drawn: f32 = out.iter().map(|pixel| pixel[0]).sum();
+        let expected = total * (scale * scale) as f32;
+        assert!(
+            (drawn / expected - 1.0).abs() < 0.01,
+            "{drawn} of {expected}"
+        );
+        let (mut cx, mut cy) = (0.0_f64, 0.0_f64);
+        for (index, pixel) in out.iter().enumerate() {
+            cx += (index % width) as f64 * pixel[0] as f64;
+            cy += (index / width) as f64 * pixel[0] as f64;
+        }
+        let (cx, cy) = (cx / drawn as f64, cy / drawn as f64);
+        assert!(
+            (cx - 30.3).abs() < 0.1 && (cy - 15.6).abs() < 0.1,
+            "({cx}, {cy})"
+        );
     }
 
     #[test]

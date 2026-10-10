@@ -164,14 +164,14 @@ pub fn lift_object(starless: &mut LightImage, extent: &Extent, distance_pc: f64)
             }
         }
     }
-    Some(Sprite {
+    Some(Sprite::new(
         left,
         top,
         image,
-        x: extent.x,
-        y: extent.y,
+        extent.x,
+        extent.y,
         distance_pc,
-    })
+    ))
 }
 
 /// The median light, summed over channels, on the ellipse `scale` times

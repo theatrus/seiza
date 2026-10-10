@@ -187,7 +187,8 @@ impl Dust {
     pub fn at(&self, x: f64, y: f64) -> f32 {
         let fx = (x / self.cell - 0.5).clamp(0.0, (self.columns - 1) as f64);
         let fy = (y / self.cell - 0.5).clamp(0.0, (self.rows - 1) as f64);
-        let (column, row) = (fx.floor() as usize, fy.floor() as usize);
+        // Both are clamped at zero, so truncating rounds them down.
+        let (column, row) = (fx as usize, fy as usize);
         let (next_column, next_row) = (
             (column + 1).min(self.columns - 1),
             (row + 1).min(self.rows - 1),

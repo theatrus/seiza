@@ -117,9 +117,24 @@ impl LightImage {
     /// Bilinear light at `(x, y)` in pixel-centre coordinates (pixel `i`
     /// covers `i − 0.5` to `i + 0.5`), dark outside the image.
     pub fn sample(&self, x: f32, y: f32) -> [f32; 3] {
-        let (fx, fy) = (x.floor(), y.floor());
-        let (tx, ty) = (x - fx, y - fy);
-        let (x0, y0) = (fx as isize, fy as isize);
+        let (x0, y0) = (floor(x), floor(y));
+        let (tx, ty) = (x - x0 as f32, y - y0 as f32);
+        // Most samples have all four neighbours inside the image.
+        if x0 >= 0 && y0 >= 0 && (x0 as usize) + 1 < self.width && (y0 as usize) + 1 < self.height {
+            let index = y0 as usize * self.width + x0 as usize;
+            let (a, b) = (self.pixels[index], self.pixels[index + 1]);
+            let (c, d) = (
+                self.pixels[index + self.width],
+                self.pixels[index + self.width + 1],
+            );
+            let mut sum = [0.0_f32; 3];
+            for channel in 0..3 {
+                let top = a[channel] + (b[channel] - a[channel]) * tx;
+                let bottom = c[channel] + (d[channel] - c[channel]) * tx;
+                sum[channel] = top + (bottom - top) * ty;
+            }
+            return sum;
+        }
         let mut sum = [0.0_f32; 3];
         for (dy, wy) in [(0, 1.0 - ty), (1, ty)] {
             for (dx, wx) in [(0, 1.0 - tx), (1, tx)] {
@@ -137,32 +152,50 @@ impl LightImage {
         sum
     }
 
+    /// [`Self::halved`] on one thread, for a small image.
+    pub(crate) fn halved_serial(&self) -> Self {
+        let (width, height) = (self.width.div_ceil(2), self.height.div_ceil(2));
+        let mut pixels = Vec::with_capacity(width * height);
+        for y in 0..height {
+            for x in 0..width {
+                pixels.push(self.mean_of_four(x, y));
+            }
+        }
+        Self {
+            width,
+            height,
+            pixels,
+        }
+    }
+
+    /// The mean of the pixels of the 2×2 block `(x, y)` that lie in the
+    /// image.
+    fn mean_of_four(&self, x: usize, y: usize) -> [f32; 3] {
+        let mut sum = [0.0_f32; 3];
+        let mut count = 0.0;
+        for (sx, sy) in [
+            (2 * x, 2 * y),
+            (2 * x + 1, 2 * y),
+            (2 * x, 2 * y + 1),
+            (2 * x + 1, 2 * y + 1),
+        ] {
+            if sx < self.width && sy < self.height {
+                let light = self.at(sx, sy);
+                for channel in 0..3 {
+                    sum[channel] += light[channel];
+                }
+                count += 1.0;
+            }
+        }
+        sum.map(|value| value / count)
+    }
+
     /// Half the size, each pixel the mean of the four it covers.
     fn halved(&self) -> Self {
         let (width, height) = (self.width.div_ceil(2), self.height.div_ceil(2));
         let pixels = (0..height)
             .into_par_iter()
-            .flat_map_iter(|y| {
-                (0..width).map(move |x| {
-                    let mut sum = [0.0_f32; 3];
-                    let mut count = 0.0;
-                    for (sx, sy) in [
-                        (2 * x, 2 * y),
-                        (2 * x + 1, 2 * y),
-                        (2 * x, 2 * y + 1),
-                        (2 * x + 1, 2 * y + 1),
-                    ] {
-                        if sx < self.width && sy < self.height {
-                            let light = self.at(sx, sy);
-                            for channel in 0..3 {
-                                sum[channel] += light[channel];
-                            }
-                            count += 1.0;
-                        }
-                    }
-                    sum.map(|value| value / count)
-                })
-            })
+            .flat_map_iter(|y| (0..width).map(move |x| self.mean_of_four(x, y)))
             .collect();
         Self {
             width,
@@ -216,6 +249,29 @@ impl Pyramid {
             (x - (scale - 1.0) / 2.0) / scale,
             (y - (scale - 1.0) / 2.0) / scale,
         )
+    }
+}
+
+/// `value` rounded down, without the library call `f32::floor` makes on
+/// targets lacking a rounding instruction: it runs for every pixel.
+#[inline]
+pub(crate) fn floor(value: f32) -> isize {
+    let truncated = value as isize;
+    if (truncated as f32) > value {
+        truncated - 1
+    } else {
+        truncated
+    }
+}
+
+/// [`floor`] for `f64`.
+#[inline]
+pub(crate) fn floor64(value: f64) -> isize {
+    let truncated = value as isize;
+    if (truncated as f64) > value {
+        truncated - 1
+    } else {
+        truncated
     }
 }
 
