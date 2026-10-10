@@ -24,15 +24,17 @@ pub const REQUIRED_V2_FILES: &[&str] = REQUIRED_BUNDLE_FILES;
 /// A known artifact in the current hosted bundle.
 ///
 /// Not every variant is part of the coherent [`REQUIRED_BUNDLE_FILES`] set:
-/// [`Dataset::StarsDeepGaia20`] is an optional, very large deep catalog, and
+/// [`Dataset::StarsDeepGaia20`] is an optional, very large deep catalog,
 /// [`Dataset::GaiaPhotometry`] holds Gaia DR3 colours for photometric colour
-/// calibration. Both host alongside the bundle but are fetched only on
-/// explicit request.
+/// calibration, and [`Dataset::ObjectDistances`] holds distances to the
+/// objects in `objects.bin`. They host alongside the bundle but are fetched
+/// only on explicit request.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Dataset {
     BlindGaia16,
     GaiaPhotometry,
     MinorBodies,
+    ObjectDistances,
     Objects,
     StarsDeepGaia17,
     StarsDeepGaia20,
@@ -48,6 +50,7 @@ impl Dataset {
             Self::BlindGaia16 => "blind-gaia16.idx",
             Self::GaiaPhotometry => "stars-gaia-photometry.bin",
             Self::MinorBodies => "minor-bodies.bin",
+            Self::ObjectDistances => "object-distances.bin",
             Self::Objects => "objects.bin",
             Self::StarsDeepGaia17 => "stars-deep-gaia17.bin",
             Self::StarsDeepGaia20 => "stars-deep-gaia20.bin",
@@ -132,6 +135,12 @@ impl CatalogSet {
     /// calibration reads instead of querying the Gaia archive.
     pub fn gaia_photometry() -> Self {
         Self::dataset(Dataset::GaiaPhotometry)
+    }
+
+    /// The optional distances to catalog objects, for placing a nebula or
+    /// galaxy at depth among stars.
+    pub fn object_distances() -> Self {
+        Self::dataset(Dataset::ObjectDistances)
     }
 
     /// Build a selection from hosted filenames. An empty iterator retains the
@@ -681,6 +690,35 @@ mod tests {
         manifest.validate().unwrap();
         let plan = manifest
             .plan(&CatalogSet::gaia_photometry())
+            .unwrap()
+            .into_iter()
+            .map(|file| file.name)
+            .collect::<Vec<_>>();
+        assert_eq!(plan, [name]);
+        assert!(
+            !manifest
+                .plan(&CatalogSet::all())
+                .unwrap()
+                .iter()
+                .any(|file| file.name == name)
+        );
+    }
+
+    #[test]
+    fn optional_object_distances_are_hostable_but_not_required() {
+        let name = Dataset::ObjectDistances.file_name();
+        assert!(!REQUIRED_BUNDLE_FILES.contains(&name));
+        let mut manifest = manifest();
+        let sha256 = hash('f');
+        manifest.files.push(ManifestFile {
+            key: Some(format!("artifacts/{sha256}/{name}")),
+            bytes: 9,
+            sha256,
+            name: name.to_string(),
+        });
+        manifest.validate().unwrap();
+        let plan = manifest
+            .plan(&CatalogSet::object_distances())
             .unwrap()
             .into_iter()
             .map(|file| file.name)

@@ -17,6 +17,93 @@ const CDS_TYCHO2: &str = "https://cdsarc.cds.unistra.fr/ftp/I/259";
 const OPENNGC: &str = "https://raw.githubusercontent.com/mattiaverga/OpenNGC/master/database_files";
 const OPENNGC_ARCHIVE: &str =
     "https://github.com/mattiaverga/OpenNGC/archive/refs/heads/master.tar.gz";
+const VIZIER_TSV: &str = "https://vizier.cds.unistra.fr/viz-bin/asu-tsv?-source=";
+const SIMBAD_TAP: &str = "https://simbad.cds.unistra.fr/simbad/sim-tap/sync";
+/// Row cap asked of SIMBAD; a result this long may be cut short.
+const SIMBAD_MAXREC: u64 = 3_000_000;
+
+/// VizieR tables behind the object distance builder: file name, table, and
+/// the columns kept. The first column names the header line that marks a
+/// complete download.
+const DISTANCE_TABLES: &[(&str, &str, &str)] = &[
+    (
+        "hunt-reffert-2024.tsv",
+        "J/A+A/686/A42/clusters",
+        "Name,AllNames,Type,dist16,dist50,dist84,_RAJ2000,_DEJ2000",
+    ),
+    ("cosmicflows-4.tsv", "J/ApJ/944/94/table2", "PGC,DM,e_DM"),
+    (
+        "chornay-walton-2021.tsv",
+        "J/A+A/656/A110/tablea1",
+        "PNG,Name,rcomb,b_rcomb,B_rcomb,pnRAdeg,pnDEdeg",
+    ),
+    (
+        "gonzalez-santamaria-2021-names.tsv",
+        "J/A+A/656/A51/tablea1",
+        "PNG,OName,_RAJ2000,_DEJ2000",
+    ),
+    (
+        "gonzalez-santamaria-2021.tsv",
+        "J/A+A/656/A51/tablea2",
+        "PNG,Dist,b_Dist,B_Dist",
+    ),
+    (
+        "stanghellini-haywood-2010.tsv",
+        "J/ApJ/714/1096/table1",
+        "PNG,d,e_d,_RA,_DE",
+    ),
+    (
+        "foster-brunt-2015.tsv",
+        "J/AJ/150/147/table2",
+        "HII,r,dr,SimbadName,_RAJ2000,_DEJ2000",
+    ),
+    (
+        "ranasinghe-leahy-2023.tsv",
+        "J/ApJS/265/53/table1",
+        "SNR,l_X,X,_RAJ2000,_DEJ2000",
+    ),
+    (
+        "harris-1997.tsv",
+        "VII/202/catalog",
+        "ID,Rsun,_RAJ2000,_DEJ2000",
+    ),
+    (
+        "wise-hii-2014.tsv",
+        "J/ApJS/212/1/wisecat",
+        "WISE,Rad,Dist,_RAJ2000,_DEJ2000",
+    ),
+    (
+        "zucker-2020.tsv",
+        "J/A+A/633/A51/handbook",
+        "Name,d50,_RAJ2000,_DEJ2000",
+    ),
+    (
+        "hilton-lahulla-1995.tsv",
+        "J/A+AS/113/325/table1b",
+        "LDN,n_Dist2,Dist,Refs",
+    ),
+    ("vdb-stars.tsv", "VII/21/catalog", "VdB,DM,HD"),
+];
+
+/// SIMBAD identifier patterns for the catalogues `objects.bin` draws on.
+const SIMBAD_DESIGNATIONS: &[&str] = &[
+    "NGC %",
+    "IC %",
+    "M %",
+    "SH %",
+    "LBN %",
+    "LDN %",
+    "Barnard %",
+    "VdB %",
+    "Ced %",
+    "UGC %",
+    "LEDA %",
+    "SNR G%",
+    "PN G%",
+    "HCG %",
+    "Cl Melotte %",
+    "Cl Collinder %",
+];
 /// A TAP service carrying Gaia DR3 under the archive's column names.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum GaiaArchive {
@@ -513,6 +600,113 @@ impl SourceDownloader {
         Ok(())
     }
 
+    /// The catalogues behind the object distance file: VizieR tables of
+    /// cluster, nebula, supernova-remnant, molecular-cloud and galaxy
+    /// distances, then SIMBAD's distance measurements and galaxy redshifts
+    /// for the designations in `objects.bin`, and the parallaxes of the
+    /// stars that light van den Bergh's reflection nebulae. Files already
+    /// downloaded are kept, so an interrupted download resumes.
+    pub async fn download_object_distances(&self, output: impl AsRef<Path>) -> Result<()> {
+        let output = output.as_ref();
+        create_dir_all(output).await?;
+        for (name, table, columns) in DISTANCE_TABLES {
+            let header = columns.split(',').next().unwrap_or_default();
+            self.fetch(
+                &format!("{VIZIER_TSV}{table}&-out={columns}&-out.max=unlimited"),
+                &output.join(name),
+                Verify::Text {
+                    header: header.to_string(),
+                },
+            )
+            .await?;
+        }
+        let designations = SIMBAD_DESIGNATIONS
+            .iter()
+            .map(|pattern| format!("i.id LIKE '{pattern}'"))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        self.fetch_simbad(
+            &format!(
+                "SELECT i.id, d.oidref, b.ra, b.dec, d.dist, d.unit, d.minus_err, \
+                 d.plus_err, d.method, d.bibcode FROM mesDistance AS d \
+                 JOIN ident AS i ON i.oidref = d.oidref JOIN basic AS b ON b.oid = d.oidref \
+                 WHERE {designations}"
+            ),
+            &output.join("simbad-distances.csv"),
+        )
+        .await?;
+        self.fetch_simbad(
+            "SELECT i.id, b.rvz_redshift, b.rvz_qual, b.rvz_bibcode FROM ident AS i \
+             JOIN basic AS b ON b.oid = i.oidref WHERE (i.id LIKE 'LEDA %' \
+             OR i.id LIKE 'UGC %' OR i.id LIKE 'NGC %' OR i.id LIKE 'IC %' \
+             OR i.id LIKE 'M %' OR i.id LIKE 'HCG %') AND b.rvz_redshift IS NOT NULL",
+            &output.join("simbad-redshifts.csv"),
+        )
+        .await?;
+        let vdb = output.join("vdb-stars.tsv");
+        let stars = tokio::fs::read_to_string(&vdb)
+            .await
+            .map_err(|source| io("read", &vdb, source))?;
+        let identifiers = vdb_star_identifiers(&stars)
+            .into_iter()
+            .map(|identifier| format!("'{identifier}'"))
+            .collect::<Vec<_>>();
+        if identifiers.is_empty() {
+            return Err(Error::Integrity(format!(
+                "{} lists no illuminating stars",
+                vdb.display()
+            )));
+        }
+        self.fetch_simbad(
+            &format!(
+                "SELECT i.id, b.plx_value, b.plx_err, b.plx_bibcode FROM ident AS i \
+                 JOIN basic AS b ON b.oid = i.oidref WHERE i.id IN ({})",
+                identifiers.join(",")
+            ),
+            &output.join("simbad-vdb-stars.csv"),
+        )
+        .await?;
+        self.ready("object distance sources", output);
+        Ok(())
+    }
+
+    /// Run an ADQL query on SIMBAD's TAP service into a CSV file, unless an
+    /// earlier run left a complete one.
+    async fn fetch_simbad(&self, query: &str, target: &Path) -> Result<()> {
+        let form = [
+            ("REQUEST", "doQuery".to_string()),
+            ("LANG", "ADQL".to_string()),
+            ("FORMAT", "csv".to_string()),
+            ("MAXREC", SIMBAD_MAXREC.to_string()),
+            ("QUERY", query.to_string()),
+        ];
+        let header = query
+            .trim_start_matches("SELECT ")
+            .split([',', ' '])
+            .next()
+            .unwrap_or_default()
+            .rsplit('.')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        self.fetch_request(
+            SIMBAD_TAP,
+            || self.client.post(SIMBAD_TAP).form(&form),
+            target,
+            Verify::Text { header },
+            false,
+        )
+        .await?;
+        if count_rows(target).await? >= SIMBAD_MAXREC {
+            let _ = tokio::fs::remove_file(target).await;
+            return Err(Error::Integrity(format!(
+                "SIMBAD query for {} reached its {SIMBAD_MAXREC}-row cap",
+                target.display()
+            )));
+        }
+        Ok(())
+    }
+
     /// Rochester Astronomy's active supernova list. Always refreshed.
     pub async fn download_transients(&self, output: impl AsRef<Path>) -> Result<()> {
         let output = output.as_ref();
@@ -741,7 +935,22 @@ impl SourceDownloader {
         verify: Verify,
         force: bool,
     ) -> Result<()> {
-        if !force && verify_file(target, verify).await? {
+        self.fetch_request(url, || self.client.get(url), target, verify, force)
+            .await
+    }
+
+    /// Download what `request` returns into `target` through a temporary
+    /// file, unless `target` already passes `verify` and `force` is false.
+    /// `url` labels progress events and errors.
+    async fn fetch_request(
+        &self,
+        url: &str,
+        request: impl FnOnce() -> reqwest::RequestBuilder,
+        target: &Path,
+        verify: Verify,
+        force: bool,
+    ) -> Result<()> {
+        if !force && verify_file(target, verify.clone()).await? {
             (self.reporter)(SourceEvent::AlreadyPresent {
                 path: target.to_path_buf(),
             });
@@ -752,15 +961,10 @@ impl SourceDownloader {
             url: url.into(),
             path: target.to_path_buf(),
         });
-        let response = self
-            .client
-            .get(url)
-            .send()
-            .await
-            .map_err(|source| Error::Http {
-                url: url.into(),
-                source,
-            })?;
+        let response = request().send().await.map_err(|source| Error::Http {
+            url: url.into(),
+            source,
+        })?;
         if !response.status().is_success() {
             return Err(Error::HttpStatus {
                 url: url.into(),
@@ -1210,14 +1414,24 @@ fn valid_repository(value: &str) -> bool {
     matches!((parts.next(), parts.next(), parts.next()), (Some(owner), Some(repo), None) if valid_part(owner) && valid_part(repo))
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Verify {
     None,
     Gzip,
+    /// A text table: some line starts with `header`, and the file ends with
+    /// a newline.
+    Text {
+        header: String,
+    },
 }
 
 async fn verify_file(path: &Path, verify: Verify) -> Result<bool> {
     match verify {
+        Verify::Text { header } => match tokio::fs::read(path).await {
+            Ok(bytes) => Ok(text_table_complete(&bytes, &header)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(source) => Err(io("read", path, source)),
+        },
         Verify::None => match tokio::fs::metadata(path).await {
             Ok(metadata) => Ok(metadata.is_file() && metadata.len() > 0),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -1247,6 +1461,52 @@ async fn verify_file(path: &Path, verify: Verify) -> Result<bool> {
             .map_err(|source| io("verify gzip file", path, source))
         }
     }
+}
+
+/// A downloaded table is whole when a line starts with its header and the
+/// last line is finished.
+fn text_table_complete(bytes: &[u8], header: &str) -> bool {
+    !header.is_empty()
+        && bytes.last() == Some(&b'\n')
+        && bytes
+            .split(|&byte| byte == b'\n')
+            .any(|line| line.starts_with(header.as_bytes()))
+}
+
+/// SIMBAD identifiers of the stars that light van den Bergh's reflection
+/// nebulae, from VizieR's VII/21 table with columns VdB, DM and HD: the HD
+/// number padded as SIMBAD writes it, else the Durchmusterung number.
+/// Anything else is dropped, so nothing from the file reaches a query
+/// unchecked.
+fn vdb_star_identifiers(table: &str) -> Vec<String> {
+    let mut identifiers = Vec::new();
+    for line in table.lines().filter(|line| !line.starts_with('#')) {
+        let fields = line.split('\t').map(str::trim).collect::<Vec<_>>();
+        let [number, durchmusterung, hd, ..] = fields[..] else {
+            continue;
+        };
+        if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        if !hd.is_empty() && hd.len() <= 6 && hd.bytes().all(|byte| byte.is_ascii_digit()) {
+            identifiers.push(format!("HD{hd:>7}"));
+            continue;
+        }
+        let zone_ok = durchmusterung.len() > 6
+            && ["BD", "CD", "CP"].contains(&&durchmusterung[..2])
+            && matches!(durchmusterung.as_bytes()[2], b'+' | b'-')
+            && durchmusterung.as_bytes()[3..5]
+                .iter()
+                .all(u8::is_ascii_digit);
+        let number_ok = durchmusterung.get(5..).is_some_and(|rest| {
+            let rest = rest.trim_start_matches(' ');
+            !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit())
+        });
+        if zone_ok && number_ok {
+            identifiers.push(durchmusterung.to_string());
+        }
+    }
+    identifiers
 }
 
 /// Where one source_id range of a chunk fetched in pieces is kept. The name
@@ -1376,6 +1636,35 @@ mod tests {
         assert_eq!(stars[1].pmra, None);
         assert_eq!(stars[1].bp_rp(), None);
         assert!(parse_gaia_photometry("ra,dec\n1,2\n").is_err());
+    }
+
+    #[test]
+    fn text_tables_are_complete_with_header_and_final_newline() {
+        let vizier = b"#RESOURCE=yCat\n#Name: VII/21\n\nVdB\tDM\tHD\n \t \t \n---\t---\t---\n  1\tBD+57   22\t   627\n";
+        assert!(text_table_complete(vizier, "VdB"));
+        assert!(!text_table_complete(&vizier[..vizier.len() - 1], "VdB"));
+        assert!(!text_table_complete(vizier, "Name,"));
+        assert!(text_table_complete(
+            b"id,plx_value\n\"HD    627\",1.0\n",
+            "id"
+        ));
+        assert!(!text_table_complete(b"<VOTABLE>error</VOTABLE>\n", "id"));
+        assert!(!text_table_complete(b"", ""));
+    }
+
+    #[test]
+    fn vdb_star_identifiers_are_padded_and_sanitized() {
+        let table = "#Column\tVdB\nVdB\tDM\tHD\n \t \t \n---\t----------\t------\n\
+                     \x20 1\tBD+57   22\t   627\n\
+                     \x20 2\tBD+64   13\t      \n\
+                     \x20 3\tCD-27 3174\t143018\n\
+                     \x20 4\tBD+64 13') OR 1=1 --\t\n\
+                     \x20 5\tXX+01    1\t\n\
+                     \x20 6\tBD+61  154\t12a\n";
+        assert_eq!(
+            vdb_star_identifiers(table),
+            ["HD    627", "BD+64   13", "HD 143018", "BD+61  154"]
+        );
     }
 
     #[tokio::test]

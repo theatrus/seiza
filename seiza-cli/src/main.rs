@@ -18,6 +18,7 @@ use std::path::PathBuf;
 mod astap;
 mod background;
 mod build_data;
+mod build_distances;
 mod color;
 mod color_calibrate;
 mod common;
@@ -722,6 +723,11 @@ enum CatalogCommand {
         #[command(flatten)]
         args: CatalogObjectsArgs,
     },
+    /// Distance to an object, from object-distances.bin
+    Distance {
+        #[command(flatten)]
+        args: CatalogDistanceArgs,
+    },
     /// Resolve an exact stellar catalog designation without a network query
     Star {
         #[command(flatten)]
@@ -752,6 +758,22 @@ struct CatalogObjectArgs {
     /// Maximum prefix completions; ignored for exact lookup
     #[arg(long, default_value_t = 25)]
     limit: usize,
+    #[arg(long, value_enum, default_value_t = CatalogOutputFormat::Table)]
+    format: CatalogOutputFormat,
+}
+
+#[derive(Args)]
+struct CatalogDistanceArgs {
+    /// Object catalog file or catalog directory (default: standard
+    /// catalog locations)
+    #[arg(long)]
+    data: Option<PathBuf>,
+    /// Object distance file or directory (default: beside the object
+    /// catalog, then the standard catalog locations)
+    #[arg(long)]
+    distances: Option<PathBuf>,
+    /// Object designation, common name, alias, or stable ID
+    query: String,
     #[arg(long, value_enum, default_value_t = CatalogOutputFormat::Table)]
     format: CatalogOutputFormat,
 }
@@ -929,6 +951,13 @@ enum DownloadSource {
         #[arg(long)]
         output: PathBuf,
     },
+    /// Advanced source: cluster, nebula, cloud and galaxy distances from
+    /// VizieR and SIMBAD for build-data object-distances (~55 MB; resumable)
+    ObjectDistances {
+        /// Directory to download into
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// Advanced source: Gaia DR3 via ESA TAP (resumable; can take hours)
     Gaia {
         /// Directory to download into
@@ -1037,6 +1066,20 @@ enum BuildDataSource {
         /// Optional deterministic provenance manifest with source-file hashes
         #[arg(long)]
         source_manifest: Option<PathBuf>,
+    },
+    /// Distances to the objects in objects.bin from the downloaded sources
+    /// (download-data object-distances)
+    ObjectDistances {
+        /// Directory containing the source files
+        #[arg(long)]
+        input: PathBuf,
+        /// Object catalog the distances are keyed to (default: standard
+        /// catalog locations)
+        #[arg(long)]
+        objects: Option<PathBuf>,
+        /// Output distance file (object-distances.bin)
+        #[arg(long)]
+        output: PathBuf,
     },
     /// Star tiles from Gaia DR3 TAP chunks (download-data gaia)
     Gaia {
@@ -1349,6 +1392,14 @@ fn main() -> Result<()> {
                 source_manifest.as_deref(),
                 curation_dir.as_deref(),
             ),
+            BuildDataSource::ObjectDistances {
+                input,
+                objects,
+                output,
+            } => {
+                let objects = with_data_flag_hint(data_paths::objects(objects.as_deref()))?;
+                build_distances::build_object_distances(&input, &objects, &output)
+            }
             BuildDataSource::Gaia {
                 input,
                 output,
@@ -1500,6 +1551,7 @@ fn main() -> Result<()> {
         Command::Catalog { query } => match query {
             CatalogCommand::Object { args } => catalog_object(args),
             CatalogCommand::Objects { args } => catalog_objects(args),
+            CatalogCommand::Distance { args } => catalog_distance(args),
             CatalogCommand::Star { args } => catalog_star(args),
             CatalogCommand::Validate { data } => catalog_validate(&data),
         },
@@ -1627,6 +1679,9 @@ async fn download_source(source: DownloadSource) -> Result<()> {
                 .await
         }
         DownloadSource::Objects { output } => downloader.download_objects(output).await,
+        DownloadSource::ObjectDistances { output } => {
+            downloader.download_object_distances(output).await
+        }
         DownloadSource::Gaia {
             output,
             max_mag,
@@ -1867,6 +1922,166 @@ fn catalog_object(args: CatalogObjectArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn catalog_distance(args: CatalogDistanceArgs) -> Result<()> {
+    use seiza::catalog::distances::{DistanceBasis, ObjectDistances};
+
+    let data = with_data_flag_hint(data_paths::objects(args.data.as_deref()))?;
+    let catalog =
+        ObjectCatalog::open(&data).with_context(|| format!("failed to open {}", data.display()))?;
+    let path = data_paths::object_distances_beside(args.distances.as_deref(), &data)?.context(
+        "no object distance file found; pass --distances, or run: \
+             seiza download-data prebuilt --output <dir> --file object-distances.bin",
+    )?;
+    // Refuses a distance file built for another objects.bin: its IDs would
+    // name other objects, or none, and every answer would be a guess.
+    let distances = ObjectDistances::open(&path, &catalog)
+        .with_context(|| format!("cannot use {} with {}", path.display(), data.display()))?;
+    let matches = catalog.lookup_name(&args.query)?;
+    if matches.is_empty() {
+        anyhow::bail!("no object named {:?} in {}", args.query, data.display());
+    }
+    match args.format {
+        CatalogOutputFormat::Table => {
+            for item in &matches {
+                let object = &item.object;
+                println!(
+                    "{} [{}]  {}{}",
+                    object.name,
+                    object.metadata.id,
+                    object.kind.as_str(),
+                    if object.common_name.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  ({})", object.common_name)
+                    },
+                );
+                let Some(distance) = distances.estimate(object) else {
+                    println!("  no distance\n");
+                    continue;
+                };
+                println!(
+                    "  distance  {} ({}){}",
+                    format_length(distance.distance_pc, "pc"),
+                    format_length(distance.distance_pc * 3.261_563_777, "ly"),
+                    match (distance.lower_pc, distance.upper_pc) {
+                        (None, None) => String::new(),
+                        (lower, upper) => format!(
+                            ", range {} to {}",
+                            lower.map_or("?".into(), |value| format_length(value, "pc")),
+                            upper.map_or("?".into(), |value| format_length(value, "pc")),
+                        ),
+                    },
+                );
+                println!(
+                    "  basis     {}{}",
+                    distance.basis.as_str(),
+                    match distance.via {
+                        Some(via) => format!(" (from {via})"),
+                        None if distance.basis == DistanceBasis::KindDefault => format!(
+                            " (no source measures it; typical {} distance)",
+                            object.kind.as_str()
+                        ),
+                        None => String::new(),
+                    },
+                );
+                println!("  method    {}", distance.method.as_str());
+                if let Some(source) = distance.source {
+                    println!("  source    {} [{}]", source.citation, source.licence);
+                }
+                if let Some(reference) = distance.reference {
+                    println!("  reference {reference}");
+                }
+                println!();
+            }
+        }
+        CatalogOutputFormat::Json => {
+            let values = matches
+                .iter()
+                .map(|item| {
+                    let object = &item.object;
+                    let distance = distances.estimate(object).map(|distance| {
+                        serde_json::json!({
+                            "distance_pc": distance.distance_pc,
+                            "lower_pc": distance.lower_pc,
+                            "upper_pc": distance.upper_pc,
+                            "basis": distance.basis.as_str(),
+                            "method": distance.method.as_str(),
+                            "source": distance.source.map(|source| &source.key),
+                            "citation": distance.source.map(|source| &source.citation),
+                            "licence": distance.source.map(|source| &source.licence),
+                            "reference": distance.reference,
+                            "via": distance.via,
+                        })
+                    });
+                    serde_json::json!({
+                        "matched_name": item.matched_name,
+                        "name": object.name,
+                        "common_name": object.common_name,
+                        "id": object.metadata.id,
+                        "kind": object.kind.as_str(),
+                        "distance": distance,
+                    })
+                })
+                .collect::<Vec<_>>();
+            println!("{}", serde_json::to_string_pretty(&values)?);
+        }
+        CatalogOutputFormat::Csv => {
+            println!(
+                "matched_name,name,id,kind,distance_pc,lower_pc,upper_pc,basis,method,source,reference,via"
+            );
+            for item in &matches {
+                let object = &item.object;
+                let distance = distances.estimate(object);
+                println!(
+                    "{},{},{},{},{},{},{},{},{},{},{},{}",
+                    csv_field(&item.matched_name),
+                    csv_field(&object.name),
+                    csv_field(&object.metadata.id),
+                    object.kind.as_str(),
+                    distance.map_or(String::new(), |distance| format!(
+                        "{:.1}",
+                        distance.distance_pc
+                    )),
+                    distance
+                        .and_then(|distance| distance.lower_pc)
+                        .map_or(String::new(), |value| format!("{value:.1}")),
+                    distance
+                        .and_then(|distance| distance.upper_pc)
+                        .map_or(String::new(), |value| format!("{value:.1}")),
+                    distance.map_or("", |distance| distance.basis.as_str()),
+                    distance.map_or("", |distance| distance.method.as_str()),
+                    csv_field(
+                        distance
+                            .and_then(|distance| distance.source)
+                            .map_or("", |source| source.key.as_str())
+                    ),
+                    csv_field(
+                        distance
+                            .and_then(|distance| distance.reference)
+                            .unwrap_or("")
+                    ),
+                    csv_field(distance.and_then(|distance| distance.via).unwrap_or("")),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A length in `unit` (pc or ly), scaled to kilo or mega units, with a
+/// decimal where the value is small.
+fn format_length(value: f64, unit: &str) -> String {
+    if value >= 1e6 {
+        format!("{:.2} M{unit}", value / 1e6)
+    } else if value >= 1e4 {
+        format!("{:.1} k{unit}", value / 1e3)
+    } else if value >= 1e3 {
+        format!("{value:.0} {unit}")
+    } else {
+        format!("{value:.1} {unit}")
+    }
 }
 
 fn catalog_object_all_sources(
@@ -2548,6 +2763,19 @@ fn catalog_validate(path: &std::path::Path) -> Result<()> {
             let catalog = MinorBodyCatalog::open(path)?;
             catalog.validate()?;
             format!("minor-body catalog: {} bodies", catalog.len())
+        }
+        b"SEIZADS1" => {
+            let distances = seiza::catalog::distances::ObjectDistances::open_unpaired(path)?;
+            let fingerprint = distances.catalog_fingerprint();
+            format!(
+                "object distances: {} objects from {} sources, for object catalog {}",
+                distances.len(),
+                distances.sources().len(),
+                fingerprint
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            )
         }
         _ => anyhow::bail!("{} is not a recognized seiza catalog", path.display()),
     };

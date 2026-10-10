@@ -40,7 +40,8 @@ bundle. A bare star catalog remains available through `CatalogSet::dataset`. The
 9 GB and remains opt-in: request `Dataset::StarsDeepGaia20` explicitly, or use
 `CatalogSet::blind_deep_gaia20()` to pair it with the G≤16 blind index.
 The Gaia DR3 photometry catalog for colour calibration (about 460 MB) is
-opt-in the same way: `CatalogSet::gaia_photometry()`.
+opt-in the same way: `CatalogSet::gaia_photometry()`. So are the distances to
+deep-sky objects in `objects.bin` (about 10 MB): `CatalogSet::object_distances()`.
 
 Raw Gaia, VizieR, MPC, and other builder inputs intentionally live in
 [`seiza-sources`](https://crates.io/crates/seiza-sources).

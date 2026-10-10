@@ -765,6 +765,31 @@ impl ObjectCatalog {
         Ok(())
     }
 
+    /// A SHA-256 that identifies the catalog's canonical objects, so data
+    /// keyed by their stable IDs can tell which catalog it belongs to. For
+    /// a v4 file it is the checksum the section directory records for the
+    /// canonical section, read without hashing ([`Self::validate`] checks
+    /// it). For a v3 file it hashes the file; for v1 and in-memory catalogs,
+    /// the encoded objects.
+    pub fn fingerprint(&self) -> io::Result<[u8; 32]> {
+        use sha2::{Digest, Sha256};
+        match &self.storage {
+            ObjectStorage::MappedV4(catalog) => Ok(catalog.canonical_checksum()),
+            ObjectStorage::MappedV3(catalog) => Ok(Sha256::digest(catalog.section_bytes()).into()),
+            ObjectStorage::Memory { data, .. } => {
+                let mut hasher = Sha256::new();
+                for object in &data.objects {
+                    let encoded = postcard::to_allocvec(object).map_err(|error| {
+                        io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+                    })?;
+                    hasher.update((encoded.len() as u64).to_le_bytes());
+                    hasher.update(&encoded);
+                }
+                Ok(hasher.finalize().into())
+            }
+        }
+    }
+
     /// Binary format generation (`1`, `3`, or `4`).
     pub fn format_version(&self) -> u8 {
         match &self.storage {
@@ -1665,6 +1690,39 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].object.name, "Inside polar cone");
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn fingerprints_follow_the_canonical_objects() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut objects = vec![test_object("A", 10.0, 20.0), test_object("B", 11.0, 21.0)];
+        for (index, object) in objects.iter_mut().enumerate() {
+            object.metadata.id = format!("test:{index}");
+        }
+        let fingerprint_of = |objects: Vec<SkyObject>, name: &str, v3: bool| {
+            let path = dir.path().join(name);
+            let catalog = ObjectCatalog::new(objects);
+            if v3 {
+                catalog.write_v3_to(&path).unwrap();
+            } else {
+                catalog.write_to(&path).unwrap();
+            }
+            let opened = ObjectCatalog::open(&path).unwrap();
+            opened.validate().unwrap();
+            opened.fingerprint().unwrap()
+        };
+        let v4 = fingerprint_of(objects.clone(), "a.bin", false);
+        assert_eq!(v4, fingerprint_of(objects.clone(), "b.bin", false));
+        let v3 = fingerprint_of(objects.clone(), "a3.bin", true);
+        assert_eq!(v3, fingerprint_of(objects.clone(), "b3.bin", true));
+
+        let mut moved = objects.clone();
+        moved[1].ra += 0.5;
+        assert_ne!(v4, fingerprint_of(moved.clone(), "c.bin", false));
+        assert_ne!(v3, fingerprint_of(moved.clone(), "c3.bin", true));
+
+        let memory = ObjectCatalog::new(objects).fingerprint().unwrap();
+        assert_ne!(memory, ObjectCatalog::new(moved).fingerprint().unwrap());
     }
 
     #[test]

@@ -3145,7 +3145,7 @@ fn catalog_properties(fields: &[&str], names: &[&str]) -> Vec<seiza::objects::Ob
         .collect()
 }
 
-fn designation_key(value: &str) -> String {
+pub(crate) fn designation_key(value: &str) -> String {
     let compact: String = value
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())

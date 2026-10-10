@@ -5,9 +5,9 @@
 //!
 //! - **A file** — used as given.
 //! - **A directory** — the right file inside is picked: the deepest
-//!   star catalog present, `objects.bin`, `minor-bodies.bin`,
-//!   `transients.bin`, any `.idx` blind index, any `.ids.bin` star
-//!   identifier sidecar.
+//!   star catalog present, `objects.bin`, `object-distances.bin`,
+//!   `minor-bodies.bin`, `transients.bin`, any `.idx` blind index, any
+//!   `.ids.bin` star identifier sidecar.
 //! - **Nothing** — the standard places are checked in order: the
 //!   kind's environment variable (`SEIZA_STAR_DATA`,
 //!   `SEIZA_BLIND_INDEX`; each takes a file or a directory, and a set
@@ -151,6 +151,47 @@ pub fn blind_index_beside(
 
 pub fn objects(arg: Option<&Path>) -> Result<PathBuf, DataPathError> {
     resolve(arg, "object catalog", None, None, &["objects.bin"], None)
+}
+
+/// Distances to catalog objects (`object-distances.bin`, built by `seiza
+/// build-data object-distances`). Optional: `Ok(None)` means none is
+/// installed.
+pub fn object_distances(arg: Option<&Path>) -> Result<Option<PathBuf>, DataPathError> {
+    let result = resolve(
+        arg,
+        "object distance file",
+        Some("SEIZA_OBJECT_DISTANCES"),
+        Some("object_distances"),
+        &["object-distances.bin"],
+        None,
+    );
+    match arg {
+        Some(_) => result.map(Some),
+        None => match result {
+            Err(DataPathError::NoDefault { .. }) => Ok(None),
+            other => other.map(Some),
+        },
+    }
+}
+
+/// The distance file to use with the object catalog at `objects`: an
+/// explicit `arg` or `SEIZA_OBJECT_DISTANCES` first, then an
+/// `object-distances.bin` beside the catalog, then the usual default
+/// locations.
+pub fn object_distances_beside(
+    arg: Option<&Path>,
+    objects: &Path,
+) -> Result<Option<PathBuf>, DataPathError> {
+    let env_set = std::env::var_os("SEIZA_OBJECT_DISTANCES").is_some_and(|value| !value.is_empty());
+    if arg.is_none()
+        && !env_set
+        && let Some(beside) = objects
+            .parent()
+            .and_then(|dir| find_in_dir(dir, &["object-distances.bin"], None))
+    {
+        return Ok(Some(beside));
+    }
+    object_distances(arg)
 }
 
 pub fn star_identifiers(arg: Option<&Path>) -> Result<PathBuf, DataPathError> {
@@ -416,6 +457,33 @@ mod tests {
             star_identifiers(Some(dir.path()))
                 .unwrap()
                 .ends_with("stars-lite-tycho2.ids.bin")
+        );
+    }
+
+    #[test]
+    fn object_distances_are_found_beside_the_object_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let objects = dir.path().join("objects.bin");
+        std::fs::write(&objects, b"objects").unwrap();
+        let distances = dir.path().join("object-distances.bin");
+        assert!(object_distances(Some(dir.path())).is_err());
+        std::fs::write(&distances, b"distances").unwrap();
+        assert_eq!(
+            object_distances(Some(dir.path())).unwrap(),
+            Some(distances.clone())
+        );
+        if std::env::var_os("SEIZA_OBJECT_DISTANCES").is_none() {
+            assert_eq!(
+                object_distances_beside(None, &objects).unwrap(),
+                Some(distances)
+            );
+        }
+        let other = tempfile::tempdir().unwrap();
+        let explicit = other.path().join("custom-distances.bin");
+        std::fs::write(&explicit, b"distances").unwrap();
+        assert_eq!(
+            object_distances_beside(Some(&explicit), &objects).unwrap(),
+            Some(explicit)
         );
     }
 

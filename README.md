@@ -614,7 +614,10 @@ seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-
   facet selections, source-qualified geometry (including hand-drawn OpenNGC
   outlines), pinned build provenance, and externally curated corrections;
   `seiza catalog object --all-sources` audits all of it. Earlier `SEIZAOB1`
-  and `SEIZAOB3` files remain readable.
+  and `SEIZAOB3` files remain readable. An optional distance file gives
+  about 180,000 of the objects a distance with its range, method and source,
+  from Gaia cluster parallaxes, Cosmicflows-4, SIMBAD and other catalogues
+  (`seiza catalog distance "M 42"`).
 - **FITS** — streaming reading with typed headers, exact
   histogram statistics, planar RGB
   (NAXIS3) support, OSC debayering (`BAYERPAT`), and bounded-memory

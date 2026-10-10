@@ -19,6 +19,9 @@ pub(crate) struct SetupArgs {
     /// `seiza color-calibrate` uses offline
     #[arg(long)]
     gaia_photometry: bool,
+    /// Also install distances to deep-sky objects (object-distances.bin)
+    #[arg(long)]
+    object_distances: bool,
     /// Directory that receives the selected files (defaults to SEIZA_CATALOG_DIR when set)
     #[arg(long)]
     output: Option<PathBuf>,
@@ -103,6 +106,7 @@ impl SetupPreset {
                 Dataset::StarsDeepGaia20,
                 Dataset::BlindGaia16,
                 Dataset::GaiaPhotometry,
+                Dataset::ObjectDistances,
             ],
         };
         datasets
@@ -126,7 +130,7 @@ impl SetupPreset {
                 "Faintest deep solving (large, ~9 GB): objects + Solar System + transients + G≤20 Gaia catalog + blind index"
             }
             Self::All => {
-                "Development and offline use: every published catalog, including the large G≤20 deep catalog (slower, ~9 GB extra) and Gaia photometry for colour calibration"
+                "Development and offline use: every published catalog, including the large G≤20 deep catalog (slower, ~9 GB extra), Gaia photometry for colour calibration and object distances"
             }
         }
     }
@@ -185,14 +189,22 @@ fn run_setup(args: SetupArgs) -> Result<()> {
         };
 
         let mut files = preset.files();
-        let photometry = Dataset::GaiaPhotometry.file_name().to_string();
-        if args.gaia_photometry && !files.contains(&photometry) {
-            files.push(photometry);
+        for (wanted, dataset) in [
+            (args.gaia_photometry, Dataset::GaiaPhotometry),
+            (args.object_distances, Dataset::ObjectDistances),
+        ] {
+            let name = dataset.file_name().to_string();
+            if wanted && !files.contains(&name) {
+                files.push(name);
+            }
         }
 
         println!("Selection : {}", preset.description());
         if args.gaia_photometry && preset != SetupPreset::All {
             println!("          + Gaia photometry for colour calibration");
+        }
+        if args.object_distances && preset != SetupPreset::All {
+            println!("          + distances to deep-sky objects");
         }
         println!("Directory : {}", output.display());
         println!("Downloads are SHA-256 verified and safe to retry.\n");
@@ -278,6 +290,9 @@ fn elevated_parameters(args: &SetupArgs) -> Vec<u16> {
     }
     if args.gaia_photometry {
         arguments.push(OsString::from("--gaia-photometry"));
+    }
+    if args.object_distances {
+        arguments.push(OsString::from("--object-distances"));
     }
     if args.yes {
         arguments.push(OsString::from("--yes"));
@@ -464,6 +479,12 @@ mod tests {
                 .files()
                 .iter()
                 .any(|file| file == "stars-deep-gaia20.bin")
+        );
+        assert!(
+            preset
+                .files()
+                .iter()
+                .any(|file| file == "object-distances.bin")
         );
     }
 

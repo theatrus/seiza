@@ -550,6 +550,11 @@ impl MappedObjectCatalog {
         Self::from_mmap(map, 0, section_len)
     }
 
+    /// The bytes of this canonical section.
+    pub(crate) fn section_bytes(&self) -> &[u8] {
+        &self.map[self.base..self.base + self.section_len]
+    }
+
     pub(crate) fn from_mmap(
         map: Arc<memmap2::Mmap>,
         base: usize,

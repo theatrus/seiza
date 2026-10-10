@@ -4,11 +4,17 @@
 //! `(ra, dec, magnitude)` records binned into sky tiles,
 //! proper-motion-corrected to a fixed epoch at build time.
 //! [`MemoryCatalog`] provides the same interface from an in-memory list for
-//! tests and synthetic solves.
+//! tests and synthetic solves. [`distances`] holds distances to the objects
+//! in the object catalog.
 
+pub mod distances;
 pub mod photometry;
 pub mod tiles;
 
+pub use distances::{
+    CatalogMismatch, DistanceBasis, DistanceEntry, DistanceMethod, DistanceSource, KindDistance,
+    ObjectAtPixel, ObjectDistance, ObjectDistances, ObjectDistancesBuilder, typical_distance,
+};
 pub use photometry::{
     PhotometricStar, PhotometryCatalog, PhotometryCatalogBuilder, propagate_proper_motion,
 };
