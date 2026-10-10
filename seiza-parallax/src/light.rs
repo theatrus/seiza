@@ -193,7 +193,7 @@ impl LightImage {
     }
 
     /// Half the size, each pixel the mean of the four it covers.
-    fn halved(&self) -> Self {
+    pub(crate) fn halved(&self) -> Self {
         let (width, height) = (self.width.div_ceil(2), self.height.div_ceil(2));
         let pixels = (0..height)
             .into_par_iter()
@@ -240,6 +240,23 @@ impl Pyramid {
             0
         };
         (&self.levels[index], (1u64 << index) as f32)
+    }
+
+    /// The two levels either side of a view where one output pixel spans
+    /// `footprint` base pixels, each with its scale, and how far toward the
+    /// coarser one the view lies, 0 to 1: blending them changes the
+    /// sharpness smoothly as the footprint does.
+    pub(crate) fn levels_between(
+        &self,
+        footprint: f32,
+    ) -> ((&LightImage, f32), (&LightImage, f32), f32) {
+        let finer = self.level_for(footprint);
+        let index = (finer.1 as u64).trailing_zeros() as usize;
+        if footprint <= 1.0 || index + 1 >= self.levels.len() {
+            return (finer, finer, 0.0);
+        }
+        let toward = (footprint.log2() - index as f32).clamp(0.0, 1.0);
+        (finer, (&self.levels[index + 1], finer.1 * 2.0), toward)
     }
 
     /// Bilinear light at base coordinates `(x, y)` from `level` of scale

@@ -13,8 +13,8 @@ use clap::{Args, ValueEnum};
 use image::{Rgb, Rgb32FImage};
 use seiza::{DetectConfig, Wcs};
 use seiza_parallax::{
-    CutOptions, Easing, Extent, FfmpegSink, FrameSink, LightImage, PngSequence, Scene, Shot,
-    SmallStars, Star, Start, VideoSettings,
+    CutOptions, Easing, Extent, FfmpegSink, FrameSink, LightImage, PngSequence, Quality, Scene,
+    Shot, SmallStars, Star, Start, VideoSettings,
 };
 use seiza_sources::{GaiaDistance, HipparcosStar};
 use seiza_stars::PeakStar;
@@ -112,6 +112,12 @@ pub(crate) struct ParallaxVideoArgs {
     /// How the camera speeds up and slows down
     #[arg(long, value_enum, default_value_t = EasingArg::InOut)]
     easing: EasingArg,
+    /// How carefully frames are drawn: `high` draws each at twice the size
+    /// and averages it down, blending levels of detail so fine detail
+    /// neither shimmers nor steps in sharpness, for about four times the
+    /// rendering time
+    #[arg(long, value_enum, default_value_t = QualityArg::Standard)]
+    quality: QualityArg,
     /// A star the camera nears grows with it up to this many times its size
     #[arg(long, default_value_t = 4.0)]
     growth_limit: f64,
@@ -203,6 +209,12 @@ pub(crate) struct ParallaxVideoArgs {
     /// (default text: "Rendered with seiza.fyi")
     #[arg(long, num_args = 0..=1, default_missing_value = parallax_overlay::DEFAULT_WATERMARK)]
     watermark: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum QualityArg {
+    Standard,
+    High,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -471,6 +483,10 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
         easing: match args.easing {
             EasingArg::Linear => Easing::Linear,
             EasingArg::InOut => Easing::InOut,
+        },
+        quality: match args.quality {
+            QualityArg::Standard => Quality::Standard,
+            QualityArg::High => Quality::High,
         },
         growth_limit: args.growth_limit,
         fade_from: args.fade_from,

@@ -399,7 +399,9 @@ lengthens the lens over the shot. `--rotate` and `--rotate-end` turn the frame
 about its centre, in degrees anticlockwise, from the first frame to the last;
 every depth turns alike, and the first frame zooms in as far as the turned
 frame needs to stay inside the image. `--seconds`, `--fps` and `--size` set the
-video. A deep image holds so many faint stars that, each moving on its own,
+video, and `--quality high` draws each frame at twice the size and averages it
+down, blending levels of detail so fine detail neither shimmers nor steps in
+sharpness as the camera moves, for about four times the rendering time. A deep image holds so many faint stars that, each moving on its own,
 they crowd the view: `--max-stars N` lets only the N brightest fly, and
 `--small-stars` drops the rest (`drop`, the default) or keeps them on the
 distant star field's plane (`field`). Frames go to ffmpeg (libx264 or

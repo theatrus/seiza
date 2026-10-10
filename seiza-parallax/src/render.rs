@@ -40,6 +40,20 @@ impl Easing {
     }
 }
 
+/// How carefully frames are drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Quality {
+    /// One sample per output pixel, from the level of detail nearest the
+    /// view.
+    #[default]
+    Standard,
+    /// Drawn at twice the size and averaged down, with the levels of
+    /// detail either side of the view blended, so fine detail neither
+    /// shimmers nor steps in sharpness as the camera moves. About four
+    /// times the work.
+    High,
+}
+
 /// What a shot's first frame shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Start {
@@ -95,6 +109,7 @@ pub struct Shot {
     /// Number of frames.
     pub frames: usize,
     pub easing: Easing,
+    pub quality: Quality,
     /// How much nearer a star has come, as its first-frame distance over its
     /// distance now, is its growth. A star is a point, so it keeps its
     /// first-frame size as the background grows around it; it swells as the
@@ -123,6 +138,7 @@ impl Default for Shot {
             height: 1080,
             frames: 240,
             easing: Easing::default(),
+            quality: Quality::default(),
             growth_limit: 4.0,
             brightening: 0.5,
             fade_from: 6.0,
@@ -470,6 +486,24 @@ impl Shot {
 
     /// Render frame `frame` of `scene`.
     pub fn render(&self, scene: &Scene, frame: usize) -> LightImage {
+        match self.quality {
+            Quality::Standard => self.draw(scene, frame, false),
+            Quality::High => {
+                // The same view at twice the size; light adds, so the mean
+                // of each 2×2 block is what the pixel it becomes would see.
+                let finer = Self {
+                    width: self.width * 2,
+                    height: self.height * 2,
+                    ..*self
+                };
+                finer.draw(scene, frame, true).halved()
+            }
+        }
+    }
+
+    /// Draw frame `frame` at this shot's size, blending levels of detail
+    /// if `blend`.
+    fn draw(&self, scene: &Scene, frame: usize, blend: bool) -> LightImage {
         let view = self.view(scene, frame);
         let mut out = LightImage::new(self.width, self.height);
         draw_plane(
@@ -478,6 +512,7 @@ impl Shot {
             &view,
             scene.background_distance_pc,
             None,
+            blend,
         );
         // The leftover star light lies behind the dust when it lies beyond
         // the background.
@@ -492,6 +527,7 @@ impl Shot {
             &view,
             scene.leftover_distance_pc,
             behind,
+            blend,
         );
         draw_sprites(&mut out, scene, &view, self);
         out
@@ -501,35 +537,44 @@ impl Shot {
 /// Rows each parallel band of the frame covers.
 const BAND_ROWS: usize = 16;
 
-/// Add the light of the plane `image` at `distance` to `out`.
 /// Draw the plane `image` at `distance`, and if `dust` gives the dust and
 /// the distance of the plane it lies on, in front, dim it by the change in
-/// the dust it shows through.
+/// the dust it shows through. With `blend`, sample the levels of detail
+/// either side of the view and blend them.
 fn draw_plane(
     out: &mut LightImage,
     image: &Pyramid,
     view: &View,
     distance: f64,
     dust: Option<(&Dust, f64)>,
+    blend: bool,
 ) {
     let Some(map) = view.plane_map(distance) else {
         return;
     };
     let dust = dust.and_then(|(dust, at)| view.plane_map(at).map(|front| (dust, front)));
-    let footprint = map.across.0.hypot(map.across.1);
-    let (level, level_scale) = image.level_for(footprint as f32);
+    let footprint = map.across.0.hypot(map.across.1) as f32;
+    let (finer, coarser, toward) = image.levels_between(footprint);
+    let levels = if blend && toward > 0.0 {
+        (finer, Some((coarser, toward)))
+    } else {
+        (image.level_for(footprint), None)
+    };
     let width = out.width;
     out.pixels
         .par_chunks_mut(width)
         .enumerate()
         .for_each(|(row, pixels)| {
-            plane_row(pixels, row, map, (level, level_scale), dust);
+            plane_row(pixels, row, map, levels, dust);
         });
 }
 
+/// A level of detail and its scale relative to the base.
+type Level<'a> = (&'a LightImage, f32);
+
 /// One row of [`draw_plane`]: output row `row` shows the plane as `map`
-/// has it, sampled from `level` of scale `level_scale`, and the dust as
-/// its map has it. Built for wider vector units too, and picked at run
+/// has it, sampled from a level of detail, blended `toward` a coarser one
+/// if given, and the dust as its map has it. Built for wider vector units too, and picked at run
 /// time; it must do the work itself, as a closure it handed on would be
 /// built without them.
 #[multiversion::multiversion(targets("x86_64+avx2+fma", "x86_64+sse4.1"))]
@@ -537,13 +582,19 @@ fn plane_row(
     pixels: &mut [[f32; 3]],
     row: usize,
     map: PlaneMap,
-    (level, level_scale): (&LightImage, f32),
+    ((level, level_scale), coarser): (Level, Option<(Level, f32)>),
     dust: Option<(&Dust, PlaneMap)>,
 ) {
     let row = row as f64;
     for (column, pixel) in pixels.iter_mut().enumerate() {
         let (x, y) = map.at(column as f64, row);
         let mut light = Pyramid::sample_level(level, level_scale, x as f32, y as f32);
+        if let Some(((coarse, coarse_scale), toward)) = coarser {
+            let other = Pyramid::sample_level(coarse, coarse_scale, x as f32, y as f32);
+            for channel in 0..3 {
+                light[channel] += (other[channel] - light[channel]) * toward;
+            }
+        }
         if let Some((dust, front)) = dust {
             let change = dust.change((x, y), front.at(column as f64, row));
             light = light.map(|value| value * change);
@@ -736,8 +787,12 @@ fn sample_sprite(
 }
 
 /// Draw a sprite smaller than its pixels by spreading each pixel's light
-/// over the output pixels it lands between, so a shrunk star keeps its
-/// total light instead of flickering. It spreads the halving of the sprite
+/// over the output pixels it covers, so a shrunk star keeps its total light
+/// instead of flickering. Each pixel is a square shared by area, not a
+/// point shared by distance: the squares tile the frame, so a smooth sprite
+/// stays smooth however its pixels fall between the frame's, where points
+/// would beat against the frame's grid in faint cross-hatching. It spreads
+/// the halving of the sprite
 /// whose pixels come nearest an output pixel without passing it, which
 /// keeps that light with a fraction of the work, and only the rows that
 /// land in this band.
@@ -751,7 +806,20 @@ fn splat_sprite(pixels: &mut [[f32; 3]], width: usize, first: usize, rows: usize
     // centred on them.
     let offset = (step - 1.0) / 2.0;
     let scale = placed.scale * step;
-    let area = (scale * scale) as f32 * placed.gain;
+    // A halved pixel's square, `scale` output pixels a side (at most one),
+    // from `centre`: the first output pixel it covers, and how much of that
+    // one and the next.
+    let half = scale / 2.0;
+    let shares = |centre: f64| {
+        let low = centre - half;
+        let first = floor64(low + 0.5);
+        let edge = first as f64 + 0.5;
+        (
+            first,
+            (edge.min(centre + half) - low) as f32,
+            (centre + half - edge).max(0.0) as f32,
+        )
+    };
     // Halved pixel (i, j) lands at output `start + i · along + j · down`.
     let (cos, sin) = placed.turn;
     let west = (sprite.left as f64 + offset - sprite.x) * placed.scale;
@@ -780,21 +848,19 @@ fn splat_sprite(pixels: &mut [[f32; 3]], width: usize, first: usize, rows: usize
                 continue;
             }
             let (x, y) = (line.0 + i as f64 * along.0, line.1 + i as f64 * along.1);
-            let fy = floor64(y);
-            let ty = (y - fy as f64) as f32;
-            let fx = floor64(x);
-            let tx = (x - fx as f64) as f32;
-            for (dy, wy) in [(0, 1.0 - ty), (1, ty)] {
+            let (fx, left, right) = shares(x);
+            let (fy, top, bottom) = shares(y);
+            for (dy, wy) in [(0, top), (1, bottom)] {
                 let row = fy + dy;
-                if row < first as isize || row >= (first + rows) as isize {
+                if wy == 0.0 || row < first as isize || row >= (first + rows) as isize {
                     continue;
                 }
-                for (dx, wx) in [(0, 1.0 - tx), (1, tx)] {
+                for (dx, wx) in [(0, left), (1, right)] {
                     let column = fx + dx;
                     if column < 0 || column >= width as isize {
                         continue;
                     }
-                    let weight = wx * wy * area;
+                    let weight = wx * wy * placed.gain;
                     let pixel = &mut pixels[(row as usize - first) * width + column as usize];
                     for channel in 0..3 {
                         pixel[channel] += light[channel] * weight;
@@ -971,6 +1037,106 @@ mod tests {
             assert!(
                 (cx - 30.3).abs() < 0.1 && (cy - 15.6).abs() < 0.1,
                 "{angle}: ({cx}, {cy})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_high_quality_frame_is_the_same_view_drawn_finer() {
+        let scene = scene_with(&[Star {
+            x: 230.0,
+            y: 160.0,
+            distance_pc: Some(300.0),
+        }]);
+        let shot = Shot {
+            focus: (199.5, 149.5),
+            dolly: 0.3,
+            width: 200,
+            height: 150,
+            frames: 3,
+            ..Shot::default()
+        };
+        let high = Shot {
+            quality: Quality::High,
+            ..shot
+        };
+        for frame in 0..3 {
+            let (standard, fine) = (shot.render(&scene, frame), high.render(&scene, frame));
+            assert_eq!((fine.width, fine.height), (200, 150));
+            // The same light in the same places: the gradient background
+            // and the star agree pixel by pixel to within the finer
+            // sampling.
+            let total = |image: &LightImage| -> f64 {
+                image.pixels.iter().map(|pixel| pixel[0] as f64).sum()
+            };
+            assert!(
+                (total(&fine) / total(&standard) - 1.0).abs() < 0.01,
+                "frame {frame}"
+            );
+            let (a, b) = (brightest(&fine), brightest(&standard));
+            assert!(
+                a.0.abs_diff(b.0) <= 1 && a.1.abs_diff(b.1) <= 1,
+                "frame {frame}: {a:?} {b:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn levels_between_blend_toward_the_coarser_as_the_view_widens() {
+        let pyramid = Pyramid::new(LightImage::new(512, 512));
+        let ((_, finer), (_, coarser), toward) = pyramid.levels_between(2.0);
+        assert_eq!((finer, coarser, toward), (2.0, 4.0, 0.0));
+        let ((_, finer), (_, coarser), toward) = pyramid.levels_between(2.0_f32.powf(1.5));
+        assert_eq!((finer, coarser), (2.0, 4.0));
+        assert!((toward - 0.5).abs() < 1e-6);
+        let (_, _, toward) = pyramid.levels_between(0.7);
+        assert_eq!(toward, 0.0);
+    }
+
+    #[test]
+    fn a_smooth_sprite_drawn_small_stays_smooth() {
+        // An even patch of light, drawn at scales whose halvings land a
+        // little under an output pixel apart, where points shared by
+        // distance beat against the frame's grid.
+        let image = LightImage {
+            width: 400,
+            height: 400,
+            pixels: vec![[1.0; 3]; 400 * 400],
+        };
+        let sprite = Sprite::new(0, 0, image, 200.0, 200.0, 50.0);
+        for scale in [0.37, 0.29, 0.6, 0.153] {
+            let reach = 201.0 * scale;
+            let placed = Placed {
+                sprite: &sprite,
+                x: 100.3,
+                y: 100.6,
+                scale,
+                gain: 1.0,
+                turn: (1.0, 0.0),
+                left: 100.3 - reach,
+                right: 100.3 + reach,
+                top: 100.6 - reach,
+                bottom: 100.6 + reach,
+            };
+            let width = 200;
+            let mut out = vec![[0.0_f32; 3]; width * 200];
+            for (band, pixels) in out.chunks_mut(width * BAND_ROWS).enumerate() {
+                let rows = pixels.len() / width;
+                splat_sprite(pixels, width, band * BAND_ROWS, rows, &placed);
+            }
+            // Well inside the patch every pixel holds the same light.
+            let inner = (reach * 0.8) as usize;
+            let (low, high) = (100 - inner, 100 + inner);
+            let values: Vec<f32> = (low..high)
+                .flat_map(|y| (low..high).map(move |x| (x, y)))
+                .map(|(x, y)| out[y * width + x][0])
+                .collect();
+            let (least, most) = values
+                .iter()
+                .fold((f32::MAX, f32::MIN), |(a, b), &v| (a.min(v), b.max(v)));
+            assert!(
+                (least - 1.0).abs() < 1e-3 && (most - 1.0).abs() < 1e-3,
+                "scale {scale}: {least}..{most}"
             );
         }
     }
