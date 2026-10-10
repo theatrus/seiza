@@ -2068,7 +2068,7 @@ char *seiza_rc_astro_process_file_json(const char *request_json,
  `pan`, `zoom`, `zoomEnd`, `rotateDegrees` `[first, last]`, `easing`
  ("inOut", "linear"), `quality` ("standard", "high"), `growthLimit`,
  `fadeFrom`, `tour` (stops `[{focus, dolly, zoom, rotateDegrees, pan,
- travel, hold}]`, the first the opening view, which replace the single
+ travel, hold, spinDegrees}]`, the first the opening view, which replace the single
  move and set the length; [`seiza_parallax_plan_tour_json`] plans
  one), `autoTour` (`{targets, hold, motion}`: plan a tour of the
  catalogued objects and render it), `size` ("720p", "1080p", "1440p", "4k", each with
@@ -2183,8 +2183,8 @@ int32_t seiza_parallax_render_frames(const SeizaParallax *video,
 
 /*
  Write the video to a file: `{"output": path, "encoder": "auto" |
- "ffmpeg" | "png", "ffmpeg": program}`. "auto" and "ffmpeg" encode H.264
- with ffmpeg; "png" writes numbered PNG frames into the `output`
+ "ffmpeg" | "png", "ffmpeg": program, "codec": "h264" | "hevc"}`.
+ "auto" and "ffmpeg" encode with ffmpeg, H.264 unless `codec` says HEVC; "png" writes numbered PNG frames into the `output`
  directory. Returns 1 when written, 0 when `cancel` stopped it, and -1
  with `error_out` set on failure. `events` (nullable) hears each frame
  drawn, with `context` passed through.

@@ -86,6 +86,10 @@ pub struct Stop {
     /// and to stay here.
     pub travel: f64,
     pub hold: f64,
+    /// How far the frame turns while the camera holds here, radians
+    /// anticlockwise, easing in and out. Later stops' turns count from the
+    /// frame as it is left, so a whole turn does not unwind on the way on.
+    pub spin: f64,
 }
 
 impl Default for Stop {
@@ -98,6 +102,7 @@ impl Default for Stop {
             pan: 0.0,
             travel: 5.0,
             hold: 0.0,
+            spin: 0.0,
         }
     }
 }
@@ -795,7 +800,28 @@ fn tour_state(tour: &[Stop], t: f64) -> [f64; 6] {
     let times = tour_times(tour);
     let total = times.last().map_or(0.0, |&(_, leave)| leave);
     let now = t.clamp(0.0, 1.0) * total;
-    let states: Vec<[f64; 6]> = tour.iter().map(stop_state).collect();
+    // Each stop as the camera reaches it, its turn counted from the frame
+    // the spins before it left.
+    let mut spun = 0.0;
+    let states: Vec<[f64; 6]> = tour
+        .iter()
+        .map(|stop| {
+            let mut state = stop_state(stop);
+            state[4] += spun;
+            if stop.hold > 0.0 {
+                spun += stop.spin;
+            }
+            state
+        })
+        .collect();
+    // And as it leaves.
+    let left = |index: usize| {
+        let mut state = states[index];
+        if tour[index].hold > 0.0 {
+            state[4] += tour[index].spin;
+        }
+        state
+    };
     let last = tour.len() - 1;
     // The rate of change through each stop, per second: none at the ends
     // and where the camera holds, else Catmull-Rom's.
@@ -804,13 +830,18 @@ fn tour_state(tour: &[Stop], t: f64) -> [f64; 6] {
             return [0.0; 6];
         }
         let span = (times[index + 1].0 - times[index - 1].1).max(1e-9);
-        std::array::from_fn(|k| (states[index + 1][k] - states[index - 1][k]) / span)
+        std::array::from_fn(|k| (states[index + 1][k] - left(index - 1)[k]) / span)
     };
     for index in 0..=last {
         let (arrive, leave) = times[index];
         if now <= leave || index == last {
             if now >= arrive || index == 0 {
-                return states[index];
+                // Held here, spinning as the stop asks.
+                let mut state = states[index];
+                if leave > arrive {
+                    state[4] += tour[index].spin * spin_share(now - arrive, leave - arrive);
+                }
+                return state;
             }
             // On the way here from the stop before.
             let from = times[index - 1].1;
@@ -836,16 +867,34 @@ fn tour_state(tour: &[Stop], t: f64) -> [f64; 6] {
                 )
             };
             let (start, end) = (rate(index - 1), rate(index));
+            let from_state = left(index - 1);
             return std::array::from_fn(|k| {
                 let (h00, h10, h01, h11) = hermite(if k >= 4 { late } else { s });
-                h00 * states[index - 1][k]
+                h00 * from_state[k]
                     + h10 * span * start[k]
                     + h01 * states[index][k]
                     + h11 * span * end[k]
             });
         }
     }
-    states[last]
+    left(last)
+}
+
+/// How much of a spin is done `elapsed` seconds into a hold of `hold`
+/// seconds: at an even pace, easing up to it over the first second or
+/// quarter of the hold and down from it over the last.
+fn spin_share(elapsed: f64, hold: f64) -> f64 {
+    let ramp = (hold / 4.0).min(1.0);
+    let t = elapsed.clamp(0.0, hold);
+    // The even pace that covers the whole spin, ramps included.
+    let pace = 1.0 / (hold - ramp);
+    if t < ramp {
+        pace * t * t / (2.0 * ramp)
+    } else if t <= hold - ramp {
+        pace * (t - ramp / 2.0)
+    } else {
+        1.0 - pace * (hold - t) * (hold - t) / (2.0 * ramp)
+    }
 }
 
 /// Rows each parallel band of the frame covers.
@@ -1956,6 +2005,61 @@ mod tour_tests {
                 "a jerk: {pair:?} of at most {biggest}"
             );
         }
+    }
+
+    #[test]
+    fn a_spin_turns_the_held_frame_at_an_even_pace_and_later_stops_follow_on() {
+        // The share of a spin done eases in, runs evenly and eases out.
+        assert_eq!(spin_share(0.0, 8.0), 0.0);
+        assert!((spin_share(8.0, 8.0) - 1.0).abs() < 1e-12);
+        let pace = |t: f64| (spin_share(t + 0.01, 8.0) - spin_share(t, 8.0)) / 0.01;
+        assert!((pace(3.0) - pace(5.0)).abs() < 1e-9 && pace(0.1) < pace(3.0));
+        let mut last = 0.0;
+        for step in 1..=80 {
+            let share = spin_share(step as f64 * 0.1, 8.0);
+            assert!(share >= last);
+            last = share;
+        }
+        // A whole turn while holding at the second stop, then back to the
+        // whole view: the turn grows through the hold and is not undone.
+        let scene = scene();
+        let shot = Shot {
+            tour: vec![
+                Stop {
+                    focus: (299.5, 199.5),
+                    ..Stop::default()
+                },
+                Stop {
+                    focus: (299.5, 199.5),
+                    dolly: 0.6,
+                    travel: 2.0,
+                    hold: 8.0,
+                    spin: std::f64::consts::TAU,
+                    ..Stop::default()
+                },
+                Stop {
+                    focus: (299.5, 199.5),
+                    travel: 2.0,
+                    ..Stop::default()
+                },
+            ],
+            width: 300,
+            height: 200,
+            // Twelve seconds, a frame each tenth.
+            frames: 121,
+            ..Shot::default()
+        };
+        let turn = |frame: usize| tour_state(&shot.tour, frame as f64 / 120.0)[4];
+        assert_eq!(turn(20), 0.0);
+        assert!(
+            (turn(60) - std::f64::consts::PI).abs() < 1e-9,
+            "{}",
+            turn(60)
+        );
+        assert!((turn(100) - std::f64::consts::TAU).abs() < 1e-9);
+        assert!((turn(120) - std::f64::consts::TAU).abs() < 1e-9);
+        let view = shot.view(&scene, 120);
+        assert!(view.turn().abs() < 1e-9);
     }
 
     #[test]

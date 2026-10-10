@@ -162,6 +162,7 @@ struct StopRequest {
     pan: Option<f64>,
     travel: Option<f64>,
     hold: Option<f64>,
+    spin_degrees: Option<f64>,
 }
 
 /// How to plan a tour: how many targets (every one worth a visit if
@@ -225,6 +226,9 @@ struct WriteRequest {
     /// The ffmpeg program; "ffmpeg" on PATH if absent.
     #[serde(default)]
     ffmpeg: Option<PathBuf>,
+    /// "h264" (the default) or "hevc".
+    #[serde(default)]
+    codec: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -379,6 +383,7 @@ fn options(request: &ParallaxRequest) -> Result<ParallaxOptions, String> {
                     pan: stop.pan.unwrap_or(base.pan),
                     travel: stop.travel.unwrap_or(base.travel),
                     hold: stop.hold.unwrap_or(base.hold),
+                    spin_deg: stop.spin_degrees.unwrap_or(base.spin_deg),
                 }
             })
             .collect(),
@@ -507,7 +512,7 @@ fn split(
 /// `pan`, `zoom`, `zoomEnd`, `rotateDegrees` `[first, last]`, `easing`
 /// ("inOut", "linear"), `quality` ("standard", "high"), `growthLimit`,
 /// `fadeFrom`, `tour` (stops `[{focus, dolly, zoom, rotateDegrees, pan,
-/// travel, hold}]`, the first the opening view, which replace the single
+/// travel, hold, spinDegrees}]`, the first the opening view, which replace the single
 /// move and set the length; [`seiza_parallax_plan_tour_json`] plans
 /// one), `autoTour` (`{targets, hold, motion}`: plan a tour of the
 /// catalogued objects and render it), `size` ("720p", "1080p", "1440p", "4k", each with
@@ -607,6 +612,7 @@ struct PlannedStopResponse {
     pan: f64,
     travel: f64,
     hold: f64,
+    spin_degrees: f64,
 }
 
 #[derive(Serialize)]
@@ -693,6 +699,7 @@ pub unsafe extern "C" fn seiza_parallax_plan_tour_json(
                     pan: planned.stop.pan,
                     travel: planned.stop.travel,
                     hold: planned.stop.hold,
+                    spin_degrees: planned.stop.spin_deg,
                 })
                 .collect(),
         })
@@ -918,8 +925,8 @@ pub unsafe extern "C" fn seiza_parallax_render_frames(
 }
 
 /// Write the video to a file: `{"output": path, "encoder": "auto" |
-/// "ffmpeg" | "png", "ffmpeg": program}`. "auto" and "ffmpeg" encode H.264
-/// with ffmpeg; "png" writes numbered PNG frames into the `output`
+/// "ffmpeg" | "png", "ffmpeg": program, "codec": "h264" | "hevc"}`.
+/// "auto" and "ffmpeg" encode with ffmpeg, H.264 unless `codec` says HEVC; "png" writes numbered PNG frames into the `output`
 /// directory. Returns 1 when written, 0 when `cancel` stopped it, and -1
 /// with `error_out` set on failure. `events` (nullable) hears each frame
 /// drawn, with `context` passed through.
@@ -952,8 +959,16 @@ pub unsafe extern "C" fn seiza_parallax_write_video_json(
         let ffmpeg = request.ffmpeg.unwrap_or_else(|| PathBuf::from("ffmpeg"));
         let sink: Box<dyn FrameSink> = match request.encoder.as_deref().unwrap_or("auto") {
             "auto" | "ffmpeg" => Box::new(
-                FfmpegSink::start(&ffmpeg, &request.output, settings)
-                    .map_err(|error| error.to_string())?,
+                FfmpegSink::start(
+                    &ffmpeg,
+                    &request.output,
+                    settings,
+                    match &request.codec {
+                        Some(codec) => seiza_parallax::Codec::parse(codec)?,
+                        None => seiza_parallax::Codec::H264,
+                    },
+                )
+                .map_err(|error| error.to_string())?,
             ),
             "png" => Box::new(
                 PngSequence::new(&request.output, settings).map_err(|error| error.to_string())?,

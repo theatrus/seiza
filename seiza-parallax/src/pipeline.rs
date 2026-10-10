@@ -72,6 +72,9 @@ pub struct TourStop {
     /// Seconds to come here from the stop before, and to stay.
     pub travel: f64,
     pub hold: f64,
+    /// Degrees the frame turns anticlockwise while the camera holds here,
+    /// easing in and out; later stops' turns count from where it ends.
+    pub spin_deg: f64,
 }
 
 impl Default for TourStop {
@@ -84,14 +87,16 @@ impl Default for TourStop {
             pan: 0.0,
             travel: 5.0,
             hold: 0.0,
+            spin_deg: 0.0,
         }
     }
 }
 
 /// A [`TourStop`] written `X,Y` or `whole` (the image's centre), then any
 /// of `dolly=`, `zoom=`, `rotate=` (degrees), `pan=`, `travel=` and
-/// `hold=` (seconds), separated by spaces: `2700,3400 dolly=0.85
-/// rotate=-20 travel=6 hold=1.5`.
+/// `hold=` (seconds), and `spin=` (degrees turned while holding),
+/// separated by spaces: `2700,3400 dolly=0.85 rotate=-20 travel=6
+/// hold=1.5`.
 pub fn parse_stop(text: &str) -> Result<TourStop, String> {
     let mut parts = text.split_whitespace();
     let place = parts
@@ -125,9 +130,10 @@ pub fn parse_stop(text: &str) -> Result<TourStop, String> {
             "pan" => stop.pan = value,
             "travel" => stop.travel = value,
             "hold" => stop.hold = value,
+            "spin" => stop.spin_deg = value,
             other => {
                 return Err(format!(
-                    "a stop takes dolly, zoom, rotate, pan, travel and hold; got {other}"
+                    "a stop takes dolly, zoom, rotate, pan, travel, hold and spin; got {other}"
                 ));
             }
         }
@@ -314,8 +320,11 @@ impl ParallaxOptions {
             if !(0.0..1.0).contains(&stop.dolly) || !(0.0..=1.0).contains(&stop.pan) {
                 return invalid("a stop's dolly must be from 0 to below 1, and its pan 0 to 1");
             }
-            if !(stop.zoom.is_finite() && stop.zoom > 0.0) || !stop.rotate_deg.is_finite() {
-                return invalid("a stop's zoom must be positive and its turn a number");
+            if !(stop.zoom.is_finite() && stop.zoom > 0.0)
+                || !stop.rotate_deg.is_finite()
+                || !stop.spin_deg.is_finite()
+            {
+                return invalid("a stop's zoom must be positive, and its turn and spin numbers");
             }
             if !(stop.travel >= 0.0 && stop.hold >= 0.0) {
                 return invalid("a stop's travel and hold must be at least 0 seconds");
@@ -666,6 +675,7 @@ impl Parallax {
                     pan: stop.pan,
                     travel: stop.travel,
                     hold: stop.hold,
+                    spin: stop.spin_deg.to_radians(),
                 })
                 .collect(),
             ..Shot::default()
@@ -888,6 +898,7 @@ pub fn format_stop(stop: &TourStop) -> String {
         ("pan", stop.pan, defaults.pan),
         ("travel", stop.travel, f64::NAN),
         ("hold", stop.hold, defaults.hold),
+        ("spin", stop.spin_deg, defaults.spin_deg),
     ] {
         if value != default {
             let value = format!("{value:.3}");
@@ -1239,6 +1250,7 @@ mod tests {
                 pan: 0.3,
                 travel: 6.0,
                 hold: 1.5,
+                spin_deg: 360.0,
             },
         ] {
             let text = format_stop(&stop);

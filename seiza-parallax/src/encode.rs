@@ -149,12 +149,40 @@ pub struct FfmpegSink {
     settings: VideoSettings,
 }
 
+/// The video codec ffmpeg writes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Codec {
+    /// H.264, which every player takes: libx264, else libopenh264.
+    #[default]
+    H264,
+    /// HEVC (H.265) with libx265: about half the size for the same look,
+    /// tagged so Apple's players open it.
+    Hevc,
+}
+
+impl Codec {
+    /// The codec named `h264` (or `avc`, `x264`) or `hevc` (or `h265`,
+    /// `x265`).
+    pub fn parse(text: &str) -> std::result::Result<Self, String> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "h264" | "h.264" | "avc" | "x264" => Ok(Self::H264),
+            "hevc" | "h265" | "h.265" | "x265" => Ok(Self::Hevc),
+            other => Err(format!("the codec is h264 or hevc; got {other}")),
+        }
+    }
+}
+
 impl FfmpegSink {
     /// Start `ffmpeg` (or the program `executable` names) writing `output`
-    /// as H.264: with libx264 when the build has it, else with Cisco's
+    /// in `codec`. H.264 uses libx264 when the build has it, else Cisco's
     /// libopenh264, which builds without the x264 encoder (Fedora's
-    /// ffmpeg-free among them) carry.
-    pub fn start(executable: &Path, output: &Path, settings: VideoSettings) -> Result<Self> {
+    /// ffmpeg-free among them) carry; HEVC uses libx265.
+    pub fn start(
+        executable: &Path,
+        output: &Path,
+        settings: VideoSettings,
+        codec: Codec,
+    ) -> Result<Self> {
         if !settings.width.is_multiple_of(2) || !settings.height.is_multiple_of(2) {
             return Err(Error::OddSize(settings.width, settings.height));
         }
@@ -166,7 +194,25 @@ impl FfmpegSink {
         let encoders = String::from_utf8_lossy(&encoders.stdout);
         let has = |name: &str| encoders.split_whitespace().any(|word| word == name);
         let bitrate = settings.bitrate.to_string();
-        let codec: Vec<&str> = if has("libx264") {
+        let codec: Vec<&str> = if codec == Codec::Hevc {
+            if !has("libx265") {
+                return Err(Error::Ffmpeg(
+                    "this ffmpeg has no libx265 HEVC encoder; use H.264".into(),
+                ));
+            }
+            vec![
+                "-c:v",
+                "libx265",
+                "-preset",
+                "slow",
+                "-crf",
+                "18",
+                "-tag:v",
+                "hvc1",
+                "-x265-params",
+                "log-level=error",
+            ]
+        } else if has("libx264") {
             vec!["-c:v", "libx264", "-preset", "slow", "-crf", "16"]
         } else if has("libopenh264") {
             vec![
@@ -518,8 +564,26 @@ mod tests {
             bitrate: 1_000_000,
         };
         assert!(matches!(
-            FfmpegSink::start(Path::new("ffmpeg"), Path::new("out.mp4"), settings),
+            FfmpegSink::start(
+                Path::new("ffmpeg"),
+                Path::new("out.mp4"),
+                settings,
+                Codec::Hevc
+            ),
             Err(Error::OddSize(3, 2))
         ));
+    }
+
+    #[test]
+    fn codecs_parse_by_their_common_names() {
+        for (text, codec) in [
+            ("h264", Codec::H264),
+            ("x264", Codec::H264),
+            ("HEVC", Codec::Hevc),
+            ("h265", Codec::Hevc),
+        ] {
+            assert_eq!(Codec::parse(text), Ok(codec), "{text}");
+        }
+        assert!(Codec::parse("vp9").is_err());
     }
 }

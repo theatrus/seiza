@@ -170,6 +170,10 @@ pub(crate) struct ParallaxVideoArgs {
     /// built-in encoder when this build has one
     #[arg(long, value_enum, default_value_t = EncoderArg::Auto)]
     encoder: EncoderArg,
+    /// The codec ffmpeg writes: h264 (libx264, else libopenh264) or hevc
+    /// (libx265, about half the size for the same look)
+    #[arg(long, default_value = "h264", value_parser = seiza_parallax::Codec::parse)]
+    codec: seiza_parallax::Codec,
     /// The ffmpeg program to run
     #[arg(long, default_value = "ffmpeg")]
     ffmpeg: PathBuf,
@@ -688,11 +692,15 @@ fn open_sink(args: &ParallaxVideoArgs, settings: VideoSettings) -> Result<Box<dy
             &args.ffmpeg,
             output(args),
             settings,
+            args.codec,
         )?))
     };
     match args.encoder {
         EncoderArg::Png => Ok(Box::new(PngSequence::new(output(args), settings)?)),
         EncoderArg::Ffmpeg => ffmpeg(),
+        EncoderArg::Openh264 if args.codec == seiza_parallax::Codec::Hevc => {
+            bail!("the built-in encoder writes H.264 only; use ffmpeg for HEVC")
+        }
         EncoderArg::Openh264 => openh264(output(args), settings),
         EncoderArg::Auto => {
             if FfmpegSink::available(&args.ffmpeg) {

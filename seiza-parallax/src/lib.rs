@@ -41,7 +41,8 @@ pub use dust::Dust;
 #[cfg(feature = "openh264")]
 pub use encode::OpenH264Sink;
 pub use encode::{
-    FRAME_SIZES, FfmpegSink, FrameFn, FrameSink, PngSequence, VideoSettings, parse_frame_size,
+    Codec, FRAME_SIZES, FfmpegSink, FrameFn, FrameSink, PngSequence, VideoSettings,
+    parse_frame_size,
 };
 pub use field::default_gaia_cache;
 pub use lift::{Extent, lift_object};

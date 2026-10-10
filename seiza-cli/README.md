@@ -425,8 +425,8 @@ down, blending levels of detail so fine detail neither shimmers nor steps in
 sharpness as the camera moves, for about four times the rendering time. A deep image holds so many faint stars that, each moving on its own,
 they crowd the view: `--max-stars N` lets only the N brightest fly, and
 `--small-stars` drops the rest (`drop`, the default) or keeps them on the
-distant star field's plane (`field`). Frames go to ffmpeg (libx264 or
-libopenh264), to PNG files with `--encoder png`, or, in a build with the
+distant star field's plane (`field`). Frames go to ffmpeg (H.264 with libx264 or
+libopenh264, or with `--codec hevc` HEVC with libx265, about half the size), to PNG files with `--encoder png`, or, in a build with the
 `openh264` feature, to a built-in encoder. Catalogued galaxies, which a star remover leaves in the starless image, are
 lifted out of it onto the far field, where they hold still while the nebula
 grows past them; the nebula behind is filled in from around each one.
