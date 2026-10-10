@@ -405,7 +405,7 @@ the star counts map how much light it lets through, and a patch of the
 starless image darker than its surroundings and short of stars marks a
 globule thick enough to black out everything; whatever lies behind the
 nebula dims as the camera's move slides it behind thicker dust than it was
-photographed through. `--dust-opacity` (default 2) darkens or lightens the
+photographed through. `--dust-opacity` (default 3) darkens or lightens the
 dust, and `--no-dust` turns this off. `--debug-layers DIR` writes the background, the leftover star
 light, and every cut-out star tinted by distance, for checking a result.
 

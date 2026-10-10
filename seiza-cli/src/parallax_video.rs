@@ -163,7 +163,7 @@ pub(crate) struct ParallaxVideoArgs {
     no_dust: bool,
     /// How dark the dust is for the stars it hides: the light it lets
     /// through is the share of stars seen to this power
-    #[arg(long, default_value_t = 2.0)]
+    #[arg(long, default_value_t = 3.0)]
     dust_opacity: f32,
 }
 
