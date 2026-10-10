@@ -110,20 +110,41 @@ impl Scene {
         let footprints: Vec<Footprint> = kept.iter().map(|&index| measured[index]).collect();
         let stars: Vec<Star> = kept.iter().map(|&index| stars[index]).collect();
 
-        // The sum of every footprint's weight at each pixel.
+        // The sum of every footprint's weight at each pixel, which says how
+        // much of the light the stars take, and the sum of their claims,
+        // which says how they share it.
+        let peaks: Vec<f32> = footprints
+            .iter()
+            .map(|footprint| footprint.peak(star_light))
+            .collect();
         let mut total = vec![0.0_f32; width * height];
-        for footprint in &footprints {
-            footprint.for_each(width, height, |x, y, weight| total[y * width + x] += weight);
+        let mut claims = vec![0.0_f32; width * height];
+        for (footprint, &peak) in footprints.iter().zip(&peaks) {
+            footprint.for_each(width, height, |x, y, weight| {
+                total[y * width + x] += weight;
+                claims[y * width + x] += weight * footprint.model(x, y, peak);
+            });
         }
 
         let sprites: Vec<Sprite> = footprints
             .par_iter()
             .zip(&stars)
-            .map(|(footprint, star)| {
+            .zip(&peaks)
+            .map(|((footprint, star), &peak)| {
                 let (left, top, right, bottom) = footprint.bounds(width, height);
                 let mut image = LightImage::new(right - left, bottom - top);
                 footprint.for_each(width, height, |x, y, weight| {
-                    let share = weight / total[y * width + x].max(1.0);
+                    // Overlapping stars share the light they take in
+                    // proportion to how much each would put there, so a
+                    // bright star's halo stays with it rather than going to
+                    // the faint stars inside it.
+                    let index = y * width + x;
+                    let claim = weight * footprint.model(x, y, peak);
+                    let share = if claims[index] > 0.0 {
+                        total[index].min(1.0) * claim / claims[index]
+                    } else {
+                        0.0
+                    };
                     let light = star_light.at(x, y);
                     image.pixels[(y - top) * image.width + (x - left)] =
                         light.map(|value| value * share);
@@ -182,6 +203,23 @@ struct Footprint {
 }
 
 impl Footprint {
+    /// The star's light at its centre, summed over channels.
+    fn peak(&self, light: &LightImage) -> f32 {
+        let x = (self.x.round().max(0.0) as usize).min(light.width - 1);
+        let y = (self.y.round().max(0.0) as usize).min(light.height - 1);
+        let pixel = light.at(x, y);
+        (pixel[0] + pixel[1] + pixel[2]).max(1e-6)
+    }
+
+    /// The light this star would put at `(x, y)`: a Moffat-like profile of
+    /// its peak, as wide as a third of its inner radius. A bright star's
+    /// footprint, and so its profile, reaches far into its halo.
+    fn model(&self, x: usize, y: usize, peak: f32) -> f32 {
+        let scale = (self.inner / 3.0).max(1.0);
+        let r2 = ((x as f64 - self.x).powi(2) + (y as f64 - self.y).powi(2)) / (scale * scale);
+        peak * (1.0 / (1.0 + r2)).powi(2) as f32
+    }
+
     fn measure(star: &Star, light: &LightImage, edge: f32, options: &CutOptions) -> Self {
         let mut radius = options.min_radius;
         while radius < options.max_radius && ring_light(light, star.x, star.y, radius) >= edge {
@@ -349,6 +387,42 @@ mod tests {
         );
         assert_eq!(scene.sprites.len(), 1);
         assert_eq!(scene.sprites[0].distance_pc, 136.0);
+    }
+
+    #[test]
+    fn a_bright_halo_stays_with_its_star_not_with_faint_neighbours() {
+        // A bright star with a wide halo, and a faint star well out in it.
+        let mut light = gaussian_stars(200, 160, &[(70.0, 80.0, 6.0), (125.0, 80.0, 0.6)]);
+        for (index, pixel) in light.pixels.iter_mut().enumerate() {
+            let (x, y) = ((index % 200) as f64, (index / 200) as f64);
+            let halo =
+                0.4 * (-((x - 70.0).powi(2) + (y - 80.0).powi(2)) / (2.0 * 30.0_f64.powi(2))).exp();
+            for channel in pixel.iter_mut() {
+                *channel += halo as f32;
+            }
+        }
+        let starless = LightImage::new(200, 160);
+        let stars = [(70.0, 80.0, Some(130.0)), (125.0, 80.0, Some(900.0))]
+            .map(|(x, y, distance_pc)| Star { x, y, distance_pc });
+        let scene = Scene::new(
+            &starless,
+            &light,
+            &stars,
+            130.0,
+            900.0,
+            500.0,
+            &CutOptions::default(),
+        );
+        assert_eq!(scene.sprites.len(), 2);
+        let total =
+            |sprite: &Sprite| -> f32 { sprite.image.pixels.iter().map(|pixel| pixel[0]).sum() };
+        // The faint star's own light: a Gaussian of peak 0.6 and variance 2.
+        let own = 0.6 * 2.0 * std::f32::consts::PI * 2.0;
+        let faint = total(&scene.sprites[1]);
+        assert!(
+            faint < own * 1.5,
+            "the faint sprite took {faint}, its own light is {own}"
+        );
     }
 
     #[test]
