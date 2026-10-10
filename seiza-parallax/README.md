@@ -40,6 +40,10 @@ both, matching stars to Gaia DR3 for their Bailer-Jones distances.
   frame inside the image). Stars stay points: they keep their first-frame
   size and only swell and brighten as the camera nears them, fading out as it
   passes.
+- **Placing marks:** `Shot::view` gives the camera at any frame, and
+  `View::project` puts a point of any depth in it, so a caller can draw
+  labels that move with what they mark (`seiza parallax-video --overlay`
+  does). `Shot::star_fade` says how far a star the camera passes has faded.
 - **Output:** frames go to `ffmpeg` (libx264, or libopenh264 when that is the
   build's H.264 encoder), to numbered PNG files, or, with the `openh264`
   feature, to an in-process OpenH264 encoder and MP4 muxer.

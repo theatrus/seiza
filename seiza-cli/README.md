@@ -416,6 +416,20 @@ photographed through. `--dust-opacity` (default 3) darkens or lightens the
 dust, and `--no-dust` turns this off. `--debug-layers DIR` writes the background, the leftover star
 light, and every cut-out star tinted by distance, for checking a result.
 
+`--overlay` labels the catalogued objects in the field the way Seiza's image
+overlays do, with the same colours, names, outlines and ranking. Each label
+sits at the depth of the layer that shows its object: the nebula's plane, a
+named star's own distance, or the far field for a lifted galaxy, so it moves
+with what it marks. Labels fade in and out rather than popping: as they near
+the frame's edge, as a star the camera passes fades, and as smaller objects
+take or lose their share of the view. `--overlay-density` (default 0.6) sets
+that share. Once the camera is inside an object, its name moves to a "Field
+within" line in the corner. `--label 'X,Y:TEXT'` adds a label of your own at
+image pixel X,Y on the nebula's plane, and `--label 'X,Y,R:TEXT'` circles R
+pixels about it as well; repeat it for more, and set their colour with
+`--label-color '#RRGGBB'`. `--watermark` writes "Rendered with seiza.fyi" in
+the bottom-right corner, or `--watermark 'TEXT'` your own line.
+
 ## Image stacking
 
 `seiza stack` calibrates, registers, and incrementally integrates FITS or XISF light

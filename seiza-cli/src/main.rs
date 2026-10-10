@@ -25,6 +25,7 @@ mod common;
 mod deconvolution;
 mod interrupt;
 mod master;
+mod parallax_overlay;
 mod parallax_video;
 mod preview;
 mod provenance;
@@ -656,7 +657,7 @@ enum Command {
     ColorCalibrate(color_calibrate::ColorCalibrateArgs),
     /// Fly toward a point of a stretched image, with its stars at their
     /// Gaia distances, and write the video
-    ParallaxVideo(parallax_video::ParallaxVideoArgs),
+    ParallaxVideo(Box<parallax_video::ParallaxVideoArgs>),
     /// Experimentally restore mild blur in a linear FITS using a measured PSF
     Deconvolve(deconvolution::DeconvolutionArgs),
     /// Register and incrementally stack linear FITS light frames
@@ -1583,7 +1584,7 @@ fn main() -> Result<()> {
         Command::Stretch(options) => stretch_command::run(options),
         Command::Background(options) => background::run(options),
         Command::ColorCalibrate(options) => color_calibrate::run(options),
-        Command::ParallaxVideo(options) => parallax_video::run(options),
+        Command::ParallaxVideo(options) => parallax_video::run(*options),
         Command::Deconvolve(options) => deconvolution::run(options),
         Command::Stack(options) => stack::run(options),
         Command::Color(options) => color::run(options),

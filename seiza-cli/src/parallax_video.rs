@@ -7,9 +7,10 @@
 //! the brightest stars Gaia has no parallax for. [`seiza_parallax`] renders
 //! the frames and an encoder writes them.
 
+use crate::parallax_overlay::{self, CustomLabel, Overlay};
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
-use image::Rgb32FImage;
+use image::{Rgb, Rgb32FImage};
 use seiza::{DetectConfig, Wcs};
 use seiza_parallax::{
     CutOptions, Easing, Extent, FfmpegSink, FrameSink, LightImage, PngSequence, Scene, Shot,
@@ -180,6 +181,28 @@ pub(crate) struct ParallaxVideoArgs {
     /// through is the share of stars seen to this power
     #[arg(long, default_value_t = 3.0)]
     dust_opacity: f32,
+    /// Label the catalogued objects in the field as Seiza's image overlays
+    /// do. Each label moves with the layer that shows its object and fades
+    /// as it leaves the view; once the camera is inside an object, its name
+    /// goes to a "Field within" caption
+    #[arg(long)]
+    overlay: bool,
+    /// The share of the objects in view that --overlay labels, most
+    /// prominent first, 0 to 1
+    #[arg(long, default_value_t = parallax_overlay::DEFAULT_DENSITY)]
+    overlay_density: f64,
+    /// A label of your own, `X,Y:TEXT` in image pixels on the nebula's
+    /// plane, or `X,Y,RADIUS:TEXT` to circle that many pixels about the
+    /// point. Repeat for more
+    #[arg(long = "label", value_parser = parallax_overlay::parse_label)]
+    labels: Vec<CustomLabel>,
+    /// Colour of your labels, `#RRGGBB`
+    #[arg(long, default_value = "#f0f4f8", value_parser = parallax_overlay::parse_color)]
+    label_color: Rgb<u8>,
+    /// Write a line of text in the bottom-right corner of every frame
+    /// (default text: "Rendered with seiza.fyi")
+    #[arg(long, num_args = 0..=1, default_missing_value = parallax_overlay::DEFAULT_WATERMARK)]
+    watermark: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -377,6 +400,10 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
             ..CutOptions::default()
         },
     );
+    let lifted: Vec<(String, (f64, f64), f64)> = galaxies
+        .iter()
+        .map(|(name, sprite)| (name.clone(), (sprite.x, sprite.y), sprite.distance_pc))
+        .collect();
     scene
         .sprites
         .extend(galaxies.into_iter().map(|(_, sprite)| sprite));
@@ -477,6 +504,8 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
         );
     }
 
+    let overlay = overlay(&args, &wcs, &scene, &lifted, &shot)?;
+
     let settings = VideoSettings {
         width: args.size.0 as u32,
         height: args.size.1 as u32,
@@ -486,7 +515,10 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
     let mut sink = open_sink(&args, settings)?;
     let rendering = std::time::Instant::now();
     for frame in 0..frames {
-        let image = shot.render(&scene, frame).to_display_rgb8();
+        let mut image = shot.render(&scene, frame).to_display_rgb8();
+        if let Some(overlay) = &overlay {
+            overlay.draw(frame, &shot.view(&scene, frame), &mut image);
+        }
         sink.push(&image)?;
         if (frame + 1) % (frames / 10).max(1) == 0 || frame + 1 == frames {
             println!("rendered {}/{frames} frames", frame + 1);
@@ -508,6 +540,9 @@ fn check_shot(args: &ParallaxVideoArgs) -> Result<()> {
     }
     if !(0.0..1.0).contains(&args.dolly) {
         bail!("--dolly must be at least 0 and below 1");
+    }
+    if !(0.0..=1.0).contains(&args.overlay_density) {
+        bail!("--overlay-density must be from 0 to 1");
     }
     if !(0.0..=1.0).contains(&args.pan) {
         bail!("--pan must be from 0 to 1");
@@ -1163,6 +1198,40 @@ const GALAXY_DISTANCE_PC: f64 = 1e8;
 /// Catalogued galaxies in the image large enough to see, largest first,
 /// leaving out one at the focus point, which is the target, and each only
 /// once: catalogs list some galaxies twice, a little apart.
+/// The labels over the video, if any were asked for: the caller's own, the
+/// catalogued objects with --overlay, and the watermark.
+fn overlay(
+    args: &ParallaxVideoArgs,
+    wcs: &Wcs,
+    scene: &Scene,
+    lifted: &[(String, (f64, f64), f64)],
+    shot: &Shot,
+) -> Result<Option<Overlay>> {
+    let mut marks = parallax_overlay::custom_marks(&args.labels, args.label_color, scene);
+    if args.overlay {
+        let path = seiza::data_paths::objects(args.objects.as_deref())
+            .context("--overlay needs the object catalog (seiza setup)")?;
+        let catalog = seiza::objects::ObjectCatalog::open(&path)
+            .with_context(|| format!("failed to open {}", path.display()))?;
+        let dimensions = (scene.width() as u32, scene.height() as u32);
+        let found = parallax_overlay::catalog_marks(&catalog, wcs, dimensions, scene, lifted)?;
+        println!("{} catalogued objects in the field to label", found.len());
+        marks.extend(found);
+    }
+    if marks.is_empty() && args.watermark.is_none() {
+        return Ok(None);
+    }
+    let mut overlay = Overlay::new(
+        marks,
+        args.watermark.clone(),
+        args.overlay_density,
+        wcs.scale_arcsec_per_px(),
+        args.size,
+    )?;
+    overlay.plan(shot, scene, args.fps as f64);
+    Ok(Some(overlay))
+}
+
 fn galaxies_in_image(
     args: &ParallaxVideoArgs,
     wcs: &Wcs,

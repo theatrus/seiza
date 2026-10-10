@@ -736,7 +736,7 @@ impl LabelPlacer {
 /// Coverage mask for one colour layer over a `width` x `height` area whose
 /// top-left pixel is `origin` in the target image, composited once so
 /// overlapping strokes never double-blend.
-struct Mask {
+pub(crate) struct Mask {
     origin: (i64, i64),
     width: usize,
     height: usize,
@@ -748,7 +748,7 @@ impl Mask {
         Self::at((0, 0), width as usize, height as usize)
     }
 
-    fn at(origin: (i64, i64), width: usize, height: usize) -> Self {
+    pub(crate) fn at(origin: (i64, i64), width: usize, height: usize) -> Self {
         Self {
             origin,
             width,
@@ -783,7 +783,7 @@ impl Mask {
     }
 
     /// An anti-aliased line of `width` pixels.
-    fn stroke(&mut self, p: (f64, f64), q: (f64, f64), width: f64) {
+    pub(crate) fn stroke(&mut self, p: (f64, f64), q: (f64, f64), width: f64) {
         let half = width / 2.0;
         let reach = half + 1.0;
         let (columns, rows) = self.span(
@@ -811,14 +811,14 @@ impl Mask {
         }
     }
 
-    fn polyline(&mut self, points: &[(f64, f64)], width: f64) {
+    pub(crate) fn polyline(&mut self, points: &[(f64, f64)], width: f64) {
         for pair in points.windows(2) {
             self.stroke(pair[0], pair[1], width);
         }
     }
 
     /// A ring of `radius` and line `width`; a radius of zero fills a disc.
-    fn ring(&mut self, center: (f64, f64), radius: f64, width: f64) {
+    pub(crate) fn ring(&mut self, center: (f64, f64), radius: f64, width: f64) {
         let reach = radius + width / 2.0 + 1.0;
         let (columns, rows) = self.span(
             center.0 - reach,
@@ -837,11 +837,11 @@ impl Mask {
         }
     }
 
-    fn disc(&mut self, center: (f64, f64), radius: f64) {
+    pub(crate) fn disc(&mut self, center: (f64, f64), radius: f64) {
         self.ring(center, radius / 2.0, radius);
     }
 
-    fn ellipse(
+    pub(crate) fn ellipse(
         &mut self,
         center: (f64, f64),
         semi_major: f64,
@@ -875,7 +875,7 @@ impl Mask {
     }
 
     /// Spread the mask by `radius` pixels with a soft edge, for a halo.
-    fn dilated(&self, radius: f64) -> Mask {
+    pub(crate) fn dilated(&self, radius: f64) -> Mask {
         let r = radius.ceil() as i64;
         let mut out = Mask::at(self.origin, self.width, self.height);
         let offsets = (-r..=r)
@@ -904,7 +904,7 @@ impl Mask {
         out
     }
 
-    fn composite(&self, canvas: &mut RgbImage, color: Rgb<u8>, alpha: f32) {
+    pub(crate) fn composite(&self, canvas: &mut RgbImage, color: Rgb<u8>, alpha: f32) {
         let (canvas_width, canvas_height) = canvas.dimensions();
         for (index, &value) in self.coverage.iter().enumerate() {
             if value <= 0.0 {
@@ -925,13 +925,13 @@ impl Mask {
     }
 }
 
-struct Fonts<'a> {
-    regular: FontRef<'a>,
-    semibold: FontRef<'a>,
+pub(crate) struct Fonts<'a> {
+    pub(crate) regular: FontRef<'a>,
+    pub(crate) semibold: FontRef<'a>,
 }
 
 impl Fonts<'static> {
-    fn load() -> Result<Self> {
+    pub(crate) fn load() -> Result<Self> {
         Ok(Self {
             regular: FontRef::try_from_slice(REGULAR_TTF).context("embedded Inter Regular")?,
             semibold: FontRef::try_from_slice(SEMIBOLD_TTF).context("embedded Inter SemiBold")?,
@@ -941,7 +941,7 @@ impl Fonts<'static> {
 
 /// Width and line height of `text` at `size` pixels, with `tracking` extra
 /// pixels between letters.
-fn measure(font: &FontRef<'_>, size: f64, tracking: f64, text: &str) -> (f64, f64) {
+pub(crate) fn measure(font: &FontRef<'_>, size: f64, tracking: f64, text: &str) -> (f64, f64) {
     let scaled = font.as_scaled(PxScale::from(size as f32));
     let mut width = 0.0f64;
     let mut previous = None;
@@ -978,7 +978,7 @@ fn wrap(font: &FontRef<'_>, size: f64, text: &str, max_width: f64) -> Vec<String
 }
 
 /// Draw `text` with its top-left corner at `(x, y)` into a mask.
-fn draw_text(
+pub(crate) fn draw_text(
     mask: &mut Mask,
     font: &FontRef<'_>,
     size: f64,

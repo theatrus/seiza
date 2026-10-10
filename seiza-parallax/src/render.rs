@@ -130,9 +130,10 @@ impl Default for Shot {
     }
 }
 
-/// The camera at one moment.
+/// The camera at one moment, from [`Shot::view`]: where it puts the
+/// points of each depth in the frame.
 #[derive(Clone, Copy, Debug)]
-struct View {
+pub struct View {
     /// Image centre, pixels.
     centre: (f64, f64),
     focal_px: f64,
@@ -170,7 +171,7 @@ impl PlaneMap {
 
 impl View {
     /// The image pixel at `distance` that output pixel `(u, v)` shows.
-    fn unproject(&self, u: f64, v: f64, distance: f64) -> (f64, f64) {
+    pub fn unproject(&self, u: f64, v: f64, distance: f64) -> (f64, f64) {
         let depth = distance - self.along;
         let scale = self.focal_out * distance / (self.focal_px * depth);
         // Turn the frame back first.
@@ -184,6 +185,17 @@ impl View {
             back(du, self.across.0, self.focus_shift.0, self.centre.0),
             back(dv, self.across.1, self.focus_shift.1, self.centre.1),
         )
+    }
+
+    /// The frame's turn about its centre, radians anticlockwise.
+    pub fn turn(&self) -> f64 {
+        self.turn.1.atan2(self.turn.0)
+    }
+
+    /// How much nearer a point drawn at `scale` output pixels per image
+    /// pixel has come since the first frame, with the lens as it is now.
+    fn growth(&self, scale: f64) -> f64 {
+        scale * self.focal_px / self.focal_out
     }
 
     /// The plane at `distance` as the frame shows it, or `None` when it is
@@ -204,7 +216,7 @@ impl View {
 
     /// Output position of image pixel `(x, y)` at `distance`, and output
     /// pixels per image pixel there, or `None` when it is behind the camera.
-    fn project(&self, x: f64, y: f64, distance: f64) -> Option<(f64, f64, f64)> {
+    pub fn project(&self, x: f64, y: f64, distance: f64) -> Option<(f64, f64, f64)> {
         let depth = distance - self.along;
         if depth <= distance * 1e-3 {
             return None;
@@ -292,7 +304,8 @@ impl Shot {
         })
     }
 
-    fn view(&self, scene: &Scene, frame: usize) -> View {
+    /// The camera at frame `frame` of `scene`.
+    pub fn view(&self, scene: &Scene, frame: usize) -> View {
         let t = if self.frames > 1 {
             frame as f64 / (self.frames - 1) as f64
         } else {
@@ -444,6 +457,17 @@ impl Shot {
         )
     }
 
+    /// How much of a star drawn at `scale` output pixels per image pixel in
+    /// `view` is left, 0 to 1: it fades as the camera passes it.
+    pub fn star_fade(&self, view: &View, scale: f64) -> f64 {
+        let growth = view.growth(scale);
+        if growth <= self.fade_from {
+            1.0
+        } else {
+            (2.0 - growth / self.fade_from).max(0.0)
+        }
+    }
+
     /// Render frame `frame` of `scene`.
     pub fn render(&self, scene: &Scene, frame: usize) -> LightImage {
         let view = self.view(scene, frame);
@@ -587,12 +611,8 @@ fn draw_sprites(out: &mut LightImage, scene: &Scene, view: &View, shot: &Shot) {
         .iter()
         .filter_map(|sprite| {
             let (x, y, scale) = view.project(sprite.x, sprite.y, sprite.distance_pc)?;
-            let growth = scale / lens_scale;
-            let fade = if growth <= shot.fade_from {
-                1.0
-            } else {
-                (2.0 - growth / shot.fade_from).max(0.0)
-            };
+            let growth = view.growth(scale);
+            let fade = shot.star_fade(view, scale);
             if fade <= 0.0 {
                 return None;
             }
