@@ -38,6 +38,12 @@ pub struct CutOptions {
     /// The smallest and largest footprint radius, pixels.
     pub min_radius: usize,
     pub max_radius: usize,
+    /// How many stars, brightest first, fly at their own distances; `None`
+    /// for all of them. A deep image holds so many faint stars that, each
+    /// moving on its own, they crowd the view.
+    pub max_stars: Option<usize>,
+    /// What becomes of the stars past `max_stars`.
+    pub small_stars: SmallStars,
 }
 
 impl Default for CutOptions {
@@ -46,8 +52,20 @@ impl Default for CutOptions {
             edge_light: 0.004,
             min_radius: 3,
             max_radius: 200,
+            max_stars: None,
+            small_stars: SmallStars::Drop,
         }
     }
+}
+
+/// What becomes of the stars past [`CutOptions::max_stars`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SmallStars {
+    /// Their light stays on the leftover plane, which moves as the distant
+    /// star field does.
+    Field,
+    /// Their light is removed from the video.
+    Drop,
 }
 
 /// Everything a frame is rendered from.
@@ -78,7 +96,7 @@ impl Scene {
     /// Each star takes a soft round footprint. Where footprints overlap the
     /// light is shared out in proportion to their weights, and the weights
     /// never sum past one, so the sprites plus the leftover add back up to
-    /// the star image exactly.
+    /// the star image exactly, less any stars `options` drops.
     pub fn new(
         starless: &LightImage,
         star_light: &LightImage,
@@ -125,8 +143,29 @@ impl Scene {
                 claims[y * width + x] += weight * footprint.model(x, y, peak);
             });
         }
+        // Every star is cut, so a small star keeps its own light rather
+        // than a bright neighbour taking it, but only the brightest fly.
+        let flying = options.max_stars.unwrap_or(usize::MAX).min(stars.len());
+        // The leftover plane gives up only the flying stars' light when the
+        // small stars stay on it: their share of what the stars take.
+        let flying_share =
+            (flying < stars.len() && options.small_stars == SmallStars::Field).then(|| {
+                let mut flying_claims = vec![0.0_f32; width * height];
+                for (footprint, &peak) in footprints.iter().zip(&peaks).take(flying) {
+                    footprint.for_each(width, height, |x, y, weight| {
+                        flying_claims[y * width + x] += weight * footprint.model(x, y, peak);
+                    });
+                }
+                flying_claims
+                    .par_iter_mut()
+                    .zip(&claims)
+                    .for_each(|(flying, &all)| {
+                        *flying = if all > 0.0 { *flying / all } else { 0.0 };
+                    });
+                flying_claims
+            });
 
-        let sprites: Vec<Sprite> = footprints
+        let sprites: Vec<Sprite> = footprints[..flying]
             .par_iter()
             .zip(&stars)
             .zip(&peaks)
@@ -167,9 +206,13 @@ impl Scene {
                 .pixels
                 .par_iter()
                 .zip(total.par_iter())
-                .map(|(stars, taken)| {
-                    let left = 1.0 - taken.min(1.0);
-                    stars.map(|value| value * left)
+                .enumerate()
+                .map(|(index, (stars, taken))| {
+                    let taken = match &flying_share {
+                        Some(share) => taken.min(1.0) * share[index],
+                        None => taken.min(1.0),
+                    };
+                    stars.map(|value| value * (1.0 - taken))
                 })
                 .collect(),
         };
@@ -487,23 +530,7 @@ mod tests {
             "no distance keeps it on the background"
         );
 
-        let mut rebuilt = scene.background.base().clone();
-        for (rebuilt, leftover) in rebuilt.pixels.iter_mut().zip(&scene.leftover.base().pixels) {
-            for channel in 0..3 {
-                rebuilt[channel] += leftover[channel];
-            }
-        }
-        for sprite in &scene.sprites {
-            for y in 0..sprite.image.height {
-                for x in 0..sprite.image.width {
-                    let target = &mut rebuilt.pixels[(sprite.top + y) * 64 + sprite.left + x];
-                    let light = sprite.image.at(x, y);
-                    for channel in 0..3 {
-                        target[channel] += light[channel];
-                    }
-                }
-            }
-        }
+        let rebuilt = rebuilt(&scene);
         for (index, (rebuilt, (base, stars))) in rebuilt
             .pixels
             .iter()
@@ -521,5 +548,90 @@ mod tests {
         // A bright star's footprint reaches further than a faint one's.
         let size = |sprite: &Sprite| sprite.image.width;
         assert!(size(&scene.sprites[0]) > size(&scene.sprites[2]));
+    }
+
+    /// The background, leftover and sprites of `scene` added back together.
+    fn rebuilt(scene: &Scene) -> LightImage {
+        let mut rebuilt = scene.background.base().clone();
+        for (rebuilt, leftover) in rebuilt.pixels.iter_mut().zip(&scene.leftover.base().pixels) {
+            for channel in 0..3 {
+                rebuilt[channel] += leftover[channel];
+            }
+        }
+        for sprite in &scene.sprites {
+            for y in 0..sprite.image.height {
+                for x in 0..sprite.image.width {
+                    let index = (sprite.top + y) * rebuilt.width + sprite.left + x;
+                    let light = sprite.image.at(x, y);
+                    for (target, light) in rebuilt.pixels[index].iter_mut().zip(light) {
+                        *target += light;
+                    }
+                }
+            }
+        }
+        rebuilt
+    }
+
+    #[test]
+    fn small_stars_stay_on_the_field_or_are_dropped() {
+        // A bright star with a faint one in its halo, and a faint one alone.
+        let stars_light = gaussian_stars(
+            64,
+            48,
+            &[(20.0, 20.0, 2.0), (27.0, 20.0, 0.3), (50.0, 34.0, 0.3)],
+        );
+        let starless = LightImage::new(64, 48);
+        let stars = [(20.0, 20.0), (27.0, 20.0), (50.0, 34.0)].map(|(x, y)| Star {
+            x,
+            y,
+            distance_pc: Some(100.0),
+        });
+        let scene = |small_stars| {
+            let options = CutOptions {
+                max_stars: Some(1),
+                small_stars,
+                ..CutOptions::default()
+            };
+            Scene::new(
+                &starless,
+                &stars_light,
+                &stars,
+                400.0,
+                900.0,
+                1000.0,
+                &options,
+            )
+        };
+        let light = |image: &LightImage, (x, y): (usize, usize)| image.at(x, y)[0];
+
+        let field = scene(SmallStars::Field);
+        assert_eq!(field.sprites.len(), 1);
+        // The small stars' light is all still there, on the leftover plane.
+        let whole = rebuilt(&field);
+        for (whole, stars) in whole.pixels.iter().zip(&stars_light.pixels) {
+            assert!((whole[0] - stars[0]).abs() < 1e-5);
+        }
+        for point in [(27, 20), (50, 34)] {
+            let expected = light(&stars_light, point);
+            let leftover = light(field.leftover.base(), point);
+            assert!(
+                leftover > 0.5 * expected,
+                "{point:?}: {leftover} of {expected}"
+            );
+        }
+
+        let dropped = scene(SmallStars::Drop);
+        assert_eq!(dropped.sprites.len(), 1);
+        // The small stars are gone, and the bright star keeps no more than
+        // it would have with them flying.
+        for point in [(27, 20), (50, 34)] {
+            let left = light(&rebuilt(&dropped), point);
+            let expected = light(&stars_light, point);
+            assert!(left < 0.5 * expected, "{point:?}: {left} of {expected}");
+        }
+        assert_eq!(
+            dropped.sprites[0].image.pixels,
+            field.sprites[0].image.pixels
+        );
     }
 }

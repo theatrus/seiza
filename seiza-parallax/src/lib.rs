@@ -31,4 +31,4 @@ pub use encode::{FfmpegSink, FrameSink, PngSequence, VideoSettings};
 pub use find::{FoundStar, find_stars};
 pub use light::{LightImage, Pyramid};
 pub use render::{Easing, Shot};
-pub use scene::{CutOptions, Scene, Sprite, Star};
+pub use scene::{CutOptions, Scene, SmallStars, Sprite, Star};

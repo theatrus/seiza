@@ -19,7 +19,8 @@ both, matching stars to Gaia DR3 for their Bailer-Jones distances.
   grows until it reaches the star image's background. Overlapping light is
   shared in proportion to each star's modelled light, so a bright star keeps
   its halo. Star light no star takes forms a plane of its own at the star
-  field's distance.
+  field's distance. `CutOptions::max_stars` lets only the brightest stars
+  fly; the rest are dropped or stay on that plane (`SmallStars`).
 - **Blending:** layers combine as a screen blend, done as addition of "light"
   `−ln(1 − v)` taken from each pixel's brightest channel, so stars keep their
   hue as they brighten.

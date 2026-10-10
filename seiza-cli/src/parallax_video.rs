@@ -12,8 +12,8 @@ use clap::{Args, ValueEnum};
 use image::Rgb32FImage;
 use seiza::{DetectConfig, DetectedStar, Wcs};
 use seiza_parallax::{
-    CutOptions, Easing, FfmpegSink, FrameSink, LightImage, PngSequence, Scene, Shot, Star,
-    VideoSettings,
+    CutOptions, Easing, FfmpegSink, FrameSink, LightImage, PngSequence, Scene, Shot, SmallStars,
+    Star, VideoSettings,
 };
 use seiza_sources::{GaiaDistance, HipparcosStar};
 use std::path::{Path, PathBuf};
@@ -98,6 +98,15 @@ pub(crate) struct ParallaxVideoArgs {
     /// A star past this growth fades out as the camera flies by it
     #[arg(long, default_value_t = 6.0)]
     fade_from: f64,
+    /// How many stars, brightest first, fly at their own distances. A deep
+    /// image holds so many faint stars that, each moving on its own, they
+    /// crowd the view; see --small-stars for the rest (default: all fly)
+    #[arg(long)]
+    max_stars: Option<usize>,
+    /// What becomes of the stars past --max-stars: `drop` removes them,
+    /// and `field` keeps them on the distant star field's plane
+    #[arg(long, value_enum, default_value_t = SmallStarsArg::Drop)]
+    small_stars: SmallStarsArg,
     /// How the video is written: auto uses ffmpeg when it runs, then the
     /// built-in encoder when this build has one
     #[arg(long, value_enum, default_value_t = EncoderArg::Auto)]
@@ -134,6 +143,12 @@ pub(crate) struct ParallaxVideoArgs {
     /// marked by their distance
     #[arg(long)]
     debug_layers: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum SmallStarsArg {
+    Drop,
+    Field,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -276,8 +291,25 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
         distance,
         unmatched,
         focal_px,
-        &CutOptions::default(),
+        &CutOptions {
+            max_stars: args.max_stars,
+            small_stars: match args.small_stars {
+                SmallStarsArg::Drop => SmallStars::Drop,
+                SmallStarsArg::Field => SmallStars::Field,
+            },
+            ..CutOptions::default()
+        },
     );
+    if args.max_stars.is_some() {
+        println!(
+            "the {} brightest stars fly; the rest {}",
+            scene.sprites.len(),
+            match args.small_stars {
+                SmallStarsArg::Drop => "are dropped",
+                SmallStarsArg::Field => "stay on the star field",
+            }
+        );
+    }
     if let Some(directory) = &args.debug_layers {
         write_layers(directory, &scene)?;
     }

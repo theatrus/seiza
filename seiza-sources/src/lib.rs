@@ -163,6 +163,11 @@ const GAIA_MAXREC: u64 = 3_000_000;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const READ_TIMEOUT: Duration = Duration::from_secs(300);
+/// A synchronous archive query answers a small cone in seconds; one still
+/// running after this long is given up for the next archive or the job
+/// queue. An archive can hold the connection open without answering, which
+/// the read timeout alone does not catch.
+const SYNC_QUERY_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// The ADQL for Gaia DR3 sources in a cone with their Bailer-Jones distances.
 fn gaia_distance_query(
@@ -1447,6 +1452,7 @@ impl SourceDownloader {
         let response = self
             .client
             .post(url)
+            .timeout(SYNC_QUERY_TIMEOUT)
             .form(&[
                 ("REQUEST", "doQuery"),
                 ("LANG", "ADQL"),
@@ -1505,6 +1511,7 @@ impl SourceDownloader {
         let response = self
             .client
             .post(url)
+            .timeout(SYNC_QUERY_TIMEOUT)
             .form(&[
                 ("REQUEST", "doQuery"),
                 ("LANG", "ADQL"),
