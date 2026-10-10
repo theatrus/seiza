@@ -12,6 +12,7 @@ use crate::lift::Extent;
 use crate::overlay::{self, CustomLabel, Overlay};
 use crate::render::{Easing, Quality, Shot, Start, Stop};
 use crate::scene::{CutOptions, Scene, SmallStars, Star};
+use crate::tour::{self, AutoTour, PlannedStop};
 use crate::{FrameSink, LightImage, VideoSettings};
 use image::{Rgb, Rgb32FImage, RgbImage};
 use seiza::Wcs;
@@ -206,6 +207,10 @@ pub struct ParallaxOptions {
     /// move's own settings (`start`, `dolly`, `truck`, `pan`, `rotate_deg`,
     /// `zoom_end`, `easing`) go unused.
     pub tour: Vec<TourStop>,
+    /// Plan a tour of the catalogued objects in the field, when `tour` is
+    /// empty: the most prominent, visited in a short round from the whole
+    /// image and back.
+    pub auto_tour: Option<AutoTour>,
     /// Frame size, even sides.
     pub size: (usize, usize),
     pub seconds: f64,
@@ -251,6 +256,7 @@ impl Default for ParallaxOptions {
             growth_limit: 4.0,
             fade_from: 6.0,
             tour: Vec::new(),
+            auto_tour: None,
             size: (1920, 1080),
             seconds: 8.0,
             fps: 30,
@@ -314,6 +320,17 @@ impl ParallaxOptions {
             if !(stop.travel >= 0.0 && stop.hold >= 0.0) {
                 return invalid("a stop's travel and hold must be at least 0 seconds");
             }
+        }
+        if let Some(auto) = &self.auto_tour
+            && (auto.targets == Some(0)
+                || auto.hold.is_nan()
+                || auto.hold < 0.0
+                || auto.motion.is_nan()
+                || auto.motion < 0.0)
+        {
+            return invalid(
+                "an automatic tour needs a target, and a hold and motion of at least 0",
+            );
         }
         if !self.tour.is_empty() && self.seconds() <= 0.0 {
             return invalid("a tour must take some time");
@@ -398,6 +415,14 @@ impl Parallax {
         report: &mut dyn FnMut(Event),
     ) -> Result<Self, Error> {
         options.check()?;
+        let planned;
+        let options = match &options.auto_tour {
+            Some(auto) if options.tour.is_empty() => {
+                planned = plan_options(options, auto, wcs, starless.dimensions(), report)?;
+                &planned
+            }
+            _ => options,
+        };
         if starless.dimensions() != stars.dimensions() {
             return Err(Error::Invalid(format!(
                 "the starless image is {:?} but the stars image is {:?}",
@@ -797,6 +822,120 @@ impl Parallax {
     }
 }
 
+/// A tour a planner chose: its stops, each with the name of the target it
+/// visits, and the target most worth a visit, at whose place the nebula's
+/// distance is best taken.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlannedTour {
+    pub stops: Vec<PlannedStop>,
+    pub focus: (f64, f64),
+    pub focus_name: String,
+}
+
+impl PlannedTour {
+    /// The stops alone, for [`ParallaxOptions::tour`].
+    pub fn tour(&self) -> Vec<TourStop> {
+        self.stops.iter().map(|planned| planned.stop).collect()
+    }
+}
+
+/// Plan a tour of the catalogued objects in a `width` × `height` image
+/// whose sky `wcs` gives, as `auto` asks, for frames of `frame` output
+/// pixels, from the object catalog at `objects` or the standard places.
+/// The plan is the caller's to edit, dropping, moving or changing stops,
+/// before passing its stops as [`ParallaxOptions::tour`] and its `focus`
+/// as [`ParallaxOptions::focus`].
+pub fn plan_tour(
+    wcs: &Wcs,
+    (width, height): (u32, u32),
+    objects: Option<&Path>,
+    frame: (usize, usize),
+    auto: &AutoTour,
+) -> Result<PlannedTour, Error> {
+    let path = seiza::data_paths::objects(objects).map_err(|error| {
+        Error::Invalid(format!(
+            "planning a tour needs the object catalog (seiza setup): {error}"
+        ))
+    })?;
+    let placed = open_objects(&path)?
+        .objects_in_footprint(wcs, (width, height))
+        .map_err(|error| Error::Invalid(error.to_string()))?;
+    let size = (width as usize, height as usize);
+    let targets = tour::targets(&placed, size, auto.targets);
+    let Some(best) = targets.first() else {
+        return Err(Error::Invalid(
+            "no catalogued objects in the field to tour".into(),
+        ));
+    };
+    Ok(PlannedTour {
+        stops: tour::plan(&targets, size, frame, auto),
+        focus: (best.x, best.y),
+        focus_name: best.name.clone(),
+    })
+}
+
+/// A stop written as [`parse_stop`] reads it.
+pub fn format_stop(stop: &TourStop) -> String {
+    let mut text = match stop.focus {
+        Some((x, y)) => format!("{x:.0},{y:.0}"),
+        None => "whole".to_string(),
+    };
+    let defaults = TourStop::default();
+    for (key, value, default) in [
+        ("dolly", stop.dolly, defaults.dolly),
+        ("zoom", stop.zoom, defaults.zoom),
+        ("rotate", stop.rotate_deg, defaults.rotate_deg),
+        ("pan", stop.pan, defaults.pan),
+        ("travel", stop.travel, f64::NAN),
+        ("hold", stop.hold, defaults.hold),
+    ] {
+        if value != default {
+            let value = format!("{value:.3}");
+            let value = value.trim_end_matches('0').trim_end_matches('.');
+            text.push_str(&format!(" {key}={value}"));
+        }
+    }
+    text
+}
+
+/// `options` with a tour of the catalogued objects in a `dimensions` image
+/// planned as `auto` asks, and the nebula's distance taken at the target
+/// most worth a visit unless `focus` says otherwise.
+fn plan_options(
+    options: &ParallaxOptions,
+    auto: &AutoTour,
+    wcs: &Wcs,
+    dimensions: (u32, u32),
+    report: &mut dyn FnMut(Event),
+) -> Result<ParallaxOptions, Error> {
+    let plan = plan_tour(
+        wcs,
+        dimensions,
+        options.objects.as_deref(),
+        options.size,
+        auto,
+    )?;
+    let mut planned = ParallaxOptions {
+        tour: plan.tour(),
+        focus: options.focus.or(Some(plan.focus)),
+        ..options.clone()
+    };
+    planned.auto_tour = None;
+    let names: Vec<&str> = plan
+        .stops
+        .iter()
+        .filter_map(|stop| stop.name.as_deref())
+        .collect();
+    report(Event::Note(&format!(
+        "an automatic tour of {} targets over {:.0} s: {}",
+        names.len(),
+        planned.seconds(),
+        names.join(" → ")
+    )));
+    planned.check()?;
+    Ok(planned)
+}
+
 /// Whether every value of `image` sits on one of 256 levels, as an 8-bit
 /// file's do; a 16-bit image's hardly ever all fall there. Looks at a
 /// spread of up to 100,000 values.
@@ -1086,6 +1225,26 @@ mod tests {
             matches!(&refused, Err(Error::Encode(crate::encode::Error::Sink(message))) if message == "disk full"),
             "{refused:?}"
         );
+    }
+
+    #[test]
+    fn a_stop_written_out_reads_back() {
+        for stop in [
+            TourStop::default(),
+            TourStop {
+                focus: Some((2700.0, 3400.0)),
+                dolly: 0.85,
+                zoom: 1.2,
+                rotate_deg: -12.5,
+                pan: 0.3,
+                travel: 6.0,
+                hold: 1.5,
+            },
+        ] {
+            let text = format_stop(&stop);
+            assert_eq!(parse_stop(&text).unwrap(), stop, "{text}");
+        }
+        assert_eq!(format_stop(&TourStop::default()), "whole travel=5");
     }
 
     #[test]

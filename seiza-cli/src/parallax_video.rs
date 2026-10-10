@@ -31,8 +31,8 @@ pub(crate) struct ParallaxVideoArgs {
     stars: Option<PathBuf>,
     /// The video to write (.mp4), or a directory of PNG frames with
     /// --encoder png
-    #[arg(short, long)]
-    output: PathBuf,
+    #[arg(short, long, required_unless_present = "plan_tour")]
+    output: Option<PathBuf>,
     /// Point to fly toward, as image pixels `x,y` (default: the image
     /// centre)
     #[arg(long, value_parser = parse_point)]
@@ -109,6 +109,31 @@ pub(crate) struct ParallaxVideoArgs {
     /// replaces --focus's single move
     #[arg(long = "stop", value_parser = seiza_parallax::parse_stop, allow_hyphen_values = true)]
     stops: Vec<seiza_parallax::TourStop>,
+    /// Tour the catalogued objects in the field: every one worth a visit
+    /// (up to twelve), or the N most worth it, visited in a short round
+    /// from the whole image and back, each framed to its size with a
+    /// gentle turn and pan
+    #[arg(long, num_args = 0..=1, default_missing_value = "0", conflicts_with = "stops")]
+    auto_tour: Option<usize>,
+    /// Plan a tour as --auto-tour would (taking its count, --tour-hold and
+    /// --tour-motion), write it to this file for editing, and stop. Each
+    /// line is a stop as --stop takes it, named in a comment; drop, move or
+    /// change lines, then pass the file with --tour-file
+    #[arg(long, conflicts_with_all = ["stops", "tour_file"])]
+    plan_tour: Option<PathBuf>,
+    /// Take the tour's stops from this file, one a line as --stop takes
+    /// them, with `#` starting a comment, and a `focus X,Y` line, if any,
+    /// saying where the nebula's distance is taken (as --focus does)
+    #[arg(long, conflicts_with_all = ["stops", "auto_tour"])]
+    tour_file: Option<PathBuf>,
+    /// Seconds an automatic tour stays at each target; the three most
+    /// prominent stay half as long again
+    #[arg(long, default_value_t = 1.5)]
+    tour_hold: f64,
+    /// How much an automatic tour turns and pans: 0 for none, 1 for the
+    /// gentle default, 2 for twice that
+    #[arg(long, default_value_t = 1.0)]
+    tour_motion: f64,
     /// Frames per second
     #[arg(long, default_value_t = 30)]
     fps: u32,
@@ -275,7 +300,14 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
     if args.image.is_none() && args.starless.is_none() {
         bail!("give an image to split, or --starless and --stars");
     }
-    let options = options(&args);
+    if let Some(plan) = &args.plan_tour {
+        return write_plan(&args, plan);
+    }
+    let file = match &args.tour_file {
+        Some(path) => Some(read_tour(path)?),
+        None => None,
+    };
+    let options = options(&args, file);
     options.check()?;
     let started = std::time::Instant::now();
     let (starless, stars, solve_path, _split_dir) = split(&args)?;
@@ -289,7 +321,7 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
     parallax.render(sink, &mut print_event, &|| false)?;
     println!(
         "wrote {} ({} frames in {:.1}s, {:.1}s in all)",
-        args.output.display(),
+        output(&args).display(),
         parallax.frames(),
         rendering.elapsed().as_secs_f64(),
         started.elapsed().as_secs_f64()
@@ -312,9 +344,95 @@ fn print_event(event: Event) {
 }
 
 /// The video's options from the command line.
-fn options(args: &ParallaxVideoArgs) -> ParallaxOptions {
+/// The automatic tour the flags ask for.
+fn auto_tour(args: &ParallaxVideoArgs) -> seiza_parallax::AutoTour {
+    seiza_parallax::AutoTour {
+        targets: args.auto_tour.filter(|&targets| targets > 0),
+        hold: args.tour_hold,
+        motion: args.tour_motion,
+    }
+}
+
+/// Plan a tour of the catalogued objects in the image and write it to
+/// `path` for editing.
+fn write_plan(args: &ParallaxVideoArgs, path: &Path) -> Result<()> {
+    let solve_path = args
+        .image
+        .clone()
+        .or_else(|| args.stars.clone())
+        .expect("checked in run");
+    let dimensions = open_display(&solve_path)?.dimensions();
+    let wcs = solve(args, &solve_path)?;
+    let plan = seiza_parallax::plan_tour(
+        &wcs,
+        dimensions,
+        args.objects.as_deref(),
+        args.size,
+        &auto_tour(args),
+    )?;
+    let mut text = format!(
+        "# A tour of {} planned by seiza parallax-video. Each line is a stop as\n\
+         # --stop takes it; drop, move or change lines, then pass this file with\n\
+         # --tour-file. The nebula's distance is taken at the focus line.\n\
+         focus {:.0},{:.0}  # {}\n",
+        solve_path.display(),
+        plan.focus.0,
+        plan.focus.1,
+        plan.focus_name
+    );
+    for planned in &plan.stops {
+        let line = seiza_parallax::format_stop(&planned.stop);
+        match &planned.name {
+            Some(name) => text.push_str(&format!("{line}  # {name}\n")),
+            None if planned.stop.focus.is_some() => {
+                text.push_str(&format!("{line}  # pulling back on the way\n"))
+            }
+            None => text.push_str(&format!("{line}\n")),
+        }
+    }
+    std::fs::write(path, &text).with_context(|| format!("failed to write {}", path.display()))?;
+    print!("{text}");
+    println!("wrote {}", path.display());
+    Ok(())
+}
+
+/// A tour file's stops, and its focus line if any.
+type TourFile = (Vec<seiza_parallax::TourStop>, Option<(f64, f64)>);
+
+/// The stops and focus of the tour file at `path`.
+fn read_tour(path: &Path) -> Result<TourFile> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let (mut stops, mut focus) = (Vec::new(), None);
+    for (number, line) in text.lines().enumerate() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let where_ = || format!("{} line {}", path.display(), number + 1);
+        if let Some(place) = line.strip_prefix("focus ") {
+            focus = Some(
+                parse_point(place.trim())
+                    .map_err(anyhow::Error::msg)
+                    .with_context(where_)?,
+            );
+        } else {
+            stops.push(
+                seiza_parallax::parse_stop(line)
+                    .map_err(anyhow::Error::msg)
+                    .with_context(where_)?,
+            );
+        }
+    }
+    Ok((stops, focus))
+}
+
+/// The video's options from the command line, with the tour file's stops
+/// and focus if one was given.
+fn options(args: &ParallaxVideoArgs, file: Option<TourFile>) -> ParallaxOptions {
+    let (file_stops, file_focus) = file.unwrap_or_default();
     ParallaxOptions {
-        focus: args.focus,
+        focus: args.focus.or(file_focus),
         distance_pc: args.distance,
         unmatched_distance_pc: args.unmatched_distance,
         objects: args.objects.clone(),
@@ -352,7 +470,12 @@ fn options(args: &ParallaxVideoArgs) -> ParallaxOptions {
         },
         growth_limit: args.growth_limit,
         fade_from: args.fade_from,
-        tour: args.stops.clone(),
+        tour: if file_stops.is_empty() {
+            args.stops.clone()
+        } else {
+            file_stops
+        },
+        auto_tour: args.auto_tour.map(|_| auto_tour(args)),
         size: args.size,
         seconds: args.seconds,
         fps: args.fps,
@@ -383,11 +506,11 @@ fn split(
     println!("splitting {} with StarXTerminator", image_path.display());
     let (starless, stars) = star_x_terminator(&image)?;
     if args.keep_split {
-        let stem = args.output.file_stem().map_or_else(
+        let stem = output(args).file_stem().map_or_else(
             || "parallax".into(),
             |stem| stem.to_string_lossy().into_owned(),
         );
-        let directory = args.output.parent().unwrap_or(Path::new("."));
+        let directory = output(args).parent().unwrap_or(Path::new("."));
         for (suffix, split) in [("starless", &starless), ("stars", &stars)] {
             let path = directory.join(format!("{stem}-{suffix}.png"));
             image::DynamicImage::ImageRgb32F(split.clone())
@@ -552,23 +675,30 @@ fn write_layers(directory: &Path, scene: &Scene) -> Result<()> {
     Ok(())
 }
 
+/// Where the video goes; clap asks for it unless only planning a tour.
+fn output(args: &ParallaxVideoArgs) -> &Path {
+    args.output
+        .as_deref()
+        .expect("required unless planning a tour")
+}
+
 fn open_sink(args: &ParallaxVideoArgs, settings: VideoSettings) -> Result<Box<dyn FrameSink>> {
     let ffmpeg = || -> Result<Box<dyn FrameSink>> {
         Ok(Box::new(FfmpegSink::start(
             &args.ffmpeg,
-            &args.output,
+            output(args),
             settings,
         )?))
     };
     match args.encoder {
-        EncoderArg::Png => Ok(Box::new(PngSequence::new(&args.output, settings)?)),
+        EncoderArg::Png => Ok(Box::new(PngSequence::new(output(args), settings)?)),
         EncoderArg::Ffmpeg => ffmpeg(),
-        EncoderArg::Openh264 => openh264(&args.output, settings),
+        EncoderArg::Openh264 => openh264(output(args), settings),
         EncoderArg::Auto => {
             if FfmpegSink::available(&args.ffmpeg) {
                 ffmpeg()
             } else {
-                openh264(&args.output, settings)
+                openh264(output(args), settings)
                     .context("ffmpeg did not run; install it, pass --ffmpeg, or use --encoder png")
             }
         }

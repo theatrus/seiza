@@ -35,6 +35,7 @@ pub mod overlay;
 pub mod pipeline;
 pub mod render;
 pub mod scene;
+pub mod tour;
 
 pub use dust::Dust;
 #[cfg(feature = "openh264")]
@@ -46,10 +47,14 @@ pub use field::default_gaia_cache;
 pub use lift::{Extent, lift_object};
 pub use light::{LightImage, Pyramid};
 pub use overlay::{CustomLabel, DEFAULT_WATERMARK, parse_color, parse_label};
-pub use pipeline::{Event, Parallax, ParallaxOptions, Summary, TourStop, parse_stop};
+pub use pipeline::{
+    Event, Parallax, ParallaxOptions, PlannedTour, Summary, TourStop, format_stop, parse_stop,
+    plan_tour,
+};
 pub use render::{Easing, Quality, Shot, Start, Stop, View};
 pub use scene::{CutOptions, Scene, SmallStars, Sprite, Star};
 pub use seiza_stars::PeakStar;
+pub use tour::{AutoTour, PlannedStop};
 
 use rayon::prelude::*;
 

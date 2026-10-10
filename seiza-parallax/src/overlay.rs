@@ -318,18 +318,18 @@ fn after<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
 }
 
 /// Whether `name` is `prefix` followed by a space or nothing.
-fn word(name: &str, prefix: &str) -> bool {
+pub(crate) fn word(name: &str, prefix: &str) -> bool {
     after(name, prefix).is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
 }
 
 /// Whether `name` is `prefix` followed by a number, spaced or not.
-fn numbered(name: &str, prefix: &str) -> bool {
+pub(crate) fn numbered(name: &str, prefix: &str) -> bool {
     after(name, prefix)
         .is_some_and(|rest| rest.trim_start().starts_with(|c: char| c.is_ascii_digit()))
 }
 
 /// Whether `name` is a Sharpless designation, `Sh2-` or `Sh 2 `.
-fn sharpless(name: &str) -> bool {
+pub(crate) fn sharpless(name: &str) -> bool {
     after(name, "Sh").is_some_and(|rest| {
         let rest = rest.trim_start();
         rest.starts_with("2-") || rest.starts_with("2 ")
