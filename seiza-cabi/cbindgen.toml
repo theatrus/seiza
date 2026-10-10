@@ -39,8 +39,11 @@ after_includes = """
  *   - SeizaStackExportSnapshot* returned by
  *     seiza_live_stacker_export_snapshot
  *       -> release with seiza_stack_export_snapshot_free().
- *   - SeizaParallax* returned by seiza_parallax_prepare_json
+ *   - SeizaParallax* returned by seiza_parallax_prepare_json or
+ *     seiza_parallax_reconfigure_json
  *       -> release with seiza_parallax_free() once no call using it runs.
+ *          Videos reconfigured from one preparation share its scene, which
+ *          lives until the last of them is freed; free them in any order.
  *   - char* returned by seiza_catalog_status_json, seiza_solve_image_json,
  *     seiza_probe_frame_json, seiza_calibration_plan_json,
  *     seiza_calibration_build_master_json, seiza_live_stacker_state_json, and

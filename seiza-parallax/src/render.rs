@@ -504,7 +504,15 @@ impl Shot {
     }
 
     /// This shot made to keep every layer's edge out of view, and the
-    /// factor its truck was scaled by (for a tour, its stops' pan). A turning frame's first frame zooms
+    /// factor its truck was scaled by (for a tour, its stops' pan), as
+    /// [`Self::fitted_until`] finds them with nothing to stop it.
+    pub fn fitted(&self, scene: &Scene) -> (Self, f64) {
+        self.fitted_until(scene, &|| false)
+            .expect("a fit nothing stops finishes")
+    }
+
+    /// [`Self::fitted`], asking `stop` as it goes and giving `None` once it
+    /// answers true. A turning frame's first frame zooms
     /// in as far as it must. The camera's sideways travel toward
     /// the focus point comes as early as `lead` allows, it turns as much of
     /// the way as `pan` allows, and its truck swings as wide as the image
@@ -512,10 +520,27 @@ impl Shot {
     /// different depths against each other, and the far ones would uncover
     /// ground the image never showed. Moving along a straight line from
     /// where the image was taken never does.
-    pub fn fitted(&self, scene: &Scene) -> (Self, f64) {
+    pub fn fitted_until(&self, scene: &Scene, stop: &dyn Fn() -> bool) -> Option<(Self, f64)> {
+        // Once asked to stop, every check fails at once, so each search
+        // ends quickly, and the result is thrown away.
+        let stopped = std::cell::Cell::new(false);
+        let halted = || {
+            if !stopped.get() && stop() {
+                stopped.set(true);
+            }
+            stopped.get()
+        };
+        let fitted = self.fit(scene, &halted);
+        (!stopped.get()).then_some(fitted)
+    }
+
+    /// The fit itself, every check failing once `halted` answers true.
+    fn fit(&self, scene: &Scene, halted: &dyn Fn() -> bool) -> (Self, f64) {
         let depths = self.guarded_depths(scene);
         let fits = |shot: &Self| {
-            (0..shot.frames).all(|frame| shot.inside(scene, &shot.view(scene, frame), &depths))
+            !halted()
+                && (0..shot.frames)
+                    .all(|frame| shot.inside(scene, &shot.view(scene, frame), &depths))
         };
         // The largest factor in [0, 1] the shot `make` builds still fits at.
         let largest = |make: &dyn Fn(f64) -> Self| -> f64 {
@@ -573,7 +598,7 @@ impl Shot {
                     .collect(),
                 ..self.clone()
             };
-            let zoomed = |share: f64| self.zoom_stops(scene, &depths, panned(share), 1.5);
+            let zoomed = |share: f64| self.zoom_stops(scene, &depths, panned(share), 1.5, halted);
             let share = if zoomed(1.0).is_some() {
                 1.0
             } else {
@@ -656,11 +681,21 @@ impl Shot {
     /// `depths`, or `None` if that is not enough. A view that shows an edge
     /// zooms in the stop it is at, or the nearer of the two it lies
     /// between, a little at a time.
-    fn zoom_stops(&self, scene: &Scene, depths: &[f64], mut shot: Self, most: f64) -> Option<Self> {
+    fn zoom_stops(
+        &self,
+        scene: &Scene,
+        depths: &[f64],
+        mut shot: Self,
+        most: f64,
+        halted: &dyn Fn() -> bool,
+    ) -> Option<Self> {
         let asked: Vec<f64> = shot.tour.iter().map(|stop| stop.zoom).collect();
         let times = tour_times(&shot.tour);
         let total = times.last().map_or(0.0, |&(_, leave)| leave);
         for _ in 0..400 {
+            if halted() {
+                return None;
+            }
             let mut bump = vec![false; shot.tour.len()];
             for frame in 0..shot.frames {
                 if shot.inside(scene, &shot.view(scene, frame), depths) {

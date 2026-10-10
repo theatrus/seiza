@@ -9,7 +9,7 @@
 
 use crate::field::{self, FieldSource};
 use crate::lift::Extent;
-use crate::overlay::{self, CustomLabel, Overlay};
+use crate::overlay::{self, CustomLabel, Mark, Overlay};
 use crate::render::{Easing, Quality, Shot, Start, Stop};
 use crate::scene::{CutOptions, Scene, SmallStars, Star};
 use crate::tour::{self, AutoTour, PlannedStop};
@@ -17,6 +17,7 @@ use crate::{FrameSink, LightImage, VideoSettings};
 use image::{Rgb, Rgb32FImage, RgbImage};
 use seiza::Wcs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 /// Where lifted galaxies fly: so far beyond the stars that they hold still.
 pub const GALAXY_DISTANCE_PC: f64 = 1e8;
@@ -148,17 +149,23 @@ pub fn parse_stop(text: &str) -> Result<TourStop, String> {
     Ok(stop)
 }
 
-/// Everything about a video but its images and plate solution. The
-/// defaults are `seiza parallax-video`'s.
+/// What preparing a video's scene takes beyond its images and plate
+/// solution: where the distances come from and how the stars are cut.
+/// Changing any of these needs a new [`Parallax::prepare`]. The defaults are
+/// `seiza parallax-video`'s.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ParallaxOptions {
-    /// The image point the camera flies toward, image pixels; the image's
-    /// centre if `None`.
-    pub focus: Option<(f64, f64)>,
+pub struct SceneOptions {
     /// Distance to the nebula or galaxy behind the stars, parsecs; if
-    /// `None`, the catalogued object's at the focus point, else the median
-    /// Gaia distance of the stars near it.
+    /// `None`, that of the catalogued object at `distance_focus`, else the
+    /// median Gaia distance of the stars near it.
     pub distance_pc: Option<f64>,
+    /// The image point whose object, or nearby stars, give the nebula's
+    /// distance when `distance_pc` is `None`, image pixels. If `None`, the
+    /// camera's destination: [`VideoOptions::focus`], a tour's first stop
+    /// flown in toward, or an automatic tour's target most worth a visit;
+    /// else the image's centre. The scene keeps that depth whatever later
+    /// camera moves aim at.
+    pub distance_focus: Option<(f64, f64)>,
     /// Distance for stars without one, parsecs; if `None`, the matched
     /// stars' median, and never nearer than the nebula.
     pub unmatched_distance_pc: Option<f64>,
@@ -190,6 +197,62 @@ pub struct ParallaxOptions {
     /// The light the dust lets through is the share of stars seen to this
     /// power.
     pub dust_opacity: f32,
+}
+
+impl Default for SceneOptions {
+    fn default() -> Self {
+        Self {
+            distance_pc: None,
+            distance_focus: None,
+            unmatched_distance_pc: None,
+            objects: None,
+            object_distances: None,
+            star_distances: None,
+            gaia_max_mag: 16.0,
+            gaia_cache: None,
+            online: true,
+            max_stars: None,
+            small_stars: SmallStars::Drop,
+            keep_galaxies: false,
+            dust: true,
+            dust_opacity: 3.0,
+        }
+    }
+}
+
+impl SceneOptions {
+    /// Whether these options can prepare a scene.
+    pub fn check(&self) -> Result<(), Error> {
+        let invalid = |message: &str| Err(Error::Invalid(message.into()));
+        if self.dust_opacity.is_nan() || self.dust_opacity < 0.0 {
+            return invalid("the dust opacity must be at least 0");
+        }
+        if self
+            .distance_pc
+            .is_some_and(|distance| distance.is_nan() || distance <= 0.0)
+        {
+            return invalid("the distance must be positive");
+        }
+        if self
+            .distance_focus
+            .is_some_and(|(x, y)| !x.is_finite() || !y.is_finite())
+        {
+            return invalid("the distance focus must be a point");
+        }
+        Ok(())
+    }
+}
+
+/// How a prepared scene is filmed: the camera, the output and the labels.
+/// [`Parallax::reconfigure`] films the same scene anew with other
+/// `VideoOptions`, without preparing it again. The defaults are `seiza
+/// parallax-video`'s.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VideoOptions {
+    /// The image point the camera flies toward, image pixels; the image's
+    /// centre if `None`. It moves the camera only; the nebula's depth is
+    /// [`SceneOptions`]'s.
+    pub focus: Option<(f64, f64)>,
     pub start: Start,
     /// Fraction of the way to the nebula the camera flies, 0 to below 1.
     pub dolly: f64,
@@ -205,7 +268,8 @@ pub struct ParallaxOptions {
     pub zoom: f64,
     pub zoom_end: f64,
     /// The frame's turn at the first and last frames, degrees
-    /// anticlockwise.
+    /// anticlockwise, taken as given: 0 to 360 turns once anticlockwise and
+    /// 0 to -360 once clockwise.
     pub rotate_deg: (f64, f64),
     pub easing: Easing,
     pub quality: Quality,
@@ -214,11 +278,11 @@ pub struct ParallaxOptions {
     pub growth_limit: f64,
     pub fade_from: f64,
     /// A tour of stops instead of the single move toward `focus`: the
-    /// camera glides through them, easing to a halt where it holds. The
-    /// first is the opening view. The nebula takes the distance of the
-    /// object at `focus` if given, else at the first stop flown in toward. Its length replaces `seconds`, and the
+    /// camera glides through them, slowing through each it holds at. The
+    /// first is the opening view. Its length replaces `seconds`, and the
     /// move's own settings (`start`, `dolly`, `truck`, `pan`, `rotate_deg`,
-    /// `zoom_end`, `easing`) go unused.
+    /// `zoom_end`, `easing`) go unused. Stops' turns are taken as given,
+    /// unwrapped.
     pub tour: Vec<TourStop>,
     /// Plan a tour of the catalogued objects in the field, when `tour` is
     /// empty: the most prominent, visited in a short round from the whole
@@ -242,23 +306,10 @@ pub struct ParallaxOptions {
     pub watermark: Option<String>,
 }
 
-impl Default for ParallaxOptions {
+impl Default for VideoOptions {
     fn default() -> Self {
         Self {
             focus: None,
-            distance_pc: None,
-            unmatched_distance_pc: None,
-            objects: None,
-            object_distances: None,
-            star_distances: None,
-            gaia_max_mag: 16.0,
-            gaia_cache: None,
-            online: true,
-            max_stars: None,
-            small_stars: SmallStars::Drop,
-            keep_galaxies: false,
-            dust: true,
-            dust_opacity: 3.0,
             start: Start::Focus,
             dolly: 0.4,
             truck: 0.0,
@@ -286,8 +337,8 @@ impl Default for ParallaxOptions {
     }
 }
 
-impl ParallaxOptions {
-    /// Whether these options can make a video.
+impl VideoOptions {
+    /// Whether these options can film a video.
     pub fn check(&self) -> Result<(), Error> {
         let invalid = |message: &str| Err(Error::Invalid(message.into()));
         if !(0.0..1.0).contains(&self.dolly) {
@@ -298,9 +349,6 @@ impl ParallaxOptions {
         }
         if !(0.0..=1.0).contains(&self.overlay_density) {
             return invalid("the overlay density must be from 0 to 1");
-        }
-        if self.dust_opacity.is_nan() || self.dust_opacity < 0.0 {
-            return invalid("the dust opacity must be at least 0");
         }
         if !self.rotate_deg.0.is_finite() || !self.rotate_deg.1.is_finite() {
             return invalid("the rotation must be numbers of degrees");
@@ -319,10 +367,10 @@ impl ParallaxOptions {
             return invalid("the frame's sides must be even and at least 16");
         }
         if self
-            .distance_pc
-            .is_some_and(|distance| distance.is_nan() || distance <= 0.0)
+            .focus
+            .is_some_and(|(x, y)| !x.is_finite() || !y.is_finite())
         {
-            return invalid("the distance must be positive");
+            return invalid("the focus must be a point");
         }
         if self.tour.len() == 1 {
             return invalid("a tour needs at least two stops");
@@ -384,7 +432,46 @@ impl ParallaxOptions {
     }
 }
 
-/// What preparing a video found.
+/// Everything about a video but its images and plate solution.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ParallaxOptions {
+    pub scene: SceneOptions,
+    pub video: VideoOptions,
+}
+
+impl ParallaxOptions {
+    /// Whether these options can make a video.
+    pub fn check(&self) -> Result<(), Error> {
+        self.scene.check()?;
+        self.video.check()
+    }
+}
+
+/// How the fit changed the framing asked for, so a caller can explain it.
+/// Each pair is what was asked and what the video uses.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FitSummary {
+    /// The first frame's zoom.
+    pub zoom: (f64, f64),
+    /// The single move's pan.
+    pub pan: (f64, f64),
+    /// How early the single move's sideways travel toward the focus comes,
+    /// 1 as asked.
+    pub lead: (f64, f64),
+    /// The single move's truck, as a fraction of the nebula's distance.
+    pub truck: (f64, f64),
+    /// A tour's stops, in order.
+    pub stops: Vec<StopFit>,
+}
+
+/// How the fit changed one tour stop: its zoom and pan, asked and used.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StopFit {
+    pub zoom: (f64, f64),
+    pub pan: (f64, f64),
+}
+
+/// What preparing a video found, and how its camera was fitted.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Summary {
     /// Stars found in the stars image.
@@ -395,9 +482,11 @@ pub struct Summary {
     /// Detections matched to a Gaia star, and those given a distance.
     pub gaia_matches: usize,
     pub with_distance: usize,
-    /// The nebula's distance and how it was found.
+    /// The nebula's distance, how it was found, and the image point it was
+    /// taken at.
     pub background_distance_pc: f64,
     pub background_basis: String,
+    pub background_focus: (f64, f64),
     /// Where stars without a distance were put.
     pub unmatched_distance_pc: f64,
     /// Stars cut out to fly at their own distances.
@@ -409,15 +498,61 @@ pub struct Summary {
     pub dust_transmission: Option<(f32, f32)>,
     /// Catalogued objects in the field to label.
     pub labelled_objects: usize,
+    /// How the camera was fitted.
+    pub fit: FitSummary,
 }
 
-/// A prepared parallax video.
-pub struct Parallax {
+/// What preparation made once, shared by every video of the scene.
+struct Prepared {
     scene: Scene,
+    wcs: Wcs,
+    image_size: (usize, usize),
+    /// Galaxies lifted onto the far field: name, place and distance.
+    lifted: Vec<(String, (f64, f64), f64)>,
+    objects: Option<PathBuf>,
+    summary: Summary,
+    /// The catalogued objects' labels, read on first need and kept for
+    /// every video of the scene, or why they could not be.
+    catalog_marks: OnceLock<Result<Arc<Vec<Mark>>, String>>,
+}
+
+impl Prepared {
+    /// The catalogued objects' labels, read once.
+    fn catalog_marks(&self) -> Result<Arc<Vec<Mark>>, Error> {
+        self.catalog_marks
+            .get_or_init(|| {
+                let path =
+                    seiza::data_paths::objects(self.objects.as_deref()).map_err(|error| {
+                        format!("labelling objects needs the object catalog (seiza setup): {error}")
+                    })?;
+                let catalog = open_objects(&path).map_err(|error| error.to_string())?;
+                let (width, height) = self.image_size;
+                overlay::catalog_marks(
+                    &catalog,
+                    &self.wcs,
+                    (width as u32, height as u32),
+                    &self.scene,
+                    &self.lifted,
+                )
+                .map(Arc::new)
+                .map_err(|error| error.to_string())
+            })
+            .clone()
+            .map_err(Error::Invalid)
+    }
+}
+
+/// A prepared parallax video: a scene cut into depths, filmed by a fitted
+/// camera. Its frames may be drawn from several threads at once.
+/// [`Parallax::reconfigure`] films the same scene anew, sharing it: the
+/// scene is held once, however many videos film it, and lives until the
+/// last of them is dropped.
+pub struct Parallax {
+    prepared: Arc<Prepared>,
+    video: VideoOptions,
     shot: Shot,
     overlay: Option<Overlay>,
     summary: Summary,
-    fps: u32,
 }
 
 impl std::fmt::Debug for Parallax {
@@ -426,7 +561,6 @@ impl std::fmt::Debug for Parallax {
             .debug_struct("Parallax")
             .field("shot", &self.shot)
             .field("summary", &self.summary)
-            .field("fps", &self.fps)
             .finish_non_exhaustive()
     }
 }
@@ -434,22 +568,35 @@ impl std::fmt::Debug for Parallax {
 impl Parallax {
     /// Prepare a video of `starless` and `stars`, a stretched image split
     /// into its starless image and its unscreened stars (values 0 to 1),
-    /// whose sky `wcs` gives. `report` hears each step.
+    /// whose sky `wcs` gives. `report` hears each step; `stop` is asked
+    /// between steps and through the fit, and when it answers true the
+    /// preparation ends with [`Error::Stopped`].
     pub fn prepare(
         starless: &Rgb32FImage,
         stars: &Rgb32FImage,
         wcs: &Wcs,
         options: &ParallaxOptions,
         report: &mut dyn FnMut(Event),
+        stop: &dyn Fn() -> bool,
     ) -> Result<Self, Error> {
         options.check()?;
-        let planned;
-        let options = match &options.auto_tour {
-            Some(auto) if options.tour.is_empty() => {
-                planned = plan_options(options, auto, wcs, starless.dimensions(), report)?;
-                &planned
+        let halt = || if stop() { Err(Error::Stopped) } else { Ok(()) };
+        let scene_options = &options.scene;
+        // An automatic tour is planned first, as its best target may give
+        // the nebula's distance.
+        let (video, planned_focus) = match &options.video.auto_tour {
+            Some(auto) if options.video.tour.is_empty() => {
+                let (video, focus) = plan_video(
+                    &options.video,
+                    auto,
+                    wcs,
+                    starless.dimensions(),
+                    scene_options.objects.as_deref(),
+                    report,
+                )?;
+                (video, Some(focus))
             }
-            _ => options,
+            _ => (options.video.clone(), None),
         };
         if starless.dimensions() != stars.dimensions() {
             return Err(Error::Invalid(format!(
@@ -484,11 +631,12 @@ impl Parallax {
             "{} stars found in the stars image",
             detections.len()
         )));
+        halt()?;
         let source = FieldSource {
-            star_distances: options.star_distances.as_deref(),
-            gaia_max_mag: options.gaia_max_mag,
-            cache: options.gaia_cache.as_deref(),
-            online: options.online,
+            star_distances: scene_options.star_distances.as_deref(),
+            gaia_max_mag: scene_options.gaia_max_mag,
+            cache: scene_options.gaia_cache.as_deref(),
+            online: scene_options.online,
         };
         let (gaia, hipparcos) = field::catalogue_stars(&source, wcs, (width, height), report)?;
         (summary.gaia_stars, summary.hipparcos_stars) = (gaia.len(), hipparcos.len());
@@ -502,24 +650,31 @@ impl Parallax {
         report(Event::Note(&format!(
             "{gaia_matches} matched to Gaia, {with_distance} with a distance"
         )));
+        halt()?;
 
         let centre = ((width as f64 - 1.0) / 2.0, (height as f64 - 1.0) / 2.0);
-        // On a tour, the first stop the camera flies in toward stands for
-        // the target whose distance the nebula takes, unless `focus` says.
-        let first_visited = options
+        // The nebula's depth is taken where the scene options say, else at
+        // the camera's destination: its focus, a tour's first stop flown in
+        // toward, or an automatic tour's target most worth a visit.
+        let first_visited = video
             .tour
             .iter()
             .find(|stop| stop.dolly > 0.0)
             .map(|stop| stop.focus.unwrap_or(centre));
-        let focus = options.focus.or(first_visited).unwrap_or(centre);
+        let focus = scene_options
+            .distance_focus
+            .or(video.focus)
+            .or(planned_focus)
+            .or(first_visited)
+            .unwrap_or(centre);
         if focus.0 < 0.0 || focus.1 < 0.0 || focus.0 >= width as f64 || focus.1 >= height as f64 {
             return Err(Error::Invalid(format!(
-                "the focus point {focus:?} is outside the {width}x{height} image"
+                "the distance focus {focus:?} is outside the {width}x{height} image"
             )));
         }
-        let (distance, basis) = match options.distance_pc {
+        let (distance, basis) = match scene_options.distance_pc {
             Some(distance) => (distance, "given".to_string()),
-            None => match target_distance(options, wcs, (width, height), focus) {
+            None => match target_distance(scene_options, wcs, (width, height), focus) {
                 Ok(Some((name, distance, basis))) => {
                     (distance, format!("the distance of {name} ({basis})"))
                 }
@@ -541,12 +696,16 @@ impl Parallax {
         report(Event::Note(&format!(
             "background at {distance:.0} pc, {basis}"
         )));
-        (summary.background_distance_pc, summary.background_basis) = (distance, basis);
+        (
+            summary.background_distance_pc,
+            summary.background_basis,
+            summary.background_focus,
+        ) = (distance, basis, focus);
 
         // Most stars too faint to match are field stars well beyond a
         // nearby target, so they go to the matched stars' median distance
         // rather than onto the nebula.
-        let unmatched = options.unmatched_distance_pc.unwrap_or_else(|| {
+        let unmatched = scene_options.unmatched_distance_pc.unwrap_or_else(|| {
             field::median(matched.iter().filter_map(|star| star.distance_pc))
                 .unwrap_or(distance)
                 .max(distance)
@@ -567,8 +726,8 @@ impl Parallax {
         // Galaxies lie far beyond everything else, but the star remover
         // leaves them on the nebula's plane.
         let mut galaxies = Vec::new();
-        if !options.keep_galaxies {
-            match galaxies_in_image(options, wcs, (width, height), focus) {
+        if !scene_options.keep_galaxies {
+            match galaxies_in_image(scene_options, wcs, (width, height), focus) {
                 Ok(found) => {
                     for (name, extent) in found {
                         if let Some(sprite) =
@@ -598,6 +757,7 @@ impl Parallax {
                 )));
             }
         }
+        halt()?;
         let mut scene = Scene::new(
             &starless,
             &stars_light,
@@ -606,8 +766,8 @@ impl Parallax {
             unmatched,
             focal_px,
             &CutOptions {
-                max_stars: options.max_stars,
-                small_stars: options.small_stars,
+                max_stars: scene_options.max_stars,
+                small_stars: scene_options.small_stars,
                 ..CutOptions::default()
             },
         );
@@ -620,7 +780,7 @@ impl Parallax {
         scene
             .sprites
             .extend(galaxies.into_iter().map(|(_, sprite)| sprite));
-        if options.dust {
+        if scene_options.dust {
             // The stars seen through the dust: all but the matched ones in
             // front of it. The unmatched ones count however near the dust
             // they were placed, as faint stars are mostly far.
@@ -630,7 +790,7 @@ impl Parallax {
                 .map(|star| (star.x, star.y))
                 .collect();
             scene.dust =
-                crate::Dust::from_star_counts(&behind, width, height, options.dust_opacity)
+                crate::Dust::from_star_counts(&behind, width, height, scene_options.dust_opacity)
                     .map(|dust| dust.with_darkness(&starless, &behind));
             match &scene.dust {
                 Some(dust) => {
@@ -652,38 +812,98 @@ impl Parallax {
                 )),
             }
         }
-        if options.max_stars.is_some() {
+        if scene_options.max_stars.is_some() {
             report(Event::Note(&format!(
                 "the {} brightest stars fly; the rest {}",
                 summary.flying_stars,
-                match options.small_stars {
+                match scene_options.small_stars {
                     SmallStars::Drop => "are dropped",
                     SmallStars::Field => "stay on the star field",
                 }
             )));
         }
+        halt()?;
+        let prepared = Arc::new(Prepared {
+            scene,
+            wcs: wcs.clone(),
+            image_size: (width, height),
+            lifted,
+            objects: scene_options.objects.clone(),
+            summary,
+            catalog_marks: OnceLock::new(),
+        });
+        Self::film(prepared, &video, report, stop)
+    }
 
-        let (sin, cos) = options.truck_angle_deg.to_radians().sin_cos();
-        let shot = Shot {
+    /// The same scene filmed anew with `video`: another camera move, frame
+    /// size, length, frame rate, quality or labels. Nothing of the scene is
+    /// prepared again, and this video is left as it was, free to keep
+    /// drawing frames while the new one is fitted and after. The catalogued
+    /// objects' labels are read once for every video of the scene. `stop`
+    /// is asked through the fit; when it answers true the result is
+    /// [`Error::Stopped`].
+    pub fn reconfigure(
+        &self,
+        video: &VideoOptions,
+        report: &mut dyn FnMut(Event),
+        stop: &dyn Fn() -> bool,
+    ) -> Result<Self, Error> {
+        Self::film(Arc::clone(&self.prepared), video, report, stop)
+    }
+
+    /// Film `prepared` as `video` asks: plan any automatic tour, fit the
+    /// camera to the scene and plan the labels.
+    fn film(
+        prepared: Arc<Prepared>,
+        video: &VideoOptions,
+        report: &mut dyn FnMut(Event),
+        stop: &dyn Fn() -> bool,
+    ) -> Result<Self, Error> {
+        video.check()?;
+        let (width, height) = prepared.image_size;
+        let video = match &video.auto_tour {
+            Some(auto) if video.tour.is_empty() => {
+                plan_video(
+                    video,
+                    auto,
+                    &prepared.wcs,
+                    (width as u32, height as u32),
+                    prepared.objects.as_deref(),
+                    report,
+                )?
+                .0
+            }
+            _ => video.clone(),
+        };
+        let scene = &prepared.scene;
+        let centre = ((width as f64 - 1.0) / 2.0, (height as f64 - 1.0) / 2.0);
+        let focus = video.focus.unwrap_or(centre);
+        if focus.0 < 0.0 || focus.1 < 0.0 || focus.0 >= width as f64 || focus.1 >= height as f64 {
+            return Err(Error::Invalid(format!(
+                "the focus point {focus:?} is outside the {width}x{height} image"
+            )));
+        }
+        let (sin, cos) = video.truck_angle_deg.to_radians().sin_cos();
+        let asked = Shot {
             focus,
-            dolly: options.dolly,
-            truck: (options.truck * cos, -options.truck * sin),
-            start: options.start,
-            pan: options.pan,
+            dolly: video.dolly,
+            truck: (video.truck * cos, -video.truck * sin),
+            start: video.start,
+            pan: video.pan,
             rotation: (
-                options.rotate_deg.0.to_radians(),
-                options.rotate_deg.1.to_radians(),
+                video.rotate_deg.0.to_radians(),
+                video.rotate_deg.1.to_radians(),
             ),
-            zoom: options.zoom,
-            zoom_end: options.zoom_end,
-            width: options.size.0,
-            height: options.size.1,
-            frames: options.frames(),
-            easing: options.easing,
-            quality: options.quality,
-            growth_limit: options.growth_limit,
-            fade_from: options.fade_from,
-            tour: options
+            zoom: video.zoom,
+            zoom_end: video.zoom_end,
+            width: video.size.0,
+            height: video.size.1,
+            frames: video.frames(),
+            easing: video.easing,
+            quality: video.quality,
+            growth_limit: video.growth_limit,
+            fade_from: video.fade_from,
+            tour: video
                 .tour
                 .iter()
                 .map(|stop| Stop {
@@ -698,84 +918,73 @@ impl Parallax {
                     push: stop.push,
                 })
                 .collect(),
-            glide: options.tour_glide,
+            glide: video.tour_glide,
             ..Shot::default()
         };
-        if !shot.tour.is_empty() {
+        if !asked.tour.is_empty() {
             report(Event::Note(&format!(
                 "a tour of {} stops over {:.1} s",
-                shot.tour.len(),
-                options.seconds()
+                asked.tour.len(),
+                video.seconds()
             )));
         }
-        let (shot, fitted) = shot.fitted(&scene);
-        if shot.zoom > options.zoom.max(1.0) {
-            report(Event::Note(&format!(
-                "first frame zoomed in to {:.2} so {} stays inside the image",
-                shot.zoom,
-                if shot.tour.is_empty() {
-                    "the turned frame"
-                } else {
-                    "every view of the tour"
-                }
-            )));
-        }
-        if shot.pan < options.pan {
-            report(Event::Note(&format!(
-                "pan reduced to {:.2} so the far stars stay inside the image",
-                shot.pan
-            )));
-        }
-        if shot.lead < 1.0 {
-            report(Event::Note(&format!(
-                "sideways travel toward the focus point comes later (lead {:.2}) so the far \
-                 stars stay inside the image",
-                shot.lead
-            )));
-        }
-        let zoomed: Vec<String> = shot
-            .tour
-            .iter()
-            .zip(&options.tour)
-            .enumerate()
-            .filter(|(_, (fitted, asked))| fitted.zoom > asked.zoom * 1.001)
-            .map(|(index, (fitted, asked))| {
-                format!("stop {} by {:.2}", index + 1, fitted.zoom / asked.zoom)
-            })
-            .collect();
-        if !zoomed.is_empty() {
-            report(Event::Note(&format!(
-                "zoomed in so every view stays inside the image: {}",
-                zoomed.join(", ")
-            )));
-        }
-        if !shot.tour.is_empty() && fitted < 1.0 && options.tour.iter().any(|stop| stop.pan > 0.0) {
-            report(Event::Note(&format!(
-                "each stop's pan reduced to {:.2} of what it asked so the far stars stay inside \
-                 the image",
-                fitted
-            )));
-        }
-        if shot.tour.is_empty() && fitted < 1.0 && options.truck != 0.0 {
-            report(Event::Note(&format!(
-                "truck reduced to {:.4} of the distance so the far stars stay inside the image",
-                options.truck * fitted
-            )));
+        let (shot, share) = asked.fitted_until(scene, stop).ok_or(Error::Stopped)?;
+        let fit = FitSummary {
+            zoom: (video.zoom, shot.zoom),
+            pan: (video.pan, shot.pan),
+            lead: (1.0, shot.lead),
+            truck: (video.truck, video.truck * share),
+            stops: asked
+                .tour
+                .iter()
+                .zip(&shot.tour)
+                .map(|(asked, fitted)| StopFit {
+                    zoom: (asked.zoom, fitted.zoom),
+                    pan: (asked.pan, fitted.pan),
+                })
+                .collect(),
+        };
+        report_fit(&fit, &shot, report);
+        if stop() {
+            return Err(Error::Stopped);
         }
 
-        let overlay = prepare_overlay(options, wcs, &scene, &lifted, &shot, &mut summary)?;
-        if summary.labelled_objects > 0 {
+        // The labels: the caller's own, the catalogued objects (read once
+        // for every video of the scene), and the watermark.
+        let mut summary = prepared.summary.clone();
+        let mut marks = overlay::custom_marks(&video.labels, Rgb(video.label_color), scene);
+        if video.overlay {
+            let catalogued = prepared.catalog_marks()?;
+            summary.labelled_objects = catalogued.len();
             report(Event::Note(&format!(
                 "{} catalogued objects in the field to label",
-                summary.labelled_objects
+                catalogued.len()
             )));
+            marks.extend(catalogued.iter().cloned());
         }
+        let overlay = if marks.is_empty() && video.watermark.is_none() {
+            None
+        } else {
+            let mut overlay = Overlay::new(
+                marks,
+                video.watermark.clone(),
+                video.overlay_density,
+                prepared.wcs.scale_arcsec_per_px(),
+                video.size,
+            )?;
+            overlay.plan(&shot, scene, video.fps as f64);
+            Some(overlay)
+        };
+        if stop() {
+            return Err(Error::Stopped);
+        }
+        summary.fit = fit;
         Ok(Self {
-            scene,
+            prepared,
+            video,
             shot,
             overlay,
             summary,
-            fps: options.fps,
         })
     }
 
@@ -785,7 +994,7 @@ impl Parallax {
     }
 
     pub fn fps(&self) -> u32 {
-        self.fps
+        self.video.fps
     }
 
     /// The frame size, pixels.
@@ -800,7 +1009,18 @@ impl Parallax {
 
     /// The scene cut into depths.
     pub fn scene(&self) -> &Scene {
-        &self.scene
+        &self.prepared.scene
+    }
+
+    /// The image's plate solution.
+    pub fn wcs(&self) -> &Wcs {
+        &self.prepared.wcs
+    }
+
+    /// The video options this video was filmed with, an automatic tour as
+    /// planned.
+    pub fn video_options(&self) -> &VideoOptions {
+        &self.video
     }
 
     pub fn summary(&self) -> &Summary {
@@ -811,19 +1031,21 @@ impl Parallax {
     /// per pixel per frame.
     pub fn video_settings(&self) -> VideoSettings {
         let (width, height) = self.size();
+        let fps = self.fps();
         VideoSettings {
             width: width as u32,
             height: height as u32,
-            fps: self.fps,
-            bitrate: (width * height * self.fps as usize / 2).min(u32::MAX as usize) as u32,
+            fps,
+            bitrate: (width * height * fps as usize / 2).min(u32::MAX as usize) as u32,
         }
     }
 
     /// Frame `index`, with its labels, as display RGB.
     pub fn frame(&self, index: usize) -> RgbImage {
-        let mut image = self.shot.render(&self.scene, index).to_display_rgb8();
+        let scene = self.scene();
+        let mut image = self.shot.render(scene, index).to_display_rgb8();
         if let Some(overlay) = &self.overlay {
-            overlay.draw(index, &self.shot.view(&self.scene, index), &mut image);
+            overlay.draw(index, &self.shot.view(scene, index), &mut image);
         }
         image
     }
@@ -850,6 +1072,65 @@ impl Parallax {
         }
         sink.finish()?;
         Ok(())
+    }
+}
+
+/// Tell the caller how the fit changed the framing asked for.
+fn report_fit(fit: &FitSummary, shot: &Shot, report: &mut dyn FnMut(Event)) {
+    if fit.zoom.1 > fit.zoom.0.max(1.0) * 1.001 {
+        report(Event::Note(&format!(
+            "first frame zoomed in to {:.2} so {} stays inside the image",
+            fit.zoom.1,
+            if shot.tour.is_empty() {
+                "the turned frame"
+            } else {
+                "every view of the tour"
+            }
+        )));
+    }
+    if shot.tour.is_empty() {
+        if fit.pan.1 < fit.pan.0 {
+            report(Event::Note(&format!(
+                "pan reduced to {:.2} so the far stars stay inside the image",
+                fit.pan.1
+            )));
+        }
+        if fit.lead.1 < 1.0 {
+            report(Event::Note(&format!(
+                "sideways travel toward the focus point comes later (lead {:.2}) so the far \
+                 stars stay inside the image",
+                fit.lead.1
+            )));
+        }
+        if fit.truck.1 < fit.truck.0 {
+            report(Event::Note(&format!(
+                "truck reduced to {:.4} of the distance so the far stars stay inside the image",
+                fit.truck.1
+            )));
+        }
+        return;
+    }
+    let zoomed: Vec<String> = fit
+        .stops
+        .iter()
+        .enumerate()
+        .filter(|(_, stop)| stop.zoom.1 > stop.zoom.0 * 1.001)
+        .map(|(index, stop)| format!("stop {} by {:.2}", index + 1, stop.zoom.1 / stop.zoom.0))
+        .collect();
+    if !zoomed.is_empty() {
+        report(Event::Note(&format!(
+            "zoomed in so every view stays inside the image: {}",
+            zoomed.join(", ")
+        )));
+    }
+    if let Some(stop) = fit.stops.iter().find(|stop| stop.pan.0 > 0.0)
+        && stop.pan.1 < stop.pan.0
+    {
+        report(Event::Note(&format!(
+            "each stop's pan reduced to {:.2} of what it asked so the far stars stay inside \
+             the image",
+            stop.pan.1 / stop.pan.0
+        )));
     }
 }
 
@@ -931,29 +1212,23 @@ pub fn format_stop(stop: &TourStop) -> String {
     text
 }
 
-/// `options` with a tour of the catalogued objects in a `dimensions` image
-/// planned as `auto` asks, and the nebula's distance taken at the target
-/// most worth a visit unless `focus` says otherwise.
-fn plan_options(
-    options: &ParallaxOptions,
+/// `video` with a tour of the catalogued objects in a `dimensions` image
+/// planned as `auto` asks, and the target most worth a visit, where the
+/// nebula's distance is best taken.
+fn plan_video(
+    video: &VideoOptions,
     auto: &AutoTour,
     wcs: &Wcs,
     dimensions: (u32, u32),
+    objects: Option<&Path>,
     report: &mut dyn FnMut(Event),
-) -> Result<ParallaxOptions, Error> {
-    let plan = plan_tour(
-        wcs,
-        dimensions,
-        options.objects.as_deref(),
-        options.size,
-        auto,
-    )?;
-    let mut planned = ParallaxOptions {
+) -> Result<(VideoOptions, (f64, f64)), Error> {
+    let plan = plan_tour(wcs, dimensions, objects, video.size, auto)?;
+    let planned = VideoOptions {
         tour: plan.tour(),
-        focus: options.focus.or(Some(plan.focus)),
-        ..options.clone()
+        auto_tour: None,
+        ..video.clone()
     };
-    planned.auto_tour = None;
     let names: Vec<&str> = plan
         .stops
         .iter()
@@ -966,7 +1241,7 @@ fn plan_options(
         names.join(" → ")
     )));
     planned.check()?;
-    Ok(planned)
+    Ok((planned, plan.focus))
 }
 
 /// Whether every value of `image` sits on one of 256 levels, as an 8-bit
@@ -981,44 +1256,6 @@ fn eight_bit(image: &Rgb32FImage) -> bool {
         .all(|&value| ((value * 255.0) - (value * 255.0).round()).abs() < 1e-3)
 }
 
-/// The labels over the video, if any were asked for: the caller's own, the
-/// catalogued objects, and the watermark.
-fn prepare_overlay(
-    options: &ParallaxOptions,
-    wcs: &Wcs,
-    scene: &Scene,
-    lifted: &[(String, (f64, f64), f64)],
-    shot: &Shot,
-    summary: &mut Summary,
-) -> Result<Option<Overlay>, Error> {
-    let color = Rgb(options.label_color);
-    let mut marks = overlay::custom_marks(&options.labels, color, scene);
-    if options.overlay {
-        let path = seiza::data_paths::objects(options.objects.as_deref()).map_err(|error| {
-            Error::Invalid(format!(
-                "labelling objects needs the object catalog (seiza setup): {error}"
-            ))
-        })?;
-        let catalog = open_objects(&path)?;
-        let dimensions = (scene.width() as u32, scene.height() as u32);
-        let found = overlay::catalog_marks(&catalog, wcs, dimensions, scene, lifted)?;
-        summary.labelled_objects = found.len();
-        marks.extend(found);
-    }
-    if marks.is_empty() && options.watermark.is_none() {
-        return Ok(None);
-    }
-    let mut overlay = Overlay::new(
-        marks,
-        options.watermark.clone(),
-        options.overlay_density,
-        wcs.scale_arcsec_per_px(),
-        options.size,
-    )?;
-    overlay.plan(shot, scene, options.fps as f64);
-    Ok(Some(overlay))
-}
-
 fn open_objects(path: &Path) -> Result<seiza::objects::ObjectCatalog, Error> {
     seiza::objects::ObjectCatalog::open(path).map_err(|error| Error::Catalog {
         path: path.to_path_buf(),
@@ -1030,7 +1267,7 @@ fn open_objects(path: &Path) -> Result<seiza::objects::ObjectCatalog, Error> {
 /// distance was found, or `None` without an object catalog, a distance file
 /// or an object there.
 fn target_distance(
-    options: &ParallaxOptions,
+    options: &SceneOptions,
     wcs: &Wcs,
     (width, height): (usize, usize),
     focus: (f64, f64),
@@ -1077,7 +1314,7 @@ fn target_distance(
 /// leaving out one at the focus point, which is the target, and each only
 /// once: catalogs list some galaxies twice, a little apart.
 fn galaxies_in_image(
-    options: &ParallaxOptions,
+    options: &SceneOptions,
     wcs: &Wcs,
     (width, height): (usize, usize),
     focus: (f64, f64),
@@ -1174,21 +1411,26 @@ mod tests {
 
     fn options(star_distances: PathBuf, directory: &Path) -> ParallaxOptions {
         ParallaxOptions {
-            distance_pc: Some(400.0),
-            objects: Some(directory.join("no-objects.bin")),
-            star_distances: Some(star_distances),
-            online: false,
-            size: (160, 120),
-            seconds: 1.0,
-            fps: 6,
-            labels: vec![CustomLabel {
-                x: 100.0,
-                y: 100.0,
-                radius: 20.0,
-                text: "here".into(),
-            }],
-            watermark: Some(overlay::DEFAULT_WATERMARK.into()),
-            ..ParallaxOptions::default()
+            scene: SceneOptions {
+                distance_pc: Some(400.0),
+                objects: Some(directory.join("no-objects.bin")),
+                star_distances: Some(star_distances),
+                online: false,
+                ..SceneOptions::default()
+            },
+            video: VideoOptions {
+                size: (160, 120),
+                seconds: 1.0,
+                fps: 6,
+                labels: vec![CustomLabel {
+                    x: 100.0,
+                    y: 100.0,
+                    radius: 20.0,
+                    text: "here".into(),
+                }],
+                watermark: Some(overlay::DEFAULT_WATERMARK.into()),
+                ..VideoOptions::default()
+            },
         }
     }
 
@@ -1198,11 +1440,18 @@ mod tests {
         let (starless, stars, wcs, distances) = field(directory.path());
         let options = options(distances, directory.path());
         let mut notes = Vec::new();
-        let parallax = Parallax::prepare(&starless, &stars, &wcs, &options, &mut |event| {
-            if let Event::Note(note) = event {
-                notes.push(note.to_string());
-            }
-        })
+        let parallax = Parallax::prepare(
+            &starless,
+            &stars,
+            &wcs,
+            &options,
+            &mut |event| {
+                if let Event::Note(note) = event {
+                    notes.push(note.to_string());
+                }
+            },
+            &|| false,
+        )
         .unwrap();
         let summary = parallax.summary();
         assert_eq!(summary.detected_stars, 4, "{notes:?}");
@@ -1237,7 +1486,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let (starless, stars, wcs, distances) = field(directory.path());
         let options = options(distances, directory.path());
-        let parallax = Parallax::prepare(&starless, &stars, &wcs, &options, &mut |_| {}).unwrap();
+        let parallax =
+            Parallax::prepare(&starless, &stars, &wcs, &options, &mut |_| {}, &|| false).unwrap();
         let pushed = std::cell::Cell::new(0);
         let stopped = parallax.render(
             Box::new(FrameFn::new(|_: &RgbImage| {
@@ -1296,26 +1546,111 @@ mod tests {
 
     #[test]
     fn options_that_cannot_make_a_video_are_refused() {
+        let video = |video: VideoOptions| ParallaxOptions {
+            video,
+            ..ParallaxOptions::default()
+        };
         for options in [
-            ParallaxOptions {
+            video(VideoOptions {
                 dolly: 1.0,
-                ..ParallaxOptions::default()
-            },
-            ParallaxOptions {
+                ..VideoOptions::default()
+            }),
+            video(VideoOptions {
                 size: (161, 120),
-                ..ParallaxOptions::default()
-            },
-            ParallaxOptions {
+                ..VideoOptions::default()
+            }),
+            video(VideoOptions {
                 fps: 0,
-                ..ParallaxOptions::default()
-            },
-            ParallaxOptions {
+                ..VideoOptions::default()
+            }),
+            video(VideoOptions {
                 overlay_density: 2.0,
+                ..VideoOptions::default()
+            }),
+            ParallaxOptions {
+                scene: SceneOptions {
+                    distance_pc: Some(-1.0),
+                    ..SceneOptions::default()
+                },
                 ..ParallaxOptions::default()
             },
         ] {
             assert!(options.check().is_err(), "{options:?}");
         }
         assert!(ParallaxOptions::default().check().is_ok());
+    }
+
+    #[test]
+    fn a_reconfigured_video_shares_the_scene_and_leaves_the_first_alone() {
+        let directory = tempfile::tempdir().unwrap();
+        let (starless, stars, wcs, distances) = field(directory.path());
+        let options = options(distances, directory.path());
+        let first =
+            Parallax::prepare(&starless, &stars, &wcs, &options, &mut |_| {}, &|| false).unwrap();
+        let before = first.frame(3);
+        // Another camera, size, length, rate and quality on the same scene.
+        let video = VideoOptions {
+            focus: Some((150.0, 110.0)),
+            dolly: 0.6,
+            rotate_deg: (0.0, -360.0),
+            size: (200, 150),
+            seconds: 2.0,
+            fps: 5,
+            quality: Quality::High,
+            watermark: None,
+            ..options.video.clone()
+        };
+        let second = std::thread::scope(|scope| {
+            // The first video keeps drawing while the second is fitted.
+            let drawing = scope.spawn(|| first.frame(3));
+            let second = first.reconfigure(&video, &mut |_| {}, &|| false).unwrap();
+            assert_eq!(drawing.join().unwrap(), before);
+            second
+        });
+        assert!(Arc::ptr_eq(&first.prepared, &second.prepared));
+        assert_eq!(
+            (second.frames(), second.size(), second.fps()),
+            (10, (200, 150), 5)
+        );
+        assert_eq!(first.frames(), 6);
+        assert_eq!(first.frame(3), before);
+        // The scene's depth is the first's, wherever the camera now aims.
+        assert_eq!(
+            second.summary().background_distance_pc,
+            first.summary().background_distance_pc
+        );
+        assert_eq!(
+            second.summary().detected_stars,
+            first.summary().detected_stars
+        );
+        // A whole turn clockwise is kept as asked: early on the frame has
+        // turned clockwise by as much of the turn as the move has gone.
+        let t = 2.0 / 9.0;
+        let progress = t * t * (3.0 - 2.0 * t);
+        let early = second.shot().view(second.scene(), 2).turn();
+        assert!(
+            (early + std::f64::consts::TAU * progress).abs() < 1e-9,
+            "{early}"
+        );
+        assert_eq!(second.shot().rotation, (0.0, -std::f64::consts::TAU));
+        // A stop asked for ends the reconfiguration.
+        let stopped = first.reconfigure(&video, &mut |_| {}, &|| true);
+        assert!(matches!(stopped, Err(Error::Stopped)), "{stopped:?}");
+    }
+
+    #[test]
+    fn the_fit_is_reported_as_asked_and_used() {
+        let directory = tempfile::tempdir().unwrap();
+        let (starless, stars, wcs, distances) = field(directory.path());
+        let mut options = options(distances, directory.path());
+        // A turned frame from the whole image must zoom in.
+        options.video.rotate_deg = (0.0, 45.0);
+        let video =
+            Parallax::prepare(&starless, &stars, &wcs, &options, &mut |_| {}, &|| false).unwrap();
+        let fit = &video.summary().fit;
+        assert_eq!(fit.zoom.0, 1.0);
+        assert!(fit.zoom.1 > 1.0, "{fit:?}");
+        assert_eq!(fit.lead, (1.0, video.shot().lead));
+        assert!(fit.stops.is_empty());
     }
 }

@@ -384,10 +384,12 @@ parallax for. Both come from the optional star distance dataset (`seiza setup
 cones and cached when it is not installed. To build that dataset, `seiza
 download-data star-distances` fetches the sky in small HEALPix tiles and
 `seiza build-data star-distances` packs them. The starless image is placed at
-the distance of the catalogued object at the focus point, from the optional
-object distance dataset (`seiza setup --object-distances`), or at `--distance`
+the distance of the catalogued object at `--distance-focus x,y` (default
+`--focus`, the first tour stop flown in toward, or an automatic tour's best
+target), from the optional object distance dataset (`seiza setup --object-distances`), or at `--distance`
 parsecs. Stars too faint to match sit at the star field's median
-distance.
+distance. Only the distance focus sets the scene's depth, so moving the
+camera's destination never moves the nebula.
 
 The camera flies `--dolly` of the way to the target (default 0.4) toward
 `--focus x,y` (default the image centre). It never turns: every change of view
@@ -421,8 +423,9 @@ alternate in direction and a little pan; a long way between two targets
 pulls back on the way. `--tour-hold` sets the seconds at each target and
 `--tour-motion` how much it turns and pans (0 for none, 2 for twice the
 default). To edit a planned tour first, `--plan-tour FILE` writes the plan,
-one `--stop` a line with each target's name in a comment, and stops;
-remove, move or change lines, then render it with `--tour-file FILE`. `--seconds`, `--fps` and `--size` set the
+one `--stop` a line with each target's name in a comment, and a `focus
+X,Y` line for the distance focus, and stops; remove, move or change lines,
+then render it with `--tour-file FILE`. `--seconds`, `--fps` and `--size` set the
 video (`--size` takes `720p`, `1080p`, the default, `1440p` or `4k`, any of
 them with `-portrait` for vertical video, or `WIDTHxHEIGHT`), and `--quality high` draws each frame at twice the size and averages it
 down, blending levels of detail so fine detail neither shimmers nor steps in
@@ -430,7 +433,7 @@ sharpness as the camera moves, for about four times the rendering time. A deep i
 they crowd the view: `--max-stars N` lets only the N brightest fly, and
 `--small-stars` drops the rest (`drop`, the default) or keeps them on the
 distant star field's plane (`field`). Frames go to ffmpeg (H.264 with libx264 or
-libopenh264, or with `--codec hevc` HEVC with libx265, about half the size), to PNG files with `--encoder png`, or, in a build with the
+libopenh264, or with `--codec hevc` HEVC with libx265, about a fifth smaller at the same quality but slower to encode), to PNG files with `--encoder png`, or, in a build with the
 `openh264` feature, to a built-in encoder. Catalogued galaxies, which a star remover leaves in the starless image, are
 lifted out of it onto the far field, where they hold still while the nebula
 grows past them; the nebula behind is filled in from around each one.

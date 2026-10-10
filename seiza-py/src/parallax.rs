@@ -62,7 +62,7 @@ fn auto_tour_argument(value: &Bound<'_, PyAny>) -> PyResult<Option<seiza_paralla
 /// `zoom`, `rotate_deg`, `pan`, `travel`, `hold`), and `focus` with
 /// `focus_name`, the target most worth a visit, where the nebula's distance
 /// is best taken. Drop, move or change stops, then pass `tour=plan["tour"],
-/// focus=plan["focus"]` to `ParallaxVideo`.
+/// distance_focus=plan["focus"]` to `ParallaxVideo`.
 #[pyfunction]
 #[pyo3(signature = (width, height, wcs, *, objects=None, size=None, targets=None, hold=1.5, motion=1.0))]
 #[allow(clippy::too_many_arguments)]
@@ -78,7 +78,7 @@ pub(crate) fn plan_parallax_tour<'py>(
     motion: f64,
 ) -> PyResult<Bound<'py, PyDict>> {
     let frame = match size {
-        None => ParallaxOptions::default().size,
+        None => seiza_parallax::VideoOptions::default().size,
         Some(size) => match size.extract::<String>() {
             Ok(text) => seiza_parallax::parse_frame_size(&text).map_err(PyValueError::new_err)?,
             Err(_) => size.extract()?,
@@ -108,6 +108,8 @@ pub(crate) fn plan_parallax_tour<'py>(
             stop.set_item("pan", planned.stop.pan)?;
             stop.set_item("travel", planned.stop.travel)?;
             stop.set_item("hold", planned.stop.hold)?;
+            stop.set_item("spin_deg", planned.stop.spin_deg)?;
+            stop.set_item("push", planned.stop.push)?;
             Ok(stop)
         })
         .collect::<PyResult<Vec<_>>>()?;
@@ -227,6 +229,25 @@ fn choice<T: Copy>(value: &str, name: &str, choices: &[(&str, T)]) -> PyResult<T
         })
 }
 
+/// The keyword arguments that make the scene: changing any needs a new
+/// `ParallaxVideo`, and `reconfigure` refuses them.
+const SCENE_KEYS: [&str; 14] = [
+    "distance_pc",
+    "distance_focus",
+    "unmatched_distance_pc",
+    "objects",
+    "object_distances",
+    "star_distances",
+    "gaia_max_mag",
+    "gaia_cache",
+    "online",
+    "max_stars",
+    "small_stars",
+    "keep_galaxies",
+    "dust",
+    "dust_opacity",
+];
+
 /// The video's options from keyword arguments, over the defaults.
 fn options(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ParallaxOptions> {
     let mut options = ParallaxOptions::default();
@@ -239,58 +260,60 @@ fn options(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ParallaxOptions> {
             continue;
         }
         match key.as_str() {
-            "focus" => options.focus = Some(value.extract()?),
-            "distance_pc" => options.distance_pc = Some(value.extract()?),
-            "unmatched_distance_pc" => options.unmatched_distance_pc = Some(value.extract()?),
-            "objects" => options.objects = Some(value.extract()?),
-            "object_distances" => options.object_distances = Some(value.extract()?),
-            "star_distances" => options.star_distances = Some(value.extract()?),
-            "gaia_max_mag" => options.gaia_max_mag = value.extract()?,
-            "gaia_cache" => options.gaia_cache = Some(value.extract()?),
-            "online" => options.online = value.extract()?,
-            "max_stars" => options.max_stars = Some(value.extract()?),
+            "focus" => options.video.focus = Some(value.extract()?),
+            "distance_pc" => options.scene.distance_pc = Some(value.extract()?),
+            "distance_focus" => options.scene.distance_focus = Some(value.extract()?),
+            "unmatched_distance_pc" => options.scene.unmatched_distance_pc = Some(value.extract()?),
+            "objects" => options.scene.objects = Some(value.extract()?),
+            "object_distances" => options.scene.object_distances = Some(value.extract()?),
+            "star_distances" => options.scene.star_distances = Some(value.extract()?),
+            "gaia_max_mag" => options.scene.gaia_max_mag = value.extract()?,
+            "gaia_cache" => options.scene.gaia_cache = Some(value.extract()?),
+            "online" => options.scene.online = value.extract()?,
+            "max_stars" => options.scene.max_stars = Some(value.extract()?),
             "small_stars" => {
-                options.small_stars = choice(
+                options.scene.small_stars = choice(
                     &value.extract::<String>()?,
                     "small_stars",
                     &[("drop", SmallStars::Drop), ("field", SmallStars::Field)],
                 )?
             }
-            "keep_galaxies" => options.keep_galaxies = value.extract()?,
-            "dust" => options.dust = value.extract()?,
-            "dust_opacity" => options.dust_opacity = value.extract()?,
+            "keep_galaxies" => options.scene.keep_galaxies = value.extract()?,
+            "dust" => options.scene.dust = value.extract()?,
+            "dust_opacity" => options.scene.dust_opacity = value.extract()?,
             "start" => {
-                options.start = choice(
+                options.video.start = choice(
                     &value.extract::<String>()?,
                     "start",
                     &[("focus", Start::Focus), ("whole", Start::Whole)],
                 )?
             }
-            "dolly" => options.dolly = value.extract()?,
-            "truck" => options.truck = value.extract()?,
-            "truck_angle_deg" => options.truck_angle_deg = value.extract()?,
-            "pan" => options.pan = value.extract()?,
-            "zoom" => options.zoom = value.extract()?,
-            "zoom_end" => options.zoom_end = value.extract()?,
-            "rotate_deg" => options.rotate_deg = value.extract()?,
+            "dolly" => options.video.dolly = value.extract()?,
+            "truck" => options.video.truck = value.extract()?,
+            "truck_angle_deg" => options.video.truck_angle_deg = value.extract()?,
+            "pan" => options.video.pan = value.extract()?,
+            "zoom" => options.video.zoom = value.extract()?,
+            "zoom_end" => options.video.zoom_end = value.extract()?,
+            "rotate_deg" => options.video.rotate_deg = value.extract()?,
             "easing" => {
-                options.easing = choice(
+                options.video.easing = choice(
                     &value.extract::<String>()?,
                     "easing",
                     &[("in_out", Easing::InOut), ("linear", Easing::Linear)],
                 )?
             }
             "quality" => {
-                options.quality = choice(
+                options.video.quality = choice(
                     &value.extract::<String>()?,
                     "quality",
                     &[("standard", Quality::Standard), ("high", Quality::High)],
                 )?
             }
-            "growth_limit" => options.growth_limit = value.extract()?,
-            "auto_tour" => options.auto_tour = auto_tour_argument(&value)?,
+            "growth_limit" => options.video.growth_limit = value.extract()?,
+            "auto_tour" => options.video.auto_tour = auto_tour_argument(&value)?,
+            "tour_glide" => options.video.tour_glide = value.extract()?,
             "tour" => {
-                options.tour = value
+                options.video.tour = value
                     .try_iter()?
                     .map(|stop| {
                         let stop = stop?;
@@ -310,6 +333,8 @@ fn options(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ParallaxOptions> {
                                 "pan" => parsed.pan = value.extract()?,
                                 "travel" => parsed.travel = value.extract()?,
                                 "hold" => parsed.hold = value.extract()?,
+                                "spin_deg" => parsed.spin_deg = value.extract()?,
+                                "push" => parsed.push = value.extract()?,
                                 // A plan's name for the stop's target.
                                 "name" => {}
                                 other => {
@@ -323,21 +348,21 @@ fn options(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ParallaxOptions> {
                     })
                     .collect::<PyResult<_>>()?
             }
-            "fade_from" => options.fade_from = value.extract()?,
+            "fade_from" => options.video.fade_from = value.extract()?,
             "size" => {
-                options.size = match value.extract::<String>() {
+                options.video.size = match value.extract::<String>() {
                     Ok(size) => {
                         seiza_parallax::parse_frame_size(&size).map_err(PyValueError::new_err)?
                     }
                     Err(_) => value.extract()?,
                 }
             }
-            "seconds" => options.seconds = value.extract()?,
-            "fps" => options.fps = value.extract()?,
-            "overlay" => options.overlay = value.extract()?,
-            "overlay_density" => options.overlay_density = value.extract()?,
+            "seconds" => options.video.seconds = value.extract()?,
+            "fps" => options.video.fps = value.extract()?,
+            "overlay" => options.video.overlay = value.extract()?,
+            "overlay_density" => options.video.overlay_density = value.extract()?,
             "labels" => {
-                options.labels = value
+                options.video.labels = value
                     .try_iter()?
                     .map(|label| {
                         let label = label?;
@@ -363,12 +388,12 @@ fn options(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ParallaxOptions> {
                     .collect::<PyResult<_>>()?
             }
             "label_color" => {
-                options.label_color = seiza_parallax::parse_color(&value.extract::<String>()?)
+                options.video.label_color = seiza_parallax::parse_color(&value.extract::<String>()?)
                     .map_err(PyValueError::new_err)?
                     .0
             }
             "watermark" => {
-                options.watermark = match value.extract::<bool>() {
+                options.video.watermark = match value.extract::<bool>() {
                     Ok(true) => Some(seiza_parallax::DEFAULT_WATERMARK.into()),
                     Ok(false) => None,
                     Err(_) => Some(value.extract()?),
@@ -488,13 +513,14 @@ fn frame_array(py: Python<'_>, frame: image::RgbImage, format: &str) -> PyResult
 #[pymethods]
 impl PyParallaxVideo {
     #[new]
-    #[pyo3(signature = (starless, stars, wcs, *, progress=None, **options))]
+    #[pyo3(signature = (starless, stars, wcs, *, progress=None, cancel=None, **options))]
     fn new(
         py: Python<'_>,
         starless: &Bound<'_, PyAny>,
         stars: &Bound<'_, PyAny>,
         wcs: &Bound<'_, PyWcs>,
         progress: Option<PyObject>,
+        cancel: Option<PyObject>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         let options = self::options(options)?;
@@ -506,10 +532,56 @@ impl PyParallaxVideo {
         let wcs = wcs.get().wcs.clone();
         let raised = Arc::new(Mutex::new(None));
         let mut report = reporter(progress, Arc::clone(&raised));
-        let prepared =
-            py.allow_threads(|| Parallax::prepare(&starless, &stars, &wcs, &options, &mut report));
+        let stop_raised = Arc::clone(&raised);
+        let prepared = py.allow_threads(|| {
+            Parallax::prepare(&starless, &stars, &wcs, &options, &mut report, &|| {
+                should_stop(&cancel, &stop_raised)
+            })
+        });
         reraise(&raised)?;
         let video = prepared.map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        Ok(Self { video })
+    }
+
+    /// A new video of the same prepared scene, filmed with `options`: the
+    /// camera, tour, output and labels, as the constructor takes them.
+    /// Options left out take their defaults, not this video's. Nothing of
+    /// the scene is prepared again, and options that would change it (the
+    /// distances and their sources, `distance_focus`, star placement,
+    /// galaxies or dust) are refused. This video is left as it was; both
+    /// may draw frames at once, and the scene lives as long as either.
+    /// `cancel()` returning True, or Ctrl-C, stops it.
+    #[pyo3(signature = (*, progress=None, cancel=None, **options))]
+    fn reconfigure(
+        &self,
+        py: Python<'_>,
+        progress: Option<PyObject>,
+        cancel: Option<PyObject>,
+        options: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        if let Some(options) = options {
+            for key in options.keys() {
+                let key: String = key.extract()?;
+                if SCENE_KEYS.contains(&key.as_str()) {
+                    return Err(PyValueError::new_err(format!(
+                        "{key} changes the prepared scene; make a new ParallaxVideo for it"
+                    )));
+                }
+            }
+        }
+        let video = self::options(options)?.video;
+        let raised = Arc::new(Mutex::new(None));
+        let mut report = reporter(progress, Arc::clone(&raised));
+        let stop_raised = Arc::clone(&raised);
+        let refilmed = py.allow_threads(|| {
+            self.video
+                .reconfigure(&video, &mut report, &|| should_stop(&cancel, &stop_raised))
+        });
+        reraise(&raised)?;
+        let video = refilmed.map_err(|error| match error {
+            seiza_parallax::pipeline::Error::Invalid(message) => PyValueError::new_err(message),
+            other => PyRuntimeError::new_err(other.to_string()),
+        })?;
         Ok(Self { video })
     }
 
@@ -542,11 +614,30 @@ impl PyParallaxVideo {
         dict.set_item("with_distance", summary.with_distance)?;
         dict.set_item("background_distance_pc", summary.background_distance_pc)?;
         dict.set_item("background_basis", &summary.background_basis)?;
+        dict.set_item("background_focus", summary.background_focus)?;
         dict.set_item("unmatched_distance_pc", summary.unmatched_distance_pc)?;
         dict.set_item("flying_stars", summary.flying_stars)?;
         dict.set_item("galaxies_lifted", summary.galaxies_lifted.clone())?;
         dict.set_item("dust_transmission", summary.dust_transmission)?;
         dict.set_item("labelled_objects", summary.labelled_objects)?;
+        let fit = PyDict::new(py);
+        fit.set_item("zoom", summary.fit.zoom)?;
+        fit.set_item("pan", summary.fit.pan)?;
+        fit.set_item("lead", summary.fit.lead)?;
+        fit.set_item("truck", summary.fit.truck)?;
+        let stops = summary
+            .fit
+            .stops
+            .iter()
+            .map(|stop| {
+                let entry = PyDict::new(py);
+                entry.set_item("zoom", stop.zoom)?;
+                entry.set_item("pan", stop.pan)?;
+                Ok(entry)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        fit.set_item("stops", stops)?;
+        dict.set_item("fit", fit)?;
         Ok(dict)
     }
 
@@ -613,15 +704,18 @@ impl PyParallaxVideo {
     }
 
     /// Write the video to `output`: an MP4 through ffmpeg ("auto",
-    /// "ffmpeg"), or numbered PNG frames in the `output` directory ("png").
+    /// "ffmpeg") in `codec` "h264" or "hevc", or numbered PNG frames in the
+    /// `output` directory ("png").
     /// Returns True when written and False when `cancel()` returned True or
     /// Ctrl-C stopped it.
-    #[pyo3(signature = (output, *, encoder="auto", ffmpeg=None, progress=None, cancel=None))]
+    #[pyo3(signature = (output, *, encoder="auto", codec="h264", ffmpeg=None, progress=None, cancel=None))]
+    #[allow(clippy::too_many_arguments)]
     fn write(
         &self,
         py: Python<'_>,
         output: PathBuf,
         encoder: &str,
+        codec: &str,
         ffmpeg: Option<PathBuf>,
         progress: Option<PyObject>,
         cancel: Option<PyObject>,
@@ -630,8 +724,13 @@ impl PyParallaxVideo {
         let ffmpeg = ffmpeg.unwrap_or_else(|| PathBuf::from("ffmpeg"));
         let sink: Box<dyn FrameSink + Send> = match encoder {
             "auto" | "ffmpeg" => Box::new(
-                FfmpegSink::start(&ffmpeg, &output, settings)
-                    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?,
+                FfmpegSink::start(
+                    &ffmpeg,
+                    &output,
+                    settings,
+                    seiza_parallax::Codec::parse(codec).map_err(PyValueError::new_err)?,
+                )
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?,
             ),
             "png" => Box::new(
                 PngSequence::new(&output, settings)

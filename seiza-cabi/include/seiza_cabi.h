@@ -36,8 +36,11 @@
  *   - SeizaStackExportSnapshot* returned by
  *     seiza_live_stacker_export_snapshot
  *       -> release with seiza_stack_export_snapshot_free().
- *   - SeizaParallax* returned by seiza_parallax_prepare_json
+ *   - SeizaParallax* returned by seiza_parallax_prepare_json or
+ *     seiza_parallax_reconfigure_json
  *       -> release with seiza_parallax_free() once no call using it runs.
+ *          Videos reconfigured from one preparation share its scene, which
+ *          lives until the last of them is freed; free them in any order.
  *   - char* returned by seiza_catalog_status_json, seiza_solve_image_json,
  *     seiza_probe_frame_json, seiza_calibration_plan_json,
  *     seiza_calibration_build_master_json, seiza_live_stacker_state_json, and
@@ -211,7 +214,9 @@ typedef struct SeizaLiveStacker SeizaLiveStacker;
 /*
  An opaque prepared parallax video. Release it with
  [`seiza_parallax_free`]. Its frames may be drawn from several threads at
- once; do not free it while any call using it is running.
+ once; do not free it while any call using it is running. Videos made
+ from it by [`seiza_parallax_reconfigure_json`] share its prepared scene,
+ which lives until the last of them is freed.
  */
 typedef struct SeizaParallax SeizaParallax;
 
@@ -2122,10 +2127,63 @@ char *seiza_parallax_plan_tour_json(const char *request_json,
                                     char **error_out);
 
 /*
+ A new video of the same prepared scene, filmed as `settings_json`
+ asks, released with [`seiza_parallax_free`]; null with `error_out` set
+ on failure, and when `cancel` stopped it.
+
+ `settings_json` is a complete set of the video's settings, as in
+ [`seiza_parallax_prepare_json`] but for the scene's: the single move
+ (`focus`, `start`, `dolly`, `truck`, `truckAngleDegrees`, `pan`, `zoom`,
+ `zoomEnd`, `rotateDegrees`, `easing`), a tour (`tour`, `autoTour`,
+ `tourGlide`), the output (`size`, `seconds`, `fps`, `quality`,
+ `growthLimit`, `fadeFrom`) and the labels (`overlay`, `overlayDensity`,
+ `labels`, `labelColor`, `watermark`). Fields left out take their
+ defaults, not the first video's. Turns are taken as given, unwrapped:
+ `rotateDegrees` [0, 360] turns once anticlockwise and [0, -360] once
+ clockwise, and a stop's `rotateDegrees` likewise. A field that would
+ change the scene (the images, plate solution, catalogs, distances,
+ `distanceFocus`, star placement, galaxies or dust) is refused: those
+ need a new preparation. The camera's `focus` only moves the camera; the
+ nebula keeps the depth it was prepared at.
+
+ Nothing of the scene is prepared again: the image is not reloaded,
+ split or solved, the stars are not found again and their distances not
+ looked up. The camera is fitted to the scene anew, and
+ [`seiza_parallax_summary_json`] on the new video gives its frame count,
+ size and the fit's adjustments. The catalogued objects' labels are read
+ once for every video of the scene.
+
+ Ownership: the new video and `video` share the prepared scene, which
+ lives until the last video using it is freed; free each with
+ [`seiza_parallax_free`], in any order. `video` is not changed: it may
+ keep drawing frames on other threads while this runs and after, and
+ both videos may draw frames at once. `cancel` stops the fit and the
+ label planning; `events` (nullable) hears each step on the calling
+ thread, with `context` passed through.
+
+ # Safety
+
+ `video` must be a live pointer from [`seiza_parallax_prepare_json`] or
+ this function, kept alive until this call returns. `settings_json` must
+ be a NUL-terminated UTF-8 string. `cancel` must be null or a live
+ [`SeizaCancelSignal`] retained until this call returns. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+SeizaParallax *seiza_parallax_reconfigure_json(const SeizaParallax *video,
+                                               const char *settings_json,
+                                               const SeizaCancelSignal *cancel,
+                                               SeizaParallaxEventCallback events,
+                                               void *context,
+                                               char **error_out);
+
+/*
  What preparing the video found, as JSON: its frame count, frame rate
- and size, the stars found and matched, the nebula's distance and how it
- was found, galaxies lifted, the dust, objects labelled, and the WCS
- used. Returns a string released with `seiza_string_free`, or null with
+ and size, the stars found and matched, the nebula's distance with how
+ and where (`backgroundFocus`) it was found, galaxies lifted, the dust,
+ objects labelled, the WCS used, and `fit`, how fitting the camera to the
+ image changed the framing asked for: `zoom`, `pan`, `lead` and `truck`
+ for the single move and `stops[].zoom` and `stops[].pan` for a tour,
+ each `{asked, used}`. Returns a string released with `seiza_string_free`, or null with
  `error_out` set.
 
  # Safety

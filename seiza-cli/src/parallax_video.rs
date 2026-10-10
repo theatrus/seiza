@@ -13,7 +13,7 @@ use image::{Rgb, Rgb32FImage};
 use seiza::{DetectConfig, Wcs};
 use seiza_parallax::{
     CustomLabel, Easing, Event, FfmpegSink, FrameSink, LightImage, Parallax, ParallaxOptions,
-    PngSequence, Quality, Scene, SmallStars, Start, VideoSettings,
+    PngSequence, Quality, Scene, SceneOptions, SmallStars, Start, VideoOptions, VideoSettings,
 };
 use std::path::{Path, PathBuf};
 
@@ -42,6 +42,12 @@ pub(crate) struct ParallaxVideoArgs {
     /// else the median Gaia distance of the stars near it)
     #[arg(long)]
     distance: Option<f64>,
+    /// The image point, `x,y` in pixels, whose catalogued object or nearby
+    /// stars give the nebula's distance (default: --focus, a tour's first
+    /// stop flown in toward, or an automatic tour's best target). It sets
+    /// the scene's depth; the camera's destination does not
+    #[arg(long, value_parser = parse_point)]
+    distance_focus: Option<(f64, f64)>,
     /// Object catalog file or directory, for finding the target (default:
     /// standard catalog locations)
     #[arg(long)]
@@ -123,7 +129,8 @@ pub(crate) struct ParallaxVideoArgs {
     plan_tour: Option<PathBuf>,
     /// Take the tour's stops from this file, one a line as --stop takes
     /// them, with `#` starting a comment, and a `focus X,Y` line, if any,
-    /// saying where the nebula's distance is taken (as --focus does)
+    /// saying where the nebula's distance is taken (as --distance-focus
+    /// does)
     #[arg(long, conflicts_with_all = ["stops", "auto_tour"])]
     tour_file: Option<PathBuf>,
     /// Seconds an automatic tour stays at each target; the three most
@@ -320,7 +327,9 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
     let started = std::time::Instant::now();
     let (starless, stars, solve_path, _split_dir) = split(&args)?;
     let wcs = solve(&args, &solve_path)?;
-    let parallax = Parallax::prepare(&starless, &stars, &wcs, &options, &mut print_event)?;
+    let parallax = Parallax::prepare(&starless, &stars, &wcs, &options, &mut print_event, &|| {
+        false
+    })?;
     if let Some(directory) = &args.debug_layers {
         write_layers(directory, parallax.scene())?;
     }
@@ -440,59 +449,64 @@ fn read_tour(path: &Path) -> Result<TourFile> {
 fn options(args: &ParallaxVideoArgs, file: Option<TourFile>) -> ParallaxOptions {
     let (file_stops, file_focus) = file.unwrap_or_default();
     ParallaxOptions {
-        focus: args.focus.or(file_focus),
-        distance_pc: args.distance,
-        unmatched_distance_pc: args.unmatched_distance,
-        objects: args.objects.clone(),
-        object_distances: args.distances.clone(),
-        star_distances: args.star_distances.clone(),
-        gaia_max_mag: args.gaia_max_mag,
-        gaia_cache: args.gaia_cache.clone(),
-        online: true,
-        max_stars: args.max_stars,
-        small_stars: match args.small_stars {
-            SmallStarsArg::Drop => SmallStars::Drop,
-            SmallStarsArg::Field => SmallStars::Field,
+        scene: SceneOptions {
+            distance_pc: args.distance,
+            distance_focus: args.distance_focus.or(file_focus),
+            unmatched_distance_pc: args.unmatched_distance,
+            objects: args.objects.clone(),
+            object_distances: args.distances.clone(),
+            star_distances: args.star_distances.clone(),
+            gaia_max_mag: args.gaia_max_mag,
+            gaia_cache: args.gaia_cache.clone(),
+            online: true,
+            max_stars: args.max_stars,
+            small_stars: match args.small_stars {
+                SmallStarsArg::Drop => SmallStars::Drop,
+                SmallStarsArg::Field => SmallStars::Field,
+            },
+            keep_galaxies: args.keep_galaxies,
+            dust: !args.no_dust,
+            dust_opacity: args.dust_opacity,
         },
-        keep_galaxies: args.keep_galaxies,
-        dust: !args.no_dust,
-        dust_opacity: args.dust_opacity,
-        start: match args.start {
-            StartArg::Focus => Start::Focus,
-            StartArg::Whole => Start::Whole,
+        video: VideoOptions {
+            focus: args.focus,
+            start: match args.start {
+                StartArg::Focus => Start::Focus,
+                StartArg::Whole => Start::Whole,
+            },
+            dolly: args.dolly,
+            truck: args.truck,
+            truck_angle_deg: args.truck_angle,
+            pan: args.pan,
+            zoom: args.zoom,
+            zoom_end: args.zoom_end,
+            rotate_deg: (args.rotate, args.rotate_end.unwrap_or(args.rotate)),
+            easing: match args.easing {
+                EasingArg::Linear => Easing::Linear,
+                EasingArg::InOut => Easing::InOut,
+            },
+            quality: match args.quality {
+                QualityArg::Standard => Quality::Standard,
+                QualityArg::High => Quality::High,
+            },
+            growth_limit: args.growth_limit,
+            fade_from: args.fade_from,
+            tour: if file_stops.is_empty() {
+                args.stops.clone()
+            } else {
+                file_stops
+            },
+            auto_tour: args.auto_tour.map(|_| auto_tour(args)),
+            tour_glide: args.tour_glide,
+            size: args.size,
+            seconds: args.seconds,
+            fps: args.fps,
+            overlay: args.overlay,
+            overlay_density: args.overlay_density,
+            labels: args.labels.clone(),
+            label_color: args.label_color.0,
+            watermark: args.watermark.clone(),
         },
-        dolly: args.dolly,
-        truck: args.truck,
-        truck_angle_deg: args.truck_angle,
-        pan: args.pan,
-        zoom: args.zoom,
-        zoom_end: args.zoom_end,
-        rotate_deg: (args.rotate, args.rotate_end.unwrap_or(args.rotate)),
-        easing: match args.easing {
-            EasingArg::Linear => Easing::Linear,
-            EasingArg::InOut => Easing::InOut,
-        },
-        quality: match args.quality {
-            QualityArg::Standard => Quality::Standard,
-            QualityArg::High => Quality::High,
-        },
-        growth_limit: args.growth_limit,
-        fade_from: args.fade_from,
-        tour: if file_stops.is_empty() {
-            args.stops.clone()
-        } else {
-            file_stops
-        },
-        auto_tour: args.auto_tour.map(|_| auto_tour(args)),
-        tour_glide: args.tour_glide,
-        size: args.size,
-        seconds: args.seconds,
-        fps: args.fps,
-        overlay: args.overlay,
-        overlay_density: args.overlay_density,
-        labels: args.labels.clone(),
-        label_color: args.label_color.0,
-        watermark: args.watermark.clone(),
     }
 }
 

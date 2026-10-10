@@ -548,8 +548,10 @@ class ParallaxVideo:
         wcs: Wcs,
         *,
         progress: Callable[[dict[str, Any]], None] | None = None,
+        cancel: Callable[[], bool] | None = None,
         focus: tuple[float, float] | None = None,
         distance_pc: float | None = None,
+        distance_focus: tuple[float, float] | None = None,
         unmatched_distance_pc: float | None = None,
         objects: str | Path | None = None,
         object_distances: str | Path | None = None,
@@ -576,6 +578,7 @@ class ParallaxVideo:
         fade_from: float = 6.0,
         tour: Sequence[str | Mapping[str, Any]] = (),
         auto_tour: bool | int | Mapping[str, Any] | None = None,
+        tour_glide: float = 0.2,
         size: str | tuple[int, int] = "1080p",
         seconds: float = 8.0,
         fps: int = 30,
@@ -596,6 +599,13 @@ class ParallaxVideo:
     def __len__(self) -> int: ...
     def __iter__(self) -> ParallaxFrames: ...
     def frame(self, index: int, format: str = "rgb") -> npt.NDArray[np.uint8]: ...
+    def reconfigure(
+        self,
+        *,
+        progress: Callable[[dict[str, Any]], None] | None = None,
+        cancel: Callable[[], bool] | None = None,
+        **options: Any,
+    ) -> ParallaxVideo: ...
     def render(
         self,
         on_frame: Callable[[npt.NDArray[np.uint8], int], bool | None],
@@ -609,6 +619,7 @@ class ParallaxVideo:
         output: str | Path,
         *,
         encoder: str = "auto",
+        codec: str = "h264",
         ffmpeg: str | Path | None = None,
         progress: Callable[[dict[str, Any]], None] | None = None,
         cancel: Callable[[], bool] | None = None,

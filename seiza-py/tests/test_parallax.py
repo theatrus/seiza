@@ -149,3 +149,26 @@ def test_a_tour_plan_comes_back_editable_and_goes_back_in(tmp_path):
     )
     assert made.frame_count == 20
 
+
+def test_a_reconfigured_video_shares_the_scene(tmp_path):
+    made, _ = video(tmp_path)
+    first_frame = made.frame(2)
+    other = made.reconfigure(
+        focus=(150.0, 110.0),
+        dolly=0.6,
+        rotate_deg=(0.0, -360.0),
+        size=(200, 150),
+        seconds=2.0,
+        fps=5,
+        quality="high",
+    )
+    assert (other.frame_count, other.size) == (10, (200, 150))
+    assert made.frame_count == 5 and (made.frame(2) == first_frame).all()
+    assert other.summary["background_distance_pc"] == made.summary["background_distance_pc"]
+    fit = other.summary["fit"]
+    assert fit["zoom"][0] == 1.0 and fit["zoom"][1] >= 1.0
+    with pytest.raises(ValueError, match="changes the prepared scene"):
+        made.reconfigure(distance_pc=500.0)
+    del made
+    assert other.frame(9).shape == (150, 200, 3)
+

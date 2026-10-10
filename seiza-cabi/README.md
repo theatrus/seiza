@@ -162,8 +162,22 @@ exposes the **superset** of what both apps need.
   such as `"1080p"`, `"4k"` or `"1080p-portrait"`. An unknown field is an
   error. It returns an opaque `SeizaParallax`, released with
   `seiza_parallax_free`, and reports each step as JSON to a
-  `SeizaParallaxEventCallback`. `seiza_parallax_summary_json` says what it
-  found. Frames then come three ways:
+  `SeizaParallaxEventCallback`. `distanceFocus` is where the nebula's
+  distance is measured; `focus` only aims the camera, so a new destination
+  never changes the scene's depth. `seiza_parallax_summary_json` says what it
+  found, with `fit`: each zoom and pan as asked and as used, after the camera
+  was fitted to stay inside the image, so an app can explain a change to the
+  framing it asked for. `seiza_parallax_reconfigure_json` films the same
+  scene again from a JSON object of camera and output settings (focus, start,
+  dolly, pan, rotation, zoom, tour stops, glide, length, frame rate, size,
+  quality, labels), fitting the camera anew. Settings left out take their
+  defaults, not the first video's. It loads, splits, solves and looks up
+  nothing: the new `SeizaParallax` shares the prepared scene and the
+  catalogue labels with the first, which stays valid and can draw frames at
+  the same time; the scene is freed with the last handle. Fields that change
+  the scene (distances and their sources, `distanceFocus`, star placement,
+  galaxies, dust) are an error that says to prepare again. Its
+  `SeizaCancelSignal` stops it. Frames then come three ways:
   `seiza_parallax_render_frame` draws any frame into the caller's own
   buffer, with a row stride and `SEIZA_PIXEL_FORMAT_RGB8`, `_RGBA8` or
   `_BGRA8`, so a platform encoder's pixel buffer (a `CVPixelBuffer`, a Media

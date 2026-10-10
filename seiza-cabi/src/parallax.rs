@@ -20,6 +20,7 @@ use seiza_parallax::{
     CustomLabel, Easing, Event, FfmpegSink, FrameFn, FrameSink, Parallax, ParallaxOptions,
     PngSequence, Quality, SmallStars, Start,
 };
+use seiza_parallax::{FitSummary, SceneOptions, VideoOptions};
 use serde::{Deserialize, Serialize};
 use std::ffi::{CString, c_char, c_void};
 use std::path::{Path, PathBuf};
@@ -37,10 +38,11 @@ pub const SEIZA_PIXEL_FORMAT_BGRA8: u32 = 2;
 
 /// An opaque prepared parallax video. Release it with
 /// [`seiza_parallax_free`]. Its frames may be drawn from several threads at
-/// once; do not free it while any call using it is running.
+/// once; do not free it while any call using it is running. Videos made
+/// from it by [`seiza_parallax_reconfigure_json`] share its prepared scene,
+/// which lives until the last of them is freed.
 pub struct SeizaParallax {
     video: Parallax,
-    wcs: Wcs,
 }
 
 /// Progress for the parallax functions: one event as JSON, valid only for
@@ -61,12 +63,50 @@ pub type SeizaParallaxEventCallback = Option<unsafe extern "C" fn(*const c_char,
 pub type SeizaParallaxFrameCallback =
     Option<unsafe extern "C" fn(*const u8, usize, u32, u32, u32, u32, f64, *mut c_void) -> i32>;
 
-/// Everything a parallax video takes. Fields left out keep `seiza
-/// parallax-video`'s defaults; a field not listed here is an error, so a
-/// typo cannot silently run the defaults.
+/// A parallax request's fields that make the scene: the images, the plate
+/// solution, the catalogs and how the stars are placed. Changing any of
+/// them needs a new [`seiza_parallax_prepare_json`];
+/// [`seiza_parallax_reconfigure_json`] refuses them.
+const SCENE_FIELDS: [&str; 23] = [
+    "image",
+    "starless",
+    "stars",
+    "rcAstroExecutable",
+    "rcAstroHost",
+    "wcs",
+    "catalogDirectory",
+    "minimumScaleArcsecPerPixel",
+    "maximumScaleArcsecPerPixel",
+    "distanceParsecs",
+    "distanceFocus",
+    "unmatchedDistanceParsecs",
+    "objects",
+    "objectDistances",
+    "starDistances",
+    "gaiaMaxMagnitude",
+    "gaiaCache",
+    "online",
+    "maxStars",
+    "smallStars",
+    "keepGalaxies",
+    "dust",
+    "dustOpacity",
+];
+
+/// Everything a parallax video takes, as one JSON object: the scene's
+/// fields ([`SCENE_FIELDS`]) and the video's. Fields left out keep `seiza
+/// parallax-video`'s defaults; a field not known is an error, so a typo
+/// cannot silently run the defaults.
+#[derive(Debug, Default)]
+struct ParallaxRequest {
+    scene: SceneRequest,
+    video: VideoRequest,
+}
+
+/// The fields that make the scene.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ParallaxRequest {
+struct SceneRequest {
     /// The stretched image. Split with StarXTerminator when `starless` and
     /// `stars` are absent, and plate-solved when `wcs` is absent.
     image: Option<PathBuf>,
@@ -82,8 +122,10 @@ struct ParallaxRequest {
     catalog_directory: Option<PathBuf>,
     minimum_scale_arcsec_per_pixel: Option<f64>,
     maximum_scale_arcsec_per_pixel: Option<f64>,
-    focus: Option<[f64; 2]>,
     distance_parsecs: Option<f64>,
+    /// The image point whose object or nearby stars give the nebula's
+    /// distance; the camera's destination if absent.
+    distance_focus: Option<[f64; 2]>,
     unmatched_distance_parsecs: Option<f64>,
     objects: Option<PathBuf>,
     object_distances: Option<PathBuf>,
@@ -97,6 +139,14 @@ struct ParallaxRequest {
     keep_galaxies: Option<bool>,
     dust: Option<bool>,
     dust_opacity: Option<f32>,
+}
+
+/// The fields that film the scene: the camera, the output and the labels.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VideoRequest {
+    /// The image point the camera flies toward; it moves the camera only.
+    focus: Option<[f64; 2]>,
     /// "focus" or "whole".
     start: Option<String>,
     dolly: Option<f64>,
@@ -106,7 +156,8 @@ struct ParallaxRequest {
     zoom: Option<f64>,
     zoom_end: Option<f64>,
     /// The frame's turn at the first and last frames, degrees
-    /// anticlockwise.
+    /// anticlockwise, taken as given: [0, 360] turns once anticlockwise and
+    /// [0, -360] once clockwise.
     rotate_degrees: Option<[f64; 2]>,
     /// "inOut" or "linear".
     easing: Option<String>,
@@ -136,6 +187,54 @@ struct ParallaxRequest {
     label_color: Option<String>,
     /// true for "Rendered with seiza.fyi", or the text to write.
     watermark: Option<WatermarkRequest>,
+}
+
+/// A JSON object's fields.
+type Fields = serde_json::Map<String, serde_json::Value>;
+
+/// A JSON object's fields, the scene's and the video's apart.
+fn split_fields(json: &str, what: &str) -> Result<(Fields, Fields), String> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| format!("invalid {what}: {error}"))?;
+    let serde_json::Value::Object(fields) = value else {
+        return Err(format!("the {what} must be a JSON object"));
+    };
+    let (mut scene, mut video) = (Fields::new(), Fields::new());
+    for (key, value) in fields {
+        if SCENE_FIELDS.contains(&key.as_str()) {
+            scene.insert(key, value);
+        } else {
+            video.insert(key, value);
+        }
+    }
+    Ok((scene, video))
+}
+
+/// A prepare request, its scene's fields and its video's apart.
+fn parse_request(json: &str) -> Result<ParallaxRequest, String> {
+    let what = "parallax request JSON";
+    let (scene, video) = split_fields(json, what)?;
+    Ok(ParallaxRequest {
+        scene: serde_json::from_value(serde_json::Value::Object(scene))
+            .map_err(|error| format!("invalid {what}: {error}"))?,
+        video: serde_json::from_value(serde_json::Value::Object(video))
+            .map_err(|error| format!("invalid {what}: {error}"))?,
+    })
+}
+
+/// A reconfiguration's video fields, refusing any that would change the
+/// prepared scene.
+fn parse_video(json: &str) -> Result<VideoRequest, String> {
+    let what = "parallax settings JSON";
+    let (scene, video) = split_fields(json, what)?;
+    if let Some(field) = scene.keys().next() {
+        return Err(format!(
+            "\"{field}\" changes the prepared scene (its images, plate solution, catalogs, \
+             distances or star placement); prepare a new video for it"
+        ));
+    }
+    serde_json::from_value(serde_json::Value::Object(video))
+        .map_err(|error| format!("invalid {what}: {error}"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -250,12 +349,64 @@ struct SummaryResponse {
     with_distance: usize,
     background_distance_parsecs: f64,
     background_basis: String,
+    /// The image point the nebula's distance was taken at.
+    background_focus: [f64; 2],
     unmatched_distance_parsecs: f64,
     flying_stars: usize,
     galaxies_lifted: Vec<String>,
     dust_transmission: Option<DustResponse>,
     labelled_objects: usize,
+    /// How the fit changed the framing asked for.
+    fit: FitResponse,
     wcs: WcsResponse,
+}
+
+/// A setting as asked and as the video uses it.
+#[derive(Serialize)]
+struct AskedUsed {
+    asked: f64,
+    used: f64,
+}
+
+impl From<(f64, f64)> for AskedUsed {
+    fn from((asked, used): (f64, f64)) -> Self {
+        Self { asked, used }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FitResponse {
+    zoom: AskedUsed,
+    pan: AskedUsed,
+    lead: AskedUsed,
+    truck: AskedUsed,
+    stops: Vec<StopFitResponse>,
+}
+
+#[derive(Serialize)]
+struct StopFitResponse {
+    zoom: AskedUsed,
+    pan: AskedUsed,
+}
+
+impl From<&FitSummary> for FitResponse {
+    fn from(fit: &FitSummary) -> Self {
+        Self {
+            zoom: fit.zoom.into(),
+            pan: fit.pan.into(),
+            lead: fit.lead.into(),
+            truck: fit.truck.into(),
+            stops: fit
+                .stops
+                .iter()
+                .map(|stop| StopFitResponse {
+                    zoom: stop.zoom.into(),
+                    pan: stop.pan.into(),
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -311,7 +462,15 @@ fn choice<T: Copy>(
 
 /// The video's options from the request, over the defaults.
 fn options(request: &ParallaxRequest) -> Result<ParallaxOptions, String> {
-    let defaults = ParallaxOptions::default();
+    Ok(ParallaxOptions {
+        scene: scene_options(&request.scene)?,
+        video: video_options(&request.video)?,
+    })
+}
+
+/// The scene's options from the request, over the defaults.
+fn scene_options(request: &SceneRequest) -> Result<SceneOptions, String> {
+    let defaults = SceneOptions::default();
     let catalogs = request.catalog_directory.as_deref();
     // A star distance file the request names must be there; one beside the
     // other catalogs is taken only if it is.
@@ -320,9 +479,9 @@ fn options(request: &ParallaxRequest) -> Result<ParallaxOptions, String> {
             .map(|directory| directory.join("star-distances.bin"))
             .filter(|path| path.is_file())
     });
-    Ok(ParallaxOptions {
-        focus: request.focus.map(|[x, y]| (x, y)),
+    Ok(SceneOptions {
         distance_pc: request.distance_parsecs,
+        distance_focus: request.distance_focus.map(|[x, y]| (x, y)),
         unmatched_distance_pc: request.unmatched_distance_parsecs,
         objects: request
             .objects
@@ -343,6 +502,14 @@ fn options(request: &ParallaxRequest) -> Result<ParallaxOptions, String> {
         keep_galaxies: request.keep_galaxies.unwrap_or(defaults.keep_galaxies),
         dust: request.dust.unwrap_or(defaults.dust),
         dust_opacity: request.dust_opacity.unwrap_or(defaults.dust_opacity),
+    })
+}
+
+/// The video's options from the request, over the defaults.
+fn video_options(request: &VideoRequest) -> Result<VideoOptions, String> {
+    let defaults = VideoOptions::default();
+    Ok(VideoOptions {
+        focus: request.focus.map(|[x, y]| (x, y)),
         start: choice(
             &request.start,
             "start",
@@ -449,21 +616,22 @@ fn split(
     events: SeizaParallaxEventCallback,
     context: usize,
 ) -> Result<(Rgb32FImage, Rgb32FImage, PathBuf), String> {
-    if let (Some(starless), Some(stars)) = (&request.starless, &request.stars) {
-        let solve = request.image.clone().unwrap_or_else(|| stars.clone());
+    if let (Some(starless), Some(stars)) = (&request.scene.starless, &request.scene.stars) {
+        let solve = request.scene.image.clone().unwrap_or_else(|| stars.clone());
         return Ok((open_display(starless)?, open_display(stars)?, solve));
     }
-    if request.starless.is_some() || request.stars.is_some() {
+    if request.scene.starless.is_some() || request.scene.stars.is_some() {
         return Err("give both starless and stars, or neither".into());
     }
     let path = request
+        .scene
         .image
         .clone()
         .ok_or("give an image to split, or starless and stars")?;
     let image = open_display(&path)?;
     let cli = rc_astro_cli(
-        request.rc_astro_executable.clone(),
-        request.rc_astro_host.clone(),
+        request.scene.rc_astro_executable.clone(),
+        request.scene.rc_astro_host.clone(),
     )?;
     let linear = seiza_stacking::LinearImage::new(
         image.width() as usize,
@@ -552,10 +720,10 @@ pub unsafe extern "C" fn seiza_parallax_prepare_json(
     // The callback runs on this thread and the context's lifetime is the
     // caller's promise, so the address crosses catch_unwind as an integer.
     let context = context as usize;
+    let cancel_address = cancel as usize;
     ffi_result(error_out, || {
         let request_json = required_str(request_json, "parallax request JSON")?;
-        let request: ParallaxRequest = serde_json::from_str(&request_json)
-            .map_err(|error| format!("invalid parallax request JSON: {error}"))?;
+        let request = parse_request(&request_json)?;
         let options = options(&request)?;
         options.check().map_err(|error| error.to_string())?;
         let cancellation = unsafe { cancel.as_ref() }
@@ -563,11 +731,16 @@ pub unsafe extern "C" fn seiza_parallax_prepare_json(
         let (starless, stars, solve_path) =
             split(&request, cancellation.as_ref(), events, context)?;
         let wcs = solution(&request, &solve_path, events, context)?;
-        let video = Parallax::prepare(&starless, &stars, &wcs, &options, &mut |event| {
-            send(events, context, event_json(event));
-        })
+        let video = Parallax::prepare(
+            &starless,
+            &stars,
+            &wcs,
+            &options,
+            &mut |event| send(events, context, event_json(event)),
+            &|| cancelled(cancel_address),
+        )
         .map_err(|error| error.to_string())?;
-        Ok(Box::into_raw(Box::new(SeizaParallax { video, wcs })))
+        Ok(Box::into_raw(Box::new(SeizaParallax { video })))
     })
     .unwrap_or(ptr::null_mut())
 }
@@ -580,14 +753,17 @@ fn solution(
     events: SeizaParallaxEventCallback,
     context: usize,
 ) -> Result<Wcs, String> {
-    if let Some(wcs) = &request.wcs {
+    if let Some(wcs) = &request.scene.wcs {
         return Ok(wcs.wcs());
     }
-    let minimum = request.minimum_scale_arcsec_per_pixel.unwrap_or(0.1);
-    let maximum = request.maximum_scale_arcsec_per_pixel.unwrap_or(1000.0);
+    let minimum = request.scene.minimum_scale_arcsec_per_pixel.unwrap_or(0.1);
+    let maximum = request
+        .scene
+        .maximum_scale_arcsec_per_pixel
+        .unwrap_or(1000.0);
     let solved = blind_solve_path(
         solve_path,
-        request.catalog_directory.as_deref(),
+        request.scene.catalog_directory.as_deref(),
         minimum,
         maximum,
         2,
@@ -661,18 +837,19 @@ pub unsafe extern "C" fn seiza_parallax_plan_tour_json(
     let context = context as usize;
     ffi_result(error_out, || {
         let request_json = required_str(request_json, "parallax request JSON")?;
-        let request: ParallaxRequest = serde_json::from_str(&request_json)
-            .map_err(|error| format!("invalid parallax request JSON: {error}"))?;
+        let request = parse_request(&request_json)?;
         let options = options(&request)?;
         let path = request
+            .scene
             .image
             .clone()
-            .or_else(|| request.stars.clone())
-            .or_else(|| request.starless.clone())
+            .or_else(|| request.scene.stars.clone())
+            .or_else(|| request.scene.starless.clone())
             .ok_or("give the image to plan a tour of")?;
         let dimensions = open_display(&path)?.dimensions();
         let wcs = solution(&request, &path, events, context)?;
         let auto = request
+            .video
             .auto_tour
             .as_ref()
             .map(AutoTourRequest::auto_tour)
@@ -680,14 +857,14 @@ pub unsafe extern "C" fn seiza_parallax_plan_tour_json(
         let plan = seiza_parallax::plan_tour(
             &wcs,
             dimensions,
-            options.objects.as_deref(),
-            options.size,
+            options.scene.objects.as_deref(),
+            options.video.size,
             &auto,
         )
         .map_err(|error| error.to_string())?;
-        let seconds = ParallaxOptions {
+        let seconds = VideoOptions {
             tour: plan.tour(),
-            ..ParallaxOptions::default()
+            ..VideoOptions::default()
         }
         .seconds();
         owned_json(&PlannedTourResponse {
@@ -716,10 +893,82 @@ pub unsafe extern "C" fn seiza_parallax_plan_tour_json(
     .unwrap_or(ptr::null_mut())
 }
 
+/// A new video of the same prepared scene, filmed as `settings_json`
+/// asks, released with [`seiza_parallax_free`]; null with `error_out` set
+/// on failure, and when `cancel` stopped it.
+///
+/// `settings_json` is a complete set of the video's settings, as in
+/// [`seiza_parallax_prepare_json`] but for the scene's: the single move
+/// (`focus`, `start`, `dolly`, `truck`, `truckAngleDegrees`, `pan`, `zoom`,
+/// `zoomEnd`, `rotateDegrees`, `easing`), a tour (`tour`, `autoTour`,
+/// `tourGlide`), the output (`size`, `seconds`, `fps`, `quality`,
+/// `growthLimit`, `fadeFrom`) and the labels (`overlay`, `overlayDensity`,
+/// `labels`, `labelColor`, `watermark`). Fields left out take their
+/// defaults, not the first video's. Turns are taken as given, unwrapped:
+/// `rotateDegrees` [0, 360] turns once anticlockwise and [0, -360] once
+/// clockwise, and a stop's `rotateDegrees` likewise. A field that would
+/// change the scene (the images, plate solution, catalogs, distances,
+/// `distanceFocus`, star placement, galaxies or dust) is refused: those
+/// need a new preparation. The camera's `focus` only moves the camera; the
+/// nebula keeps the depth it was prepared at.
+///
+/// Nothing of the scene is prepared again: the image is not reloaded,
+/// split or solved, the stars are not found again and their distances not
+/// looked up. The camera is fitted to the scene anew, and
+/// [`seiza_parallax_summary_json`] on the new video gives its frame count,
+/// size and the fit's adjustments. The catalogued objects' labels are read
+/// once for every video of the scene.
+///
+/// Ownership: the new video and `video` share the prepared scene, which
+/// lives until the last video using it is freed; free each with
+/// [`seiza_parallax_free`], in any order. `video` is not changed: it may
+/// keep drawing frames on other threads while this runs and after, and
+/// both videos may draw frames at once. `cancel` stops the fit and the
+/// label planning; `events` (nullable) hears each step on the calling
+/// thread, with `context` passed through.
+///
+/// # Safety
+///
+/// `video` must be a live pointer from [`seiza_parallax_prepare_json`] or
+/// this function, kept alive until this call returns. `settings_json` must
+/// be a NUL-terminated UTF-8 string. `cancel` must be null or a live
+/// [`SeizaCancelSignal`] retained until this call returns. When non-null,
+/// `error_out` must point to writable storage for one pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_parallax_reconfigure_json(
+    video: *const SeizaParallax,
+    settings_json: *const c_char,
+    cancel: *const SeizaCancelSignal,
+    events: SeizaParallaxEventCallback,
+    context: *mut c_void,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaParallax {
+    clear_error(error_out);
+    let context = context as usize;
+    let cancel = cancel as usize;
+    ffi_result(error_out, || {
+        let video = &unsafe { video.as_ref() }.ok_or("video is null")?.video;
+        let settings_json = required_str(settings_json, "parallax settings JSON")?;
+        let settings = video_options(&parse_video(&settings_json)?)?;
+        let refilmed = video
+            .reconfigure(
+                &settings,
+                &mut |event| send(events, context, event_json(event)),
+                &|| cancelled(cancel),
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(Box::into_raw(Box::new(SeizaParallax { video: refilmed })))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
 /// What preparing the video found, as JSON: its frame count, frame rate
-/// and size, the stars found and matched, the nebula's distance and how it
-/// was found, galaxies lifted, the dust, objects labelled, and the WCS
-/// used. Returns a string released with `seiza_string_free`, or null with
+/// and size, the stars found and matched, the nebula's distance with how
+/// and where (`backgroundFocus`) it was found, galaxies lifted, the dust,
+/// objects labelled, the WCS used, and `fit`, how fitting the camera to the
+/// image changed the framing asked for: `zoom`, `pan`, `lead` and `truck`
+/// for the single move and `stops[].zoom` and `stops[].pan` for a tour,
+/// each `{asked, used}`. Returns a string released with `seiza_string_free`, or null with
 /// `error_out` set.
 ///
 /// # Safety
@@ -738,7 +987,7 @@ pub unsafe extern "C" fn seiza_parallax_summary_json(
         let video = &owner.video;
         let summary = video.summary();
         let (width, height) = video.size();
-        let wcs = &owner.wcs;
+        let wcs = video.wcs();
         owned_json(&SummaryResponse {
             schema_version: 1,
             frames: video.frames(),
@@ -752,6 +1001,7 @@ pub unsafe extern "C" fn seiza_parallax_summary_json(
             with_distance: summary.with_distance,
             background_distance_parsecs: summary.background_distance_pc,
             background_basis: summary.background_basis.clone(),
+            background_focus: [summary.background_focus.0, summary.background_focus.1],
             unmatched_distance_parsecs: summary.unmatched_distance_pc,
             flying_stars: summary.flying_stars,
             galaxies_lifted: summary.galaxies_lifted.clone(),
@@ -759,6 +1009,7 @@ pub unsafe extern "C" fn seiza_parallax_summary_json(
                 .dust_transmission
                 .map(|(median, thickest)| DustResponse { median, thickest }),
             labelled_objects: summary.labelled_objects,
+            fit: (&summary.fit).into(),
             wcs: WcsResponse {
                 crval: [wcs.crval.0, wcs.crval.1],
                 crpix: [wcs.crpix.0, wcs.crpix.1],
@@ -1433,6 +1684,159 @@ mod tests {
             .sum();
         assert_eq!(parsed["frames"], (seconds * 5.0).round() as u64);
         unsafe { seiza_parallax_free(video) };
+    }
+
+    fn summary(video: *const SeizaParallax) -> serde_json::Value {
+        let mut error = ptr::null_mut();
+        let json = unsafe { seiza_parallax_summary_json(video, &mut error) };
+        assert!(!json.is_null(), "{}", take_error(error));
+        let parsed =
+            serde_json::from_str(&unsafe { CStr::from_ptr(json) }.to_string_lossy()).unwrap();
+        unsafe { seiza_string_free(json) };
+        parsed
+    }
+
+    #[test]
+    fn a_reconfigured_video_shares_the_scene_and_both_draw_at_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let request = self::request(directory.path(), "");
+        let mut error = ptr::null_mut();
+        let first = unsafe {
+            seiza_parallax_prepare_json(
+                request.as_ptr(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(!first.is_null(), "{}", take_error(error));
+        let settings = CString::new(
+            serde_json::json!({
+                "focus": [150, 110],
+                "dolly": 0.6,
+                "rotateDegrees": [0, -360],
+                "size": "200x150",
+                "seconds": 2,
+                "fps": 5,
+                "quality": "high",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let second = unsafe {
+            seiza_parallax_reconfigure_json(
+                first,
+                settings.as_ptr(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(!second.is_null(), "{}", take_error(error));
+        let (before, after) = (summary(first), summary(second));
+        assert_eq!(
+            (before["frames"].as_u64(), before["width"].as_u64()),
+            (Some(5), Some(160))
+        );
+        assert_eq!(
+            (after["frames"].as_u64(), after["width"].as_u64()),
+            (Some(10), Some(200))
+        );
+        assert_eq!(
+            after["backgroundDistanceParsecs"],
+            before["backgroundDistanceParsecs"]
+        );
+        assert_eq!(after["detectedStars"], before["detectedStars"]);
+        assert_eq!(after["fit"]["zoom"]["asked"], 1.0);
+        assert!(after["fit"]["zoom"]["used"].as_f64().unwrap() >= 1.0);
+        // Both draw frames at once, on threads of their own.
+        let (first_at, second_at) = (first as usize, second as usize);
+        std::thread::scope(|scope| {
+            for (address, (width, height)) in [(first_at, (160, 120)), (second_at, (200, 150))] {
+                scope.spawn(move || {
+                    let mut pixels = vec![0_u8; width * height * 3];
+                    for index in 0..4 {
+                        let mut error = ptr::null_mut();
+                        assert!(unsafe {
+                            seiza_parallax_render_frame(
+                                address as *const SeizaParallax,
+                                index,
+                                SEIZA_PIXEL_FORMAT_RGB8,
+                                pixels.as_mut_ptr(),
+                                pixels.len(),
+                                width * 3,
+                                &mut error,
+                            )
+                        });
+                    }
+                });
+            }
+        });
+        // Fields that would change the scene are refused by name, and
+        // unknown ones as before.
+        for (settings, expected) in [
+            (
+                "{\"distanceParsecs\": 500}",
+                "\"distanceParsecs\" changes the prepared scene",
+            ),
+            (
+                "{\"maxStars\": 10}",
+                "\"maxStars\" changes the prepared scene",
+            ),
+            (
+                "{\"distanceFocus\": [1, 2]}",
+                "\"distanceFocus\" changes the prepared scene",
+            ),
+            ("{\"dollly\": 0.5}", "unknown field"),
+        ] {
+            let settings = CString::new(settings).unwrap();
+            let refused = unsafe {
+                seiza_parallax_reconfigure_json(
+                    first,
+                    settings.as_ptr(),
+                    ptr::null(),
+                    None,
+                    ptr::null_mut(),
+                    &mut error,
+                )
+            };
+            assert!(refused.is_null());
+            let message = take_error(error);
+            assert!(message.contains(expected), "{message}");
+        }
+        // A cancelled reconfiguration gives nothing.
+        let signal = seiza_cancel_signal_create();
+        unsafe { seiza_cancel_signal_cancel(signal) };
+        let cancelled = unsafe {
+            seiza_parallax_reconfigure_json(
+                first,
+                settings.as_ptr(),
+                signal,
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(cancelled.is_null());
+        assert!(take_error(error).contains("stopped"));
+        unsafe { seiza_cancel_signal_free(signal) };
+        // The second outlives the first: the scene is theirs together.
+        unsafe { seiza_parallax_free(first) };
+        let mut pixels = vec![0_u8; 200 * 150 * 3];
+        assert!(unsafe {
+            seiza_parallax_render_frame(
+                second,
+                9,
+                SEIZA_PIXEL_FORMAT_RGB8,
+                pixels.as_mut_ptr(),
+                pixels.len(),
+                600,
+                &mut error,
+            )
+        });
+        unsafe { seiza_parallax_free(second) };
     }
 
     #[test]

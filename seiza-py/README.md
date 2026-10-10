@@ -528,10 +528,25 @@ for stop in plan["tour"]:
     print(stop["name"], stop["focus"], stop["dolly"])
 stops = [stop for stop in plan["tour"] if stop["name"] != "LDN 1267"]
 video = seiza.ParallaxVideo(starless, stars, solution.wcs, size="1080p-portrait",
-                            tour=stops, focus=plan["focus"])
+                            tour=stops, distance_focus=plan["focus"])
 ```
 
 `auto_tour=True` plans and renders in one go.
+
+`distance_focus` is where the nebula's distance is measured; `focus` only
+aims the camera, so moving it never changes the scene's depth. To film the
+same scene again with another camera, tour, size or quality, call
+`reconfigure`. It returns a new video that shares the prepared scene, so
+nothing is loaded, solved or looked up again, and leaves the first as it
+was; both can draw frames at once. Options that change the scene, such as
+the distances, `distance_focus`, star placement or dust, raise `ValueError`.
+`summary["fit"]` gives each zoom and pan as asked and as used, after the
+camera was fitted to stay inside the image:
+
+```python
+wide = video.reconfigure(size="4k", quality="high", rotate_deg=(0, -360))
+print(wide.summary["fit"]["zoom"])      # (asked, used)
+```
 
 Images may be paths (PNG, JPEG or TIFF) or arrays, float32 from 0 to 1 or
 uint8; 16-bit files make the best videos, as 8 bits flatten bright star
@@ -539,7 +554,7 @@ cores and band smooth nebula. Options are the command's, in snake case,
 with frame sizes such as `"720p"`, `"1080p"`, `"4k"` or `"1080p-portrait"`.
 Distances come from the star distance file when installed, or the archives
 unless `online=False`. `render` stops when its callback returns `False`;
-Ctrl-C or `cancel` stop `render` and `write`.
+Ctrl-C or `cancel` stop preparing, `reconfigure`, `render` and `write`.
 
 ## Predicted satellite tracks
 
