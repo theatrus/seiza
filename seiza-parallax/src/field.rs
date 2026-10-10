@@ -36,9 +36,11 @@ pub(crate) fn catalogue_stars(
         return Ok(field);
     }
     if !source.online {
-        return Err(Error::Invalid(
-            "no star distance file deep enough for the field, and fetching online is off".into(),
+        report(Event::Warning(
+            "no star distance file deep enough for the field, and fetching online is off: \
+             every star sits at one distance",
         ));
+        return Ok((Vec::new(), Vec::new()));
     }
     Ok((
         gaia_field(source, wcs, width, height, report)?,

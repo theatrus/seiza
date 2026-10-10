@@ -303,9 +303,15 @@ impl Shot {
         ]
     }
 
-    /// Whether every corner of `view` lies inside the image at `depths`.
+    /// Whether every corner of `view` lies inside the image at `depths`. A
+    /// whole-image start puts the corners on the image's edges, so rounding
+    /// a millionth of a pixel past them still counts as inside.
     fn inside(&self, scene: &Scene, view: &View, depths: &[f64]) -> bool {
-        let (width, height) = (scene.width() as f64 - 1.0, scene.height() as f64 - 1.0);
+        const SLACK: f64 = 1e-6;
+        let (width, height) = (
+            scene.width() as f64 - 1.0 + SLACK,
+            scene.height() as f64 - 1.0 + SLACK,
+        );
         let corners = [
             (0.0, 0.0),
             (self.width as f64 - 1.0, 0.0),
@@ -315,7 +321,7 @@ impl Shot {
         depths.iter().all(|&distance| {
             corners.iter().all(|&(u, v)| {
                 let (x, y) = view.unproject(u, v, distance);
-                (0.0..=width).contains(&x) && (0.0..=height).contains(&y)
+                (-SLACK..=width).contains(&x) && (-SLACK..=height).contains(&y)
             })
         })
     }
@@ -1483,5 +1489,49 @@ mod tests {
             .map(|(a, b)| (a[2] - b[2]).abs())
             .sum();
         assert_eq!(excess, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod edge_tests {
+    use super::*;
+    use crate::scene::CutOptions;
+
+    #[test]
+    fn a_whole_start_first_frame_counts_as_inside_whatever_the_scale() {
+        // The first frame spans the image edge to edge; rounding must not
+        // put its corners a hair outside, which would leave no room for
+        // any sideways travel at all.
+        let mut outside = Vec::new();
+        for (width, height) in [(9595, 6346), (4000, 2671), (6248, 4176), (3001, 1999)] {
+            let image = LightImage::new(width, height);
+            let mut scene = Scene::new(
+                &image,
+                &image,
+                &[],
+                355.0,
+                1134.0,
+                150_000.0,
+                &CutOptions::default(),
+            );
+            for step in 0..40 {
+                let focal_px = 150_000.0 + step as f64 * 1234.567;
+                scene.focal_px = focal_px;
+                let shot = Shot {
+                    focus: (width as f64 * 0.625, height as f64 * 0.37),
+                    start: Start::Whole,
+                    dolly: 0.8,
+                    width: 1920,
+                    height: 1080,
+                    frames: 2,
+                    ..Shot::default()
+                };
+                let view = shot.view(&scene, 0);
+                if !shot.inside(&scene, &view, &shot.guarded_depths(&scene)) {
+                    outside.push((width, focal_px));
+                }
+            }
+        }
+        assert!(outside.is_empty(), "{outside:?}");
     }
 }

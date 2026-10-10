@@ -80,7 +80,8 @@ pub struct ParallaxOptions {
     /// directory if `None`.
     pub gaia_cache: Option<PathBuf>,
     /// Whether to ask the archives when the offline star distance file is
-    /// missing or too shallow.
+    /// missing or too shallow. Without either, every star sits at one
+    /// distance.
     pub online: bool,
     /// How many stars, brightest first, fly at their own distances; all if
     /// `None`. The rest go as `small_stars` says.
@@ -288,6 +289,20 @@ impl Parallax {
             )));
         }
         let (width, height) = (stars.width() as usize, stars.height() as usize);
+        let shallow: Vec<&str> = [("starless", starless), ("stars", stars)]
+            .into_iter()
+            .filter(|(_, image)| eight_bit(image))
+            .map(|(name, _)| name)
+            .collect();
+        if !shallow.is_empty() {
+            report(Event::Warning(&format!(
+                "the {} image{} only 8 bits a channel: a bright star's core flattens, which \
+                 can misplace it and lose its distance, and smooth nebula bands as the camera \
+                 nears it; split and export at 16 bits (TIFF or PNG) for the best video",
+                shallow.join(" and "),
+                if shallow.len() > 1 { "s have" } else { " has" }
+            )));
+        }
         let mut summary = Summary::default();
         let scale = wcs.scale_arcsec_per_px();
         let focal_px = 206_264.806_247 / scale;
@@ -611,6 +626,18 @@ impl Parallax {
     }
 }
 
+/// Whether every value of `image` sits on one of 256 levels, as an 8-bit
+/// file's do; a 16-bit image's hardly ever all fall there. Looks at a
+/// spread of up to 100,000 values.
+fn eight_bit(image: &Rgb32FImage) -> bool {
+    let values = image.as_raw();
+    let step = (values.len() / 100_000).max(1);
+    values
+        .iter()
+        .step_by(step)
+        .all(|&value| ((value * 255.0) - (value * 255.0).round()).abs() < 1e-3)
+}
+
 /// The labels over the video, if any were asked for: the caller's own, the
 /// catalogued objects, and the watermark.
 fn prepare_overlay(
@@ -888,6 +915,18 @@ mod tests {
             matches!(&refused, Err(Error::Encode(crate::encode::Error::Sink(message))) if message == "disk full"),
             "{refused:?}"
         );
+    }
+
+    #[test]
+    fn eight_bit_images_are_told_from_deeper_ones() {
+        let eight = Rgb32FImage::from_fn(40, 30, |x, y| {
+            image::Rgb([((x * 7 + y) % 256) as f32 / 255.0, 0.0, 1.0])
+        });
+        assert!(eight_bit(&eight));
+        let sixteen = Rgb32FImage::from_fn(40, 30, |x, y| {
+            image::Rgb([((x * 977 + y * 31) % 65_536) as f32 / 65_535.0, 0.25, 1.0])
+        });
+        assert!(!eight_bit(&sixteen));
     }
 
     #[test]

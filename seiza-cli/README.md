@@ -371,7 +371,11 @@ seiza parallax-video m45.tif --starless m45-starless.tif --stars m45-stars.tif \
 The starless and stars images are the stretched image split by
 StarXTerminator, with "unscreen" so the stars screen back over the starless
 image. Given only the stretched image, Seiza runs StarXTerminator's `rc-astro`
-CLI itself when it is installed and licensed. Inputs can be PNG, JPEG or TIFF.
+CLI itself when it is installed and licensed. Inputs can be PNG, JPEG or TIFF,
+but 16-bit TIFF or PNG gives the best video: at 8 bits a bright star's core
+flattens, which can misplace it so it loses its distance, and smooth nebula
+bands as the camera nears it. Seiza warns when an image has only 8 bits a
+channel.
 
 The image is plate-solved and its stars matched to Gaia DR3 for their
 Bailer-Jones distances; Hipparcos supplies the brightest stars Gaia has no
