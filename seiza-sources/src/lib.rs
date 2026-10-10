@@ -1579,6 +1579,13 @@ impl SourceDownloader {
         dec: f64,
         radius_deg: f64,
     ) -> Result<Vec<HipparcosStar>> {
+        parse_hipparcos(&self.hipparcos_cone_csv(ra, dec, radius_deg).await?)
+    }
+
+    /// [`Self::hipparcos_cone`] as VizieR's CSV, for a caller that caches
+    /// it; [`parse_hipparcos`] reads it, and the answer is checked to read
+    /// before it is returned.
+    pub async fn hipparcos_cone_csv(&self, ra: f64, dec: f64, radius_deg: f64) -> Result<String> {
         check_cone(ra, dec, radius_deg, 0.0)?;
         let query = format!(
             "SELECT HIP, RArad, DErad, Plx, e_Plx, Hpmag FROM \"I/311/hip2\" \
@@ -1609,7 +1616,9 @@ impl SourceDownloader {
                 status: response.status().as_u16(),
             });
         }
-        parse_hipparcos(&response.text().await.map_err(http)?)
+        let csv = response.text().await.map_err(http)?;
+        parse_hipparcos(&csv)?;
+        Ok(csv)
     }
 
     /// Run a Gaia cone `query` as an asynchronous job on `archive` and return

@@ -251,7 +251,7 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
         seiza_stars::fold_core_fragments(seiza_parallax::find_stars(&stars_light, 5.0));
     println!("{} stars found in the stars image", detections.len());
     let gaia = gaia_field(&args, &wcs, width, height)?;
-    let hipparcos = hipparcos_field(&wcs, width, height);
+    let hipparcos = hipparcos_field(&args, &wcs, width, height);
     let (matched, gaia_matches) = match_distances(&detections, &gaia, &hipparcos, &wcs, scale);
     let with_distance = matched
         .iter()
@@ -803,14 +803,38 @@ fn cones(wcs: &Wcs, width: usize, height: usize) -> Vec<(f64, f64, f64)> {
 
 /// Hipparcos stars in the field, or none when VizieR does not answer: they
 /// only fill in the brightest stars' distances.
-fn hipparcos_field(wcs: &Wcs, width: usize, height: usize) -> Vec<HipparcosStar> {
+fn hipparcos_field(
+    args: &ParallaxVideoArgs,
+    wcs: &Wcs,
+    width: usize,
+    height: usize,
+) -> Vec<HipparcosStar> {
     let (centre, radius) = field(wcs, width, height);
+    // Kept beside the Gaia fields, so a field is asked for once.
+    let cache = args.gaia_cache.clone().unwrap_or_else(default_gaia_cache);
+    let path = cache.join(format!(
+        "hipparcos-{:.4}{:+.4}-r{:.4}.csv",
+        centre.0, centre.1, radius
+    ));
+    if let Ok(csv) = std::fs::read_to_string(&path)
+        && let Ok(stars) = seiza_sources::parse_hipparcos(&csv)
+    {
+        return stars;
+    }
     let fetched = seiza_sources::SourceDownloader::new()
         .map_err(anyhow::Error::from)
         .and_then(|downloader| {
             runtime()?
-                .block_on(downloader.hipparcos_cone(centre.0, centre.1, radius))
+                .block_on(downloader.hipparcos_cone_csv(centre.0, centre.1, radius))
                 .map_err(anyhow::Error::from)
+        })
+        .and_then(|csv| {
+            let stars = seiza_sources::parse_hipparcos(&csv)?;
+            let partial = path.with_extension("csv.partial");
+            if std::fs::create_dir_all(&cache).is_ok() && std::fs::write(&partial, &csv).is_ok() {
+                let _ = std::fs::rename(&partial, &path);
+            }
+            Ok(stars)
         });
     match fetched {
         Ok(stars) => stars,
