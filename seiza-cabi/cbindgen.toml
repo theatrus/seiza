@@ -39,10 +39,13 @@ after_includes = """
  *   - SeizaStackExportSnapshot* returned by
  *     seiza_live_stacker_export_snapshot
  *       -> release with seiza_stack_export_snapshot_free().
+ *   - SeizaParallax* returned by seiza_parallax_prepare_json
+ *       -> release with seiza_parallax_free() once no call using it runs.
  *   - char* returned by seiza_catalog_status_json, seiza_solve_image_json,
  *     seiza_probe_frame_json, seiza_calibration_plan_json,
  *     seiza_calibration_build_master_json, seiza_live_stacker_state_json, and
- *     seiza_live_stacker_push_*_json, plus any char* stored into an
+ *     seiza_live_stacker_push_*_json, seiza_parallax_summary_json, plus any
+ *     char* stored into an
  *     `error_out` argument on failure
  *       -> release with seiza_string_free().
  *
@@ -63,6 +66,8 @@ after_includes = """
  *   - const char* from seiza_core_version is static and is never freed.
  *   - the `json` argument to a SeizaCatalogSetupProgressCallback is valid only
  *     for the duration of that one callback; copy it if you need it afterward.
+ *   - the pixels a SeizaParallaxFrameCallback receives, and the JSON a
+ *     SeizaParallaxEventCallback receives, are valid only for that one call.
  *
  * Convention: a non-const `char*` return transfers ownership (free it); a
  * `const` return is borrowed (do not free).

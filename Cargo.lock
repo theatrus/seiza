@@ -2506,6 +2506,7 @@ dependencies = [
  "seiza-calibration",
  "seiza-deconvolution",
  "seiza-fits",
+ "seiza-parallax",
  "seiza-sources",
  "seiza-stacking",
  "seiza-stars",

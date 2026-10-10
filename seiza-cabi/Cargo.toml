@@ -20,6 +20,7 @@ seiza-background.workspace = true
 seiza-calibration.workspace = true
 seiza-deconvolution.workspace = true
 seiza-fits = { workspace = true }
+seiza-parallax = { workspace = true }
 seiza-xisf = { workspace = true }
 seiza-stacking = { workspace = true }
 seiza-sources = { workspace = true }

@@ -1,4 +1,5 @@
 use image::DynamicImage;
+mod parallax;
 mod resample;
 use resample::{downsample_interleaved_f32, downsample_rgba};
 use seiza::blind::{BlindIndex, BlindParams, solve_blind};
@@ -3770,6 +3771,101 @@ pub unsafe extern "C" fn seiza_rendered_image16_free(image: *mut SeizaRenderedIm
     }
 }
 
+/// A blind plate solution of an image file against the catalogs in
+/// `catalog_directory`, with the stars found in it, its size and capture
+/// date, and the star catalog it was solved against.
+struct BlindSolved {
+    width: u32,
+    height: u32,
+    stars: Vec<seiza::DetectedStar>,
+    acquisition_jd: Option<f64>,
+    catalog: TileCatalog,
+    capture_time: Option<String>,
+    solution: seiza::solve::Solution,
+}
+
+/// Blind-solve the image at `path`, a FITS, XISF or raster file, retrying
+/// a raster converted from 8-bit colour with float detection.
+fn blind_solve_path(
+    path: &Path,
+    catalog_directory: Option<&Path>,
+    minimum_scale_arcsec_per_pixel: f64,
+    maximum_scale_arcsec_per_pixel: f64,
+    sip_order: u8,
+) -> Result<BlindSolved, String> {
+    let detection_config = DetectConfig {
+        max_stars: 600,
+        ..Default::default()
+    };
+    let (width, height, mut stars, raster_fallback, capture_time) = if is_astronomy_image_path(path)
+    {
+        let (image, _) = open_astronomy_image(path)?;
+        let width = u32::try_from(image.width).map_err(|_| "image width is too large")?;
+        let height = u32::try_from(image.height).map_err(|_| "image height is too large")?;
+        let capture_time = fits_capture_time(&image);
+        let luma = image.to_luma_f32();
+        let stars = detect_stars_luma_f32(&luma, width, height, &detection_config);
+        (width, height, stars, None, capture_time)
+    } else {
+        let image = open_raster(path)?;
+        let width = image.width();
+        let height = image.height();
+        let stars = detect_stars(&image, &detection_config);
+        let fallback = is_converted_8bit_color(&image).then_some(image);
+        let capture_time = seiza::raster::PhotoMetadata::read(path).capture_time_utc;
+        (width, height, stars, fallback, capture_time)
+    };
+    let acquisition_jd = capture_time.as_deref().and_then(parse_iso_jd);
+
+    let star_path =
+        seiza::data_paths::star_data(catalog_directory).map_err(|error| error.to_string())?;
+    let index_path = seiza::data_paths::blind_index_beside(catalog_directory, &star_path)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| {
+            "no blind index found; install a complete Seiza catalog bundle first".to_string()
+        })?;
+    let catalog = TileCatalog::open(&star_path)
+        .map_err(|error| format!("failed to open {}: {error}", star_path.display()))?;
+    let index = BlindIndex::open(&index_path)
+        .map_err(|error| format!("failed to open {}: {error}", index_path.display()))?;
+
+    let params = BlindParams {
+        min_scale_arcsec_px: minimum_scale_arcsec_per_pixel.max(0.01),
+        max_scale_arcsec_px: maximum_scale_arcsec_per_pixel
+            .max(minimum_scale_arcsec_per_pixel.max(0.01)),
+        index_mag_limit: index.index_mag_limit(),
+        max_pattern_deg: index.max_pattern_deg(),
+        sip_order: sip_order.min(5),
+        ..Default::default()
+    };
+    let solution = match solve_blind(&stars, &catalog, &index, &params, (width, height)) {
+        Ok(solution) => solution,
+        Err(primary_error) => {
+            let Some(image) = raster_fallback else {
+                return Err(primary_error.to_string());
+            };
+            stars = detect_stars(
+                &image,
+                &DetectConfig {
+                    backend: DetectBackend::F32,
+                    ..detection_config
+                },
+            );
+            solve_blind(&stars, &catalog, &index, &params, (width, height))
+                .map_err(|error| error.to_string())?
+        }
+    };
+    Ok(BlindSolved {
+        width,
+        height,
+        stars,
+        acquisition_jd,
+        catalog,
+        capture_time,
+        solution,
+    })
+}
+
 #[unsafe(no_mangle)]
 /// Solves an image and returns a JSON string for the C ABI.
 ///
@@ -3790,71 +3886,21 @@ pub unsafe extern "C" fn seiza_solve_image_json(
         let started = Instant::now();
         let path = required_path(path, "image path")?;
         let catalog_directory = optional_path(catalog_directory)?;
-        let detection_config = DetectConfig {
-            max_stars: 600,
-            ..Default::default()
-        };
-        let (width, height, mut stars, raster_fallback, capture_time) =
-            if is_astronomy_image_path(&path) {
-                let (image, _) = open_astronomy_image(&path)?;
-                let width = u32::try_from(image.width).map_err(|_| "image width is too large")?;
-                let height =
-                    u32::try_from(image.height).map_err(|_| "image height is too large")?;
-                let capture_time = fits_capture_time(&image);
-                let luma = image.to_luma_f32();
-                let stars = detect_stars_luma_f32(&luma, width, height, &detection_config);
-                (width, height, stars, None, capture_time)
-            } else {
-                let image = open_raster(&path)?;
-                let width = image.width();
-                let height = image.height();
-                let stars = detect_stars(&image, &detection_config);
-                let fallback = is_converted_8bit_color(&image).then_some(image);
-                let capture_time = seiza::raster::PhotoMetadata::read(&path).capture_time_utc;
-                (width, height, stars, fallback, capture_time)
-            };
-        let acquisition_jd = capture_time.as_deref().and_then(parse_iso_jd);
-
-        let star_path = seiza::data_paths::star_data(catalog_directory.as_deref())
-            .map_err(|error| error.to_string())?;
-        let index_path =
-            seiza::data_paths::blind_index_beside(catalog_directory.as_deref(), &star_path)
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| {
-                    "no blind index found; install a complete Seiza catalog bundle first"
-                        .to_string()
-                })?;
-        let catalog = TileCatalog::open(&star_path)
-            .map_err(|error| format!("failed to open {}: {error}", star_path.display()))?;
-        let index = BlindIndex::open(&index_path)
-            .map_err(|error| format!("failed to open {}: {error}", index_path.display()))?;
-
-        let params = BlindParams {
-            min_scale_arcsec_px: minimum_scale_arcsec_per_pixel.max(0.01),
-            max_scale_arcsec_px: maximum_scale_arcsec_per_pixel
-                .max(minimum_scale_arcsec_per_pixel.max(0.01)),
-            index_mag_limit: index.index_mag_limit(),
-            max_pattern_deg: index.max_pattern_deg(),
-            sip_order: sip_order.min(5),
-            ..Default::default()
-        };
-        let solution = match solve_blind(&stars, &catalog, &index, &params, (width, height)) {
-            Ok(solution) => solution,
-            Err(primary_error) => {
-                let Some(image) = raster_fallback else {
-                    return Err(primary_error.to_string());
-                };
-                stars = detect_stars(
-                    &image,
-                    &DetectConfig {
-                        backend: DetectBackend::F32,
-                        ..detection_config
-                    },
-                );
-                solve_blind(&stars, &catalog, &index, &params, (width, height))
-                    .map_err(|error| error.to_string())?
-            }
-        };
+        let BlindSolved {
+            width,
+            height,
+            stars,
+            acquisition_jd,
+            catalog,
+            capture_time,
+            solution,
+        } = blind_solve_path(
+            &path,
+            catalog_directory.as_deref(),
+            minimum_scale_arcsec_per_pixel,
+            maximum_scale_arcsec_per_pixel,
+            sip_order,
+        )?;
         let center = solution
             .wcs
             .pixel_to_world(width as f64 / 2.0, height as f64 / 2.0);

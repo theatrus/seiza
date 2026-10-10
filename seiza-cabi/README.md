@@ -154,6 +154,27 @@ exposes the **superset** of what both apps need.
   Include the schema's `cliVersion`/`mlVersion` in any cache key: a tool
   upgrade changes the output for identical inputs.
 - **Plate solving** — `seiza_solve_image_json`.
+- **Parallax videos** — `seiza_parallax_prepare_json` makes what `seiza
+  parallax-video` makes from a JSON request: an image for StarXTerminator to
+  split (through `rc-astro`) or its starless and stars files, an optional WCS
+  (as `seiza_solve_image_json` returns it; without one the image is
+  blind-solved), and the command's options in camelCase, with frame sizes
+  such as `"1080p"`, `"4k"` or `"1080p-portrait"`. An unknown field is an
+  error. It returns an opaque `SeizaParallax`, released with
+  `seiza_parallax_free`, and reports each step as JSON to a
+  `SeizaParallaxEventCallback`. `seiza_parallax_summary_json` says what it
+  found. Frames then come three ways:
+  `seiza_parallax_render_frame` draws any frame into the caller's own
+  buffer, with a row stride and `SEIZA_PIXEL_FORMAT_RGB8`, `_RGBA8` or
+  `_BGRA8`, so a platform encoder's pixel buffer (a `CVPixelBuffer`, a Media
+  Foundation sample) can take it directly, from several threads at once;
+  `seiza_parallax_render_frames` hands every frame in order to a
+  `SeizaParallaxFrameCallback`, the hook for an external encoder, which
+  returns nonzero to stop; and `seiza_parallax_write_video_json` writes an
+  MP4 through ffmpeg or numbered PNG frames. Both whole-video calls take a
+  `SeizaCancelSignal` and return `1` done, `0` stopped, or `-1` failed.
+  Labels use the Inter typeface, embedded; an app shipping this library must
+  ship its licence, `seiza-draw/fonts/LICENSE-Inter.txt`.
 - **Catalog setup** — `seiza_catalog_status_json` and `seiza_catalog_setup`
   (with a progress callback). Preset `3` installs only the Gaia photometry
   catalog that colour calibration reads. The install path delegates to
