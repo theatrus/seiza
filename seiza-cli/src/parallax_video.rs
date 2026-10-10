@@ -362,8 +362,9 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
         .extend(galaxies.into_iter().map(|(_, sprite)| sprite));
     if !args.no_dust {
         // The stars seen through the dust: all but the matched ones in
-        // front of it.
-        let behind: Vec<(f64, f64)> = placed
+        // front of it. The unmatched ones count however near the dust they
+        // were placed, as faint stars are mostly far.
+        let behind: Vec<(f64, f64)> = matched
             .iter()
             .filter(|star| star.distance_pc.is_none_or(|pc| pc > distance))
             .map(|star| (star.x, star.y))
