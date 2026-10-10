@@ -6,16 +6,25 @@
 //! counts where the sky is clearest, the shortfall gives the share of light
 //! that gets through. When the camera moves, a far star or galaxy slides
 //! behind other dust than it was photographed through, and dims or
-//! brightens by the ratio of the two.
+//! brightens by the ratio of the two. Dust thick enough to black out the
+//! glow behind it shows too in the starless image's own darkness, finer
+//! than the counts can see.
+
+use crate::light::LightImage;
+use rayon::prelude::*;
 
 /// Light from behind the dust brightens at most this much as it slides out
 /// from behind thicker dust: the star counts are noisy, and a star the
 /// image barely showed should not blaze.
 const MAX_BRIGHTENING: f32 = 1.5;
 
-/// The least transmission the map gives: no stars at all in a cell may be
-/// chance as well as dust.
-const LEAST: f32 = 0.05;
+/// The least transmission the map gives: black dust lets through next to
+/// nothing.
+const LEAST: f32 = 0.01;
+
+/// The darkness map's cell size, image pixels: fine enough for a small
+/// black globule.
+const FINE: f64 = 16.0;
 
 /// The share of light the dust lets through, over the image.
 #[derive(Clone, Debug)]
@@ -25,6 +34,10 @@ pub struct Dust {
     columns: usize,
     rows: usize,
     transmission: Vec<f32>,
+    /// The power the share of stars seen, or of light, is raised to.
+    opacity: f32,
+    /// Stars per pixel where the sky is clear.
+    clear_density: f32,
 }
 
 impl Dust {
@@ -33,7 +46,17 @@ impl Dust {
     /// count. Cells are sized to hold a few dozen stars where the sky is
     /// clear; the counts are smoothed over a few cells and set against the
     /// densest tenth of the sky.
-    pub fn from_star_counts(stars: &[(f64, f64)], width: usize, height: usize) -> Option<Self> {
+    ///
+    /// The light let through is the share of stars seen to the power
+    /// `opacity`. Dust that dims every star by a magnitude hides only the
+    /// faintest of them, so the share of stars seen falls more slowly than
+    /// the light does, and 1 understates the dust.
+    pub fn from_star_counts(
+        stars: &[(f64, f64)],
+        width: usize,
+        height: usize,
+        opacity: f32,
+    ) -> Option<Self> {
         if stars.len() < 500 || width == 0 || height == 0 {
             return None;
         }
@@ -74,14 +97,89 @@ impl Dust {
         }
         let transmission = density
             .iter()
-            .map(|density| (density / clear).clamp(LEAST, 1.0))
+            .map(|density| (density / clear).min(1.0).powf(opacity).max(LEAST))
             .collect();
         Some(Self {
             cell,
             columns,
             rows,
             transmission,
+            opacity,
+            clear_density: clear,
         })
+    }
+
+    /// This map on a finer grid, made darker where the starless image is
+    /// darker than its surroundings and the stars run short: a globule
+    /// thick enough to black out the light behind it, smaller than the
+    /// star counts can see. A dark patch with its full share of stars is
+    /// clear sky, not dust. `stars` are the places
+    /// [`Self::from_star_counts`] counted.
+    pub fn with_darkness(self, starless: &LightImage, stars: &[(f64, f64)]) -> Self {
+        let (width, height) = (starless.width, starless.height);
+        let cell = FINE.min(self.cell);
+        let columns = (width as f64 / cell).ceil() as usize;
+        let rows = (height as f64 / cell).ceil() as usize;
+        let light: Vec<f32> = (0..rows)
+            .into_par_iter()
+            .flat_map_iter(|row| {
+                (0..columns).map(move |column| {
+                    let (left, top) = (
+                        (column as f64 * cell) as usize,
+                        (row as f64 * cell) as usize,
+                    );
+                    let right = (((column + 1) as f64 * cell) as usize).min(width);
+                    let bottom = (((row + 1) as f64 * cell) as usize).min(height);
+                    let mut sum = 0.0_f32;
+                    for y in top..bottom {
+                        for x in left..right {
+                            let pixel = starless.at(x, y);
+                            sum += (pixel[0] + pixel[1] + pixel[2]) / 3.0;
+                        }
+                    }
+                    sum / ((right - left) * (bottom - top)).max(1) as f32
+                })
+            })
+            .collect();
+        // The light around each cell, a few hundred pixels across, and the
+        // image's black: its darkest cell, the sky's own floor.
+        let mut around = light.clone();
+        smooth(&mut around, columns, rows, 6.0);
+        let black = light.iter().copied().fold(f32::INFINITY, f32::min);
+        // The share of the clear sky's stars within a few dozen pixels.
+        let mut counts = vec![0.0_f32; columns * rows];
+        for &(x, y) in stars {
+            if x >= 0.0 && y >= 0.0 && x < width as f64 && y < height as f64 {
+                let (column, row) = ((x / cell) as usize, (y / cell) as usize);
+                counts[row.min(rows - 1) * columns + column.min(columns - 1)] += 1.0;
+            }
+        }
+        smooth(&mut counts, columns, rows, 2.0);
+        let expected = self.clear_density * (cell * cell) as f32;
+        let transmission = (0..rows * columns)
+            .map(|index| {
+                let (row, column) = (index / columns, index % columns);
+                let counted = self.at((column as f64 + 0.5) * cell, (row as f64 + 0.5) * cell);
+                let dark = if around[index] > black {
+                    ((light[index] - black) / (around[index] - black)).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+                // The darkness counts in full where half the clear sky's
+                // stars or fewer show, and not at all where all of them do.
+                let stars = (counts[index] / expected).min(1.0);
+                let belief = ((1.0 - stars) / 0.5).clamp(0.0, 1.0);
+                let dark = 1.0 - belief * (1.0 - dark);
+                counted.min(dark.powf(self.opacity)).max(LEAST)
+            })
+            .collect();
+        Self {
+            cell,
+            columns,
+            rows,
+            transmission,
+            ..self
+        }
     }
 
     /// The share of light let through at image pixel `(x, y)`, between
@@ -183,7 +281,7 @@ mod tests {
     fn thick_dust_shows_as_a_shortage_of_stars() {
         // A dark cloud letting through a tenth of the stars.
         let stars = field(2000, 1500, 10.0, (1000.0, 750.0, 300.0), 10);
-        let dust = Dust::from_star_counts(&stars, 2000, 1500).expect("enough stars");
+        let dust = Dust::from_star_counts(&stars, 2000, 1500, 1.0).expect("enough stars");
         let clear = dust.at(200.0, 200.0);
         let thick = dust.at(1000.0, 750.0);
         assert!(clear > 0.9, "{clear}");
@@ -200,7 +298,63 @@ mod tests {
     }
 
     #[test]
+    fn a_black_globule_blocks_what_the_counts_miss() {
+        // Stars everywhere but in a black globule too small for the counts.
+        let stars = field(2000, 1500, 10.0, (700.0, 500.0, 40.0), 1000);
+        let mut starless = LightImage::new(2000, 1500);
+        for (index, pixel) in starless.pixels.iter_mut().enumerate() {
+            let (x, y) = ((index % 2000) as f64, (index / 2000) as f64);
+            let glow = if (x - 700.0).hypot(y - 500.0) < 40.0 {
+                0.002
+            } else {
+                0.3
+            };
+            *pixel = [glow; 3];
+        }
+        let counted = Dust::from_star_counts(&stars, 2000, 1500, 2.0).unwrap();
+        // The counts barely see it.
+        assert!(
+            counted.at(700.0, 500.0) > 0.4,
+            "{}",
+            counted.at(700.0, 500.0)
+        );
+        let dust = counted.with_darkness(&starless, &stars);
+        assert!(dust.at(700.0, 500.0) <= 0.05, "{}", dust.at(700.0, 500.0));
+        assert!(dust.at(1200.0, 900.0) > 0.9, "{}", dust.at(1200.0, 900.0));
+    }
+
+    #[test]
+    fn a_dark_patch_full_of_stars_is_clear_sky() {
+        // Bright dust all around a dark gap with its full share of stars.
+        let stars = field(2000, 1500, 10.0, (0.0, 0.0, 0.0), 1);
+        let mut starless = LightImage::new(2000, 1500);
+        for (index, pixel) in starless.pixels.iter_mut().enumerate() {
+            let (x, y) = ((index % 2000) as f64, (index / 2000) as f64);
+            let glow = if (x - 700.0).hypot(y - 500.0) < 150.0 {
+                0.002
+            } else {
+                0.4
+            };
+            *pixel = [glow; 3];
+        }
+        let dust = Dust::from_star_counts(&stars, 2000, 1500, 2.0)
+            .unwrap()
+            .with_darkness(&starless, &stars);
+        assert!(dust.at(700.0, 500.0) > 0.8, "{}", dust.at(700.0, 500.0));
+    }
+
+    #[test]
     fn too_few_stars_make_no_map() {
-        assert!(Dust::from_star_counts(&[(1.0, 1.0); 10], 100, 100).is_none());
+        assert!(Dust::from_star_counts(&[(1.0, 1.0); 10], 100, 100, 1.0).is_none());
+    }
+
+    #[test]
+    fn more_opacity_darkens_the_same_shortage() {
+        let stars = field(2000, 1500, 10.0, (1000.0, 750.0, 300.0), 4);
+        let light = Dust::from_star_counts(&stars, 2000, 1500, 1.0).unwrap();
+        let heavy = Dust::from_star_counts(&stars, 2000, 1500, 2.0).unwrap();
+        let (a, b) = (light.at(1000.0, 750.0), heavy.at(1000.0, 750.0));
+        assert!((b - a * a).abs() < 1e-3, "{a} {b}");
+        assert!(heavy.at(200.0, 200.0) > 0.85);
     }
 }

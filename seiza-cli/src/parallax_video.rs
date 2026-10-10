@@ -161,6 +161,10 @@ pub(crate) struct ParallaxVideoArgs {
     /// few stars show through)
     #[arg(long)]
     no_dust: bool,
+    /// How dark the dust is for the stars it hides: the light it lets
+    /// through is the share of stars seen to this power
+    #[arg(long, default_value_t = 2.0)]
+    dust_opacity: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -364,14 +368,17 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
             .filter(|star| star.distance_pc.is_none_or(|pc| pc > distance))
             .map(|star| (star.x, star.y))
             .collect();
-        scene.dust = seiza_parallax::Dust::from_star_counts(&behind, width, height);
+        scene.dust =
+            seiza_parallax::Dust::from_star_counts(&behind, width, height, args.dust_opacity)
+                .map(|dust| dust.with_darkness(&starless, &behind));
         match &scene.dust {
             Some(dust) => {
                 let (cells, _) = dust.cells();
                 let mut sorted = cells.to_vec();
                 sorted.sort_by(f32::total_cmp);
                 println!(
-                    "dust mapped from {} stars behind it: median transmission {:.0}%, thickest {:.0}%",
+                    "dust mapped from {} stars behind it and the nebula's dark places: median \
+                     transmission {:.0}%, thickest {:.0}%",
                     behind.len(),
                     100.0 * sorted[sorted.len() / 2],
                     100.0 * sorted[0]
@@ -473,6 +480,9 @@ fn check_shot(args: &ParallaxVideoArgs) -> Result<()> {
     }
     if !(0.0..=1.0).contains(&args.pan) {
         bail!("--pan must be from 0 to 1");
+    }
+    if args.dust_opacity.is_nan() || args.dust_opacity < 0.0 {
+        bail!("--dust-opacity must be at least 0");
     }
     if !(1.0..).contains(&args.zoom_end) {
         bail!("--zoom-end must be at least 1");
