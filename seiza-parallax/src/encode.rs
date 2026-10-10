@@ -32,6 +32,9 @@ pub enum Error {
         #[source]
         source: image::ImageError,
     },
+    /// A sink of the caller's own refused a frame.
+    #[error("the frame sink stopped: {0}")]
+    Sink(String),
     #[error("OpenH264 encoding failed: {0}")]
     #[cfg(feature = "openh264")]
     OpenH264(String),
@@ -48,6 +51,29 @@ pub trait FrameSink {
     fn push(&mut self, frame: &RgbImage) -> Result<()>;
     /// Finish the output.
     fn finish(self: Box<Self>) -> Result<()>;
+}
+
+/// A sink that hands each frame to a function: the way to feed frames to
+/// an encoder of the caller's own, such as a platform's video encoder. An
+/// error from the function stops the video.
+pub struct FrameFn<F> {
+    push: F,
+}
+
+impl<F: FnMut(&RgbImage) -> std::result::Result<(), String>> FrameFn<F> {
+    pub fn new(push: F) -> Self {
+        Self { push }
+    }
+}
+
+impl<F: FnMut(&RgbImage) -> std::result::Result<(), String>> FrameSink for FrameFn<F> {
+    fn push(&mut self, frame: &RgbImage) -> Result<()> {
+        (self.push)(frame).map_err(Error::Sink)
+    }
+
+    fn finish(self: Box<Self>) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Common frame sizes by name, landscape; add `-portrait` to a name for

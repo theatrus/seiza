@@ -751,3 +751,167 @@ fn galaxies_in_image(
     }
     Ok(kept)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::FrameFn;
+    use seiza::catalog::{DistanceStar, StarDistanceCatalogBuilder};
+
+    /// A small solved field: a smooth starless image, a stars image with a
+    /// few Gaussian stars, and an offline star distance file placing them.
+    fn field(directory: &Path) -> (Rgb32FImage, Rgb32FImage, Wcs, PathBuf) {
+        let (width, height) = (320_u32, 240_u32);
+        let wcs = Wcs::from_center_scale_rotation((56.75, 24.12), (160.0, 120.0), 2.0, 0.0, false);
+        let starless = Rgb32FImage::from_fn(width, height, |x, y| {
+            image::Rgb([
+                0.1 + 0.2 * x as f32 / width as f32,
+                0.15,
+                0.1 + 0.1 * y as f32 / height as f32,
+            ])
+        });
+        let places = [
+            (60.0, 50.0, 120.0),
+            (250.0, 70.0, 900.0),
+            (140.0, 180.0, 300.0),
+            (200.0, 110.0, 2500.0),
+        ];
+        let stars = Rgb32FImage::from_fn(width, height, |x, y| {
+            let light: f32 = places
+                .iter()
+                .map(|&(sx, sy, _)| {
+                    let r2 = (x as f64 - sx).powi(2) + (y as f64 - sy).powi(2);
+                    0.9 * (-r2 / 4.0).exp() as f32
+                })
+                .sum();
+            image::Rgb([light.min(1.0); 3])
+        });
+        let mut builder = StarDistanceCatalogBuilder::new(18, 2016.0, 16.0, "test");
+        for &(x, y, distance) in &places {
+            let (ra, dec) = wcs.pixel_to_world(x, y);
+            builder.add(DistanceStar {
+                ra,
+                dec,
+                mag: 9.0,
+                distance_pc: Some(distance),
+                hipparcos: false,
+            });
+        }
+        let path = directory.join("star-distances.bin");
+        builder.write_to(&path).unwrap();
+        (starless, stars, wcs, path)
+    }
+
+    fn options(star_distances: PathBuf, directory: &Path) -> ParallaxOptions {
+        ParallaxOptions {
+            distance_pc: Some(400.0),
+            objects: Some(directory.join("no-objects.bin")),
+            star_distances: Some(star_distances),
+            online: false,
+            size: (160, 120),
+            seconds: 1.0,
+            fps: 6,
+            labels: vec![CustomLabel {
+                x: 100.0,
+                y: 100.0,
+                radius: 20.0,
+                text: "here".into(),
+            }],
+            watermark: Some(overlay::DEFAULT_WATERMARK.into()),
+            ..ParallaxOptions::default()
+        }
+    }
+
+    #[test]
+    fn a_prepared_video_hands_every_frame_to_the_callers_sink() {
+        let directory = tempfile::tempdir().unwrap();
+        let (starless, stars, wcs, distances) = field(directory.path());
+        let options = options(distances, directory.path());
+        let mut notes = Vec::new();
+        let parallax = Parallax::prepare(&starless, &stars, &wcs, &options, &mut |event| {
+            if let Event::Note(note) = event {
+                notes.push(note.to_string());
+            }
+        })
+        .unwrap();
+        let summary = parallax.summary();
+        assert_eq!(summary.detected_stars, 4, "{notes:?}");
+        assert_eq!(summary.gaia_matches, 4);
+        assert_eq!(summary.background_distance_pc, 400.0);
+        assert_eq!(parallax.frames(), 6);
+        assert_eq!(parallax.size(), (160, 120));
+        let mut seen = Vec::new();
+        let mut frames_reported = 0;
+        parallax
+            .render(
+                Box::new(FrameFn::new(|frame: &RgbImage| {
+                    seen.push(frame.dimensions());
+                    Ok(())
+                })),
+                &mut |event| {
+                    if let Event::Frame { .. } = event {
+                        frames_reported += 1;
+                    }
+                },
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(seen, vec![(160, 120); 6]);
+        assert_eq!(frames_reported, 6);
+        // A frame on request is the one the sink saw.
+        assert_eq!(parallax.frame(0).dimensions(), (160, 120));
+    }
+
+    #[test]
+    fn a_stop_or_a_refusing_sink_ends_the_video_early() {
+        let directory = tempfile::tempdir().unwrap();
+        let (starless, stars, wcs, distances) = field(directory.path());
+        let options = options(distances, directory.path());
+        let parallax = Parallax::prepare(&starless, &stars, &wcs, &options, &mut |_| {}).unwrap();
+        let pushed = std::cell::Cell::new(0);
+        let stopped = parallax.render(
+            Box::new(FrameFn::new(|_: &RgbImage| {
+                pushed.set(pushed.get() + 1);
+                Ok(())
+            })),
+            &mut |_| {},
+            &|| pushed.get() == 2,
+        );
+        assert!(matches!(stopped, Err(Error::Stopped)), "{stopped:?}");
+        assert_eq!(pushed.get(), 2);
+        let refused = parallax.render(
+            Box::new(FrameFn::new(|_: &RgbImage| Err("disk full".to_string()))),
+            &mut |_| {},
+            &|| false,
+        );
+        assert!(
+            matches!(&refused, Err(Error::Encode(crate::encode::Error::Sink(message))) if message == "disk full"),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn options_that_cannot_make_a_video_are_refused() {
+        for options in [
+            ParallaxOptions {
+                dolly: 1.0,
+                ..ParallaxOptions::default()
+            },
+            ParallaxOptions {
+                size: (161, 120),
+                ..ParallaxOptions::default()
+            },
+            ParallaxOptions {
+                fps: 0,
+                ..ParallaxOptions::default()
+            },
+            ParallaxOptions {
+                overlay_density: 2.0,
+                ..ParallaxOptions::default()
+            },
+        ] {
+            assert!(options.check().is_err(), "{options:?}");
+        }
+        assert!(ParallaxOptions::default().check().is_ok());
+    }
+}
