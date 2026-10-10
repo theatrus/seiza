@@ -408,7 +408,11 @@ centre), and the camera glides through them in turn, easing to a halt
 where it holds, turning and panning as each stop asks. The first stop is
 the opening view, and the stops' times set the video's length; if a turn
 or pan would show the image's edge, every view zooms in together as far as
-it must. `--auto-tour [N]` plans a tour itself from the catalogued objects
+it must. The camera never quite stops: it moves on through a stop it holds
+at at a fifth of its pace between stops (`--tour-glide`, 0 to come to rest).
+A stop's `spin=DEG` turns the frame while it holds there, and `push=P` flies
+on in by that share of the remaining way, which with a spin turns the near
+stars in a spiral past the far ones. `--auto-tour [N]` plans a tour itself from the catalogued objects
 in the field: every one worth a visit (the well-known catalogues, and
 broad regions that are large, bright or named), up to twelve, or the N
 most worth it, visited in a short round

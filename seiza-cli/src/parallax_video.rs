@@ -134,6 +134,10 @@ pub(crate) struct ParallaxVideoArgs {
     /// gentle default, 2 for twice that
     #[arg(long, default_value_t = 1.0)]
     tour_motion: f64,
+    /// How fast a tour moves on through a stop it holds at, as a share of
+    /// its pace between stops, so it never quite stops; 0 comes to rest
+    #[arg(long, default_value_t = 0.2)]
+    tour_glide: f64,
     /// Frames per second
     #[arg(long, default_value_t = 30)]
     fps: u32,
@@ -480,6 +484,7 @@ fn options(args: &ParallaxVideoArgs, file: Option<TourFile>) -> ParallaxOptions 
             file_stops
         },
         auto_tour: args.auto_tour.map(|_| auto_tour(args)),
+        tour_glide: args.tour_glide,
         size: args.size,
         seconds: args.seconds,
         fps: args.fps,

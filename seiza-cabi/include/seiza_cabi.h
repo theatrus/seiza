@@ -2068,7 +2068,8 @@ char *seiza_rc_astro_process_file_json(const char *request_json,
  `pan`, `zoom`, `zoomEnd`, `rotateDegrees` `[first, last]`, `easing`
  ("inOut", "linear"), `quality` ("standard", "high"), `growthLimit`,
  `fadeFrom`, `tour` (stops `[{focus, dolly, zoom, rotateDegrees, pan,
- travel, hold, spinDegrees}]`, the first the opening view, which replace the single
+ travel, hold, spinDegrees, push}]`, gliding through held stops at
+ `tourGlide` of the pace between them), the first the opening view, which replace the single
  move and set the length; [`seiza_parallax_plan_tour_json`] plans
  one), `autoTour` (`{targets, hold, motion}`: plan a tour of the
  catalogued objects and render it), `size` ("720p", "1080p", "1440p", "4k", each with

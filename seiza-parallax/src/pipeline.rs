@@ -75,6 +75,9 @@ pub struct TourStop {
     /// Degrees the frame turns anticlockwise while the camera holds here,
     /// easing in and out; later stops' turns count from where it ends.
     pub spin_deg: f64,
+    /// How much of its remaining way to the nebula the camera flies on
+    /// while it holds here, 0 to below 1.
+    pub push: f64,
 }
 
 impl Default for TourStop {
@@ -88,13 +91,15 @@ impl Default for TourStop {
             travel: 5.0,
             hold: 0.0,
             spin_deg: 0.0,
+            push: 0.0,
         }
     }
 }
 
 /// A [`TourStop`] written `X,Y` or `whole` (the image's centre), then any
 /// of `dolly=`, `zoom=`, `rotate=` (degrees), `pan=`, `travel=` and
-/// `hold=` (seconds), and `spin=` (degrees turned while holding),
+/// `hold=` (seconds), `spin=` (degrees turned while holding) and `push=`
+/// (the share of the remaining way flown in while holding),
 /// separated by spaces: `2700,3400 dolly=0.85 rotate=-20 travel=6
 /// hold=1.5`.
 pub fn parse_stop(text: &str) -> Result<TourStop, String> {
@@ -131,9 +136,11 @@ pub fn parse_stop(text: &str) -> Result<TourStop, String> {
             "travel" => stop.travel = value,
             "hold" => stop.hold = value,
             "spin" => stop.spin_deg = value,
+            "push" => stop.push = value,
             other => {
                 return Err(format!(
-                    "a stop takes dolly, zoom, rotate, pan, travel, hold and spin; got {other}"
+                    "a stop takes dolly, zoom, rotate, pan, travel, hold, spin and push; got \
+                     {other}"
                 ));
             }
         }
@@ -217,6 +224,9 @@ pub struct ParallaxOptions {
     /// empty: the most prominent, visited in a short round from the whole
     /// image and back.
     pub auto_tour: Option<AutoTour>,
+    /// How fast a tour moves on through a stop it holds at, as a share of
+    /// its pace between stops, so it never quite stops; 0 comes to rest.
+    pub tour_glide: f64,
     /// Frame size, even sides.
     pub size: (usize, usize),
     pub seconds: f64,
@@ -263,6 +273,7 @@ impl Default for ParallaxOptions {
             fade_from: 6.0,
             tour: Vec::new(),
             auto_tour: None,
+            tour_glide: 0.2,
             size: (1920, 1080),
             seconds: 8.0,
             fps: 30,
@@ -317,8 +328,13 @@ impl ParallaxOptions {
             return invalid("a tour needs at least two stops");
         }
         for stop in &self.tour {
-            if !(0.0..1.0).contains(&stop.dolly) || !(0.0..=1.0).contains(&stop.pan) {
-                return invalid("a stop's dolly must be from 0 to below 1, and its pan 0 to 1");
+            if !(0.0..1.0).contains(&stop.dolly)
+                || !(0.0..=1.0).contains(&stop.pan)
+                || !(0.0..1.0).contains(&stop.push)
+            {
+                return invalid(
+                    "a stop's dolly and push must be from 0 to below 1, and its pan 0 to 1",
+                );
             }
             if !(stop.zoom.is_finite() && stop.zoom > 0.0)
                 || !stop.rotate_deg.is_finite()
@@ -340,6 +356,9 @@ impl ParallaxOptions {
             return invalid(
                 "an automatic tour needs a target, and a hold and motion of at least 0",
             );
+        }
+        if self.tour_glide.is_nan() || self.tour_glide < 0.0 {
+            return invalid("a tour's glide must be at least 0");
         }
         if !self.tour.is_empty() && self.seconds() <= 0.0 {
             return invalid("a tour must take some time");
@@ -676,8 +695,10 @@ impl Parallax {
                     travel: stop.travel,
                     hold: stop.hold,
                     spin: stop.spin_deg.to_radians(),
+                    push: stop.push,
                 })
                 .collect(),
+            glide: options.tour_glide,
             ..Shot::default()
         };
         if !shot.tour.is_empty() {
@@ -899,6 +920,7 @@ pub fn format_stop(stop: &TourStop) -> String {
         ("travel", stop.travel, f64::NAN),
         ("hold", stop.hold, defaults.hold),
         ("spin", stop.spin_deg, defaults.spin_deg),
+        ("push", stop.push, defaults.push),
     ] {
         if value != default {
             let value = format!("{value:.3}");
@@ -1251,6 +1273,7 @@ mod tests {
                 travel: 6.0,
                 hold: 1.5,
                 spin_deg: 360.0,
+                push: 0.25,
             },
         ] {
             let text = format_stop(&stop);

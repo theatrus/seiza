@@ -120,6 +120,9 @@ struct ParallaxRequest {
     /// Plan a tour of the catalogued objects in the field when `tour` is
     /// empty: `{targets, hold, motion}`, each optional.
     auto_tour: Option<AutoTourRequest>,
+    /// How fast a tour moves on through a stop it holds at, as a share of
+    /// its pace between stops; 0 comes to rest.
+    tour_glide: Option<f64>,
     /// "720p", "1080p", "1440p" or "4k", each with "-portrait" for the tall
     /// form, or "WIDTHxHEIGHT".
     size: Option<String>,
@@ -163,6 +166,7 @@ struct StopRequest {
     travel: Option<f64>,
     hold: Option<f64>,
     spin_degrees: Option<f64>,
+    push: Option<f64>,
 }
 
 /// How to plan a tour: how many targets (every one worth a visit if
@@ -384,10 +388,12 @@ fn options(request: &ParallaxRequest) -> Result<ParallaxOptions, String> {
                     travel: stop.travel.unwrap_or(base.travel),
                     hold: stop.hold.unwrap_or(base.hold),
                     spin_deg: stop.spin_degrees.unwrap_or(base.spin_deg),
+                    push: stop.push.unwrap_or(base.push),
                 }
             })
             .collect(),
         auto_tour: request.auto_tour.as_ref().map(AutoTourRequest::auto_tour),
+        tour_glide: request.tour_glide.unwrap_or(defaults.tour_glide),
         size: match &request.size {
             Some(size) => seiza_parallax::parse_frame_size(size)?,
             None => defaults.size,
@@ -512,7 +518,8 @@ fn split(
 /// `pan`, `zoom`, `zoomEnd`, `rotateDegrees` `[first, last]`, `easing`
 /// ("inOut", "linear"), `quality` ("standard", "high"), `growthLimit`,
 /// `fadeFrom`, `tour` (stops `[{focus, dolly, zoom, rotateDegrees, pan,
-/// travel, hold, spinDegrees}]`, the first the opening view, which replace the single
+/// travel, hold, spinDegrees, push}]`, gliding through held stops at
+/// `tourGlide` of the pace between them), the first the opening view, which replace the single
 /// move and set the length; [`seiza_parallax_plan_tour_json`] plans
 /// one), `autoTour` (`{targets, hold, motion}`: plan a tour of the
 /// catalogued objects and render it), `size` ("720p", "1080p", "1440p", "4k", each with
@@ -613,6 +620,7 @@ struct PlannedStopResponse {
     travel: f64,
     hold: f64,
     spin_degrees: f64,
+    push: f64,
 }
 
 #[derive(Serialize)]
@@ -700,6 +708,7 @@ pub unsafe extern "C" fn seiza_parallax_plan_tour_json(
                     travel: planned.stop.travel,
                     hold: planned.stop.hold,
                     spin_degrees: planned.stop.spin_deg,
+                    push: planned.stop.push,
                 })
                 .collect(),
         })
