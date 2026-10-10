@@ -7,12 +7,12 @@
 //! outline for each object, ticks either side of a named star, and a
 //! "Field within" caption once the camera is inside an object.
 
-use crate::sky_map::{Fonts, Mask, draw_text, measure};
 use ab_glyph::{Font, PxScale, ScaleFont};
 use anyhow::Result;
 use image::{Rgb, RgbImage};
 use seiza::Wcs;
 use seiza::objects::{GeometryData, ObjectCatalog, ObjectKind, SkyObject};
+use seiza_draw::{Fonts, Mask, draw_text, measure};
 use seiza_parallax::{Scene, Shot, View};
 
 /// The watermark `--watermark` writes when given no text.

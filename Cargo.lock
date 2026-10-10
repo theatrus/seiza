@@ -2548,6 +2548,7 @@ dependencies = [
  "seiza-background",
  "seiza-deconvolution",
  "seiza-download",
+ "seiza-draw",
  "seiza-fits",
  "seiza-parallax",
  "seiza-satellites",
@@ -2595,6 +2596,14 @@ dependencies = [
  "tokio",
  "tokio-util",
  "zstd 0.14.0",
+]
+
+[[package]]
+name = "seiza-draw"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "image",
 ]
 
 [[package]]

@@ -26,6 +26,7 @@ mod deconvolution;
 mod interrupt;
 mod master;
 mod parallax_overlay;
+pub(crate) use seiza_draw::ellipse_points;
 mod parallax_video;
 mod preview;
 mod provenance;
@@ -3853,26 +3854,6 @@ fn draw_rotated_ellipse(
     for pair in points.windows(2) {
         imageproc::drawing::draw_line_segment_mut(canvas, pair[0], pair[1], color);
     }
-}
-
-/// `segments + 1` points around an ellipse whose major axis lies
-/// `angle_deg` from +x, the last repeating the first.
-pub(crate) fn ellipse_points(
-    center: (f64, f64),
-    semi_major: f64,
-    semi_minor: f64,
-    angle_deg: f64,
-    segments: usize,
-) -> impl Iterator<Item = (f64, f64)> {
-    let (sin_r, cos_r) = angle_deg.to_radians().sin_cos();
-    (0..=segments).map(move |i| {
-        let t = i as f64 / segments as f64 * std::f64::consts::TAU;
-        let (lx, ly) = (semi_major * t.cos(), semi_minor * t.sin());
-        (
-            center.0 + lx * cos_r - ly * sin_r,
-            center.1 + lx * sin_r + ly * cos_r,
-        )
-    })
 }
 
 /// The ellipse to draw for a placed object, as (semi-major, semi-minor,

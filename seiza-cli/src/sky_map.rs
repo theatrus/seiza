@@ -9,10 +9,9 @@
 //! from drawing ([`render`]) so either can be tested alone.
 
 use std::collections::HashSet;
-use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
-use ab_glyph::{Font, FontRef, PxScale, ScaleFont, point};
+use ab_glyph::FontRef;
 use anyhow::{Context, Result};
 use image::{Rgb, RgbImage};
 use rayon::prelude::*;
@@ -21,9 +20,7 @@ use seiza::constellations::{self, ProjectedFigure};
 use seiza::data_paths;
 use seiza::objects::{ObjectCatalog, ObjectKind, ObjectQuery, ObjectSort};
 use seiza::star_ids::{StarIdentifierCatalog, StarNameCatalog, StarNameKind};
-
-const REGULAR_TTF: &[u8] = include_bytes!("../fonts/Inter-Regular.ttf");
-const SEMIBOLD_TTF: &[u8] = include_bytes!("../fonts/Inter-SemiBold.ttf");
+use seiza_draw::{Fonts, Mask, draw_text, measure, wrap};
 
 /// Default output width, pixels.
 pub(crate) const DEFAULT_WIDTH: u32 = 2100;
@@ -733,285 +730,6 @@ impl LabelPlacer {
     }
 }
 
-/// Coverage mask for one colour layer over a `width` x `height` area whose
-/// top-left pixel is `origin` in the target image, composited once so
-/// overlapping strokes never double-blend.
-pub(crate) struct Mask {
-    origin: (i64, i64),
-    width: usize,
-    height: usize,
-    coverage: Vec<f32>,
-}
-
-impl Mask {
-    fn new(width: u32, height: u32) -> Self {
-        Self::at((0, 0), width as usize, height as usize)
-    }
-
-    pub(crate) fn at(origin: (i64, i64), width: usize, height: usize) -> Self {
-        Self {
-            origin,
-            width,
-            height,
-            coverage: vec![0.0; width * height],
-        }
-    }
-
-    /// The columns and rows of the mask, in target pixels, that a box from
-    /// `(x0, y0)` to `(x1, y1)` touches.
-    fn span(
-        &self,
-        x0: f64,
-        y0: f64,
-        x1: f64,
-        y1: f64,
-    ) -> (RangeInclusive<i64>, RangeInclusive<i64>) {
-        let (ox, oy) = self.origin;
-        (
-            (x0.floor() as i64).max(ox)..=(x1.ceil() as i64).min(ox + self.width as i64 - 1),
-            (y0.floor() as i64).max(oy)..=(y1.ceil() as i64).min(oy + self.height as i64 - 1),
-        )
-    }
-
-    fn set(&mut self, x: i64, y: i64, value: f32) {
-        let (x, y) = (x - self.origin.0, y - self.origin.1);
-        if x < 0 || y < 0 || x as usize >= self.width || y as usize >= self.height {
-            return;
-        }
-        let cell = &mut self.coverage[y as usize * self.width + x as usize];
-        *cell = cell.max(value.clamp(0.0, 1.0));
-    }
-
-    /// An anti-aliased line of `width` pixels.
-    pub(crate) fn stroke(&mut self, p: (f64, f64), q: (f64, f64), width: f64) {
-        let half = width / 2.0;
-        let reach = half + 1.0;
-        let (columns, rows) = self.span(
-            p.0.min(q.0) - reach,
-            p.1.min(q.1) - reach,
-            p.0.max(q.0) + reach,
-            p.1.max(q.1) + reach,
-        );
-        let (dx, dy) = (q.0 - p.0, q.1 - p.1);
-        let length_sq = dx * dx + dy * dy;
-        for y in rows {
-            for x in columns.clone() {
-                let (cx, cy) = (x as f64 + 0.5, y as f64 + 0.5);
-                let t = if length_sq > 0.0 {
-                    (((cx - p.0) * dx + (cy - p.1) * dy) / length_sq).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-                let distance = (cx - (p.0 + t * dx)).hypot(cy - (p.1 + t * dy));
-                let value = (half + 0.5 - distance) as f32;
-                if value > 0.0 {
-                    self.set(x, y, value);
-                }
-            }
-        }
-    }
-
-    pub(crate) fn polyline(&mut self, points: &[(f64, f64)], width: f64) {
-        for pair in points.windows(2) {
-            self.stroke(pair[0], pair[1], width);
-        }
-    }
-
-    /// A ring of `radius` and line `width`; a radius of zero fills a disc.
-    pub(crate) fn ring(&mut self, center: (f64, f64), radius: f64, width: f64) {
-        let reach = radius + width / 2.0 + 1.0;
-        let (columns, rows) = self.span(
-            center.0 - reach,
-            center.1 - reach,
-            center.0 + reach,
-            center.1 + reach,
-        );
-        for y in rows {
-            for x in columns.clone() {
-                let distance = (x as f64 + 0.5 - center.0).hypot(y as f64 + 0.5 - center.1);
-                let value = (width / 2.0 + 0.5 - (distance - radius).abs()) as f32;
-                if value > 0.0 {
-                    self.set(x, y, value);
-                }
-            }
-        }
-    }
-
-    pub(crate) fn disc(&mut self, center: (f64, f64), radius: f64) {
-        self.ring(center, radius / 2.0, radius);
-    }
-
-    pub(crate) fn ellipse(
-        &mut self,
-        center: (f64, f64),
-        semi_major: f64,
-        semi_minor: f64,
-        angle_deg: f64,
-        width: f64,
-    ) {
-        let segments = ((semi_major * 0.5) as usize).clamp(48, 720);
-        let points = crate::ellipse_points(center, semi_major, semi_minor, angle_deg, segments)
-            .collect::<Vec<_>>();
-        self.polyline(&points, width);
-    }
-
-    /// Fade coverage to nothing over `fade` pixels above `floor(x)`.
-    /// Returns whether anything drawn was dimmed.
-    fn fade_below(&mut self, fade: f64, floor: impl Fn(f64) -> f64) -> bool {
-        let mut dimmed = false;
-        for x in 0..self.width {
-            let limit = floor((self.origin.0 + x as i64) as f64 + 0.5) - self.origin.1 as f64;
-            let start = ((limit - fade).max(0.0) as usize).min(self.height);
-            for y in start..self.height {
-                let factor = ((limit - (y as f64 + 0.5)) / fade).clamp(0.0, 1.0) as f32;
-                let cell = &mut self.coverage[y * self.width + x];
-                if *cell > 0.0 && factor < 1.0 {
-                    dimmed = true;
-                    *cell *= factor;
-                }
-            }
-        }
-        dimmed
-    }
-
-    /// Spread the mask by `radius` pixels with a soft edge, for a halo.
-    pub(crate) fn dilated(&self, radius: f64) -> Mask {
-        let r = radius.ceil() as i64;
-        let mut out = Mask::at(self.origin, self.width, self.height);
-        let offsets = (-r..=r)
-            .flat_map(|dy| (-r..=r).map(move |dx| (dx, dy)))
-            .filter_map(|(dx, dy)| {
-                let weight = (radius + 0.5 - (dx as f64).hypot(dy as f64)).clamp(0.0, 1.0) as f32;
-                (weight > 0.0).then_some((dx, dy, weight))
-            })
-            .collect::<Vec<_>>();
-        for y in 0..self.height as i64 {
-            for x in 0..self.width as i64 {
-                let value = self.coverage[y as usize * self.width + x as usize];
-                if value <= 0.0 {
-                    continue;
-                }
-                for &(dx, dy, weight) in &offsets {
-                    let (nx, ny) = (x + dx, y + dy);
-                    if nx < 0 || ny < 0 || nx as usize >= self.width || ny as usize >= self.height {
-                        continue;
-                    }
-                    let cell = &mut out.coverage[ny as usize * self.width + nx as usize];
-                    *cell = cell.max(value * weight);
-                }
-            }
-        }
-        out
-    }
-
-    pub(crate) fn composite(&self, canvas: &mut RgbImage, color: Rgb<u8>, alpha: f32) {
-        let (canvas_width, canvas_height) = canvas.dimensions();
-        for (index, &value) in self.coverage.iter().enumerate() {
-            if value <= 0.0 {
-                continue;
-            }
-            let x = self.origin.0 + (index % self.width) as i64;
-            let y = self.origin.1 + (index / self.width) as i64;
-            if x < 0 || y < 0 || x >= canvas_width as i64 || y >= canvas_height as i64 {
-                continue;
-            }
-            let a = value * alpha;
-            let pixel = canvas.get_pixel_mut(x as u32, y as u32);
-            for channel in 0..3 {
-                let blended = pixel[channel] as f32 * (1.0 - a) + color[channel] as f32 * a;
-                pixel[channel] = blended.round().clamp(0.0, 255.0) as u8;
-            }
-        }
-    }
-}
-
-pub(crate) struct Fonts<'a> {
-    pub(crate) regular: FontRef<'a>,
-    pub(crate) semibold: FontRef<'a>,
-}
-
-impl Fonts<'static> {
-    pub(crate) fn load() -> Result<Self> {
-        Ok(Self {
-            regular: FontRef::try_from_slice(REGULAR_TTF).context("embedded Inter Regular")?,
-            semibold: FontRef::try_from_slice(SEMIBOLD_TTF).context("embedded Inter SemiBold")?,
-        })
-    }
-}
-
-/// Width and line height of `text` at `size` pixels, with `tracking` extra
-/// pixels between letters.
-pub(crate) fn measure(font: &FontRef<'_>, size: f64, tracking: f64, text: &str) -> (f64, f64) {
-    let scaled = font.as_scaled(PxScale::from(size as f32));
-    let mut width = 0.0f64;
-    let mut previous = None;
-    for character in text.chars() {
-        let id = scaled.glyph_id(character);
-        if let Some(previous) = previous {
-            width += scaled.kern(previous, id) as f64 + tracking;
-        }
-        width += scaled.h_advance(id) as f64;
-        previous = Some(id);
-    }
-    (width, (scaled.ascent() - scaled.descent()) as f64)
-}
-
-/// Break `text` at spaces into lines no wider than `max_width`. A word
-/// wider than that gets a line of its own.
-fn wrap(font: &FontRef<'_>, size: f64, text: &str, max_width: f64) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    for word in text.split(' ') {
-        let candidate = if line.is_empty() {
-            word.to_string()
-        } else {
-            format!("{line} {word}")
-        };
-        if line.is_empty() || measure(font, size, 0.0, &candidate).0 <= max_width {
-            line = candidate;
-        } else {
-            lines.push(std::mem::replace(&mut line, word.to_string()));
-        }
-    }
-    lines.push(line);
-    lines
-}
-
-/// Draw `text` with its top-left corner at `(x, y)` into a mask.
-pub(crate) fn draw_text(
-    mask: &mut Mask,
-    font: &FontRef<'_>,
-    size: f64,
-    tracking: f64,
-    (x, y): (f64, f64),
-    text: &str,
-) {
-    let scale = PxScale::from(size as f32);
-    let scaled = font.as_scaled(scale);
-    let baseline = y as f32 + scaled.ascent();
-    let mut caret = x as f32;
-    let mut previous = None;
-    for character in text.chars() {
-        let id = scaled.glyph_id(character);
-        if let Some(previous) = previous {
-            caret += scaled.kern(previous, id) + tracking as f32;
-        }
-        let glyph = id.with_scale_and_position(scale, point(caret, baseline));
-        caret += scaled.h_advance(id);
-        previous = Some(id);
-        if let Some(outline) = font.outline_glyph(glyph) {
-            let bounds = outline.px_bounds();
-            outline.draw(|gx, gy, coverage| {
-                mask.set(
-                    bounds.min.x as i64 + gx as i64,
-                    bounds.min.y as i64 + gy as i64,
-                    coverage,
-                );
-            });
-        }
-    }
-}
-
 /// Draw one line of text straight onto the canvas.
 #[allow(clippy::too_many_arguments)]
 fn draw_line(
@@ -1393,9 +1111,7 @@ fn draw_annotations(
     // Dark halos under everything drawn on the photo, then the layers.
     let mut halo = Mask::new(width, height);
     for layer in [&gold, &cyan, &names] {
-        for (cell, &value) in halo.coverage.iter_mut().zip(&layer.coverage) {
-            *cell = cell.max(value);
-        }
+        halo.absorb(layer);
     }
     halo.dilated(1.6 * u).composite(view, SHADOW, 0.55);
     lines.composite(view, FIGURE_LINE, 0.72);
@@ -1978,30 +1694,5 @@ mod tests {
                 .unwrap();
             assert!(worst <= 1, "{width}x{height}: off by {worst}");
         }
-    }
-
-    #[test]
-    fn text_measures_and_draws() {
-        let fonts = Fonts::load().unwrap();
-        let (w, h) = measure(&fonts.semibold, 20.0, 0.0, "Polaris");
-        assert!(w > 50.0 && w < 90.0, "{w}");
-        assert!(h > 18.0 && h < 30.0, "{h}");
-        let (tracked, _) = measure(&fonts.semibold, 20.0, 2.0, "Polaris");
-        assert!((tracked - w - 12.0).abs() < 1e-3);
-        let mut mask = Mask::new(120, 40);
-        draw_text(&mut mask, &fonts.semibold, 20.0, 0.0, (2.0, 2.0), "Polaris");
-        assert!(mask.coverage.iter().filter(|&&c| c > 0.5).count() > 100);
-        // A mask placed elsewhere takes the same text at its own origin.
-        let mut moved = Mask::at((500, 300), 120, 40);
-        draw_text(
-            &mut moved,
-            &fonts.semibold,
-            20.0,
-            0.0,
-            (502.0, 302.0),
-            "Polaris",
-        );
-        let ink = |mask: &Mask| mask.coverage.iter().sum::<f32>();
-        assert!((ink(&moved) - ink(&mask)).abs() < 0.01 * ink(&mask));
     }
 }
