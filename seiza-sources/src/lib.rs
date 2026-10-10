@@ -137,6 +137,15 @@ impl GaiaArchive {
         }
     }
 
+    /// The archive's copy of Bailer-Jones et al. (2021), distances to
+    /// Gaia EDR3 sources, which keep their source IDs in DR3.
+    fn distance_table(self) -> &'static str {
+        match self {
+            Self::Esa => "external.gaiaedr3_distance",
+            Self::Gavo => "gedr3dist.main",
+        }
+    }
+
     /// How many source_id ranges each bulk chunk is fetched in. GAVO stops a
     /// synchronous query after about 25 s, which a whole chunk near the
     /// galactic plane exceeds.
@@ -154,6 +163,22 @@ const GAIA_MAXREC: u64 = 3_000_000;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const READ_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// VizieR's synchronous TAP endpoint.
+const VIZIER_TAP_SYNC: &str = "https://tapvizier.cds.unistra.fr/TAPVizieR/tap/sync";
+
+/// A cone needs a finite centre, a radius in (0, 90] degrees and a finite
+/// magnitude limit.
+fn check_cone(ra: f64, dec: f64, radius_deg: f64, max_mag: f32) -> Result<()> {
+    if !ra.is_finite()
+        || !dec.is_finite()
+        || !(radius_deg.is_finite() && radius_deg > 0.0 && radius_deg <= 90.0)
+        || !max_mag.is_finite()
+    {
+        return Err(Error::InvalidGaiaCone);
+    }
+    Ok(())
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -188,6 +213,9 @@ pub enum Error {
 
     #[error("Gaia archive query {0}")]
     GaiaJobFailed(String),
+
+    #[error("Hipparcos query response was malformed")]
+    MalformedHipparcos,
 
     #[error("Gaia magnitude limit must be finite; got {0}")]
     InvalidGaiaMagnitude(f32),
@@ -328,6 +356,215 @@ pub fn parse_gaia_photometry(csv: &str) -> Result<Vec<GaiaPhotometry>> {
         });
     }
     Ok(stars)
+}
+
+/// One Gaia DR3 source from [`SourceDownloader::gaia_distance_cone`]: its
+/// position at epoch J2016.0, proper motion, G magnitude and colour, and how
+/// far away it is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GaiaDistance {
+    /// Right ascension, degrees.
+    pub ra: f64,
+    /// Declination, degrees.
+    pub dec: f64,
+    /// Proper motion in right ascension times cos(dec), mas/yr.
+    pub pmra: Option<f64>,
+    /// Proper motion in declination, mas/yr.
+    pub pmdec: Option<f64>,
+    /// G-band mean magnitude.
+    pub g: f32,
+    /// BP − RP colour, when both are measured.
+    pub bp_rp: Option<f32>,
+    /// Parallax and its standard error, mas. Gaia has none for the
+    /// brightest stars, and a faint star's can be negative.
+    pub parallax: Option<f64>,
+    pub parallax_error: Option<f64>,
+    /// Bailer-Jones et al. (2021) geometric distance in parsecs: the median
+    /// and the 16th and 84th percentiles. It stays sensible where 1/parallax
+    /// does not, for faint stars and small or negative parallaxes.
+    pub distance: Option<f64>,
+    pub distance_low: Option<f64>,
+    pub distance_high: Option<f64>,
+}
+
+impl GaiaDistance {
+    /// The best distance in parsecs: Bailer-Jones's, or else 1/parallax when
+    /// the parallax is at least five times its error.
+    pub fn best_distance(&self) -> Option<f64> {
+        self.distance.or_else(|| {
+            let parallax = self.parallax?;
+            let error = self.parallax_error?;
+            (parallax > 0.0 && parallax >= 5.0 * error).then(|| 1000.0 / parallax)
+        })
+    }
+}
+
+/// Parse the CSV [`SourceDownloader::gaia_distance_cone_csv`] returns. Rows
+/// with a missing position or G magnitude are skipped.
+pub fn parse_gaia_distances(csv: &str) -> Result<Vec<GaiaDistance>> {
+    let table = CsvTable::new(csv, || Error::MalformedGaiaChunk)?;
+    let [
+        ra,
+        dec,
+        pmra,
+        pmdec,
+        g,
+        bp,
+        rp,
+        parallax,
+        parallax_error,
+        r_med,
+        r_lo,
+        r_hi,
+    ] = [
+        "ra",
+        "dec",
+        "pmra",
+        "pmdec",
+        "phot_g_mean_mag",
+        "phot_bp_mean_mag",
+        "phot_rp_mean_mag",
+        "parallax",
+        "parallax_error",
+        "r_med_geo",
+        "r_lo_geo",
+        "r_hi_geo",
+    ]
+    .map(|name| table.column(name));
+    let indices = [
+        ra?,
+        dec?,
+        pmra?,
+        pmdec?,
+        g?,
+        bp?,
+        rp?,
+        parallax?,
+        parallax_error?,
+        r_med?,
+        r_lo?,
+        r_hi?,
+    ];
+    Ok(table
+        .rows()
+        .filter_map(|row| {
+            let value = |index: usize| row.number(indices[index]);
+            let (ra, dec, g) = (value(0)?, value(1)?, value(4)?);
+            let bp_rp = value(5).zip(value(6)).map(|(bp, rp)| (bp - rp) as f32);
+            Some(GaiaDistance {
+                ra,
+                dec,
+                pmra: value(2),
+                pmdec: value(3),
+                g: g as f32,
+                bp_rp,
+                parallax: value(7),
+                parallax_error: value(8),
+                distance: value(9),
+                distance_low: value(10),
+                distance_high: value(11),
+            })
+        })
+        .collect())
+}
+
+/// One star of the Hipparcos new reduction (van Leeuwen 2007), from
+/// [`SourceDownloader::hipparcos_cone`]. Gaia leaves the brightest stars
+/// without parallaxes; Hipparcos measured them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HipparcosStar {
+    /// Hipparcos catalogue number.
+    pub hip: u32,
+    /// ICRS position at epoch J1991.25, degrees.
+    pub ra: f64,
+    pub dec: f64,
+    /// Parallax and its standard error, mas.
+    pub parallax: Option<f64>,
+    pub parallax_error: Option<f64>,
+    /// Hipparcos magnitude.
+    pub hp_mag: Option<f32>,
+}
+
+impl HipparcosStar {
+    /// 1/parallax in parsecs, when the parallax is at least five times its
+    /// error.
+    pub fn distance(&self) -> Option<f64> {
+        let parallax = self.parallax?;
+        let error = self.parallax_error?;
+        (parallax > 0.0 && parallax >= 5.0 * error).then(|| 1000.0 / parallax)
+    }
+}
+
+/// Parse the CSV [`SourceDownloader::hipparcos_cone`] fetches.
+pub fn parse_hipparcos(csv: &str) -> Result<Vec<HipparcosStar>> {
+    let table = CsvTable::new(csv, || Error::MalformedHipparcos)?;
+    let indices = ["HIP", "RArad", "DErad", "Plx", "e_Plx", "Hpmag"].map(|name| table.column(name));
+    let [hip, ra, dec, plx, e_plx, hp] = indices;
+    let indices = [hip?, ra?, dec?, plx?, e_plx?, hp?];
+    Ok(table
+        .rows()
+        .filter_map(|row| {
+            let value = |index: usize| row.number(indices[index]);
+            Some(HipparcosStar {
+                hip: u32::try_from(value(0)? as i64).ok()?,
+                ra: value(1)?,
+                dec: value(2)?,
+                parallax: value(3),
+                parallax_error: value(4),
+                hp_mag: value(5).map(|value| value as f32),
+            })
+        })
+        .collect())
+}
+
+/// A comma-separated table with a header row, as TAP services return.
+struct CsvTable<'a> {
+    columns: Vec<&'a str>,
+    body: std::str::Lines<'a>,
+    malformed: fn() -> Error,
+}
+
+impl<'a> CsvTable<'a> {
+    fn new(csv: &'a str, malformed: fn() -> Error) -> Result<Self> {
+        let mut body = csv.lines();
+        let header = body.next().ok_or_else(malformed)?;
+        Ok(Self {
+            columns: header
+                .split(',')
+                .map(|column| column.trim().trim_matches('"'))
+                .collect(),
+            body,
+            malformed,
+        })
+    }
+
+    fn column(&self, name: &str) -> Result<usize> {
+        self.columns
+            .iter()
+            .position(|column| *column == name)
+            .ok_or_else(self.malformed)
+    }
+
+    fn rows(self) -> impl Iterator<Item = CsvRow<'a>> {
+        self.body
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| CsvRow {
+                fields: line.split(',').map(str::trim).collect(),
+            })
+    }
+}
+
+struct CsvRow<'a> {
+    fields: Vec<&'a str>,
+}
+
+impl CsvRow<'_> {
+    fn number(&self, index: usize) -> Option<f64> {
+        self.fields
+            .get(index)
+            .and_then(|field| field.parse::<f64>().ok())
+            .filter(|value| value.is_finite())
+    }
 }
 
 /// Reusable asynchronous client for upstream astronomy sources.
@@ -1081,13 +1318,7 @@ impl SourceDownloader {
         radius_deg: f64,
         max_mag: f32,
     ) -> Result<String> {
-        if !ra.is_finite()
-            || !dec.is_finite()
-            || !(radius_deg.is_finite() && radius_deg > 0.0 && radius_deg <= 90.0)
-            || !max_mag.is_finite()
-        {
-            return Err(Error::InvalidGaiaCone);
-        }
+        check_cone(ra, dec, radius_deg, max_mag)?;
         let query = format!(
             "SELECT ra, dec, pmra, pmdec, phot_g_mean_mag, phot_bp_mean_mag, \
              phot_rp_mean_mag, ruwe FROM {table} \
@@ -1095,6 +1326,184 @@ impl SourceDownloader {
              AND phot_g_mean_mag <= {max_mag} ORDER BY phot_g_mean_mag",
             table = archive.table()
         );
+        let body = self.gaia_cone_job(archive, query).await?;
+        // Check it parses before a caller caches it.
+        parse_gaia_photometry(&body)?;
+        Ok(body)
+    }
+
+    /// Gaia DR3 sources within `radius_deg` of `(ra, dec)` down to G
+    /// `max_mag`, brightest first, with their parallaxes and Bailer-Jones
+    /// distances. ESA's archive answers first; when it fails, GAVO's mirror
+    /// does. A field holding [`GAIA_CONE_MAXREC`] stars or more is refused.
+    pub async fn gaia_distance_cone(
+        &self,
+        ra: f64,
+        dec: f64,
+        radius_deg: f64,
+        max_mag: f32,
+    ) -> Result<Vec<GaiaDistance>> {
+        parse_gaia_distances(
+            &self
+                .gaia_distance_cone_csv(ra, dec, radius_deg, max_mag)
+                .await?,
+        )
+    }
+
+    /// [`Self::gaia_distance_cone`] as the archive's CSV, for a caller that
+    /// caches it; [`parse_gaia_distances`] reads it.
+    pub async fn gaia_distance_cone_csv(
+        &self,
+        ra: f64,
+        dec: f64,
+        radius_deg: f64,
+        max_mag: f32,
+    ) -> Result<String> {
+        match self
+            .gaia_distance_cone_csv_from(GaiaArchive::Esa, ra, dec, radius_deg, max_mag)
+            .await
+        {
+            Ok(csv) => Ok(csv),
+            Err(esa) => {
+                (self.reporter)(SourceEvent::Retry {
+                    label: "Gaia distance search on the GAVO mirror".into(),
+                    attempt: 1,
+                    delay: Duration::ZERO,
+                    error: esa.to_string(),
+                });
+                self.gaia_distance_cone_csv_from(GaiaArchive::Gavo, ra, dec, radius_deg, max_mag)
+                    .await
+                    .map_err(|_| esa)
+            }
+        }
+    }
+
+    /// [`Self::gaia_distance_cone_csv`] from one archive.
+    pub async fn gaia_distance_cone_csv_from(
+        &self,
+        archive: GaiaArchive,
+        ra: f64,
+        dec: f64,
+        radius_deg: f64,
+        max_mag: f32,
+    ) -> Result<String> {
+        check_cone(ra, dec, radius_deg, max_mag)?;
+        let query = format!(
+            "SELECT g.ra, g.dec, g.pmra, g.pmdec, g.phot_g_mean_mag, g.phot_bp_mean_mag, \
+             g.phot_rp_mean_mag, g.parallax, g.parallax_error, \
+             d.r_med_geo, d.r_lo_geo, d.r_hi_geo \
+             FROM {table} AS g LEFT OUTER JOIN {distances} AS d ON g.source_id = d.source_id \
+             WHERE 1 = CONTAINS(POINT('ICRS', g.ra, g.dec), \
+             CIRCLE('ICRS', {ra}, {dec}, {radius_deg})) \
+             AND g.phot_g_mean_mag <= {max_mag} ORDER BY g.phot_g_mean_mag",
+            table = archive.table(),
+            distances = archive.distance_table(),
+        );
+        // A cone of a few thousand stars answers in seconds on the
+        // synchronous endpoint, while a queued job can wait minutes for the
+        // archive to start it. A wide cone the synchronous endpoint times
+        // out on goes through the job queue instead.
+        let body = match self.gaia_cone_sync(archive, &query).await {
+            Ok(body) if parse_gaia_distances(&body).is_ok() => body,
+            _ => self.gaia_cone_job(archive, query).await?,
+        };
+        // Check it parses before a caller caches it.
+        parse_gaia_distances(&body)?;
+        Ok(body)
+    }
+
+    /// Run a Gaia cone `query` on `archive`'s synchronous endpoint. An
+    /// answer that is not CSV, such as a timeout reported as VOTable, is an
+    /// error, and so is one that may have been cut at the row limit.
+    async fn gaia_cone_sync(&self, archive: GaiaArchive, query: &str) -> Result<String> {
+        let url = archive.sync_url();
+        let http = |source| Error::Http {
+            url: url.into(),
+            source,
+        };
+        let response = self
+            .client
+            .post(url)
+            .form(&[
+                ("REQUEST", "doQuery"),
+                ("LANG", "ADQL"),
+                ("FORMAT", "csv"),
+                ("MAXREC", &GAIA_CONE_MAXREC.to_string()),
+                ("QUERY", query),
+            ])
+            .send()
+            .await
+            .map_err(http)?;
+        if !response.status().is_success() {
+            return Err(Error::HttpStatus {
+                url: url.into(),
+                status: response.status().as_u16(),
+            });
+        }
+        let body = response.text().await.map_err(http)?;
+        if body.trim_start().starts_with('<') {
+            return Err(Error::GaiaJobFailed(
+                "answered with an error document".into(),
+            ));
+        }
+        let rows = body
+            .lines()
+            .skip(1)
+            .filter(|line| !line.trim().is_empty())
+            .count();
+        if rows as u64 >= GAIA_CONE_MAXREC {
+            return Err(Error::GaiaJobFailed(format!(
+                "returned its {GAIA_CONE_MAXREC}-star limit; use a brighter magnitude limit"
+            )));
+        }
+        Ok(body)
+    }
+
+    /// Hipparcos stars (van Leeuwen 2007, VizieR I/311) within `radius_deg`
+    /// of `(ra, dec)`, brightest first, from VizieR's TAP service. Gaia has
+    /// no parallax for the brightest stars; these do.
+    pub async fn hipparcos_cone(
+        &self,
+        ra: f64,
+        dec: f64,
+        radius_deg: f64,
+    ) -> Result<Vec<HipparcosStar>> {
+        check_cone(ra, dec, radius_deg, 0.0)?;
+        let query = format!(
+            "SELECT HIP, RArad, DErad, Plx, e_Plx, Hpmag FROM \"I/311/hip2\" \
+             WHERE 1 = CONTAINS(POINT('ICRS', RArad, DErad), \
+             CIRCLE('ICRS', {ra}, {dec}, {radius_deg})) ORDER BY Hpmag"
+        );
+        let url = VIZIER_TAP_SYNC;
+        let http = |source| Error::Http {
+            url: url.into(),
+            source,
+        };
+        let response = self
+            .client
+            .post(url)
+            .form(&[
+                ("REQUEST", "doQuery"),
+                ("LANG", "ADQL"),
+                ("FORMAT", "csv"),
+                ("QUERY", query.as_str()),
+            ])
+            .send()
+            .await
+            .map_err(http)?;
+        if !response.status().is_success() {
+            return Err(Error::HttpStatus {
+                url: url.into(),
+                status: response.status().as_u16(),
+            });
+        }
+        parse_hipparcos(&response.text().await.map_err(http)?)
+    }
+
+    /// Run a Gaia cone `query` as an asynchronous job on `archive` and return
+    /// its CSV. A result holding [`GAIA_CONE_MAXREC`] rows or more is refused
+    /// rather than cut short.
+    async fn gaia_cone_job(&self, archive: GaiaArchive, query: String) -> Result<String> {
         // A wide field holds hundreds of thousands of stars, more than the
         // synchronous endpoint returns before it times out, so the query
         // runs as an asynchronous job: submit, poll, then fetch.
@@ -1159,8 +1568,6 @@ impl SourceDownloader {
                 "returned its {GAIA_CONE_MAXREC}-star limit; use a brighter magnitude limit"
             )));
         }
-        // Check it parses before a caller caches it.
-        parse_gaia_photometry(&body)?;
         Ok(body)
     }
 
@@ -1623,6 +2030,67 @@ fn io(action: &'static str, path: impl Into<PathBuf>, source: std::io::Error) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gaia_distances_parse_with_and_without_parallaxes() {
+        // Rows as ESA's archive returned them for the Pleiades: Alcyone has
+        // no parallax in DR3, Atlas does.
+        let csv = "ra,dec,pmra,pmdec,phot_g_mean_mag,phot_bp_mean_mag,phot_rp_mean_mag,\
+                   parallax,parallax_error,r_med_geo,r_lo_geo,r_hi_geo\n\
+                   56.87125,24.10493,,,2.896132,,,,,,,\n\
+                   57.29068,24.05321,17.6,-45.1,3.6157947,3.55,3.70,8.118448,0.47909123,\
+                   125.42968,117.72701,134.53589\n\
+                   ,24.0,,,9.0,,,,,,,\n";
+        let stars = parse_gaia_distances(csv).unwrap();
+        assert_eq!(stars.len(), 2, "a row without a position is skipped");
+        assert_eq!(stars[0].parallax, None);
+        assert_eq!(stars[0].best_distance(), None);
+        assert_eq!(stars[1].distance, Some(125.42968));
+        assert_eq!(stars[1].distance_low, Some(117.72701));
+        assert!((stars[1].bp_rp.unwrap() - -0.15).abs() < 1e-5);
+        assert_eq!(stars[1].best_distance(), Some(125.42968));
+        assert!(parse_gaia_distances("ra,dec\n1,2\n").is_err());
+    }
+
+    #[test]
+    fn best_distance_falls_back_to_a_precise_parallax_only() {
+        let star = |parallax: f64, error: f64| GaiaDistance {
+            ra: 0.0,
+            dec: 0.0,
+            pmra: None,
+            pmdec: None,
+            g: 10.0,
+            bp_rp: None,
+            parallax: Some(parallax),
+            parallax_error: Some(error),
+            distance: None,
+            distance_low: None,
+            distance_high: None,
+        };
+        assert_eq!(star(10.0, 1.0).best_distance(), Some(100.0));
+        assert_eq!(star(1.0, 0.5).best_distance(), None);
+        assert_eq!(star(-1.0, 0.1).best_distance(), None);
+    }
+
+    #[test]
+    fn hipparcos_rows_parse() {
+        let csv = "HIP,RArad,DErad,Plx,e_Plx,Hpmag,B-V\n\
+                   17702,56.87110081,24.10524179,8.09,0.42,2.848,-0.086\n\
+                   17847,57.29054699,24.05352413,0.5,0.9,3.6084,-0.07\n";
+        let stars = parse_hipparcos(csv).unwrap();
+        assert_eq!(stars.len(), 2);
+        assert_eq!(stars[0].hip, 17702);
+        assert!((stars[0].distance().unwrap() - 1000.0 / 8.09).abs() < 1e-9);
+        assert_eq!(
+            stars[1].distance(),
+            None,
+            "an imprecise parallax gives none"
+        );
+        assert!(matches!(
+            parse_hipparcos("HIP,RArad\n1,2\n"),
+            Err(Error::MalformedHipparcos)
+        ));
+    }
 
     #[test]
     fn gaia_photometry_rows_parse_with_missing_colours() {

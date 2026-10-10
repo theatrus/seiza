@@ -25,6 +25,7 @@ mod common;
 mod deconvolution;
 mod interrupt;
 mod master;
+mod parallax_video;
 mod preview;
 mod provenance;
 mod setup;
@@ -653,6 +654,9 @@ enum Command {
     Background(background::BackgroundArgs),
     /// Calibrate a linear RGB image's colour against Gaia DR3 star colours
     ColorCalibrate(color_calibrate::ColorCalibrateArgs),
+    /// Fly toward a point of a stretched image, with its stars at their
+    /// Gaia distances, and write the video
+    ParallaxVideo(parallax_video::ParallaxVideoArgs),
     /// Experimentally restore mild blur in a linear FITS using a measured PSF
     Deconvolve(deconvolution::DeconvolutionArgs),
     /// Register and incrementally stack linear FITS light frames
@@ -1537,6 +1541,7 @@ fn main() -> Result<()> {
         Command::Stretch(options) => stretch_command::run(options),
         Command::Background(options) => background::run(options),
         Command::ColorCalibrate(options) => color_calibrate::run(options),
+        Command::ParallaxVideo(options) => parallax_video::run(options),
         Command::Deconvolve(options) => deconvolution::run(options),
         Command::Stack(options) => stack::run(options),
         Command::Color(options) => color::run(options),
@@ -3871,6 +3876,71 @@ fn dms(dec: f64) -> String {
     format!("{sign}{:02}° {:02}′ {:04.1}″", d as u32, m as u32, sec)
 }
 
+/// Load the blind pattern index beside `catalog` (or build one) and
+/// blind-solve `invocation`'s stars over each of `search`'s pixel-scale
+/// ranges, printing the index's size as `solve-blind` does.
+fn blind_solve_invocation(
+    invocation: &mut SolveInvocation<'_>,
+    catalog: &TileCatalog,
+    search: &ScaleSearch,
+    options: &SolveBlindOptions<'_>,
+    can_retry_f32: bool,
+    dims: (u32, u32),
+) -> Result<(seiza::solve::Solution, std::time::Duration)> {
+    use seiza::blind::{BlindIndex, BlindParams, solve_blind};
+
+    let mut params = BlindParams {
+        min_scale_arcsec_px: search.ranges[0].0,
+        max_scale_arcsec_px: search.ranges[0].1,
+        index_mag_limit: options.index_mag_limit,
+        max_hypotheses: options.max_hypotheses,
+        max_coarse_hypotheses: options.max_coarse_hypotheses,
+        sip_order: options.sip_order,
+        ..Default::default()
+    };
+    let started = std::time::Instant::now();
+    let index = if let Some(path) = options.index_path {
+        let index = BlindIndex::open(path)
+            .map_err(anyhow::Error::from)
+            .with_context(|| format!("failed to open {}", path.display()))?;
+        params.index_mag_limit = index.index_mag_limit();
+        params.max_pattern_deg = index.max_pattern_deg();
+        warn_on_index_catalog_mismatch(&index, catalog);
+        println!(
+            "pattern index: {} patterns mapped from {} in {:.2}s (G<={:.1})",
+            index.pattern_count(),
+            path.display(),
+            started.elapsed().as_secs_f64(),
+            index.index_mag_limit()
+        );
+        index
+    } else {
+        let index = BlindIndex::build(catalog, &params);
+        println!(
+            "pattern index: {} patterns built in {:.2}s",
+            index.pattern_count(),
+            started.elapsed().as_secs_f64()
+        );
+        index
+    };
+
+    let started = std::time::Instant::now();
+    let solution = invocation.solve_with_pass(|stars, pass| {
+        let mut attempt_params = blind_params_for_detection_pass(
+            &params,
+            can_retry_f32,
+            options.detection_fallback_hypotheses,
+            pass,
+        );
+        solve_over_ranges(&search.ranges, |(min, max)| {
+            attempt_params.min_scale_arcsec_px = min;
+            attempt_params.max_scale_arcsec_px = max;
+            solve_blind(stars, catalog, &index, &attempt_params, dims)
+        })
+    })?;
+    Ok((solution, started.elapsed()))
+}
+
 struct SolveBlindOptions<'a> {
     index_path: Option<&'a std::path::Path>,
     min_scale: Option<f64>,
@@ -3978,8 +4048,6 @@ fn solve_blind_command(
     data: &std::path::Path,
     options: SolveBlindOptions<'_>,
 ) -> Result<()> {
-    use seiza::blind::{BlindIndex, BlindParams, solve_blind};
-
     let img = load_image(path, options.detection_backend)?;
     let dims = img.dimensions();
     let metadata = if is_astronomy_image_path(path) {
@@ -4019,58 +4087,17 @@ fn solve_blind_command(
 
     let catalog =
         TileCatalog::open(data).with_context(|| format!("failed to open {}", data.display()))?;
-    let mut params = BlindParams {
-        min_scale_arcsec_px: min_scale,
-        max_scale_arcsec_px: max_scale,
-        index_mag_limit: options.index_mag_limit,
-        max_hypotheses: options.max_hypotheses,
-        max_coarse_hypotheses: options.max_coarse_hypotheses,
-        sip_order: options.sip_order,
-        ..Default::default()
-    };
-    let started = std::time::Instant::now();
-    let index = if let Some(path) = options.index_path {
-        let index = BlindIndex::open(path)
-            .map_err(anyhow::Error::from)
-            .with_context(|| format!("failed to open {}", path.display()))?;
-        params.index_mag_limit = index.index_mag_limit();
-        params.max_pattern_deg = index.max_pattern_deg();
-        warn_on_index_catalog_mismatch(&index, &catalog);
-        println!(
-            "pattern index: {} patterns mapped from {} in {:.2}s (G<={:.1})",
-            index.pattern_count(),
-            path.display(),
-            started.elapsed().as_secs_f64(),
-            index.index_mag_limit()
-        );
-        index
-    } else {
-        let index = BlindIndex::build(&catalog, &params);
-        println!(
-            "pattern index: {} patterns built in {:.2}s",
-            index.pattern_count(),
-            started.elapsed().as_secs_f64()
-        );
-        index
-    };
-
-    let started = std::time::Instant::now();
-    let solution = invocation.solve_with_pass(|stars, pass| {
-        let mut attempt_params = blind_params_for_detection_pass(
-            &params,
-            can_retry_f32,
-            options.detection_fallback_hypotheses,
-            pass,
-        );
-        solve_over_ranges(&search.ranges, |(min, max)| {
-            attempt_params.min_scale_arcsec_px = min;
-            attempt_params.max_scale_arcsec_px = max;
-            solve_blind(stars, &catalog, &index, &attempt_params, dims)
-        })
-    })?;
+    let (solution, elapsed) = blind_solve_invocation(
+        &mut invocation,
+        &catalog,
+        &search,
+        &options,
+        can_retry_f32,
+        dims,
+    )?;
     let wcs = &solution.wcs;
     let (ra, dec) = wcs.pixel_to_world(dims.0 as f64 / 2.0, dims.1 as f64 / 2.0);
-    println!("Blind-solved in {:.2}s:", started.elapsed().as_secs_f64());
+    println!("Blind-solved in {:.2}s:", elapsed.as_secs_f64());
     println!(
         "  center     : {} {}  ({ra:.5}°, {dec:.5}°)",
         hms(ra),

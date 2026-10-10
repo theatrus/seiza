@@ -1,0 +1,292 @@
+//! Images of screen-blend "light".
+//!
+//! A stretched star image is laid over its starless image with a screen
+//! blend, `1 − (1 − a)(1 − b)`. Writing a display value `v` as the light
+//! `L = −ln(1 − v)` turns the screen blend into addition: the light of a
+//! screened stack of layers is the sum of the layers' lights. So a star image
+//! cut into one layer per star plus a leftover layer, each moved on its own,
+//! puts itself back together wherever the layers line up again.
+//!
+//! The light of a pixel is taken from its brightest channel, with the other
+//! channels kept in the same proportion. Per channel, a near-white star core
+//! such as (0.95, 0.92, 1.0) would become light of very different sizes, and
+//! brightening or shrinking the star would turn it magenta. Scaled together,
+//! the channels keep the star's hue. Where two layers of different hue
+//! overlap, the blend is then close to a screen blend rather than exact.
+
+use image::{Rgb, Rgb32FImage, RgbImage};
+use rayon::prelude::*;
+
+/// The brightest display value kept, so white maps to a finite light.
+const MAX_DISPLAY: f32 = 1.0 - 1.0 / 65_536.0;
+
+/// The light of display value `value`, which runs 0 to 1.
+pub fn light_of(value: f32) -> f32 {
+    -(1.0 - value.clamp(0.0, MAX_DISPLAY)).ln()
+}
+
+/// The display value of `light`.
+pub fn display_of(light: f32) -> f32 {
+    1.0 - (-light.max(0.0)).exp()
+}
+
+/// The light of an RGB display pixel: its brightest channel's light, shared
+/// across the channels in their display proportions.
+pub fn pixel_light(display: [f32; 3]) -> [f32; 3] {
+    let display = display.map(|value| value.clamp(0.0, 1.0));
+    let peak = display[0].max(display[1]).max(display[2]);
+    if peak <= 0.0 {
+        return [0.0; 3];
+    }
+    let light = light_of(peak) / peak;
+    display.map(|value| value * light)
+}
+
+/// The display pixel of `light`, inverting [`pixel_light`].
+pub fn pixel_display(light: [f32; 3]) -> [f32; 3] {
+    let light = light.map(|value| value.max(0.0));
+    let peak = light[0].max(light[1]).max(light[2]);
+    if peak <= 0.0 {
+        return [0.0; 3];
+    }
+    let display = display_of(peak) / peak;
+    light.map(|value| value * display)
+}
+
+/// An RGB image of light, row-major.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LightImage {
+    pub width: usize,
+    pub height: usize,
+    pub pixels: Vec<[f32; 3]>,
+}
+
+impl LightImage {
+    /// A dark image.
+    pub fn new(width: usize, height: usize) -> Self {
+        Self {
+            width,
+            height,
+            pixels: vec![[0.0; 3]; width * height],
+        }
+    }
+
+    /// The light of a stretched image whose values run 0 to 1.
+    pub fn from_display(image: &Rgb32FImage) -> Self {
+        let (width, height) = (image.width() as usize, image.height() as usize);
+        let pixels = image
+            .as_raw()
+            .par_chunks_exact(3)
+            .map(|pixel| pixel_light([pixel[0], pixel[1], pixel[2]]))
+            .collect();
+        Self {
+            width,
+            height,
+            pixels,
+        }
+    }
+
+    /// The image as 8-bit display values.
+    pub fn to_display_rgb8(&self) -> RgbImage {
+        let mut out = RgbImage::new(self.width as u32, self.height as u32);
+        out.as_mut()
+            .par_chunks_exact_mut(3)
+            .zip(self.pixels.par_iter())
+            .for_each(|(out, light)| {
+                let display = pixel_display(*light);
+                for channel in 0..3 {
+                    out[channel] = (display[channel] * 255.0 + 0.5) as u8;
+                }
+            });
+        out
+    }
+
+    /// The image as display values.
+    pub fn to_display(&self) -> Rgb32FImage {
+        let mut out = Rgb32FImage::new(self.width as u32, self.height as u32);
+        for (pixel, light) in out.pixels_mut().zip(&self.pixels) {
+            *pixel = Rgb(pixel_display(*light));
+        }
+        out
+    }
+
+    pub(crate) fn at(&self, x: usize, y: usize) -> [f32; 3] {
+        self.pixels[y * self.width + x]
+    }
+
+    /// Bilinear light at `(x, y)` in pixel-centre coordinates (pixel `i`
+    /// covers `i − 0.5` to `i + 0.5`), dark outside the image.
+    pub fn sample(&self, x: f32, y: f32) -> [f32; 3] {
+        let (fx, fy) = (x.floor(), y.floor());
+        let (tx, ty) = (x - fx, y - fy);
+        let (x0, y0) = (fx as isize, fy as isize);
+        let mut sum = [0.0_f32; 3];
+        for (dy, wy) in [(0, 1.0 - ty), (1, ty)] {
+            for (dx, wx) in [(0, 1.0 - tx), (1, tx)] {
+                let (px, py) = (x0 + dx, y0 + dy);
+                if px < 0 || py < 0 || px >= self.width as isize || py >= self.height as isize {
+                    continue;
+                }
+                let weight = wx * wy;
+                let light = self.at(px as usize, py as usize);
+                for channel in 0..3 {
+                    sum[channel] += weight * light[channel];
+                }
+            }
+        }
+        sum
+    }
+
+    /// Half the size, each pixel the mean of the four it covers.
+    fn halved(&self) -> Self {
+        let (width, height) = (self.width.div_ceil(2), self.height.div_ceil(2));
+        let pixels = (0..height)
+            .into_par_iter()
+            .flat_map_iter(|y| {
+                (0..width).map(move |x| {
+                    let mut sum = [0.0_f32; 3];
+                    let mut count = 0.0;
+                    for (sx, sy) in [
+                        (2 * x, 2 * y),
+                        (2 * x + 1, 2 * y),
+                        (2 * x, 2 * y + 1),
+                        (2 * x + 1, 2 * y + 1),
+                    ] {
+                        if sx < self.width && sy < self.height {
+                            let light = self.at(sx, sy);
+                            for channel in 0..3 {
+                                sum[channel] += light[channel];
+                            }
+                            count += 1.0;
+                        }
+                    }
+                    sum.map(|value| value / count)
+                })
+            })
+            .collect();
+        Self {
+            width,
+            height,
+            pixels,
+        }
+    }
+}
+
+/// An image with its successive halvings, sampled at the level whose pixels
+/// match the output's, so a shrunk view does not alias.
+#[derive(Clone, Debug)]
+pub struct Pyramid {
+    levels: Vec<LightImage>,
+}
+
+impl Pyramid {
+    pub fn new(image: LightImage) -> Self {
+        let mut levels = vec![image];
+        while let Some(last) = levels.last()
+            && last.width > 64
+            && last.height > 64
+        {
+            let next = last.halved();
+            levels.push(next);
+        }
+        Self { levels }
+    }
+
+    pub fn base(&self) -> &LightImage {
+        &self.levels[0]
+    }
+
+    /// The level for a view where one output pixel spans `footprint` base
+    /// pixels, and that level's scale relative to the base.
+    pub(crate) fn level_for(&self, footprint: f32) -> (&LightImage, f32) {
+        let index = if footprint > 1.0 {
+            (footprint.log2().floor() as usize).min(self.levels.len() - 1)
+        } else {
+            0
+        };
+        (&self.levels[index], (1u64 << index) as f32)
+    }
+
+    /// Bilinear light at base coordinates `(x, y)` from `level` of scale
+    /// `scale`.
+    pub(crate) fn sample_level(level: &LightImage, scale: f32, x: f32, y: f32) -> [f32; 3] {
+        // Pixel centres of level k sit at base coordinates
+        // `scale * i + (scale − 1) / 2`.
+        level.sample(
+            (x - (scale - 1.0) / 2.0) / scale,
+            (y - (scale - 1.0) / 2.0) / scale,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn screen_blend_is_addition_of_light() {
+        for (a, b) in [(0.2_f32, 0.5_f32), (0.0, 0.9), (0.7, 0.7)] {
+            let screened = 1.0 - (1.0 - a) * (1.0 - b);
+            let added = display_of(light_of(a) + light_of(b));
+            assert!((screened - added).abs() < 1e-6, "{a} {b}");
+        }
+        assert_eq!(display_of(light_of(0.0)), 0.0);
+        assert!(light_of(1.0).is_finite());
+    }
+
+    #[test]
+    fn pixel_light_round_trips_and_keeps_hue_when_scaled() {
+        for display in [
+            [0.95_f32, 0.92, 1.0],
+            [0.2, 0.5, 0.1],
+            [0.0, 0.0, 0.0],
+            [0.3, 0.3, 0.3],
+        ] {
+            let back = pixel_display(pixel_light(display));
+            for channel in 0..3 {
+                assert!(
+                    (back[channel] - display[channel]).abs() < 1e-4,
+                    "{display:?} {back:?}"
+                );
+            }
+        }
+        // A near-white core brightened stays near white, not magenta.
+        let core = pixel_light([0.95, 0.92, 0.99]);
+        let brighter = pixel_display(core.map(|value| value * 1.5));
+        assert!(
+            brighter[0] / brighter[1] < 0.95 / 0.92 + 1e-3,
+            "{brighter:?}"
+        );
+        // Grey layers still screen exactly.
+        let screened = 1.0 - (1.0 - 0.3) * (1.0 - 0.5);
+        let added = pixel_display(
+            [0, 1, 2]
+                .map(|channel| pixel_light([0.3; 3])[channel] + pixel_light([0.5; 3])[channel]),
+        );
+        assert!((added[0] - screened).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bilinear_sampling_hits_pixel_centres_and_fades_outside() {
+        let mut image = LightImage::new(2, 1);
+        image.pixels = vec![[1.0; 3], [3.0; 3]];
+        assert_eq!(image.sample(0.0, 0.0), [1.0; 3]);
+        assert_eq!(image.sample(0.5, 0.0), [2.0; 3]);
+        assert_eq!(image.sample(2.0, 0.0), [0.0; 3]);
+    }
+
+    #[test]
+    fn pyramid_levels_average_and_line_up() {
+        let mut image = LightImage::new(256, 256);
+        for (index, pixel) in image.pixels.iter_mut().enumerate() {
+            *pixel = [(index % 256) as f32; 3];
+        }
+        let pyramid = Pyramid::new(image);
+        let (level, scale) = pyramid.level_for(2.5);
+        assert_eq!(scale, 2.0);
+        assert_eq!(level.width, 128);
+        // Level 1 pixel 0 averages base columns 0 and 1, centred at 0.5.
+        let value = Pyramid::sample_level(level, scale, 0.5, 0.5)[0];
+        assert!((value - 0.5).abs() < 1e-5, "{value}");
+    }
+}

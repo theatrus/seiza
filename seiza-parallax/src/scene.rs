@@ -1,0 +1,425 @@
+//! The layers a fly-through moves: the starless image as a plane at the
+//! target's distance, and every star cut out of the star image at its own.
+
+use crate::light::{LightImage, Pyramid};
+use rayon::prelude::*;
+
+/// A star found in the star image, and how far away it is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Star {
+    /// Centroid in image pixels, pixel-centre coordinates.
+    pub x: f64,
+    pub y: f64,
+    /// Distance in parsecs, or `None` to keep it on the background plane.
+    pub distance_pc: Option<f64>,
+}
+
+/// One star's light, cut from the star image.
+#[derive(Clone, Debug)]
+pub struct Sprite {
+    /// The sprite's top-left pixel in the image.
+    pub left: usize,
+    pub top: usize,
+    pub image: LightImage,
+    /// The star's centroid in image pixels.
+    pub x: f64,
+    pub y: f64,
+    pub distance_pc: f64,
+}
+
+/// How [`Scene::new`] cuts stars out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CutOptions {
+    /// A star's footprint grows ring by ring until the ring's median light
+    /// is within this much of the star image's background (or four times
+    /// its noise, if that is more), so faint stars cut small and bright ones
+    /// take their halo.
+    pub edge_light: f32,
+    /// The smallest and largest footprint radius, pixels.
+    pub min_radius: usize,
+    pub max_radius: usize,
+}
+
+impl Default for CutOptions {
+    fn default() -> Self {
+        Self {
+            edge_light: 0.004,
+            min_radius: 3,
+            max_radius: 200,
+        }
+    }
+}
+
+/// Everything a frame is rendered from.
+#[derive(Clone, Debug)]
+pub struct Scene {
+    /// The starless image plus whatever star light no sprite took, on the
+    /// background plane.
+    pub background: Pyramid,
+    pub sprites: Vec<Sprite>,
+    /// Distance of the background plane, parsecs.
+    pub background_distance_pc: f64,
+    /// The image's focal length in pixels: one radian across the field is
+    /// this many pixels.
+    pub focal_px: f64,
+}
+
+impl Scene {
+    /// Cut `stars` out of `star_light` and lay the rest over `starless`.
+    ///
+    /// Each star takes a soft round footprint. Where footprints overlap the
+    /// light is shared out in proportion to their weights, and the weights
+    /// never sum past one, so the sprites plus the leftover add back up to
+    /// the star image exactly.
+    pub fn new(
+        starless: &LightImage,
+        star_light: &LightImage,
+        stars: &[Star],
+        background_distance_pc: f64,
+        focal_px: f64,
+        options: &CutOptions,
+    ) -> Self {
+        assert_eq!(
+            (starless.width, starless.height),
+            (star_light.width, star_light.height),
+            "the starless and star images must be the same size"
+        );
+        let (width, height) = (star_light.width, star_light.height);
+        // A star image keeps a little light between stars; a footprint ends
+        // where its ring reaches that level, not at zero.
+        let (background, noise) = background_and_noise(star_light);
+        let edge = background + options.edge_light.max(4.0 * noise);
+        let measured: Vec<Footprint> = stars
+            .par_iter()
+            .map(|star| Footprint::measure(star, star_light, edge, options))
+            .collect();
+        // `stars` come brightest first. A fainter star inside a brighter
+        // one's footprint is most often a piece of its halo or spikes, and
+        // even a real neighbour there shares its light: either way it moves
+        // as part of the brighter star rather than flying off on its own.
+        let kept = outside_brighter(&measured);
+        let footprints: Vec<Footprint> = kept.iter().map(|&index| measured[index]).collect();
+        let stars: Vec<Star> = kept.iter().map(|&index| stars[index]).collect();
+
+        // The sum of every footprint's weight at each pixel.
+        let mut total = vec![0.0_f32; width * height];
+        for footprint in &footprints {
+            footprint.for_each(width, height, |x, y, weight| total[y * width + x] += weight);
+        }
+
+        let sprites: Vec<Sprite> = footprints
+            .par_iter()
+            .zip(&stars)
+            .map(|(footprint, star)| {
+                let (left, top, right, bottom) = footprint.bounds(width, height);
+                let mut image = LightImage::new(right - left, bottom - top);
+                footprint.for_each(width, height, |x, y, weight| {
+                    let share = weight / total[y * width + x].max(1.0);
+                    let light = star_light.at(x, y);
+                    image.pixels[(y - top) * image.width + (x - left)] =
+                        light.map(|value| value * share);
+                });
+                Sprite {
+                    left,
+                    top,
+                    image,
+                    x: star.x,
+                    y: star.y,
+                    distance_pc: star.distance_pc.unwrap_or(background_distance_pc),
+                }
+            })
+            .collect();
+
+        let background = LightImage {
+            width,
+            height,
+            pixels: starless
+                .pixels
+                .par_iter()
+                .zip(star_light.pixels.par_iter())
+                .zip(total.par_iter())
+                .map(|((base, stars), taken)| {
+                    let left = 1.0 - taken.min(1.0);
+                    [0, 1, 2].map(|channel| base[channel] + stars[channel] * left)
+                })
+                .collect(),
+        };
+        Self {
+            background: Pyramid::new(background),
+            sprites,
+            background_distance_pc,
+            focal_px,
+        }
+    }
+
+    pub fn width(&self) -> usize {
+        self.background.base().width
+    }
+
+    pub fn height(&self) -> usize {
+        self.background.base().height
+    }
+}
+
+/// A star's soft round footprint: weight one out to `inner`, falling to zero
+/// at `outer`.
+#[derive(Clone, Copy, Debug)]
+struct Footprint {
+    x: f64,
+    y: f64,
+    inner: f64,
+    outer: f64,
+}
+
+impl Footprint {
+    fn measure(star: &Star, light: &LightImage, edge: f32, options: &CutOptions) -> Self {
+        let mut radius = options.min_radius;
+        while radius < options.max_radius && ring_light(light, star.x, star.y, radius) >= edge {
+            radius += 1;
+        }
+        let outer = radius as f64 + 1.5;
+        Self {
+            x: star.x,
+            y: star.y,
+            inner: outer * 0.6,
+            outer,
+        }
+    }
+
+    fn weight(&self, x: usize, y: usize) -> f32 {
+        let distance = ((x as f64 - self.x).powi(2) + (y as f64 - self.y).powi(2)).sqrt();
+        if distance <= self.inner {
+            1.0
+        } else if distance >= self.outer {
+            0.0
+        } else {
+            let t = (distance - self.inner) / (self.outer - self.inner);
+            // Smoothstep down to zero.
+            (1.0 - t * t * (3.0 - 2.0 * t)) as f32
+        }
+    }
+
+    fn bounds(&self, width: usize, height: usize) -> (usize, usize, usize, usize) {
+        let clamp = |value: f64, limit: usize| (value.max(0.0) as usize).min(limit);
+        (
+            clamp((self.x - self.outer).floor(), width),
+            clamp((self.y - self.outer).floor(), height),
+            clamp((self.x + self.outer).ceil() + 1.0, width),
+            clamp((self.y + self.outer).ceil() + 1.0, height),
+        )
+    }
+
+    fn for_each(&self, width: usize, height: usize, mut visit: impl FnMut(usize, usize, f32)) {
+        let (left, top, right, bottom) = self.bounds(width, height);
+        for y in top..bottom {
+            for x in left..right {
+                let weight = self.weight(x, y);
+                if weight > 0.0 {
+                    visit(x, y, weight);
+                }
+            }
+        }
+    }
+}
+
+/// Indices of the footprints whose centres lie outside every earlier (so
+/// brighter) kept footprint.
+fn outside_brighter(footprints: &[Footprint]) -> Vec<usize> {
+    const CELL: f64 = 64.0;
+    let cell = |x: f64, y: f64| ((x / CELL).floor() as i64, (y / CELL).floor() as i64);
+    let mut grid: std::collections::HashMap<(i64, i64), Vec<usize>> =
+        std::collections::HashMap::new();
+    let mut widest = 0.0_f64;
+    let mut kept = Vec::with_capacity(footprints.len());
+    for (index, footprint) in footprints.iter().enumerate() {
+        let span = (widest / CELL).ceil() as i64;
+        let (cx, cy) = cell(footprint.x, footprint.y);
+        let inside = (cy - span..=cy + span).any(|row| {
+            (cx - span..=cx + span).any(|column| {
+                grid.get(&(column, row)).is_some_and(|indices| {
+                    indices.iter().any(|&other| {
+                        let brighter: &Footprint = &footprints[other];
+                        (brighter.x - footprint.x).hypot(brighter.y - footprint.y) < brighter.inner
+                    })
+                })
+            })
+        });
+        if inside {
+            continue;
+        }
+        widest = widest.max(footprint.inner);
+        grid.entry(cell(footprint.x, footprint.y))
+            .or_default()
+            .push(index);
+        kept.push(index);
+    }
+    kept
+}
+
+/// Median light, summed over channels, on the ring `radius` pixels from
+/// `(x, y)`. The median ignores the few ring pixels a neighbouring star
+/// covers.
+fn ring_light(light: &LightImage, x: f64, y: f64, radius: usize) -> f32 {
+    let steps = (radius * 8).max(8);
+    let mut samples = Vec::with_capacity(steps);
+    for step in 0..steps {
+        let angle = step as f64 / steps as f64 * std::f64::consts::TAU;
+        let (px, py) = (
+            (x + radius as f64 * angle.cos()).round(),
+            (y + radius as f64 * angle.sin()).round(),
+        );
+        if px < 0.0 || py < 0.0 || px >= light.width as f64 || py >= light.height as f64 {
+            continue;
+        }
+        let pixel = light.at(px as usize, py as usize);
+        samples.push(pixel[0] + pixel[1] + pixel[2]);
+    }
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let middle = samples.len() / 2;
+    *samples.select_nth_unstable_by(middle, f32::total_cmp).1
+}
+
+/// The median light, summed over channels, of a sample of the image, and
+/// its noise as a scaled median absolute deviation.
+fn background_and_noise(light: &LightImage) -> (f32, f32) {
+    let step = (light.pixels.len() / 200_000).max(1);
+    let mut samples: Vec<f32> = light
+        .pixels
+        .iter()
+        .step_by(step)
+        .map(|pixel| pixel[0] + pixel[1] + pixel[2])
+        .collect();
+    if samples.is_empty() {
+        return (0.0, 0.0);
+    }
+    let middle = samples.len() / 2;
+    let median = *samples.select_nth_unstable_by(middle, f32::total_cmp).1;
+    let mut deviations: Vec<f32> = samples.iter().map(|value| (value - median).abs()).collect();
+    let mad = *deviations.select_nth_unstable_by(middle, f32::total_cmp).1;
+    (median, 1.4826 * mad)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gaussian_stars(width: usize, height: usize, stars: &[(f64, f64, f32)]) -> LightImage {
+        let mut image = LightImage::new(width, height);
+        for y in 0..height {
+            for x in 0..width {
+                let mut light = 0.0;
+                for (sx, sy, peak) in stars {
+                    let r2 = (x as f64 - sx).powi(2) + (y as f64 - sy).powi(2);
+                    light += peak * (-r2 / 4.0).exp() as f32;
+                }
+                image.pixels[y * width + x] = [light, light * 0.8, light * 0.6];
+            }
+        }
+        image
+    }
+
+    #[test]
+    fn a_fainter_star_inside_a_brighter_footprint_joins_it() {
+        // A bright star and a piece of its halo, found as a star of its own.
+        let light = gaussian_stars(64, 48, &[(30.0, 24.0, 8.0), (33.0, 24.0, 0.2)]);
+        let starless = LightImage::new(64, 48);
+        let stars = [(30.0, 24.0, Some(136.0)), (33.0, 24.0, Some(2000.0))]
+            .map(|(x, y, distance_pc)| Star { x, y, distance_pc });
+        let scene = Scene::new(
+            &starless,
+            &light,
+            &stars,
+            136.0,
+            500.0,
+            &CutOptions::default(),
+        );
+        assert_eq!(scene.sprites.len(), 1);
+        assert_eq!(scene.sprites[0].distance_pc, 136.0);
+    }
+
+    #[test]
+    fn stars_at_the_edges_measure_inside_the_image() {
+        let light = gaussian_stars(32, 24, &[(31.4, 23.4, 3.0), (0.0, 0.0, 3.0)]);
+        let starless = LightImage::new(32, 24);
+        let stars = [(31.4, 23.4), (0.0, 0.0)].map(|(x, y)| Star {
+            x,
+            y,
+            distance_pc: None,
+        });
+        let scene = Scene::new(
+            &starless,
+            &light,
+            &stars,
+            100.0,
+            500.0,
+            &CutOptions::default(),
+        );
+        assert_eq!(scene.sprites.len(), 2);
+    }
+
+    #[test]
+    fn sprites_and_leftover_add_back_to_the_star_image() {
+        // Two stars whose footprints overlap, and one alone.
+        let stars_light = gaussian_stars(
+            64,
+            48,
+            &[(20.0, 20.0, 2.0), (31.0, 21.0, 1.0), (50.0, 34.0, 0.5)],
+        );
+        let mut starless = LightImage::new(64, 48);
+        starless
+            .pixels
+            .iter_mut()
+            .for_each(|pixel| *pixel = [0.1, 0.2, 0.3]);
+        let stars = [
+            (20.0, 20.0, Some(100.0)),
+            (31.0, 21.0, None),
+            (50.0, 34.0, Some(5000.0)),
+        ]
+        .map(|(x, y, distance_pc)| Star { x, y, distance_pc });
+        let scene = Scene::new(
+            &starless,
+            &stars_light,
+            &stars,
+            400.0,
+            1000.0,
+            &CutOptions::default(),
+        );
+        assert_eq!(scene.sprites.len(), 3);
+        assert_eq!(
+            scene.sprites[1].distance_pc, 400.0,
+            "no distance keeps it on the background"
+        );
+
+        let mut rebuilt = scene.background.base().clone();
+        for sprite in &scene.sprites {
+            for y in 0..sprite.image.height {
+                for x in 0..sprite.image.width {
+                    let target = &mut rebuilt.pixels[(sprite.top + y) * 64 + sprite.left + x];
+                    let light = sprite.image.at(x, y);
+                    for channel in 0..3 {
+                        target[channel] += light[channel];
+                    }
+                }
+            }
+        }
+        for (index, (rebuilt, (base, stars))) in rebuilt
+            .pixels
+            .iter()
+            .zip(starless.pixels.iter().zip(&stars_light.pixels))
+            .enumerate()
+        {
+            for channel in 0..3 {
+                let expected = base[channel] + stars[channel];
+                assert!(
+                    (rebuilt[channel] - expected).abs() < 1e-5,
+                    "pixel {index} channel {channel}"
+                );
+            }
+        }
+        // A bright star's footprint reaches further than a faint one's.
+        let size = |sprite: &Sprite| sprite.image.width;
+        assert!(size(&scene.sprites[0]) > size(&scene.sprites[2]));
+    }
+}

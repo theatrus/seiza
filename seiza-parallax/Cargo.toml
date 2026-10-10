@@ -1,0 +1,28 @@
+[package]
+name = "seiza-parallax"
+description = "Parallax fly-through videos of astrophotographs, with stars placed at their Gaia distances"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "README.md"
+keywords = ["astronomy", "astrophotography", "parallax", "video", "gaia"]
+categories = ["science", "multimedia::video"]
+
+[features]
+default = []
+# Encode H.264 in process with Cisco's OpenH264, built from source, and mux
+# MP4, for hosts without ffmpeg.
+openh264 = ["dep:openh264", "dep:mp4"]
+
+[dependencies]
+image.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+openh264 = { version = "0.9", optional = true }
+mp4 = { version = "0.14", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
