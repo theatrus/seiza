@@ -10,6 +10,13 @@
 //! Layers combine with a screen blend, done as addition of "light" (see
 //! [`light`]), so the first frame reproduces the original image.
 //!
+//! [`Parallax`] makes a whole video from the split image and its plate
+//! solution, as `seiza parallax-video` does: it finds the stars' distances,
+//! lifts galaxies onto the far field, maps the dust and labels the objects,
+//! then draws frames on request or hands them in turn to a [`FrameSink`],
+//! which may be the caller's own encoder. The pieces below it, [`Scene`]
+//! and [`Shot`], serve a caller who places the stars itself.
+//!
 //! ```no_run
 //! use seiza_parallax::{CutOptions, LightImage, Scene, Shot, Star};
 //! # let (starless, stars) = (LightImage::new(64, 64), LightImage::new(64, 64));
@@ -21,8 +28,11 @@
 
 pub mod dust;
 pub mod encode;
+mod field;
 pub mod lift;
 pub mod light;
+pub mod overlay;
+pub mod pipeline;
 pub mod render;
 pub mod scene;
 
@@ -32,8 +42,11 @@ pub use encode::OpenH264Sink;
 pub use encode::{
     FRAME_SIZES, FfmpegSink, FrameSink, PngSequence, VideoSettings, parse_frame_size,
 };
+pub use field::default_gaia_cache;
 pub use lift::{Extent, lift_object};
 pub use light::{LightImage, Pyramid};
+pub use overlay::{CustomLabel, DEFAULT_WATERMARK, parse_color, parse_label};
+pub use pipeline::{Event, Parallax, ParallaxOptions, Summary};
 pub use render::{Easing, Quality, Shot, Start, View};
 pub use scene::{CutOptions, Scene, SmallStars, Sprite, Star};
 pub use seiza_stars::PeakStar;

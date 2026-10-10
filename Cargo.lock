@@ -2629,14 +2629,19 @@ dependencies = [
 name = "seiza-parallax"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "image",
  "mp4",
  "multiversion",
  "openh264",
  "rayon",
+ "seiza",
+ "seiza-draw",
+ "seiza-sources",
  "seiza-stars",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]

@@ -25,7 +25,6 @@ mod common;
 mod deconvolution;
 mod interrupt;
 mod master;
-mod parallax_overlay;
 pub(crate) use seiza_draw::ellipse_points;
 mod parallax_video;
 mod preview;

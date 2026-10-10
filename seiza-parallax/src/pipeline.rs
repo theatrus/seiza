@@ -1,0 +1,753 @@
+//! A whole parallax video from a starless image, its stars and a plate
+//! solution: the stars' distances from Gaia and Hipparcos, the scene cut
+//! into depths, the dust, lifted galaxies and labels, then the frames.
+//!
+//! [`Parallax::prepare`] does the work that comes once. [`Parallax::frame`]
+//! then draws any frame on request, and [`Parallax::render`] hands every
+//! frame in turn to a [`FrameSink`]: one of this crate's encoders, or the
+//! caller's own, such as a platform video encoder.
+
+use crate::field::{self, FieldSource};
+use crate::lift::Extent;
+use crate::overlay::{self, CustomLabel, Overlay};
+use crate::render::{Easing, Quality, Shot, Start};
+use crate::scene::{CutOptions, Scene, SmallStars, Star};
+use crate::{FrameSink, LightImage, VideoSettings};
+use image::{Rgb, Rgb32FImage, RgbImage};
+use seiza::Wcs;
+use std::path::{Path, PathBuf};
+
+/// Where lifted galaxies fly: so far beyond the stars that they hold still.
+pub const GALAXY_DISTANCE_PC: f64 = 1e8;
+
+/// What happens as a video is prepared and rendered.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Event<'a> {
+    /// A step done or a choice made, worth telling the user.
+    Note(&'a str),
+    /// Something missing that the video goes on without.
+    Warning(&'a str),
+    /// `done` of `total` frames rendered.
+    Frame { done: usize, total: usize },
+}
+
+/// Why a video could not be made.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// The options or images cannot make a video.
+    #[error("{0}")]
+    Invalid(String),
+    #[error("failed to open {}: {message}", path.display())]
+    Catalog { path: PathBuf, message: String },
+    #[error("Gaia archive query failed: {0}")]
+    Gaia(String),
+    #[error(
+        "no catalogued object or Gaia distances near the focus point to place the background at; \
+         give its distance"
+    )]
+    NoDistance,
+    #[error("the labels' font: {0}")]
+    Fonts(String),
+    #[error(transparent)]
+    Encode(#[from] crate::encode::Error),
+    #[error("stopped before the last frame")]
+    Stopped,
+}
+
+/// Everything about a video but its images and plate solution. The
+/// defaults are `seiza parallax-video`'s.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParallaxOptions {
+    /// The image point the camera flies toward, image pixels; the image's
+    /// centre if `None`.
+    pub focus: Option<(f64, f64)>,
+    /// Distance to the nebula or galaxy behind the stars, parsecs; if
+    /// `None`, the catalogued object's at the focus point, else the median
+    /// Gaia distance of the stars near it.
+    pub distance_pc: Option<f64>,
+    /// Distance for stars without one, parsecs; if `None`, the matched
+    /// stars' median, and never nearer than the nebula.
+    pub unmatched_distance_pc: Option<f64>,
+    /// The object catalog and object distance files, or the standard places
+    /// if `None`.
+    pub objects: Option<PathBuf>,
+    pub object_distances: Option<PathBuf>,
+    /// The offline star distance file, or the standard places if `None`.
+    pub star_distances: Option<PathBuf>,
+    /// The faintest Gaia G magnitude to match.
+    pub gaia_max_mag: f32,
+    /// Where fetched Gaia and Hipparcos fields are kept, or Seiza's data
+    /// directory if `None`.
+    pub gaia_cache: Option<PathBuf>,
+    /// Whether to ask the archives when the offline star distance file is
+    /// missing or too shallow.
+    pub online: bool,
+    /// How many stars, brightest first, fly at their own distances; all if
+    /// `None`. The rest go as `small_stars` says.
+    pub max_stars: Option<usize>,
+    pub small_stars: SmallStars,
+    /// Leave catalogued galaxies on the nebula's plane rather than lifting
+    /// them onto the far field.
+    pub keep_galaxies: bool,
+    /// Dim what lies behind the nebula by the dust it slides behind,
+    /// mapped from how few stars show through.
+    pub dust: bool,
+    /// The light the dust lets through is the share of stars seen to this
+    /// power.
+    pub dust_opacity: f32,
+    pub start: Start,
+    /// Fraction of the way to the nebula the camera flies, 0 to below 1.
+    pub dolly: f64,
+    /// Sideways swing at the middle of the shot, as a fraction of the
+    /// nebula's distance, and its direction, degrees anticlockwise from the
+    /// image's rightward axis.
+    pub truck: f64,
+    pub truck_angle_deg: f64,
+    /// How much of its way to the focus point the camera turns, 0 to 1.
+    pub pan: f64,
+    /// How far the first frame zooms in, and how much more the last frame
+    /// is magnified by lengthening the lens.
+    pub zoom: f64,
+    pub zoom_end: f64,
+    /// The frame's turn at the first and last frames, degrees
+    /// anticlockwise.
+    pub rotate_deg: (f64, f64),
+    pub easing: Easing,
+    pub quality: Quality,
+    /// A star the camera nears grows up to this many times its size, and
+    /// fades out past this growth.
+    pub growth_limit: f64,
+    pub fade_from: f64,
+    /// Frame size, even sides.
+    pub size: (usize, usize),
+    pub seconds: f64,
+    pub fps: u32,
+    /// Label the catalogued objects in the field, the most prominent
+    /// `overlay_density` share of them.
+    pub overlay: bool,
+    pub overlay_density: f64,
+    /// The caller's own labels, in `label_color`.
+    pub labels: Vec<CustomLabel>,
+    pub label_color: [u8; 3],
+    /// A line of text in the bottom-right corner of every frame.
+    pub watermark: Option<String>,
+}
+
+impl Default for ParallaxOptions {
+    fn default() -> Self {
+        Self {
+            focus: None,
+            distance_pc: None,
+            unmatched_distance_pc: None,
+            objects: None,
+            object_distances: None,
+            star_distances: None,
+            gaia_max_mag: 16.0,
+            gaia_cache: None,
+            online: true,
+            max_stars: None,
+            small_stars: SmallStars::Drop,
+            keep_galaxies: false,
+            dust: true,
+            dust_opacity: 3.0,
+            start: Start::Focus,
+            dolly: 0.4,
+            truck: 0.0,
+            truck_angle_deg: 0.0,
+            pan: 0.0,
+            zoom: 1.0,
+            zoom_end: 1.0,
+            rotate_deg: (0.0, 0.0),
+            easing: Easing::InOut,
+            quality: Quality::Standard,
+            growth_limit: 4.0,
+            fade_from: 6.0,
+            size: (1920, 1080),
+            seconds: 8.0,
+            fps: 30,
+            overlay: false,
+            overlay_density: overlay::DEFAULT_DENSITY,
+            labels: Vec::new(),
+            label_color: [0xf0, 0xf4, 0xf8],
+            watermark: None,
+        }
+    }
+}
+
+impl ParallaxOptions {
+    /// Whether these options can make a video.
+    pub fn check(&self) -> Result<(), Error> {
+        let invalid = |message: &str| Err(Error::Invalid(message.into()));
+        if !(0.0..1.0).contains(&self.dolly) {
+            return invalid("the dolly must be at least 0 and below 1");
+        }
+        if !(0.0..=1.0).contains(&self.pan) {
+            return invalid("the pan must be from 0 to 1");
+        }
+        if !(0.0..=1.0).contains(&self.overlay_density) {
+            return invalid("the overlay density must be from 0 to 1");
+        }
+        if self.dust_opacity.is_nan() || self.dust_opacity < 0.0 {
+            return invalid("the dust opacity must be at least 0");
+        }
+        if !self.rotate_deg.0.is_finite() || !self.rotate_deg.1.is_finite() {
+            return invalid("the rotation must be numbers of degrees");
+        }
+        if !(self.zoom.is_finite() && self.zoom > 0.0) || !(1.0..).contains(&self.zoom_end) {
+            return invalid("the zoom must be positive and the end zoom at least 1");
+        }
+        if !self.truck.is_finite() || !self.truck_angle_deg.is_finite() {
+            return invalid("the truck must be a number");
+        }
+        if self.seconds.is_nan() || self.seconds <= 0.0 || self.fps == 0 {
+            return invalid("the length and frame rate must be positive");
+        }
+        let (width, height) = self.size;
+        if width < 16 || height < 16 || width % 2 != 0 || height % 2 != 0 {
+            return invalid("the frame's sides must be even and at least 16");
+        }
+        if self
+            .distance_pc
+            .is_some_and(|distance| distance.is_nan() || distance <= 0.0)
+        {
+            return invalid("the distance must be positive");
+        }
+        Ok(())
+    }
+
+    /// The number of frames the video runs to.
+    pub fn frames(&self) -> usize {
+        ((self.seconds * self.fps as f64).round() as usize).max(2)
+    }
+}
+
+/// What preparing a video found.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Summary {
+    /// Stars found in the stars image.
+    pub detected_stars: usize,
+    /// Catalogue stars in the field.
+    pub gaia_stars: usize,
+    pub hipparcos_stars: usize,
+    /// Detections matched to a Gaia star, and those given a distance.
+    pub gaia_matches: usize,
+    pub with_distance: usize,
+    /// The nebula's distance and how it was found.
+    pub background_distance_pc: f64,
+    pub background_basis: String,
+    /// Where stars without a distance were put.
+    pub unmatched_distance_pc: f64,
+    /// Stars cut out to fly at their own distances.
+    pub flying_stars: usize,
+    /// Galaxies lifted onto the far field.
+    pub galaxies_lifted: Vec<String>,
+    /// The dust map's median and least transmission, 0 to 1, if one was
+    /// made.
+    pub dust_transmission: Option<(f32, f32)>,
+    /// Catalogued objects in the field to label.
+    pub labelled_objects: usize,
+}
+
+/// A prepared parallax video.
+pub struct Parallax {
+    scene: Scene,
+    shot: Shot,
+    overlay: Option<Overlay>,
+    summary: Summary,
+    fps: u32,
+}
+
+impl std::fmt::Debug for Parallax {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Parallax")
+            .field("shot", &self.shot)
+            .field("summary", &self.summary)
+            .field("fps", &self.fps)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Parallax {
+    /// Prepare a video of `starless` and `stars`, a stretched image split
+    /// into its starless image and its unscreened stars (values 0 to 1),
+    /// whose sky `wcs` gives. `report` hears each step.
+    pub fn prepare(
+        starless: &Rgb32FImage,
+        stars: &Rgb32FImage,
+        wcs: &Wcs,
+        options: &ParallaxOptions,
+        report: &mut dyn FnMut(Event),
+    ) -> Result<Self, Error> {
+        options.check()?;
+        if starless.dimensions() != stars.dimensions() {
+            return Err(Error::Invalid(format!(
+                "the starless image is {:?} but the stars image is {:?}",
+                starless.dimensions(),
+                stars.dimensions()
+            )));
+        }
+        let (width, height) = (stars.width() as usize, stars.height() as usize);
+        let mut summary = Summary::default();
+        let scale = wcs.scale_arcsec_per_px();
+        let focal_px = 206_264.806_247 / scale;
+
+        let stars_light = LightImage::from_display(stars);
+        let detections = seiza_stars::fold_core_fragments(crate::find_stars(&stars_light, 5.0));
+        summary.detected_stars = detections.len();
+        report(Event::Note(&format!(
+            "{} stars found in the stars image",
+            detections.len()
+        )));
+        let source = FieldSource {
+            star_distances: options.star_distances.as_deref(),
+            gaia_max_mag: options.gaia_max_mag,
+            cache: options.gaia_cache.as_deref(),
+            online: options.online,
+        };
+        let (gaia, hipparcos) = field::catalogue_stars(&source, wcs, (width, height), report)?;
+        (summary.gaia_stars, summary.hipparcos_stars) = (gaia.len(), hipparcos.len());
+        let (matched, gaia_matches) =
+            field::match_distances(&detections, &gaia, &hipparcos, wcs, scale);
+        let with_distance = matched
+            .iter()
+            .filter(|star| star.distance_pc.is_some())
+            .count();
+        (summary.gaia_matches, summary.with_distance) = (gaia_matches, with_distance);
+        report(Event::Note(&format!(
+            "{gaia_matches} matched to Gaia, {with_distance} with a distance"
+        )));
+
+        let focus = options
+            .focus
+            .unwrap_or(((width as f64 - 1.0) / 2.0, (height as f64 - 1.0) / 2.0));
+        if focus.0 < 0.0 || focus.1 < 0.0 || focus.0 >= width as f64 || focus.1 >= height as f64 {
+            return Err(Error::Invalid(format!(
+                "the focus point {focus:?} is outside the {width}x{height} image"
+            )));
+        }
+        let (distance, basis) = match options.distance_pc {
+            Some(distance) => (distance, "given".to_string()),
+            None => match target_distance(options, wcs, (width, height), focus) {
+                Ok(Some((name, distance, basis))) => {
+                    (distance, format!("the distance of {name} ({basis})"))
+                }
+                found => {
+                    if let Err(error) = found {
+                        report(Event::Warning(&format!("no object distance: {error}")));
+                    }
+                    let distance = field::median_distance_near(&matched, focus, width, height)
+                        .ok_or(Error::NoDistance)?;
+                    (
+                        distance,
+                        "the median distance of the stars near the focus point (no catalogued \
+                         object there)"
+                            .to_string(),
+                    )
+                }
+            },
+        };
+        report(Event::Note(&format!(
+            "background at {distance:.0} pc, {basis}"
+        )));
+        (summary.background_distance_pc, summary.background_basis) = (distance, basis);
+
+        // Most stars too faint to match are field stars well beyond a
+        // nearby target, so they go to the matched stars' median distance
+        // rather than onto the nebula.
+        let unmatched = options.unmatched_distance_pc.unwrap_or_else(|| {
+            field::median(matched.iter().filter_map(|star| star.distance_pc))
+                .unwrap_or(distance)
+                .max(distance)
+        });
+        summary.unmatched_distance_pc = unmatched;
+        report(Event::Note(&format!(
+            "stars without a distance at {unmatched:.0} pc"
+        )));
+        let placed: Vec<Star> = matched
+            .iter()
+            .map(|star| Star {
+                distance_pc: Some(star.distance_pc.unwrap_or(unmatched)),
+                ..*star
+            })
+            .collect();
+
+        let mut starless = LightImage::from_display(starless);
+        // Galaxies lie far beyond everything else, but the star remover
+        // leaves them on the nebula's plane.
+        let mut galaxies = Vec::new();
+        if !options.keep_galaxies {
+            match galaxies_in_image(options, wcs, (width, height), focus) {
+                Ok(found) => {
+                    for (name, extent) in found {
+                        if let Some(sprite) =
+                            crate::lift_object(&mut starless, &extent, GALAXY_DISTANCE_PC)
+                        {
+                            galaxies.push((name, sprite));
+                        }
+                    }
+                }
+                Err(error) => report(Event::Warning(&format!("no galaxies lifted: {error}"))),
+            }
+            if !galaxies.is_empty() {
+                let names: Vec<&str> = galaxies
+                    .iter()
+                    .take(5)
+                    .map(|(name, _)| name.as_str())
+                    .collect();
+                report(Event::Note(&format!(
+                    "{} galaxies lifted onto the far field: {}{}",
+                    galaxies.len(),
+                    names.join(", "),
+                    if galaxies.len() > names.len() {
+                        ", ..."
+                    } else {
+                        ""
+                    }
+                )));
+            }
+        }
+        let mut scene = Scene::new(
+            &starless,
+            &stars_light,
+            &placed,
+            distance,
+            unmatched,
+            focal_px,
+            &CutOptions {
+                max_stars: options.max_stars,
+                small_stars: options.small_stars,
+                ..CutOptions::default()
+            },
+        );
+        summary.flying_stars = scene.sprites.len();
+        summary.galaxies_lifted = galaxies.iter().map(|(name, _)| name.clone()).collect();
+        let lifted: Vec<(String, (f64, f64), f64)> = galaxies
+            .iter()
+            .map(|(name, sprite)| (name.clone(), (sprite.x, sprite.y), sprite.distance_pc))
+            .collect();
+        scene
+            .sprites
+            .extend(galaxies.into_iter().map(|(_, sprite)| sprite));
+        if options.dust {
+            // The stars seen through the dust: all but the matched ones in
+            // front of it. The unmatched ones count however near the dust
+            // they were placed, as faint stars are mostly far.
+            let behind: Vec<(f64, f64)> = matched
+                .iter()
+                .filter(|star| star.distance_pc.is_none_or(|pc| pc > distance))
+                .map(|star| (star.x, star.y))
+                .collect();
+            scene.dust =
+                crate::Dust::from_star_counts(&behind, width, height, options.dust_opacity)
+                    .map(|dust| dust.with_darkness(&starless, &behind));
+            match &scene.dust {
+                Some(dust) => {
+                    let (cells, _) = dust.cells();
+                    let mut sorted = cells.to_vec();
+                    sorted.sort_by(f32::total_cmp);
+                    let (middle, thickest) = (sorted[sorted.len() / 2], sorted[0]);
+                    summary.dust_transmission = Some((middle, thickest));
+                    report(Event::Note(&format!(
+                        "dust mapped from {} stars behind it and the nebula's dark places: \
+                         median transmission {:.0}%, thickest {:.0}%",
+                        behind.len(),
+                        100.0 * middle,
+                        100.0 * thickest
+                    )));
+                }
+                None => report(Event::Note(
+                    "too few stars to map the dust; nothing dims behind it",
+                )),
+            }
+        }
+        if options.max_stars.is_some() {
+            report(Event::Note(&format!(
+                "the {} brightest stars fly; the rest {}",
+                summary.flying_stars,
+                match options.small_stars {
+                    SmallStars::Drop => "are dropped",
+                    SmallStars::Field => "stay on the star field",
+                }
+            )));
+        }
+
+        let (sin, cos) = options.truck_angle_deg.to_radians().sin_cos();
+        let shot = Shot {
+            focus,
+            dolly: options.dolly,
+            truck: (options.truck * cos, -options.truck * sin),
+            start: options.start,
+            pan: options.pan,
+            rotation: (
+                options.rotate_deg.0.to_radians(),
+                options.rotate_deg.1.to_radians(),
+            ),
+            zoom: options.zoom,
+            zoom_end: options.zoom_end,
+            width: options.size.0,
+            height: options.size.1,
+            frames: options.frames(),
+            easing: options.easing,
+            quality: options.quality,
+            growth_limit: options.growth_limit,
+            fade_from: options.fade_from,
+            ..Shot::default()
+        };
+        let (shot, fitted) = shot.fitted(&scene);
+        if shot.zoom > options.zoom.max(1.0) {
+            report(Event::Note(&format!(
+                "first frame zoomed in to {:.2} so the turned frame stays inside the image",
+                shot.zoom
+            )));
+        }
+        if shot.pan < options.pan {
+            report(Event::Note(&format!(
+                "pan reduced to {:.2} so the far stars stay inside the image",
+                shot.pan
+            )));
+        }
+        if shot.lead < 1.0 {
+            report(Event::Note(&format!(
+                "sideways travel toward the focus point comes later (lead {:.2}) so the far \
+                 stars stay inside the image",
+                shot.lead
+            )));
+        }
+        if fitted < 1.0 && options.truck != 0.0 {
+            report(Event::Note(&format!(
+                "truck reduced to {:.4} of the distance so the far stars stay inside the image",
+                options.truck * fitted
+            )));
+        }
+
+        let overlay = prepare_overlay(options, wcs, &scene, &lifted, &shot, &mut summary)?;
+        if summary.labelled_objects > 0 {
+            report(Event::Note(&format!(
+                "{} catalogued objects in the field to label",
+                summary.labelled_objects
+            )));
+        }
+        Ok(Self {
+            scene,
+            shot,
+            overlay,
+            summary,
+            fps: options.fps,
+        })
+    }
+
+    /// The number of frames.
+    pub fn frames(&self) -> usize {
+        self.shot.frames
+    }
+
+    pub fn fps(&self) -> u32 {
+        self.fps
+    }
+
+    /// The frame size, pixels.
+    pub fn size(&self) -> (usize, usize) {
+        (self.shot.width, self.shot.height)
+    }
+
+    /// The camera move as fitted to the image.
+    pub fn shot(&self) -> &Shot {
+        &self.shot
+    }
+
+    /// The scene cut into depths.
+    pub fn scene(&self) -> &Scene {
+        &self.scene
+    }
+
+    pub fn summary(&self) -> &Summary {
+        &self.summary
+    }
+
+    /// Settings for an encoder of this video, with a bitrate of half a bit
+    /// per pixel per frame.
+    pub fn video_settings(&self) -> VideoSettings {
+        let (width, height) = self.size();
+        VideoSettings {
+            width: width as u32,
+            height: height as u32,
+            fps: self.fps,
+            bitrate: (width * height * self.fps as usize / 2).min(u32::MAX as usize) as u32,
+        }
+    }
+
+    /// Frame `index`, with its labels, as display RGB.
+    pub fn frame(&self, index: usize) -> RgbImage {
+        let mut image = self.shot.render(&self.scene, index).to_display_rgb8();
+        if let Some(overlay) = &self.overlay {
+            overlay.draw(index, &self.shot.view(&self.scene, index), &mut image);
+        }
+        image
+    }
+
+    /// Render every frame in turn into `sink` and finish it. `stop` is
+    /// asked before each frame; when it answers true the sink is dropped
+    /// unfinished and [`Error::Stopped`] returned.
+    pub fn render(
+        &self,
+        mut sink: Box<dyn FrameSink + '_>,
+        report: &mut dyn FnMut(Event),
+        stop: &dyn Fn() -> bool,
+    ) -> Result<(), Error> {
+        let total = self.frames();
+        for index in 0..total {
+            if stop() {
+                return Err(Error::Stopped);
+            }
+            sink.push(&self.frame(index))?;
+            report(Event::Frame {
+                done: index + 1,
+                total,
+            });
+        }
+        sink.finish()?;
+        Ok(())
+    }
+}
+
+/// The labels over the video, if any were asked for: the caller's own, the
+/// catalogued objects, and the watermark.
+fn prepare_overlay(
+    options: &ParallaxOptions,
+    wcs: &Wcs,
+    scene: &Scene,
+    lifted: &[(String, (f64, f64), f64)],
+    shot: &Shot,
+    summary: &mut Summary,
+) -> Result<Option<Overlay>, Error> {
+    let color = Rgb(options.label_color);
+    let mut marks = overlay::custom_marks(&options.labels, color, scene);
+    if options.overlay {
+        let path = seiza::data_paths::objects(options.objects.as_deref()).map_err(|error| {
+            Error::Invalid(format!(
+                "labelling objects needs the object catalog (seiza setup): {error}"
+            ))
+        })?;
+        let catalog = open_objects(&path)?;
+        let dimensions = (scene.width() as u32, scene.height() as u32);
+        let found = overlay::catalog_marks(&catalog, wcs, dimensions, scene, lifted)?;
+        summary.labelled_objects = found.len();
+        marks.extend(found);
+    }
+    if marks.is_empty() && options.watermark.is_none() {
+        return Ok(None);
+    }
+    let mut overlay = Overlay::new(
+        marks,
+        options.watermark.clone(),
+        options.overlay_density,
+        wcs.scale_arcsec_per_px(),
+        options.size,
+    )?;
+    overlay.plan(shot, scene, options.fps as f64);
+    Ok(Some(overlay))
+}
+
+fn open_objects(path: &Path) -> Result<seiza::objects::ObjectCatalog, Error> {
+    seiza::objects::ObjectCatalog::open(path).map_err(|error| Error::Catalog {
+        path: path.to_path_buf(),
+        message: error.to_string(),
+    })
+}
+
+/// The catalogued object at the focus point, its distance and how that
+/// distance was found, or `None` without an object catalog, a distance file
+/// or an object there.
+fn target_distance(
+    options: &ParallaxOptions,
+    wcs: &Wcs,
+    (width, height): (usize, usize),
+    focus: (f64, f64),
+) -> Result<Option<(String, f64, &'static str)>, Error> {
+    let Ok(objects_path) = seiza::data_paths::objects(options.objects.as_deref()) else {
+        return Ok(None);
+    };
+    let Some(distances_path) = seiza::data_paths::object_distances_beside(
+        options.object_distances.as_deref(),
+        &objects_path,
+    )
+    .map_err(|error| Error::Invalid(error.to_string()))?
+    else {
+        return Ok(None);
+    };
+    let catalog = open_objects(&objects_path)?;
+    let distances =
+        seiza::catalog::ObjectDistances::open(&distances_path, &catalog).map_err(|error| {
+            Error::Catalog {
+                path: distances_path.clone(),
+                message: error.to_string(),
+            }
+        })?;
+    // Search a twentieth of the image's diagonal past the nearest edge.
+    let reach = (width as f64).hypot(height as f64) / 20.0;
+    let Some(found) = distances
+        .object_at_pixel(&catalog, wcs, (width as u32, height as u32), focus, reach)
+        .map_err(|error| Error::Invalid(error.to_string()))?
+    else {
+        return Ok(None);
+    };
+    let object = &found.placed.object;
+    let name = if object.common_name.is_empty() {
+        object.name.clone()
+    } else {
+        format!("{} ({})", object.name, object.common_name)
+    };
+    Ok(found
+        .distance()
+        .map(|distance| (name, distance.distance_pc, distance.basis.as_str())))
+}
+
+/// Catalogued galaxies in the image large enough to see, largest first,
+/// leaving out one at the focus point, which is the target, and each only
+/// once: catalogs list some galaxies twice, a little apart.
+fn galaxies_in_image(
+    options: &ParallaxOptions,
+    wcs: &Wcs,
+    (width, height): (usize, usize),
+    focus: (f64, f64),
+) -> Result<Vec<(String, Extent)>, Error> {
+    let Ok(objects_path) = seiza::data_paths::objects(options.objects.as_deref()) else {
+        return Ok(Vec::new());
+    };
+    let catalog = open_objects(&objects_path)?;
+    let placed = catalog
+        .objects_in_footprint(wcs, (width as u32, height as u32))
+        .map_err(|error| Error::Invalid(error.to_string()))?;
+    let mut kept: Vec<(String, Extent)> = Vec::new();
+    for object in placed {
+        if object.object.kind != seiza::objects::ObjectKind::Galaxy || object.semi_major_px < 4.0 {
+            continue;
+        }
+        // An asymmetric extent without a position angle must not be drawn
+        // at a guessed orientation, so it becomes a circle.
+        let (semi_minor, angle) = match object.angle_deg {
+            Some(angle) => (object.semi_minor_px, angle),
+            None => (object.semi_major_px, 0.0),
+        };
+        let extent = Extent {
+            x: object.x,
+            y: object.y,
+            semi_major: object.semi_major_px,
+            semi_minor: semi_minor.max(1.0),
+            angle: angle.to_radians(),
+        };
+        if extent.reach(focus.0, focus.1) <= 2.0
+            || kept
+                .iter()
+                .any(|(_, other)| other.reach(extent.x, extent.y) <= 1.5)
+        {
+            continue;
+        }
+        kept.push((object.object.name.clone(), extent));
+        if kept.len() == 200 {
+            break;
+        }
+    }
+    Ok(kept)
+}

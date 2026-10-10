@@ -18,11 +18,16 @@ default = []
 openh264 = ["dep:openh264", "dep:mp4"]
 
 [dependencies]
+ab_glyph.workspace = true
 image.workspace = true
 multiversion.workspace = true
 rayon.workspace = true
+seiza.workspace = true
+seiza-draw.workspace = true
+seiza-sources.workspace = true
 seiza-stars.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["rt"] }
 openh264 = { version = "0.9", optional = true }
 mp4 = { version = "0.14", optional = true }
 

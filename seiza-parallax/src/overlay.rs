@@ -7,20 +7,20 @@
 //! outline for each object, ticks either side of a named star, and a
 //! "Field within" caption once the camera is inside an object.
 
+use crate::pipeline::Error;
+use crate::{Scene, Shot, View};
 use ab_glyph::{Font, PxScale, ScaleFont};
-use anyhow::Result;
 use image::{Rgb, RgbImage};
 use seiza::Wcs;
 use seiza::objects::{GeometryData, ObjectCatalog, ObjectKind, SkyObject};
 use seiza_draw::{Fonts, Mask, draw_text, measure};
-use seiza_parallax::{Scene, Shot, View};
 
 /// The watermark `--watermark` writes when given no text.
-pub(crate) const DEFAULT_WATERMARK: &str = "Rendered with seiza.fyi";
+pub const DEFAULT_WATERMARK: &str = "Rendered with seiza.fyi";
 
 /// The share of the ranked objects in view that are labelled, as in the
 /// image overlays.
-pub(crate) const DEFAULT_DENSITY: f64 = 0.6;
+pub const DEFAULT_DENSITY: f64 = 0.6;
 
 /// The most prominent objects in view are labelled however low the density.
 const MINIMUM_RANKED: usize = 4;
@@ -75,16 +75,19 @@ pub(crate) struct Mark {
     star: bool,
 }
 
-/// A label the caller placed: `X,Y[,RADIUS]:TEXT` in image pixels.
+/// A label of the caller's own on the nebula's plane, at image pixel
+/// `(x, y)`, circling `radius` pixels about it, or with a radius of zero
+/// only the text, centred on the point.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct CustomLabel {
-    pub(crate) x: f64,
-    pub(crate) y: f64,
-    pub(crate) radius: f64,
-    pub(crate) text: String,
+pub struct CustomLabel {
+    pub x: f64,
+    pub y: f64,
+    pub radius: f64,
+    pub text: String,
 }
 
-pub(crate) fn parse_label(text: &str) -> std::result::Result<CustomLabel, String> {
+/// A [`CustomLabel`] written `X,Y:TEXT` or `X,Y,RADIUS:TEXT`.
+pub fn parse_label(text: &str) -> std::result::Result<CustomLabel, String> {
     let (place, label) = text
         .split_once(':')
         .ok_or_else(|| format!("expected X,Y[,RADIUS]:TEXT; got {text}"))?;
@@ -119,7 +122,8 @@ pub(crate) fn parse_label(text: &str) -> std::result::Result<CustomLabel, String
     })
 }
 
-pub(crate) fn parse_color(text: &str) -> std::result::Result<Rgb<u8>, String> {
+/// A colour written `#RRGGBB`.
+pub fn parse_color(text: &str) -> std::result::Result<Rgb<u8>, String> {
     let hex = text.trim().trim_start_matches('#');
     if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(format!("expected a colour as #RRGGBB; got {text}"));
@@ -156,10 +160,10 @@ pub(crate) fn catalog_marks(
     dimensions: (u32, u32),
     scene: &Scene,
     lifted: &[(String, (f64, f64), f64)],
-) -> Result<Vec<Mark>> {
+) -> Result<Vec<Mark>, Error> {
     let placed = catalog
         .objects_in_footprint(wcs, dimensions)
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
+        .map_err(|error| Error::Invalid(error.to_string()))?;
     let mut marks = Vec::new();
     for placed in placed {
         let object = placed.object;
@@ -357,8 +361,8 @@ impl Overlay {
         density: f64,
         arcsec_per_px: f64,
         (width, height): (usize, usize),
-    ) -> Result<Self> {
-        let fonts = Fonts::load()?;
+    ) -> Result<Self, Error> {
+        let fonts = Fonts::load().map_err(|error| Error::Fonts(error.to_string()))?;
         let short = width.min(height) as f64;
         let font_size = (short / 42.0).max(14.0);
         let widths = marks
@@ -764,7 +768,7 @@ fn smoothstep(low: f64, high: f64, value: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seiza_parallax::{CutOptions, Easing, LightImage};
+    use crate::{CutOptions, Easing, LightImage};
 
     fn object(name: &str, common: &str, kind: ObjectKind, major: f32) -> SkyObject {
         SkyObject {
