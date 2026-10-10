@@ -979,6 +979,21 @@ enum DownloadSource {
         )]
         chunks: u64,
     },
+    /// Gaia DR3 stars with Bailer-Jones distances, and the Hipparcos
+    /// catalogue, for build-data star-distances: the sky in small HEALPix
+    /// tiles on the ESA and GAVO synchronous services (resumable; can take
+    /// hours)
+    StarDistances {
+        /// Directory to download into
+        #[arg(long)]
+        output: PathBuf,
+        /// Magnitude limit for the download
+        #[arg(long, default_value_t = 16.0, allow_negative_numbers = true)]
+        max_mag: f32,
+        /// Tiles fetched at once
+        #[arg(long, default_value_t = 4)]
+        concurrency: usize,
+    },
     /// Gaia DR3 photometry (G, BP, RP, RUWE) via ESA TAP for an offline
     /// colour-calibration catalog (resumable; can take hours)
     GaiaPhotometry {
@@ -1117,6 +1132,26 @@ enum BuildDataSource {
         epoch: f64,
         /// Drop stars fainter than this magnitude
         #[arg(long, default_value_t = 15.0)]
+        max_mag: f32,
+        /// Declination bands (tile granularity); 90 = 2° tiles
+        #[arg(long, default_value_t = 90)]
+        bands: u32,
+    },
+    /// Star distance catalog from Gaia DR3 distance tiles and the
+    /// Hipparcos catalogue (download-data star-distances)
+    StarDistances {
+        /// Directory containing gaiadist-*.csv and hipparcos.csv
+        #[arg(long)]
+        input: PathBuf,
+        /// Output star distance catalog file (star-distances.bin)
+        #[arg(long)]
+        output: PathBuf,
+        /// Epoch to apply proper motions to, Julian year
+        #[arg(long, default_value_t = 2026.0)]
+        epoch: f64,
+        /// Drop Gaia stars fainter than this G magnitude; at most the
+        /// download's limit
+        #[arg(long, default_value_t = 16.0)]
         max_mag: f32,
         /// Declination bands (tile granularity); 90 = 2° tiles
         #[arg(long, default_value_t = 90)]
@@ -1418,6 +1453,13 @@ fn main() -> Result<()> {
                 max_mag,
                 bands,
             } => build_data::build_gaia_photometry(&input, &output, epoch, max_mag, bands),
+            BuildDataSource::StarDistances {
+                input,
+                output,
+                epoch,
+                max_mag,
+                bands,
+            } => build_data::build_star_distances(&input, &output, epoch, max_mag, bands),
             BuildDataSource::Transients { input, output } => {
                 build_data::build_transients(&input, &output)
             }
@@ -1692,6 +1734,15 @@ async fn download_source(source: DownloadSource) -> Result<()> {
             max_mag,
             chunks,
         } => downloader.download_gaia(output, max_mag, chunks).await,
+        DownloadSource::StarDistances {
+            output,
+            max_mag,
+            concurrency,
+        } => {
+            downloader
+                .download_gaia_distances(output, max_mag, concurrency)
+                .await
+        }
         DownloadSource::GaiaPhotometry {
             output,
             max_mag,

@@ -131,6 +131,11 @@ pub(crate) struct ParallaxVideoArgs {
     /// directory)
     #[arg(long)]
     gaia_cache: Option<PathBuf>,
+    /// Star distance file (`seiza setup --star-distances`) giving the
+    /// field's Gaia and Hipparcos stars offline (default: the standard
+    /// catalog locations; without one they are fetched online)
+    #[arg(long)]
+    star_distances: Option<PathBuf>,
     /// Star tile file or catalog directory for plate solving (default:
     /// standard catalog locations)
     #[arg(long)]
@@ -250,8 +255,13 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
     let detections =
         seiza_stars::fold_core_fragments(seiza_parallax::find_stars(&stars_light, 5.0));
     println!("{} stars found in the stars image", detections.len());
-    let gaia = gaia_field(&args, &wcs, width, height)?;
-    let hipparcos = hipparcos_field(&args, &wcs, width, height);
+    let (gaia, hipparcos) = match offline_field(&args, &wcs, width, height)? {
+        Some(field) => field,
+        None => (
+            gaia_field(&args, &wcs, width, height)?,
+            hipparcos_field(&args, &wcs, width, height),
+        ),
+    };
     let (matched, gaia_matches) = match_distances(&detections, &gaia, &hipparcos, &wcs, scale);
     let with_distance = matched
         .iter()
@@ -681,6 +691,71 @@ fn default_gaia_cache() -> PathBuf {
         .parent()
         .map_or_else(|| catalogs.clone(), Path::to_path_buf)
         .join("gaia-fields")
+}
+
+/// The field's Gaia and Hipparcos stars from the offline star distance
+/// file, or `None` when there is none or it stops short of the magnitude
+/// asked for.
+fn offline_field(
+    args: &ParallaxVideoArgs,
+    wcs: &Wcs,
+    width: usize,
+    height: usize,
+) -> Result<Option<(Vec<GaiaDistance>, Vec<HipparcosStar>)>> {
+    let Some(path) = seiza::data_paths::star_distances(args.star_distances.as_deref())? else {
+        return Ok(None);
+    };
+    let catalog = seiza::catalog::StarDistanceCatalog::open(&path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    if catalog.max_mag() < args.gaia_max_mag {
+        println!(
+            "{} holds Gaia stars to G {}, short of --gaia-max-mag {}; fetching online",
+            path.display(),
+            catalog.max_mag(),
+            args.gaia_max_mag
+        );
+        return Ok(None);
+    }
+    let (centre, radius) = field(wcs, width, height);
+    let (mut gaia, mut hipparcos) = (Vec::new(), Vec::new());
+    // Hipparcos stars whatever --gaia-max-mag says, as online.
+    for star in catalog.cone_search(centre.0, centre.1, radius, 99.0) {
+        if star.hipparcos {
+            hipparcos.push(HipparcosStar {
+                hip: 0,
+                ra: star.ra,
+                dec: star.dec,
+                // A parallax that gives back the distance, as precise as
+                // the catalogue found it.
+                parallax: star.distance_pc.map(|distance| 1000.0 / distance),
+                parallax_error: Some(0.0),
+                hp_mag: Some(star.mag),
+                pmra: None,
+                pmdec: None,
+            });
+        } else if star.mag <= args.gaia_max_mag {
+            gaia.push(GaiaDistance {
+                ra: star.ra,
+                dec: star.dec,
+                pmra: None,
+                pmdec: None,
+                g: star.mag,
+                bp_rp: None,
+                parallax: None,
+                parallax_error: None,
+                distance: star.distance_pc,
+                distance_low: None,
+                distance_high: None,
+            });
+        }
+    }
+    println!(
+        "{} Gaia and {} Hipparcos stars from {}",
+        gaia.len(),
+        hipparcos.len(),
+        path.display()
+    );
+    Ok(Some((gaia, hipparcos)))
 }
 
 fn gaia_field(
@@ -1233,6 +1308,8 @@ mod tests {
             parallax: Some(10.0),
             parallax_error: Some(0.5),
             hp_mag: Some(3.0),
+            pmra: None,
+            pmdec: None,
         }];
         let detection = |x: f64, y: f64| PeakStar {
             x: 500.0 + x,

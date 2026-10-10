@@ -153,6 +153,27 @@ pub fn objects(arg: Option<&Path>) -> Result<PathBuf, DataPathError> {
     resolve(arg, "object catalog", None, None, &["objects.bin"], None)
 }
 
+/// Distances to Gaia and Hipparcos stars (`star-distances.bin`, built by
+/// `seiza build-data star-distances`). Optional: `Ok(None)` means none is
+/// installed.
+pub fn star_distances(arg: Option<&Path>) -> Result<Option<PathBuf>, DataPathError> {
+    let result = resolve(
+        arg,
+        "star distance file",
+        Some("SEIZA_STAR_DISTANCES"),
+        Some("star_distances"),
+        &["star-distances.bin"],
+        None,
+    );
+    match arg {
+        Some(_) => result.map(Some),
+        None => match result {
+            Err(DataPathError::NoDefault { .. }) => Ok(None),
+            other => other.map(Some),
+        },
+    }
+}
+
 /// Distances to catalog objects (`object-distances.bin`, built by `seiza
 /// build-data object-distances`). Optional: `Ok(None)` means none is
 /// installed.

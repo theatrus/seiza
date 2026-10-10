@@ -3874,6 +3874,117 @@ fn validated_tle_digest(path: &Path) -> Result<(u64, String)> {
 /// Build a colour-calibration catalog from Gaia DR3 photometry chunks
 /// (download-data gaia-photometry): positions proper-motion corrected to
 /// `epoch`, G, BP − RP, and a flag on sources with RUWE ≥ 1.4.
+/// A star distance catalog from the Gaia DR3 distance tiles and the
+/// Hipparcos catalogue that `download-data star-distances` fetches, each
+/// star moved along its proper motion to `epoch`. Gaia stars keep their
+/// Bailer-Jones distance, else the inverse of a parallax measured to a
+/// fifth of itself; Hipparcos stars the inverse of theirs.
+pub fn build_star_distances(
+    input: &Path,
+    output: &Path,
+    epoch: f64,
+    max_mag: f32,
+    bands: u32,
+) -> Result<()> {
+    use rayon::prelude::*;
+    let mut parts: Vec<_> = std::fs::read_dir(input)
+        .with_context(|| format!("cannot read {}", input.display()))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("gaiadist-") && name.ends_with(".csv"))
+        })
+        .collect();
+    parts.sort();
+    let hipparcos = input.join("hipparcos.csv");
+    if parts.is_empty() || !hipparcos.is_file() {
+        bail!(
+            "no gaiadist-*.csv files or hipparcos.csv in {}; run download-data star-distances first",
+            input.display()
+        );
+    }
+    let mut builder = seiza::catalog::StarDistanceCatalogBuilder::new(
+        bands,
+        epoch,
+        max_mag,
+        "Gaia DR3 (ESA/Gaia/DPAC, CC BY-SA 3.0 IGO); distances from Bailer-Jones et al. \
+         2021, AJ 161, 147 (VizieR I/352); Hipparcos, the new reduction, van Leeuwen \
+         2007, A&A 474, 653 (VizieR I/311)",
+    );
+    let years = epoch - 2016.0;
+    let (mut gaia, mut too_faint, mut with_distance) = (0_u64, 0_u64, 0_u64);
+    // A few hundred tiles at a time, read in parallel.
+    for batch in parts.chunks(256) {
+        let read: Vec<Vec<seiza_sources::GaiaDistance>> = batch
+            .par_iter()
+            .map(|part| {
+                let csv = std::fs::read_to_string(part)
+                    .with_context(|| format!("cannot read {}", part.display()))?;
+                seiza_sources::parse_gaia_distances(&csv)
+                    .with_context(|| format!("{} is not a Gaia distance tile", part.display()))
+            })
+            .collect::<Result<_>>()?;
+        for star in read.into_iter().flatten() {
+            if star.g > max_mag {
+                too_faint += 1;
+                continue;
+            }
+            let (ra, dec) = seiza::catalog::propagate_proper_motion(
+                star.ra,
+                star.dec,
+                star.pmra.unwrap_or(0.0),
+                star.pmdec.unwrap_or(0.0),
+                years,
+            );
+            let distance_pc = star.best_distance();
+            with_distance += u64::from(distance_pc.is_some());
+            gaia += 1;
+            builder.add(seiza::catalog::DistanceStar {
+                ra,
+                dec,
+                mag: star.g,
+                distance_pc,
+                hipparcos: false,
+            });
+        }
+    }
+    let csv = std::fs::read_to_string(&hipparcos)
+        .with_context(|| format!("cannot read {}", hipparcos.display()))?;
+    let hipparcos_years = epoch - 1991.25;
+    let mut bright = 0_u64;
+    for star in seiza_sources::parse_hipparcos(&csv)
+        .with_context(|| format!("{} is not the Hipparcos catalogue", hipparcos.display()))?
+    {
+        let Some(mag) = star.hp_mag else {
+            continue;
+        };
+        let (ra, dec) = seiza::catalog::propagate_proper_motion(
+            star.ra,
+            star.dec,
+            star.pmra.unwrap_or(0.0),
+            star.pmdec.unwrap_or(0.0),
+            hipparcos_years,
+        );
+        bright += 1;
+        builder.add(seiza::catalog::DistanceStar {
+            ra,
+            dec,
+            mag,
+            distance_pc: star.distance(),
+            hipparcos: true,
+        });
+    }
+    builder.write_to(output)?;
+    println!(
+        "{gaia} Gaia stars ({with_distance} with a distance, {too_faint} fainter than {max_mag}) \
+         and {bright} Hipparcos stars written to {} (epoch {epoch})",
+        output.display()
+    );
+    Ok(())
+}
+
 pub fn build_gaia_photometry(
     input: &Path,
     output: &Path,

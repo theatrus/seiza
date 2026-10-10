@@ -215,6 +215,33 @@ fn quarter_cones(ra: f64, dec: f64, radius_deg: f64) -> [(f64, f64, f64); 4] {
     })
 }
 
+/// The HEALPix level the whole-sky distance download starts at, and the
+/// finest it splits a dense tile down to.
+const DISTANCE_TILE_LEVEL: u32 = 5;
+const DISTANCE_TILE_FINEST_LEVEL: u32 = 9;
+
+/// The source IDs of the stars in nested HEALPix tile `tile` at `level`:
+/// a Gaia DR3 source ID holds its level-12 tile in its top bits, so a
+/// coarser tile's stars form one range.
+fn healpix_source_ids(level: u32, tile: u64) -> (u64, u64) {
+    let shift = 35 + 2 * (12 - level);
+    (tile << shift, ((tile + 1) << shift) - 1)
+}
+
+/// The ADQL for the Gaia DR3 sources in one source ID range, with their
+/// Bailer-Jones distances.
+fn gaia_distance_range_query(archive: GaiaArchive, lo: u64, hi: u64, max_mag: f32) -> String {
+    format!(
+        "SELECT g.ra, g.dec, g.pmra, g.pmdec, g.phot_g_mean_mag, g.phot_bp_mean_mag, \
+         g.phot_rp_mean_mag, g.parallax, g.parallax_error, \
+         d.r_med_geo, d.r_lo_geo, d.r_hi_geo \
+         FROM {table} AS g LEFT OUTER JOIN {distances} AS d ON g.source_id = d.source_id \
+         WHERE g.source_id BETWEEN {lo} AND {hi} AND g.phot_g_mean_mag <= {max_mag}",
+        table = archive.table(),
+        distances = archive.distance_table(),
+    )
+}
+
 /// One CSV from several with the same header, each row once: overlapping
 /// cones return the same sources.
 pub fn merge_csv(bodies: &[String]) -> String {
@@ -291,6 +318,11 @@ pub enum Error {
 
     #[error("Hipparcos query response was malformed")]
     MalformedHipparcos,
+
+    #[error(
+        "{failed} of {total} sky tiles could not be fetched; run the download again to retry them"
+    )]
+    GaiaTilesFailed { failed: u64, total: u64 },
 
     #[error("Gaia magnitude limit must be finite; got {0}")]
     InvalidGaiaMagnitude(f32),
@@ -558,6 +590,10 @@ pub struct HipparcosStar {
     pub parallax_error: Option<f64>,
     /// Hipparcos magnitude.
     pub hp_mag: Option<f32>,
+    /// Proper motion, mas/yr, right ascension's times cos(dec): fetched
+    /// with the whole catalogue, not with a cone.
+    pub pmra: Option<f64>,
+    pub pmdec: Option<f64>,
 }
 
 impl HipparcosStar {
@@ -576,6 +612,7 @@ pub fn parse_hipparcos(csv: &str) -> Result<Vec<HipparcosStar>> {
     let indices = ["HIP", "RArad", "DErad", "Plx", "e_Plx", "Hpmag"].map(|name| table.column(name));
     let [hip, ra, dec, plx, e_plx, hp] = indices;
     let indices = [hip?, ra?, dec?, plx?, e_plx?, hp?];
+    let (pmra, pmdec) = (table.column("pmRA").ok(), table.column("pmDE").ok());
     Ok(table
         .rows()
         .filter_map(|row| {
@@ -587,6 +624,8 @@ pub fn parse_hipparcos(csv: &str) -> Result<Vec<HipparcosStar>> {
                 parallax: value(3),
                 parallax_error: value(4),
                 hp_mag: value(5).map(|value| value as f32),
+                pmra: pmra.and_then(|index| row.number(index)),
+                pmdec: pmdec.and_then(|index| row.number(index)),
             })
         })
         .collect())
@@ -1498,6 +1537,205 @@ impl SourceDownloader {
         })
     }
 
+    /// Gaia DR3 stars to `max_mag` with their Bailer-Jones distances over
+    /// the whole sky, and the whole Hipparcos catalogue, for an offline
+    /// catalogue. The sky is fetched in small HEALPix tiles, each one range
+    /// of source IDs, so tiles never overlap: level 5 (3.4 square degrees),
+    /// `concurrency` at a time on the archives' synchronous services, the
+    /// two archives taking turns going first. A tile both refuse, too dense
+    /// to answer in time, is fetched as its four children instead, down to
+    /// level 9. Each lands in `gaiadist-L<level>-<tile>.csv` and Hipparcos
+    /// in `hipparcos.csv`. Finished tiles are kept, so an interrupted
+    /// download resumes, and a tile that fails does not stop the others.
+    pub async fn download_gaia_distances(
+        &self,
+        output: impl AsRef<Path>,
+        max_mag: f32,
+        concurrency: usize,
+    ) -> Result<()> {
+        let output = output.as_ref();
+        if !max_mag.is_finite() {
+            return Err(Error::InvalidGaiaMagnitude(max_mag));
+        }
+        create_dir_all(output).await?;
+        self.download_hipparcos_catalog(&output.join("hipparcos.csv"))
+            .await?;
+        let total = 12 * 4_u64.pow(DISTANCE_TILE_LEVEL);
+        let completed = AtomicU64::new(0);
+        let failed = AtomicU64::new(0);
+        futures_util::stream::iter(0..total)
+            .map(|tile| {
+                let (completed, failed) = (&completed, &failed);
+                async move {
+                    match self
+                        .fetch_distance_tile(output, max_mag, DISTANCE_TILE_LEVEL, tile)
+                        .await
+                    {
+                        Ok(rows) => {
+                            let completed = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                            (self.reporter)(SourceEvent::GaiaChunkComplete {
+                                chunk: tile,
+                                rows,
+                                completed,
+                                total,
+                            });
+                        }
+                        Err(error) => {
+                            failed.fetch_add(1, Ordering::Relaxed);
+                            (self.reporter)(SourceEvent::Retry {
+                                label: format!("sky tile {tile} (left for the next run)"),
+                                attempt: 1,
+                                delay: Duration::ZERO,
+                                error: error.to_string(),
+                            });
+                        }
+                    }
+                }
+            })
+            .buffer_unordered(concurrency.max(1))
+            .for_each(|()| async {})
+            .await;
+        let failed = failed.into_inner();
+        if failed > 0 {
+            return Err(Error::GaiaTilesFailed { failed, total });
+        }
+        self.ready("Gaia DR3 distances and Hipparcos", output);
+        Ok(())
+    }
+
+    /// HEALPix tile `tile` at `level` into `output`, or its four children
+    /// when neither archive answers it, as
+    /// [`Self::download_gaia_distances`] describes. Returns the rows
+    /// fetched, or 0 for a tile an earlier run finished.
+    fn fetch_distance_tile<'a>(
+        &'a self,
+        output: &'a Path,
+        max_mag: f32,
+        level: u32,
+        tile: u64,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u64>> + Send + 'a>> {
+        Box::pin(async move {
+            let target = output.join(format!("gaiadist-L{level}-{tile:07}.csv"));
+            if tokio::fs::try_exists(&target).await.unwrap_or(false) {
+                return Ok(0);
+            }
+            let split = target.with_extension("split");
+            if !tokio::fs::try_exists(&split).await.unwrap_or(false) {
+                let (lo, hi) = healpix_source_ids(level, tile);
+                let archives = if tile.is_multiple_of(2) {
+                    [GaiaArchive::Gavo, GaiaArchive::Esa]
+                } else {
+                    [GaiaArchive::Esa, GaiaArchive::Gavo]
+                };
+                for archive in archives {
+                    let query = gaia_distance_range_query(archive, lo, hi, max_mag);
+                    if let Ok(body) = self.gaia_cone_sync(archive, &query).await
+                        && let Ok(stars) = parse_gaia_distances(&body)
+                    {
+                        let partial = target.with_extension("csv.partial");
+                        tokio::fs::write(&partial, body)
+                            .await
+                            .map_err(|source| Error::Io {
+                                action: "write",
+                                path: partial.clone(),
+                                source,
+                            })?;
+                        tokio::fs::rename(&partial, &target)
+                            .await
+                            .map_err(|source| Error::Io {
+                                action: "rename",
+                                path: target.clone(),
+                                source,
+                            })?;
+                        return Ok(stars.len() as u64);
+                    }
+                }
+                if level >= DISTANCE_TILE_FINEST_LEVEL {
+                    return Err(Error::GaiaJobFailed(format!(
+                        "neither archive answered HEALPix level {level} tile {tile}"
+                    )));
+                }
+                tokio::fs::write(&split, b"")
+                    .await
+                    .map_err(|source| Error::Io {
+                        action: "write",
+                        path: split.clone(),
+                        source,
+                    })?;
+            }
+            let mut rows = 0;
+            for child in 0..4 {
+                rows += self
+                    .fetch_distance_tile(output, max_mag, level + 1, tile * 4 + child)
+                    .await?;
+            }
+            Ok(rows)
+        })
+    }
+
+    /// The whole Hipparcos catalogue (van Leeuwen 2007, VizieR I/311) with
+    /// proper motions into `target` as CSV, unless it is already there.
+    async fn download_hipparcos_catalog(&self, target: &Path) -> Result<()> {
+        if tokio::fs::try_exists(target).await.unwrap_or(false) {
+            (self.reporter)(SourceEvent::AlreadyPresent {
+                path: target.to_path_buf(),
+            });
+            return Ok(());
+        }
+        let url = VIZIER_TAP_SYNC;
+        (self.reporter)(SourceEvent::Fetching {
+            url: url.into(),
+            path: target.to_path_buf(),
+        });
+        let http = |source| Error::Http {
+            url: url.into(),
+            source,
+        };
+        let response = self
+            .client
+            .post(url)
+            .timeout(Duration::from_secs(600))
+            .form(&[
+                ("REQUEST", "doQuery"),
+                ("LANG", "ADQL"),
+                ("FORMAT", "csv"),
+                ("MAXREC", "200000"),
+                (
+                    "QUERY",
+                    "SELECT HIP, RArad, DErad, pmRA, pmDE, Plx, e_Plx, Hpmag FROM \"I/311/hip2\"",
+                ),
+            ])
+            .send()
+            .await
+            .map_err(http)?;
+        if !response.status().is_success() {
+            return Err(Error::HttpStatus {
+                url: url.into(),
+                status: response.status().as_u16(),
+            });
+        }
+        let csv = response.text().await.map_err(http)?;
+        // The catalogue has 117,955 stars; fewer means a cut-off answer.
+        if parse_hipparcos(&csv)?.len() < 117_000 {
+            return Err(Error::MalformedHipparcos);
+        }
+        let partial = target.with_extension("csv.partial");
+        tokio::fs::write(&partial, csv)
+            .await
+            .map_err(|source| Error::Io {
+                action: "write",
+                path: partial.clone(),
+                source,
+            })?;
+        tokio::fs::rename(&partial, target)
+            .await
+            .map_err(|source| Error::Io {
+                action: "rename",
+                path: target.to_path_buf(),
+                source,
+            })
+    }
+
     /// [`Self::gaia_distance_cone_csv`] from one archive.
     pub async fn gaia_distance_cone_csv_from(
         &self,
@@ -2233,6 +2471,24 @@ mod tests {
     }
 
     #[test]
+    fn healpix_tiles_are_source_id_ranges_that_nest() {
+        // A star in the Scutum cloud lies in level 6 tile 30244.
+        let star = 4_256_587_403_869_648_128_u64;
+        let (lo, hi) = healpix_source_ids(6, 30244);
+        assert!((lo..=hi).contains(&star));
+        // A tile's range is its four children's, end to end.
+        let (parent_lo, parent_hi) = healpix_source_ids(5, 7561);
+        assert_eq!(healpix_source_ids(6, 7561 * 4).0, parent_lo);
+        assert_eq!(healpix_source_ids(6, 7561 * 4 + 3).1, parent_hi);
+        // And the level-5 tiles cover every source ID.
+        assert_eq!(healpix_source_ids(5, 0).0, 0);
+        assert_eq!(
+            healpix_source_ids(5, 12 * 1024 - 1).1 + 1,
+            GAIA_SOURCE_ID_MAX
+        );
+    }
+
+    #[test]
     fn overlapping_csv_rows_merge_once() {
         let merged = merge_csv(&["a,b\n1,2\n3,4\n".into(), "a,b\n3,4\n5,6\n".into()]);
         assert_eq!(merged, "a,b\n1,2\n3,4\n5,6\n");
@@ -2256,6 +2512,12 @@ mod tests {
             parse_hipparcos("HIP,RArad\n1,2\n"),
             Err(Error::MalformedHipparcos)
         ));
+        assert_eq!(stars[0].pmra, None, "a cone fetches no proper motion");
+        // The whole catalogue comes with proper motions.
+        let csv = "HIP,RArad,DErad,pmRA,pmDE,Plx,e_Plx,Hpmag\n\
+                   17702,56.87110081,24.10524179,19.34,-43.67,8.09,0.42,2.848\n";
+        let star = parse_hipparcos(csv).unwrap()[0];
+        assert_eq!((star.pmra, star.pmdec), (Some(19.34), Some(-43.67)));
     }
 
     #[test]
