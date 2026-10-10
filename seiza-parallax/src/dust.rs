@@ -184,6 +184,7 @@ impl Dust {
 
     /// The share of light let through at image pixel `(x, y)`, between
     /// cell centres.
+    #[inline]
     pub fn at(&self, x: f64, y: f64) -> f32 {
         let fx = (x / self.cell - 0.5).clamp(0.0, (self.columns - 1) as f64);
         let fy = (y / self.cell - 0.5).clamp(0.0, (self.rows - 1) as f64);
@@ -202,6 +203,7 @@ impl Dust {
 
     /// How light from behind the dust that was photographed through it at
     /// image pixel `seen` changes when it shows through it at `now`.
+    #[inline]
     pub fn change(&self, seen: (f64, f64), now: (f64, f64)) -> f32 {
         (self.at(now.0, now.1) / self.at(seen.0, seen.1)).min(MAX_BRIGHTENING)
     }

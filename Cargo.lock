@@ -2622,6 +2622,7 @@ version = "0.1.0"
 dependencies = [
  "image",
  "mp4",
+ "multiversion",
  "openh264",
  "rayon",
  "seiza-stars",

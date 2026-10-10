@@ -56,6 +56,7 @@ impl Sprite {
 
     /// `image` halved `level` times, or as many times as it halves, and how
     /// many times that is.
+    #[inline]
     pub(crate) fn level(&self, level: usize) -> (&LightImage, usize) {
         if level == 0 {
             return (&self.image, 0);

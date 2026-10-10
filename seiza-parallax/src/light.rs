@@ -110,12 +110,14 @@ impl LightImage {
         out
     }
 
+    #[inline]
     pub(crate) fn at(&self, x: usize, y: usize) -> [f32; 3] {
         self.pixels[y * self.width + x]
     }
 
     /// Bilinear light at `(x, y)` in pixel-centre coordinates (pixel `i`
     /// covers `i − 0.5` to `i + 0.5`), dark outside the image.
+    #[inline]
     pub fn sample(&self, x: f32, y: f32) -> [f32; 3] {
         let (x0, y0) = (floor(x), floor(y));
         let (tx, ty) = (x - x0 as f32, y - y0 as f32);
@@ -242,6 +244,7 @@ impl Pyramid {
 
     /// Bilinear light at base coordinates `(x, y)` from `level` of scale
     /// `scale`.
+    #[inline]
     pub(crate) fn sample_level(level: &LightImage, scale: f32, x: f32, y: f32) -> [f32; 3] {
         // Pixel centres of level k sit at base coordinates
         // `scale * i + (scale − 1) / 2`.

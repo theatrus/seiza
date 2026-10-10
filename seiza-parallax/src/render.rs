@@ -437,23 +437,47 @@ fn draw_plane(
         .par_chunks_mut(width)
         .enumerate()
         .for_each(|(row, pixels)| {
-            let y = view.centre.1 + (row as f64 - y0) / scale;
-            for (column, pixel) in pixels.iter_mut().enumerate() {
-                let x = view.centre.0 + (column as f64 - x0) / scale;
-                let mut light = Pyramid::sample_level(level, level_scale, x as f32, y as f32);
-                if let Some((dust, (dx0, dy0, dust_scale))) = dust {
-                    let now = (
-                        view.centre.0 + (column as f64 - dx0) / dust_scale,
-                        view.centre.1 + (row as f64 - dy0) / dust_scale,
-                    );
-                    let change = dust.change((x, y), now);
-                    light = light.map(|value| value * change);
-                }
-                for channel in 0..3 {
-                    pixel[channel] += light[channel];
-                }
-            }
+            plane_row(
+                pixels,
+                row,
+                view.centre,
+                (x0, y0, scale),
+                (level, level_scale),
+                dust,
+            );
         });
+}
+
+/// One row of [`draw_plane`]: output row `row` shows the plane, whose
+/// image point `centre` lands at output `(x0, y0)` at `scale` output
+/// pixels per image pixel, sampled from `level` of scale `level_scale`.
+/// Built for wider vector units too, and picked at run time; it must do the
+/// work itself, as a closure it handed on would be built without them.
+#[multiversion::multiversion(targets("x86_64+avx2+fma", "x86_64+sse4.1"))]
+fn plane_row(
+    pixels: &mut [[f32; 3]],
+    row: usize,
+    centre: (f64, f64),
+    (x0, y0, scale): (f64, f64, f64),
+    (level, level_scale): (&LightImage, f32),
+    dust: Option<(&Dust, (f64, f64, f64))>,
+) {
+    let y = centre.1 + (row as f64 - y0) / scale;
+    for (column, pixel) in pixels.iter_mut().enumerate() {
+        let x = centre.0 + (column as f64 - x0) / scale;
+        let mut light = Pyramid::sample_level(level, level_scale, x as f32, y as f32);
+        if let Some((dust, (dx0, dy0, dust_scale))) = dust {
+            let now = (
+                centre.0 + (column as f64 - dx0) / dust_scale,
+                centre.1 + (row as f64 - dy0) / dust_scale,
+            );
+            let change = dust.change((x, y), now);
+            light = light.map(|value| value * change);
+        }
+        for channel in 0..3 {
+            pixel[channel] += light[channel];
+        }
+    }
 }
 
 /// A sprite placed in one frame.
@@ -543,26 +567,37 @@ fn draw_sprites(out: &mut LightImage, scene: &Scene, view: &View, shot: &Shot) {
         .zip(by_band.par_iter())
         .enumerate()
         .for_each(|(band, (pixels, indices))| {
-            let first = band * BAND_ROWS;
-            let rows = pixels.len() / out_width;
-            for placed in indices
-                .iter()
-                .map(|&index| &placed[index as usize])
-                .filter(|placed| {
-                    placed.bottom >= first as f64 && placed.top < (first + rows) as f64
-                })
-            {
-                if placed.scale >= 1.0 {
-                    sample_sprite(pixels, out_width, first, rows, placed);
-                } else {
-                    splat_sprite(pixels, out_width, first, rows, placed);
-                }
-            }
+            draw_band(pixels, out_width, band * BAND_ROWS, &placed, indices);
         });
+}
+
+/// The sprites `indices` of `placed` in the band of output rows starting
+/// at `first`. Built for wider vector units too, as [`plane_row`] is.
+#[multiversion::multiversion(targets("x86_64+avx2+fma", "x86_64+sse4.1"))]
+fn draw_band(
+    pixels: &mut [[f32; 3]],
+    width: usize,
+    first: usize,
+    placed: &[Placed<'_>],
+    indices: &[u32],
+) {
+    let rows = pixels.len() / width;
+    for placed in indices
+        .iter()
+        .map(|&index| &placed[index as usize])
+        .filter(|placed| placed.bottom >= first as f64 && placed.top < (first + rows) as f64)
+    {
+        if placed.scale >= 1.0 {
+            sample_sprite(pixels, width, first, rows, placed);
+        } else {
+            splat_sprite(pixels, width, first, rows, placed);
+        }
+    }
 }
 
 /// Draw a sprite at least as large as its pixels by sampling it at each
 /// output pixel it covers.
+#[inline]
 fn sample_sprite(
     pixels: &mut [[f32; 3]],
     width: usize,
@@ -600,6 +635,7 @@ fn sample_sprite(
 /// whose pixels come nearest an output pixel without passing it, which
 /// keeps that light with a fraction of the work, and only the rows that
 /// land in this band.
+#[inline]
 fn splat_sprite(pixels: &mut [[f32; 3]], width: usize, first: usize, rows: usize, placed: &Placed) {
     let sprite = placed.sprite;
     let wanted = floor64((1.0 / placed.scale).log2()).max(0) as usize;
