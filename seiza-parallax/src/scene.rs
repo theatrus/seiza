@@ -93,6 +93,9 @@ pub struct Scene {
     /// The image's focal length in pixels: one radian across the field is
     /// this many pixels.
     pub focal_px: f64,
+    /// A distance most sprites lie within, at least the background's: the
+    /// far star field a camera move must not uncover the edge of.
+    pub far_distance_pc: f64,
 }
 
 impl Scene {
@@ -241,6 +244,14 @@ impl Scene {
             }
             !embedded
         });
+        let mut distances: Vec<f64> = sprites.iter().map(|sprite| sprite.distance_pc).collect();
+        let far_distance_pc = if distances.is_empty() {
+            background_distance_pc
+        } else {
+            let index = distances.len() * 9 / 10;
+            let (_, &mut far, _) = distances.select_nth_unstable_by(index, f64::total_cmp);
+            far.max(background_distance_pc)
+        };
         Self {
             background: Pyramid::new(background),
             leftover: Pyramid::new(leftover),
@@ -248,6 +259,7 @@ impl Scene {
             background_distance_pc,
             leftover_distance_pc,
             focal_px,
+            far_distance_pc,
         }
     }
 

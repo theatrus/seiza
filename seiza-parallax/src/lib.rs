@@ -28,7 +28,7 @@ pub mod scene;
 pub use encode::OpenH264Sink;
 pub use encode::{FfmpegSink, FrameSink, PngSequence, VideoSettings};
 pub use light::{LightImage, Pyramid};
-pub use render::{Easing, Shot};
+pub use render::{Easing, Shot, Start};
 pub use scene::{CutOptions, Scene, SmallStars, Sprite, Star};
 pub use seiza_stars::PeakStar;
 

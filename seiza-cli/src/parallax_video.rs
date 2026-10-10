@@ -13,7 +13,7 @@ use image::Rgb32FImage;
 use seiza::{DetectConfig, Wcs};
 use seiza_parallax::{
     CutOptions, Easing, FfmpegSink, FrameSink, LightImage, PngSequence, Scene, Shot, SmallStars,
-    Star, VideoSettings,
+    Star, Start, VideoSettings,
 };
 use seiza_sources::{GaiaDistance, HipparcosStar};
 use seiza_stars::PeakStar;
@@ -59,16 +59,12 @@ pub(crate) struct ParallaxVideoArgs {
     /// Fraction of the way to the nebula the camera flies
     #[arg(long, default_value_t = 0.4)]
     dolly: f64,
-    /// Sideways travel, as a fraction of the nebula's distance (reduced if
-    /// the far stars would slide off the image). The default flies straight
-    /// in
+    /// Sideways swing at the middle of the shot, as a fraction of the
+    /// nebula's distance: the camera moves out and back without turning, so
+    /// near stars slide across far ones (reduced if the far stars would
+    /// slide off the image). The default flies straight in
     #[arg(long, default_value_t = 0.0)]
     truck: f64,
-    /// What the camera keeps steady at the focus point: the target nebula
-    /// (the camera flies into it while the sky slides behind) or the star
-    /// field (the sky stays put and nearer stars and the nebula move)
-    #[arg(long, value_enum, default_value_t = HoldArg::Target)]
-    hold: HoldArg,
     /// Magnification added over the shot by lengthening the lens, which
     /// enlarges every depth alike
     #[arg(long, default_value_t = 1.0)]
@@ -77,8 +73,13 @@ pub(crate) struct ParallaxVideoArgs {
     /// image's rightward axis
     #[arg(long, default_value_t = 0.0)]
     truck_angle: f64,
-    /// How far the first frame zooms in: 1 shows the widest view around the
-    /// focus point that fits inside the image
+    /// What the first frame shows: `focus`, the widest view centred on the
+    /// focus point, or `whole`, the widest view of the whole image, the aim
+    /// then moving to the focus point as the camera flies in
+    #[arg(long, value_enum, default_value_t = StartArg::Focus)]
+    start: StartArg,
+    /// How far the first frame zooms in: 1 shows the widest view --start
+    /// allows inside the image
     #[arg(long, default_value_t = 1.0)]
     zoom: f64,
     /// Length of the video, seconds
@@ -147,14 +148,14 @@ pub(crate) struct ParallaxVideoArgs {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-enum SmallStarsArg {
-    Drop,
-    Field,
+enum StartArg {
+    Focus,
+    Whole,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-enum HoldArg {
-    Target,
+enum SmallStarsArg {
+    Drop,
     Field,
 }
 
@@ -321,12 +322,12 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
         focus,
         dolly: args.dolly,
         truck: (args.truck * cos, -args.truck * sin),
+        start: match args.start {
+            StartArg::Focus => Start::Focus,
+            StartArg::Whole => Start::Whole,
+        },
         zoom: args.zoom,
         zoom_end: args.zoom_end,
-        hold_pc: match args.hold {
-            HoldArg::Field => Some(unmatched),
-            HoldArg::Target => None,
-        },
         width: args.size.0,
         height: args.size.1,
         frames,
@@ -340,6 +341,13 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
     };
 
     let (shot, fitted) = shot.fitted(&scene);
+    if shot.lead < 1.0 {
+        println!(
+            "sideways travel toward the focus point comes later (lead {:.2}) so the far stars \
+             stay inside the image",
+            shot.lead
+        );
+    }
     if fitted < 1.0 && args.truck != 0.0 {
         println!(
             "truck reduced to {:.4} of the distance so the far stars stay inside the image",

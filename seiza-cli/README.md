@@ -382,15 +382,20 @@ parsecs. Stars too faint to match sit at the star field's median
 distance.
 
 The camera flies `--dolly` of the way to the target (default 0.4) toward
-`--focus x,y` (default the image centre), keeping it centred. `--truck` adds
-sideways travel, reduced if the far stars would slide off the image, and
-`--zoom-end` lengthens the lens over the shot. `--seconds`, `--fps` and
-`--size` set the video. A deep image holds so many faint stars that, each
-moving on its own, they crowd the view: `--max-stars N` lets only the N
-brightest fly, and `--small-stars` drops the rest (`drop`, the default) or
-keeps them on the distant star field's plane (`field`). Frames go to ffmpeg (libx264 or libopenh264), to PNG
-files with `--encoder png`, or, in a build with the `openh264` feature, to a
-built-in encoder. `--debug-layers DIR` writes the background, the leftover star
+`--focus x,y` (default the image centre). It never turns: every change of view
+comes from moving it, so near stars slide across far ones as they would.
+`--start focus` (the default) opens on the widest view centred on the focus
+point and flies straight at it; `--start whole` opens on the whole image and
+moves sideways as it flies in, until the focus point is ahead. `--truck`
+swings the camera sideways and back (`--truck-angle` sets the direction),
+reduced if the far stars would slide off the image, and `--zoom-end`
+lengthens the lens over the shot. `--seconds`, `--fps` and `--size` set the
+video. A deep image holds so many faint stars that, each moving on its own,
+they crowd the view: `--max-stars N` lets only the N brightest fly, and
+`--small-stars` drops the rest (`drop`, the default) or keeps them on the
+distant star field's plane (`field`). Frames go to ffmpeg (libx264 or
+libopenh264), to PNG files with `--encoder png`, or, in a build with the
+`openh264` feature, to a built-in encoder. `--debug-layers DIR` writes the background, the leftover star
 light, and every cut-out star tinted by distance, for checking a result.
 
 ## Image stacking

@@ -4,13 +4,14 @@
 //! The image is treated as a pinhole view from Earth with its optical axis
 //! through the image centre: a pixel `Δ` pixels off centre at distance `d`
 //! sits at `Δ · d / f` across, where `f` is the image's focal length in
-//! pixels. The camera flies `dolly` of the way to the background plane along
-//! the line of sight to the focus point, moves `truck` of the plane's
-//! distance sideways, and shifts its lens so the focus point stays at the
-//! centre of the frame. Without a truck every depth then only grows about
-//! the focus point, so no layer's edges come into view; with one, a star
-//! nearer than the plane slides against the truck and one beyond it drifts
-//! with it.
+//! pixels. The camera never turns: its lens keeps the angle that framed the
+//! first frame, and every change of view comes from moving it. It flies
+//! `dolly` of the way to the background plane and moves sideways until the
+//! focus point is ahead of it, at the centre of the frame. Started on the
+//! focus point it simply flies along the line of sight to it, and every
+//! depth only grows about that point. Moving sideways, toward the focus
+//! point or in a `truck`, slides nearer depths across farther ones, as
+//! from a moving car the near trees race by and the hills barely move.
 
 use crate::light::{LightImage, Pyramid};
 use crate::scene::{Scene, Sprite};
@@ -36,6 +37,17 @@ impl Easing {
     }
 }
 
+/// What a shot's first frame shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Start {
+    /// The widest view centred on the focus point, which stays centred.
+    #[default]
+    Focus,
+    /// The widest view of the whole image. The camera moves sideways as it
+    /// flies in, without turning, until the focus point is ahead of it.
+    Whole,
+}
+
 /// A camera move and how it is filmed.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Shot {
@@ -44,21 +56,25 @@ pub struct Shot {
     pub focus: (f64, f64),
     /// The fraction of the way to the background plane the camera travels.
     pub dolly: f64,
-    /// Sideways travel, as a fraction of the background distance, along the
-    /// image's x and y axes.
+    /// Sideways travel at the middle of the shot, as a fraction of the
+    /// background distance, along the image's x and y axes. The camera
+    /// swings out and back without turning, so near stars slide across the
+    /// far ones.
     pub truck: (f64, f64),
-    /// How far the first frame zooms in: 1 shows the widest view around the
-    /// focus point that stays inside the image, 2 half as wide.
+    /// What the first frame shows, and so where the camera's aim starts.
+    pub start: Start,
+    /// How far the first frame zooms in: 1 shows the widest view the start
+    /// allows that stays inside the image, 2 half as wide.
     pub zoom: f64,
     /// How much more the last frame is magnified than the first, by
     /// lengthening the lens rather than moving the camera: it enlarges every
     /// depth alike, so it pushes in without sliding layers apart.
     pub zoom_end: f64,
-    /// The distance, parsecs, that the camera's aim holds still: the focus
-    /// point at this depth stays at the centre of the frame. `None` holds the
-    /// background plane. Holding the star field keeps the sky steady while
-    /// nearer stars and the nebula move against it.
-    pub hold_pc: Option<f64>,
+    /// How early the camera makes its sideways travel toward the focus
+    /// point from the opening view, 0 to 1: at 1 the focus point closes on
+    /// the frame's centre in step with the shot, at 0 mostly at the end.
+    /// [`Self::fitted`] lowers it if a far layer's edge would show.
+    pub lead: f64,
     /// Output frame size, pixels.
     pub width: usize,
     pub height: usize,
@@ -83,9 +99,10 @@ impl Default for Shot {
             focus: (0.0, 0.0),
             dolly: 0.5,
             truck: (0.05, 0.0),
+            start: Start::Focus,
             zoom: 1.0,
             zoom_end: 1.0,
-            hold_pc: None,
+            lead: 1.0,
             width: 1920,
             height: 1080,
             frames: 240,
@@ -108,7 +125,7 @@ struct View {
     along: f64,
     /// Output focal length, pixels.
     focal_out: f64,
-    /// Where the focus point would land before the lens shift.
+    /// The lens shift that frames the first frame's view, output pixels.
     focus_shift: (f64, f64),
     /// Output centre, pixels.
     out_centre: (f64, f64),
@@ -160,13 +177,71 @@ impl View {
 }
 
 impl Shot {
-    /// The widest first-frame footprint (image pixels per output pixel)
-    /// that keeps the frame inside a `width` × `height` image.
-    fn widest_footprint(&self, width: usize, height: usize) -> f64 {
-        let (fx, fy) = self.focus;
-        let half_x = fx.min(width as f64 - 1.0 - fx).max(1.0);
-        let half_y = fy.min(height as f64 - 1.0 - fy).max(1.0);
+    /// The widest footprint (image pixels per output pixel) of a frame
+    /// centred on `(x, y)` that stays inside a `width` × `height` image.
+    fn widest_footprint(&self, (x, y): (f64, f64), width: usize, height: usize) -> f64 {
+        let half_x = x.min(width as f64 - 1.0 - x).max(1.0);
+        let half_y = y.min(height as f64 - 1.0 - y).max(1.0);
         (2.0 * half_x / self.width as f64).min(2.0 * half_y / self.height as f64)
+    }
+
+    /// The first frame's centre on the background plane and its footprint.
+    fn opening(&self, width: usize, height: usize) -> ((f64, f64), f64) {
+        let zoom = self.zoom.max(1.0);
+        match self.start {
+            Start::Focus => (
+                self.focus,
+                self.widest_footprint(self.focus, width, height) / zoom,
+            ),
+            Start::Whole => {
+                let centre = ((width as f64 - 1.0) / 2.0, (height as f64 - 1.0) / 2.0);
+                let footprint = self.widest_footprint(centre, width, height) / zoom;
+                // As near the focus point as a view that size allows.
+                let toward = |focus: f64, out: usize, size: usize, centre: f64| {
+                    let half = footprint * (out as f64 - 1.0) / 2.0;
+                    let (low, high) = (half, size as f64 - 1.0 - half);
+                    if low <= high {
+                        focus.clamp(low, high)
+                    } else {
+                        centre
+                    }
+                };
+                (
+                    (
+                        toward(self.focus.0, self.width, width, centre.0),
+                        toward(self.focus.1, self.height, height, centre.1),
+                    ),
+                    footprint,
+                )
+            }
+        }
+    }
+
+    /// The depths whose edges must stay out of view: the background, the
+    /// leftover star light and the far sprites.
+    fn guarded_depths(&self, scene: &Scene) -> [f64; 3] {
+        [
+            scene.background_distance_pc,
+            scene.leftover_distance_pc,
+            scene.far_distance_pc,
+        ]
+    }
+
+    /// Whether every corner of `view` lies inside the image at `depths`.
+    fn inside(&self, scene: &Scene, view: &View, depths: &[f64]) -> bool {
+        let (width, height) = (scene.width() as f64 - 1.0, scene.height() as f64 - 1.0);
+        let corners = [
+            (0.0, 0.0),
+            (self.width as f64 - 1.0, 0.0),
+            (0.0, self.height as f64 - 1.0),
+            (self.width as f64 - 1.0, self.height as f64 - 1.0),
+        ];
+        depths.iter().all(|&distance| {
+            corners.iter().all(|&(u, v)| {
+                let (x, y) = view.unproject(u, v, distance);
+                (0.0..=width).contains(&x) && (0.0..=height).contains(&y)
+            })
+        })
     }
 
     fn view(&self, scene: &Scene, frame: usize) -> View {
@@ -181,98 +256,96 @@ impl Shot {
             (scene.width() as f64 - 1.0) / 2.0,
             (scene.height() as f64 - 1.0) / 2.0,
         );
-        let footprint = self.widest_footprint(scene.width(), scene.height()) / self.zoom.max(1.0);
+        let (opening, footprint) = self.opening(scene.width(), scene.height());
         let focal_out = scene.focal_px / footprint * self.zoom_end.max(1.0).powf(progress);
-        let along = self.dolly.clamp(0.0, 0.99) * distance * progress;
-        // The camera flies along the line of sight to the focus point, so
-        // the focus point at every depth stays in line ahead of it. Flying
-        // along the image's axis instead would slide the depths across each
-        // other toward an off-centre focus, and uncover the far layers' edges.
-        let toward = (
-            (self.focus.0 - centre.0) / scene.focal_px,
-            (self.focus.1 - centre.1) / scene.focal_px,
-        );
-        let across = (
-            toward.0 * along + self.truck.0 * distance * progress,
-            toward.1 * along + self.truck.1 * distance * progress,
-        );
-        let mut view = View {
+        let dolly = self.dolly.clamp(0.0, 0.99);
+        let along = dolly * distance * progress;
+        // The background's distance from the camera, as a fraction of its
+        // distance from where the image was taken.
+        let near = 1.0 - dolly * progress;
+        // The camera never turns: its lens keeps the angle that framed the
+        // opening view, and it reaches the focus point by moving. The
+        // background point at the centre of the frame goes from the opening
+        // view's centre to the focus point, and the focus point's place in
+        // the frame closes on the centre in step with the shot's progress
+        // (`lead` 1) or, as a straight line from where the image was taken
+        // would have it, mostly at the end (`lead` 0). A truck swings the
+        // camera sideways and back.
+        let lead = self.lead.clamp(0.0, 1.0);
+        let remaining = (1.0 - progress) * (lead + (1.0 - lead) / near);
+        let swing = 4.0 * progress * (1.0 - progress);
+        let across = |focus: f64, opening: f64, centre: f64, truck: f64| {
+            let aimed = focus - (focus - opening) * remaining * near;
+            (aimed - centre - (opening - centre) * near) * distance / scene.focal_px
+                + truck * distance * swing
+        };
+        View {
             centre,
             focal_px: scene.focal_px,
-            across,
+            across: (
+                across(self.focus.0, opening.0, centre.0, self.truck.0),
+                across(self.focus.1, opening.1, centre.1, self.truck.1),
+            ),
             along,
             focal_out,
-            focus_shift: (0.0, 0.0),
+            focus_shift: (
+                focal_out * (opening.0 - centre.0) / scene.focal_px,
+                focal_out * (opening.1 - centre.1) / scene.focal_px,
+            ),
             out_centre: (
                 (self.width as f64 - 1.0) / 2.0,
                 (self.height as f64 - 1.0) / 2.0,
             ),
-        };
-        let held = self.hold_pc.unwrap_or(distance);
-        let (fx, fy, _) = view
-            .project(self.focus.0, self.focus.1, held)
-            .expect("the camera stops short of the plane it holds");
-        view.focus_shift = (fx - view.out_centre.0, fy - view.out_centre.1);
-        view
+        }
     }
 
-    /// This shot with its truck scaled down, if need be, so that the
-    /// background and the far stars stay inside the image in every frame,
-    /// and the factor applied. Dollying in only ever shows less of each
-    /// layer; trucking slides layers at different depths against each other,
-    /// and the far ones would uncover ground the image never showed.
+    /// This shot made to keep every layer's edge out of view, and the
+    /// factor its truck was scaled by. The camera's sideways travel toward
+    /// the focus point comes as early as `lead` allows, and its truck swings
+    /// as wide as the image allows: moving sideways slides layers at
+    /// different depths against each other, and the far ones would uncover
+    /// ground the image never showed. Moving along a straight line from
+    /// where the image was taken never does.
     pub fn fitted(&self, scene: &Scene) -> (Self, f64) {
-        let mut far: Vec<f64> = scene
-            .sprites
-            .iter()
-            .map(|sprite| sprite.distance_pc)
-            .collect();
-        far.sort_by(f64::total_cmp);
-        let mut depths = vec![scene.background_distance_pc, scene.leftover_distance_pc];
-        depths.extend(self.hold_pc);
-        if let Some(&distance) = far.get(far.len() * 9 / 10) {
-            depths.push(distance.max(scene.background_distance_pc));
-        }
-        let fits = |factor: f64| {
-            let shot = Self {
-                truck: (self.truck.0 * factor, self.truck.1 * factor),
-                ..*self
-            };
-            let (width, height) = (scene.width() as f64 - 1.0, scene.height() as f64 - 1.0);
-            let corners = [
-                (0.0, 0.0),
-                (self.width as f64 - 1.0, 0.0),
-                (0.0, self.height as f64 - 1.0),
-                (self.width as f64 - 1.0, self.height as f64 - 1.0),
-            ];
-            (0..self.frames).all(|frame| {
-                let view = shot.view(scene, frame);
-                depths.iter().all(|&distance| {
-                    corners.iter().all(|&(u, v)| {
-                        let (x, y) = view.unproject(u, v, distance);
-                        (0.0..=width).contains(&x) && (0.0..=height).contains(&y)
-                    })
-                })
-            })
+        let depths = self.guarded_depths(scene);
+        let fits = |shot: &Self| {
+            (0..shot.frames).all(|frame| shot.inside(scene, &shot.view(scene, frame), &depths))
         };
-        if fits(1.0) {
-            return (*self, 1.0);
-        }
-        let (mut low, mut high) = (0.0, 1.0);
-        for _ in 0..30 {
-            let middle = (low + high) / 2.0;
-            if fits(middle) {
-                low = middle;
-            } else {
-                high = middle;
+        // The largest factor in [0, 1] the shot `make` builds still fits at.
+        let largest = |make: &dyn Fn(f64) -> Self| -> f64 {
+            if fits(&make(1.0)) {
+                return 1.0;
             }
-        }
+            let (mut low, mut high) = (0.0, 1.0);
+            for _ in 0..30 {
+                let middle = (low + high) / 2.0;
+                if fits(&make(middle)) {
+                    low = middle;
+                } else {
+                    high = middle;
+                }
+            }
+            low
+        };
+        let lead = largest(&|factor| Self {
+            lead: self.lead * factor,
+            truck: (0.0, 0.0),
+            ..*self
+        });
+        let led = Self {
+            lead: self.lead * lead,
+            ..*self
+        };
+        let factor = largest(&|factor| Self {
+            truck: (self.truck.0 * factor, self.truck.1 * factor),
+            ..led
+        });
         (
             Self {
-                truck: (self.truck.0 * low, self.truck.1 * low),
-                ..*self
+                truck: (self.truck.0 * factor, self.truck.1 * factor),
+                ..led
             },
-            low,
+            factor,
         )
     }
 
@@ -554,32 +627,63 @@ mod tests {
         let shot = Shot {
             focus: (199.5, 149.5),
             dolly: 0.0,
-            truck: (0.2, 0.0),
+            truck: (0.01, 0.0),
             width: 200,
             height: 150,
-            frames: 2,
+            frames: 3,
             easing: Easing::Linear,
             ..Shot::default()
         };
+        // The middle frame is the truck's widest swing.
         let start = shot.view(&scene, 0);
-        let end = shot.view(&scene, 1);
-        let moved = |star: &Star| {
-            let a = start
-                .project(star.x, star.y, star.distance_pc.unwrap())
-                .unwrap()
-                .0;
-            let b = end
-                .project(star.x, star.y, star.distance_pc.unwrap())
-                .unwrap()
-                .0;
-            b - a
+        let middle = shot.view(&scene, 1);
+        let moved = |x: f64, y: f64, distance: f64| {
+            middle.project(x, y, distance).unwrap().0 - start.project(x, y, distance).unwrap().0
         };
-        // The camera moves +x: a near star slides −x, a far one drifts +x,
-        // and the focus point stays put.
-        assert!(moved(&stars[0]) < -5.0, "{}", moved(&stars[0]));
-        assert!(moved(&stars[1]) > 0.0, "{}", moved(&stars[1]));
-        let focus = |view: &View| view.project(199.5, 149.5, 400.0).unwrap();
-        assert!((focus(&start).0 - focus(&end).0).abs() < 1e-9);
+        // The camera moves +x without turning: everything slides −x, the
+        // near star most, the background less, the far star least.
+        let near = moved(150.0, 150.0, 50.0);
+        let background = moved(199.5, 149.5, 400.0);
+        let far = moved(250.0, 150.0, 5000.0);
+        assert!(
+            near < background && background < far && far < 0.0,
+            "{near} {background} {far}"
+        );
+        // And the swing returns: the last frame is the first.
+        let last = shot.view(&scene, 2);
+        let (a, b) = (
+            start.project(150.0, 150.0, 50.0).unwrap(),
+            last.project(150.0, 150.0, 50.0).unwrap(),
+        );
+        assert!((a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_camera_never_turns() {
+        let scene = scene_with(&[]);
+        let shot = Shot {
+            focus: (320.0, 60.0),
+            dolly: 0.8,
+            truck: (0.002, 0.001),
+            start: Start::Whole,
+            zoom_end: 1.5,
+            width: 200,
+            height: 150,
+            frames: 12,
+            ..Shot::default()
+        };
+        // The lens shift, as an angle, is the same in every frame.
+        let angle = |view: &View| {
+            (
+                view.focus_shift.0 / view.focal_out,
+                view.focus_shift.1 / view.focal_out,
+            )
+        };
+        let first = angle(&shot.view(&scene, 0));
+        for frame in 1..shot.frames {
+            let now = angle(&shot.view(&scene, frame));
+            assert!((now.0 - first.0).abs() < 1e-12 && (now.1 - first.1).abs() < 1e-12);
+        }
     }
 
     #[test]
@@ -645,6 +749,43 @@ mod tests {
     }
 
     #[test]
+    fn a_whole_start_shows_the_image_then_closes_on_the_focus() {
+        let scene = scene_with(&[]);
+        let shot = Shot {
+            focus: (320.0, 60.0),
+            dolly: 0.8,
+            truck: (0.0, 0.0),
+            start: Start::Whole,
+            width: 200,
+            height: 150,
+            frames: 30,
+            easing: Easing::Linear,
+            ..Shot::default()
+        };
+        // The first frame spans nearly the whole image, which is the
+        // frame's shape.
+        let first = shot.view(&scene, 0);
+        let (left, top) = first.unproject(0.0, 0.0, 400.0);
+        let (right, bottom) = first.unproject(199.0, 149.0, 400.0);
+        assert!(left < 3.0 && right > 396.0, "{left}..{right}");
+        assert!(top < 3.0 && bottom > 296.0, "{top}..{bottom}");
+        // Fitted, no frame shows past the image at the background or the far
+        // field, and the last one is centred on the focus point.
+        let (shot, _) = shot.fitted(&scene);
+        let depths = shot.guarded_depths(&scene);
+        for frame in 0..shot.frames {
+            let view = shot.view(&scene, frame);
+            assert!(shot.inside(&scene, &view, &depths), "frame {frame}");
+        }
+        let last = shot.view(&scene, shot.frames - 1);
+        let (x, y, _) = last.project(320.0, 60.0, 400.0).unwrap();
+        assert!(
+            (x - 99.5).abs() < 0.5 && (y - 74.5).abs() < 0.5,
+            "({x}, {y})"
+        );
+    }
+
+    #[test]
     fn a_truck_too_wide_for_the_image_is_scaled_down() {
         let scene = scene_with(&[Star {
             x: 100.0,
@@ -663,14 +804,10 @@ mod tests {
         };
         let (fitted, factor) = shot.fitted(&scene);
         assert!(factor > 0.0 && factor < 1.0, "{factor}");
-        // Every corner of the last frame, on the far layer, stays inside.
-        let view = fitted.view(&scene, 19);
-        for (u, v) in [(0.0, 0.0), (199.0, 149.0)] {
-            let (x, y) = view.unproject(u, v, 4000.0);
-            assert!(
-                (0.0..=399.0).contains(&x) && (0.0..=299.0).contains(&y),
-                "{x} {y}"
-            );
+        // Every frame's corners, on the far layer, stay inside.
+        for frame in 0..fitted.frames {
+            let view = fitted.view(&scene, frame);
+            assert!(fitted.inside(&scene, &view, &[4000.0]), "frame {frame}");
         }
         let gentle = Shot {
             truck: (0.0001, 0.0),
