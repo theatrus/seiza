@@ -22,6 +22,9 @@ both, matching stars to Gaia DR3 for their Bailer-Jones distances.
   its halo. Star light no star takes forms a plane of its own at the star
   field's distance. `CutOptions::max_stars` lets only the brightest stars
   fly; the rest are dropped or stay on that plane (`SmallStars`).
+- **Galaxies:** `lift_object` takes an extended object, such as a galaxy a
+  star remover left in the starless image, out onto a sprite of its own at
+  its distance, and fills the nebula in behind it from around it.
 - **Blending:** layers combine as a screen blend, done as addition of "light"
   `−ln(1 − v)` taken from each pixel's brightest channel, so stars keep their
   hue as they brighten.

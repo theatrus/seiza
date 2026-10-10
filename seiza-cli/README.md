@@ -397,7 +397,10 @@ they crowd the view: `--max-stars N` lets only the N brightest fly, and
 `--small-stars` drops the rest (`drop`, the default) or keeps them on the
 distant star field's plane (`field`). Frames go to ffmpeg (libx264 or
 libopenh264), to PNG files with `--encoder png`, or, in a build with the
-`openh264` feature, to a built-in encoder. `--debug-layers DIR` writes the background, the leftover star
+`openh264` feature, to a built-in encoder. Catalogued galaxies, which a star remover leaves in the starless image, are
+lifted out of it onto the far field, where they hold still while the nebula
+grows past them; the nebula behind is filled in from around each one.
+`--keep-galaxies` leaves them in place. `--debug-layers DIR` writes the background, the leftover star
 light, and every cut-out star tinted by distance, for checking a result.
 
 ## Image stacking

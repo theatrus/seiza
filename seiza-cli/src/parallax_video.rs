@@ -12,8 +12,8 @@ use clap::{Args, ValueEnum};
 use image::Rgb32FImage;
 use seiza::{DetectConfig, Wcs};
 use seiza_parallax::{
-    CutOptions, Easing, FfmpegSink, FrameSink, LightImage, PngSequence, Scene, Shot, SmallStars,
-    Star, Start, VideoSettings,
+    CutOptions, Easing, Extent, FfmpegSink, FrameSink, LightImage, PngSequence, Scene, Shot,
+    SmallStars, Star, Start, VideoSettings,
 };
 use seiza_sources::{GaiaDistance, HipparcosStar};
 use seiza_stars::PeakStar;
@@ -152,6 +152,10 @@ pub(crate) struct ParallaxVideoArgs {
     /// marked by their distance
     #[arg(long)]
     debug_layers: Option<PathBuf>,
+    /// Leave galaxies in the starless image, on the nebula's plane, rather
+    /// than lifting them onto the far field where they hold still
+    #[arg(long)]
+    keep_galaxies: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -293,8 +297,42 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
         })
         .collect();
 
-    let starless = LightImage::from_display(&starless);
-    let scene = Scene::new(
+    let mut starless = LightImage::from_display(&starless);
+    // Galaxies lie far beyond everything else, but the star remover leaves
+    // them on the nebula's plane.
+    let mut galaxies = Vec::new();
+    if !args.keep_galaxies {
+        match galaxies_in_image(&args, &wcs, (width, height), focus) {
+            Ok(found) => {
+                for (name, extent) in found {
+                    if let Some(sprite) =
+                        seiza_parallax::lift_object(&mut starless, &extent, GALAXY_DISTANCE_PC)
+                    {
+                        galaxies.push((name, sprite));
+                    }
+                }
+            }
+            Err(error) => eprintln!("warning: no galaxies lifted: {error:#}"),
+        }
+        if !galaxies.is_empty() {
+            let names: Vec<&str> = galaxies
+                .iter()
+                .take(5)
+                .map(|(name, _)| name.as_str())
+                .collect();
+            println!(
+                "{} galaxies lifted onto the far field: {}{}",
+                galaxies.len(),
+                names.join(", "),
+                if galaxies.len() > names.len() {
+                    ", ..."
+                } else {
+                    ""
+                }
+            );
+        }
+    }
+    let mut scene = Scene::new(
         &starless,
         &stars_light,
         &placed,
@@ -310,6 +348,9 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
             ..CutOptions::default()
         },
     );
+    scene
+        .sprites
+        .extend(galaxies.into_iter().map(|(_, sprite)| sprite));
     if args.max_stars.is_some() {
         println!(
             "the {} brightest stars fly; the rest {}",
@@ -939,6 +980,54 @@ fn target_distance(
     Ok(found
         .distance()
         .map(|distance| (name, distance.distance_pc, distance.basis.as_str())))
+}
+
+/// Where lifted galaxies fly: so far beyond the stars that they hold still.
+const GALAXY_DISTANCE_PC: f64 = 1e8;
+
+/// Catalogued galaxies in the image large enough to see, largest first,
+/// leaving out one at the focus point, which is the target, and each only
+/// once: catalogs list some galaxies twice, a little apart.
+fn galaxies_in_image(
+    args: &ParallaxVideoArgs,
+    wcs: &Wcs,
+    (width, height): (usize, usize),
+    focus: (f64, f64),
+) -> Result<Vec<(String, Extent)>> {
+    let Ok(objects_path) = seiza::data_paths::objects(args.objects.as_deref()) else {
+        return Ok(Vec::new());
+    };
+    let catalog = seiza::objects::ObjectCatalog::open(&objects_path)
+        .with_context(|| format!("failed to open {}", objects_path.display()))?;
+    let placed = catalog
+        .objects_in_footprint(wcs, (width as u32, height as u32))
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let mut kept: Vec<(String, Extent)> = Vec::new();
+    for object in placed {
+        if object.object.kind != seiza::objects::ObjectKind::Galaxy || object.semi_major_px < 4.0 {
+            continue;
+        }
+        let (semi_major, semi_minor, angle) = crate::object_outline(&object);
+        let extent = Extent {
+            x: object.x,
+            y: object.y,
+            semi_major,
+            semi_minor: semi_minor.max(1.0),
+            angle: angle.to_radians(),
+        };
+        if extent.reach(focus.0, focus.1) <= 2.0
+            || kept
+                .iter()
+                .any(|(_, other)| other.reach(extent.x, extent.y) <= 1.5)
+        {
+            continue;
+        }
+        kept.push((object.object.name.clone(), extent));
+        if kept.len() == 200 {
+            break;
+        }
+    }
+    Ok(kept)
 }
 
 /// The median distance of the stars within a fifth of the image's

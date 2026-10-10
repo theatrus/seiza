@@ -20,6 +20,7 @@
 //! ```
 
 pub mod encode;
+pub mod lift;
 pub mod light;
 pub mod render;
 pub mod scene;
@@ -27,6 +28,7 @@ pub mod scene;
 #[cfg(feature = "openh264")]
 pub use encode::OpenH264Sink;
 pub use encode::{FfmpegSink, FrameSink, PngSequence, VideoSettings};
+pub use lift::{Extent, lift_object};
 pub use light::{LightImage, Pyramid};
 pub use render::{Easing, Shot, Start};
 pub use scene::{CutOptions, Scene, SmallStars, Sprite, Star};
