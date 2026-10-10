@@ -373,9 +373,13 @@ StarXTerminator, with "unscreen" so the stars screen back over the starless
 image. Given only the stretched image, Seiza runs StarXTerminator's `rc-astro`
 CLI itself when it is installed and licensed. Inputs can be PNG, JPEG or TIFF.
 
-The image is plate-solved and its stars matched to Gaia DR3, queried online in
-small cones and cached, for their Bailer-Jones distances; Hipparcos supplies
-the brightest stars Gaia has no parallax for. The starless image is placed at
+The image is plate-solved and its stars matched to Gaia DR3 for their
+Bailer-Jones distances; Hipparcos supplies the brightest stars Gaia has no
+parallax for. Both come from the optional star distance dataset (`seiza setup
+--star-distances`, every Gaia star to G 16), or are queried online in small
+cones and cached when it is not installed. To build that dataset, `seiza
+download-data star-distances` fetches the sky in small HEALPix tiles and
+`seiza build-data star-distances` packs them. The starless image is placed at
 the distance of the catalogued object at the focus point, from the optional
 object distance dataset (`seiza setup --object-distances`), or at `--distance`
 parsecs. Stars too faint to match sit at the star field's median
