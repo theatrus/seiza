@@ -164,6 +164,27 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const READ_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// The ADQL for Gaia DR3 sources in a cone with their Bailer-Jones distances.
+fn gaia_distance_query(
+    archive: GaiaArchive,
+    ra: f64,
+    dec: f64,
+    radius_deg: f64,
+    max_mag: f32,
+) -> String {
+    format!(
+        "SELECT g.ra, g.dec, g.pmra, g.pmdec, g.phot_g_mean_mag, g.phot_bp_mean_mag, \
+         g.phot_rp_mean_mag, g.parallax, g.parallax_error, \
+         d.r_med_geo, d.r_lo_geo, d.r_hi_geo \
+         FROM {table} AS g LEFT OUTER JOIN {distances} AS d ON g.source_id = d.source_id \
+         WHERE 1 = CONTAINS(POINT('ICRS', g.ra, g.dec), \
+         CIRCLE('ICRS', {ra}, {dec}, {radius_deg})) \
+         AND g.phot_g_mean_mag <= {max_mag} ORDER BY g.phot_g_mean_mag",
+        table = archive.table(),
+        distances = archive.distance_table(),
+    )
+}
+
 /// VizieR's synchronous TAP endpoint.
 const VIZIER_TAP_SYNC: &str = "https://tapvizier.cds.unistra.fr/TAPVizieR/tap/sync";
 
@@ -1359,11 +1380,25 @@ impl SourceDownloader {
         radius_deg: f64,
         max_mag: f32,
     ) -> Result<String> {
-        match self
-            .gaia_distance_cone_csv_from(GaiaArchive::Esa, ra, dec, radius_deg, max_mag)
-            .await
-        {
-            Ok(csv) => Ok(csv),
+        check_cone(ra, dec, radius_deg, max_mag)?;
+        let query = |archive| gaia_distance_query(archive, ra, dec, radius_deg, max_mag);
+        // Each archive's synchronous endpoint answers a cone in seconds; a
+        // queued job can wait many minutes to start. So both archives are
+        // asked directly before either queue.
+        for archive in [GaiaArchive::Esa, GaiaArchive::Gavo] {
+            if let Ok(body) = self.gaia_cone_sync(archive, &query(archive)).await
+                && parse_gaia_distances(&body).is_ok()
+            {
+                return Ok(body);
+            }
+        }
+        let queued = |archive: GaiaArchive| async move {
+            let body = self.gaia_cone_job(archive, query(archive)).await?;
+            parse_gaia_distances(&body)?;
+            Ok::<_, Error>(body)
+        };
+        match queued(GaiaArchive::Esa).await {
+            Ok(body) => Ok(body),
             Err(esa) => {
                 (self.reporter)(SourceEvent::Retry {
                     label: "Gaia distance search on the GAVO mirror".into(),
@@ -1371,9 +1406,7 @@ impl SourceDownloader {
                     delay: Duration::ZERO,
                     error: esa.to_string(),
                 });
-                self.gaia_distance_cone_csv_from(GaiaArchive::Gavo, ra, dec, radius_deg, max_mag)
-                    .await
-                    .map_err(|_| esa)
+                queued(GaiaArchive::Gavo).await.map_err(|_| esa)
             }
         }
     }
@@ -1388,17 +1421,7 @@ impl SourceDownloader {
         max_mag: f32,
     ) -> Result<String> {
         check_cone(ra, dec, radius_deg, max_mag)?;
-        let query = format!(
-            "SELECT g.ra, g.dec, g.pmra, g.pmdec, g.phot_g_mean_mag, g.phot_bp_mean_mag, \
-             g.phot_rp_mean_mag, g.parallax, g.parallax_error, \
-             d.r_med_geo, d.r_lo_geo, d.r_hi_geo \
-             FROM {table} AS g LEFT OUTER JOIN {distances} AS d ON g.source_id = d.source_id \
-             WHERE 1 = CONTAINS(POINT('ICRS', g.ra, g.dec), \
-             CIRCLE('ICRS', {ra}, {dec}, {radius_deg})) \
-             AND g.phot_g_mean_mag <= {max_mag} ORDER BY g.phot_g_mean_mag",
-            table = archive.table(),
-            distances = archive.distance_table(),
-        );
+        let query = gaia_distance_query(archive, ra, dec, radius_deg, max_mag);
         // A cone of a few thousand stars answers in seconds on the
         // synchronous endpoint, while a queued job can wait minutes for the
         // archive to start it. A wide cone the synchronous endpoint times

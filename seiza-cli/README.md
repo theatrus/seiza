@@ -359,6 +359,37 @@ record the first measured trial, and the
 defines a safer path from synthetic degradations and expert before/after pairs
 to a provenance-bearing learned operation.
 
+## Parallax fly-through videos
+
+Fly toward a point of a stretched image, with its stars at their distances:
+
+```
+seiza parallax-video m45.tif --starless m45-starless.tif --stars m45-stars.tif \
+  --output m45.mp4
+```
+
+The starless and stars images are the stretched image split by
+StarXTerminator, with "unscreen" so the stars screen back over the starless
+image. Given only the stretched image, Seiza runs StarXTerminator's `rc-astro`
+CLI itself when it is installed and licensed. Inputs can be PNG, JPEG or TIFF.
+
+The image is plate-solved and its stars matched to Gaia DR3, queried online in
+small cones and cached, for their Bailer-Jones distances; Hipparcos supplies
+the brightest stars Gaia has no parallax for. The starless image is placed at
+the distance of the catalogued object at the focus point, from the optional
+object distance dataset (`seiza setup --object-distances`), or at `--distance`
+parsecs. Stars too faint to match sit at the star field's median
+distance.
+
+The camera flies `--dolly` of the way to the target (default 0.4) toward
+`--focus x,y` (default the image centre), keeping it centred. `--truck` adds
+sideways travel, reduced if the far stars would slide off the image, and
+`--zoom-end` lengthens the lens over the shot. `--seconds`, `--fps` and
+`--size` set the video. Frames go to ffmpeg (libx264 or libopenh264), to PNG
+files with `--encoder png`, or, in a build with the `openh264` feature, to a
+built-in encoder. `--debug-layers DIR` writes the background, the leftover star
+light, and every cut-out star tinted by distance, for checking a result.
+
 ## Image stacking
 
 `seiza stack` calibrates, registers, and incrementally integrates FITS or XISF light

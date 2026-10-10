@@ -83,7 +83,7 @@ impl FfmpegSink {
     /// libopenh264, which builds without the x264 encoder (Fedora's
     /// ffmpeg-free among them) carry.
     pub fn start(executable: &Path, output: &Path, settings: VideoSettings) -> Result<Self> {
-        if settings.width % 2 != 0 || settings.height % 2 != 0 {
+        if !settings.width.is_multiple_of(2) || !settings.height.is_multiple_of(2) {
             return Err(Error::OddSize(settings.width, settings.height));
         }
         let encoders = Command::new(executable)
@@ -242,7 +242,7 @@ mod openh264_sink {
 
     impl OpenH264Sink {
         pub fn start(output: &Path, settings: VideoSettings) -> Result<Self> {
-            if settings.width % 2 != 0 || settings.height % 2 != 0 {
+            if !settings.width.is_multiple_of(2) || !settings.height.is_multiple_of(2) {
                 return Err(Error::OddSize(settings.width, settings.height));
             }
             let config = EncoderConfig::new()
@@ -285,7 +285,7 @@ mod openh264_sink {
         let mut start = None;
         let mut index = 0;
         while index + 3 <= stream.len() {
-            let three = &stream[index..index + 3] == [0, 0, 1];
+            let three = stream[index..index + 3] == [0, 0, 1];
             let four = index + 4 <= stream.len() && stream[index..index + 4] == [0, 0, 0, 1];
             if three || four {
                 if let Some(begin) = start {

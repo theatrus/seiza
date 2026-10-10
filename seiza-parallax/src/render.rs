@@ -479,8 +479,8 @@ mod tests {
                     let r2 = (x as f64 - star.x).powi(2) + (y as f64 - star.y).powi(2);
                     let value = 3.0 * (-r2 / 3.0).exp() as f32;
                     let pixel = &mut star_light.pixels[y * width + x];
-                    for channel in 0..3 {
-                        pixel[channel] += value;
+                    for channel in pixel.iter_mut() {
+                        *channel += value;
                     }
                 }
             }

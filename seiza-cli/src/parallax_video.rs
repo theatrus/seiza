@@ -345,14 +345,14 @@ fn check_shot(args: &ParallaxVideoArgs) -> Result<()> {
     if !(0.0..1.0).contains(&args.dolly) {
         bail!("--dolly must be at least 0 and below 1");
     }
-    if !(args.zoom_end >= 1.0) {
+    if !(1.0..).contains(&args.zoom_end) {
         bail!("--zoom-end must be at least 1");
     }
-    if !(args.seconds > 0.0) || args.fps == 0 {
+    if args.seconds.is_nan() || args.seconds <= 0.0 || args.fps == 0 {
         bail!("--seconds and --fps must be positive");
     }
     if let Some(distance) = args.distance
-        && !(distance > 0.0)
+        && (distance.is_nan() || distance <= 0.0)
     {
         bail!("--distance must be positive");
     }
@@ -622,33 +622,57 @@ fn gaia_field(
     );
     let downloader = seiza_sources::SourceDownloader::new()?;
     let max_mag = args.gaia_max_mag;
-    let bodies = runtime()?
+    // Each cone is kept as it arrives, so a run stopped part way, or one
+    // whose last cone fails, does not fetch the others again.
+    let cone_path = move |&(ra, dec, radius): &(f64, f64, f64)| {
+        format!("gaia-dr3-distances-cone-{ra:.4}{dec:+.4}-r{radius:.4}-g{max_mag}.csv")
+    };
+    let _ = std::fs::create_dir_all(&cache);
+    let mut bodies = Vec::new();
+    let mut missing = Vec::new();
+    for cone in cones {
+        match std::fs::read_to_string(cache.join(cone_path(&cone))) {
+            Ok(csv) if seiza_sources::parse_gaia_distances(&csv).is_ok() => bodies.push(csv),
+            _ => missing.push(cone),
+        }
+    }
+    let cone_cache = cache.clone();
+    let fetched = runtime()?
         .block_on(async move {
-            // A few archive jobs at once; each finishes in seconds where one
-            // wide cone can take the archive a quarter of an hour.
-            let mut pending = cones.into_iter();
+            // A few archive queries at once.
+            let mut pending = missing.into_iter();
             let mut running = tokio::task::JoinSet::new();
-            let mut bodies = Vec::new();
+            let mut fetched = Vec::new();
             loop {
                 while running.len() < 4
-                    && let Some((ra, dec, radius)) = pending.next()
+                    && let Some(cone) = pending.next()
                 {
                     let downloader = downloader.clone();
                     running.spawn(async move {
-                        downloader
+                        let (ra, dec, radius) = cone;
+                        let csv = downloader
                             .gaia_distance_cone_csv(ra, dec, radius, max_mag)
-                            .await
+                            .await;
+                        (cone, csv)
                     });
                 }
                 let Some(done) = running.join_next().await else {
                     break;
                 };
-                bodies.push(done.context("a Gaia query task failed")??);
-                println!("  {} cone(s) fetched", bodies.len());
+                let (cone, csv) = done.context("a Gaia query task failed")?;
+                let csv = csv?;
+                let path = cone_cache.join(cone_path(&cone));
+                let partial = path.with_extension("csv.partial");
+                if std::fs::write(&partial, &csv).is_ok() {
+                    let _ = std::fs::rename(&partial, &path);
+                }
+                fetched.push(csv);
+                println!("  {} cone(s) fetched", fetched.len());
             }
-            anyhow::Ok(bodies)
+            anyhow::Ok(fetched)
         })
         .context("Gaia archive query failed")?;
+    bodies.extend(fetched);
     let csv = merge_csv(&bodies);
     let stars = seiza_sources::parse_gaia_distances(&csv)?;
     if std::fs::create_dir_all(&cache).is_ok() {

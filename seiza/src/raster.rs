@@ -38,11 +38,16 @@ pub struct OrientedRaster {
 }
 
 /// Open a raster file and apply its EXIF orientation.
+///
+/// A local file is the caller's own, so the decoder's default memory limit,
+/// which a large 16-bit TIFF exceeds, does not apply; [`decode_oriented`]
+/// keeps it for bytes from elsewhere.
 pub fn open_oriented(path: &Path) -> Result<OrientedRaster, Error> {
-    let reader = ImageReader::open(path)
+    let mut reader = ImageReader::open(path)
         .map_err(image::ImageError::IoError)?
         .with_guessed_format()
         .map_err(image::ImageError::IoError)?;
+    reader.no_limits();
     oriented(reader)
 }
 
