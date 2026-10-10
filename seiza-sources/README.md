@@ -2,7 +2,9 @@
 
 `seiza-sources` asynchronously acquires the upstream astronomy distributions
 used to build custom Seiza catalogs: Tycho-2, Gaia DR3 TAP queries, OpenNGC,
-selected VizieR catalogs, stellar identifiers, transients, MPC, and JPL SBDB.
+selected VizieR catalogs, stellar identifiers, transients, MPC, JPL SBDB, and
+the VizieR tables and SIMBAD TAP queries behind the object distance file
+(`download_object_distances`).
 The OpenNGC acquisition includes both database CSVs and the hand-drawn contour
 files under `outlines/objects`; the object builder associates outlines only
 through explicit curation mappings.

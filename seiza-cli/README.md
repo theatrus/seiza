@@ -77,6 +77,10 @@ seiza catalog star --data data "HIP 32349"
 seiza catalog star --data data "RR Lyr"
 seiza catalog star --data data "STF 2382 AB"
 seiza catalog star --data data "RR L" --prefix --limit 10
+
+# Distance to an object, from the optional object-distances.bin
+seiza catalog distance --data data "M 42"
+seiza catalog distance --data data "Horsehead Nebula" --format json
 ```
 
 Explicit file paths still work everywhere a directory is shown, for
@@ -230,6 +234,18 @@ alternate IDs. Both object viewport queries and name completion use indices
 embedded in the memory-mapped `objects.bin`; normal open does not decode every
 record or touch every index page. Add `--all-sources` to audit every normalized
 upstream row, preferred facet selection, and source-qualified geometry.
+
+`catalog distance` reads `object-distances.bin`, an optional download that
+gives about 180,000 catalog objects a distance in parsecs: clusters, nebulae,
+supernova remnants, dark clouds and galaxies. Each comes with its range where
+the source gives one, the method, the source and its licence, and the
+publication. An object no source measures may borrow a distance: from the
+galaxy it lies in (a cluster in the Large Magellanic Cloud), from a nebula or
+remnant that contains it (the Veil's filaments), or for a dark cloud from the
+nearest molecular-cloud sightline. The output says which. With no entry at
+all, the command reports the median distance of measured objects of the same
+kind, marked `kind-default`. The file is released under the ODbL 1.0 because
+it is built from SIMBAD.
 
 ## Background extraction
 
@@ -612,6 +628,8 @@ seiza download-data prebuilt --output data \
   --file stars-deep-gaia20.bin --file blind-gaia16.idx
 # The optional Gaia photometry catalog for colour calibration is explicit too.
 seiza download-data prebuilt --output data --file stars-gaia-photometry.bin
+# So are distances to deep-sky objects (or: seiza setup --object-distances).
+seiza download-data prebuilt --output data --file object-distances.bin
 ```
 
 The other `download-data` subcommands acquire upstream source material for
@@ -681,7 +699,22 @@ seiza download-data transients --output raw/transients
 seiza build-data transients --input raw/transients --output transients.bin
 seiza download-data mpc --output raw/minor-bodies
 seiza build-data minor-bodies --input raw/minor-bodies --output minor-bodies.bin
+seiza download-data object-distances --output raw/distances   # resumable
+seiza build-data object-distances --input raw/distances \
+  --objects objects.bin --output object-distances.bin
 ```
+
+`build-data object-distances` keys distances to the stable IDs in the
+`objects.bin` it is given, so rebuild it whenever the object catalog changes.
+When several sources measure an object, the first in this order wins: Hunt &
+Reffert 2024 (clusters, Gaia DR3), Cosmicflows-4 (galaxies), Chornay & Walton
+2021 and Gonzalez-Santamaria et al. 2021 (planetary nebulae), Foster & Brunt
+2015 (HII regions), Ranasinghe & Leahy 2023 (supernova remnants), Zucker et
+al. 2020 (named molecular clouds), the parallax of the star lighting a van den
+Bergh nebula, Harris 1997 (globular clusters), SIMBAD's distance
+measurements, Stanghellini & Haywood 2010 (planetary nebulae), Hilton &
+Lahulla 1995 (Lynds clouds), the WISE HII region catalogue (kinematic), and
+last the redshift of a galaxy (H0 = 75 km/s/Mpc, as Cosmicflows-4 uses).
 
 The optional curation directory is a pinned local checkout; the builder never
 fetches it. Its `curation.json` records repository, commit, and schema version.
