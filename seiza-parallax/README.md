@@ -25,6 +25,9 @@ both, matching stars to Gaia DR3 for their Bailer-Jones distances.
 - **Galaxies:** `lift_object` takes an extended object, such as a galaxy a
   star remover left in the starless image, out onto a sprite of its own at
   its distance, and fills the nebula in behind it from around it.
+- **Dust:** `Dust::from_star_counts` maps the dust's transmission from how
+  few stars show through it; with `Scene::dust` set, far stars, the far star
+  field and lifted galaxies dim as they slide behind thicker dust.
 - **Blending:** layers combine as a screen blend, done as addition of "light"
   `−ln(1 − v)` taken from each pixel's brightest channel, so stars keep their
   hue as they brighten.

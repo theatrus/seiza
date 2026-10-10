@@ -19,12 +19,14 @@
 //! let first = shot.render(&scene, 0).to_display_rgb8();
 //! ```
 
+pub mod dust;
 pub mod encode;
 pub mod lift;
 pub mod light;
 pub mod render;
 pub mod scene;
 
+pub use dust::Dust;
 #[cfg(feature = "openh264")]
 pub use encode::OpenH264Sink;
 pub use encode::{FfmpegSink, FrameSink, PngSequence, VideoSettings};

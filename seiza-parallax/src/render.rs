@@ -13,6 +13,7 @@
 //! point or in a `truck`, slides nearer depths across farther ones, as
 //! from a moving car the near trees race by and the hills barely move.
 
+use crate::dust::Dust;
 use crate::light::{LightImage, Pyramid};
 use crate::scene::{Scene, Sprite};
 use rayon::prelude::*;
@@ -386,8 +387,22 @@ impl Shot {
             &scene.background,
             &view,
             scene.background_distance_pc,
+            None,
         );
-        draw_plane(&mut out, &scene.leftover, &view, scene.leftover_distance_pc);
+        // The leftover star light lies behind the dust when it lies beyond
+        // the background.
+        let behind = scene
+            .dust
+            .as_ref()
+            .filter(|_| scene.leftover_distance_pc > scene.background_distance_pc)
+            .map(|dust| (dust, scene.background_distance_pc));
+        draw_plane(
+            &mut out,
+            &scene.leftover,
+            &view,
+            scene.leftover_distance_pc,
+            behind,
+        );
         draw_sprites(&mut out, scene, &view, self);
         out
     }
@@ -397,11 +412,25 @@ impl Shot {
 const BAND_ROWS: usize = 16;
 
 /// Add the light of the plane `image` at `distance` to `out`.
-fn draw_plane(out: &mut LightImage, image: &Pyramid, view: &View, distance: f64) {
+/// Draw the plane `image` at `distance`, and if `dust` gives the dust and
+/// the distance of the plane it lies on, in front, dim it by the change in
+/// the dust it shows through.
+fn draw_plane(
+    out: &mut LightImage,
+    image: &Pyramid,
+    view: &View,
+    distance: f64,
+    dust: Option<(&Dust, f64)>,
+) {
     // Invert `project` at the plane's distance, where it is affine.
     let Some((x0, y0, scale)) = view.project(view.centre.0, view.centre.1, distance) else {
         return;
     };
+    // And at the dust's.
+    let dust = dust.and_then(|(dust, at)| {
+        view.project(view.centre.0, view.centre.1, at)
+            .map(|front| (dust, front))
+    });
     let (level, level_scale) = image.level_for((1.0 / scale) as f32);
     let width = out.width;
     out.pixels
@@ -411,7 +440,15 @@ fn draw_plane(out: &mut LightImage, image: &Pyramid, view: &View, distance: f64)
             let y = view.centre.1 + (row as f64 - y0) / scale;
             for (column, pixel) in pixels.iter_mut().enumerate() {
                 let x = view.centre.0 + (column as f64 - x0) / scale;
-                let light = Pyramid::sample_level(level, level_scale, x as f32, y as f32);
+                let mut light = Pyramid::sample_level(level, level_scale, x as f32, y as f32);
+                if let Some((dust, (dx0, dy0, dust_scale))) = dust {
+                    let now = (
+                        view.centre.0 + (column as f64 - dx0) / dust_scale,
+                        view.centre.1 + (row as f64 - dy0) / dust_scale,
+                    );
+                    let change = dust.change((x, y), now);
+                    light = light.map(|value| value * change);
+                }
                 for channel in 0..3 {
                     pixel[channel] += light[channel];
                 }
@@ -455,7 +492,15 @@ fn draw_sprites(out: &mut LightImage, scene: &Scene, view: &View, shot: &Shot) {
             }
             let grown = growth.clamp(1.0, shot.growth_limit);
             let size = lens_scale * grown.sqrt();
-            let gain = (grown.powf(shot.brightening) * fade) as f32;
+            // Behind the dust, the change in the dust it shows through.
+            let dimming = match &scene.dust {
+                Some(dust) if sprite.distance_pc > scene.background_distance_pc => {
+                    let now = view.unproject(x, y, scene.background_distance_pc);
+                    dust.change((sprite.x, sprite.y), now)
+                }
+                _ => 1.0,
+            };
+            let gain = (grown.powf(shot.brightening) * fade) as f32 * dimming;
             // Sprite pixel (i, j) sits at image (left + i, top + j).
             let reach_left = (sprite.x - sprite.left as f64 + 1.0) * size;
             let reach_right =

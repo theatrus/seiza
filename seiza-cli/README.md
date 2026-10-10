@@ -400,7 +400,10 @@ libopenh264), to PNG files with `--encoder png`, or, in a build with the
 `openh264` feature, to a built-in encoder. Catalogued galaxies, which a star remover leaves in the starless image, are
 lifted out of it onto the far field, where they hold still while the nebula
 grows past them; the nebula behind is filled in from around each one.
-`--keep-galaxies` leaves them in place. `--debug-layers DIR` writes the background, the leftover star
+`--keep-galaxies` leaves them in place. Dust hides the stars behind it, so
+the star counts map how much light it lets through; whatever lies behind the
+nebula dims as the camera's move slides it behind thicker dust than it was
+photographed through (`--no-dust` turns this off). `--debug-layers DIR` writes the background, the leftover star
 light, and every cut-out star tinted by distance, for checking a result.
 
 ## Image stacking

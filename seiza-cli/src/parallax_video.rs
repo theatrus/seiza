@@ -156,6 +156,11 @@ pub(crate) struct ParallaxVideoArgs {
     /// than lifting them onto the far field where they hold still
     #[arg(long)]
     keep_galaxies: bool,
+    /// Leave what lies behind the nebula as bright as photographed, rather
+    /// than dimming it as it slides behind thicker dust (mapped from how
+    /// few stars show through)
+    #[arg(long)]
+    no_dust: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -351,6 +356,30 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
     scene
         .sprites
         .extend(galaxies.into_iter().map(|(_, sprite)| sprite));
+    if !args.no_dust {
+        // The stars seen through the dust: all but the matched ones in
+        // front of it.
+        let behind: Vec<(f64, f64)> = placed
+            .iter()
+            .filter(|star| star.distance_pc.is_none_or(|pc| pc > distance))
+            .map(|star| (star.x, star.y))
+            .collect();
+        scene.dust = seiza_parallax::Dust::from_star_counts(&behind, width, height);
+        match &scene.dust {
+            Some(dust) => {
+                let (cells, _) = dust.cells();
+                let mut sorted = cells.to_vec();
+                sorted.sort_by(f32::total_cmp);
+                println!(
+                    "dust mapped from {} stars behind it: median transmission {:.0}%, thickest {:.0}%",
+                    behind.len(),
+                    100.0 * sorted[sorted.len() / 2],
+                    100.0 * sorted[0]
+                );
+            }
+            None => println!("too few stars to map the dust; nothing dims behind it"),
+        }
+    }
     if args.max_stars.is_some() {
         println!(
             "the {} brightest stars fly; the rest {}",
@@ -939,7 +968,20 @@ fn write_layers(directory: &Path, scene: &Scene) -> Result<()> {
             }
         }
     }
-    save("sprites.png", &sprites)
+    save("sprites.png", &sprites)?;
+    // The dust's transmission, white where clear.
+    if let Some(dust) = &scene.dust {
+        let (cells, columns) = dust.cells();
+        let rows = cells.len() / columns;
+        let path = directory.join("dust.png");
+        image::GrayImage::from_fn(columns as u32, rows as u32, |x, y| {
+            image::Luma([(255.0 * cells[y as usize * columns + x as usize]).round() as u8])
+        })
+        .save(&path)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+        println!("wrote {}", path.display());
+    }
+    Ok(())
 }
 
 /// The catalogued object at the focus point, its distance and how that

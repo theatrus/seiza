@@ -1,6 +1,7 @@
 //! The layers a fly-through moves: the starless image as a plane at the
 //! target's distance, and every star cut out of the star image at its own.
 
+use crate::dust::Dust;
 use crate::light::{LightImage, Pyramid};
 use rayon::prelude::*;
 
@@ -96,6 +97,11 @@ pub struct Scene {
     /// A distance most sprites lie within, at least the background's: the
     /// far star field a camera move must not uncover the edge of.
     pub far_distance_pc: f64,
+    /// The dust on the background plane, which dims what lies behind it as
+    /// the camera's moves slide it behind thicker dust: `None` to leave
+    /// everything as bright as photographed. [`Scene::new`] leaves it
+    /// `None`.
+    pub dust: Option<Dust>,
 }
 
 impl Scene {
@@ -260,6 +266,7 @@ impl Scene {
             leftover_distance_pc,
             focal_px,
             far_distance_pc,
+            dust: None,
         }
     }
 
