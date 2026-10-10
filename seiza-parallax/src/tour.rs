@@ -224,6 +224,26 @@ pub fn plan(
         };
         (axis(place.0, half.0, width), axis(place.1, half.1, height))
     };
+    // How near to fly to see `target`: near enough that it fills about
+    // three fifths of the frame's shorter side, flying 0.3 to 0.85 of the
+    // way, but nearer still where the image's edge moves the aim in from
+    // it, until its centre stays in the middle four fifths of the frame. A
+    // region larger than the whole view, away from the edges, has no view
+    // of its own: the whole view shows it.
+    let nearness = |target: &Target| {
+        let fill = (target.radius.max(0.01 * diagonal) / 0.6) / half.0.min(half.1);
+        let edge = (target.x.min(width - 1.0 - target.x) / half.0)
+            .min(target.y.min(height - 1.0 - target.y) / half.1)
+            / 0.45;
+        let near = fill.clamp(0.15, 0.7).min(edge).max(0.12);
+        (fill <= 1.0 || near < 0.6).then_some(near)
+    };
+    let targets: Vec<Target> = targets
+        .iter()
+        .filter(|target| nearness(target).is_some())
+        .cloned()
+        .collect();
+    let targets = targets.as_slice();
     let motion = auto.motion.max(0.0);
     let order = route(targets, centre);
     let mut prominent: Vec<usize> = (0..targets.len()).collect();
@@ -243,10 +263,7 @@ pub fn plan(
     let mut here = (centre, 0.0);
     for (step, &index) in order.iter().enumerate() {
         let target = &targets[index];
-        // Near enough that the target fills about three fifths of the
-        // frame's shorter side, flying 0.3 to 0.85 of the way.
-        let fill = (target.radius.max(0.01 * diagonal) / 0.6) / half.0.min(half.1);
-        let near = fill.clamp(0.15, 0.7);
+        let near = nearness(target).expect("kept above");
         let dolly = 1.0 - near;
         let place = aim((target.x, target.y), near);
         // Turns alternate in direction so they do not add up, and vary in
@@ -418,6 +435,42 @@ mod tests {
             names(targets(&placed, (2000, 1600), Some(3))),
             ["NGC 7822", "NGC 7762", "LDN 1267"]
         );
+    }
+
+    #[test]
+    fn a_large_region_is_seen_close_at_an_edge_and_left_to_the_whole_view_inside() {
+        // A frame of 1920 by 1080 shows a 1000 by 800 image's whole width
+        // and 562 pixels of its height, so its half height is 281.
+        let targets = [
+            // Larger than the whole view and on the top edge: a close view
+            // of the part about its centre, which stays in the frame.
+            target("arc", 500.0, 30.0, 500.0, 0.9),
+            // Larger than the whole view and in the middle: the whole view
+            // shows it.
+            target("cloud", 500.0, 400.0, 600.0, 0.8),
+            target("knot", 300.0, 500.0, 30.0, 0.7),
+        ];
+        let planned = plan(&targets, (1000, 800), (1920, 1080), &AutoTour::default());
+        let names: Vec<&str> = planned
+            .iter()
+            .filter_map(|stop| stop.name.as_deref())
+            .collect();
+        assert!(
+            names.contains(&"arc") && names.contains(&"knot"),
+            "{names:?}"
+        );
+        assert!(!names.contains(&"cloud"), "{names:?}");
+        let arc = planned
+            .iter()
+            .find(|stop| stop.name.as_deref() == Some("arc"))
+            .unwrap()
+            .stop;
+        let near = 1.0 - arc.dolly;
+        let (_, y) = arc.focus.unwrap();
+        // The target's centre inside the middle four fifths of the frame's
+        // height there.
+        let half = 1000.0 / 1920.0 * 540.0;
+        assert!((y - 30.0).abs() <= 0.8 * half * near + 1e-6, "{y} {near}");
     }
 
     #[test]
