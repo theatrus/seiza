@@ -402,7 +402,13 @@ reduced if the far stars would slide off the image, and `--zoom-end`
 lengthens the lens over the shot. `--rotate` and `--rotate-end` turn the frame
 about its centre, in degrees anticlockwise, from the first frame to the last;
 every depth turns alike, and the first frame zooms in as far as the turned
-frame needs to stay inside the image. `--seconds`, `--fps` and `--size` set the
+frame needs to stay inside the image. A tour visits several places instead: give two or more `--stop "X,Y
+dolly=D zoom=Z rotate=DEG pan=P travel=S hold=S"` (or `whole` for the image's
+centre), and the camera glides through them in turn, easing to a halt
+where it holds, turning and panning as each stop asks. The first stop is
+the opening view, and the stops' times set the video's length; if a turn
+or pan would show the image's edge, every view zooms in together as far as
+it must. `--seconds`, `--fps` and `--size` set the
 video (`--size` takes `720p`, `1080p`, the default, `1440p` or `4k`, any of
 them with `-portrait` for vertical video, or `WIDTHxHEIGHT`), and `--quality high` draws each frame at twice the size and averages it
 down, blending levels of detail so fine detail neither shimmers nor steps in

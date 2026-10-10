@@ -10,7 +10,7 @@
 use crate::field::{self, FieldSource};
 use crate::lift::Extent;
 use crate::overlay::{self, CustomLabel, Overlay};
-use crate::render::{Easing, Quality, Shot, Start};
+use crate::render::{Easing, Quality, Shot, Start, Stop};
 use crate::scene::{CutOptions, Scene, SmallStars, Star};
 use crate::{FrameSink, LightImage, VideoSettings};
 use image::{Rgb, Rgb32FImage, RgbImage};
@@ -52,6 +52,86 @@ pub enum Error {
     Encode(#[from] crate::encode::Error),
     #[error("stopped before the last frame")]
     Stopped,
+}
+
+/// A stop on a tour, as the options give it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TourStop {
+    /// The image point the camera centres, or the image's centre if
+    /// `None`.
+    pub focus: Option<(f64, f64)>,
+    /// Fraction of the way to the nebula the camera has flown, 0 to below 1.
+    pub dolly: f64,
+    /// The lens's magnification over the opening view's.
+    pub zoom: f64,
+    /// The frame's turn, degrees anticlockwise.
+    pub rotate_deg: f64,
+    /// How much of its way here the camera turns rather than moves, 0 to 1.
+    pub pan: f64,
+    /// Seconds to come here from the stop before, and to stay.
+    pub travel: f64,
+    pub hold: f64,
+}
+
+impl Default for TourStop {
+    fn default() -> Self {
+        Self {
+            focus: None,
+            dolly: 0.0,
+            zoom: 1.0,
+            rotate_deg: 0.0,
+            pan: 0.0,
+            travel: 5.0,
+            hold: 0.0,
+        }
+    }
+}
+
+/// A [`TourStop`] written `X,Y` or `whole` (the image's centre), then any
+/// of `dolly=`, `zoom=`, `rotate=` (degrees), `pan=`, `travel=` and
+/// `hold=` (seconds), separated by spaces: `2700,3400 dolly=0.85
+/// rotate=-20 travel=6 hold=1.5`.
+pub fn parse_stop(text: &str) -> Result<TourStop, String> {
+    let mut parts = text.split_whitespace();
+    let place = parts
+        .next()
+        .ok_or_else(|| "a stop needs a place, X,Y or whole".to_string())?;
+    let mut stop = TourStop {
+        focus: if place.eq_ignore_ascii_case("whole") {
+            None
+        } else {
+            let (x, y) = place
+                .split_once(',')
+                .ok_or_else(|| format!("a stop's place is X,Y or whole; got {place}"))?;
+            let number = |part: &str| {
+                part.trim()
+                    .parse::<f64>()
+                    .map_err(|error| format!("{part}: {error}"))
+            };
+            Some((number(x)?, number(y)?))
+        },
+        ..TourStop::default()
+    };
+    for part in parts {
+        let (key, value) = part
+            .split_once('=')
+            .ok_or_else(|| format!("expected key=value in a stop; got {part}"))?;
+        let value: f64 = value.parse().map_err(|error| format!("{part}: {error}"))?;
+        match key {
+            "dolly" => stop.dolly = value,
+            "zoom" => stop.zoom = value,
+            "rotate" => stop.rotate_deg = value,
+            "pan" => stop.pan = value,
+            "travel" => stop.travel = value,
+            "hold" => stop.hold = value,
+            other => {
+                return Err(format!(
+                    "a stop takes dolly, zoom, rotate, pan, travel and hold; got {other}"
+                ));
+            }
+        }
+    }
+    Ok(stop)
 }
 
 /// Everything about a video but its images and plate solution. The
@@ -119,6 +199,13 @@ pub struct ParallaxOptions {
     /// fades out past this growth.
     pub growth_limit: f64,
     pub fade_from: f64,
+    /// A tour of stops instead of the single move toward `focus`: the
+    /// camera glides through them, easing to a halt where it holds. The
+    /// first is the opening view. The nebula takes the distance of the
+    /// object at `focus` if given, else at the first stop flown in toward. Its length replaces `seconds`, and the
+    /// move's own settings (`start`, `dolly`, `truck`, `pan`, `rotate_deg`,
+    /// `zoom_end`, `easing`) go unused.
+    pub tour: Vec<TourStop>,
     /// Frame size, even sides.
     pub size: (usize, usize),
     pub seconds: f64,
@@ -163,6 +250,7 @@ impl Default for ParallaxOptions {
             quality: Quality::Standard,
             growth_limit: 4.0,
             fade_from: 6.0,
+            tour: Vec::new(),
             size: (1920, 1080),
             seconds: 8.0,
             fps: 30,
@@ -213,12 +301,41 @@ impl ParallaxOptions {
         {
             return invalid("the distance must be positive");
         }
+        if self.tour.len() == 1 {
+            return invalid("a tour needs at least two stops");
+        }
+        for stop in &self.tour {
+            if !(0.0..1.0).contains(&stop.dolly) || !(0.0..=1.0).contains(&stop.pan) {
+                return invalid("a stop's dolly must be from 0 to below 1, and its pan 0 to 1");
+            }
+            if !(stop.zoom.is_finite() && stop.zoom > 0.0) || !stop.rotate_deg.is_finite() {
+                return invalid("a stop's zoom must be positive and its turn a number");
+            }
+            if !(stop.travel >= 0.0 && stop.hold >= 0.0) {
+                return invalid("a stop's travel and hold must be at least 0 seconds");
+            }
+        }
+        if !self.tour.is_empty() && self.seconds() <= 0.0 {
+            return invalid("a tour must take some time");
+        }
         Ok(())
+    }
+
+    /// The video's length, seconds: the tour's, if there is one.
+    pub fn seconds(&self) -> f64 {
+        if self.tour.is_empty() {
+            return self.seconds;
+        }
+        self.tour
+            .iter()
+            .enumerate()
+            .map(|(index, stop)| if index > 0 { stop.travel } else { 0.0 } + stop.hold)
+            .sum()
     }
 
     /// The number of frames the video runs to.
     pub fn frames(&self) -> usize {
-        ((self.seconds * self.fps as f64).round() as usize).max(2)
+        ((self.seconds() * self.fps as f64).round() as usize).max(2)
     }
 }
 
@@ -333,9 +450,15 @@ impl Parallax {
             "{gaia_matches} matched to Gaia, {with_distance} with a distance"
         )));
 
-        let focus = options
-            .focus
-            .unwrap_or(((width as f64 - 1.0) / 2.0, (height as f64 - 1.0) / 2.0));
+        let centre = ((width as f64 - 1.0) / 2.0, (height as f64 - 1.0) / 2.0);
+        // On a tour, the first stop the camera flies in toward stands for
+        // the target whose distance the nebula takes, unless `focus` says.
+        let first_visited = options
+            .tour
+            .iter()
+            .find(|stop| stop.dolly > 0.0)
+            .map(|stop| stop.focus.unwrap_or(centre));
+        let focus = options.focus.or(first_visited).unwrap_or(centre);
         if focus.0 < 0.0 || focus.1 < 0.0 || focus.0 >= width as f64 || focus.1 >= height as f64 {
             return Err(Error::Invalid(format!(
                 "the focus point {focus:?} is outside the {width}x{height} image"
@@ -507,13 +630,38 @@ impl Parallax {
             quality: options.quality,
             growth_limit: options.growth_limit,
             fade_from: options.fade_from,
+            tour: options
+                .tour
+                .iter()
+                .map(|stop| Stop {
+                    focus: stop.focus.unwrap_or(centre),
+                    dolly: stop.dolly,
+                    zoom: stop.zoom,
+                    rotation: stop.rotate_deg.to_radians(),
+                    pan: stop.pan,
+                    travel: stop.travel,
+                    hold: stop.hold,
+                })
+                .collect(),
             ..Shot::default()
         };
+        if !shot.tour.is_empty() {
+            report(Event::Note(&format!(
+                "a tour of {} stops over {:.1} s",
+                shot.tour.len(),
+                options.seconds()
+            )));
+        }
         let (shot, fitted) = shot.fitted(&scene);
         if shot.zoom > options.zoom.max(1.0) {
             report(Event::Note(&format!(
-                "first frame zoomed in to {:.2} so the turned frame stays inside the image",
-                shot.zoom
+                "first frame zoomed in to {:.2} so {} stays inside the image",
+                shot.zoom,
+                if shot.tour.is_empty() {
+                    "the turned frame"
+                } else {
+                    "every view of the tour"
+                }
             )));
         }
         if shot.pan < options.pan {
@@ -529,7 +677,30 @@ impl Parallax {
                 shot.lead
             )));
         }
-        if fitted < 1.0 && options.truck != 0.0 {
+        let zoomed: Vec<String> = shot
+            .tour
+            .iter()
+            .zip(&options.tour)
+            .enumerate()
+            .filter(|(_, (fitted, asked))| fitted.zoom > asked.zoom * 1.001)
+            .map(|(index, (fitted, asked))| {
+                format!("stop {} by {:.2}", index + 1, fitted.zoom / asked.zoom)
+            })
+            .collect();
+        if !zoomed.is_empty() {
+            report(Event::Note(&format!(
+                "zoomed in so every view stays inside the image: {}",
+                zoomed.join(", ")
+            )));
+        }
+        if !shot.tour.is_empty() && fitted < 1.0 && options.tour.iter().any(|stop| stop.pan > 0.0) {
+            report(Event::Note(&format!(
+                "each stop's pan reduced to {:.2} of what it asked so the far stars stay inside \
+                 the image",
+                fitted
+            )));
+        }
+        if shot.tour.is_empty() && fitted < 1.0 && options.truck != 0.0 {
             report(Event::Note(&format!(
                 "truck reduced to {:.4} of the distance so the far stars stay inside the image",
                 options.truck * fitted

@@ -100,6 +100,15 @@ pub(crate) struct ParallaxVideoArgs {
     /// Length of the video, seconds
     #[arg(long, default_value_t = 8.0)]
     seconds: f64,
+    /// A stop on a tour, given in order, two or more: `X,Y` or `whole`
+    /// (the image's centre), then any of `dolly=`, `zoom=`, `rotate=`
+    /// (degrees), `pan=`, `travel=` and `hold=` (seconds), e.g. `--stop
+    /// "2700,3400 dolly=0.85 rotate=-20 pan=0.25 travel=6 hold=1.5"`. The
+    /// camera glides through the stops, easing to a halt where it holds;
+    /// the first is the opening view. A tour sets the video's length and
+    /// replaces --focus's single move
+    #[arg(long = "stop", value_parser = seiza_parallax::parse_stop, allow_hyphen_values = true)]
+    stops: Vec<seiza_parallax::TourStop>,
     /// Frames per second
     #[arg(long, default_value_t = 30)]
     fps: u32,
@@ -343,6 +352,7 @@ fn options(args: &ParallaxVideoArgs) -> ParallaxOptions {
         },
         growth_limit: args.growth_limit,
         fade_from: args.fade_from,
+        tour: args.stops.clone(),
         size: args.size,
         seconds: args.seconds,
         fps: args.fps,

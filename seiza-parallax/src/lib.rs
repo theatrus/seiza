@@ -46,8 +46,8 @@ pub use field::default_gaia_cache;
 pub use lift::{Extent, lift_object};
 pub use light::{LightImage, Pyramid};
 pub use overlay::{CustomLabel, DEFAULT_WATERMARK, parse_color, parse_label};
-pub use pipeline::{Event, Parallax, ParallaxOptions, Summary};
-pub use render::{Easing, Quality, Shot, Start, View};
+pub use pipeline::{Event, Parallax, ParallaxOptions, Summary, TourStop, parse_stop};
+pub use render::{Easing, Quality, Shot, Start, Stop, View};
 pub use scene::{CutOptions, Scene, SmallStars, Sprite, Star};
 pub use seiza_stars::PeakStar;
 

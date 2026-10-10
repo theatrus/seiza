@@ -25,6 +25,9 @@ pub const DEFAULT_DENSITY: f64 = 0.6;
 /// The most prominent objects in view are labelled however low the density.
 const MINIMUM_RANKED: usize = 4;
 
+/// The most "Field within" lines shown at once.
+const MOST_WITHIN: usize = 3;
+
 /// Seconds a mark takes to fade in or out.
 const FADE_SECONDS: f64 = 0.5;
 
@@ -350,8 +353,6 @@ pub(crate) struct Overlay {
     /// its "Field within" caption.
     shown: Vec<Vec<f32>>,
     within: Vec<Vec<f32>>,
-    /// Each mark's line among the captions, the first at the bottom.
-    slots: Vec<Option<usize>>,
 }
 
 impl Overlay {
@@ -380,7 +381,6 @@ impl Overlay {
             widths,
             shown: Vec::new(),
             within: Vec::new(),
-            slots: Vec::new(),
         })
     }
 
@@ -402,20 +402,6 @@ impl Overlay {
         let radius = (FADE_SECONDS * fps / 2.0).round() as usize;
         self.shown = smoothed(&shown, radius);
         self.within = smoothed(&within, radius);
-        // Captions keep their lines, in the order they first appear.
-        let mut first: Vec<(usize, usize)> = (0..self.marks.len())
-            .filter_map(|mark| {
-                self.within
-                    .iter()
-                    .position(|frame| frame[mark] > 0.01)
-                    .map(|at| (at, mark))
-            })
-            .collect();
-        first.sort();
-        self.slots = vec![None; self.marks.len()];
-        for (slot, &(_, mark)) in first.iter().enumerate() {
-            self.slots[mark] = Some(slot);
-        }
     }
 
     /// How much of each mark `view` should show before fading in time, and
@@ -446,6 +432,19 @@ impl Overlay {
                 let field_deg = half_diagonal / scale * self.arcsec_per_px / 3600.0;
                 prominence[index] = seiza::objects::predicted_prominence(object, true, field_deg);
             }
+        }
+        // Deep in a nebula the frame lies within many catalogued regions;
+        // the few smallest say most about where it is.
+        let mut inside: Vec<usize> = (0..count).filter(|&index| within[index] > 0.0).collect();
+        inside.sort_by(|&a, &b| {
+            self.marks[a]
+                .extent
+                .1
+                .total_cmp(&self.marks[b].extent.1)
+                .then(a.cmp(&b))
+        });
+        for &index in inside.iter().skip(MOST_WITHIN) {
+            within[index] = 0.0;
         }
         // The density's share of the ranked objects in view, the most
         // prominent first; the caller's own labels always.
@@ -604,15 +603,21 @@ impl Overlay {
                 self.composite(&mask, canvas, mark.color, alpha);
             }
         }
-        // The objects the camera is inside, a line each.
+        // The objects the camera is inside, a line each, the smallest
+        // nearest the corner.
         if let Some(within) = self.within.get(frame) {
-            for (index, mark) in self.marks.iter().enumerate() {
-                let (alpha, Some(slot)) = (within[index], self.slots[index]) else {
-                    continue;
-                };
-                if alpha < 1.0 / 255.0 {
-                    continue;
-                }
+            let mut lines: Vec<usize> = (0..self.marks.len())
+                .filter(|&index| within[index] >= 1.0 / 255.0)
+                .collect();
+            lines.sort_by(|&a, &b| {
+                self.marks[a]
+                    .extent
+                    .1
+                    .total_cmp(&self.marks[b].extent.1)
+                    .then(a.cmp(&b))
+            });
+            for (slot, &index) in lines.iter().enumerate() {
+                let (alpha, mark) = (within[index], &self.marks[index]);
                 let text = format!("Field within: {}", mark.label);
                 let baseline = height - size - slot as f64 * size * 1.4;
                 self.caption(canvas, (size, baseline), size, &text, ENCOMPASSING, alpha);
@@ -914,11 +919,33 @@ mod tests {
         assert!(last[0] < 0.01, "{last:?}");
         assert!(last[1] < 0.01, "{last:?}");
         assert!(overlay.within[39][1] > 0.9 && overlay.within[0][1] < 0.01);
-        assert_eq!(overlay.slots, vec![None, Some(0)]);
+        assert!(overlay.within.iter().all(|frame| frame[0] == 0.0));
         // And it draws.
         let mut canvas = RgbImage::new(200, 150);
         overlay.draw(0, &shot.view(&scene, 0), &mut canvas);
         assert!(canvas.pixels().any(|pixel| pixel[0] > 128));
+    }
+
+    #[test]
+    fn only_the_three_smallest_regions_around_the_frame_are_named() {
+        let scene = scene();
+        let shot = Shot {
+            focus: (199.5, 149.5),
+            dolly: 0.0,
+            truck: (0.0, 0.0),
+            width: 200,
+            height: 150,
+            frames: 2,
+            ..Shot::default()
+        };
+        let marks: Vec<Mark> = [400.0, 300.0, 600.0, 500.0, 900.0]
+            .iter()
+            .map(|&radius| mark(&format!("r{radius}"), 199.5, 149.5, radius))
+            .collect();
+        let overlay = Overlay::new(marks, None, 1.0, 1.0, (200, 150)).unwrap();
+        let (_, within) = overlay.wanted(&shot, &shot.view(&scene, 0));
+        let named: Vec<bool> = within.iter().map(|&value| value > 0.0).collect();
+        assert_eq!(named, [true, true, false, true, false]);
     }
 
     #[test]

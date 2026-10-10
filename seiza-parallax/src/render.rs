@@ -65,8 +65,45 @@ pub enum Start {
     Whole,
 }
 
-/// A camera move and how it is filmed.
+/// A stop on a tour: where the camera looks, how near it has come, and
+/// how long it takes to come here and stays.
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Stop {
+    /// The point of the background plane at the frame's centre, image
+    /// pixels.
+    pub focus: (f64, f64),
+    /// The fraction of the way to the background plane the camera has
+    /// flown, 0 to below 1.
+    pub dolly: f64,
+    /// The lens's magnification over the opening view's.
+    pub zoom: f64,
+    /// The frame's turn about its centre, radians anticlockwise.
+    pub rotation: f64,
+    /// How much of its way to the focus point the camera turns rather than
+    /// moves, 0 to 1. Turning sweeps the far star field with the nebula.
+    pub pan: f64,
+    /// Seconds to come here from the stop before (unused for the first),
+    /// and to stay here.
+    pub travel: f64,
+    pub hold: f64,
+}
+
+impl Default for Stop {
+    fn default() -> Self {
+        Self {
+            focus: (0.0, 0.0),
+            dolly: 0.0,
+            zoom: 1.0,
+            rotation: 0.0,
+            pan: 0.0,
+            travel: 5.0,
+            hold: 0.0,
+        }
+    }
+}
+
+/// A camera move and how it is filmed.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Shot {
     /// The point of the background plane the camera keeps centred, image
     /// pixels.
@@ -103,6 +140,11 @@ pub struct Shot {
     /// needs more of the image than a square one, so [`Self::fitted`] zooms
     /// the first frame in until every frame fits.
     pub rotation: (f64, f64),
+    /// A tour instead of the single move: the camera glides through the
+    /// stops in turn, the first being the opening view, easing to a halt
+    /// at each stop it holds at. Empty for the single move, which the
+    /// fields above describe; a tour uses only `zoom` of them.
+    pub tour: Vec<Stop>,
     /// Output frame size, pixels.
     pub width: usize,
     pub height: usize,
@@ -134,6 +176,7 @@ impl Default for Shot {
             lead: 1.0,
             pan: 0.0,
             rotation: (0.0, 0.0),
+            tour: Vec::new(),
             width: 1920,
             height: 1080,
             frames: 240,
@@ -333,16 +376,12 @@ impl Shot {
         } else {
             0.0
         };
+        if self.tour.len() >= 2 {
+            return self.tour_view(scene, t);
+        }
         let progress = self.easing.apply(t);
-        let distance = scene.background_distance_pc;
-        let centre = (
-            (scene.width() as f64 - 1.0) / 2.0,
-            (scene.height() as f64 - 1.0) / 2.0,
-        );
         let (opening, footprint) = self.opening(scene.width(), scene.height());
-        let focal_out = scene.focal_px / footprint * self.zoom_end.max(1.0).powf(progress);
         let dolly = self.dolly.clamp(0.0, 0.99);
-        let along = dolly * distance * progress;
         // The background's distance from the camera, as a fraction of its
         // distance from where the image was taken.
         let near = 1.0 - dolly * progress;
@@ -350,34 +389,86 @@ impl Shot {
         // opening view's centre to the focus point, and the focus point's
         // place in the frame closes on the centre in step with the shot's
         // progress (`lead` 1) or, as a straight line from where the image
-        // was taken would have it, mostly at the end (`lead` 0). The lens
-        // keeps the angle that framed the opening view, and the camera moves
-        // sideways to bring that point to the centre, or turns for `pan` of
-        // the way. A truck swings it sideways and back.
+        // was taken would have it, mostly at the end (`lead` 0). A truck
+        // swings the camera sideways and back.
         let lead = self.lead.clamp(0.0, 1.0);
-        let pan = self.pan.clamp(0.0, 1.0);
         let remaining = (1.0 - progress) * (lead + (1.0 - lead) / near);
-        let swing = 4.0 * progress * (1.0 - progress);
-        // Per axis: the camera's sideways place, parsecs, and its lens angle
-        // as image pixels at the image's focal length.
-        let axis = |focus: f64, opening: f64, centre: f64, truck: f64| {
-            let aimed = focus - (focus - opening) * remaining * near;
+        let aimed = |focus: f64, opening: f64| focus - (focus - opening) * remaining * near;
+        let swing = 4.0 * progress * (1.0 - progress) * scene.background_distance_pc;
+        self.place(
+            scene,
+            (opening, footprint),
+            Placement {
+                aimed: (
+                    aimed(self.focus.0, opening.0),
+                    aimed(self.focus.1, opening.1),
+                ),
+                near,
+                pan: self.pan,
+                swing: (self.truck.0 * swing, self.truck.1 * swing),
+                magnification: self.zoom_end.max(1.0).powf(progress),
+                turn: self.rotation.0 + (self.rotation.1 - self.rotation.0) * progress,
+            },
+        )
+    }
+
+    /// The camera `t` of the way through a tour.
+    fn tour_view(&self, scene: &Scene, t: f64) -> View {
+        let first = self.tour[0];
+        let footprint =
+            self.widest_footprint(first.focus, scene.width(), scene.height()) / self.zoom.max(1.0);
+        let [x, y, log_near, log_zoom, turn, pan] = tour_state(&self.tour, t);
+        self.place(
+            scene,
+            (first.focus, footprint),
+            Placement {
+                aimed: (x, y),
+                near: log_near.exp().clamp(0.01, 1.0),
+                pan,
+                swing: (0.0, 0.0),
+                magnification: log_zoom.exp() / first.zoom.max(1e-6),
+                turn,
+            },
+        )
+    }
+
+    /// The camera that frames `placement`, its lens keeping the angle that
+    /// framed the opening view of `footprint` centred on `opening`.
+    fn place(
+        &self,
+        scene: &Scene,
+        (opening, footprint): ((f64, f64), f64),
+        placement: Placement,
+    ) -> View {
+        let distance = scene.background_distance_pc;
+        let centre = (
+            (scene.width() as f64 - 1.0) / 2.0,
+            (scene.height() as f64 - 1.0) / 2.0,
+        );
+        let focal_out = scene.focal_px / footprint * placement.magnification;
+        let near = placement.near;
+        let pan = placement.pan.clamp(0.0, 1.0);
+        // The lens keeps the angle that framed the opening view, and the
+        // camera moves sideways to bring the aimed point to the centre, or
+        // turns for `pan` of the way. Per axis: the camera's sideways
+        // place, parsecs, and its lens angle as image pixels at the image's
+        // focal length.
+        let axis = |aimed: f64, opening: f64, centre: f64, swing: f64| {
             // Where the opening angle meets the background from here, and
             // how far the centre of the frame still has to go.
             let to_go = aimed - (centre + (opening - centre) * near);
-            let across = (1.0 - pan) * to_go * distance / scene.focal_px + truck * distance * swing;
+            let across = (1.0 - pan) * to_go * distance / scene.focal_px + swing;
             let angle = opening - centre + pan * to_go / near;
             (across, angle)
         };
-        let (across_x, angle_x) = axis(self.focus.0, opening.0, centre.0, self.truck.0);
-        let (across_y, angle_y) = axis(self.focus.1, opening.1, centre.1, self.truck.1);
-        let (sin, cos) =
-            (self.rotation.0 + (self.rotation.1 - self.rotation.0) * progress).sin_cos();
+        let (across_x, angle_x) = axis(placement.aimed.0, opening.0, centre.0, placement.swing.0);
+        let (across_y, angle_y) = axis(placement.aimed.1, opening.1, centre.1, placement.swing.1);
+        let (sin, cos) = placement.turn.sin_cos();
         View {
             centre,
             focal_px: scene.focal_px,
             across: (across_x, across_y),
-            along,
+            along: (1.0 - near) * distance,
             focal_out,
             focus_shift: (
                 focal_out * angle_x / scene.focal_px,
@@ -391,8 +482,15 @@ impl Shot {
         }
     }
 
+    /// A tour's length in seconds.
+    pub fn tour_seconds(&self) -> f64 {
+        tour_times(&self.tour)
+            .last()
+            .map_or(0.0, |&(_, leave)| leave)
+    }
+
     /// This shot made to keep every layer's edge out of view, and the
-    /// factor its truck was scaled by. A turning frame's first frame zooms
+    /// factor its truck was scaled by (for a tour, its stops' pan). A turning frame's first frame zooms
     /// in as far as it must. The camera's sideways travel toward
     /// the focus point comes as early as `lead` allows, it turns as much of
     /// the way as `pan` allows, and its truck swings as wide as the image
@@ -421,6 +519,78 @@ impl Shot {
             }
             low
         };
+        // The least zoom from the shot's own that the shot `make` builds
+        // fits at.
+        let least_zoom = |make: &dyn Fn(f64) -> Self| -> f64 {
+            if fits(&make(self.zoom)) {
+                return self.zoom;
+            }
+            let base = self.zoom.max(1.0);
+            let (mut low, mut high) = (base, base * 2.0);
+            while !fits(&make(high)) && high < base * 64.0 {
+                (low, high) = (high, high * 2.0);
+            }
+            for _ in 0..30 {
+                let middle = (low + high) / 2.0;
+                if fits(&make(middle)) {
+                    high = middle;
+                } else {
+                    low = middle;
+                }
+            }
+            high
+        };
+        // A tour keeps its stops, so it is fitted by turning less and
+        // zooming in. Turning toward a stop far to the side from near the
+        // nebula sweeps the far star field off the image, which no zoom
+        // mends, so the stops keep the largest share of their pan that fits
+        // with each stop zoomed in by at most half again. Each stop zooms
+        // only as far as the views about it need, so an opening on the
+        // whole image stays whole.
+        if self.tour.len() >= 2 {
+            let panned = |share: f64| Self {
+                tour: self
+                    .tour
+                    .iter()
+                    .map(|stop| Stop {
+                        pan: stop.pan * share,
+                        ..*stop
+                    })
+                    .collect(),
+                ..self.clone()
+            };
+            let zoomed = |share: f64| self.zoom_stops(scene, &depths, panned(share), 1.5);
+            let share = if zoomed(1.0).is_some() {
+                1.0
+            } else {
+                let (mut low, mut high) = (0.0, 1.0);
+                for _ in 0..20 {
+                    let middle = (low + high) / 2.0;
+                    if zoomed(middle).is_some() {
+                        low = middle;
+                    } else {
+                        high = middle;
+                    }
+                }
+                low
+            };
+            // Past half again even without turning, the whole tour zooms in
+            // together.
+            let fitted = match zoomed(share) {
+                Some(fitted) => fitted,
+                None => {
+                    let zoom = least_zoom(&|zoom| Self {
+                        zoom,
+                        ..panned(share)
+                    });
+                    Self {
+                        zoom,
+                        ..panned(share)
+                    }
+                }
+            };
+            return (fitted, share);
+        }
         // A turned frame reaches past a square one's corners, so the first
         // frame zooms in until flying straight in, turning, fits.
         let straight = |zoom: f64| Self {
@@ -428,25 +598,13 @@ impl Shot {
             lead: 0.0,
             pan: 0.0,
             truck: (0.0, 0.0),
-            ..*self
+            ..self.clone()
         };
-        let mut zoom = self.zoom;
-        if self.rotation != (0.0, 0.0) && !fits(&straight(zoom)) {
-            let base = self.zoom.max(1.0);
-            let (mut low, mut high) = (base, base * 2.0);
-            while !fits(&straight(high)) && high < base * 64.0 {
-                (low, high) = (high, high * 2.0);
-            }
-            for _ in 0..30 {
-                let middle = (low + high) / 2.0;
-                if fits(&straight(middle)) {
-                    high = middle;
-                } else {
-                    low = middle;
-                }
-            }
-            zoom = high;
-        }
+        let zoom = if self.rotation != (0.0, 0.0) {
+            least_zoom(&straight)
+        } else {
+            self.zoom
+        };
         // Then the sideways travel, then turning, then the truck: each
         // takes what room the ones before it leave.
         let lead = largest(&|factor| Self {
@@ -459,7 +617,7 @@ impl Shot {
         };
         let pan = largest(&|factor| Self {
             pan: self.pan * factor,
-            ..led
+            ..led.clone()
         });
         let led = Self {
             pan: self.pan * pan,
@@ -468,7 +626,7 @@ impl Shot {
         };
         let factor = largest(&|factor| Self {
             truck: (self.truck.0 * factor, self.truck.1 * factor),
-            ..led
+            ..led.clone()
         });
         (
             Self {
@@ -477,6 +635,52 @@ impl Shot {
             },
             factor,
         )
+    }
+
+    /// `shot`, a tour, with each stop zoomed in by at most `most` times its
+    /// own zoom, no further than keeps every view inside the image at
+    /// `depths`, or `None` if that is not enough. A view that shows an edge
+    /// zooms in the stop it is at, or the nearer of the two it lies
+    /// between, a little at a time.
+    fn zoom_stops(&self, scene: &Scene, depths: &[f64], mut shot: Self, most: f64) -> Option<Self> {
+        let asked: Vec<f64> = shot.tour.iter().map(|stop| stop.zoom).collect();
+        let times = tour_times(&shot.tour);
+        let total = times.last().map_or(0.0, |&(_, leave)| leave);
+        for _ in 0..400 {
+            let mut bump = vec![false; shot.tour.len()];
+            for frame in 0..shot.frames {
+                if shot.inside(scene, &shot.view(scene, frame), depths) {
+                    continue;
+                }
+                let now = frame as f64 / (shot.frames - 1).max(1) as f64 * total;
+                let next = times
+                    .iter()
+                    .position(|&(arrive, _)| arrive >= now)
+                    .unwrap_or(times.len() - 1);
+                // The stop it is held at, or the nearer of the two it
+                // travels between.
+                let index = if next == 0 || now >= times[next].0 {
+                    next
+                } else if now - times[next - 1].1 < times[next].0 - now {
+                    next - 1
+                } else {
+                    next
+                };
+                bump[index] = true;
+            }
+            if !bump.contains(&true) {
+                return Some(shot);
+            }
+            for (index, stop) in shot.tour.iter_mut().enumerate() {
+                if bump[index] {
+                    if stop.zoom >= asked[index] * most {
+                        return None;
+                    }
+                    stop.zoom = (stop.zoom * 1.02).min(asked[index] * most);
+                }
+            }
+        }
+        None
     }
 
     /// How much of a star drawn at `scale` output pixels per image pixel in
@@ -500,7 +704,7 @@ impl Shot {
                 let finer = Self {
                     width: self.width * 2,
                     height: self.height * 2,
-                    ..*self
+                    ..self.clone()
                 };
                 finer.draw(scene, frame, true).halved()
             }
@@ -538,6 +742,110 @@ impl Shot {
         draw_sprites(&mut out, scene, &view, self);
         out
     }
+}
+
+/// Where a camera is: the background point at the frame's centre, the
+/// background's distance as a fraction of its distance from where the image
+/// was taken, how much of the way to that point it turned, its sideways
+/// swing in parsecs, its lens's magnification over the opening view's, and
+/// the frame's turn, radians anticlockwise.
+#[derive(Clone, Copy, Debug)]
+struct Placement {
+    aimed: (f64, f64),
+    near: f64,
+    pan: f64,
+    swing: (f64, f64),
+    magnification: f64,
+    turn: f64,
+}
+
+/// When the camera reaches each stop of a tour and leaves it, seconds.
+fn tour_times(tour: &[Stop]) -> Vec<(f64, f64)> {
+    let mut times = Vec::with_capacity(tour.len());
+    let mut clock = 0.0;
+    for (index, stop) in tour.iter().enumerate() {
+        if index > 0 {
+            clock += stop.travel.max(0.0);
+        }
+        let arrive = clock;
+        clock += stop.hold.max(0.0);
+        times.push((arrive, clock));
+    }
+    times
+}
+
+/// A stop as numbers that blend smoothly: its focus, the logarithms of the
+/// background's nearness and of the lens's zoom (so a flight in or a zoom
+/// keeps an even pace), its turn and its pan.
+fn stop_state(stop: &Stop) -> [f64; 6] {
+    [
+        stop.focus.0,
+        stop.focus.1,
+        (1.0 - stop.dolly.clamp(0.0, 0.99)).ln(),
+        stop.zoom.max(1e-6).ln(),
+        stop.rotation,
+        stop.pan.clamp(0.0, 1.0),
+    ]
+}
+
+/// The camera's state `t` of the way through `tour`: still at a stop it
+/// holds at, and between stops a smooth curve through them that eases to a
+/// halt at the ends and at each held stop and glides through the others.
+fn tour_state(tour: &[Stop], t: f64) -> [f64; 6] {
+    let times = tour_times(tour);
+    let total = times.last().map_or(0.0, |&(_, leave)| leave);
+    let now = t.clamp(0.0, 1.0) * total;
+    let states: Vec<[f64; 6]> = tour.iter().map(stop_state).collect();
+    let last = tour.len() - 1;
+    // The rate of change through each stop, per second: none at the ends
+    // and where the camera holds, else Catmull-Rom's.
+    let rate = |index: usize| -> [f64; 6] {
+        if index == 0 || index == last || tour[index].hold > 0.0 {
+            return [0.0; 6];
+        }
+        let span = (times[index + 1].0 - times[index - 1].1).max(1e-9);
+        std::array::from_fn(|k| (states[index + 1][k] - states[index - 1][k]) / span)
+    };
+    for index in 0..=last {
+        let (arrive, leave) = times[index];
+        if now <= leave || index == last {
+            if now >= arrive || index == 0 {
+                return states[index];
+            }
+            // On the way here from the stop before.
+            let from = times[index - 1].1;
+            let span = (arrive - from).max(1e-9);
+            let s = ((now - from) / span).clamp(0.0, 1.0);
+            // The turn and the pan need room the camera only has nearer
+            // the nebula, so flying in they begin slowly and catch up, and
+            // flying out they finish early.
+            let (before, after) = (states[index - 1][2], states[index][2]);
+            let late = if after < before {
+                s * s
+            } else if after > before {
+                1.0 - (1.0 - s) * (1.0 - s)
+            } else {
+                s
+            };
+            let hermite = |s: f64| {
+                (
+                    2.0 * s.powi(3) - 3.0 * s * s + 1.0,
+                    s.powi(3) - 2.0 * s * s + s,
+                    -2.0 * s.powi(3) + 3.0 * s * s,
+                    s.powi(3) - s * s,
+                )
+            };
+            let (start, end) = (rate(index - 1), rate(index));
+            return std::array::from_fn(|k| {
+                let (h00, h10, h01, h11) = hermite(if k >= 4 { late } else { s });
+                h00 * states[index - 1][k]
+                    + h10 * span * start[k]
+                    + h01 * states[index][k]
+                    + h11 * span * end[k]
+            });
+        }
+    }
+    states[last]
 }
 
 /// Rows each parallel band of the frame covers.
@@ -1064,7 +1372,7 @@ mod tests {
         };
         let high = Shot {
             quality: Quality::High,
-            ..shot
+            ..shot.clone()
         };
         for frame in 0..3 {
             let (standard, fine) = (shot.render(&scene, frame), high.render(&scene, frame));
@@ -1255,7 +1563,7 @@ mod tests {
         // the image.
         let wider = Shot {
             zoom: fitted.zoom * 0.99,
-            ..fitted
+            ..fitted.clone()
         };
         assert!(!(0..wider.frames).all(|frame| wider.inside(
             &scene,
@@ -1265,7 +1573,7 @@ mod tests {
         // An unturned shot is left as it was.
         let still = Shot {
             rotation: (0.0, 0.0),
-            ..shot
+            ..shot.clone()
         };
         assert_eq!(still.fitted(&scene).0.zoom, 1.0);
     }
@@ -1288,7 +1596,11 @@ mod tests {
         let (first, last) = (shot.view(&scene, 0), shot.view(&scene, 9));
         // The lens turns toward the focus point, and the camera moves less.
         assert!(angle(&last) > angle(&first));
-        let unpanned = Shot { pan: 0.0, ..shot }.view(&scene, 9);
+        let unpanned = Shot {
+            pan: 0.0,
+            ..shot.clone()
+        }
+        .view(&scene, 9);
         assert!(last.across.0.abs() < unpanned.across.0.abs());
         let (x, y, _) = last.project(320.0, 60.0, 400.0).unwrap();
         assert!(
@@ -1450,7 +1762,7 @@ mod tests {
         }
         let gentle = Shot {
             truck: (0.0001, 0.0),
-            ..shot
+            ..shot.clone()
         };
         assert_eq!(gentle.fitted(&scene).1, 1.0);
     }
@@ -1533,5 +1845,156 @@ mod edge_tests {
             }
         }
         assert!(outside.is_empty(), "{outside:?}");
+    }
+}
+
+#[cfg(test)]
+mod tour_tests {
+    use super::*;
+    use crate::scene::CutOptions;
+
+    fn scene() -> Scene {
+        let image = LightImage::new(600, 400);
+        Scene::new(
+            &image,
+            &image,
+            &[],
+            400.0,
+            1500.0,
+            2000.0,
+            &CutOptions::default(),
+        )
+    }
+
+    fn tour() -> Shot {
+        Shot {
+            tour: vec![
+                Stop {
+                    focus: (299.5, 199.5),
+                    hold: 1.0,
+                    ..Stop::default()
+                },
+                Stop {
+                    focus: (200.0, 150.0),
+                    dolly: 0.6,
+                    rotation: 0.3,
+                    pan: 0.2,
+                    travel: 3.0,
+                    hold: 1.0,
+                    ..Stop::default()
+                },
+                Stop {
+                    focus: (420.0, 260.0),
+                    dolly: 0.4,
+                    zoom: 1.5,
+                    rotation: -0.2,
+                    travel: 2.0,
+                    ..Stop::default()
+                },
+                Stop {
+                    focus: (299.5, 199.5),
+                    travel: 3.0,
+                    ..Stop::default()
+                },
+            ],
+            width: 300,
+            height: 200,
+            // Ten seconds at ten frames a second, a frame on each tenth.
+            frames: 101,
+            ..Shot::default()
+        }
+    }
+
+    #[test]
+    fn a_tour_arrives_at_each_stop_framed_as_asked() {
+        let scene = scene();
+        let shot = tour();
+        assert_eq!(shot.tour_seconds(), 10.0);
+        // Frame 10k is k/10 of the way, so second k.
+        for (frame, stop) in [(0, 0), (40, 1), (70, 2), (100, 3)] {
+            let view = shot.view(&scene, frame);
+            let stop = shot.tour[stop];
+            let (x, y, _) = view.project(stop.focus.0, stop.focus.1, 400.0).unwrap();
+            assert!(
+                (x - 149.5).abs() < 1e-6 && (y - 99.5).abs() < 1e-6,
+                "frame {frame}: ({x}, {y})"
+            );
+            assert!((view.turn() - stop.rotation).abs() < 1e-9, "frame {frame}");
+            assert!(
+                (view.along - stop.dolly * 400.0).abs() < 1e-6,
+                "frame {frame}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tour_holds_still_and_moves_smoothly_between_stops() {
+        let scene = scene();
+        let shot = tour();
+        // Held at the second stop from second 4 to 5.
+        let (a, b) = (shot.view(&scene, 40), shot.view(&scene, 50));
+        assert_eq!(
+            a.project(100.0, 100.0, 900.0),
+            b.project(100.0, 100.0, 900.0)
+        );
+        // No jumps: a point's place changes by a bounded step each frame.
+        let place = |frame| {
+            shot.view(&scene, frame)
+                .project(299.5, 199.5, 400.0)
+                .unwrap()
+        };
+        let steps: Vec<f64> = (1..=100)
+            .map(|frame| {
+                let (p, q) = (place(frame - 1), place(frame));
+                (q.0 - p.0).hypot(q.1 - p.1)
+            })
+            .collect();
+        let biggest = steps.iter().cloned().fold(0.0, f64::max);
+        for pair in steps.windows(2) {
+            assert!(
+                (pair[1] - pair[0]).abs() <= biggest * 0.35 + 1e-9,
+                "a jerk: {pair:?} of at most {biggest}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tour_that_would_show_an_edge_zooms_in_until_it_does_not() {
+        let scene = scene();
+        let shot = tour();
+        let depths = shot.guarded_depths(&scene);
+        let fits = |shot: &Shot| {
+            (0..shot.frames).all(|frame| shot.inside(&scene, &shot.view(&scene, frame), &depths))
+        };
+        assert!(!fits(&shot), "the turning and panning tour shows an edge");
+        let (fitted, share) = shot.fitted(&scene);
+        assert!(fits(&fitted));
+        for (fitted, stop) in fitted.tour.iter().zip(&shot.tour) {
+            assert_eq!(fitted.focus, stop.focus);
+            assert!(fitted.zoom >= stop.zoom && fitted.zoom <= stop.zoom * 1.5 + 1e-9);
+            assert!((fitted.pan - stop.pan * share).abs() < 1e-12);
+        }
+        // Only the stops whose views need it zoom in: the opening, on the
+        // whole image, stays as it was.
+        assert_eq!(fitted.zoom, shot.zoom);
+        assert_eq!(fitted.tour[0].zoom, 1.0);
+        assert!(
+            fitted
+                .tour
+                .iter()
+                .zip(&shot.tour)
+                .any(|(a, b)| a.zoom > b.zoom)
+        );
+        // Turning hard toward a stop at the image's edge from near the
+        // nebula cannot fit at any zoom; the pan gives way.
+        let mut hard = tour();
+        hard.tour[1] = Stop {
+            focus: (300.0, 30.0),
+            dolly: 0.8,
+            pan: 1.0,
+            ..hard.tour[1]
+        };
+        let (fitted, share) = hard.fitted(&scene);
+        assert!(share < 1.0 && fits(&fitted), "{share} {}", fitted.zoom);
     }
 }
