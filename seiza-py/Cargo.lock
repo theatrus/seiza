@@ -1605,7 +1605,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "seiza"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "chrono",
  "directories",
@@ -1658,7 +1658,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-download"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-compression",
  "directories",
@@ -1701,7 +1701,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-parallax"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ab_glyph",
  "image",
@@ -1717,7 +1717,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-py"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "image",
  "numpy",
@@ -1740,7 +1740,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-satellites"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "directories",
  "fs2",
@@ -1757,7 +1757,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-sources"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "flate2",
  "futures-util",
@@ -1769,7 +1769,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-stacking"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "multiversion",
  "postcard",
@@ -1792,7 +1792,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-stars"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "nalgebra",
  "rayon",
