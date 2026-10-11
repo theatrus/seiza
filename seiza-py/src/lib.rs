@@ -8,6 +8,7 @@ mod color;
 mod color_calibration;
 mod deconvolution;
 mod imgproc;
+mod parallax;
 mod rc_astro;
 mod satellites;
 mod stacking;
@@ -650,12 +651,13 @@ fn solve_blind(
 
 fn dataset_by_file_name(name: &str) -> PyResult<seiza::downloads::Dataset> {
     use seiza::downloads::Dataset;
-    const ALL: [Dataset; 11] = [
+    const ALL: [Dataset; 12] = [
         Dataset::BlindGaia16,
         Dataset::GaiaPhotometry,
         Dataset::MinorBodies,
         Dataset::ObjectDistances,
         Dataset::Objects,
+        Dataset::StarDistances,
         Dataset::StarsDeepGaia17,
         Dataset::StarsDeepGaia20,
         Dataset::StarsGaia,
@@ -809,6 +811,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     stacking::register(m)?;
     stars::register(m)?;
     rc_astro::register(m)?;
+    parallax::register(m)?;
     calibration::register(m)?;
     stretch::register(m)?;
     m.add("SolveError", m.py().get_type::<SolveError>())?;

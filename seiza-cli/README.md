@@ -359,6 +359,114 @@ record the first measured trial, and the
 defines a safer path from synthetic degradations and expert before/after pairs
 to a provenance-bearing learned operation.
 
+## Parallax fly-through videos
+
+Fly toward a point of a stretched image, with its stars at their distances:
+
+```
+seiza parallax-video m45.tif --starless m45-starless.tif --stars m45-stars.tif \
+  --output m45.mp4
+```
+
+The starless and stars images are the stretched image split by
+StarXTerminator, with "unscreen" so the stars screen back over the starless
+image. Given only the stretched image, Seiza runs StarXTerminator's `rc-astro`
+CLI itself when it is installed and licensed. Inputs can be PNG, JPEG or TIFF,
+but 16-bit TIFF or PNG gives the best video: at 8 bits a bright star's core
+flattens, which can misplace it so it loses its distance, and smooth nebula
+bands as the camera nears it. Seiza warns when an image has only 8 bits a
+channel.
+
+The image is plate-solved and its stars matched to Gaia DR3 for their
+Bailer-Jones distances; Hipparcos supplies the brightest stars Gaia has no
+parallax for. Both come from the optional star distance dataset (`seiza setup
+--star-distances`, every Gaia star to G 16), or are queried online in small
+cones and cached when it is not installed. To build that dataset, `seiza
+download-data star-distances` fetches the sky in small HEALPix tiles and
+`seiza build-data star-distances` packs them. The starless image is placed at
+the distance of the catalogued object at `--distance-focus x,y` (default
+`--focus`, the first tour stop flown in toward, or an automatic tour's best
+target), from the optional object distance dataset (`seiza setup --object-distances`), or at `--distance`
+parsecs. Stars too faint to match sit at the star field's median
+distance. Only the distance focus sets the scene's depth, so moving the
+camera's destination never moves the nebula.
+
+The camera flies `--dolly` of the way to the target (default 0.4) toward
+`--focus x,y` (default the image centre). It never turns: every change of view
+comes from moving it, so near stars slide across far ones as they would.
+`--start focus` (the default) opens on the widest view centred on the focus
+point and flies straight at it; `--start whole` opens on the whole image and
+moves sideways as it flies in, until the focus point is ahead. `--pan F` has
+it turn for that fraction of the way instead, which sweeps the far star field
+with the nebula. `--truck`
+swings the camera sideways and back (`--truck-angle` sets the direction),
+reduced if the far stars would slide off the image, and `--zoom-end`
+lengthens the lens over the shot. `--rotate` and `--rotate-end` turn the frame
+about its centre, in degrees anticlockwise, from the first frame to the last;
+every depth turns alike, and the first frame zooms in as far as the turned
+frame needs to stay inside the image. A tour visits several places instead: give two or more `--stop "X,Y
+dolly=D zoom=Z rotate=DEG pan=P travel=S hold=S"` (or `whole` for the image's
+centre), and the camera glides through them in turn, easing to a halt
+where it holds, turning and panning as each stop asks. The first stop is
+the opening view, and the stops' times set the video's length; if a turn
+or pan would show the image's edge, every view zooms in together as far as
+it must. The camera never quite stops: it moves on through a stop it holds
+at at a fifth of its pace between stops (`--tour-glide`, 0 to come to rest).
+A stop's `spin=DEG` turns the frame while it holds there, and `push=P` flies
+on in by that share of the remaining way, which with a spin turns the near
+stars in a spiral past the far ones. The last stop's hold is a final drift
+that slows to rest. `--loop` ends the tour where it began instead, adding a
+last stop at the first's view unless the tour ends there, so the last frame
+leads into the first and the video loops. A stop's `title="TEXT"` names it,
+and `--tour-titles` shows each title low in the frame while the camera
+drifts through its stop, fading in and out. `--auto-tour[=N]` plans a tour itself from the catalogued objects
+in the field: every one worth a visit (the well-known catalogues, and
+broad regions that are large, bright or named), up to twelve, or the N
+most worth it, visited in a short round
+from the whole image and back to a final drift three times as long, each framed to its size, with turns that
+alternate in direction and a little pan; a long way between two targets
+pulls back on the way. `--tour-hold` sets the seconds at each target and
+`--tour-motion` how much it turns and pans (0 for none, 2 for twice the
+default). To edit a planned tour first, `--plan-tour FILE` writes the plan,
+one `--stop` a line, each target's titled with its name, and a `focus
+X,Y` line for the distance focus, and stops; remove, move or change lines,
+then render it with `--tour-file FILE`. `--seconds`, `--fps` and `--size` set the
+video (`--size` takes `720p`, `1080p`, the default, `1440p` or `4k`, any of
+them with `-portrait` for vertical video, or `WIDTHxHEIGHT`), and `--quality high` draws each frame at twice the size and averages it
+down, blending levels of detail so fine detail neither shimmers nor steps in
+sharpness as the camera moves, for about four times the rendering time. A deep image holds so many faint stars that, each moving on its own,
+they crowd the view: `--max-stars N` lets only the N brightest fly, and
+`--small-stars` drops the rest (`drop`, the default) or keeps them on the
+distant star field's plane (`field`). Frames go to ffmpeg (H.264 with libx264 or
+libopenh264, or with `--codec hevc` HEVC with libx265, about a fifth smaller at the same quality but slower to encode), in MP4, MOV or Matroska as `-o`'s extension says, to PNG files with `--encoder png`, or, in a build with the
+`openh264` feature, to a built-in encoder. Catalogued galaxies, which a star remover leaves in the starless image, are
+lifted out of it onto the far field, where they hold still while the nebula
+grows past them; the nebula behind is filled in from around each one.
+`--keep-galaxies` leaves them in place. Dust hides the stars behind it, so
+the star counts map how much light it lets through, and a patch of the
+starless image darker than its surroundings and short of stars marks a
+globule thick enough to black out everything; whatever lies behind the
+nebula dims as the camera's move slides it behind thicker dust than it was
+photographed through. `--dust-opacity` (default 3) darkens or lightens the
+dust, and `--no-dust` turns this off. `--debug-layers DIR` writes the background, the leftover star
+light, and every cut-out star tinted by distance, for checking a result.
+
+`--overlay` labels the catalogued objects in the field the way Seiza's image
+overlays do, with the same colours, names, outlines and ranking. Each label
+sits at the depth of the layer that shows its object: the nebula's plane, a
+named star's own distance, or the far field for a lifted galaxy, so it moves
+with what it marks. Labels fade in and out rather than popping: as they near
+the frame's edge, as a star the camera passes fades, and as smaller objects
+take or lose their share of the view. `--overlay-density` (default 0.6) sets
+that share. Once the camera is inside an object, its name moves to a "Field
+within" line in the corner. `--label 'X,Y:TEXT'` adds a label of your own at
+image pixel X,Y on the nebula's plane, and `--label 'X,Y,R:TEXT'` circles R
+pixels about it as well; repeat it for more, and set their colour with
+`--label-color '#RRGGBB'`. `--watermark` writes "Rendered with seiza.fyi" in
+the bottom-right corner, or `--watermark='TEXT'` your own line. Labels,
+titles and the watermark are drawn in Inter, which holds Latin and Greek
+letters; others are left blank, with a warning.
+
 ## Image stacking
 
 `seiza stack` calibrates, registers, and incrementally integrates FITS or XISF light

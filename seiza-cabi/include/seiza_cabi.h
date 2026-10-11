@@ -36,10 +36,17 @@
  *   - SeizaStackExportSnapshot* returned by
  *     seiza_live_stacker_export_snapshot
  *       -> release with seiza_stack_export_snapshot_free().
+ *   - SeizaParallax* returned by seiza_parallax_prepare_json or
+ *     seiza_parallax_reconfigure_json
+ *       -> release with seiza_parallax_free() once no call using it runs.
+ *          Videos reconfigured from one preparation share its scene, which
+ *          lives until the last of them is freed; free them in any order.
  *   - char* returned by seiza_catalog_status_json, seiza_solve_image_json,
  *     seiza_probe_frame_json, seiza_calibration_plan_json,
  *     seiza_calibration_build_master_json, seiza_live_stacker_state_json, and
- *     seiza_live_stacker_push_*_json, plus any char* stored into an
+ *     seiza_live_stacker_push_*_json, seiza_parallax_summary_json,
+ *     seiza_parallax_plan_tour_json, plus any
+ *     char* stored into an
  *     `error_out` argument on failure
  *       -> release with seiza_string_free().
  *
@@ -60,6 +67,8 @@
  *   - const char* from seiza_core_version is static and is never freed.
  *   - the `json` argument to a SeizaCatalogSetupProgressCallback is valid only
  *     for the duration of that one callback; copy it if you need it afterward.
+ *   - the pixels a SeizaParallaxFrameCallback receives, and the JSON a
+ *     SeizaParallaxEventCallback receives, are valid only for that one call.
  *
  * Convention: a non-const `char*` return transfers ownership (free it); a
  * `const` return is borrowed (do not free).
@@ -159,6 +168,23 @@
 #define SEIZA_TOLERANCE_HAS_EXPOSURE_FRACTION (1 << 6)
 
 /*
+ Frame pixels as 3 bytes each, red, green, blue.
+ */
+#define SEIZA_PIXEL_FORMAT_RGB8 0
+
+/*
+ Frame pixels as 4 bytes each, red, green, blue and an opaque alpha.
+ */
+#define SEIZA_PIXEL_FORMAT_RGBA8 1
+
+/*
+ Frame pixels as 4 bytes each, blue, green, red and an opaque alpha: the
+ order of Core Video's `kCVPixelFormatType_32BGRA`, Direct2D and Media
+ Foundation's RGB32.
+ */
+#define SEIZA_PIXEL_FORMAT_BGRA8 2
+
+/*
  An opaque fitted background model. Release it with
  [`seiza_background_model_free`]. Its diagnostics string is borrowed and
  remains valid until the model is freed.
@@ -185,6 +211,15 @@ typedef struct SeizaDrizzleResult SeizaDrizzleResult;
  [`seiza_live_stacker_finish`].
  */
 typedef struct SeizaLiveStacker SeizaLiveStacker;
+
+/*
+ An opaque prepared parallax video. Release it with
+ [`seiza_parallax_free`]. Its frames may be drawn from several threads at
+ once; do not free it while any call using it is running. Videos made
+ from it by [`seiza_parallax_reconfigure_json`] share its prepared scene,
+ which lives until the last of them is freed.
+ */
+typedef struct SeizaParallax SeizaParallax;
 
 /*
  An opaque, owned rendered image. C sees only a pointer; release it with
@@ -378,6 +413,34 @@ typedef struct {
  pointer. Called on the thread that made the call.
  */
 typedef void (*SeizaRcAstroProgressCallback)(float, void*);
+
+/*
+ Progress for the parallax functions: one event as JSON, valid only for
+ the call, plus the caller's context pointer. Events are
+ `{"kind":"note","message":...}` for a step done or a choice made,
+ `{"kind":"warning","message":...}` for something the video goes on
+ without, `{"kind":"split","fraction":...}` as StarXTerminator works, and
+ `{"kind":"frame","done":...,"total":...}` as frames are drawn. Called on
+ the thread that made the call.
+ */
+typedef void (*SeizaParallaxEventCallback)(const char*, void*);
+
+/*
+ One frame for [`seiza_parallax_render_frames`]: its pixels in the
+ requested format, `stride` bytes a row, borrowed for the call only;
+ its width and height; its index and the number of frames; its time in
+ seconds from the start; and the caller's context. Return 0 to go on,
+ anything else to stop the video. Called on the thread that made the
+ call, frames in order.
+ */
+typedef int32_t (*SeizaParallaxFrameCallback)(const uint8_t*,
+                                              size_t,
+                                              uint32_t,
+                                              uint32_t,
+                                              uint32_t,
+                                              uint32_t,
+                                              double,
+                                              void*);
 
 #ifdef __cplusplus
 extern "C" {
@@ -1989,6 +2052,244 @@ char *seiza_rc_astro_process_file_json(const char *request_json,
                                        SeizaRcAstroProgressCallback progress,
                                        void *context,
                                        char **error_out);
+
+/*
+ Prepare a parallax video from a JSON request (see the fields below) and
+ return it, released with [`seiza_parallax_free`], or null with
+ `error_out` set.
+
+ The request gives either `image` (a stretched PNG, JPEG or TIFF), which
+ StarXTerminator splits through the `rc-astro` CLI, or `starless` and
+ `stars` (the split, with the stars unscreened), plus `image` to solve
+ when it differs from `stars`; `rcAstroExecutable` and `rcAstroHost`
+ point at the `rc-astro` CLI and its host when they are not the
+ defaults. Without `wcs` (`{crval, crpix, cd, sip}`
+ as `seiza_solve_image_json` returns it) the image is blind-solved
+ against the catalogs in `catalogDirectory`, between
+ `minimumScaleArcsecPerPixel` and `maximumScaleArcsecPerPixel` (0.1 and
+ 1000 if absent). The other fields are `seiza parallax-video`'s options
+ in camelCase: `focus` `[x, y]` (where the camera flies), `distanceParsecs`,
+ `distanceFocus` `[x, y]` (where the nebula's distance is measured; by
+ default the camera's destination), `unmatchedDistanceParsecs`, `objects`, `objectDistances`,
+ `starDistances`, `gaiaMaxMagnitude`, `gaiaCache`, `online`, `maxStars`,
+ `smallStars` ("drop", "field"), `keepGalaxies`, `dust`, `dustOpacity`,
+ `start` ("focus", "whole"), `dolly`, `truck`, `truckAngleDegrees`,
+ `pan`, `zoom`, `zoomEnd`, `rotateDegrees` `[first, last]`, `easing`
+ ("inOut", "linear"), `quality` ("standard", "high"), `growthLimit`,
+ `fadeFrom`, `tour` (stops `[{focus, dolly, zoom, rotateDegrees, pan,
+ travel, hold, spinDegrees, push, title}]`, gliding through held stops
+ at `tourGlide` of the pace between them, the first the opening view and
+ the last's hold a final drift that slows to rest, which replace the
+ single move and set the length; [`seiza_parallax_plan_tour_json`] plans
+ one), `autoTour` (`{targets, hold, motion}`: plan a tour of the
+ catalogued objects and render it), `tourTitles` (show each stop's
+ title low in the frame while the camera drifts through it, fading in
+ and out), `tourLoop` (end where the tour began, adding a last stop at
+ the first's view unless it ends there, so the last frame leads into the
+ first), `size` ("720p", "1080p", "1440p", "4k", each with
+ "-portrait", or "WIDTHxHEIGHT"), `seconds`, `fps`, `overlay`,
+ `overlayDensity`, `labels` (`[{x, y, radius, text}]`), `labelColor`
+ ("#RRGGBB") and `watermark` (true, or the text). An unknown field is an
+ error; a null field takes its default.
+
+ Stars' distances come from the star distance file when installed, else
+ from the Gaia and VizieR archives unless `online` is false. `cancel`
+ stops the preparation, StarXTerminator's split included, between steps
+ and while the camera is fitted; it then returns null with an error
+ saying it stopped (check the signal to tell a cancel from a failure).
+ `events` (nullable) hears each step on the calling thread, with
+ `context` passed through.
+
+ # Safety
+
+ `request_json` must be a NUL-terminated UTF-8 string. `cancel` must be
+ null or a live [`SeizaCancelSignal`] retained until this call returns.
+ When non-null, `error_out` must point to writable storage for one
+ pointer.
+ */
+SeizaParallax *seiza_parallax_prepare_json(const char *request_json,
+                                           const SeizaCancelSignal *cancel,
+                                           SeizaParallaxEventCallback events,
+                                           void *context,
+                                           char **error_out);
+
+/*
+ Plan a tour of the catalogued objects in an image, for the caller to
+ edit before making the video. The request is
+ [`seiza_parallax_prepare_json`]'s: the image (`image`, else `stars` or
+ `starless`) gives the size, and is blind-solved without `wcs`; `size`
+ is the video's frame; `objects` or `catalogDirectory` the object
+ catalog; and `autoTour` (`{targets, hold, motion}`, each optional) how
+ to plan. Returns JSON, released with `seiza_string_free`:
+ `{"focus": [x, y], "focusName", "seconds", "tour": [{name, focus,
+ dolly, zoom, rotateDegrees, pan, travel, hold, spinDegrees, push,
+ title}]}`, each target's stop titled with its name. Its `tour`, with any
+ stops or titles dropped, moved or changed, goes back into a prepare
+ request as it is, and its `focus` as `distanceFocus`. Null with `error_out` set on failure; `events`
+ (nullable) hears the solve.
+
+ # Safety
+
+ `request_json` must be a NUL-terminated UTF-8 string. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_parallax_plan_tour_json(const char *request_json,
+                                    SeizaParallaxEventCallback events,
+                                    void *context,
+                                    char **error_out);
+
+/*
+ A new video of the same prepared scene, filmed as `settings_json`
+ asks, released with [`seiza_parallax_free`]; null with `error_out` set
+ on failure, and when `cancel` stopped it.
+
+ `settings_json` is a complete set of the video's settings, as in
+ [`seiza_parallax_prepare_json`] but for the scene's: the single move
+ (`focus`, `start`, `dolly`, `truck`, `truckAngleDegrees`, `pan`, `zoom`,
+ `zoomEnd`, `rotateDegrees`, `easing`), a tour (`tour`, `autoTour`,
+ `tourGlide`, `tourTitles`, `tourLoop`), the output (`size`, `seconds`, `fps`, `quality`,
+ `growthLimit`, `fadeFrom`) and the labels (`overlay`, `overlayDensity`,
+ `labels`, `labelColor`, `watermark`). Fields left out take their
+ defaults, not the first video's. Turns are taken as given, unwrapped:
+ `rotateDegrees` [0, 360] turns once anticlockwise and [0, -360] once
+ clockwise, and a stop's `rotateDegrees` likewise. A field that would
+ change the scene (the images, plate solution, catalogs, distances,
+ `distanceFocus`, star placement, galaxies or dust) is refused: those
+ need a new preparation. The camera's `focus` only moves the camera; the
+ nebula keeps the depth it was prepared at.
+
+ Nothing of the scene is prepared again: the image is not reloaded,
+ split or solved, the stars are not found again and their distances not
+ looked up. The camera is fitted to the scene anew, and
+ [`seiza_parallax_summary_json`] on the new video gives its frame count,
+ size and the fit's adjustments. The catalogued objects' labels are read
+ once for every video of the scene.
+
+ Ownership: the new video and `video` share the prepared scene, which
+ lives until the last video using it is freed; free each with
+ [`seiza_parallax_free`], in any order. `video` is not changed: it may
+ keep drawing frames on other threads while this runs and after, and
+ both videos may draw frames at once. `cancel` stops the fit and the
+ label planning; `events` (nullable) hears each step on the calling
+ thread, with `context` passed through.
+
+ # Safety
+
+ `video` must be a live pointer from [`seiza_parallax_prepare_json`] or
+ this function, kept alive until this call returns. `settings_json` must
+ be a NUL-terminated UTF-8 string. `cancel` must be null or a live
+ [`SeizaCancelSignal`] retained until this call returns. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+SeizaParallax *seiza_parallax_reconfigure_json(const SeizaParallax *video,
+                                               const char *settings_json,
+                                               const SeizaCancelSignal *cancel,
+                                               SeizaParallaxEventCallback events,
+                                               void *context,
+                                               char **error_out);
+
+/*
+ What preparing the video found, as JSON: its frame count, frame rate
+ and size, the stars found and matched, the nebula's distance with how
+ and where (`backgroundFocus`) it was found, galaxies lifted, the dust,
+ objects labelled, the WCS used, and `fit`, how fitting the camera to the
+ image changed the framing asked for: `zoom`, `pan`, `lead` and `truck`
+ for the single move and `stops[].zoom` and `stops[].pan` for a tour,
+ each `{asked, used}`, and `inside`, false when some frames still show
+ past the image's edge. Returns a string released with
+ `seiza_string_free`, or null with `error_out` set.
+
+ # Safety
+
+ `video` must be a live pointer from [`seiza_parallax_prepare_json`] or
+ [`seiza_parallax_reconfigure_json`].
+ When non-null, `error_out` must point to writable storage for one
+ pointer.
+ */
+char *seiza_parallax_summary_json(const SeizaParallax *video, char **error_out);
+
+/*
+ Draw frame `index` into the caller's `buffer` of `buffer_length` bytes,
+ `stride` bytes a row (at least the frame's width times the pixel's
+ bytes), in `format` (a `SEIZA_PIXEL_FORMAT_*` value): a platform
+ encoder's own pixel buffer can take the frame directly. Returns false
+ with `error_out` set when the index, format or buffer will not do.
+ Frames may be drawn in any order, from several threads at once.
+
+ # Safety
+
+ `video` must be a live pointer from [`seiza_parallax_prepare_json`] or
+ [`seiza_parallax_reconfigure_json`].
+ `buffer` must point to `buffer_length` writable bytes. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+bool seiza_parallax_render_frame(const SeizaParallax *video,
+                                 uint32_t index,
+                                 uint32_t format,
+                                 uint8_t *buffer,
+                                 size_t buffer_length,
+                                 size_t stride,
+                                 char **error_out);
+
+/*
+ Draw every frame in order and hand each to `frame` in `format` (a
+ `SEIZA_PIXEL_FORMAT_*` value), rows packed with no padding: the hook for
+ a platform or other external video encoder. Returns 1 when every frame
+ was delivered, 0 when `cancel` or a nonzero return from `frame` stopped
+ the video, and -1 with `error_out` set on failure. `events` (nullable)
+ hears each frame drawn, with `context` passed through to both
+ callbacks.
+
+ # Safety
+
+ `video` must be a live pointer from [`seiza_parallax_prepare_json`] or
+ [`seiza_parallax_reconfigure_json`].
+ `cancel` must be null or a live [`SeizaCancelSignal`] retained until
+ this call returns. When non-null, `error_out` must point to writable
+ storage for one pointer.
+ */
+int32_t seiza_parallax_render_frames(const SeizaParallax *video,
+                                     uint32_t format,
+                                     const SeizaCancelSignal *cancel,
+                                     SeizaParallaxFrameCallback frame,
+                                     SeizaParallaxEventCallback events,
+                                     void *context,
+                                     char **error_out);
+
+/*
+ Write the video to a file: `{"output": path, "encoder": "auto" |
+ "ffmpeg" | "png", "ffmpeg": program, "codec": "h264" | "hevc"}`.
+ "auto" and "ffmpeg" encode with ffmpeg, H.264 unless `codec` says HEVC; "png" writes numbered PNG frames into the `output`
+ directory. Returns 1 when written, 0 when `cancel` stopped it, and -1
+ with `error_out` set on failure. `events` (nullable) hears each frame
+ drawn, with `context` passed through.
+
+ # Safety
+
+ `video` must be a live pointer from [`seiza_parallax_prepare_json`] or
+ [`seiza_parallax_reconfigure_json`].
+ `request_json` must be a NUL-terminated UTF-8 string. `cancel` must be
+ null or a live [`SeizaCancelSignal`] retained until this call returns.
+ When non-null, `error_out` must point to writable storage for one
+ pointer.
+ */
+int32_t seiza_parallax_write_video_json(const SeizaParallax *video,
+                                        const char *request_json,
+                                        const SeizaCancelSignal *cancel,
+                                        SeizaParallaxEventCallback events,
+                                        void *context,
+                                        char **error_out);
+
+/*
+ Release a video from [`seiza_parallax_prepare_json`].
+
+ # Safety
+
+ `video` must be null or a pointer from [`seiza_parallax_prepare_json`]
+ or [`seiza_parallax_reconfigure_json`] that has not already been freed,
+ with no call using it still running.
+ */
+void seiza_parallax_free(SeizaParallax *video);
 
 #ifdef __cplusplus
 }  // extern "C"

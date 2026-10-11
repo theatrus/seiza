@@ -1205,7 +1205,15 @@ fn sort_hits(hits: &mut [ObjectHit], sort: ObjectSort) {
     });
 }
 
-fn predicted_prominence(object: &SkyObject, center_inside: bool, region_radius_deg: f64) -> f64 {
+/// How prominent `object` is likely to look in a field of
+/// `region_radius_deg`, 0 to 1, from its size against the field, its
+/// magnitude and whether it has a common name, as [`ObjectHit`] reports it.
+/// It predicts likely prominence; it does not prove pixel visibility.
+pub fn predicted_prominence(
+    object: &SkyObject,
+    center_inside: bool,
+    region_radius_deg: f64,
+) -> f64 {
     let frame_diameter_arcmin = (region_radius_deg * 120.0).max(1e-9);
     let size_score = object
         .major_arcmin

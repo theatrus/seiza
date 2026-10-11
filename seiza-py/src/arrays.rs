@@ -24,6 +24,11 @@ pub(crate) fn float_image_view<'a>(
             ));
         }
     };
+    // `as_slice` also takes a Fortran-ordered array, whose bytes are not in
+    // row order.
+    if !array.is_c_contiguous() {
+        return Err(PyValueError::new_err("image arrays must be C-contiguous"));
+    }
     let data = array
         .as_slice()
         .map_err(|_| PyValueError::new_err("image arrays must be C-contiguous"))?;

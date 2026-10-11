@@ -26,8 +26,9 @@ pub const REQUIRED_V2_FILES: &[&str] = REQUIRED_BUNDLE_FILES;
 /// Not every variant is part of the coherent [`REQUIRED_BUNDLE_FILES`] set:
 /// [`Dataset::StarsDeepGaia20`] is an optional, very large deep catalog,
 /// [`Dataset::GaiaPhotometry`] holds Gaia DR3 colours for photometric colour
-/// calibration, and [`Dataset::ObjectDistances`] holds distances to the
-/// objects in `objects.bin`. They host alongside the bundle but are fetched
+/// calibration, [`Dataset::ObjectDistances`] holds distances to the
+/// objects in `objects.bin`, and [`Dataset::StarDistances`] distances to
+/// Gaia and Hipparcos stars. They host alongside the bundle but are fetched
 /// only on explicit request.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Dataset {
@@ -36,6 +37,7 @@ pub enum Dataset {
     MinorBodies,
     ObjectDistances,
     Objects,
+    StarDistances,
     StarsDeepGaia17,
     StarsDeepGaia20,
     StarsGaia,
@@ -52,6 +54,7 @@ impl Dataset {
             Self::MinorBodies => "minor-bodies.bin",
             Self::ObjectDistances => "object-distances.bin",
             Self::Objects => "objects.bin",
+            Self::StarDistances => "star-distances.bin",
             Self::StarsDeepGaia17 => "stars-deep-gaia17.bin",
             Self::StarsDeepGaia20 => "stars-deep-gaia20.bin",
             Self::StarsGaia => "stars-gaia.bin",
@@ -141,6 +144,12 @@ impl CatalogSet {
     /// galaxy at depth among stars.
     pub fn object_distances() -> Self {
         Self::dataset(Dataset::ObjectDistances)
+    }
+
+    /// The optional distances to Gaia (G≤16) and Hipparcos stars, for
+    /// placing a field's stars at depth without querying the archives.
+    pub fn star_distances() -> Self {
+        Self::dataset(Dataset::StarDistances)
     }
 
     /// Build a selection from hosted filenames. An empty iterator retains the

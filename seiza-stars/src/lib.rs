@@ -1,7 +1,7 @@
 //! Star detection, PSF fitting, and sensor tilt analysis.
 //!
-//! Two detector families, extracted from PSF Guard where they graded tens of
-//! thousands of real frames:
+//! Two measurement detector families, extracted from PSF Guard where they
+//! graded tens of thousands of real frames:
 //!
 //! - [`hocus_focus_star_detection`] — a port of the HocusFocus plugin for
 //!   N.I.N.A. by George Hilios: à trous wavelet structure removal, kappa-sigma
@@ -16,6 +16,12 @@
 //! threshold detector in the `seiza` crate serves registration and solving,
 //! where speed matters and photometric fidelity does not; the two are
 //! different tools, not rivals.
+//!
+//! [`peak_star_detection`] serves a different input: a star-only image, such
+//! as StarXTerminator's stars image, where a crowded cluster's halos touch.
+//! It takes each star as a local peak, so crowded stars stay apart and a
+//! saturated core counts once, and reports where each star is and how much
+//! light it holds.
 //!
 //! [`tilt`] turns per-star PSF measurements into parallelogram and triangle
 //! sensor-tilt diagrams plus field-curvature numbers.
@@ -37,6 +43,7 @@ pub mod accord_imaging;
 pub mod debug;
 pub mod hocus_focus_star_detection;
 pub mod nina_star_detection;
+pub mod peak_star_detection;
 pub mod psf_fitting;
 pub mod star_contours;
 pub mod tilt;
@@ -46,6 +53,7 @@ pub use hocus_focus_star_detection::{
     detect_stars_hocus_focus, detect_stars_hocus_focus_adaptive, pixel_scale_arcsec,
     recommend_detection_binning,
 };
+pub use peak_star_detection::{PeakStar, find_peak_stars, fold_core_fragments};
 pub use psf_fitting::{PSFModel, PSFType};
 pub use tilt::{
     CellStats, Corner, CornerHfr, TRIANGLE_INNER_RADIUS_FRACTION,

@@ -474,6 +474,55 @@ impl RcAstroCli {
         })
     }
 
+    /// Split a stretched image with StarXTerminator into its starless image
+    /// and an unscreened stars image, so that screening the stars over the
+    /// starless image gives back the original. Fails when StarXTerminator
+    /// is not licensed on this machine.
+    pub fn split_stars(
+        &self,
+        image: &LinearImage,
+        cancel: Option<&CancelSignal>,
+        progress: &mut dyn FnMut(f32),
+    ) -> Result<(LinearImage, LinearImage)> {
+        let schema = self.tool_schema("sxt")?;
+        self.split_stars_with(&schema, image, cancel, progress)
+    }
+
+    /// [`Self::split_stars`] with StarXTerminator's schema already read.
+    pub fn split_stars_with(
+        &self,
+        schema: &ExternalToolSchema,
+        image: &LinearImage,
+        cancel: Option<&CancelSignal>,
+        progress: &mut dyn FnMut(f32),
+    ) -> Result<(LinearImage, LinearImage)> {
+        if !schema.licensed {
+            return Err(external_error(
+                "sxt",
+                format!(
+                    "StarXTerminator is not licensed on this machine ({})",
+                    schema
+                        .license_message
+                        .as_deref()
+                        .unwrap_or("no license message")
+                ),
+            ));
+        }
+        let request = ExternalToolRequest {
+            tool: "sxt".into(),
+            parameters: vec![
+                ("stars".into(), ExternalParameterValue::Bool(true)),
+                ("unscreen".into(), ExternalParameterValue::Bool(true)),
+            ],
+            device: None,
+        };
+        let processed = self.process_image(schema, &request, image, &[], cancel, progress)?;
+        let stars = processed
+            .stars
+            .ok_or_else(|| external_error("sxt", "StarXTerminator wrote no stars image"))?;
+        Ok((processed.image, stars))
+    }
+
     /// Round-trip a [`LinearImage`] through a tool: write it as 32-bit-float
     /// FITS, run, and read the result (and any stars sidecar) back. WCS and
     /// observation metadata from `reference_headers` ride along so the
@@ -1218,6 +1267,27 @@ fi
         assert_eq!(processed.stars.unwrap().data, image.data);
         assert_eq!(processed.device.as_deref(), Some("cpu"));
         assert_eq!(fractions, vec![1.0]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn splitting_stars_returns_the_starless_and_stars_images() {
+        let directory = tempfile::tempdir().unwrap();
+        let cli = RcAstroCli::with_executable(fake_rc_astro(directory.path()));
+        let image = LinearImage::new(2, 1, 3, vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6]).unwrap();
+        let (starless, stars) = cli
+            .split_stars_with(&sxt_schema(), &image, None, &mut |_| {})
+            .unwrap();
+        assert_eq!(starless.data, image.data);
+        assert_eq!(stars.data, image.data);
+        let unlicensed = ExternalToolSchema {
+            licensed: false,
+            ..sxt_schema()
+        };
+        let error = cli
+            .split_stars_with(&unlicensed, &image, None, &mut |_| {})
+            .unwrap_err();
+        assert!(error.to_string().contains("not licensed"), "{error}");
     }
 
     #[cfg(unix)]

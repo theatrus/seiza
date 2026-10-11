@@ -130,6 +130,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(rc_astro_locate, module)?)?;
     module.add_function(wrap_pyfunction!(rc_astro_tool_schema, module)?)?;
     module.add_function(wrap_pyfunction!(rc_astro_process_file, module)?)?;
+    module.add_function(wrap_pyfunction!(rc_astro_split_stars, module)?)?;
     Ok(())
 }
 
@@ -244,14 +245,18 @@ pub(crate) fn rc_astro_process_file(
     };
     let tool_name = tool.to_string();
     // A raising progress callback must not vanish: the first exception is
-    // kept and re-raised once the run settles (the run itself is not
-    // interrupted — progress is advisory). A raising cancel predicate stops
-    // the run and re-raises the same way, so Ctrl-C surfaces as
-    // KeyboardInterrupt rather than a generic run error.
+    // kept, stops the run at the next cancel check (Ctrl-C usually lands in
+    // the progress callback as KeyboardInterrupt), and is re-raised once the
+    // run settles. A raising cancel predicate stops the run and re-raises
+    // the same way, so Ctrl-C surfaces as KeyboardInterrupt rather than a
+    // generic run error.
     let raised: Arc<Mutex<Option<PyErr>>> = Arc::new(Mutex::new(None));
     let signal = {
         let raised = Arc::clone(&raised);
         CancelSignal::new(move || {
+            if raised.lock().is_ok_and(|slot| slot.is_some()) {
+                return true;
+            }
             Python::with_gil(|py| {
                 let asked = py.check_signals().and_then(|()| match &cancel {
                     Some(cancel) => cancel
@@ -311,4 +316,88 @@ pub(crate) fn rc_astro_process_file(
         cli_version: schema.cli_version.clone(),
         ml_version: schema.ml_version,
     })
+}
+
+/// A starless image and its stars, as float32 arrays.
+type SplitArrays<'py> = (
+    Bound<'py, numpy::PyArrayDyn<f32>>,
+    Bound<'py, numpy::PyArrayDyn<f32>>,
+);
+
+/// Split a stretched image with StarXTerminator into its starless image and
+/// unscreened stars, so that screening the stars over the starless image
+/// gives back the original: the inputs `seiza.ParallaxVideo` takes.
+/// `image` is a float32 array of shape (height, width, 3) from 0 to 1; the
+/// two results have the same shape. Fails when StarXTerminator is not
+/// licensed. `progress` and `cancel` work as for `rc_astro_process_file`.
+#[pyfunction]
+#[pyo3(signature = (image, *, executable=None, host=None, progress=None, cancel=None))]
+pub(crate) fn rc_astro_split_stars<'py>(
+    py: Python<'py>,
+    image: numpy::PyReadonlyArrayDyn<'py, f32>,
+    executable: Option<PathBuf>,
+    host: Option<String>,
+    progress: Option<PyObject>,
+    cancel: Option<PyObject>,
+) -> PyResult<SplitArrays<'py>> {
+    let linear = crate::arrays::linear_image(image)?;
+    if linear.channels != 3 {
+        return Err(PyValueError::new_err(
+            "the image must have shape (height, width, 3)",
+        ));
+    }
+    let cli = cli(executable, host)?;
+    let raised: Arc<Mutex<Option<PyErr>>> = Arc::new(Mutex::new(None));
+    let signal = {
+        let raised = Arc::clone(&raised);
+        CancelSignal::new(move || {
+            if raised.lock().is_ok_and(|slot| slot.is_some()) {
+                return true;
+            }
+            Python::with_gil(|py| {
+                let asked = py.check_signals().and_then(|()| match &cancel {
+                    Some(cancel) => cancel
+                        .call0(py)
+                        .and_then(|value| value.bind(py).is_truthy()),
+                    None => Ok(false),
+                });
+                match asked {
+                    Ok(stop) => stop,
+                    Err(error) => {
+                        if let Ok(mut slot) = raised.lock()
+                            && slot.is_none()
+                        {
+                            *slot = Some(error);
+                        }
+                        true
+                    }
+                }
+            })
+        })
+    };
+    let split = py.allow_threads(|| {
+        let mut report = |fraction: f32| {
+            if let Some(callback) = &progress {
+                Python::with_gil(|py| {
+                    if let Err(error) = callback.call1(py, (fraction,))
+                        && let Ok(mut slot) = raised.lock()
+                        && slot.is_none()
+                    {
+                        *slot = Some(error);
+                    }
+                });
+            }
+        };
+        cli.split_stars(&linear, Some(&signal), &mut report)
+    });
+    if let Ok(mut slot) = raised.lock()
+        && let Some(error) = slot.take()
+    {
+        return Err(error);
+    }
+    let (starless, stars) = split.map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    Ok((
+        crate::arrays::into_image_array(py, starless)?,
+        crate::arrays::into_image_array(py, stars)?,
+    ))
 }

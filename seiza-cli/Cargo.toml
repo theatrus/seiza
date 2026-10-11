@@ -27,14 +27,17 @@ seiza-fits.workspace = true
 seiza-xisf.workspace = true
 seiza-satellites.workspace = true
 rayon.workspace = true
+seiza-parallax.workspace = true
 seiza-stacking.workspace = true
 seiza-stretch.workspace = true
 seiza-sources.workspace = true
+seiza-stars.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 image = { workspace = true, features = ["png", "jpeg", "tiff"] }
 imageproc.workspace = true
 ab_glyph.workspace = true
+seiza-draw.workspace = true
 flate2.workspace = true
 serde_json.workspace = true
 serde.workspace = true
@@ -47,6 +50,10 @@ ureq.workspace = true
 zstd.workspace = true
 font8x8.workspace = true
 chrono.workspace = true
+
+[features]
+# A built-in H.264 encoder for `parallax-video`, for hosts without ffmpeg.
+openh264 = ["seiza-parallax/openh264"]
 
 [dev-dependencies]
 seiza = { workspace = true, features = ["test-support"] }

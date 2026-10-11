@@ -513,6 +513,120 @@ def rc_astro_process_file(
     progress: Callable[[float], None] | None = None,
     cancel: Callable[[], bool] | None = None,
 ) -> RcAstroRun: ...
+def rc_astro_split_stars(
+    image: npt.NDArray[np.float32],
+    *,
+    executable: str | Path | None = None,
+    host: str | None = None,
+    progress: Callable[[float], None] | None = None,
+    cancel: Callable[[], bool] | None = None,
+) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]: ...
+
+def plan_parallax_tour(
+    width: int,
+    height: int,
+    wcs: Wcs,
+    *,
+    objects: str | Path | None = None,
+    size: str | tuple[int, int] | None = None,
+    targets: int | None = None,
+    hold: float = 1.5,
+    motion: float = 1.0,
+) -> dict[str, Any]: ...
+
+ParallaxImage = Union[str, Path, npt.NDArray[np.float32], npt.NDArray[np.uint8]]
+
+class ParallaxFrames:
+    def __iter__(self) -> ParallaxFrames: ...
+    def __next__(self) -> npt.NDArray[np.uint8]: ...
+
+class ParallaxVideo:
+    def __init__(
+        self,
+        starless: ParallaxImage,
+        stars: ParallaxImage,
+        wcs: Wcs,
+        *,
+        progress: Callable[[dict[str, Any]], None] | None = None,
+        cancel: Callable[[], bool] | None = None,
+        focus: tuple[float, float] | None = None,
+        distance_pc: float | None = None,
+        distance_focus: tuple[float, float] | None = None,
+        unmatched_distance_pc: float | None = None,
+        objects: str | Path | None = None,
+        object_distances: str | Path | None = None,
+        star_distances: str | Path | None = None,
+        gaia_max_mag: float = 16.0,
+        gaia_cache: str | Path | None = None,
+        online: bool = True,
+        max_stars: int | None = None,
+        small_stars: str = "drop",
+        keep_galaxies: bool = False,
+        dust: bool = True,
+        dust_opacity: float = 3.0,
+        start: str = "focus",
+        dolly: float = 0.4,
+        truck: float = 0.0,
+        truck_angle_deg: float = 0.0,
+        pan: float = 0.0,
+        zoom: float = 1.0,
+        zoom_end: float = 1.0,
+        rotate_deg: tuple[float, float] = (0.0, 0.0),
+        easing: str = "in_out",
+        quality: str = "standard",
+        growth_limit: float = 4.0,
+        fade_from: float = 6.0,
+        tour: Sequence[str | Mapping[str, Any]] = (),
+        auto_tour: bool | int | Mapping[str, Any] | None = None,
+        tour_glide: float = 0.2,
+        tour_titles: bool = False,
+        tour_loop: bool = False,
+        size: str | tuple[int, int] = "1080p",
+        seconds: float = 8.0,
+        fps: int = 30,
+        overlay: bool = False,
+        overlay_density: float = 0.6,
+        labels: Sequence[tuple[float, float, str] | tuple[float, float, float, str]] = (),
+        label_color: str = "#f0f4f8",
+        watermark: bool | str = False,
+    ) -> None: ...
+    @property
+    def frame_count(self) -> int: ...
+    @property
+    def fps(self) -> int: ...
+    @property
+    def size(self) -> tuple[int, int]: ...
+    @property
+    def summary(self) -> dict[str, Any]: ...
+    def __len__(self) -> int: ...
+    def __iter__(self) -> ParallaxFrames: ...
+    def frame(self, index: int, format: str = "rgb") -> npt.NDArray[np.uint8]: ...
+    def reconfigure(
+        self,
+        *,
+        progress: Callable[[dict[str, Any]], None] | None = None,
+        cancel: Callable[[], bool] | None = None,
+        **options: Any,
+    ) -> ParallaxVideo: ...
+    def render(
+        self,
+        on_frame: Callable[[npt.NDArray[np.uint8], int], bool | None],
+        *,
+        format: str = "rgb",
+        progress: Callable[[dict[str, Any]], None] | None = None,
+        cancel: Callable[[], bool] | None = None,
+    ) -> bool: ...
+    def write(
+        self,
+        output: str | Path,
+        *,
+        encoder: str = "auto",
+        codec: str = "h264",
+        ffmpeg: str | Path | None = None,
+        progress: Callable[[dict[str, Any]], None] | None = None,
+        cancel: Callable[[], bool] | None = None,
+    ) -> bool: ...
+
 def solve(
     stars: Sequence[StarInput],
     catalog: StarCatalog,

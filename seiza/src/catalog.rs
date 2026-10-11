@@ -9,6 +9,7 @@
 
 pub mod distances;
 pub mod photometry;
+pub mod star_distances;
 pub mod tiles;
 
 pub use distances::{
@@ -18,6 +19,7 @@ pub use distances::{
 pub use photometry::{
     PhotometricStar, PhotometryCatalog, PhotometryCatalogBuilder, propagate_proper_motion,
 };
+pub use star_distances::{DistanceStar, StarDistanceCatalog, StarDistanceCatalogBuilder};
 pub use tiles::{TileCatalog, TileSetBuilder};
 
 /// A reference star position, ICRS degrees.

@@ -8,8 +8,10 @@ members = [
     "seiza-cli",
     "seiza-deconvolution",
     "seiza-download",
+    "seiza-draw",
     "seiza-fits",
     "seiza-imgproc",
+    "seiza-parallax",
     "seiza-satellites",
     "seiza-stacking",
     "seiza-stars",
@@ -33,8 +35,10 @@ seiza-background = { path = "seiza-background", version = "0.3.1" }
 seiza-calibration = { path = "seiza-calibration", version = "0.4.2" }
 seiza-deconvolution = { path = "seiza-deconvolution", version = "0.1.1" }
 seiza-download = { path = "seiza-download", version = "0.7.0" }
+seiza-draw = { path = "seiza-draw", version = "0.1.0" }
 seiza-fits = { path = "seiza-fits", version = "0.3.0" }
 seiza-imgproc = { path = "seiza-imgproc", version = "0.3.2" }
+seiza-parallax = { path = "seiza-parallax", version = "0.1.0" }
 seiza-satellites = { path = "seiza-satellites", version = "0.13.0" }
 seiza-stacking = { path = "seiza-stacking", version = "0.26.0" }
 seiza-stars = { path = "seiza-stars", version = "0.2.0" }

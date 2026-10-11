@@ -25,6 +25,8 @@ mod common;
 mod deconvolution;
 mod interrupt;
 mod master;
+pub(crate) use seiza_draw::ellipse_points;
+mod parallax_video;
 mod preview;
 mod provenance;
 mod setup;
@@ -653,6 +655,9 @@ enum Command {
     Background(background::BackgroundArgs),
     /// Calibrate a linear RGB image's colour against Gaia DR3 star colours
     ColorCalibrate(color_calibrate::ColorCalibrateArgs),
+    /// Fly toward a point of a stretched image, with its stars at their
+    /// Gaia distances, and write the video
+    ParallaxVideo(Box<parallax_video::ParallaxVideoArgs>),
     /// Experimentally restore mild blur in a linear FITS using a measured PSF
     Deconvolve(deconvolution::DeconvolutionArgs),
     /// Register and incrementally stack linear FITS light frames
@@ -975,6 +980,21 @@ enum DownloadSource {
         )]
         chunks: u64,
     },
+    /// Gaia DR3 stars with Bailer-Jones distances, and the Hipparcos
+    /// catalogue, for build-data star-distances: the sky in small HEALPix
+    /// tiles on the ESA and GAVO synchronous services (resumable; can take
+    /// hours)
+    StarDistances {
+        /// Directory to download into
+        #[arg(long)]
+        output: PathBuf,
+        /// Magnitude limit for the download
+        #[arg(long, default_value_t = 16.0, allow_negative_numbers = true)]
+        max_mag: f32,
+        /// Tiles fetched at once
+        #[arg(long, default_value_t = 4)]
+        concurrency: usize,
+    },
     /// Gaia DR3 photometry (G, BP, RP, RUWE) via ESA TAP for an offline
     /// colour-calibration catalog (resumable; can take hours)
     GaiaPhotometry {
@@ -1113,6 +1133,26 @@ enum BuildDataSource {
         epoch: f64,
         /// Drop stars fainter than this magnitude
         #[arg(long, default_value_t = 15.0)]
+        max_mag: f32,
+        /// Declination bands (tile granularity); 90 = 2° tiles
+        #[arg(long, default_value_t = 90)]
+        bands: u32,
+    },
+    /// Star distance catalog from Gaia DR3 distance tiles and the
+    /// Hipparcos catalogue (download-data star-distances)
+    StarDistances {
+        /// Directory containing gaiadist-*.csv and hipparcos.csv
+        #[arg(long)]
+        input: PathBuf,
+        /// Output star distance catalog file (star-distances.bin)
+        #[arg(long)]
+        output: PathBuf,
+        /// Epoch to apply proper motions to, Julian year
+        #[arg(long, default_value_t = 2026.0)]
+        epoch: f64,
+        /// Drop Gaia stars fainter than this G magnitude; at most the
+        /// download's limit
+        #[arg(long, default_value_t = 16.0)]
         max_mag: f32,
         /// Declination bands (tile granularity); 90 = 2° tiles
         #[arg(long, default_value_t = 90)]
@@ -1414,6 +1454,13 @@ fn main() -> Result<()> {
                 max_mag,
                 bands,
             } => build_data::build_gaia_photometry(&input, &output, epoch, max_mag, bands),
+            BuildDataSource::StarDistances {
+                input,
+                output,
+                epoch,
+                max_mag,
+                bands,
+            } => build_data::build_star_distances(&input, &output, epoch, max_mag, bands),
             BuildDataSource::Transients { input, output } => {
                 build_data::build_transients(&input, &output)
             }
@@ -1537,6 +1584,7 @@ fn main() -> Result<()> {
         Command::Stretch(options) => stretch_command::run(options),
         Command::Background(options) => background::run(options),
         Command::ColorCalibrate(options) => color_calibrate::run(options),
+        Command::ParallaxVideo(options) => parallax_video::run(*options),
         Command::Deconvolve(options) => deconvolution::run(options),
         Command::Stack(options) => stack::run(options),
         Command::Color(options) => color::run(options),
@@ -1687,6 +1735,15 @@ async fn download_source(source: DownloadSource) -> Result<()> {
             max_mag,
             chunks,
         } => downloader.download_gaia(output, max_mag, chunks).await,
+        DownloadSource::StarDistances {
+            output,
+            max_mag,
+            concurrency,
+        } => {
+            downloader
+                .download_gaia_distances(output, max_mag, concurrency)
+                .await
+        }
         DownloadSource::GaiaPhotometry {
             output,
             max_mag,
@@ -3798,26 +3855,6 @@ fn draw_rotated_ellipse(
     }
 }
 
-/// `segments + 1` points around an ellipse whose major axis lies
-/// `angle_deg` from +x, the last repeating the first.
-pub(crate) fn ellipse_points(
-    center: (f64, f64),
-    semi_major: f64,
-    semi_minor: f64,
-    angle_deg: f64,
-    segments: usize,
-) -> impl Iterator<Item = (f64, f64)> {
-    let (sin_r, cos_r) = angle_deg.to_radians().sin_cos();
-    (0..=segments).map(move |i| {
-        let t = i as f64 / segments as f64 * std::f64::consts::TAU;
-        let (lx, ly) = (semi_major * t.cos(), semi_minor * t.sin());
-        (
-            center.0 + lx * cos_r - ly * sin_r,
-            center.1 + lx * sin_r + ly * cos_r,
-        )
-    })
-}
-
 /// The ellipse to draw for a placed object, as (semi-major, semi-minor,
 /// angle): an asymmetric extent without a position angle must not be drawn
 /// at a guessed orientation, so it becomes a circle of the major axis.
@@ -3869,6 +3906,71 @@ fn dms(dec: f64) -> String {
     let m = ((a - d) * 60.0).floor();
     let sec = (a - d - m / 60.0) * 3600.0;
     format!("{sign}{:02}° {:02}′ {:04.1}″", d as u32, m as u32, sec)
+}
+
+/// Load the blind pattern index beside `catalog` (or build one) and
+/// blind-solve `invocation`'s stars over each of `search`'s pixel-scale
+/// ranges, printing the index's size as `solve-blind` does.
+fn blind_solve_invocation(
+    invocation: &mut SolveInvocation<'_>,
+    catalog: &TileCatalog,
+    search: &ScaleSearch,
+    options: &SolveBlindOptions<'_>,
+    can_retry_f32: bool,
+    dims: (u32, u32),
+) -> Result<(seiza::solve::Solution, std::time::Duration)> {
+    use seiza::blind::{BlindIndex, BlindParams, solve_blind};
+
+    let mut params = BlindParams {
+        min_scale_arcsec_px: search.ranges[0].0,
+        max_scale_arcsec_px: search.ranges[0].1,
+        index_mag_limit: options.index_mag_limit,
+        max_hypotheses: options.max_hypotheses,
+        max_coarse_hypotheses: options.max_coarse_hypotheses,
+        sip_order: options.sip_order,
+        ..Default::default()
+    };
+    let started = std::time::Instant::now();
+    let index = if let Some(path) = options.index_path {
+        let index = BlindIndex::open(path)
+            .map_err(anyhow::Error::from)
+            .with_context(|| format!("failed to open {}", path.display()))?;
+        params.index_mag_limit = index.index_mag_limit();
+        params.max_pattern_deg = index.max_pattern_deg();
+        warn_on_index_catalog_mismatch(&index, catalog);
+        println!(
+            "pattern index: {} patterns mapped from {} in {:.2}s (G<={:.1})",
+            index.pattern_count(),
+            path.display(),
+            started.elapsed().as_secs_f64(),
+            index.index_mag_limit()
+        );
+        index
+    } else {
+        let index = BlindIndex::build(catalog, &params);
+        println!(
+            "pattern index: {} patterns built in {:.2}s",
+            index.pattern_count(),
+            started.elapsed().as_secs_f64()
+        );
+        index
+    };
+
+    let started = std::time::Instant::now();
+    let solution = invocation.solve_with_pass(|stars, pass| {
+        let mut attempt_params = blind_params_for_detection_pass(
+            &params,
+            can_retry_f32,
+            options.detection_fallback_hypotheses,
+            pass,
+        );
+        solve_over_ranges(&search.ranges, |(min, max)| {
+            attempt_params.min_scale_arcsec_px = min;
+            attempt_params.max_scale_arcsec_px = max;
+            solve_blind(stars, catalog, &index, &attempt_params, dims)
+        })
+    })?;
+    Ok((solution, started.elapsed()))
 }
 
 struct SolveBlindOptions<'a> {
@@ -3978,8 +4080,6 @@ fn solve_blind_command(
     data: &std::path::Path,
     options: SolveBlindOptions<'_>,
 ) -> Result<()> {
-    use seiza::blind::{BlindIndex, BlindParams, solve_blind};
-
     let img = load_image(path, options.detection_backend)?;
     let dims = img.dimensions();
     let metadata = if is_astronomy_image_path(path) {
@@ -4019,58 +4119,17 @@ fn solve_blind_command(
 
     let catalog =
         TileCatalog::open(data).with_context(|| format!("failed to open {}", data.display()))?;
-    let mut params = BlindParams {
-        min_scale_arcsec_px: min_scale,
-        max_scale_arcsec_px: max_scale,
-        index_mag_limit: options.index_mag_limit,
-        max_hypotheses: options.max_hypotheses,
-        max_coarse_hypotheses: options.max_coarse_hypotheses,
-        sip_order: options.sip_order,
-        ..Default::default()
-    };
-    let started = std::time::Instant::now();
-    let index = if let Some(path) = options.index_path {
-        let index = BlindIndex::open(path)
-            .map_err(anyhow::Error::from)
-            .with_context(|| format!("failed to open {}", path.display()))?;
-        params.index_mag_limit = index.index_mag_limit();
-        params.max_pattern_deg = index.max_pattern_deg();
-        warn_on_index_catalog_mismatch(&index, &catalog);
-        println!(
-            "pattern index: {} patterns mapped from {} in {:.2}s (G<={:.1})",
-            index.pattern_count(),
-            path.display(),
-            started.elapsed().as_secs_f64(),
-            index.index_mag_limit()
-        );
-        index
-    } else {
-        let index = BlindIndex::build(&catalog, &params);
-        println!(
-            "pattern index: {} patterns built in {:.2}s",
-            index.pattern_count(),
-            started.elapsed().as_secs_f64()
-        );
-        index
-    };
-
-    let started = std::time::Instant::now();
-    let solution = invocation.solve_with_pass(|stars, pass| {
-        let mut attempt_params = blind_params_for_detection_pass(
-            &params,
-            can_retry_f32,
-            options.detection_fallback_hypotheses,
-            pass,
-        );
-        solve_over_ranges(&search.ranges, |(min, max)| {
-            attempt_params.min_scale_arcsec_px = min;
-            attempt_params.max_scale_arcsec_px = max;
-            solve_blind(stars, &catalog, &index, &attempt_params, dims)
-        })
-    })?;
+    let (solution, elapsed) = blind_solve_invocation(
+        &mut invocation,
+        &catalog,
+        &search,
+        &options,
+        can_retry_f32,
+        dims,
+    )?;
     let wcs = &solution.wcs;
     let (ra, dec) = wcs.pixel_to_world(dims.0 as f64 / 2.0, dims.1 as f64 / 2.0);
-    println!("Blind-solved in {:.2}s:", started.elapsed().as_secs_f64());
+    println!("Blind-solved in {:.2}s:", elapsed.as_secs_f64());
     println!(
         "  center     : {} {}  ({ra:.5}°, {dec:.5}°)",
         hms(ra),

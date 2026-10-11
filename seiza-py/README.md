@@ -492,6 +492,76 @@ CLI's `--no-` negation, overriding a true default. A child completely
 silent for ten minutes is killed; a first run downloads ML models, which
 `rc-astro download-models` handles ahead of time.
 
+## Parallax fly-through videos
+
+Make the video `seiza parallax-video` makes, from a starless image, its
+stars and a plate solution: the stars fly at their Gaia distances as the
+camera moves toward a point of the nebula. `rc_astro_split_stars` splits a
+stretched image with StarXTerminator, and `solve_blind` gives the WCS.
+
+```python
+import seiza
+
+starless, stars = seiza.rc_astro_split_stars(image)   # float32 (h, w, 3), 0 to 1
+video = seiza.ParallaxVideo(
+    starless, stars, solution.wcs,
+    focus=(5997, 2351), start="whole", dolly=0.8, seconds=16, size="4k",
+    overlay=True, watermark=True,
+    progress=lambda event: print(event.get("message", "")),
+)
+print(video.summary["background_distance_pc"], video.frame_count)
+
+first = video.frame(0)                  # uint8 (height, width, 3)
+for frame in video:                     # every frame in order, e.g. for PyAV
+    container_stream_encode(frame)
+video.render(lambda frame, index: encoder.write(frame), format="bgra")
+video.write("iris.mp4")                 # through ffmpeg; encoder="png" for frames
+```
+
+A tour visits several places: `tour=` takes stops, each a `--stop` string
+or a dict. `seiza.plan_parallax_tour(width, height, wcs, size=...)` plans
+one from the catalogued objects in the field and returns it for editing:
+
+```python
+plan = seiza.plan_parallax_tour(width, height, solution.wcs, size="1080p-portrait")
+for stop in plan["tour"]:
+    print(stop["name"], stop["focus"], stop["dolly"])
+stops = [stop for stop in plan["tour"] if stop["name"] != "LDN 1267"]
+video = seiza.ParallaxVideo(starless, stars, solution.wcs, size="1080p-portrait",
+                            tour=stops, distance_focus=plan["focus"])
+```
+
+`auto_tour=True` plans and renders in one go. Each planned stop's
+`title` is its target's name; `tour_titles=True` shows it low in the frame
+while the camera drifts through the stop, fading in and out, so change or
+drop titles as you would stops. A tour ends on a longer final drift that
+slows to rest; `tour_loop=True` instead ends where it began, so the last
+frame leads into the first and the video loops.
+
+`distance_focus` is where the nebula's distance is measured; `focus` only
+aims the camera, so moving it never changes the scene's depth. To film the
+same scene again with another camera, tour, size or quality, call
+`reconfigure`. It returns a new video that shares the prepared scene, so
+nothing is loaded, solved or looked up again, and leaves the first as it
+was; both can draw frames at once. Options that change the scene, such as
+the distances, `distance_focus`, star placement or dust, raise `ValueError`.
+`summary["fit"]` gives each zoom and pan as asked and as used, after the
+camera was fitted to stay inside the image, and `inside`, false when some
+frames still show past the image's edge:
+
+```python
+wide = video.reconfigure(size="4k", quality="high", rotate_deg=(0, -360))
+print(wide.summary["fit"]["zoom"])      # (asked, used)
+```
+
+Images may be paths (PNG, JPEG or TIFF) or arrays, float32 from 0 to 1 or
+uint8; 16-bit files make the best videos, as 8 bits flatten bright star
+cores and band smooth nebula. Options are the command's, in snake case,
+with frame sizes such as `"720p"`, `"1080p"`, `"4k"` or `"1080p-portrait"`.
+Distances come from the star distance file when installed, or the archives
+unless `online=False`. `render` stops when its callback returns `False`;
+Ctrl-C or `cancel` stop preparing, `reconfigure`, `render` and `write`.
+
 ## Predicted satellite tracks
 
 After a solve, predict which satellites crossed the image while the shutter

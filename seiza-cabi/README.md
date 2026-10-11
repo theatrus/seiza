@@ -154,6 +154,48 @@ exposes the **superset** of what both apps need.
   Include the schema's `cliVersion`/`mlVersion` in any cache key: a tool
   upgrade changes the output for identical inputs.
 - **Plate solving** — `seiza_solve_image_json`.
+- **Parallax videos** — `seiza_parallax_prepare_json` makes what `seiza
+  parallax-video` makes from a JSON request: an image for StarXTerminator to
+  split (through `rc-astro`) or its starless and stars files, an optional WCS
+  (as `seiza_solve_image_json` returns it; without one the image is
+  blind-solved), and the command's options in camelCase, with frame sizes
+  such as `"1080p"`, `"4k"` or `"1080p-portrait"`. An unknown field is an
+  error. It returns an opaque `SeizaParallax`, released with
+  `seiza_parallax_free`, and reports each step as JSON to a
+  `SeizaParallaxEventCallback`. `distanceFocus` is where the nebula's
+  distance is measured; `focus` only aims the camera, so a new destination
+  never changes the scene's depth. `seiza_parallax_summary_json` says what it
+  found, with `fit`: each zoom and pan as asked and as used, after the camera
+  was fitted to stay inside the image, so an app can explain a change to the
+  framing it asked for, and `inside`, false when some frames still show past
+  the image's edge. `seiza_parallax_reconfigure_json` films the same
+  scene again from a JSON object of camera and output settings (focus, start,
+  dolly, pan, rotation, zoom, tour stops, glide, length, frame rate, size,
+  quality, labels), fitting the camera anew. Settings left out take their
+  defaults, not the first video's. It loads, splits, solves and looks up
+  nothing: the new `SeizaParallax` shares the prepared scene and the
+  catalogue labels with the first, which stays valid and can draw frames at
+  the same time; the scene is freed with the last handle. Fields that change
+  the scene (distances and their sources, `distanceFocus`, star placement,
+  galaxies, dust) are an error that says to prepare again. Its
+  `SeizaCancelSignal` stops it. `seiza_parallax_plan_tour_json` plans a
+  tour of the catalogued objects in the field (`autoTour`) and returns it
+  as JSON to edit, each target's stop titled with its name; its `tour`
+  goes back into a request as it is, and its `focus` as `distanceFocus`.
+  `tourTitles` shows each stop's title low in the frame as the camera
+  drifts through it, and `tourLoop` ends the tour where it began so the
+  video loops. Frames then come three ways:
+  `seiza_parallax_render_frame` draws any frame into the caller's own
+  buffer, with a row stride and `SEIZA_PIXEL_FORMAT_RGB8`, `_RGBA8` or
+  `_BGRA8`, so a platform encoder's pixel buffer (a `CVPixelBuffer`, a Media
+  Foundation sample) can take it directly, from several threads at once;
+  `seiza_parallax_render_frames` hands every frame in order to a
+  `SeizaParallaxFrameCallback`, the hook for an external encoder, which
+  returns nonzero to stop; and `seiza_parallax_write_video_json` writes an
+  MP4 through ffmpeg or numbered PNG frames. Both whole-video calls take a
+  `SeizaCancelSignal` and return `1` done, `0` stopped, or `-1` failed.
+  Labels use the Inter typeface, embedded; an app shipping this library must
+  ship its licence, `seiza-draw/fonts/LICENSE-Inter.txt`.
 - **Catalog setup** — `seiza_catalog_status_json` and `seiza_catalog_setup`
   (with a progress callback). Preset `3` installs only the Gaia photometry
   catalog that colour calibration reads. The install path delegates to
