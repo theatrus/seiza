@@ -1024,7 +1024,8 @@ pub unsafe extern "C" fn seiza_parallax_reconfigure_json(
 /// # Safety
 ///
 /// `video` must be a live pointer from [`seiza_parallax_prepare_json`],
-/// [`seiza_parallax_reconfigure_json`] or [`seiza_parallax_with_dust_map`].
+/// [`seiza_parallax_reconfigure_json`], [`seiza_parallax_with_dust_map`] or
+/// [`seiza_parallax_with_dust_map_json`].
 /// When non-null, `error_out` must point to writable storage for one
 /// pointer.
 #[unsafe(no_mangle)]
@@ -1109,7 +1110,8 @@ fn which_dust(video: &Parallax, which: u32) -> Result<Option<&Dust>, String> {
 /// # Safety
 ///
 /// `video` must be a live pointer from [`seiza_parallax_prepare_json`],
-/// [`seiza_parallax_reconfigure_json`] or [`seiza_parallax_with_dust_map`].
+/// [`seiza_parallax_reconfigure_json`], [`seiza_parallax_with_dust_map`] or
+/// [`seiza_parallax_with_dust_map_json`].
 /// `opacity` must point to `length` writable floats. When non-null,
 /// `error_out` must point to writable storage for one pointer.
 #[unsafe(no_mangle)]
@@ -1157,7 +1159,8 @@ pub unsafe extern "C" fn seiza_parallax_dust_map(
 /// What lies behind the nebula dims by the map, and a star seen where it
 /// is opaque flies in front of the nebula. This is for painting: draw over
 /// [`seiza_parallax_dust_map`]'s map, pass it here, and draw frames from
-/// the new video. A map gives dust even to a video prepared without it.
+/// the new video; [`seiza_parallax_with_dust_map_json`] reads the map from
+/// a file instead. A map gives dust even to a video prepared without it.
 ///
 /// Only the dust changes. The planes and stars are shared, not copied, so
 /// this takes about as long as fitting the camera again
@@ -1220,6 +1223,60 @@ pub unsafe extern "C" fn seiza_parallax_with_dust_map(
     .unwrap_or(ptr::null_mut())
 }
 
+/// What [`seiza_parallax_with_dust_map_json`] reads.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DustMapReadRequest {
+    /// The map file, its format by its extension; the counted dust if absent.
+    path: Option<PathBuf>,
+}
+
+/// [`seiza_parallax_with_dust_map`] with the map read from a file:
+/// `request_json` is `{"path": ...}`, an image white where the dust is
+/// opaque, at any size of the image's shape, as PNG, JPEG, TIFF, FITS or
+/// XISF by its extension; `{}` or a null `path` goes back to the dust
+/// mapped from the star counts. For a map painted in another program and
+/// read again after each change. Ownership, sharing and the other arguments
+/// are as for [`seiza_parallax_with_dust_map`].
+///
+/// # Safety
+///
+/// `video` must be a live pointer from [`seiza_parallax_prepare_json`],
+/// [`seiza_parallax_reconfigure_json`] or [`seiza_parallax_with_dust_map`],
+/// kept alive until this call returns. `request_json` must be a
+/// NUL-terminated UTF-8 string. `cancel` must be null or a live
+/// [`SeizaCancelSignal`] retained until this call returns. When non-null,
+/// `error_out` must point to writable storage for one pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_parallax_with_dust_map_json(
+    video: *const SeizaParallax,
+    request_json: *const c_char,
+    cancel: *const SeizaCancelSignal,
+    events: SeizaParallaxEventCallback,
+    context: *mut c_void,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaParallax {
+    clear_error(error_out);
+    let context = context as usize;
+    let cancel = cancel as usize;
+    ffi_result(error_out, || {
+        let video = &unsafe { video.as_ref() }.ok_or("video is null")?.video;
+        let request_json = required_str(request_json, "dust map request JSON")?;
+        let request: DustMapReadRequest = serde_json::from_str(&request_json)
+            .map_err(|error| format!("invalid dust map request JSON: {error}"))?;
+        let map = request.path.as_deref().map(DustMap::open).transpose()?;
+        let painted = video
+            .with_dust_map(
+                map.as_ref(),
+                &mut |event| send(events, context, event_json(event)),
+                &|| cancelled(cancel),
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(Box::into_raw(Box::new(SeizaParallax { video: painted })))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
 /// What [`seiza_parallax_write_dust_map_json`] writes.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1246,7 +1303,8 @@ struct DustMapWriteRequest {
 /// # Safety
 ///
 /// `video` must be a live pointer from [`seiza_parallax_prepare_json`],
-/// [`seiza_parallax_reconfigure_json`] or [`seiza_parallax_with_dust_map`].
+/// [`seiza_parallax_reconfigure_json`], [`seiza_parallax_with_dust_map`] or
+/// [`seiza_parallax_with_dust_map_json`].
 /// `request_json` must be a NUL-terminated UTF-8 string. When non-null,
 /// `error_out` must point to writable storage for one pointer.
 #[unsafe(no_mangle)]
@@ -1323,7 +1381,8 @@ fn write_pixels(frame: &RgbImage, format: u32, out: &mut [u8], stride: usize) {
 /// # Safety
 ///
 /// `video` must be a live pointer from [`seiza_parallax_prepare_json`],
-/// [`seiza_parallax_reconfigure_json`] or [`seiza_parallax_with_dust_map`].
+/// [`seiza_parallax_reconfigure_json`], [`seiza_parallax_with_dust_map`] or
+/// [`seiza_parallax_with_dust_map_json`].
 /// `buffer` must point to `buffer_length` writable bytes. When non-null,
 /// `error_out` must point to writable storage for one pointer.
 #[unsafe(no_mangle)]
@@ -1382,7 +1441,8 @@ pub unsafe extern "C" fn seiza_parallax_render_frame(
 /// # Safety
 ///
 /// `video` must be a live pointer from [`seiza_parallax_prepare_json`],
-/// [`seiza_parallax_reconfigure_json`] or [`seiza_parallax_with_dust_map`].
+/// [`seiza_parallax_reconfigure_json`], [`seiza_parallax_with_dust_map`] or
+/// [`seiza_parallax_with_dust_map_json`].
 /// `cancel` must be null or a live [`SeizaCancelSignal`] retained until
 /// this call returns. When non-null, `error_out` must point to writable
 /// storage for one pointer.
@@ -1453,7 +1513,8 @@ pub unsafe extern "C" fn seiza_parallax_render_frames(
 /// # Safety
 ///
 /// `video` must be a live pointer from [`seiza_parallax_prepare_json`],
-/// [`seiza_parallax_reconfigure_json`] or [`seiza_parallax_with_dust_map`].
+/// [`seiza_parallax_reconfigure_json`], [`seiza_parallax_with_dust_map`] or
+/// [`seiza_parallax_with_dust_map_json`].
 /// `request_json` must be a NUL-terminated UTF-8 string. `cancel` must be
 /// null or a live [`SeizaCancelSignal`] retained until this call returns.
 /// When non-null, `error_out` must point to writable storage for one
@@ -2161,6 +2222,60 @@ mod tests {
             unsafe { seiza_parallax_write_dust_map_json(counted, request.as_ptr(), &mut error) },
             0
         );
+
+        // A painted file read in, clear: no star in front; then back.
+        let clear_file = directory.path().join("clear.tif");
+        seiza_image_io::save(
+            &clear_file,
+            &seiza_image_io::FloatImage::gray(32, 24, vec![0.0; 32 * 24]),
+        )
+        .unwrap();
+        let request = CString::new(serde_json::json!({ "path": clear_file }).to_string()).unwrap();
+        let from_file = unsafe {
+            seiza_parallax_with_dust_map_json(
+                video,
+                request.as_ptr(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(!from_file.is_null(), "{}", take_error(error));
+        assert_eq!(summary(from_file)["dustGiven"], true);
+        assert_eq!(summary(from_file)["starsInFrontOfDust"], 0);
+        let back = CString::new("{}").unwrap();
+        let counted_again = unsafe {
+            seiza_parallax_with_dust_map_json(
+                from_file,
+                back.as_ptr(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(!counted_again.is_null(), "{}", take_error(error));
+        assert!(dust_map(counted_again, SEIZA_DUST_MAP_IN_USE, 4, 3).is_none());
+        let missing = CString::new(
+            serde_json::json!({ "path": directory.path().join("missing.png") }).to_string(),
+        )
+        .unwrap();
+        let refused = unsafe {
+            seiza_parallax_with_dust_map_json(
+                video,
+                missing.as_ptr(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(refused.is_null());
+        assert!(take_error(error).contains("missing.png"));
+        for video in [from_file, counted_again] {
+            unsafe { seiza_parallax_free(video) };
+        }
 
         // A map of another shape, a short buffer and an unknown choice.
         let square: Vec<f32> = vec![0.5; 20 * 20];

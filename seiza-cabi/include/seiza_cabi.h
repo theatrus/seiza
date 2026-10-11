@@ -2223,7 +2223,8 @@ SeizaParallax *seiza_parallax_reconfigure_json(const SeizaParallax *video,
  # Safety
 
  `video` must be a live pointer from [`seiza_parallax_prepare_json`],
- [`seiza_parallax_reconfigure_json`] or [`seiza_parallax_with_dust_map`].
+ [`seiza_parallax_reconfigure_json`], [`seiza_parallax_with_dust_map`] or
+ [`seiza_parallax_with_dust_map_json`].
  When non-null, `error_out` must point to writable storage for one
  pointer.
  */
@@ -2243,7 +2244,8 @@ char *seiza_parallax_summary_json(const SeizaParallax *video, char **error_out);
  # Safety
 
  `video` must be a live pointer from [`seiza_parallax_prepare_json`],
- [`seiza_parallax_reconfigure_json`] or [`seiza_parallax_with_dust_map`].
+ [`seiza_parallax_reconfigure_json`], [`seiza_parallax_with_dust_map`] or
+ [`seiza_parallax_with_dust_map_json`].
  `opacity` must point to `length` writable floats. When non-null,
  `error_out` must point to writable storage for one pointer.
  */
@@ -2263,7 +2265,8 @@ int32_t seiza_parallax_dust_map(const SeizaParallax *video,
  What lies behind the nebula dims by the map, and a star seen where it
  is opaque flies in front of the nebula. This is for painting: draw over
  [`seiza_parallax_dust_map`]'s map, pass it here, and draw frames from
- the new video. A map gives dust even to a video prepared without it.
+ the new video; [`seiza_parallax_with_dust_map_json`] reads the map from
+ a file instead. A map gives dust even to a video prepared without it.
 
  Only the dust changes. The planes and stars are shared, not copied, so
  this takes about as long as fitting the camera again
@@ -2292,6 +2295,31 @@ SeizaParallax *seiza_parallax_with_dust_map(const SeizaParallax *video,
                                             char **error_out);
 
 /*
+ [`seiza_parallax_with_dust_map`] with the map read from a file:
+ `request_json` is `{"path": ...}`, an image white where the dust is
+ opaque, at any size of the image's shape, as PNG, JPEG, TIFF, FITS or
+ XISF by its extension; `{}` or a null `path` goes back to the dust
+ mapped from the star counts. For a map painted in another program and
+ read again after each change. Ownership, sharing and the other arguments
+ are as for [`seiza_parallax_with_dust_map`].
+
+ # Safety
+
+ `video` must be a live pointer from [`seiza_parallax_prepare_json`],
+ [`seiza_parallax_reconfigure_json`] or [`seiza_parallax_with_dust_map`],
+ kept alive until this call returns. `request_json` must be a
+ NUL-terminated UTF-8 string. `cancel` must be null or a live
+ [`SeizaCancelSignal`] retained until this call returns. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+SeizaParallax *seiza_parallax_with_dust_map_json(const SeizaParallax *video,
+                                                 const char *request_json,
+                                                 const SeizaCancelSignal *cancel,
+                                                 SeizaParallaxEventCallback events,
+                                                 void *context,
+                                                 char **error_out);
+
+/*
  Write `video`'s dust, white (1) where opaque, as `seiza parallax-video
  --export-dust-map` does, in the format the path's extension names: a
  16-bit grayscale PNG or TIFF (`.png`, `.tif`), or a 32-bit float FITS or
@@ -2304,7 +2332,8 @@ SeizaParallax *seiza_parallax_with_dust_map(const SeizaParallax *video,
  # Safety
 
  `video` must be a live pointer from [`seiza_parallax_prepare_json`],
- [`seiza_parallax_reconfigure_json`] or [`seiza_parallax_with_dust_map`].
+ [`seiza_parallax_reconfigure_json`], [`seiza_parallax_with_dust_map`] or
+ [`seiza_parallax_with_dust_map_json`].
  `request_json` must be a NUL-terminated UTF-8 string. When non-null,
  `error_out` must point to writable storage for one pointer.
  */
@@ -2323,7 +2352,8 @@ int32_t seiza_parallax_write_dust_map_json(const SeizaParallax *video,
  # Safety
 
  `video` must be a live pointer from [`seiza_parallax_prepare_json`],
- [`seiza_parallax_reconfigure_json`] or [`seiza_parallax_with_dust_map`].
+ [`seiza_parallax_reconfigure_json`], [`seiza_parallax_with_dust_map`] or
+ [`seiza_parallax_with_dust_map_json`].
  `buffer` must point to `buffer_length` writable bytes. When non-null,
  `error_out` must point to writable storage for one pointer.
  */
@@ -2347,7 +2377,8 @@ bool seiza_parallax_render_frame(const SeizaParallax *video,
  # Safety
 
  `video` must be a live pointer from [`seiza_parallax_prepare_json`],
- [`seiza_parallax_reconfigure_json`] or [`seiza_parallax_with_dust_map`].
+ [`seiza_parallax_reconfigure_json`], [`seiza_parallax_with_dust_map`] or
+ [`seiza_parallax_with_dust_map_json`].
  `cancel` must be null or a live [`SeizaCancelSignal`] retained until
  this call returns. When non-null, `error_out` must point to writable
  storage for one pointer.
@@ -2371,7 +2402,8 @@ int32_t seiza_parallax_render_frames(const SeizaParallax *video,
  # Safety
 
  `video` must be a live pointer from [`seiza_parallax_prepare_json`],
- [`seiza_parallax_reconfigure_json`] or [`seiza_parallax_with_dust_map`].
+ [`seiza_parallax_reconfigure_json`], [`seiza_parallax_with_dust_map`] or
+ [`seiza_parallax_with_dust_map_json`].
  `request_json` must be a NUL-terminated UTF-8 string. `cancel` must be
  null or a live [`SeizaCancelSignal`] retained until this call returns.
  When non-null, `error_out` must point to writable storage for one
