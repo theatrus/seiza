@@ -33,6 +33,10 @@ also pushed. Online integration, retained-frame replay, and drizzle use its
 pixel grid and output WCS. Prepared channel counts must match.
 Saved contexts retain both references; older readers reject these contexts,
 while ordinary stack contexts retain their existing format.
+`LiveStacker::open_fits_with_reference_image` does the same from paths, with
+`open_fits`'s duplicate-path checks. The reference image may also be one of
+the lights, and `protected_paths` keeps outputs and contexts from replacing
+it.
 
 Live delta-sigma rejection cannot remove trails admitted during its warm-up.
 `LiveStacker::reintegrate` fixes that for a live stack. The stacker keeps a

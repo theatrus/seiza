@@ -683,6 +683,64 @@ impl PyLiveStacker {
         Ok(Self { inner: Some(inner) })
     }
 
+    /// Open a stack aligned to ``reference_image``, an image shared by the
+    /// stacks of several filters so their outputs share one pixel grid and
+    /// WCS. ``channel_reference``, one of this filter's lights, sets
+    /// normalization and noise weighting. The stack starts empty: push the
+    /// channel reference like every other light. The reference image adds no
+    /// pixels unless it is pushed as well, and outputs may not replace it.
+    #[staticmethod]
+    #[pyo3(signature = (
+        reference_image,
+        channel_reference,
+        *,
+        options=None,
+        bias=None,
+        dark=None,
+        flat=None,
+        dark_exposure_seconds=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn open_fits_with_reference_image(
+        py: Python<'_>,
+        reference_image: PathBuf,
+        channel_reference: PathBuf,
+        options: Option<PyRef<'_, PyStackOptions>>,
+        bias: Option<PathBuf>,
+        dark: Option<PathBuf>,
+        flat: Option<PathBuf>,
+        dark_exposure_seconds: Option<f64>,
+    ) -> PyResult<Self> {
+        validate_exposure_override(dark.as_ref(), dark_exposure_seconds, "dark")?;
+        for image in [&reference_image, &channel_reference] {
+            let paths = std::iter::once(image.clone())
+                .chain(
+                    [bias.clone(), dark.clone(), flat.clone()]
+                        .into_iter()
+                        .flatten(),
+                )
+                .collect::<Vec<_>>();
+            validate_distinct_paths(&paths)?;
+        }
+        let options = options
+            .as_ref()
+            .map_or_else(StackOptions::default, |options| options.inner.clone());
+        let inner = py
+            .allow_threads(move || {
+                LiveStacker::open_fits_with_reference_image(
+                    reference_image,
+                    channel_reference,
+                    bias.as_deref(),
+                    dark.as_deref(),
+                    flat.as_deref(),
+                    dark_exposure_seconds,
+                    options,
+                )
+            })
+            .map_err(stack_error)?;
+        Ok(Self { inner: Some(inner) })
+    }
+
     /// Reopen a versioned on-disk context and continue adding frames.
     #[staticmethod]
     fn open_context(py: Python<'_>, path: PathBuf) -> PyResult<Self> {
@@ -739,6 +797,13 @@ impl PyLiveStacker {
     #[getter]
     fn rejected_frames(&self) -> PyResult<u32> {
         Ok(self.active()?.view().rejected_frames)
+    }
+
+    /// False for a stack aligned to a separate reference image, which starts
+    /// with no accepted frames.
+    #[getter]
+    fn reference_integrated(&self) -> PyResult<bool> {
+        Ok(self.active()?.reference_is_integrated())
     }
 
     fn push_fits(&mut self, py: Python<'_>, path: PathBuf) -> PyResult<PyFrameDisposition> {
@@ -945,7 +1010,7 @@ impl PyLiveStacker {
             accepted_frames: result.snapshot.accepted_frames,
             rejected_frames: result.snapshot.rejected_frames,
             reference_headers: stacker.reference_headers().to_vec(),
-            input_paths: stacker.input_paths().to_vec(),
+            input_paths: stacker.protected_paths(),
         };
         Ok((
             PyStackSnapshot {
@@ -961,7 +1026,7 @@ impl PyLiveStacker {
         if let Some(output) = &output
             && self
                 .active()?
-                .input_paths()
+                .protected_paths()
                 .iter()
                 .any(|input| paths_refer_to_same_file(input, output))
         {
@@ -1072,7 +1137,8 @@ impl PyMasterResult {
     bias=None,
     dark=None,
     flat=None,
-    dark_exposure_seconds=None
+    dark_exposure_seconds=None,
+    reference_image=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn stack_fits(
@@ -1084,6 +1150,7 @@ fn stack_fits(
     dark: Option<PathBuf>,
     flat: Option<PathBuf>,
     dark_exposure_seconds: Option<f64>,
+    reference_image: Option<PathBuf>,
 ) -> PyResult<PyStackResult> {
     if images.len() < 2 {
         return Err(PyValueError::new_err(
@@ -1096,21 +1163,54 @@ fn stack_fits(
         &output,
         [bias.as_ref(), dark.as_ref(), flat.as_ref()],
     )?;
+    if let Some(reference_image) = &reference_image {
+        // The reference image may be one of the lights, but not a master or
+        // the output.
+        if paths_refer_to_same_file(reference_image, &output) {
+            return Err(PyValueError::new_err(
+                "output path must not refer to the reference image",
+            ));
+        }
+        let paths = std::iter::once(reference_image.clone())
+            .chain(
+                [bias.clone(), dark.clone(), flat.clone()]
+                    .into_iter()
+                    .flatten(),
+            )
+            .collect::<Vec<_>>();
+        validate_distinct_paths(&paths)?;
+    }
     let options = options
         .as_ref()
         .map_or_else(StackOptions::default, |options| options.inner.clone());
     py.allow_threads(move || {
         let calibration = load_calibration(bias, dark, flat, dark_exposure_seconds)?;
-        let mut paths = images.into_iter();
-        let reference_path = paths.next().expect("two paths were validated");
-        let reference = FitsFrame::open(&reference_path)?;
-        let mut stacker = LiveStacker::new(reference, calibration, options)?;
+        // The first light is the reference. With a reference image, it sets
+        // only normalization and noise weighting and is stacked like the rest.
+        let first = FitsFrame::open(&images[0])?;
+        let (mut stacker, lights) = match &reference_image {
+            Some(reference_image) => (
+                LiveStacker::with_reference_image(
+                    FitsFrame::open(reference_image)?,
+                    first,
+                    calibration,
+                    options,
+                )?,
+                &images[..],
+            ),
+            None => (LiveStacker::new(first, calibration, options)?, &images[1..]),
+        };
         let mut frames = Vec::new();
-        for path in paths {
-            let frame = FitsFrame::open(&path)?;
+        for path in lights {
+            let frame = FitsFrame::open(path)?;
             frames.push(PyFrameDisposition::from_rust(
-                Some(path),
+                Some(path.clone()),
                 stacker.push(frame)?,
+            ));
+        }
+        if stacker.view().accepted_frames == 0 {
+            return Err(seiza_stacking::Error::Stack(
+                "no light frames were accepted against the reference image".into(),
             ));
         }
         let headers = stacker.reference_headers().to_vec();

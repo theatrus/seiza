@@ -100,6 +100,45 @@ def test_live_stacker_context_reopens_and_continues(tmp_path):
     assert np.all(final.coverage == 3)
 
 
+def test_channels_stack_onto_a_shared_reference_image(tmp_path):
+    # A larger, brighter image sets the grid but adds none of its pixels.
+    common = tmp_path / "common.fits"
+    fits.writeto(common, synthetic_star_field(height=144, width=176) * 2.0)
+    image = synthetic_star_field()
+    lights = [tmp_path / "red-001.fits", tmp_path / "red-002.fits"]
+    for light in lights:
+        fits.writeto(light, image)
+    options = no_adjustment_options()
+
+    output = tmp_path / "red.fits"
+    result = seiza.stack_fits(lights, output, options=options, reference_image=common)
+    assert result.accepted_frames == 2
+    assert len(result.frames) == 2
+    assert (result.height, result.width) == (144, 176)
+    with fits.open(output) as hdus:
+        assert abs(hdus[0].data[70, 70] - image[70, 70]) < 1.0
+    with pytest.raises(ValueError, match="reference image"):
+        seiza.stack_fits(lights, common, options=options, reference_image=common)
+    with pytest.raises(ValueError, match="duplicate"):
+        seiza.stack_fits(
+            lights, output, options=options, bias=common, reference_image=common
+        )
+
+    stacker = seiza.LiveStacker.open_fits_with_reference_image(
+        common, lights[0], options=options
+    )
+    assert not stacker.reference_integrated
+    assert stacker.accepted_frames == 0
+    for light in lights:
+        assert stacker.push_fits(light).accepted
+    assert stacker.accepted_frames == 2
+    with pytest.raises(ValueError, match="must not refer"):
+        stacker.finish(common)
+    final = stacker.finish(tmp_path / "live.fits")
+    assert final.image.shape == (144, 176)
+    assert seiza.LiveStacker.from_array(image).reference_integrated
+
+
 def test_live_stacker_accepts_and_registers_meridian_flipped_frame():
     image = synthetic_star_field()
     flipped = np.ascontiguousarray(np.rot90(image, 2))

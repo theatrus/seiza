@@ -265,6 +265,22 @@ around small ones, and `"bilinear"` is fastest. The CLI's other stacking
 options (reference choice, registration model, interpolation, weighting, Bayer
 drizzle) are not yet exposed here.
 
+To stack each filter onto the same grid, pass every run the same
+`reference_image`, as the CLI's `--reference-image` does. It sets only the
+alignment grid and WCS; the first light still sets normalization and noise
+weighting, and every light listed is stacked, the first included. The
+reference image is not calibrated and adds no pixels unless it is also listed
+as a light. It must have the lights' channel count:
+
+```python
+for name in ["red", "green", "blue"]:
+    seiza.stack_fits(lights[name], f"{name}.fits", reference_image="common.fits")
+```
+
+`LiveStacker.open_fits_with_reference_image(reference_image, channel_reference)`
+does the same for a live stack. It starts with no frames, so push the channel
+reference like every other light; `reference_integrated` is then false.
+
 For live integration, construct from a FITS path or a C-contiguous mono/HWC
 RGB NumPy `float32` array. An array-based stacker accepts only already-linear,
 calibrated arrays through `push()`. A path-based stacker can use `push_fits()`

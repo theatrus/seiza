@@ -616,6 +616,12 @@ struct LiveStackStateResponse {
     input_mode: &'static str,
     input_paths: Vec<String>,
     reference_frame: LiveStackReferenceResponse,
+    /// False for a stack aligned to a separate reference image, which starts
+    /// with no accepted frames; see
+    /// [`seiza_live_stacker_open_fits_with_reference_image`].
+    reference_integrated: bool,
+    /// That reference image, or null.
+    reference_image_path: Option<String>,
     /// Why [`seiza_live_stacker_reintegrate`] cannot replay this stack, or
     /// null when it can.
     reintegration_unavailable: Option<String>,
@@ -1993,6 +1999,78 @@ pub unsafe extern "C" fn seiza_live_stacker_open_fits(
 }
 
 #[unsafe(no_mangle)]
+/// Opens a stack aligned to `reference_image_path`, a FITS or XISF image
+/// shared by the stacks of several filters, so that their outputs share one
+/// pixel grid and WCS. The reference image sets only the grid: it is
+/// demosaiced when it is a raw colour frame, but not calibrated, and it adds
+/// no pixels unless it is also pushed as a light.
+///
+/// `channel_reference_path`, one of this filter's lights, is calibrated,
+/// aligned to the reference image, and sets normalization and noise
+/// weighting. It is not taken as a light here: the stack starts with no
+/// accepted frames, so push it like every other light. Both images must
+/// prepare to the same channel count, mono for mono lights and RGB for RGB or
+/// Bayer lights. The masters, `dark_exposure_seconds` and `options_json` are
+/// those of [`seiza_live_stacker_open_fits`]. The state JSON reports
+/// `referenceIntegrated` false and the `referenceImagePath`, and snapshots,
+/// drizzles and contexts refuse to replace the reference image.
+///
+/// # Safety
+/// `reference_image_path` and `channel_reference_path` must be valid
+/// NUL-terminated strings. Optional paths and `options_json` may be null;
+/// when non-null they must be NUL-terminated. When non-null, `error_out` must
+/// point to writable storage for one pointer.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn seiza_live_stacker_open_fits_with_reference_image(
+    reference_image_path: *const c_char,
+    channel_reference_path: *const c_char,
+    bias_path: *const c_char,
+    dark_path: *const c_char,
+    flat_path: *const c_char,
+    dark_exposure_seconds: f64,
+    options_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaLiveStacker {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let reference_image_path =
+            required_path(reference_image_path, "stack reference image path")?;
+        let channel_reference_path =
+            required_path(channel_reference_path, "stack channel reference path")?;
+        let bias_path = optional_path(bias_path)?;
+        let dark_path = optional_path(dark_path)?;
+        let flat_path = optional_path(flat_path)?;
+        let masters = [bias_path.clone(), dark_path.clone(), flat_path.clone()];
+        // The reference image may be a light, even the channel reference,
+        // but neither may be a master.
+        for image in [&reference_image_path, &channel_reference_path] {
+            let paths = std::iter::once(image.clone())
+                .chain(masters.iter().flatten().cloned())
+                .collect::<Vec<_>>();
+            validate_distinct_stack_paths(&paths)?;
+        }
+        if dark_path.is_none() && dark_exposure_seconds != 0.0 {
+            return Err("a master-dark exposure override requires a dark path".into());
+        }
+        let dark_exposure_seconds =
+            optional_positive_seconds(dark_exposure_seconds, "master-dark exposure override")?;
+        let options = stack_options(options_json)?;
+        let stacker = LiveStacker::open_fits_with_reference_image(
+            &reference_image_path,
+            &channel_reference_path,
+            bias_path.as_deref(),
+            dark_path.as_deref(),
+            flat_path.as_deref(),
+            dark_exposure_seconds,
+            options,
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(SeizaLiveStacker { stacker })
+    })
+    .map_or(ptr::null_mut(), |stacker| Box::into_raw(Box::new(stacker)))
+}
+
+#[unsafe(no_mangle)]
 /// Reopens a versioned live-stack context previously written by
 /// [`seiza_live_stacker_save_context`]. The restored handle retains its
 /// original registration reference, calibration, online rejection moments,
@@ -2147,6 +2225,11 @@ pub unsafe extern "C" fn seiza_live_stacker_state_json(
                     flat_normalized: reference_metadata.calibration_state.flat_normalized,
                 },
             },
+            reference_integrated: stacker.stacker.reference_is_integrated(),
+            reference_image_path: stacker
+                .stacker
+                .reference_image_path()
+                .map(|path| path.to_string_lossy().into_owned()),
             reintegration_unavailable: stacker.stacker.reintegration_unavailable(),
         })
     })
@@ -2538,7 +2621,7 @@ pub unsafe extern "C" fn seiza_live_stacker_snapshot(
         Ok(SeizaStackSnapshot {
             snapshot,
             reference_headers,
-            input_paths: stacker.stacker.input_paths().to_vec(),
+            input_paths: stacker.stacker.protected_paths(),
         })
     })
     .map_or(ptr::null_mut(), |snapshot| {
@@ -2566,7 +2649,7 @@ pub unsafe extern "C" fn seiza_live_stacker_export_snapshot(
     ffi_result(error_out, || {
         let stacker = unsafe { required_live_stacker(stacker)? };
         let reference_headers = stacker.stacker.reference_headers().to_vec();
-        let input_paths = stacker.stacker.input_paths().to_vec();
+        let input_paths = stacker.stacker.protected_paths();
         let snapshot = stacker
             .stacker
             .export_snapshot()
@@ -2713,7 +2796,7 @@ pub unsafe extern "C" fn seiza_live_stacker_reintegrate(
         Ok(SeizaStackSnapshot {
             snapshot: result.snapshot,
             reference_headers: stacker.stacker.reference_headers().to_vec(),
-            input_paths: stacker.stacker.input_paths().to_vec(),
+            input_paths: stacker.stacker.protected_paths(),
         })
     })
     .map_or(ptr::null_mut(), |snapshot| {
@@ -2804,7 +2887,7 @@ pub unsafe extern "C" fn seiza_live_stacker_reintegrate_drizzled(
             })
             .map_err(|error| error.to_string())?;
         let reference_headers = stacker.stacker.reference_headers().to_vec();
-        let input_paths = stacker.stacker.input_paths().to_vec();
+        let input_paths = stacker.stacker.protected_paths();
         let drizzled = SeizaDrizzleResult {
             result: drizzled,
             accepted_frames: result.snapshot.accepted_frames,
@@ -3009,7 +3092,7 @@ pub unsafe extern "C" fn seiza_live_stacker_finish(
         let live = unsafe { Box::from_raw(live) };
         let SeizaLiveStacker { stacker } = *live;
         let reference_headers = stacker.reference_headers().to_vec();
-        let input_paths = stacker.input_paths().to_vec();
+        let input_paths = stacker.protected_paths();
         let snapshot = stacker.into_snapshot().map_err(|error| error.to_string())?;
         Ok(SeizaStackSnapshot {
             snapshot,
@@ -8073,6 +8156,121 @@ mod tests {
         assert!(!snapshot.is_null());
         assert!(!unsafe {
             seiza_stack_snapshot_write_fits(snapshot, first_c.as_ptr(), &mut error)
+        });
+        assert!(
+            unsafe { CStr::from_ptr(error) }
+                .to_str()
+                .unwrap()
+                .contains("must not refer")
+        );
+        unsafe {
+            seiza_string_free(error);
+            seiza_stack_snapshot_free(snapshot);
+            seiza_live_stacker_free(stacker);
+        }
+    }
+
+    #[test]
+    fn stacking_cabi_aligns_a_channel_to_a_shared_reference_image() {
+        let directory = tempfile::tempdir().unwrap();
+        let write = |name: &str, width: usize, height: usize| {
+            let path = directory.path().join(name);
+            let image = LinearImage::new(width, height, 1, stacking_star_field(width, height));
+            seiza_stacking::write_processed_image_fits_f32(&path, &image.unwrap(), &[], &[])
+                .unwrap();
+            CString::new(path.to_str().unwrap()).unwrap()
+        };
+        // A larger shared image sets the grid every channel stacks onto.
+        let reference = write("common.fits", 176, 144);
+        let lights = [
+            write("red-001.fits", 160, 128),
+            write("red-002.fits", 160, 128),
+        ];
+        let bias = directory.path().join("bias.fits");
+        seiza_stacking::write_processed_image_fits_f32(
+            &bias,
+            &LinearImage::new(160, 128, 1, vec![0.0; 160 * 128]).unwrap(),
+            &[],
+            &[],
+        )
+        .unwrap();
+        let bias = CString::new(bias.to_str().unwrap()).unwrap();
+        let context = directory.path().join("red.seiza-stack");
+        let context = CString::new(context.to_str().unwrap()).unwrap();
+        let config = no_adjustment_stack_options();
+        let open = |reference: &CString, error: &mut *mut c_char| unsafe {
+            seiza_live_stacker_open_fits_with_reference_image(
+                reference.as_ptr(),
+                lights[0].as_ptr(),
+                bias.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                0.0,
+                config.as_ptr(),
+                error,
+            )
+        };
+        let state = |stacker: *const SeizaLiveStacker| {
+            let mut error = ptr::null_mut();
+            let json = unsafe { seiza_live_stacker_state_json(stacker, &mut error) };
+            assert!(!json.is_null());
+            let value: serde_json::Value =
+                serde_json::from_str(unsafe { CStr::from_ptr(json) }.to_str().unwrap()).unwrap();
+            unsafe { seiza_string_free(json) };
+            value
+        };
+
+        let mut error = ptr::null_mut();
+        assert!(open(&bias, &mut error).is_null());
+        assert!(
+            unsafe { CStr::from_ptr(error) }
+                .to_str()
+                .unwrap()
+                .contains("duplicate stack input path")
+        );
+        unsafe { seiza_string_free(error) };
+        error = ptr::null_mut();
+
+        let mut stacker = open(&reference, &mut error);
+        assert!(!stacker.is_null(), "{:?}", unsafe { CStr::from_ptr(error) });
+        let opened = state(stacker);
+        assert_eq!(opened["referenceIntegrated"], false);
+        assert_eq!(opened["acceptedFrames"], 0);
+        assert_eq!(
+            (opened["width"].clone(), opened["height"].clone()),
+            (176.into(), 144.into())
+        );
+        assert!(
+            opened["referenceImagePath"]
+                .as_str()
+                .unwrap()
+                .ends_with("common.fits")
+        );
+        for light in &lights {
+            let disposition =
+                unsafe { seiza_live_stacker_push_fits_json(stacker, light.as_ptr(), &mut error) };
+            assert!(!disposition.is_null());
+            unsafe { seiza_string_free(disposition) };
+        }
+        assert_eq!(unsafe { seiza_live_stacker_accepted_frames(stacker) }, 2);
+        assert!(!unsafe {
+            seiza_live_stacker_save_context(stacker, reference.as_ptr(), &mut error)
+        });
+        unsafe { seiza_string_free(error) };
+        error = ptr::null_mut();
+        assert!(unsafe { seiza_live_stacker_save_context(stacker, context.as_ptr(), &mut error) });
+        unsafe { seiza_live_stacker_free(stacker) };
+
+        stacker = unsafe { seiza_live_stacker_open_context(context.as_ptr(), &mut error) };
+        assert!(!stacker.is_null());
+        let resumed = state(stacker);
+        assert_eq!(resumed["referenceIntegrated"], false);
+        assert_eq!(resumed["referenceImagePath"], opened["referenceImagePath"]);
+        assert_eq!(resumed["acceptedFrames"], 2);
+        let snapshot = unsafe { seiza_live_stacker_snapshot(stacker, &mut error) };
+        assert!(!snapshot.is_null());
+        assert!(!unsafe {
+            seiza_stack_snapshot_write_fits(snapshot, reference.as_ptr(), &mut error)
         });
         assert!(
             unsafe { CStr::from_ptr(error) }

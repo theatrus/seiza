@@ -536,6 +536,10 @@ pub struct LiveStacker {
     pub(crate) reference_cfa: Option<BayerLayout>,
     /// Whether the prepared reference is also the first admitted image.
     pub(crate) reference_is_integrated: bool,
+    /// The reference image a stack from
+    /// [`Self::open_fits_with_reference_image`] aligns to. Outputs must not
+    /// replace it, though it is no input until pushed as a light.
+    reference_image_path: Option<PathBuf>,
 }
 
 enum ReferenceContribution {
@@ -758,6 +762,7 @@ impl LiveStacker {
             frame_cache: None,
             reference_cfa,
             reference_is_integrated,
+            reference_image_path: None,
         })
     }
 
@@ -772,22 +777,8 @@ impl LiveStacker {
         options: StackOptions,
     ) -> Result<Self> {
         let reference_path = reference_path.as_ref();
-        let input_paths = [Some(reference_path), bias_path, dark_path, flat_path]
-            .into_iter()
-            .flatten()
-            .map(path_identity)
-            .collect::<Vec<_>>();
-        for (index, path) in input_paths.iter().enumerate() {
-            if input_paths[..index]
-                .iter()
-                .any(|other| paths_refer_to_same_file(other, path))
-            {
-                return Err(Error::Stack(format!(
-                    "stack input path {} is used more than once",
-                    path.display()
-                )));
-            }
-        }
+        let input_paths =
+            distinct_input_paths([Some(reference_path), bias_path, dark_path, flat_path])?;
         let calibration = CalibrationMasters::from_fits_paths(
             bias_path,
             dark_path,
@@ -797,6 +788,51 @@ impl LiveStacker {
         let reference = FitsFrame::open(reference_path)?;
         let mut stacker = Self::new(reference, calibration, options)?;
         stacker.input_paths = input_paths;
+        stacker
+            .ledger
+            .set_current_calibration(crate::replay::CalibrationRecord::from_paths(
+                bias_path,
+                dark_path,
+                flat_path,
+                dark_exposure_seconds,
+            ));
+        Ok(stacker)
+    }
+
+    /// [`Self::with_reference_image`] from FITS or XISF paths, with the
+    /// duplicate-input and output-path protection of [`Self::open_fits`].
+    ///
+    /// The stack starts empty: push the channel reference like every other
+    /// light. The reference image may also be one of the lights, though not a
+    /// calibration master, and [`Self::protected_paths`] keeps outputs off it.
+    pub fn open_fits_with_reference_image(
+        reference_image_path: impl AsRef<Path>,
+        channel_reference_path: impl AsRef<Path>,
+        bias_path: Option<&Path>,
+        dark_path: Option<&Path>,
+        flat_path: Option<&Path>,
+        dark_exposure_seconds: Option<f64>,
+        options: StackOptions,
+    ) -> Result<Self> {
+        let reference_image_path = reference_image_path.as_ref();
+        let channel_reference_path = channel_reference_path.as_ref();
+        let masters = [bias_path, dark_path, flat_path];
+        distinct_input_paths(std::iter::once(Some(reference_image_path)).chain(masters))?;
+        distinct_input_paths(std::iter::once(Some(channel_reference_path)).chain(masters))?;
+        let calibration = CalibrationMasters::from_fits_paths(
+            bias_path,
+            dark_path,
+            flat_path,
+            dark_exposure_seconds,
+        )?;
+        let mut stacker = Self::with_reference_image(
+            FitsFrame::open(reference_image_path)?,
+            FitsFrame::open(channel_reference_path)?,
+            calibration,
+            options,
+        )?;
+        stacker.input_paths = distinct_input_paths(masters)?;
+        stacker.reference_image_path = Some(path_identity(reference_image_path));
         stacker
             .ledger
             .set_current_calibration(crate::replay::CalibrationRecord::from_paths(
@@ -856,6 +892,7 @@ impl LiveStacker {
             frame_cache: None,
             reference_cfa: None,
             reference_is_integrated: restored.reference_is_integrated,
+            reference_image_path: restored.reference_image_path,
         })
     }
 
@@ -864,7 +901,7 @@ impl LiveStacker {
     pub fn save_context(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
         if self
-            .input_paths
+            .protected_paths()
             .iter()
             .any(|input| paths_refer_to_same_file(input, path))
         {
@@ -878,6 +915,7 @@ impl LiveStacker {
             context::ContextWriteState {
                 reference_is_integrated: self.reference_is_integrated,
                 alignment_reference: self.alignment_reference.as_ref(),
+                reference_image_path: self.reference_image_path.as_deref(),
                 options: &self.options,
                 calibration: &self.calibration,
                 reference: &self.reference,
@@ -1300,6 +1338,30 @@ impl LiveStacker {
         &self.input_paths
     }
 
+    /// Every path an output must not replace: [`Self::input_paths`] and the
+    /// reference image of a stack from
+    /// [`Self::open_fits_with_reference_image`].
+    pub fn protected_paths(&self) -> Vec<PathBuf> {
+        self.input_paths
+            .iter()
+            .chain(&self.reference_image_path)
+            .cloned()
+            .collect()
+    }
+
+    /// The reference image a stack from
+    /// [`Self::open_fits_with_reference_image`] aligns to.
+    pub fn reference_image_path(&self) -> Option<&Path> {
+        self.reference_image_path.as_deref()
+    }
+
+    /// Whether the reference frame is part of the stack. It is, except in a
+    /// stack aligned to a separate reference image
+    /// ([`Self::with_reference_image`]), which starts with no frames.
+    pub fn reference_is_integrated(&self) -> bool {
+        self.reference_is_integrated
+    }
+
     /// Which kind of inputs this stack accepts after its reference.
     pub fn input_mode(&self) -> FrameInputMode {
         self.input_mode
@@ -1338,6 +1400,26 @@ impl LiveStacker {
         self.rejected_frames += 1;
         FrameDisposition::Rejected(reason)
     }
+}
+
+/// The identities of `paths`, refusing any two that name the same file.
+fn distinct_input_paths<'a>(
+    paths: impl IntoIterator<Item = Option<&'a Path>>,
+) -> Result<Vec<PathBuf>> {
+    let mut identities: Vec<PathBuf> = Vec::new();
+    for path in paths.into_iter().flatten().map(path_identity) {
+        if identities
+            .iter()
+            .any(|other| paths_refer_to_same_file(other, &path))
+        {
+            return Err(Error::Stack(format!(
+                "stack input path {} is used more than once",
+                path.display()
+            )));
+        }
+        identities.push(path);
+    }
+    Ok(identities)
 }
 
 /// Calibrate and prepare a light used as a channel's photometric target.
@@ -2374,6 +2456,88 @@ mod tests {
     }
 
     #[test]
+    fn a_stack_opened_on_a_reference_image_protects_it_and_keeps_its_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let light = stacking_star_field(160, 128);
+        let reference = stacking_star_field(176, 144);
+        let reference_path = directory.path().join("reference.fits");
+        crate::write_processed_image_fits_f32(&reference_path, &reference, &[], &[]).unwrap();
+        let bias_path = directory.path().join("bias.fits");
+        crate::write_processed_image_fits_f32(
+            &bias_path,
+            &LinearImage::new(160, 128, 1, vec![0.0; 160 * 128]).unwrap(),
+            &[],
+            &[],
+        )
+        .unwrap();
+        let paths = (0..2)
+            .map(|index| {
+                let path = directory.path().join(format!("light-{index}.fits"));
+                crate::write_processed_image_fits_f32(
+                    &path,
+                    &offset_image(&light, index as f32),
+                    &[],
+                    &[],
+                )
+                .unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+        let open = |reference: &Path, channel: &Path| {
+            LiveStacker::open_fits_with_reference_image(
+                reference,
+                channel,
+                Some(&bias_path),
+                None,
+                None,
+                None,
+                StackOptions::default(),
+            )
+        };
+        // Neither image may be a calibration master.
+        assert!(open(&bias_path, &paths[0]).is_err());
+        assert!(open(&reference_path, &bias_path).is_err());
+
+        let mut stacker = open(&reference_path, &paths[0]).unwrap();
+        assert!(!stacker.reference_is_integrated());
+        assert_eq!(stacker.view().accepted_frames, 0);
+        assert_eq!((stacker.view().width, stacker.view().height), (176, 144));
+        assert_eq!(stacker.input_paths(), [path_identity(&bias_path)]);
+        assert_eq!(
+            stacker.protected_paths(),
+            [path_identity(&bias_path), path_identity(&reference_path)]
+        );
+        for path in &paths {
+            assert!(matches!(
+                stacker.push_fits(path).unwrap(),
+                FrameDisposition::Accepted(_)
+            ));
+        }
+        assert_eq!(stacker.view().accepted_frames, 2);
+        assert!(stacker.save_context(&reference_path).is_err());
+
+        let context = directory.path().join("stack.seiza-stack");
+        stacker.save_context(&context).unwrap();
+        let restored = LiveStacker::open_context(&context).unwrap();
+        assert!(!restored.reference_is_integrated());
+        assert_eq!(
+            restored.reference_image_path(),
+            Some(path_identity(&reference_path).as_path())
+        );
+        assert_eq!(restored.protected_paths(), stacker.protected_paths());
+
+        // The reference image may be a light as well, pushed like any other.
+        let mut stacker = open(&paths[1], &paths[0]).unwrap();
+        for path in &paths {
+            assert!(matches!(
+                stacker.push_fits(path).unwrap(),
+                FrameDisposition::Accepted(_)
+            ));
+        }
+        assert_eq!(stacker.view().accepted_frames, 2);
+    }
+
+    #[test]
     fn delta_sigma_rejects_late_outlier_without_moving_mean() {
         let mut accumulator = Accumulator::new(1, false);
         let rejection = RejectionMode::DeltaSigma(DeltaSigmaOptions {
@@ -2654,6 +2818,7 @@ mod tests {
             context::ContextWriteState {
                 reference_is_integrated: stacker.reference_is_integrated,
                 alignment_reference: stacker.alignment_reference.as_ref(),
+                reference_image_path: stacker.reference_image_path.as_deref(),
                 options: &stacker.options,
                 calibration: &stacker.calibration,
                 reference: &stacker.reference,

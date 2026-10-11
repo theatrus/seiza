@@ -68,7 +68,14 @@ exposes the **superset** of what both apps need.
 - **Live stacking** — `seiza_live_stacker_create` starts from caller-provided
   calibrated linear mono/RGB samples, while `seiza_live_stacker_open_fits`
   retains its ABI name but decodes raw linear FITS or XISF and optionally
-  applies integrated bias, dark, and flat masters. Array and path-based pushes
+  applies integrated bias, dark, and flat masters.
+  `seiza_live_stacker_open_fits_with_reference_image` aligns a stack to an
+  image shared by every filter's stack, as the CLI's `--reference-image` does,
+  so their outputs share one pixel grid and WCS. One of the filter's lights,
+  the channel reference, sets normalization and noise weighting; the stack
+  starts empty, so it is pushed like every other light, and the state JSON
+  reports `referenceIntegrated` false. Outputs and contexts refuse to replace
+  the reference image. Array and path-based pushes
   return owned admission JSON. Borrowed
   mean/coverage/rejection views support copy-free live display, snapshots add
   variance, and `seiza_live_stacker_finish` moves the final accumulator into an

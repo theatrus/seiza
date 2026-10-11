@@ -355,11 +355,24 @@ class LiveStacker:
         options: StackOptions | None = None,
     ) -> LiveStacker: ...
     @staticmethod
+    def open_fits_with_reference_image(
+        reference_image: str | Path,
+        channel_reference: str | Path,
+        *,
+        options: StackOptions | None = None,
+        bias: str | Path | None = None,
+        dark: str | Path | None = None,
+        flat: str | Path | None = None,
+        dark_exposure_seconds: float | None = None,
+    ) -> LiveStacker: ...
+    @staticmethod
     def open_context(path: str | Path) -> LiveStacker: ...
     @property
     def accepted_frames(self) -> int: ...
     @property
     def rejected_frames(self) -> int: ...
+    @property
+    def reference_integrated(self) -> bool: ...
     def push_fits(self, path: str | Path) -> FrameDisposition: ...
     def push_fits_pipelined(
         self,
@@ -761,6 +774,7 @@ def stack_fits(
     dark: str | Path | None = None,
     flat: str | Path | None = None,
     dark_exposure_seconds: float | None = None,
+    reference_image: str | Path | None = None,
 ) -> StackResult: ...
 def build_bias(
     images: Sequence[str | Path],

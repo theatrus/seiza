@@ -29,6 +29,7 @@ const IO_BUFFER_VALUES: usize = 16 * 1024;
 
 pub(crate) struct ContextWriteState<'a> {
     pub alignment_reference: Option<&'a LinearImage>,
+    pub reference_image_path: Option<&'a Path>,
     pub reference_is_integrated: bool,
     pub options: &'a StackOptions,
     pub calibration: &'a CalibrationMasters,
@@ -50,6 +51,7 @@ pub(crate) struct ContextWriteState<'a> {
 
 pub(crate) struct RestoredContext {
     pub alignment_reference: Option<LinearImage>,
+    pub reference_image_path: Option<PathBuf>,
     pub reference_is_integrated: bool,
     pub options: StackOptions,
     pub calibration: CalibrationMasters,
@@ -81,6 +83,10 @@ struct ContextMetadata {
     /// channel's photometric target on the same grid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     alignment_reference: Option<ImageMetadata>,
+    /// Where the alignment reference was read from, when the stack was
+    /// opened from paths; outputs must not replace it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reference_image_path: Option<String>,
     schema_version: u32,
     options: StackOptions,
     calibration: CalibrationMetadata,
@@ -536,6 +542,7 @@ pub(crate) fn read(path: &Path) -> Result<RestoredContext> {
 
     Ok(RestoredContext {
         alignment_reference,
+        reference_image_path: metadata.reference_image_path.map(PathBuf::from),
         reference_is_integrated: !metadata.external_reference,
         options: metadata.options,
         calibration,
@@ -574,6 +581,14 @@ impl ContextMetadata {
             schema_version,
             external_reference: !state.reference_is_integrated,
             alignment_reference: state.alignment_reference.map(ImageMetadata::from),
+            reference_image_path: state
+                .reference_image_path
+                .map(|path| {
+                    path.to_str().map(str::to_owned).ok_or_else(|| {
+                        format!("reference image path {} is not valid UTF-8", path.display())
+                    })
+                })
+                .transpose()?,
             options: state.options.clone(),
             calibration: CalibrationMetadata::from(state.calibration),
             reference: ImageMetadata::from(state.reference),
@@ -622,6 +637,9 @@ impl ContextMetadata {
             {
                 return Err("alignment reference does not match the external output grid".into());
             }
+        }
+        if self.reference_image_path.is_some() && self.alignment_reference.is_none() {
+            return Err("context names a reference image but holds no alignment reference".into());
         }
         for image in [
             self.calibration.bias,

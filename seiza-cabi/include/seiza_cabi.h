@@ -801,6 +801,38 @@ SeizaLiveStacker *seiza_live_stacker_open_fits(const char *reference_path,
                                                char **error_out);
 
 /*
+ Opens a stack aligned to `reference_image_path`, a FITS or XISF image
+ shared by the stacks of several filters, so that their outputs share one
+ pixel grid and WCS. The reference image sets only the grid: it is
+ demosaiced when it is a raw colour frame, but not calibrated, and it adds
+ no pixels unless it is also pushed as a light.
+
+ `channel_reference_path`, one of this filter's lights, is calibrated,
+ aligned to the reference image, and sets normalization and noise
+ weighting. It is not taken as a light here: the stack starts with no
+ accepted frames, so push it like every other light. Both images must
+ prepare to the same channel count, mono for mono lights and RGB for RGB or
+ Bayer lights. The masters, `dark_exposure_seconds` and `options_json` are
+ those of [`seiza_live_stacker_open_fits`]. The state JSON reports
+ `referenceIntegrated` false and the `referenceImagePath`, and snapshots,
+ drizzles and contexts refuse to replace the reference image.
+
+ # Safety
+ `reference_image_path` and `channel_reference_path` must be valid
+ NUL-terminated strings. Optional paths and `options_json` may be null;
+ when non-null they must be NUL-terminated. When non-null, `error_out` must
+ point to writable storage for one pointer.
+ */
+SeizaLiveStacker *seiza_live_stacker_open_fits_with_reference_image(const char *reference_image_path,
+                                                                    const char *channel_reference_path,
+                                                                    const char *bias_path,
+                                                                    const char *dark_path,
+                                                                    const char *flat_path,
+                                                                    double dark_exposure_seconds,
+                                                                    const char *options_json,
+                                                                    char **error_out);
+
+/*
  Reopens a versioned live-stack context previously written by
  [`seiza_live_stacker_save_context`]. The restored handle retains its
  original registration reference, calibration, online rejection moments,
