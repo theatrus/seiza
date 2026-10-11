@@ -7,9 +7,9 @@ from astropy.io import fits
 import seiza
 
 
-def synthetic_star_field(height=128, width=160):
+def synthetic_star_field(height=128, width=160, noise=1.5):
     rng = np.random.default_rng(29)
-    image = rng.normal(100.0, 1.5, size=(height, width)).astype(np.float32)
+    image = rng.normal(100.0, noise, size=(height, width)).astype(np.float32)
     yy, xx = np.mgrid[:height, :width]
     positions = [
         (16.4, 19.7),
@@ -137,6 +137,74 @@ def test_channels_stack_onto_a_shared_reference_image(tmp_path):
     final = stacker.finish(tmp_path / "live.fits")
     assert final.image.shape == (144, 176)
     assert seiza.LiveStacker.from_array(image).reference_integrated
+
+
+def test_auto_reference_falls_back_to_a_light_that_aligns(tmp_path):
+    common = tmp_path / "common.fits"
+    fits.writeto(common, synthetic_star_field(height=144, width=176))
+    # The quietest light scores best, but it is turned a quarter turn and
+    # cannot align to the common image.
+    turned = tmp_path / "red-turned.fits"
+    fits.writeto(
+        turned, np.ascontiguousarray(np.rot90(synthetic_star_field(noise=0.5)))
+    )
+    lights = [tmp_path / "red-001.fits", turned, tmp_path / "red-002.fits"]
+    for light in lights[::2]:
+        fits.writeto(light, synthetic_star_field())
+    options = no_adjustment_options()
+
+    choice = seiza.choose_reference(lights)
+    assert (choice.reference_index, choice.reference_path) == (1, turned)
+    assert choice.ranking[0] == 1
+    assert sorted(choice.ranking) == [0, 1, 2]
+    assert all(score.stars > 0 for score in choice.scores)
+    with pytest.raises(ValueError, match="at least one"):
+        seiza.choose_reference([])
+
+    result = seiza.stack_fits(
+        lights,
+        tmp_path / "red.fits",
+        options=options,
+        reference_image=common,
+        reference="auto",
+    )
+    assert result.reference_light in lights[::2]
+    assert result.accepted_frames == 2
+    assert len(result.frames) == 3
+    assert result.frames[0].source == result.reference_light
+    assert not next(frame for frame in result.frames if frame.source == turned)
+    # Asked for the first light, the stack tries no other.
+    with pytest.raises(seiza.StackError, match="could not be aligned"):
+        seiza.stack_fits(
+            [turned, lights[0]],
+            tmp_path / "first.fits",
+            options=options,
+            reference_image=common,
+        )
+    with pytest.raises(ValueError, match="first"):
+        seiza.stack_fits(lights, tmp_path / "unused.fits", reference="best")
+
+    # Without a reference image, the best light becomes the stack's reference.
+    result = seiza.stack_fits(
+        lights[::2], tmp_path / "auto.fits", options=options, reference="auto"
+    )
+    assert result.reference_light in lights[::2]
+    assert [frame.source for frame in result.frames] == [
+        light for light in lights[::2] if light != result.reference_light
+    ]
+
+    stacker, selection = seiza.LiveStacker.open_fits_with_reference_image_candidates(
+        common, [turned, lights[0]], options=options
+    )
+    assert (selection.index, selection.path) == (1, lights[0])
+    [(index, path, reason)] = selection.skipped
+    assert (index, path) == (0, turned)
+    assert reason
+    assert not stacker.reference_integrated
+    assert stacker.accepted_frames == 0
+    assert stacker.push_fits(selection.path).accepted
+    with pytest.raises(ValueError, match="at least one"):
+        seiza.LiveStacker.open_fits_with_reference_image_candidates(common, [])
 
 
 def test_live_stacker_accepts_and_registers_meridian_flipped_frame():

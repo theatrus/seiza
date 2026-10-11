@@ -313,7 +313,26 @@ class StackResult:
     width: int
     height: int
     channels: int
+    reference_light: Path
     frames: list[FrameDisposition]
+
+class ReferenceScore:
+    stars: int
+    median_star_area: float
+    background: float
+    background_variation: float
+    score: float
+
+class ReferenceChoice:
+    reference_index: int
+    reference_path: Path
+    ranking: list[int]
+    scores: list[ReferenceScore | None]
+
+class ChannelReferenceSelection:
+    index: int
+    path: Path
+    skipped: list[tuple[int, Path, str]]
 
 class StackSnapshot:
     width: int
@@ -365,6 +384,17 @@ class LiveStacker:
         flat: str | Path | None = None,
         dark_exposure_seconds: float | None = None,
     ) -> LiveStacker: ...
+    @staticmethod
+    def open_fits_with_reference_image_candidates(
+        reference_image: str | Path,
+        channel_references: Sequence[str | Path],
+        *,
+        options: StackOptions | None = None,
+        bias: str | Path | None = None,
+        dark: str | Path | None = None,
+        flat: str | Path | None = None,
+        dark_exposure_seconds: float | None = None,
+    ) -> tuple[LiveStacker, ChannelReferenceSelection]: ...
     @staticmethod
     def open_context(path: str | Path) -> LiveStacker: ...
     @property
@@ -775,7 +805,13 @@ def stack_fits(
     flat: str | Path | None = None,
     dark_exposure_seconds: float | None = None,
     reference_image: str | Path | None = None,
+    reference: str = "first",
 ) -> StackResult: ...
+def choose_reference(
+    images: Sequence[str | Path],
+    *,
+    concurrency: int = 8,
+) -> ReferenceChoice: ...
 def build_bias(
     images: Sequence[str | Path],
     output: str | Path,

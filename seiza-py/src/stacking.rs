@@ -391,6 +391,10 @@ pub(crate) struct PyStackResult {
     height: usize,
     #[pyo3(get)]
     channels: usize,
+    /// The light that set normalization: the stack's reference frame, or
+    /// with a reference image, the channel reference.
+    #[pyo3(get)]
+    reference_light: PathBuf,
     frames: Vec<PyFrameDisposition>,
 }
 
@@ -417,6 +421,116 @@ impl PyStackResult {
         )
     }
 }
+
+/// How good a frame would be as the stack's reference; see
+/// :func:`choose_reference`.
+#[pyclass(frozen, name = "ReferenceScore", module = "seiza")]
+#[derive(Clone)]
+pub(crate) struct PyReferenceScore {
+    /// Stars detected at five sigma on the half-resolution luminance.
+    #[pyo3(get)]
+    stars: usize,
+    /// Median star area in half-resolution pixels; smaller is sharper.
+    #[pyo3(get)]
+    median_star_area: f32,
+    /// Median sky level of the half-resolution luminance.
+    #[pyo3(get)]
+    background: f32,
+    /// How far the sky departs from flat; cloud and twilight raise it.
+    #[pyo3(get)]
+    background_variation: f32,
+    /// The bright stars' signal over the sky noise; higher is better.
+    #[pyo3(get)]
+    score: f32,
+}
+
+impl From<seiza_stacking::ReferenceScore> for PyReferenceScore {
+    fn from(score: seiza_stacking::ReferenceScore) -> Self {
+        Self {
+            stars: score.stars,
+            median_star_area: score.median_star_area,
+            background: score.background,
+            background_variation: score.background_variation,
+            score: score.score,
+        }
+    }
+}
+
+#[pymethods]
+impl PyReferenceScore {
+    fn __repr__(&self) -> String {
+        format!(
+            "ReferenceScore(score={:.3}, stars={}, median_star_area={:.1}, background_variation={:.4})",
+            self.score, self.stars, self.median_star_area, self.background_variation,
+        )
+    }
+}
+
+/// The reference :func:`choose_reference` chose, with every frame's score.
+#[pyclass(frozen, name = "ReferenceChoice", module = "seiza")]
+pub(crate) struct PyReferenceChoice {
+    /// The chosen frame's index in the list given.
+    #[pyo3(get)]
+    reference_index: usize,
+    /// The chosen frame's path.
+    #[pyo3(get)]
+    reference_path: PathBuf,
+    /// Every scored frame's index, best reference first.
+    #[pyo3(get)]
+    ranking: Vec<usize>,
+    scores: Vec<Option<PyReferenceScore>>,
+}
+
+#[pymethods]
+impl PyReferenceChoice {
+    /// One score per frame, in the order given; ``None`` for a frame that
+    /// could not be read or scored.
+    #[getter]
+    fn scores(&self, py: Python<'_>) -> PyResult<Vec<Option<Py<PyReferenceScore>>>> {
+        self.scores
+            .iter()
+            .map(|score| score.clone().map(|score| Py::new(py, score)).transpose())
+            .collect()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ReferenceChoice(reference_index={}, reference_path={:?}, ranking={:?})",
+            self.reference_index, self.reference_path, self.ranking,
+        )
+    }
+}
+
+/// The channel reference
+/// :meth:`LiveStacker.open_fits_with_reference_image_candidates` used.
+#[pyclass(frozen, name = "ChannelReferenceSelection", module = "seiza")]
+pub(crate) struct PyChannelReferenceSelection {
+    /// Its index in the list given.
+    #[pyo3(get)]
+    index: usize,
+    /// Its path.
+    #[pyo3(get)]
+    path: PathBuf,
+    /// ``(index, path, reason)`` for each earlier light that did not align.
+    #[pyo3(get)]
+    skipped: Vec<(usize, PathBuf, String)>,
+}
+
+#[pymethods]
+impl PyChannelReferenceSelection {
+    fn __repr__(&self) -> String {
+        format!(
+            "ChannelReferenceSelection(index={}, path={:?}, skipped={})",
+            self.index,
+            self.path,
+            self.skipped.len(),
+        )
+    }
+}
+
+/// With ``reference="auto"`` and a reference image, how many of the best
+/// lights :func:`stack_fits` tries in turn, as the CLI does.
+const CHANNEL_REFERENCE_ATTEMPTS: usize = 5;
 
 #[pyclass(frozen, name = "StackSnapshot", module = "seiza")]
 pub(crate) struct PyStackSnapshot {
@@ -739,6 +853,85 @@ impl PyLiveStacker {
             })
             .map_err(stack_error)?;
         Ok(Self { inner: Some(inner) })
+    }
+
+    /// :meth:`open_fits_with_reference_image` with ``channel_references``,
+    /// this filter's lights best first, tried in turn until one aligns to
+    /// the reference image, which is read and prepared once. For an
+    /// automatic choice, pass the first few paths of
+    /// :func:`choose_reference`'s ``ranking``. A light that cannot be read or
+    /// calibrated, or whose channel count differs from the reference
+    /// image's, raises at once, since the next light would fail the same way.
+    ///
+    /// Returns the stack and a :class:`ChannelReferenceSelection` naming the
+    /// light it used and why each earlier one was skipped. Push every light,
+    /// the channel reference included.
+    #[staticmethod]
+    #[pyo3(signature = (
+        reference_image,
+        channel_references,
+        *,
+        options=None,
+        bias=None,
+        dark=None,
+        flat=None,
+        dark_exposure_seconds=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn open_fits_with_reference_image_candidates(
+        py: Python<'_>,
+        reference_image: PathBuf,
+        channel_references: Vec<PathBuf>,
+        options: Option<PyRef<'_, PyStackOptions>>,
+        bias: Option<PathBuf>,
+        dark: Option<PathBuf>,
+        flat: Option<PathBuf>,
+        dark_exposure_seconds: Option<f64>,
+    ) -> PyResult<(Self, PyChannelReferenceSelection)> {
+        if channel_references.is_empty() {
+            return Err(PyValueError::new_err(
+                "at least one channel reference is required",
+            ));
+        }
+        validate_exposure_override(dark.as_ref(), dark_exposure_seconds, "dark")?;
+        for image in std::iter::once(&reference_image).chain(&channel_references) {
+            let paths = std::iter::once(image.clone())
+                .chain(
+                    [bias.clone(), dark.clone(), flat.clone()]
+                        .into_iter()
+                        .flatten(),
+                )
+                .collect::<Vec<_>>();
+            validate_distinct_paths(&paths)?;
+        }
+        let options = options
+            .as_ref()
+            .map_or_else(StackOptions::default, |options| options.inner.clone());
+        let (inner, used, skipped) = py
+            .allow_threads(|| {
+                let mut skipped = Vec::new();
+                LiveStacker::open_fits_with_reference_image_candidates(
+                    &reference_image,
+                    &channel_references,
+                    bias.as_deref(),
+                    dark.as_deref(),
+                    flat.as_deref(),
+                    dark_exposure_seconds,
+                    options,
+                    |index, reason| skipped.push((index, reason.to_string())),
+                )
+                .map(|(inner, used)| (inner, used, skipped))
+            })
+            .map_err(stack_error)?;
+        let selection = PyChannelReferenceSelection {
+            index: used,
+            path: channel_references[used].clone(),
+            skipped: skipped
+                .into_iter()
+                .map(|(index, reason)| (index, channel_references[index].clone(), reason))
+                .collect(),
+        };
+        Ok((Self { inner: Some(inner) }, selection))
     }
 
     /// Reopen a versioned on-disk context and continue adding frames.
@@ -1138,7 +1331,8 @@ impl PyMasterResult {
     dark=None,
     flat=None,
     dark_exposure_seconds=None,
-    reference_image=None
+    reference_image=None,
+    reference="first"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn stack_fits(
@@ -1151,12 +1345,22 @@ fn stack_fits(
     flat: Option<PathBuf>,
     dark_exposure_seconds: Option<f64>,
     reference_image: Option<PathBuf>,
+    reference: &str,
 ) -> PyResult<PyStackResult> {
     if images.len() < 2 {
         return Err(PyValueError::new_err(
             "stack_fits requires at least two light frames",
         ));
     }
+    let automatic = match reference {
+        "first" => false,
+        "auto" => true,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "reference must be \"first\" or \"auto\", not {other:?}"
+            )));
+        }
+    };
     validate_exposure_override(dark.as_ref(), dark_exposure_seconds, "dark")?;
     validate_output_path(
         &images,
@@ -1185,21 +1389,44 @@ fn stack_fits(
         .map_or_else(StackOptions::default, |options| options.inner.clone());
     py.allow_threads(move || {
         let calibration = load_calibration(bias, dark, flat, dark_exposure_seconds)?;
-        // The first light is the reference. With a reference image, it sets
-        // only normalization and noise weighting and is stacked like the rest.
-        let first = FitsFrame::open(&images[0])?;
-        let (mut stacker, lights) = match &reference_image {
-            Some(reference_image) => (
-                LiveStacker::with_reference_image(
+        let mut images = images;
+        // The lights that may become the reference light, best first. With
+        // a reference image, the next ones stand in when the best does not
+        // align to it.
+        let mut candidates = vec![0];
+        if automatic {
+            let (_, scores) = seiza_stacking::choose_reference(&images, 8)?;
+            candidates = seiza_stacking::rank_references(&scores);
+            candidates.truncate(CHANNEL_REFERENCE_ATTEMPTS);
+        }
+        // The reference light goes first. Without a reference image it is
+        // the stack's reference; with one, it sets only normalization and
+        // noise weighting and is stacked like the rest.
+        let (mut stacker, chosen) = match &reference_image {
+            Some(reference_image) => {
+                let (stacker, used) = LiveStacker::with_reference_image_candidates(
                     FitsFrame::open(reference_image)?,
-                    first,
+                    candidates
+                        .iter()
+                        .map(|&index| FitsFrame::open(&images[index])),
+                    calibration,
+                    options,
+                    |_, _| {},
+                )?;
+                (stacker, candidates[used])
+            }
+            None => (
+                LiveStacker::new(
+                    FitsFrame::open(&images[candidates[0]])?,
                     calibration,
                     options,
                 )?,
-                &images[..],
+                candidates[0],
             ),
-            None => (LiveStacker::new(first, calibration, options)?, &images[1..]),
         };
+        let reference_light = images.remove(chosen);
+        images.insert(0, reference_light.clone());
+        let lights = &images[usize::from(reference_image.is_none())..];
         let mut frames = Vec::new();
         for path in lights {
             let frame = FitsFrame::open(path)?;
@@ -1223,10 +1450,41 @@ fn stack_fits(
             width: snapshot.image.width,
             height: snapshot.image.height,
             channels: snapshot.image.channels,
+            reference_light,
             frames,
         })
     })
     .map_err(stack_error)
+}
+
+/// Score every image as a possible stack reference and choose one, as the
+/// CLI's ``--reference auto`` does: among frames with nearly the best
+/// stars, the one with the flattest sky. Only reads the images, at most
+/// ``concurrency`` at once.
+#[pyfunction(name = "choose_reference")]
+#[pyo3(signature = (images, *, concurrency=8))]
+fn py_choose_reference(
+    py: Python<'_>,
+    images: Vec<PathBuf>,
+    concurrency: usize,
+) -> PyResult<PyReferenceChoice> {
+    if images.is_empty() {
+        return Err(PyValueError::new_err(
+            "choose_reference requires at least one image",
+        ));
+    }
+    let (reference_index, scores) = py
+        .allow_threads(|| seiza_stacking::choose_reference(&images, concurrency))
+        .map_err(stack_error)?;
+    Ok(PyReferenceChoice {
+        reference_index,
+        reference_path: images[reference_index].clone(),
+        ranking: seiza_stacking::rank_references(&scores),
+        scores: scores
+            .into_iter()
+            .map(|score| score.map(PyReferenceScore::from))
+            .collect(),
+    })
 }
 
 #[pyfunction]
@@ -1578,6 +1836,9 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyFrameDisposition>()?;
     module.add_class::<PyPipelineReport>()?;
     module.add_class::<PyStackResult>()?;
+    module.add_class::<PyReferenceScore>()?;
+    module.add_class::<PyReferenceChoice>()?;
+    module.add_class::<PyChannelReferenceSelection>()?;
     module.add_class::<PyStackSnapshot>()?;
     module.add_class::<PySnrSample>()?;
     module.add_function(wrap_pyfunction!(py_checkpoint_depths, module)?)?;
@@ -1585,6 +1846,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyDrizzleResult>()?;
     module.add_class::<PyMasterResult>()?;
     module.add_function(wrap_pyfunction!(stack_fits, module)?)?;
+    module.add_function(wrap_pyfunction!(py_choose_reference, module)?)?;
     module.add_function(wrap_pyfunction!(build_bias, module)?)?;
     module.add_function(wrap_pyfunction!(build_dark, module)?)?;
     module.add_function(wrap_pyfunction!(build_flat, module)?)?;
