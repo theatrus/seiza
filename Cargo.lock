@@ -2462,7 +2462,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "seiza"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "chrono",
  "directories",
@@ -2497,7 +2497,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-cabi"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "cbindgen",
  "image",
@@ -2532,7 +2532,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-cli"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -2623,7 +2623,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-image-io"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "image",
  "seiza",
@@ -2642,7 +2642,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-parallax"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ab_glyph",
  "image",
@@ -2662,7 +2662,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-satellites"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "directories",
  "fs2",
@@ -2694,7 +2694,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-stacking"
-version = "0.28.0"
+version = "0.29.0"
 dependencies = [
  "multiversion",
  "postcard",
