@@ -946,6 +946,12 @@ fn tour_spin(tour: &[Stop], times: &[(f64, f64)], now: f64) -> f64 {
 /// The share of the glide's pace a looped tour drifts through its join at.
 const JOIN_DRIFT: f64 = 0.5;
 
+/// The least the lens lengthens through a looped tour's join, per second
+/// as a logarithm: 2% a second. The stops either side can leave the join
+/// next to nothing to drift by (on a whole view, a wide image in a tall
+/// frame moved 0.1 pixels a frame), and the view must never stand still.
+const JOIN_ZOOM: f64 = 0.02;
+
 /// The camera's state `now` seconds into `tour`, but for its spins.
 fn tour_path(tour: &[Stop], times: &[(f64, f64)], glide: f64, looped: bool, now: f64) -> [f64; 6] {
     let last = tour.len() - 1;
@@ -994,6 +1000,9 @@ fn tour_path(tour: &[Stop], times: &[(f64, f64)], glide: f64, looped: bool, now:
         let longest = tour[0].hold.max(tour[last].hold).max(1e-9);
         let room = (-states[0][2]).max(0.0) / longest;
         drift[2] = drift[2].clamp(-room, room);
+        // Zooming in, never out: the fit zooms the join's stops in to give
+        // the frames before it room.
+        drift[3] = drift[3].max(JOIN_ZOOM);
         drift
     });
     // Where the camera is as it reaches and leaves each stop, its pace
@@ -2469,10 +2478,12 @@ mod tour_tests {
         for k in 0..6 {
             assert!((into[k] - out[k]).abs() < 1e-9, "{k}: {into:?} {out:?}");
         }
-        // Never further back than the whole image.
+        // Never further back than the whole image, and the lens drifts in
+        // at least JOIN_ZOOM a second through the join.
         for frame in 0..shot.frames {
             assert!(state(shot.progress(frame))[2] <= 1e-12);
         }
+        assert!(into[3] >= JOIN_ZOOM * 14.0 * step - 1e-12, "{into:?}");
         // Fitted, the join's two stops zoom in together, so its views still
         // meet.
         let (fitted, _) = shot.fitted(&scene);
