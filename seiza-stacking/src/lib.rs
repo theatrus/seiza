@@ -110,7 +110,7 @@ pub use pipeline::{
     Continue, MAXIMUM_WORKERS, PipelineExecution, PipelineOptions, PipelineReport, PipelineTimings,
     PoolPipelineMemory, PoolPipelineReport,
 };
-pub use reference::{ReferenceScore, choose_reference, reference_score};
+pub use reference::{ReferenceScore, choose_reference, rank_references, reference_score};
 pub use registration::{
     AffineTransform, Interpolation, PolynomialWarp, ReferenceRegion, Registrar, RegistrationModel,
     RegistrationOptions, RegistrationResult, SimilarityTransform, resample_region_photosites,

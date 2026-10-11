@@ -609,9 +609,10 @@ image, nor one-shot-color lights to a mono luminance master. Its pixel scale
 must match the lights' to within 4%, so 2x2-binned lights cannot align to an
 unbinned image. Normalization and noise weighting use a
 calibrated light from the current channel, selected by `--reference auto`
-(the default) or `--reference first`. If that light does not align to the
-shared image, the run stops; to try another, list it first and pass
-`--reference first`. The shared image supplies geometry only,
+(the default) or `--reference first`. With `--reference auto`, if the chosen
+light does not align to the shared image, the next-best lights are tried in
+turn, up to five in all. With `--reference first`, a first light that does
+not align stops the run; list another light first to use it instead. The shared image supplies geometry only,
 so default normalization remains enabled without matching different filters
 to one brightness scale. Only listed lights count toward the stack.
 With this option, the report's `reference_integrated` is false

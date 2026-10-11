@@ -586,14 +586,33 @@ impl LiveStacker {
         calibration: CalibrationMasters,
         options: StackOptions,
     ) -> Result<Self> {
+        Self::with_reference_image_candidates(
+            reference,
+            [Ok::<_, Error>(channel_reference)],
+            calibration,
+            options,
+            |_, _| {},
+        )
+        .map(|(stacker, _)| stacker)
+    }
+
+    /// [`Self::with_reference_image`] with channel references to try in
+    /// turn, best first, until one aligns to the external image, which is
+    /// prepared once. `rejected` hears the index and reason of each one that
+    /// does not align. Returns the stack and the index of the channel
+    /// reference it uses.
+    ///
+    /// A candidate that cannot be read or calibrated, or whose channel count
+    /// differs from the external image's, ends the search with an error:
+    /// the next candidate would fail the same way.
+    pub fn with_reference_image_candidates<E: From<Error>>(
+        reference: FitsFrame,
+        channel_references: impl IntoIterator<Item = std::result::Result<FitsFrame, E>>,
+        calibration: CalibrationMasters,
+        options: StackOptions,
+        mut rejected: impl FnMut(usize, &FrameRejectionReason),
+    ) -> std::result::Result<(Self, usize), E> {
         options.validate()?;
-        let metadata = channel_reference.metadata();
-        let (channel, _) = prepare_reference(channel_reference, &calibration, &options)?;
-        let noise = if options.weighting.is_equal() {
-            Vec::new()
-        } else {
-            measure_reference_noise(&channel.image)?
-        };
         let (alignment, _) = reference.into_prepared_with_layout(options.demosaic)?;
         let registrar = Registrar::new(&alignment.image, options.registration.clone())?;
         // Use the regular registration gates, with no photometric comparison
@@ -604,35 +623,66 @@ impl LiveStacker {
             cfa_integration: CfaIntegration::Demosaic,
             ..options.clone()
         };
-        let registered = match prepare_frame(
-            &alignment.image,
-            &registrar,
-            &geometry_options,
-            &[],
-            channel.image,
-            None,
-            None,
-        )? {
-            PreparedFrame::Ready(ready) => ready.registered,
-            PreparedFrame::Rejected(reason) => {
-                return Err(Error::Stack(format!(
-                    "channel reference could not be aligned to the reference image: {reason}"
-                )));
+        let mut first_rejection = None;
+        let mut tried = 0;
+        for (index, channel_reference) in channel_references.into_iter().enumerate() {
+            let channel_reference = channel_reference?;
+            tried += 1;
+            let metadata = channel_reference.metadata();
+            let (channel, _) = prepare_reference(channel_reference, &calibration, &options)?;
+            let noise = if options.weighting.is_equal() {
+                Vec::new()
+            } else {
+                measure_reference_noise(&channel.image)?
+            };
+            match prepare_frame(
+                &alignment.image,
+                &registrar,
+                &geometry_options,
+                &[],
+                channel.image,
+                None,
+                None,
+            )? {
+                PreparedFrame::Ready(ready) => {
+                    let stacker = Self::from_prepared(
+                        ready.registered,
+                        alignment.headers,
+                        metadata,
+                        calibration,
+                        options,
+                        FrameInputMode::CalibrateAndPrepare,
+                        ReferenceContribution::External {
+                            image: alignment.image,
+                            registrar: Box::new(registrar),
+                            noise,
+                        },
+                    )?;
+                    return Ok((stacker, index));
+                }
+                PreparedFrame::Rejected(reason @ FrameRejectionReason::IncompatibleImage(_)) => {
+                    return Err(Error::Stack(format!(
+                        "channel reference could not be aligned to the reference image: {reason}"
+                    ))
+                    .into());
+                }
+                PreparedFrame::Rejected(reason) => {
+                    rejected(index, &reason);
+                    first_rejection.get_or_insert(reason);
+                }
             }
-        };
-        Self::from_prepared(
-            registered,
-            alignment.headers,
-            metadata,
-            calibration,
-            options,
-            FrameInputMode::CalibrateAndPrepare,
-            ReferenceContribution::External {
-                image: alignment.image,
-                registrar: Box::new(registrar),
-                noise,
-            },
-        )
+        }
+        Err(Error::Stack(match (first_rejection, tried) {
+            (None, _) => "no channel reference was given".into(),
+            (Some(reason), 1) => {
+                format!("channel reference could not be aligned to the reference image: {reason}")
+            }
+            (Some(reason), tried) => format!(
+                "none of {tried} channel references could be aligned to the reference image; \
+                 the first: {reason}"
+            ),
+        })
+        .into())
     }
 
     /// Start a stack from an already-prepared linear reference, with no
@@ -2560,6 +2610,71 @@ mod tests {
             ));
         }
         assert_eq!(stacker.view().accepted_frames, 2);
+    }
+
+    /// `image` turned a quarter turn.
+    fn quarter_turn(image: &LinearImage) -> LinearImage {
+        let (width, height) = (image.height, image.width);
+        let channels = image.channels;
+        let data = (0..width * height)
+            .flat_map(|index| {
+                let (x, y) = (index % width, index / width);
+                let base = ((image.height - 1 - x) * image.width + y) * channels;
+                image.data[base..base + channels].iter().copied()
+            })
+            .collect();
+        LinearImage::new(width, height, channels, data).unwrap()
+    }
+
+    #[test]
+    fn the_next_channel_reference_is_tried_when_one_does_not_align() {
+        let light = stacking_star_field(160, 128);
+        let reference = stacking_star_field(176, 144);
+        let frame = |image: &LinearImage| FitsFrame {
+            image: image.clone(),
+            headers: Vec::new(),
+            exposure_seconds: None,
+            bayer: None,
+            source: None,
+            bounds: None,
+        };
+        let open = |candidates: &[&LinearImage], heard: &mut Vec<usize>| {
+            LiveStacker::with_reference_image_candidates(
+                frame(&reference),
+                candidates.iter().map(|image| Ok::<_, Error>(frame(image))),
+                CalibrationMasters::default(),
+                StackOptions::default(),
+                |index, _| heard.push(index),
+            )
+        };
+        let turned = quarter_turn(&light);
+
+        let mut heard = Vec::new();
+        let (stacker, used) = open(&[&turned, &light], &mut heard).unwrap();
+        assert_eq!((used, heard), (1, vec![0]));
+        assert_eq!(stacker.view().accepted_frames, 0);
+        assert_eq!((stacker.view().width, stacker.view().height), (176, 144));
+
+        let mut heard = Vec::new();
+        let Err(error) = open(&[&turned, &turned], &mut heard) else {
+            panic!("no channel reference aligns");
+        };
+        assert_eq!(heard, [0, 1]);
+        let error = error.to_string();
+        assert!(error.contains("none of 2 channel references"), "{error}");
+
+        // A light whose channel count differs from the reference image's
+        // ends the search: the next light would differ too.
+        let color = LinearImage::new(
+            160,
+            128,
+            3,
+            light.data.iter().flat_map(|&value| [value; 3]).collect(),
+        )
+        .unwrap();
+        let mut heard = Vec::new();
+        assert!(open(&[&color, &light], &mut heard).is_err());
+        assert!(heard.is_empty());
     }
 
     #[test]

@@ -5,10 +5,15 @@ use std::process::{Command, Output};
 const WIDTH: usize = 128;
 const HEIGHT: usize = 128;
 
-fn star_field(shift_x: usize, shift_y: usize) -> Vec<f32> {
-    let mut values = (0..WIDTH * HEIGHT)
+/// The textured sky under every star field.
+fn sky() -> Vec<f32> {
+    (0..WIDTH * HEIGHT)
         .map(|index| 0.01 + ((index * 37 + index / WIDTH * 19) % 29) as f32 * 1.0e-4)
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+fn star_field(shift_x: usize, shift_y: usize) -> Vec<f32> {
+    let mut values = sky();
     let stars = [
         (18, 17),
         (43, 22),
@@ -228,6 +233,103 @@ fn common_reference_aligns_channels_without_contributing_pixels() {
             );
         }
     }
+}
+
+#[test]
+fn reference_auto_tries_the_next_light_when_the_best_does_not_align() {
+    let directory = tempfile::tempdir().unwrap();
+    let reference = directory.path().join("reference.fits");
+    write_f32_image(
+        &reference,
+        WIDTH,
+        HEIGHT,
+        F32ImageData::Mono(&star_field(5, 4)),
+        &[],
+    )
+    .unwrap();
+    let mut lights = write_lights(directory.path());
+    // This light's stars stand three times higher above the sky, so it
+    // scores best, but it is turned a quarter turn and cannot align.
+    let bright = star_field(1, 1)
+        .into_iter()
+        .zip(sky())
+        .map(|(value, sky)| sky + (value - sky) * 3.0)
+        .collect::<Vec<_>>();
+    let turned = (0..WIDTH * HEIGHT)
+        .map(|index| bright[(HEIGHT - 1 - index % WIDTH) * WIDTH + index / WIDTH])
+        .collect::<Vec<_>>();
+    let turned_path = directory.path().join("turned.fits");
+    write_f32_image(
+        &turned_path,
+        WIDTH,
+        HEIGHT,
+        F32ImageData::Mono(&turned),
+        &[],
+    )
+    .unwrap();
+    lights.insert(1, turned_path.clone());
+    let output = directory.path().join("stack.fits");
+    let report = directory.path().join("stack.json");
+    let result = Command::new(env!("CARGO_BIN_EXE_seiza"))
+        .arg("stack")
+        .args(&lights)
+        .arg("--reference-image")
+        .arg(&reference)
+        .arg("--output")
+        .arg(&output)
+        .arg("--report")
+        .arg(&report)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stdout}\n{stderr}");
+    assert!(
+        stdout.contains(&format!(
+            "chose      {} as reference",
+            turned_path.display()
+        )),
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "{} does not align to the reference image",
+            turned_path.display()
+        )),
+        "{stderr}"
+    );
+    assert!(stdout.contains("2 accepted frame(s)"), "{stdout}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+    // Either other light may come next; it is pushed first.
+    let channel = &report["normalization_reference"]["path"];
+    assert_ne!(channel, &turned_path.display().to_string());
+    let frames = report["frames"].as_array().unwrap();
+    assert_eq!(frames.len(), 3);
+    assert_eq!(&frames[0]["source"]["path"], channel);
+    let turned_frame = frames
+        .iter()
+        .find(|frame| frame["source"]["path"] == turned_path.display().to_string())
+        .unwrap();
+    assert_eq!(turned_frame["disposition"], "rejected");
+
+    // Asked for the first light, the stack does not try another.
+    let result = Command::new(env!("CARGO_BIN_EXE_seiza"))
+        .arg("stack")
+        .arg(&turned_path)
+        .args(&lights[..1])
+        .arg("--reference-image")
+        .arg(&reference)
+        .args(["--reference", "first", "--output"])
+        .arg(directory.path().join("first.fits"))
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("could not be aligned to the reference image"),
+        "{stderr}"
+    );
 }
 
 #[test]

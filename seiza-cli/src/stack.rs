@@ -290,10 +290,13 @@ fn stop_interrupted() -> ! {
     std::process::exit(crate::interrupt::INTERRUPTED_EXIT_CODE);
 }
 
+/// With `--reference auto` and `--reference-image`, how many of the best
+/// lights to try in turn until one aligns to the shared image.
+const CHANNEL_REFERENCE_ATTEMPTS: usize = 5;
+
 /// The sensor temperature a frame recorded (CCD-TEMP, else SET-TEMP).
-fn known_temperature(frame: &FitsFrame) -> Option<f64> {
-    frame
-        .metadata()
+fn known_temperature(metadata: &seiza_stacking::FrameMetadata) -> Option<f64> {
+    metadata
         .signature
         .camera_temp_c
         .filter(|value| value.is_finite())
@@ -406,7 +409,9 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
     if let (Some(report), Some(dark)) = (&mut calibration_report, &dark) {
         report.dark_exposure_seconds = options.dark_exposure_seconds.or(dark.exposure_seconds);
     }
-    let dark_records_temperature = dark.as_ref().map(|dark| known_temperature(dark).is_some());
+    let dark_records_temperature = dark
+        .as_ref()
+        .map(|dark| known_temperature(&dark.metadata()).is_some());
     // From the decoded frames, not their pixels: each master's headers say
     // what it was shot at, and every light is checked against that.
     let calibration =
@@ -468,8 +473,16 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
     // supplies the alignment grid. The first light of a night can be low
     // in the sky and in twilight.
     let mut ordered = options.images.clone();
+    // The lights to try in turn as the channel reference of a stack on
+    // `--reference-image`, best first.
+    let mut channel_candidates = vec![ordered[0].clone()];
     if matches!(options.reference, ReferenceArg::Auto) {
         let (best, scores) = seiza_stacking::choose_reference(&ordered, 8)?;
+        channel_candidates = seiza_stacking::rank_references(&scores)
+            .into_iter()
+            .take(CHANNEL_REFERENCE_ATTEMPTS)
+            .map(|index| ordered[index].clone())
+            .collect();
         let chosen = ordered.remove(best);
         if let Some(score) = &scores[best] {
             println!(
@@ -482,38 +495,15 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
         }
         ordered.insert(0, chosen);
     }
-    let mut images = ordered.iter();
     let reference_path = options
         .reference_image
-        .as_ref()
-        .unwrap_or_else(|| images.next().expect("clap requires at least two images"));
+        .clone()
+        .unwrap_or_else(|| ordered[0].clone());
     let reference_identity = report_path
         .as_ref()
-        .map(|_| file_identity(reference_path))
+        .map(|_| file_identity(&reference_path))
         .transpose()?;
-    let reference = crate::common::open_frame(reference_path, "reference frame")?;
-    let channel_reference = options
-        .reference_image
-        .as_ref()
-        .map(|_| crate::common::open_frame(&ordered[0], "channel normalization reference"))
-        .transpose()?;
-    let normalization_identity = options
-        .reference_image
-        .as_ref()
-        .and(report_path.as_ref())
-        .map(|_| file_identity(&ordered[0]))
-        .transpose()?;
-    // A dark master that never recorded its temperature is used, since
-    // nothing says it is wrong, but nothing says it is right either.
-    if dark_records_temperature == Some(false)
-        && let Some(temperature) =
-            known_temperature(channel_reference.as_ref().unwrap_or(&reference))
-    {
-        eprintln!(
-            "warning: the master dark records no sensor temperature, so it cannot be checked against the lights ({temperature}C in {})",
-            ordered[0].display()
-        );
-    }
+    let reference = crate::common::open_frame(&reference_path, "reference frame")?;
     let effective_maximum_drift_pixels = stack_options
         .registration
         .effective_maximum_drift_pixels(reference.image.width, reference.image.height);
@@ -579,23 +569,58 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
         minimum_integrated_fraction: stack_options.acceptance.minimum_integrated_fraction,
     };
 
-    let mut stacker = if let Some(channel_reference) = channel_reference {
-        println!("normalize  {} (channel reference)", ordered[0].display());
-        seiza_stacking::LiveStacker::with_reference_image(
-            reference,
-            channel_reference,
-            calibration,
-            stack_options,
-        )
-    } else {
-        seiza_stacking::LiveStacker::new(reference, calibration, stack_options)
-    }
-    .with_context(|| {
+    let initialize = || {
         format!(
             "failed to initialize stack from {}",
             reference_path.display()
         )
-    })?;
+    };
+    let mut stacker = if options.reference_image.is_some() {
+        let (stacker, used) = seiza_stacking::LiveStacker::with_reference_image_candidates(
+            reference,
+            channel_candidates
+                .iter()
+                .map(|path| crate::common::open_frame(path, "channel normalization reference")),
+            calibration,
+            stack_options,
+            |index, reason| {
+                eprintln!(
+                    "warning: {} does not align to the reference image: {reason}",
+                    channel_candidates[index].display()
+                );
+            },
+        )
+        .with_context(initialize)?;
+        // The channel reference is pushed first, like an integrated reference.
+        let used = &channel_candidates[used];
+        let position = ordered
+            .iter()
+            .position(|path| path == used)
+            .expect("channel candidates are listed lights");
+        let chosen = ordered.remove(position);
+        ordered.insert(0, chosen);
+        println!("normalize  {} (channel reference)", ordered[0].display());
+        stacker
+    } else {
+        seiza_stacking::LiveStacker::new(reference, calibration, stack_options)
+            .with_context(initialize)?
+    };
+    let normalization_identity = options
+        .reference_image
+        .as_ref()
+        .and(report_path.as_ref())
+        .map(|_| file_identity(&ordered[0]))
+        .transpose()?;
+    // A dark master that never recorded its temperature is used, since
+    // nothing says it is wrong, but nothing says it is right either.
+    if dark_records_temperature == Some(false)
+        && let Some(temperature) = known_temperature(stacker.reference_metadata())
+    {
+        eprintln!(
+            "warning: the master dark records no sensor temperature, so it cannot be checked against the lights ({temperature}C in {})",
+            ordered[0].display()
+        );
+    }
     // Each admitted frame's registered image waits here for reintegration:
     // about four bytes per output sample per frame, beside the output rather
     // than in a temporary directory that may live in memory. The live pass
@@ -626,7 +651,8 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
 
     // Fingerprint every frame up front, on all cores, so the report costs the
     // stacking loop nothing.
-    let paths = images.cloned().collect::<Vec<_>>();
+    // An integrated reference is already in the stack.
+    let paths = ordered[usize::from(options.reference_image.is_none())..].to_vec();
     let mut source_identities = match &report_path {
         Some(_) => paths
             .par_iter()

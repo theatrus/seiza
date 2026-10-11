@@ -162,7 +162,7 @@ fn half_resolution_luminance(image: &LinearImage) -> Option<Vec<f32>> {
 }
 
 /// Open and score every path, a few at a time, and return the index of the
-/// chosen reference (see [`CANDIDATE_SHARE`]) with every score in path order (`None` for a frame
+/// chosen reference (see [`rank_references`]) with every score in path order (`None` for a frame
 /// that could not be read or scored). Errors only when no frame scores.
 pub fn choose_reference(
     paths: &[PathBuf],
@@ -177,6 +177,17 @@ pub fn choose_reference(
     for chunk in paths.chunks(concurrency.max(1)) {
         scores.extend(chunk.par_iter().map(|path| score(path)).collect::<Vec<_>>());
     }
+    let best = rank_references(&scores)
+        .first()
+        .copied()
+        .ok_or_else(|| crate::Error::Stack("no frame could be scored as a reference".into()))?;
+    Ok((best, scores))
+}
+
+/// The indices of the scored frames, best reference first: the frames
+/// within [`CANDIDATE_SHARE`] of the best score, flattest sky first, then
+/// the rest by falling score. Frames with no score are left out.
+pub fn rank_references(scores: &[Option<ReferenceScore>]) -> Vec<usize> {
     // Stars alone can pick a frame half under cloud whose clear half is
     // excellent, and local background normalization would then copy that
     // cloud into every frame: among frames with nearly the best stars, take
@@ -186,19 +197,21 @@ pub fn choose_reference(
         .flatten()
         .map(|score| score.score)
         .fold(f32::NEG_INFINITY, f32::max);
-    let best = scores
+    let (mut near, mut rest): (Vec<_>, Vec<_>) = scores
         .iter()
         .enumerate()
         .filter_map(|(index, score)| score.as_ref().map(|score| (index, score)))
-        .filter(|(_, score)| score.score >= CANDIDATE_SHARE * top)
-        .min_by(|left, right| {
-            left.1
-                .background_variation
-                .total_cmp(&right.1.background_variation)
-        })
+        .partition(|(_, score)| score.score >= CANDIDATE_SHARE * top);
+    near.sort_by(|left, right| {
+        left.1
+            .background_variation
+            .total_cmp(&right.1.background_variation)
+    });
+    rest.sort_by(|left, right| right.1.score.total_cmp(&left.1.score));
+    near.into_iter()
+        .chain(rest)
         .map(|(index, _)| index)
-        .ok_or_else(|| crate::Error::Stack("no frame could be scored as a reference".into()))?;
-    Ok((best, scores))
+        .collect()
 }
 
 #[cfg(test)]
@@ -284,6 +297,30 @@ mod tests {
                 "{name}: {sharp:?} against {other:?}"
             );
         }
+    }
+
+    #[test]
+    fn references_rank_the_flattest_near_the_best_then_by_score() {
+        let score = |score: f32, background_variation: f32| {
+            Some(ReferenceScore {
+                stars: 10,
+                median_star_area: 4.0,
+                background: 0.1,
+                background_variation,
+                score,
+            })
+        };
+        // The best score is 10, so 7.5 and 8 are near it and 6 is not.
+        let scores = [
+            score(6.0, 0.1),
+            None,
+            score(10.0, 0.5),
+            score(7.5, 0.2),
+            score(8.0, 0.2),
+            score(3.0, 0.0),
+        ];
+        assert_eq!(rank_references(&scores), [3, 4, 2, 0, 5]);
+        assert!(rank_references(&[None]).is_empty());
     }
 
     #[test]

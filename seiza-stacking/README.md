@@ -36,7 +36,10 @@ while ordinary stack contexts retain their existing format.
 `LiveStacker::open_fits_with_reference_image` does the same from paths, with
 `open_fits`'s duplicate-path checks. The reference image may also be one of
 the lights, and `protected_paths` keeps outputs and contexts from replacing
-it.
+it. `LiveStacker::with_reference_image_candidates` takes several channel
+references, best first, prepares the alignment image once, and uses the first
+that aligns to it; a channel count that differs from the alignment image's
+ends the search at once.
 
 Live delta-sigma rejection cannot remove trails admitted during its warm-up.
 `LiveStacker::reintegrate` fixes that for a live stack. The stacker keeps a
@@ -484,6 +487,8 @@ twilight all lower, and among frames within 70% of the best score takes the
 flattest sky. On M45 it chose a frame from high in the sky, and the online
 stack's background ripple fell to 0.11 and its column banding to 0.06 (WBPP:
 0.11 and 0.07), bringing out the faint dust around the cluster.
+`rank_references` orders every scored frame the same way: the frames near the
+best score by flattest sky, then the rest by falling score.
 
 Frame weighting (`StackOptions::weighting`, the CLI's `--weighting
 inverse-noise`, its default) then counts hazy frames for less. Together with
