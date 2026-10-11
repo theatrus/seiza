@@ -75,7 +75,12 @@ exposes the **superset** of what both apps need.
   the channel reference, sets normalization and noise weighting; the stack
   starts empty, so it is pushed like every other light, and the state JSON
   reports `referenceIntegrated` false. Outputs and contexts refuse to replace
-  the reference image. Array and path-based pushes
+  the reference image.
+  `seiza_live_stacker_open_fits_with_reference_image_candidates` takes a JSON
+  array of channel references, best first, and uses the first that aligns to
+  the reference image, as the CLI's `--reference auto` does. Its optional
+  selection JSON names the light it used and why each earlier one was
+  skipped. Array and path-based pushes
   return owned admission JSON. Borrowed
   mean/coverage/rejection views support copy-free live display, snapshots add
   variance, and `seiza_live_stacker_finish` moves the final accumulator into an
@@ -112,8 +117,12 @@ exposes the **superset** of what both apps need.
   an ordered JSON array of FITS/XISF paths using the native stacking algorithm.
   It chooses the flattest background among frames with nearly the best star
   quality, without calibrating or modifying any source. Its owned schema-1
-  JSON returns `referenceIndex`, the unchanged input `referencePath`, and a
-  parallel `scores` array. Unreadable or unscorable inputs have null scores;
+  JSON returns `referenceIndex`, the unchanged input `referencePath`, a
+  `ranking` of the scored inputs' indices, best first, and a parallel
+  `scores` array. Pass the first few ranked paths to
+  `seiza_live_stacker_open_fits_with_reference_image_candidates` so another
+  light can stand in when the best does not align to a shared reference
+  image. Unreadable or unscorable inputs have null scores;
   a batch with no scoreable frame fails the call. Each score contains `stars`,
   `medianStarArea`, `background`, `backgroundVariation`, and `score`, measured
   on half-resolution luminance. The concurrency argument bounds simultaneous

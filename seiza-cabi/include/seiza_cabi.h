@@ -752,10 +752,12 @@ bool seiza_color_calibration_apply(float *data,
  it does not calibrate, register, stack, or modify them.
 
  Returns owned schema-1 JSON with `referenceIndex` (zero-based),
- `referencePath` (exactly the input string at that index), and `scores`
- (one entry per input in the original order). A score is null for an
- unreadable or unscorable frame; otherwise it contains `stars`,
- `medianStarArea`, `background`, `backgroundVariation`, and `score`.
+ `referencePath` (exactly the input string at that index), `ranking` (the
+ indices of every scored frame, best reference first, so `referenceIndex`
+ leads it), and `scores` (one entry per input in the original order). A
+ score is null for an unreadable or unscorable frame; otherwise it
+ contains `stars`, `medianStarArea`, `background`, `backgroundVariation`,
+ and `score`.
  `medianStarArea` is in half-resolution pixels, and background measurements
  use the scorer's half-resolution luminance units, not display pixels.
  See `seiza_stacking::ReferenceScore` for the native measurements.
@@ -831,6 +833,41 @@ SeizaLiveStacker *seiza_live_stacker_open_fits_with_reference_image(const char *
                                                                     double dark_exposure_seconds,
                                                                     const char *options_json,
                                                                     char **error_out);
+
+/*
+ [`seiza_live_stacker_open_fits_with_reference_image`] with a JSON array
+ of channel reference paths, best first. Each is tried in turn until one
+ aligns to the reference image, which is read and prepared once. For an
+ automatic choice, pass the first few lights of the `ranking` from
+ [`seiza_stack_choose_reference_json`]; the CLI tries five. A light that
+ cannot be read or calibrated, or whose channel count differs from the
+ reference image's, ends the search with an error, since the next light
+ would fail the same way. The masters, `dark_exposure_seconds` and
+ `options_json` are those of [`seiza_live_stacker_open_fits`].
+
+ On success, when `selection_json_out` is non-null, it receives owned
+ schema-1 JSON: `channelReferenceIndex` (zero-based, into the array),
+ `channelReferencePath` (exactly that input string), and `skipped`, an
+ `{index, path, reason}` entry for each earlier light that did not align.
+ Free it with [`seiza_string_free`]. The stack starts with no accepted
+ frames: push every light, the channel reference included.
+
+ # Safety
+ `reference_image_path` and `channel_reference_paths_json` must be valid
+ NUL-terminated strings. Optional paths and `options_json` may be null;
+ when non-null they must be NUL-terminated. When non-null,
+ `selection_json_out` and `error_out` must each point to writable storage
+ for one pointer.
+ */
+SeizaLiveStacker *seiza_live_stacker_open_fits_with_reference_image_candidates(const char *reference_image_path,
+                                                                               const char *channel_reference_paths_json,
+                                                                               const char *bias_path,
+                                                                               const char *dark_path,
+                                                                               const char *flat_path,
+                                                                               double dark_exposure_seconds,
+                                                                               const char *options_json,
+                                                                               char **selection_json_out,
+                                                                               char **error_out);
 
 /*
  Reopens a versioned live-stack context previously written by

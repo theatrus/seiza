@@ -559,7 +559,25 @@ struct StackReferenceResponse {
     schema_version: u32,
     reference_index: usize,
     reference_path: String,
+    ranking: Vec<usize>,
     scores: Vec<Option<StackReferenceScoreResponse>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChannelReferenceSelectionResponse {
+    schema_version: u32,
+    channel_reference_index: usize,
+    channel_reference_path: String,
+    skipped: Vec<SkippedChannelReferenceResponse>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkippedChannelReferenceResponse {
+    index: usize,
+    path: String,
+    reason: String,
 }
 
 #[derive(Serialize)]
@@ -1890,10 +1908,12 @@ pub unsafe extern "C" fn seiza_color_calibration_apply(
 /// it does not calibrate, register, stack, or modify them.
 ///
 /// Returns owned schema-1 JSON with `referenceIndex` (zero-based),
-/// `referencePath` (exactly the input string at that index), and `scores`
-/// (one entry per input in the original order). A score is null for an
-/// unreadable or unscorable frame; otherwise it contains `stars`,
-/// `medianStarArea`, `background`, `backgroundVariation`, and `score`.
+/// `referencePath` (exactly the input string at that index), `ranking` (the
+/// indices of every scored frame, best reference first, so `referenceIndex`
+/// leads it), and `scores` (one entry per input in the original order). A
+/// score is null for an unreadable or unscorable frame; otherwise it
+/// contains `stars`, `medianStarArea`, `background`, `backgroundVariation`,
+/// and `score`.
 /// `medianStarArea` is in half-resolution pixels, and background measurements
 /// use the scorer's half-resolution luminance units, not display pixels.
 /// See `seiza_stacking::ReferenceScore` for the native measurements.
@@ -1927,6 +1947,7 @@ pub unsafe extern "C" fn seiza_stack_choose_reference_json(
             schema_version: 1,
             reference_index,
             reference_path: paths[reference_index].clone(),
+            ranking: seiza_stacking::rank_references(&scores),
             scores: scores
                 .into_iter()
                 .map(|score| score.map(StackReferenceScoreResponse::from))
@@ -2037,37 +2058,157 @@ pub unsafe extern "C" fn seiza_live_stacker_open_fits_with_reference_image(
             required_path(reference_image_path, "stack reference image path")?;
         let channel_reference_path =
             required_path(channel_reference_path, "stack channel reference path")?;
-        let bias_path = optional_path(bias_path)?;
-        let dark_path = optional_path(dark_path)?;
-        let flat_path = optional_path(flat_path)?;
-        let masters = [bias_path.clone(), dark_path.clone(), flat_path.clone()];
-        // The reference image may be a light, even the channel reference,
-        // but neither may be a master.
-        for image in [&reference_image_path, &channel_reference_path] {
-            let paths = std::iter::once(image.clone())
-                .chain(masters.iter().flatten().cloned())
-                .collect::<Vec<_>>();
-            validate_distinct_stack_paths(&paths)?;
-        }
-        if dark_path.is_none() && dark_exposure_seconds != 0.0 {
-            return Err("a master-dark exposure override requires a dark path".into());
-        }
-        let dark_exposure_seconds =
-            optional_positive_seconds(dark_exposure_seconds, "master-dark exposure override")?;
-        let options = stack_options(options_json)?;
-        let stacker = LiveStacker::open_fits_with_reference_image(
+        let ReferenceImageStack { stacker, .. } = open_with_reference_image(
             &reference_image_path,
-            &channel_reference_path,
-            bias_path.as_deref(),
-            dark_path.as_deref(),
-            flat_path.as_deref(),
+            &[channel_reference_path],
+            [bias_path, dark_path, flat_path],
             dark_exposure_seconds,
-            options,
-        )
-        .map_err(|error| error.to_string())?;
+            options_json,
+        )?;
         Ok(SeizaLiveStacker { stacker })
     })
     .map_or(ptr::null_mut(), |stacker| Box::into_raw(Box::new(stacker)))
+}
+
+#[unsafe(no_mangle)]
+/// [`seiza_live_stacker_open_fits_with_reference_image`] with a JSON array
+/// of channel reference paths, best first. Each is tried in turn until one
+/// aligns to the reference image, which is read and prepared once. For an
+/// automatic choice, pass the first few lights of the `ranking` from
+/// [`seiza_stack_choose_reference_json`]; the CLI tries five. A light that
+/// cannot be read or calibrated, or whose channel count differs from the
+/// reference image's, ends the search with an error, since the next light
+/// would fail the same way. The masters, `dark_exposure_seconds` and
+/// `options_json` are those of [`seiza_live_stacker_open_fits`].
+///
+/// On success, when `selection_json_out` is non-null, it receives owned
+/// schema-1 JSON: `channelReferenceIndex` (zero-based, into the array),
+/// `channelReferencePath` (exactly that input string), and `skipped`, an
+/// `{index, path, reason}` entry for each earlier light that did not align.
+/// Free it with [`seiza_string_free`]. The stack starts with no accepted
+/// frames: push every light, the channel reference included.
+///
+/// # Safety
+/// `reference_image_path` and `channel_reference_paths_json` must be valid
+/// NUL-terminated strings. Optional paths and `options_json` may be null;
+/// when non-null they must be NUL-terminated. When non-null,
+/// `selection_json_out` and `error_out` must each point to writable storage
+/// for one pointer.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn seiza_live_stacker_open_fits_with_reference_image_candidates(
+    reference_image_path: *const c_char,
+    channel_reference_paths_json: *const c_char,
+    bias_path: *const c_char,
+    dark_path: *const c_char,
+    flat_path: *const c_char,
+    dark_exposure_seconds: f64,
+    options_json: *const c_char,
+    selection_json_out: *mut *mut c_char,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaLiveStacker {
+    clear_error(error_out);
+    if !selection_json_out.is_null() {
+        unsafe { *selection_json_out = ptr::null_mut() };
+    }
+    ffi_result(error_out, || {
+        let reference_image_path =
+            required_path(reference_image_path, "stack reference image path")?;
+        let paths_json = required_str(channel_reference_paths_json, "channel reference paths")?;
+        let paths: Vec<String> = serde_json::from_str(&paths_json).map_err(|error| {
+            format!("channel reference paths must be a JSON array of strings: {error}")
+        })?;
+        if paths.is_empty() {
+            return Err("at least one channel reference path is required".into());
+        }
+        let native_paths = paths.iter().map(PathBuf::from).collect::<Vec<_>>();
+        let ReferenceImageStack {
+            stacker,
+            used,
+            skipped,
+        } = open_with_reference_image(
+            &reference_image_path,
+            &native_paths,
+            [bias_path, dark_path, flat_path],
+            dark_exposure_seconds,
+            options_json,
+        )?;
+        if !selection_json_out.is_null() {
+            let selection = owned_json(&ChannelReferenceSelectionResponse {
+                schema_version: 1,
+                channel_reference_index: used,
+                channel_reference_path: paths[used].clone(),
+                skipped: skipped
+                    .into_iter()
+                    .map(|(index, reason)| SkippedChannelReferenceResponse {
+                        index,
+                        path: paths[index].clone(),
+                        reason,
+                    })
+                    .collect(),
+            })?;
+            unsafe { *selection_json_out = selection };
+        }
+        Ok(SeizaLiveStacker { stacker })
+    })
+    .map_or(ptr::null_mut(), |stacker| Box::into_raw(Box::new(stacker)))
+}
+
+/// A stack opened on a reference image.
+struct ReferenceImageStack {
+    stacker: LiveStacker,
+    /// The index of the channel reference it uses.
+    used: usize,
+    /// The index and reason of each earlier channel reference that did not
+    /// align.
+    skipped: Vec<(usize, String)>,
+}
+
+/// Open a stack on a reference image, trying `channel_reference_paths` in
+/// turn.
+fn open_with_reference_image(
+    reference_image_path: &Path,
+    channel_reference_paths: &[PathBuf],
+    [bias_path, dark_path, flat_path]: [*const c_char; 3],
+    dark_exposure_seconds: f64,
+    options_json: *const c_char,
+) -> Result<ReferenceImageStack, String> {
+    let bias_path = optional_path(bias_path)?;
+    let dark_path = optional_path(dark_path)?;
+    let flat_path = optional_path(flat_path)?;
+    let masters = [bias_path.clone(), dark_path.clone(), flat_path.clone()];
+    // The reference image may be a light, even a channel reference, but
+    // neither may be a master.
+    for image in std::iter::once(reference_image_path)
+        .chain(channel_reference_paths.iter().map(PathBuf::as_path))
+    {
+        let paths = std::iter::once(image.to_path_buf())
+            .chain(masters.iter().flatten().cloned())
+            .collect::<Vec<_>>();
+        validate_distinct_stack_paths(&paths)?;
+    }
+    if dark_path.is_none() && dark_exposure_seconds != 0.0 {
+        return Err("a master-dark exposure override requires a dark path".into());
+    }
+    let dark_exposure_seconds =
+        optional_positive_seconds(dark_exposure_seconds, "master-dark exposure override")?;
+    let options = stack_options(options_json)?;
+    let mut skipped = Vec::new();
+    let (stacker, used) = LiveStacker::open_fits_with_reference_image_candidates(
+        reference_image_path,
+        channel_reference_paths,
+        bias_path.as_deref(),
+        dark_path.as_deref(),
+        flat_path.as_deref(),
+        dark_exposure_seconds,
+        options,
+        |index, reason| skipped.push((index, reason.to_string())),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(ReferenceImageStack {
+        stacker,
+        used,
+        skipped,
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -7241,6 +7382,9 @@ mod tests {
         let (expected_index, expected_scores) =
             seiza_stacking::choose_reference(&paths, 2).unwrap();
         assert!(matches!(expected_index, 1 | 3));
+        let expected_ranking = seiza_stacking::rank_references(&expected_scores);
+        assert_eq!(expected_ranking.len(), 2);
+        assert_eq!(expected_ranking[0], expected_index);
         let strings = paths
             .iter()
             .map(|path| path.to_str().unwrap())
@@ -7260,6 +7404,7 @@ mod tests {
         assert_eq!(response["schemaVersion"], 1);
         assert_eq!(response["referenceIndex"], expected_index);
         assert_eq!(response["referencePath"], strings[expected_index]);
+        assert_eq!(response["ranking"], serde_json::json!(expected_ranking));
         let scores = response["scores"].as_array().unwrap();
         assert_eq!(scores.len(), paths.len());
         for (actual, expected) in scores.iter().zip(expected_scores) {
@@ -8283,6 +8428,115 @@ mod tests {
             seiza_stack_snapshot_free(snapshot);
             seiza_live_stacker_free(stacker);
         }
+    }
+
+    #[test]
+    fn stacking_cabi_tries_channel_references_until_one_aligns() {
+        let directory = tempfile::tempdir().unwrap();
+        let write = |name: &str, image: LinearImage| {
+            let path = directory.path().join(name);
+            seiza_stacking::write_processed_image_fits_f32(&path, &image, &[], &[]).unwrap();
+            path.to_str().unwrap().to_owned()
+        };
+        let field = |width: usize, height: usize| {
+            LinearImage::new(width, height, 1, stacking_star_field(width, height)).unwrap()
+        };
+        let reference = CString::new(write("common.fits", field(176, 144))).unwrap();
+        // A quarter turn of a light cannot align to the shared image.
+        let light = field(160, 128);
+        let turned = (0..light.data.len())
+            .map(|index| light.data[(127 - index % 128) * 160 + index / 128])
+            .collect::<Vec<_>>();
+        let turned = write(
+            "red-turned.fits",
+            LinearImage::new(128, 160, 1, turned).unwrap(),
+        );
+        let light = write("red-001.fits", light);
+        let bias = write(
+            "bias.fits",
+            LinearImage::new(160, 128, 1, vec![0.0; 160 * 128]).unwrap(),
+        );
+        let bias_c = CString::new(bias.as_str()).unwrap();
+        let config = no_adjustment_stack_options();
+        // The turned light's size differs from the bias's, which would end
+        // the search, so only the duplicate-path check uses the bias.
+        let open_with = |bias: *const c_char,
+                         candidates: &[&str],
+                         selection: *mut *mut c_char,
+                         error: &mut *mut c_char| {
+            let candidates = CString::new(serde_json::to_string(candidates).unwrap()).unwrap();
+            unsafe {
+                seiza_live_stacker_open_fits_with_reference_image_candidates(
+                    reference.as_ptr(),
+                    candidates.as_ptr(),
+                    bias,
+                    ptr::null(),
+                    ptr::null(),
+                    0.0,
+                    config.as_ptr(),
+                    selection,
+                    error,
+                )
+            }
+        };
+        let open = |candidates: &[&str], selection: *mut *mut c_char, error: &mut *mut c_char| {
+            open_with(ptr::null(), candidates, selection, error)
+        };
+        let take_error = |error: &mut *mut c_char| {
+            assert!(!error.is_null());
+            let message = unsafe { CStr::from_ptr(*error) }
+                .to_str()
+                .unwrap()
+                .to_owned();
+            unsafe { seiza_string_free(*error) };
+            *error = ptr::null_mut();
+            message
+        };
+
+        let mut error = ptr::null_mut();
+        let mut selection = ptr::null_mut();
+        let stacker = open(&[&turned, &light], &mut selection, &mut error);
+        assert!(!stacker.is_null(), "{:?}", unsafe { CStr::from_ptr(error) });
+        let chosen: serde_json::Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(selection) }.to_str().unwrap()).unwrap();
+        unsafe { seiza_string_free(selection) };
+        assert_eq!(chosen["schemaVersion"], 1);
+        assert_eq!(chosen["channelReferenceIndex"], 1);
+        assert_eq!(chosen["channelReferencePath"], light.as_str());
+        let skipped = chosen["skipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0]["index"], 0);
+        assert_eq!(skipped[0]["path"], turned.as_str());
+        assert!(!skipped[0]["reason"].as_str().unwrap().is_empty());
+        assert_eq!(unsafe { seiza_live_stacker_accepted_frames(stacker) }, 0);
+        assert_eq!(unsafe { seiza_live_stacker_width(stacker) }, 176);
+        unsafe { seiza_live_stacker_free(stacker) };
+
+        // The selection is optional.
+        let stacker = open(&[&light], ptr::null_mut(), &mut error);
+        assert!(!stacker.is_null());
+        unsafe { seiza_live_stacker_free(stacker) };
+
+        // On failure, the selection stays null and the error says why.
+        selection = CString::new("stale").unwrap().into_raw();
+        let stale = selection;
+        assert!(open(&[&turned], &mut selection, &mut error).is_null());
+        assert!(selection.is_null());
+        unsafe { seiza_string_free(stale) };
+        let message = take_error(&mut error);
+        assert!(message.contains("could not be aligned"), "{message}");
+        assert!(open(&[], ptr::null_mut(), &mut error).is_null());
+        assert!(take_error(&mut error).contains("at least one"));
+        assert!(
+            open_with(
+                bias_c.as_ptr(),
+                &[&light, &bias],
+                ptr::null_mut(),
+                &mut error
+            )
+            .is_null()
+        );
+        assert!(take_error(&mut error).contains("duplicate stack input path"));
     }
 
     #[test]

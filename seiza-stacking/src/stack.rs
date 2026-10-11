@@ -864,22 +864,52 @@ impl LiveStacker {
         dark_exposure_seconds: Option<f64>,
         options: StackOptions,
     ) -> Result<Self> {
+        Self::open_fits_with_reference_image_candidates(
+            reference_image_path,
+            &[channel_reference_path],
+            bias_path,
+            dark_path,
+            flat_path,
+            dark_exposure_seconds,
+            options,
+            |_, _| {},
+        )
+        .map(|(stacker, _)| stacker)
+    }
+
+    /// [`Self::open_fits_with_reference_image`] with channel references to
+    /// try in turn, best first, as [`Self::with_reference_image_candidates`]
+    /// does. Returns the stack and the index of the channel reference it
+    /// uses.
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_fits_with_reference_image_candidates<P: AsRef<Path>>(
+        reference_image_path: impl AsRef<Path>,
+        channel_reference_paths: &[P],
+        bias_path: Option<&Path>,
+        dark_path: Option<&Path>,
+        flat_path: Option<&Path>,
+        dark_exposure_seconds: Option<f64>,
+        options: StackOptions,
+        rejected: impl FnMut(usize, &FrameRejectionReason),
+    ) -> Result<(Self, usize)> {
         let reference_image_path = reference_image_path.as_ref();
-        let channel_reference_path = channel_reference_path.as_ref();
         let masters = [bias_path, dark_path, flat_path];
         distinct_input_paths(std::iter::once(Some(reference_image_path)).chain(masters))?;
-        distinct_input_paths(std::iter::once(Some(channel_reference_path)).chain(masters))?;
+        for path in channel_reference_paths {
+            distinct_input_paths(std::iter::once(Some(path.as_ref())).chain(masters))?;
+        }
         let calibration = CalibrationMasters::from_fits_paths(
             bias_path,
             dark_path,
             flat_path,
             dark_exposure_seconds,
         )?;
-        let mut stacker = Self::with_reference_image(
+        let (mut stacker, used) = Self::with_reference_image_candidates(
             FitsFrame::open(reference_image_path)?,
-            FitsFrame::open(channel_reference_path)?,
+            channel_reference_paths.iter().map(FitsFrame::open),
             calibration,
             options,
+            rejected,
         )?;
         stacker.input_paths = distinct_input_paths(masters)?;
         stacker.reference_image_path = Some(path_identity(reference_image_path));
@@ -891,7 +921,7 @@ impl LiveStacker {
                 flat_path,
                 dark_exposure_seconds,
             ));
-        Ok(stacker)
+        Ok((stacker, used))
     }
 
     /// Restore an atomically checkpointed live stack, including its immutable

@@ -39,7 +39,8 @@ the lights, and `protected_paths` keeps outputs and contexts from replacing
 it. `LiveStacker::with_reference_image_candidates` takes several channel
 references, best first, prepares the alignment image once, and uses the first
 that aligns to it; a channel count that differs from the alignment image's
-ends the search at once.
+ends the search at once. `LiveStacker::open_fits_with_reference_image_candidates`
+does the same from paths.
 
 Live delta-sigma rejection cannot remove trails admitted during its warm-up.
 `LiveStacker::reintegrate` fixes that for a live stack. The stacker keeps a
