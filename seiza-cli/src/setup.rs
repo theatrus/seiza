@@ -135,7 +135,7 @@ impl SetupPreset {
                 "Faintest deep solving (large, ~9 GB): objects + Solar System + transients + G≤20 Gaia catalog + blind index"
             }
             Self::All => {
-                "Development and offline use: every published catalog, including the large G≤20 deep catalog (slower, ~9 GB extra), Gaia photometry for colour calibration and object distances"
+                "Development and offline use: every published catalog, including the large G≤20 deep catalog (slower, ~9 GB extra), Gaia photometry for colour calibration, object distances, and star distances for parallax videos (~1 GB)"
             }
         }
     }

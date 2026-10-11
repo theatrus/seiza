@@ -423,6 +423,20 @@ impl Overlay {
         })
     }
 
+    /// The characters of the caller's labels, the titles and the watermark
+    /// that the labels' font cannot draw.
+    pub(crate) fn missing_glyphs(&self) -> Vec<char> {
+        let mut text: String = self
+            .marks
+            .iter()
+            .filter(|mark| mark.object.is_none())
+            .map(|mark| mark.label.as_str())
+            .collect();
+        text.extend(self.titles.iter().flatten().map(String::as_str));
+        text.extend(self.watermark.as_deref());
+        self.fonts.missing(&text)
+    }
+
     /// Work out how much of each mark every frame of `shot` shows, at
     /// `fps` frames a second: a mark fades out as it nears the frame's edge,
     /// as the camera flies inside it (its name going to the "Field within"

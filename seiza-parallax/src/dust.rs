@@ -40,6 +40,36 @@ pub struct Dust {
     clear_density: f32,
 }
 
+/// How many cells of `cell` pixels span `size`: the whole ones, the last
+/// taking any remainder, so no cell is a sliver.
+fn cells(size: usize, cell: f64) -> usize {
+    ((size as f64 / cell).floor() as usize).max(1)
+}
+
+/// The pixels cell `index` of `count` spans along a side of `size`.
+fn span(index: usize, count: usize, size: usize, cell: f64) -> (usize, usize) {
+    let start = ((index as f64 * cell) as usize).min(size);
+    let end = if index + 1 >= count {
+        size
+    } else {
+        (((index + 1) as f64 * cell) as usize).min(size)
+    };
+    (start, end)
+}
+
+/// The area in pixels of cell `index` of a `columns` × `rows` grid of
+/// `cell`-pixel cells over a `width` × `height` image.
+fn cell_area(
+    index: usize,
+    (columns, rows): (usize, usize),
+    (width, height): (usize, usize),
+    cell: f64,
+) -> f32 {
+    let (left, right) = span(index % columns, columns, width, cell);
+    let (top, bottom) = span(index / columns, rows, height, cell);
+    ((right - left) * (bottom - top)).max(1) as f32
+}
+
 impl Dust {
     /// The dust in front of `stars`, the places of the stars seen behind it,
     /// over a `width` × `height` image, or `None` when there are too few to
@@ -62,8 +92,7 @@ impl Dust {
         }
         let area = width as f64 * height as f64;
         let cell = (30.0 * area / stars.len() as f64).sqrt().clamp(16.0, 512.0);
-        let columns = (width as f64 / cell).ceil() as usize;
-        let rows = (height as f64 / cell).ceil() as usize;
+        let (columns, rows) = (cells(width, cell), cells(height, cell));
         let mut counts = vec![0.0_f32; columns * rows];
         for &(x, y) in stars {
             if !(x >= 0.0 && y >= 0.0 && x < width as f64 && y < height as f64) {
@@ -72,21 +101,9 @@ impl Dust {
             let (column, row) = ((x / cell) as usize, (y / cell) as usize);
             counts[row.min(rows - 1) * columns + column.min(columns - 1)] += 1.0;
         }
-        // Stars per pixel, with the image's edge cutting the last cells
-        // short.
-        let inside = |index: usize, size: usize, cells: usize| {
-            if index + 1 < cells {
-                cell
-            } else {
-                size as f64 - index as f64 * cell
-            }
-        };
+        // Stars per pixel, the last cells taking what the whole cells leave.
         let mut density: Vec<f32> = (0..rows * columns)
-            .map(|index| {
-                let (row, column) = (index / columns, index % columns);
-                let pixels = inside(column, width, columns) * inside(row, height, rows);
-                counts[index] / pixels.max(1.0) as f32
-            })
+            .map(|index| counts[index] / cell_area(index, (columns, rows), (width, height), cell))
             .collect();
         smooth(&mut density, columns, rows, 1.5);
         let mut sorted = density.clone();
@@ -118,18 +135,13 @@ impl Dust {
     pub fn with_darkness(self, starless: &LightImage, stars: &[(f64, f64)]) -> Self {
         let (width, height) = (starless.width, starless.height);
         let cell = FINE.min(self.cell);
-        let columns = (width as f64 / cell).ceil() as usize;
-        let rows = (height as f64 / cell).ceil() as usize;
+        let (columns, rows) = (cells(width, cell), cells(height, cell));
         let light: Vec<f32> = (0..rows)
             .into_par_iter()
             .flat_map_iter(|row| {
                 (0..columns).map(move |column| {
-                    let (left, top) = (
-                        (column as f64 * cell) as usize,
-                        (row as f64 * cell) as usize,
-                    );
-                    let right = (((column + 1) as f64 * cell) as usize).min(width);
-                    let bottom = (((row + 1) as f64 * cell) as usize).min(height);
+                    let (left, right) = span(column, columns, width, cell);
+                    let (top, bottom) = span(row, rows, height, cell);
                     let mut sum = 0.0_f32;
                     for y in top..bottom {
                         for x in left..right {
@@ -155,19 +167,30 @@ impl Dust {
             }
         }
         smooth(&mut counts, columns, rows, 2.0);
-        let expected = self.clear_density * (cell * cell) as f32;
+        // The clear sky's count for the same pixels, the edge cells' size
+        // and the smoothing alike.
+        let mut expected: Vec<f32> = (0..rows * columns)
+            .map(|index| {
+                self.clear_density * cell_area(index, (columns, rows), (width, height), cell)
+            })
+            .collect();
+        smooth(&mut expected, columns, rows, 2.0);
         let transmission = (0..rows * columns)
             .map(|index| {
                 let (row, column) = (index / columns, index % columns);
                 let counted = self.at((column as f64 + 0.5) * cell, (row as f64 + 0.5) * cell);
-                let dark = if around[index] > black {
+                // Only surroundings standing clearly above the black say
+                // what is dark: over a gentle gradient, such as vignetting
+                // toward a darkest corner, a hair's difference would read as
+                // a globule.
+                let dark = if around[index] - black > 0.05 * around[index] {
                     ((light[index] - black) / (around[index] - black)).clamp(0.0, 1.0)
                 } else {
                     1.0
                 };
                 // The darkness counts in full where half the clear sky's
                 // stars or fewer show, and not at all where all of them do.
-                let stars = (counts[index] / expected).min(1.0);
+                let stars = (counts[index] / expected[index].max(f32::MIN_POSITIVE)).min(1.0);
                 let belief = ((1.0 - stars) / 0.5).clamp(0.0, 1.0);
                 let dark = 1.0 - belief * (1.0 - dark);
                 counted.min(dark.powf(self.opacity)).max(LEAST)
@@ -324,6 +347,43 @@ mod tests {
         let dust = counted.with_darkness(&starless, &stars);
         assert!(dust.at(700.0, 500.0) <= 0.05, "{}", dust.at(700.0, 500.0));
         assert!(dust.at(1200.0, 900.0) > 0.9, "{}", dust.at(1200.0, 900.0));
+    }
+
+    #[test]
+    fn a_thin_last_cell_is_not_taken_for_dust() {
+        // Clear sky everywhere, and a starless image dimming a tenth toward
+        // its right edge, as vignetting does; widths that leave the last
+        // cells a few pixels wide.
+        for width in [1975, 1990, 2001, 2003, 2008, 2017] {
+            let stars = field(width, 1500, 10.0, (-1e4, -1e4, 1.0), 1);
+            let mut starless = LightImage::new(width, 1500);
+            for (index, pixel) in starless.pixels.iter_mut().enumerate() {
+                let x = (index % width) as f32 / width as f32;
+                *pixel = [0.3 * (1.0 - 0.1 * x); 3];
+            }
+            let counted = Dust::from_star_counts(&stars, width, 1500, 3.0).unwrap();
+            let edge = (width - 1) as f64;
+            assert!(
+                counted.at(edge, 750.0) > 0.8,
+                "{width}: {}",
+                counted.at(edge, 750.0)
+            );
+            assert!(
+                counted.at(edge, 1499.0) > 0.8,
+                "{width}: {}",
+                counted.at(edge, 1499.0)
+            );
+            // The darkness adds nothing to what the counts say there.
+            let before = counted.at(edge, 750.0);
+            let dust = counted.with_darkness(&starless, &stars);
+            for x in [edge, edge - 8.0] {
+                assert!(
+                    dust.at(x, 750.0) > before - 0.05,
+                    "{width} at {x}: {}",
+                    dust.at(x, 750.0)
+                );
+            }
+        }
     }
 
     #[test]

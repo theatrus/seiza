@@ -109,6 +109,14 @@ impl StarDistanceCatalogBuilder {
         self.count
     }
 
+    /// Record at most `faintest` as the magnitude limit: the faintest star
+    /// the source held, when it went less deep than asked.
+    pub fn limit_max_mag(&mut self, faintest: f32) {
+        if faintest.is_finite() {
+            self.max_mag = self.max_mag.min(faintest);
+        }
+    }
+
     pub fn write_to(mut self, path: &Path) -> io::Result<()> {
         let mut out = BufWriter::new(File::create(path)?);
         out.write_all(MAGIC)?;

@@ -11,8 +11,11 @@ pub struct Star {
     /// Centroid in image pixels, pixel-centre coordinates.
     pub x: f64,
     pub y: f64,
-    /// Distance in parsecs, or `None` to make it part of the background
-    /// plane.
+    /// Distance in parsecs, or `None` to put it at the background's
+    /// distance. A star within [`CutOptions::embedded`] of the background's
+    /// distance joins the background plane, if it is among the stars that
+    /// fly ([`CutOptions::max_stars`]); otherwise it goes as the small
+    /// stars do.
     pub distance_pc: Option<f64>,
 }
 
@@ -95,7 +98,8 @@ pub struct CutOptions {
     pub max_radius: usize,
     /// How many stars, brightest first, fly at their own distances; `None`
     /// for all of them. A deep image holds so many faint stars that, each
-    /// moving on its own, they crowd the view.
+    /// moving on its own, they crowd the view. Stars that join the
+    /// background for lying at its distance count among them.
     pub max_stars: Option<usize>,
     /// What becomes of the stars past `max_stars`.
     pub small_stars: SmallStars,
@@ -187,7 +191,7 @@ impl Scene {
         let edge = background + options.edge_light.max(4.0 * noise);
         let measured: Vec<Footprint> = stars
             .par_iter()
-            .map(|star| Footprint::measure(star, star_light, edge, options))
+            .map(|star| Footprint::measure(star, star_light, (edge, background), options))
             .collect();
         // `stars` come brightest first. A fainter star inside a brighter
         // one's footprint is most often a piece of its halo or spikes, and
@@ -365,7 +369,19 @@ impl Footprint {
         peak * (1.0 / (1.0 + r2)).powi(2) as f32
     }
 
-    fn measure(star: &Star, light: &LightImage, edge: f32, options: &CutOptions) -> Self {
+    /// The footprint grows ring by ring while its light stays above
+    /// `edge`, raised by however much the light the star sits in (nebula a
+    /// star remover left, a gradient) stands above the image's
+    /// `background`: that floor is the median light on a ring as far out
+    /// as a footprint may reach, which a star's own halo has left behind.
+    fn measure(
+        star: &Star,
+        light: &LightImage,
+        (edge, background): (f32, f32),
+        options: &CutOptions,
+    ) -> Self {
+        let floor = ring_floor(light, star.x, star.y, options.max_radius);
+        let edge = edge + (floor - background).max(0.0);
         let mut radius = options.min_radius;
         while radius < options.max_radius && ring_light(light, star.x, star.y, radius) >= edge {
             radius += 1;
@@ -476,6 +492,32 @@ fn ring_light(light: &LightImage, x: f64, y: f64, radius: usize) -> f32 {
     *samples.select_nth_unstable_by(middle, f32::total_cmp).1
 }
 
+/// The median light, summed over channels, on 256 points of the circle of
+/// `radius` about `(x, y)` that fall in the image, or 0 if none do.
+fn ring_floor(light: &LightImage, x: f64, y: f64, radius: usize) -> f32 {
+    const STEPS: usize = 256;
+    let mut samples: Vec<f32> = (0..STEPS)
+        .filter_map(|step| {
+            let angle = step as f64 / STEPS as f64 * std::f64::consts::TAU;
+            let (px, py) = (
+                (x + radius as f64 * angle.cos()).round(),
+                (y + radius as f64 * angle.sin()).round(),
+            );
+            let inside =
+                px >= 0.0 && py >= 0.0 && px < light.width as f64 && py < light.height as f64;
+            inside.then(|| {
+                let pixel = light.at(px as usize, py as usize);
+                pixel[0] + pixel[1] + pixel[2]
+            })
+        })
+        .collect();
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let middle = samples.len() / 2;
+    *samples.select_nth_unstable_by(middle, f32::total_cmp).1
+}
+
 /// The median light, summed over channels, of a sample of the image, and
 /// its noise as a scaled median absolute deviation.
 fn background_and_noise(light: &LightImage) -> (f32, f32) {
@@ -570,6 +612,35 @@ mod tests {
             faint < own * 1.5,
             "the faint sprite took {faint}, its own light is {own}"
         );
+    }
+
+    #[test]
+    fn a_star_in_a_glow_keeps_a_footprint_of_its_own_size() {
+        // Faint glow left over two fifths of a star image, as a star
+        // remover leaves over bright nebula, and a star in it and one out
+        // of it.
+        let mut light = gaussian_stars(600, 400, &[(150.0, 200.0, 2.0), (480.0, 200.0, 2.0)]);
+        for (index, pixel) in light.pixels.iter_mut().enumerate() {
+            if index % 600 >= 360 {
+                for channel in pixel.iter_mut() {
+                    *channel += 0.004;
+                }
+            }
+        }
+        let options = CutOptions::default();
+        let (background, noise) = background_and_noise(&light);
+        let edge = background + options.edge_light.max(4.0 * noise);
+        let outer = |x: f64| {
+            let star = Star {
+                x,
+                y: 200.0,
+                distance_pc: Some(500.0),
+            };
+            Footprint::measure(&star, &light, (edge, background), &options).outer
+        };
+        // The glow once grew the star in it to the 200-pixel cap.
+        assert!(outer(480.0) < 20.0, "{}", outer(480.0));
+        assert!((outer(480.0) - outer(150.0)).abs() < 3.0);
     }
 
     #[test]

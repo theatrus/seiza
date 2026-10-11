@@ -108,24 +108,35 @@ pub(crate) struct ParallaxVideoArgs {
     seconds: f64,
     /// A stop on a tour, given in order, two or more: `X,Y` or `whole`
     /// (the image's centre), then any of `dolly=`, `zoom=`, `rotate=`
-    /// (degrees), `pan=`, `travel=` and `hold=` (seconds), e.g. `--stop
+    /// (degrees), `pan=`, `travel=` and `hold=` (seconds), `spin=`
+    /// (degrees turned while holding), `push=` (the share of the remaining
+    /// way flown in while holding) and `title="..."`, e.g. `--stop
     /// "2700,3400 dolly=0.85 rotate=-20 pan=0.25 travel=6 hold=1.5"`. The
-    /// camera glides through the stops, easing to a halt where it holds;
-    /// the first is the opening view. A tour sets the video's length and
-    /// replaces --focus's single move
+    /// camera glides on slowly through the stops it holds at; the first
+    /// is the opening view. A tour sets the video's length and replaces
+    /// --focus's single move
     #[arg(long = "stop", value_parser = seiza_parallax::parse_stop, allow_hyphen_values = true)]
     stops: Vec<seiza_parallax::TourStop>,
     /// Tour the catalogued objects in the field: every one worth a visit
     /// (up to twelve), or the N most worth it, visited in a short round
     /// from the whole image and back, each framed to its size with a
     /// gentle turn and pan
-    #[arg(long, num_args = 0..=1, default_missing_value = "0", conflicts_with = "stops")]
+    #[arg(
+        long,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "0",
+        conflicts_with = "stops"
+    )]
     auto_tour: Option<usize>,
     /// Plan a tour as --auto-tour would (taking its count, --tour-hold and
     /// --tour-motion), write it to this file for editing, and stop. Each
     /// line is a stop as --stop takes it, named in a comment; drop, move or
     /// change lines, then pass the file with --tour-file
-    #[arg(long, conflicts_with_all = ["stops", "tour_file"])]
+    #[arg(
+        long,
+        conflicts_with_all = ["stops", "tour_file", "output", "tour_loop", "tour_titles", "debug_layers"]
+    )]
     plan_tour: Option<PathBuf>,
     /// Take the tour's stops from this file, one a line as --stop takes
     /// them, with `#` starting a comment, and a `focus X,Y` line, if any,
@@ -195,7 +206,7 @@ pub(crate) struct ParallaxVideoArgs {
     #[arg(long, value_enum, default_value_t = EncoderArg::Auto)]
     encoder: EncoderArg,
     /// The codec ffmpeg writes: h264 (libx264, else libopenh264) or hevc
-    /// (libx265, about half the size for the same look)
+    /// (libx265, about a fifth smaller for the same look, and slower)
     #[arg(long, default_value = "h264", value_parser = seiza_parallax::Codec::parse)]
     codec: seiza_parallax::Codec,
     /// The ffmpeg program to run
@@ -228,7 +239,7 @@ pub(crate) struct ParallaxVideoArgs {
     max_scale: Option<f64>,
     /// Keep the starless and stars images StarXTerminator made, beside the
     /// output
-    #[arg(long)]
+    #[arg(long, conflicts_with = "starless")]
     keep_split: bool,
     /// Write the scene's layers to this directory as PNG files: the
     /// background, the star light no star took, and the stars cut out,
@@ -268,7 +279,12 @@ pub(crate) struct ParallaxVideoArgs {
     label_color: Rgb<u8>,
     /// Write a line of text in the bottom-right corner of every frame
     /// (default text: "Rendered with seiza.fyi")
-    #[arg(long, num_args = 0..=1, default_missing_value = seiza_parallax::DEFAULT_WATERMARK)]
+    #[arg(
+        long,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = seiza_parallax::DEFAULT_WATERMARK
+    )]
     watermark: Option<String>,
 }
 
@@ -337,18 +353,32 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
     };
     let options = options(&args, file);
     options.check()?;
+    // Everything that would refuse the video at the end is asked first: the
+    // split, the solve and the stars' distances take minutes.
+    check_output(&args)?;
+    crate::interrupt::install();
+    let stop = crate::interrupt::interrupted;
     let started = std::time::Instant::now();
-    let (starless, stars, solve_path, _split_dir) = split(&args)?;
-    let wcs = solve(&args, &solve_path)?;
-    let parallax = Parallax::prepare(&starless, &stars, &wcs, &options, &mut print_event, &|| {
-        false
-    })?;
+    let (starless, stars, solve_path) = split(&args)?;
+    let (wcs, solved) = solve(&args, &solve_path)?;
+    if solved != starless.dimensions() {
+        bail!(
+            "{} is {}x{} but the split images are {}x{}: the plate solution must come from the \
+             same pixels",
+            solve_path.display(),
+            solved.0,
+            solved.1,
+            starless.width(),
+            starless.height()
+        );
+    }
+    let parallax = Parallax::prepare(&starless, &stars, &wcs, &options, &mut print_event, &stop)?;
     if let Some(directory) = &args.debug_layers {
         write_layers(directory, parallax.scene())?;
     }
     let sink = open_sink(&args, parallax.video_settings())?;
     let rendering = std::time::Instant::now();
-    parallax.render(sink, &mut print_event, &|| false)?;
+    parallax.render(sink, &mut print_event, &stop)?;
     println!(
         "wrote {} ({} frames in {:.1}s, {:.1}s in all)",
         output(&args).display(),
@@ -356,6 +386,51 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
         rendering.elapsed().as_secs_f64(),
         started.elapsed().as_secs_f64()
     );
+    Ok(())
+}
+
+/// Whether the video can be written where `-o` says, with the encoder
+/// asked for, and does not name an input.
+fn check_output(args: &ParallaxVideoArgs) -> Result<()> {
+    let output = output(args);
+    let same = |input: &Path| {
+        let canonical = |path: &Path| std::fs::canonicalize(path).ok();
+        canonical(input).is_some_and(|input| Some(input) == canonical(output))
+    };
+    for input in [&args.image, &args.starless, &args.stars]
+        .into_iter()
+        .flatten()
+    {
+        if same(input) {
+            bail!(
+                "-o {} is an input; the video would overwrite it",
+                output.display()
+            );
+        }
+    }
+    let hevc = args.codec == seiza_parallax::Codec::Hevc;
+    match args.encoder {
+        EncoderArg::Png => {
+            if output.is_file() {
+                bail!("{} is a file; PNG frames go in a folder", output.display());
+            }
+        }
+        EncoderArg::Ffmpeg => FfmpegSink::check(&args.ffmpeg, output, args.codec)?,
+        EncoderArg::Openh264 if hevc => {
+            bail!("the built-in encoder writes H.264 only; use ffmpeg for HEVC")
+        }
+        EncoderArg::Openh264 => {}
+        EncoderArg::Auto if FfmpegSink::available(&args.ffmpeg) => {
+            FfmpegSink::check(&args.ffmpeg, output, args.codec)?
+        }
+        EncoderArg::Auto if hevc => {
+            bail!("ffmpeg did not run, and HEVC needs it; install it or pass --ffmpeg")
+        }
+        EncoderArg::Auto if !cfg!(feature = "openh264") => {
+            bail!("ffmpeg did not run; install it, pass --ffmpeg, or use --encoder png")
+        }
+        EncoderArg::Auto => {}
+    }
     Ok(())
 }
 
@@ -391,8 +466,7 @@ fn write_plan(args: &ParallaxVideoArgs, path: &Path) -> Result<()> {
         .clone()
         .or_else(|| args.stars.clone())
         .expect("checked in run");
-    let dimensions = open_display(&solve_path)?.dimensions();
-    let wcs = solve(args, &solve_path)?;
+    let (wcs, dimensions) = solve(args, &solve_path)?;
     let plan = seiza_parallax::plan_tour(
         &wcs,
         dimensions,
@@ -456,14 +530,27 @@ type TourFile = (Vec<seiza_parallax::TourStop>, Option<(f64, f64)>);
 fn read_tour(path: &Path) -> Result<TourFile> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
+    parse_tour(&text).with_context(|| format!("in {}", path.display()))
+}
+
+/// A tour file's stops and focus line: a stop a line as --stop takes it,
+/// `focus X,Y` at most once, `#` comments, and a byte-order mark, as some
+/// Windows editors write, ignored.
+fn parse_tour(text: &str) -> Result<TourFile> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let (mut stops, mut focus) = (Vec::new(), None);
     for (number, line) in text.lines().enumerate() {
         let line = uncommented(line).trim();
         if line.is_empty() {
             continue;
         }
-        let where_ = || format!("{} line {}", path.display(), number + 1);
-        if let Some(place) = line.strip_prefix("focus ") {
+        let where_ = || format!("line {}", number + 1);
+        let mut words = line.splitn(2, char::is_whitespace);
+        if words.next() == Some("focus") {
+            if focus.is_some() {
+                bail!("{}: a second focus line; keep one", where_());
+            }
+            let place = words.next().unwrap_or_default();
             focus = Some(
                 parse_point(place.trim())
                     .map_err(anyhow::Error::msg)
@@ -476,6 +563,12 @@ fn read_tour(path: &Path) -> Result<TourFile> {
                     .with_context(where_)?,
             );
         }
+    }
+    if stops.len() < 2 {
+        bail!(
+            "a tour file needs two stops or more; it has {}",
+            stops.len()
+        );
     }
     Ok((stops, focus))
 }
@@ -550,17 +643,10 @@ fn options(args: &ParallaxVideoArgs, file: Option<TourFile>) -> ParallaxOptions 
 
 /// The starless and stars images, the path to plate-solve, and the
 /// directory holding a split this run made, if any.
-fn split(
-    args: &ParallaxVideoArgs,
-) -> Result<(Rgb32FImage, Rgb32FImage, PathBuf, Option<tempfile::TempDir>)> {
+fn split(args: &ParallaxVideoArgs) -> Result<(Rgb32FImage, Rgb32FImage, PathBuf)> {
     if let (Some(starless), Some(stars)) = (&args.starless, &args.stars) {
         let solve_path = args.image.clone().unwrap_or_else(|| stars.clone());
-        return Ok((
-            open_display(starless)?,
-            open_display(stars)?,
-            solve_path,
-            None,
-        ));
+        return Ok((open_display(starless)?, open_display(stars)?, solve_path));
     }
     let image_path = args.image.as_ref().expect("checked in run");
     let image = open_display(image_path)?;
@@ -581,7 +667,7 @@ fn split(
             println!("wrote {}", path.display());
         }
     }
-    Ok((starless, stars, image_path.clone(), None))
+    Ok((starless, stars, image_path.clone()))
 }
 
 /// Split a stretched image with StarXTerminator into its starless image
@@ -602,8 +688,11 @@ fn star_x_terminator(image: &Rgb32FImage) -> Result<(Rgb32FImage, Rgb32FImage)> 
         image.as_raw().clone(),
     )?;
     let mut last = -1;
+    // Ctrl-C stops the run and lets its scratch files go, rather than
+    // leaving hundreds of megabytes of FITS behind.
+    let cancel = crate::interrupt::cancel_signal();
     let (starless, stars) = cli
-        .split_stars(&linear, None, &mut |fraction| {
+        .split_stars(&linear, Some(&cancel), &mut |fraction| {
             let percent = (fraction * 100.0) as i32;
             if percent / 10 != last / 10 {
                 println!("StarXTerminator {percent}%");
@@ -625,7 +714,8 @@ fn star_x_terminator(image: &Rgb32FImage) -> Result<(Rgb32FImage, Rgb32FImage)> 
     Ok((to_display(starless), to_display(stars)))
 }
 
-fn solve(args: &ParallaxVideoArgs, path: &Path) -> Result<Wcs> {
+/// The plate solution of the image at `path`, and its size.
+fn solve(args: &ParallaxVideoArgs, path: &Path) -> Result<(Wcs, (u32, u32))> {
     let data = crate::with_data_flag_hint(seiza::data_paths::star_data(args.data.as_deref()))?;
     let index = seiza::data_paths::blind_index_beside(args.index.as_deref(), &data)?;
     let options = crate::SolveBlindOptions {
@@ -679,7 +769,7 @@ fn solve(args: &ParallaxVideoArgs, path: &Path) -> Result<Wcs> {
         solution.wcs.scale_arcsec_per_px(),
         solution.matched_stars
     );
-    Ok(solution.wcs)
+    Ok((solution.wcs, dims))
 }
 
 /// Write `scene`'s layers as PNG files, for checking how the stars were cut.
@@ -790,6 +880,17 @@ mod tests {
     fn points_parse() {
         assert_eq!(parse_point("10.5, 20"), Ok((10.5, 20.0)));
         assert!(parse_point("10").is_err());
+    }
+
+    #[test]
+    fn tour_files_read_as_editors_write_them() {
+        // A byte-order mark, a tab after `focus`, and Windows line ends.
+        let (stops, focus) =
+            parse_tour("\u{feff}focus\t10,20\r\nwhole hold=1\r\n100,100 dolly=0.5\r\n").unwrap();
+        assert_eq!((stops.len(), focus), (2, Some((10.0, 20.0))));
+        // Two focus lines, or no stops, are refused rather than half read.
+        assert!(parse_tour("focus 1,2\nfocus 3,4\nwhole\nwhole travel=1\n").is_err());
+        assert!(parse_tour("focus 1,2\n# only a comment\n").is_err());
     }
 
     #[test]

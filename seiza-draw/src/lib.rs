@@ -230,6 +230,21 @@ impl Fonts<'static> {
     }
 }
 
+impl Fonts<'_> {
+    /// The characters of `text`, each once, that these fonts have no glyph
+    /// for, such as CJK or emoji: they would be drawn as blank space.
+    pub fn missing(&self, text: &str) -> Vec<char> {
+        let mut missing: Vec<char> = Vec::new();
+        for c in text.chars() {
+            let drawn = c.is_whitespace() || c.is_control() || self.regular.glyph_id(c).0 != 0;
+            if !drawn && !missing.contains(&c) {
+                missing.push(c);
+            }
+        }
+        missing
+    }
+}
+
 /// Width and line height of `text` at `size` pixels, with `tracking` extra
 /// pixels between letters.
 pub fn measure(font: &FontRef<'_>, size: f64, tracking: f64, text: &str) -> (f64, f64) {
@@ -326,6 +341,15 @@ pub fn ellipse_points(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_glyphs_are_named_once() {
+        let fonts = Fonts::load().unwrap();
+        assert!(fonts.missing("NGC 7822 · Sh2-170 α Cyg").is_empty());
+        assert_eq!(fonts.missing("漢字 漢"), ['漢', '字']);
+        // The embedded subset holds Latin and Greek, not Cyrillic.
+        assert_eq!(fonts.missing("Ок").len(), 2);
+    }
 
     #[test]
     fn text_measures_and_draws() {

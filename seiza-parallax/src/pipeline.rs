@@ -219,7 +219,9 @@ pub struct SceneOptions {
     /// camera moves aim at.
     pub distance_focus: Option<(f64, f64)>,
     /// Distance for stars without one, parsecs; if `None`, the matched
-    /// stars' median, and never nearer than the nebula.
+    /// stars' median when the nebula lies nearer than it, else the star
+    /// field's far end (the matched stars' 90th percentile), and never
+    /// within 3% of the nebula, where they would join its plane.
     pub unmatched_distance_pc: Option<f64>,
     /// The object catalog and object distance files, or the standard places
     /// if `None`.
@@ -824,13 +826,29 @@ impl Parallax {
             summary.background_focus,
         ) = (distance, basis, focus);
 
-        // Most stars too faint to match are field stars well beyond a
-        // nearby target, so they go to the matched stars' median distance
-        // rather than onto the nebula.
+        // Most stars too faint to match are field stars: well beyond a
+        // nearby target, so at the matched stars' median distance, and in
+        // front of a target beyond most stars (a galaxy above all), so at
+        // the star field's far end. Never on the nebula's plane, where they
+        // would join it and swell with it rather than fly as points.
         let unmatched = scene_options.unmatched_distance_pc.unwrap_or_else(|| {
-            field::median(matched.iter().filter_map(|star| star.distance_pc))
-                .unwrap_or(distance)
-                .max(distance)
+            let mut known: Vec<f64> = matched.iter().filter_map(|star| star.distance_pc).collect();
+            known.sort_by(f64::total_cmp);
+            let share = |part: f64| {
+                known
+                    .get(((known.len() as f64 * part) as usize).min(known.len().saturating_sub(1)))
+                    .copied()
+            };
+            let placed = match (share(0.5), share(0.9)) {
+                (Some(median), _) if distance < median => median,
+                (_, Some(far)) => far,
+                _ => distance,
+            };
+            if (placed - distance).abs() <= 0.03 * distance {
+                distance * if placed >= distance { 1.03 } else { 0.97 }
+            } else {
+                placed
+            }
         });
         summary.unmatched_distance_pc = unmatched;
         report(Event::Note(&format!(
@@ -1115,6 +1133,18 @@ impl Parallax {
                 prepared.wcs.scale_arcsec_per_px(),
                 video.size,
             )?;
+            let missing = overlay.missing_glyphs();
+            if !missing.is_empty() {
+                report(Event::Warning(&format!(
+                    "the labels' typeface (Inter, Latin and Greek letters) has no {}; they are \
+                     left blank",
+                    missing
+                        .iter()
+                        .map(|c| format!("\"{c}\""))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
             if !overlay.plan(&shot, scene, video.fps as f64, stop) {
                 return Err(Error::Stopped);
             }
@@ -1953,6 +1983,39 @@ mod tests {
             assert!(options.check().is_err(), "{options:?}");
         }
         assert!(ParallaxOptions::default().check().is_ok());
+    }
+
+    #[test]
+    fn stars_without_a_distance_fly_in_front_of_a_target_beyond_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let (starless, mut stars, wcs, distances) = field(directory.path());
+        // Three stars the catalogue does not have.
+        for (sx, sy) in [(30.0, 200.0), (290.0, 200.0), (100.0, 120.0)] {
+            for (x, y, pixel) in stars.enumerate_pixels_mut() {
+                let r2 = (x as f64 - sx).powi(2) + (y as f64 - sy).powi(2);
+                let light = 0.9 * (-r2 / 4.0).exp() as f32;
+                for channel in pixel.0.iter_mut() {
+                    *channel = (*channel + light).min(1.0);
+                }
+            }
+        }
+        for (target, flying) in [(400.0, 7), (5000.0, 7)] {
+            let mut options = options(distances.clone(), directory.path());
+            options.scene.distance_pc = Some(target);
+            let video =
+                Parallax::prepare(&starless, &stars, &wcs, &options, &mut |_| {}, &|| false)
+                    .unwrap();
+            let summary = video.summary();
+            assert_eq!(summary.flying_stars, flying, "target {target}: {summary:?}");
+            let unmatched = summary.unmatched_distance_pc;
+            assert!(
+                (unmatched - target).abs() > 0.02 * target,
+                "{unmatched} {target}"
+            );
+            if target > 2500.0 {
+                assert!(unmatched < target, "{unmatched}");
+            }
+        }
     }
 
     #[test]

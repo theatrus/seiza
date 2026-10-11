@@ -419,7 +419,7 @@ that slows to rest. `--loop` ends the tour where it began instead, adding a
 last stop at the first's view unless the tour ends there, so the last frame
 leads into the first and the video loops. A stop's `title="TEXT"` names it,
 and `--tour-titles` shows each title low in the frame while the camera
-drifts through its stop, fading in and out. `--auto-tour [N]` plans a tour itself from the catalogued objects
+drifts through its stop, fading in and out. `--auto-tour[=N]` plans a tour itself from the catalogued objects
 in the field: every one worth a visit (the well-known catalogues, and
 broad regions that are large, bright or named), up to twelve, or the N
 most worth it, visited in a short round
@@ -438,7 +438,7 @@ sharpness as the camera moves, for about four times the rendering time. A deep i
 they crowd the view: `--max-stars N` lets only the N brightest fly, and
 `--small-stars` drops the rest (`drop`, the default) or keeps them on the
 distant star field's plane (`field`). Frames go to ffmpeg (H.264 with libx264 or
-libopenh264, or with `--codec hevc` HEVC with libx265, about a fifth smaller at the same quality but slower to encode), to PNG files with `--encoder png`, or, in a build with the
+libopenh264, or with `--codec hevc` HEVC with libx265, about a fifth smaller at the same quality but slower to encode), in MP4, MOV or Matroska as `-o`'s extension says, to PNG files with `--encoder png`, or, in a build with the
 `openh264` feature, to a built-in encoder. Catalogued galaxies, which a star remover leaves in the starless image, are
 lifted out of it onto the far field, where they hold still while the nebula
 grows past them; the nebula behind is filled in from around each one.
@@ -463,7 +463,9 @@ within" line in the corner. `--label 'X,Y:TEXT'` adds a label of your own at
 image pixel X,Y on the nebula's plane, and `--label 'X,Y,R:TEXT'` circles R
 pixels about it as well; repeat it for more, and set their colour with
 `--label-color '#RRGGBB'`. `--watermark` writes "Rendered with seiza.fyi" in
-the bottom-right corner, or `--watermark 'TEXT'` your own line.
+the bottom-right corner, or `--watermark='TEXT'` your own line. Labels,
+titles and the watermark are drawn in Inter, which holds Latin and Greek
+letters; others are left blank, with a warning.
 
 ## Image stacking
 

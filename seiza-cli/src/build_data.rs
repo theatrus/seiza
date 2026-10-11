@@ -3871,14 +3871,14 @@ fn validated_tle_digest(path: &Path) -> Result<(u64, String)> {
     file_digest(path)
 }
 
-/// Build a colour-calibration catalog from Gaia DR3 photometry chunks
-/// (download-data gaia-photometry): positions proper-motion corrected to
-/// `epoch`, G, BP − RP, and a flag on sources with RUWE ≥ 1.4.
 /// A star distance catalog from the Gaia DR3 distance tiles and the
 /// Hipparcos catalogue that `download-data star-distances` fetches, each
 /// star moved along its proper motion to `epoch`. Gaia stars keep their
 /// Bailer-Jones distance, else the inverse of a parallax measured to a
-/// fifth of itself; Hipparcos stars the inverse of theirs.
+/// fifth of itself; Hipparcos stars the inverse of theirs. Every sky tile
+/// must be there, and the file records the faintest magnitude it truly
+/// holds: no fainter than `max_mag`, the download's limit, or its faintest
+/// star.
 pub fn build_star_distances(
     input: &Path,
     output: &Path,
@@ -3905,6 +3905,25 @@ pub fn build_star_distances(
             input.display()
         );
     }
+    // A sky tile missing would be a hole where the file finds no stars
+    // and never asks the archives instead.
+    let missing = seiza_sources::missing_distance_tiles(input);
+    if !missing.is_empty() {
+        bail!(
+            "{} sky tiles are missing from {} (first {}); run download-data star-distances again \
+             to fetch them",
+            missing.len(),
+            input.display(),
+            missing[..missing.len().min(3)].join(", ")
+        );
+    }
+    let downloaded = seiza_sources::distance_download_limit(input);
+    if let Some(limit) = downloaded
+        && limit < max_mag
+    {
+        println!("the tiles were downloaded to G {limit}, so the catalog holds stars to G {limit}");
+    }
+    let max_mag = downloaded.map_or(max_mag, |limit| limit.min(max_mag));
     let mut builder = seiza::catalog::StarDistanceCatalogBuilder::new(
         bands,
         epoch,
@@ -3915,6 +3934,7 @@ pub fn build_star_distances(
     );
     let years = epoch - 2016.0;
     let (mut gaia, mut too_faint, mut with_distance) = (0_u64, 0_u64, 0_u64);
+    let mut faintest = f32::NEG_INFINITY;
     // A few hundred tiles at a time, read in parallel.
     for batch in parts.chunks(256) {
         let read: Vec<Vec<seiza_sources::GaiaDistance>> = batch
@@ -3941,6 +3961,7 @@ pub fn build_star_distances(
             let distance_pc = star.best_distance();
             with_distance += u64::from(distance_pc.is_some());
             gaia += 1;
+            faintest = faintest.max(star.g);
             builder.add(seiza::catalog::DistanceStar {
                 ra,
                 dec,
@@ -3950,6 +3971,7 @@ pub fn build_star_distances(
             });
         }
     }
+    builder.limit_max_mag(faintest);
     let csv = std::fs::read_to_string(&hipparcos)
         .with_context(|| format!("cannot read {}", hipparcos.display()))?;
     let hipparcos_years = epoch - 1991.25;
@@ -3985,6 +4007,9 @@ pub fn build_star_distances(
     Ok(())
 }
 
+/// Build a colour-calibration catalog from Gaia DR3 photometry chunks
+/// (download-data gaia-photometry): positions proper-motion corrected to
+/// `epoch`, G, BP − RP, and a flag on sources with RUWE ≥ 1.4.
 pub fn build_gaia_photometry(
     input: &Path,
     output: &Path,

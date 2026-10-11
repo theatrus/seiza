@@ -59,7 +59,7 @@ pub fn lift_object(starless: &mut LightImage, extent: &Extent, distance_pc: f64)
     let (width, height) = (starless.width, starless.height);
     // Catalog places can be tens of pixels out, more than enough to leave
     // half a galaxy behind, so the ellipse first moves onto the light.
-    let extent = &recentred(starless, extent);
+    let extent = &recentred(starless, extent)?;
     let ring = |scale: f64| ring_median(starless, extent, scale);
     let scales: Vec<f64> = (1..=(FARTHEST * 4.0) as usize)
         .map(|step| step as f64 / 4.0)
@@ -198,9 +198,14 @@ fn ring_median(light: &LightImage, extent: &Extent, scale: f64) -> Option<f32> {
 }
 
 /// `extent` moved to the centroid of the light standing above its
-/// surroundings within one and a half times its size, a few times over.
-fn recentred(light: &LightImage, extent: &Extent) -> Extent {
+/// surroundings within one and a half times its size, a few times over, or
+/// `None` if that walks farther than the ellipse's own size from where the
+/// catalogue put it: onto a brighter neighbour, a knot of nebula, which is
+/// not the galaxy and must not be lifted away as one.
+fn recentred(light: &LightImage, extent: &Extent) -> Option<Extent> {
+    let listed = *extent;
     let mut extent = *extent;
+    let farthest = listed.semi_major.max(listed.semi_minor).max(1.0);
     for _ in 0..4 {
         let Some(floor) = ring_median(light, &extent, 3.0) else {
             break;
@@ -233,16 +238,53 @@ fn recentred(light: &LightImage, extent: &Extent) -> Extent {
         let moved = (sx / total - extent.x, sy / total - extent.y);
         extent.x += moved.0;
         extent.y += moved.1;
+        if (extent.x - listed.x).hypot(extent.y - listed.y) > farthest {
+            return None;
+        }
         if moved.0.hypot(moved.1) < 0.5 {
             break;
         }
     }
-    extent
+    Some(extent)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_galaxy_beside_a_brighter_knot_is_not_walked_onto_it() {
+        // A faint galaxy, ten pixels across its half-axis, with a much
+        // brighter knot of nebula 24 pixels away.
+        let (width, height) = (240, 160);
+        let mut image = LightImage::new(width, height);
+        for (index, pixel) in image.pixels.iter_mut().enumerate() {
+            let (x, y) = ((index % width) as f64, (index / width) as f64);
+            let galaxy = 0.15 * (-((x - 100.0).powi(2) + (y - 80.0).powi(2)) / 50.0).exp();
+            let knot = 1.0 * (-((x - 124.0).powi(2) + (y - 80.0).powi(2)) / 128.0).exp();
+            *pixel = [(galaxy + knot) as f32; 3];
+        }
+        let before: f32 = image.pixels.iter().map(|pixel| pixel[0]).sum();
+        let extent = Extent {
+            x: 100.0,
+            y: 80.0,
+            semi_major: 10.0,
+            semi_minor: 10.0,
+            angle: 0.0,
+        };
+        // Either the galaxy alone is lifted, or nothing is; the knot stays.
+        let knot_before = image.at(124, 80)[0];
+        if let Some(sprite) = lift_object(&mut image, &extent, 1e8) {
+            assert!((sprite.x - 100.0).abs() < 10.0, "{}", sprite.x);
+        }
+        assert!(
+            image.at(124, 80)[0] > 0.8 * knot_before,
+            "{}",
+            image.at(124, 80)[0]
+        );
+        let after: f32 = image.pixels.iter().map(|pixel| pixel[0]).sum();
+        assert!(after <= before + 1e-3);
+    }
 
     #[test]
     fn a_galaxy_lifts_off_its_nebula_and_adds_back() {

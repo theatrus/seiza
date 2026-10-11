@@ -37,18 +37,25 @@ pub struct OrientedRaster {
     pub coordinates: PixelCoordinates,
 }
 
+/// The most a local raster may take to decode. A large 16-bit TIFF passes
+/// the decoder's default 512 MiB; a corrupt header claiming gigapixels is
+/// refused rather than aborting the process for want of memory.
+const LOCAL_DECODE_LIMIT: u64 = 16 << 30;
+
 /// Open a raster file and apply its EXIF orientation.
 ///
-/// A local file is the caller's own, so the decoder's default memory limit,
-/// which a large 16-bit TIFF exceeds, does not apply; [`decode_oriented`]
-/// keeps it for bytes from elsewhere.
+/// A local file is the caller's own, so the decoder may take up to 16 GiB
+/// rather than its default 512 MiB, which a large 16-bit TIFF exceeds;
+/// [`decode_oriented`] keeps the default for bytes from elsewhere.
 pub fn open_oriented(path: &Path) -> Result<OrientedRaster, Error> {
     let mut reader = ImageReader::open(path)
         .map_err(image::ImageError::IoError)?
         .with_guessed_format()
         .map_err(image::ImageError::IoError)?;
-    reader.no_limits();
-    oriented(reader)
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(LOCAL_DECODE_LIMIT);
+    reader.limits(limits);
+    oriented(reader, Some(LOCAL_DECODE_LIMIT))
 }
 
 /// Decode raster bytes, such as an upload, and apply their EXIF orientation.
@@ -56,11 +63,27 @@ pub fn decode_oriented(bytes: &[u8]) -> Result<OrientedRaster, Error> {
     let reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(image::ImageError::IoError)?;
-    oriented(reader)
+    oriented(reader, None)
 }
 
-fn oriented<R: BufRead + Seek>(reader: ImageReader<R>) -> Result<OrientedRaster, Error> {
+/// The decoded raster, refused when its pixels would take more than
+/// `most` bytes: the decoder checks only an image's sides once opened, so
+/// a header claiming gigapixels would otherwise be allocated, and abort.
+fn oriented<R: BufRead + Seek>(
+    reader: ImageReader<R>,
+    most: Option<u64>,
+) -> Result<OrientedRaster, Error> {
     let mut decoder = reader.into_decoder()?;
+    if let Some(most) = most
+        && decoder.total_bytes() > most
+    {
+        return Err(
+            image::ImageError::Limits(image::error::LimitError::from_kind(
+                image::error::LimitErrorKind::InsufficientMemory,
+            ))
+            .into(),
+        );
+    }
     let original_dimensions = decoder.dimensions();
     let orientation = decoder.orientation()?;
     let mut pixels = DynamicImage::from_decoder(decoder)?;
@@ -513,6 +536,46 @@ pub mod test_support {
 mod tests {
     use super::test_support::{ascii, exif_block, field, jpeg_with_exif, rationals};
     use super::*;
+
+    #[test]
+    fn a_header_claiming_gigapixels_is_refused_not_allocated() {
+        // A PNG whose header claims 200000 × 200000 16-bit RGBA: 320 GB.
+        fn crc(bytes: &[u8]) -> u32 {
+            let mut crc = !0_u32;
+            for &byte in bytes {
+                crc ^= u32::from(byte);
+                for _ in 0..8 {
+                    crc = if crc & 1 == 1 {
+                        (crc >> 1) ^ 0xedb8_8320
+                    } else {
+                        crc >> 1
+                    };
+                }
+            }
+            !crc
+        }
+        let mut header = b"IHDR".to_vec();
+        header.extend(200_000_u32.to_be_bytes());
+        header.extend(200_000_u32.to_be_bytes());
+        header.extend([16, 6, 0, 0, 0]);
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend(13_u32.to_be_bytes());
+        png.extend(&header);
+        png.extend(crc(&header).to_be_bytes());
+        // A little image data, an empty zlib stream, so decoding begins.
+        let mut data = b"IDAT".to_vec();
+        data.extend([0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        png.extend(8_u32.to_be_bytes());
+        png.extend(&data);
+        png.extend(crc(&data).to_be_bytes());
+        png.extend(0_u32.to_be_bytes());
+        png.extend(b"IEND");
+        png.extend(crc(b"IEND").to_be_bytes());
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("huge.png");
+        std::fs::write(&path, png).unwrap();
+        assert!(open_oriented(&path).is_err());
+    }
 
     fn parse(fields: &[exif::Field], little_endian: bool) -> PhotoMetadata {
         from_exif(

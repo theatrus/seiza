@@ -20,8 +20,12 @@ use rayon::prelude::*;
 /// The brightest display value kept, so white maps to a finite light.
 const MAX_DISPLAY: f32 = 1.0 - 1.0 / 65_536.0;
 
-/// The light of display value `value`, which runs 0 to 1.
+/// The light of display value `value`, which runs 0 to 1; a NaN, as a
+/// float image's blank border holds, is dark.
 pub fn light_of(value: f32) -> f32 {
+    if value.is_nan() {
+        return 0.0;
+    }
     -(1.0 - value.clamp(0.0, MAX_DISPLAY)).ln()
 }
 
@@ -33,7 +37,15 @@ pub fn display_of(light: f32) -> f32 {
 /// The light of an RGB display pixel: its brightest channel's light, shared
 /// across the channels in their display proportions.
 pub fn pixel_light(display: [f32; 3]) -> [f32; 3] {
-    let display = display.map(|value| value.clamp(0.0, 1.0));
+    // A NaN is dark; `clamp` would keep it, and one NaN star pixel would
+    // pass for a star 200 pixels wide.
+    let display = display.map(|value| {
+        if value.is_nan() {
+            0.0
+        } else {
+            value.clamp(0.0, 1.0)
+        }
+    });
     let peak = display[0].max(display[1]).max(display[2]);
     if peak <= 0.0 {
         return [0.0; 3];
@@ -325,6 +337,17 @@ mod tests {
             }
             assert!(Pyramid::sample_level(level, scale, -3.0, 3.0)[0] < 0.5);
         }
+    }
+
+    #[test]
+    fn a_nan_pixel_is_dark() {
+        assert_eq!(pixel_light([f32::NAN, 0.5, f32::NAN])[0], 0.0);
+        assert!(
+            pixel_light([f32::NAN, 0.5, 0.2])
+                .iter()
+                .all(|value| value.is_finite())
+        );
+        assert_eq!(light_of(f32::NAN), 0.0);
     }
 
     #[test]

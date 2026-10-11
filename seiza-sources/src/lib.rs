@@ -243,10 +243,17 @@ fn gaia_distance_range_query(archive: GaiaArchive, lo: u64, hi: u64, max_mag: f3
 }
 
 /// One CSV from several with the same header, each row once: overlapping
-/// cones return the same sources.
+/// cones return the same sources. With `ra` and `dec` columns a row is the
+/// same source as one within 36 milliarcseconds, closer than Gaia resolves
+/// two stars, however each archive prints it (GAVO keeps six decimals where
+/// ESA keeps fourteen); otherwise rows must match exactly.
 pub fn merge_csv(bodies: &[String]) -> String {
+    const SAME: f64 = 1e-5;
     let mut merged = String::new();
     let mut seen = std::collections::HashSet::new();
+    let mut places: std::collections::HashMap<(i64, i64), Vec<(f64, f64)>> =
+        std::collections::HashMap::new();
+    let mut columns: Option<(usize, usize)> = None;
     for body in bodies {
         let mut lines = body.lines();
         let Some(header) = lines.next() else {
@@ -255,15 +262,154 @@ pub fn merge_csv(bodies: &[String]) -> String {
         if merged.is_empty() {
             merged.push_str(header);
             merged.push('\n');
+            let names: Vec<&str> = header
+                .split(',')
+                .map(|name| name.trim().trim_matches('"'))
+                .collect();
+            let index = |name: &str| names.iter().position(|column| *column == name);
+            columns = index("ra").zip(index("dec"));
         }
         for line in lines.filter(|line| !line.trim().is_empty()) {
-            if seen.insert(line.to_owned()) {
+            let place = columns.and_then(|(ra, dec)| {
+                let fields: Vec<&str> = line.split(',').collect();
+                let number = |index: usize| fields.get(index)?.trim().parse::<f64>().ok();
+                Some((number(ra)?, number(dec)?))
+            });
+            // Cells round the sky in right ascension wrap at 360°.
+            let around = (360.0 / SAME).round() as i64;
+            let new = match place {
+                Some((ra, dec)) => {
+                    let ra = ra.rem_euclid(360.0);
+                    let cell = ((ra / SAME).floor() as i64, (dec / SAME).floor() as i64);
+                    let cos = dec.to_radians().cos();
+                    let near = (-1..=1).any(|dy| {
+                        (-1..=1).any(|dx| {
+                            let column = (cell.0 + dx).rem_euclid(around);
+                            places.get(&(column, cell.1 + dy)).is_some_and(|stars| {
+                                stars.iter().any(|&(other_ra, other_dec)| {
+                                    let mut apart = (ra - other_ra).abs();
+                                    apart = apart.min(360.0 - apart) * cos;
+                                    apart.hypot(dec - other_dec) < SAME
+                                })
+                            })
+                        })
+                    });
+                    if !near {
+                        places.entry(cell).or_default().push((ra, dec));
+                    }
+                    !near
+                }
+                None => seen.insert(line.to_owned()),
+            };
+            if new {
                 merged.push_str(line);
                 merged.push('\n');
             }
         }
     }
     merged
+}
+
+/// The file [`SourceDownloader::download_gaia_distances`] keeps its tiles'
+/// magnitude limit in.
+const DISTANCE_LIMIT_FILE: &str = "max-mag.txt";
+
+/// The magnitude limit the Gaia distance tiles in `dir` were downloaded
+/// to, if recorded.
+pub fn distance_download_limit(dir: &Path) -> Option<f32> {
+    std::fs::read_to_string(dir.join(DISTANCE_LIMIT_FILE))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// A Gaia distance tile's file name.
+fn distance_tile_name(level: u32, tile: u64) -> String {
+    format!("gaiadist-L{level}-{tile:07}.csv")
+}
+
+/// The sky tiles, as file names, that the Gaia distance download in `dir`
+/// lacks: a level-5 tile is there when its file is, or when it was split
+/// and each of its children is there, down to level 9.
+pub fn missing_distance_tiles(dir: &Path) -> Vec<String> {
+    fn missing(dir: &Path, level: u32, tile: u64, out: &mut Vec<String>) {
+        let name = distance_tile_name(level, tile);
+        let path = dir.join(&name);
+        if path.is_file() {
+            return;
+        }
+        if level < DISTANCE_TILE_FINEST_LEVEL && path.with_extension("split").is_file() {
+            for child in 0..4 {
+                missing(dir, level + 1, tile * 4 + child, out);
+            }
+        } else {
+            out.push(name);
+        }
+    }
+    let mut out = Vec::new();
+    for tile in 0..12 * 4_u64.pow(DISTANCE_TILE_LEVEL) {
+        missing(dir, DISTANCE_TILE_LEVEL, tile, &mut out);
+    }
+    out
+}
+
+/// Whether the tile at `path` was written whole: a body ending in a line
+/// break, as every CSV the archives send does. A tile cut short by a crash
+/// is fetched again.
+async fn complete_tile(path: &Path) -> bool {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let Ok(mut file) = tokio::fs::File::open(path).await else {
+        return false;
+    };
+    let mut last = [0_u8];
+    file.seek(std::io::SeekFrom::End(-1)).await.is_ok()
+        && file.read_exact(&mut last).await.is_ok()
+        && last[0] == b'\n'
+}
+
+/// `body` written to `target` through a partial file, synced to disk
+/// before it takes the tile's name.
+async fn write_tile(target: &Path, body: String) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let body = if body.ends_with('\n') {
+        body
+    } else {
+        body + "\n"
+    };
+    let partial = target.with_extension("csv.partial");
+    let io = |action: &'static str, path: &Path| {
+        let path = path.to_path_buf();
+        move |source| Error::Io {
+            action,
+            path,
+            source,
+        }
+    };
+    let mut file = tokio::fs::File::create(&partial)
+        .await
+        .map_err(io("create", &partial))?;
+    file.write_all(body.as_bytes())
+        .await
+        .map_err(io("write", &partial))?;
+    file.sync_all().await.map_err(io("sync", &partial))?;
+    drop(file);
+    tokio::fs::rename(&partial, target)
+        .await
+        .map_err(io("rename", target))
+}
+
+/// Whether `error` says an archive's answer was too big to give in time
+/// (a timeout, on either side, or the row limit): what splitting a query
+/// into smaller pieces mends, unlike a failed connection or a refusal.
+fn too_big(error: &Error) -> bool {
+    match error {
+        Error::Http { source, .. } => source.is_timeout(),
+        Error::GaiaJobFailed(message) => {
+            message.contains("timed out") || message.contains("star limit")
+        }
+        _ => false,
+    }
 }
 
 /// VizieR's synchronous TAP endpoint.
@@ -590,8 +736,7 @@ pub struct HipparcosStar {
     pub parallax_error: Option<f64>,
     /// Hipparcos magnitude.
     pub hp_mag: Option<f32>,
-    /// Proper motion, mas/yr, right ascension's times cos(dec): fetched
-    /// with the whole catalogue, not with a cone.
+    /// Proper motion, mas/yr, right ascension's times cos(dec).
     pub pmra: Option<f64>,
     pub pmdec: Option<f64>,
 }
@@ -1447,9 +1592,13 @@ impl SourceDownloader {
     }
 
     /// Gaia DR3 sources within `radius_deg` of `(ra, dec)` down to G
-    /// `max_mag`, brightest first, with their parallaxes and Bailer-Jones
-    /// distances. ESA's archive answers first; when it fails, GAVO's mirror
-    /// does. A field holding [`GAIA_CONE_MAXREC`] stars or more is refused.
+    /// `max_mag`, with their parallaxes and Bailer-Jones distances. ESA's
+    /// archive answers first; when it fails, GAVO's mirror does. A cone
+    /// answered whole comes brightest first, and one holding
+    /// [`GAIA_CONE_MAXREC`] stars or more is refused. A cone too big to
+    /// answer in time comes in smaller pieces that cover it, merged: then
+    /// the stars are in no order, reach a little past the cone, and may
+    /// number more than the limit.
     pub async fn gaia_distance_cone(
         &self,
         ra: f64,
@@ -1474,66 +1623,64 @@ impl SourceDownloader {
         max_mag: f32,
     ) -> Result<String> {
         check_cone(ra, dec, radius_deg, max_mag)?;
-        let query = |archive| gaia_distance_query(archive, ra, dec, radius_deg, max_mag);
-        // Each archive's synchronous endpoint answers a cone in seconds; a
-        // queued job can wait many minutes to start. So both archives are
-        // asked directly, for the cone or for it in pieces, before either
-        // queue.
-        if let Some(body) = self
-            .gaia_distance_sync(ra, dec, radius_deg, max_mag, GAIA_CONE_SPLITS)
+        self.gaia_distance_piece(ra, dec, radius_deg, max_mag, GAIA_CONE_SPLITS)
             .await
-        {
-            return Ok(body);
-        }
-        let queued = |archive: GaiaArchive| async move {
-            let body = self.gaia_cone_job(archive, query(archive)).await?;
-            parse_gaia_distances(&body)?;
-            Ok::<_, Error>(body)
-        };
-        match queued(GaiaArchive::Esa).await {
-            Ok(body) => Ok(body),
-            Err(esa) => {
-                (self.reporter)(SourceEvent::Retry {
-                    label: "Gaia distance search on the GAVO mirror".into(),
-                    attempt: 1,
-                    delay: Duration::ZERO,
-                    error: esa.to_string(),
-                });
-                queued(GaiaArchive::Gavo).await.map_err(|_| esa)
-            }
-        }
     }
 
-    /// The cone from either archive's synchronous endpoint, or `None`. When
-    /// both fail on it the cone is asked for in four smaller cones that
-    /// cover it, `splits` times over at most: ESA timed out on a 0.8° cone
-    /// it answers within seconds elsewhere, and GAVO answered the same field
-    /// as a 0.4° cone in two seconds.
-    fn gaia_distance_sync(
+    /// The cone from either archive's synchronous endpoint, which answers
+    /// in seconds. When both find it too big to answer in time, it is asked
+    /// for as four smaller cones that cover it, `splits` times over at
+    /// most: ESA timed out on a 0.8° cone it answers within seconds
+    /// elsewhere, and GAVO answered the same field as a 0.4° cone in two
+    /// seconds. A piece they fail on otherwise, or too big still, goes to
+    /// the archives' job queues, which can wait many minutes to start; the
+    /// pieces already answered are kept.
+    fn gaia_distance_piece(
         &self,
         ra: f64,
         dec: f64,
         radius_deg: f64,
         max_mag: f32,
         splits: u32,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + '_>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + '_>> {
         Box::pin(async move {
+            let mut split = false;
             for archive in [GaiaArchive::Esa, GaiaArchive::Gavo] {
                 let query = gaia_distance_query(archive, ra, dec, radius_deg, max_mag);
-                if let Ok(body) = self.gaia_cone_sync(archive, &query).await
-                    && parse_gaia_distances(&body).is_ok()
-                {
-                    return Some(body);
+                let answer = self
+                    .gaia_cone_sync(archive, &query)
+                    .await
+                    .and_then(|body| parse_gaia_distances(&body).map(|_| body));
+                match answer {
+                    Ok(body) => return Ok(body),
+                    Err(error) => split |= too_big(&error),
                 }
             }
-            if splits == 0 {
-                return None;
+            if split && splits > 0 {
+                let [a, b, c, d] = quarter_cones(ra, dec, radius_deg).map(|(ra, dec, radius)| {
+                    self.gaia_distance_piece(ra, dec, radius, max_mag, splits - 1)
+                });
+                let (a, b, c, d) = tokio::join!(a, b, c, d);
+                return Ok(merge_csv(&[a?, b?, c?, d?]));
             }
-            let [a, b, c, d] = quarter_cones(ra, dec, radius_deg).map(|(ra, dec, radius)| {
-                self.gaia_distance_sync(ra, dec, radius, max_mag, splits - 1)
-            });
-            let (a, b, c, d) = tokio::join!(a, b, c, d);
-            Some(merge_csv(&[a?, b?, c?, d?]))
+            let queued = |archive: GaiaArchive| async move {
+                let query = gaia_distance_query(archive, ra, dec, radius_deg, max_mag);
+                let body = self.gaia_cone_job(archive, query).await?;
+                parse_gaia_distances(&body)?;
+                Ok::<_, Error>(body)
+            };
+            match queued(GaiaArchive::Esa).await {
+                Ok(body) => Ok(body),
+                Err(esa) => {
+                    (self.reporter)(SourceEvent::Retry {
+                        label: "Gaia distance search on the GAVO mirror".into(),
+                        attempt: 1,
+                        delay: Duration::ZERO,
+                        error: esa.to_string(),
+                    });
+                    queued(GaiaArchive::Gavo).await.map_err(|_| esa)
+                }
+            }
         })
     }
 
@@ -1558,8 +1705,28 @@ impl SourceDownloader {
             return Err(Error::InvalidGaiaMagnitude(max_mag));
         }
         create_dir_all(output).await?;
-        self.download_hipparcos_catalog(&output.join("hipparcos.csv"))
-            .await?;
+        // The tiles' magnitude limit, kept so a resumed download cannot mix
+        // two depths and the build can record the true one.
+        let limit_path = output.join(DISTANCE_LIMIT_FILE);
+        match distance_download_limit(output) {
+            Some(limit) if limit != max_mag => {
+                return Err(Error::GaiaJobFailed(format!(
+                    "{} was downloaded to G {limit}; resume it with that limit, or download G \
+                     {max_mag} into another directory",
+                    output.display()
+                )));
+            }
+            Some(_) => {}
+            None => {
+                tokio::fs::write(&limit_path, format!("{max_mag}\n"))
+                    .await
+                    .map_err(|source| Error::Io {
+                        action: "write",
+                        path: limit_path.clone(),
+                        source,
+                    })?;
+            }
+        }
         let total = 12 * 4_u64.pow(DISTANCE_TILE_LEVEL);
         let completed = AtomicU64::new(0);
         let failed = AtomicU64::new(0);
@@ -1595,10 +1762,16 @@ impl SourceDownloader {
             .buffer_unordered(concurrency.max(1))
             .for_each(|()| async {})
             .await;
+        // Hipparcos last: VizieR being down must not hold up the hours of
+        // Gaia tiles, which do not need it.
+        let hipparcos = self
+            .download_hipparcos_catalog(&output.join("hipparcos.csv"))
+            .await;
         let failed = failed.into_inner();
         if failed > 0 {
             return Err(Error::GaiaTilesFailed { failed, total });
         }
+        hipparcos?;
         self.ready("Gaia DR3 distances and Hipparcos", output);
         Ok(())
     }
@@ -1615,8 +1788,8 @@ impl SourceDownloader {
         tile: u64,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u64>> + Send + 'a>> {
         Box::pin(async move {
-            let target = output.join(format!("gaiadist-L{level}-{tile:07}.csv"));
-            if tokio::fs::try_exists(&target).await.unwrap_or(false) {
+            let target = output.join(distance_tile_name(level, tile));
+            if complete_tile(&target).await {
                 return Ok(0);
             }
             let split = target.with_extension("split");
@@ -1627,32 +1800,38 @@ impl SourceDownloader {
                 } else {
                     [GaiaArchive::Esa, GaiaArchive::Gavo]
                 };
-                for archive in archives {
-                    let query = gaia_distance_range_query(archive, lo, hi, max_mag);
-                    if let Ok(body) = self.gaia_cone_sync(archive, &query).await
-                        && let Ok(stars) = parse_gaia_distances(&body)
-                    {
-                        let partial = target.with_extension("csv.partial");
-                        tokio::fs::write(&partial, body)
-                            .await
-                            .map_err(|source| Error::Io {
-                                action: "write",
-                                path: partial.clone(),
-                                source,
-                            })?;
-                        tokio::fs::rename(&partial, &target)
-                            .await
-                            .map_err(|source| Error::Io {
-                                action: "rename",
-                                path: target.clone(),
-                                source,
-                            })?;
-                        return Ok(stars.len() as u64);
+                // A tile too dense to answer in time splits for good; any
+                // other failure (a dropped connection, a busy archive) is
+                // tried once more after a pause, then left whole for the
+                // next run.
+                let mut errors = Vec::new();
+                for attempt in 0..2 {
+                    if attempt > 0 {
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                    }
+                    for archive in archives {
+                        let query = gaia_distance_range_query(archive, lo, hi, max_mag);
+                        let answer = self.gaia_cone_sync(archive, &query).await.and_then(|body| {
+                            let stars = parse_gaia_distances(&body)?;
+                            Ok((body, stars.len() as u64))
+                        });
+                        match answer {
+                            Ok((body, rows)) => {
+                                write_tile(&target, body).await?;
+                                return Ok(rows);
+                            }
+                            Err(error) => errors.push(error),
+                        }
+                    }
+                    if errors.iter().any(too_big) {
+                        break;
                     }
                 }
-                if level >= DISTANCE_TILE_FINEST_LEVEL {
+                if !errors.iter().any(too_big) || level >= DISTANCE_TILE_FINEST_LEVEL {
+                    let reasons: Vec<String> = errors.iter().map(ToString::to_string).collect();
                     return Err(Error::GaiaJobFailed(format!(
-                        "neither archive answered HEALPix level {level} tile {tile}"
+                        "HEALPix level {level} tile {tile}: {}",
+                        reasons.join("; ")
                     )));
                 }
                 tokio::fs::write(&split, b"")
@@ -1663,13 +1842,23 @@ impl SourceDownloader {
                         source,
                     })?;
             }
-            let mut rows = 0;
+            // Every child is tried, whichever fail; their failures together
+            // fail the tile, which the next run takes up where it stopped.
+            let (mut rows, mut failures) = (0, Vec::new());
             for child in 0..4 {
-                rows += self
+                match self
                     .fetch_distance_tile(output, max_mag, level + 1, tile * 4 + child)
-                    .await?;
+                    .await
+                {
+                    Ok(fetched) => rows += fetched,
+                    Err(error) => failures.push(error.to_string()),
+                }
             }
-            Ok(rows)
+            if failures.is_empty() {
+                Ok(rows)
+            } else {
+                Err(Error::GaiaJobFailed(failures.join("; ")))
+            }
         })
     }
 
@@ -1791,9 +1980,15 @@ impl SourceDownloader {
         }
         let body = response.text().await.map_err(http)?;
         if body.trim_start().starts_with('<') {
-            return Err(Error::GaiaJobFailed(
-                "answered with an error document".into(),
-            ));
+            let lower = body.to_ascii_lowercase();
+            let timed_out = ["timeout", "timed out", "time limit", "execution time"]
+                .iter()
+                .any(|phrase| lower.contains(phrase));
+            return Err(Error::GaiaJobFailed(if timed_out {
+                "timed out on the server".into()
+            } else {
+                "answered with an error document".into()
+            }));
         }
         let rows = body
             .lines()
@@ -1826,7 +2021,7 @@ impl SourceDownloader {
     pub async fn hipparcos_cone_csv(&self, ra: f64, dec: f64, radius_deg: f64) -> Result<String> {
         check_cone(ra, dec, radius_deg, 0.0)?;
         let query = format!(
-            "SELECT HIP, RArad, DErad, Plx, e_Plx, Hpmag FROM \"I/311/hip2\" \
+            "SELECT HIP, RArad, DErad, Plx, e_Plx, Hpmag, pmRA, pmDE FROM \"I/311/hip2\" \
              WHERE 1 = CONTAINS(POINT('ICRS', RArad, DErad), \
              CIRCLE('ICRS', {ra}, {dec}, {radius_deg})) ORDER BY Hpmag"
         );
@@ -2492,6 +2687,73 @@ mod tests {
     fn overlapping_csv_rows_merge_once() {
         let merged = merge_csv(&["a,b\n1,2\n3,4\n".into(), "a,b\n3,4\n5,6\n".into()]);
         assert_eq!(merged, "a,b\n1,2\n3,4\n5,6\n");
+        // The same star as ESA and GAVO print it, and a neighbour 0.1
+        // arcseconds off, across RA 0.
+        let esa = "ra,dec,phot_g_mean_mag\n\
+                   19.07896807307441,-46.193244590476716,8.118448445799721\n\
+                   359.99999999,10.0,12.0\n"
+            .to_string();
+        let gavo = "ra,dec,phot_g_mean_mag\n\
+                    19.078968,-46.193245,8.118448\n\
+                    0.000001,10.0,12.0\n\
+                    19.07896807307441,-46.19321681,9.0\n"
+            .to_string();
+        let merged = merge_csv(&[esa, gavo]);
+        assert_eq!(merged.lines().count(), 1 + 3, "{merged}");
+    }
+
+    #[test]
+    fn archive_failures_split_only_when_too_big() {
+        assert!(too_big(&Error::GaiaJobFailed(
+            "timed out on the server".into()
+        )));
+        assert!(too_big(&Error::GaiaJobFailed(format!(
+            "returned its {GAIA_CONE_MAXREC}-star limit; use a brighter magnitude limit"
+        ))));
+        assert!(!too_big(&Error::GaiaJobFailed(
+            "answered with an error document".into()
+        )));
+        assert!(!too_big(&Error::HttpStatus {
+            url: "https://example.org".into(),
+            status: 503,
+        }));
+    }
+
+    #[test]
+    fn a_distance_download_is_whole_only_with_every_tile() {
+        let directory = tempfile::tempdir().unwrap();
+        let dir = directory.path();
+        assert_eq!(
+            missing_distance_tiles(dir).len(),
+            12 * 4_usize.pow(DISTANCE_TILE_LEVEL)
+        );
+        for tile in 0..12 * 4_u64.pow(DISTANCE_TILE_LEVEL) {
+            std::fs::write(
+                dir.join(distance_tile_name(DISTANCE_TILE_LEVEL, tile)),
+                "ra\n",
+            )
+            .unwrap();
+        }
+        assert!(missing_distance_tiles(dir).is_empty());
+        // A split tile needs its children, all the way down.
+        let level = DISTANCE_TILE_LEVEL;
+        std::fs::remove_file(dir.join(distance_tile_name(level, 7))).unwrap();
+        std::fs::write(
+            dir.join(distance_tile_name(level, 7))
+                .with_extension("split"),
+            "",
+        )
+        .unwrap();
+        for child in 0..3 {
+            std::fs::write(dir.join(distance_tile_name(level + 1, 28 + child)), "ra\n").unwrap();
+        }
+        assert_eq!(
+            missing_distance_tiles(dir),
+            [distance_tile_name(level + 1, 31)]
+        );
+        assert_eq!(distance_download_limit(dir), None);
+        std::fs::write(dir.join(DISTANCE_LIMIT_FILE), "14\n").unwrap();
+        assert_eq!(distance_download_limit(dir), Some(14.0));
     }
 
     #[test]

@@ -42,7 +42,19 @@ pub fn find_peak_stars(light: &[f32], width: usize, height: usize, sigma: f32) -
     if width < 5 || height < 5 {
         return Vec::new();
     }
-    let sum = light;
+    // A NaN or infinite value (a float image's blank border) counts as no
+    // light: a NaN passes every comparison's negation, and would be taken
+    // for a peak whose core never ends.
+    let finite: Vec<f32>;
+    let sum = if light.iter().all(|value| value.is_finite()) {
+        light
+    } else {
+        finite = light
+            .iter()
+            .map(|&value| if value.is_finite() { value } else { 0.0 })
+            .collect();
+        &finite
+    };
     let smooth = binomial(sum, width, height);
     let (background, noise) = median_and_noise(&smooth);
     let threshold = background + (sigma * noise).max(0.02);
@@ -352,6 +364,23 @@ mod tests {
         // The saturated star comes first and has the largest core.
         assert!((found[0].x - 40.0).abs() < 1.0 && (found[0].y - 50.0).abs() < 1.0);
         assert!(found[0].area > found.iter().skip(1).map(|star| star.area).max().unwrap());
+    }
+
+    #[test]
+    fn a_nan_pixel_is_dark_and_hides_no_star() {
+        let stars = [
+            (100.0, 100.0, 1.0, 1.2),
+            (200.0, 150.0, 1.0, 1.2),
+            (300.0, 200.0, 1.0, 1.2),
+            (60.0, 250.0, 1.0, 1.2),
+        ];
+        let clean = find_peak_stars(&field(400, 300, &stars), 400, 300, 5.0);
+        let mut image = field(400, 300, &stars);
+        image[150 * 400 + 230] = f32::NAN;
+        image[10 * 400 + 10] = f32::INFINITY;
+        let found = find_peak_stars(&image, 400, 300, 5.0);
+        assert_eq!(found.len(), clean.len(), "{found:?}");
+        assert_eq!(found.len(), 4, "{found:?}");
     }
 
     #[test]

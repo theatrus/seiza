@@ -166,8 +166,10 @@ fn gaia_field(
         .cache
         .map_or_else(default_gaia_cache, Path::to_path_buf);
     let max_mag = source.gaia_max_mag;
+    // Keyed as finely as the cones are, so a re-solved or cropped image of
+    // the same target never reuses a field that misses its corners.
     let path = cache.join(format!(
-        "gaia-dr3-distances-{:.2}{:+.2}-r{:.2}-g{}.csv",
+        "gaia-dr3-distances-{:.4}{:+.4}-r{:.4}-g{}.csv",
         centre.0, centre.1, radius, max_mag
     ));
     if let Ok(csv) = std::fs::read_to_string(&path)
@@ -293,14 +295,15 @@ fn hipparcos_field(
     let cache = source
         .cache
         .map_or_else(default_gaia_cache, Path::to_path_buf);
+    // With proper motions, which older cached answers lack.
     let path = cache.join(format!(
-        "hipparcos-{:.4}{:+.4}-r{:.4}.csv",
+        "hipparcos-pm-{:.4}{:+.4}-r{:.4}.csv",
         centre.0, centre.1, radius
     ));
     if let Ok(csv) = std::fs::read_to_string(&path)
         && let Ok(stars) = seiza_sources::parse_hipparcos(&csv)
     {
-        return stars;
+        return to_gaia_epoch(stars);
     }
     let fetched = seiza_sources::SourceDownloader::new()
         .map_err(|error| error.to_string())
@@ -319,7 +322,7 @@ fn hipparcos_field(
             Ok(stars)
         });
     match fetched {
-        Ok(stars) => stars,
+        Ok(stars) => to_gaia_epoch(stars),
         Err(error) => {
             report(Event::Warning(&format!(
                 "no Hipparcos distances for the brightest stars: {error}"
@@ -327,6 +330,23 @@ fn hipparcos_field(
             Vec::new()
         }
     }
+}
+
+/// Hipparcos stars moved from their J1991.25 places along their proper
+/// motions to Gaia DR3's J2016.0, so the two catalogues meet at one epoch:
+/// a star moving more than a fifth of an arcsecond a year (Vega, Pollux)
+/// would otherwise miss its Gaia self.
+fn to_gaia_epoch(mut stars: Vec<HipparcosStar>) -> Vec<HipparcosStar> {
+    const YEARS: f64 = 2016.0 - 1991.25;
+    const MAS_PER_DEGREE: f64 = 3.6e6;
+    for star in &mut stars {
+        if let (Some(pmra), Some(pmdec)) = (star.pmra, star.pmdec) {
+            let cos = star.dec.to_radians().cos().max(1e-6);
+            star.ra = (star.ra + pmra * YEARS / MAS_PER_DEGREE / cos).rem_euclid(360.0);
+            star.dec = (star.dec + pmdec * YEARS / MAS_PER_DEGREE).clamp(-90.0, 90.0);
+        }
+    }
+    stars
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime, Error> {
@@ -378,6 +398,28 @@ pub(crate) fn match_distances(
         } else {
             candidates.min_by(|a, b| a.1.total_cmp(&b.1))
         };
+        // Gaia misses some of the brightest stars. A Hipparcos star under a
+        // saturated one, brighter by far than the Gaia star chosen, is the
+        // star itself, not that faint neighbour.
+        let hipparcos_under = (footprint >= 4.0)
+            .then(|| {
+                hipparcos
+                    .iter()
+                    .filter_map(|hip| {
+                        let (x, y) = wcs.world_to_pixel(hip.ra, hip.dec)?;
+                        let offset = (x - detection.x).hypot(y - detection.y);
+                        (offset <= reach).then_some((offset, hip))
+                    })
+                    .min_by(|a, b| a.0.total_cmp(&b.0))
+                    .map(|(_, hip)| hip)
+            })
+            .flatten();
+        let chosen = chosen.filter(
+            |(index, _)| match hipparcos_under.and_then(|hip| hip.hp_mag) {
+                Some(hp) => f64::from(gaia[*index].g) <= f64::from(hp) + 3.0,
+                None => true,
+            },
+        );
         let gaia_distance = chosen.and_then(|(index, _)| {
             used[index] = true;
             found += 1;
@@ -555,5 +597,72 @@ mod tests {
             median_distance_near(&stars, (500.0, 500.0), 1000, 1000),
             Some(136.0)
         );
+    }
+
+    #[test]
+    fn a_bright_star_gaia_lacks_takes_its_hipparcos_distance() {
+        let wcs = Wcs::from_center_scale_rotation((56.75, 24.12), (500.0, 500.0), 2.0, 0.0, false);
+        let place = |dx: f64, dy: f64| wcs.pixel_to_world(500.0 + dx, 500.0 + dy);
+        // Gaia has only a faint field star 2.5 pixels off the bright one.
+        let (ra, dec) = place(2.5, 0.0);
+        let gaia = [GaiaDistance {
+            ra,
+            dec,
+            pmra: None,
+            pmdec: None,
+            g: 15.0,
+            bp_rp: None,
+            parallax: None,
+            parallax_error: None,
+            distance: Some(3000.0),
+            distance_low: None,
+            distance_high: None,
+        }];
+        let (ra, dec) = place(0.0, 0.0);
+        let hipparcos = [HipparcosStar {
+            hip: 2,
+            ra,
+            dec,
+            parallax: Some(20.0),
+            parallax_error: Some(0.5),
+            hp_mag: Some(2.0),
+            pmra: None,
+            pmdec: None,
+        }];
+        let saturated = PeakStar {
+            x: 500.0,
+            y: 500.0,
+            flux: 1e5,
+            area: 177,
+        };
+        let (stars, found) = match_distances(&[saturated], &gaia, &hipparcos, &wcs, 2.0);
+        assert_eq!(found, 0);
+        let distance = stars[0].distance_pc.unwrap();
+        assert!((distance - 50.0).abs() < 1e-9, "{distance}");
+    }
+
+    #[test]
+    fn hipparcos_places_move_to_gaias_epoch() {
+        let star = HipparcosStar {
+            hip: 3,
+            ra: 10.0,
+            dec: 60.0,
+            parallax: None,
+            parallax_error: None,
+            hp_mag: None,
+            pmra: Some(1000.0),
+            pmdec: Some(-500.0),
+        };
+        let moved = to_gaia_epoch(vec![star]);
+        // 24.75 years: 24.75" along the sky east, 12.375" south.
+        let east = (moved[0].ra - 10.0) * 60.0_f64.to_radians().cos() * 3600.0;
+        let north = (moved[0].dec - 60.0) * 3600.0;
+        assert!(
+            (east - 24.75).abs() < 1e-6 && (north + 12.375).abs() < 1e-6,
+            "{east} {north}"
+        );
+        // No motion, no move.
+        let still = HipparcosStar { pmra: None, ..star };
+        assert_eq!(to_gaia_epoch(vec![still])[0].ra, still.ra);
     }
 }

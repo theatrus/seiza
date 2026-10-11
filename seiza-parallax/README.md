@@ -44,9 +44,11 @@ both, matching stars to Gaia DR3 for their Bailer-Jones distances.
   `View::project` puts a point of any depth in it, so a caller can draw
   labels that move with what they mark (`seiza parallax-video --overlay`
   does). `Shot::star_fade` says how far a star the camera passes has faded.
-- **Output:** frames go to `ffmpeg` (libx264, or libopenh264 when that is the
-  build's H.264 encoder), to numbered PNG files, or, with the `openh264`
-  feature, to an in-process OpenH264 encoder and MP4 muxer.
+- **Output:** frames go to `ffmpeg` (H.264 with libx264, or libopenh264 when
+  that is the build's H.264 encoder, or HEVC with libx265), in MP4, MOV or
+  Matroska by the file's extension, with BT.709 colour; to numbered PNG
+  files; or, with the `openh264` feature, to an in-process OpenH264 encoder
+  and MP4 muxer. A video stopped or failed part way leaves no file.
 
 ## License
 

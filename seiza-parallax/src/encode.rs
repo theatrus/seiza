@@ -19,6 +19,9 @@ pub enum Error {
     FfmpegMissing(std::io::Error),
     #[error("ffmpeg failed: {0}")]
     Ffmpeg(String),
+    /// The output cannot be written: not a video's name, or no folder.
+    #[error("{0}")]
+    Output(String),
     #[error("a frame is {got:?}, not the video's {expected:?}")]
     FrameSize {
         got: (u32, u32),
@@ -141,12 +144,36 @@ fn check_size(frame: &RgbImage, settings: &VideoSettings) -> Result<()> {
     Ok(())
 }
 
-/// H.264 MP4 through an `ffmpeg` executable, fed raw RGB on its standard
-/// input.
+/// An MP4, MOV or Matroska video through an `ffmpeg` executable, fed raw
+/// RGB on its standard input. Dropped before [`FrameSink::finish`] (the
+/// video stopped or failed), it stops ffmpeg and removes the unfinished
+/// file, which would otherwise play as a shorter, finished-looking video.
 pub struct FfmpegSink {
     child: Child,
     stdin: Option<ChildStdin>,
     settings: VideoSettings,
+    output: PathBuf,
+    finished: bool,
+}
+
+/// ffmpeg's muxer for `output`'s extension: MP4 (`.mp4`, `.m4v`), QuickTime
+/// (`.mov`) or Matroska (`.mkv`). Named outright, so a slip such as `-o
+/// image.tif` cannot overwrite an image with a video frame, and a name
+/// without an extension gets a plain answer.
+fn container(output: &Path) -> Result<&'static str> {
+    let extension = output
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
+    match extension.as_deref() {
+        Some("mp4" | "m4v") => Ok("mp4"),
+        Some("mov") => Ok("mov"),
+        Some("mkv") => Ok("matroska"),
+        _ => Err(Error::Output(format!(
+            "{} is not a video file name: end it in .mp4, .m4v, .mov or .mkv",
+            output.display()
+        ))),
+    }
 }
 
 /// The video codec ffmpeg writes.
@@ -155,8 +182,8 @@ pub enum Codec {
     /// H.264, which every player takes: libx264, else libopenh264.
     #[default]
     H264,
-    /// HEVC (H.265) with libx265: about half the size for the same look,
-    /// tagged so Apple's players open it.
+    /// HEVC (H.265) with libx265: about a fifth smaller for the same look,
+    /// and slower to encode, tagged so Apple's players open it.
     Hevc,
 }
 
@@ -173,19 +200,28 @@ impl Codec {
 }
 
 impl FfmpegSink {
-    /// Start `ffmpeg` (or the program `executable` names) writing `output`
-    /// in `codec`. H.264 uses libx264 when the build has it, else Cisco's
-    /// libopenh264, which builds without the x264 encoder (Fedora's
-    /// ffmpeg-free among them) carry; HEVC uses libx265.
-    pub fn start(
-        executable: &Path,
-        output: &Path,
-        settings: VideoSettings,
-        codec: Codec,
-    ) -> Result<Self> {
-        if !settings.width.is_multiple_of(2) || !settings.height.is_multiple_of(2) {
-            return Err(Error::OddSize(settings.width, settings.height));
+    /// Whether `ffmpeg` (or `executable`) can write `output` in `codec`:
+    /// it runs and has the encoder, the name is a video's, and its folder
+    /// is there. Worth asking before the slow work a video needs.
+    pub fn check(executable: &Path, output: &Path, codec: Codec) -> Result<()> {
+        container(output)?;
+        let folder = output
+            .parent()
+            .filter(|folder| !folder.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        if !folder.is_dir() {
+            return Err(Error::Output(format!(
+                "{} has no folder {} to go in",
+                output.display(),
+                folder.display()
+            )));
         }
+        Self::encoder(executable, codec, 0).map(|_| ())
+    }
+
+    /// The arguments choosing `codec`'s encoder in the `executable`'s
+    /// ffmpeg, at `bitrate` where it takes one.
+    fn encoder(executable: &Path, codec: Codec, bitrate: u32) -> Result<Vec<String>> {
         let encoders = Command::new(executable)
             .args(["-hide_banner", "-encoders"])
             .stderr(Stdio::null())
@@ -193,7 +229,7 @@ impl FfmpegSink {
             .map_err(Error::FfmpegMissing)?;
         let encoders = String::from_utf8_lossy(&encoders.stdout);
         let has = |name: &str| encoders.split_whitespace().any(|word| word == name);
-        let bitrate = settings.bitrate.to_string();
+        let bitrate = bitrate.to_string();
         let codec: Vec<&str> = if codec == Codec::Hevc {
             if !has("libx265") {
                 return Err(Error::Ffmpeg(
@@ -210,7 +246,7 @@ impl FfmpegSink {
                 "-tag:v",
                 "hvc1",
                 "-x265-params",
-                "log-level=error",
+                "log-level=error:colorprim=bt709:transfer=bt709:colormatrix=bt709:range=limited",
             ]
         } else if has("libx264") {
             vec!["-c:v", "libx264", "-preset", "slow", "-crf", "16"]
@@ -228,14 +264,45 @@ impl FfmpegSink {
                 "this ffmpeg has neither the libx264 nor the libopenh264 H.264 encoder".into(),
             ));
         };
+        Ok(codec.into_iter().map(String::from).collect())
+    }
+
+    /// Start `ffmpeg` (or the program `executable` names) writing `output`
+    /// in `codec`, in the container its extension names (see
+    /// [`Self::check`]). H.264 uses libx264 when the build has it, else
+    /// Cisco's libopenh264, which builds without the x264 encoder (Fedora's
+    /// ffmpeg-free among them) carry; HEVC uses libx265. Colours are
+    /// converted and tagged as BT.709, which players assume for HD video.
+    pub fn start(
+        executable: &Path,
+        output: &Path,
+        settings: VideoSettings,
+        codec: Codec,
+    ) -> Result<Self> {
+        if !settings.width.is_multiple_of(2) || !settings.height.is_multiple_of(2) {
+            return Err(Error::OddSize(settings.width, settings.height));
+        }
+        let format = container(output)?;
+        let codec = Self::encoder(executable, codec, settings.bitrate)?;
+        // `file:` keeps a name with a colon or a leading dash a file name.
+        let mut target = std::ffi::OsString::from("file:");
+        target.push(output);
         let mut child = Command::new(executable)
             .args(["-hide_banner", "-loglevel", "error", "-y"])
             .args(["-f", "rawvideo", "-pix_fmt", "rgb24"])
             .args(["-s", &format!("{}x{}", settings.width, settings.height)])
             .args(["-r", &settings.fps.to_string(), "-i", "-"])
             .args(&codec)
+            .args([
+                "-vf",
+                "scale=out_color_matrix=bt709:out_range=tv,setparams=colorspace=bt709:\
+                 color_primaries=bt709:color_trc=bt709:range=tv",
+            ])
+            .args(["-colorspace", "bt709", "-color_primaries", "bt709"])
+            .args(["-color_trc", "bt709", "-color_range", "tv"])
             .args(["-pix_fmt", "yuv420p", "-movflags", "+faststart"])
-            .arg(output)
+            .args(["-f", format])
+            .arg(target)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -246,6 +313,8 @@ impl FfmpegSink {
             child,
             stdin,
             settings,
+            output: output.to_owned(),
+            finished: false,
         })
     }
 
@@ -263,7 +332,9 @@ impl FfmpegSink {
 impl FrameSink for FfmpegSink {
     fn push(&mut self, frame: &RgbImage) -> Result<()> {
         check_size(frame, &self.settings)?;
-        let stdin = self.stdin.as_mut().expect("open until finished");
+        let Some(stdin) = self.stdin.as_mut() else {
+            return Err(Error::Ffmpeg("ffmpeg has already stopped".into()));
+        };
         if let Err(error) = stdin.write_all(frame.as_raw()) {
             // ffmpeg quit; its own message says why.
             drop(self.stdin.take());
@@ -292,10 +363,25 @@ impl FrameSink for FfmpegSink {
             source,
         })?;
         if status.success() {
+            self.finished = true;
             Ok(())
         } else {
             Err(Error::Ffmpeg(message.trim().to_owned()))
         }
+    }
+}
+
+impl Drop for FfmpegSink {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        // Stopped or failed: no ffmpeg left behind, and no file that looks
+        // finished.
+        drop(self.stdin.take());
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_file(&self.output);
     }
 }
 
@@ -307,12 +393,31 @@ pub struct PngSequence {
 }
 
 impl PngSequence {
+    /// Frames into `directory`, made if need be. Frames an earlier, longer
+    /// video left there (`frame-NNNNN.png`) are removed first, so a
+    /// `frame-%05d.png` pattern reads this video alone.
     pub fn new(directory: &Path, settings: VideoSettings) -> Result<Self> {
         std::fs::create_dir_all(directory).map_err(|source| Error::Io {
             action: "creating",
             path: directory.to_owned(),
             source,
         })?;
+        let stale = |name: &str| {
+            name.strip_prefix("frame-")
+                .and_then(|rest| rest.strip_suffix(".png"))
+                .is_some_and(|number| {
+                    number.len() == 5 && number.bytes().all(|b| b.is_ascii_digit())
+                })
+        };
+        for entry in std::fs::read_dir(directory).into_iter().flatten().flatten() {
+            if entry.file_name().to_str().is_some_and(stale) {
+                std::fs::remove_file(entry.path()).map_err(|source| Error::Io {
+                    action: "removing",
+                    path: entry.path(),
+                    source,
+                })?;
+            }
+        }
         Ok(Self {
             directory: directory.to_owned(),
             next: 0,
@@ -348,7 +453,9 @@ mod openh264_sink {
     use openh264::formats::{RgbSliceU8, YUVBuffer};
 
     /// H.264 MP4 encoded in process with Cisco's OpenH264, for hosts without
-    /// ffmpeg.
+    /// ffmpeg. Its colours are converted with the BT.601 matrix and left
+    /// untagged, so players assuming BT.709 shift them a little; ffmpeg
+    /// converts and tags BT.709.
     pub struct OpenH264Sink {
         encoder: Encoder,
         writer: mp4::Mp4Writer<std::io::BufWriter<std::fs::File>>,
@@ -363,9 +470,12 @@ mod openh264_sink {
             if !settings.width.is_multiple_of(2) || !settings.height.is_multiple_of(2) {
                 return Err(Error::OddSize(settings.width, settings.height));
             }
+            // Skipping frames to hold the bitrate would drop them from the
+            // video, shortening it.
             let config = EncoderConfig::new()
                 .bitrate(BitRate::from_bps(settings.bitrate))
-                .max_frame_rate(FrameRate::from_hz(settings.fps as f32));
+                .max_frame_rate(FrameRate::from_hz(settings.fps as f32))
+                .skip_frames(false);
             let encoder = Encoder::with_api_config(OpenH264API::from_source(), config)
                 .map_err(|error| Error::OpenH264(error.to_string()))?;
             let file = std::fs::File::create(output).map_err(|source| Error::Io {
@@ -475,6 +585,8 @@ mod openh264_sink {
                 self.track_added = true;
             }
             if sample.is_empty() {
+                // Time moves on all the same.
+                self.frame += 1;
                 return Ok(());
             }
             self.writer
@@ -502,18 +614,6 @@ mod openh264_sink {
 
     #[cfg(test)]
     mod tests {
-        #[test]
-        fn frame_sizes_parse_by_name_and_by_sides() {
-            assert_eq!(super::parse_frame_size("1080p"), Ok((1920, 1080)));
-            assert_eq!(super::parse_frame_size("4K"), Ok((3840, 2160)));
-            assert_eq!(super::parse_frame_size("720p-portrait"), Ok((720, 1280)));
-            assert_eq!(super::parse_frame_size("1920x1080"), Ok((1920, 1080)));
-            assert_eq!(super::parse_frame_size("1080X1350"), Ok((1080, 1350)));
-            for bad in ["1921x1080", "8x8", "8k", "1080p-sideways", "big"] {
-                assert!(super::parse_frame_size(bad).is_err(), "{bad}");
-            }
-        }
-
         use super::*;
 
         #[test]
@@ -535,6 +635,92 @@ mod tests {
     use super::*;
 
     #[test]
+    fn frame_sizes_parse_by_name_and_by_sides() {
+        assert_eq!(parse_frame_size("1080p"), Ok((1920, 1080)));
+        assert_eq!(parse_frame_size("4K"), Ok((3840, 2160)));
+        assert_eq!(parse_frame_size("720p-portrait"), Ok((720, 1280)));
+        assert_eq!(parse_frame_size("1920x1080"), Ok((1920, 1080)));
+        assert_eq!(parse_frame_size("1080X1350"), Ok((1080, 1350)));
+        for bad in ["1921x1080", "8x8", "8k", "1080p-sideways", "big"] {
+            assert!(parse_frame_size(bad).is_err(), "{bad}");
+        }
+    }
+
+    fn small() -> VideoSettings {
+        VideoSettings {
+            width: 64,
+            height: 48,
+            fps: 10,
+            bitrate: 1_000_000,
+        }
+    }
+
+    #[test]
+    fn a_video_name_must_be_a_videos_in_a_folder_that_is_there() {
+        for name in ["frame.tif", "video", "notes.txt"] {
+            assert!(container(Path::new(name)).is_err(), "{name}");
+        }
+        assert_eq!(container(Path::new("a/B.MP4")).unwrap(), "mp4");
+        assert_eq!(container(Path::new("b.mkv")).unwrap(), "matroska");
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("no-such-folder").join("out.mp4");
+        assert!(FfmpegSink::check(Path::new("ffmpeg"), &missing, Codec::H264).is_err());
+    }
+
+    #[test]
+    fn ffmpeg_writes_a_video_and_cleans_up_one_it_did_not_finish() {
+        if !FfmpegSink::available(Path::new("ffmpeg"))
+            || FfmpegSink::check(Path::new("ffmpeg"), Path::new("probe.mp4"), Codec::H264).is_err()
+        {
+            eprintln!("no ffmpeg with an H.264 encoder; skipped");
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        // A name ffmpeg would read as a protocol, or an option, without
+        // the `file:` prefix.
+        let finished = directory.path().join("-M42:Orion.mp4");
+        let mut sink = Box::new(
+            FfmpegSink::start(Path::new("ffmpeg"), &finished, small(), Codec::H264).unwrap(),
+        );
+        for _ in 0..5 {
+            sink.push(&RgbImage::from_pixel(64, 48, image::Rgb([200, 40, 40])))
+                .unwrap();
+        }
+        sink.finish().unwrap();
+        assert!(std::fs::metadata(&finished).unwrap().len() > 0);
+        // Tagged BT.709 throughout, in both codecs, where ffprobe can say.
+        for codec in [Codec::H264, Codec::Hevc] {
+            let path = directory.path().join(format!("{codec:?}.mp4"));
+            let Ok(mut sink) = FfmpegSink::start(Path::new("ffmpeg"), &path, small(), codec) else {
+                continue;
+            };
+            sink.push(&RgbImage::from_pixel(64, 48, image::Rgb([40, 200, 40])))
+                .unwrap();
+            Box::new(sink).finish().unwrap();
+            let Ok(probe) = Command::new("ffprobe")
+                .args(["-v", "error", "-select_streams", "v", "-show_entries"])
+                .arg("stream=color_space,color_primaries,color_transfer")
+                .args(["-of", "csv=p=0"])
+                .arg(&path)
+                .output()
+            else {
+                continue;
+            };
+            let tags = String::from_utf8_lossy(&probe.stdout);
+            assert_eq!(tags.trim(), "bt709,bt709,bt709", "{codec:?}");
+        }
+        // Stopped early: no partial file, and ffmpeg waited for.
+        let stopped = directory.path().join("stopped.mp4");
+        let mut sink =
+            FfmpegSink::start(Path::new("ffmpeg"), &stopped, small(), Codec::H264).unwrap();
+        sink.push(&RgbImage::new(64, 48)).unwrap();
+        let id = sink.child.id();
+        drop(sink);
+        assert!(!stopped.exists());
+        assert!(!Path::new(&format!("/proc/{id}")).exists() || cfg!(not(target_os = "linux")));
+    }
+
+    #[test]
     fn png_sequences_number_their_frames_and_check_sizes() {
         let directory = tempfile::tempdir().unwrap();
         let settings = VideoSettings {
@@ -553,6 +739,16 @@ mod tests {
         ));
         sink.finish().unwrap();
         assert!(directory.path().join("frame-00001.png").exists());
+        // A shorter video into the same folder leaves none of the longer
+        // one's frames, and touches nothing else there.
+        std::fs::write(directory.path().join("notes.txt"), "keep").unwrap();
+        let mut sink: Box<dyn FrameSink> =
+            Box::new(PngSequence::new(directory.path(), settings).unwrap());
+        sink.push(&RgbImage::new(4, 2)).unwrap();
+        sink.finish().unwrap();
+        assert!(directory.path().join("frame-00000.png").exists());
+        assert!(!directory.path().join("frame-00001.png").exists());
+        assert!(directory.path().join("notes.txt").exists());
     }
 
     #[test]
