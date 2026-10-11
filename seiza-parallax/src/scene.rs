@@ -19,6 +19,11 @@ pub struct Star {
     pub distance_pc: Option<f64>,
 }
 
+/// The footprint radius, pixels, from which a star takes the star light
+/// about it too: a bright star's halo, which would otherwise drift away
+/// from it on the leftover plane.
+const HALO_TAIL_FROM: f64 = 30.0;
+
 /// One star's light, cut from the star image.
 #[derive(Clone, Debug)]
 pub struct Sprite {
@@ -272,7 +277,7 @@ impl Scene {
             })
             .collect();
 
-        let leftover = LightImage {
+        let mut leftover = LightImage {
             width,
             height,
             pixels: star_light
@@ -289,6 +294,55 @@ impl Scene {
                 })
                 .collect(),
         };
+        // A bright star's halo reaches past its footprint. What lies past it
+        // would stay on the leftover plane, far behind, and drift away from
+        // the star as a ring (HD 200775's, lighting the Iris), so a star
+        // with a large footprint takes the star light about it as well, out
+        // to twice its footprint, fading. Brightest first, so a tail is
+        // taken once.
+        for sprite in sprites.iter_mut() {
+            let reach = sprite.image.width.max(sprite.image.height) as f64 / 2.0;
+            if reach < HALO_TAIL_FROM {
+                continue;
+            }
+            let far = 2.0 * reach;
+            let (left, top) = (
+                (sprite.x - far).floor().max(0.0) as usize,
+                (sprite.y - far).floor().max(0.0) as usize,
+            );
+            let (right, bottom) = (
+                ((sprite.x + far).ceil().max(0.0) as usize + 1).min(width),
+                ((sprite.y + far).ceil().max(0.0) as usize + 1).min(height),
+            );
+            let mut image = LightImage::new(right - left, bottom - top);
+            for y in 0..sprite.image.height {
+                for x in 0..sprite.image.width {
+                    let at = (sprite.top + y - top) * image.width + sprite.left + x - left;
+                    image.pixels[at] = sprite.image.at(x, y);
+                }
+            }
+            for row in top..bottom {
+                for column in left..right {
+                    let distance = (column as f64 - sprite.x).hypot(row as f64 - sprite.y);
+                    let share = if distance <= reach {
+                        1.0
+                    } else if distance >= far {
+                        continue;
+                    } else {
+                        let t = (distance - reach) / reach;
+                        1.0 - t * t * (3.0 - 2.0 * t)
+                    } as f32;
+                    let index = row * width + column;
+                    let at = (row - top) * image.width + column - left;
+                    for channel in 0..3 {
+                        let moved = leftover.pixels[index][channel] * share;
+                        leftover.pixels[index][channel] -= moved;
+                        image.pixels[at][channel] += moved;
+                    }
+                }
+            }
+            (sprite.left, sprite.top, sprite.image) = (left, top, image);
+        }
         // Stars at the background's distance become part of it.
         let mut background = starless.clone();
         sprites.retain(|sprite| {
@@ -641,6 +695,57 @@ mod tests {
         // The glow once grew the star in it to the 200-pixel cap.
         assert!(outer(480.0) < 20.0, "{}", outer(480.0));
         assert!((outer(480.0) - outer(150.0)).abs() < 3.0);
+    }
+
+    #[test]
+    fn a_bright_stars_halo_goes_with_it_not_onto_the_leftover() {
+        // A bright star whose faint halo runs on past where its footprint
+        // stops.
+        let (size, centre) = (900, 450.0);
+        let mut light = LightImage::new(size, size);
+        for (index, pixel) in light.pixels.iter_mut().enumerate() {
+            let r2 =
+                ((index % size) as f64 - centre).powi(2) + ((index / size) as f64 - centre).powi(2);
+            let value = 40.0 * (-r2 / 450.0).exp() + 0.5 * (-r2 / 7200.0).exp();
+            *pixel = [value as f32; 3];
+        }
+        let star = Star {
+            x: centre,
+            y: centre,
+            distance_pc: Some(200.0),
+        };
+        let starless = LightImage::new(size, size);
+        let scene = Scene::new(
+            &starless,
+            &light,
+            &[star],
+            400.0,
+            1000.0,
+            2000.0,
+            &CutOptions::default(),
+        );
+        let sprite = &scene.sprites[0];
+        let footprint = Footprint::measure(
+            &star,
+            &light,
+            {
+                let (background, noise) = background_and_noise(&light);
+                (
+                    background + CutOptions::default().edge_light.max(4.0 * noise),
+                    background,
+                )
+            },
+            &CutOptions::default(),
+        );
+        assert!(footprint.outer >= HALO_TAIL_FROM, "{}", footprint.outer);
+        // The sprite reaches past its footprint, and the halo just past the
+        // footprint's edge, which once stayed behind as a ring, went with
+        // it.
+        assert!(sprite.image.width as f64 > 3.0 * footprint.outer);
+        let edge = (centre + footprint.outer + 2.0) as usize;
+        let left = scene.leftover.level_for(1.0).0.at(edge, centre as usize)[0];
+        let there = light.at(edge, centre as usize)[0];
+        assert!(left < 0.05 * there, "{left} of {there} left behind");
     }
 
     #[test]
