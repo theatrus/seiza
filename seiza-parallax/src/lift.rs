@@ -199,13 +199,15 @@ fn ring_median(light: &LightImage, extent: &Extent, scale: f64) -> Option<f32> {
 
 /// `extent` moved to the centroid of the light standing above its
 /// surroundings within one and a half times its size, a few times over, or
-/// `None` if that walks farther than the ellipse's own size from where the
-/// catalogue put it: onto a brighter neighbour, a knot of nebula, which is
-/// not the galaxy and must not be lifted away as one.
+/// `None` if that walks farther than one and a half times the ellipse's
+/// size from where the catalogue put it: onto a brighter neighbour, a knot
+/// of nebula, which is not the galaxy and must not be lifted away as one.
+/// (UGC 11678 in the Iris field lies 1.14 times its size from its listing;
+/// a knot pulled a small galaxy's ellipse twice its size.)
 fn recentred(light: &LightImage, extent: &Extent) -> Option<Extent> {
     let listed = *extent;
     let mut extent = *extent;
-    let farthest = listed.semi_major.max(listed.semi_minor).max(1.0);
+    let farthest = 1.5 * listed.semi_major.max(listed.semi_minor).max(1.0);
     for _ in 0..4 {
         let Some(floor) = ring_median(light, &extent, 3.0) else {
             break;
@@ -273,6 +275,17 @@ mod tests {
             angle: 0.0,
         };
         // Either the galaxy alone is lifted, or nothing is; the knot stays.
+        // A galaxy listed 1.2 times its size off its light, as UGC 11678
+        // is, is still found.
+        let mut off = LightImage::new(width, height);
+        for (index, pixel) in off.pixels.iter_mut().enumerate() {
+            let (x, y) = ((index % width) as f64, (index / width) as f64);
+            let galaxy = 0.5 * (-((x - 100.0).powi(2) + (y - 80.0).powi(2)) / 50.0).exp();
+            *pixel = [galaxy as f32; 3];
+        }
+        let listed = Extent { x: 112.0, ..extent };
+        let found = lift_object(&mut off, &listed, 1e8).expect("found despite the listing");
+        assert!((found.x - 100.0).abs() < 1.5, "{}", found.x);
         let knot_before = image.at(124, 80)[0];
         if let Some(sprite) = lift_object(&mut image, &extent, 1e8) {
             assert!((sprite.x - 100.0).abs() < 10.0, "{}", sprite.x);
