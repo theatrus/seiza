@@ -20,8 +20,8 @@ pub struct Star {
 }
 
 /// The footprint radius, pixels, from which a star takes the star light
-/// about it too: a bright star's halo, which would otherwise drift away
-/// from it on the leftover plane.
+/// about it too, out to three times its footprint: a bright star's halo,
+/// which would otherwise drift away from it on the leftover plane.
 const HALO_TAIL_FROM: f64 = 30.0;
 
 /// One star's light, cut from the star image.
@@ -171,10 +171,11 @@ impl Scene {
     /// plane at `background_distance_pc` and the light no star took as a
     /// plane at `leftover_distance_pc`.
     ///
-    /// Each star takes a soft round footprint. Where footprints overlap the
-    /// light is shared out in proportion to their weights, and the weights
-    /// never sum past one, so the sprites plus the leftover add back up to
-    /// the star image exactly, less any stars `options` drops.
+    /// Each star takes a soft round footprint, and of the light in it, only
+    /// what stands above the light just outside it. Where footprints overlap
+    /// the light is shared out in proportion to their weights, and the
+    /// weights never sum past one, so the sprites plus the leftover add back
+    /// up to the star image exactly, less any stars `options` drops.
     pub fn new(
         starless: &LightImage,
         star_light: &LightImage,
@@ -202,7 +203,16 @@ impl Scene {
         // one's footprint is most often a piece of its halo or spikes, and
         // even a real neighbour there shares its light: either way it moves
         // as part of the brighter star rather than flying off on its own.
-        let kept = outside_brighter(&measured);
+        // A star given the leftover plane's distance has none of its own:
+        // the catalogue had no match for it.
+        let unmatched: Vec<bool> = stars
+            .iter()
+            .map(|star| {
+                star.distance_pc
+                    .is_none_or(|distance| distance == leftover_distance_pc)
+            })
+            .collect();
+        let kept = outside_brighter(&measured, &unmatched);
         let footprints: Vec<Footprint> = kept.iter().map(|&index| measured[index]).collect();
         let stars: Vec<Star> = kept.iter().map(|&index| stars[index]).collect();
 
@@ -224,25 +234,27 @@ impl Scene {
         // Every star is cut, so a small star keeps its own light rather
         // than a bright neighbour taking it, but only the brightest fly.
         let flying = options.max_stars.unwrap_or(usize::MAX).min(stars.len());
-        // The leftover plane gives up only the flying stars' light when the
-        // small stars stay on it: their share of what the stars take.
-        let flying_share =
-            (flying < stars.len() && options.small_stars == SmallStars::Field).then(|| {
-                let mut flying_claims = vec![0.0_f32; width * height];
-                for (footprint, &peak) in footprints.iter().zip(&peaks).take(flying) {
-                    footprint.for_each(width, height, |x, y, weight| {
-                        flying_claims[y * width + x] += weight * footprint.model(x, y, peak);
-                    });
-                }
-                flying_claims
-                    .par_iter_mut()
-                    .zip(&claims)
-                    .for_each(|(flying, &all)| {
-                        *flying = if all > 0.0 { *flying / all } else { 0.0 };
-                    });
-                flying_claims
-            });
-
+        // A star's light at `(x, y)`: its share of the light there above
+        // the floor it sits in. Overlapping stars share in proportion to
+        // how much each would put there, so a bright star's halo stays with
+        // it rather than going to the faint stars inside it.
+        let own = |footprint: &Footprint, peak: f32, x: usize, y: usize, weight: f32| {
+            let index = y * width + x;
+            let claim = weight * footprint.model(x, y, peak);
+            let share = if claims[index] > 0.0 {
+                total[index].min(1.0) * claim / claims[index]
+            } else {
+                0.0
+            };
+            let light = star_light.at(x, y);
+            let sum = light[0] + light[1] + light[2];
+            let above = if sum > 0.0 {
+                ((sum - footprint.floor) / sum).max(0.0)
+            } else {
+                0.0
+            };
+            light.map(|value| value * share * above)
+        };
         let mut sprites: Vec<Sprite> = footprints[..flying]
             .par_iter()
             .zip(&stars)
@@ -251,20 +263,8 @@ impl Scene {
                 let (left, top, right, bottom) = footprint.bounds(width, height);
                 let mut image = LightImage::new(right - left, bottom - top);
                 footprint.for_each(width, height, |x, y, weight| {
-                    // Overlapping stars share the light they take in
-                    // proportion to how much each would put there, so a
-                    // bright star's halo stays with it rather than going to
-                    // the faint stars inside it.
-                    let index = y * width + x;
-                    let claim = weight * footprint.model(x, y, peak);
-                    let share = if claims[index] > 0.0 {
-                        total[index].min(1.0) * claim / claims[index]
-                    } else {
-                        0.0
-                    };
-                    let light = star_light.at(x, y);
                     image.pixels[(y - top) * image.width + (x - left)] =
-                        light.map(|value| value * share);
+                        own(footprint, peak, x, y, weight);
                 });
                 Sprite::new(
                     left,
@@ -277,35 +277,47 @@ impl Scene {
             })
             .collect();
 
-        let mut leftover = LightImage {
-            width,
-            height,
-            pixels: star_light
-                .pixels
-                .par_iter()
-                .zip(total.par_iter())
-                .enumerate()
-                .map(|(index, (stars, taken))| {
-                    let taken = match &flying_share {
-                        Some(share) => taken.min(1.0) * share[index],
-                        None => taken.min(1.0),
-                    };
-                    stars.map(|value| value * (1.0 - taken))
-                })
-                .collect(),
-        };
+        // The leftover is the star light no star took: the flying stars, and
+        // the small ones too when they are dropped (kept, their light stays
+        // on the leftover plane, which moves as the distant field does).
+        let mut leftover = star_light.clone();
+        for sprite in &sprites {
+            for y in 0..sprite.image.height {
+                for x in 0..sprite.image.width {
+                    let index = (sprite.top + y) * width + sprite.left + x;
+                    let took = sprite.image.at(x, y);
+                    for (left, took) in leftover.pixels[index].iter_mut().zip(took) {
+                        *left -= took;
+                    }
+                }
+            }
+        }
+        if options.small_stars == SmallStars::Drop {
+            for (footprint, &peak) in footprints.iter().zip(&peaks).skip(flying) {
+                footprint.for_each(width, height, |x, y, weight| {
+                    let took = own(footprint, peak, x, y, weight);
+                    for (left, took) in leftover.pixels[y * width + x].iter_mut().zip(took) {
+                        *left -= took;
+                    }
+                });
+            }
+        }
+        leftover
+            .pixels
+            .par_iter_mut()
+            .for_each(|pixel| *pixel = pixel.map(|value| value.max(0.0)));
         // A bright star's halo reaches past its footprint. What lies past it
         // would stay on the leftover plane, far behind, and drift away from
         // the star as a ring (HD 200775's, lighting the Iris), so a star
         // with a large footprint takes the star light about it as well, out
-        // to twice its footprint, fading. Brightest first, so a tail is
+        // to three times its footprint, fading. Brightest first, so a tail is
         // taken once.
         for sprite in sprites.iter_mut() {
             let reach = sprite.image.width.max(sprite.image.height) as f64 / 2.0;
             if reach < HALO_TAIL_FROM {
                 continue;
             }
-            let far = 2.0 * reach;
+            let far = 3.0 * reach;
             let (left, top) = (
                 (sprite.x - far).floor().max(0.0) as usize,
                 (sprite.y - far).floor().max(0.0) as usize,
@@ -329,7 +341,7 @@ impl Scene {
                     } else if distance >= far {
                         continue;
                     } else {
-                        let t = (distance - reach) / reach;
+                        let t = (distance - reach) / (far - reach);
                         1.0 - t * t * (3.0 - 2.0 * t)
                     } as f32;
                     let index = row * width + column;
@@ -398,6 +410,11 @@ struct Footprint {
     y: f64,
     inner: f64,
     outer: f64,
+    /// The light, summed over channels, the star sits in: the median just
+    /// outside its footprint. A star takes only its light above it, and
+    /// leaves the glow under it (a bright neighbour's halo, a remover's
+    /// residue) to whatever owns it.
+    floor: f32,
 }
 
 impl Footprint {
@@ -446,6 +463,7 @@ impl Footprint {
             y: star.y,
             inner: outer * 0.6,
             outer,
+            floor: ring_light(light, star.x, star.y, radius + 2),
         }
     }
 
@@ -488,8 +506,13 @@ impl Footprint {
 /// Indices of the footprints whose centres lie outside the core of every
 /// earlier (so brighter) kept star. Only a bright star's core swallows what
 /// lies in it; a star in its halo travels on its own, and the halo's light
-/// stays with the bright star by the shares the profiles set.
-fn outside_brighter(footprints: &[Footprint]) -> Vec<usize> {
+/// stays with the bright star by the shares the profiles set. But a large
+/// footprint within twice a brighter star's, which the catalogue has no
+/// star for (`unmatched`), is a knot of that star's halo or of nebula the
+/// star image took: cut out, it would fly off with a piece of the halo.
+/// Around HD 200775, in the Iris, a dozen did, just past its footprint's
+/// edge, and drifted as a ring.
+fn outside_brighter(footprints: &[Footprint], unmatched: &[bool]) -> Vec<usize> {
     const CELL: f64 = 64.0;
     let cell = |x: f64, y: f64| ((x / CELL).floor() as i64, (y / CELL).floor() as i64);
     let mut grid: std::collections::HashMap<(i64, i64), Vec<usize>> =
@@ -497,14 +520,17 @@ fn outside_brighter(footprints: &[Footprint]) -> Vec<usize> {
     let mut widest = 0.0_f64;
     let mut kept = Vec::with_capacity(footprints.len());
     for (index, footprint) in footprints.iter().enumerate() {
-        let span = (widest / CELL).ceil() as i64;
+        let span = (2.0 * widest / CELL).ceil() as i64;
         let (cx, cy) = cell(footprint.x, footprint.y);
+        // A large footprint the catalogue has no star for.
+        let knot = unmatched[index] && footprint.outer >= HALO_TAIL_FROM;
         let inside = (cy - span..=cy + span).any(|row| {
             (cx - span..=cx + span).any(|column| {
                 grid.get(&(column, row)).is_some_and(|indices| {
                     indices.iter().any(|&other| {
                         let brighter: &Footprint = &footprints[other];
-                        (brighter.x - footprint.x).hypot(brighter.y - footprint.y) < brighter.core()
+                        let apart = (brighter.x - footprint.x).hypot(brighter.y - footprint.y);
+                        apart < brighter.core() || (knot && apart < 2.0 * brighter.outer)
                     })
                 })
             })
@@ -512,7 +538,7 @@ fn outside_brighter(footprints: &[Footprint]) -> Vec<usize> {
         if inside {
             continue;
         }
-        widest = widest.max(footprint.core());
+        widest = widest.max(footprint.outer);
         grid.entry(cell(footprint.x, footprint.y))
             .or_default()
             .push(index);
@@ -746,6 +772,47 @@ mod tests {
         let left = scene.leftover.level_for(1.0).0.at(edge, centre as usize)[0];
         let there = light.at(edge, centre as usize)[0];
         assert!(left < 0.05 * there, "{left} of {there} left behind");
+    }
+
+    #[test]
+    fn a_knot_in_a_bright_stars_halo_is_not_cut_out_as_a_star() {
+        // A bright star with a wide halo, a lump on the halo just past where
+        // its footprint stops, and a real star the catalogue placed nearby.
+        let (size, centre) = (900, 450.0);
+        let mut light = LightImage::new(size, size);
+        for (index, pixel) in light.pixels.iter_mut().enumerate() {
+            let (x, y) = ((index % size) as f64, (index / size) as f64);
+            let r2 = (x - centre).powi(2) + (y - centre).powi(2);
+            let knot = 0.3 * (-((x - centre).powi(2) + (y - 660.0).powi(2)) / 800.0).exp();
+            let real = 3.0 * (-((x - 260.0).powi(2) + (y - centre).powi(2)) / 4.0).exp();
+            let value = 40.0 * (-r2 / 450.0).exp() + 0.5 * (-r2 / 7200.0).exp() + knot + real;
+            *pixel = [value as f32; 3];
+        }
+        let unmatched = 1000.0;
+        let stars = [
+            (centre, centre, Some(200.0)),
+            (centre, 660.0, Some(unmatched)),
+            (260.0, centre, Some(900.0)),
+        ]
+        .map(|(x, y, distance_pc)| Star { x, y, distance_pc });
+        let starless = LightImage::new(size, size);
+        let scene = Scene::new(
+            &starless,
+            &light,
+            &stars,
+            400.0,
+            unmatched,
+            2000.0,
+            &CutOptions::default(),
+        );
+        // The bright star and the real one fly; the knot goes with the
+        // bright star's halo, not off on its own at the leftover's distance.
+        let places: Vec<(f64, f64)> = scene
+            .sprites
+            .iter()
+            .map(|sprite| (sprite.x, sprite.y))
+            .collect();
+        assert_eq!(places, [(centre, centre), (260.0, centre)], "{places:?}");
     }
 
     #[test]
