@@ -839,7 +839,7 @@ impl Shot {
             .dust
             .as_ref()
             .filter(|_| scene.leftover_distance_pc > scene.background_distance_pc)
-            .map(|dust| (dust, scene.background_distance_pc));
+            .map(|dust| (&**dust, scene.background_distance_pc));
         draw_plane(
             &mut out,
             &scene.leftover,
@@ -1276,7 +1276,8 @@ fn draw_sprites(out: &mut LightImage, scene: &Scene, view: &View, shot: &Shot) {
         .sprites
         .iter()
         .filter_map(|sprite| {
-            let (x, y, scale) = view.project(sprite.x, sprite.y, sprite.distance_pc)?;
+            let distance = scene.flies_at(sprite);
+            let (x, y, scale) = view.project(sprite.x, sprite.y, distance)?;
             let growth = view.growth(scale);
             let fade = shot.star_fade(view, scale);
             if fade <= 0.0 {
@@ -1286,7 +1287,7 @@ fn draw_sprites(out: &mut LightImage, scene: &Scene, view: &View, shot: &Shot) {
             let size = lens_scale * grown.sqrt();
             // Behind the dust, the change in the dust it shows through.
             let dimming = match &scene.dust {
-                Some(dust) if sprite.distance_pc > scene.background_distance_pc => {
+                Some(dust) if distance > scene.background_distance_pc => {
                     let now = view.unproject(x, y, scene.background_distance_pc);
                     dust.change((sprite.x, sprite.y), now)
                 }
@@ -2113,7 +2114,7 @@ mod tests {
         let frame = shot.render(&scene, 1);
         let background = {
             let mut without = scene.clone();
-            without.sprites.clear();
+            without.sprites = std::sync::Arc::new(Vec::new());
             shot.render(&without, 1)
         };
         let excess: f32 = frame

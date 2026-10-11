@@ -4376,33 +4376,12 @@ pub unsafe extern "C" fn seiza_string_free(value: *mut c_char) {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AstronomyImageFormat {
-    Fits,
-    Xisf,
-}
-
-impl AstronomyImageFormat {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Fits => "FITS",
-            Self::Xisf => "XISF",
-        }
-    }
-}
+/// FITS or XISF, as the shared image reader names it; its `name()` says
+/// which in rendered metadata.
+use seiza_image_io::Format as AstronomyImageFormat;
 
 fn astronomy_image_format(path: &Path) -> Option<AstronomyImageFormat> {
-    if seiza_xisf::is_xisf_path(path) {
-        return Some(AstronomyImageFormat::Xisf);
-    }
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("fits")
-                || extension.eq_ignore_ascii_case("fit")
-                || extension.eq_ignore_ascii_case("fts")
-        })
-        .then_some(AstronomyImageFormat::Fits)
+    AstronomyImageFormat::from_path(path).filter(|format| format.is_astronomy())
 }
 
 fn is_astronomy_image_path(path: &Path) -> bool {
@@ -4410,15 +4389,7 @@ fn is_astronomy_image_path(path: &Path) -> bool {
 }
 
 fn open_astronomy_image(path: &Path) -> Result<(FitsImage, AstronomyImageFormat), String> {
-    let format = astronomy_image_format(path)
-        .ok_or_else(|| format!("{} is not a FITS or XISF path", path.display()))?;
-    let image = match format {
-        AstronomyImageFormat::Fits => FitsImage::open(path)
-            .map_err(|error| format!("failed to open {}: {error}", path.display()))?,
-        AstronomyImageFormat::Xisf => seiza_xisf::open(path)
-            .map_err(|error| format!("failed to open {}: {error}", path.display()))?,
-    };
-    Ok((image, format))
+    seiza_image_io::open_astronomy(path).map_err(|error| error.to_string())
 }
 
 fn render_path(
@@ -6034,7 +6005,7 @@ fn probe_frame_header(path: &Path) -> Result<FrameProbeResponse, String> {
     let headers = match format {
         AstronomyImageFormat::Fits => seiza_fits::read_header(path)
             .map_err(|error| format!("failed to read FITS header {}: {error}", path.display()))?,
-        AstronomyImageFormat::Xisf => seiza_xisf::read_header(path)
+        _ => seiza_xisf::read_header(path)
             .map_err(|error| format!("failed to read XISF header {}: {error}", path.display()))?,
     };
     let metadata = seiza_stacking::FrameMetadata::from_headers(&headers);

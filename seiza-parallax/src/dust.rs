@@ -9,9 +9,16 @@
 //! brightens by the ratio of the two. Dust thick enough to black out the
 //! glow behind it shows too in the starless image's own darkness, finer
 //! than the counts can see.
+//!
+//! A [`DustMap`] is the same dust as an image a person can paint: white
+//! where the dust is opaque, black where the sky is clear. One given to the
+//! video takes the place of the counted map, and is taken at its word: a
+//! star seen where it is opaque lies in front. The counted map can be
+//! written out as one to start from.
 
 use crate::light::LightImage;
 use rayon::prelude::*;
+use std::path::Path;
 
 /// Light from behind the dust brightens at most this much as it slides out
 /// from behind thicker dust: the star counts are noisy, and a star the
@@ -26,9 +33,112 @@ const LEAST: f32 = 0.01;
 /// black globule.
 const FINE: f64 = 16.0;
 
+/// Dust that lets through this share of the light or less hides everything
+/// behind it, so a star seen through a given map's opaque dust must lie in
+/// front.
+pub const OPAQUE: f32 = 0.05;
+
+/// The finest cell a given map is kept at, image pixels: a painted map
+/// needs no finer, and a full-size one would cost a quarter of the image.
+const GIVEN_CELL: f64 = 4.0;
+
+/// How far a map's shape may stray from the image's and still fit it.
+const SHAPE_TOLERANCE: f64 = 0.01;
+
+/// How far past 0 to 1 a float map's samples may stray, rounding, and still
+/// be read as a map.
+const SAMPLE_SLACK: f32 = 1e-3;
+
+/// Dust as an image: its opacity, 0 where the sky is clear to 1 where
+/// nothing behind shows, row by row. It spans the whole image at any size of
+/// the same shape.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DustMap {
+    pub width: usize,
+    pub height: usize,
+    pub opacity: Vec<f32>,
+}
+
+impl DustMap {
+    /// The map in the image at `path`, white opaque, its format chosen by
+    /// its extension: PNG, JPEG, TIFF, FITS or XISF. A colour image gives
+    /// each pixel's mean channel. Integer samples read as 0 to 1; float ones
+    /// must already lie there, give or take a rounding.
+    pub fn open(path: &Path) -> Result<Self, String> {
+        let image = seiza_image_io::open(path).map_err(|error| error.to_string())?;
+        let mut opacity = image.to_gray();
+        let (least, most) = opacity.iter().fold(
+            (f32::INFINITY, f32::NEG_INFINITY),
+            |(least, most), &value| (least.min(value), most.max(value)),
+        );
+        if !(least >= -SAMPLE_SLACK && most <= 1.0 + SAMPLE_SLACK) {
+            return Err(format!(
+                "the dust map {} runs from {least} to {most}; its values must lie between 0 \
+                 (clear) and 1 (opaque)",
+                path.display()
+            ));
+        }
+        for value in &mut opacity {
+            *value = value.clamp(0.0, 1.0);
+        }
+        Ok(Self {
+            width: image.width,
+            height: image.height,
+            opacity,
+        })
+    }
+
+    /// Write the map to `path`, white opaque, in the format its extension
+    /// names: a 16-bit grayscale PNG or TIFF, or a 32-bit float FITS or XISF.
+    pub fn save(&self, path: &Path) -> Result<(), String> {
+        self.check()?;
+        let image = seiza_image_io::FloatImage::gray(self.width, self.height, self.opacity.clone());
+        seiza_image_io::save(path, &image).map_err(|error| error.to_string())
+    }
+
+    /// Whether it is a map: a size, an opacity for every pixel, each 0 to 1.
+    pub fn check(&self) -> Result<(), String> {
+        if self.width == 0 || self.height == 0 {
+            return Err("the dust map is empty".into());
+        }
+        if self.opacity.len() != self.width * self.height {
+            return Err(format!(
+                "the dust map has {} values for {}×{} pixels",
+                self.opacity.len(),
+                self.width,
+                self.height
+            ));
+        }
+        if !self
+            .opacity
+            .iter()
+            .all(|opacity| (0.0..=1.0).contains(opacity))
+        {
+            return Err("the dust map's opacity must lie between 0 and 1".into());
+        }
+        Ok(())
+    }
+}
+
+/// The share of light a map's `opacity` lets through: [`LEAST`] where it
+/// is opaque, all of it where clear, so a map read back gives the dust it
+/// was written from.
+fn transmission_of(opacity: f32) -> f32 {
+    LEAST + (1.0 - LEAST) * (1.0 - opacity)
+}
+
+/// The opacity a map shows for `transmission`, as [`transmission_of`]
+/// reads it.
+fn opacity_of(transmission: f32) -> f32 {
+    ((1.0 - transmission) / (1.0 - LEAST)).clamp(0.0, 1.0)
+}
+
 /// The share of light the dust lets through, over the image.
 #[derive(Clone, Debug)]
 pub struct Dust {
+    /// The image's size, pixels.
+    width: usize,
+    height: usize,
     /// Cell size, image pixels.
     cell: f64,
     columns: usize,
@@ -38,6 +148,8 @@ pub struct Dust {
     opacity: f32,
     /// Stars per pixel where the sky is clear.
     clear_density: f32,
+    /// Whether a map gave it, rather than the star counts.
+    given: bool,
 }
 
 /// How many cells of `cell` pixels span `size`: the whole ones, the last
@@ -117,13 +229,128 @@ impl Dust {
             .map(|density| (density / clear).min(1.0).powf(opacity).max(LEAST))
             .collect();
         Some(Self {
+            width,
+            height,
             cell,
             columns,
             rows,
             transmission,
             opacity,
             clear_density: clear,
+            given: false,
         })
+    }
+
+    /// The dust `map` draws over a `width` × `height` image, or why it
+    /// cannot: a map of another shape. A map coarser than a few pixels is
+    /// kept at its own size and smoothed between its pixels; a finer one is
+    /// averaged into cells of a few pixels.
+    pub fn from_map(map: &DustMap, width: usize, height: usize) -> Result<Self, String> {
+        map.check()?;
+        if width == 0 || height == 0 {
+            return Err("the image is empty".into());
+        }
+        let (shape, image) = (
+            map.width as f64 / map.height as f64,
+            width as f64 / height as f64,
+        );
+        if (shape / image - 1.0).abs() > SHAPE_TOLERANCE {
+            return Err(format!(
+                "the dust map is {}×{}, not the shape of the {width}×{height} image",
+                map.width, map.height
+            ));
+        }
+        let cell = (width as f64 / map.width as f64).max(GIVEN_CELL);
+        let (columns, rows) = (cells(width, cell), cells(height, cell));
+        // Map pixels per image pixel, each way.
+        let (across, down) = (
+            map.width as f64 / width as f64,
+            map.height as f64 / height as f64,
+        );
+        let transmission = (0..rows * columns)
+            .into_par_iter()
+            .map(|index| {
+                let (left, right) = span(index % columns, columns, width, cell);
+                let (top, bottom) = span(index / columns, rows, height, cell);
+                // The map pixels whose centres the cell covers, or the one
+                // under its centre when it covers none.
+                let first = |start: usize, scale: f64| (start as f64 * scale - 0.5).ceil().max(0.0);
+                let last = |end: usize, scale: f64, size: usize| {
+                    ((end as f64 * scale - 0.5).ceil() - 1.0).min(size as f64 - 1.0)
+                };
+                let (mut x0, mut x1) = (first(left, across), last(right, across, map.width));
+                let (mut y0, mut y1) = (first(top, down), last(bottom, down, map.height));
+                if x1 < x0 {
+                    let centre = ((left + right) as f64 / 2.0 * across).floor();
+                    (x0, x1) = (
+                        centre.min(map.width as f64 - 1.0),
+                        centre.min(map.width as f64 - 1.0),
+                    );
+                }
+                if y1 < y0 {
+                    let centre = ((top + bottom) as f64 / 2.0 * down).floor();
+                    (y0, y1) = (
+                        centre.min(map.height as f64 - 1.0),
+                        centre.min(map.height as f64 - 1.0),
+                    );
+                }
+                let (mut sum, mut count) = (0.0_f32, 0.0_f32);
+                for y in y0 as usize..=y1 as usize {
+                    for x in x0 as usize..=x1 as usize {
+                        sum += map.opacity[y * map.width + x];
+                        count += 1.0;
+                    }
+                }
+                transmission_of(sum / count)
+            })
+            .collect();
+        Ok(Self {
+            width,
+            height,
+            cell,
+            columns,
+            rows,
+            transmission,
+            opacity: 1.0,
+            clear_density: 0.0,
+            given: true,
+        })
+    }
+
+    /// This dust as a `width` × `height` map over the image, white opaque.
+    pub fn to_map(&self, width: usize, height: usize) -> DustMap {
+        let (across, down) = (
+            self.width as f64 / width.max(1) as f64,
+            self.height as f64 / height.max(1) as f64,
+        );
+        let opacity = (0..width * height)
+            .into_par_iter()
+            .map(|index| {
+                let (x, y) = ((index % width) as f64 + 0.5, (index / width) as f64 + 0.5);
+                opacity_of(self.at(x * across, y * down))
+            })
+            .collect();
+        DustMap {
+            width,
+            height,
+            opacity,
+        }
+    }
+
+    /// Whether the dust at image pixel `(x, y)` hides everything behind it.
+    #[inline]
+    pub fn is_opaque(&self, x: f64, y: f64) -> bool {
+        self.at(x, y) <= OPAQUE
+    }
+
+    /// The image's size, pixels.
+    pub fn size(&self) -> (usize, usize) {
+        (self.width, self.height)
+    }
+
+    /// Whether a map gave this dust, rather than the star counts.
+    pub fn given(&self) -> bool {
+        self.given
     }
 
     /// This map on a finer grid, made darker where the starless image is
@@ -404,6 +631,112 @@ mod tests {
             .unwrap()
             .with_darkness(&starless, &stars);
         assert!(dust.at(700.0, 500.0) > 0.8, "{}", dust.at(700.0, 500.0));
+    }
+
+    /// A `width` × `height` map, opaque left of `edge`, a share of the
+    /// width, and clear right of it.
+    fn half_map(width: usize, height: usize, edge: f64) -> DustMap {
+        DustMap {
+            width,
+            height,
+            opacity: (0..width * height)
+                .map(|index| {
+                    if ((index % width) as f64 + 0.5) < edge * width as f64 {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_painted_map_of_any_size_covers_the_image() {
+        for (width, height) in [(50, 30), (1000, 600), (333, 200)] {
+            let dust = Dust::from_map(&half_map(width, height, 0.5), 1000, 600).unwrap();
+            assert!(dust.given());
+            assert_eq!(dust.size(), (1000, 600));
+            // Opaque lets through next to nothing, and hides what is behind.
+            assert!((dust.at(100.0, 300.0) - LEAST).abs() < 1e-6, "{width}");
+            assert!(dust.is_opaque(100.0, 300.0));
+            // Clear lets everything through.
+            assert!((dust.at(900.0, 300.0) - 1.0).abs() < 1e-6, "{width}");
+            assert!(!dust.is_opaque(900.0, 300.0));
+        }
+    }
+
+    #[test]
+    fn a_map_of_another_shape_is_refused() {
+        let error = Dust::from_map(&half_map(50, 50, 0.5), 1000, 600).unwrap_err();
+        assert!(error.contains("50×50"), "{error}");
+        let mut short = half_map(10, 6, 0.5);
+        short.opacity.pop();
+        assert!(Dust::from_map(&short, 1000, 600).is_err());
+        let mut bright = half_map(10, 6, 0.5);
+        bright.opacity[0] = 1.5;
+        assert!(Dust::from_map(&bright, 1000, 600).is_err());
+    }
+
+    #[test]
+    fn a_fine_map_is_averaged_into_cells() {
+        // Opaque and clear pixels in turn: the cells see half of each.
+        let map = DustMap {
+            width: 1000,
+            height: 600,
+            opacity: (0..600_000)
+                .map(|index| ((index % 1000) % 2) as f32)
+                .collect(),
+        };
+        let dust = Dust::from_map(&map, 1000, 600).unwrap();
+        let half = transmission_of(0.5);
+        assert!(
+            (dust.at(500.0, 300.0) - half).abs() < 1e-3,
+            "{}",
+            dust.at(500.0, 300.0)
+        );
+    }
+
+    #[test]
+    fn counted_dust_written_out_and_read_back_is_the_same_dust() {
+        let stars = field(2000, 1500, 10.0, (1000.0, 750.0, 300.0), 10);
+        let counted = Dust::from_star_counts(&stars, 2000, 1500, 2.0).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        for extension in ["png", "tif", "fits", "xisf"] {
+            let path = directory.path().join(format!("dust.{extension}"));
+            counted.to_map(1000, 750).save(&path).unwrap();
+            let read = DustMap::open(&path).unwrap();
+            assert_eq!((read.width, read.height), (1000, 750), "{extension}");
+            let again = Dust::from_map(&read, 2000, 1500).unwrap();
+            for (x, y) in [
+                (200.0, 200.0),
+                (1000.0, 750.0),
+                (1250.0, 750.0),
+                (1999.0, 1499.0),
+            ] {
+                let (before, after) = (counted.at(x, y), again.at(x, y));
+                assert!(
+                    (before - after).abs() < 0.02,
+                    "{extension} at {x},{y}: {before} then {after}"
+                );
+            }
+        }
+        assert!(!counted.is_opaque(200.0, 200.0));
+    }
+
+    #[test]
+    fn a_float_map_outside_zero_to_one_is_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("counts.fits");
+        let image = seiza_image_io::FloatImage::gray(2, 1, vec![0.0, 40_000.0]);
+        seiza_image_io::save(&path, &image).unwrap();
+        let error = DustMap::open(&path).unwrap_err();
+        assert!(error.contains("between 0"), "{error}");
+        assert!(DustMap::open(&directory.path().join("missing.png")).is_err());
+        let error = half_map(4, 2, 0.5)
+            .save(&directory.path().join("map.jpg"))
+            .unwrap_err();
+        assert!(error.contains(".png"), "{error}");
     }
 
     #[test]

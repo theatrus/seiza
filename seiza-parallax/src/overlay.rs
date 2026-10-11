@@ -202,7 +202,9 @@ pub(crate) fn catalog_marks(
                 .filter(|&(_, apart)| apart <= reach)
                 .min_by(|a, b| a.1.total_cmp(&b.1))
             {
-                Some((sprite, _)) => (x, y, distance_pc) = (sprite.x, sprite.y, sprite.distance_pc),
+                Some((sprite, _)) => {
+                    (x, y, distance_pc) = (sprite.x, sprite.y, scene.flies_at(sprite))
+                }
                 None => distance_pc = scene.leftover_distance_pc,
             }
         } else if let Some(galaxy) = lifted

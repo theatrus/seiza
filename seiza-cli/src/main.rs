@@ -9,6 +9,7 @@ use seiza::raster::{self, PhotoMetadata, ScaleSearch};
 use seiza::solve::{SolveHint, solve};
 use seiza::star_ids::{StarIdentifierCatalog, StarLookupMatch};
 use seiza::{DetectBackend, DetectConfig, DetectedStar};
+use seiza_image_io::Format as ImageFormat;
 use seiza_satellites::{
     CacheState, CelesTrakSource, ExposureProvenance, ObserverLocation, OrbitalCatalogSource,
     SatelliteCatalog, SatelliteTrack, SingleExposure, TrackOptions, UtcTimestamp,
@@ -36,28 +37,13 @@ mod stack;
 mod stretch_command;
 mod worker;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AstronomyImageFormat {
-    Fits,
-    Xisf,
-}
-
-fn astronomy_image_format(path: &std::path::Path) -> Option<AstronomyImageFormat> {
-    if seiza_xisf::is_xisf_path(path) || seiza_xisf::is_xisf_header_path(path) {
-        return Some(AstronomyImageFormat::Xisf);
-    }
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("fits")
-                || extension.eq_ignore_ascii_case("fit")
-                || extension.eq_ignore_ascii_case("fts")
-        })
-        .then_some(AstronomyImageFormat::Fits)
+/// A FITS or XISF path's format, as the shared image reader names it.
+fn astronomy_image_format(path: &std::path::Path) -> Option<ImageFormat> {
+    ImageFormat::from_path(path).filter(|format| format.is_astronomy())
 }
 
 fn is_fits_path(path: &std::path::Path) -> bool {
-    astronomy_image_format(path) == Some(AstronomyImageFormat::Fits)
+    astronomy_image_format(path) == Some(ImageFormat::Fits)
 }
 
 fn is_astronomy_image_path(path: &std::path::Path) -> bool {
@@ -65,23 +51,16 @@ fn is_astronomy_image_path(path: &std::path::Path) -> bool {
 }
 
 fn open_astronomy_image(path: &std::path::Path) -> Result<seiza_fits::FitsImage> {
-    match astronomy_image_format(path) {
-        Some(AstronomyImageFormat::Fits) => seiza_fits::FitsImage::open(path)
-            .map_err(|error| anyhow::anyhow!("{}: {error}", path.display())),
-        Some(AstronomyImageFormat::Xisf) => {
-            seiza_xisf::open(path).map_err(|error| anyhow::anyhow!("{}: {error}", path.display()))
-        }
-        None => anyhow::bail!("{} is not a FITS or XISF path", path.display()),
-    }
+    Ok(seiza_image_io::open_astronomy(path)?.0)
 }
 
 fn read_astronomy_headers(
     path: &std::path::Path,
 ) -> Result<Vec<(String, seiza_fits::HeaderValue)>> {
     match astronomy_image_format(path) {
-        Some(AstronomyImageFormat::Fits) => seiza_fits::read_header(path)
+        Some(ImageFormat::Fits) => seiza_fits::read_header(path)
             .map_err(|error| anyhow::anyhow!("{}: {error}", path.display())),
-        Some(AstronomyImageFormat::Xisf) => seiza_xisf::read_header(path)
+        Some(_) => seiza_xisf::read_header(path)
             .map_err(|error| anyhow::anyhow!("{}: {error}", path.display())),
         None => anyhow::bail!("{} is not a FITS or XISF path", path.display()),
     }
@@ -4759,10 +4738,7 @@ mod cli_tests {
         assert!(auto_can_retry_f32(fits, &luma, DetectBackend::Auto));
         assert!(!auto_can_retry_f32(fits, &luma, DetectBackend::U8));
         assert!(auto_can_retry_f32(xisf, &luma, DetectBackend::Auto));
-        assert_eq!(
-            astronomy_image_format(xisf),
-            Some(AstronomyImageFormat::Xisf)
-        );
+        assert_eq!(astronomy_image_format(xisf), Some(ImageFormat::Xisf));
         assert!(!is_fits_path(xisf));
     }
 

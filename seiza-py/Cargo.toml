@@ -34,6 +34,7 @@ seiza-background = { path = "../seiza-background" }
 seiza-calibration = { path = "../seiza-calibration" }
 seiza-deconvolution = { path = "../seiza-deconvolution" }
 seiza-fits = { path = "../seiza-fits" }
+seiza-image-io = { path = "../seiza-image-io" }
 seiza-imgproc = { path = "../seiza-imgproc" }
 seiza-satellites = { path = "../seiza-satellites" }
 seiza-sources = { path = "../seiza-sources" }

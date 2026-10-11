@@ -4,6 +4,7 @@
 use crate::dust::Dust;
 use crate::light::{LightImage, Pyramid};
 use rayon::prelude::*;
+use std::sync::Arc;
 
 /// A star found in the star image, and how far away it is.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -35,6 +36,9 @@ pub struct Sprite {
     pub x: f64,
     pub y: f64,
     pub distance_pc: f64,
+    /// Whether it is an object lifted off the starless image, such as a
+    /// galaxy, rather than a star: dust never brings it in front.
+    pub lifted: bool,
     /// `image` halved again and again, made when the sprite is first drawn
     /// smaller than its pixels.
     pub(crate) smaller: std::sync::OnceLock<Vec<LightImage>>,
@@ -58,6 +62,7 @@ impl Sprite {
             x,
             y,
             distance_pc,
+            lifted: false,
             smaller: std::sync::OnceLock::new(),
         }
     }
@@ -138,17 +143,18 @@ pub enum SmallStars {
     Drop,
 }
 
-/// Everything a frame is rendered from.
+/// Everything a frame is rendered from. The planes and sprites are shared,
+/// so a copy with other dust costs next to nothing.
 #[derive(Clone, Debug)]
 pub struct Scene {
     /// The starless image, on the background plane.
-    pub background: Pyramid,
+    pub background: Arc<Pyramid>,
     /// Star light no sprite took: stars too faint to find, and the edges of
     /// halos. Most of it belongs to the field's distant stars, so it is a
     /// plane of its own at their distance rather than part of the
     /// background, where it would grow with a nearby nebula.
-    pub leftover: Pyramid,
-    pub sprites: Vec<Sprite>,
+    pub leftover: Arc<Pyramid>,
+    pub sprites: Arc<Vec<Sprite>>,
     /// Distance of the background plane, parsecs.
     pub background_distance_pc: f64,
     /// Distance of the leftover star light, parsecs.
@@ -159,11 +165,16 @@ pub struct Scene {
     /// A distance most sprites lie within, at least the background's: the
     /// far star field a camera move must not uncover the edge of.
     pub far_distance_pc: f64,
+    /// Where a star flies when opaque dust shows it must lie in front of
+    /// the background: among the stars in front, or just short of the
+    /// background when there are few.
+    pub foreground_distance_pc: f64,
     /// The dust on the background plane, which dims what lies behind it as
-    /// the camera's moves slide it behind thicker dust: `None` to leave
-    /// everything as bright as photographed. [`Scene::new`] leaves it
-    /// `None`.
-    pub dust: Option<Dust>,
+    /// the camera's moves slide it behind thicker dust; a given map's also
+    /// brings in front any star seen where it is opaque. `None` leaves
+    /// everything as bright as photographed, at its own distance.
+    /// [`Scene::new`] leaves it `None`.
+    pub dust: Option<Arc<Dust>>,
 }
 
 impl Scene {
@@ -382,15 +393,44 @@ impl Scene {
             far.max(background_distance_pc)
         };
         Self {
-            background: Pyramid::new(background),
-            leftover: Pyramid::new(leftover),
-            sprites,
+            background: Arc::new(Pyramid::new(background)),
+            leftover: Arc::new(Pyramid::new(leftover)),
+            foreground_distance_pc: foreground_distance(&sprites, background_distance_pc),
+            sprites: Arc::new(sprites),
             background_distance_pc,
             leftover_distance_pc,
             focal_px,
             far_distance_pc,
             dust: None,
         }
+    }
+
+    /// Where `sprite` flies: at its own distance, unless it is a star behind
+    /// the background seen where a given dust map is opaque. Nothing from
+    /// behind shows through such dust, so the star must lie in front. The
+    /// dust counted from the stars never moves one: its finest cells see
+    /// small dark patches that are not dust.
+    #[inline]
+    pub fn flies_at(&self, sprite: &Sprite) -> f64 {
+        match &self.dust {
+            Some(dust)
+                if dust.given()
+                    && !sprite.lifted
+                    && sprite.distance_pc > self.background_distance_pc
+                    && dust.is_opaque(sprite.x, sprite.y) =>
+            {
+                self.foreground_distance_pc
+            }
+            _ => sprite.distance_pc,
+        }
+    }
+
+    /// How many stars the dust brings in front of the background.
+    pub fn stars_brought_forward(&self) -> usize {
+        self.sprites
+            .iter()
+            .filter(|sprite| self.flies_at(sprite) != sprite.distance_pc)
+            .count()
     }
 
     pub fn width(&self) -> usize {
@@ -400,6 +440,27 @@ impl Scene {
     pub fn height(&self) -> usize {
         self.background.base().height
     }
+}
+
+/// The stars this few in front of the background say too little about
+/// where the foreground lies.
+const FEW_IN_FRONT: usize = 10;
+
+/// Where a star opaque dust brings forward flies: the median distance of
+/// the stars in front of the background, or a tenth short of it when there
+/// are few.
+fn foreground_distance(sprites: &[Sprite], background_distance_pc: f64) -> f64 {
+    let mut front: Vec<f64> = sprites
+        .iter()
+        .filter(|sprite| !sprite.lifted && sprite.distance_pc < background_distance_pc)
+        .map(|sprite| sprite.distance_pc)
+        .collect();
+    if front.len() < FEW_IN_FRONT {
+        return 0.9 * background_distance_pc;
+    }
+    let middle = front.len() / 2;
+    let (_, &mut median, _) = front.select_nth_unstable_by(middle, f64::total_cmp);
+    median
 }
 
 /// A star's soft round footprint: weight one out to `inner`, falling to zero
@@ -621,6 +682,7 @@ fn background_and_noise(light: &LightImage) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dust::DustMap;
 
     fn gaussian_stars(width: usize, height: usize, stars: &[(f64, f64, f32)]) -> LightImage {
         let mut image = LightImage::new(width, height);
@@ -656,6 +718,77 @@ mod tests {
         );
         assert_eq!(scene.sprites.len(), 1);
         assert_eq!(scene.sprites[0].distance_pc, 136.0);
+    }
+
+    #[test]
+    fn stars_seen_through_opaque_dust_fly_in_front_of_it() {
+        // Stars behind the background left and right, one in front, and a
+        // lifted galaxy left; the dust is opaque over the left half.
+        let light = gaussian_stars(
+            200,
+            100,
+            &[(40.0, 50.0, 1.0), (160.0, 50.0, 1.0), (60.0, 20.0, 1.0)],
+        );
+        let starless = LightImage::new(200, 100);
+        let stars = [
+            (40.0, 50.0, Some(2000.0)),
+            (160.0, 50.0, Some(2000.0)),
+            (60.0, 20.0, Some(150.0)),
+        ]
+        .map(|(x, y, distance_pc)| Star { x, y, distance_pc });
+        let mut scene = Scene::new(
+            &starless,
+            &light,
+            &stars,
+            400.0,
+            900.0,
+            500.0,
+            &CutOptions::default(),
+        );
+        let mut galaxy = Sprite::new(20, 70, LightImage::new(4, 4), 22.0, 72.0, 1e8);
+        galaxy.lifted = true;
+        Arc::make_mut(&mut scene.sprites).push(galaxy);
+        let at = |scene: &Scene, x: f64| {
+            let sprite = scene
+                .sprites
+                .iter()
+                .find(|sprite| (sprite.x - x).abs() < 3.0)
+                .unwrap();
+            scene.flies_at(sprite)
+        };
+        // Without dust, every sprite flies at its own distance.
+        assert_eq!(at(&scene, 40.0), 2000.0);
+        assert_eq!(scene.stars_brought_forward(), 0);
+        let map = DustMap {
+            width: 20,
+            height: 10,
+            opacity: (0..200)
+                .map(|index| if index % 20 < 10 { 1.0 } else { 0.0 })
+                .collect(),
+        };
+        scene.dust = Some(Arc::new(Dust::from_map(&map, 200, 100).unwrap()));
+        // Too few stars in front to say where the foreground lies.
+        assert_eq!(scene.foreground_distance_pc, 360.0);
+        assert_eq!(at(&scene, 40.0), 360.0);
+        assert_eq!(at(&scene, 160.0), 2000.0);
+        assert_eq!(at(&scene, 60.0), 150.0);
+        assert_eq!(at(&scene, 22.0), 1e8);
+        assert_eq!(scene.stars_brought_forward(), 1);
+        // Dust counted from the stars, thick over the left half, dims but
+        // moves no star.
+        let mut field = Vec::new();
+        for y in 0..50 {
+            for x in 0..100 {
+                if x >= 50 || (x + y) % 40 == 0 {
+                    field.push((2.0 * x as f64 + 1.0, 2.0 * y as f64 + 1.0));
+                }
+            }
+        }
+        let counted = Dust::from_star_counts(&field, 200, 100, 3.0).unwrap();
+        assert!(counted.is_opaque(40.0, 50.0), "{}", counted.at(40.0, 50.0));
+        scene.dust = Some(Arc::new(counted));
+        assert_eq!(at(&scene, 40.0), 2000.0);
+        assert_eq!(scene.stars_brought_forward(), 0);
     }
 
     #[test]
@@ -900,7 +1033,7 @@ mod tests {
                 rebuilt[channel] += leftover[channel];
             }
         }
-        for sprite in &scene.sprites {
+        for sprite in scene.sprites.iter() {
             for y in 0..sprite.image.height {
                 for x in 0..sprite.image.width {
                     let index = (sprite.top + y) * rebuilt.width + sprite.left + x;

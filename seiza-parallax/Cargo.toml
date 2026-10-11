@@ -24,6 +24,7 @@ multiversion.workspace = true
 rayon.workspace = true
 seiza.workspace = true
 seiza-draw.workspace = true
+seiza-image-io.workspace = true
 seiza-sources.workspace = true
 seiza-stars.workspace = true
 thiserror.workspace = true

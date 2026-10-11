@@ -37,7 +37,7 @@ pub mod render;
 pub mod scene;
 pub mod tour;
 
-pub use dust::Dust;
+pub use dust::{Dust, DustMap};
 #[cfg(feature = "openh264")]
 pub use encode::OpenH264Sink;
 pub use encode::{

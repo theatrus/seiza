@@ -1,0 +1,22 @@
+[package]
+name = "seiza-image-io"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "README.md"
+description = "Open and save images by file extension, the same way across Seiza: PNG, JPEG, TIFF, FITS and XISF"
+keywords = ["astronomy", "fits", "xisf", "image", "astrophotography"]
+categories = ["science", "multimedia::images"]
+
+[dependencies]
+image = { workspace = true, features = ["png", "jpeg", "tiff"] }
+seiza.workspace = true
+seiza-fits.workspace = true
+seiza-xisf.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

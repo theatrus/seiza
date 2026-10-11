@@ -554,8 +554,8 @@ wide = video.reconfigure(size="4k", quality="high", rotate_deg=(0, -360))
 print(wide.summary["fit"]["zoom"])      # (asked, used)
 ```
 
-Images may be paths (PNG, JPEG or TIFF) or arrays, float32 from 0 to 1 or
-uint8; 16-bit files make the best videos, as 8 bits flatten bright star
+Images may be paths (PNG, JPEG, TIFF, FITS or XISF) or arrays, float32 from
+0 to 1 or uint8; 16-bit or float files make the best videos, as 8 bits flatten bright star
 cores and band smooth nebula. Options are the command's, in snake case,
 with frame sizes such as `"720p"`, `"1080p"`, `"4k"` or `"1080p-portrait"`.
 Distances come from the star distance file when installed, or the archives

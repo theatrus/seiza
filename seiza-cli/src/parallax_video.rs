@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 
 #[derive(Args)]
 pub(crate) struct ParallaxVideoArgs {
-    /// The stretched image: PNG, JPEG or TIFF. Without --starless and
-    /// --stars, StarXTerminator splits it into the two
+    /// The stretched image: PNG, JPEG, TIFF, FITS or XISF. Without
+    /// --starless and --stars, StarXTerminator splits it into the two
     image: Option<PathBuf>,
     /// The image with its stars removed, stretched like the stars image
     #[arg(long, requires = "stars")]
@@ -31,7 +31,7 @@ pub(crate) struct ParallaxVideoArgs {
     stars: Option<PathBuf>,
     /// The video to write (.mp4), or a directory of PNG frames with
     /// --encoder png
-    #[arg(short, long, required_unless_present = "plan_tour")]
+    #[arg(short, long, required_unless_present_any = ["plan_tour", "export_dust_map"])]
     output: Option<PathBuf>,
     /// Point to fly toward, as image pixels `x,y` (default: the image
     /// centre)
@@ -259,6 +259,20 @@ pub(crate) struct ParallaxVideoArgs {
     /// through is the share of stars seen to this power
     #[arg(long, default_value_t = 3.0)]
     dust_opacity: f32,
+    /// Dust drawn as an image, in place of the dust mapped from how few
+    /// stars show through: white (1) where it is opaque, black (0) where
+    /// clear, at any size of the image's shape, its format by its
+    /// extension (PNG, JPEG, TIFF, FITS or XISF). What lies behind the
+    /// nebula dims by it, and a star seen where it is opaque flies in front
+    /// of the nebula
+    #[arg(long, conflicts_with = "no_dust")]
+    dust_map: Option<PathBuf>,
+    /// Write the dust the video uses, the size of the image, white (1)
+    /// where opaque, to paint over and give back with --dust-map: a 16-bit
+    /// PNG or TIFF, or a 32-bit float FITS or XISF, by the extension.
+    /// Without -o, write it and stop
+    #[arg(long, conflicts_with = "no_dust")]
+    export_dust_map: Option<PathBuf>,
     /// Label the catalogued objects in the field as Seiza's image overlays
     /// do. Each label moves with the layer that shows its object and fades
     /// as it leaves the view; once the camera is inside an object, its name
@@ -332,12 +346,10 @@ fn parse_point(text: &str) -> std::result::Result<(f64, f64), String> {
     Ok((number(x)?, number(y)?))
 }
 
-/// Open a stretched raster with values 0 to 1, in its EXIF orientation.
+/// Open a stretched image with values 0 to 1, as RGB: PNG, JPEG or TIFF
+/// in its EXIF orientation, or FITS or XISF.
 fn open_display(path: &Path) -> Result<Rgb32FImage> {
-    Ok(seiza::raster::open_oriented(path)
-        .with_context(|| format!("failed to open {}", path.display()))?
-        .pixels
-        .to_rgb32f())
+    Ok(seiza_image_io::open(path)?.to_rgb())
 }
 
 pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
@@ -351,11 +363,20 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
         Some(path) => Some(read_tour(path)?),
         None => None,
     };
-    let options = options(&args, file);
+    let mut options = options(&args, file);
+    if let Some(path) = &args.dust_map {
+        options.scene.dust_map =
+            Some(seiza_parallax::DustMap::open(path).map_err(anyhow::Error::msg)?);
+    }
     options.check()?;
     // Everything that would refuse the video at the end is asked first: the
     // split, the solve and the stars' distances take minutes.
-    check_output(&args)?;
+    if args.output.is_some() {
+        check_output(&args)?;
+    }
+    if let Some(path) = &args.export_dust_map {
+        check_dust_export(&args, path)?;
+    }
     crate::interrupt::install();
     let stop = crate::interrupt::interrupted;
     let started = std::time::Instant::now();
@@ -375,6 +396,19 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
     let parallax = Parallax::prepare(&starless, &stars, &wcs, &options, &mut print_event, &stop)?;
     if let Some(directory) = &args.debug_layers {
         write_layers(directory, parallax.scene())?;
+    }
+    if let Some(path) = &args.export_dust_map {
+        let Some(dust) = parallax.dust() else {
+            bail!("too few stars show to map the dust; give one with --dust-map to export it");
+        };
+        let (width, height) = dust.size();
+        dust.to_map(width, height)
+            .save(path)
+            .map_err(anyhow::Error::msg)?;
+        println!("wrote the dust map to {}", path.display());
+    }
+    if args.output.is_none() {
+        return Ok(());
     }
     let sink = open_sink(&args, parallax.video_settings())?;
     let rendering = std::time::Instant::now();
@@ -430,6 +464,48 @@ fn check_output(args: &ParallaxVideoArgs) -> Result<()> {
             bail!("ffmpeg did not run; install it, pass --ffmpeg, or use --encoder png")
         }
         EncoderArg::Auto => {}
+    }
+    Ok(())
+}
+
+/// Whether the dust map can be written to `path`: a format it writes, in a
+/// folder that exists, and neither an input nor the video.
+fn check_dust_export(args: &ParallaxVideoArgs, path: &Path) -> Result<()> {
+    let writable = seiza_image_io::Format::from_path(path).is_some_and(|format| format.can_save());
+    if !writable {
+        bail!(
+            "--export-dust-map writes PNG, TIFF, FITS or XISF; name it {}",
+            seiza_image_io::SAVE_EXTENSIONS
+        );
+    }
+    let canonical = |path: &Path| std::fs::canonicalize(path).ok();
+    for input in [
+        &args.image,
+        &args.starless,
+        &args.stars,
+        &args.dust_map,
+        &args.output,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if canonical(input).is_some_and(|input| Some(input) == canonical(path)) {
+            bail!(
+                "--export-dust-map {} is also {}; the map would overwrite it",
+                path.display(),
+                input.display()
+            );
+        }
+    }
+    let folder = match path.parent() {
+        Some(folder) if !folder.as_os_str().is_empty() => folder,
+        _ => Path::new("."),
+    };
+    if !folder.is_dir() {
+        bail!(
+            "{} is not a folder to write the dust map in",
+            folder.display()
+        );
     }
     Ok(())
 }
@@ -596,6 +672,7 @@ fn options(args: &ParallaxVideoArgs, file: Option<TourFile>) -> ParallaxOptions 
             keep_galaxies: args.keep_galaxies,
             dust: !args.no_dust,
             dust_opacity: args.dust_opacity,
+            dust_map: None,
         },
         video: VideoOptions {
             focus: args.focus,
@@ -653,11 +730,14 @@ fn split(args: &ParallaxVideoArgs) -> Result<(Rgb32FImage, Rgb32FImage, PathBuf)
     println!("splitting {} with StarXTerminator", image_path.display());
     let (starless, stars) = star_x_terminator(&image)?;
     if args.keep_split {
-        let stem = output(args).file_stem().map_or_else(
+        // Beside the video, or beside the image when only the dust map is
+        // written.
+        let base = args.output.as_deref().unwrap_or(image_path);
+        let stem = base.file_stem().map_or_else(
             || "parallax".into(),
             |stem| stem.to_string_lossy().into_owned(),
         );
-        let directory = output(args).parent().unwrap_or(Path::new("."));
+        let directory = base.parent().unwrap_or(Path::new("."));
         for (suffix, split) in [("starless", &starless), ("stars", &stars)] {
             let path = directory.join(format!("{stem}-{suffix}.png"));
             image::DynamicImage::ImageRgb32F(split.clone())
@@ -790,7 +870,7 @@ fn write_layers(directory: &Path, scene: &Scene) -> Result<()> {
     // Every sprite at its place, tinted by distance: red nearer than the
     // background, green near it, blue beyond.
     let mut sprites = LightImage::new(scene.width(), scene.height());
-    for sprite in &scene.sprites {
+    for sprite in scene.sprites.iter() {
         let ratio = sprite.distance_pc / scene.background_distance_pc;
         let tint = if ratio < 0.8 {
             [1.0, 0.25, 0.25]
@@ -811,16 +891,14 @@ fn write_layers(directory: &Path, scene: &Scene) -> Result<()> {
         }
     }
     save("sprites.png", &sprites)?;
-    // The dust's transmission, white where clear.
+    // The dust at its own cells, white where opaque, as --export-dust-map
+    // writes it.
     if let Some(dust) = &scene.dust {
         let (cells, columns) = dust.cells();
-        let rows = cells.len() / columns;
         let path = directory.join("dust.png");
-        image::GrayImage::from_fn(columns as u32, rows as u32, |x, y| {
-            image::Luma([(255.0 * cells[y as usize * columns + x as usize]).round() as u8])
-        })
-        .save(&path)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+        dust.to_map(columns, cells.len() / columns)
+            .save(&path)
+            .map_err(anyhow::Error::msg)?;
         println!("wrote {}", path.display());
     }
     Ok(())
@@ -830,7 +908,7 @@ fn write_layers(directory: &Path, scene: &Scene) -> Result<()> {
 fn output(args: &ParallaxVideoArgs) -> &Path {
     args.output
         .as_deref()
-        .expect("required unless planning a tour")
+        .expect("required unless planning a tour or only writing the dust map")
 }
 
 fn open_sink(args: &ParallaxVideoArgs, settings: VideoSettings) -> Result<Box<dyn FrameSink>> {

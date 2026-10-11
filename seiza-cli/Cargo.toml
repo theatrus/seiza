@@ -24,6 +24,7 @@ seiza-background.workspace = true
 seiza-deconvolution.workspace = true
 seiza-download.workspace = true
 seiza-fits.workspace = true
+seiza-image-io.workspace = true
 seiza-xisf.workspace = true
 seiza-satellites.workspace = true
 rayon.workspace = true

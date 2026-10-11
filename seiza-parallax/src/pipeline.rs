@@ -7,6 +7,7 @@
 //! frame in turn to a [`FrameSink`]: one of this crate's encoders, or the
 //! caller's own, such as a platform video encoder.
 
+use crate::dust::{Dust, DustMap};
 use crate::field::{self, FieldSource};
 use crate::lift::Extent;
 use crate::overlay::{self, CustomLabel, Mark, Overlay};
@@ -251,6 +252,11 @@ pub struct SceneOptions {
     /// The light the dust lets through is the share of stars seen to this
     /// power.
     pub dust_opacity: f32,
+    /// Dust drawn as a map, in place of the one mapped from the stars;
+    /// [`SceneOptions::dust`] must be on. Where it is opaque, the stars seen
+    /// through it fly in front of the background, which the counted map
+    /// never does.
+    pub dust_map: Option<DustMap>,
 }
 
 impl Default for SceneOptions {
@@ -270,6 +276,7 @@ impl Default for SceneOptions {
             keep_galaxies: false,
             dust: true,
             dust_opacity: 3.0,
+            dust_map: None,
         }
     }
 }
@@ -281,6 +288,12 @@ impl SceneOptions {
         let distance = |distance: f64| distance.is_finite() && distance > 0.0;
         if !(self.dust_opacity.is_finite() && self.dust_opacity >= 0.0) {
             return invalid("the dust opacity must be at least 0");
+        }
+        if let Some(map) = &self.dust_map {
+            if !self.dust {
+                return invalid("a dust map needs the dust on");
+            }
+            map.check().map_err(Error::Invalid)?;
         }
         if self.distance_pc.is_some_and(|parsecs| !distance(parsecs))
             || self
@@ -588,6 +601,48 @@ pub struct StopFit {
     pub pan: (f64, f64),
 }
 
+/// Tell what `scene`'s dust is and does, and note it in `summary`.
+fn describe_dust(scene: &Scene, summary: &mut Summary, report: &mut dyn FnMut(Event)) {
+    let Some(dust) = &scene.dust else {
+        return;
+    };
+    let (cells, _) = dust.cells();
+    let mut sorted = cells.to_vec();
+    sorted.sort_by(f32::total_cmp);
+    let (middle, thickest) = (sorted[sorted.len() / 2], sorted[0]);
+    let opaque = sorted.partition_point(|&transmission| transmission <= crate::dust::OPAQUE);
+    summary.dust_transmission = Some((middle, thickest));
+    summary.dust_given = dust.given();
+    summary.stars_in_front_of_dust = scene.stars_brought_forward();
+    if dust.given() {
+        report(Event::Note(&format!(
+            "dust from the given map: median transmission {:.0}%, thickest {:.0}%, opaque \
+             over {:.0}% of the image; {} star{} seen where it is opaque fl{} in front of \
+             the nebula",
+            100.0 * middle,
+            100.0 * thickest,
+            100.0 * opaque as f32 / sorted.len() as f32,
+            summary.stars_in_front_of_dust,
+            if summary.stars_in_front_of_dust == 1 {
+                ""
+            } else {
+                "s"
+            },
+            if summary.stars_in_front_of_dust == 1 {
+                "ies"
+            } else {
+                "y"
+            },
+        )));
+    } else {
+        report(Event::Note(&format!(
+            "dust from the star counts: median transmission {:.0}%, thickest {:.0}%",
+            100.0 * middle,
+            100.0 * thickest,
+        )));
+    }
+}
+
 /// What preparing a video found, and how its camera was fitted.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Summary {
@@ -613,6 +668,11 @@ pub struct Summary {
     /// The dust map's median and least transmission, 0 to 1, if one was
     /// made.
     pub dust_transmission: Option<(f32, f32)>,
+    /// Whether the dust came from a given map rather than the star counts.
+    pub dust_given: bool,
+    /// Stars seen where a given map is opaque, and so brought in front of
+    /// the background.
+    pub stars_in_front_of_dust: usize,
     /// Catalogued objects in the field to label.
     pub labelled_objects: usize,
     /// How the camera was fitted.
@@ -622,6 +682,9 @@ pub struct Summary {
 /// What preparation made once, shared by every video of the scene.
 struct Prepared {
     scene: Scene,
+    /// The dust mapped from the star counts, kept when a given map takes
+    /// its place so that it can come back.
+    counted_dust: Option<Arc<Dust>>,
     wcs: Wcs,
     image_size: (usize, usize),
     /// Galaxies lifted onto the far field.
@@ -725,6 +788,13 @@ impl Parallax {
         }
         let (width, height) = (stars.width() as usize, stars.height() as usize);
         check_places(&video, (width, height))?;
+        // A map of the wrong shape is refused before the slow work.
+        let given_dust = scene_options
+            .dust_map
+            .as_ref()
+            .map(|map| Dust::from_map(map, width, height).map(Arc::new))
+            .transpose()
+            .map_err(Error::Invalid)?;
         let scale = wcs.scale_arcsec_per_px();
         if !(scale.is_finite() && scale > 0.0) {
             return Err(Error::Invalid(format!(
@@ -922,9 +992,8 @@ impl Parallax {
                 distance_pc: sprite.distance_pc,
             })
             .collect();
-        scene
-            .sprites
-            .extend(galaxies.into_iter().map(|(_, _, sprite)| sprite));
+        Arc::make_mut(&mut scene.sprites).extend(galaxies.into_iter().map(|(_, _, sprite)| sprite));
+        let mut counted_dust = None;
         if scene_options.dust {
             // The stars seen through the dust: all but the matched ones in
             // front of it. The unmatched ones count however near the dust
@@ -934,28 +1003,21 @@ impl Parallax {
                 .filter(|star| star.distance_pc.is_none_or(|pc| pc > distance))
                 .map(|star| (star.x, star.y))
                 .collect();
-            scene.dust =
-                crate::Dust::from_star_counts(&behind, width, height, scene_options.dust_opacity)
-                    .map(|dust| dust.with_darkness(&starless, &behind));
-            match &scene.dust {
-                Some(dust) => {
-                    let (cells, _) = dust.cells();
-                    let mut sorted = cells.to_vec();
-                    sorted.sort_by(f32::total_cmp);
-                    let (middle, thickest) = (sorted[sorted.len() / 2], sorted[0]);
-                    summary.dust_transmission = Some((middle, thickest));
-                    report(Event::Note(&format!(
-                        "dust mapped from {} stars behind it and the nebula's dark places: \
-                         median transmission {:.0}%, thickest {:.0}%",
-                        behind.len(),
-                        100.0 * middle,
-                        100.0 * thickest
-                    )));
-                }
-                None => report(Event::Note(
+            counted_dust =
+                Dust::from_star_counts(&behind, width, height, scene_options.dust_opacity)
+                    .map(|dust| Arc::new(dust.with_darkness(&starless, &behind)));
+            match (&counted_dust, &given_dust) {
+                (Some(_), None) => report(Event::Note(&format!(
+                    "dust mapped from {} stars behind it and the nebula's dark places",
+                    behind.len()
+                ))),
+                (None, None) => report(Event::Note(
                     "too few stars to map the dust; nothing dims behind it",
                 )),
+                (_, Some(_)) => {}
             }
+            scene.dust = given_dust.or_else(|| counted_dust.clone());
+            describe_dust(&scene, &mut summary, report);
         }
         if scene_options.max_stars.is_some() {
             report(Event::Note(&format!(
@@ -970,6 +1032,7 @@ impl Parallax {
         halt()?;
         let prepared = Arc::new(Prepared {
             scene,
+            counted_dust,
             wcs: wcs.clone(),
             image_size: (width, height),
             lifted,
@@ -994,6 +1057,60 @@ impl Parallax {
         stop: &dyn Fn() -> bool,
     ) -> Result<Self, Error> {
         Self::film(Arc::clone(&self.prepared), video, report, stop)
+    }
+
+    /// The same scene and camera with the dust `map` draws, or the dust
+    /// mapped from the star counts again if `None`: for trying a map
+    /// painted over this one. Only the dust changes; the planes and sprites
+    /// are shared, and this video is left as it was. A map gives dust even
+    /// to a video prepared without it; `None` then leaves it without.
+    pub fn with_dust_map(
+        &self,
+        map: Option<&DustMap>,
+        report: &mut dyn FnMut(Event),
+        stop: &dyn Fn() -> bool,
+    ) -> Result<Self, Error> {
+        let prepared = &self.prepared;
+        let (width, height) = prepared.image_size;
+        let dust = match map {
+            Some(map) => Some(Arc::new(
+                Dust::from_map(map, width, height).map_err(Error::Invalid)?,
+            )),
+            None => prepared.counted_dust.clone(),
+        };
+        let mut scene = prepared.scene.clone();
+        scene.dust = dust;
+        let mut summary = prepared.summary.clone();
+        summary.dust_transmission = None;
+        summary.dust_given = false;
+        summary.stars_in_front_of_dust = 0;
+        describe_dust(&scene, &mut summary, report);
+        let catalog_marks = OnceLock::new();
+        if let Some(marks) = prepared.catalog_marks.get() {
+            let _ = catalog_marks.set(Arc::clone(marks));
+        }
+        let prepared = Arc::new(Prepared {
+            scene,
+            counted_dust: prepared.counted_dust.clone(),
+            wcs: prepared.wcs.clone(),
+            image_size: prepared.image_size,
+            lifted: prepared.lifted.clone(),
+            objects: prepared.objects.clone(),
+            summary,
+            catalog_marks,
+        });
+        Self::film(prepared, &self.video, report, stop)
+    }
+
+    /// The dust the video dims and brings stars forward by, if any.
+    pub fn dust(&self) -> Option<&Dust> {
+        self.prepared.scene.dust.as_deref()
+    }
+
+    /// The dust mapped from the star counts, whether or not a given map
+    /// took its place: `None` when the dust is off or too few stars show.
+    pub fn counted_dust(&self) -> Option<&Dust> {
+        self.prepared.counted_dust.as_deref()
     }
 
     /// Film `prepared` as `video` asks: plan any automatic tour, fit the
@@ -1709,6 +1826,87 @@ mod tests {
                 ..VideoOptions::default()
             },
         }
+    }
+
+    /// A `width` × `height` dust map of one opacity.
+    fn even_map(width: usize, height: usize, opacity: f32) -> DustMap {
+        DustMap {
+            width,
+            height,
+            opacity: vec![opacity; width * height],
+        }
+    }
+
+    #[test]
+    fn a_given_dust_map_brings_stars_forward_and_another_can_take_its_place() {
+        let directory = tempfile::tempdir().unwrap();
+        let (starless, stars, wcs, distances) = field(directory.path());
+        let mut options = options(distances, directory.path());
+        // Opaque everywhere, at a quarter of the image's size.
+        options.scene.dust_map = Some(even_map(80, 60, 1.0));
+        let mut notes = Vec::new();
+        let opaque = Parallax::prepare(
+            &starless,
+            &stars,
+            &wcs,
+            &options,
+            &mut |event| {
+                if let Event::Note(note) = event {
+                    notes.push(note.to_string());
+                }
+            },
+            &|| false,
+        )
+        .unwrap();
+        let summary = opaque.summary();
+        assert!(summary.dust_given);
+        // The two stars behind the nebula at 400 pc, at 900 and 2500 pc.
+        assert_eq!(summary.stars_in_front_of_dust, 2, "{notes:?}");
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("dust from the given map")),
+            "{notes:?}"
+        );
+        // Four stars are too few to count dust from.
+        assert!(opaque.counted_dust().is_none());
+        let before = opaque.frame(2);
+        // A clear map brings none forward, and the first video is untouched.
+        let clear = opaque
+            .with_dust_map(Some(&even_map(320, 240, 0.0)), &mut |_| {}, &|| false)
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &opaque.prepared.scene.background,
+            &clear.prepared.scene.background
+        ));
+        assert_eq!(clear.summary().stars_in_front_of_dust, 0);
+        assert!(clear.summary().dust_given);
+        assert_ne!(clear.frame(2), before);
+        assert_eq!(opaque.frame(2), before);
+        assert_eq!(opaque.summary().stars_in_front_of_dust, 2);
+        // No map, and none counted: no dust at all.
+        let none = opaque.with_dust_map(None, &mut |_| {}, &|| false).unwrap();
+        assert!(none.dust().is_none());
+        assert_eq!(none.summary().dust_transmission, None);
+        // The map in use, written out, is the one given.
+        let map = clear.dust().unwrap().to_map(32, 24);
+        assert!(map.opacity.iter().all(|&opacity| opacity == 0.0));
+    }
+
+    #[test]
+    fn a_dust_map_of_the_wrong_shape_or_without_dust_is_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let (starless, stars, wcs, distances) = field(directory.path());
+        let mut options = options(distances, directory.path());
+        options.scene.dust_map = Some(even_map(100, 100, 0.5));
+        let error = Parallax::prepare(&starless, &stars, &wcs, &options, &mut |_| {}, &|| false)
+            .unwrap_err();
+        assert!(error.to_string().contains("100×100"), "{error}");
+        options.scene.dust_map = Some(even_map(32, 24, 0.5));
+        options.scene.dust = false;
+        let error = Parallax::prepare(&starless, &stars, &wcs, &options, &mut |_| {}, &|| false)
+            .unwrap_err();
+        assert!(error.to_string().contains("needs the dust on"), "{error}");
     }
 
     #[test]

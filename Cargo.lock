@@ -2506,6 +2506,7 @@ dependencies = [
  "seiza-calibration",
  "seiza-deconvolution",
  "seiza-fits",
+ "seiza-image-io",
  "seiza-parallax",
  "seiza-sources",
  "seiza-stacking",
@@ -2551,6 +2552,7 @@ dependencies = [
  "seiza-download",
  "seiza-draw",
  "seiza-fits",
+ "seiza-image-io",
  "seiza-parallax",
  "seiza-satellites",
  "seiza-sources",
@@ -2620,6 +2622,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "seiza-image-io"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "seiza",
+ "seiza-fits",
+ "seiza-xisf",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "seiza-imgproc"
 version = "0.3.2"
 dependencies = [
@@ -2638,6 +2652,7 @@ dependencies = [
  "rayon",
  "seiza",
  "seiza-draw",
+ "seiza-image-io",
  "seiza-sources",
  "seiza-stars",
  "tempfile",

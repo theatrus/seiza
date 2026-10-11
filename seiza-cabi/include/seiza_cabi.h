@@ -185,6 +185,18 @@
 #define SEIZA_PIXEL_FORMAT_BGRA8 2
 
 /*
+ [`seiza_parallax_dust_map`] reads the dust the video uses: a given
+ map's, or the dust mapped from the star counts.
+ */
+#define SEIZA_DUST_MAP_IN_USE 0
+
+/*
+ [`seiza_parallax_dust_map`] reads the dust mapped from the star counts,
+ even while a given map takes its place.
+ */
+#define SEIZA_DUST_MAP_COUNTED 1
+
+/*
  An opaque fitted background model. Release it with
  [`seiza_background_model_free`]. Its diagnostics string is borrowed and
  remains valid until the model is freed.
@@ -216,8 +228,9 @@ typedef struct SeizaLiveStacker SeizaLiveStacker;
  An opaque prepared parallax video. Release it with
  [`seiza_parallax_free`]. Its frames may be drawn from several threads at
  once; do not free it while any call using it is running. Videos made
- from it by [`seiza_parallax_reconfigure_json`] share its prepared scene,
- which lives until the last of them is freed.
+ from it by [`seiza_parallax_reconfigure_json`] and
+ [`seiza_parallax_with_dust_map`] share its prepared scene, which lives
+ until the last of them is freed.
  */
 typedef struct SeizaParallax SeizaParallax;
 
@@ -2058,9 +2071,10 @@ char *seiza_rc_astro_process_file_json(const char *request_json,
  return it, released with [`seiza_parallax_free`], or null with
  `error_out` set.
 
- The request gives either `image` (a stretched PNG, JPEG or TIFF), which
- StarXTerminator splits through the `rc-astro` CLI, or `starless` and
- `stars` (the split, with the stars unscreened), plus `image` to solve
+ The request gives either `image` (a stretched PNG, JPEG, TIFF, FITS or
+ XISF), which StarXTerminator splits through the `rc-astro` CLI, or
+ `starless` and `stars` (the split, with the stars unscreened, in any of
+ those formats), plus `image` to solve
  when it differs from `stars`; `rcAstroExecutable` and `rcAstroHost`
  point at the `rc-astro` CLI and its host when they are not the
  defaults. Without `wcs` (`{crval, crpix, cd, sip}`
@@ -2073,7 +2087,11 @@ char *seiza_rc_astro_process_file_json(const char *request_json,
  default the camera's destination), `unmatchedDistanceParsecs`, `objects`, `objectDistances`,
  `starDistances`, `gaiaMaxMagnitude`, `gaiaCache`, `online`, `maxStars`,
  `smallStars` ("drop", "field"), `keepGalaxies`, `dust`, `dustOpacity`,
- `start` ("focus", "whole"), `dolly`, `truck`, `truckAngleDegrees`,
+ `dustMap` (an image, white where the dust is opaque, black where clear,
+ at any size of the image's shape, its format by its extension: PNG,
+ JPEG, TIFF, FITS or XISF; it takes the place of the dust mapped from the
+ star counts, and a star seen where it is opaque flies in front of the
+ nebula), `start` ("focus", "whole"), `dolly`, `truck`, `truckAngleDegrees`,
  `pan`, `zoom`, `zoomEnd`, `rotateDegrees` `[first, last]`, `easing`
  ("inOut", "linear"), `quality` ("standard", "high"), `growthLimit`,
  `fadeFrom`, `tour` (stops `[{focus, dolly, zoom, rotateDegrees, pan,
@@ -2155,7 +2173,8 @@ char *seiza_parallax_plan_tour_json(const char *request_json,
  clockwise, and a stop's `rotateDegrees` likewise. A field that would
  change the scene (the images, plate solution, catalogs, distances,
  `distanceFocus`, star placement, galaxies or dust) is refused: those
- need a new preparation. The camera's `focus` only moves the camera; the
+ need a new preparation, except a dust map, which
+ [`seiza_parallax_with_dust_map`] changes. The camera's `focus` only moves the camera; the
  nebula keeps the depth it was prepared at.
 
  Nothing of the scene is prepared again: the image is not reloaded,
@@ -2191,8 +2210,10 @@ SeizaParallax *seiza_parallax_reconfigure_json(const SeizaParallax *video,
 /*
  What preparing the video found, as JSON: its frame count, frame rate
  and size, the stars found and matched, the nebula's distance with how
- and where (`backgroundFocus`) it was found, galaxies lifted, the dust,
- objects labelled, the WCS used, and `fit`, how fitting the camera to the
+ and where (`backgroundFocus`) it was found, galaxies lifted, the dust
+ (`dustTransmission` `{median, thickest}`, `dustGiven` when a map gave
+ it, and `starsInFrontOfDust`, the stars it brought in front), objects
+ labelled, the WCS used, and `fit`, how fitting the camera to the
  image changed the framing asked for: `zoom`, `pan`, `lead` and `truck`
  for the single move and `stops[].zoom` and `stops[].pan` for a tour,
  each `{asked, used}`, and `inside`, false when some frames still show
@@ -2201,12 +2222,95 @@ SeizaParallax *seiza_parallax_reconfigure_json(const SeizaParallax *video,
 
  # Safety
 
- `video` must be a live pointer from [`seiza_parallax_prepare_json`] or
- [`seiza_parallax_reconfigure_json`].
+ `video` must be a live pointer from [`seiza_parallax_prepare_json`],
+ [`seiza_parallax_reconfigure_json`] or [`seiza_parallax_with_dust_map`].
  When non-null, `error_out` must point to writable storage for one
  pointer.
  */
 char *seiza_parallax_summary_json(const SeizaParallax *video, char **error_out);
+
+/*
+ Write `video`'s dust into `opacity` as a `width` × `height` map over the
+ whole image, row by row: 0 where the sky is clear to 1 where the dust is
+ opaque, the values [`seiza_parallax_with_dust_map`] takes back, so a
+ desktop app can show it and paint over it. `which` is
+ [`SEIZA_DUST_MAP_IN_USE`] or [`SEIZA_DUST_MAP_COUNTED`]. Returns 1 when
+ the map was written, 0 when the video has no such dust (the dust is off,
+ or too few stars show to count it), and -1 with `error_out` set on
+ failure. Any size works; the image's own shape keeps the map square to
+ it.
+
+ # Safety
+
+ `video` must be a live pointer from [`seiza_parallax_prepare_json`],
+ [`seiza_parallax_reconfigure_json`] or [`seiza_parallax_with_dust_map`].
+ `opacity` must point to `length` writable floats. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+int32_t seiza_parallax_dust_map(const SeizaParallax *video,
+                                uint32_t which,
+                                uint32_t width,
+                                uint32_t height,
+                                float *opacity,
+                                size_t length,
+                                char **error_out);
+
+/*
+ A new video of `video`'s scene and camera whose dust is the `width` ×
+ `height` map `opacity`, row by row, 0 where the sky is clear to 1 where
+ the dust is opaque, spanning the whole image at any size of its shape;
+ or, when `opacity` is null, the dust mapped from the star counts again.
+ What lies behind the nebula dims by the map, and a star seen where it
+ is opaque flies in front of the nebula. This is for painting: draw over
+ [`seiza_parallax_dust_map`]'s map, pass it here, and draw frames from
+ the new video. A map gives dust even to a video prepared without it.
+
+ Only the dust changes. The planes and stars are shared, not copied, so
+ this takes about as long as fitting the camera again
+ ([`seiza_parallax_reconfigure_json`]). Ownership is as there: free each
+ video with [`seiza_parallax_free`], in any order; `video` is not changed
+ and may keep drawing frames meanwhile. `cancel` stops the fit; `events`
+ (nullable) hears each step on the calling thread, with `context` passed
+ through.
+
+ # Safety
+
+ `video` must be a live pointer from [`seiza_parallax_prepare_json`],
+ [`seiza_parallax_reconfigure_json`] or this function, kept alive until
+ this call returns. `opacity` must be null or point to `width` × `height`
+ readable floats. `cancel` must be null or a live [`SeizaCancelSignal`]
+ retained until this call returns. When non-null, `error_out` must point
+ to writable storage for one pointer.
+ */
+SeizaParallax *seiza_parallax_with_dust_map(const SeizaParallax *video,
+                                            const float *opacity,
+                                            uint32_t width,
+                                            uint32_t height,
+                                            const SeizaCancelSignal *cancel,
+                                            SeizaParallaxEventCallback events,
+                                            void *context,
+                                            char **error_out);
+
+/*
+ Write `video`'s dust, white (1) where opaque, as `seiza parallax-video
+ --export-dust-map` does, in the format the path's extension names: a
+ 16-bit grayscale PNG or TIFF (`.png`, `.tif`), or a 32-bit float FITS or
+ XISF (`.fits`, `.xisf`). `request_json` is `{"path": ..., "width": ...,
+ "height": ..., "counted": false}`, the size the image's when absent, and
+ `counted` true for the dust mapped from the star counts rather than the
+ dust in use. Returns 1 when written, 0 when
+ the video has no such dust, and -1 with `error_out` set on failure.
+
+ # Safety
+
+ `video` must be a live pointer from [`seiza_parallax_prepare_json`],
+ [`seiza_parallax_reconfigure_json`] or [`seiza_parallax_with_dust_map`].
+ `request_json` must be a NUL-terminated UTF-8 string. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+int32_t seiza_parallax_write_dust_map_json(const SeizaParallax *video,
+                                           const char *request_json,
+                                           char **error_out);
 
 /*
  Draw frame `index` into the caller's `buffer` of `buffer_length` bytes,
@@ -2218,8 +2322,8 @@ char *seiza_parallax_summary_json(const SeizaParallax *video, char **error_out);
 
  # Safety
 
- `video` must be a live pointer from [`seiza_parallax_prepare_json`] or
- [`seiza_parallax_reconfigure_json`].
+ `video` must be a live pointer from [`seiza_parallax_prepare_json`],
+ [`seiza_parallax_reconfigure_json`] or [`seiza_parallax_with_dust_map`].
  `buffer` must point to `buffer_length` writable bytes. When non-null,
  `error_out` must point to writable storage for one pointer.
  */
@@ -2242,8 +2346,8 @@ bool seiza_parallax_render_frame(const SeizaParallax *video,
 
  # Safety
 
- `video` must be a live pointer from [`seiza_parallax_prepare_json`] or
- [`seiza_parallax_reconfigure_json`].
+ `video` must be a live pointer from [`seiza_parallax_prepare_json`],
+ [`seiza_parallax_reconfigure_json`] or [`seiza_parallax_with_dust_map`].
  `cancel` must be null or a live [`SeizaCancelSignal`] retained until
  this call returns. When non-null, `error_out` must point to writable
  storage for one pointer.
@@ -2266,8 +2370,8 @@ int32_t seiza_parallax_render_frames(const SeizaParallax *video,
 
  # Safety
 
- `video` must be a live pointer from [`seiza_parallax_prepare_json`] or
- [`seiza_parallax_reconfigure_json`].
+ `video` must be a live pointer from [`seiza_parallax_prepare_json`],
+ [`seiza_parallax_reconfigure_json`] or [`seiza_parallax_with_dust_map`].
  `request_json` must be a NUL-terminated UTF-8 string. `cancel` must be
  null or a live [`SeizaCancelSignal`] retained until this call returns.
  When non-null, `error_out` must point to writable storage for one
@@ -2285,9 +2389,9 @@ int32_t seiza_parallax_write_video_json(const SeizaParallax *video,
 
  # Safety
 
- `video` must be null or a pointer from [`seiza_parallax_prepare_json`]
- or [`seiza_parallax_reconfigure_json`] that has not already been freed,
- with no call using it still running.
+ `video` must be null or a pointer from [`seiza_parallax_prepare_json`],
+ [`seiza_parallax_reconfigure_json`] or [`seiza_parallax_with_dust_map`]
+ that has not already been freed, with no call using it still running.
  */
 void seiza_parallax_free(SeizaParallax *video);
 

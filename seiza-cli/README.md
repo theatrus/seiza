@@ -371,8 +371,8 @@ seiza parallax-video m45.tif --starless m45-starless.tif --stars m45-stars.tif \
 The starless and stars images are the stretched image split by
 StarXTerminator, with "unscreen" so the stars screen back over the starless
 image. Given only the stretched image, Seiza runs StarXTerminator's `rc-astro`
-CLI itself when it is installed and licensed. Inputs can be PNG, JPEG or TIFF,
-but 16-bit TIFF or PNG gives the best video: at 8 bits a bright star's core
+CLI itself when it is installed and licensed. Inputs can be PNG, JPEG, TIFF,
+FITS or XISF, but 16-bit or float images give the best video: at 8 bits a bright star's core
 flattens, which can misplace it so it loses its distance, and smooth nebula
 bands as the camera nears it. Seiza warns when an image has only 8 bits a
 channel.
@@ -448,8 +448,35 @@ starless image darker than its surroundings and short of stars marks a
 globule thick enough to black out everything; whatever lies behind the
 nebula dims as the camera's move slides it behind thicker dust than it was
 photographed through. `--dust-opacity` (default 3) darkens or lightens the
-dust, and `--no-dust` turns this off. `--debug-layers DIR` writes the background, the leftover star
-light, and every cut-out star tinted by distance, for checking a result.
+dust, and `--no-dust` turns this off.
+
+`--dust-map FILE` gives the dust as an image to use in place of the counted
+map: white (1) where the dust is opaque, black (0) where the sky is clear,
+grays between, at any size with the image's shape, as PNG, JPEG, TIFF, FITS
+or XISF by the file's extension. A given map is taken at its word: where it
+lets through 5% of the light or less, about 96% white, nothing behind shows,
+so a star seen there flies in front of the nebula, among the field's
+foreground stars. The counted map never moves a star; its finest cells see
+small dark patches that are not dust.
+
+`--export-dust-map FILE` writes the dust the video uses, the size of the
+image and in the same convention, to paint over in an image editor and give
+back with `--dust-map`: a 16-bit grayscale PNG or TIFF (`.png`, `.tif`) or a
+32-bit float FITS or XISF (`.fits`, `.xisf`). Read back unchanged, it dims
+the same; as a given map, its opaque places also bring stars forward, so
+paint out any specks the counted map has in clear sky. Without `-o`, the
+command prepares the scene, writes the map and stops:
+
+```
+seiza parallax-video m45.tif --starless m45-starless.tif --stars m45-stars.tif \
+  --export-dust-map m45-dust.xisf
+seiza parallax-video m45.tif --starless m45-starless.tif --stars m45-stars.tif \
+  --dust-map m45-dust-painted.xisf --output m45.mp4
+```
+
+`--debug-layers DIR` writes the background, the leftover star light, every
+cut-out star tinted by distance, and the dust (white where opaque), for
+checking a result.
 
 `--overlay` labels the catalogued objects in the field the way Seiza's image
 overlays do, with the same colours, names, outlines and ranking. Each label

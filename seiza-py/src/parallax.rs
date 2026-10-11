@@ -128,8 +128,9 @@ pub(crate) fn plan_parallax_tour<'py>(
 /// dust mapped, and a camera move fitted to the image.
 ///
 /// `starless` and `stars` are the stretched image split into its starless
-/// image and unscreened stars, each a path to a PNG, JPEG or TIFF or a
-/// numpy array of shape (height, width, 3), float32 from 0 to 1 or uint8;
+/// image and unscreened stars, each a path to a PNG, JPEG, TIFF, FITS or
+/// XISF, or a numpy array of shape (height, width, 3), float32 from 0 to 1
+/// or uint8;
 /// `wcs` is the image's plate solution (`seiza.solve_blind(...).wcs`).
 /// The other keyword arguments are `seiza parallax-video`'s options, where
 /// a pair is a tuple or a list:
@@ -196,12 +197,9 @@ impl ImageArgument {
     fn pixels(self) -> PyResult<image::Rgb32FImage> {
         match self {
             Self::Pixels(pixels) => Ok(pixels),
-            Self::Path(path) => Ok(seiza::raster::open_oriented(&path)
-                .map_err(|error| {
-                    PyValueError::new_err(format!("failed to open {}: {error}", path.display()))
-                })?
-                .pixels
-                .to_rgb32f()),
+            Self::Path(path) => Ok(seiza_image_io::open(&path)
+                .map_err(|error| PyValueError::new_err(error.to_string()))?
+                .to_rgb()),
         }
     }
 }
