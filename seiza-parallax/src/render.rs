@@ -370,6 +370,20 @@ impl Shot {
         ]
     }
 
+    /// Whether every frame's view keeps every layer's edge out of sight, as
+    /// the fit aims for. A fit can fall short, such as for a tour stop
+    /// too near the image's edge to turn there.
+    pub fn stays_inside(&self, scene: &Scene) -> bool {
+        self.inside_throughout(scene, &self.guarded_depths(scene))
+    }
+
+    /// Whether every frame's view lies inside the image at `depths`.
+    fn inside_throughout(&self, scene: &Scene, depths: &[f64]) -> bool {
+        (0..self.frames)
+            .into_par_iter()
+            .all(|frame| self.inside(scene, &self.view(scene, frame), depths))
+    }
+
     /// Whether every corner of `view` lies inside the image at `depths`. A
     /// whole-image start puts the corners on the image's edges, so rounding
     /// a millionth of a pixel past them still counts as inside.
@@ -562,11 +576,7 @@ impl Shot {
     /// The fit itself, every check failing once `halted` answers true.
     fn fit(&self, scene: &Scene, halted: &dyn Fn() -> bool) -> (Self, f64) {
         let depths = self.guarded_depths(scene);
-        let fits = |shot: &Self| {
-            !halted()
-                && (0..shot.frames)
-                    .all(|frame| shot.inside(scene, &shot.view(scene, frame), &depths))
-        };
+        let fits = |shot: &Self| !halted() && shot.inside_throughout(scene, &depths);
         // The largest factor in [0, 1] the shot `make` builds still fits at.
         let largest = |make: &dyn Fn(f64) -> Self| -> f64 {
             if fits(&make(1.0)) {
@@ -626,6 +636,25 @@ impl Shot {
             let zoomed = |share: f64| self.zoom_stops(scene, &depths, panned(share), 1.5, halted);
             let share = if zoomed(1.0).is_some() {
                 1.0
+            } else if zoomed(0.0).is_none() {
+                // Even without turning some stop needs more than half
+                // again, which the pan is not to blame for: the whole tour
+                // zooms in together, keeping what pan fits at that zoom.
+                let zoom = least_zoom(&|zoom| Self {
+                    zoom,
+                    ..panned(0.0)
+                });
+                let share = largest(&|share| Self {
+                    zoom,
+                    ..panned(share)
+                });
+                return (
+                    Self {
+                        zoom,
+                        ..panned(share)
+                    },
+                    share,
+                );
             } else {
                 let (mut low, mut high) = (0.0, 1.0);
                 for _ in 0..20 {
@@ -664,11 +693,10 @@ impl Shot {
             truck: (0.0, 0.0),
             ..self.clone()
         };
-        let zoom = if self.rotation != (0.0, 0.0) {
-            least_zoom(&straight)
-        } else {
-            self.zoom
-        };
+        // A whole-image opening whose focus lies near an edge also ends on
+        // a view past the edge unless zoomed; the search keeps the shot's
+        // own zoom when it fits.
+        let zoom = least_zoom(&straight);
         // Then the sideways travel, then turning, then the truck: each
         // takes what room the ones before it leave.
         let lead = largest(&|factor| Self {
@@ -722,10 +750,11 @@ impl Shot {
                 return None;
             }
             let mut bump = vec![false; shot.tour.len()];
-            for frame in 0..shot.frames {
-                if shot.inside(scene, &shot.view(scene, frame), depths) {
-                    continue;
-                }
+            let outside: Vec<usize> = (0..shot.frames)
+                .into_par_iter()
+                .filter(|&frame| !shot.inside(scene, &shot.view(scene, frame), depths))
+                .collect();
+            for frame in outside {
                 let now = shot.progress(frame) * total;
                 let next = times
                     .iter()
@@ -924,19 +953,27 @@ fn tour_path(tour: &[Stop], times: &[(f64, f64)], glide: f64, looped: bool, now:
     let states: Vec<[f64; 6]> = tour.iter().map(stop_state).collect();
     // A looped tour joins its last stop to its first, which shows the same
     // view turned by whole turns (less the spins, which tour_spin adds).
-    let join = looped && last >= 2;
+    let join = looped && last >= 1;
     // The pace through each stop, per second: Catmull-Rom's, from the
     // stops either side (or one side at the ends, or across the join).
     let through = |index: usize| -> [f64; 6] {
+        // Stops with no time between them (a zero travel, a cut) give no
+        // pace rather than an endless one.
         if join && (index == 0 || index == last) {
-            let span = (total - times[last - 1].1 + times[1].0).max(1e-9);
+            let span = total - times[last - 1].1 + times[1].0;
+            if span < 1e-6 {
+                return [0.0; 6];
+            }
             return std::array::from_fn(|k| {
                 let before = states[last - 1][k] - (states[last][k] - states[0][k]);
                 (states[1][k] - before) / span
             });
         }
         let (before, after) = (index.saturating_sub(1), (index + 1).min(last));
-        let span = (times[after].0 - times[before].1).max(1e-9);
+        let span = times[after].0 - times[before].1;
+        if span < 1e-6 {
+            return [0.0; 6];
+        }
         std::array::from_fn(|k| (states[after][k] - states[before][k]) / span)
     };
     // No turning or panning on the way through a view near the whole
@@ -995,10 +1032,13 @@ fn tour_path(tour: &[Stop], times: &[(f64, f64)], glide: f64, looped: bool, now:
         if stop.spin != 0.0 && joined.is_none() {
             drift = [0.0; 6];
         }
+        // The push in, eased in and out over the hold as a spin is, so the
+        // camera neither backs off before a short hold nor ends a final
+        // drift still flying.
         let push = if joined.is_some() {
             0.0
         } else {
-            (1.0 - stop.push.clamp(0.0, 0.95)).ln() / hold
+            (1.0 - stop.push.clamp(0.0, 0.95)).ln()
         };
         // An unlooped tour's last hold slows to rest, covering half the way
         // a steady drift would.
@@ -1017,12 +1057,10 @@ fn tour_path(tour: &[Stop], times: &[(f64, f64)], glide: f64, looped: bool, now:
         let start: [f64; 6] =
             std::array::from_fn(|k| states[index][k] - drift[k] * covered * before);
         let mut end: [f64; 6] = std::array::from_fn(|k| start[k] + drift[k] * covered);
-        end[2] += push * hold;
-        let mut rate = drift;
-        rate[2] += push;
+        end[2] += push;
         reach.push(start);
         leave.push(end);
-        pace.push(rate);
+        pace.push(drift);
         drifts.push(drift);
         pushes.push(push);
     }
@@ -1041,7 +1079,9 @@ fn tour_path(tour: &[Stop], times: &[(f64, f64)], glide: f64, looped: bool, now:
                 };
                 let mut state: [f64; 6] =
                     std::array::from_fn(|k| reach[index][k] + drifts[index][k] * moved);
-                state[2] += pushes[index] * held;
+                if hold > 0.0 {
+                    state[2] += pushes[index] * spin_share(held, hold);
+                }
                 return state;
             }
             // On the way here from the stop before.
@@ -1067,9 +1107,12 @@ fn tour_path(tour: &[Stop], times: &[(f64, f64)], glide: f64, looped: bool, now:
                     s.powi(3) - s * s,
                 )
             };
+            // The turn and pan blend late, but their speeds at either end
+            // stay the stops' own, so they never jerk.
             let (start, end) = (pace[index - 1], pace[index]);
+            let (_, h10, _, h11) = hermite(s);
             return std::array::from_fn(|k| {
-                let (h00, h10, h01, h11) = hermite(if k >= 4 { late } else { s });
+                let (h00, _, h01, _) = hermite(if k >= 4 { late } else { s });
                 h00 * leave[index - 1][k]
                     + h10 * span * start[k]
                     + h01 * reach[index][k]
@@ -1949,6 +1992,27 @@ mod tests {
     }
 
     #[test]
+    fn a_whole_start_toward_an_edge_zooms_in_until_its_last_frame_fits() {
+        // At dolly 0.4 the last view is 0.6 of the whole one, centred on a
+        // focus 60 pixels from the edge: past it unless zoomed.
+        let scene = scene_with(&[]);
+        let shot = Shot {
+            focus: (60.0, 150.0),
+            dolly: 0.4,
+            truck: (0.0, 0.0),
+            start: Start::Whole,
+            width: 200,
+            height: 150,
+            frames: 20,
+            ..Shot::default()
+        };
+        assert!(!shot.stays_inside(&scene));
+        let (fitted, _) = shot.fitted(&scene);
+        assert!(fitted.stays_inside(&scene));
+        assert!(fitted.zoom > 1.0);
+    }
+
+    #[test]
     fn a_whole_start_shows_the_image_then_closes_on_the_focus() {
         let scene = scene_with(&[]);
         let shot = Shot {
@@ -2358,9 +2422,25 @@ mod tour_tests {
         let left = |seconds: f64| tour_state(&tour, 0.0, false, seconds / 8.0)[2].exp();
         assert!((left(2.0) - 0.4).abs() < 1e-9);
         assert!((left(6.0) - 0.2).abs() < 1e-9);
-        // Evenly on a log scale, so each second takes the same share.
-        let (a, b) = (left(3.0) / left(2.0), left(5.0) / left(4.0));
+        // Evenly on a log scale through the middle of the hold, each second
+        // taking the same share, easing in and out over the first and last.
+        let (a, b) = (left(4.0) / left(3.0), left(5.0) / left(4.0));
         assert!((a - b).abs() < 1e-9 && a < 1.0);
+        assert!(left(2.5) / left(2.0) > a);
+        // The camera never backs away, even flying in to a short hold.
+        let short = vec![
+            tour[0],
+            Stop {
+                hold: 0.5,
+                ..tour[1]
+            },
+        ];
+        let mut last = f64::INFINITY;
+        for step in 0..=70 {
+            let now = tour_state(&short, 0.0, false, step as f64 / 70.0)[2].exp();
+            assert!(now <= last + 1e-12, "step {step}: {now} after {last}");
+            last = now;
+        }
     }
 
     #[test]
@@ -2433,6 +2513,114 @@ mod tour_tests {
             assert!(now <= last + 1e-9);
             last = now;
         }
+    }
+
+    #[test]
+    fn turning_and_panning_keep_their_pace_through_a_stop_passed_by() {
+        // A stop not held between two legs in: the turn arrives and leaves
+        // at the same pace.
+        let tour = vec![
+            Stop {
+                focus: (299.5, 199.5),
+                ..Stop::default()
+            },
+            Stop {
+                focus: (299.5, 199.5),
+                dolly: 0.3,
+                rotation: 0.5,
+                pan: 0.2,
+                travel: 3.0,
+                ..Stop::default()
+            },
+            Stop {
+                focus: (299.5, 199.5),
+                dolly: 0.6,
+                rotation: 1.0,
+                pan: 0.4,
+                travel: 3.0,
+                ..Stop::default()
+            },
+        ];
+        let at = |seconds: f64| tour_state(&tour, 0.0, false, seconds / 6.0);
+        for k in [4, 5] {
+            let arriving = (at(3.0)[k] - at(3.0 - 1e-5)[k]) / 1e-5;
+            let leaving = (at(3.0 + 1e-5)[k] - at(3.0)[k]) / 1e-5;
+            assert!(
+                (arriving - leaving).abs() < 1e-3 * arriving.abs().max(1e-3),
+                "{k}: {arriving} then {leaving}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_zero_travel_cuts_without_flinging_the_camera() {
+        let tour = vec![
+            Stop {
+                focus: (299.5, 199.5),
+                hold: 2.0,
+                ..Stop::default()
+            },
+            Stop {
+                focus: (200.0, 150.0),
+                dolly: 0.5,
+                travel: 0.0,
+                hold: 2.0,
+                ..Stop::default()
+            },
+            Stop {
+                focus: (299.5, 199.5),
+                travel: 3.0,
+                ..Stop::default()
+            },
+        ];
+        for step in 0..=70 {
+            let state = tour_state(&tour, 0.2, false, step as f64 / 70.0);
+            assert!(
+                state
+                    .iter()
+                    .all(|value| value.is_finite() && value.abs() < 1e3),
+                "step {step}: {state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_last_stop_with_a_push_still_comes_to_rest() {
+        let mut tour = tour().tour;
+        tour[3].hold = 4.0;
+        tour[3].push = 0.5;
+        // 1 + 3 + 1 + 2 + 3 + 4 = 14 seconds.
+        let near = |seconds: f64| tour_state(&tour, 0.2, false, seconds / 14.0)[2];
+        let ending = (near(14.0) - near(14.0 - 1e-4)) / 1e-4;
+        let arriving = (near(10.0 + 1e-4) - near(10.0)) / 1e-4;
+        assert!(ending.abs() < 0.01 * arriving.abs(), "{ending} {arriving}");
+        assert!((near(14.0) - 0.5_f64.ln()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_two_stop_loop_drifts_through_its_join() {
+        // Round the same place once, the last stop the first a turn on.
+        let tour = vec![
+            Stop {
+                focus: (299.5, 199.5),
+                dolly: 0.5,
+                hold: 2.0,
+                ..Stop::default()
+            },
+            Stop {
+                focus: (299.5, 199.5),
+                dolly: 0.5,
+                rotation: std::f64::consts::TAU,
+                travel: 4.0,
+                hold: 2.0,
+                ..Stop::default()
+            },
+        ];
+        let state = |t: f64| tour_state(&tour, 0.2, true, t);
+        let step = 0.001;
+        let into = state(1.0)[4] - state(1.0 - step)[4];
+        let out = state(step)[4] - state(0.0)[4];
+        assert!(into > 0.0 && (into - out).abs() < 1e-6, "{into} {out}");
     }
 
     #[test]

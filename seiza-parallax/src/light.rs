@@ -264,11 +264,18 @@ impl Pyramid {
     #[inline]
     pub(crate) fn sample_level(level: &LightImage, scale: f32, x: f32, y: f32) -> [f32; 3] {
         // Pixel centres of level k sit at base coordinates
-        // `scale * i + (scale − 1) / 2`.
-        level.sample(
-            (x - (scale - 1.0) / 2.0) / scale,
-            (y - (scale - 1.0) / 2.0) / scale,
-        )
+        // `scale * i + (scale − 1) / 2`. A point within the image's edge
+        // pixels, outside the outer centres, takes the edge's light rather
+        // than fading toward the dark beyond.
+        let edge = |at: f32, size: usize| {
+            let at = (at - (scale - 1.0) / 2.0) / scale;
+            if (-0.5..=size as f32 - 0.5).contains(&at) {
+                at.clamp(0.0, size.saturating_sub(1) as f32)
+            } else {
+                at
+            }
+        };
+        level.sample(edge(x, level.width), edge(y, level.height))
     }
 }
 
@@ -298,6 +305,27 @@ pub(crate) fn floor64(value: f64) -> isize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_coarse_level_takes_the_edge_light_up_to_the_image_edge() {
+        // Pyramids halve while a level is over 64 pixels a side.
+        let mut image = LightImage::new(130, 130);
+        image.pixels.fill([1.0; 3]);
+        let pyramid = Pyramid::new(image);
+        // Base coordinates on the outer pixel centres, and half a pixel
+        // past them, read the edge's light at every level; farther out is
+        // dark.
+        for (scale, level) in [(1.0, &pyramid.levels[0]), (2.0, &pyramid.levels[1])] {
+            for (x, y) in [(0.0, 0.0), (129.0, 129.0), (-0.5, 3.0), (129.5, 3.0)] {
+                let light = Pyramid::sample_level(level, scale, x, y);
+                assert!(
+                    (light[0] - 1.0).abs() < 1e-6,
+                    "scale {scale} at ({x}, {y}): {light:?}"
+                );
+            }
+            assert!(Pyramid::sample_level(level, scale, -3.0, 3.0)[0] < 0.5);
+        }
+    }
 
     #[test]
     fn screen_blend_is_addition_of_light() {

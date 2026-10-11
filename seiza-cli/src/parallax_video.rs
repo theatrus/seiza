@@ -172,10 +172,13 @@ pub(crate) struct ParallaxVideoArgs {
     /// rendering time
     #[arg(long, value_enum, default_value_t = QualityArg::Standard)]
     quality: QualityArg,
-    /// A star the camera nears grows with it up to this many times its size
+    /// The most a star's growth counts as it swells: growth is how many
+    /// times nearer the camera has come, and a star swells as its square
+    /// root, so the default 4 at most doubles it (at least 1)
     #[arg(long, default_value_t = 4.0)]
     growth_limit: f64,
-    /// A star past this growth fades out as the camera flies by it
+    /// A star past this growth fades out as the camera flies by it, gone at
+    /// twice it
     #[arg(long, default_value_t = 6.0)]
     fade_from: f64,
     /// How many stars, brightest first, fly at their own distances. A deep

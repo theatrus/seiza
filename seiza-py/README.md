@@ -546,7 +546,8 @@ nothing is loaded, solved or looked up again, and leaves the first as it
 was; both can draw frames at once. Options that change the scene, such as
 the distances, `distance_focus`, star placement or dust, raise `ValueError`.
 `summary["fit"]` gives each zoom and pan as asked and as used, after the
-camera was fitted to stay inside the image:
+camera was fitted to stay inside the image, and `inside`, false when some
+frames still show past the image's edge:
 
 ```python
 wide = video.reconfigure(size="4k", quality="high", rotate_deg=(0, -360))

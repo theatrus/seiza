@@ -698,6 +698,7 @@ impl PyParallaxVideo {
             })
             .collect::<PyResult<Vec<_>>>()?;
         fit.set_item("stops", stops)?;
+        fit.set_item("inside", summary.fit.inside)?;
         dict.set_item("fit", fit)?;
         Ok(dict)
     }

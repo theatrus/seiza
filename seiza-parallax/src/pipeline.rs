@@ -276,14 +276,19 @@ impl SceneOptions {
     /// Whether these options can prepare a scene.
     pub fn check(&self) -> Result<(), Error> {
         let invalid = |message: &str| Err(Error::Invalid(message.into()));
-        if self.dust_opacity.is_nan() || self.dust_opacity < 0.0 {
+        let distance = |distance: f64| distance.is_finite() && distance > 0.0;
+        if !(self.dust_opacity.is_finite() && self.dust_opacity >= 0.0) {
             return invalid("the dust opacity must be at least 0");
         }
-        if self
-            .distance_pc
-            .is_some_and(|distance| distance.is_nan() || distance <= 0.0)
+        if self.distance_pc.is_some_and(|parsecs| !distance(parsecs))
+            || self
+                .unmatched_distance_pc
+                .is_some_and(|parsecs| !distance(parsecs))
         {
-            return invalid("the distance must be positive");
+            return invalid("the distances must be positive numbers of parsecs");
+        }
+        if !self.gaia_max_mag.is_finite() {
+            return invalid("the faintest Gaia magnitude must be a number");
         }
         if self
             .distance_focus
@@ -325,8 +330,10 @@ pub struct VideoOptions {
     pub rotate_deg: (f64, f64),
     pub easing: Easing,
     pub quality: Quality,
-    /// A star the camera nears grows up to this many times its size, and
-    /// fades out past this growth.
+    /// How much nearer a star has come, its first-frame distance over its
+    /// distance now, is its growth. It swells as the square root of its
+    /// growth capped at `growth_limit` (the default 4 doubles its size),
+    /// and fades out from `fade_from` until gone at twice it.
     pub growth_limit: f64,
     pub fade_from: f64,
     /// A tour of stops instead of the single move toward `focus`: the
@@ -401,10 +408,26 @@ impl Default for VideoOptions {
     }
 }
 
+/// The longest video, seconds, and the most frames: past these a typo
+/// (`--seconds 1e9`, `hold=inf`) would fit and render for ever.
+const LONGEST_SECONDS: f64 = 24.0 * 3600.0;
+const MOST_FRAMES: f64 = 5_000_000.0;
+
+/// Whether a frame of `size` pixels can be encoded: even sides, at least 16.
+fn check_frame((width, height): (usize, usize)) -> Result<(), Error> {
+    if width < 16 || height < 16 || width % 2 != 0 || height % 2 != 0 {
+        return Err(Error::Invalid(
+            "the frame's sides must be even and at least 16".into(),
+        ));
+    }
+    Ok(())
+}
+
 impl VideoOptions {
     /// Whether these options can film a video.
     pub fn check(&self) -> Result<(), Error> {
         let invalid = |message: &str| Err(Error::Invalid(message.into()));
+        let point = |(x, y): (f64, f64)| x.is_finite() && y.is_finite();
         if !(0.0..1.0).contains(&self.dolly) {
             return invalid("the dolly must be at least 0 and below 1");
         }
@@ -417,29 +440,41 @@ impl VideoOptions {
         if !self.rotate_deg.0.is_finite() || !self.rotate_deg.1.is_finite() {
             return invalid("the rotation must be numbers of degrees");
         }
-        if !(self.zoom.is_finite() && self.zoom > 0.0) || !(1.0..).contains(&self.zoom_end) {
-            return invalid("the zoom must be positive and the end zoom at least 1");
+        if !(self.zoom.is_finite() && self.zoom >= 1.0)
+            || !(self.zoom_end.is_finite() && self.zoom_end >= 1.0)
+        {
+            return invalid("the zoom and the end zoom must be at least 1");
         }
         if !self.truck.is_finite() || !self.truck_angle_deg.is_finite() {
             return invalid("the truck must be a number");
         }
-        if self.seconds.is_nan() || self.seconds <= 0.0 || self.fps == 0 {
+        if !(self.growth_limit.is_finite() && self.growth_limit >= 1.0) {
+            return invalid("the growth limit must be at least 1");
+        }
+        if !(self.fade_from.is_finite() && self.fade_from > 0.0) {
+            return invalid("stars must start fading at a positive growth");
+        }
+        if !(self.seconds.is_finite() && self.seconds > 0.0) || self.fps == 0 {
             return invalid("the length and frame rate must be positive");
         }
-        let (width, height) = self.size;
-        if width < 16 || height < 16 || width % 2 != 0 || height % 2 != 0 {
-            return invalid("the frame's sides must be even and at least 16");
+        check_frame(self.size)?;
+        if self.focus.is_some_and(|focus| !point(focus)) {
+            return invalid("the focus must be a point");
         }
         if self
-            .focus
-            .is_some_and(|(x, y)| !x.is_finite() || !y.is_finite())
+            .labels
+            .iter()
+            .any(|label| !point((label.x, label.y)) || !label.radius.is_finite())
         {
-            return invalid("the focus must be a point");
+            return invalid("a label's place and radius must be numbers");
         }
         if self.tour.len() == 1 {
             return invalid("a tour needs at least two stops");
         }
         for stop in &self.tour {
+            if stop.focus.is_some_and(|focus| !point(focus)) {
+                return invalid("a stop's focus must be a point");
+            }
             if !(0.0..1.0).contains(&stop.dolly)
                 || !(0.0..=1.0).contains(&stop.pan)
                 || !(0.0..1.0).contains(&stop.push)
@@ -454,22 +489,18 @@ impl VideoOptions {
             {
                 return invalid("a stop's zoom must be positive, and its turn and spin numbers");
             }
-            if !(stop.travel >= 0.0 && stop.hold >= 0.0) {
+            if !(stop.travel.is_finite()
+                && stop.travel >= 0.0
+                && stop.hold.is_finite()
+                && stop.hold >= 0.0)
+            {
                 return invalid("a stop's travel and hold must be at least 0 seconds");
             }
         }
-        if let Some(auto) = &self.auto_tour
-            && (auto.targets == Some(0)
-                || auto.hold.is_nan()
-                || auto.hold < 0.0
-                || auto.motion.is_nan()
-                || auto.motion < 0.0)
-        {
-            return invalid(
-                "an automatic tour needs a target, and a hold and motion of at least 0",
-            );
+        if let Some(auto) = &self.auto_tour {
+            auto.check().map_err(Error::Invalid)?;
         }
-        if self.tour_glide.is_nan() || self.tour_glide < 0.0 {
+        if !(self.tour_glide.is_finite() && self.tour_glide >= 0.0) {
             return invalid("a tour's glide must be at least 0");
         }
         if (self.tour_titles || self.tour_loop) && self.tour.is_empty() && self.auto_tour.is_none()
@@ -478,6 +509,9 @@ impl VideoOptions {
         }
         if !self.tour.is_empty() && self.seconds() <= 0.0 {
             return invalid("a tour must take some time");
+        }
+        if self.seconds() > LONGEST_SECONDS || self.seconds() * self.fps as f64 > MOST_FRAMES {
+            return invalid("the video must be under a day long and five million frames");
         }
         Ok(())
     }
@@ -539,6 +573,10 @@ pub struct FitSummary {
     pub truck: (f64, f64),
     /// A tour's stops, in order.
     pub stops: Vec<StopFit>,
+    /// Whether every frame keeps the layers' edges out of view. When it
+    /// does not (a stop too near the image's edge to turn there, say),
+    /// some frames show past the image.
+    pub inside: bool,
 }
 
 /// How the fit changed one tour stop: its zoom and pan, asked and used.
@@ -584,38 +622,39 @@ struct Prepared {
     scene: Scene,
     wcs: Wcs,
     image_size: (usize, usize),
-    /// Galaxies lifted onto the far field: name, place and distance.
-    lifted: Vec<(String, (f64, f64), f64)>,
+    /// Galaxies lifted onto the far field.
+    lifted: Vec<overlay::Lifted>,
     objects: Option<PathBuf>,
     summary: Summary,
     /// The catalogued objects' labels, read on first need and kept for
-    /// every video of the scene, or why they could not be.
-    catalog_marks: OnceLock<Result<Arc<Vec<Mark>>, String>>,
+    /// every video of the scene.
+    catalog_marks: OnceLock<Arc<Vec<Mark>>>,
 }
 
 impl Prepared {
-    /// The catalogued objects' labels, read once.
+    /// The catalogued objects' labels, read once they can be: a failure,
+    /// such as a catalogue not yet installed, is tried again next time.
     fn catalog_marks(&self) -> Result<Arc<Vec<Mark>>, Error> {
-        self.catalog_marks
-            .get_or_init(|| {
-                let path =
-                    seiza::data_paths::objects(self.objects.as_deref()).map_err(|error| {
-                        format!("labelling objects needs the object catalog (seiza setup): {error}")
-                    })?;
-                let catalog = open_objects(&path).map_err(|error| error.to_string())?;
-                let (width, height) = self.image_size;
-                overlay::catalog_marks(
-                    &catalog,
-                    &self.wcs,
-                    (width as u32, height as u32),
-                    &self.scene,
-                    &self.lifted,
-                )
-                .map(Arc::new)
-                .map_err(|error| error.to_string())
-            })
-            .clone()
-            .map_err(Error::Invalid)
+        if let Some(marks) = self.catalog_marks.get() {
+            return Ok(Arc::clone(marks));
+        }
+        let path = seiza::data_paths::objects(self.objects.as_deref()).map_err(|error| {
+            Error::Invalid(format!(
+                "labelling objects needs the object catalog (seiza setup): {error}"
+            ))
+        })?;
+        let catalog = open_objects(&path)?;
+        let (width, height) = self.image_size;
+        let marks = overlay::catalog_marks(
+            &catalog,
+            &self.wcs,
+            (width as u32, height as u32),
+            &self.scene,
+            &self.lifted,
+        )?;
+        Ok(Arc::clone(
+            self.catalog_marks.get_or_init(|| Arc::new(marks)),
+        ))
     }
 }
 
@@ -683,6 +722,13 @@ impl Parallax {
             )));
         }
         let (width, height) = (stars.width() as usize, stars.height() as usize);
+        check_places(&video, (width, height))?;
+        let scale = wcs.scale_arcsec_per_px();
+        if !(scale.is_finite() && scale > 0.0) {
+            return Err(Error::Invalid(format!(
+                "the plate solution's scale ({scale} arcsec a pixel) is unusable"
+            )));
+        }
         let shallow: Vec<&str> = [("starless", starless), ("stars", stars)]
             .into_iter()
             .filter(|(_, image)| eight_bit(image))
@@ -698,7 +744,6 @@ impl Parallax {
             )));
         }
         let mut summary = Summary::default();
-        let scale = wcs.scale_arcsec_per_px();
         let focal_px = 206_264.806_247 / scale;
 
         let stars_light = LightImage::from_display(stars);
@@ -810,7 +855,7 @@ impl Parallax {
                         if let Some(sprite) =
                             crate::lift_object(&mut starless, &extent, GALAXY_DISTANCE_PC)
                         {
-                            galaxies.push((name, sprite));
+                            galaxies.push((name, extent, sprite));
                         }
                     }
                 }
@@ -820,7 +865,7 @@ impl Parallax {
                 let names: Vec<&str> = galaxies
                     .iter()
                     .take(5)
-                    .map(|(name, _)| name.as_str())
+                    .map(|(name, _, _)| name.as_str())
                     .collect();
                 report(Event::Note(&format!(
                     "{} galaxies lifted onto the far field: {}{}",
@@ -849,14 +894,19 @@ impl Parallax {
             },
         );
         summary.flying_stars = scene.sprites.len();
-        summary.galaxies_lifted = galaxies.iter().map(|(name, _)| name.clone()).collect();
-        let lifted: Vec<(String, (f64, f64), f64)> = galaxies
+        summary.galaxies_lifted = galaxies.iter().map(|(name, _, _)| name.clone()).collect();
+        let lifted: Vec<overlay::Lifted> = galaxies
             .iter()
-            .map(|(name, sprite)| (name.clone(), (sprite.x, sprite.y), sprite.distance_pc))
+            .map(|(name, extent, sprite)| overlay::Lifted {
+                name: name.clone(),
+                extent: *extent,
+                at: (sprite.x, sprite.y),
+                distance_pc: sprite.distance_pc,
+            })
             .collect();
         scene
             .sprites
-            .extend(galaxies.into_iter().map(|(_, sprite)| sprite));
+            .extend(galaxies.into_iter().map(|(_, _, sprite)| sprite));
         if scene_options.dust {
             // The stars seen through the dust: all but the matched ones in
             // front of it. The unmatched ones count however near the dust
@@ -954,12 +1004,8 @@ impl Parallax {
         };
         let scene = &prepared.scene;
         let centre = ((width as f64 - 1.0) / 2.0, (height as f64 - 1.0) / 2.0);
+        check_places(&video, (width, height))?;
         let focus = video.focus.unwrap_or(centre);
-        if focus.0 < 0.0 || focus.1 < 0.0 || focus.0 >= width as f64 || focus.1 >= height as f64 {
-            return Err(Error::Invalid(format!(
-                "the focus point {focus:?} is outside the {width}x{height} image"
-            )));
-        }
         let (sin, cos) = video.truck_angle_deg.to_radians().sin_cos();
         let asked = Shot {
             focus,
@@ -1021,6 +1067,7 @@ impl Parallax {
                     pan: (asked.pan, fitted.pan),
                 })
                 .collect(),
+            inside: shot.stays_inside(scene),
         };
         report_fit(&fit, &shot, report);
         if stop() {
@@ -1031,14 +1078,23 @@ impl Parallax {
         // for every video of the scene), and the watermark.
         let mut summary = prepared.summary.clone();
         let mut marks = overlay::custom_marks(&video.labels, Rgb(video.label_color), scene);
+        // Without the catalogue the video goes on unlabelled, as it does
+        // without galaxies or object distances, rather than throwing away
+        // the preparation; a later video tries the catalogue again.
         if video.overlay {
-            let catalogued = prepared.catalog_marks()?;
-            summary.labelled_objects = catalogued.len();
-            report(Event::Note(&format!(
-                "{} catalogued objects in the field to label",
-                catalogued.len()
-            )));
-            marks.extend(catalogued.iter().cloned());
+            match prepared.catalog_marks() {
+                Ok(catalogued) => {
+                    summary.labelled_objects = catalogued.len();
+                    report(Event::Note(&format!(
+                        "{} catalogued objects in the field to label",
+                        catalogued.len()
+                    )));
+                    marks.extend(catalogued.iter().cloned());
+                }
+                Err(error) => report(Event::Warning(&format!(
+                    "no catalogued objects labelled: {error}"
+                ))),
+            }
         }
         let titles: Vec<Option<String>> = if video.tour_titles {
             video.stops().into_iter().map(|stop| stop.title).collect()
@@ -1059,7 +1115,9 @@ impl Parallax {
                 prepared.wcs.scale_arcsec_per_px(),
                 video.size,
             )?;
-            overlay.plan(&shot, scene, video.fps as f64);
+            if !overlay.plan(&shot, scene, video.fps as f64, stop) {
+                return Err(Error::Stopped);
+            }
             Some(overlay)
         };
         if stop() {
@@ -1164,14 +1222,19 @@ impl Parallax {
 
 /// Tell the caller how the fit changed the framing asked for.
 fn report_fit(fit: &FitSummary, shot: &Shot, report: &mut dyn FnMut(Event)) {
-    if fit.zoom.1 > fit.zoom.0.max(1.0) * 1.001 {
+    if !fit.inside {
+        report(Event::Warning(
+            "the camera could not be kept inside the image: some frames show past its edge; \
+             move the focus or stops in from the edge, or ask for less turn and pan",
+        ));
+    } else if fit.zoom.1 > fit.zoom.0.max(1.0) * 1.001 {
         report(Event::Note(&format!(
-            "first frame zoomed in to {:.2} so {} stays inside the image",
+            "first frame zoomed in to {:.2} so every {} stays inside the image",
             fit.zoom.1,
             if shot.tour.is_empty() {
-                "the turned frame"
+                "frame"
             } else {
-                "every view of the tour"
+                "view of the tour"
             }
         )));
     }
@@ -1204,7 +1267,7 @@ fn report_fit(fit: &FitSummary, shot: &Shot, report: &mut dyn FnMut(Event)) {
         .filter(|(_, stop)| stop.zoom.1 > stop.zoom.0 * 1.001)
         .map(|(index, stop)| format!("stop {} by {:.2}", index + 1, stop.zoom.1 / stop.zoom.0))
         .collect();
-    if !zoomed.is_empty() {
+    if !zoomed.is_empty() && fit.inside {
         report(Event::Note(&format!(
             "zoomed in so every view stays inside the image: {}",
             zoomed.join(", ")
@@ -1232,7 +1295,7 @@ pub struct PlannedTour {
 }
 
 impl PlannedTour {
-    /// The stops alone, for [`ParallaxOptions::tour`].
+    /// The stops alone, for [`VideoOptions::tour`].
     pub fn tour(&self) -> Vec<TourStop> {
         self.stops
             .iter()
@@ -1254,6 +1317,8 @@ pub fn plan_tour(
     frame: (usize, usize),
     auto: &AutoTour,
 ) -> Result<PlannedTour, Error> {
+    auto.check().map_err(Error::Invalid)?;
+    check_frame(frame)?;
     let path = seiza::data_paths::objects(objects).map_err(|error| {
         Error::Invalid(format!(
             "planning a tour needs the object catalog (seiza setup): {error}"
@@ -1263,10 +1328,10 @@ pub fn plan_tour(
         .objects_in_footprint(wcs, (width, height))
         .map_err(|error| Error::Invalid(error.to_string()))?;
     let size = (width as usize, height as usize);
-    let targets = tour::targets(&placed, size, auto.targets);
+    let targets = tour::targets(&placed, size, frame, auto.targets);
     let Some(best) = targets.first() else {
         return Err(Error::Invalid(
-            "no catalogued objects in the field to tour".into(),
+            "no catalogued objects in the field to tour: none has a view of its own".into(),
         ));
     };
     Ok(PlannedTour {
@@ -1328,10 +1393,48 @@ fn close_loop(tour: &[TourStop]) -> Vec<TourStop> {
     closed
 }
 
-/// A stop written as [`parse_stop`] reads it.
+/// Whether the camera's focus and every tour stop's lie inside a `width` ×
+/// `height` image.
+fn check_places(video: &VideoOptions, (width, height): (usize, usize)) -> Result<(), Error> {
+    let inside =
+        |(x, y): (f64, f64)| (0.0..width as f64).contains(&x) && (0.0..height as f64).contains(&y);
+    if let Some(focus) = video.focus.filter(|&focus| !inside(focus)) {
+        return Err(Error::Invalid(format!(
+            "the focus point {focus:?} is outside the {width}x{height} image"
+        )));
+    }
+    for (index, stop) in video.tour.iter().enumerate() {
+        if let Some(focus) = stop.focus.filter(|&focus| !inside(focus)) {
+            return Err(Error::Invalid(format!(
+                "tour stop {}'s place {focus:?} is outside the {width}x{height} image",
+                index + 1
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// `value` to `places` decimals, trailing zeros dropped, or to more where
+/// rounding would carry a value below 1 up to 1, past a dolly's or push's
+/// limit.
+fn decimal(value: f64, places: usize) -> String {
+    let mut places = places.max(1);
+    loop {
+        let text = format!("{value:.places$}");
+        let text = text.trim_end_matches('0').trim_end_matches('.').to_string();
+        let carried = value < 1.0 && text.parse::<f64>().is_ok_and(|read| read >= 1.0);
+        if !carried || places >= 12 {
+            return text;
+        }
+        places += 1;
+    }
+}
+
+/// A stop written as [`parse_stop`] reads it: the focus to a hundredth of a
+/// pixel, the rest to three decimals.
 pub fn format_stop(stop: &TourStop) -> String {
     let mut text = match stop.focus {
-        Some((x, y)) => format!("{x:.0},{y:.0}"),
+        Some((x, y)) => format!("{},{}", decimal(x, 2), decimal(y, 2)),
         None => "whole".to_string(),
     };
     let defaults = TourStop::default();
@@ -1346,12 +1449,10 @@ pub fn format_stop(stop: &TourStop) -> String {
         ("push", stop.push, defaults.push),
     ] {
         if value != default {
-            let value = format!("{value:.3}");
-            let value = value.trim_end_matches('0').trim_end_matches('.');
-            text.push_str(&format!(" {key}={value}"));
+            text.push_str(&format!(" {key}={}", decimal(value, 3)));
         }
     }
-    if let Some(title) = &stop.title {
+    if let Some(title) = stop.title.as_ref().filter(|title| !title.is_empty()) {
         let quoted = title.replace('\\', "\\\\").replace('"', "\\\"");
         text.push_str(&format!(" title=\"{quoted}\""));
     }
@@ -1677,6 +1778,23 @@ mod tests {
             assert_eq!(parse_stop(&text).unwrap(), stop, "{text}");
         }
         assert_eq!(format_stop(&TourStop::default()), "whole travel=5");
+        // Fractions of a pixel survive, and a dolly just short of 1 is not
+        // rounded up to it.
+        let fine = TourStop {
+            focus: Some((1999.5, 431.25)),
+            dolly: 0.9996,
+            push: 0.99995,
+            title: Some(String::new()),
+            ..TourStop::default()
+        };
+        let read = parse_stop(&format_stop(&fine)).unwrap();
+        assert_eq!(read.focus, fine.focus);
+        assert!(
+            read.dolly < 1.0 && read.push < 1.0,
+            "{}",
+            format_stop(&fine)
+        );
+        assert_eq!(read.title, None);
         let titled = parse_stop("whole hold=2 title=Plain").unwrap();
         assert_eq!(titled.title.as_deref(), Some("Plain"));
         let spaced = parse_stop(r#"10,20 title="NGC 7822 \"east\"" hold=1"#).unwrap();
@@ -1776,10 +1894,148 @@ mod tests {
                 },
                 ..ParallaxOptions::default()
             },
+            // Values that once passed and then panicked, hung, or drew
+            // black frames.
+            video(VideoOptions {
+                growth_limit: 0.5,
+                ..VideoOptions::default()
+            }),
+            video(VideoOptions {
+                fade_from: 0.0,
+                ..VideoOptions::default()
+            }),
+            video(VideoOptions {
+                seconds: f64::INFINITY,
+                ..VideoOptions::default()
+            }),
+            video(VideoOptions {
+                zoom: 0.5,
+                ..VideoOptions::default()
+            }),
+            video(VideoOptions {
+                tour: vec![
+                    parse_stop("whole hold=1").unwrap(),
+                    parse_stop("100,100 dolly=0.3 hold=inf").unwrap(),
+                ],
+                ..VideoOptions::default()
+            }),
+            video(VideoOptions {
+                tour: vec![
+                    parse_stop("whole hold=1").unwrap(),
+                    parse_stop("nan,50 dolly=0.3 travel=1").unwrap(),
+                ],
+                ..VideoOptions::default()
+            }),
+            video(VideoOptions {
+                labels: vec![CustomLabel {
+                    x: f64::NAN,
+                    y: 1.0,
+                    radius: 0.0,
+                    text: "lost".into(),
+                }],
+                ..VideoOptions::default()
+            }),
+            ParallaxOptions {
+                scene: SceneOptions {
+                    distance_pc: Some(f64::INFINITY),
+                    ..SceneOptions::default()
+                },
+                ..ParallaxOptions::default()
+            },
+            ParallaxOptions {
+                scene: SceneOptions {
+                    unmatched_distance_pc: Some(f64::NAN),
+                    ..SceneOptions::default()
+                },
+                ..ParallaxOptions::default()
+            },
         ] {
             assert!(options.check().is_err(), "{options:?}");
         }
         assert!(ParallaxOptions::default().check().is_ok());
+    }
+
+    #[test]
+    fn a_tour_stop_off_the_image_is_refused_before_the_work() {
+        let directory = tempfile::tempdir().unwrap();
+        let (starless, stars, wcs, distances) = field(directory.path());
+        let mut options = options(distances, directory.path());
+        options.video.tour = vec![
+            parse_stop("whole hold=1").unwrap(),
+            parse_stop("100,100 dolly=0.3 travel=1").unwrap(),
+            parse_stop("3000,-2000 dolly=0.5 travel=1 hold=1").unwrap(),
+        ];
+        let mut notes = Vec::new();
+        let refused = Parallax::prepare(
+            &starless,
+            &stars,
+            &wcs,
+            &options,
+            &mut |event| notes.push(format!("{event:?}")),
+            &|| false,
+        );
+        let Err(Error::Invalid(message)) = refused else {
+            panic!("{:?}", refused.map(|_| ()));
+        };
+        assert!(message.contains("tour stop 3"), "{message}");
+        // Refused before any of the work.
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[test]
+    fn labels_wait_for_the_catalogue_and_fit_a_short_frame() {
+        let directory = tempfile::tempdir().unwrap();
+        let (starless, stars, wcs, distances) = field(directory.path());
+        let mut options = options(distances, directory.path());
+        options.video.overlay = true;
+        // A frame shorter than a line of labels.
+        options.video.size = (64, 18);
+        let mut warnings = Vec::new();
+        let video = Parallax::prepare(
+            &starless,
+            &stars,
+            &wcs,
+            &options,
+            &mut |event| {
+                if let Event::Warning(message) = event {
+                    warnings.push(message.to_string());
+                }
+            },
+            &|| false,
+        )
+        .expect("an unlabelled video, not a failure");
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("no catalogued objects labelled")),
+            "{warnings:?}"
+        );
+        assert_eq!(video.summary().labelled_objects, 0);
+        video.frame(0);
+        // Installed later, the catalogue labels the next video.
+        let place = |x: f64, y: f64| {
+            let (ra, dec) = wcs.pixel_to_world(x, y);
+            seiza::objects::SkyObject {
+                kind: seiza::objects::ObjectKind::Nebula,
+                ra,
+                dec,
+                mag: None,
+                major_arcmin: Some(1.0),
+                minor_arcmin: None,
+                position_angle_deg: None,
+                name: "NGC 9001".into(),
+                common_name: String::new(),
+                metadata: Default::default(),
+            }
+        };
+        seiza::objects::ObjectCatalog::new(vec![place(160.0, 120.0)])
+            .write_to(&directory.path().join("no-objects.bin"))
+            .unwrap();
+        let again = video
+            .reconfigure(&options.video, &mut |_| {}, &|| false)
+            .unwrap();
+        assert_eq!(again.summary().labelled_objects, 1);
+        again.frame(0);
     }
 
     #[test]

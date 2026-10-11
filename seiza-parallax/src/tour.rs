@@ -35,6 +35,20 @@ impl Default for AutoTour {
     }
 }
 
+impl AutoTour {
+    /// Whether this can plan a tour: a target at least, and a hold and
+    /// motion of at least 0.
+    pub fn check(&self) -> Result<(), String> {
+        let allowed = |value: f64| value.is_finite() && value >= 0.0;
+        if self.targets == Some(0) || !allowed(self.hold) || !allowed(self.motion) {
+            return Err(
+                "an automatic tour needs a target, and a hold and motion of at least 0".into(),
+            );
+        }
+        Ok(())
+    }
+}
+
 /// A place worth visiting.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Target {
@@ -83,13 +97,15 @@ fn worth(object: &SkyObject) -> f64 {
     catalogue + 0.25 * brightness + 0.2 * named + 0.15 * size
 }
 
-/// The `count` catalogued objects of a `width` × `height` image most worth
-/// flying to, or with no count every one worth a visit up to twelve:
-/// inside the image, not so large that the whole view already shows them,
-/// and not sharing a frame with one more worth a visit.
+/// The `count` catalogued objects of a `width` × `height` image filmed at
+/// `frame` most worth flying to, or with no count every one worth a visit
+/// up to twelve: inside the image, with a view of their own (not so large
+/// that the whole view already shows them), and not sharing a frame with
+/// one more worth a visit.
 pub fn targets(
     placed: &[PlacedObject],
     (width, height): (usize, usize),
+    frame: (usize, usize),
     count: Option<usize>,
 ) -> Vec<Target> {
     let (count, least) = match count {
@@ -125,6 +141,7 @@ pub fn targets(
             prominence: worth(&placed.object),
         })
         .filter(|target| target.prominence >= least)
+        .filter(|target| nearness(target, (width, height), frame).is_some())
         .collect();
     candidates.sort_by(|a, b| b.prominence.total_cmp(&a.prominence));
     let mut chosen: Vec<Target> = Vec::new();
@@ -140,6 +157,34 @@ pub fn targets(
         }
     }
     chosen
+}
+
+/// The whole view's image pixels per output pixel, and the frame's half
+/// sides in image pixels, for a `width` × `height` image filmed at `frame`.
+fn whole_view((width, height): (f64, f64), frame: (usize, usize)) -> (f64, (f64, f64)) {
+    let whole = (width / frame.0 as f64).min(height / frame.1 as f64);
+    (
+        whole,
+        (whole * frame.0 as f64 / 2.0, whole * frame.1 as f64 / 2.0),
+    )
+}
+
+/// How near to fly to see `target` in a `width` × `height` image filmed
+/// at `frame`: near enough that it fills about three fifths of the frame's
+/// shorter side, flying 0.3 to 0.85 of the way, but nearer still where the
+/// image's edge moves the aim in from it, until its centre stays in the
+/// middle four fifths of the frame. A region larger than the whole view,
+/// away from the edges, has no view of its own (`None`): the whole view
+/// shows it.
+fn nearness(target: &Target, (width, height): (f64, f64), frame: (usize, usize)) -> Option<f64> {
+    let diagonal = width.hypot(height);
+    let (_, half) = whole_view((width, height), frame);
+    let fill = (target.radius.max(0.01 * diagonal) / 0.6) / half.0.min(half.1);
+    let edge = (target.x.min(width - 1.0 - target.x) / half.0)
+        .min(target.y.min(height - 1.0 - target.y) / half.1)
+        / 0.45;
+    let near = fill.clamp(0.15, 0.7).min(edge).max(0.12);
+    (fill <= 1.0 || near < 0.6).then_some(near)
 }
 
 /// Visit `targets` in an order that keeps the round from the image's
@@ -198,6 +243,8 @@ pub struct PlannedStop {
 /// `frame` (output pixels): from the whole image, to each target in a
 /// short round, and back to the whole image for a final drift three times
 /// a target's hold. Each target's stop is titled with its name.
+/// Targets with no view of their own (see [`targets`]) are left to the
+/// whole view.
 pub fn plan(
     targets: &[Target],
     (width, height): (usize, usize),
@@ -209,8 +256,7 @@ pub fn plan(
     let diagonal = width.hypot(height);
     // Image pixels per output pixel in the whole view, and the frame's
     // half sides in those pixels.
-    let whole = (width / frame.0 as f64).min(height / frame.1 as f64);
-    let half = (whole * frame.0 as f64 / 2.0, whole * frame.1 as f64 / 2.0);
+    let (_, half) = whole_view((width, height), frame);
     // Where to aim to see `place` from `near` of the way: on it, or moved
     // in from the image's edge until the frame, with room to turn a
     // little, stays inside.
@@ -225,20 +271,7 @@ pub fn plan(
         };
         (axis(place.0, half.0, width), axis(place.1, half.1, height))
     };
-    // How near to fly to see `target`: near enough that it fills about
-    // three fifths of the frame's shorter side, flying 0.3 to 0.85 of the
-    // way, but nearer still where the image's edge moves the aim in from
-    // it, until its centre stays in the middle four fifths of the frame. A
-    // region larger than the whole view, away from the edges, has no view
-    // of its own: the whole view shows it.
-    let nearness = |target: &Target| {
-        let fill = (target.radius.max(0.01 * diagonal) / 0.6) / half.0.min(half.1);
-        let edge = (target.x.min(width - 1.0 - target.x) / half.0)
-            .min(target.y.min(height - 1.0 - target.y) / half.1)
-            / 0.45;
-        let near = fill.clamp(0.15, 0.7).min(edge).max(0.12);
-        (fill <= 1.0 || near < 0.6).then_some(near)
-    };
+    let nearness = |target: &Target| nearness(target, (width, height), frame);
     let targets: Vec<Target> = targets
         .iter()
         .filter(|target| nearness(target).is_some())
@@ -435,12 +468,22 @@ mod tests {
             targets.into_iter().map(|target| target.name).collect()
         };
         assert_eq!(
-            names(targets(&placed, (2000, 1600), None)),
+            names(targets(&placed, (2000, 1600), (1920, 1080), None)),
             ["NGC 7822", "NGC 7762"]
         );
         assert_eq!(
-            names(targets(&placed, (2000, 1600), Some(3))),
+            names(targets(&placed, (2000, 1600), (1920, 1080), Some(3))),
             ["NGC 7822", "NGC 7762", "LDN 1267"]
+        );
+        // A region with no view of its own crowds out nothing: the small
+        // object beside it is still visited.
+        let beside = [
+            self::placed("NGC 1", ObjectKind::HiiRegion, 3000.0, 2000.0, 1200.0),
+            self::placed("NGC 2", ObjectKind::OpenCluster, 3300.0, 2000.0, 60.0),
+        ];
+        assert_eq!(
+            names(targets(&beside, (6000, 4000), (1920, 1080), None)),
+            ["NGC 2"]
         );
     }
 

@@ -391,6 +391,8 @@ struct FitResponse {
     lead: AskedUsed,
     truck: AskedUsed,
     stops: Vec<StopFitResponse>,
+    /// Whether every frame stays inside the image.
+    inside: bool,
 }
 
 #[derive(Serialize)]
@@ -414,6 +416,7 @@ impl From<&FitSummary> for FitResponse {
                     pan: stop.pan.into(),
                 })
                 .collect(),
+            inside: fit.inside,
         }
     }
 }
@@ -995,8 +998,9 @@ pub unsafe extern "C" fn seiza_parallax_reconfigure_json(
 /// objects labelled, the WCS used, and `fit`, how fitting the camera to the
 /// image changed the framing asked for: `zoom`, `pan`, `lead` and `truck`
 /// for the single move and `stops[].zoom` and `stops[].pan` for a tour,
-/// each `{asked, used}`. Returns a string released with `seiza_string_free`, or null with
-/// `error_out` set.
+/// each `{asked, used}`, and `inside`, false when some frames still show
+/// past the image's edge. Returns a string released with
+/// `seiza_string_free`, or null with `error_out` set.
 ///
 /// # Safety
 ///

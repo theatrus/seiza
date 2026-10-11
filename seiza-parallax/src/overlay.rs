@@ -15,6 +15,16 @@ use seiza::Wcs;
 use seiza::objects::{GeometryData, ObjectCatalog, ObjectKind, SkyObject};
 use seiza_draw::{Fonts, Mask, draw_text, measure};
 
+/// A galaxy lifted onto the far field: its catalogued ellipse, where its
+/// sprite was put, and the sprite's distance.
+#[derive(Clone, Debug)]
+pub(crate) struct Lifted {
+    pub name: String,
+    pub extent: crate::Extent,
+    pub at: (f64, f64),
+    pub distance_pc: f64,
+}
+
 /// The watermark `--watermark` writes when given no text.
 pub const DEFAULT_WATERMARK: &str = "Rendered with seiza.fyi";
 
@@ -160,14 +170,15 @@ pub(crate) fn custom_marks(labels: &[CustomLabel], color: Rgb<u8>, scene: &Scene
 
 /// The catalogued objects in a `dimensions` image, each at the depth of the
 /// layer that shows it: a named star at the distance of its sprite, a
-/// galaxy lifted onto the far field where `lifted` put it, and everything
-/// else on the nebula's plane.
+/// galaxy lifted onto the far field where `lifted` put it, with its other
+/// listings and the objects within it, and everything else on the nebula's
+/// plane.
 pub(crate) fn catalog_marks(
     catalog: &ObjectCatalog,
     wcs: &Wcs,
     dimensions: (u32, u32),
     scene: &Scene,
-    lifted: &[(String, (f64, f64), f64)],
+    lifted: &[Lifted],
 ) -> Result<Vec<Mark>, Error> {
     let placed = catalog
         .objects_in_footprint(wcs, dimensions)
@@ -194,8 +205,24 @@ pub(crate) fn catalog_marks(
                 Some((sprite, _)) => (x, y, distance_pc) = (sprite.x, sprite.y, sprite.distance_pc),
                 None => distance_pc = scene.leftover_distance_pc,
             }
-        } else if let Some((_, at, pc)) = lifted.iter().find(|(name, _, _)| *name == object.name) {
-            (x, y, distance_pc) = (at.0, at.1, *pc);
+        } else if let Some(galaxy) = lifted
+            .iter()
+            .find(|galaxy| galaxy.name == object.name)
+            .or_else(|| {
+                // Another listing of the galaxy, or an object within it,
+                // flies with its light.
+                lifted
+                    .iter()
+                    .find(|galaxy| galaxy.extent.reach(placed.x, placed.y) <= 1.0)
+            })
+        {
+            // The galaxy's sprite sits where its light was found, which
+            // may be off its catalogued place; the mark moves with it.
+            (x, y, distance_pc) = (
+                placed.x + galaxy.at.0 - galaxy.extent.x,
+                placed.y + galaxy.at.1 - galaxy.extent.y,
+                galaxy.distance_pc,
+            );
         }
         let (dx, dy) = (x - placed.x, y - placed.y);
         let outlines = if star || object.metadata.id.is_empty() {
@@ -402,10 +429,20 @@ impl Overlay {
     /// caption), as a star the camera passes fades, or when its label
     /// would cover a more prominent one or more prominent objects fill the
     /// density's share.
-    pub(crate) fn plan(&mut self, shot: &Shot, scene: &Scene, fps: f64) {
+    /// `halted` returning true stops the planning, and `plan` returns false.
+    pub(crate) fn plan(
+        &mut self,
+        shot: &Shot,
+        scene: &Scene,
+        fps: f64,
+        halted: &dyn Fn() -> bool,
+    ) -> bool {
         let mut shown = Vec::with_capacity(shot.frames);
         let mut within = Vec::with_capacity(shot.frames);
         for frame in 0..shot.frames {
+            if frame % 64 == 0 && halted() {
+                return false;
+            }
             let view = shot.view(scene, frame);
             let (show, inside) = self.wanted(shot, &view);
             shown.push(show);
@@ -426,6 +463,7 @@ impl Overlay {
         } else {
             Vec::new()
         };
+        true
     }
 
     /// How much of each mark `view` should show before fading in time, and
@@ -546,7 +584,14 @@ impl Overlay {
         } else {
             x.clamp(half + pad, width - half - pad)
         };
-        (x, y.clamp(size * 1.1, height - size * 0.35))
+        // A frame too short for a line of labels takes it at its middle.
+        let (top, bottom) = (size * 1.1, height - size * 0.35);
+        let y = if top >= bottom {
+            height / 2.0
+        } else {
+            y.clamp(top, bottom)
+        };
+        (x, y)
     }
 
     /// Draw frame `frame`'s marks, as `view` sees them, over `canvas`.
@@ -784,7 +829,7 @@ fn title_shares(
 ) -> Vec<(usize, f32)> {
     let last = times.len() - 1;
     let total = times[last].1;
-    let join = looped && last >= 2;
+    let join = looped && last >= 1;
     let window = |index: usize| {
         let (arrive, depart) = times[index];
         let early = if index > 0 {
@@ -804,22 +849,30 @@ fn title_shares(
         x * x * (3.0 - 2.0 * x)
     };
     let mut shares = Vec::new();
-    for (index, &titled) in titled.iter().enumerate() {
-        if !titled || (join && index == last) {
-            continue;
-        }
+    for index in 0..=last {
+        // A looped tour's first and last stops are one view, with one
+        // window across the join: it shows the first's title or, without
+        // one, the last's.
+        let joined = join && (index == 0 || index == last);
+        let shown = match (joined, index == last) {
+            (true, true) => continue,
+            (true, false) if titled[0] => 0,
+            (true, false) if titled[last] => last,
+            (false, _) if titled[index] => index,
+            _ => continue,
+        };
         let (mut from, to) = window(index);
-        if join && index == 0 {
+        if joined {
             from = window(last).0 - total;
         }
         let fade = ((to - from) / 3.0).clamp(1e-9, TITLE_FADE);
         let at = |when: f64| smooth((when - from) / fade).min(smooth((to - when) / fade));
         let mut share = at(now);
-        if join && index == 0 {
+        if joined {
             share = share.max(at(now - total));
         }
         if share >= 1.0 / 255.0 {
-            shares.push((index, share as f32));
+            shares.push((shown, share as f32));
         }
     }
     shares
@@ -1039,7 +1092,7 @@ mod tests {
             mark("core", 199.5, 149.5, 80.0),
         ];
         let mut overlay = Overlay::new(marks, Vec::new(), None, 1.0, 1.0, (200, 150)).unwrap();
-        overlay.plan(&shot, &scene, 10.0);
+        assert!(overlay.plan(&shot, &scene, 10.0, &|| false));
         let (first, last) = (&overlay.shown[0], &overlay.shown[39]);
         assert!(first[0] > 0.9 && first[1] > 0.9, "{first:?}");
         assert!(last[0] < 0.01, "{last:?}");
@@ -1157,6 +1210,47 @@ mod tests {
         assert_eq!(shares(11.9), [(0, 1.0)]);
         assert!(shares(8.6)[0].1 < 1.0 && shares(2.3)[0].1 < 1.0);
         assert!(shares(4.0).is_empty() && shares(7.0).is_empty());
+        // Titled only at its last stop, the join shows the last's title.
+        let last_only = title_shares(&looped, &[false, false, true], true, 0.0);
+        assert_eq!(last_only, [(2, 1.0)]);
+    }
+
+    #[test]
+    fn a_lifted_galaxys_other_listings_fly_with_it() {
+        let scene = scene();
+        let wcs = Wcs::from_center_scale_rotation((10.0, 20.0), (200.0, 150.0), 2.0, 0.0, false);
+        let at = |name: &str, x: f64, y: f64| {
+            let (ra, dec) = wcs.pixel_to_world(x, y);
+            SkyObject {
+                ra,
+                dec,
+                ..object(name, "", ObjectKind::Galaxy, 0.5)
+            }
+        };
+        let catalog = ObjectCatalog::new(vec![
+            at("NGC 1", 240.0, 40.0),
+            at("UGC 1", 241.0, 41.0),
+            at("NGC 2", 100.0, 200.0),
+        ]);
+        // NGC 1 was lifted, its light found 5 pixels right of its listing.
+        let lifted = [Lifted {
+            name: "NGC 1".into(),
+            extent: crate::Extent {
+                x: 240.0,
+                y: 40.0,
+                semi_major: 8.0,
+                semi_minor: 8.0,
+                angle: 0.0,
+            },
+            at: (245.0, 40.0),
+            distance_pc: 1e8,
+        }];
+        let marks = catalog_marks(&catalog, &wcs, (400, 300), &scene, &lifted).unwrap();
+        let mark = |name: &str| marks.iter().find(|mark| mark.label == name).unwrap();
+        assert_eq!(mark("NGC 1").distance_pc, 1e8);
+        assert_eq!(mark("UGC 1").distance_pc, 1e8);
+        assert!((mark("UGC 1").x - 246.0).abs() < 0.5, "{}", mark("UGC 1").x);
+        assert_eq!(mark("NGC 2").distance_pc, scene.background_distance_pc);
     }
 
     #[test]
@@ -1190,7 +1284,7 @@ mod tests {
             (320, 240),
         )
         .unwrap();
-        overlay.plan(&shot, &scene, 10.0);
+        assert!(overlay.plan(&shot, &scene, 10.0, &|| false));
         // It fades in from the opening frame, shows fully a second in, and
         // is gone by the end.
         assert!(overlay.titled[0].is_empty());

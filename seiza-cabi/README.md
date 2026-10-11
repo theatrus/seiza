@@ -167,7 +167,8 @@ exposes the **superset** of what both apps need.
   never changes the scene's depth. `seiza_parallax_summary_json` says what it
   found, with `fit`: each zoom and pan as asked and as used, after the camera
   was fitted to stay inside the image, so an app can explain a change to the
-  framing it asked for. `seiza_parallax_reconfigure_json` films the same
+  framing it asked for, and `inside`, false when some frames still show past
+  the image's edge. `seiza_parallax_reconfigure_json` films the same
   scene again from a JSON object of camera and output settings (focus, start,
   dolly, pan, rotation, zoom, tour stops, glide, length, frame rate, size,
   quality, labels), fitting the camera anew. Settings left out take their
