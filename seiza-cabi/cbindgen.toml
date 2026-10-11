@@ -47,7 +47,8 @@ after_includes = """
  *   - char* returned by seiza_catalog_status_json, seiza_solve_image_json,
  *     seiza_probe_frame_json, seiza_calibration_plan_json,
  *     seiza_calibration_build_master_json, seiza_live_stacker_state_json, and
- *     seiza_live_stacker_push_*_json, seiza_parallax_summary_json, plus any
+ *     seiza_live_stacker_push_*_json, seiza_parallax_summary_json,
+ *     seiza_parallax_plan_tour_json, plus any
  *     char* stored into an
  *     `error_out` argument on failure
  *       -> release with seiza_string_free().

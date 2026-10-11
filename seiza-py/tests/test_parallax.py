@@ -203,3 +203,59 @@ def test_a_reconfigured_video_shares_the_scene(tmp_path):
     del made
     assert other.frame(9).shape == (150, 200, 3)
 
+
+
+def test_any_array_layout_and_lists_for_pairs_are_read_as_given(tmp_path):
+    starless, stars, wcs = field()
+    common = dict(distance_pc=400.0, online=False, objects=str(tmp_path / "none.bin"), fps=5)
+    as_c = seiza.ParallaxVideo(
+        starless, stars, wcs, size=(160, 120), focus=(150.0, 110.0), seconds=1.0, **common
+    )
+    # Fortran-ordered arrays, and pairs as lists, as a plan saved to JSON
+    # and read back gives them.
+    as_lists = seiza.ParallaxVideo(
+        np.asfortranarray(starless),
+        np.asfortranarray(stars),
+        wcs,
+        size=[160, 120],
+        focus=[150.0, 110.0],
+        seconds=1.0,
+        **common,
+    )
+    assert as_lists.summary["detected_stars"] == as_c.summary["detected_stars"]
+    assert (as_lists.frame(3) == as_c.frame(3)).all()
+    toured = seiza.ParallaxVideo(
+        starless,
+        stars,
+        wcs,
+        size=[160, 120],
+        rotate_deg=[0.0, 10.0],
+        tour=[{"focus": None, "hold": 1.0}, {"focus": [150.0, 110.0], "dolly": 0.5, "travel": 1.0}],
+        labels=[[100.0, 90.0, "here"]],
+        **common,
+    )
+    assert toured.frame_count == 10
+
+
+def test_a_raising_progress_stops_the_work_and_is_raised(tmp_path):
+    made, _ = video(tmp_path)
+    longer = made.reconfigure(seconds=8.0, fps=5, size=(160, 120))
+    output = tmp_path / "frames"
+
+    def refuse(event):
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        longer.write(output, encoder="png", progress=refuse)
+    assert len(list(output.iterdir())) < longer.frame_count
+
+
+def test_bad_options_raise_value_errors_and_none_means_the_default(tmp_path):
+    made, _ = video(tmp_path)
+    with pytest.raises(ValueError, match="outside"):
+        video(tmp_path, focus=(1000.0, 1000.0))
+    with pytest.raises(ValueError, match="outside"):
+        made.reconfigure(focus=(1000.0, 1000.0))
+    # A scene option given as None is left at its default, not refused.
+    again = made.reconfigure(distance_pc=None, size=(160, 120), seconds=1.0, fps=5)
+    assert again.frame_count == made.frame_count

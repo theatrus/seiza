@@ -166,8 +166,7 @@ struct VideoRequest {
     growth_limit: Option<f64>,
     fade_from: Option<f64>,
     /// A tour of stops instead of the single move.
-    #[serde(default)]
-    tour: Vec<StopRequest>,
+    tour: Option<Vec<StopRequest>>,
     /// Plan a tour of the catalogued objects in the field when `tour` is
     /// empty: `{targets, hold, motion}`, each optional.
     auto_tour: Option<AutoTourRequest>,
@@ -186,8 +185,7 @@ struct VideoRequest {
     fps: Option<u32>,
     overlay: Option<bool>,
     overlay_density: Option<f64>,
-    #[serde(default)]
-    labels: Vec<LabelRequest>,
+    labels: Option<Vec<LabelRequest>>,
     /// "#RRGGBB".
     label_color: Option<String>,
     /// true for "Rendered with seiza.fyi", or the text to write.
@@ -207,7 +205,11 @@ fn split_fields(json: &str, what: &str) -> Result<(Fields, Fields), String> {
     let (mut scene, mut video) = (Fields::new(), Fields::new());
     for (key, value) in fields {
         if SCENE_FIELDS.contains(&key.as_str()) {
-            scene.insert(key, value);
+            // A null scene field is left at its default, as it would be
+            // left out, so a reconfiguration may carry it.
+            if !value.is_null() {
+                scene.insert(key, value);
+            }
         } else {
             video.insert(key, value);
         }
@@ -551,6 +553,7 @@ fn video_options(request: &VideoRequest) -> Result<VideoOptions, String> {
         tour: request
             .tour
             .iter()
+            .flatten()
             .map(|stop| {
                 let base = seiza_parallax::TourStop::default();
                 seiza_parallax::TourStop {
@@ -582,6 +585,7 @@ fn video_options(request: &VideoRequest) -> Result<VideoOptions, String> {
         labels: request
             .labels
             .iter()
+            .flatten()
             .map(|label| CustomLabel {
                 x: label.x,
                 y: label.y,
@@ -683,13 +687,16 @@ fn split(
 /// The request gives either `image` (a stretched PNG, JPEG or TIFF), which
 /// StarXTerminator splits through the `rc-astro` CLI, or `starless` and
 /// `stars` (the split, with the stars unscreened), plus `image` to solve
-/// when it differs from `stars`. Without `wcs` (`{crval, crpix, cd, sip}`
+/// when it differs from `stars`; `rcAstroExecutable` and `rcAstroHost`
+/// point at the `rc-astro` CLI and its host when they are not the
+/// defaults. Without `wcs` (`{crval, crpix, cd, sip}`
 /// as `seiza_solve_image_json` returns it) the image is blind-solved
 /// against the catalogs in `catalogDirectory`, between
 /// `minimumScaleArcsecPerPixel` and `maximumScaleArcsecPerPixel` (0.1 and
 /// 1000 if absent). The other fields are `seiza parallax-video`'s options
-/// in camelCase: `focus` `[x, y]`, `distanceParsecs`,
-/// `unmatchedDistanceParsecs`, `objects`, `objectDistances`,
+/// in camelCase: `focus` `[x, y]` (where the camera flies), `distanceParsecs`,
+/// `distanceFocus` `[x, y]` (where the nebula's distance is measured; by
+/// default the camera's destination), `unmatchedDistanceParsecs`, `objects`, `objectDistances`,
 /// `starDistances`, `gaiaMaxMagnitude`, `gaiaCache`, `online`, `maxStars`,
 /// `smallStars` ("drop", "field"), `keepGalaxies`, `dust`, `dustOpacity`,
 /// `start` ("focus", "whole"), `dolly`, `truck`, `truckAngleDegrees`,
@@ -709,12 +716,14 @@ fn split(
 /// "-portrait", or "WIDTHxHEIGHT"), `seconds`, `fps`, `overlay`,
 /// `overlayDensity`, `labels` (`[{x, y, radius, text}]`), `labelColor`
 /// ("#RRGGBB") and `watermark` (true, or the text). An unknown field is an
-/// error.
+/// error; a null field takes its default.
 ///
 /// Stars' distances come from the star distance file when installed, else
 /// from the Gaia and VizieR archives unless `online` is false. `cancel`
-/// stops StarXTerminator's split; the rest of the preparation runs to the
-/// end. `events` (nullable) hears each step on the calling thread, with
+/// stops the preparation, StarXTerminator's split included, between steps
+/// and while the camera is fitted; it then returns null with an error
+/// saying it stopped (check the signal to tell a cancel from a failure).
+/// `events` (nullable) hears each step on the calling thread, with
 /// `context` passed through.
 ///
 /// # Safety
@@ -991,7 +1000,8 @@ pub unsafe extern "C" fn seiza_parallax_reconfigure_json(
 ///
 /// # Safety
 ///
-/// `video` must be a live pointer from [`seiza_parallax_prepare_json`].
+/// `video` must be a live pointer from [`seiza_parallax_prepare_json`] or
+/// [`seiza_parallax_reconfigure_json`].
 /// When non-null, `error_out` must point to writable storage for one
 /// pointer.
 #[unsafe(no_mangle)]
@@ -1084,7 +1094,8 @@ fn write_pixels(frame: &RgbImage, format: u32, out: &mut [u8], stride: usize) {
 ///
 /// # Safety
 ///
-/// `video` must be a live pointer from [`seiza_parallax_prepare_json`].
+/// `video` must be a live pointer from [`seiza_parallax_prepare_json`] or
+/// [`seiza_parallax_reconfigure_json`].
 /// `buffer` must point to `buffer_length` writable bytes. When non-null,
 /// `error_out` must point to writable storage for one pointer.
 #[unsafe(no_mangle)]
@@ -1106,13 +1117,14 @@ pub unsafe extern "C" fn seiza_parallax_render_frame(
         }
         let (width, height) = video.size();
         let bytes = pixel_bytes(format)?;
-        if stride < width * bytes {
-            return Err(format!(
-                "a row needs {} bytes; the stride is {stride}",
-                width * bytes
-            ));
+        let row = width * bytes;
+        if stride < row {
+            return Err(format!("a row needs {row} bytes; the stride is {stride}"));
         }
-        let needed = stride * (height - 1) + width * bytes;
+        let needed = stride
+            .checked_mul(height - 1)
+            .and_then(|rows| rows.checked_add(row))
+            .ok_or_else(|| format!("a stride of {stride} bytes is too large"))?;
         if buffer_length < needed {
             return Err(format!(
                 "the frame needs {needed} bytes; the buffer holds {buffer_length}"
@@ -1141,7 +1153,8 @@ pub unsafe extern "C" fn seiza_parallax_render_frame(
 ///
 /// # Safety
 ///
-/// `video` must be a live pointer from [`seiza_parallax_prepare_json`].
+/// `video` must be a live pointer from [`seiza_parallax_prepare_json`] or
+/// [`seiza_parallax_reconfigure_json`].
 /// `cancel` must be null or a live [`SeizaCancelSignal`] retained until
 /// this call returns. When non-null, `error_out` must point to writable
 /// storage for one pointer.
@@ -1211,7 +1224,8 @@ pub unsafe extern "C" fn seiza_parallax_render_frames(
 ///
 /// # Safety
 ///
-/// `video` must be a live pointer from [`seiza_parallax_prepare_json`].
+/// `video` must be a live pointer from [`seiza_parallax_prepare_json`] or
+/// [`seiza_parallax_reconfigure_json`].
 /// `request_json` must be a NUL-terminated UTF-8 string. `cancel` must be
 /// null or a live [`SeizaCancelSignal`] retained until this call returns.
 /// When non-null, `error_out` must point to writable storage for one
@@ -1294,7 +1308,8 @@ fn finish(
 /// # Safety
 ///
 /// `video` must be null or a pointer from [`seiza_parallax_prepare_json`]
-/// that has not already been freed, with no call using it still running.
+/// or [`seiza_parallax_reconfigure_json`] that has not already been freed,
+/// with no call using it still running.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn seiza_parallax_free(video: *mut SeizaParallax) {
     if !video.is_null() {
@@ -1724,6 +1739,64 @@ mod tests {
             serde_json::from_str(&unsafe { CStr::from_ptr(json) }.to_string_lossy()).unwrap();
         unsafe { seiza_string_free(json) };
         parsed
+    }
+
+    #[test]
+    fn null_fields_take_their_defaults_and_a_huge_stride_is_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        // As a .NET or Swift encoder writes options it has no value for.
+        let request = self::request(
+            directory.path(),
+            "\"tour\": null, \"labels\": null, \"autoTour\": null, \"distanceFocus\": null",
+        );
+        let mut error = ptr::null_mut();
+        let video = unsafe {
+            seiza_parallax_prepare_json(
+                request.as_ptr(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(!video.is_null(), "{}", take_error(error));
+        let settings = CString::new(
+            "{\"distanceParsecs\": null, \"maxStars\": null, \"tour\": null, \"dolly\": 0.3}",
+        )
+        .unwrap();
+        let again = unsafe {
+            seiza_parallax_reconfigure_json(
+                video,
+                settings.as_ptr(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(!again.is_null(), "{}", take_error(error));
+        // A stride whose rows overflow is an error, not a panic.
+        let mut pixels = vec![0_u8; 160 * 120 * 3];
+        for stride in [usize::MAX, usize::MAX / 119 + 1] {
+            let drawn = unsafe {
+                seiza_parallax_render_frame(
+                    video,
+                    0,
+                    SEIZA_PIXEL_FORMAT_RGB8,
+                    pixels.as_mut_ptr(),
+                    pixels.len(),
+                    stride,
+                    &mut error,
+                )
+            };
+            assert!(!drawn);
+            let message = take_error(error);
+            assert!(message.contains("too large"), "{message}");
+        }
+        unsafe {
+            seiza_parallax_free(again);
+            seiza_parallax_free(video);
+        }
     }
 
     #[test]

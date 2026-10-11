@@ -245,14 +245,18 @@ pub(crate) fn rc_astro_process_file(
     };
     let tool_name = tool.to_string();
     // A raising progress callback must not vanish: the first exception is
-    // kept and re-raised once the run settles (the run itself is not
-    // interrupted — progress is advisory). A raising cancel predicate stops
-    // the run and re-raises the same way, so Ctrl-C surfaces as
-    // KeyboardInterrupt rather than a generic run error.
+    // kept, stops the run at the next cancel check (Ctrl-C usually lands in
+    // the progress callback as KeyboardInterrupt), and is re-raised once the
+    // run settles. A raising cancel predicate stops the run and re-raises
+    // the same way, so Ctrl-C surfaces as KeyboardInterrupt rather than a
+    // generic run error.
     let raised: Arc<Mutex<Option<PyErr>>> = Arc::new(Mutex::new(None));
     let signal = {
         let raised = Arc::clone(&raised);
         CancelSignal::new(move || {
+            if raised.lock().is_ok_and(|slot| slot.is_some()) {
+                return true;
+            }
             Python::with_gil(|py| {
                 let asked = py.check_signals().and_then(|()| match &cancel {
                     Some(cancel) => cancel
@@ -347,6 +351,9 @@ pub(crate) fn rc_astro_split_stars<'py>(
     let signal = {
         let raised = Arc::clone(&raised);
         CancelSignal::new(move || {
+            if raised.lock().is_ok_and(|slot| slot.is_some()) {
+                return true;
+            }
             Python::with_gil(|py| {
                 let asked = py.check_signals().and_then(|()| match &cancel {
                     Some(cancel) => cancel

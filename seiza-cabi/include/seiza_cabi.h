@@ -44,7 +44,8 @@
  *   - char* returned by seiza_catalog_status_json, seiza_solve_image_json,
  *     seiza_probe_frame_json, seiza_calibration_plan_json,
  *     seiza_calibration_build_master_json, seiza_live_stacker_state_json, and
- *     seiza_live_stacker_push_*_json, seiza_parallax_summary_json, plus any
+ *     seiza_live_stacker_push_*_json, seiza_parallax_summary_json,
+ *     seiza_parallax_plan_tour_json, plus any
  *     char* stored into an
  *     `error_out` argument on failure
  *       -> release with seiza_string_free().
@@ -2060,13 +2061,16 @@ char *seiza_rc_astro_process_file_json(const char *request_json,
  The request gives either `image` (a stretched PNG, JPEG or TIFF), which
  StarXTerminator splits through the `rc-astro` CLI, or `starless` and
  `stars` (the split, with the stars unscreened), plus `image` to solve
- when it differs from `stars`. Without `wcs` (`{crval, crpix, cd, sip}`
+ when it differs from `stars`; `rcAstroExecutable` and `rcAstroHost`
+ point at the `rc-astro` CLI and its host when they are not the
+ defaults. Without `wcs` (`{crval, crpix, cd, sip}`
  as `seiza_solve_image_json` returns it) the image is blind-solved
  against the catalogs in `catalogDirectory`, between
  `minimumScaleArcsecPerPixel` and `maximumScaleArcsecPerPixel` (0.1 and
  1000 if absent). The other fields are `seiza parallax-video`'s options
- in camelCase: `focus` `[x, y]`, `distanceParsecs`,
- `unmatchedDistanceParsecs`, `objects`, `objectDistances`,
+ in camelCase: `focus` `[x, y]` (where the camera flies), `distanceParsecs`,
+ `distanceFocus` `[x, y]` (where the nebula's distance is measured; by
+ default the camera's destination), `unmatchedDistanceParsecs`, `objects`, `objectDistances`,
  `starDistances`, `gaiaMaxMagnitude`, `gaiaCache`, `online`, `maxStars`,
  `smallStars` ("drop", "field"), `keepGalaxies`, `dust`, `dustOpacity`,
  `start` ("focus", "whole"), `dolly`, `truck`, `truckAngleDegrees`,
@@ -2086,12 +2090,14 @@ char *seiza_rc_astro_process_file_json(const char *request_json,
  "-portrait", or "WIDTHxHEIGHT"), `seconds`, `fps`, `overlay`,
  `overlayDensity`, `labels` (`[{x, y, radius, text}]`), `labelColor`
  ("#RRGGBB") and `watermark` (true, or the text). An unknown field is an
- error.
+ error; a null field takes its default.
 
  Stars' distances come from the star distance file when installed, else
  from the Gaia and VizieR archives unless `online` is false. `cancel`
- stops StarXTerminator's split; the rest of the preparation runs to the
- end. `events` (nullable) hears each step on the calling thread, with
+ stops the preparation, StarXTerminator's split included, between steps
+ and while the camera is fitted; it then returns null with an error
+ saying it stopped (check the signal to tell a cancel from a failure).
+ `events` (nullable) hears each step on the calling thread, with
  `context` passed through.
 
  # Safety
@@ -2194,7 +2200,8 @@ SeizaParallax *seiza_parallax_reconfigure_json(const SeizaParallax *video,
 
  # Safety
 
- `video` must be a live pointer from [`seiza_parallax_prepare_json`].
+ `video` must be a live pointer from [`seiza_parallax_prepare_json`] or
+ [`seiza_parallax_reconfigure_json`].
  When non-null, `error_out` must point to writable storage for one
  pointer.
  */
@@ -2210,7 +2217,8 @@ char *seiza_parallax_summary_json(const SeizaParallax *video, char **error_out);
 
  # Safety
 
- `video` must be a live pointer from [`seiza_parallax_prepare_json`].
+ `video` must be a live pointer from [`seiza_parallax_prepare_json`] or
+ [`seiza_parallax_reconfigure_json`].
  `buffer` must point to `buffer_length` writable bytes. When non-null,
  `error_out` must point to writable storage for one pointer.
  */
@@ -2233,7 +2241,8 @@ bool seiza_parallax_render_frame(const SeizaParallax *video,
 
  # Safety
 
- `video` must be a live pointer from [`seiza_parallax_prepare_json`].
+ `video` must be a live pointer from [`seiza_parallax_prepare_json`] or
+ [`seiza_parallax_reconfigure_json`].
  `cancel` must be null or a live [`SeizaCancelSignal`] retained until
  this call returns. When non-null, `error_out` must point to writable
  storage for one pointer.
@@ -2256,7 +2265,8 @@ int32_t seiza_parallax_render_frames(const SeizaParallax *video,
 
  # Safety
 
- `video` must be a live pointer from [`seiza_parallax_prepare_json`].
+ `video` must be a live pointer from [`seiza_parallax_prepare_json`] or
+ [`seiza_parallax_reconfigure_json`].
  `request_json` must be a NUL-terminated UTF-8 string. `cancel` must be
  null or a live [`SeizaCancelSignal`] retained until this call returns.
  When non-null, `error_out` must point to writable storage for one
@@ -2275,7 +2285,8 @@ int32_t seiza_parallax_write_video_json(const SeizaParallax *video,
  # Safety
 
  `video` must be null or a pointer from [`seiza_parallax_prepare_json`]
- that has not already been freed, with no call using it still running.
+ or [`seiza_parallax_reconfigure_json`] that has not already been freed,
+ with no call using it still running.
  */
 void seiza_parallax_free(SeizaParallax *video);
 

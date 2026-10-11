@@ -177,7 +177,13 @@ exposes the **superset** of what both apps need.
   the same time; the scene is freed with the last handle. Fields that change
   the scene (distances and their sources, `distanceFocus`, star placement,
   galaxies, dust) are an error that says to prepare again. Its
-  `SeizaCancelSignal` stops it. Frames then come three ways:
+  `SeizaCancelSignal` stops it. `seiza_parallax_plan_tour_json` plans a
+  tour of the catalogued objects in the field (`autoTour`) and returns it
+  as JSON to edit, each target's stop titled with its name; its `tour`
+  goes back into a request as it is, and its `focus` as `distanceFocus`.
+  `tourTitles` shows each stop's title low in the frame as the camera
+  drifts through it, and `tourLoop` ends the tour where it began so the
+  video loops. Frames then come three ways:
   `seiza_parallax_render_frame` draws any frame into the caller's own
   buffer, with a row stride and `SEIZA_PIXEL_FORMAT_RGB8`, `_RGBA8` or
   `_BGRA8`, so a platform encoder's pixel buffer (a `CVPixelBuffer`, a Media

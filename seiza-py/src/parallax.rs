@@ -9,7 +9,7 @@ use numpy::ndarray::Array3;
 use numpy::{IntoPyArray, PyArray3, PyReadonlyArrayDyn, PyUntypedArrayMethods};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple};
+use pyo3::types::{PyDict, PyString};
 use seiza_parallax::{
     CustomLabel, Easing, Event, FfmpegSink, FrameSink, Parallax, ParallaxOptions, PngSequence,
     Quality, SmallStars, Start,
@@ -131,8 +131,10 @@ pub(crate) fn plan_parallax_tour<'py>(
 /// image and unscreened stars, each a path to a PNG, JPEG or TIFF or a
 /// numpy array of shape (height, width, 3), float32 from 0 to 1 or uint8;
 /// `wcs` is the image's plate solution (`seiza.solve_blind(...).wcs`).
-/// The other keyword arguments are `seiza parallax-video`'s options:
-/// `focus` (x, y), `distance_pc`, `unmatched_distance_pc`, `objects`,
+/// The other keyword arguments are `seiza parallax-video`'s options, where
+/// a pair is a tuple or a list:
+/// `focus` (x, y), `distance_pc`, `distance_focus` (x, y),
+/// `unmatched_distance_pc`, `objects`,
 /// `object_distances`, `star_distances`, `gaia_max_mag`, `gaia_cache`,
 /// `online`, `max_stars`, `small_stars` ("drop", "field"), `keep_galaxies`,
 /// `dust`, `dust_opacity`, `start` ("focus", "whole"), `dolly`, `truck`,
@@ -141,15 +143,18 @@ pub(crate) fn plan_parallax_tour<'py>(
 /// `growth_limit`, `fade_from`, `tour` (stops, each a string as `seiza
 /// parallax-video --stop` takes, "X,Y dolly=0.8 rotate=-10 travel=6
 /// hold=1" or "whole ...", or a dict of `focus`, `dolly`, `zoom`,
-/// `rotate_deg`, `pan`, `travel` and `hold`, as `plan_parallax_tour`
-/// gives them), `auto_tour` (True, a count, or a dict of `targets`,
-/// `hold` and `motion`: plan a tour of the catalogued objects and render
-/// it), `size` ("720p", "1080p", "1440p", "4k",
+/// `rotate_deg`, `pan`, `travel`, `hold`, `spin_deg`, `push` and `title`,
+/// as `plan_parallax_tour` gives them, with its `name`), `auto_tour`
+/// (True, a count, or a dict of `targets`, `hold` and `motion`: plan a
+/// tour of the catalogued objects and render it), `tour_glide`,
+/// `tour_titles`, `tour_loop`, `size` ("720p", "1080p", "1440p", "4k",
 /// each with "-portrait", "WIDTHxHEIGHT", or (width, height)), `seconds`,
 /// `fps`, `overlay`, `overlay_density`, `labels` ((x, y, text) or (x, y,
 /// radius, text) tuples), `label_color` ("#RRGGBB") and `watermark` (True,
 /// or the text). `progress` hears each step as a dict with a "kind" of
-/// "note" or "warning" and a "message".
+/// "note" or "warning" and a "message". `cancel()` returning True, or
+/// Ctrl-C, stops preparing; a `progress` that raises stops it too, and its
+/// exception is raised.
 #[pyclass(name = "ParallaxVideo", module = "seiza", frozen)]
 pub(crate) struct PyParallaxVideo {
     video: Parallax,
@@ -179,15 +184,33 @@ impl PyParallaxFrames {
     }
 }
 
-/// An image argument: a path, or a numpy array of float32 0 to 1 or uint8.
-fn image_argument(value: &Bound<'_, PyAny>, name: &str) -> PyResult<image::Rgb32FImage> {
+/// An image argument as given: a file to open, or its pixels.
+enum ImageArgument {
+    Path(PathBuf),
+    Pixels(image::Rgb32FImage),
+}
+
+impl ImageArgument {
+    /// The pixels, opening a file if need be; call it without the GIL, as
+    /// a large file takes a while to decode.
+    fn pixels(self) -> PyResult<image::Rgb32FImage> {
+        match self {
+            Self::Pixels(pixels) => Ok(pixels),
+            Self::Path(path) => Ok(seiza::raster::open_oriented(&path)
+                .map_err(|error| {
+                    PyValueError::new_err(format!("failed to open {}: {error}", path.display()))
+                })?
+                .pixels
+                .to_rgb32f()),
+        }
+    }
+}
+
+/// An image argument: a path, or a numpy array of float32 0 to 1 or uint8,
+/// in any memory layout.
+fn image_argument(value: &Bound<'_, PyAny>, name: &str) -> PyResult<ImageArgument> {
     if let Ok(path) = value.extract::<PathBuf>() {
-        return Ok(seiza::raster::open_oriented(&path)
-            .map_err(|error| {
-                PyValueError::new_err(format!("failed to open {}: {error}", path.display()))
-            })?
-            .pixels
-            .to_rgb32f());
+        return Ok(ImageArgument::Path(path));
     }
     let shape_error =
         || PyValueError::new_err(format!("{name} must have shape (height, width, 3)"));
@@ -195,27 +218,39 @@ fn image_argument(value: &Bound<'_, PyAny>, name: &str) -> PyResult<image::Rgb32
         [height, width, 3] => Ok((*width as u32, *height as u32)),
         _ => Err(shape_error()),
     };
-    if let Ok(array) = value.extract::<PyReadonlyArrayDyn<'_, f32>>() {
+    // Read in index order, whatever the array's strides.
+    let pixels = if let Ok(array) = value.extract::<PyReadonlyArrayDyn<'_, f32>>() {
+        let (width, height) = raw(array.shape())?;
+        let data = array.as_array().iter().copied().collect();
+        image::Rgb32FImage::from_raw(width, height, data)
+    } else if let Ok(array) = value.extract::<PyReadonlyArrayDyn<'_, u8>>() {
         let (width, height) = raw(array.shape())?;
         let data = array
-            .as_slice()
-            .map_err(|_| PyValueError::new_err(format!("{name} must be C-contiguous")))?
-            .to_vec();
-        return image::Rgb32FImage::from_raw(width, height, data).ok_or_else(shape_error);
-    }
-    if let Ok(array) = value.extract::<PyReadonlyArrayDyn<'_, u8>>() {
-        let (width, height) = raw(array.shape())?;
-        let data = array
-            .as_slice()
-            .map_err(|_| PyValueError::new_err(format!("{name} must be C-contiguous")))?
+            .as_array()
             .iter()
             .map(|&value| value as f32 / 255.0)
             .collect();
-        return image::Rgb32FImage::from_raw(width, height, data).ok_or_else(shape_error);
+        image::Rgb32FImage::from_raw(width, height, data)
+    } else {
+        return Err(PyValueError::new_err(format!(
+            "{name} must be a path or a numpy array of float32 or uint8"
+        )));
+    };
+    pixels.map(ImageArgument::Pixels).ok_or_else(shape_error)
+}
+
+/// Two numbers from a two-item tuple or list.
+fn pair<'py, T: FromPyObject<'py>>(value: &Bound<'py, PyAny>) -> PyResult<(T, T)> {
+    let [a, b]: [T; 2] = value.extract()?;
+    Ok((a, b))
+}
+
+/// A video error as Python sees it: bad options are a `ValueError`.
+fn video_error(error: seiza_parallax::pipeline::Error) -> PyErr {
+    match error {
+        seiza_parallax::pipeline::Error::Invalid(message) => PyValueError::new_err(message),
+        other => PyRuntimeError::new_err(other.to_string()),
     }
-    Err(PyValueError::new_err(format!(
-        "{name} must be a path or a numpy array of float32 or uint8"
-    )))
 }
 
 fn choice<T: Copy>(value: &str, name: &str, choices: &[(&str, T)]) -> PyResult<T> {
@@ -263,9 +298,9 @@ fn options(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ParallaxOptions> {
             continue;
         }
         match key.as_str() {
-            "focus" => options.video.focus = Some(value.extract()?),
+            "focus" => options.video.focus = Some(pair(&value)?),
             "distance_pc" => options.scene.distance_pc = Some(value.extract()?),
-            "distance_focus" => options.scene.distance_focus = Some(value.extract()?),
+            "distance_focus" => options.scene.distance_focus = Some(pair(&value)?),
             "unmatched_distance_pc" => options.scene.unmatched_distance_pc = Some(value.extract()?),
             "objects" => options.scene.objects = Some(value.extract()?),
             "object_distances" => options.scene.object_distances = Some(value.extract()?),
@@ -297,7 +332,7 @@ fn options(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ParallaxOptions> {
             "pan" => options.video.pan = value.extract()?,
             "zoom" => options.video.zoom = value.extract()?,
             "zoom_end" => options.video.zoom_end = value.extract()?,
-            "rotate_deg" => options.video.rotate_deg = value.extract()?,
+            "rotate_deg" => options.video.rotate_deg = pair(&value)?,
             "easing" => {
                 options.video.easing = choice(
                     &value.extract::<String>()?,
@@ -331,7 +366,13 @@ fn options(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ParallaxOptions> {
                         for (key, value) in stop.iter() {
                             let key: String = key.extract()?;
                             match key.as_str() {
-                                "focus" => parsed.focus = value.extract()?,
+                                "focus" => {
+                                    parsed.focus = if value.is_none() {
+                                        None
+                                    } else {
+                                        Some(pair(&value)?)
+                                    }
+                                }
                                 "dolly" => parsed.dolly = value.extract()?,
                                 "zoom" => parsed.zoom = value.extract()?,
                                 "rotate_deg" => parsed.rotate_deg = value.extract()?,
@@ -364,7 +405,7 @@ fn options(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ParallaxOptions> {
                     Ok(size) => {
                         seiza_parallax::parse_frame_size(&size).map_err(PyValueError::new_err)?
                     }
-                    Err(_) => value.extract()?,
+                    Err(_) => pair(&value)?,
                 }
             }
             "seconds" => options.video.seconds = value.extract()?,
@@ -376,19 +417,23 @@ fn options(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ParallaxOptions> {
                     .try_iter()?
                     .map(|label| {
                         let label = label?;
-                        let label = label.downcast::<PyTuple>()?;
-                        match label.len() {
-                            3 => Ok(CustomLabel {
-                                x: label.get_item(0)?.extract()?,
-                                y: label.get_item(1)?.extract()?,
+                        let label: Vec<Bound<'_, PyAny>> = if label.is_instance_of::<PyString>() {
+                            Vec::new()
+                        } else {
+                            label.try_iter()?.collect::<PyResult<_>>()?
+                        };
+                        match label.as_slice() {
+                            [x, y, text] => Ok(CustomLabel {
+                                x: x.extract()?,
+                                y: y.extract()?,
                                 radius: 0.0,
-                                text: label.get_item(2)?.extract()?,
+                                text: text.extract()?,
                             }),
-                            4 => Ok(CustomLabel {
-                                x: label.get_item(0)?.extract()?,
-                                y: label.get_item(1)?.extract()?,
-                                radius: label.get_item(2)?.extract()?,
-                                text: label.get_item(3)?.extract()?,
+                            [x, y, radius, text] => Ok(CustomLabel {
+                                x: x.extract()?,
+                                y: y.extract()?,
+                                radius: radius.extract()?,
+                                text: text.extract()?,
                             }),
                             _ => Err(PyValueError::new_err(
                                 "a label is (x, y, text) or (x, y, radius, text)",
@@ -465,9 +510,14 @@ fn reraise(raised: &Arc<Mutex<Option<PyErr>>>) -> PyResult<()> {
     }
 }
 
-/// Whether to stop: Ctrl-C, or `cancel` returning true. A raising `cancel`
-/// stops too, its error kept for re-raising.
+/// Whether to stop: Ctrl-C, `cancel` returning true, or a callback that has
+/// raised. A raising `cancel` stops too, its error kept for re-raising.
 fn should_stop(cancel: &Option<PyObject>, raised: &Arc<Mutex<Option<PyErr>>>) -> bool {
+    // A callback has raised already, most often `progress` taking Ctrl-C's
+    // KeyboardInterrupt: stop, and let it be raised.
+    if raised.lock().is_ok_and(|slot| slot.is_some()) {
+        return true;
+    }
     Python::with_gil(|py| {
         let asked = py.check_signals().and_then(|()| match cancel {
             Some(cancel) => cancel
@@ -534,9 +584,7 @@ impl PyParallaxVideo {
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         let options = self::options(options)?;
-        options
-            .check()
-            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        options.check().map_err(video_error)?;
         let starless = image_argument(starless, "starless")?;
         let stars = image_argument(stars, "stars")?;
         let wcs = wcs.get().wcs.clone();
@@ -544,12 +592,18 @@ impl PyParallaxVideo {
         let mut report = reporter(progress, Arc::clone(&raised));
         let stop_raised = Arc::clone(&raised);
         let prepared = py.allow_threads(|| {
-            Parallax::prepare(&starless, &stars, &wcs, &options, &mut report, &|| {
-                should_stop(&cancel, &stop_raised)
-            })
-        });
+            let (starless, stars) = (starless.pixels()?, stars.pixels()?);
+            Ok::<_, PyErr>(Parallax::prepare(
+                &starless,
+                &stars,
+                &wcs,
+                &options,
+                &mut report,
+                &|| should_stop(&cancel, &stop_raised),
+            ))
+        })?;
         reraise(&raised)?;
-        let video = prepared.map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        let video = prepared.map_err(video_error)?;
         Ok(Self { video })
     }
 
@@ -570,9 +624,9 @@ impl PyParallaxVideo {
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         if let Some(options) = options {
-            for key in options.keys() {
+            for (key, value) in options.iter() {
                 let key: String = key.extract()?;
-                if SCENE_KEYS.contains(&key.as_str()) {
+                if SCENE_KEYS.contains(&key.as_str()) && !value.is_none() {
                     return Err(PyValueError::new_err(format!(
                         "{key} changes the prepared scene; make a new ParallaxVideo for it"
                     )));
@@ -588,10 +642,7 @@ impl PyParallaxVideo {
                 .reconfigure(&video, &mut report, &|| should_stop(&cancel, &stop_raised))
         });
         reraise(&raised)?;
-        let video = refilmed.map_err(|error| match error {
-            seiza_parallax::pipeline::Error::Invalid(message) => PyValueError::new_err(message),
-            other => PyRuntimeError::new_err(other.to_string()),
-        })?;
+        let video = refilmed.map_err(video_error)?;
         Ok(Self { video })
     }
 

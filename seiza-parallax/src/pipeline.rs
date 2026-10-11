@@ -52,7 +52,7 @@ pub enum Error {
     Fonts(String),
     #[error(transparent)]
     Encode(#[from] crate::encode::Error),
-    #[error("stopped before the last frame")]
+    #[error("stopped before finishing")]
     Stopped,
 }
 
