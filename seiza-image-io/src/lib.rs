@@ -2,18 +2,31 @@
 //!
 //! PNG, JPEG and TIFF go through the `image` crate, upright by their EXIF
 //! orientation as [`seiza::raster`] reads them; FITS and XISF go through
-//! Seiza's own readers and writers. [`open`] gives any of them as
-//! floating-point samples. Integer samples are scaled to 0 to 1 by their
-//! type's range, so an 8-bit PNG and a 16-bit FITS read alike;
-//! floating-point samples are kept as stored. [`save`] writes PNG and TIFF
-//! at 16 bits and FITS and XISF as 32-bit floats.
+//! Seiza's own readers and writers. Three ways in:
+//!
+//! - [`open`] gives any format as floating-point samples. Integer samples
+//!   are scaled to 0 to 1 by their type's range, so an 8-bit PNG and a
+//!   16-bit FITS read alike; floating-point samples are kept as stored.
+//! - [`open_raster`] gives a PNG, JPEG or TIFF at its own depth, for callers
+//!   that choose how to treat 8-bit pixels.
+//! - [`read_astronomy`] gives a FITS or XISF file as Seiza's [`FitsImage`],
+//!   with its headers and stored sample type, and an XISF file's
+//!   description and metadata.
+//!
+//! And three ways out: [`save`] writes floating-point samples, PNG and TIFF
+//! at 16 bits and FITS and XISF as 32-bit floats; [`save_f32`] writes
+//! borrowed samples with FITS header cards, XISF bounds or a chosen format;
+//! [`save_display`] writes a display image, 8 or 16 bits, as PNG, JPEG or
+//! TIFF, or as floats in FITS or XISF.
 //!
 //! FITS rows are read in their stored order, as the rest of Seiza reads
-//! them, and written top-down with a `ROWORDER` card saying so, which
-//! PixInsight and Siril follow.
+//! them. [`save`] writes them top-down with a `ROWORDER` card saying so,
+//! which PixInsight and Siril follow.
 
-use image::{ImageBuffer, ImageFormat, Luma, Rgb, Rgb32FImage};
-use seiza_fits::{F32ImageData, FitsImage, HeaderValue, Pixels, WriteHeaderCard};
+use image::{DynamicImage, ImageBuffer, ImageFormat, Luma, Rgb, Rgb32FImage};
+use seiza::raster::OrientedRaster;
+use seiza_fits::{F32ImageData, FitsError, FitsImage, HeaderValue, Pixels, WriteHeaderCard};
+use seiza_xisf::{XisfError, XisfImageInfo, XisfMetadata};
 use std::path::{Path, PathBuf};
 
 /// An image file's format, as its extension names it.
@@ -60,37 +73,99 @@ impl Format {
         matches!(self, Self::Fits | Self::Xisf)
     }
 
-    /// Whether [`save`] writes it. JPEG is lossy and 8-bit, so it does not.
+    /// Whether [`save`] writes it. JPEG is lossy and 8-bit, so only
+    /// [`save_display`] does.
     pub fn can_save(self) -> bool {
         !matches!(self, Self::Jpeg)
+    }
+
+    /// The `image` crate's format for a raster.
+    fn raster(self) -> Option<ImageFormat> {
+        match self {
+            Self::Png => Some(ImageFormat::Png),
+            Self::Jpeg => Some(ImageFormat::Jpeg),
+            Self::Tiff => Some(ImageFormat::Tiff),
+            Self::Fits | Self::Xisf => None,
+        }
     }
 }
 
 /// The extensions [`save`] writes, for messages.
 pub const SAVE_EXTENSIONS: &str = ".png, .tif, .fits or .xisf";
 
-/// Why an image could not be opened or saved.
+/// The extensions [`save_display`] writes, for messages.
+pub const DISPLAY_EXTENSIONS: &str = ".png, .jpg, .tif, .fits or .xisf";
+
+/// Why an image could not be opened or saved, and the file.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("failed to open {}: {message}", path.display())]
-    Open { path: PathBuf, message: String },
-    #[error("failed to write {}: {message}", path.display())]
-    Save { path: PathBuf, message: String },
+    #[error("failed to open {}: {cause}", path.display())]
+    Open { path: PathBuf, cause: Cause },
+    #[error("failed to write {}: {cause}", path.display())]
+    Save { path: PathBuf, cause: Cause },
 }
 
 impl Error {
-    fn open(path: &Path, message: impl ToString) -> Self {
+    fn open(path: &Path, cause: impl Into<Cause>) -> Self {
         Self::Open {
             path: path.to_path_buf(),
-            message: message.to_string(),
+            cause: cause.into(),
         }
     }
 
-    fn save(path: &Path, message: impl ToString) -> Self {
+    fn save(path: &Path, cause: impl Into<Cause>) -> Self {
         Self::Save {
             path: path.to_path_buf(),
-            message: message.to_string(),
+            cause: cause.into(),
         }
+    }
+
+    /// The file it concerns.
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Open { path, .. } | Self::Save { path, .. } => path,
+        }
+    }
+
+    /// What went wrong, without the file.
+    pub fn cause(&self) -> &Cause {
+        match self {
+            Self::Open { cause, .. } | Self::Save { cause, .. } => cause,
+        }
+    }
+
+    /// The file and what went wrong, taken apart.
+    pub fn into_parts(self) -> (PathBuf, Cause) {
+        match self {
+            Self::Open { path, cause } | Self::Save { path, cause } => (path, cause),
+        }
+    }
+}
+
+/// What went wrong, from the reader or writer that found it.
+#[derive(Debug, thiserror::Error)]
+pub enum Cause {
+    #[error(transparent)]
+    Fits(#[from] FitsError),
+    #[error(transparent)]
+    Xisf(#[from] XisfError),
+    #[error(transparent)]
+    Image(#[from] image::ImageError),
+    #[error(transparent)]
+    Raster(#[from] seiza::Error),
+    #[error("{0}")]
+    Invalid(String),
+}
+
+impl From<String> for Cause {
+    fn from(message: String) -> Self {
+        Self::Invalid(message)
+    }
+}
+
+impl From<&str> for Cause {
+    fn from(message: &str) -> Self {
+        Self::Invalid(message.into())
     }
 }
 
@@ -125,6 +200,16 @@ impl FloatImage {
         }
     }
 
+    /// A display image's samples, 0 to 1: gray if it has no colour.
+    pub fn from_display(image: &DynamicImage) -> Self {
+        let (width, height) = (image.width() as usize, image.height() as usize);
+        if image.color().has_color() {
+            Self::from_rgb(&image.to_rgb32f())
+        } else {
+            Self::gray(width, height, image.to_luma32f().into_raw())
+        }
+    }
+
     /// The image as RGB, a gray one's sample in every channel.
     pub fn to_rgb(&self) -> Rgb32FImage {
         let samples = match self.channels {
@@ -151,6 +236,15 @@ impl FloatImage {
         }
     }
 
+    /// The samples as the FITS and XISF writers take them.
+    pub fn data(&self) -> F32ImageData<'_> {
+        if self.channels == 1 {
+            F32ImageData::Mono(&self.samples)
+        } else {
+            F32ImageData::RgbInterleaved(&self.samples)
+        }
+    }
+
     /// Whether the samples fill the size, with 1 or 3 channels.
     fn check(&self) -> Result<(), String> {
         if !matches!(self.channels, 1 | 3) {
@@ -159,25 +253,62 @@ impl FloatImage {
                 self.channels
             ));
         }
-        if self.width == 0 || self.height == 0 {
-            return Err("the image is empty".into());
-        }
-        let expected = self
-            .width
-            .checked_mul(self.height)
-            .and_then(|pixels| pixels.checked_mul(self.channels));
-        if expected != Some(self.samples.len()) {
-            return Err(format!(
-                "{} samples do not fill a {}×{} image of {} channel{}",
-                self.samples.len(),
-                self.width,
-                self.height,
-                self.channels,
-                if self.channels == 1 { "" } else { "s" }
-            ));
-        }
-        Ok(())
+        check_size(self.width, self.height, self.channels, self.samples.len())
     }
+}
+
+/// Whether `samples` fill a `width` × `height` image of `channels`.
+fn check_size(width: usize, height: usize, channels: usize, samples: usize) -> Result<(), String> {
+    if width == 0 || height == 0 {
+        return Err("the image is empty".into());
+    }
+    let expected = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(channels));
+    if expected != Some(samples) {
+        return Err(format!(
+            "{samples} samples do not fill a {width}×{height} image of {channels} channel{}",
+            if channels == 1 { "" } else { "s" }
+        ));
+    }
+    Ok(())
+}
+
+/// A FITS or XISF file as Seiza's [`FitsImage`], and for XISF its
+/// description and metadata.
+#[derive(Debug, Clone)]
+pub struct AstronomyImage {
+    pub image: FitsImage,
+    pub format: Format,
+    /// An XISF image's description, such as its declared `bounds`.
+    pub xisf_info: Option<XisfImageInfo>,
+    /// Everything else an XISF file says about the image, such as a
+    /// PixInsight astrometric solution.
+    pub xisf_metadata: Option<XisfMetadata>,
+}
+
+/// Read a FITS or XISF file: XISF when the extension says so (`.xisf`, or a
+/// distributed unit's `.xish` header), FITS otherwise, whatever the
+/// extension, as a FITS reader of camera files must.
+pub fn read_astronomy(path: &Path) -> Result<AstronomyImage, Error> {
+    if Format::from_path(path) == Some(Format::Xisf) {
+        let read =
+            seiza_xisf::read_image_with_options(path, 0, &seiza_xisf::ReadOptions::default())
+                .map_err(|error| Error::open(path, error))?;
+        return Ok(AstronomyImage {
+            image: read.image,
+            format: Format::Xisf,
+            xisf_info: Some(read.info),
+            xisf_metadata: Some(read.metadata),
+        });
+    }
+    let image = FitsImage::open(path).map_err(|error| Error::open(path, error))?;
+    Ok(AstronomyImage {
+        image,
+        format: Format::Fits,
+        xisf_info: None,
+        xisf_metadata: None,
+    })
 }
 
 /// Read a FITS or XISF file as Seiza's [`FitsImage`], with its headers and
@@ -194,6 +325,19 @@ pub fn open_astronomy(path: &Path) -> Result<(FitsImage, Format), Error> {
     }
 }
 
+/// Open a PNG, JPEG or TIFF, or any raster the `image` crate knows, at its
+/// own depth and upright by its EXIF orientation; an error for FITS or
+/// XISF.
+pub fn open_raster(path: &Path) -> Result<OrientedRaster, Error> {
+    if Format::from_path(path).is_some_and(Format::is_astronomy) {
+        return Err(Error::open(
+            path,
+            "it is a FITS or XISF file, not a PNG, JPEG or TIFF",
+        ));
+    }
+    seiza::raster::open_oriented(path).map_err(|error| Error::open(path, error))
+}
+
 /// Open the image at `path`, its format chosen by its extension: FITS and
 /// XISF by their own readers, anything else as a raster the `image` crate
 /// knows, upright by its EXIF orientation.
@@ -203,17 +347,7 @@ pub fn open(path: &Path) -> Result<FloatImage, Error> {
             let (image, _) = open_astronomy(path)?;
             from_fits(image).map_err(|message| Error::open(path, message))
         }
-        _ => {
-            let raster = seiza::raster::open_oriented(path)
-                .map_err(|error| Error::open(path, error))?
-                .pixels;
-            let (width, height) = (raster.width() as usize, raster.height() as usize);
-            Ok(if raster.color().has_color() {
-                FloatImage::from_rgb(&raster.to_rgb32f())
-            } else {
-                FloatImage::gray(width, height, raster.to_luma32f().into_raw())
-            })
-        }
+        _ => Ok(FloatImage::from_display(&open_raster(path)?.pixels)),
     }
 }
 
@@ -258,67 +392,148 @@ fn from_fits(image: FitsImage) -> Result<FloatImage, String> {
     })
 }
 
+/// How [`save_f32`] writes.
+#[derive(Clone, Debug, Default)]
+pub struct SaveOptions<'a> {
+    /// The format, in place of the one the extension names.
+    pub format: Option<Format>,
+    /// FITS header cards, written in FITS files and as FITS keywords in
+    /// XISF files.
+    pub headers: &'a [WriteHeaderCard],
+    /// The range an XISF reader shows the samples on; `None` declares 0 to
+    /// 1 when the samples lie in it, and nothing otherwise.
+    pub xisf_bounds: Option<(f64, f64)>,
+    /// Add a `ROWORDER` card saying FITS rows run top-down, unless the
+    /// headers carry one.
+    pub fits_top_down: bool,
+}
+
 /// Write `image` to `path` in the format its extension names: PNG or TIFF
 /// at 16 bits, samples clamped to 0 to 1, or FITS or XISF as 32-bit
-/// floats, as they are.
+/// floats, as they are. FITS rows are declared top-down.
 pub fn save(path: &Path, image: &FloatImage) -> Result<(), Error> {
     image
         .check()
         .map_err(|message| Error::save(path, message))?;
-    let format = Format::from_path(path)
+    save_f32(
+        path,
+        image.width,
+        image.height,
+        image.data(),
+        &SaveOptions {
+            fits_top_down: true,
+            ..SaveOptions::default()
+        },
+    )
+}
+
+/// Write borrowed samples, gray or RGB, to `path` in the format `options`
+/// or the extension names: PNG or TIFF at 16 bits, samples clamped to 0 to
+/// 1, or FITS or XISF as 32-bit floats with `options`' header cards. FITS
+/// and XISF files are written atomically.
+pub fn save_f32(
+    path: &Path,
+    width: usize,
+    height: usize,
+    pixels: F32ImageData<'_>,
+    options: &SaveOptions<'_>,
+) -> Result<(), Error> {
+    let samples = match pixels {
+        F32ImageData::Mono(samples)
+        | F32ImageData::RgbInterleaved(samples)
+        | F32ImageData::RgbPlanar(samples) => samples,
+    };
+    check_size(width, height, pixels.planes(), samples.len())
+        .map_err(|message| Error::save(path, message))?;
+    let format = options
+        .format
+        .or_else(|| Format::from_path(path))
         .filter(|format| format.can_save())
         .ok_or_else(|| Error::save(path, format!("name it {SAVE_EXTENSIONS}")))?;
-    let (width, height) = (image.width, image.height);
     match format {
         Format::Png | Format::Tiff => {
-            let encoding = if format == Format::Png {
-                ImageFormat::Png
-            } else {
-                ImageFormat::Tiff
-            };
-            let samples: Vec<u16> = image
-                .samples
-                .iter()
-                .map(|&sample| (sample.clamp(0.0, 1.0) * f32::from(u16::MAX)).round() as u16)
-                .collect();
             let (width, height) = (
                 u32::try_from(width).map_err(|_| Error::save(path, "it is too wide"))?,
                 u32::try_from(height).map_err(|_| Error::save(path, "it is too tall"))?,
             );
-            let saved = if image.channels == 1 {
-                ImageBuffer::<Luma<u16>, _>::from_raw(width, height, samples)
-                    .expect("checked size")
-                    .save_with_format(path, encoding)
-            } else {
-                ImageBuffer::<Rgb<u16>, _>::from_raw(width, height, samples)
-                    .expect("checked size")
-                    .save_with_format(path, encoding)
+            let sixteen =
+                |sample: f32| (sample.clamp(0.0, 1.0) * f32::from(u16::MAX)).round() as u16;
+            let image = match pixels {
+                F32ImageData::Mono(samples) => DynamicImage::ImageLuma16(
+                    ImageBuffer::<Luma<u16>, _>::from_raw(
+                        width,
+                        height,
+                        samples.iter().copied().map(sixteen).collect(),
+                    )
+                    .expect("checked size"),
+                ),
+                F32ImageData::RgbInterleaved(samples) => DynamicImage::ImageRgb16(
+                    ImageBuffer::<Rgb<u16>, _>::from_raw(
+                        width,
+                        height,
+                        samples.iter().copied().map(sixteen).collect(),
+                    )
+                    .expect("checked size"),
+                ),
+                F32ImageData::RgbPlanar(samples) => {
+                    let plane = samples.len() / 3;
+                    let interleaved = (0..plane)
+                        .flat_map(|index| {
+                            [
+                                samples[index],
+                                samples[plane + index],
+                                samples[2 * plane + index],
+                            ]
+                        })
+                        .map(sixteen)
+                        .collect();
+                    DynamicImage::ImageRgb16(
+                        ImageBuffer::<Rgb<u16>, _>::from_raw(width, height, interleaved)
+                            .expect("checked size"),
+                    )
+                }
             };
-            saved.map_err(|error| Error::save(path, error))
+            image
+                .save_with_format(path, format.raster().expect("a raster format"))
+                .map_err(|error| Error::save(path, error))
         }
         Format::Fits => {
-            let row_order =
-                WriteHeaderCard::new("ROWORDER", HeaderValue::String("TOP-DOWN".into()))
-                    .with_comment("first row is the top of the image");
-            seiza_fits::write_f32_image(path, width, height, f32_data(image), &[row_order])
+            let mut headers = options.headers.to_vec();
+            if options.fits_top_down && !headers.iter().any(|card| card.keyword() == "ROWORDER") {
+                headers.push(
+                    WriteHeaderCard::new("ROWORDER", HeaderValue::String("TOP-DOWN".into()))
+                        .with_comment("first row is the top of the image"),
+                );
+            }
+            seiza_fits::write_f32_image(path, width, height, pixels, &headers)
                 .map_err(|error| Error::save(path, error))
         }
         Format::Xisf => {
-            let normalized = image
-                .samples
-                .iter()
-                .all(|sample| (0.0..=1.0).contains(sample));
-            let options = seiza_xisf::WriteOptions {
-                bounds: normalized.then_some((0.0, 1.0)),
+            if seiza_xisf::is_xisf_header_path(path) {
+                return Err(Error::save(
+                    path,
+                    XisfError::Unsupported(
+                        ".xish names a distributed unit's header file; write a .xisf file".into(),
+                    ),
+                ));
+            }
+            let bounds = options.xisf_bounds.or_else(|| {
+                samples
+                    .iter()
+                    .all(|sample| (0.0..=1.0).contains(sample))
+                    .then_some((0.0, 1.0))
+            });
+            let xisf = seiza_xisf::WriteOptions {
+                bounds,
                 ..seiza_xisf::WriteOptions::default()
             };
             seiza_xisf::write_f32_image_with_options(
                 path,
                 width,
                 height,
-                f32_data(image),
-                &[],
-                &options,
+                pixels,
+                options.headers,
+                &xisf,
             )
             .map_err(|error| Error::save(path, error))
         }
@@ -326,12 +541,28 @@ pub fn save(path: &Path, image: &FloatImage) -> Result<(), Error> {
     }
 }
 
-/// `image`'s samples as the FITS and XISF writers take them.
-fn f32_data(image: &FloatImage) -> F32ImageData<'_> {
-    if image.channels == 1 {
-        F32ImageData::Mono(&image.samples)
-    } else {
-        F32ImageData::RgbInterleaved(&image.samples)
+/// Write a display image, such as a preview or an annotated photo, in the
+/// format its extension names: PNG or TIFF at the image's own depth, JPEG
+/// at 8 bits, or FITS or XISF as 32-bit floats from 0 to 1.
+pub fn save_display(path: &Path, image: &DynamicImage) -> Result<(), Error> {
+    let format = Format::from_path(path)
+        .ok_or_else(|| Error::save(path, format!("name it {DISPLAY_EXTENSIONS}")))?;
+    match format.raster() {
+        Some(ImageFormat::Jpeg) => {
+            // JPEG holds 8-bit gray or colour, without alpha.
+            let eight = if image.color().has_color() {
+                DynamicImage::ImageRgb8(image.to_rgb8())
+            } else {
+                DynamicImage::ImageLuma8(image.to_luma8())
+            };
+            eight
+                .save_with_format(path, ImageFormat::Jpeg)
+                .map_err(|error| Error::save(path, error))
+        }
+        Some(raster) => image
+            .save_with_format(path, raster)
+            .map_err(|error| Error::save(path, error)),
+        None => save(path, &FloatImage::from_display(image)),
     }
 }
 
@@ -369,6 +600,7 @@ mod tests {
             ("a.fit", Some(Format::Fits)),
             ("a.FTS", Some(Format::Fits)),
             ("a.xisf", Some(Format::Xisf)),
+            ("a.xish", Some(Format::Xisf)),
             ("a.webp", None),
             ("a", None),
         ] {
@@ -423,6 +655,103 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_samples_keep_their_cards_bounds_and_planes() {
+        let directory = tempfile::tempdir().unwrap();
+        let counts: Vec<f32> = (0..15).map(|index| index as f32 * 1000.0).collect();
+        let cards = [WriteHeaderCard::new("EXPTIME", HeaderValue::Float(30.0))];
+        let options = SaveOptions {
+            headers: &cards,
+            xisf_bounds: Some((0.0, 65535.0)),
+            ..SaveOptions::default()
+        };
+        // No ROWORDER unless asked, and counts kept as counts.
+        let fits = directory.path().join("counts.fits");
+        save_f32(&fits, 5, 3, F32ImageData::Mono(&counts), &options).unwrap();
+        let read = read_astronomy(&fits).unwrap();
+        assert_eq!(read.format, Format::Fits);
+        assert_eq!(read.image.header_f64("EXPTIME"), Some(30.0));
+        assert_eq!(read.image.header_str("ROWORDER"), None);
+        assert_eq!(read.image.into_physical_f32(), counts);
+        let xisf = directory.path().join("counts.xisf");
+        save_f32(&xisf, 5, 3, F32ImageData::Mono(&counts), &options).unwrap();
+        let read = read_astronomy(&xisf).unwrap();
+        assert_eq!(read.format, Format::Xisf);
+        assert_eq!(read.xisf_info.unwrap().bounds, Some((0.0, 65535.0)));
+        assert!(read.xisf_metadata.is_some());
+        // A chosen format wins over the extension.
+        let other = directory.path().join("counts.dat");
+        let fits_anyway = SaveOptions {
+            format: Some(Format::Fits),
+            ..options.clone()
+        };
+        save_f32(&other, 5, 3, F32ImageData::Mono(&counts), &fits_anyway).unwrap();
+        assert_eq!(read_astronomy(&other).unwrap().format, Format::Fits);
+        // Planar RGB reads back interleaved.
+        let planar: Vec<f32> = [0.1_f32, 0.2, 0.3, 0.4, 0.5, 0.6].to_vec();
+        let png = directory.path().join("planar.png");
+        save_f32(
+            &png,
+            2,
+            1,
+            F32ImageData::RgbPlanar(&planar),
+            &SaveOptions::default(),
+        )
+        .unwrap();
+        let read = open(&png).unwrap();
+        let expected = [0.1, 0.3, 0.5, 0.2, 0.4, 0.6];
+        for (read, expected) in read.samples.iter().zip(expected) {
+            assert!((read - expected).abs() < 1e-4, "{read} for {expected}");
+        }
+        // A distributed unit's header is not a file to write pixels to.
+        let error = save_f32(
+            &directory.path().join("unit.xish"),
+            5,
+            3,
+            F32ImageData::Mono(&counts),
+            &options,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error.cause(),
+            Cause::Xisf(XisfError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn display_images_go_out_as_their_extension_says() {
+        let directory = tempfile::tempdir().unwrap();
+        let photo = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(3, 2, Rgb([255, 0, 51])));
+        for extension in ["png", "jpg", "tif", "fits", "xisf"] {
+            let path = directory.path().join(format!("photo.{extension}"));
+            save_display(&path, &photo).unwrap();
+            let read = open(&path).unwrap();
+            assert_eq!(
+                (read.width, read.height, read.channels),
+                (3, 2, 3),
+                "{extension}"
+            );
+            // JPEG is lossy; the rest keep the 8-bit values.
+            let tolerance = if extension == "jpg" { 0.05 } else { 1e-6 };
+            for (read, expected) in read.samples[..3].iter().zip([1.0, 0.0, 0.2]) {
+                assert!(
+                    (read - expected).abs() <= tolerance,
+                    "{extension}: {read} for {expected}"
+                );
+            }
+        }
+        // A 16-bit gray preview stays 16-bit in PNG and becomes 8-bit JPEG.
+        let deep = DynamicImage::ImageLuma16(ImageBuffer::from_pixel(2, 2, Luma([40_000_u16])));
+        let png = directory.path().join("deep.png");
+        save_display(&png, &deep).unwrap();
+        assert_eq!(image::open(&png).unwrap().color(), image::ColorType::L16);
+        let jpeg = directory.path().join("deep.jpg");
+        save_display(&jpeg, &deep).unwrap();
+        assert_eq!(image::open(&jpeg).unwrap().color(), image::ColorType::L8);
+        let error = save_display(&directory.path().join("photo.bmp"), &photo).unwrap_err();
+        assert!(error.to_string().contains(DISPLAY_EXTENSIONS), "{error}");
+    }
+
+    #[test]
     fn an_eight_bit_png_reads_as_zero_to_one() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("eight.png");
@@ -443,6 +772,14 @@ mod tests {
         assert_eq!(read.samples, vec![1.0, 0.0, 0.2]);
         assert_eq!(read.to_gray(), vec![0.4]);
         assert_eq!(read.to_rgb().get_pixel(0, 0).0, [1.0, 0.0, 0.2]);
+        // The raster at its own depth, and not a FITS file.
+        assert_eq!(
+            open_raster(&path).unwrap().pixels.color(),
+            image::ColorType::L8
+        );
+        let fits = directory.path().join("image.fits");
+        save(&fits, &gray()).unwrap();
+        assert!(open_raster(&fits).is_err());
     }
 
     #[test]
@@ -458,5 +795,6 @@ mod tests {
         assert!(error.to_string().contains("do not fill"), "{error}");
         let error = open_astronomy(&directory.path().join("image.png")).unwrap_err();
         assert!(error.to_string().contains("not a FITS or XISF"), "{error}");
+        assert_eq!(error.path(), directory.path().join("image.png"));
     }
 }

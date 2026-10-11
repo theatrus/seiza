@@ -4389,6 +4389,9 @@ fn is_astronomy_image_path(path: &Path) -> bool {
 }
 
 fn open_astronomy_image(path: &Path) -> Result<(FitsImage, AstronomyImageFormat), String> {
+    if !is_astronomy_image_path(path) {
+        return Err(format!("{} is not a FITS or XISF path", path.display()));
+    }
     seiza_image_io::open_astronomy(path).map_err(|error| error.to_string())
 }
 
@@ -4425,9 +4428,9 @@ fn render_path16(
 /// Opens a JPEG, PNG or TIFF upright, applying its EXIF orientation, so
 /// solving, rendering and overlays share the frame the CLI uses.
 fn open_raster(path: &Path) -> Result<image::DynamicImage, String> {
-    seiza::raster::open_oriented(path)
+    seiza_image_io::open_raster(path)
         .map(|raster| raster.pixels)
-        .map_err(|error| format!("failed to open {}: {error}", path.display()))
+        .map_err(|error| error.to_string())
 }
 
 /// Classifies a FITS image as planar RGB, Bayer-mosaicked, or mono for the

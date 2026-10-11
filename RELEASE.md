@@ -21,9 +21,9 @@ PyPI**. They are cut from a single "Release `<version>`" PR followed by two tags
 
   At the time of writing that is `seiza-background`, `seiza-calibration`,
   `seiza-deconvolution`, `seiza-download`, `seiza-draw`, `seiza-fits`,
-  `seiza-imgproc`, `seiza-parallax`, `seiza-satellites`, `seiza-sources`,
-  `seiza-stacking`, `seiza-stars`, `seiza-stats`, `seiza-stretch`, and
-  `seiza-xisf`. A list written down goes
+  `seiza-image-io`, `seiza-imgproc`, `seiza-parallax`, `seiza-satellites`,
+  `seiza-sources`, `seiza-stacking`, `seiza-stars`, `seiza-stats`,
+  `seiza-stretch`, and `seiza-xisf`. A list written down goes
   stale the first time a crate is added, which is how `seiza-calibration`,
   `seiza-stats`, `seiza-stretch`, `seiza-background` and
   `seiza-deconvolution` came to be missing from it.
@@ -101,12 +101,14 @@ waits for the index):
 ```
 seiza-stats  →  seiza-stretch  →  seiza-imgproc  →  seiza-fits  →  seiza-xisf
 →  seiza-background  →  seiza-calibration  →  seiza-deconvolution
-→  seiza-sources  →  seiza-download  →  seiza  →  seiza-satellites
-→  seiza-stacking  →  seiza-stars  →  seiza-draw  →  seiza-parallax
-→  seiza-cabi  →  seiza-cli
+→  seiza-sources  →  seiza-download  →  seiza  →  seiza-image-io
+→  seiza-satellites  →  seiza-stacking  →  seiza-stars  →  seiza-draw
+→  seiza-parallax  →  seiza-cabi  →  seiza-cli
 ```
 
-`seiza-calibration` sits before `seiza-stacking`, which depends on it. If you
+`seiza-calibration` sits before `seiza-stacking`, which depends on it, and
+`seiza-image-io`, which needs `seiza`, `seiza-fits` and `seiza-xisf`, sits
+before `seiza-stacking` and `seiza-parallax`, which read and write through it. If you
 ever need to re-derive this order rather than trust it, `cargo tree` gives it:
 a crate must be published after everything it depends on.
 

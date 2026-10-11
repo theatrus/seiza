@@ -31,15 +31,17 @@ pub(crate) fn write_display_image(
     channels: usize,
     pixels: Vec<u8>,
 ) -> Result<()> {
-    if channels == 1 {
-        image::GrayImage::from_raw(width as u32, height as u32, pixels)
-            .ok_or_else(|| anyhow::anyhow!("display image dimensions do not match"))?
-            .save(path)?;
+    let mismatch = || anyhow::anyhow!("display image dimensions do not match");
+    let image = if channels == 1 {
+        image::DynamicImage::ImageLuma8(
+            image::GrayImage::from_raw(width as u32, height as u32, pixels).ok_or_else(mismatch)?,
+        )
     } else {
-        image::RgbImage::from_raw(width as u32, height as u32, pixels)
-            .ok_or_else(|| anyhow::anyhow!("display image dimensions do not match"))?
-            .save(path)?;
-    }
+        image::DynamicImage::ImageRgb8(
+            image::RgbImage::from_raw(width as u32, height as u32, pixels).ok_or_else(mismatch)?,
+        )
+    };
+    seiza_image_io::save_display(path, &image)?;
     Ok(())
 }
 

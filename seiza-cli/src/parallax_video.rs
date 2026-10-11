@@ -740,10 +740,7 @@ fn split(args: &ParallaxVideoArgs) -> Result<(Rgb32FImage, Rgb32FImage, PathBuf)
         let directory = base.parent().unwrap_or(Path::new("."));
         for (suffix, split) in [("starless", &starless), ("stars", &stars)] {
             let path = directory.join(format!("{stem}-{suffix}.png"));
-            image::DynamicImage::ImageRgb32F(split.clone())
-                .to_rgb16()
-                .save(&path)
-                .with_context(|| format!("failed to write {}", path.display()))?;
+            seiza_image_io::save(&path, &seiza_image_io::FloatImage::from_rgb(split))?;
             println!("wrote {}", path.display());
         }
     }
@@ -858,10 +855,10 @@ fn write_layers(directory: &Path, scene: &Scene) -> Result<()> {
         .with_context(|| format!("failed to create {}", directory.display()))?;
     let save = |name: &str, image: &LightImage| -> Result<()> {
         let path = directory.join(name);
-        image
-            .to_display_rgb8()
-            .save(&path)
-            .with_context(|| format!("failed to write {}", path.display()))?;
+        seiza_image_io::save_display(
+            &path,
+            &image::DynamicImage::ImageRgb8(image.to_display_rgb8()),
+        )?;
         println!("wrote {}", path.display());
         Ok(())
     };

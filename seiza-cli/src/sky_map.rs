@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use ab_glyph::FontRef;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use image::{Rgb, RgbImage};
 use rayon::prelude::*;
 use seiza::Wcs;
@@ -606,8 +606,7 @@ pub(crate) fn write(
 ) -> Result<()> {
     let annotations = collect(wcs, photo.dimensions(), catalogs, foreground);
     let map = render(photo, wcs, &annotations, summary, width)?;
-    map.save(path)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    seiza_image_io::save_display(path, &image::DynamicImage::ImageRgb8(map))?;
     println!(
         "sky map written to {} ({} constellations, {} named stars, {} deep-sky objects)",
         path.display(),

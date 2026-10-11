@@ -132,27 +132,15 @@ impl FitsFrame {
     /// Read and decode a FITS or XISF file into a linear frame.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let (image, bounds) = if seiza_xisf::is_xisf_path(path)
-            || seiza_xisf::is_xisf_header_path(path)
-        {
-            // The metadata carries the astrometric solution, which a
-            // PixInsight file keeps as properties rather than WCS cards.
-            let read =
-                seiza_xisf::read_image_with_options(path, 0, &seiza_xisf::ReadOptions::default())
-                    .map_err(|source| Error::XisfRead {
-                    path: path.to_path_buf(),
-                    source,
-                })?;
-            let mut image = read.image;
-            add_xisf_solution_wcs(&mut image.headers, &read.metadata);
-            (image, read.info.bounds)
-        } else {
-            let image = FitsImage::open(path).map_err(|source| Error::FitsRead {
-                path: path.to_path_buf(),
-                source,
-            })?;
-            (image, None)
-        };
+        let read =
+            seiza_image_io::read_astronomy(path).map_err(|error| image_io_error(error, false))?;
+        let mut image = read.image;
+        // The metadata carries the astrometric solution, which a PixInsight
+        // file keeps as properties rather than WCS cards.
+        if let Some(metadata) = &read.xisf_metadata {
+            add_xisf_solution_wcs(&mut image.headers, metadata);
+        }
+        let bounds = read.xisf_info.and_then(|info| info.bounds);
         let mut frame = Self::from_fits(image, Some(path.to_path_buf()))?;
         frame.bounds = bounds;
         Ok(frame)
@@ -971,43 +959,44 @@ fn write_linear_fits_f32(
     } else {
         F32ImageData::Mono(&image.data)
     };
-    if seiza_xisf::is_xisf_header_path(path) {
-        return Err(Error::XisfWrite {
-            path: path.to_path_buf(),
-            source: seiza_xisf::XisfError::Unsupported(
-                ".xish names a distributed unit's header file; write a .xisf file".into(),
-            ),
-        });
-    }
-    if seiza_xisf::is_xisf_path(path) {
-        // Stacking works in 16-bit camera counts. Declaring that range
-        // lets PixInsight load the samples on that scale rather than
-        // stretching their own minimum and maximum across the display.
-        let options = seiza_xisf::WriteOptions {
-            bounds: Some((0.0, 65535.0)),
-            ..seiza_xisf::WriteOptions::default()
-        };
-        seiza_xisf::write_f32_image_with_options(
+    // XISF by its extension (a `.xish` header is refused), FITS otherwise.
+    let format = match seiza_image_io::Format::from_path(path) {
+        Some(seiza_image_io::Format::Xisf) => seiza_image_io::Format::Xisf,
+        _ => seiza_image_io::Format::Fits,
+    };
+    let options = seiza_image_io::SaveOptions {
+        format: Some(format),
+        headers: &extra_cards,
+        // Stacking works in 16-bit camera counts. Declaring that range lets
+        // PixInsight load the samples on that scale rather than stretching
+        // their own minimum and maximum across the display.
+        xisf_bounds: Some((0.0, 65535.0)),
+        // The reference frame's own ROWORDER, if any, travels in the cards.
+        fits_top_down: false,
+    };
+    seiza_image_io::save_f32(path, image.width, image.height, pixels, &options)
+        .map_err(|error| image_io_error(error, true))
+}
+
+/// Stacking's error for an image the shared reader or writer refused: the
+/// FITS or XISF error it met, as a read or a write.
+fn image_io_error(error: seiza_image_io::Error, writing: bool) -> Error {
+    use seiza_image_io::Cause;
+    let (path, cause) = error.into_parts();
+    match (cause, writing) {
+        (Cause::Xisf(source), false) => Error::XisfRead { path, source },
+        (Cause::Xisf(source), true) => Error::XisfWrite { path, source },
+        (Cause::Fits(source), false) => Error::FitsRead { path, source },
+        (Cause::Fits(source), true) => Error::FitsWrite { path, source },
+        (other, false) => Error::FitsRead {
             path,
-            image.width,
-            image.height,
-            pixels,
-            &extra_cards,
-            &options,
-        )
-        .map_err(|source| Error::XisfWrite {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        return Ok(());
-    }
-    seiza_fits::write_f32_image(path, image.width, image.height, pixels, &extra_cards).map_err(
-        |source| Error::FitsWrite {
-            path: path.to_path_buf(),
-            source,
+            source: seiza_fits::FitsError::Unsupported(other.to_string()),
         },
-    )?;
-    Ok(())
+        (other, true) => Error::FitsWrite {
+            path,
+            source: seiza_fits::FitsError::Unsupported(other.to_string()),
+        },
+    }
 }
 
 fn logical_card(key: &str, value: bool, comment: &str) -> WriteHeaderCard {

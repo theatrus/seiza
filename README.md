@@ -111,6 +111,8 @@ compiler, formatter, and linter.
   [`seiza-fits`](seiza-fits/README.md) (FITS reading and linear `f32` writing),
   [`seiza-xisf`](seiza-xisf/README.md) (XISF reading into the same astronomy
   image representation),
+  [`seiza-image-io`](seiza-image-io/README.md) (opening and saving PNG,
+  JPEG, TIFF, FITS and XISF by file extension),
   [`seiza-background`](seiza-background/README.md) (robust gradient models),
   [`seiza-calibration`](seiza-calibration/README.md) (host-neutral calibration
   response fitting and application),
@@ -755,6 +757,8 @@ and solves in the table's exact frame. Contract details:
   statistics and MTF autostretch that now live in `seiza-stretch`
 - `seiza-xisf/` — XISF metadata and attached-pixel reading into `FitsImage`,
   plus atomic linear `f32` writing
+- `seiza-image-io/` — opening and saving images by file extension, PNG, JPEG,
+  TIFF, FITS and XISF alike, for the CLI, the C ABI, stacking and parallax
 - `seiza-background/` — format-independent robust background sampling,
   polynomial fitting, diagnostics, and linear correction
 - `seiza-calibration/` — format-independent calibration response fitting,

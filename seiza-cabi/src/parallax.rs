@@ -524,11 +524,7 @@ fn scene_options(request: &SceneRequest) -> Result<SceneOptions, String> {
         keep_galaxies: request.keep_galaxies.unwrap_or(defaults.keep_galaxies),
         dust: request.dust.unwrap_or(defaults.dust),
         dust_opacity: request.dust_opacity.unwrap_or(defaults.dust_opacity),
-        dust_map: request
-            .dust_map
-            .as_deref()
-            .map(DustMap::open)
-            .transpose()?,
+        dust_map: request.dust_map.as_deref().map(DustMap::open).transpose()?,
     })
 }
 
