@@ -171,9 +171,12 @@ impl Ledger {
         }
     }
 
-    /// The ledger of a context saved before ledgers existed: it cannot
-    /// replay anything, but records later calibration sets and frames.
-    pub(crate) fn legacy() -> Self {
+    /// A ledger with no admitted frames, which records later calibration
+    /// sets and frames. A stack aligned to an external reference image
+    /// starts here and replays as usual. A context saved before ledgers
+    /// existed also restores to this, and cannot replay: its frame count
+    /// does not match the ledger.
+    pub(crate) fn empty() -> Self {
         Self {
             frames: Vec::new(),
             calibrations: vec![CalibrationRecord::default()],

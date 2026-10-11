@@ -586,8 +586,8 @@ frames are admitted atomically: incompatible images, weak registrations,
 excess transform drift, low overlap, or implausible normalization leave the
 existing additive stack unchanged. The optional `--report` JSON records
 SHA-256 identities for every source and calibration master, the complete
-configuration, and the ordered accepted/rejected disposition ledger. The
-automatically selected reference is integrated, so it counts toward `accepted_frames` but has
+configuration, and the ordered accepted/rejected disposition ledger. Without
+`--reference-image`, the reference light is integrated, so it counts toward `accepted_frames` but has
 no entry in the per-frame `frames` ledger; that ledger lists only the frames
 pushed after it, with each one's weight when frames are weighted. FITS and report outputs are
 published atomically after they are complete.
@@ -604,12 +604,17 @@ seiza stack blue/*.fits --reference-image common.fits --output blue.fits --reint
 The common reference is demosaiced if needed, but the lights' bias, dark, and
 flat are not applied to it; supply a calibrated reference when needed. Its
 prepared channel count must match the lights (mono for separate mono filters,
-RGB for RGB or Bayer lights). Normalization and noise weighting use a
+RGB for RGB or Bayer lights), so mono filter lights cannot align to an RGB
+image, nor one-shot-color lights to a mono luminance master. Its pixel scale
+must match the lights' to within 4%, so 2x2-binned lights cannot align to an
+unbinned image. Normalization and noise weighting use a
 calibrated light from the current channel, selected by `--reference auto`
-(the default) or `--reference first`. The shared image supplies geometry only,
+(the default) or `--reference first`. If that light does not align to the
+shared image, the run stops; to try another, list it first and pass
+`--reference first`. The shared image supplies geometry only,
 so default normalization remains enabled without matching different filters
 to one brightness scale. Only listed lights count toward the stack.
-With this option, the report's `reference_integrated_automatically` is false
+With this option, the report's `reference_integrated` is false
 and `frames` contains every listed light, even when the reference is one of
 them. The alignment image retains its SHA-256 identity in `reference`, and
 `normalization_reference` identifies the selected channel light.

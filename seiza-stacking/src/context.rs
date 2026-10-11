@@ -638,6 +638,9 @@ impl ContextMetadata {
                 return Err("alignment reference does not match the external output grid".into());
             }
         }
+        if self.external_reference && self.alignment_reference.is_none() {
+            return Err("external-reference context holds no alignment reference".into());
+        }
         if self.reference_image_path.is_some() && self.alignment_reference.is_none() {
             return Err("context names a reference image but holds no alignment reference".into());
         }

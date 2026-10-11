@@ -738,7 +738,7 @@ impl LiveStacker {
         let mut ledger = if reference_is_integrated {
             crate::replay::Ledger::new(&reference)
         } else {
-            crate::replay::Ledger::legacy()
+            crate::replay::Ledger::empty()
         };
         if !reference_noise.is_empty() {
             ledger.set_reference_weighting(&reference_noise);
@@ -886,9 +886,7 @@ impl LiveStacker {
             input_paths: restored.input_paths,
             input_mode: restored.input_mode,
             configuration_fingerprint,
-            ledger: restored
-                .ledger
-                .unwrap_or_else(crate::replay::Ledger::legacy),
+            ledger: restored.ledger.unwrap_or_else(crate::replay::Ledger::empty),
             frame_cache: None,
             reference_cfa: None,
             reference_is_integrated: restored.reference_is_integrated,
@@ -2525,6 +2523,33 @@ mod tests {
             Some(path_identity(&reference_path).as_path())
         );
         assert_eq!(restored.protected_paths(), stacker.protected_paths());
+
+        // A context marked as aligned to an external image must hold that
+        // image, or it would reopen aligned to its channel light instead.
+        let bytes = std::fs::read(&context).unwrap();
+        let payload = zstd::stream::decode_all(&bytes[12..]).unwrap();
+        let metadata_end = 8 + u64::from_le_bytes(payload[..8].try_into().unwrap()) as usize;
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&payload[8..metadata_end]).unwrap();
+        let fields = metadata.as_object_mut().unwrap();
+        assert_eq!(fields["external_reference"], true);
+        fields.remove("alignment_reference").unwrap();
+        fields.remove("reference_image_path").unwrap();
+        let metadata = serde_json::to_vec(&metadata).unwrap();
+        let alignment_bytes = 176 * 144 * 4;
+        let mut stripped = (metadata.len() as u64).to_le_bytes().to_vec();
+        stripped.extend(&metadata);
+        stripped.extend(&payload[metadata_end..payload.len() - alignment_bytes]);
+        let mut rewritten = bytes[..12].to_vec();
+        rewritten.extend(zstd::stream::encode_all(&stripped[..], 1).unwrap());
+        std::fs::write(&context, rewritten).unwrap();
+        let Err(error) = LiveStacker::open_context(&context) else {
+            panic!("an external-reference context without its alignment image must be refused");
+        };
+        assert!(
+            error.to_string().contains("no alignment reference"),
+            "{error}"
+        );
 
         // The reference image may be a light as well, pushed like any other.
         let mut stacker = open(&paths[1], &paths[0]).unwrap();

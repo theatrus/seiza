@@ -276,7 +276,7 @@ struct StackReport {
     reference: FileIdentity,
     #[serde(skip_serializing_if = "Option::is_none")]
     normalization_reference: Option<FileIdentity>,
-    reference_integrated_automatically: bool,
+    reference_integrated: bool,
     calibration: CalibrationReport,
     configuration: ConfigurationReport,
     frames: Vec<AdmissionRecord>,
@@ -826,7 +826,7 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
             preview: preview_path.map(|path| path.display().to_string()),
             reference: reference_identity.expect("report identity was prepared"),
             normalization_reference: normalization_identity,
-            reference_integrated_automatically: options.reference_image.is_none(),
+            reference_integrated: options.reference_image.is_none(),
             calibration: calibration_report.expect("report calibration was prepared"),
             configuration: configuration_report,
             frames: admission_records,

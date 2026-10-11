@@ -212,7 +212,7 @@ fn common_reference_aligns_channels_without_contributing_pixels() {
                 serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
             assert_eq!(report["accepted_frames"], 2);
             assert_eq!(report["frames"].as_array().unwrap().len(), 2);
-            assert_eq!(report["reference_integrated_automatically"], false);
+            assert_eq!(report["reference_integrated"], false);
             assert_eq!(report["reference"]["path"], reference.display().to_string());
             assert_eq!(
                 report["normalization_reference"]["path"],
