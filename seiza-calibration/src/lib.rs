@@ -1,16 +1,28 @@
 //! Host-neutral calibration for linear image buffers.
 //!
-//! Two things live here: the pixel kernels that apply a calibration response,
-//! and the rules for deciding which frames belong together in the first place
-//! — whether a dark suits a light, whether a flat still corrects it, which
-//! candidates can be averaged into one master.
+//! Three things live here: the pixel kernels that apply a calibration
+//! response; the rules for deciding which frames belong together in the first
+//! place — whether a dark suits a light, whether a flat still corrects it,
+//! which candidates can be averaged into one master; and grades for the bias,
+//! dark, and flat frames that go into a master.
 //!
-//! Both are pure. Hosts retain file loading, detector evidence, cache policy,
+//! All are pure. Hosts retain file loading, detector evidence, cache policy,
 //! and user confirmation; they hand this crate values and act on what comes
 //! back.
+//!
+//! # Grading calibration frames
+//!
+//! [`measure_flat`] and [`measure_dark`] read one raw frame each and return a
+//! small, serializable measurement. [`screen_flats`], [`screen_darks`], and
+//! [`screen_bias`] judge the measurements of one set — frames that should
+//! match — and give each frame a [`FrameVerdict`]: a [`Grade`] and the
+//! [`Finding`]s behind it. Most checks compare a frame with its peers and need
+//! three or more frames. The screens say what the pixels show, never why, and
+//! never judge a flat by its temperature.
 
 mod matching;
 mod pedestal;
+mod quality;
 mod residual_flat;
 
 pub use matching::{
@@ -20,6 +32,12 @@ pub use matching::{
     sensor_consistent, sensor_matches, sort_by_proximity, temperature_matches,
 };
 pub use pedestal::fit_flat_pedestal;
+pub use quality::{
+    BiasScreening, DarkMeasureOptions, DarkMeasurement, DarkScreening,
+    FRAME_QUALITY_ALGORITHM_VERSION, Finding, FindingCode, FlatFeature, FlatMeasureOptions,
+    FlatMeasurement, FlatScreening, FlatSetReport, FrameVerdict, Grade, IlluminationProfile,
+    Limits, measure_dark, measure_flat, screen_bias, screen_darks, screen_flats,
+};
 
 pub use residual_flat::{
     RESIDUAL_FLAT_ALGORITHM_VERSION, ResidualFlatBuild, ResidualFlatDiagnostics,
@@ -138,6 +156,10 @@ pub enum Error {
     /// A residual response could not be fitted or applied safely.
     #[error("residual flat: {0}")]
     ResidualFlat(String),
+    /// Calibration frame measurement or screening settings were refused, or
+    /// the measurements given cannot form one set.
+    #[error("frame quality: {0}")]
+    FrameQuality(String),
 }
 
 /// Result specialized to this crate's [`Error`].

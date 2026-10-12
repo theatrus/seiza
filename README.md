@@ -154,6 +154,7 @@ below, and **—** means that surface does not expose the feature.
 | Batch stacking | ✓ | ✓ | ◐ |
 | Incremental stacking with saved contexts | ✓ | ✓ | ✓ |
 | Bias, dark, and flat master construction | ✓ | ✓ | — |
+| Bias, dark, and flat frame grading | ✓ | — | — |
 | RGB, LRGB, and narrowband composition | ✓ | ✓ | ◐ |
 | Satellite track prediction | ✓ | ✓ | — |
 | OpenCV-compatible image-processing primitives | ✓ | ✓ | — |
@@ -761,8 +762,9 @@ and solves in the table's exact frame. Contract details:
   TIFF, FITS and XISF alike, for the CLI, the C ABI, stacking and parallax
 - `seiza-background/` — format-independent robust background sampling,
   polynomial fitting, diagnostics, and linear correction
-- `seiza-calibration/` — format-independent calibration response fitting,
-  validation, and bounded application on caller-owned linear buffers
+- `seiza-calibration/` — format-independent calibration on caller-owned
+  linear buffers: response fitting, validation, and bounded application;
+  frame matching; and bias, dark, and flat frame grading
 - `seiza-stretch/` — parameterized, format-independent display analysis,
   transfer plans, and mono/RGB application
 - `seiza-stacking/` — FITS/XISF calibration adapters, local registration,
