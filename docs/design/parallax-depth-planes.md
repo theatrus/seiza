@@ -219,8 +219,10 @@ the clear sky's, or the cloud lies in front of them too. The cloud lies
 past its last star in front, by as far as the next would most likely have
 come. Its range takes in the splits within a natural log of 4 of the best,
 widened by a tenth each way, as Gaia's distances are no closer. On test
-skies this places a cloud hiding most stars behind it to within a tenth,
-and finds none in 250 skies without one.
+skies of 1,500 stars, a cloud hiding four fifths of the stars behind it
+comes within a tenth of its distance; with fewer stars, or thinner dust,
+fewer clouds are placed, and less closely. No cloud was found in 250
+skies without one.
 
 On the Iris, given at 355 pc, all of the field's dust joins the nebula's
 own cloud, and LDN 1167, 1168, 1170 and 1171 stay with it; the counts put
