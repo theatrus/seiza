@@ -424,6 +424,10 @@ struct PlaneResponse {
     basis: String,
     coverage: f64,
     absorbs: bool,
+    /// The catalogued object whose distance places it, which
+    /// `distanceOverrides` moves it by; null for a given mask or a cloud of
+    /// dust no catalogued object names.
+    object: Option<String>,
 }
 
 /// A setting as asked and as the video uses it.
@@ -1107,9 +1111,12 @@ pub unsafe extern "C" fn seiza_parallax_reconfigure_json(
 /// and size, the stars found and matched, the nebula's distance with how
 /// and where (`backgroundFocus`) it was found, galaxies lifted, the depth
 /// planes lifted (`planes`, `[{name, distanceParsecs, basis, coverage,
-/// absorbs}]`, `basis` saying how the distance was found, `coverage` the
-/// share of the image, and `absorbs` whether it is a dark cloud that
-/// blocks light behind it), the dust
+/// absorbs, object}]`, `basis` saying how the distance was found,
+/// `coverage` the share of the image, `absorbs` whether it is a dark cloud
+/// that blocks light behind it, and `object` the catalogued object whose
+/// distance places it, by name, which `distanceOverrides` moves it by, or
+/// null for a given mask or a cloud of dust no catalogued object names),
+/// the dust
 /// (`dustTransmission` `{median, thickest}`, `dustGiven` when a map gave
 /// it, and `starsInFrontOfDust`, the stars it brought in front), objects
 /// labelled, the WCS used, and `fit`, how fitting the camera to the
@@ -1164,6 +1171,7 @@ pub unsafe extern "C" fn seiza_parallax_summary_json(
                     basis: plane.basis.clone(),
                     coverage: plane.coverage,
                     absorbs: plane.absorbs,
+                    object: plane.object.clone(),
                 })
                 .collect(),
             dust_transmission: summary
@@ -2611,6 +2619,7 @@ mod tests {
         assert_eq!(planes[0]["name"], "knot");
         assert_eq!(planes[0]["distanceParsecs"], 150.0);
         assert_eq!(planes[0]["basis"], "given");
+        assert!(planes[0]["object"].is_null());
         let coverage = planes[0]["coverage"].as_f64().unwrap();
         // A disc of 40 pixels on the 320 by 240 image.
         let disc = std::f64::consts::PI * 40.0 * 40.0 / (320.0 * 240.0);

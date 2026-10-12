@@ -2298,9 +2298,12 @@ SeizaParallax *seiza_parallax_reconfigure_json(const SeizaParallax *video,
  and size, the stars found and matched, the nebula's distance with how
  and where (`backgroundFocus`) it was found, galaxies lifted, the depth
  planes lifted (`planes`, `[{name, distanceParsecs, basis, coverage,
- absorbs}]`, `basis` saying how the distance was found, `coverage` the
- share of the image, and `absorbs` whether it is a dark cloud that
- blocks light behind it), the dust
+ absorbs, object}]`, `basis` saying how the distance was found,
+ `coverage` the share of the image, `absorbs` whether it is a dark cloud
+ that blocks light behind it, and `object` the catalogued object whose
+ distance places it, by name, which `distanceOverrides` moves it by, or
+ null for a given mask or a cloud of dust no catalogued object names),
+ the dust
  (`dustTransmission` `{median, thickest}`, `dustGiven` when a map gave
  it, and `starsInFrontOfDust`, the stars it brought in front), objects
  labelled, the WCS used, and `fit`, how fitting the camera to the

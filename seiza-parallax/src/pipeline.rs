@@ -53,6 +53,10 @@ pub struct PlaneSummary {
     pub coverage: f64,
     /// Whether it blocks light behind it: a dark cloud.
     pub absorbs: bool,
+    /// The catalogued object whose distance places it, by name, which a
+    /// distance override moves it by; `None` for a given mask or a cloud
+    /// of dust no catalogued object names.
+    pub object: Option<String>,
 }
 
 /// What happens as a video is prepared and rendered.
@@ -905,6 +909,7 @@ impl Parallax {
                     distance_pc: plane.distance_pc,
                     basis: "given".into(),
                     blocks: true,
+                    object: None,
                 }),
                 None => report(Event::Warning(&format!(
                     "the depth plane {}'s mask marks nothing; it is left out",
@@ -1179,6 +1184,7 @@ impl Parallax {
                         basis: plane.basis.clone(),
                         coverage,
                         absorbs,
+                        object: plane.object.clone(),
                     });
                     planes.push(lifted);
                 }
@@ -2055,6 +2061,8 @@ struct PlaneToLift {
     distance_pc: f64,
     basis: String,
     blocks: bool,
+    /// The catalogued object a distance override moves it by.
+    object: Option<String>,
 }
 
 /// How the catalogue found `distance`, in a few words.
@@ -2213,6 +2221,7 @@ fn catalogued_planes(
                 at_focus,
             }),
             (false, Some((distance_pc, basis))) => planes.push(PlaneToLift {
+                object: Some(name.clone()),
                 name,
                 region,
                 distance_pc,
@@ -2340,6 +2349,7 @@ fn cloud_planes(
                 )));
             }
             planes.push(PlaneToLift {
+                object: nebulae.first().map(|largest| largest.name.clone()),
                 name,
                 region,
                 distance_pc: depth,
@@ -2368,6 +2378,7 @@ fn cloud_planes(
         });
         if let Some((depth, basis)) = found.filter(|(depth, _)| in_front(*depth)) {
             planes.push(PlaneToLift {
+                object: Some(nebula.name.clone()),
                 name: nebula.name,
                 region: nebula.region,
                 distance_pc: depth,
@@ -2835,6 +2846,12 @@ mod tests {
             [("NGC 9001".into(), 2500.0, "measured, photometric".into())]
         );
         assert_eq!(video.scene().depth_at(240.0, 70.0), 2500.0);
+        // Its object names it for a distance given in place of the
+        // catalogue's.
+        assert_eq!(
+            video.summary().planes[0].object.as_deref(),
+            Some("NGC 9001")
+        );
         // A distance given by name makes the second a near plane.
         options.scene.distance_overrides = vec![DistanceOverride {
             object: "ngc 9002".into(),
@@ -3033,6 +3050,8 @@ mod tests {
             carried.region.area()
         );
         assert!(carried.region.covers(1320.0, 140.0) > 0.9);
+        // A distance given for the dark nebula moves the cloud.
+        assert_eq!(carried.object.as_deref(), Some("LDN 9002"));
         // The cloud no catalogue lists lies where its stars run short.
         let counted = found("dust cloud 1");
         assert!(
@@ -3043,8 +3062,11 @@ mod tests {
         );
         assert!(counted.basis.starts_with("Gaia star counts"));
         assert!(counted.region.covers(1150.0, 730.0) > 0.9);
+        assert_eq!(counted.object, None);
         // The one in clear sky stands alone.
-        assert_eq!(found("LDN 9003").region, disc((800.0, 120.0)));
+        let alone = found("LDN 9003");
+        assert_eq!(alone.region, disc((800.0, 120.0)));
+        assert_eq!(alone.object.as_deref(), Some("LDN 9003"));
         assert_eq!(planes.len(), 3, "{notes:?}");
     }
 
