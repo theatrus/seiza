@@ -27,6 +27,7 @@
 //! let first = shot.render(&scene, 0).to_display_rgb8();
 //! ```
 
+mod cloud;
 pub mod dust;
 pub mod encode;
 mod field;

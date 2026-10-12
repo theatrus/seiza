@@ -405,7 +405,7 @@ impl Region {
     /// The region cut down to the pixels it takes a share of, with a dark
     /// border of [`BORDER`] pixels inside a `size` image, or `None` when it
     /// takes none.
-    fn trimmed(&self, (width, height): (usize, usize)) -> Option<Self> {
+    pub(crate) fn trimmed(&self, (width, height): (usize, usize)) -> Option<Self> {
         let (mut low, mut high) = ((usize::MAX, usize::MAX), (0, 0));
         for (index, &share) in self.coverage.iter().enumerate() {
             if share > 0.0 {
@@ -452,6 +452,24 @@ impl Region {
             return 0.0;
         }
         self.at(x.round() as usize, y.round() as usize)
+    }
+
+    /// The region taking each pixel's larger share of this one's and
+    /// `other`'s.
+    pub(crate) fn union(&self, other: &Self) -> Self {
+        let (left, top) = (self.left.min(other.left), self.top.min(other.top));
+        let right = (self.left + self.width).max(other.left + other.width);
+        let bottom = (self.top + self.height).max(other.top + other.height);
+        let coverage = (top..bottom)
+            .flat_map(|y| (left..right).map(move |x| self.at(x, y).max(other.at(x, y))))
+            .collect();
+        Self {
+            left,
+            top,
+            width: right - left,
+            height: bottom - top,
+            coverage,
+        }
     }
 
     /// How many pixels' worth the plane takes in all.
@@ -642,22 +660,36 @@ fn add(image: &mut LightImage, at: (usize, usize), light: &LightImage, from: (us
 
 /// Lift the light `region` marks off `starless` onto a plane named `name`
 /// at `distance_pc`, or `None` when nothing there stands apart from what
-/// fills in behind it.
+/// fills in behind it. `earlier` are the planes already lifted off
+/// `starless`.
 ///
 /// What lies behind the region is filled in from the light around it.
 /// Where the region is brighter than the fill, past [`NEAR_FILL`] of it,
 /// the plane takes, in its share of each pixel, the light above that.
-/// Where it is darker, a cloud blocks the light behind: the plane keeps the
-/// share it lets through, each channel's, and `starless` keeps the light
-/// behind, restored. Either way the plane drawn over what is left gives
-/// back `starless`.
+/// Where it is darker, and the plane `absorbs`, a cloud blocks the light
+/// behind: the plane keeps the share it lets through, each channel's, and
+/// `starless` keeps the light behind, restored. Only a plane in front of
+/// the background may absorb, as a cloud behind it cannot darken it;
+/// otherwise the darkness stays where it is. Either way the plane drawn
+/// over what is left gives back `starless`.
+///
+/// Light restored behind an earlier plane's cloud, taken onto a plane in
+/// front of that cloud, is dimmed by it as it was photographed: the cloud
+/// never dims a plane in front of it.
 pub fn lift_region(
     starless: &mut LightImage,
     region: &Region,
     distance_pc: f64,
     name: &str,
+    absorbs: bool,
+    earlier: &[Plane],
 ) -> Option<Plane> {
     let (width, height) = (starless.width, starless.height);
+    let behind: Vec<&Transmission> = earlier
+        .iter()
+        .filter(|plane| plane.distance_pc > distance_pc)
+        .filter_map(|plane| plane.transmission.as_ref())
+        .collect();
     // The fill draws on the light about the region, out to half its size
     // again.
     let margin = (region.width.max(region.height) / 2).max(16);
@@ -690,15 +722,22 @@ pub fn lift_region(
                     }
                     let x = region.left + column;
                     let here = &mut pixels[x];
-                    let behind = fill.at(x - left, y - top);
+                    let fill_here = fill.at(x - left, y - top);
+                    let mut dimmed = [1.0_f32; 3];
+                    for cloud in &behind {
+                        let through = cloud.at(x as f64, y as f64);
+                        for channel in 0..3 {
+                            dimmed[channel] *= through[channel];
+                        }
+                    }
                     for channel in 0..3 {
-                        let bright = behind[channel] / NEAR_FILL;
+                        let bright = fill_here[channel] / NEAR_FILL;
                         if here[channel] > bright {
                             let above = share * (here[channel] - bright);
-                            light[column][channel] = above;
+                            light[column][channel] = above * dimmed[channel];
                             here[channel] -= above;
-                        } else if behind[channel] > 0.0 {
-                            let ratio = here[channel] / behind[channel] / NEAR_FILL;
+                        } else if absorbs && fill_here[channel] > 0.0 {
+                            let ratio = here[channel] / fill_here[channel] / NEAR_FILL;
                             if ratio < 1.0 {
                                 let through = 1.0 - share * (1.0 - ratio.max(LEAST_PASSED));
                                 passed[column][channel] = through;
@@ -927,7 +966,7 @@ pub(crate) mod tests {
         let region = Region::from_mask(&disc(width, height, (90.0, 70.0), 35.0), width, height)
             .unwrap()
             .unwrap();
-        let plane = lift_region(&mut image, &region, 150.0, "cloud").unwrap();
+        let plane = lift_region(&mut image, &region, 150.0, "cloud", true, &[]).unwrap();
         assert_eq!((plane.name.as_str(), plane.distance_pc), ("cloud", 150.0));
         // The plane and what is left add back to the image.
         let mut rebuilt = image.clone();
@@ -993,7 +1032,7 @@ pub(crate) mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(region.left, 0);
-        let plane = lift_region(&mut left, &region, 150.0, "left").unwrap();
+        let plane = lift_region(&mut left, &region, 150.0, "left", true, &[]).unwrap();
         assert_eq!(plane.cut_edges(width, height), [true, false, false, false]);
         // The mask reaches the right edge, but the light is gone by then.
         let mut right = glow(165.0, 6.0);
@@ -1001,7 +1040,7 @@ pub(crate) mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(region.left + region.width, width);
-        let plane = lift_region(&mut right, &region, 150.0, "right").unwrap();
+        let plane = lift_region(&mut right, &region, 150.0, "right", true, &[]).unwrap();
         assert_eq!(plane.cut_edges(width, height), [false; 4]);
     }
 
@@ -1069,7 +1108,7 @@ pub(crate) mod tests {
         let region = Region::from_mask(&disc(width, height, (50.0, 50.0), 20.0), width, height)
             .unwrap()
             .unwrap();
-        assert!(lift_region(&mut image, &region, 150.0, "flat").is_none());
+        assert!(lift_region(&mut image, &region, 150.0, "flat", true, &[]).is_none());
         // A dark cloud, redder than the glow it hides, with a black core.
         for (index, pixel) in image.pixels.iter_mut().enumerate() {
             let (x, y) = ((index % width) as f64, (index / width) as f64);
@@ -1081,7 +1120,12 @@ pub(crate) mod tests {
             }
         }
         let original = image.clone();
-        let plane = lift_region(&mut image, &region, 150.0, "dark").unwrap();
+        // A plane that may not block light, behind the nebula, leaves the
+        // darkness where it is.
+        let mut kept = image.clone();
+        assert!(lift_region(&mut kept, &region, 900.0, "behind", false, &[]).is_none());
+        assert_eq!(kept, original);
+        let plane = lift_region(&mut image, &region, 150.0, "dark", true, &[]).unwrap();
         assert!(!plane.lit);
         let passed = plane.transmission.clone().expect("it blocks light");
         // Behind it, the glow about it, near enough.

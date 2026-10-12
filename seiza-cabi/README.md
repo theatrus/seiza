@@ -183,8 +183,9 @@ exposes the **superset** of what both apps need.
   never changes the scene's depth. `planes` (`[{mask, distanceParsecs,
   name}]`) lifts regions of the image, each marked by a mask image, onto
   planes at their own distances; `autoPlanes` lifts the catalogued nebulae
-  at distances of their own, and `distanceOverrides` gives objects'
-  distances by name. `seiza_parallax_summary_json` says what it
+  at distances of their own, and the clouds of dust in front of the nebula,
+  each dark nebula moving with the cloud it lies in, and
+  `distanceOverrides` gives objects' distances by name. `seiza_parallax_summary_json` says what it
   found, its `planes` among it, with `fit`: each zoom and pan as asked and as used, after the camera
   was fitted to stay inside the image, so an app can explain a change to the
   framing it asked for, and `inside`, false when some frames still show past

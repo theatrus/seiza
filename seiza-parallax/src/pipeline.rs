@@ -8,6 +8,7 @@
 //! frame in turn to a [`FrameSink`]: one of this crate's encoders, or the
 //! caller's own, such as a platform video encoder.
 
+use crate::cloud::{Clouds, CountedDistance, counted_distance};
 use crate::dust::{Dust, DustMap};
 use crate::field::{self, FieldSource};
 use crate::lift::Extent;
@@ -302,14 +303,22 @@ pub struct SceneOptions {
     pub planes: Vec<DepthPlane>,
     /// Lift the catalogued nebulae in the field that lie at distances of
     /// their own onto planes, besides `planes`: those whose distance was
-    /// measured, or borrowed from an object about them or, for a dark
-    /// cloud, from the nearest cloud measured (never one typical of their
-    /// kind), that lie at least [`AUTO_PLANE_DEPTH`] nearer or farther than
-    /// the nebula, and whose range of distances leaves the nebula's out.
-    /// Each takes its catalogued outline, or else its ellipse sized by the
-    /// image's light, or for a dark cloud its darkness. One holding the
+    /// measured, or borrowed from an object about them (never one typical
+    /// of their kind), that lie at least [`AUTO_PLANE_DEPTH`] nearer or
+    /// farther than the nebula, and whose range of distances leaves the
+    /// nebula's out. Each takes its catalogued outline, or else its ellipse
+    /// sized by the image's light, and only its light. One holding the
     /// distance focus is the nebula, or holds it, and keeps to the nebula's
     /// plane.
+    ///
+    /// A dark nebula moves with the cloud of dust it lies in, as the star
+    /// counts find the clouds. The cloud holding the distance focus stays
+    /// on the nebula's plane, its dark nebulae with it. Another cloud at
+    /// least [`AUTO_PLANE_DEPTH`] in front of the nebula moves as one
+    /// plane, at the distance of its largest dark nebula that the
+    /// catalogue places, also from the nearest cloud measured, else where
+    /// the Gaia stars seen through it run short. A dark nebula in clear sky
+    /// stands alone, likewise placed.
     pub auto_planes: bool,
     /// Distances to use for catalogued objects in place of the catalogue's:
     /// for the nebula's distance and the automatic planes.
@@ -895,6 +904,7 @@ impl Parallax {
                     region,
                     distance_pc: plane.distance_pc,
                     basis: "given".into(),
+                    blocks: true,
                 }),
                 None => report(Event::Warning(&format!(
                     "the depth plane {}'s mask marks nothing; it is left out",
@@ -1041,6 +1051,18 @@ impl Parallax {
                 ..*star
             })
             .collect();
+        // The stars seen through the dust: all but the matched ones in
+        // front of it. The unmatched ones count however near the dust they
+        // were placed, as faint stars are mostly far. Their counts map the
+        // dust, and find its clouds.
+        let behind: Vec<(f64, f64)> = matched
+            .iter()
+            .filter(|star| star.distance_pc.is_none_or(|pc| pc > distance))
+            .map(|star| (star.x, star.y))
+            .collect();
+        let counts = (scene_options.dust || scene_options.auto_planes)
+            .then(|| Dust::from_star_counts(&behind, width, height, scene_options.dust_opacity))
+            .flatten();
 
         let mut starless = LightImage::from_display(starless);
         // Galaxies lie far beyond everything else, but the star remover
@@ -1078,25 +1100,48 @@ impl Parallax {
             }
         }
         if scene_options.auto_planes {
-            match catalogued_planes(
+            let (glowing, dark) = catalogued_planes(
                 scene_options,
                 wcs,
                 &starless,
                 (focus, distance),
                 &given_distances,
-            ) {
-                Ok(found) => {
-                    if found.is_empty() {
-                        report(Event::Note(
-                            "no catalogued nebula in the field lies at a distance of its own",
-                        ));
-                    }
-                    regions.extend(found);
-                }
-                Err(error) => report(Event::Warning(&format!(
-                    "no automatic depth planes: {error}"
-                ))),
+            )
+            .unwrap_or_else(|error| {
+                report(Event::Warning(&format!(
+                    "no catalogued nebulae as depth planes: {error}"
+                )));
+                Default::default()
+            });
+            // Gaia's stars with distances, where they lie in the image: the
+            // dust clouds' stars.
+            let gaia_stars: Vec<(f64, f64, f64)> = gaia
+                .iter()
+                .filter_map(|star| {
+                    let star_distance = star.best_distance()?;
+                    let (x, y) = wcs.world_to_pixel(star.ra, star.dec)?;
+                    (x >= 0.0 && y >= 0.0 && x < width as f64 && y < height as f64).then_some((
+                        x,
+                        y,
+                        star_distance,
+                    ))
+                })
+                .collect();
+            let clouds = counts.as_ref().map(Clouds::find);
+            let dusty = cloud_planes(
+                clouds.as_ref(),
+                dark,
+                &gaia_stars,
+                (focus, distance),
+                report,
+            );
+            if glowing.is_empty() && dusty.is_empty() {
+                report(Event::Note(
+                    "no catalogued nebula or dust cloud in the field lies at a distance of its own",
+                ));
             }
+            regions.extend(glowing);
+            regions.extend(dusty);
         }
         // The depth planes, smallest first: where one lies within another,
         // the smaller takes its own light, and the larger the fill left
@@ -1104,8 +1149,14 @@ impl Parallax {
         regions.sort_by(|a, b| a.region.area().total_cmp(&b.region.area()));
         let mut planes = Vec::new();
         for plane in &regions {
-            let lifted =
-                crate::lift_region(&mut starless, &plane.region, plane.distance_pc, &plane.name);
+            let lifted = crate::lift_region(
+                &mut starless,
+                &plane.region,
+                plane.distance_pc,
+                &plane.name,
+                plane.blocks && plane.distance_pc < distance,
+                &planes,
+            );
             match lifted {
                 Some(lifted) => {
                     let coverage = plane.region.area() / (width * height) as f64;
@@ -1132,8 +1183,8 @@ impl Parallax {
                     planes.push(lifted);
                 }
                 None => report(Event::Warning(&format!(
-                    "nothing in the depth plane {} stands above the light around it; it is \
-                     left out",
+                    "nothing in the depth plane {} stands apart from the light around it; it \
+                     is left out",
                     plane.name
                 ))),
             }
@@ -1168,25 +1219,16 @@ impl Parallax {
         Arc::make_mut(&mut scene.sprites).extend(galaxies.into_iter().map(|(_, _, sprite)| sprite));
         let mut counted_dust = None;
         if scene_options.dust {
-            // The stars seen through the dust: all but the matched ones in
-            // front of it. The unmatched ones count however near the dust
-            // they were placed, as faint stars are mostly far.
-            let behind: Vec<(f64, f64)> = matched
-                .iter()
-                .filter(|star| star.distance_pc.is_none_or(|pc| pc > distance))
-                .map(|star| (star.x, star.y))
-                .collect();
             // A dark cloud on a plane in front of the nebula blocks the
             // light behind it itself, so the counted dust clears there.
-            let clouds: Vec<&Region> = scene
+            let clouds: Vec<&crate::plane::Transmission> = scene
                 .planes
                 .iter()
-                .filter(|plane| plane.transmission.is_some() && plane.distance_pc < distance)
-                .map(|plane| &plane.region)
+                .filter(|plane| plane.distance_pc < distance)
+                .filter_map(|plane| plane.transmission.as_ref())
                 .collect();
-            counted_dust =
-                Dust::from_star_counts(&behind, width, height, scene_options.dust_opacity)
-                    .map(|dust| Arc::new(dust.with_darkness(&starless, &behind).cleared(&clouds)));
+            counted_dust = counts
+                .map(|dust| Arc::new(dust.with_darkness(&starless, &behind).cleared(&clouds)));
             match (&counted_dust, &given_dust) {
                 (Some(_), None) => report(Event::Note(&format!(
                     "dust mapped from {} stars behind it and the nebula's dark places",
@@ -2004,12 +2046,15 @@ fn given_distance(given: &HashMap<String, f64>, object: &SkyObject) -> Option<f6
 }
 
 /// A depth plane to lift: its name, region, distance and how that was
-/// found.
+/// found, and whether it may block light. A glowing nebula found in the
+/// catalogue takes only its light: the darkness about it is dust, which
+/// stays with its cloud.
 struct PlaneToLift {
     name: String,
     region: Region,
     distance_pc: f64,
     basis: String,
+    blocks: bool,
 }
 
 /// How the catalogue found `distance`, in a few words.
@@ -2028,18 +2073,32 @@ fn basis_of(distance: &ObjectDistance) -> String {
     }
 }
 
-/// The catalogued nebulae in the field lying at distances of their own, as
-/// [`SceneOptions::auto_planes`] chooses them, largest first, against a
-/// nebula at `distance` whose depth was taken at `focus`: each with its
-/// outermost catalogued outline as its region, or else its ellipse sized by
-/// the light of `starless`. `given` distances take the catalogue's place.
+/// A catalogued dark nebula in the field.
+struct DarkNebula {
+    name: String,
+    region: Region,
+    /// Its distance and how that was found, if the catalogue places it: at
+    /// the nebula's own distance when its range takes that in.
+    distance: Option<(f64, String)>,
+    /// Whether its ellipse holds the point the nebula's distance was taken
+    /// at: it is the nebula, or holds it.
+    at_focus: bool,
+}
+
+/// The catalogued nebulae in the field, as [`SceneOptions::auto_planes`]
+/// chooses them, against a nebula at `distance` whose depth was taken at
+/// `focus`: the glowing ones lying at distances of their own, largest
+/// first, and every dark one, each with its outermost catalogued outline as
+/// its region, or else its ellipse sized by the light of `starless`. A dark
+/// nebula lies in a cloud of dust and moves with it, so [`cloud_planes`]
+/// places the dark ones. `given` distances take the catalogue's place.
 fn catalogued_planes(
     options: &SceneOptions,
     wcs: &Wcs,
     starless: &LightImage,
     (focus, distance): ((f64, f64), f64),
     given: &HashMap<String, f64>,
-) -> Result<Vec<PlaneToLift>, Error> {
+) -> Result<(Vec<PlaneToLift>, Vec<DarkNebula>), Error> {
     let (width, height) = (starless.width, starless.height);
     let objects_path = seiza::data_paths::objects(options.objects.as_deref())
         .map_err(|error| Error::Invalid(format!("they need the object catalog: {error}")))?;
@@ -2061,26 +2120,27 @@ fn catalogued_planes(
         .objects_in_footprint(wcs, (width as u32, height as u32))
         .map_err(|error| Error::Invalid(error.to_string()))?;
     let short = width.min(height) as f64;
-    let mut kept: Vec<(Extent, f64)> = Vec::new();
-    let mut planes = Vec::new();
+    let mut kept: Vec<(Extent, Option<f64>)> = Vec::new();
+    let (mut planes, mut dark_nebulae) = (Vec::new(), Vec::new());
     for object in placed {
-        use seiza::objects::ObjectKind::*;
-        let dark = object.object.kind == DarkNebula;
+        use seiza::objects::ObjectKind as Kind;
+        let dark = object.object.kind == Kind::DarkNebula;
         let nebula = dark
             || matches!(
                 object.object.kind,
-                Nebula | PlanetaryNebula | HiiRegion | SupernovaRemnant | ClusterWithNebula
+                Kind::Nebula
+                    | Kind::PlanetaryNebula
+                    | Kind::HiiRegion
+                    | Kind::SupernovaRemnant
+                    | Kind::ClusterWithNebula
             );
         // Too small to see move, or so large it is most of the image.
         if !nebula || object.semi_major_px < 12.0 || object.semi_major_px > 0.6 * short {
             continue;
         }
-        let (depth, basis) = match given_distance(given, &object.object) {
-            Some(depth) => (depth, "given".to_string()),
-            None => {
-                let Some(found) = distances.for_object(&object.object) else {
-                    continue;
-                };
+        let found = match given_distance(given, &object.object) {
+            Some(depth) => Some((depth, "given".to_string())),
+            None => distances.for_object(&object.object).and_then(|found| {
                 // A dark cloud's distance may come from the nearest cloud
                 // measured along a sightline beside it.
                 let measured = match found.basis {
@@ -2092,13 +2152,17 @@ fn catalogued_planes(
                 // which lies nearer.
                 let overlaps = found.lower_pc.is_some_and(|lower| lower <= distance)
                     && found.upper_pc.is_some_and(|upper| upper >= distance);
-                if !measured || overlaps {
-                    continue;
+                match (measured, overlaps) {
+                    (false, _) => None,
+                    (true, true) => Some((distance, "its range takes in the nebula's".into())),
+                    (true, false) => Some((found.distance_pc, basis_of(&found))),
                 }
-                (found.distance_pc, basis_of(&found))
-            }
+            }),
         };
-        if (depth - distance).abs() < AUTO_PLANE_DEPTH * distance {
+        let apart = found
+            .as_ref()
+            .is_some_and(|(depth, _)| (depth - distance).abs() >= AUTO_PLANE_DEPTH * distance);
+        if !dark && !apart {
             continue;
         }
         let (semi_minor, angle) = match object.angle_deg {
@@ -2112,12 +2176,18 @@ fn catalogued_planes(
             semi_minor: semi_minor.max(1.0),
             angle: angle.to_radians(),
         };
+        let at_focus = extent.reach(focus.0, focus.1) <= 1.0;
         // The nebula itself, or a region about it, which would carry it
         // off; and a second listing of one already taken.
-        if extent.reach(focus.0, focus.1) <= 1.0
+        let depth = found.as_ref().map(|(depth, _)| *depth);
+        let same_depth = |other: Option<f64>| match (other, depth) {
+            (Some(other), Some(depth)) => (other - depth).abs() < AUTO_PLANE_DEPTH * other,
+            (None, None) => true,
+            _ => false,
+        };
+        if (at_focus && !dark)
             || kept.iter().any(|(other, other_depth)| {
-                other.reach(extent.x, extent.y) <= 1.0
-                    && (other_depth - depth).abs() < AUTO_PLANE_DEPTH * other_depth
+                other.reach(extent.x, extent.y) <= 1.0 && same_depth(*other_depth)
             })
         {
             continue;
@@ -2134,14 +2204,179 @@ fn catalogued_planes(
             continue;
         };
         kept.push((extent, depth));
-        planes.push(PlaneToLift {
-            name: object.object.name.clone(),
-            region,
-            distance_pc: depth,
-            basis,
-        });
+        let name = object.object.name.clone();
+        match (dark, found) {
+            (true, distance) => dark_nebulae.push(DarkNebula {
+                name,
+                region,
+                distance,
+                at_focus,
+            }),
+            (false, Some((distance_pc, basis))) => planes.push(PlaneToLift {
+                name,
+                region,
+                distance_pc,
+                basis,
+                blocks: false,
+            }),
+            (false, None) => {}
+        }
     }
-    Ok(planes)
+    Ok((planes, dark_nebulae))
+}
+
+/// The dust clouds lying in front of a nebula at `distance`, whose depth
+/// was taken at `focus`, as planes to lift: each of `clouds` that does not
+/// hold the nebula, with the catalogued `dark` nebulae in it, placed at its
+/// largest dark nebula's distance, else where the Gaia `stars` (image
+/// place and parsecs) seen through it run short; and the dark nebulae that
+/// lie in no cloud, each at its own distance. Dark nebulae in the nebula's
+/// own cloud stay with it. Without `clouds`, every dark nebula stands
+/// alone.
+fn cloud_planes(
+    clouds: Option<&Clouds>,
+    dark: Vec<DarkNebula>,
+    stars: &[(f64, f64, f64)],
+    (focus, distance): ((f64, f64), f64),
+    report: &mut dyn FnMut(Event),
+) -> Vec<PlaneToLift> {
+    let in_front = |depth: f64| depth <= (1.0 - AUTO_PLANE_DEPTH) * distance;
+    let counted_basis = |found: &CountedDistance| {
+        format!(
+            "Gaia star counts, {} stars in front, {:.0}-{:.0} pc",
+            found.in_front, found.lower_pc, found.upper_pc
+        )
+    };
+    let names = |nebulae: &[DarkNebula]| {
+        let names: Vec<&str> = nebulae.iter().map(|nebula| nebula.name.as_str()).collect();
+        match names.as_slice() {
+            [] => String::new(),
+            [one] => one.to_string(),
+            [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+        }
+    };
+    let mut planes = Vec::new();
+    let mut alone = Vec::new();
+    let mut clear = Vec::new();
+    if let Some(clouds) = clouds {
+        let mut members: Vec<Vec<DarkNebula>> = (0..clouds.len()).map(|_| Vec::new()).collect();
+        for nebula in dark {
+            match clouds.holding(&nebula.region) {
+                Some(label) => members[label].push(nebula),
+                None => alone.push(nebula),
+            }
+        }
+        // The stars seen through each cloud's core, and over clear sky.
+        let mut seen: Vec<Vec<f64>> = vec![Vec::new(); clouds.len()];
+        for &(x, y, star_distance) in stars {
+            if let Some(label) = clouds.core_at(x, y) {
+                seen[label].push(star_distance);
+            } else if clouds.is_clear(x, y) {
+                clear.push(star_distance);
+            }
+        }
+        let clear_area = clouds.clear_area();
+        let home = clouds.near(focus, 2);
+        let mut labels: Vec<(usize, f64)> = (0..clouds.len())
+            .map(|label| (label, clouds.area(label)))
+            .collect();
+        labels.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let mut unnamed = 0;
+        for (label, _) in labels {
+            let mut nebulae = std::mem::take(&mut members[label]);
+            nebulae.sort_by(|a, b| b.region.area().total_cmp(&a.region.area()));
+            let counted = || {
+                let core = clouds.core_area(label);
+                counted_distance(&seen[label], &clear, clear_area / core)
+            };
+            if home == Some(label) || nebulae.iter().any(|nebula| nebula.at_focus) {
+                if let Some(found) = counted() {
+                    report(Event::Note(&format!(
+                        "the Gaia star counts put the nebula's dust at {:.0} pc ({:.0}-{:.0}), \
+                         {} stars in front of it",
+                        found.distance_pc, found.lower_pc, found.upper_pc, found.in_front
+                    )));
+                }
+                if !nebulae.is_empty() {
+                    report(Event::Note(&format!(
+                        "{} lie{} in the nebula's own dust and stay{} with it",
+                        names(&nebulae),
+                        if nebulae.len() == 1 { "s" } else { "" },
+                        if nebulae.len() == 1 { "s" } else { "" },
+                    )));
+                }
+                continue;
+            }
+            let placed = nebulae.iter().find_map(|nebula| nebula.distance.clone());
+            let (depth, basis, upper) = match placed {
+                Some((depth, basis)) => (depth, basis, depth),
+                None => match counted() {
+                    Some(found) => (found.distance_pc, counted_basis(&found), found.upper_pc),
+                    None => continue,
+                },
+            };
+            if !(in_front(depth) && upper < distance) {
+                continue;
+            }
+            let Some(mut region) = clouds.region(label) else {
+                continue;
+            };
+            for nebula in &nebulae {
+                region = region.union(&nebula.region);
+            }
+            let name = match nebulae.first() {
+                Some(largest) => largest.name.clone(),
+                None => {
+                    unnamed += 1;
+                    format!("dust cloud {unnamed}")
+                }
+            };
+            if nebulae.len() > 1 {
+                report(Event::Note(&format!(
+                    "{} lie{} in {name}'s dust and move{} with it",
+                    names(&nebulae[1..]),
+                    if nebulae.len() == 2 { "s" } else { "" },
+                    if nebulae.len() == 2 { "s" } else { "" },
+                )));
+            }
+            planes.push(PlaneToLift {
+                name,
+                region,
+                distance_pc: depth,
+                basis,
+                blocks: true,
+            });
+        }
+    } else {
+        alone = dark;
+    }
+    // A dark nebula in clear sky stands alone.
+    for nebula in alone {
+        if nebula.at_focus {
+            continue;
+        }
+        let found = nebula.distance.or_else(|| {
+            let seen: Vec<f64> = stars
+                .iter()
+                .filter(|&&(x, y, _)| nebula.region.covers(x, y) >= 0.5)
+                .map(|star| star.2)
+                .collect();
+            let area = clouds.map(|clouds| clouds.clear_area() / nebula.region.area());
+            area.and_then(|area| counted_distance(&seen, &clear, area))
+                .filter(|found| found.upper_pc < distance)
+                .map(|found| (found.distance_pc, counted_basis(&found)))
+        });
+        if let Some((depth, basis)) = found.filter(|(depth, _)| in_front(*depth)) {
+            planes.push(PlaneToLift {
+                name: nebula.name,
+                region: nebula.region,
+                distance_pc: depth,
+                basis,
+                blocks: true,
+            });
+        }
+    }
+    planes
 }
 
 /// The closed contours of the outermost brightness level catalogued for
@@ -2698,6 +2933,119 @@ mod tests {
         }
         let last = plain.frames() - 1;
         assert_ne!(plain.frame(last), clouded.frame(last));
+    }
+
+    #[test]
+    fn dark_nebulae_move_with_the_dust_clouds_they_lie_in() {
+        // Stars on a jittered grid, evenly spread from 50 to 1500 pc, and
+        // three clouds of dust far apart, hiding most of the stars behind
+        // them: one about the nebula at 600 pc, one at 150 pc to its upper
+        // right, and one at 300 pc to its lower right.
+        let (width, height) = (1600, 900);
+        let dusty = [
+            ((400.0, 450.0), 110.0, 550.0),
+            ((1350.0, 170.0), 90.0, 150.0),
+            ((1150.0, 730.0), 90.0, 300.0),
+        ];
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut random = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        let mut stars = Vec::new();
+        for row in 0..height / 8 {
+            for column in 0..width / 8 {
+                let x = column as f64 * 8.0 + 8.0 * random();
+                let y = row as f64 * 8.0 + 8.0 * random();
+                let distance = 50.0 + 1450.0 * random();
+                let hidden = dusty.iter().any(|&((cx, cy), radius, at)| {
+                    (x - cx).hypot(y - cy) <= radius && distance > at
+                }) && random() < 0.9;
+                if !hidden {
+                    stars.push((x, y, distance));
+                }
+            }
+        }
+        let behind: Vec<(f64, f64)> = stars
+            .iter()
+            .filter(|star| star.2 > 600.0)
+            .map(|star| (star.0, star.1))
+            .collect();
+        let dust = Dust::from_star_counts(&behind, width, height, 3.0).unwrap();
+        let clouds = Clouds::find(&dust);
+        let disc = |centre: (f64, f64)| {
+            let mask = crate::plane::tests::disc(width, height, centre, 25.0);
+            Region::from_mask(&mask, width, height).unwrap().unwrap()
+        };
+        let nebula = |name: &str, centre: (f64, f64), distance: f64| DarkNebula {
+            name: name.into(),
+            region: disc(centre),
+            distance: Some((distance, "nearby-cloud".into())),
+            at_focus: false,
+        };
+        let dark = vec![
+            nebula("LDN 9001", (420.0, 430.0), 150.0),
+            nebula("LDN 9002", (1360.0, 180.0), 150.0),
+            nebula("LDN 9003", (800.0, 120.0), 300.0),
+        ];
+        let mut notes = Vec::new();
+        let planes = cloud_planes(
+            Some(&clouds),
+            dark,
+            &stars,
+            ((400.0, 450.0), 600.0),
+            &mut |event| {
+                if let Event::Note(note) = event {
+                    notes.push(note.to_string());
+                }
+            },
+        );
+        let found = |name: &str| {
+            planes
+                .iter()
+                .find(|plane| plane.name == name)
+                .unwrap_or_else(|| {
+                    let found: Vec<(&str, f64, f64)> = planes
+                        .iter()
+                        .map(|plane| (plane.name.as_str(), plane.distance_pc, plane.region.area()))
+                        .collect();
+                    panic!("no plane {name}: {found:?} {notes:?}")
+                })
+        };
+        // The dark nebula in the nebula's own dust stays with it.
+        assert!(planes.iter().all(|plane| plane.name != "LDN 9001"));
+        assert!(
+            notes
+                .iter()
+                .any(|note| note
+                    .contains("LDN 9001 lies in the nebula's own dust and stays with it")),
+            "{notes:?}"
+        );
+        // The one in the other cloud takes the whole cloud with it.
+        let carried = found("LDN 9002");
+        assert_eq!(carried.distance_pc, 150.0);
+        assert!(carried.blocks);
+        assert!(
+            carried.region.area() > 5.0 * disc((1360.0, 180.0)).area(),
+            "{}",
+            carried.region.area()
+        );
+        assert!(carried.region.covers(1320.0, 140.0) > 0.9);
+        // The cloud no catalogue lists lies where its stars run short.
+        let counted = found("dust cloud 1");
+        assert!(
+            (counted.distance_pc - 300.0).abs() < 30.0,
+            "{} {}",
+            counted.distance_pc,
+            counted.basis
+        );
+        assert!(counted.basis.starts_with("Gaia star counts"));
+        assert!(counted.region.covers(1150.0, 730.0) > 0.9);
+        // The one in clear sky stands alone.
+        assert_eq!(found("LDN 9003").region, disc((800.0, 120.0)));
+        assert_eq!(planes.len(), 3, "{notes:?}");
     }
 
     #[test]

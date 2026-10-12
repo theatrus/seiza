@@ -299,7 +299,11 @@ pub(crate) struct ParallaxVideoArgs {
     /// their own onto planes: those with a measured distance, or one
     /// borrowed from an object around them, at least 15% nearer or farther
     /// than the nebula, each in its catalogued outline or its ellipse sized
-    /// by the image's light
+    /// by the image's light. A dark nebula moves with the cloud of dust it
+    /// lies in: a cloud that holds the nebula stays with it, and one at
+    /// least 15% in front of it, placed by its dark nebulae's distances or
+    /// where the Gaia stars seen through it run short, moves as one
+    /// plane
     #[arg(long)]
     auto_planes: bool,
     /// A distance for a catalogued object in place of the catalogue's,

@@ -1933,7 +1933,7 @@ mod tests {
             let region = crate::Region::from_mask(&mask, width, height)
                 .unwrap()
                 .unwrap();
-            crate::lift_region(&mut starless, &region, distance, "cloud").unwrap()
+            crate::lift_region(&mut starless, &region, distance, "cloud", true, &[]).unwrap()
         });
         let scene = Scene::new(
             &starless,
@@ -1981,6 +1981,70 @@ mod tests {
     }
 
     #[test]
+    fn light_lifted_in_front_of_a_dark_cloud_keeps_the_first_frame() {
+        // An even glow behind a dark cloud at 200 pc, and a glowing
+        // nebula at 100 pc over both, larger than the cloud, so lifted
+        // after it.
+        let (width, height) = (400, 300);
+        let mut starless = LightImage::new(width, height);
+        for (index, pixel) in starless.pixels.iter_mut().enumerate() {
+            let (x, y) = ((index % width) as f64, (index / width) as f64);
+            let r = (x - 150.0).hypot(y - 150.0);
+            let t = ((r - 4.0) / 16.0).clamp(0.0, 1.0);
+            let passed = (0.05 + 0.95 * t * t * (3.0 - 2.0 * t)) as f32;
+            let glow = (0.3 * (-(r / 35.0).powi(2)).exp()) as f32;
+            *pixel = [0.3 * passed + glow, 0.3 * passed + glow, 0.4 * passed];
+        }
+        let scene = |starless: &LightImage, planes: Vec<crate::Plane>| {
+            Scene::new(
+                starless,
+                &LightImage::new(width, height),
+                &[],
+                400.0,
+                400.0,
+                2000.0,
+                &CutOptions::default(),
+            )
+            .with_planes(planes, 0.02)
+        };
+        let region = |radius: f64| {
+            let mask = crate::plane::tests::disc(width, height, (150.0, 150.0), radius);
+            crate::Region::from_mask(&mask, width, height)
+                .unwrap()
+                .unwrap()
+        };
+        let mut lifted = starless.clone();
+        let cloud =
+            crate::lift_region(&mut lifted, &region(30.0), 200.0, "cloud", true, &[]).unwrap();
+        assert!(cloud.transmission.is_some());
+        let earlier = [cloud];
+        let nebula =
+            crate::lift_region(&mut lifted, &region(70.0), 100.0, "nebula", true, &earlier)
+                .unwrap();
+        assert!(nebula.lit);
+        let [cloud] = earlier;
+        let shot = Shot {
+            focus: (199.5, 149.5),
+            dolly: 0.0,
+            width: 400,
+            height: 300,
+            frames: 2,
+            ..Shot::default()
+        };
+        let (a, b) = (
+            shot.render(&scene(&starless, Vec::new()), 0)
+                .to_display_rgb8(),
+            shot.render(&scene(&lifted, vec![cloud, nebula]), 0)
+                .to_display_rgb8(),
+        );
+        for (a, b) in a.pixels().zip(b.pixels()) {
+            for channel in 0..3 {
+                assert!(a.0[channel].abs_diff(b.0[channel]) <= 1, "{a:?} {b:?}");
+            }
+        }
+    }
+
+    #[test]
     fn a_dark_cloud_slides_across_what_it_hides_at_its_own_depth() {
         // An even glow, and a dark cloud in front of it at a quarter of its
         // distance, letting through 2% at its core and thinning out to
@@ -2007,7 +2071,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let mut lifted = starless.clone();
-        let cloud = crate::lift_region(&mut lifted, &region, 100.0, "cloud").unwrap();
+        let cloud = crate::lift_region(&mut lifted, &region, 100.0, "cloud", true, &[]).unwrap();
         assert!(cloud.transmission.is_some() && !cloud.lit);
         // A star behind the cloud, seen through its black core.
         let behind = Sprite::new(148, 148, LightImage::new(5, 5), 150.0, 150.0, 1000.0);
@@ -2109,7 +2173,7 @@ mod tests {
         let region = crate::Region::from_mask(&mask, width, height)
             .unwrap()
             .unwrap();
-        let plane = crate::lift_region(&mut starless, &region, 100.0, "cloud").unwrap();
+        let plane = crate::lift_region(&mut starless, &region, 100.0, "cloud", true, &[]).unwrap();
         let bare = Scene::new(
             &starless,
             &LightImage::new(width, height),

@@ -450,22 +450,38 @@ impl Dust {
         }
     }
 
-    /// This dust with what lies within `regions` cleared away, by each
-    /// region's share of a cell's centre: dark clouds on planes of their
-    /// own, which block that light themselves.
-    pub(crate) fn cleared(mut self, regions: &[&crate::Region]) -> Self {
-        for (index, transmission) in self.transmission.iter_mut().enumerate() {
-            let (column, row) = (index % self.columns, index / self.columns);
-            let (x, y) = (
-                (column as f64 + 0.5) * self.cell,
-                (row as f64 + 0.5) * self.cell,
-            );
-            let share = regions
-                .iter()
-                .map(|region| region.covers(x, y))
-                .fold(0.0_f32, f32::max);
-            *transmission += (1.0 - *transmission) * share;
-        }
+    /// This dust cleared away as far as `clouds` block the light
+    /// themselves: dark clouds on planes of their own. Each cell takes the
+    /// most any cloud blocks of it, averaged over a few points across it.
+    pub(crate) fn cleared(mut self, clouds: &[&crate::plane::Transmission]) -> Self {
+        const ACROSS: usize = 4;
+        let (cell, columns, rows) = (self.cell, self.columns, self.rows);
+        let (width, height) = (self.width, self.height);
+        self.transmission
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(index, transmission)| {
+                let (left, right) = span(index % columns, columns, width, cell);
+                let (top, bottom) = span(index / columns, rows, height, cell);
+                let blocked = clouds
+                    .iter()
+                    .map(|cloud| {
+                        let mut passed = 0.0_f32;
+                        for step_y in 0..ACROSS {
+                            for step_x in 0..ACROSS {
+                                let x = left as f64
+                                    + (step_x as f64 + 0.5) / ACROSS as f64 * (right - left) as f64;
+                                let y = top as f64
+                                    + (step_y as f64 + 0.5) / ACROSS as f64 * (bottom - top) as f64;
+                                let through = cloud.at(x, y);
+                                passed += (through[0] + through[1] + through[2]) / 3.0;
+                            }
+                        }
+                        1.0 - passed / (ACROSS * ACROSS) as f32
+                    })
+                    .fold(0.0_f32, f32::max);
+                *transmission += (1.0 - *transmission) * blocked;
+            });
         self
     }
 
@@ -499,12 +515,24 @@ impl Dust {
     pub fn cells(&self) -> (&[f32], usize) {
         (&self.transmission, self.columns)
     }
+
+    /// The cells' size, image pixels.
+    pub(crate) fn cell_size(&self) -> f64 {
+        self.cell
+    }
+
+    /// The pixels cell `index` spans: left, top, right and bottom.
+    pub(crate) fn cell_box(&self, index: usize) -> (usize, usize, usize, usize) {
+        let (left, right) = span(index % self.columns, self.columns, self.width, self.cell);
+        let (top, bottom) = span(index / self.columns, self.rows, self.height, self.cell);
+        (left, top, right, bottom)
+    }
 }
 
 /// A Gaussian blur of `sigma` cells over a `columns` × `rows` grid, each
 /// cell weighted by how much of the kernel lies on the grid, so the edges
 /// do not darken.
-fn smooth(values: &mut [f32], columns: usize, rows: usize, sigma: f64) {
+pub(crate) fn smooth(values: &mut [f32], columns: usize, rows: usize, sigma: f64) {
     let radius = (3.0 * sigma).ceil() as isize;
     let kernel: Vec<f32> = (-radius..=radius)
         .map(|offset| (-(offset as f64).powi(2) / (2.0 * sigma * sigma)).exp() as f32)

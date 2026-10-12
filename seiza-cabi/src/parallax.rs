@@ -801,7 +801,10 @@ fn split(
 /// it in events and the summary), `autoPlanes` (lift the catalogued nebulae
 /// that lie at least 15% nearer or farther than the nebula, by a measured
 /// distance or one borrowed from an object around them, onto planes of
-/// their own), `distanceOverrides` (`[{object, distanceParsecs}]`:
+/// their own; a dark nebula moves with the cloud of dust it lies in, which
+/// stays with the nebula when it holds it, and moves as one plane when it
+/// lies at least 15% in front, placed by its dark nebulae or the Gaia star
+/// counts), `distanceOverrides` (`[{object, distanceParsecs}]`:
 /// distances for catalogued objects, by name, in place of the catalogue's,
 /// for the nebula's distance and the automatic planes), `start` ("focus",
 /// "whole"), `dolly`, `truck`, `truckAngleDegrees`,

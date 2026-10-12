@@ -805,7 +805,7 @@ mod tests {
         let region = crate::Region::from_mask(&mask, width, height)
             .unwrap()
             .unwrap();
-        let plane = crate::lift_region(&mut starless, &region, 150.0, "cloud").unwrap();
+        let plane = crate::lift_region(&mut starless, &region, 150.0, "cloud", true, &[]).unwrap();
         let before: f32 = plane.base().pixels.iter().map(|pixel| pixel[0]).sum();
         let scene = Scene::new(
             &starless,

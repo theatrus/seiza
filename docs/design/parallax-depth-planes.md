@@ -60,7 +60,9 @@ when the mask is hard.
 Where the region is brighter than the fill, the plane takes the light
 above it; where darker, a cloud blocks light (dust per plane, below). Light
 within a twentieth of the fill either way is the background's own
-variation, and the plane takes nothing there.
+variation, and the plane takes nothing there. A glowing nebula found in the
+catalogue takes only its light: the darkness about it is dust, which stays
+with its cloud.
 
 Where regions nest, the smaller is lifted first. It takes its own light above
 its local fill, and the larger then takes the rest, the fill under the
@@ -123,11 +125,8 @@ with the cloud.
   at most three times the ellipse (`Region::from_extent`). On the Big Q
   field this finds Sh2-170 at 2790 pc, behind NGC 7822 at 900 pc, and
   vdB 2 at 717 pc, in front.
-- **Dark clouds, from the Gaia stars already matched (later).** Inside a region the
-  dust map marks opaque, compare star counts by distance with the counts
-  outside it. The distance where the inside counts fall short is the cloud's
-  distance; published cloud distances are measured the same way. This gives
-  the counted dust a real depth.
+- **Dust clouds**, dark nebulae among them, by the clouds the star counts
+  find and the Gaia stars' distances (below).
 - **Galaxies** still go to the far field.
 - **Depth images (later).** Accept a continuous depth image and cut it into a few
   planes, sharing each pixel between its two nearest planes so no steps show.
@@ -162,15 +161,77 @@ nothing.
 A star behind a dark cloud, seen where the cloud lets through 5% or less,
 must lie in front of it: `Scene::flies_at` puts it a tenth short of the
 cloud. The dust counted from the star counts on the background's plane
-clears where a dark cloud's plane in front of it blocks the light itself,
-so the cloud is not counted twice.
+clears as far as a dark cloud's plane in front of it blocks the light
+itself, so the cloud is not counted twice.
 
-`--auto-planes` takes catalogued dark clouds too. A dark cloud's distance
-may come from the nearest cloud measured beside it (`NearbyCloud`), and its
-region is its catalogue ellipse grown to where the image brightens to its
-surroundings (`Region::from_dark_extent`), as the catalogue does not
-outline them. On the Iris, given at 355 pc, this finds LDN 1167, 1168 and
-1171 at 288 pc in front of it.
+Only a plane in front of the background blocks light: a cloud behind the
+nebula cannot darken it, and restoring the light behind it would brighten
+the first frame. Its darkness stays in the background. A plane lifted
+after a dark cloud, and lying in front of it, takes its light from the
+restored image, so it takes that light dimmed by the cloud, as it was
+photographed: the cloud never dims a plane in front of it.
+
+## Dust clouds
+
+A dark nebula is the thickest part of a cloud of dust that reaches out
+around it, glowing faintly where starlight falls on it and hiding the stars
+behind it. Cut out alone, a dark nebula slides across its own dust. So the
+dust moves by clouds:
+
+1. `Clouds::find` joins the cells of the star counts' dust map that let
+   through 70% or less, faint dust included, into clouds. In a field such
+   as the Iris, the dust joins into one web.
+2. A catalogued dark nebula belongs to the cloud a quarter or more of its
+   region lies in.
+3. The cloud under the point the nebula's distance was taken at, or within
+   two cells of it, is the nebula's own, and stays on the background with
+   every dark nebula in it. The notes name them.
+4. Any other cloud at least 15% in front of the nebula moves as one plane,
+   its region the cloud's cells fading out over a cell, with its dark
+   nebulae's regions added: at the distance of its largest dark nebula
+   that has one, else where the Gaia stars seen through it run short.
+   Clouds behind the nebula stay, as a plane there blocks nothing.
+5. A dark nebula in no cloud stands alone, on a plane of its own as before
+   when it lies at least 15% in front of the nebula, by its catalogued
+   distance or the Gaia stars seen through it. Its region is its
+   catalogue ellipse grown to where the image brightens to its
+   surroundings (`Region::from_dark_extent`), as the catalogue does not
+   outline dark nebulae.
+
+### Distances from star counts
+
+Gaia counts the stars to its magnitude limit however brightly the image
+glows, and gives their distances. In front of a cloud there are as many
+stars at each distance as over clear sky; behind it, fewer. Published
+distances to dark clouds are measured the same way.
+
+`counted_distance` takes the distances of the Gaia stars over a cloud's
+core, the cells letting through 30% or less (else its thickest half), and
+of those over clear sky, the cells letting through 90% or more. The thin
+dust about a cloud hides few stars, and counted in, would hide where the
+cloud lies. For each split, after the k-th nearest star of the cloud, it
+compares the cloud's stars with the clear sky's in front and behind, each
+as a share, so the sky thinning across the image does not read as a
+cloud. The likeliest split must be much likelier than none (a natural log
+of 12 or more), leave at most 70% of the stars showing behind, have five
+or more stars in front, and those as many for their area as at least half
+the clear sky's, or the cloud lies in front of them too. The cloud lies
+past its last star in front, by as far as the next would most likely have
+come. Its range takes in the splits within a natural log of 4 of the best,
+widened by a tenth each way, as Gaia's distances are no closer. On test
+skies this places a cloud hiding most stars behind it to within a tenth,
+and finds none in 250 skies without one.
+
+On the Iris, given at 355 pc, all of the field's dust joins the nebula's
+own cloud, and LDN 1167, 1168, 1170 and 1171 stay with it; the counts put
+that dust at 357 pc (308 to 676). On the Big Q, the nebula's cloud covers
+most of the image and holds its dark nebulae; the counts put it at 1160 pc
+(1040 to 1280), behind the nebula's catalogued 900 pc.
+
+The counted dust on the background's plane keeps the stars' dimming for a
+cloud moved onto a plane of its own: the plane carries only the darkness
+the starless image shows. As the dimming is coarse and smooth, its slower
+motion at the background's depth hardly shows.
 
 ## Tours
 
@@ -228,6 +289,7 @@ light along it.
 3. Automatic planes from catalogued objects, and tour stops at a plane's
    depth. (Done.)
 4. Dust per plane, and catalogued dark clouds as planes. (Done.)
-5. Dark-cloud distances from Gaia star counts, for clouds the catalogue
-   has none for.
+5. Dust clouds: dark nebulae moving with the dust they lie in, and
+   distances from Gaia star counts for clouds the catalogue does not place.
+   (Done.)
 6. The apps' interface.

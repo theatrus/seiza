@@ -37,15 +37,19 @@ both, matching stars to Gaia DR3 for their Bailer-Jones distances.
   `Scene::depth_at` gives the depth under a point. Each plane is drawn in
   perspective over the part of the frame it reaches and fades as the
   camera flies through it, and `Shot::fitted` keeps the edges where the
-  image cuts a plane off out of view. Where a region is darker than the
-  fill, a dark cloud blocks the light behind: the plane keeps a
-  `Transmission`, each colour's, the light behind is restored, and
-  everything behind the cloud dims by it at the cloud's own depth.
+  image cuts a plane off out of view. Where a region in front of the
+  target is darker than the fill, a dark cloud blocks the light behind: the
+  plane keeps a `Transmission`, each colour's, the light behind is
+  restored, and everything behind the cloud dims by it at the cloud's own
+  depth.
 - **Dust:** `Dust::from_star_counts` maps the dust's transmission from how
   few stars show through it, and `Dust::with_darkness` adds globules too
   small for the counts: darker than their surroundings and short of stars.
   With `Scene::dust` set, far stars, the far star field and lifted galaxies
-  dim as they slide behind thicker dust.
+  dim as they slide behind thicker dust. `Parallax` splits the counted dust
+  into clouds, each at one distance: a dark nebula moves with the cloud it
+  lies in, and a cloud the catalogue does not place lies where the Gaia
+  stars seen through it run short.
 - **Blending:** layers combine as a screen blend, done as addition of "light"
   `−ln(1 − v)` taken from each pixel's brightest channel, so stars keep their
   hue as they brighten.
