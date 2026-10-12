@@ -37,7 +37,10 @@ both, matching stars to Gaia DR3 for their Bailer-Jones distances.
   `Scene::depth_at` gives the depth under a point. Each plane is drawn in
   perspective over the part of the frame it reaches and fades as the
   camera flies through it, and `Shot::fitted` keeps the edges where the
-  image cuts a plane off out of view.
+  image cuts a plane off out of view. Where a region is darker than the
+  fill, a dark cloud blocks the light behind: the plane keeps a
+  `Transmission`, each colour's, the light behind is restored, and
+  everything behind the cloud dims by it at the cloud's own depth.
 - **Dust:** `Dust::from_star_counts` maps the dust's transmission from how
   few stars show through it, and `Dust::with_darkness` adds globules too
   small for the counts: darker than their surroundings and short of stars.

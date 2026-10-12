@@ -8,13 +8,18 @@
 //! the plane and the filled image add back to the starless image, so the
 //! first frame is still the photograph.
 //!
+//! A plane can block light as well as give it: where its region is darker
+//! than what fills in behind it, a dark cloud lies there, and the plane
+//! keeps the share of light it lets through. Everything behind it then
+//! dims or brightens as the cloud slides across it.
+//!
 //! A [`PlaneMask`] marks a plane's region as an image a person can paint:
 //! white where the image belongs to the plane, black where it does not,
 //! and grays for a soft edge.
 
-use crate::dust::{open_unit_image, same_shape};
+use crate::dust::{OPAQUE, open_unit_image, same_shape};
 use crate::lift::{Extent, recentred, ring_median};
-use crate::light::{LightImage, Pyramid};
+use crate::light::{LightImage, Pyramid, floor64};
 use crate::scene::Sprite;
 use rayon::prelude::*;
 use std::path::Path;
@@ -35,6 +40,15 @@ const FARTHEST: f64 = 3.0;
 /// Past its edge, a region drawn from an ellipse fades out over this much
 /// more of its size.
 const TAPER: f64 = 1.3;
+
+/// A region's light within this share of what fills in behind it, either
+/// way, is the background's own variation; below it, a cloud blocks light,
+/// and above it, the plane gives light of its own.
+const NEAR_FILL: f32 = 0.95;
+
+/// The least share of light a cloud lets through: black dust lets through
+/// next to nothing, and the light restored behind it stays near the fill.
+const LEAST_PASSED: f32 = 0.01;
 
 /// A depth plane's region as an image: its share of each pixel, 1 where the
 /// image belongs to the plane and 0 where it does not, row by row. It spans
@@ -213,13 +227,26 @@ impl Region {
     /// object does not stand out from its surroundings, or lies mostly off
     /// the image.
     pub fn from_extent(starless: &LightImage, extent: &Extent) -> Option<Self> {
-        let extent = recentred(starless, extent)?;
+        Self::from_profile(starless, &recentred(starless, extent)?, 1.0)
+    }
+
+    /// [`Self::from_extent`] for a dark cloud: out to where the image,
+    /// darkest at its middle, brightens to near its surroundings or stops
+    /// brightening. The ellipse stays where the catalogue puts it, as
+    /// moving it onto the light would take it off the cloud.
+    pub fn from_dark_extent(starless: &LightImage, extent: &Extent) -> Option<Self> {
+        Self::from_profile(starless, extent, -1.0)
+    }
+
+    /// The region about `extent` out to where its light, times `sign`,
+    /// ring by ring, comes near its surroundings' or levels off.
+    fn from_profile(starless: &LightImage, extent: &Extent, sign: f32) -> Option<Self> {
         let scales: Vec<f64> = (1..=(FARTHEST * 4.0) as usize)
             .map(|step| step as f64 / 4.0)
             .collect();
         let profile: Vec<Option<f32>> = scales
             .iter()
-            .map(|&scale| ring_median(starless, &extent, scale))
+            .map(|&scale| ring_median(starless, extent, scale).map(|light| sign * light))
             .collect();
         let core = profile[0]?;
         let floor = profile
@@ -233,8 +260,9 @@ impl Region {
         }
         let rise = core - floor;
         // From the ellipse out, the first ring near the floor, or where the
-        // light has levelled off: a nebula within a wider glow stops there,
-        // not at the darker sky beyond the glow.
+        // light has levelled off once it has fallen half way: a nebula
+        // within a wider glow stops there, not at the darker sky beyond the
+        // glow, and a flat-topped one does not stop on its top.
         let edge = scales
             .iter()
             .enumerate()
@@ -244,7 +272,9 @@ impl Region {
                     return true;
                 };
                 let next = profile.get(index + 1).copied().flatten();
-                light - floor <= 0.1 * rise || next.is_some_and(|next| light - next <= 0.02 * rise)
+                light - floor <= 0.1 * rise
+                    || (light - floor <= 0.5 * rise
+                        && next.is_some_and(|next| light - next <= 0.02 * rise))
             })
             .map_or(FARTHEST, |(_, scale)| *scale);
         let (width, height) = (starless.width, starless.height);
@@ -430,6 +460,54 @@ impl Region {
     }
 }
 
+/// The share of the light behind it a plane lets through, each channel's,
+/// over a box of the image, row by row; all of it outside the box.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Transmission {
+    /// The box's top-left pixel in the image, and its size.
+    pub left: usize,
+    pub top: usize,
+    pub width: usize,
+    pub height: usize,
+    pub values: Vec<[f32; 3]>,
+}
+
+impl Transmission {
+    /// The share let through at image point `(x, y)`, between pixel
+    /// centres; all of it outside the box.
+    #[inline]
+    pub fn at(&self, x: f64, y: f64) -> [f32; 3] {
+        let (fx, fy) = (x - self.left as f64, y - self.top as f64);
+        if !(fx > -1.0 && fy > -1.0 && fx < self.width as f64 && fy < self.height as f64) {
+            return [1.0; 3];
+        }
+        let (x0, y0) = (floor64(fx), floor64(fy));
+        let (tx, ty) = ((fx - x0 as f64) as f32, (fy - y0 as f64) as f32);
+        let value = |dx: isize, dy: isize| {
+            let (column, row) = (x0 + dx, y0 + dy);
+            if column < 0 || row < 0 || column as usize >= self.width || row as usize >= self.height
+            {
+                [1.0; 3]
+            } else {
+                self.values[row as usize * self.width + column as usize]
+            }
+        };
+        let (a, b, c, d) = (value(0, 0), value(1, 0), value(0, 1), value(1, 1));
+        std::array::from_fn(|channel| {
+            let top = a[channel] + (b[channel] - a[channel]) * tx;
+            let bottom = c[channel] + (d[channel] - c[channel]) * tx;
+            top + (bottom - top) * ty
+        })
+    }
+
+    /// Whether it hides everything behind it at image point `(x, y)`, every
+    /// channel letting through [`OPAQUE`] or less.
+    pub fn is_opaque(&self, x: f64, y: f64) -> bool {
+        let passed = self.at(x, y);
+        passed[0].max(passed[1]).max(passed[2]) <= OPAQUE
+    }
+}
+
 /// A region lifted off the starless image onto a plane at a distance of its
 /// own, which grows and slides as the camera moves, as the background does.
 #[derive(Clone, Debug)]
@@ -444,6 +522,11 @@ pub struct Plane {
     /// The plane's share of each pixel: what a label or a star there sits
     /// on.
     pub region: Region,
+    /// The light the plane lets through from behind it, where it is a dark
+    /// cloud; `None` where it blocks nothing.
+    pub transmission: Option<Transmission>,
+    /// Whether it gives any light of its own, rather than only blocking it.
+    pub lit: bool,
 }
 
 impl Plane {
@@ -456,6 +539,10 @@ impl Plane {
         distance_pc: f64,
         region: Region,
     ) -> Self {
+        let lit = image
+            .pixels
+            .iter()
+            .any(|pixel| pixel.iter().any(|&value| value > 0.0));
         Self {
             name: name.into(),
             left,
@@ -463,6 +550,8 @@ impl Plane {
             image: Pyramid::down_to_a_pixel(image),
             distance_pc,
             region,
+            transmission: None,
+            lit,
         }
     }
 
@@ -534,6 +623,7 @@ impl Plane {
         }
         (self.left, self.top) = (left, top);
         self.image = Pyramid::down_to_a_pixel(image);
+        self.lit = true;
     }
 }
 
@@ -551,13 +641,16 @@ fn add(image: &mut LightImage, at: (usize, usize), light: &LightImage, from: (us
 }
 
 /// Lift the light `region` marks off `starless` onto a plane named `name`
-/// at `distance_pc`, or `None` when nothing there stands above what fills
-/// in behind it.
+/// at `distance_pc`, or `None` when nothing there stands apart from what
+/// fills in behind it.
 ///
-/// What lies behind the region is filled in from the light around it, and
-/// the plane takes, in its share of each pixel, the light above the fill:
-/// the plane and what is left add back to `starless`. A dark cloud gives
-/// the plane nothing, as the light it blocks cannot be lifted off.
+/// What lies behind the region is filled in from the light around it.
+/// Where the region is brighter than the fill, past [`NEAR_FILL`] of it,
+/// the plane takes, in its share of each pixel, the light above that.
+/// Where it is darker, a cloud blocks the light behind: the plane keeps the
+/// share it lets through, each channel's, and `starless` keeps the light
+/// behind, restored. Either way the plane drawn over what is left gives
+/// back `starless`.
 pub fn lift_region(
     starless: &mut LightImage,
     region: &Region,
@@ -576,64 +669,71 @@ pub fn lift_region(
         1.0 - region.at(x, y)
     });
     let mut image = LightImage::new(region.width, region.height);
+    let mut passed = vec![[1.0_f32; 3]; region.width * region.height];
     {
-        let starless = &*starless;
-        image
+        let starless = &mut *starless;
+        let columns = region.width;
+        starless
             .pixels
-            .par_chunks_mut(region.width)
+            .par_chunks_mut(width)
+            .skip(region.top)
+            .take(region.height)
+            .zip(image.pixels.par_chunks_mut(columns))
+            .zip(passed.par_chunks_mut(columns))
             .enumerate()
-            .for_each(|(row, pixels)| {
+            .for_each(|(row, ((pixels, light), passed))| {
                 let y = region.top + row;
-                for (column, pixel) in pixels.iter_mut().enumerate() {
-                    let share = region.coverage[row * region.width + column];
+                for column in 0..columns {
+                    let share = region.coverage[row * columns + column];
                     if share <= 0.0 {
                         continue;
                     }
                     let x = region.left + column;
-                    let here = starless.at(x, y);
+                    let here = &mut pixels[x];
                     let behind = fill.at(x - left, y - top);
                     for channel in 0..3 {
-                        pixel[channel] = share * (here[channel] - behind[channel]).max(0.0);
+                        let bright = behind[channel] / NEAR_FILL;
+                        if here[channel] > bright {
+                            let above = share * (here[channel] - bright);
+                            light[column][channel] = above;
+                            here[channel] -= above;
+                        } else if behind[channel] > 0.0 {
+                            let ratio = here[channel] / behind[channel] / NEAR_FILL;
+                            if ratio < 1.0 {
+                                let through = 1.0 - share * (1.0 - ratio.max(LEAST_PASSED));
+                                passed[column][channel] = through;
+                                here[channel] /= through;
+                            }
+                        }
                     }
                 }
             });
     }
-    let lifted: f64 = image
+    let lit = image
         .pixels
-        .par_iter()
-        .map(|pixel| (pixel[0] + pixel[1] + pixel[2]) as f64)
-        .sum();
-    if lifted <= 0.0 {
+        .iter()
+        .any(|pixel| pixel.iter().any(|&value| value > 0.0));
+    let dark = passed
+        .iter()
+        .any(|through| through.iter().any(|&share| share < 1.0));
+    if !lit && !dark {
         return None;
     }
-    add_scaled(starless, &image, (region.left, region.top), -1.0);
-    Some(Plane::new(
+    let mut plane = Plane::new(
         name,
         (region.left, region.top),
         image,
         distance_pc,
         region.clone(),
-    ))
-}
-
-/// Add `scale` times `light`, whose top-left pixel is image pixel `at`, to
-/// `image`.
-fn add_scaled(image: &mut LightImage, light: &LightImage, at: (usize, usize), scale: f32) {
-    let width = image.width;
-    image
-        .pixels
-        .par_chunks_mut(width)
-        .skip(at.1)
-        .take(light.height)
-        .enumerate()
-        .for_each(|(row, pixels)| {
-            for (column, pixel) in pixels[at.0..at.0 + light.width].iter_mut().enumerate() {
-                let light = light.at(column, row);
-                for channel in 0..3 {
-                    pixel[channel] += scale * light[channel];
-                }
-            }
-        });
+    );
+    plane.transmission = dark.then_some(Transmission {
+        left: region.left,
+        top: region.top,
+        width: region.width,
+        height: region.height,
+        values: passed,
+    });
+    Some(plane)
 }
 
 /// The light of `image` over the box `(left, top, width, height)`, each
@@ -838,7 +938,8 @@ pub(crate) mod tests {
             }
         }
         // What is left under the cloud is the nebula, filled in from around
-        // it, and the plane holds nearly all of the cloud.
+        // it, and the plane holds nearly all of the cloud: all but the
+        // twentieth of the nebula's light the background may vary by.
         let centre = image.at(90, 70)[0];
         assert!((centre - nebula(90, 70)).abs() < 0.03, "{centre}");
         let lifted: f32 = plane.base().pixels.iter().map(|pixel| pixel[0]).sum();
@@ -846,7 +947,7 @@ pub(crate) mod tests {
             .flat_map(|y| (0..width).map(move |x| cloud(x, y)))
             .sum();
         assert!(
-            lifted > 0.9 * total && lifted < 1.1 * total,
+            lifted > 0.85 * total && lifted < 1.05 * total,
             "{lifted} of {total}"
         );
         // Nothing outside the mask moved.
@@ -961,7 +1062,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_flat_or_dark_region_lifts_nothing() {
+    fn a_flat_region_lifts_nothing_and_a_dark_cloud_blocks_light() {
         let (width, height) = (100, 100);
         let mut image = LightImage::new(width, height);
         image.pixels.fill([0.3; 3]);
@@ -969,14 +1070,62 @@ pub(crate) mod tests {
             .unwrap()
             .unwrap();
         assert!(lift_region(&mut image, &region, 150.0, "flat").is_none());
-        // A dark cloud: nothing stands above what fills in behind it.
+        // A dark cloud, redder than the glow it hides, with a black core.
         for (index, pixel) in image.pixels.iter_mut().enumerate() {
             let (x, y) = ((index % width) as f64, (index / width) as f64);
-            if (x - 50.0).hypot(y - 50.0) < 10.0 {
-                *pixel = [0.1; 3];
+            let r = (x - 50.0).hypot(y - 50.0);
+            if r < 3.0 {
+                *pixel = [0.0; 3];
+            } else if r < 10.0 {
+                *pixel = [0.15, 0.1, 0.06];
             }
         }
-        assert!(lift_region(&mut image, &region, 150.0, "dark").is_none());
-        assert_eq!(image.at(50, 50), [0.1; 3]);
+        let original = image.clone();
+        let plane = lift_region(&mut image, &region, 150.0, "dark").unwrap();
+        assert!(!plane.lit);
+        let passed = plane.transmission.clone().expect("it blocks light");
+        // Behind it, the glow about it, near enough.
+        let behind = image.at(56, 50);
+        assert!(
+            behind.iter().all(|&light| (light - 0.285).abs() < 0.01),
+            "{behind:?}"
+        );
+        // It lets through more red than blue, none at its core, and all of
+        // the light outside it.
+        let at = passed.at(56.0, 50.0);
+        assert!(at[0] > at[2] && at[2] < 0.3, "{at:?}");
+        assert!(
+            passed
+                .at(50.0, 50.0)
+                .iter()
+                .all(|&share| (share - LEAST_PASSED).abs() < 1e-6)
+        );
+        assert!(passed.is_opaque(50.0, 50.0) && !passed.is_opaque(56.0, 50.0));
+        assert_eq!(passed.at(80.0, 80.0), [1.0; 3]);
+        // The light behind, dimmed by what it lets through, is the image.
+        for y in 0..height {
+            for x in 0..width {
+                let through = passed.at(x as f64, y as f64);
+                let (behind, photographed) = (image.at(x, y), original.at(x, y));
+                for ((behind, through), photographed) in
+                    behind.iter().zip(through).zip(photographed)
+                {
+                    assert!((behind * through - photographed).abs() < 1e-5, "({x}, {y})");
+                }
+            }
+        }
+        // The cloud's darkness, not light, sizes its region.
+        let extent = Extent {
+            x: 50.0,
+            y: 50.0,
+            semi_major: 4.0,
+            semi_minor: 4.0,
+            angle: 0.0,
+        };
+        let region = Region::from_dark_extent(&original, &extent).unwrap();
+        assert_eq!(region.covers(50.0, 50.0), 1.0);
+        assert!(region.covers(57.0, 50.0) > 0.9, "{region:?}");
+        assert_eq!(region.covers(80.0, 50.0), 0.0);
+        assert!(Region::from_extent(&original, &extent).is_none());
     }
 }

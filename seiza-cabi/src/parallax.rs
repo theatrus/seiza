@@ -414,8 +414,8 @@ struct SummaryResponse {
     wcs: WcsResponse,
 }
 
-/// A depth plane lifted: its name, distance, how that was found, and the
-/// share of the image it covers.
+/// A depth plane lifted: its name, distance, how that was found, the
+/// share of the image it covers, and whether it blocks light behind it.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PlaneResponse {
@@ -423,6 +423,7 @@ struct PlaneResponse {
     distance_parsecs: f64,
     basis: String,
     coverage: f64,
+    absorbs: bool,
 }
 
 /// A setting as asked and as the video uses it.
@@ -1102,9 +1103,10 @@ pub unsafe extern "C" fn seiza_parallax_reconfigure_json(
 /// What preparing the video found, as JSON: its frame count, frame rate
 /// and size, the stars found and matched, the nebula's distance with how
 /// and where (`backgroundFocus`) it was found, galaxies lifted, the depth
-/// planes lifted (`planes`, `[{name, distanceParsecs, basis, coverage}]`,
-/// `basis` saying how the distance was found and `coverage` the share of
-/// the image), the dust
+/// planes lifted (`planes`, `[{name, distanceParsecs, basis, coverage,
+/// absorbs}]`, `basis` saying how the distance was found, `coverage` the
+/// share of the image, and `absorbs` whether it is a dark cloud that
+/// blocks light behind it), the dust
 /// (`dustTransmission` `{median, thickest}`, `dustGiven` when a map gave
 /// it, and `starsInFrontOfDust`, the stars it brought in front), objects
 /// labelled, the WCS used, and `fit`, how fitting the camera to the
@@ -1158,6 +1160,7 @@ pub unsafe extern "C" fn seiza_parallax_summary_json(
                     distance_parsecs: plane.distance_pc,
                     basis: plane.basis.clone(),
                     coverage: plane.coverage,
+                    absorbs: plane.absorbs,
                 })
                 .collect(),
             dust_transmission: summary

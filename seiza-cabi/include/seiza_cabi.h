@@ -2294,9 +2294,10 @@ SeizaParallax *seiza_parallax_reconfigure_json(const SeizaParallax *video,
  What preparing the video found, as JSON: its frame count, frame rate
  and size, the stars found and matched, the nebula's distance with how
  and where (`backgroundFocus`) it was found, galaxies lifted, the depth
- planes lifted (`planes`, `[{name, distanceParsecs, basis, coverage}]`,
- `basis` saying how the distance was found and `coverage` the share of
- the image), the dust
+ planes lifted (`planes`, `[{name, distanceParsecs, basis, coverage,
+ absorbs}]`, `basis` saying how the distance was found, `coverage` the
+ share of the image, and `absorbs` whether it is a dark cloud that
+ blocks light behind it), the dust
  (`dustTransmission` `{median, thickest}`, `dustGiven` when a map gave
  it, and `starsInFrontOfDust`, the stars it brought in front), objects
  labelled, the WCS used, and `fit`, how fitting the camera to the

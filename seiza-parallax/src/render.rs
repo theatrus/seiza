@@ -15,8 +15,9 @@
 //! point or in a `truck`, slides nearer depths across farther ones, as
 //! from a moving car the near trees race by and the hills barely move.
 
-use crate::dust::Dust;
+use crate::dust::{Dust, MAX_BRIGHTENING};
 use crate::light::{LightImage, Pyramid, floor64};
+use crate::plane::Transmission;
 use crate::scene::{Scene, Sprite};
 use rayon::prelude::*;
 
@@ -897,6 +898,22 @@ impl Shot {
     fn draw(&self, scene: &Scene, frame: usize, blend: bool) -> LightImage {
         let view = self.view(scene, frame);
         let mut out = LightImage::new(self.width, self.height);
+        let absorbers = self.absorbers(scene, &view);
+        // The dark clouds in front of a layer at `distance`: each dims a
+        // layer lifted after it, or the background, by the light it lets
+        // through, as the light behind it was restored; and the stars and
+        // the layers lifted before it, photographed through it, by the
+        // change in that light.
+        let shading = |distance: f64, restored: &dyn Fn(usize) -> bool| -> Vec<Shade> {
+            absorbers
+                .iter()
+                .filter(|absorber| absorber.distance < distance)
+                .map(|&absorber| Shade {
+                    absorber,
+                    restored: restored(absorber.order),
+                })
+                .collect()
+        };
         let whole = |image, distance| Layer {
             image,
             at: (0, 0),
@@ -907,7 +924,7 @@ impl Shot {
             &mut out,
             whole(&scene.background, scene.background_distance_pc),
             &view,
-            None,
+            (None, &shading(scene.background_distance_pc, &|_| true)),
             blend,
         );
         // What lies beyond the background lies behind its dust.
@@ -922,12 +939,15 @@ impl Shot {
             &mut out,
             whole(&scene.leftover, scene.leftover_distance_pc),
             &view,
-            behind(scene.leftover_distance_pc),
+            (
+                behind(scene.leftover_distance_pc),
+                &shading(scene.leftover_distance_pc, &|_| false),
+            ),
             blend,
         );
-        for plane in scene.planes.iter() {
+        for (order, plane) in scene.planes.iter().enumerate() {
             let gain = self.plane_fade(&view, plane.distance_pc) as f32;
-            if gain <= 0.0 {
+            if gain <= 0.0 || !plane.lit {
                 continue;
             }
             draw_plane(
@@ -939,13 +959,83 @@ impl Shot {
                     gain,
                 },
                 &view,
-                behind(plane.distance_pc),
+                (
+                    behind(plane.distance_pc),
+                    &shading(plane.distance_pc, &|before| before < order),
+                ),
                 blend,
             );
         }
-        draw_sprites(&mut out, scene, &view, self);
+        draw_sprites(&mut out, scene, &view, self, &absorbers);
         out
     }
+
+    /// The planes of `scene` that block light, as `view` sees them.
+    fn absorbers<'a>(&self, scene: &'a Scene, view: &View) -> Vec<Absorber<'a>> {
+        scene
+            .planes
+            .iter()
+            .enumerate()
+            .filter_map(|(order, plane)| {
+                let transmission = plane.transmission.as_ref()?;
+                // Once the camera has flown through a cloud, it blocks
+                // nothing in front of it.
+                let fade = self.plane_fade(view, plane.distance_pc) as f32;
+                Some(Absorber {
+                    map: view.plane_map(plane.distance_pc).filter(|_| fade > 0.0),
+                    transmission,
+                    distance: plane.distance_pc,
+                    order,
+                    fade,
+                })
+            })
+            .collect()
+    }
+}
+
+/// A plane that blocks light, as a frame sees it: which of its points each
+/// output pixel shows, if it lies ahead, the light it lets through, its
+/// distance, its place in the order the planes were lifted, and how much
+/// of it is left as the camera passes through it.
+#[derive(Clone, Copy)]
+struct Absorber<'a> {
+    map: Option<PlaneMap>,
+    transmission: &'a Transmission,
+    distance: f64,
+    order: usize,
+    fade: f32,
+}
+
+impl Absorber<'_> {
+    /// The share of light it lets through at output pixel `(column, row)`.
+    #[inline]
+    fn now(&self, column: f64, row: f64) -> [f32; 3] {
+        let Some(map) = self.map else {
+            return [1.0; 3];
+        };
+        let (x, y) = map.at(column, row);
+        self.transmission
+            .at(x, y)
+            .map(|passed| 1.0 - self.fade * (1.0 - passed))
+    }
+
+    /// How light photographed through it at image point `seen` changes as
+    /// it shows through it at output pixel `(column, row)`, each channel.
+    #[inline]
+    fn change(&self, seen: (f64, f64), (column, row): (f64, f64)) -> [f32; 3] {
+        let now = self.now(column, row);
+        let then = self.transmission.at(seen.0, seen.1);
+        std::array::from_fn(|channel| (now[channel] / then[channel]).min(MAX_BRIGHTENING))
+    }
+}
+
+/// A dark cloud in front of a layer, and whether the light behind it was
+/// restored as the layer was lifted, so that the cloud dims it by the light
+/// it lets through rather than by the change in it.
+#[derive(Clone, Copy)]
+struct Shade<'a> {
+    absorber: Absorber<'a>,
+    restored: bool,
 }
 
 /// A depth whose layer's image edges must stay out of view: which of them,
@@ -1376,7 +1466,7 @@ fn draw_plane(
     out: &mut LightImage,
     layer: Layer,
     view: &View,
-    dust: Option<(&Dust, f64)>,
+    (dust, shades): (Option<(&Dust, f64)>, &[Shade]),
     blend: bool,
 ) {
     let Some(map) = view.plane_map(layer.distance) else {
@@ -1408,7 +1498,7 @@ fn draw_plane(
         .skip(rows.0)
         .take(rows.1 - rows.0)
         .for_each(|(row, pixels)| {
-            plane_row(pixels, row, plan, levels, dust);
+            plane_row(pixels, row, plan, levels, (dust, shades));
         });
 }
 
@@ -1437,7 +1527,7 @@ fn plane_row(
     row: usize,
     plan: RowPlan,
     ((level, level_scale), coarser): (Level, Option<(Level, f32)>),
-    dust: Option<(&Dust, PlaneMap)>,
+    (dust, shades): (Option<(&Dust, PlaneMap)>, &[Shade]),
 ) {
     let row = row as f64;
     let (first, last) = plan.columns;
@@ -1451,12 +1541,23 @@ fn plane_row(
                 light[channel] += (other[channel] - light[channel]) * toward;
             }
         }
-        let mut gain = plan.gain;
+        let mut gain = [plan.gain; 3];
         if let Some((dust, front)) = dust {
-            gain *= dust.change((x, y), front.at(column as f64, row));
+            let change = dust.change((x, y), front.at(column as f64, row));
+            gain = gain.map(|gain| gain * change);
+        }
+        for shade in shades {
+            let factor = if shade.restored {
+                shade.absorber.now(column as f64, row)
+            } else {
+                shade.absorber.change((x, y), (column as f64, row))
+            };
+            for channel in 0..3 {
+                gain[channel] *= factor[channel];
+            }
         }
         for channel in 0..3 {
-            pixel[channel] += light[channel] * gain;
+            pixel[channel] += light[channel] * gain[channel];
         }
     }
 }
@@ -1508,7 +1609,13 @@ fn within(start: f64, step: f64, (low, high): (f64, f64), count: usize) -> std::
     }
 }
 
-fn draw_sprites(out: &mut LightImage, scene: &Scene, view: &View, shot: &Shot) {
+fn draw_sprites(
+    out: &mut LightImage,
+    scene: &Scene,
+    view: &View,
+    shot: &Shot,
+    absorbers: &[Absorber],
+) {
     // Every layer's scale with the lens as it is now and the camera not yet
     // moved: a star's growth is how much nearer it has come.
     let lens_scale = view.focal_out / view.focal_px;
@@ -1527,13 +1634,22 @@ fn draw_sprites(out: &mut LightImage, scene: &Scene, view: &View, shot: &Shot) {
             let grown = growth.clamp(1.0, shot.growth_limit);
             let size = lens_scale * grown.sqrt();
             // Behind the dust, the change in the dust it shows through.
-            let dimming = match &scene.dust {
+            let mut dimming = match &scene.dust {
                 Some(dust) if distance > scene.background_distance_pc => {
                     let now = view.unproject(x, y, scene.background_distance_pc);
                     dust.change((sprite.x, sprite.y), now)
                 }
                 _ => 1.0,
             };
+            // And the change in each dark cloud in front of it, as the star
+            // was photographed through it.
+            for absorber in absorbers
+                .iter()
+                .filter(|absorber| absorber.distance < distance)
+            {
+                let change = absorber.change((sprite.x, sprite.y), (x, y));
+                dimming *= (change[0] + change[1] + change[2]) / 3.0;
+            }
             let gain = (grown.powf(shot.brightening) * fade) as f32 * dimming;
             // Sprite pixel (i, j) sits at image (left + i, top + j), and
             // its corners from the centroid, in output pixels unturned, at:
@@ -1862,6 +1978,95 @@ mod tests {
             (x as f64 - at_plane.0).abs() <= 1.0 && (y as f64 - at_plane.1).abs() <= 1.0,
             "{x} {y} {at_plane:?}"
         );
+    }
+
+    #[test]
+    fn a_dark_cloud_slides_across_what_it_hides_at_its_own_depth() {
+        // An even glow, and a dark cloud in front of it at a quarter of its
+        // distance, letting through 2% at its core and thinning out to
+        // nothing 20 pixels out.
+        let (width, height) = (400, 300);
+        let mut starless = LightImage::new(width, height);
+        for (index, pixel) in starless.pixels.iter_mut().enumerate() {
+            let (x, y) = ((index % width) as f64, (index / width) as f64);
+            let t = (((x - 150.0).hypot(y - 150.0) - 4.0) / 16.0).clamp(0.0, 1.0);
+            let passed = (0.02 + 0.98 * t * t * (3.0 - 2.0 * t)) as f32;
+            *pixel = [0.3 * passed, 0.3 * passed, 0.4 * passed];
+        }
+        let photo = Scene::new(
+            &starless,
+            &LightImage::new(width, height),
+            &[],
+            400.0,
+            400.0,
+            2000.0,
+            &CutOptions::default(),
+        );
+        let mask = crate::plane::tests::disc(width, height, (150.0, 150.0), 30.0);
+        let region = crate::Region::from_mask(&mask, width, height)
+            .unwrap()
+            .unwrap();
+        let mut lifted = starless.clone();
+        let cloud = crate::lift_region(&mut lifted, &region, 100.0, "cloud").unwrap();
+        assert!(cloud.transmission.is_some() && !cloud.lit);
+        // A star behind the cloud, seen through its black core.
+        let behind = Sprite::new(148, 148, LightImage::new(5, 5), 150.0, 150.0, 1000.0);
+        let mut scene = Scene::new(
+            &lifted,
+            &LightImage::new(width, height),
+            &[],
+            400.0,
+            400.0,
+            2000.0,
+            &CutOptions::default(),
+        )
+        .with_planes(vec![cloud], 0.02);
+        Arc::make_mut(&mut scene.sprites).push(behind);
+        assert_eq!(scene.flies_at(&scene.sprites[0]), 90.0);
+        let shot = Shot {
+            focus: (199.5, 149.5),
+            dolly: 0.0,
+            truck: (0.002, 0.0),
+            width: 400,
+            height: 300,
+            frames: 3,
+            easing: Easing::Linear,
+            ..Shot::default()
+        };
+        // The first frame is the image. It samples it between pixels'
+        // centres, where the light behind and the cloud, sampled apart,
+        // multiply to a little more or less than the image's own light at
+        // the cloud's hard edges: at most a step of an 8-bit frame.
+        let (a, b) = (
+            shot.render(&photo, 0).to_display_rgb8(),
+            shot.render(&scene, 0).to_display_rgb8(),
+        );
+        for (a, b) in a.pixels().zip(b.pixels()) {
+            for channel in 0..3 {
+                assert!(a.0[channel].abs_diff(b.0[channel]) <= 1, "{a:?} {b:?}");
+            }
+        }
+        // At the truck's widest swing the cloud's core is where its own
+        // depth puts it, and where it was, the glow shows again.
+        let view = shot.view(&scene, 1);
+        let frame = shot.render(&scene, 1);
+        let at = |(x, y): (f64, f64)| frame.at(x.round() as usize, y.round() as usize)[2];
+        let (core, _) = {
+            let (x, y, _) = view.project(150.0, 150.0, 100.0).unwrap();
+            ((x, y), ())
+        };
+        let (was, _) = {
+            let (x, y, _) = view.project(150.0, 150.0, 400.0).unwrap();
+            ((x, y), ())
+        };
+        assert!((core.0 - was.0).abs() > 12.0, "{core:?} {was:?}");
+        assert!(at(core) < 0.01, "{}", at(core));
+        // Behind the cloud as it moves off, the glow it hid shows again, as
+        // bright as the glow about it.
+        let uncovered = (was.0 + 8.0, was.1);
+        let first = shot.render(&scene, 0);
+        assert!(first.at(154, 150)[2] < 0.05, "{}", first.at(154, 150)[2]);
+        assert!(at(uncovered) > 0.35, "{}", at(uncovered));
     }
 
     #[test]

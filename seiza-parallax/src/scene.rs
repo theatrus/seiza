@@ -460,23 +460,36 @@ impl Scene {
     }
 
     /// Where `sprite` flies: at its own distance, unless it is a star behind
-    /// the background seen where a given dust map is opaque. Nothing from
-    /// behind shows through such dust, so the star must lie in front. The
-    /// dust counted from the stars never moves one: its finest cells see
-    /// small dark patches that are not dust.
+    /// the background seen where a given dust map is opaque, or behind a
+    /// dark cloud's plane seen where that is. Nothing from behind shows
+    /// through such dust, so the star must lie in front: among the stars in
+    /// front of the background, or a tenth short of the cloud. The dust
+    /// counted from the stars never moves one: its finest cells see small
+    /// dark patches that are not dust.
     #[inline]
     pub fn flies_at(&self, sprite: &Sprite) -> f64 {
-        match &self.dust {
+        if sprite.lifted {
+            return sprite.distance_pc;
+        }
+        let mut distance = match &self.dust {
             Some(dust)
                 if dust.given()
-                    && !sprite.lifted
                     && sprite.distance_pc > self.background_distance_pc
                     && dust.is_opaque(sprite.x, sprite.y) =>
             {
                 self.foreground_distance_pc
             }
             _ => sprite.distance_pc,
+        };
+        for plane in self.planes.iter() {
+            if let Some(transmission) = &plane.transmission
+                && distance > plane.distance_pc
+                && transmission.is_opaque(sprite.x, sprite.y)
+            {
+                distance = 0.9 * plane.distance_pc;
+            }
         }
+        distance
     }
 
     /// How many stars the dust brings in front of the background.

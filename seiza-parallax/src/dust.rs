@@ -23,7 +23,7 @@ use std::path::Path;
 /// Light from behind the dust brightens at most this much as it slides out
 /// from behind thicker dust: the star counts are noisy, and a star the
 /// image barely showed should not blaze.
-const MAX_BRIGHTENING: f32 = 1.5;
+pub(crate) const MAX_BRIGHTENING: f32 = 1.5;
 
 /// The least transmission the map gives: black dust lets through next to
 /// nothing.
@@ -448,6 +448,25 @@ impl Dust {
             transmission,
             ..self
         }
+    }
+
+    /// This dust with what lies within `regions` cleared away, by each
+    /// region's share of a cell's centre: dark clouds on planes of their
+    /// own, which block that light themselves.
+    pub(crate) fn cleared(mut self, regions: &[&crate::Region]) -> Self {
+        for (index, transmission) in self.transmission.iter_mut().enumerate() {
+            let (column, row) = (index % self.columns, index / self.columns);
+            let (x, y) = (
+                (column as f64 + 0.5) * self.cell,
+                (row as f64 + 0.5) * self.cell,
+            );
+            let share = regions
+                .iter()
+                .map(|region| region.covers(x, y))
+                .fold(0.0_f32, f32::max);
+            *transmission += (1.0 - *transmission) * share;
+        }
+        self
     }
 
     /// The share of light let through at image pixel `(x, y)`, between

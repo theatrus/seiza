@@ -251,7 +251,7 @@ pub(crate) struct ParallaxVideoArgs {
     keep_split: bool,
     /// Write the scene's layers to this directory as PNG files: the
     /// background, the star light no star took, the stars cut out, marked
-    /// by their distance, and each depth plane
+    /// by their distance, and each depth plane, with a dark cloud's dust
     #[arg(long)]
     debug_layers: Option<PathBuf>,
     /// Leave galaxies in the starless image, on the nebula's plane, rather
@@ -1123,6 +1123,25 @@ fn write_layers(directory: &Path, scene: &Scene) -> Result<()> {
                 .copy_from_slice(&base.pixels[y * base.width..(y + 1) * base.width]);
         }
         save(&format!("plane-{}.png", index + 1), &image)?;
+        // A dark cloud's dust, white where it is opaque, as dust.png.
+        if let Some(transmission) = &plane.transmission {
+            let (width, height) = (scene.width(), scene.height());
+            let opacity = (0..width * height)
+                .map(|index| {
+                    let passed = transmission.at((index % width) as f64, (index / width) as f64);
+                    1.0 - (passed[0] + passed[1] + passed[2]) / 3.0
+                })
+                .collect();
+            let path = directory.join(format!("plane-{}-dust.png", index + 1));
+            seiza_parallax::DustMap {
+                width,
+                height,
+                opacity,
+            }
+            .save(&path)
+            .map_err(anyhow::Error::msg)?;
+            println!("wrote {}", path.display());
+        }
     }
     // The dust at its own cells, white where opaque, as --export-dust-map
     // writes it.

@@ -50,6 +50,8 @@ pub struct PlaneSummary {
     pub basis: String,
     /// The share of the image it covers, 0 to 1.
     pub coverage: f64,
+    /// Whether it blocks light behind it: a dark cloud.
+    pub absorbs: bool,
 }
 
 /// What happens as a video is prepared and rendered.
@@ -300,12 +302,14 @@ pub struct SceneOptions {
     pub planes: Vec<DepthPlane>,
     /// Lift the catalogued nebulae in the field that lie at distances of
     /// their own onto planes, besides `planes`: those whose distance was
-    /// measured, or borrowed from an object about them (never one typical of
-    /// their kind), that lie at least [`AUTO_PLANE_DEPTH`] nearer or farther
-    /// than the nebula, and whose range of distances leaves the nebula's
-    /// out. Each takes its catalogued outline, or else its ellipse sized by
-    /// the image's light. One holding the distance focus is the nebula, or
-    /// holds it, and keeps to the nebula's plane.
+    /// measured, or borrowed from an object about them or, for a dark
+    /// cloud, from the nearest cloud measured (never one typical of their
+    /// kind), that lie at least [`AUTO_PLANE_DEPTH`] nearer or farther than
+    /// the nebula, and whose range of distances leaves the nebula's out.
+    /// Each takes its catalogued outline, or else its ellipse sized by the
+    /// image's light, or for a dark cloud its darkness. One holding the
+    /// distance focus is the nebula, or holds it, and keeps to the nebula's
+    /// plane.
     pub auto_planes: bool,
     /// Distances to use for catalogued objects in place of the catalogue's:
     /// for the nebula's distance and the automatic planes.
@@ -1105,11 +1109,17 @@ impl Parallax {
             match lifted {
                 Some(lifted) => {
                     let coverage = plane.region.area() / (width * height) as f64;
+                    let absorbs = lifted.transmission.is_some();
                     report(Event::Note(&format!(
-                        "depth plane {} at {:.0} pc ({}), over {:.1}% of the image",
+                        "depth plane {} at {:.0} pc ({}){}, over {:.1}% of the image",
                         plane.name,
                         plane.distance_pc,
                         plane.basis,
+                        match (lifted.lit, absorbs) {
+                            (true, true) => ", glowing and dark",
+                            (false, true) => ", a dark cloud",
+                            _ => "",
+                        },
                         100.0 * coverage
                     )));
                     summary.planes.push(PlaneSummary {
@@ -1117,6 +1127,7 @@ impl Parallax {
                         distance_pc: plane.distance_pc,
                         basis: plane.basis.clone(),
                         coverage,
+                        absorbs,
                     });
                     planes.push(lifted);
                 }
@@ -1165,9 +1176,17 @@ impl Parallax {
                 .filter(|star| star.distance_pc.is_none_or(|pc| pc > distance))
                 .map(|star| (star.x, star.y))
                 .collect();
+            // A dark cloud on a plane in front of the nebula blocks the
+            // light behind it itself, so the counted dust clears there.
+            let clouds: Vec<&Region> = scene
+                .planes
+                .iter()
+                .filter(|plane| plane.transmission.is_some() && plane.distance_pc < distance)
+                .map(|plane| &plane.region)
+                .collect();
             counted_dust =
                 Dust::from_star_counts(&behind, width, height, scene_options.dust_opacity)
-                    .map(|dust| Arc::new(dust.with_darkness(&starless, &behind)));
+                    .map(|dust| Arc::new(dust.with_darkness(&starless, &behind).cleared(&clouds)));
             match (&counted_dust, &given_dust) {
                 (Some(_), None) => report(Event::Note(&format!(
                     "dust mapped from {} stars behind it and the nebula's dark places",
@@ -1180,6 +1199,27 @@ impl Parallax {
             }
             scene.dust = given_dust.or_else(|| counted_dust.clone());
             describe_dust(&scene, &mut summary, report);
+        }
+        let behind_clouds = scene
+            .sprites
+            .iter()
+            .filter(|sprite| {
+                scene.planes.iter().any(|plane| {
+                    plane.transmission.as_ref().is_some_and(|transmission| {
+                        !sprite.lifted
+                            && sprite.distance_pc > plane.distance_pc
+                            && transmission.is_opaque(sprite.x, sprite.y)
+                    })
+                })
+            })
+            .count();
+        if behind_clouds > 0 {
+            report(Event::Note(&format!(
+                "{behind_clouds} star{} seen where a dark cloud's plane is opaque fl{} in front \
+                 of it",
+                if behind_clouds == 1 { "" } else { "s" },
+                if behind_clouds == 1 { "ies" } else { "y" },
+            )));
         }
         if scene_options.max_stars.is_some() {
             report(Event::Note(&format!(
@@ -2025,10 +2065,12 @@ fn catalogued_planes(
     let mut planes = Vec::new();
     for object in placed {
         use seiza::objects::ObjectKind::*;
-        let nebula = matches!(
-            object.object.kind,
-            Nebula | PlanetaryNebula | HiiRegion | SupernovaRemnant | ClusterWithNebula
-        );
+        let dark = object.object.kind == DarkNebula;
+        let nebula = dark
+            || matches!(
+                object.object.kind,
+                Nebula | PlanetaryNebula | HiiRegion | SupernovaRemnant | ClusterWithNebula
+            );
         // Too small to see move, or so large it is most of the image.
         if !nebula || object.semi_major_px < 12.0 || object.semi_major_px > 0.6 * short {
             continue;
@@ -2039,10 +2081,13 @@ fn catalogued_planes(
                 let Some(found) = distances.for_object(&object.object) else {
                     continue;
                 };
-                let measured = matches!(
-                    found.basis,
-                    DistanceBasis::Measured | DistanceBasis::Contained
-                );
+                // A dark cloud's distance may come from the nearest cloud
+                // measured along a sightline beside it.
+                let measured = match found.basis {
+                    DistanceBasis::Measured | DistanceBasis::Contained => true,
+                    DistanceBasis::NearbyCloud => dark,
+                    _ => false,
+                };
                 // A range that takes in the nebula's distance cannot say
                 // which lies nearer.
                 let overlaps = found.lower_pc.is_some_and(|lower| lower <= distance)
@@ -2078,10 +2123,12 @@ fn catalogued_planes(
             continue;
         }
         let outline = outermost_outline(&catalog, &object.object.metadata.id, wcs);
-        let region = if outline.is_empty() {
-            Region::from_extent(starless, &extent)
-        } else {
+        let region = if !outline.is_empty() {
             Region::from_outlines(&outline, width, height)
+        } else if dark {
+            Region::from_dark_extent(starless, &extent)
+        } else {
+            Region::from_extent(starless, &extent)
         };
         let Some(region) = region else {
             continue;
@@ -2412,7 +2459,8 @@ mod tests {
 
     /// An object catalogue of the nebulae `listed`, placed in `wcs`'s
     /// image, and their distances, written to `directory`; the starless
-    /// image brightened by each one's glow.
+    /// image brightened by each one's glow, or darkened by a dark cloud's,
+    /// whose name starts `LDN`.
     fn nebulae(
         directory: &Path,
         wcs: &Wcs,
@@ -2428,7 +2476,11 @@ mod tests {
             .map(|&(name, (x, y), radius, _)| {
                 let (ra, dec) = wcs.pixel_to_world(x, y);
                 SkyObject {
-                    kind: ObjectKind::HiiRegion,
+                    kind: if name.starts_with("LDN") {
+                        ObjectKind::DarkNebula
+                    } else {
+                        ObjectKind::HiiRegion
+                    },
                     ra,
                     dec,
                     mag: None,
@@ -2473,15 +2525,18 @@ mod tests {
         let distances_path = directory.join("nebula-distances.bin");
         builder.write_to(&distances_path).unwrap();
         for (x, y, pixel) in starless.enumerate_pixels_mut() {
-            let glow: f64 = listed
-                .iter()
-                .map(|&(_, (cx, cy), radius, _)| {
-                    let r2 = (x as f64 - cx).powi(2) + (y as f64 - cy).powi(2);
-                    0.4 * (-r2 / (2.0 * (0.7 * radius).powi(2))).exp()
-                })
-                .sum();
+            let (mut glow, mut passed) = (0.0_f64, 1.0_f64);
+            for &(name, (cx, cy), radius, _) in listed {
+                let r2 = (x as f64 - cx).powi(2) + (y as f64 - cy).powi(2);
+                let profile = (-r2 / (2.0 * (0.7 * radius).powi(2))).exp();
+                if name.starts_with("LDN") {
+                    passed *= 1.0 - 0.9 * profile;
+                } else {
+                    glow += 0.4 * profile;
+                }
+            }
             for value in pixel.0.iter_mut() {
-                *value = (*value + glow as f32).min(1.0);
+                *value = ((*value as f64 * passed + glow) as f32).min(1.0);
             }
         }
         (objects_path, distances_path)
@@ -2586,6 +2641,63 @@ mod tests {
         let error = Parallax::prepare(&starless, &stars, &wcs, &options, &mut |_| {}, &|| false)
             .unwrap_err();
         assert!(error.to_string().contains("NGC 404404"), "{error}");
+    }
+
+    #[test]
+    fn a_catalogued_dark_cloud_gets_a_plane_that_blocks_light() {
+        use seiza::catalog::DistanceBasis::NearbyCloud;
+        let directory = tempfile::tempdir().unwrap();
+        let (mut starless, stars, wcs, distances) = field(directory.path());
+        // A dark cloud at 150 pc, in front of the nebula at 400, its
+        // distance that of the nearest cloud measured.
+        let listed: [Listed; 1] = [(
+            "LDN 9001",
+            (230.0, 170.0),
+            16.0,
+            Some((150.0, None, NearbyCloud)),
+        )];
+        let (objects, object_distances) = nebulae(directory.path(), &wcs, &mut starless, &listed);
+        let mut options = options(distances, directory.path());
+        options.scene.objects = Some(objects);
+        options.scene.object_distances = Some(object_distances);
+        options.video.size = (320, 240);
+        let plain =
+            Parallax::prepare(&starless, &stars, &wcs, &options, &mut |_| {}, &|| false).unwrap();
+        options.scene.auto_planes = true;
+        let mut notes = Vec::new();
+        let clouded = Parallax::prepare(
+            &starless,
+            &stars,
+            &wcs,
+            &options,
+            &mut |event| {
+                if let Event::Note(note) = event {
+                    notes.push(note.to_string());
+                }
+            },
+            &|| false,
+        )
+        .unwrap();
+        let planes = &clouded.summary().planes;
+        assert_eq!(planes.len(), 1, "{notes:?}");
+        assert!(planes[0].absorbs && planes[0].basis.starts_with("nearby-cloud"));
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("LDN 9001 at 150 pc") && note.contains("a dark cloud")),
+            "{notes:?}"
+        );
+        assert_eq!(clouded.scene().depth_at(230.0, 170.0), 150.0);
+        // The first frame is the photograph, to a step of 8 bits; the last
+        // is not.
+        let (first, also) = (plain.frame(0), clouded.frame(0));
+        for (a, b) in first.pixels().zip(also.pixels()) {
+            for channel in 0..3 {
+                assert!(a.0[channel].abs_diff(b.0[channel]) <= 1, "{a:?} {b:?}");
+            }
+        }
+        let last = plain.frames() - 1;
+        assert_ne!(plain.frame(last), clouded.frame(last));
     }
 
     #[test]

@@ -484,10 +484,14 @@ image belongs to the region and black elsewhere, with grays for a soft edge
 starless image onto a plane at that distance, and what lay behind it is
 filled in from the light around it, so the first frame is still the
 photograph. As the camera moves, a cloud in front of the nebula grows and
-slides past it, and a cloud behind it barely moves. A plane takes only the
-light that stands above what fills in behind it, so a dark cloud, which
-blocks light rather than giving it, gives its plane nothing. Repeat the
-option for more planes; where one lies inside another, the smaller keeps
+slides past it, and a cloud behind it barely moves. Where the region is
+brighter than what fills in behind it, the plane takes the light above
+that; where it is darker, a dark cloud blocks the light behind, and the
+plane keeps the share it lets through, each colour's. Everything behind
+the cloud then dims or brightens as the cloud slides across it, and a star
+seen where the cloud is opaque flies in front of it. Within a twentieth of
+the fill either way, the light is the background's own. Repeat the option
+for more planes; where one lies inside another, the smaller keeps
 its own light and the larger takes the rest. A star within 2% of a plane's
 distance, inside the plane, joins it, and a label on a plane moves with it.
 A plane fades as the camera flies through it, and where the image's edge
@@ -500,13 +504,16 @@ seiza parallax-video field.tif --starless field-starless.tif --stars field-stars
   --plane near-cloud.png=900 --plane far-shell.png=2400 --output field.mp4
 ```
 
-`--auto-planes` finds planes in the object catalogue: the nebulae in the
-field whose distance was measured, or borrowed from an object around them,
-that lie at least 15% nearer or farther than the nebula. A distance typical
-of an object's kind never counts, and nor does one whose range takes in the
+`--auto-planes` finds planes in the object catalogue: the nebulae and dark
+clouds in the field whose distance was measured, or borrowed from an object
+around them, or for a dark cloud from the nearest cloud measured, that lie
+at least 15% nearer or farther than the nebula. A distance typical of an
+object's kind never counts, and nor does one whose range takes in the
 nebula's own, as it cannot say which lies nearer. Each plane takes the
 object's outermost catalogued outline, or else its ellipse, grown to where
-the image's light levels off. The notes name each plane, its distance and
+the image's light levels off, or a dark cloud's darkness. The dust mapped
+from the star counts clears where a dark cloud's plane in front of the
+nebula blocks the light itself. The notes name each plane, its distance and
 how that was found. `--object-distance NAME=PARSECS` gives an object's
 distance in place of the catalogue's, for the nebula's distance and for the
 automatic planes; repeat it for more objects. An automatic tour frames each
@@ -531,8 +538,9 @@ seiza parallax-video bigq.tif --starless bigq-starless.tif --stars bigq-stars.ti
 ```
 
 `--debug-layers DIR` writes the background, the leftover star light, every
-cut-out star tinted by distance, each depth plane, and the dust (white where
-opaque), for checking a result.
+cut-out star tinted by distance, each depth plane, a dark cloud's dust as
+`plane-N-dust.png`, and the dust (white where opaque), for checking a
+result.
 
 `--overlay` labels the catalogued objects in the field the way Seiza's image
 overlays do, with the same colours, names, outlines and ranking. Each label

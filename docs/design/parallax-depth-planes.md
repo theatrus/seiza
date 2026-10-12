@@ -57,9 +57,10 @@ Deep in a hole the fill is smooth; at its edge it stays close to the light
 just outside, so the plane's light falls to nothing at the mask's edge even
 when the mask is hard.
 
-A plane takes only light above the fill. A dark cloud blocks light rather
-than giving it, so it gives its plane nothing; dark clouds need dust per
-plane (below).
+Where the region is brighter than the fill, the plane takes the light
+above it; where darker, a cloud blocks light (dust per plane, below). Light
+within a twentieth of the fill either way is the background's own
+variation, and the plane takes nothing there.
 
 Where regions nest, the smaller is lifted first. It takes its own light above
 its local fill, and the larger then takes the rest, the fill under the
@@ -131,14 +132,45 @@ with the cloud.
 - **Depth images (later).** Accept a continuous depth image and cut it into a few
   planes, sharing each pixel between its two nearest planes so no steps show.
 
-## Dust per plane (later)
+## Dust per plane
 
-Each plane could carry its own dust. What lies behind a plane would dim as it
-slides behind thicker dust on that plane, the dimming from several planes
-multiplying. `Scene::flies_at` would then put a star seen through opaque dust
-in front of that cloud's own distance, not the target's. Until then, planes
-beyond the background dim by the background's dust, as the leftover plane
-does.
+A plane can block light as well as give it. Where its region is darker than
+the fill, below 95% of it, `lift_region` gives the plane a `Transmission`:
+each colour's share of the fill the image shows there, so a reddish cloud
+lets through more red than blue. The starless image under the cloud is
+restored to the light behind it, 95% of the fill, so the restored light
+times the transmission is the image again. The cloud's texture, noise and
+all, lies in its transmission and moves with it.
+
+Drawing, every layer behind a dark cloud is dimmed by it at the cloud's
+own depth, the dimming of several clouds multiplying:
+
+- a layer whose light was restored, the background and the planes lifted
+  after the cloud, by the light the cloud lets through where it lies now;
+- the stars, the far star field and the planes lifted before the cloud,
+  photographed through it, by the change in that light from where they were
+  photographed through it, brightening at most half again, as the dust on
+  the background's plane does.
+
+At the first frame every factor gives back the image, but where the frame
+samples between pixels' centres: there the cloud and the light behind,
+sampled apart, multiply to a little more or less than the image's own
+light at a hard edge, at most a step of an 8-bit frame. As the camera
+passes through a cloud, it fades, and once behind the camera it blocks
+nothing.
+
+A star behind a dark cloud, seen where the cloud lets through 5% or less,
+must lie in front of it: `Scene::flies_at` puts it a tenth short of the
+cloud. The dust counted from the star counts on the background's plane
+clears where a dark cloud's plane in front of it blocks the light itself,
+so the cloud is not counted twice.
+
+`--auto-planes` takes catalogued dark clouds too. A dark cloud's distance
+may come from the nearest cloud measured beside it (`NearbyCloud`), and its
+region is its catalogue ellipse grown to where the image brightens to its
+surroundings (`Region::from_dark_extent`), as the catalogue does not
+outline them. On the Iris, given at 355 pc, this finds LDN 1167, 1168 and
+1171 at 288 pc in front of it.
 
 ## Tours
 
@@ -195,5 +227,7 @@ light along it.
 2. `--export-planes`, `--plane-file` and `--object-distance`. (Done.)
 3. Automatic planes from catalogued objects, and tour stops at a plane's
    depth. (Done.)
-4. Dark-cloud distances from Gaia star counts, and dust per plane.
-5. The apps' interface.
+4. Dust per plane, and catalogued dark clouds as planes. (Done.)
+5. Dark-cloud distances from Gaia star counts, for clouds the catalogue
+   has none for.
+6. The apps' interface.
