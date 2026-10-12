@@ -17,8 +17,8 @@ use super::{
 use image::{Rgb32FImage, RgbImage};
 use seiza::wcs::{Sip, Wcs};
 use seiza_parallax::{
-    CustomLabel, DepthPlane, Dust, DustMap, Easing, Event, FfmpegSink, FrameFn, FrameSink,
-    Parallax, ParallaxOptions, PlaneMask, PngSequence, Quality, SmallStars, Start,
+    CustomLabel, DepthPlane, DistanceOverride, Dust, DustMap, Easing, Event, FfmpegSink, FrameFn,
+    FrameSink, Parallax, ParallaxOptions, PlaneMask, PngSequence, Quality, SmallStars, Start,
 };
 use seiza_parallax::{FitSummary, SceneOptions, VideoOptions};
 use serde::{Deserialize, Serialize};
@@ -68,7 +68,7 @@ pub type SeizaParallaxFrameCallback =
 /// solution, the catalogs and how the stars are placed. Changing any of
 /// them needs a new [`seiza_parallax_prepare_json`];
 /// [`seiza_parallax_reconfigure_json`] refuses them.
-const SCENE_FIELDS: [&str; 25] = [
+const SCENE_FIELDS: [&str; 27] = [
     "image",
     "starless",
     "stars",
@@ -94,6 +94,8 @@ const SCENE_FIELDS: [&str; 25] = [
     "dustOpacity",
     "dustMap",
     "planes",
+    "autoPlanes",
+    "distanceOverrides",
 ];
 
 /// Everything a parallax video takes, as one JSON object: the scene's
@@ -147,6 +149,19 @@ struct SceneRequest {
     dust_map: Option<PathBuf>,
     /// Regions of the image lifted onto planes at their own distances.
     planes: Option<Vec<PlaneRequest>>,
+    /// Lift the catalogued nebulae at distances of their own onto planes.
+    auto_planes: Option<bool>,
+    /// Distances for catalogued objects in place of the catalogue's.
+    distance_overrides: Option<Vec<DistanceOverrideRequest>>,
+}
+
+/// A distance for a catalogued object, by name, in place of the
+/// catalogue's.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DistanceOverrideRequest {
+    object: String,
+    distance_parsecs: f64,
 }
 
 /// A depth plane: a region of the image at a distance of its own.
@@ -295,6 +310,9 @@ struct StopRequest {
     push: Option<f64>,
     /// Shown while the camera drifts through the stop, with `tourTitles`.
     title: Option<String>,
+    /// The distance of the plane the focus point is centred on, parsecs;
+    /// that of the plane the image shows there if absent.
+    depth_parsecs: Option<f64>,
 }
 
 /// How to plan a tour: how many targets (every one worth a visit if
@@ -396,12 +414,15 @@ struct SummaryResponse {
     wcs: WcsResponse,
 }
 
-/// A depth plane lifted, by name, and its distance.
+/// A depth plane lifted: its name, distance, how that was found, and the
+/// share of the image it covers.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PlaneResponse {
     name: String,
     distance_parsecs: f64,
+    basis: String,
+    coverage: f64,
 }
 
 /// A setting as asked and as the video uses it.
@@ -567,6 +588,16 @@ fn scene_options(request: &SceneRequest) -> Result<SceneOptions, String> {
                 })
             })
             .collect::<Result<_, String>>()?,
+        auto_planes: request.auto_planes.unwrap_or(defaults.auto_planes),
+        distance_overrides: request
+            .distance_overrides
+            .iter()
+            .flatten()
+            .map(|given| DistanceOverride {
+                object: given.object.clone(),
+                distance_pc: given.distance_parsecs,
+            })
+            .collect(),
     })
 }
 
@@ -623,6 +654,7 @@ fn video_options(request: &VideoRequest) -> Result<VideoOptions, String> {
                     spin_deg: stop.spin_degrees.unwrap_or(base.spin_deg),
                     push: stop.push.unwrap_or(base.push),
                     title: stop.title.clone().filter(|title| !title.is_empty()),
+                    depth_pc: stop.depth_parsecs,
                 }
             })
             .collect(),
@@ -765,11 +797,19 @@ fn split(
 /// elsewhere, at any size of the image's shape, whose region is lifted off
 /// the starless image onto a plane at `distanceParsecs`, what lay behind it
 /// filled in from around it; `name`, the mask's file name if absent, names
-/// it in events and the summary), `start` ("focus", "whole"), `dolly`, `truck`, `truckAngleDegrees`,
+/// it in events and the summary), `autoPlanes` (lift the catalogued nebulae
+/// that lie at least 15% nearer or farther than the nebula, by a measured
+/// distance or one borrowed from an object around them, onto planes of
+/// their own), `distanceOverrides` (`[{object, distanceParsecs}]`:
+/// distances for catalogued objects, by name, in place of the catalogue's,
+/// for the nebula's distance and the automatic planes), `start` ("focus",
+/// "whole"), `dolly`, `truck`, `truckAngleDegrees`,
 /// `pan`, `zoom`, `zoomEnd`, `rotateDegrees` `[first, last]`, `easing`
 /// ("inOut", "linear"), `quality` ("standard", "high"), `growthLimit`,
 /// `fadeFrom`, `tour` (stops `[{focus, dolly, zoom, rotateDegrees, pan,
-/// travel, hold, spinDegrees, push, title}]`, gliding through held stops
+/// travel, hold, spinDegrees, push, title, depthParsecs}]`, each centring
+/// its focus point on the plane at `depthParsecs`, or on the plane the
+/// image shows there if absent, gliding through held stops
 /// at `tourGlide` of the pace between them, the first the opening view and
 /// the last's hold a final drift that slows to rest, which replace the
 /// single move and set the length; [`seiza_parallax_plan_tour_json`] plans
@@ -888,6 +928,7 @@ struct PlannedStopResponse {
     spin_degrees: f64,
     push: f64,
     title: Option<String>,
+    depth_parsecs: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -909,7 +950,7 @@ struct PlannedTourResponse {
 /// to plan. Returns JSON, released with `seiza_string_free`:
 /// `{"focus": [x, y], "focusName", "seconds", "tour": [{name, focus,
 /// dolly, zoom, rotateDegrees, pan, travel, hold, spinDegrees, push,
-/// title}]}`, each target's stop titled with its name. Its `tour`, with any
+/// title, depthParsecs}]}`, each target's stop titled with its name. Its `tour`, with any
 /// stops or titles dropped, moved or changed, goes back into a prepare
 /// request as it is, and its `focus` as `distanceFocus`. Null with `error_out` set on failure; `events`
 /// (nullable) hears the solve.
@@ -979,6 +1020,7 @@ pub unsafe extern "C" fn seiza_parallax_plan_tour_json(
                     spin_degrees: planned.stop.spin_deg,
                     push: planned.stop.push,
                     title: planned.stop.title.clone(),
+                    depth_parsecs: planned.stop.depth_pc,
                 })
                 .collect(),
         })
@@ -1060,7 +1102,9 @@ pub unsafe extern "C" fn seiza_parallax_reconfigure_json(
 /// What preparing the video found, as JSON: its frame count, frame rate
 /// and size, the stars found and matched, the nebula's distance with how
 /// and where (`backgroundFocus`) it was found, galaxies lifted, the depth
-/// planes lifted (`planes`, `[{name, distanceParsecs}]`), the dust
+/// planes lifted (`planes`, `[{name, distanceParsecs, basis, coverage}]`,
+/// `basis` saying how the distance was found and `coverage` the share of
+/// the image), the dust
 /// (`dustTransmission` `{median, thickest}`, `dustGiven` when a map gave
 /// it, and `starsInFrontOfDust`, the stars it brought in front), objects
 /// labelled, the WCS used, and `fit`, how fitting the camera to the
@@ -1109,9 +1153,11 @@ pub unsafe extern "C" fn seiza_parallax_summary_json(
             planes: summary
                 .planes
                 .iter()
-                .map(|(name, distance)| PlaneResponse {
-                    name: name.clone(),
-                    distance_parsecs: *distance,
+                .map(|plane| PlaneResponse {
+                    name: plane.name.clone(),
+                    distance_parsecs: plane.distance_pc,
+                    basis: plane.basis.clone(),
+                    coverage: plane.coverage,
                 })
                 .collect(),
             dust_transmission: summary
@@ -2556,10 +2602,13 @@ mod tests {
         };
         assert!(!video.is_null(), "{}", take_error(error));
         let planes = &summary(video)["planes"];
-        assert_eq!(
-            *planes,
-            serde_json::json!([{"name": "knot", "distanceParsecs": 150.0}])
-        );
+        assert_eq!(planes[0]["name"], "knot");
+        assert_eq!(planes[0]["distanceParsecs"], 150.0);
+        assert_eq!(planes[0]["basis"], "given");
+        let coverage = planes[0]["coverage"].as_f64().unwrap();
+        // A disc of 40 pixels on the 320 by 240 image.
+        let disc = std::f64::consts::PI * 40.0 * 40.0 / (320.0 * 240.0);
+        assert!((coverage / disc - 1.0).abs() < 0.05, "{planes}");
         assert!(
             events
                 .iter()

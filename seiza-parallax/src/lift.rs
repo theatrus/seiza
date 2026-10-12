@@ -171,7 +171,7 @@ pub fn lift_object(starless: &mut LightImage, extent: &Extent, distance_pc: f64)
 
 /// The median light, summed over channels, on the ellipse `scale` times
 /// `extent`'s size, or `None` when the ring lies mostly off the image.
-fn ring_median(light: &LightImage, extent: &Extent, scale: f64) -> Option<f32> {
+pub(crate) fn ring_median(light: &LightImage, extent: &Extent, scale: f64) -> Option<f32> {
     let (width, height) = (light.width as f64, light.height as f64);
     let around = 2.0 * std::f64::consts::PI * scale * extent.semi_major.max(1.0);
     let steps = (around as usize).clamp(16, 2048);
@@ -199,7 +199,7 @@ fn ring_median(light: &LightImage, extent: &Extent, scale: f64) -> Option<f32> {
 /// of nebula, which is not the galaxy and must not be lifted away as one.
 /// (UGC 11678 in the Iris field lies 1.14 times its size from its listing;
 /// a knot pulled a small galaxy's ellipse twice its size.)
-fn recentred(light: &LightImage, extent: &Extent) -> Option<Extent> {
+pub(crate) fn recentred(light: &LightImage, extent: &Extent) -> Option<Extent> {
     let listed = *extent;
     let mut extent = *extent;
     let farthest = 1.5 * listed.semi_major.max(listed.semi_minor).max(1.0);

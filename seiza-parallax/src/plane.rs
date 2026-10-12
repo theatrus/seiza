@@ -13,18 +13,28 @@
 //! and grays for a soft edge.
 
 use crate::dust::{open_unit_image, same_shape};
+use crate::lift::{Extent, recentred, ring_median};
 use crate::light::{LightImage, Pyramid};
 use crate::scene::Sprite;
 use rayon::prelude::*;
 use std::path::Path;
 
-/// A region's share of a pixel on the image's edge above this cuts the
-/// plane off there; below it, the mask has faded the plane out first.
-const EDGE_SHARE: f32 = 0.01;
+/// Light along the image's edge above this share of a plane's mean light
+/// over its body cuts the plane off there; below it, the plane has faded
+/// out before the edge.
+const EDGE_LIGHT: f32 = 0.05;
 
 /// The dark pixels a region keeps about the pixels it takes, so a plane
 /// cut from it fades to nothing before its edges.
 const BORDER: usize = 2;
+
+/// The scale, in catalogue ellipses, an object's light is followed out to
+/// for its region.
+const FARTHEST: f64 = 3.0;
+
+/// Past its edge, a region drawn from an ellipse fades out over this much
+/// more of its size.
+const TAPER: f64 = 1.3;
 
 /// A depth plane's region as an image: its share of each pixel, 1 where the
 /// image belongs to the plane and 0 where it does not, row by row. It spans
@@ -72,6 +82,16 @@ impl PlaneMask {
             return Err("the plane mask's values must lie between 0 and 1".into());
         }
         Ok(())
+    }
+
+    /// Write the mask to `path`, white in the plane, in the format its
+    /// extension names: a 16-bit grayscale PNG or TIFF, or a 32-bit float
+    /// FITS or XISF.
+    pub fn save(&self, path: &Path) -> Result<(), String> {
+        self.check()?;
+        let image =
+            seiza_image_io::FloatImage::gray(self.width, self.height, self.coverage.clone());
+        seiza_image_io::save(path, &image).map_err(|error| error.to_string())
     }
 
     /// The share at mask point `(x, y)`, between pixel centres, and the
@@ -184,6 +204,174 @@ impl Region {
         Ok(region.trimmed((width, height)))
     }
 
+    /// The region of the extended object whose catalogue ellipse is
+    /// `extent`, sized by the light of `starless`: moved onto the light,
+    /// then out to where its light, ring by elliptical ring, comes near its
+    /// surroundings' or stops falling, at most [`FARTHEST`] times the
+    /// ellipse, and fading out over [`TAPER`] times that. A catalogue's
+    /// ellipse often marks only a nebula's bright body. `None` when the
+    /// object does not stand out from its surroundings, or lies mostly off
+    /// the image.
+    pub fn from_extent(starless: &LightImage, extent: &Extent) -> Option<Self> {
+        let extent = recentred(starless, extent)?;
+        let scales: Vec<f64> = (1..=(FARTHEST * 4.0) as usize)
+            .map(|step| step as f64 / 4.0)
+            .collect();
+        let profile: Vec<Option<f32>> = scales
+            .iter()
+            .map(|&scale| ring_median(starless, &extent, scale))
+            .collect();
+        let core = profile[0]?;
+        let floor = profile
+            .iter()
+            .zip(&scales)
+            .filter(|(_, scale)| **scale >= 1.0)
+            .filter_map(|(light, _)| *light)
+            .fold(f32::INFINITY, f32::min);
+        if !floor.is_finite() || core - floor < 0.02 {
+            return None;
+        }
+        let rise = core - floor;
+        // From the ellipse out, the first ring near the floor, or where the
+        // light has levelled off: a nebula within a wider glow stops there,
+        // not at the darker sky beyond the glow.
+        let edge = scales
+            .iter()
+            .enumerate()
+            .filter(|(_, scale)| **scale >= 1.0)
+            .find(|&(index, _)| {
+                let Some(light) = profile[index] else {
+                    return true;
+                };
+                let next = profile.get(index + 1).copied().flatten();
+                light - floor <= 0.1 * rise || next.is_some_and(|next| light - next <= 0.02 * rise)
+            })
+            .map_or(FARTHEST, |(_, scale)| *scale);
+        let (width, height) = (starless.width, starless.height);
+        let reach = edge * TAPER * extent.semi_major.max(extent.semi_minor).max(1.0);
+        let left = (extent.x - reach).floor().max(0.0) as usize;
+        let top = (extent.y - reach).floor().max(0.0) as usize;
+        let right = (((extent.x + reach).ceil() + 1.0).max(0.0) as usize).min(width);
+        let bottom = (((extent.y + reach).ceil() + 1.0).max(0.0) as usize).min(height);
+        if left >= right || top >= bottom {
+            return None;
+        }
+        let coverage = (top..bottom)
+            .into_par_iter()
+            .flat_map_iter(|y| {
+                (left..right).map(move |x| {
+                    let out = extent.reach(x as f64, y as f64) / edge;
+                    if out <= 1.0 {
+                        1.0
+                    } else if out >= TAPER {
+                        0.0
+                    } else {
+                        let t = (TAPER - out) / (TAPER - 1.0);
+                        (t * t * (3.0 - 2.0 * t)) as f32
+                    }
+                })
+            })
+            .collect();
+        Self {
+            left,
+            top,
+            width: right - left,
+            height: bottom - top,
+            coverage,
+        }
+        .trimmed((width, height))
+    }
+
+    /// The region inside `outlines`, closed polygons in image pixels of a
+    /// `width` × `height` image, a point being inside when an odd number of
+    /// them hold it, with its edge softened over a thirtieth of its size,
+    /// at least 3 pixels; `None` when it covers none of the image.
+    pub fn from_outlines(
+        outlines: &[Vec<(f64, f64)>],
+        width: usize,
+        height: usize,
+    ) -> Option<Self> {
+        let (mut low, mut high) = (
+            (f64::INFINITY, f64::INFINITY),
+            (f64::NEG_INFINITY, f64::NEG_INFINITY),
+        );
+        for &(x, y) in outlines.iter().flatten() {
+            low = (low.0.min(x), low.1.min(y));
+            high = (high.0.max(x), high.1.max(y));
+        }
+        if !(low.0.is_finite() && high.0.is_finite() && low.1.is_finite() && high.1.is_finite()) {
+            return None;
+        }
+        let soften = ((high.0 - low.0).max(high.1 - low.1) / 30.0).max(3.0);
+        let pad = 2.0 * soften + 2.0;
+        let clamp = |value: f64, size: usize| (value.max(0.0) as usize).min(size);
+        let (left, right) = (
+            clamp((low.0 - pad).floor(), width),
+            clamp((high.0 + pad).ceil() + 1.0, width),
+        );
+        let (top, bottom) = (
+            clamp((low.1 - pad).floor(), height),
+            clamp((high.1 + pad).ceil() + 1.0, height),
+        );
+        if left >= right || top >= bottom {
+            return None;
+        }
+        let (columns, rows) = (right - left, bottom - top);
+        let mut coverage = vec![0.0_f32; columns * rows];
+        // Each row's crossings with the outlines' sides, in order: the
+        // pixels whose centres lie between alternate pairs are inside.
+        coverage
+            .par_chunks_mut(columns)
+            .enumerate()
+            .for_each(|(row, pixels)| {
+                let y = (top + row) as f64;
+                let mut crossings: Vec<f64> = Vec::new();
+                for outline in outlines {
+                    let closing = outline.last().zip(outline.first());
+                    for (a, b) in outline.iter().zip(outline.iter().skip(1)).chain(closing) {
+                        if (a.1 <= y) != (b.1 <= y) {
+                            crossings.push(a.0 + (y - a.1) * (b.0 - a.0) / (b.1 - a.1));
+                        }
+                    }
+                }
+                crossings.sort_by(f64::total_cmp);
+                for pair in crossings.chunks_exact(2) {
+                    let from = ((pair[0] - left as f64).ceil().max(0.0) as usize).min(columns);
+                    let to = ((pair[1] - left as f64).ceil().max(0.0) as usize).min(columns);
+                    for pixel in &mut pixels[from..to.max(from)] {
+                        *pixel = 1.0;
+                    }
+                }
+            });
+        // Three box blurs come close to a Gaussian.
+        let radius = (soften / 2.0).round().max(1.0) as usize;
+        for _ in 0..3 {
+            box_blur(&mut coverage, columns, rows, radius);
+        }
+        Self {
+            left,
+            top,
+            width: columns,
+            height: rows,
+            coverage,
+        }
+        .trimmed((width, height))
+    }
+
+    /// The region as a mask the size of a `width` × `height` image, as
+    /// [`Self::from_mask`] reads it back.
+    pub fn to_mask(&self, width: usize, height: usize) -> PlaneMask {
+        let coverage = (0..width * height)
+            .into_par_iter()
+            .map(|index| self.at(index % width, index / width))
+            .collect();
+        PlaneMask {
+            width,
+            height,
+            coverage,
+        }
+    }
+
     /// The region cut down to the pixels it takes a share of, with a dark
     /// border of [`BORDER`] pixels inside a `size` image, or `None` when it
     /// takes none.
@@ -240,22 +428,6 @@ impl Region {
     pub fn area(&self) -> f64 {
         self.coverage.iter().map(|&share| share as f64).sum()
     }
-
-    /// Which edges of a `width` × `height` image the plane reaches, left,
-    /// top, right and bottom: where its light ends at the image's edge
-    /// rather than fading out within it.
-    pub fn edges(&self, width: usize, height: usize) -> [bool; 4] {
-        let column =
-            |x: usize| (self.top..self.top + self.height).any(|y| self.at(x, y) > EDGE_SHARE);
-        let row =
-            |y: usize| (self.left..self.left + self.width).any(|x| self.at(x, y) > EDGE_SHARE);
-        [
-            column(0),
-            row(0),
-            column(width.saturating_sub(1)),
-            row(height.saturating_sub(1)),
-        ]
-    }
 }
 
 /// A region lifted off the starless image onto a plane at a distance of its
@@ -297,6 +469,46 @@ impl Plane {
     /// The plane's light at full size.
     pub fn base(&self) -> &LightImage {
         self.image.base()
+    }
+
+    /// Which edges of a `width` × `height` image cut the plane's light
+    /// off, left, top, right and bottom: those along which it holds more
+    /// than [`EDGE_LIGHT`] of its mean light over its body, the pixels its
+    /// region takes half or more of. Elsewhere its light fades out before
+    /// the edge, and moving it uncovers nothing.
+    pub fn cut_edges(&self, width: usize, height: usize) -> [bool; 4] {
+        let base = self.base();
+        let light = |x: usize, y: usize| -> f32 {
+            if x < self.left || y < self.top {
+                return 0.0;
+            }
+            let (column, row) = (x - self.left, y - self.top);
+            if column >= base.width || row >= base.height {
+                return 0.0;
+            }
+            let pixel = base.at(column, row);
+            pixel[0] + pixel[1] + pixel[2]
+        };
+        let region = &self.region;
+        let (mut sum, mut count) = (0.0_f64, 0_usize);
+        for y in region.top..region.top + region.height {
+            for x in region.left..region.left + region.width {
+                if region.at(x, y) >= 0.5 {
+                    sum += light(x, y) as f64;
+                    count += 1;
+                }
+            }
+        }
+        let floor = EDGE_LIGHT * (sum / count.max(1) as f64) as f32;
+        let (right, bottom) = (self.left + base.width, self.top + base.height);
+        let column = |x: usize| (self.top..bottom).any(|y| light(x, y) > floor);
+        let row = |y: usize| (self.left..right).any(|x| light(x, y) > floor);
+        [
+            column(0),
+            row(0),
+            column(width.saturating_sub(1)),
+            row(height.saturating_sub(1)),
+        ]
     }
 
     /// Add `sprites`' light to the plane, growing its image to hold them.
@@ -526,6 +738,44 @@ fn filled(
     levels.swap_remove(0).0
 }
 
+/// Blur the `columns` × `rows` grid `values` by the mean of the
+/// `2 · radius + 1` values about each, across then down, of those on the
+/// grid.
+fn box_blur(values: &mut [f32], columns: usize, rows: usize, radius: usize) {
+    let pass = |line: &mut [f32], scratch: &mut Vec<f32>| {
+        scratch.clear();
+        scratch.extend_from_slice(line);
+        let mut sum: f64 = scratch[..radius.min(line.len())]
+            .iter()
+            .map(|&value| value as f64)
+            .sum();
+        for index in 0..line.len() {
+            if index + radius < line.len() {
+                sum += scratch[index + radius] as f64;
+            }
+            if index > radius {
+                sum -= scratch[index - radius - 1] as f64;
+            }
+            let first = index.saturating_sub(radius);
+            let last = (index + radius).min(line.len() - 1);
+            line[index] = (sum / (last - first + 1) as f64) as f32;
+        }
+    };
+    values
+        .par_chunks_mut(columns)
+        .for_each_init(Vec::new, |scratch, row| pass(row, scratch));
+    let mut column = Vec::with_capacity(rows);
+    let mut scratch = Vec::with_capacity(rows);
+    for x in 0..columns {
+        column.clear();
+        column.extend((0..rows).map(|y| values[y * columns + x]));
+        pass(&mut column, &mut scratch);
+        for (y, &value) in column.iter().enumerate() {
+            values[y * columns + x] = value;
+        }
+    }
+}
+
 /// Bilinear light of `image` at `(x, y)`, and the edge pixels' beyond them.
 fn sample_clamped(image: &LightImage, x: f32, y: f32) -> [f32; 3] {
     image.sample(
@@ -616,7 +866,6 @@ pub(crate) mod tests {
         // The box holds the disc and a dark border, and no more.
         assert!(region.left < 70 && region.left > 55, "{}", region.left);
         assert!(region.width < 75, "{}", region.width);
-        assert_eq!(region.edges(width, height), [false; 4]);
         // Another shape is refused, and a mask marking nothing gives none.
         let error = Region::from_mask(&disc(100, 100, (5.0, 5.0), 3.0), width, height);
         assert!(error.unwrap_err().contains("100×100"));
@@ -625,21 +874,90 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_region_tells_which_image_edges_cut_it() {
+    fn a_plane_tells_which_image_edges_cut_its_light() {
         let (width, height) = (200, 160);
-        let mask = disc(width, height, (0.0, 80.0), 30.0);
-        let region = Region::from_mask(&mask, width, height).unwrap().unwrap();
-        assert_eq!(region.left, 0);
-        assert_eq!(region.edges(width, height), [true, false, false, false]);
-        // A soft edge that fades out before the image's edge does not cut.
-        let mut soft = disc(width, height, (195.0, 80.0), 30.0);
-        for (index, share) in soft.coverage.iter_mut().enumerate() {
-            if index % width >= 198 {
-                *share = 0.0;
+        // A glow running off the left edge, and one that fades out short
+        // of the right.
+        let glow = |cx: f64, spread: f64| {
+            let mut image = LightImage::new(width, height);
+            for (index, pixel) in image.pixels.iter_mut().enumerate() {
+                let (x, y) = ((index % width) as f64, (index / width) as f64);
+                let r2 = (x - cx).powi(2) + (y - 80.0).powi(2);
+                *pixel = [0.1 + (0.8 * (-r2 / (2.0 * spread * spread)).exp()) as f32; 3];
             }
+            image
+        };
+        let mut left = glow(5.0, 20.0);
+        let region = Region::from_mask(&disc(width, height, (0.0, 80.0), 50.0), width, height)
+            .unwrap()
+            .unwrap();
+        assert_eq!(region.left, 0);
+        let plane = lift_region(&mut left, &region, 150.0, "left").unwrap();
+        assert_eq!(plane.cut_edges(width, height), [true, false, false, false]);
+        // The mask reaches the right edge, but the light is gone by then.
+        let mut right = glow(165.0, 6.0);
+        let region = Region::from_mask(&disc(width, height, (175.0, 80.0), 40.0), width, height)
+            .unwrap()
+            .unwrap();
+        assert_eq!(region.left + region.width, width);
+        let plane = lift_region(&mut right, &region, 150.0, "right").unwrap();
+        assert_eq!(plane.cut_edges(width, height), [false; 4]);
+    }
+
+    #[test]
+    fn an_ellipse_region_reaches_as_far_as_the_light_and_no_farther() {
+        // A nebula with a halo well past its catalogued ellipse, sitting in
+        // a wide, even glow with dark sky beyond it.
+        let (width, height) = (400, 300);
+        let mut image = LightImage::new(width, height);
+        for (index, pixel) in image.pixels.iter_mut().enumerate() {
+            let (x, y) = ((index % width) as f64, (index / width) as f64);
+            let r = (x - 200.0).hypot(y - 150.0);
+            let nebula = 1.0 * (-(r * r) / (2.0 * 18.0_f64.powi(2))).exp();
+            let glow = if r < 120.0 { 0.2 } else { 0.05 };
+            *pixel = [(nebula + glow) as f32; 3];
         }
-        let region = Region::from_mask(&soft, width, height).unwrap().unwrap();
-        assert_eq!(region.edges(width, height), [false; 4]);
+        let extent = Extent {
+            x: 200.0,
+            y: 150.0,
+            semi_major: 20.0,
+            semi_minor: 20.0,
+            angle: 0.0,
+        };
+        let region = Region::from_extent(&image, &extent).unwrap();
+        // It takes the halo, out past the ellipse...
+        assert_eq!(region.covers(200.0, 150.0), 1.0);
+        assert!(region.covers(235.0, 150.0) > 0.9, "{region:?}");
+        // ...but stops in the glow, not at the dark sky past it.
+        assert_eq!(region.covers(290.0, 150.0), 0.0);
+        assert!(region.width < 160, "{}", region.width);
+        // A flat image gives none.
+        let mut flat = LightImage::new(width, height);
+        flat.pixels.fill([0.3; 3]);
+        assert!(Region::from_extent(&flat, &extent).is_none());
+    }
+
+    #[test]
+    fn an_outline_region_fills_its_polygons_with_a_soft_edge() {
+        let (width, height) = (300, 200);
+        // A square with a square hole, the hole drawn the other way round.
+        let outer = vec![(50.0, 50.0), (150.0, 50.0), (150.0, 150.0), (50.0, 150.0)];
+        let hole = vec![(80.0, 80.0), (80.0, 120.0), (120.0, 120.0), (120.0, 80.0)];
+        let region = Region::from_outlines(&[outer.clone(), hole], width, height).unwrap();
+        assert!(region.at(60, 60) > 0.99, "{}", region.at(60, 60));
+        assert!(region.at(100, 100) < 0.01, "{}", region.at(100, 100));
+        assert!(
+            (region.at(50, 100) - 0.5).abs() < 0.1,
+            "{}",
+            region.at(50, 100)
+        );
+        assert_eq!(region.at(200, 100), 0.0);
+        // Off the image, or touching it only past its edge, gives none.
+        let away: Vec<(f64, f64)> = outer.iter().map(|&(x, y)| (x + 1000.0, y)).collect();
+        assert!(Region::from_outlines(&[away], width, height).is_none());
+        // Written as a mask and read back, it is the same region.
+        let mask = region.to_mask(width, height);
+        assert_eq!(Region::from_mask(&mask, width, height), Ok(Some(region)));
     }
 
     #[test]

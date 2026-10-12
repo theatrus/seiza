@@ -98,6 +98,12 @@ pub struct Stop {
     /// while it holds here, 0 to below 1: a slow push in, which with a
     /// spin turns the near stars in a spiral past the far ones.
     pub push: f64,
+    /// The distance of the plane the focus point lies on, as a share of
+    /// the background's: the camera centres the focus point on that plane.
+    /// A camera that has moved sideways sees a nearer or farther plane
+    /// shifted against the background, so it aims at the background point
+    /// that puts the focus point at the centre. 1 on the background.
+    pub depth: f64,
 }
 
 impl Default for Stop {
@@ -112,6 +118,7 @@ impl Default for Stop {
             hold: 0.0,
             spin: 0.0,
             push: 0.0,
+            depth: 1.0,
         }
     }
 }
@@ -370,7 +377,7 @@ impl Shot {
             Guard::whole(scene.far_distance_pc),
         ];
         for plane in scene.planes.iter() {
-            let edges = plane.region.edges(scene.width(), scene.height());
+            let edges = plane.cut_edges(scene.width(), scene.height());
             if edges.contains(&true) {
                 guards.push(Guard {
                     distance: plane.distance_pc,
@@ -483,8 +490,31 @@ impl Shot {
         let first = self.tour[0];
         let footprint =
             self.widest_footprint(first.focus, scene.width(), scene.height()) / self.zoom.max(1.0);
-        let [x, y, log_near, log_zoom, turn, pan] =
-            tour_state(&self.tour, self.glide, self.looped, t);
+        // Each stop as the background point it aims at to centre its focus
+        // point on its plane. The camera glides between those, so it keeps
+        // to the image between stops, as on the background alone.
+        let centre = (
+            (scene.width() as f64 - 1.0) / 2.0,
+            (scene.height() as f64 - 1.0) / 2.0,
+        );
+        let aimed: Vec<Stop> = self
+            .tour
+            .iter()
+            .map(|stop| {
+                let camera = (1.0 - stop.dolly.clamp(0.0, 0.99), stop.pan.clamp(0.0, 1.0));
+                let through = |target: f64, opening: f64, centre: f64| {
+                    aim_through(target, stop.depth, camera, (opening, centre))
+                };
+                Stop {
+                    focus: (
+                        through(stop.focus.0, first.focus.0, centre.0),
+                        through(stop.focus.1, first.focus.1, centre.1),
+                    ),
+                    ..*stop
+                }
+            })
+            .collect();
+        let [x, y, log_near, log_zoom, turn, pan] = tour_state(&aimed, self.glide, self.looped, t);
         self.place(
             scene,
             (first.focus, footprint),
@@ -642,12 +672,19 @@ impl Shot {
         // only as far as the views about it need, so an opening on the
         // whole image stays whole.
         if self.tour.len() >= 2 {
+            // A stop on a depth plane keeps its pan: the camera turns to
+            // see a plane beyond the nebula, which moving sideways cannot
+            // centre.
             let panned = |share: f64| Self {
                 tour: self
                     .tour
                     .iter()
                     .map(|stop| Stop {
-                        pan: stop.pan * share,
+                        pan: if (stop.depth - 1.0).abs() > 1e-9 {
+                            stop.pan
+                        } else {
+                            stop.pan * share
+                        },
                         ..*stop
                     })
                     .collect(),
@@ -1003,10 +1040,14 @@ fn tour_times(tour: &[Stop]) -> Vec<(f64, f64)> {
     times
 }
 
+/// The numbers a tour's camera blends between stops.
+const STATE: usize = 6;
+type TourState = [f64; STATE];
+
 /// A stop as numbers that blend smoothly: its focus, the logarithms of the
 /// background's nearness and of the lens's zoom (so a flight in or a zoom
 /// keeps an even pace), its turn and its pan.
-fn stop_state(stop: &Stop) -> [f64; 6] {
+fn stop_state(stop: &Stop) -> TourState {
     [
         stop.focus.0,
         stop.focus.1,
@@ -1017,6 +1058,34 @@ fn stop_state(stop: &Stop) -> [f64; 6] {
     ]
 }
 
+/// Along one axis, the point of the background plane a camera must aim at
+/// for image point `target`, on a plane at `depth` (as a share of the
+/// background's first distance), to lie at the frame's centre, when the
+/// camera has `near` of that distance left to the background and turns
+/// `pan` of its way from the opening view's angle on `opening`. `centre` is
+/// the image's centre. A camera that has not moved sideways sees every
+/// depth alike; one that has sees nearer planes shifted further. A plane
+/// the camera has all but reached is aimed at as the background.
+pub(crate) fn aim_through(
+    target: f64,
+    depth: f64,
+    (near, pan): (f64, f64),
+    (opening, centre): (f64, f64),
+) -> f64 {
+    let ahead = depth - (1.0 - near);
+    if (depth - 1.0).abs() < 1e-9 || ahead <= 0.05 * depth {
+        return target;
+    }
+    // Where the opening angle meets the background, and the share of the
+    // way the camera moves rather than turns: the background point `aim`
+    // is centred from `across = (1 − pan) · (aim − start)` to the side,
+    // looking `opening − centre + pan · (aim − start) / near` aside.
+    let start = centre + (opening - centre) * near;
+    start
+        + ((target - centre) * depth - (opening - centre) * ahead)
+            / ((1.0 - pan) + pan * ahead / near)
+}
+
 /// The camera's state `t` of the way through `tour`. It moves on through
 /// a stop it holds at at `glide` of its pace between stops, centred on the
 /// stop, plus any push and spin the stop asks for; it passes the others at
@@ -1025,7 +1094,7 @@ fn stop_state(stop: &Stop) -> [f64; 6] {
 /// drift that slows to rest, unless the tour is `looped`: then the last
 /// stop is the first again, and the camera drifts through the join at one
 /// pace.
-fn tour_state(tour: &[Stop], glide: f64, looped: bool, t: f64) -> [f64; 6] {
+fn tour_state(tour: &[Stop], glide: f64, looped: bool, t: f64) -> TourState {
     let times = tour_times(tour);
     let total = times.last().map_or(0.0, |&(_, leave)| leave);
     let now = t.clamp(0.0, 1.0) * total;
@@ -1073,22 +1142,22 @@ const JOIN_DRIFT: f64 = 0.5;
 const JOIN_ZOOM: f64 = 0.02;
 
 /// The camera's state `now` seconds into `tour`, but for its spins.
-fn tour_path(tour: &[Stop], times: &[(f64, f64)], glide: f64, looped: bool, now: f64) -> [f64; 6] {
+fn tour_path(tour: &[Stop], times: &[(f64, f64)], glide: f64, looped: bool, now: f64) -> TourState {
     let last = tour.len() - 1;
     let total = times[last].1;
-    let states: Vec<[f64; 6]> = tour.iter().map(stop_state).collect();
+    let states: Vec<TourState> = tour.iter().map(stop_state).collect();
     // A looped tour joins its last stop to its first, which shows the same
     // view turned by whole turns (less the spins, which tour_spin adds).
     let join = looped && last >= 1;
     // The pace through each stop, per second: Catmull-Rom's, from the
     // stops either side (or one side at the ends, or across the join).
-    let through = |index: usize| -> [f64; 6] {
+    let through = |index: usize| -> TourState {
         // Stops with no time between them (a zero travel, a cut) give no
         // pace rather than an endless one.
         if join && (index == 0 || index == last) {
             let span = total - times[last - 1].1 + times[1].0;
             if span < 1e-6 {
-                return [0.0; 6];
+                return [0.0; STATE];
             }
             return std::array::from_fn(|k| {
                 let before = states[last - 1][k] - (states[last][k] - states[0][k]);
@@ -1098,13 +1167,13 @@ fn tour_path(tour: &[Stop], times: &[(f64, f64)], glide: f64, looped: bool, now:
         let (before, after) = (index.saturating_sub(1), (index + 1).min(last));
         let span = times[after].0 - times[before].1;
         if span < 1e-6 {
-            return [0.0; 6];
+            return [0.0; STATE];
         }
         std::array::from_fn(|k| (states[after][k] - states[before][k]) / span)
     };
     // No turning or panning on the way through a view near the whole
     // image, which has no room for it.
-    let roomy = |index: usize, mut rate: [f64; 6]| {
+    let roomy = |index: usize, mut rate: TourState| {
         let room = ((1.0 - states[index][2].exp()) / 0.5).clamp(0.0, 1.0);
         rate[4] *= room;
         rate[5] *= room;
@@ -1139,13 +1208,13 @@ fn tour_path(tour: &[Stop], times: &[(f64, f64)], glide: f64, looped: bool, now:
         if hold <= 0.0 {
             let rate = match joined {
                 Some(drift) => drift,
-                None if end_stop => [0.0; 6],
+                None if end_stop => [0.0; STATE],
                 None => through(index),
             };
             reach.push(states[index]);
             leave.push(states[index]);
             pace.push(rate);
-            drifts.push([0.0; 6]);
+            drifts.push([0.0; STATE]);
             pushes.push(0.0);
             continue;
         }
@@ -1159,7 +1228,7 @@ fn tour_path(tour: &[Stop], times: &[(f64, f64)], glide: f64, looped: bool, now:
         // A spin turns about the stop itself, its motion the spin and any
         // push (tour_spin adds the spin).
         if stop.spin != 0.0 && joined.is_none() {
-            drift = [0.0; 6];
+            drift = [0.0; STATE];
         }
         // The push in, eased in and out over the hold as a spin is, so the
         // camera neither backs off before a short hold nor ends a final
@@ -1183,9 +1252,9 @@ fn tour_path(tour: &[Stop], times: &[(f64, f64)], glide: f64, looped: bool, now:
         } else {
             0.5
         };
-        let start: [f64; 6] =
+        let start: TourState =
             std::array::from_fn(|k| states[index][k] - drift[k] * covered * before);
-        let mut end: [f64; 6] = std::array::from_fn(|k| start[k] + drift[k] * covered);
+        let mut end: TourState = std::array::from_fn(|k| start[k] + drift[k] * covered);
         end[2] += push;
         reach.push(start);
         leave.push(end);
@@ -1206,10 +1275,15 @@ fn tour_path(tour: &[Stop], times: &[(f64, f64)], glide: f64, looped: bool, now:
                 } else {
                     held
                 };
-                let mut state: [f64; 6] =
+                let mut state: TourState =
                     std::array::from_fn(|k| reach[index][k] + drifts[index][k] * moved);
                 if hold > 0.0 {
                     state[2] += pushes[index] * spin_share(held, hold);
+                }
+                // A stop on a depth plane turns in step with its push, so
+                // the camera keeps to its line of sight.
+                if on_plane(&tour[index]) {
+                    state[5] = (pan_share(&reach[index]) * state[2].exp()).clamp(0.0, 1.0);
                 }
                 return state;
             }
@@ -1240,16 +1314,38 @@ fn tour_path(tour: &[Stop], times: &[(f64, f64)], glide: f64, looped: bool, now:
             // stay the stops' own, so they never jerk.
             let (start, end) = (pace[index - 1], pace[index]);
             let (_, h10, _, h11) = hermite(s);
-            return std::array::from_fn(|k| {
+            let mut state: TourState = std::array::from_fn(|k| {
                 let (h00, _, h01, _) = hermite(if k >= 4 { late } else { s });
                 h00 * leave[index - 1][k]
                     + h10 * span * start[k]
                     + h01 * reach[index][k]
                     + h11 * span * end[k]
             });
+            // To or from a stop on a depth plane, the pan keeps in step with
+            // the camera's nearness: a stop there turns as much of its way
+            // as it has left, to look along the line of sight through its
+            // target, and a pan blended on its own would turn the camera
+            // past it as it nears, sweeping the far star field off the
+            // image.
+            if on_plane(&tour[index - 1]) || on_plane(&tour[index]) {
+                let (h00, _, h01, _) = hermite(s);
+                let share = h00 * pan_share(&leave[index - 1]) + h01 * pan_share(&reach[index]);
+                state[5] = (share * state[2].exp()).clamp(0.0, 1.0);
+            }
+            return state;
         }
     }
     leave[last]
+}
+
+/// Whether `stop`'s focus point lies on a depth plane.
+fn on_plane(stop: &Stop) -> bool {
+    (stop.depth - 1.0).abs() > 1e-9
+}
+
+/// A camera state's pan as a share of the way it has left to the nebula.
+fn pan_share(state: &TourState) -> f64 {
+    state[5] / state[2].exp()
 }
 
 /// How much of a spin is done `elapsed` seconds into a hold of `hold`
@@ -2478,6 +2574,51 @@ mod tour_tests {
         )
     }
 
+    #[test]
+    fn a_stop_on_a_depth_plane_centres_its_point_there() {
+        let scene = scene();
+        let shot = Shot {
+            tour: vec![
+                Stop {
+                    focus: (299.5, 199.5),
+                    hold: 1.0,
+                    ..Stop::default()
+                },
+                Stop {
+                    focus: (100.0, 120.0),
+                    dolly: 0.3,
+                    pan: 0.2,
+                    depth: 0.5,
+                    travel: 2.0,
+                    hold: 2.0,
+                    ..Stop::default()
+                },
+            ],
+            glide: 0.0,
+            width: 160,
+            height: 90,
+            frames: 60,
+            ..Shot::default()
+        };
+        // A second into the second stop's hold, of five seconds in all.
+        let view = shot.tour_view(&scene, 0.8);
+        let (u, v, _) = view.project(100.0, 120.0, 200.0).unwrap();
+        assert!(
+            (u - 79.5).abs() < 1e-6 && (v - 44.5).abs() < 1e-6,
+            "{u} {v}"
+        );
+        // The background point behind it lies well off the centre.
+        let (u, v, _) = view.project(100.0, 120.0, 400.0).unwrap();
+        assert!((u - 79.5).hypot(v - 44.5) > 5.0, "{u} {v}");
+        // Turning as much of the way as it has left puts the camera on the
+        // line of sight from Earth through the point: at every depth, the
+        // background point to aim at is the point itself.
+        for depth in [0.5, 3.0] {
+            let aim = aim_through(100.0, depth, (0.4, 0.4), (299.5, 299.5));
+            assert!((aim - 100.0).abs() < 1e-9, "{depth}: {aim}");
+        }
+    }
+
     fn tour() -> Shot {
         Shot {
             tour: vec![
@@ -2756,16 +2897,16 @@ mod tour_tests {
         // The frame after the last is the first.
         assert_eq!(shot.progress(shot.frames), 1.0);
         let (first, end) = (state(0.0), state(1.0));
-        for k in 0..6 {
+        for k in 0..STATE {
             assert!((first[k] - end[k]).abs() < 1e-9, "{k}: {first:?} {end:?}");
         }
         // The step into the join matches the step out of it: the camera
         // neither stops nor jumps there.
         let step = 1.0 / shot.frames as f64;
-        let into: [f64; 6] = std::array::from_fn(|k| state(1.0)[k] - state(1.0 - step)[k]);
-        let out: [f64; 6] = std::array::from_fn(|k| state(step)[k] - state(0.0)[k]);
+        let into: TourState = std::array::from_fn(|k| state(1.0)[k] - state(1.0 - step)[k]);
+        let out: TourState = std::array::from_fn(|k| state(step)[k] - state(0.0)[k]);
         assert!(into[0].hypot(into[1]) > 0.1, "{into:?}");
-        for k in 0..6 {
+        for k in 0..STATE {
             assert!((into[k] - out[k]).abs() < 1e-9, "{k}: {into:?} {out:?}");
         }
         // Never further back than the whole image, and the lens drifts in

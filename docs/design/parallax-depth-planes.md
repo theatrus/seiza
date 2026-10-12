@@ -95,31 +95,40 @@ with the cloud.
 
 - `seiza parallax-video --plane MASK=PARSECS`, repeatable, and `planes` in
   the C ABI's request, each `{mask, distanceParsecs, name}`.
-- Later: `--export-planes DIR` writes the planes in use, automatic ones
-  included, as masks with their distances, to edit and give back, as
-  `--export-dust-map` does for the dust. `--object-distance NAME=PARSECS`
-  overrides a catalogue distance.
+- `--export-planes DIR` writes the planes in use, automatic ones included,
+  as masks with their distances in `planes.txt`, to edit and give back with
+  `--plane-file`, as `--export-dust-map` does for the dust.
+  `--object-distance NAME=PARSECS` (the C ABI's `distanceOverrides`)
+  overrides a catalogue distance, for the nebula's distance and the
+  automatic planes.
 - In the apps, the Source step could list suggested planes, each with an on
   and off switch and a distance field, and import a mask. Painting a region
   could come later.
 
-**Automatic (later)**
+**Automatic**
 
-- **Catalogued objects.** Take objects in the field that have a distance in
-  the object distance data and an outline (an OpenNGC contour, else the
-  catalogue ellipse). Fit the outline to the image's light, as
-  `lift_object` does. Split an object off only when its distance differs
-  from the plane around it by about 15% or more. The data records how each
-  distance was found (`DistanceBasis`): use measured distances, those of a
-  containing object and those of a nearby cloud, never `KindDefault`, a
-  typical distance for the object's kind.
-- **Dark clouds, from the Gaia stars already matched.** Inside a region the
+- **Catalogued objects** (`--auto-planes`, the C ABI's `autoPlanes`). Take
+  the nebulae in the field that have a distance in the object distance
+  data. The data records how each distance was found (`DistanceBasis`): use
+  measured distances and those borrowed from an object around them, never
+  `KindDefault`, a typical distance for the object's kind. Split an object
+  off only when its distance differs from the nebula's by 15% or more
+  (`AUTO_PLANE_DEPTH`), and not when its range of distances takes in the
+  nebula's. Leave out an object whose ellipse holds the point the nebula's
+  distance was taken at: it is the nebula, or holds it, and would carry it
+  off. The region is the outermost brightness level of its OpenNGC outline,
+  softened, or else its catalogue ellipse, moved onto the light and grown
+  ring by ring until the light comes near its surroundings or levels off,
+  at most three times the ellipse (`Region::from_extent`). On the Big Q
+  field this finds Sh2-170 at 2790 pc, behind NGC 7822 at 900 pc, and
+  vdB 2 at 717 pc, in front.
+- **Dark clouds, from the Gaia stars already matched (later).** Inside a region the
   dust map marks opaque, compare star counts by distance with the counts
   outside it. The distance where the inside counts fall short is the cloud's
   distance; published cloud distances are measured the same way. This gives
   the counted dust a real depth.
 - **Galaxies** still go to the far field.
-- **Depth images.** Accept a continuous depth image and cut it into a few
+- **Depth images (later).** Accept a continuous depth image and cut it into a few
   planes, sharing each pixel between its two nearest planes so no steps show.
 
 ## Dust per plane (later)
@@ -131,13 +140,37 @@ in front of that cloud's own distance, not the target's. Until then, planes
 beyond the background dim by the background's dust, as the leftover plane
 does.
 
-## Tours (later)
+## Tours
 
-A tour stop's `dolly` is a share of the way to the background plane, and the
-camera aims at the background point at the stop's place. Flying straight in,
-every depth along that line of sight stays centred, so a stop on a near cloud
-works. With sideways travel, the cloud drifts a little from the centre. A
-later change could aim and dolly a stop toward `Scene::depth_at` its place.
+A tour stop's `dolly` is a share of the way to the background plane. A stop
+on a depth plane centres its place on that plane: the stop's `depth`
+(`depth=PARSECS` in a stop, else the plane under its place) says which. A
+camera that has moved sideways sees a nearer or farther plane shifted
+against the background, so each stop aims at the background point that
+puts its place at the frame's centre (`aim_through`), and the camera glides
+between those background points as before, so it keeps to the image on the
+way.
+
+The camera cannot centre a plane far behind the background by moving
+sideways: it would have to stand far off to the side. Turning `near` of its
+way (the share left to the background) puts it on the line of sight from
+Earth through the stop's place, where every depth along that line is
+centred, at any depth. The planner gives each stop on a plane that pan, and
+the fit keeps it rather than scaling it down with the others. To and from
+such a stop, the pan is blended as a share of the camera's nearness, so the
+camera keeps to that line rather than turning past it as it nears.
+
+The planner frames a target on a plane at its own depth (`framing`). A
+nearer plane grows sooner, so the camera flies less far. The camera never
+flies past `MOST_DOLLY`, so a target beyond the background takes the rest of
+its growth from the lens. Along the line of sight the frame shows more of a
+farther plane, the far star field most, and that must stay inside the
+image: near the image's edge, the camera flies less far and zooms more,
+until the target lies in the middle four fifths of its frame.
+
+A plane's cut edges are judged by its light, not its region: an edge counts
+as cut only where the plane holds more than a twentieth of its body's mean
+light along it.
 
 ## Risks
 
@@ -148,9 +181,8 @@ later change could aim and dolly a stop toward `Scene::depth_at` its place.
   the fill behind it, which is smooth and can look smeared. `Shot::fitted`
   could later limit the sideways travel by how much fill would show.
 - **Wrong distances look wrong.** A bad catalogue distance gives strong,
-  wrong motion. Every plane is reported with its distance, and automatic
-  ones will say how the distance was found, so the user can see it and
-  override it.
+  wrong motion. Every plane is reported with its distance and how it was
+  found, so the user can see it and override it.
 - **Flat planes.** Real clouds have depth of their own; planes are flat
   cut-outs. That is fine for the effect.
 
@@ -160,7 +192,8 @@ later change could aim and dolly a stop toward `Scene::depth_at` its place.
    stars joining planes, labels at a plane's depth, and tests that frame 0
    is the photograph and that nearer planes move more. `--plane` and the C
    ABI's `planes`. (Done.)
-2. `--export-planes` and `--object-distance`.
-3. Automatic planes from catalogued objects.
+2. `--export-planes`, `--plane-file` and `--object-distance`. (Done.)
+3. Automatic planes from catalogued objects, and tour stops at a plane's
+   depth. (Done.)
 4. Dark-cloud distances from Gaia star counts, and dust per plane.
-5. Tour stops at a plane's depth, and the apps' interface.
+5. The apps' interface.

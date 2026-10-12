@@ -417,7 +417,10 @@ on in by that share of the remaining way, which with a spin turns the near
 stars in a spiral past the far ones. The last stop's hold is a final drift
 that slows to rest. `--loop` ends the tour where it began instead, adding a
 last stop at the first's view unless the tour ends there, so the last frame
-leads into the first and the video loops. A stop's `title="TEXT"` names it,
+leads into the first and the video loops. A stop on a depth plane (below)
+centres its place on that plane, turning to look along the line of sight
+through it; `depth=PARSECS` names the plane's distance, by default that of
+the plane the image shows there. A stop's `title="TEXT"` names it,
 and `--tour-titles` shows each title low in the frame while the camera
 drifts through its stop, fading in and out. `--auto-tour[=N]` plans a tour itself from the catalogued objects
 in the field: every one worth a visit (the well-known catalogues, and
@@ -495,6 +498,36 @@ covers:
 ```
 seiza parallax-video field.tif --starless field-starless.tif --stars field-stars.tif \
   --plane near-cloud.png=900 --plane far-shell.png=2400 --output field.mp4
+```
+
+`--auto-planes` finds planes in the object catalogue: the nebulae in the
+field whose distance was measured, or borrowed from an object around them,
+that lie at least 15% nearer or farther than the nebula. A distance typical
+of an object's kind never counts, and nor does one whose range takes in the
+nebula's own, as it cannot say which lies nearer. Each plane takes the
+object's outermost catalogued outline, or else its ellipse, grown to where
+the image's light levels off. The notes name each plane, its distance and
+how that was found. `--object-distance NAME=PARSECS` gives an object's
+distance in place of the catalogue's, for the nebula's distance and for the
+automatic planes; repeat it for more objects. An automatic tour frames each
+target at its own plane's depth: a nearer plane grows sooner, so the camera
+flies less far, and the camera cannot fly past the nebula to a plane behind
+it, so the lens makes up the rest.
+
+`--export-planes DIR` writes the planes the video uses, automatic ones
+included, as masks the size of the image (16-bit PNG), with `planes.txt`
+listing each as `MASK=PARSECS`. Paint over a mask, change a distance or drop
+a line, then give the list back with `--plane-file DIR/planes.txt` in place
+of `--auto-planes`. Without `-o`, the command writes them and stops. With
+planes, `--plan-tour` prepares the scene first, so the tour it writes frames
+each target at its plane's depth:
+
+```
+seiza parallax-video bigq.tif --starless bigq-starless.tif --stars bigq-stars.tif \
+  --auto-planes --export-planes bigq-planes --plan-tour bigq-tour.txt
+seiza parallax-video bigq.tif --starless bigq-starless.tif --stars bigq-stars.tif \
+  --plane-file bigq-planes/planes.txt --tour-file bigq-tour.txt --tour-titles \
+  --output bigq.mp4
 ```
 
 `--debug-layers DIR` writes the background, the leftover star light, every

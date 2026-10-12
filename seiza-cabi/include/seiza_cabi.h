@@ -2165,11 +2165,19 @@ char *seiza_rc_astro_process_file_json(const char *request_json,
  elsewhere, at any size of the image's shape, whose region is lifted off
  the starless image onto a plane at `distanceParsecs`, what lay behind it
  filled in from around it; `name`, the mask's file name if absent, names
- it in events and the summary), `start` ("focus", "whole"), `dolly`, `truck`, `truckAngleDegrees`,
+ it in events and the summary), `autoPlanes` (lift the catalogued nebulae
+ that lie at least 15% nearer or farther than the nebula, by a measured
+ distance or one borrowed from an object around them, onto planes of
+ their own), `distanceOverrides` (`[{object, distanceParsecs}]`:
+ distances for catalogued objects, by name, in place of the catalogue's,
+ for the nebula's distance and the automatic planes), `start` ("focus",
+ "whole"), `dolly`, `truck`, `truckAngleDegrees`,
  `pan`, `zoom`, `zoomEnd`, `rotateDegrees` `[first, last]`, `easing`
  ("inOut", "linear"), `quality` ("standard", "high"), `growthLimit`,
  `fadeFrom`, `tour` (stops `[{focus, dolly, zoom, rotateDegrees, pan,
- travel, hold, spinDegrees, push, title}]`, gliding through held stops
+ travel, hold, spinDegrees, push, title, depthParsecs}]`, each centring
+ its focus point on the plane at `depthParsecs`, or on the plane the
+ image shows there if absent, gliding through held stops
  at `tourGlide` of the pace between them, the first the opening view and
  the last's hold a final drift that slows to rest, which replace the
  single move and set the length; [`seiza_parallax_plan_tour_json`] plans
@@ -2215,7 +2223,7 @@ SeizaParallax *seiza_parallax_prepare_json(const char *request_json,
  to plan. Returns JSON, released with `seiza_string_free`:
  `{"focus": [x, y], "focusName", "seconds", "tour": [{name, focus,
  dolly, zoom, rotateDegrees, pan, travel, hold, spinDegrees, push,
- title}]}`, each target's stop titled with its name. Its `tour`, with any
+ title, depthParsecs}]}`, each target's stop titled with its name. Its `tour`, with any
  stops or titles dropped, moved or changed, goes back into a prepare
  request as it is, and its `focus` as `distanceFocus`. Null with `error_out` set on failure; `events`
  (nullable) hears the solve.
@@ -2286,7 +2294,9 @@ SeizaParallax *seiza_parallax_reconfigure_json(const SeizaParallax *video,
  What preparing the video found, as JSON: its frame count, frame rate
  and size, the stars found and matched, the nebula's distance with how
  and where (`backgroundFocus`) it was found, galaxies lifted, the depth
- planes lifted (`planes`, `[{name, distanceParsecs}]`), the dust
+ planes lifted (`planes`, `[{name, distanceParsecs, basis, coverage}]`,
+ `basis` saying how the distance was found and `coverage` the share of
+ the image), the dust
  (`dustTransmission` `{median, thickest}`, `dustGiven` when a map gave
  it, and `starsInFrontOfDust`, the stars it brought in front), objects
  labelled, the WCS used, and `fit`, how fitting the camera to the

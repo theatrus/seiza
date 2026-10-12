@@ -59,6 +59,31 @@ pub struct Target {
     /// Its catalogued extent's semi-major axis, image pixels.
     pub radius: f64,
     pub prominence: f64,
+    /// The distance of the plane it lies on, as a share of the nebula's: 1
+    /// on the nebula's own plane.
+    pub depth: f64,
+    /// That plane's distance, parsecs, when it is a depth plane's: its
+    /// stop says so, as its focus may lie off the plane.
+    pub distance_pc: Option<f64>,
+}
+
+/// The farthest share of the way to the nebula a planned stop flies: a
+/// target needs at least an eighth of the frame's height about it.
+const MOST_DOLLY: f64 = 0.88;
+
+/// The dolly and zoom that show a target on a plane at `depth` (as a share
+/// of the nebula's distance) as large as flying `1 − near` of the way to the
+/// nebula shows one on the nebula's plane, `1 / near` times its first size:
+/// a nearer plane grows sooner, so the camera flies less far. It never
+/// flies past [`MOST_DOLLY`], so a target beyond takes the rest of its
+/// growth from the lens.
+fn framing(near: f64, depth: f64) -> (f64, f64) {
+    let dolly = depth * (1.0 - near);
+    if dolly <= MOST_DOLLY {
+        return (dolly, 1.0);
+    }
+    let growth = depth / (depth - MOST_DOLLY);
+    (MOST_DOLLY, (1.0 / (near * growth)).max(1.0))
 }
 
 /// How much an object is worth a visit, about 0 to 1.5. Each stop is
@@ -139,6 +164,8 @@ pub fn targets(
             y: placed.y,
             radius: placed.semi_major_px,
             prominence: worth(&placed.object),
+            depth: 1.0,
+            distance_pc: None,
         })
         .filter(|target| target.prominence >= least)
         .filter(|target| nearness(target, (width, height), frame).is_some())
@@ -242,14 +269,17 @@ pub struct PlannedStop {
 /// A tour of `targets` in a `width` × `height` image filmed at
 /// `frame` (output pixels): from the whole image, to each target in a
 /// short round, and back to the whole image for a final drift three times
-/// a target's hold. Each target's stop is titled with its name.
-/// Targets with no view of their own (see [`targets`]) are left to the
-/// whole view.
+/// a target's hold. Each target's stop is titled with its name, and framed
+/// at the depth of the plane it lies on, the frame kept inside the image
+/// out to the depth `far`, as a share of the nebula's distance: the far
+/// star field's. Targets with no view of their own (see [`targets`]) are
+/// left to the whole view.
 pub fn plan(
     targets: &[Target],
     (width, height): (usize, usize),
     frame: (usize, usize),
     auto: &AutoTour,
+    far: f64,
 ) -> Vec<PlannedStop> {
     let (width, height) = (width as f64, height as f64);
     let centre = ((width - 1.0) / 2.0, (height - 1.0) / 2.0);
@@ -297,20 +327,64 @@ pub fn plan(
     let mut here = (centre, 0.0);
     for (step, &index) in order.iter().enumerate() {
         let target = &targets[index];
-        let near = nearness(target).expect("kept above");
-        let dolly = 1.0 - near;
-        let place = aim((target.x, target.y), near);
+        let wanted = nearness(target).expect("kept above");
+        // A target on a plane of its own is seen along the line of sight
+        // from Earth through it, over the sky the photograph shows behind
+        // it: turning `1 − dolly` of the way puts the camera on that line,
+        // and the frame's centre on the target at every depth. Off it, a
+        // target beyond the nebula would need the camera far off to the
+        // side.
+        let plane = (target.depth - 1.0).abs() > 1e-9;
+        let (dolly, zoom, place) = if plane {
+            // Along the target's line of sight, the frame shows more of a
+            // farther plane, the far star field the most: a share
+            // `(depth − dolly) / (depth · zoom)` of the whole view. That
+            // must stay inside the image, so near the image's edge the
+            // target can fall out of its own frame, which shows it
+            // `wanted` of the whole view: the camera then flies less far,
+            // and the lens makes up the rest, until the target lies in the
+            // middle four fifths of it.
+            let far = far.max(1.0);
+            let (most, _) = framing(wanted, target.depth);
+            let choices: Vec<(f64, f64, (f64, f64))> = (0..=10)
+                .map(|step| {
+                    let dolly = most * (1.0 - step as f64 / 10.0);
+                    let growth = target.depth / (target.depth - dolly);
+                    let zoom = (1.0 / (wanted * growth)).max(1.0);
+                    let widest = (far - dolly) / (far * zoom);
+                    (dolly, zoom, aim((target.x, target.y), widest))
+                })
+                .collect();
+            choices
+                .iter()
+                .copied()
+                .find(|&(_, _, place)| {
+                    (place.0 - target.x).abs() <= 0.4 * half.0 * wanted
+                        && (place.1 - target.y).abs() <= 0.4 * half.1 * wanted
+                })
+                .unwrap_or(choices[choices.len() - 1])
+        } else {
+            let (dolly, zoom) = framing(wanted, 1.0);
+            (dolly, zoom, aim((target.x, target.y), (1.0 - dolly) / zoom))
+        };
+        // The share of the whole view's size the frame shows of the
+        // nebula's plane.
+        let seen = (1.0 - dolly) / zoom;
         // Turns alternate in direction so they do not add up, and vary in
         // size; for a target near the image's edge, where room is short,
         // they and the pan are smaller.
         let room = (target.x.min(width - 1.0 - target.x) / half.0)
             .min(target.y.min(height - 1.0 - target.y) / half.1)
-            / (1.25 * near);
+            / (1.25 * seen);
         let edge = (room - 0.5).clamp(0.0, 1.0);
         let sign = if step % 2 == 0 { 1.0 } else { -1.0 };
         let size = 6.0 + 8.0 * ((step * 7 + 3) % 5) as f64 / 4.0;
         let rotate_deg = sign * size * motion * (0.4 + 0.6 * edge);
-        let pan = (0.3 * motion * edge).min(1.0);
+        let pan = if plane {
+            1.0 - dolly
+        } else {
+            (0.3 * motion * edge).min(1.0)
+        };
         let distance = (place.0 - here.0.0).hypot(place.1 - here.0.1);
         let frames = distance / (2.0 * half.1);
         let travel = (3.5 + 3.0 * frames + 1.5 * (dolly - here.1).abs()).clamp(4.0, 9.0);
@@ -323,11 +397,13 @@ pub fn plan(
             stop: TourStop {
                 focus: Some(place),
                 dolly,
+                zoom,
                 rotate_deg,
                 pan,
                 travel,
                 hold,
                 title: Some(target.name.clone()),
+                depth_pc: target.distance_pc,
                 ..TourStop::default()
             },
             name: Some(target.name.clone()),
@@ -374,7 +450,40 @@ mod tests {
             y,
             radius,
             prominence,
+            depth: 1.0,
+            distance_pc: None,
         }
+    }
+
+    #[test]
+    fn a_target_on_a_plane_is_framed_at_its_own_depth() {
+        let on = |depth: f64| {
+            let targets = [Target {
+                depth,
+                ..target("cloud", 500.0, 400.0, 40.0, 0.9)
+            }];
+            plan(
+                &targets,
+                (1000, 800),
+                (1920, 1080),
+                &AutoTour::default(),
+                1.0,
+            )[1]
+            .stop
+            .clone()
+        };
+        let (here, nearer, beyond) = (on(1.0), on(0.5), on(3.0));
+        assert_eq!(here.zoom, 1.0);
+        // A nearer plane grows sooner, so the camera flies half as far for
+        // the same size.
+        assert!((nearer.dolly - here.dolly / 2.0).abs() < 1e-9);
+        assert_eq!(nearer.zoom, 1.0);
+        // The camera cannot fly to a plane behind the nebula: it goes as
+        // far as a stop may, and the lens does the rest.
+        assert_eq!(beyond.dolly, MOST_DOLLY);
+        let growth = 3.0 / (3.0 - MOST_DOLLY);
+        let wanted = 1.0 / (1.0 - here.dolly);
+        assert!((beyond.zoom * growth - wanted).abs() < 1e-9, "{beyond:?}");
     }
 
     #[test]
@@ -385,7 +494,13 @@ mod tests {
             target("c", 820.0, 600.0, 120.0, 0.7),
             target("d", 250.0, 180.0, 40.0, 0.6),
         ];
-        let planned = plan(&targets, (1000, 800), (1920, 1080), &AutoTour::default());
+        let planned = plan(
+            &targets,
+            (1000, 800),
+            (1920, 1080),
+            &AutoTour::default(),
+            1.0,
+        );
         let stops: Vec<TourStop> = planned.iter().map(|planned| planned.stop.clone()).collect();
         assert!(stops.first().unwrap().focus.is_none() && stops.last().unwrap().focus.is_none());
         // Every target once, in a round that does not cross itself: the
@@ -500,7 +615,13 @@ mod tests {
             target("cloud", 500.0, 400.0, 600.0, 0.8),
             target("knot", 300.0, 500.0, 30.0, 0.7),
         ];
-        let planned = plan(&targets, (1000, 800), (1920, 1080), &AutoTour::default());
+        let planned = plan(
+            &targets,
+            (1000, 800),
+            (1920, 1080),
+            &AutoTour::default(),
+            1.0,
+        );
         let names: Vec<&str> = planned
             .iter()
             .filter_map(|stop| stop.name.as_deref())
@@ -534,7 +655,7 @@ mod tests {
             motion: 0.0,
             ..AutoTour::default()
         };
-        for planned in plan(&targets, (1000, 800), (1920, 1080), &still) {
+        for planned in plan(&targets, (1000, 800), (1920, 1080), &still, 1.0) {
             assert_eq!((planned.stop.rotate_deg, planned.stop.pan), (0.0, 0.0));
         }
     }

@@ -31,7 +31,11 @@ pub(crate) struct ParallaxVideoArgs {
     stars: Option<PathBuf>,
     /// The video to write (.mp4), or a directory of PNG frames with
     /// --encoder png
-    #[arg(short, long, required_unless_present_any = ["plan_tour", "export_dust_map"])]
+    #[arg(
+        short,
+        long,
+        required_unless_present_any = ["plan_tour", "export_dust_map", "export_planes"]
+    )]
     output: Option<PathBuf>,
     /// Point to fly toward, as image pixels `x,y` (default: the image
     /// centre)
@@ -110,7 +114,9 @@ pub(crate) struct ParallaxVideoArgs {
     /// (the image's centre), then any of `dolly=`, `zoom=`, `rotate=`
     /// (degrees), `pan=`, `travel=` and `hold=` (seconds), `spin=`
     /// (degrees turned while holding), `push=` (the share of the remaining
-    /// way flown in while holding) and `title="..."`, e.g. `--stop
+    /// way flown in while holding), `depth=` (parsecs: the depth plane the
+    /// place is centred on, by default the one the image shows there) and
+    /// `title="..."`, e.g. `--stop
     /// "2700,3400 dolly=0.85 rotate=-20 pan=0.25 travel=6 hold=1.5"`. The
     /// camera glides on slowly through the stops it holds at; the first
     /// is the opening view. A tour sets the video's length and replaces
@@ -132,7 +138,9 @@ pub(crate) struct ParallaxVideoArgs {
     /// Plan a tour as --auto-tour would (taking its count, --tour-hold and
     /// --tour-motion), write it to this file for editing, and stop. Each
     /// line is a stop as --stop takes it, named in a comment; drop, move or
-    /// change lines, then pass the file with --tour-file
+    /// change lines, then pass the file with --tour-file. With depth planes
+    /// the scene is prepared first, so each stop frames its target at its
+    /// plane's depth
     #[arg(
         long,
         conflicts_with_all = ["stops", "tour_file", "output", "tour_loop", "tour_titles", "debug_layers"]
@@ -282,6 +290,29 @@ pub(crate) struct ParallaxVideoArgs {
     /// the camera moves. Repeat for more
     #[arg(long = "plane", value_parser = parse_plane)]
     planes: Vec<(PathBuf, f64)>,
+    /// Take depth planes from this file, one a line as --plane takes them,
+    /// with `#` starting a comment and each mask's path taken from the
+    /// file's folder: as --export-planes writes them
+    #[arg(long, conflicts_with = "auto_planes")]
+    plane_file: Option<PathBuf>,
+    /// Lift the catalogued nebulae in the field that lie at distances of
+    /// their own onto planes: those with a measured distance, or one
+    /// borrowed from an object around them, at least 15% nearer or farther
+    /// than the nebula, each in its catalogued outline or its ellipse sized
+    /// by the image's light
+    #[arg(long)]
+    auto_planes: bool,
+    /// A distance for a catalogued object in place of the catalogue's,
+    /// `NAME=PARSECS`, for the nebula's distance and the automatic planes.
+    /// Repeat for more
+    #[arg(long = "object-distance", value_parser = parse_object_distance)]
+    object_distances: Vec<seiza_parallax::DistanceOverride>,
+    /// Write the depth planes the video uses to this folder, each as a mask
+    /// the size of the image (a 16-bit PNG), with planes.txt listing them
+    /// with their distances, to edit and give back with --plane-file.
+    /// Without -o, write them and stop
+    #[arg(long)]
+    export_planes: Option<PathBuf>,
     /// Label the catalogued objects in the field as Seiza's image overlays
     /// do. Each label moves with the layer that shows its object and fades
     /// as it leaves the view; once the camera is inside an object, its name
@@ -373,6 +404,118 @@ fn parse_plane(text: &str) -> std::result::Result<(PathBuf, f64), String> {
     Ok((PathBuf::from(path), distance))
 }
 
+/// An `--object-distance` as `NAME=PARSECS`.
+fn parse_object_distance(
+    text: &str,
+) -> std::result::Result<seiza_parallax::DistanceOverride, String> {
+    let (object, distance) = text
+        .rsplit_once('=')
+        .ok_or_else(|| format!("expected NAME=PARSECS; got {text}"))?;
+    let distance_pc: f64 = distance
+        .trim()
+        .parse()
+        .map_err(|error| format!("{distance}: {error}"))?;
+    if object.trim().is_empty() || !(distance_pc.is_finite() && distance_pc > 0.0) {
+        return Err(format!(
+            "expected NAME=PARSECS, a name and a positive distance; got {text}"
+        ));
+    }
+    Ok(seiza_parallax::DistanceOverride {
+        object: object.trim().to_string(),
+        distance_pc,
+    })
+}
+
+/// The masks and distances of a plane file: a `MASK=PARSECS` a line, `#`
+/// comments, and each mask's path taken from the file's folder.
+fn read_plane_file(path: &Path) -> Result<Vec<(PathBuf, f64)>> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let folder = path.parent().unwrap_or(Path::new("."));
+    let mut planes = Vec::new();
+    for (number, line) in text
+        .strip_prefix('\u{feff}')
+        .unwrap_or(&text)
+        .lines()
+        .enumerate()
+    {
+        let line = uncommented(line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (mask, distance) = parse_plane(line)
+            .map_err(anyhow::Error::msg)
+            .with_context(|| format!("{} line {}", path.display(), number + 1))?;
+        planes.push((folder.join(mask), distance));
+    }
+    Ok(planes)
+}
+
+/// The name a depth plane's mask is written under: its name in lower case,
+/// with anything but letters, digits and dashes a dash.
+fn mask_name(name: &str) -> String {
+    let mut slug: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    while slug.contains("--") {
+        slug = slug.replace("--", "-");
+    }
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        "plane".to_string()
+    } else {
+        slug.to_string()
+    }
+}
+
+/// Write the video's depth planes to `directory` as masks the size of the
+/// image, with planes.txt listing them as --plane-file reads them.
+fn write_planes(directory: &Path, parallax: &Parallax) -> Result<()> {
+    std::fs::create_dir_all(directory)
+        .with_context(|| format!("failed to create {}", directory.display()))?;
+    let scene = parallax.scene();
+    let mut text = String::from(
+        "# Depth planes from seiza parallax-video, one a line as --plane takes them:\n\
+         # MASK=PARSECS. Change a distance, paint over a mask (white is in the plane),\n\
+         # or drop a line, then pass this file with --plane-file.\n",
+    );
+    let mut taken = std::collections::HashSet::new();
+    for (plane, summary) in scene.planes.iter().zip(&parallax.summary().planes) {
+        let stem = mask_name(&plane.name);
+        let mut file = format!("{stem}.png");
+        let mut count = 1;
+        while !taken.insert(file.clone()) {
+            count += 1;
+            file = format!("{stem}-{count}.png");
+        }
+        let path = directory.join(&file);
+        plane
+            .region
+            .to_mask(scene.width(), scene.height())
+            .save(&path)
+            .map_err(anyhow::Error::msg)?;
+        println!("wrote {}", path.display());
+        let distance = format!("{:.1}", plane.distance_pc);
+        let distance = distance.trim_end_matches('0').trim_end_matches('.');
+        text.push_str(&format!(
+            "{file}={distance}  # {}, {}\n",
+            plane.name, summary.basis
+        ));
+    }
+    let list = directory.join("planes.txt");
+    std::fs::write(&list, &text).with_context(|| format!("failed to write {}", list.display()))?;
+    print!("{text}");
+    println!("wrote {}", list.display());
+    Ok(())
+}
+
 /// Open a stretched image with values 0 to 1, as RGB: PNG, JPEG or TIFF
 /// in its EXIF orientation, or FITS or XISF.
 fn open_display(path: &Path) -> Result<Rgb32FImage> {
@@ -383,7 +526,13 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
     if args.image.is_none() && args.starless.is_none() {
         bail!("give an image to split, or --starless and --stars");
     }
-    if let Some(plan) = &args.plan_tour {
+    // A tour is planned from the plate solution alone, unless there are
+    // depth planes: then the scene is prepared, so each stop frames its
+    // target at its plane's depth.
+    let planes_asked = !args.planes.is_empty() || args.plane_file.is_some() || args.auto_planes;
+    if let Some(plan) = &args.plan_tour
+        && !planes_asked
+    {
         return write_plan(&args, plan);
     }
     let file = match &args.tour_file {
@@ -391,11 +540,18 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
         None => None,
     };
     let mut options = options(&args, file);
+    if args.plan_tour.is_some() {
+        options.video.auto_tour = None;
+    }
     if let Some(path) = &args.dust_map {
         options.scene.dust_map =
             Some(seiza_parallax::DustMap::open(path).map_err(anyhow::Error::msg)?);
     }
-    for (path, distance) in &args.planes {
+    let from_file = match &args.plane_file {
+        Some(path) => read_plane_file(path)?,
+        None => Vec::new(),
+    };
+    for (path, distance) in args.planes.iter().chain(&from_file) {
         options.scene.planes.push(seiza_parallax::DepthPlane {
             mask: seiza_parallax::PlaneMask::open(path).map_err(anyhow::Error::msg)?,
             distance_pc: *distance,
@@ -413,6 +569,14 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
     }
     if let Some(path) = &args.export_dust_map {
         check_dust_export(&args, path)?;
+    }
+    if let Some(directory) = &args.export_planes
+        && directory.is_file()
+    {
+        bail!(
+            "--export-planes {} is a file; the planes go in a folder",
+            directory.display()
+        );
     }
     crate::interrupt::install();
     let stop = crate::interrupt::interrupted;
@@ -443,6 +607,13 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
             .save(path)
             .map_err(anyhow::Error::msg)?;
         println!("wrote the dust map to {}", path.display());
+    }
+    if let Some(directory) = &args.export_planes {
+        write_planes(directory, &parallax)?;
+    }
+    if let Some(path) = &args.plan_tour {
+        let plan = parallax.plan_tour(&auto_tour(&args), args.size)?;
+        return save_plan(&args, path, &plan);
     }
     if args.output.is_none() {
         return Ok(());
@@ -587,6 +758,20 @@ fn write_plan(args: &ParallaxVideoArgs, path: &Path) -> Result<()> {
         args.size,
         &auto_tour(args),
     )?;
+    save_plan(args, path, &plan)
+}
+
+/// Write `plan` to `path` for editing.
+fn save_plan(
+    args: &ParallaxVideoArgs,
+    path: &Path,
+    plan: &seiza_parallax::PlannedTour,
+) -> Result<()> {
+    let solve_path = args
+        .image
+        .clone()
+        .or_else(|| args.stars.clone())
+        .expect("checked in run");
     let mut text = format!(
         "# A tour of {} planned by seiza parallax-video. Each line is a stop as\n\
          # --stop takes it; drop, move or change lines, then pass this file with\n\
@@ -711,6 +896,8 @@ fn options(args: &ParallaxVideoArgs, file: Option<TourFile>) -> ParallaxOptions 
             dust_opacity: args.dust_opacity,
             dust_map: None,
             planes: Vec::new(),
+            auto_planes: args.auto_planes,
+            distance_overrides: args.object_distances.clone(),
         },
         video: VideoOptions {
             focus: args.focus,
@@ -999,6 +1186,30 @@ fn openh264(_output: &Path, _settings: VideoSettings) -> Result<Box<dyn FrameSin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn object_distances_and_plane_files_parse() {
+        let given = parse_object_distance("vdB 2 = 720").unwrap();
+        assert_eq!((given.object.as_str(), given.distance_pc), ("vdB 2", 720.0));
+        assert!(parse_object_distance("=720").is_err());
+        assert!(parse_object_distance("Sh2-170").is_err());
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("planes.txt");
+        std::fs::write(
+            &file,
+            "\u{feff}# planes\nsh2-170.png=2790  # Sh2-170, measured\n\n/abs/m.png=300\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_plane_file(&file).unwrap(),
+            [
+                (directory.path().join("sh2-170.png"), 2790.0),
+                (PathBuf::from("/abs/m.png"), 300.0)
+            ]
+        );
+        assert_eq!(mask_name("Sh2-170"), "sh2-170");
+        assert_eq!(mask_name("vdB 2 (the Bubble)"), "vdb-2-the-bubble");
+    }
 
     #[test]
     fn planes_parse() {

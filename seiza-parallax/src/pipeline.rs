@@ -19,11 +19,38 @@ use crate::tour::{self, AutoTour, PlannedStop};
 use crate::{FrameSink, LightImage, VideoSettings};
 use image::{Rgb, Rgb32FImage, RgbImage};
 use seiza::Wcs;
+use seiza::catalog::{DistanceBasis, ObjectDistance};
+use seiza::objects::{GeometryData, SkyObject};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 /// Where lifted galaxies fly: so far beyond the stars that they hold still.
 pub const GALAXY_DISTANCE_PC: f64 = 1e8;
+
+/// How much nearer or farther than the nebula, as a share of its distance,
+/// a catalogued nebula must lie for [`SceneOptions::auto_planes`] to give
+/// it a plane of its own.
+pub const AUTO_PLANE_DEPTH: f64 = 0.15;
+
+/// A distance to use for the catalogued object named `object` in place of
+/// the catalogue's own, parsecs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DistanceOverride {
+    pub object: String,
+    pub distance_pc: f64,
+}
+
+/// A depth plane lifted, as [`Summary`] tells it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlaneSummary {
+    pub name: String,
+    pub distance_pc: f64,
+    /// How the distance was found: given, or as the catalogue found it.
+    pub basis: String,
+    /// The share of the image it covers, 0 to 1.
+    pub coverage: f64,
+}
 
 /// What happens as a video is prepared and rendered.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -86,6 +113,10 @@ pub struct TourStop {
     /// The title shown while the camera drifts through here, with
     /// [`VideoOptions::tour_titles`]: a planned tour names its target.
     pub title: Option<String>,
+    /// The distance of the plane the camera centres the focus point on,
+    /// parsecs: a planned tour gives a target's on a depth plane. If
+    /// `None`, that of the plane the image shows at the focus point.
+    pub depth_pc: Option<f64>,
 }
 
 impl Default for TourStop {
@@ -101,6 +132,7 @@ impl Default for TourStop {
             spin_deg: 0.0,
             push: 0.0,
             title: None,
+            depth_pc: None,
         }
     }
 }
@@ -108,7 +140,8 @@ impl Default for TourStop {
 /// A [`TourStop`] written `X,Y` or `whole` (the image's centre), then any
 /// of `dolly=`, `zoom=`, `rotate=` (degrees), `pan=`, `travel=` and
 /// `hold=` (seconds), `spin=` (degrees turned while holding), `push=`
-/// (the share of the remaining way flown in while holding) and `title=`,
+/// (the share of the remaining way flown in while holding), `depth=`
+/// (parsecs, the plane the focus point is centred on) and `title=`,
 /// separated by spaces: `2700,3400 dolly=0.85 rotate=-20 travel=6
 /// hold=1.5 title="Sh2-170"`. A value in double quotes may hold spaces,
 /// and `\"` or `\\` within them a quote or backslash.
@@ -152,10 +185,11 @@ pub fn parse_stop(text: &str) -> Result<TourStop, String> {
             "hold" => stop.hold = value,
             "spin" => stop.spin_deg = value,
             "push" => stop.push = value,
+            "depth" => stop.depth_pc = Some(value),
             other => {
                 return Err(format!(
-                    "a stop takes dolly, zoom, rotate, pan, travel, hold, spin, push and \
-                     title; got {other}"
+                    "a stop takes dolly, zoom, rotate, pan, travel, hold, spin, push, depth \
+                     and title; got {other}"
                 ));
             }
         }
@@ -264,6 +298,18 @@ pub struct SceneOptions {
     /// behind each is filled in from around it. Each costs a draw over as
     /// much of the frame as it covers.
     pub planes: Vec<DepthPlane>,
+    /// Lift the catalogued nebulae in the field that lie at distances of
+    /// their own onto planes, besides `planes`: those whose distance was
+    /// measured, or borrowed from an object about them (never one typical of
+    /// their kind), that lie at least [`AUTO_PLANE_DEPTH`] nearer or farther
+    /// than the nebula, and whose range of distances leaves the nebula's
+    /// out. Each takes its catalogued outline, or else its ellipse sized by
+    /// the image's light. One holding the distance focus is the nebula, or
+    /// holds it, and keeps to the nebula's plane.
+    pub auto_planes: bool,
+    /// Distances to use for catalogued objects in place of the catalogue's:
+    /// for the nebula's distance and the automatic planes.
+    pub distance_overrides: Vec<DistanceOverride>,
 }
 
 impl Default for SceneOptions {
@@ -285,6 +331,8 @@ impl Default for SceneOptions {
             dust_opacity: 3.0,
             dust_map: None,
             planes: Vec::new(),
+            auto_planes: false,
+            distance_overrides: Vec::new(),
         }
     }
 }
@@ -330,6 +378,14 @@ impl SceneOptions {
                 .mask
                 .check()
                 .map_err(|error| Error::Invalid(format!("{}: {error}", plane.name)))?;
+        }
+        for given in &self.distance_overrides {
+            if given.object.trim().is_empty() || !distance(given.distance_pc) {
+                return invalid(
+                    "a distance given for an object needs the object's name and a positive \
+                     number of parsecs",
+                );
+            }
         }
         Ok(())
     }
@@ -531,6 +587,12 @@ impl VideoOptions {
             {
                 return invalid("a stop's travel and hold must be at least 0 seconds");
             }
+            if stop
+                .depth_pc
+                .is_some_and(|depth| !(depth.is_finite() && depth > 0.0))
+            {
+                return invalid("a stop's depth must be a positive number of parsecs");
+            }
         }
         if let Some(auto) = &self.auto_tour {
             auto.check().map_err(Error::Invalid)?;
@@ -685,8 +747,8 @@ pub struct Summary {
     pub flying_stars: usize,
     /// Galaxies lifted onto the far field.
     pub galaxies_lifted: Vec<String>,
-    /// The depth planes lifted, by name, and their distances, parsecs.
-    pub planes: Vec<(String, f64)>,
+    /// The depth planes lifted, smallest first.
+    pub planes: Vec<PlaneSummary>,
     /// The dust map's median and least transmission, 0 to 1, if one was
     /// made.
     pub dust_transmission: Option<(f32, f32)>,
@@ -785,21 +847,22 @@ impl Parallax {
         options.check()?;
         let halt = || if stop() { Err(Error::Stopped) } else { Ok(()) };
         let scene_options = &options.scene;
-        // An automatic tour is planned first, as its best target may give
-        // the nebula's distance.
-        let (video, planned_focus) = match &options.video.auto_tour {
-            Some(auto) if options.video.tour.is_empty() => {
-                let (video, focus) = plan_video(
-                    &options.video,
-                    auto,
+        // An automatic tour's best target may give the nebula's distance.
+        // The tour itself is planned once the scene is cut into depths, so
+        // each stop frames its target at the depth of its plane.
+        let video = &options.video;
+        let planned_focus = match &video.auto_tour {
+            Some(auto) if video.tour.is_empty() => Some(
+                plan_tour(
                     wcs,
                     starless.dimensions(),
                     scene_options.objects.as_deref(),
-                    report,
-                )?;
-                (video, Some(focus))
-            }
-            _ => (options.video.clone(), None),
+                    video.size,
+                    auto,
+                )?
+                .focus,
+            ),
+            _ => None,
         };
         if starless.dimensions() != stars.dimensions() {
             return Err(Error::Invalid(format!(
@@ -809,7 +872,8 @@ impl Parallax {
             )));
         }
         let (width, height) = (stars.width() as usize, stars.height() as usize);
-        check_places(&video, (width, height))?;
+        check_places(video, (width, height))?;
+        let given_distances = given_distances(scene_options)?;
         // A map or mask of the wrong shape is refused before the slow work.
         let given_dust = scene_options
             .dust_map
@@ -822,7 +886,12 @@ impl Parallax {
             match Region::from_mask(&plane.mask, width, height)
                 .map_err(|error| Error::Invalid(format!("{}: {error}", plane.name)))?
             {
-                Some(region) => regions.push((plane, region)),
+                Some(region) => regions.push(PlaneToLift {
+                    name: plane.name.clone(),
+                    region,
+                    distance_pc: plane.distance_pc,
+                    basis: "given".into(),
+                }),
                 None => report(Event::Warning(&format!(
                     "the depth plane {}'s mask marks nothing; it is left out",
                     plane.name
@@ -902,24 +971,27 @@ impl Parallax {
         }
         let (distance, basis) = match scene_options.distance_pc {
             Some(distance) => (distance, "given".to_string()),
-            None => match target_distance(scene_options, wcs, (width, height), focus) {
-                Ok(Some((name, distance, basis))) => {
-                    (distance, format!("the distance of {name} ({basis})"))
-                }
-                found => {
-                    if let Err(error) = found {
-                        report(Event::Warning(&format!("no object distance: {error}")));
+            None => {
+                match target_distance(scene_options, wcs, (width, height), focus, &given_distances)
+                {
+                    Ok(Some((name, distance, basis))) => {
+                        (distance, format!("the distance of {name} ({basis})"))
                     }
-                    let distance = field::median_distance_near(&matched, focus, width, height)
-                        .ok_or(Error::NoDistance)?;
-                    (
-                        distance,
-                        "the median distance of the stars near the focus point (no catalogued \
+                    found => {
+                        if let Err(error) = found {
+                            report(Event::Warning(&format!("no object distance: {error}")));
+                        }
+                        let distance = field::median_distance_near(&matched, focus, width, height)
+                            .ok_or(Error::NoDistance)?;
+                        (
+                            distance,
+                            "the median distance of the stars near the focus point (no catalogued \
                          object there)"
-                            .to_string(),
-                    )
+                                .to_string(),
+                        )
+                    }
                 }
-            },
+            }
         };
         report(Event::Note(&format!(
             "background at {distance:.0} pc, {basis}"
@@ -1001,20 +1073,51 @@ impl Parallax {
                 )));
             }
         }
+        if scene_options.auto_planes {
+            match catalogued_planes(
+                scene_options,
+                wcs,
+                &starless,
+                (focus, distance),
+                &given_distances,
+            ) {
+                Ok(found) => {
+                    if found.is_empty() {
+                        report(Event::Note(
+                            "no catalogued nebula in the field lies at a distance of its own",
+                        ));
+                    }
+                    regions.extend(found);
+                }
+                Err(error) => report(Event::Warning(&format!(
+                    "no automatic depth planes: {error}"
+                ))),
+            }
+        }
         // The depth planes, smallest first: where one lies within another,
         // the smaller takes its own light, and the larger the fill left
         // behind it.
-        regions.sort_by(|(_, a), (_, b)| a.area().total_cmp(&b.area()));
+        regions.sort_by(|a, b| a.region.area().total_cmp(&b.region.area()));
         let mut planes = Vec::new();
-        for (plane, region) in &regions {
-            match crate::lift_region(&mut starless, region, plane.distance_pc, &plane.name) {
+        for plane in &regions {
+            let lifted =
+                crate::lift_region(&mut starless, &plane.region, plane.distance_pc, &plane.name);
+            match lifted {
                 Some(lifted) => {
+                    let coverage = plane.region.area() / (width * height) as f64;
                     report(Event::Note(&format!(
-                        "depth plane {} at {:.0} pc, over {:.1}% of the image",
+                        "depth plane {} at {:.0} pc ({}), over {:.1}% of the image",
                         plane.name,
                         plane.distance_pc,
-                        100.0 * region.area() / (width * height) as f64
+                        plane.basis,
+                        100.0 * coverage
                     )));
+                    summary.planes.push(PlaneSummary {
+                        name: plane.name.clone(),
+                        distance_pc: plane.distance_pc,
+                        basis: plane.basis.clone(),
+                        coverage,
+                    });
                     planes.push(lifted);
                 }
                 None => report(Event::Warning(&format!(
@@ -1039,10 +1142,6 @@ impl Parallax {
             focal_px,
             &cut,
         );
-        summary.planes = planes
-            .iter()
-            .map(|plane| (plane.name.clone(), plane.distance_pc))
-            .collect();
         scene = scene.with_planes(planes, cut.embedded);
         summary.flying_stars = scene.sprites.len();
         summary.galaxies_lifted = galaxies.iter().map(|(name, _, _)| name.clone()).collect();
@@ -1103,7 +1202,7 @@ impl Parallax {
             summary,
             catalog_marks: OnceLock::new(),
         });
-        Self::film(prepared, &video, report, stop)
+        Self::film(prepared, video, report, stop)
     }
 
     /// The same scene filmed anew with `video`: another camera move, frame
@@ -1176,6 +1275,21 @@ impl Parallax {
         self.prepared.counted_dust.as_deref()
     }
 
+    /// Plan a tour of the catalogued objects in the image as `auto` asks,
+    /// for frames of `frame` output pixels: [`plan_tour`], each stop framing
+    /// its target at the depth of the plane this scene shows it on.
+    pub fn plan_tour(&self, auto: &AutoTour, frame: (usize, usize)) -> Result<PlannedTour, Error> {
+        let (width, height) = self.prepared.image_size;
+        plan_tour_in(
+            &self.prepared.wcs,
+            (width as u32, height as u32),
+            self.prepared.objects.as_deref(),
+            frame,
+            auto,
+            Some(&self.prepared.scene),
+        )
+    }
+
     /// Film `prepared` as `video` asks: plan any automatic tour, fit the
     /// camera to the scene and plan the labels.
     fn film(
@@ -1187,17 +1301,15 @@ impl Parallax {
         video.check()?;
         let (width, height) = prepared.image_size;
         let video = match &video.auto_tour {
-            Some(auto) if video.tour.is_empty() => {
-                plan_video(
-                    video,
-                    auto,
-                    &prepared.wcs,
-                    (width as u32, height as u32),
-                    prepared.objects.as_deref(),
-                    report,
-                )?
-                .0
-            }
+            Some(auto) if video.tour.is_empty() => plan_video(
+                video,
+                auto,
+                &prepared.wcs,
+                (width as u32, height as u32),
+                prepared.objects.as_deref(),
+                Some(&prepared.scene),
+                report,
+            )?,
             _ => video.clone(),
         };
         let scene = &prepared.scene;
@@ -1237,6 +1349,14 @@ impl Parallax {
                     hold: stop.hold,
                     spin: stop.spin_deg.to_radians(),
                     push: stop.push,
+                    // A stop on a depth plane centres its focus point there,
+                    // at the depth it gives or the image shows there; the
+                    // whole view centres the image.
+                    depth: match (stop.depth_pc, stop.focus) {
+                        (Some(depth), _) => depth / scene.background_distance_pc,
+                        (None, Some((x, y))) => scene.depth_at(x, y) / scene.background_distance_pc,
+                        (None, None) => 1.0,
+                    },
                 })
                 .collect(),
             glide: video.tour_glide,
@@ -1483,9 +1603,7 @@ fn report_fit(fit: &FitSummary, shot: &Shot, report: &mut dyn FnMut(Event)) {
             zoomed.join(", ")
         )));
     }
-    if let Some(stop) = fit.stops.iter().find(|stop| stop.pan.0 > 0.0)
-        && stop.pan.1 < stop.pan.0
-    {
+    if let Some(stop) = fit.stops.iter().find(|stop| stop.pan.1 < stop.pan.0) {
         report(Event::Note(&format!(
             "each stop's pan reduced to {:.2} of what it asked so the far stars stay inside \
              the image",
@@ -1522,10 +1640,23 @@ impl PlannedTour {
 /// [`SceneOptions::distance_focus`].
 pub fn plan_tour(
     wcs: &Wcs,
+    dimensions: (u32, u32),
+    objects: Option<&Path>,
+    frame: (usize, usize),
+    auto: &AutoTour,
+) -> Result<PlannedTour, Error> {
+    plan_tour_in(wcs, dimensions, objects, frame, auto, None)
+}
+
+/// [`plan_tour`], each stop framing its target at the depth of the plane
+/// `scene` shows it on, when given.
+fn plan_tour_in(
+    wcs: &Wcs,
     (width, height): (u32, u32),
     objects: Option<&Path>,
     frame: (usize, usize),
     auto: &AutoTour,
+    scene: Option<&Scene>,
 ) -> Result<PlannedTour, Error> {
     auto.check().map_err(Error::Invalid)?;
     check_frame(frame)?;
@@ -1538,14 +1669,29 @@ pub fn plan_tour(
         .objects_in_footprint(wcs, (width, height))
         .map_err(|error| Error::Invalid(error.to_string()))?;
     let size = (width as usize, height as usize);
-    let targets = tour::targets(&placed, size, frame, auto.targets);
+    let mut targets = tour::targets(&placed, size, frame, auto.targets);
+    if let Some(scene) = scene {
+        for target in &mut targets {
+            let depth = scene.depth_at(target.x, target.y);
+            target.depth = depth / scene.background_distance_pc;
+            target.distance_pc = (depth != scene.background_distance_pc).then_some(depth);
+        }
+    }
     let Some(best) = targets.first() else {
         return Err(Error::Invalid(
             "no catalogued objects in the field to tour: none has a view of its own".into(),
         ));
     };
     Ok(PlannedTour {
-        stops: tour::plan(&targets, size, frame, auto),
+        stops: tour::plan(
+            &targets,
+            size,
+            frame,
+            auto,
+            scene.map_or(1.0, |scene| {
+                scene.leftover_distance_pc.max(scene.far_distance_pc) / scene.background_distance_pc
+            }),
+        ),
         focus: (best.x, best.y),
         focus_name: best.name.clone(),
     })
@@ -1662,6 +1808,9 @@ pub fn format_stop(stop: &TourStop) -> String {
             text.push_str(&format!(" {key}={}", decimal(value, 3)));
         }
     }
+    if let Some(depth) = stop.depth_pc {
+        text.push_str(&format!(" depth={}", decimal(depth, 1)));
+    }
     if let Some(title) = stop.title.as_ref().filter(|title| !title.is_empty()) {
         let quoted = title.replace('\\', "\\\\").replace('"', "\\\"");
         text.push_str(&format!(" title=\"{quoted}\""));
@@ -1670,17 +1819,18 @@ pub fn format_stop(stop: &TourStop) -> String {
 }
 
 /// `video` with a tour of the catalogued objects in a `dimensions` image
-/// planned as `auto` asks, and the target most worth a visit, where the
-/// nebula's distance is best taken.
+/// planned as `auto` asks, each target framed at the depth of its plane in
+/// `scene`.
 fn plan_video(
     video: &VideoOptions,
     auto: &AutoTour,
     wcs: &Wcs,
     dimensions: (u32, u32),
     objects: Option<&Path>,
+    scene: Option<&Scene>,
     report: &mut dyn FnMut(Event),
-) -> Result<(VideoOptions, (f64, f64)), Error> {
-    let plan = plan_tour(wcs, dimensions, objects, video.size, auto)?;
+) -> Result<VideoOptions, Error> {
+    let plan = plan_tour_in(wcs, dimensions, objects, video.size, auto, scene)?;
     let planned = VideoOptions {
         tour: plan.tour(),
         auto_tour: None,
@@ -1698,7 +1848,7 @@ fn plan_video(
         names.join(" → ")
     )));
     planned.check()?;
-    Ok((planned, plan.focus))
+    Ok(planned)
 }
 
 /// Whether every value of `image` sits on one of 256 levels, as an 8-bit
@@ -1728,6 +1878,7 @@ fn target_distance(
     wcs: &Wcs,
     (width, height): (usize, usize),
     focus: (f64, f64),
+    given: &HashMap<String, f64>,
 ) -> Result<Option<(String, f64, &'static str)>, Error> {
     let Ok(objects_path) = seiza::data_paths::objects(options.objects.as_deref()) else {
         return Ok(None);
@@ -1762,9 +1913,224 @@ fn target_distance(
     } else {
         format!("{} ({})", object.name, object.common_name)
     };
+    if let Some(distance) = given_distance(given, object) {
+        return Ok(Some((name, distance, "given")));
+    }
     Ok(found
         .distance()
         .map(|distance| (name, distance.distance_pc, distance.basis.as_str())))
+}
+
+/// The distances `options` gives for catalogued objects, by catalogue ID:
+/// every object each given name resolves to. A name the catalogue does not
+/// know is an error.
+fn given_distances(options: &SceneOptions) -> Result<HashMap<String, f64>, Error> {
+    let mut given = HashMap::new();
+    if options.distance_overrides.is_empty() {
+        return Ok(given);
+    }
+    let path = seiza::data_paths::objects(options.objects.as_deref()).map_err(|error| {
+        Error::Invalid(format!(
+            "distances given by object name need the object catalog (seiza setup): {error}"
+        ))
+    })?;
+    let catalog = open_objects(&path)?;
+    for each in &options.distance_overrides {
+        let found = catalog
+            .lookup_name(each.object.trim())
+            .map_err(|error| Error::Catalog {
+                path: path.clone(),
+                message: error.to_string(),
+            })?;
+        if found.is_empty() {
+            return Err(Error::Invalid(format!(
+                "no catalogued object is named {}",
+                each.object
+            )));
+        }
+        for found in found {
+            given.insert(found.object.metadata.id, each.distance_pc);
+        }
+    }
+    Ok(given)
+}
+
+/// The distance `given` holds for `object`, under its ID or any of its
+/// alternate IDs.
+fn given_distance(given: &HashMap<String, f64>, object: &SkyObject) -> Option<f64> {
+    std::iter::once(&object.metadata.id)
+        .chain(&object.metadata.alternate_ids)
+        .find_map(|id| given.get(id).copied())
+}
+
+/// A depth plane to lift: its name, region, distance and how that was
+/// found.
+struct PlaneToLift {
+    name: String,
+    region: Region,
+    distance_pc: f64,
+    basis: String,
+}
+
+/// How the catalogue found `distance`, in a few words.
+fn basis_of(distance: &ObjectDistance) -> String {
+    match (distance.basis, distance.via) {
+        (DistanceBasis::Contained, Some(via)) => {
+            // An ID such as `vizier:VII/20:Sh2-171` ends in the object's
+            // name.
+            let name = via.rsplit(':').next().unwrap_or(via);
+            format!("that of {name}, around it")
+        }
+        (basis, _) => match distance.method.as_str() {
+            "unknown" => basis.as_str().to_string(),
+            method => format!("{}, {method}", basis.as_str()),
+        },
+    }
+}
+
+/// The catalogued nebulae in the field lying at distances of their own, as
+/// [`SceneOptions::auto_planes`] chooses them, largest first, against a
+/// nebula at `distance` whose depth was taken at `focus`: each with its
+/// outermost catalogued outline as its region, or else its ellipse sized by
+/// the light of `starless`. `given` distances take the catalogue's place.
+fn catalogued_planes(
+    options: &SceneOptions,
+    wcs: &Wcs,
+    starless: &LightImage,
+    (focus, distance): ((f64, f64), f64),
+    given: &HashMap<String, f64>,
+) -> Result<Vec<PlaneToLift>, Error> {
+    let (width, height) = (starless.width, starless.height);
+    let objects_path = seiza::data_paths::objects(options.objects.as_deref())
+        .map_err(|error| Error::Invalid(format!("they need the object catalog: {error}")))?;
+    let distances_path = seiza::data_paths::object_distances_beside(
+        options.object_distances.as_deref(),
+        &objects_path,
+    )
+    .map_err(|error| Error::Invalid(error.to_string()))?
+    .ok_or_else(|| Error::Invalid("they need the object distance file (seiza setup)".into()))?;
+    let catalog = open_objects(&objects_path)?;
+    let distances =
+        seiza::catalog::ObjectDistances::open(&distances_path, &catalog).map_err(|error| {
+            Error::Catalog {
+                path: distances_path.clone(),
+                message: error.to_string(),
+            }
+        })?;
+    let placed = catalog
+        .objects_in_footprint(wcs, (width as u32, height as u32))
+        .map_err(|error| Error::Invalid(error.to_string()))?;
+    let short = width.min(height) as f64;
+    let mut kept: Vec<(Extent, f64)> = Vec::new();
+    let mut planes = Vec::new();
+    for object in placed {
+        use seiza::objects::ObjectKind::*;
+        let nebula = matches!(
+            object.object.kind,
+            Nebula | PlanetaryNebula | HiiRegion | SupernovaRemnant | ClusterWithNebula
+        );
+        // Too small to see move, or so large it is most of the image.
+        if !nebula || object.semi_major_px < 12.0 || object.semi_major_px > 0.6 * short {
+            continue;
+        }
+        let (depth, basis) = match given_distance(given, &object.object) {
+            Some(depth) => (depth, "given".to_string()),
+            None => {
+                let Some(found) = distances.for_object(&object.object) else {
+                    continue;
+                };
+                let measured = matches!(
+                    found.basis,
+                    DistanceBasis::Measured | DistanceBasis::Contained
+                );
+                // A range that takes in the nebula's distance cannot say
+                // which lies nearer.
+                let overlaps = found.lower_pc.is_some_and(|lower| lower <= distance)
+                    && found.upper_pc.is_some_and(|upper| upper >= distance);
+                if !measured || overlaps {
+                    continue;
+                }
+                (found.distance_pc, basis_of(&found))
+            }
+        };
+        if (depth - distance).abs() < AUTO_PLANE_DEPTH * distance {
+            continue;
+        }
+        let (semi_minor, angle) = match object.angle_deg {
+            Some(angle) => (object.semi_minor_px, angle),
+            None => (object.semi_major_px, 0.0),
+        };
+        let extent = Extent {
+            x: object.x,
+            y: object.y,
+            semi_major: object.semi_major_px,
+            semi_minor: semi_minor.max(1.0),
+            angle: angle.to_radians(),
+        };
+        // The nebula itself, or a region about it, which would carry it
+        // off; and a second listing of one already taken.
+        if extent.reach(focus.0, focus.1) <= 1.0
+            || kept.iter().any(|(other, other_depth)| {
+                other.reach(extent.x, extent.y) <= 1.0
+                    && (other_depth - depth).abs() < AUTO_PLANE_DEPTH * other_depth
+            })
+        {
+            continue;
+        }
+        let outline = outermost_outline(&catalog, &object.object.metadata.id, wcs);
+        let region = if outline.is_empty() {
+            Region::from_extent(starless, &extent)
+        } else {
+            Region::from_outlines(&outline, width, height)
+        };
+        let Some(region) = region else {
+            continue;
+        };
+        kept.push((extent, depth));
+        planes.push(PlaneToLift {
+            name: object.object.name.clone(),
+            region,
+            distance_pc: depth,
+            basis,
+        });
+    }
+    Ok(planes)
+}
+
+/// The closed contours of the outermost brightness level catalogued for
+/// the object `id`, in image pixels: inner levels lie within it.
+fn outermost_outline(
+    catalog: &seiza::objects::ObjectCatalog,
+    id: &str,
+    wcs: &Wcs,
+) -> Vec<Vec<(f64, f64)>> {
+    if id.is_empty() {
+        return Vec::new();
+    }
+    let Ok(geometries) = catalog.geometries(id) else {
+        return Vec::new();
+    };
+    let outermost = geometries
+        .into_iter()
+        .filter_map(|geometry| match geometry.data {
+            GeometryData::OutlineSet { level, contours } => Some((level, contours)),
+            _ => None,
+        })
+        .min_by(|a, b| a.0.cmp(&b.0));
+    let Some((_, contours)) = outermost else {
+        return Vec::new();
+    };
+    contours
+        .into_iter()
+        .filter(|contour| contour.closed && contour.vertices.len() >= 3)
+        .filter_map(|contour| {
+            contour
+                .vertices
+                .iter()
+                .map(|&(ra, dec)| wcs.world_to_pixel(ra, dec))
+                .collect::<Option<Vec<_>>>()
+        })
+        .collect()
 }
 
 /// Catalogued galaxies in the image large enough to see, largest first,
@@ -1821,6 +2187,7 @@ mod tests {
     use super::*;
     use crate::FrameFn;
     use crate::plane::PlaneMask;
+    use crate::tour::AutoTour;
     use seiza::catalog::{DistanceStar, StarDistanceCatalogBuilder};
 
     /// A small solved field: a smooth starless image, a stars image with a
@@ -2003,14 +2370,20 @@ mod tests {
             &|| false,
         )
         .unwrap();
+        let planes: Vec<(&str, f64, &str)> = planed
+            .summary()
+            .planes
+            .iter()
+            .map(|plane| (plane.name.as_str(), plane.distance_pc, plane.basis.as_str()))
+            .collect();
         assert_eq!(
-            planed.summary().planes,
-            [("knot".to_string(), 150.0), ("cloud".to_string(), 1200.0)]
+            planes,
+            [("knot", 150.0, "given"), ("cloud", 1200.0, "given")]
         );
         assert!(
             notes
                 .iter()
-                .any(|note| note.starts_with("depth plane knot at 150 pc")),
+                .any(|note| note.starts_with("depth plane knot at 150 pc (given)")),
             "{notes:?}"
         );
         // The first frame is the photograph either way; the last is not.
@@ -2026,6 +2399,193 @@ mod tests {
         assert_eq!(planed.scene().depth_at(205.0, 115.0), 150.0);
         assert_eq!(planed.scene().depth_at(250.0, 120.0), 1200.0);
         assert_eq!(planed.scene().depth_at(20.0, 20.0), 400.0);
+    }
+
+    /// A nebula for [`nebulae`]: its name, place and radius in pixels,
+    /// and its distance, range and basis, if it has one.
+    type Listed = (
+        &'static str,
+        (f64, f64),
+        f64,
+        Option<(f64, Option<(f64, f64)>, seiza::catalog::DistanceBasis)>,
+    );
+
+    /// An object catalogue of the nebulae `listed`, placed in `wcs`'s
+    /// image, and their distances, written to `directory`; the starless
+    /// image brightened by each one's glow.
+    fn nebulae(
+        directory: &Path,
+        wcs: &Wcs,
+        starless: &mut Rgb32FImage,
+        listed: &[Listed],
+    ) -> (PathBuf, PathBuf) {
+        use seiza::catalog::{
+            DistanceEntry, DistanceMethod, DistanceSource, ObjectDistancesBuilder,
+        };
+        use seiza::objects::{ObjectCatalog, ObjectKind, ObjectMetadata, SkyObject};
+        let objects: Vec<SkyObject> = listed
+            .iter()
+            .map(|&(name, (x, y), radius, _)| {
+                let (ra, dec) = wcs.pixel_to_world(x, y);
+                SkyObject {
+                    kind: ObjectKind::HiiRegion,
+                    ra,
+                    dec,
+                    mag: None,
+                    // Two arcseconds a pixel.
+                    major_arcmin: Some((4.0 * radius / 60.0) as f32),
+                    minor_arcmin: None,
+                    position_angle_deg: None,
+                    name: name.into(),
+                    common_name: String::new(),
+                    metadata: ObjectMetadata {
+                        id: format!("test:{name}"),
+                        ..ObjectMetadata::default()
+                    },
+                }
+            })
+            .collect();
+        let objects_path = directory.join("nebulae.bin");
+        ObjectCatalog::new(objects).write_to(&objects_path).unwrap();
+        let catalog = ObjectCatalog::open(&objects_path).unwrap();
+        let mut builder = ObjectDistancesBuilder::new("test", catalog.fingerprint().unwrap());
+        let source = builder
+            .add_source(DistanceSource {
+                key: "test".into(),
+                ..DistanceSource::default()
+            })
+            .unwrap();
+        for &(name, _, _, distance) in listed {
+            if let Some((distance_pc, range, basis)) = distance {
+                builder.add(DistanceEntry {
+                    object_id: format!("test:{name}"),
+                    distance_pc,
+                    lower_pc: range.map(|(lower, _)| lower),
+                    upper_pc: range.map(|(_, upper)| upper),
+                    source,
+                    method: DistanceMethod::Photometric,
+                    basis,
+                    reference: None,
+                    via: None,
+                });
+            }
+        }
+        let distances_path = directory.join("nebula-distances.bin");
+        builder.write_to(&distances_path).unwrap();
+        for (x, y, pixel) in starless.enumerate_pixels_mut() {
+            let glow: f64 = listed
+                .iter()
+                .map(|&(_, (cx, cy), radius, _)| {
+                    let r2 = (x as f64 - cx).powi(2) + (y as f64 - cy).powi(2);
+                    0.4 * (-r2 / (2.0 * (0.7 * radius).powi(2))).exp()
+                })
+                .sum();
+            for value in pixel.0.iter_mut() {
+                *value = (*value + glow as f32).min(1.0);
+            }
+        }
+        (objects_path, distances_path)
+    }
+
+    #[test]
+    fn catalogued_nebulae_at_their_own_distances_get_planes() {
+        use seiza::catalog::DistanceBasis::Measured;
+        let directory = tempfile::tempdir().unwrap();
+        let (mut starless, stars, wcs, distances) = field(directory.path());
+        // The nebula is at 400 pc, its depth taken at the image's centre.
+        let listed: [Listed; 5] = [
+            (
+                "NGC 9001",
+                (240.0, 70.0),
+                18.0,
+                Some((2500.0, Some((2200.0, 2800.0)), Measured)),
+            ),
+            (
+                "NGC 9002",
+                (80.0, 70.0),
+                18.0,
+                Some((430.0, None, Measured)),
+            ),
+            ("NGC 9003", (80.0, 175.0), 18.0, None),
+            (
+                "NGC 9004",
+                (240.0, 175.0),
+                18.0,
+                Some((700.0, Some((300.0, 1100.0)), Measured)),
+            ),
+            (
+                "NGC 9005",
+                (160.0, 120.0),
+                40.0,
+                Some((2000.0, None, Measured)),
+            ),
+        ];
+        let (objects, object_distances) = nebulae(directory.path(), &wcs, &mut starless, &listed);
+        let mut options = options(distances, directory.path());
+        options.scene.objects = Some(objects);
+        options.scene.object_distances = Some(object_distances);
+        options.scene.auto_planes = true;
+        let prepare = |options: &ParallaxOptions| {
+            Parallax::prepare(&starless, &stars, &wcs, options, &mut |_| {}, &|| false).unwrap()
+        };
+        let planes = |video: &Parallax| -> Vec<(String, f64, String)> {
+            video
+                .summary()
+                .planes
+                .iter()
+                .map(|plane| (plane.name.clone(), plane.distance_pc, plane.basis.clone()))
+                .collect()
+        };
+        // Only the far one: the next lies within 15% of the nebula, the
+        // third has no distance, the fourth's range takes in the nebula's,
+        // and the last holds the point the nebula's depth was taken at.
+        let video = prepare(&options);
+        assert_eq!(
+            planes(&video),
+            [("NGC 9001".into(), 2500.0, "measured, photometric".into())]
+        );
+        assert_eq!(video.scene().depth_at(240.0, 70.0), 2500.0);
+        // A distance given by name makes the second a near plane.
+        options.scene.distance_overrides = vec![DistanceOverride {
+            object: "ngc 9002".into(),
+            distance_pc: 150.0,
+        }];
+        let video = prepare(&options);
+        assert_eq!(
+            planes(&video),
+            [
+                ("NGC 9002".into(), 150.0, "given".into()),
+                ("NGC 9001".into(), 2500.0, "measured, photometric".into())
+            ]
+        );
+        // An automatic tour frames the far one with the lens, the camera
+        // unable to fly to it, and the near one by flying less far; each
+        // turns to look along the line of sight from Earth through it.
+        options.video.auto_tour = Some(AutoTour {
+            targets: Some(5),
+            ..AutoTour::default()
+        });
+        let video = prepare(&options);
+        let stop = |name: &str| {
+            video
+                .video_options()
+                .tour
+                .iter()
+                .find(|stop| stop.title.as_deref() == Some(name))
+                .cloned()
+                .unwrap()
+        };
+        let (far, near, flat) = (stop("NGC 9001"), stop("NGC 9002"), stop("NGC 9003"));
+        assert!(far.zoom > 1.5 && far.dolly == 0.88, "{far:?}");
+        assert!(near.dolly < 0.5 * flat.dolly, "{near:?} {flat:?}");
+        for stop in [&far, &near] {
+            assert!((stop.pan - (1.0 - stop.dolly)).abs() < 1e-9, "{stop:?}");
+        }
+        // A name the catalogue does not know is refused.
+        options.scene.distance_overrides[0].object = "NGC 404404".into();
+        let error = Parallax::prepare(&starless, &stars, &wcs, &options, &mut |_| {}, &|| false)
+            .unwrap_err();
+        assert!(error.to_string().contains("NGC 404404"), "{error}");
     }
 
     #[test]
@@ -2185,6 +2745,7 @@ mod tests {
                 spin_deg: 360.0,
                 push: 0.25,
                 title: Some(r#"Sh2-170, the "core" \ centre"#.into()),
+                depth_pc: Some(2790.0),
             },
         ] {
             let text = format_stop(&stop);
