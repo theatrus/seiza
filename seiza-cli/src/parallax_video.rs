@@ -307,7 +307,8 @@ pub(crate) struct ParallaxVideoArgs {
     #[arg(long)]
     auto_planes: bool,
     /// A distance for a catalogued object in place of the catalogue's,
-    /// `NAME=PARSECS`, for the nebula's distance and the automatic planes.
+    /// `NAME=PARSECS`, for the nebula's distance and the automatic planes;
+    /// a nebula catalogued at the distance of one around it takes it too.
     /// Repeat for more
     #[arg(long = "object-distance", value_parser = parse_object_distance)]
     object_distances: Vec<seiza_parallax::DistanceOverride>,

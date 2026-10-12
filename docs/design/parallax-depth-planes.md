@@ -103,10 +103,14 @@ with the cloud.
   `--plane-file`, as `--export-dust-map` does for the dust.
   `--object-distance NAME=PARSECS` (the C ABI's `distanceOverrides`)
   overrides a catalogue distance, for the nebula's distance and the
-  automatic planes.
-- In the apps, the Source step could list suggested planes, each with an on
-  and off switch and a distance field, and import a mask. Painting a region
-  could come later.
+  automatic planes. A nebula the catalogue places at the distance of one
+  around it (vdB 2 and Ced 1 in the Big Q) takes a distance given for that
+  one, so the two stay one plane.
+- In the apps, the Source step has a Depth planes section: a switch for
+  automatic planes, the planes found at the last preparation, and a
+  distance field for each plane a catalogued object places (the summary's
+  `object`). Switching planes off one by one, importing a mask and painting
+  a region could come later.
 
 **Automatic**
 
@@ -294,4 +298,5 @@ light along it.
 5. Dust clouds: dark nebulae moving with the dust they lie in, and
    distances from Gaia star counts for clouds the catalogue does not place.
    (Done.)
-6. The apps' interface.
+6. The apps' interface: the Depth planes section in seiza-mac (#64) and
+   seiza-win (#53). (Done.)

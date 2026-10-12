@@ -2006,7 +2006,10 @@ fn target_distance(
     }
     Ok(found
         .distance()
-        .map(|distance| (name, distance.distance_pc, distance.basis.as_str())))
+        .map(|distance| match given_around(given, &distance) {
+            Some(around) => (name, around, "given"),
+            None => (name, distance.distance_pc, distance.basis.as_str()),
+        }))
 }
 
 /// The distances `options` gives for catalogued objects, by catalogue ID:
@@ -2051,6 +2054,21 @@ fn given_distance(given: &HashMap<String, f64>, object: &SkyObject) -> Option<f6
         .find_map(|id| given.get(id).copied())
 }
 
+/// The distance `given` holds for the object around one whose catalogued
+/// distance, `found`, is that object's: a nebula inside another lies where
+/// the other is said to, so the two keep one depth.
+fn given_around(given: &HashMap<String, f64>, found: &ObjectDistance) -> Option<f64> {
+    match (found.basis, found.via) {
+        (DistanceBasis::Contained, Some(via)) => given.get(via).copied(),
+        _ => None,
+    }
+}
+
+/// The name an ID such as `vizier:VII/20:Sh2-171` ends in.
+fn id_name(id: &str) -> &str {
+    id.rsplit(':').next().unwrap_or(id)
+}
+
 /// A depth plane to lift: its name, region, distance and how that was
 /// found, and whether it may block light. A glowing nebula found in the
 /// catalogue takes only its light: the darkness about it is dust, which
@@ -2068,12 +2086,7 @@ struct PlaneToLift {
 /// How the catalogue found `distance`, in a few words.
 fn basis_of(distance: &ObjectDistance) -> String {
     match (distance.basis, distance.via) {
-        (DistanceBasis::Contained, Some(via)) => {
-            // An ID such as `vizier:VII/20:Sh2-171` ends in the object's
-            // name.
-            let name = via.rsplit(':').next().unwrap_or(via);
-            format!("that of {name}, around it")
-        }
+        (DistanceBasis::Contained, Some(via)) => format!("that of {}, around it", id_name(via)),
         (basis, _) => match distance.method.as_str() {
             "unknown" => basis.as_str().to_string(),
             method => format!("{}, {method}", basis.as_str()),
@@ -2149,6 +2162,10 @@ fn catalogued_planes(
         let found = match given_distance(given, &object.object) {
             Some(depth) => Some((depth, "given".to_string())),
             None => distances.for_object(&object.object).and_then(|found| {
+                if let Some(depth) = given_around(given, &found) {
+                    let around = found.via.map_or("", id_name);
+                    return Some((depth, format!("given for {around}, around it")));
+                }
                 // A dark cloud's distance may come from the nearest cloud
                 // measured along a sightline beside it.
                 let measured = match found.basis {
@@ -2706,7 +2723,8 @@ mod tests {
     /// An object catalogue of the nebulae `listed`, placed in `wcs`'s
     /// image, and their distances, written to `directory`; the starless
     /// image brightened by each one's glow, or darkened by a dark cloud's,
-    /// whose name starts `LDN`.
+    /// whose name starts `LDN`. A distance `Contained` is that of the
+    /// nebula listed before it.
     fn nebulae(
         directory: &Path,
         wcs: &Wcs,
@@ -2753,7 +2771,7 @@ mod tests {
                 ..DistanceSource::default()
             })
             .unwrap();
-        for &(name, _, _, distance) in listed {
+        for (index, &(name, _, _, distance)) in listed.iter().enumerate() {
             if let Some((distance_pc, range, basis)) = distance {
                 builder.add(DistanceEntry {
                     object_id: format!("test:{name}"),
@@ -2764,7 +2782,8 @@ mod tests {
                     method: DistanceMethod::Photometric,
                     basis,
                     reference: None,
-                    via: None,
+                    via: (basis == seiza::catalog::DistanceBasis::Contained)
+                        .then(|| format!("test:{}", listed[index - 1].0)),
                 });
             }
         }
@@ -2893,6 +2912,56 @@ mod tests {
         let error = Parallax::prepare(&starless, &stars, &wcs, &options, &mut |_| {}, &|| false)
             .unwrap_err();
         assert!(error.to_string().contains("NGC 404404"), "{error}");
+    }
+
+    #[test]
+    fn a_nebula_inside_another_moves_with_a_distance_given_for_the_other() {
+        use seiza::catalog::DistanceBasis::{Contained, Measured};
+        let directory = tempfile::tempdir().unwrap();
+        let (mut starless, stars, wcs, distances) = field(directory.path());
+        // A nebula at 700 pc, and one inside it the catalogue places there
+        // too, as the nebula around it.
+        let listed: [Listed; 2] = [
+            (
+                "NGC 9101",
+                (110.0, 60.0),
+                18.0,
+                Some((700.0, None, Measured)),
+            ),
+            (
+                "NGC 9102",
+                (113.0, 63.0),
+                14.0,
+                Some((700.0, None, Contained)),
+            ),
+        ];
+        let (objects, object_distances) = nebulae(directory.path(), &wcs, &mut starless, &listed);
+        let mut options = options(distances, directory.path());
+        options.scene.objects = Some(objects);
+        options.scene.object_distances = Some(object_distances);
+        options.scene.auto_planes = true;
+        let planes = |options: &ParallaxOptions| -> Vec<(String, f64, String)> {
+            Parallax::prepare(&starless, &stars, &wcs, options, &mut |_| {}, &|| false)
+                .unwrap()
+                .summary()
+                .planes
+                .iter()
+                .map(|plane| (plane.name.clone(), plane.distance_pc, plane.basis.clone()))
+                .collect()
+        };
+        // One depth, so one plane.
+        let found = planes(&options);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].1, 700.0);
+        // A distance given for the outer one takes the inner one with it,
+        // rather than leaving it behind on a plane of its own.
+        options.scene.distance_overrides = vec![DistanceOverride {
+            object: "NGC 9101".into(),
+            distance_pc: 150.0,
+        }];
+        let moved = planes(&options);
+        assert_eq!(moved.len(), 1, "{moved:?}");
+        assert_eq!(moved[0].1, 150.0);
     }
 
     #[test]
