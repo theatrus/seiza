@@ -239,6 +239,20 @@ impl Pyramid {
         Self { levels }
     }
 
+    /// [`Self::new`] for a cut-out, such as a depth plane, halved down to a
+    /// pixel: a small one may be drawn smaller than its pixels, which a
+    /// pyramid stopping at 64 pixels would leave to shimmer.
+    pub(crate) fn down_to_a_pixel(image: LightImage) -> Self {
+        let mut levels = vec![image];
+        while let Some(last) = levels.last()
+            && (last.width > 1 || last.height > 1)
+        {
+            let next = last.halved();
+            levels.push(next);
+        }
+        Self { levels }
+    }
+
     pub fn base(&self) -> &LightImage {
         &self.levels[0]
     }

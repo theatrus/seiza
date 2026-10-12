@@ -17,8 +17,8 @@ use super::{
 use image::{Rgb32FImage, RgbImage};
 use seiza::wcs::{Sip, Wcs};
 use seiza_parallax::{
-    CustomLabel, Dust, DustMap, Easing, Event, FfmpegSink, FrameFn, FrameSink, Parallax,
-    ParallaxOptions, PngSequence, Quality, SmallStars, Start,
+    CustomLabel, DepthPlane, Dust, DustMap, Easing, Event, FfmpegSink, FrameFn, FrameSink,
+    Parallax, ParallaxOptions, PlaneMask, PngSequence, Quality, SmallStars, Start,
 };
 use seiza_parallax::{FitSummary, SceneOptions, VideoOptions};
 use serde::{Deserialize, Serialize};
@@ -68,7 +68,7 @@ pub type SeizaParallaxFrameCallback =
 /// solution, the catalogs and how the stars are placed. Changing any of
 /// them needs a new [`seiza_parallax_prepare_json`];
 /// [`seiza_parallax_reconfigure_json`] refuses them.
-const SCENE_FIELDS: [&str; 24] = [
+const SCENE_FIELDS: [&str; 25] = [
     "image",
     "starless",
     "stars",
@@ -93,6 +93,7 @@ const SCENE_FIELDS: [&str; 24] = [
     "dust",
     "dustOpacity",
     "dustMap",
+    "planes",
 ];
 
 /// Everything a parallax video takes, as one JSON object: the scene's
@@ -144,6 +145,20 @@ struct SceneRequest {
     /// Dust drawn as an image, white where opaque, in place of the dust
     /// mapped from the star counts.
     dust_map: Option<PathBuf>,
+    /// Regions of the image lifted onto planes at their own distances.
+    planes: Option<Vec<PlaneRequest>>,
+}
+
+/// A depth plane: a region of the image at a distance of its own.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PlaneRequest {
+    /// An image, white where the image belongs to the plane and black
+    /// elsewhere, at any size of the image's shape.
+    mask: PathBuf,
+    distance_parsecs: f64,
+    /// What to call it; the mask's file name if absent.
+    name: Option<String>,
 }
 
 /// The fields that film the scene: the camera, the output and the labels.
@@ -368,6 +383,8 @@ struct SummaryResponse {
     unmatched_distance_parsecs: f64,
     flying_stars: usize,
     galaxies_lifted: Vec<String>,
+    /// The depth planes lifted.
+    planes: Vec<PlaneResponse>,
     dust_transmission: Option<DustResponse>,
     /// Whether the dust came from a given map rather than the star counts.
     dust_given: bool,
@@ -377,6 +394,14 @@ struct SummaryResponse {
     /// How the fit changed the framing asked for.
     fit: FitResponse,
     wcs: WcsResponse,
+}
+
+/// A depth plane lifted, by name, and its distance.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlaneResponse {
+    name: String,
+    distance_parsecs: f64,
 }
 
 /// A setting as asked and as the video uses it.
@@ -525,6 +550,23 @@ fn scene_options(request: &SceneRequest) -> Result<SceneOptions, String> {
         dust: request.dust.unwrap_or(defaults.dust),
         dust_opacity: request.dust_opacity.unwrap_or(defaults.dust_opacity),
         dust_map: request.dust_map.as_deref().map(DustMap::open).transpose()?,
+        planes: request
+            .planes
+            .iter()
+            .flatten()
+            .map(|plane| {
+                Ok(DepthPlane {
+                    mask: PlaneMask::open(&plane.mask)?,
+                    distance_pc: plane.distance_parsecs,
+                    name: plane.name.clone().unwrap_or_else(|| {
+                        plane.mask.file_stem().map_or_else(
+                            || plane.mask.display().to_string(),
+                            |stem| stem.to_string_lossy().into_owned(),
+                        )
+                    }),
+                })
+            })
+            .collect::<Result<_, String>>()?,
     })
 }
 
@@ -718,7 +760,12 @@ fn split(
 /// at any size of the image's shape, its format by its extension: PNG,
 /// JPEG, TIFF, FITS or XISF; it takes the place of the dust mapped from the
 /// star counts, and a star seen where it is opaque flies in front of the
-/// nebula), `start` ("focus", "whole"), `dolly`, `truck`, `truckAngleDegrees`,
+/// nebula), `planes` (`[{mask, distanceParsecs, name}]`: each
+/// `mask` an image, white where the image belongs to the plane and black
+/// elsewhere, at any size of the image's shape, whose region is lifted off
+/// the starless image onto a plane at `distanceParsecs`, what lay behind it
+/// filled in from around it; `name`, the mask's file name if absent, names
+/// it in events and the summary), `start` ("focus", "whole"), `dolly`, `truck`, `truckAngleDegrees`,
 /// `pan`, `zoom`, `zoomEnd`, `rotateDegrees` `[first, last]`, `easing`
 /// ("inOut", "linear"), `quality` ("standard", "high"), `growthLimit`,
 /// `fadeFrom`, `tour` (stops `[{focus, dolly, zoom, rotateDegrees, pan,
@@ -954,7 +1001,8 @@ pub unsafe extern "C" fn seiza_parallax_plan_tour_json(
 /// `rotateDegrees` [0, 360] turns once anticlockwise and [0, -360] once
 /// clockwise, and a stop's `rotateDegrees` likewise. A field that would
 /// change the scene (the images, plate solution, catalogs, distances,
-/// `distanceFocus`, star placement, galaxies or dust) is refused: those
+/// `distanceFocus`, star placement, galaxies, depth planes or dust) is
+/// refused: those
 /// need a new preparation, except a dust map, which
 /// [`seiza_parallax_with_dust_map`] changes. The camera's `focus` only moves the camera; the
 /// nebula keeps the depth it was prepared at.
@@ -1011,7 +1059,8 @@ pub unsafe extern "C" fn seiza_parallax_reconfigure_json(
 
 /// What preparing the video found, as JSON: its frame count, frame rate
 /// and size, the stars found and matched, the nebula's distance with how
-/// and where (`backgroundFocus`) it was found, galaxies lifted, the dust
+/// and where (`backgroundFocus`) it was found, galaxies lifted, the depth
+/// planes lifted (`planes`, `[{name, distanceParsecs}]`), the dust
 /// (`dustTransmission` `{median, thickest}`, `dustGiven` when a map gave
 /// it, and `starsInFrontOfDust`, the stars it brought in front), objects
 /// labelled, the WCS used, and `fit`, how fitting the camera to the
@@ -1057,6 +1106,14 @@ pub unsafe extern "C" fn seiza_parallax_summary_json(
             unmatched_distance_parsecs: summary.unmatched_distance_pc,
             flying_stars: summary.flying_stars,
             galaxies_lifted: summary.galaxies_lifted.clone(),
+            planes: summary
+                .planes
+                .iter()
+                .map(|(name, distance)| PlaneResponse {
+                    name: name.clone(),
+                    distance_parsecs: *distance,
+                })
+                .collect(),
             dust_transmission: summary
                 .dust_transmission
                 .map(|(median, thickest)| DustResponse { median, thickest }),
@@ -2459,6 +2516,99 @@ mod tests {
             )
         });
         unsafe { seiza_parallax_free(second) };
+    }
+
+    #[test]
+    fn depth_planes_go_in_as_masks_and_come_back_in_the_summary() {
+        let directory = tempfile::tempdir().unwrap();
+        // A mask at half the image's size about a bright cloud.
+        let mask = directory.path().join("knot.png");
+        image::GrayImage::from_fn(160, 120, |x, y| {
+            let inside = (x as f64 - 100.0).hypot(y as f64 - 60.0) < 20.0;
+            image::Luma([if inside { 255 } else { 0 }])
+        })
+        .save(&mask)
+        .unwrap();
+        let asked = request(
+            directory.path(),
+            &format!(
+                "\"planes\": [{{\"mask\": {}, \"distanceParsecs\": 150}}]",
+                serde_json::json!(mask)
+            ),
+        );
+        image::RgbImage::from_fn(320, 240, |x, y| {
+            let r2 = (x as f64 - 200.0).powi(2) + (y as f64 - 120.0).powi(2);
+            let cloud = (120.0 * (-r2 / 300.0).exp()) as u8;
+            image::Rgb([20 + (x / 8) as u8 + cloud, 30 + cloud, 25 + cloud])
+        })
+        .save(directory.path().join("starless.png"))
+        .unwrap();
+        let mut events: Vec<String> = Vec::new();
+        let mut error = ptr::null_mut();
+        let video = unsafe {
+            seiza_parallax_prepare_json(
+                asked.as_ptr(),
+                ptr::null(),
+                Some(collect_event),
+                (&mut events as *mut Vec<String>).cast(),
+                &mut error,
+            )
+        };
+        assert!(!video.is_null(), "{}", take_error(error));
+        let planes = &summary(video)["planes"];
+        assert_eq!(
+            *planes,
+            serde_json::json!([{"name": "knot", "distanceParsecs": 150.0}])
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.contains("depth plane knot at 150 pc")),
+            "{events:?}"
+        );
+        // Planes make the scene, so a new video of it cannot change them.
+        let settings = CString::new(format!(
+            "{{\"planes\": [{{\"mask\": {}, \"distanceParsecs\": 90}}]}}",
+            serde_json::json!(mask)
+        ))
+        .unwrap();
+        let refused = unsafe {
+            seiza_parallax_reconfigure_json(
+                video,
+                settings.as_ptr(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(refused.is_null());
+        assert!(take_error(error).contains("planes"));
+        unsafe { seiza_parallax_free(video) };
+        // A mask of another shape is refused, naming the plane.
+        let square = directory.path().join("square.png");
+        image::GrayImage::from_pixel(50, 50, image::Luma([255]))
+            .save(&square)
+            .unwrap();
+        let wrong = request(
+            directory.path(),
+            &format!(
+                "\"planes\": [{{\"mask\": {}, \"distanceParsecs\": 150, \"name\": \"sq\"}}]",
+                serde_json::json!(square)
+            ),
+        );
+        let video = unsafe {
+            seiza_parallax_prepare_json(
+                wrong.as_ptr(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(video.is_null());
+        let message = take_error(error);
+        assert!(message.contains("sq: the plane mask is 50×50"), "{message}");
     }
 
     #[test]

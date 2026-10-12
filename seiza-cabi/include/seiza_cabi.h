@@ -2160,7 +2160,12 @@ char *seiza_rc_astro_process_file_json(const char *request_json,
  at any size of the image's shape, its format by its extension: PNG,
  JPEG, TIFF, FITS or XISF; it takes the place of the dust mapped from the
  star counts, and a star seen where it is opaque flies in front of the
- nebula), `start` ("focus", "whole"), `dolly`, `truck`, `truckAngleDegrees`,
+ nebula), `planes` (`[{mask, distanceParsecs, name}]`: each
+ `mask` an image, white where the image belongs to the plane and black
+ elsewhere, at any size of the image's shape, whose region is lifted off
+ the starless image onto a plane at `distanceParsecs`, what lay behind it
+ filled in from around it; `name`, the mask's file name if absent, names
+ it in events and the summary), `start` ("focus", "whole"), `dolly`, `truck`, `truckAngleDegrees`,
  `pan`, `zoom`, `zoomEnd`, `rotateDegrees` `[first, last]`, `easing`
  ("inOut", "linear"), `quality` ("standard", "high"), `growthLimit`,
  `fadeFrom`, `tour` (stops `[{focus, dolly, zoom, rotateDegrees, pan,
@@ -2241,7 +2246,8 @@ char *seiza_parallax_plan_tour_json(const char *request_json,
  `rotateDegrees` [0, 360] turns once anticlockwise and [0, -360] once
  clockwise, and a stop's `rotateDegrees` likewise. A field that would
  change the scene (the images, plate solution, catalogs, distances,
- `distanceFocus`, star placement, galaxies or dust) is refused: those
+ `distanceFocus`, star placement, galaxies, depth planes or dust) is
+ refused: those
  need a new preparation, except a dust map, which
  [`seiza_parallax_with_dust_map`] changes. The camera's `focus` only moves the camera; the
  nebula keeps the depth it was prepared at.
@@ -2279,7 +2285,8 @@ SeizaParallax *seiza_parallax_reconfigure_json(const SeizaParallax *video,
 /*
  What preparing the video found, as JSON: its frame count, frame rate
  and size, the stars found and matched, the nebula's distance with how
- and where (`backgroundFocus`) it was found, galaxies lifted, the dust
+ and where (`backgroundFocus`) it was found, galaxies lifted, the depth
+ planes lifted (`planes`, `[{name, distanceParsecs}]`), the dust
  (`dustTransmission` `{median, thickest}`, `dustGiven` when a map gave
  it, and `starsInFrontOfDust`, the stars it brought in front), objects
  labelled, the WCS used, and `fit`, how fitting the camera to the

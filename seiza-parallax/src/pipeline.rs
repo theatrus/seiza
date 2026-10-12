@@ -1,6 +1,7 @@
 //! A whole parallax video from a starless image, its stars and a plate
 //! solution: the stars' distances from Gaia and Hipparcos, the scene cut
-//! into depths, the dust, lifted galaxies and labels, then the frames.
+//! into depths, the dust, lifted galaxies, depth planes and labels, then
+//! the frames.
 //!
 //! [`Parallax::prepare`] does the work that comes once. [`Parallax::frame`]
 //! then draws any frame on request, and [`Parallax::render`] hands every
@@ -11,6 +12,7 @@ use crate::dust::{Dust, DustMap};
 use crate::field::{self, FieldSource};
 use crate::lift::Extent;
 use crate::overlay::{self, CustomLabel, Mark, Overlay};
+use crate::plane::{DepthPlane, Region};
 use crate::render::{Easing, Quality, Shot, Start, Stop};
 use crate::scene::{CutOptions, Scene, SmallStars, Star};
 use crate::tour::{self, AutoTour, PlannedStop};
@@ -257,6 +259,11 @@ pub struct SceneOptions {
     /// through it fly in front of the background, which the counted map
     /// never does.
     pub dust_map: Option<DustMap>,
+    /// Regions of the starless image lifted onto planes at their own
+    /// distances: clouds in front of the nebula or behind it. What lay
+    /// behind each is filled in from around it. Each costs a draw over as
+    /// much of the frame as it covers.
+    pub planes: Vec<DepthPlane>,
 }
 
 impl Default for SceneOptions {
@@ -277,6 +284,7 @@ impl Default for SceneOptions {
             dust: true,
             dust_opacity: 3.0,
             dust_map: None,
+            planes: Vec::new(),
         }
     }
 }
@@ -310,6 +318,18 @@ impl SceneOptions {
             .is_some_and(|(x, y)| !x.is_finite() || !y.is_finite())
         {
             return invalid("the distance focus must be a point");
+        }
+        for plane in &self.planes {
+            if !distance(plane.distance_pc) {
+                return Err(Error::Invalid(format!(
+                    "the depth plane {}'s distance must be a positive number of parsecs",
+                    plane.name
+                )));
+            }
+            plane
+                .mask
+                .check()
+                .map_err(|error| Error::Invalid(format!("{}: {error}", plane.name)))?;
         }
         Ok(())
     }
@@ -665,6 +685,8 @@ pub struct Summary {
     pub flying_stars: usize,
     /// Galaxies lifted onto the far field.
     pub galaxies_lifted: Vec<String>,
+    /// The depth planes lifted, by name, and their distances, parsecs.
+    pub planes: Vec<(String, f64)>,
     /// The dust map's median and least transmission, 0 to 1, if one was
     /// made.
     pub dust_transmission: Option<(f32, f32)>,
@@ -788,13 +810,25 @@ impl Parallax {
         }
         let (width, height) = (stars.width() as usize, stars.height() as usize);
         check_places(&video, (width, height))?;
-        // A map of the wrong shape is refused before the slow work.
+        // A map or mask of the wrong shape is refused before the slow work.
         let given_dust = scene_options
             .dust_map
             .as_ref()
             .map(|map| Dust::from_map(map, width, height).map(Arc::new))
             .transpose()
             .map_err(Error::Invalid)?;
+        let mut regions = Vec::new();
+        for plane in &scene_options.planes {
+            match Region::from_mask(&plane.mask, width, height)
+                .map_err(|error| Error::Invalid(format!("{}: {error}", plane.name)))?
+            {
+                Some(region) => regions.push((plane, region)),
+                None => report(Event::Warning(&format!(
+                    "the depth plane {}'s mask marks nothing; it is left out",
+                    plane.name
+                ))),
+            }
+        }
         let scale = wcs.scale_arcsec_per_px();
         if !(scale.is_finite() && scale > 0.0) {
             return Err(Error::Invalid(format!(
@@ -967,7 +1001,35 @@ impl Parallax {
                 )));
             }
         }
+        // The depth planes, smallest first: where one lies within another,
+        // the smaller takes its own light, and the larger the fill left
+        // behind it.
+        regions.sort_by(|(_, a), (_, b)| a.area().total_cmp(&b.area()));
+        let mut planes = Vec::new();
+        for (plane, region) in &regions {
+            match crate::lift_region(&mut starless, region, plane.distance_pc, &plane.name) {
+                Some(lifted) => {
+                    report(Event::Note(&format!(
+                        "depth plane {} at {:.0} pc, over {:.1}% of the image",
+                        plane.name,
+                        plane.distance_pc,
+                        100.0 * region.area() / (width * height) as f64
+                    )));
+                    planes.push(lifted);
+                }
+                None => report(Event::Warning(&format!(
+                    "nothing in the depth plane {} stands above the light around it; it is \
+                     left out",
+                    plane.name
+                ))),
+            }
+        }
         halt()?;
+        let cut = CutOptions {
+            max_stars: scene_options.max_stars,
+            small_stars: scene_options.small_stars,
+            ..CutOptions::default()
+        };
         let mut scene = Scene::new(
             &starless,
             &stars_light,
@@ -975,12 +1037,13 @@ impl Parallax {
             distance,
             unmatched,
             focal_px,
-            &CutOptions {
-                max_stars: scene_options.max_stars,
-                small_stars: scene_options.small_stars,
-                ..CutOptions::default()
-            },
+            &cut,
         );
+        summary.planes = planes
+            .iter()
+            .map(|plane| (plane.name.clone(), plane.distance_pc))
+            .collect();
+        scene = scene.with_planes(planes, cut.embedded);
         summary.flying_stars = scene.sprites.len();
         summary.galaxies_lifted = galaxies.iter().map(|(name, _, _)| name.clone()).collect();
         let lifted: Vec<overlay::Lifted> = galaxies
@@ -1757,6 +1820,7 @@ fn galaxies_in_image(
 mod tests {
     use super::*;
     use crate::FrameFn;
+    use crate::plane::PlaneMask;
     use seiza::catalog::{DistanceStar, StarDistanceCatalogBuilder};
 
     /// A small solved field: a smooth starless image, a stars image with a
@@ -1891,6 +1955,127 @@ mod tests {
         // The map in use, written out, is the one given.
         let map = clear.dust().unwrap().to_map(32, 24);
         assert!(map.opacity.iter().all(|&opacity| opacity == 0.0));
+    }
+
+    #[test]
+    fn depth_planes_lift_smallest_first_and_keep_the_first_frame() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut starless, stars, wcs, distances) = field(directory.path());
+        // A wide cloud with a bright knot in it.
+        for (x, y, pixel) in starless.enumerate_pixels_mut() {
+            let r2 = |cx: f64, cy: f64| (x as f64 - cx).powi(2) + (y as f64 - cy).powi(2);
+            let glow =
+                0.3 * (-r2(220.0, 120.0) / 1800.0).exp() + 0.4 * (-r2(205.0, 115.0) / 40.0).exp();
+            for value in pixel.0.iter_mut() {
+                *value = (*value + glow as f32).min(1.0);
+            }
+        }
+        let mut options = options(distances, directory.path());
+        // At full size, so the planes and the background draw from their
+        // finest levels.
+        options.video.size = (320, 240);
+        let plain =
+            Parallax::prepare(&starless, &stars, &wcs, &options, &mut |_| {}, &|| false).unwrap();
+        let mask = crate::plane::tests::disc;
+        options.scene.planes = vec![
+            DepthPlane {
+                mask: mask(320, 240, (220.0, 120.0), 75.0),
+                distance_pc: 1200.0,
+                name: "cloud".into(),
+            },
+            DepthPlane {
+                mask: mask(160, 120, (102.25, 57.25), 8.0),
+                distance_pc: 150.0,
+                name: "knot".into(),
+            },
+        ];
+        let mut notes = Vec::new();
+        let planed = Parallax::prepare(
+            &starless,
+            &stars,
+            &wcs,
+            &options,
+            &mut |event| {
+                if let Event::Note(note) = event {
+                    notes.push(note.to_string());
+                }
+            },
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(
+            planed.summary().planes,
+            [("knot".to_string(), 150.0), ("cloud".to_string(), 1200.0)]
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.starts_with("depth plane knot at 150 pc")),
+            "{notes:?}"
+        );
+        // The first frame is the photograph either way; the last is not.
+        let (first, also) = (plain.frame(0), planed.frame(0));
+        for (a, b) in first.pixels().zip(also.pixels()) {
+            for channel in 0..3 {
+                assert!(a.0[channel].abs_diff(b.0[channel]) <= 1, "{a:?} {b:?}");
+            }
+        }
+        let last = plain.frames() - 1;
+        assert_ne!(plain.frame(last), planed.frame(last));
+        // The knot's label would sit on its plane.
+        assert_eq!(planed.scene().depth_at(205.0, 115.0), 150.0);
+        assert_eq!(planed.scene().depth_at(250.0, 120.0), 1200.0);
+        assert_eq!(planed.scene().depth_at(20.0, 20.0), 400.0);
+    }
+
+    #[test]
+    fn a_plane_mask_of_the_wrong_shape_is_refused_and_an_empty_one_left_out() {
+        let directory = tempfile::tempdir().unwrap();
+        let (starless, stars, wcs, distances) = field(directory.path());
+        let mut options = options(distances, directory.path());
+        let plane = |mask: PlaneMask| DepthPlane {
+            mask,
+            distance_pc: 150.0,
+            name: "cloud".into(),
+        };
+        options.scene.planes = vec![plane(crate::plane::tests::disc(
+            100,
+            100,
+            (50.0, 50.0),
+            9.0,
+        ))];
+        let error = Parallax::prepare(&starless, &stars, &wcs, &options, &mut |_| {}, &|| false)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cloud: the plane mask is 100×100"),
+            "{error}"
+        );
+        options.scene.planes = vec![plane(crate::plane::tests::disc(32, 24, (-9.0, -9.0), 2.0))];
+        let mut warnings = Vec::new();
+        let video = Parallax::prepare(
+            &starless,
+            &stars,
+            &wcs,
+            &options,
+            &mut |event| {
+                if let Event::Warning(warning) = event {
+                    warnings.push(warning.to_string());
+                }
+            },
+            &|| false,
+        )
+        .unwrap();
+        assert!(video.summary().planes.is_empty());
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("marks nothing")),
+            "{warnings:?}"
+        );
+        options.scene.planes[0].distance_pc = -1.0;
+        assert!(options.check().is_err());
     }
 
     #[test]

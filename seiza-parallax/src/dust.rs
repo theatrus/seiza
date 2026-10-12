@@ -65,25 +65,11 @@ impl DustMap {
     /// each pixel's mean channel. Integer samples read as 0 to 1; float ones
     /// must already lie there, give or take a rounding.
     pub fn open(path: &Path) -> Result<Self, String> {
-        let image = seiza_image_io::open(path).map_err(|error| error.to_string())?;
-        let mut opacity = image.to_gray();
-        let (least, most) = opacity.iter().fold(
-            (f32::INFINITY, f32::NEG_INFINITY),
-            |(least, most), &value| (least.min(value), most.max(value)),
-        );
-        if !(least >= -SAMPLE_SLACK && most <= 1.0 + SAMPLE_SLACK) {
-            return Err(format!(
-                "the dust map {} runs from {least} to {most}; its values must lie between 0 \
-                 (clear) and 1 (opaque)",
-                path.display()
-            ));
-        }
-        for value in &mut opacity {
-            *value = value.clamp(0.0, 1.0);
-        }
+        let (width, height, opacity) =
+            open_unit_image(path, "dust map", "0 (clear) and 1 (opaque)")?;
         Ok(Self {
-            width: image.width,
-            height: image.height,
+            width,
+            height,
             opacity,
         })
     }
@@ -118,6 +104,42 @@ impl DustMap {
         }
         Ok(())
     }
+}
+
+/// The gray image at `path`, its format chosen by its extension, as its
+/// size and its values row by row, each 0 to 1. A colour image gives each
+/// pixel's mean channel. Integer samples read as 0 to 1; float ones must
+/// already lie there, give or take a rounding, or the error names it the
+/// `what` and says what 0 and 1 mean (`range`).
+pub(crate) fn open_unit_image(
+    path: &Path,
+    what: &str,
+    range: &str,
+) -> Result<(usize, usize, Vec<f32>), String> {
+    let image = seiza_image_io::open(path).map_err(|error| error.to_string())?;
+    let mut values = image.to_gray();
+    let (least, most) = values.iter().fold(
+        (f32::INFINITY, f32::NEG_INFINITY),
+        |(least, most), &value| (least.min(value), most.max(value)),
+    );
+    if !(least >= -SAMPLE_SLACK && most <= 1.0 + SAMPLE_SLACK) {
+        return Err(format!(
+            "the {what} {} runs from {least} to {most}; its values must lie between {range}",
+            path.display()
+        ));
+    }
+    for value in &mut values {
+        *value = value.clamp(0.0, 1.0);
+    }
+    Ok((image.width, image.height, values))
+}
+
+/// Whether a map of `map` pixels has the shape of an image of `image`
+/// pixels, near enough to span it.
+pub(crate) fn same_shape(map: (usize, usize), image: (usize, usize)) -> bool {
+    let shape = map.0 as f64 / map.1 as f64;
+    let wanted = image.0 as f64 / image.1 as f64;
+    (shape / wanted - 1.0).abs() <= SHAPE_TOLERANCE
 }
 
 /// The share of light a map's `opacity` lets through: [`LEAST`] where it
@@ -250,11 +272,7 @@ impl Dust {
         if width == 0 || height == 0 {
             return Err("the image is empty".into());
         }
-        let (shape, image) = (
-            map.width as f64 / map.height as f64,
-            width as f64 / height as f64,
-        );
-        if (shape / image - 1.0).abs() > SHAPE_TOLERANCE {
+        if !same_shape((map.width, map.height), (width, height)) {
             return Err(format!(
                 "the dust map is {}×{}, not the shape of the {width}×{height} image",
                 map.width, map.height

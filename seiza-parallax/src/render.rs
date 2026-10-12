@@ -361,13 +361,25 @@ impl Shot {
     }
 
     /// The depths whose edges must stay out of view: the background, the
-    /// leftover star light and the far sprites.
-    fn guarded_depths(&self, scene: &Scene) -> [f64; 3] {
-        [
-            scene.background_distance_pc,
-            scene.leftover_distance_pc,
-            scene.far_distance_pc,
-        ]
+    /// leftover star light and the far sprites, and the depth planes that
+    /// reach the image's edges, on those edges.
+    fn guarded_depths(&self, scene: &Scene) -> Vec<Guard> {
+        let mut guards = vec![
+            Guard::whole(scene.background_distance_pc),
+            Guard::whole(scene.leftover_distance_pc),
+            Guard::whole(scene.far_distance_pc),
+        ];
+        for plane in scene.planes.iter() {
+            let edges = plane.region.edges(scene.width(), scene.height());
+            if edges.contains(&true) {
+                guards.push(Guard {
+                    distance: plane.distance_pc,
+                    edges,
+                    fades: true,
+                });
+            }
+        }
+        guards
     }
 
     /// Whether every frame's view keeps every layer's edge out of sight, as
@@ -378,16 +390,17 @@ impl Shot {
     }
 
     /// Whether every frame's view lies inside the image at `depths`.
-    fn inside_throughout(&self, scene: &Scene, depths: &[f64]) -> bool {
+    fn inside_throughout(&self, scene: &Scene, depths: &[Guard]) -> bool {
         (0..self.frames)
             .into_par_iter()
             .all(|frame| self.inside(scene, &self.view(scene, frame), depths))
     }
 
-    /// Whether every corner of `view` lies inside the image at `depths`. A
-    /// whole-image start puts the corners on the image's edges, so rounding
-    /// a millionth of a pixel past them still counts as inside.
-    fn inside(&self, scene: &Scene, view: &View, depths: &[f64]) -> bool {
+    /// Whether every corner of `view` lies inside the guarded edges of the
+    /// image at `depths`, but for a plane gone from view. A whole-image
+    /// start puts the corners on the image's edges, so rounding a millionth
+    /// of a pixel past them still counts as inside.
+    fn inside(&self, scene: &Scene, view: &View, depths: &[Guard]) -> bool {
         const SLACK: f64 = 1e-6;
         let (width, height) = (
             scene.width() as f64 - 1.0 + SLACK,
@@ -399,10 +412,17 @@ impl Shot {
             (0.0, self.height as f64 - 1.0),
             (self.width as f64 - 1.0, self.height as f64 - 1.0),
         ];
-        depths.iter().all(|&distance| {
+        depths.iter().all(|guard| {
+            if guard.fades && self.plane_fade(view, guard.distance) <= 0.0 {
+                return true;
+            }
+            let [left, top, right, bottom] = guard.edges;
             corners.iter().all(|&(u, v)| {
-                let (x, y) = view.unproject(u, v, distance);
-                (-SLACK..=width).contains(&x) && (-SLACK..=height).contains(&y)
+                let (x, y) = view.unproject(u, v, guard.distance);
+                (!left || x >= -SLACK)
+                    && (!top || y >= -SLACK)
+                    && (!right || x <= width)
+                    && (!bottom || y <= height)
             })
         })
     }
@@ -737,7 +757,7 @@ impl Shot {
     fn zoom_stops(
         &self,
         scene: &Scene,
-        depths: &[f64],
+        depths: &[Guard],
         mut shot: Self,
         most: f64,
         halted: &dyn Fn() -> bool,
@@ -795,7 +815,22 @@ impl Shot {
     /// How much of a star drawn at `scale` output pixels per image pixel in
     /// `view` is left, 0 to 1: it fades as the camera passes it.
     pub fn star_fade(&self, view: &View, scale: f64) -> f64 {
-        let growth = view.growth(scale);
+        self.fade(view.growth(scale))
+    }
+
+    /// How much of a depth plane at `distance` is left in `view`, 0 to 1:
+    /// it fades as the camera passes through it, as a star does, and is
+    /// gone once behind the camera.
+    pub fn plane_fade(&self, view: &View, distance: f64) -> f64 {
+        let depth = distance - view.along;
+        if depth <= distance * 1e-3 {
+            return 0.0;
+        }
+        self.fade(distance / depth)
+    }
+
+    /// How much of a layer that has come `growth` times nearer is left.
+    fn fade(&self, growth: f64) -> f64 {
         if growth <= self.fade_from {
             1.0
         } else {
@@ -825,31 +860,116 @@ impl Shot {
     fn draw(&self, scene: &Scene, frame: usize, blend: bool) -> LightImage {
         let view = self.view(scene, frame);
         let mut out = LightImage::new(self.width, self.height);
+        let whole = |image, distance| Layer {
+            image,
+            at: (0, 0),
+            distance,
+            gain: 1.0,
+        };
         draw_plane(
             &mut out,
-            &scene.background,
+            whole(&scene.background, scene.background_distance_pc),
             &view,
-            scene.background_distance_pc,
             None,
             blend,
         );
-        // The leftover star light lies behind the dust when it lies beyond
-        // the background.
-        let behind = scene
-            .dust
-            .as_ref()
-            .filter(|_| scene.leftover_distance_pc > scene.background_distance_pc)
-            .map(|dust| (&**dust, scene.background_distance_pc));
+        // What lies beyond the background lies behind its dust.
+        let behind = |distance: f64| {
+            scene
+                .dust
+                .as_ref()
+                .filter(|_| distance > scene.background_distance_pc)
+                .map(|dust| (&**dust, scene.background_distance_pc))
+        };
         draw_plane(
             &mut out,
-            &scene.leftover,
+            whole(&scene.leftover, scene.leftover_distance_pc),
             &view,
-            scene.leftover_distance_pc,
-            behind,
+            behind(scene.leftover_distance_pc),
             blend,
         );
+        for plane in scene.planes.iter() {
+            let gain = self.plane_fade(&view, plane.distance_pc) as f32;
+            if gain <= 0.0 {
+                continue;
+            }
+            draw_plane(
+                &mut out,
+                Layer {
+                    image: &plane.image,
+                    at: (plane.left, plane.top),
+                    distance: plane.distance_pc,
+                    gain,
+                },
+                &view,
+                behind(plane.distance_pc),
+                blend,
+            );
+        }
         draw_sprites(&mut out, scene, &view, self);
         out
+    }
+}
+
+/// A depth whose layer's image edges must stay out of view: which of them,
+/// left, top, right and bottom, and whether the layer fades as the camera
+/// passes through it, and so needs no guard once gone.
+#[derive(Clone, Copy, Debug)]
+struct Guard {
+    distance: f64,
+    edges: [bool; 4],
+    fades: bool,
+}
+
+impl Guard {
+    /// A layer at `distance` that spans the image and never fades.
+    fn whole(distance: f64) -> Self {
+        Self {
+            distance,
+            edges: [true; 4],
+            fades: false,
+        }
+    }
+}
+
+/// A plane to draw: its image, the image pixel its top-left pixel lies on,
+/// its distance and the gain on its light.
+#[derive(Clone, Copy)]
+struct Layer<'a> {
+    image: &'a Pyramid,
+    at: (usize, usize),
+    distance: f64,
+    gain: f32,
+}
+
+impl Layer<'_> {
+    /// The output columns and rows, each from and to below, that the layer
+    /// can reach in `view` on a `width` × `height` frame: the box about its
+    /// projected corners, a pixel wider for the sampling.
+    fn reach(&self, view: &View, width: usize, height: usize) -> ((usize, usize), (usize, usize)) {
+        let base = self.image.base();
+        let (left, top) = (self.at.0 as f64 - 1.5, self.at.1 as f64 - 1.5);
+        let (right, bottom) = (
+            left + base.width as f64 + 2.0,
+            top + base.height as f64 + 2.0,
+        );
+        let (mut low, mut high) = (
+            (f64::INFINITY, f64::INFINITY),
+            (f64::NEG_INFINITY, f64::NEG_INFINITY),
+        );
+        for (x, y) in [(left, top), (right, top), (left, bottom), (right, bottom)] {
+            let Some((u, v, _)) = view.project(x, y, self.distance) else {
+                return ((0, 0), (0, 0));
+            };
+            low = (low.0.min(u), low.1.min(v));
+            high = (high.0.max(u), high.1.max(v));
+        }
+        let span = |low: f64, high: f64, size: usize| {
+            let first = low.floor().clamp(0.0, size as f64) as usize;
+            let last = (high.ceil() + 1.0).clamp(0.0, size as f64) as usize;
+            (first, last.max(first))
+        };
+        (span(low.0, high.0, width), span(low.1, high.1, height))
     }
 }
 
@@ -1152,22 +1272,22 @@ fn spin_share(elapsed: f64, hold: f64) -> f64 {
 /// Rows each parallel band of the frame covers.
 const BAND_ROWS: usize = 16;
 
-/// Draw the plane `image` at `distance`, and if `dust` gives the dust and
-/// the distance of the plane it lies on, in front, dim it by the change in
-/// the dust it shows through. With `blend`, sample the levels of detail
-/// either side of the view and blend them.
+/// Draw `layer`, and if `dust` gives the dust and the distance of the
+/// plane it lies on, in front, dim it by the change in the dust it shows
+/// through. With `blend`, sample the levels of detail either side of the
+/// view and blend them.
 fn draw_plane(
     out: &mut LightImage,
-    image: &Pyramid,
+    layer: Layer,
     view: &View,
-    distance: f64,
     dust: Option<(&Dust, f64)>,
     blend: bool,
 ) {
-    let Some(map) = view.plane_map(distance) else {
+    let Some(map) = view.plane_map(layer.distance) else {
         return;
     };
     let dust = dust.and_then(|(dust, at)| view.plane_map(at).map(|front| (dust, front)));
+    let image = layer.image;
     let footprint = map.across.0.hypot(map.across.1) as f32;
     let (finer, coarser, toward) = image.levels_between(footprint);
     let levels = if blend && toward > 0.0 {
@@ -1175,47 +1295,72 @@ fn draw_plane(
     } else {
         (image.level_for(footprint), None)
     };
+    let (columns, rows) = layer.reach(view, out.width, out.height);
+    if columns.0 >= columns.1 || rows.0 >= rows.1 {
+        return;
+    }
+    let plan = RowPlan {
+        map,
+        at: (layer.at.0 as f64, layer.at.1 as f64),
+        columns,
+        gain: layer.gain,
+    };
     let width = out.width;
     out.pixels
         .par_chunks_mut(width)
         .enumerate()
+        .skip(rows.0)
+        .take(rows.1 - rows.0)
         .for_each(|(row, pixels)| {
-            plane_row(pixels, row, map, levels, dust);
+            plane_row(pixels, row, plan, levels, dust);
         });
 }
 
 /// A level of detail and its scale relative to the base.
 type Level<'a> = (&'a LightImage, f32);
 
-/// One row of [`draw_plane`]: output row `row` shows the plane as `map`
+/// How [`plane_row`] draws a plane: which point of it each output pixel
+/// shows, the image pixel its image's top-left pixel lies on, the output
+/// columns it can reach, from and to below, and the gain on its light.
+#[derive(Clone, Copy)]
+struct RowPlan {
+    map: PlaneMap,
+    at: (f64, f64),
+    columns: (usize, usize),
+    gain: f32,
+}
+
+/// One row of [`draw_plane`]: output row `row` shows the plane as `plan`
 /// has it, sampled from a level of detail, blended `toward` a coarser one
-/// if given, and the dust as its map has it. Built for wider vector units too, and picked at run
-/// time; it must do the work itself, as a closure it handed on would be
-/// built without them.
+/// if given, and the dust as its map has it. Built for wider vector units
+/// too, and picked at run time; it must do the work itself, as a closure
+/// it handed on would be built without them.
 #[multiversion::multiversion(targets("x86_64+avx2+fma", "x86_64+sse4.1"))]
 fn plane_row(
     pixels: &mut [[f32; 3]],
     row: usize,
-    map: PlaneMap,
+    plan: RowPlan,
     ((level, level_scale), coarser): (Level, Option<(Level, f32)>),
     dust: Option<(&Dust, PlaneMap)>,
 ) {
     let row = row as f64;
-    for (column, pixel) in pixels.iter_mut().enumerate() {
-        let (x, y) = map.at(column as f64, row);
-        let mut light = Pyramid::sample_level(level, level_scale, x as f32, y as f32);
+    let (first, last) = plan.columns;
+    for (column, pixel) in (first..last).zip(&mut pixels[first..last]) {
+        let (x, y) = plan.map.at(column as f64, row);
+        let (px, py) = ((x - plan.at.0) as f32, (y - plan.at.1) as f32);
+        let mut light = Pyramid::sample_level(level, level_scale, px, py);
         if let Some(((coarse, coarse_scale), toward)) = coarser {
-            let other = Pyramid::sample_level(coarse, coarse_scale, x as f32, y as f32);
+            let other = Pyramid::sample_level(coarse, coarse_scale, px, py);
             for channel in 0..3 {
                 light[channel] += (other[channel] - light[channel]) * toward;
             }
         }
+        let mut gain = plan.gain;
         if let Some((dust, front)) = dust {
-            let change = dust.change((x, y), front.at(column as f64, row));
-            light = light.map(|value| value * change);
+            gain *= dust.change((x, y), front.at(column as f64, row));
         }
         for channel in 0..3 {
-            pixel[channel] += light[channel];
+            pixel[channel] += light[channel] * gain;
         }
     }
 }
@@ -1491,6 +1636,7 @@ fn splat_sprite(pixels: &mut [[f32; 3]], width: usize, first: usize, rows: usize
 mod tests {
     use super::*;
     use crate::scene::{CutOptions, Star};
+    use std::sync::Arc;
 
     fn scene_with(stars: &[Star]) -> Scene {
         let (width, height) = (400, 300);
@@ -1552,6 +1698,146 @@ mod tests {
             (x as i64 - 100).abs() <= 1 && (y as i64 - 75).abs() <= 1,
             "{x} {y}"
         );
+    }
+
+    /// A scene without stars whose starless image, a gradient with a soft
+    /// cloud at `(150, 150)`, has the cloud lifted onto a plane at
+    /// `distance` pc, or left on the background if `None`.
+    fn clouded(distance: Option<f64>) -> Scene {
+        let (width, height) = (400, 300);
+        let mut starless = LightImage::new(width, height);
+        for (index, pixel) in starless.pixels.iter_mut().enumerate() {
+            let (x, y) = (index % width, index / width);
+            let r2 = (x as f64 - 150.0).powi(2) + (y as f64 - 150.0).powi(2);
+            let cloud = (0.8 * (-r2 / 200.0).exp()) as f32;
+            *pixel = [
+                x as f32 / width as f32 + cloud,
+                y as f32 / height as f32 + cloud,
+                0.2 + cloud,
+            ];
+        }
+        let planes = distance.map(|distance| {
+            let mask = crate::plane::tests::disc(width, height, (150.0, 150.0), 45.0);
+            let region = crate::Region::from_mask(&mask, width, height)
+                .unwrap()
+                .unwrap();
+            crate::lift_region(&mut starless, &region, distance, "cloud").unwrap()
+        });
+        let scene = Scene::new(
+            &starless,
+            &LightImage::new(width, height),
+            &[],
+            400.0,
+            400.0,
+            2000.0,
+            &CutOptions::default(),
+        );
+        scene.with_planes(planes.into_iter().collect(), 0.02)
+    }
+
+    #[test]
+    fn a_plane_keeps_the_first_frame_and_moves_at_its_own_depth() {
+        let (flat, near) = (clouded(None), clouded(Some(100.0)));
+        // Full size, so both draw from their finest level.
+        let shot = Shot {
+            focus: (199.5, 149.5),
+            dolly: 0.0,
+            truck: (0.002, 0.0),
+            width: 400,
+            height: 300,
+            frames: 3,
+            easing: Easing::Linear,
+            ..Shot::default()
+        };
+        let (a, b) = (shot.render(&flat, 0), shot.render(&near, 0));
+        for (a, b) in a.pixels.iter().zip(&b.pixels) {
+            for channel in 0..3 {
+                assert!((a[channel] - b[channel]).abs() < 1e-4, "{a:?} {b:?}");
+            }
+        }
+        // At the truck's widest swing the cloud is where its own depth puts
+        // it, not where the background's would.
+        let view = shot.view(&near, 1);
+        let at_plane = view.project(150.0, 150.0, 100.0).unwrap();
+        let at_background = view.project(150.0, 150.0, 400.0).unwrap();
+        assert!((at_plane.0 - at_background.0).abs() > 8.0);
+        let (x, y) = brightest(&shot.render(&near, 1));
+        assert!(
+            (x as f64 - at_plane.0).abs() <= 1.0 && (y as f64 - at_plane.1).abs() <= 1.0,
+            "{x} {y} {at_plane:?}"
+        );
+    }
+
+    #[test]
+    fn a_plane_fades_as_the_camera_passes_through_it() {
+        let near = clouded(Some(100.0));
+        let mut bare = near.clone();
+        bare.planes = Arc::new(Vec::new());
+        // The camera flies to 96 pc, 4 short of the plane: 25 times nearer.
+        let shot = Shot {
+            focus: (199.5, 149.5),
+            dolly: 0.24,
+            truck: (0.0, 0.0),
+            width: 200,
+            height: 150,
+            frames: 3,
+            ..Shot::default()
+        };
+        assert_eq!(shot.plane_fade(&shot.view(&near, 0), 100.0), 1.0);
+        let last = shot.view(&near, 2);
+        assert_eq!(shot.plane_fade(&last, 100.0), 0.0);
+        assert_eq!(shot.render(&near, 2), shot.render(&bare, 2));
+        // Past it, it is behind the camera.
+        let past = Shot {
+            dolly: 0.3,
+            ..shot.clone()
+        };
+        assert_eq!(past.plane_fade(&past.view(&near, 2), 100.0), 0.0);
+    }
+
+    #[test]
+    fn a_plane_cut_by_the_image_edge_keeps_that_edge_out_of_view() {
+        // A near cloud running off the image's right edge.
+        let (width, height) = (400, 300);
+        let mut starless = LightImage::new(width, height);
+        for (index, pixel) in starless.pixels.iter_mut().enumerate() {
+            let x = (index % width) as f32;
+            *pixel = [0.2 + 0.3 * (x / width as f32).powi(4); 3];
+        }
+        let mask = crate::plane::tests::disc(width, height, (399.0, 150.0), 80.0);
+        let region = crate::Region::from_mask(&mask, width, height)
+            .unwrap()
+            .unwrap();
+        let plane = crate::lift_region(&mut starless, &region, 100.0, "cloud").unwrap();
+        let bare = Scene::new(
+            &starless,
+            &LightImage::new(width, height),
+            &[],
+            400.0,
+            450.0,
+            2000.0,
+            &CutOptions::default(),
+        );
+        let clouded = bare.clone().with_planes(vec![plane], 0.02);
+        let shot = Shot {
+            focus: (199.5, 149.5),
+            dolly: 0.0,
+            truck: (0.05, 0.0),
+            zoom: 2.0,
+            width: 200,
+            height: 150,
+            frames: 9,
+            ..Shot::default()
+        };
+        let guards = shot.guarded_depths(&clouded);
+        assert_eq!(guards.len(), 4);
+        assert_eq!(guards[3].edges, [false, false, true, false]);
+        // Moving right, the near cloud's cut edge would slide into view
+        // well before the background's.
+        let (_, free) = shot.fitted(&bare);
+        let (fitted, held) = shot.fitted(&clouded);
+        assert!(held < 0.5 * free, "{held} {free}");
+        assert!(fitted.stays_inside(&clouded));
     }
 
     #[test]
@@ -2081,7 +2367,10 @@ mod tests {
         // Every frame's corners, on the far layer, stay inside.
         for frame in 0..fitted.frames {
             let view = fitted.view(&scene, frame);
-            assert!(fitted.inside(&scene, &view, &[4000.0]), "frame {frame}");
+            assert!(
+                fitted.inside(&scene, &view, &[Guard::whole(4000.0)]),
+                "frame {frame}"
+            );
         }
         let gentle = Shot {
             truck: (0.0001, 0.0),

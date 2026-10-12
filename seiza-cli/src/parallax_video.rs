@@ -242,8 +242,8 @@ pub(crate) struct ParallaxVideoArgs {
     #[arg(long, conflicts_with = "starless")]
     keep_split: bool,
     /// Write the scene's layers to this directory as PNG files: the
-    /// background, the star light no star took, and the stars cut out,
-    /// marked by their distance
+    /// background, the star light no star took, the stars cut out, marked
+    /// by their distance, and each depth plane
     #[arg(long)]
     debug_layers: Option<PathBuf>,
     /// Leave galaxies in the starless image, on the nebula's plane, rather
@@ -273,6 +273,15 @@ pub(crate) struct ParallaxVideoArgs {
     /// Without -o, write it and stop
     #[arg(long, conflicts_with = "no_dust")]
     export_dust_map: Option<PathBuf>,
+    /// A region of the image at a distance of its own, `MASK=PARSECS`: an
+    /// image, white where the image belongs to the region and black
+    /// elsewhere, at any size of the image's shape (PNG, JPEG, TIFF, FITS
+    /// or XISF). The region is lifted off the starless image onto a plane
+    /// at that distance, and what lay behind it is filled in from around
+    /// it, so a cloud in front of the nebula grows and slides past it as
+    /// the camera moves. Repeat for more
+    #[arg(long = "plane", value_parser = parse_plane)]
+    planes: Vec<(PathBuf, f64)>,
     /// Label the catalogued objects in the field as Seiza's image overlays
     /// do. Each label moves with the layer that shows its object and fades
     /// as it leaves the view; once the camera is inside an object, its name
@@ -346,6 +355,24 @@ fn parse_point(text: &str) -> std::result::Result<(f64, f64), String> {
     Ok((number(x)?, number(y)?))
 }
 
+/// A `--plane` as `MASK=PARSECS`: the mask's path and the plane's
+/// distance.
+fn parse_plane(text: &str) -> std::result::Result<(PathBuf, f64), String> {
+    let (path, distance) = text
+        .rsplit_once('=')
+        .ok_or_else(|| format!("expected MASK=PARSECS; got {text}"))?;
+    let distance: f64 = distance
+        .trim()
+        .parse()
+        .map_err(|error| format!("{distance}: {error}"))?;
+    if path.is_empty() || !(distance.is_finite() && distance > 0.0) {
+        return Err(format!(
+            "expected MASK=PARSECS, a mask and a positive distance; got {text}"
+        ));
+    }
+    Ok((PathBuf::from(path), distance))
+}
+
 /// Open a stretched image with values 0 to 1, as RGB: PNG, JPEG or TIFF
 /// in its EXIF orientation, or FITS or XISF.
 fn open_display(path: &Path) -> Result<Rgb32FImage> {
@@ -367,6 +394,16 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
     if let Some(path) = &args.dust_map {
         options.scene.dust_map =
             Some(seiza_parallax::DustMap::open(path).map_err(anyhow::Error::msg)?);
+    }
+    for (path, distance) in &args.planes {
+        options.scene.planes.push(seiza_parallax::DepthPlane {
+            mask: seiza_parallax::PlaneMask::open(path).map_err(anyhow::Error::msg)?,
+            distance_pc: *distance,
+            name: path.file_stem().map_or_else(
+                || path.display().to_string(),
+                |stem| stem.to_string_lossy().into_owned(),
+            ),
+        });
     }
     options.check()?;
     // Everything that would refuse the video at the end is asked first: the
@@ -673,6 +710,7 @@ fn options(args: &ParallaxVideoArgs, file: Option<TourFile>) -> ParallaxOptions 
             dust: !args.no_dust,
             dust_opacity: args.dust_opacity,
             dust_map: None,
+            planes: Vec::new(),
         },
         video: VideoOptions {
             focus: args.focus,
@@ -888,6 +926,17 @@ fn write_layers(directory: &Path, scene: &Scene) -> Result<()> {
         }
     }
     save("sprites.png", &sprites)?;
+    // Each depth plane in its place.
+    for (index, plane) in scene.planes.iter().enumerate() {
+        let mut image = LightImage::new(scene.width(), scene.height());
+        let base = plane.base();
+        for y in 0..base.height {
+            let at = (plane.top + y) * image.width + plane.left;
+            image.pixels[at..at + base.width]
+                .copy_from_slice(&base.pixels[y * base.width..(y + 1) * base.width]);
+        }
+        save(&format!("plane-{}.png", index + 1), &image)?;
+    }
     // The dust at its own cells, white where opaque, as --export-dust-map
     // writes it.
     if let Some(dust) = &scene.dust {
@@ -950,6 +999,21 @@ fn openh264(_output: &Path, _settings: VideoSettings) -> Result<Box<dyn FrameSin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn planes_parse() {
+        assert_eq!(
+            parse_plane("masks/m20=1.5e3"),
+            Ok((PathBuf::from("masks/m20"), 1500.0))
+        );
+        assert_eq!(
+            parse_plane("a=b.png=410"),
+            Ok((PathBuf::from("a=b.png"), 410.0))
+        );
+        assert!(parse_plane("m20.png").is_err());
+        assert!(parse_plane("m20.png=-5").is_err());
+        assert!(parse_plane("=410").is_err());
+    }
 
     #[test]
     fn points_parse() {

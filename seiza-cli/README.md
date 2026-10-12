@@ -474,9 +474,32 @@ seiza parallax-video m45.tif --starless m45-starless.tif --stars m45-stars.tif \
   --dust-map m45-dust-painted.xisf --output m45.mp4
 ```
 
+`--plane MASK=PARSECS` puts a region of the image at a distance of its own.
+The mask is an image of the image's shape, at any size, white where the
+image belongs to the region and black elsewhere, with grays for a soft edge
+(PNG, JPEG, TIFF, FITS or XISF). The region's light is lifted off the
+starless image onto a plane at that distance, and what lay behind it is
+filled in from the light around it, so the first frame is still the
+photograph. As the camera moves, a cloud in front of the nebula grows and
+slides past it, and a cloud behind it barely moves. A plane takes only the
+light that stands above what fills in behind it, so a dark cloud, which
+blocks light rather than giving it, gives its plane nothing. Repeat the
+option for more planes; where one lies inside another, the smaller keeps
+its own light and the larger takes the rest. A star within 2% of a plane's
+distance, inside the plane, joins it, and a label on a plane moves with it.
+A plane fades as the camera flies through it, and where the image's edge
+cuts a plane off, the camera keeps that edge out of view, as it does the
+far star field's. Each plane costs a draw over the share of the frame it
+covers:
+
+```
+seiza parallax-video field.tif --starless field-starless.tif --stars field-stars.tif \
+  --plane near-cloud.png=900 --plane far-shell.png=2400 --output field.mp4
+```
+
 `--debug-layers DIR` writes the background, the leftover star light, every
-cut-out star tinted by distance, and the dust (white where opaque), for
-checking a result.
+cut-out star tinted by distance, each depth plane, and the dust (white where
+opaque), for checking a result.
 
 `--overlay` labels the catalogued objects in the field the way Seiza's image
 overlays do, with the same colours, names, outlines and ranking. Each label

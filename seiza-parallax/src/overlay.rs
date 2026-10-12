@@ -93,9 +93,9 @@ pub(crate) struct Mark {
     star: bool,
 }
 
-/// A label of the caller's own on the nebula's plane, at image pixel
-/// `(x, y)`, circling `radius` pixels about it, or with a radius of zero
-/// only the text, centred on the point.
+/// A label of the caller's own at image pixel `(x, y)`, on the plane the
+/// image shows there, circling `radius` pixels about it, or with a radius
+/// of zero only the text, centred on the point.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CustomLabel {
     pub x: f64,
@@ -150,7 +150,8 @@ pub fn parse_color(text: &str) -> std::result::Result<Rgb<u8>, String> {
     Ok(Rgb([channel(0), channel(2), channel(4)]))
 }
 
-/// The caller's labels, on the nebula's plane.
+/// The caller's labels, each on the plane the image shows at its point: a
+/// depth plane there, else the nebula's.
 pub(crate) fn custom_marks(labels: &[CustomLabel], color: Rgb<u8>, scene: &Scene) -> Vec<Mark> {
     labels
         .iter()
@@ -159,7 +160,7 @@ pub(crate) fn custom_marks(labels: &[CustomLabel], color: Rgb<u8>, scene: &Scene
             color,
             x: label.x,
             y: label.y,
-            distance_pc: scene.background_distance_pc,
+            distance_pc: scene.depth_at(label.x, label.y),
             marker: Marker::Circle(label.radius),
             extent: (0.0, 0.0),
             object: None,
@@ -171,8 +172,8 @@ pub(crate) fn custom_marks(labels: &[CustomLabel], color: Rgb<u8>, scene: &Scene
 /// The catalogued objects in a `dimensions` image, each at the depth of the
 /// layer that shows it: a named star at the distance of its sprite, a
 /// galaxy lifted onto the far field where `lifted` put it, with its other
-/// listings and the objects within it, and everything else on the nebula's
-/// plane.
+/// listings and the objects within it, and everything else on the plane
+/// the image shows at its centre, a depth plane or the nebula's.
 pub(crate) fn catalog_marks(
     catalog: &ObjectCatalog,
     wcs: &Wcs,
@@ -191,7 +192,7 @@ pub(crate) fn catalog_marks(
         }
         let star = matches!(object.kind, ObjectKind::Star | ObjectKind::DoubleStar);
         let (mut x, mut y) = (placed.x, placed.y);
-        let mut distance_pc = scene.background_distance_pc;
+        let mut distance_pc = scene.depth_at(x, y);
         if star {
             // The sprite drawn for it, if one is near enough.
             let reach = 4.0_f64.max(placed.semi_major_px);

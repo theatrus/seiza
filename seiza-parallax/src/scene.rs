@@ -1,8 +1,10 @@
 //! The layers a fly-through moves: the starless image as a plane at the
-//! target's distance, and every star cut out of the star image at its own.
+//! target's distance, any regions of it lifted onto planes at their own,
+//! and every star cut out of the star image at its own.
 
 use crate::dust::Dust;
 use crate::light::{LightImage, Pyramid};
+use crate::plane::Plane;
 use rayon::prelude::*;
 use std::sync::Arc;
 
@@ -155,6 +157,10 @@ pub struct Scene {
     /// background, where it would grow with a nearby nebula.
     pub leftover: Arc<Pyramid>,
     pub sprites: Arc<Vec<Sprite>>,
+    /// Regions lifted off the starless image onto planes at distances of
+    /// their own, smallest first: clouds in front of the target or behind
+    /// it. [`Scene::new`] leaves none; [`Scene::with_planes`] adds them.
+    pub planes: Arc<Vec<Plane>>,
     /// Distance of the background plane, parsecs.
     pub background_distance_pc: f64,
     /// Distance of the leftover star light, parsecs.
@@ -397,12 +403,60 @@ impl Scene {
             leftover: Arc::new(Pyramid::new(leftover)),
             foreground_distance_pc: foreground_distance(&sprites, background_distance_pc),
             sprites: Arc::new(sprites),
+            planes: Arc::new(Vec::new()),
             background_distance_pc,
             leftover_distance_pc,
             focal_px,
             far_distance_pc,
             dust: None,
         }
+    }
+
+    /// This scene with `planes`, lifted off the starless image it was cut
+    /// from, smallest first. A star within `embedded` of a plane's distance,
+    /// where the plane takes at least half the pixel, joins it, as a star at
+    /// the background's distance joins the background: most often the star
+    /// lighting a reflection nebula.
+    pub fn with_planes(mut self, mut planes: Vec<Plane>, embedded: f64) -> Self {
+        let sprites = Arc::make_mut(&mut self.sprites);
+        let mut joining: Vec<Vec<&Sprite>> = vec![Vec::new(); planes.len()];
+        let mut kept = Vec::with_capacity(sprites.len());
+        for sprite in sprites.iter() {
+            let plane = planes.iter().position(|plane| {
+                !sprite.lifted
+                    && (sprite.distance_pc - plane.distance_pc).abs()
+                        <= embedded * plane.distance_pc
+                    && plane.region.covers(sprite.x, sprite.y) >= 0.5
+            });
+            if let Some(plane) = plane {
+                joining[plane].push(sprite);
+            }
+            kept.push(plane.is_none());
+        }
+        for (plane, joining) in planes.iter_mut().zip(&joining) {
+            if !joining.is_empty() {
+                plane.take(joining);
+            }
+        }
+        let mut kept = kept.into_iter();
+        sprites.retain(|_| kept.next().unwrap_or(true));
+        self.planes = Arc::new(planes);
+        self
+    }
+
+    /// The first plane that takes at least half of the pixel at image
+    /// point `(x, y)`: the smallest, if they overlap.
+    pub fn plane_at(&self, x: f64, y: f64) -> Option<&Plane> {
+        self.planes
+            .iter()
+            .find(|plane| plane.region.covers(x, y) >= 0.5)
+    }
+
+    /// The distance of what the starless image shows at image point
+    /// `(x, y)`: the plane there, else the background.
+    pub fn depth_at(&self, x: f64, y: f64) -> f64 {
+        self.plane_at(x, y)
+            .map_or(self.background_distance_pc, |plane| plane.distance_pc)
     }
 
     /// Where `sprite` flies: at its own distance, unless it is a star behind
@@ -718,6 +772,48 @@ mod tests {
         );
         assert_eq!(scene.sprites.len(), 1);
         assert_eq!(scene.sprites[0].distance_pc, 136.0);
+    }
+
+    #[test]
+    fn a_star_at_a_planes_distance_joins_it() {
+        // A cloud lit by a star at its own distance, and a star in front of
+        // it that is not.
+        let (width, height) = (200, 160);
+        let light = gaussian_stars(width, height, &[(80.0, 70.0, 2.0), (95.0, 70.0, 2.0)]);
+        let mut starless = gaussian_stars(width, height, &[]);
+        for (index, pixel) in starless.pixels.iter_mut().enumerate() {
+            let (x, y) = ((index % width) as f64, (index / width) as f64);
+            *pixel = [(0.2 + 0.5 * (-((x - 80.0).powi(2) + (y - 70.0).powi(2)) / 200.0).exp())
+                as f32; 3];
+        }
+        let stars = [(80.0, 70.0, Some(151.0)), (95.0, 70.0, Some(60.0))]
+            .map(|(x, y, distance_pc)| Star { x, y, distance_pc });
+        let mask = crate::plane::tests::disc(width, height, (80.0, 70.0), 30.0);
+        let region = crate::Region::from_mask(&mask, width, height)
+            .unwrap()
+            .unwrap();
+        let plane = crate::lift_region(&mut starless, &region, 150.0, "cloud").unwrap();
+        let before: f32 = plane.base().pixels.iter().map(|pixel| pixel[0]).sum();
+        let scene = Scene::new(
+            &starless,
+            &light,
+            &stars,
+            400.0,
+            900.0,
+            500.0,
+            &CutOptions::default(),
+        )
+        .with_planes(vec![plane], CutOptions::default().embedded);
+        // The lighting star went onto the cloud's plane; the other flies.
+        assert_eq!(scene.sprites.len(), 1);
+        assert_eq!(scene.sprites[0].distance_pc, 60.0);
+        let plane = &scene.planes[0];
+        let after: f32 = plane.base().pixels.iter().map(|pixel| pixel[0]).sum();
+        assert!(after > before + 10.0, "{before} {after}");
+        // Labels and the like find the plane's depth over it alone.
+        assert_eq!(scene.depth_at(80.0, 70.0), 150.0);
+        assert_eq!(scene.depth_at(150.0, 70.0), 400.0);
+        assert!(scene.plane_at(150.0, 70.0).is_none());
     }
 
     #[test]

@@ -3,7 +3,8 @@
 `seiza-parallax` renders fly-through videos of stretched astrophotographs.
 An image is split into its starless image and its stars, for example with
 StarXTerminator's "unscreen" star image. The starless image becomes a plane at
-the target's distance, each star is cut out and placed at its own distance, and
+the target's distance, regions of it may be lifted onto planes at their own,
+each star is cut out and placed at its own distance, and
 a camera flies toward a point of the target. Nearer stars spread out and grow
 as it approaches, while the distant star field barely moves.
 
@@ -25,6 +26,18 @@ both, matching stars to Gaia DR3 for their Bailer-Jones distances.
 - **Galaxies:** `lift_object` takes an extended object, such as a galaxy a
   star remover left in the starless image, out onto a sprite of its own at
   its distance, and fills the nebula in behind it from around it.
+- **Depth planes:** `lift_region` lifts a region of the starless image onto
+  a `Plane` at its own distance: a cloud in front of the target or behind
+  it. A `PlaneMask`, an image white where the region is, becomes a `Region`
+  at the image's size. What lay behind the region is filled in by
+  push-pull: the light around the hole is averaged into coarser and coarser
+  levels and blended back down, so the fill is smooth deep in the hole and
+  close to the light at its edge. `Scene::with_planes` adds the planes,
+  smallest first; a star at a plane's distance, inside it, joins it, and
+  `Scene::depth_at` gives the depth under a point. Each plane is drawn in
+  perspective over the part of the frame it reaches and fades as the
+  camera flies through it, and `Shot::fitted` keeps the edges where the
+  image cuts a plane off out of view.
 - **Dust:** `Dust::from_star_counts` maps the dust's transmission from how
   few stars show through it, and `Dust::with_darkness` adds globules too
   small for the counts: darker than their surroundings and short of stars.

@@ -180,8 +180,10 @@ exposes the **superset** of what both apps need.
   `seiza_parallax_free`, and reports each step as JSON to a
   `SeizaParallaxEventCallback`. `distanceFocus` is where the nebula's
   distance is measured; `focus` only aims the camera, so a new destination
-  never changes the scene's depth. `seiza_parallax_summary_json` says what it
-  found, with `fit`: each zoom and pan as asked and as used, after the camera
+  never changes the scene's depth. `planes` (`[{mask, distanceParsecs,
+  name}]`) lifts regions of the image, each marked by a mask image, onto
+  planes at their own distances. `seiza_parallax_summary_json` says what it
+  found, its `planes` among it, with `fit`: each zoom and pan as asked and as used, after the camera
   was fitted to stay inside the image, so an app can explain a change to the
   framing it asked for, and `inside`, false when some frames still show past
   the image's edge. `seiza_parallax_reconfigure_json` films the same
@@ -193,7 +195,7 @@ exposes the **superset** of what both apps need.
   catalogue labels with the first, which stays valid and can draw frames at
   the same time; the scene is freed with the last handle. Fields that change
   the scene (distances and their sources, `distanceFocus`, star placement,
-  galaxies, dust) are an error that says to prepare again. Its
+  galaxies, depth planes, dust) are an error that says to prepare again. Its
   `SeizaCancelSignal` stops it. `seiza_parallax_plan_tour_json` plans a
   tour of the catalogued objects in the field (`autoTour`) and returns it
   as JSON to edit, each target's stop titled with its name; its `tour`

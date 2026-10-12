@@ -12,7 +12,8 @@
 //!
 //! [`Parallax`] makes a whole video from the split image and its plate
 //! solution, as `seiza parallax-video` does: it finds the stars' distances,
-//! lifts galaxies onto the far field, maps the dust and labels the objects,
+//! lifts galaxies onto the far field and any regions given onto planes at
+//! their own distances, maps the dust and labels the objects,
 //! then draws frames on request or hands them in turn to a [`FrameSink`],
 //! which may be the caller's own encoder. The pieces below it, [`Scene`]
 //! and [`Shot`], serve a caller who places the stars itself.
@@ -33,6 +34,7 @@ pub mod lift;
 pub mod light;
 pub mod overlay;
 pub mod pipeline;
+pub mod plane;
 pub mod render;
 pub mod scene;
 pub mod tour;
@@ -52,6 +54,7 @@ pub use pipeline::{
     Event, FitSummary, Parallax, ParallaxOptions, PlannedTour, SceneOptions, StopFit, Summary,
     TourStop, VideoOptions, format_stop, parse_stop, plan_tour,
 };
+pub use plane::{DepthPlane, Plane, PlaneMask, Region, lift_region};
 pub use render::{Easing, Quality, Shot, Start, Stop, View};
 pub use scene::{CutOptions, Scene, SmallStars, Sprite, Star};
 pub use seiza_stars::PeakStar;
