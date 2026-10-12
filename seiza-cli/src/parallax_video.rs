@@ -1195,16 +1195,21 @@ mod tests {
         assert!(parse_object_distance("Sh2-170").is_err());
         let directory = tempfile::tempdir().unwrap();
         let file = directory.path().join("planes.txt");
+        // A path from elsewhere, absolute on any platform.
+        let elsewhere = directory.path().join("elsewhere").join("m.png");
         std::fs::write(
             &file,
-            "\u{feff}# planes\nsh2-170.png=2790  # Sh2-170, measured\n\n/abs/m.png=300\n",
+            format!(
+                "\u{feff}# planes\nsh2-170.png=2790  # Sh2-170, measured\n\n{}=300\n",
+                elsewhere.display()
+            ),
         )
         .unwrap();
         assert_eq!(
             read_plane_file(&file).unwrap(),
             [
                 (directory.path().join("sh2-170.png"), 2790.0),
-                (PathBuf::from("/abs/m.png"), 300.0)
+                (elsewhere, 300.0)
             ]
         );
         assert_eq!(mask_name("Sh2-170"), "sh2-170");
