@@ -1342,10 +1342,20 @@ fn tour_path(tour: &[Stop], times: &[(f64, f64)], glide: f64, looped: bool, now:
         } else {
             0.5
         };
-        let start: TourState =
+        let mut start: TourState =
             std::array::from_fn(|k| states[index][k] - drift[k] * covered * before);
         let mut end: TourState = std::array::from_fn(|k| start[k] + drift[k] * covered);
         end[2] += push;
+        // A stop on a depth plane keeps its own share of the turn through
+        // its hold, as the hold below draws it, so the camera reaches and
+        // leaves it where the hold begins and ends. The drift alone would
+        // leave from another share, and close to the plane a little more
+        // or less turn swings the view across the frame.
+        if on_plane(stop) {
+            let share = pan_share(&states[index]);
+            start[5] = (share * start[2].exp()).clamp(0.0, 1.0);
+            end[5] = (share * end[2].exp()).clamp(0.0, 1.0);
+        }
         reach.push(start);
         leave.push(end);
         pace.push(drift);
@@ -1373,7 +1383,7 @@ fn tour_path(tour: &[Stop], times: &[(f64, f64)], glide: f64, looped: bool, now:
                 // A stop on a depth plane turns in step with its push, so
                 // the camera keeps to its line of sight.
                 if on_plane(&tour[index]) {
-                    state[5] = (pan_share(&reach[index]) * state[2].exp()).clamp(0.0, 1.0);
+                    state[5] = (pan_share(&states[index]) * state[2].exp()).clamp(0.0, 1.0);
                 }
                 return state;
             }
@@ -2885,6 +2895,52 @@ mod tour_tests {
         for depth in [0.5, 3.0] {
             let aim = aim_through(100.0, depth, (0.4, 0.4), (299.5, 299.5));
             assert!((aim - 100.0).abs() < 1e-9, "{depth}: {aim}");
+        }
+    }
+
+    #[test]
+    fn a_stop_on_a_depth_plane_leaves_where_its_hold_ends() {
+        // A close stop on a plane far behind the nebula, turning all of the
+        // way it has left, between a nearer stop and the whole view; a
+        // gliding tour drifts through the hold, backing off and turning
+        // less, and must leave from where the drift ends. Arriving at
+        // second 5, leaving at 7.25, of 12.25.
+        let tour = vec![
+            Stop {
+                focus: (200.0, 150.0),
+                dolly: 0.5,
+                pan: 0.5,
+                hold: 1.0,
+                ..Stop::default()
+            },
+            Stop {
+                focus: (100.0, 300.0),
+                dolly: 0.88,
+                zoom: 3.0,
+                pan: 0.12,
+                depth: 3.0,
+                travel: 4.0,
+                hold: 2.25,
+                ..Stop::default()
+            },
+            Stop {
+                focus: (299.5, 199.5),
+                travel: 4.0,
+                hold: 1.0,
+                ..Stop::default()
+            },
+        ];
+        let state = |seconds: f64| tour_state(&tour, 0.2, true, seconds / 12.25);
+        for seconds in [5.0, 7.25] {
+            let (before, after) = (state(seconds - 1e-6), state(seconds + 1e-6));
+            for k in 0..STATE {
+                assert!(
+                    (after[k] - before[k]).abs() < 1e-4,
+                    "at second {seconds}, state {k}: {} to {}",
+                    before[k],
+                    after[k]
+                );
+            }
         }
     }
 
