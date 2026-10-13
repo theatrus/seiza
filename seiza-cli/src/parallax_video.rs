@@ -599,6 +599,21 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
             starless.height()
         );
     }
+    // A planned tour records its best target as the point the nebula's
+    // distance is taken at, and a render reads it back from there, so the
+    // scene is prepared there too. Prepared at the image's centre, it could
+    // take another object for the nebula and find other planes than the
+    // render will.
+    if args.plan_tour.is_some() && options.scene.distance_focus.is_none() {
+        let plan = seiza_parallax::plan_tour(
+            &wcs,
+            solved,
+            options.scene.objects.as_deref(),
+            args.size,
+            &auto_tour(&args),
+        )?;
+        options.scene.distance_focus = Some(plan.focus);
+    }
     let parallax = Parallax::prepare(&starless, &stars, &wcs, &options, &mut print_event, &stop)?;
     if let Some(directory) = &args.debug_layers {
         write_layers(directory, parallax.scene())?;
