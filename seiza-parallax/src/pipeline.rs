@@ -12,7 +12,8 @@ use crate::cloud::{Clouds, CountedDistance, counted_distance};
 use crate::dust::{Dust, DustMap};
 use crate::field::{self, FieldSource};
 use crate::lift::Extent;
-use crate::overlay::{self, CustomLabel, Mark, Overlay};
+use crate::overlay::{self, Corner, CustomLabel, Decor, Mark, Overlay, Placed};
+use crate::picture::{Artwork, Picture};
 use crate::plane::{DepthPlane, Region};
 use crate::render::{Easing, Quality, Shot, Start, Stop};
 use crate::scene::{CutOptions, Scene, SmallStars, Star};
@@ -125,6 +126,10 @@ pub struct TourStop {
     /// The title shown while the camera drifts through here, with
     /// [`VideoOptions::tour_titles`]: a planned tour names its target.
     pub title: Option<String>,
+    /// An image, its transparency kept, shown while the camera drifts
+    /// through here as a title is, in place of the title, whether or not
+    /// titles are shown. It is fitted inside the frame and centred.
+    pub card: Option<PathBuf>,
     /// The distance of the plane the camera centres the focus point on,
     /// parsecs: a planned tour gives a target's on a depth plane. If
     /// `None`, that of the plane the image shows at the focus point.
@@ -144,6 +149,7 @@ impl Default for TourStop {
             spin_deg: 0.0,
             push: 0.0,
             title: None,
+            card: None,
             depth_pc: None,
         }
     }
@@ -187,6 +193,10 @@ pub fn parse_stop(text: &str) -> Result<TourStop, String> {
             stop.title = (!value.is_empty()).then(|| value.to_string());
             continue;
         }
+        if key == "card" {
+            stop.card = (!value.is_empty()).then(|| PathBuf::from(value));
+            continue;
+        }
         let value: f64 = value.parse().map_err(|error| format!("{part}: {error}"))?;
         match key {
             "dolly" => stop.dolly = value,
@@ -200,8 +210,8 @@ pub fn parse_stop(text: &str) -> Result<TourStop, String> {
             "depth" => stop.depth_pc = Some(value),
             other => {
                 return Err(format!(
-                    "a stop takes dolly, zoom, rotate, pan, travel, hold, spin, push, depth \
-                     and title; got {other}"
+                    "a stop takes dolly, zoom, rotate, pan, travel, hold, spin, push, depth, \
+                     title and card; got {other}"
                 ));
             }
         }
@@ -488,8 +498,28 @@ pub struct VideoOptions {
     /// The caller's own labels, in `label_color`.
     pub labels: Vec<CustomLabel>,
     pub label_color: [u8; 3],
-    /// A line of text in the bottom-right corner of every frame.
+    /// A line of text in a corner of every frame.
     pub watermark: Option<String>,
+    /// An image drawn in that corner of every frame, such as a logo, its
+    /// transparency kept; with text too, it sits just inside the text.
+    pub watermark_image: Option<PathBuf>,
+    /// The corner the watermark sits in.
+    pub watermark_corner: Corner,
+    /// The watermark image's height as a share of the frame's shorter
+    /// side; it is at most a third of the frame's width.
+    pub watermark_size: f64,
+    /// The watermark's opacity, 0 to 1, times the image's own alpha.
+    pub watermark_opacity: f64,
+    /// Cards laid over the start and the end of the video: images, their
+    /// transparency kept, fitted inside the frame and centred. The opening
+    /// card shows whole from the first frame and then fades out; the
+    /// closing card fades in and shows whole at the last. A looping tour
+    /// shows both across its join instead, so it still loops.
+    pub intro_card: Option<PathBuf>,
+    pub outro_card: Option<PathBuf>,
+    /// How long the opening and closing cards each show, seconds, fades
+    /// included.
+    pub card_seconds: f64,
 }
 
 impl Default for VideoOptions {
@@ -521,6 +551,13 @@ impl Default for VideoOptions {
             labels: Vec::new(),
             label_color: [0xf0, 0xf4, 0xf8],
             watermark: None,
+            watermark_image: None,
+            watermark_corner: Corner::BottomRight,
+            watermark_size: 0.06,
+            watermark_opacity: 0.8,
+            intro_card: None,
+            outro_card: None,
+            card_seconds: 3.0,
         }
     }
 }
@@ -632,6 +669,15 @@ impl VideoOptions {
         }
         if !self.tour.is_empty() && self.seconds() <= 0.0 {
             return invalid("a tour must take some time");
+        }
+        if !(self.watermark_size > 0.0 && self.watermark_size <= 1.0) {
+            return invalid("the watermark's size must be above 0 and at most 1");
+        }
+        if !(0.0..=1.0).contains(&self.watermark_opacity) {
+            return invalid("the watermark's opacity must be from 0 to 1");
+        }
+        if !(self.card_seconds.is_finite() && self.card_seconds > 0.0) {
+            return invalid("the cards must show for some seconds");
         }
         if self.seconds() > LONGEST_SECONDS || self.seconds() * self.fps as f64 > MOST_FRAMES {
             return invalid("the video must be under a day long and five million frames");
@@ -1536,21 +1582,20 @@ impl Parallax {
                 ))),
             }
         }
-        let titles: Vec<Option<String>> = if video.tour_titles {
-            video.stops().into_iter().map(|stop| stop.title).collect()
-        } else {
-            Vec::new()
-        };
-        let overlay = if marks.is_empty()
-            && video.watermark.is_none()
-            && titles.iter().all(Option::is_none)
+        let stops = video.stops();
+        let titles: Vec<Option<String>> = stops
+            .iter()
+            .map(|stop| stop.title.clone().filter(|_| video.tour_titles))
+            .collect();
+        let decor = decor(&video, &stops, report)?;
+        let overlay = if marks.is_empty() && titles.iter().all(Option::is_none) && decor.is_empty()
         {
             None
         } else {
             let mut overlay = Overlay::new(
                 marks,
                 titles,
-                video.watermark.clone(),
+                decor,
                 video.overlay_density,
                 prepared.wcs.scale_arcsec_per_px(),
                 video.size,
@@ -1967,11 +2012,100 @@ pub fn format_stop(stop: &TourStop) -> String {
     if let Some(depth) = stop.depth_pc {
         text.push_str(&format!(" depth={}", decimal(depth, 1)));
     }
+    let quoted = |text: &str| text.replace('\\', "\\\\").replace('"', "\\\"");
     if let Some(title) = stop.title.as_ref().filter(|title| !title.is_empty()) {
-        let quoted = title.replace('\\', "\\\\").replace('"', "\\\"");
-        text.push_str(&format!(" title=\"{quoted}\""));
+        text.push_str(&format!(" title=\"{}\"", quoted(title)));
+    }
+    if let Some(card) = &stop.card {
+        text.push_str(&format!(" card=\"{}\"", quoted(&card.to_string_lossy())));
     }
     text
+}
+
+/// The watermark and cards `video` asks for, its images read and scaled to
+/// its frame, each tour stop's card among `stops`. An image read for
+/// several cards is read once. A card without transparency, or of another
+/// shape than the frame, is drawn but warned of.
+fn decor(
+    video: &VideoOptions,
+    stops: &[TourStop],
+    report: &mut dyn FnMut(Event),
+) -> Result<Decor, Error> {
+    let (width, height) = video.size;
+    let read = |path: &Path, what: &str| {
+        Artwork::open(path).map_err(|error| Error::Invalid(format!("the {what}: {error}")))
+    };
+    let watermark_image = match &video.watermark_image {
+        Some(path) => {
+            let artwork = read(path, "watermark image")?;
+            // Its height a share of the frame's shorter side, its width at
+            // most a third of the frame's.
+            let tall = video.watermark_size * width.min(height) as f64;
+            let wide = (tall * artwork.aspect()).min(width as f64 / 3.0);
+            let tall = wide / artwork.aspect();
+            Some(Picture::new(
+                &artwork,
+                (wide.round().max(1.0) as u32, tall.round().max(1.0) as u32),
+            ))
+        }
+        None => None,
+    };
+    let mut read_cards: Vec<(PathBuf, Placed)> = Vec::new();
+    let mut card = |path: &Path, what: &str, report: &mut dyn FnMut(Event)| {
+        if let Some((_, placed)) = read_cards.iter().find(|(read, _)| read == path) {
+            return Ok(placed.clone());
+        }
+        let artwork = read(path, what)?;
+        if !artwork.transparent {
+            report(Event::Warning(&format!(
+                "the {what} ({}) has no transparency, so it hides the whole frame while it shows",
+                path.display()
+            )));
+        }
+        let frame = width as f64 / height as f64;
+        if (artwork.aspect() / frame - 1.0).abs() > 0.02 {
+            report(Event::Warning(&format!(
+                "the {what} ({}) is {}×{}, another shape than the {width}×{height} frame: it is \
+                 scaled to fit inside it and centred; make it the frame's shape to fill the frame",
+                path.display(),
+                artwork.image.width(),
+                artwork.image.height()
+            )));
+        }
+        let (size, at) = crate::picture::fitted(artwork.aspect(), video.size);
+        let placed = Placed {
+            picture: Arc::new(Picture::new(&artwork, size)),
+            at,
+        };
+        read_cards.push((path.to_path_buf(), placed.clone()));
+        Ok::<_, Error>(placed)
+    };
+    let intro = match &video.intro_card {
+        Some(path) => Some(card(path, "opening card", report)?),
+        None => None,
+    };
+    let outro = match &video.outro_card {
+        Some(path) => Some(card(path, "closing card", report)?),
+        None => None,
+    };
+    let cards = stops
+        .iter()
+        .enumerate()
+        .map(|(index, stop)| match &stop.card {
+            Some(path) => card(path, &format!("card of stop {}", index + 1), report).map(Some),
+            None => Ok(None),
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    Ok(Decor {
+        watermark: video.watermark.clone(),
+        watermark_image,
+        corner: video.watermark_corner,
+        opacity: video.watermark_opacity as f32,
+        intro,
+        outro,
+        card_seconds: video.card_seconds,
+        cards,
+    })
 }
 
 /// `video` with a tour of the catalogued objects in a `dimensions` image
@@ -3704,6 +3838,93 @@ mod tests {
     }
 
     #[test]
+    fn overlay_images_are_read_at_setup_and_odd_ones_warned_of() {
+        let folder = tempfile::tempdir().unwrap();
+        let png = |name: &str, (width, height): (u32, u32), alpha: u8| {
+            let path = folder.path().join(name);
+            image::RgbaImage::from_pixel(width, height, image::Rgba([200, 100, 50, alpha]))
+                .save(&path)
+                .unwrap();
+            path
+        };
+        let clear = png("clear.png", (320, 180), 128);
+        let opaque = png("opaque.png", (320, 180), 255);
+        let square = png("square.png", (100, 100), 128);
+        let logo = png("logo.png", (400, 100), 255);
+        let decorated = |video: VideoOptions| {
+            let mut warnings = Vec::new();
+            let stops = video.stops();
+            let decor = decor(&video, &stops, &mut |event| {
+                if let Event::Warning(warning) = event {
+                    warnings.push(warning.to_string());
+                }
+            });
+            (decor, warnings)
+        };
+        let video = VideoOptions {
+            size: (640, 360),
+            ..VideoOptions::default()
+        };
+        // A card the frame's shape, with transparency, passes quietly and
+        // fills the frame; one read twice is read once.
+        let (decor, warnings) = decorated(VideoOptions {
+            intro_card: Some(clear.clone()),
+            outro_card: Some(clear.clone()),
+            ..video.clone()
+        });
+        let decor = decor.unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let intro = decor.intro.unwrap();
+        assert_eq!((intro.picture.size(), intro.at), ((640, 360), (0, 0)));
+        assert!(Arc::ptr_eq(&intro.picture, &decor.outro.unwrap().picture));
+        // An opaque card, or one of another shape, is drawn but warned of.
+        let (decor, warnings) = decorated(VideoOptions {
+            tour: vec![
+                TourStop {
+                    card: Some(opaque),
+                    ..TourStop::default()
+                },
+                TourStop {
+                    card: Some(square),
+                    ..TourStop::default()
+                },
+            ],
+            ..video.clone()
+        });
+        let decor = decor.unwrap();
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].contains("card of stop 1") && warnings[0].contains("transparency"));
+        assert!(warnings[1].contains("card of stop 2") && warnings[1].contains("100×100"));
+        let square = decor.cards[1].as_ref().unwrap();
+        assert_eq!((square.picture.size(), square.at), ((360, 360), (140, 0)));
+        // The watermark image takes its share of the shorter side, at most
+        // a third of the width.
+        let (decor, _) = decorated(VideoOptions {
+            watermark_image: Some(logo.clone()),
+            ..video.clone()
+        });
+        let watermark = decor.unwrap().watermark_image.unwrap();
+        assert_eq!(watermark.size(), (86, 22));
+        let (decor, _) = decorated(VideoOptions {
+            watermark_image: Some(logo),
+            watermark_size: 0.5,
+            ..video.clone()
+        });
+        assert_eq!(decor.unwrap().watermark_image.unwrap().size(), (213, 53));
+        // A missing file fails, naming it.
+        let missing = folder.path().join("missing.png");
+        let (decor, _) = decorated(VideoOptions {
+            outro_card: Some(missing.clone()),
+            ..video
+        });
+        let error = decor.unwrap_err().to_string();
+        assert!(
+            error.contains("closing card") && error.contains("missing.png"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn a_stop_written_out_reads_back() {
         for stop in [
             TourStop::default(),
@@ -3718,6 +3939,7 @@ mod tests {
                 spin_deg: 360.0,
                 push: 0.25,
                 title: Some(r#"Sh2-170, the "core" \ centre"#.into()),
+                card: Some(PathBuf::from(r#"cards\Sh2-170 "east".png"#)),
                 depth_pc: Some(2790.0),
             },
         ] {

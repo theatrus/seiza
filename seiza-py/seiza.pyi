@@ -631,7 +631,10 @@ class ParallaxVideo:
         overlay_density: float = 0.6,
         labels: Sequence[tuple[float, float, str] | tuple[float, float, float, str]] = (),
         label_color: str = "#f0f4f8",
-        watermark: bool | str = False,
+        watermark: bool | str | Mapping[str, Any] = False,
+        intro_card: str | Path | None = None,
+        outro_card: str | Path | None = None,
+        card_seconds: float = 3.0,
     ) -> None: ...
     @property
     def frame_count(self) -> int: ...

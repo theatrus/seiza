@@ -585,6 +585,26 @@ the bottom-right corner, or `--watermark='TEXT'` your own line. Labels,
 titles and the watermark are drawn in Inter, which holds Latin and Greek
 letters; others are left blank, with a warning.
 
+Images go over the video as well, each a PNG or TIFF whose transparency is
+kept. `--watermark-image FILE` draws one, such as a logo, in the
+watermark's corner of every frame, its height 6% of the frame's shorter
+side (`--watermark-size`) and at most a third of its width; with
+`--watermark` too, it sits just inside the text. `--watermark-corner` moves
+both to `top-left`, `top-right`, `bottom-left` or `bottom-right`, and
+`--watermark-opacity` (0.8) sets how strongly both show. A title card is an
+image you design yourself, in any typeface, laid over the frame: fitted
+inside it and centred, so make it the frame's size (1920×1080, or 1080×1920
+for `-portrait`) for sharp lettering. `--intro-card FILE` shows one whole
+from the first frame and then fades it out, and `--outro-card FILE` fades
+one in for the end, each for `--card-seconds` (3); with `--loop` they show
+across the join instead, the closing card giving way to the opening one,
+so the video still loops. A tour stop's `card=FILE` shows a card while the
+camera drifts through the stop, as its title would, in its place, with or
+without `--tour-titles`; in a tour file the path is taken from the file's
+folder. A card without transparency, or of another shape than the frame,
+is drawn with a warning, and a file that cannot be read stops the video
+before it renders.
+
 ## Image stacking
 
 `seiza stack` calibrates, registers, and incrementally integrates FITS or XISF light

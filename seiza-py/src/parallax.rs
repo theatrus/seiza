@@ -11,8 +11,8 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 use seiza_parallax::{
-    CustomLabel, Easing, Event, FfmpegSink, FrameSink, Parallax, ParallaxOptions, PngSequence,
-    Quality, SmallStars, Start,
+    Corner, CustomLabel, Easing, Event, FfmpegSink, FrameSink, Parallax, ParallaxOptions,
+    PngSequence, Quality, SmallStars, Start,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -144,18 +144,24 @@ pub(crate) fn plan_parallax_tour<'py>(
 /// `growth_limit`, `fade_from`, `tour` (stops, each a string as `seiza
 /// parallax-video --stop` takes, "X,Y dolly=0.8 rotate=-10 travel=6
 /// hold=1" or "whole ...", or a dict of `focus`, `dolly`, `zoom`,
-/// `rotate_deg`, `pan`, `travel`, `hold`, `spin_deg`, `push` and `title`,
-/// as `plan_parallax_tour` gives them, with its `name`), `auto_tour`
+/// `rotate_deg`, `pan`, `travel`, `hold`, `spin_deg`, `push`, `title` and
+/// `card` (an image shown as the title would be, in its place), as
+/// `plan_parallax_tour` gives them, with its `name`), `auto_tour`
 /// (True, a count, or a dict of `targets`, `hold` and `motion`: plan a
 /// tour of the catalogued objects and render it), `tour_glide`,
 /// `tour_titles`, `tour_loop`, `size` ("720p", "1080p", "1440p", "4k",
 /// each with "-portrait", "WIDTHxHEIGHT", or (width, height)), `seconds`,
 /// `fps`, `overlay`, `overlay_density`, `labels` ((x, y, text) or (x, y,
-/// radius, text) tuples), `label_color` ("#RRGGBB") and `watermark` (True,
-/// or the text). `progress` hears each step as a dict with a "kind" of
-/// "note" or "warning" and a "message". `cancel()` returning True, or
-/// Ctrl-C, stops preparing; a `progress` that raises stops it too, and its
-/// exception is raised.
+/// radius, text) tuples), `label_color` ("#RRGGBB"), `watermark` (True,
+/// the text, or a dict of `text`, `image` (a picture such as a logo, its
+/// transparency kept), `corner` ("bottom_right", "bottom_left", "top_right"
+/// or "top_left"), `size` (the image's height as a share of the frame's
+/// shorter side, 0.06) and `opacity` (0.8)), and `intro_card`,
+/// `outro_card` and `card_seconds` (images laid over the start and the
+/// end, each shown that many seconds, 3 by default). `progress` hears
+/// each step as a dict with a "kind" of "note" or "warning" and a
+/// "message". `cancel()` returning True, or Ctrl-C, stops preparing; a
+/// `progress` that raises stops it too, and its exception is raised.
 #[pyclass(name = "ParallaxVideo", module = "seiza", frozen)]
 pub(crate) struct PyParallaxVideo {
     video: Parallax,
@@ -384,6 +390,7 @@ fn options(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ParallaxOptions> {
                                         .extract::<Option<String>>()?
                                         .filter(|title| !title.is_empty())
                                 }
+                                "card" => parsed.card = value.extract()?,
                                 // A plan's name for the stop's target.
                                 "name" => {}
                                 other => {
@@ -445,13 +452,40 @@ fn options(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ParallaxOptions> {
                     .map_err(PyValueError::new_err)?
                     .0
             }
-            "watermark" => {
-                options.video.watermark = match value.extract::<bool>() {
-                    Ok(true) => Some(seiza_parallax::DEFAULT_WATERMARK.into()),
-                    Ok(false) => None,
-                    Err(_) => Some(value.extract()?),
+            "watermark" => match value.downcast::<PyDict>() {
+                Ok(style) => {
+                    options.video.watermark = None;
+                    for (key, value) in style.iter() {
+                        match key.extract::<String>()?.as_str() {
+                            "text" => options.video.watermark = watermark_text(&value)?,
+                            "image" => options.video.watermark_image = value.extract()?,
+                            "corner" => {
+                                options.video.watermark_corner = choice(
+                                    &value.extract::<String>()?,
+                                    "watermark corner",
+                                    &[
+                                        ("bottom_right", Corner::BottomRight),
+                                        ("bottom_left", Corner::BottomLeft),
+                                        ("top_right", Corner::TopRight),
+                                        ("top_left", Corner::TopLeft),
+                                    ],
+                                )?
+                            }
+                            "size" => options.video.watermark_size = value.extract()?,
+                            "opacity" => options.video.watermark_opacity = value.extract()?,
+                            other => {
+                                return Err(PyValueError::new_err(format!(
+                                    "unknown watermark field {other:?}"
+                                )));
+                            }
+                        }
+                    }
                 }
-            }
+                Err(_) => options.video.watermark = watermark_text(&value)?,
+            },
+            "intro_card" => options.video.intro_card = value.extract()?,
+            "outro_card" => options.video.outro_card = value.extract()?,
+            "card_seconds" => options.video.card_seconds = value.extract()?,
             other => {
                 return Err(PyValueError::new_err(format!(
                     "unknown parallax video option {other:?}"
@@ -460,6 +494,16 @@ fn options(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ParallaxOptions> {
         }
     }
     Ok(options)
+}
+
+/// A watermark's text: True for "Rendered with seiza.fyi", False for none,
+/// or the text.
+fn watermark_text(value: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    Ok(match value.extract::<bool>() {
+        Ok(true) => Some(seiza_parallax::DEFAULT_WATERMARK.into()),
+        Ok(false) => None,
+        Err(_) => Some(value.extract()?),
+    })
 }
 
 /// An event as the dict `progress` callbacks receive.

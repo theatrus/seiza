@@ -12,8 +12,9 @@ use clap::{Args, ValueEnum};
 use image::{Rgb, Rgb32FImage};
 use seiza::{DetectConfig, Wcs};
 use seiza_parallax::{
-    CustomLabel, Easing, Event, FfmpegSink, FrameSink, LightImage, Parallax, ParallaxOptions,
-    PngSequence, Quality, Scene, SceneOptions, SmallStars, Start, VideoOptions, VideoSettings,
+    Corner, CustomLabel, Easing, Event, FfmpegSink, FrameSink, LightImage, Parallax,
+    ParallaxOptions, PngSequence, Quality, Scene, SceneOptions, SmallStars, Start, VideoOptions,
+    VideoSettings,
 };
 use std::path::{Path, PathBuf};
 
@@ -115,8 +116,10 @@ pub(crate) struct ParallaxVideoArgs {
     /// (degrees), `pan=`, `travel=` and `hold=` (seconds), `spin=`
     /// (degrees turned while holding), `push=` (the share of the remaining
     /// way flown in while holding), `depth=` (parsecs: the depth plane the
-    /// place is centred on, by default the one the image shows there) and
-    /// `title="..."`, e.g. `--stop
+    /// place is centred on, by default the one the image shows there),
+    /// `title="..."` and `card=FILE` (an image shown as the title would
+    /// be, in its place, with or without --tour-titles; in a tour file, a
+    /// path from the file's folder), e.g. `--stop
     /// "2700,3400 dolly=0.85 rotate=-20 pan=0.25 travel=6 hold=1.5"`. The
     /// camera glides on slowly through the stops it holds at; the first
     /// is the opening view. A stop that would show much of the smooth fill
@@ -349,12 +352,50 @@ pub(crate) struct ParallaxVideoArgs {
         default_missing_value = seiza_parallax::DEFAULT_WATERMARK
     )]
     watermark: Option<String>,
+    /// An image drawn in the watermark's corner of every frame, such as a
+    /// logo: a PNG or TIFF, its transparency kept. With --watermark too,
+    /// it sits just inside the text
+    #[arg(long)]
+    watermark_image: Option<PathBuf>,
+    /// The corner the watermark sits in
+    #[arg(long, value_enum, default_value_t = CornerArg::BottomRight)]
+    watermark_corner: CornerArg,
+    /// The watermark image's height as a share of the frame's shorter side;
+    /// it is at most a third of the frame's width
+    #[arg(long, default_value_t = 0.06)]
+    watermark_size: f64,
+    /// The watermark's opacity, 0 to 1, text and image
+    #[arg(long, default_value_t = 0.8)]
+    watermark_opacity: f64,
+    /// A card laid over the start of the video: an image, its transparency
+    /// kept (a PNG or TIFF), fitted inside the frame and centred, shown
+    /// whole from the first frame and then fading out. Make it the frame's
+    /// size for sharp lettering. With --loop it fades in over the end
+    /// instead, so the video still loops
+    #[arg(long)]
+    intro_card: Option<PathBuf>,
+    /// A card laid over the end of the video, fading in and shown whole at
+    /// the last frame; with --loop, it gives way to --intro-card at the join
+    #[arg(long)]
+    outro_card: Option<PathBuf>,
+    /// How long --intro-card and --outro-card each show, seconds, fades
+    /// included
+    #[arg(long, default_value_t = 3.0)]
+    card_seconds: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum QualityArg {
     Standard,
     High,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum CornerArg {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -852,7 +893,16 @@ type TourFile = (Vec<seiza_parallax::TourStop>, Option<(f64, f64)>);
 fn read_tour(path: &Path) -> Result<TourFile> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    parse_tour(&text).with_context(|| format!("in {}", path.display()))
+    let (mut stops, focus) = parse_tour(&text).with_context(|| format!("in {}", path.display()))?;
+    // A card's path is taken from the tour file's folder, so the file and
+    // its cards can move together.
+    let folder = path.parent().unwrap_or(Path::new(""));
+    for card in stops.iter_mut().filter_map(|stop| stop.card.as_mut()) {
+        if card.is_relative() {
+            *card = folder.join(&*card);
+        }
+    }
+    Ok((stops, focus))
 }
 
 /// A tour file's stops and focus line: a stop a line as --stop takes it,
@@ -963,6 +1013,18 @@ fn options(args: &ParallaxVideoArgs, file: Option<TourFile>) -> ParallaxOptions 
             labels: args.labels.clone(),
             label_color: args.label_color.0,
             watermark: args.watermark.clone(),
+            watermark_image: args.watermark_image.clone(),
+            watermark_corner: match args.watermark_corner {
+                CornerArg::TopLeft => Corner::TopLeft,
+                CornerArg::TopRight => Corner::TopRight,
+                CornerArg::BottomLeft => Corner::BottomLeft,
+                CornerArg::BottomRight => Corner::BottomRight,
+            },
+            watermark_size: args.watermark_size,
+            watermark_opacity: args.watermark_opacity,
+            intro_card: args.intro_card.clone(),
+            outro_card: args.outro_card.clone(),
+            card_seconds: args.card_seconds,
         },
     }
 }
@@ -1289,6 +1351,27 @@ mod tests {
         // Two focus lines, or no stops, are refused rather than half read.
         assert!(parse_tour("focus 1,2\nfocus 3,4\nwhole\nwhole travel=1\n").is_err());
         assert!(parse_tour("focus 1,2\n# only a comment\n").is_err());
+    }
+
+    #[test]
+    fn a_tour_files_cards_are_found_beside_it() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("tour.txt");
+        let absolute = folder.path().join("elsewhere").join("end.png");
+        std::fs::write(
+            &path,
+            format!(
+                "whole hold=1 card=\"cards/opening card.png\"\n100,100 dolly=0.5 card=\"{}\"\n",
+                absolute.display()
+            ),
+        )
+        .unwrap();
+        let (stops, _) = read_tour(&path).unwrap();
+        assert_eq!(
+            stops[0].card.as_deref(),
+            Some(folder.path().join("cards/opening card.png").as_path())
+        );
+        assert_eq!(stops[1].card.as_deref(), Some(absolute.as_path()));
     }
 
     #[test]

@@ -34,6 +34,7 @@ mod field;
 pub mod lift;
 pub mod light;
 pub mod overlay;
+mod picture;
 pub mod pipeline;
 pub mod plane;
 pub mod render;
@@ -50,7 +51,7 @@ pub use encode::{
 pub use field::default_gaia_cache;
 pub use lift::{Extent, lift_object};
 pub use light::{LightImage, Pyramid};
-pub use overlay::{CustomLabel, DEFAULT_WATERMARK, parse_color, parse_label};
+pub use overlay::{Corner, CustomLabel, DEFAULT_WATERMARK, parse_color, parse_label};
 pub use pipeline::{
     AUTO_PLANE_COVERAGE, AUTO_PLANE_DEPTH, DistanceOverride, Event, FitSummary, Parallax,
     ParallaxOptions, PlaneSummary, PlannedTour, SceneOptions, StopFit, Summary, TourStop,

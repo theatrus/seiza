@@ -575,7 +575,12 @@ video = seiza.ParallaxVideo(starless, stars, solution.wcs, size="1080p-portrait"
 while the camera drifts through the stop, fading in and out, so change or
 drop titles as you would stops. A tour ends on a longer final drift that
 slows to rest; `tour_loop=True` instead ends where it began, so the last
-frame leads into the first and the video loops.
+frame leads into the first and the video loops. Images with transparency
+go over the frames too: a stop's `card` (a path) shows in place of its
+title, `intro_card` and `outro_card` over the start and the end for
+`card_seconds`, and `watermark={"image": "logo.png", "corner":
+"top_left"}` puts a logo in a corner, with `text`, `size` and `opacity`
+keys as well.
 
 `distance_focus` is where the nebula's distance is measured; `focus` only
 aims the camera, so moving it never changes the scene's depth. To film the

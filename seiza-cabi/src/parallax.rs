@@ -17,8 +17,9 @@ use super::{
 use image::{Rgb32FImage, RgbImage};
 use seiza::wcs::{Sip, Wcs};
 use seiza_parallax::{
-    CustomLabel, DepthPlane, DistanceOverride, Dust, DustMap, Easing, Event, FfmpegSink, FrameFn,
-    FrameSink, Parallax, ParallaxOptions, PlaneMask, PngSequence, Quality, SmallStars, Start,
+    Corner, CustomLabel, DepthPlane, DistanceOverride, Dust, DustMap, Easing, Event, FfmpegSink,
+    FrameFn, FrameSink, Parallax, ParallaxOptions, PlaneMask, PngSequence, Quality, SmallStars,
+    Start,
 };
 use seiza_parallax::{FitSummary, SceneOptions, VideoOptions};
 use serde::{Deserialize, Serialize};
@@ -223,8 +224,14 @@ struct VideoRequest {
     labels: Option<Vec<LabelRequest>>,
     /// "#RRGGBB".
     label_color: Option<String>,
-    /// true for "Rendered with seiza.fyi", or the text to write.
+    /// true for "Rendered with seiza.fyi", the text to write, or
+    /// `{text, image, corner, size, opacity}`.
     watermark: Option<WatermarkRequest>,
+    /// Cards laid over the start and end of the video, and how long each
+    /// shows, seconds.
+    intro_card: Option<PathBuf>,
+    outro_card: Option<PathBuf>,
+    card_seconds: Option<f64>,
 }
 
 /// A JSON object's fields.
@@ -310,6 +317,9 @@ struct StopRequest {
     push: Option<f64>,
     /// Shown while the camera drifts through the stop, with `tourTitles`.
     title: Option<String>,
+    /// An image shown as the title would be, in its place, whether or not
+    /// titles are shown.
+    card: Option<PathBuf>,
     /// The distance of the plane the focus point is centred on, parsecs;
     /// that of the plane the image shows there if absent.
     depth_parsecs: Option<f64>,
@@ -336,11 +346,32 @@ impl AutoTourRequest {
     }
 }
 
+/// A watermark's text: true for "Rendered with seiza.fyi", or the text.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum WatermarkText {
+    Shown(bool),
+    Text(String),
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum WatermarkRequest {
-    Shown(bool),
-    Text(String),
+    Plain(WatermarkText),
+    Styled(WatermarkStyle),
+}
+
+/// A watermark of text, an image or both, each optional.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WatermarkStyle {
+    text: Option<WatermarkText>,
+    image: Option<PathBuf>,
+    /// "bottomRight", "bottomLeft", "topRight" or "topLeft".
+    corner: Option<String>,
+    /// The image's height as a share of the frame's shorter side.
+    size: Option<f64>,
+    opacity: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -611,6 +642,12 @@ fn scene_options(request: &SceneRequest) -> Result<SceneOptions, String> {
 /// The video's options from the request, over the defaults.
 fn video_options(request: &VideoRequest) -> Result<VideoOptions, String> {
     let defaults = VideoOptions::default();
+    let unstyled = WatermarkStyle::default();
+    let (watermark_text, style) = match &request.watermark {
+        None => (None, &unstyled),
+        Some(WatermarkRequest::Plain(text)) => (Some(text), &unstyled),
+        Some(WatermarkRequest::Styled(style)) => (style.text.as_ref(), style),
+    };
     Ok(VideoOptions {
         focus: request.focus.map(|[x, y]| (x, y)),
         start: choice(
@@ -661,6 +698,7 @@ fn video_options(request: &VideoRequest) -> Result<VideoOptions, String> {
                     spin_deg: stop.spin_degrees.unwrap_or(base.spin_deg),
                     push: stop.push.unwrap_or(base.push),
                     title: stop.title.clone().filter(|title| !title.is_empty()),
+                    card: stop.card.clone(),
                     depth_pc: stop.depth_parsecs,
                 }
             })
@@ -692,11 +730,28 @@ fn video_options(request: &VideoRequest) -> Result<VideoOptions, String> {
             Some(color) => seiza_parallax::parse_color(color)?.0,
             None => defaults.label_color,
         },
-        watermark: match &request.watermark {
-            None | Some(WatermarkRequest::Shown(false)) => None,
-            Some(WatermarkRequest::Shown(true)) => Some(seiza_parallax::DEFAULT_WATERMARK.into()),
-            Some(WatermarkRequest::Text(text)) => Some(text.clone()),
+        watermark: match watermark_text {
+            None | Some(WatermarkText::Shown(false)) => None,
+            Some(WatermarkText::Shown(true)) => Some(seiza_parallax::DEFAULT_WATERMARK.into()),
+            Some(WatermarkText::Text(text)) => Some(text.clone()),
         },
+        watermark_image: style.image.clone(),
+        watermark_corner: choice(
+            &style.corner,
+            "watermark corner",
+            &[
+                ("bottomRight", Corner::BottomRight),
+                ("bottomLeft", Corner::BottomLeft),
+                ("topRight", Corner::TopRight),
+                ("topLeft", Corner::TopLeft),
+            ],
+            defaults.watermark_corner,
+        )?,
+        watermark_size: style.size.unwrap_or(defaults.watermark_size),
+        watermark_opacity: style.opacity.unwrap_or(defaults.watermark_opacity),
+        intro_card: request.intro_card.clone(),
+        outro_card: request.outro_card.clone(),
+        card_seconds: request.card_seconds.unwrap_or(defaults.card_seconds),
     })
 }
 
@@ -819,7 +874,8 @@ fn split(
 /// `pan`, `zoom`, `zoomEnd`, `rotateDegrees` `[first, last]`, `easing`
 /// ("inOut", "linear"), `quality` ("standard", "high"), `growthLimit`,
 /// `fadeFrom`, `tour` (stops `[{focus, dolly, zoom, rotateDegrees, pan,
-/// travel, hold, spinDegrees, push, title, depthParsecs}]`, each centring
+/// travel, hold, spinDegrees, push, title, card, depthParsecs}]`, `card`
+/// an image shown as the title would be, in its place, each centring
 /// its focus point on the plane at `depthParsecs`, or on the plane the
 /// image shows there if absent, gliding through held stops
 /// at `tourGlide` of the pace between them, the first the opening view and
@@ -833,8 +889,16 @@ fn split(
 /// first), `size` ("720p", "1080p", "1440p", "4k", each with
 /// "-portrait", or "WIDTHxHEIGHT"), `seconds`, `fps`, `overlay`,
 /// `overlayDensity`, `labels` (`[{x, y, radius, text}]`), `labelColor`
-/// ("#RRGGBB") and `watermark` (true, or the text). An unknown field is an
-/// error; a null field takes its default.
+/// ("#RRGGBB"), `watermark` (true, the text, or `{text, image, corner,
+/// size, opacity}`: `text` true or the text, `image` a picture such as a
+/// logo, its transparency kept, `corner` "bottomRight" (the default),
+/// "bottomLeft", "topRight" or "topLeft", `size` the image's height as a
+/// share of the frame's shorter side, 0.06 by default, and `opacity`, 0.8
+/// by default), and `introCard` and `outroCard` (images laid over the
+/// start and the end, fitted inside the frame, each shown for
+/// `cardSeconds`, 3 by default; a looping tour shows them across its
+/// join). An image that cannot be read fails here, naming it. An unknown
+/// field is an error; a null field takes its default.
 ///
 /// Stars' distances come from the star distance file when installed, else
 /// from the Gaia and VizieR archives unless `online` is false. `cancel`
@@ -1049,8 +1113,9 @@ pub unsafe extern "C" fn seiza_parallax_plan_tour_json(
 /// (`focus`, `start`, `dolly`, `truck`, `truckAngleDegrees`, `pan`, `zoom`,
 /// `zoomEnd`, `rotateDegrees`, `easing`), a tour (`tour`, `autoTour`,
 /// `tourGlide`, `tourTitles`, `tourLoop`), the output (`size`, `seconds`, `fps`, `quality`,
-/// `growthLimit`, `fadeFrom`) and the labels (`overlay`, `overlayDensity`,
-/// `labels`, `labelColor`, `watermark`). Fields left out take their
+/// `growthLimit`, `fadeFrom`), the labels (`overlay`, `overlayDensity`,
+/// `labels`, `labelColor`, `watermark`) and the cards (`introCard`,
+/// `outroCard`, `cardSeconds`). Fields left out take their
 /// defaults, not the first video's. Turns are taken as given, unwrapped:
 /// `rotateDegrees` [0, 360] turns once anticlockwise and [0, -360] once
 /// clockwise, and a stop's `rotateDegrees` likewise. A field that would
@@ -1736,6 +1801,45 @@ mod tests {
     };
     use seiza::catalog::{DistanceStar, StarDistanceCatalogBuilder};
     use std::ffi::CStr;
+
+    #[test]
+    fn a_watermark_and_cards_read_from_their_fields() {
+        let video = |json: &str| video_options(&parse_video(json).unwrap());
+        // The plain forms keep their meaning.
+        let shown = video(r#"{"watermark": true}"#).unwrap();
+        assert_eq!(
+            shown.watermark.as_deref(),
+            Some(seiza_parallax::DEFAULT_WATERMARK)
+        );
+        assert_eq!(shown.watermark_image, None);
+        let text = video(r#"{"watermark": "© me"}"#).unwrap();
+        assert_eq!(text.watermark.as_deref(), Some("© me"));
+        // The object form adds an image, its corner, size and opacity.
+        let styled = video(
+            r#"{"watermark": {"image": "logo.png", "corner": "topLeft", "size": 0.1,
+                "opacity": 0.5},
+               "introCard": "start.png", "outroCard": "end.png", "cardSeconds": 4,
+               "tour": [{"hold": 1}, {"focus": [10, 20], "card": "stop.png"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(styled.watermark, None);
+        assert_eq!(styled.watermark_image, Some(PathBuf::from("logo.png")));
+        assert_eq!(styled.watermark_corner, Corner::TopLeft);
+        assert_eq!(
+            (styled.watermark_size, styled.watermark_opacity),
+            (0.1, 0.5)
+        );
+        assert_eq!(styled.intro_card, Some(PathBuf::from("start.png")));
+        assert_eq!(styled.outro_card, Some(PathBuf::from("end.png")));
+        assert_eq!(styled.card_seconds, 4.0);
+        assert_eq!(styled.tour[1].card, Some(PathBuf::from("stop.png")));
+        let both = video(r#"{"watermark": {"text": true, "image": "logo.png"}}"#).unwrap();
+        assert!(both.watermark.is_some() && both.watermark_image.is_some());
+        assert_eq!(both.watermark_corner, Corner::BottomRight);
+        // An unknown corner is refused.
+        let error = video(r#"{"watermark": {"corner": "middle"}}"#).unwrap_err();
+        assert!(error.contains("watermark corner"), "{error}");
+    }
 
     /// A small solved field written to `directory`: starless and stars
     /// PNGs and a star distance file placing the stars, and the request

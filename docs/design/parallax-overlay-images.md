@@ -1,10 +1,13 @@
 # Images over parallax videos
 
-`seiza parallax-video` can already write text over its frames. This note
-plans two kinds of image to go with it: a watermark image, such as a logo,
-and title cards, made elsewhere with transparency and shown over the video.
+`seiza parallax-video` could already write text over its frames. This
+note adds two kinds of image: a watermark image, such as a logo, and title
+cards, made elsewhere with transparency and shown over the video.
 
-## What there is now
+Status: built in `seiza-parallax` (`picture.rs`, `overlay.rs`), the CLI,
+the C ABI and Python, as below. The apps' fields are still to come.
+
+## What there was
 
 - `--watermark[=TEXT]` writes one line in the bottom-right corner of every
   frame, at 80% opacity over a dark halo ("Rendered with seiza.fyi" without
@@ -57,15 +60,18 @@ prepare or reconfigure), never part way through a render.
   without crowding it.
 - **Place.** `--watermark-corner`: `bottom-right` (the default),
   `bottom-left`, `top-right` or `top-left`, inset by the margin the text
-  uses (the label font size). With both an image and text, the text keeps
-  its line along the edge and the image sits just above it, aligned to the
-  same side.
-- **Opacity.** `--watermark-opacity`, default 0.8 like the text, times the
-  image's own alpha.
+  uses (the label font size). The corner moves the text too. With both an
+  image and text, the text keeps its line along the edge and the image
+  sits just inside it, above the text at the bottom and below it at the
+  top, aligned to the same side.
+- **Opacity.** `--watermark-opacity`, default 0.8 as the text always had,
+  sets both the text's and the image's; the image's own alpha multiplies
+  it.
 - **C ABI.** `watermark` also takes an object:
   `{"text": ..., "image": PATH, "corner": ..., "size": ..., "opacity": ...}`,
-  each optional; `true` and a string keep their meanings. Python's
-  `watermark` takes the same as a dict.
+  each optional; `true` and a string keep their meanings. The corner is
+  spelt `bottomRight` and so on, as the C ABI's other choices are. Python's
+  `watermark` takes the same as a dict, with `bottom_right` and so on.
 - **Apps.** The Export step gets a file picker beside the watermark switch,
   with the corner and size.
 
@@ -96,9 +102,9 @@ does, so the frame after the last is still the first. With both cards
 given, the closing card fades out as the opening card fades in.
 
 **Size and place.** A card is fitted inside the frame and centred,
-keeping its shape. A card made at the output size (1920 × 1080, or 1080 ×
-1920 for `-portrait`) is used pixel for pixel, which is the way to get
-sharp lettering. When a card's shape differs from the frame's by more than
+keeping its shape, so a smaller card is enlarged. A card made at the
+output size (1920 × 1080, or 1080 × 1920 for `-portrait`) is used pixel
+for pixel, which is the way to get sharp lettering. When a card's shape differs from the frame's by more than
 2%, the video warns, since a landscape card on a portrait video shrinks to
 a band across the middle: make a card for each shape.
 
@@ -108,9 +114,9 @@ then cards, then the watermark, so the watermark stays on top.
 **C ABI and Python.** `introCard`, `outroCard` and `cardSeconds` in the
 video options, and `card` on a tour stop, all paths; Python takes
 `intro_card=`, `outro_card=`, `card_seconds=` and a stop's `card=`. A
-planned tour's stops carry `card` through untouched. The apps' tour list
-gets a card field for each stop, and the Export step the opening and
-closing cards.
+planned tour has no cards; a stop sent back with one keeps it. The apps'
+tour list gets a card field for each stop, and the Export step the
+opening and closing cards.
 
 ## Memory and speed
 

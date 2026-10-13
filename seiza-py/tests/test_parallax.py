@@ -4,6 +4,9 @@ Fetching online is off and no star distance file is named, so the video
 warns and places every star at one distance; the test needs no network.
 """
 
+import struct
+import zlib
+
 import numpy as np
 import pytest
 import seiza
@@ -27,6 +30,7 @@ def field():
 def video(tmp_path, **options):
     starless, stars, wcs = field()
     events = []
+    options.setdefault("watermark", True)
     made = seiza.ParallaxVideo(
         starless,
         stars,
@@ -39,7 +43,6 @@ def video(tmp_path, **options):
         seconds=1.0,
         fps=5,
         labels=[(100.0, 90.0, 15.0, "here")],
-        watermark=True,
         **options,
     )
     return made, events
@@ -179,6 +182,52 @@ def test_a_titled_tour_shows_its_title_and_a_looped_one_ends_where_it_began(tmp_
     assert np.abs(first - last).mean() < 2.0
     with pytest.raises(ValueError, match="need a tour"):
         video(tmp_path, tour_loop=True)
+
+
+def write_png(path, rgba):
+    """Write an 8-bit RGBA array as a PNG, with the standard library alone."""
+    height, width, _ = rgba.shape
+    rows = b"".join(b"\x00" + rgba[row].tobytes() for row in range(height))
+
+    def chunk(kind, data):
+        crc = zlib.crc32(kind + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", crc)
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(rows))
+        + chunk(b"IEND", b"")
+    )
+    return str(path)
+
+
+def test_cards_and_a_watermark_image_are_laid_over_the_frames(tmp_path):
+    blue = np.zeros((120, 160, 4), np.uint8)
+    blue[..., 2] = blue[..., 3] = 255
+    green = np.zeros((10, 40, 4), np.uint8)
+    green[..., 1] = green[..., 3] = 255
+    card = write_png(tmp_path / "card.png", blue)
+    logo = write_png(tmp_path / "logo.png", green)
+    made, events = video(
+        tmp_path,
+        intro_card=card,
+        card_seconds=0.4,
+        watermark={"image": logo, "corner": "top_left", "opacity": 1.0},
+    )
+    # The opening card covers the first frames and is gone by the third;
+    # being opaque, it is warned of.
+    assert (made.frame(0)[60, 80] == [0, 0, 255]).all()
+    assert not (made.frame(3)[60, 80] == [0, 0, 255]).all()
+    assert any("transparency" in event["message"] for event in events), events
+    # The logo sits a label's height in from the top-left corner, over
+    # every frame.
+    assert (made.frame(3)[17, 20] == [0, 255, 0]).all()
+    with pytest.raises(ValueError, match="missing.png"):
+        made.reconfigure(outro_card=str(tmp_path / "missing.png"), size=(160, 120))
+    with pytest.raises(ValueError, match="watermark corner"):
+        made.reconfigure(watermark={"corner": "middle"}, size=(160, 120))
 
 
 def test_a_reconfigured_video_shares_the_scene(tmp_path):

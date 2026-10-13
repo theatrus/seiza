@@ -2180,7 +2180,8 @@ char *seiza_rc_astro_process_file_json(const char *request_json,
  `pan`, `zoom`, `zoomEnd`, `rotateDegrees` `[first, last]`, `easing`
  ("inOut", "linear"), `quality` ("standard", "high"), `growthLimit`,
  `fadeFrom`, `tour` (stops `[{focus, dolly, zoom, rotateDegrees, pan,
- travel, hold, spinDegrees, push, title, depthParsecs}]`, each centring
+ travel, hold, spinDegrees, push, title, card, depthParsecs}]`, `card`
+ an image shown as the title would be, in its place, each centring
  its focus point on the plane at `depthParsecs`, or on the plane the
  image shows there if absent, gliding through held stops
  at `tourGlide` of the pace between them, the first the opening view and
@@ -2194,8 +2195,16 @@ char *seiza_rc_astro_process_file_json(const char *request_json,
  first), `size` ("720p", "1080p", "1440p", "4k", each with
  "-portrait", or "WIDTHxHEIGHT"), `seconds`, `fps`, `overlay`,
  `overlayDensity`, `labels` (`[{x, y, radius, text}]`), `labelColor`
- ("#RRGGBB") and `watermark` (true, or the text). An unknown field is an
- error; a null field takes its default.
+ ("#RRGGBB"), `watermark` (true, the text, or `{text, image, corner,
+ size, opacity}`: `text` true or the text, `image` a picture such as a
+ logo, its transparency kept, `corner` "bottomRight" (the default),
+ "bottomLeft", "topRight" or "topLeft", `size` the image's height as a
+ share of the frame's shorter side, 0.06 by default, and `opacity`, 0.8
+ by default), and `introCard` and `outroCard` (images laid over the
+ start and the end, fitted inside the frame, each shown for
+ `cardSeconds`, 3 by default; a looping tour shows them across its
+ join). An image that cannot be read fails here, naming it. An unknown
+ field is an error; a null field takes its default.
 
  Stars' distances come from the star distance file when installed, else
  from the Gaia and VizieR archives unless `online` is false. `cancel`
@@ -2253,8 +2262,9 @@ char *seiza_parallax_plan_tour_json(const char *request_json,
  (`focus`, `start`, `dolly`, `truck`, `truckAngleDegrees`, `pan`, `zoom`,
  `zoomEnd`, `rotateDegrees`, `easing`), a tour (`tour`, `autoTour`,
  `tourGlide`, `tourTitles`, `tourLoop`), the output (`size`, `seconds`, `fps`, `quality`,
- `growthLimit`, `fadeFrom`) and the labels (`overlay`, `overlayDensity`,
- `labels`, `labelColor`, `watermark`). Fields left out take their
+ `growthLimit`, `fadeFrom`), the labels (`overlay`, `overlayDensity`,
+ `labels`, `labelColor`, `watermark`) and the cards (`introCard`,
+ `outroCard`, `cardSeconds`). Fields left out take their
  defaults, not the first video's. Turns are taken as given, unwrapped:
  `rotateDegrees` [0, 360] turns once anticlockwise and [0, -360] once
  clockwise, and a stop's `rotateDegrees` likewise. A field that would

@@ -66,6 +66,13 @@ both, matching stars to Gaia DR3 for their Bailer-Jones distances.
   `View::project` puts a point of any depth in it, so a caller can draw
   labels that move with what they mark (`seiza parallax-video --overlay`
   does). `Shot::star_fade` says how far a star the camera passes has faded.
+- **Over the frames:** `Parallax` draws the labels, a tour's titles, a
+  watermark of text, an image or both (`VideoOptions::watermark_image`,
+  in any `Corner`), and title cards: images with transparency, shown in
+  place of a stop's title (`TourStop::card`) or over the start and end
+  (`VideoOptions::intro_card`, `outro_card`). Each image is read once when
+  a video is set up, premultiplied by its alpha and scaled to its drawn
+  size, then blended over the finished frame in sRGB.
 - **Output:** frames go to `ffmpeg` (H.264 with libx264, or libopenh264 when
   that is the build's H.264 encoder, or HEVC with libx265), in MP4, MOV or
   Matroska by the file's extension, with BT.709 colour; to numbered PNG

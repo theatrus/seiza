@@ -1,12 +1,14 @@
 //! Labels over a parallax video: the catalogued objects in the field, each
 //! moving with the layer that shows it and fading as it leaves the view,
-//! the caller's own labels, a tour's titles, and a watermark.
+//! the caller's own labels, a tour's titles and cards, opening and closing
+//! cards, and a watermark of text, an image or both.
 //!
 //! The marks follow Seiza's image overlays (`@seiza/astro-overlay`): the same
 //! catalog colours, labels and prominence ranking, a catalogued extent or
 //! outline for each object, ticks either side of a named star, and a
 //! "Field within" caption once the camera is inside an object.
 
+use crate::picture::Picture;
 use crate::pipeline::Error;
 use crate::{Scene, Shot, View};
 use ab_glyph::{Font, PxScale, ScaleFont};
@@ -14,6 +16,7 @@ use image::{Rgb, RgbImage};
 use seiza::Wcs;
 use seiza::objects::{GeometryData, ObjectCatalog, ObjectKind, SkyObject};
 use seiza_draw::{Fonts, Mask, draw_text, measure};
+use std::sync::Arc;
 
 /// A galaxy lifted onto the far field: its catalogued ellipse, where its
 /// sprite was put, and the sprite's distance.
@@ -27,6 +30,62 @@ pub(crate) struct Lifted {
 
 /// The watermark `--watermark` writes when given no text.
 pub const DEFAULT_WATERMARK: &str = "Rendered with seiza.fyi";
+
+/// A corner of the frame, where the watermark sits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Corner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    #[default]
+    BottomRight,
+}
+
+impl Corner {
+    fn right(self) -> bool {
+        matches!(self, Self::TopRight | Self::BottomRight)
+    }
+
+    fn bottom(self) -> bool {
+        matches!(self, Self::BottomLeft | Self::BottomRight)
+    }
+}
+
+/// An image to draw, and where its top-left pixel goes in the frame.
+#[derive(Clone, Debug)]
+pub(crate) struct Placed {
+    pub picture: Arc<Picture>,
+    pub at: (i64, i64),
+}
+
+/// What an overlay lays over the frames besides the marks and the text
+/// titles: the watermark, its text and its image scaled to its size, and
+/// the cards, each scaled and placed.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Decor {
+    pub watermark: Option<String>,
+    pub watermark_image: Option<Picture>,
+    pub corner: Corner,
+    /// The watermark's opacity, 0 to 1.
+    pub opacity: f32,
+    /// The opening and closing cards, and how long each shows, seconds.
+    pub intro: Option<Placed>,
+    pub outro: Option<Placed>,
+    pub card_seconds: f64,
+    /// Each tour stop's card, shown as its title would be, in its place.
+    pub cards: Vec<Option<Placed>>,
+}
+
+impl Decor {
+    /// Whether it lays nothing over the frames.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.watermark.is_none()
+            && self.watermark_image.is_none()
+            && self.intro.is_none()
+            && self.outro.is_none()
+            && self.cards.iter().all(Option::is_none)
+    }
+}
 
 /// The share of the ranked objects in view that are labelled, as in the
 /// image overlays.
@@ -45,6 +104,12 @@ const FADE_SECONDS: f64 = 0.5;
 /// the camera reaches its stop or stay after it leaves.
 const TITLE_FADE: f64 = 0.8;
 const TITLE_EARLY: f64 = 0.5;
+
+/// Most seconds an opening or closing card takes to fade.
+const CARD_FADE: f64 = 0.8;
+
+/// The watermark's text, as a share of the labels' size.
+const WATERMARK_SCALE: f64 = 0.8;
 
 const STAR_GOLD: Rgb<u8> = Rgb([0xff, 0xd4, 0x79]);
 const ENCOMPASSING: Rgb<u8> = Rgb([0xae, 0xe8, 0xff]);
@@ -377,7 +442,11 @@ pub(crate) struct Overlay {
     /// Each tour stop's title, if it has one and titles are shown.
     titles: Vec<Option<String>>,
     fonts: Fonts<'static>,
-    watermark: Option<String>,
+    decor: Decor,
+    /// Where the watermark's text starts, its left end and baseline, and
+    /// where its image's top-left pixel goes.
+    watermark_text_at: Option<(f64, f64)>,
+    watermark_image_at: Option<(i64, i64)>,
     density: f64,
     /// The image's scale, for the field a frame shows.
     arcsec_per_px: f64,
@@ -390,15 +459,17 @@ pub(crate) struct Overlay {
     /// its "Field within" caption.
     shown: Vec<Vec<f32>>,
     within: Vec<Vec<f32>>,
-    /// Per frame, the stops whose titles show and how much.
+    /// Per frame, the stops whose titles or cards show and how much.
     titled: Vec<Vec<(usize, f32)>>,
+    /// Per frame, how much of the opening and closing cards shows.
+    carded: Vec<(f32, f32)>,
 }
 
 impl Overlay {
     pub(crate) fn new(
         marks: Vec<Mark>,
         titles: Vec<Option<String>>,
-        watermark: Option<String>,
+        decor: Decor,
         density: f64,
         arcsec_per_px: f64,
         (width, height): (usize, usize),
@@ -410,11 +481,52 @@ impl Overlay {
             .iter()
             .map(|mark| measure(&fonts.regular, font_size, 0.0, &mark.label).0)
             .collect();
+        // The watermark keeps a label's height from the frame's edges. Its
+        // text runs along the edge, and its image sits just inside the
+        // text, on the same side.
+        let (width, height) = (width as f64, height as f64);
+        let (margin, small) = (font_size, font_size * WATERMARK_SCALE);
+        let scaled = fonts.regular.as_scaled(PxScale::from(small as f32));
+        let (ascent, descent) = (scaled.ascent() as f64, -scaled.descent() as f64);
+        let corner = decor.corner;
+        let watermark_text_at = decor.watermark.as_deref().map(|text| {
+            let (text_width, _) = measure(&fonts.regular, small, 0.0, text);
+            let x = if corner.right() {
+                width - margin - text_width
+            } else {
+                margin
+            };
+            let baseline = if corner.bottom() {
+                height - margin
+            } else {
+                margin + ascent
+            };
+            (x, baseline)
+        });
+        let watermark_image_at = decor.watermark_image.as_ref().map(|picture| {
+            let (own_width, own_height) = picture.size();
+            let (own_width, own_height) = (own_width as f64, own_height as f64);
+            let x = if corner.right() {
+                width - margin - own_width
+            } else {
+                margin
+            };
+            let gap = small * 0.5;
+            let y = match (corner.bottom(), watermark_text_at) {
+                (true, Some((_, baseline))) => baseline - ascent - gap - own_height,
+                (true, None) => height - margin - own_height,
+                (false, Some((_, baseline))) => baseline + descent + gap,
+                (false, None) => margin,
+            };
+            (x.round() as i64, y.round() as i64)
+        });
         Ok(Self {
             marks,
             titles,
             fonts,
-            watermark,
+            decor,
+            watermark_text_at,
+            watermark_image_at,
             density: density.clamp(0.0, 1.0),
             arcsec_per_px,
             font_size,
@@ -423,6 +535,7 @@ impl Overlay {
             shown: Vec::new(),
             within: Vec::new(),
             titled: Vec::new(),
+            carded: Vec::new(),
         })
     }
 
@@ -436,7 +549,7 @@ impl Overlay {
             .map(|mark| mark.label.as_str())
             .collect();
         text.extend(self.titles.iter().flatten().map(String::as_str));
-        text.extend(self.watermark.as_deref());
+        text.extend(self.decor.watermark.as_deref());
         self.fonts.missing(&text)
     }
 
@@ -470,11 +583,40 @@ impl Overlay {
         self.within = smoothed(&within, radius);
         let times = shot.stop_times();
         let total = times.last().map_or(0.0, |&(_, leave)| leave);
-        let titled: Vec<bool> = self.titles.iter().map(Option::is_some).collect();
-        self.titled = if titled.contains(&true) && titled.len() == times.len() {
+        // A stop's card shows as its title would.
+        let titled: Vec<bool> = (0..times.len())
+            .map(|index| {
+                self.titles.get(index).is_some_and(Option::is_some)
+                    || self.decor.cards.get(index).is_some_and(Option::is_some)
+            })
+            .collect();
+        self.titled = if titled.contains(&true) {
             (0..shot.frames)
                 .map(|frame| {
                     title_shares(&times, &titled, shot.looped, shot.progress(frame) * total)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let cards = (self.decor.intro.is_some(), self.decor.outro.is_some());
+        self.carded = if cards.0 || cards.1 {
+            // A single move's last frame comes at its length.
+            let looped = shot.looped && times.len() >= 2;
+            let length = if times.is_empty() {
+                shot.frames.saturating_sub(1) as f64 / fps
+            } else {
+                total
+            };
+            (0..shot.frames)
+                .map(|frame| {
+                    card_shares(
+                        shot.progress(frame) * length,
+                        length,
+                        self.decor.card_seconds,
+                        looped,
+                        cards,
+                    )
                 })
                 .collect()
         } else {
@@ -710,15 +852,26 @@ impl Overlay {
             }
         }
         for &(index, alpha) in self.titled.get(frame).map_or(&[][..], Vec::as_slice) {
-            if let Some(title) = &self.titles[index] {
+            if let Some(Some(card)) = self.decor.cards.get(index) {
+                card.picture.draw(canvas, card.at, alpha);
+            } else if let Some(Some(title)) = self.titles.get(index) {
                 self.title(canvas, title, alpha);
             }
         }
-        if let Some(watermark) = &self.watermark {
-            let small = size * 0.8;
-            let (text_width, _) = measure(&self.fonts.regular, small, 0.0, watermark);
-            let place = (width - size - text_width, height - size);
-            self.caption(canvas, place, small, watermark, WATERMARK, 0.8);
+        if let Some(&(intro, outro)) = self.carded.get(frame) {
+            for (card, alpha) in [(&self.decor.outro, outro), (&self.decor.intro, intro)] {
+                if let Some(card) = card {
+                    card.picture.draw(canvas, card.at, alpha);
+                }
+            }
+        }
+        let opacity = self.decor.opacity;
+        if let (Some(picture), Some(at)) = (&self.decor.watermark_image, self.watermark_image_at) {
+            picture.draw(canvas, at, opacity);
+        }
+        if let (Some(text), Some(place)) = (&self.decor.watermark, self.watermark_text_at) {
+            let small = size * WATERMARK_SCALE;
+            self.caption(canvas, place, small, text, WATERMARK, opacity);
         }
     }
 
@@ -893,6 +1046,44 @@ fn title_shares(
         }
     }
     shares
+}
+
+/// How much of the opening and closing cards shows `now` seconds into a
+/// video `length` seconds long, each showing for `seconds` with fades of
+/// up to [`CARD_FADE`], for those `shown`. The opening card shows whole
+/// from the first frame and fades out; the closing card fades in and shows
+/// whole at the last. A looped video's frame after the last is its first,
+/// so there both show across the join: the opening card fades in over the
+/// end, the closing card fades out over the start, and with both, the one
+/// gives way to the other just before the join.
+fn card_shares(
+    now: f64,
+    length: f64,
+    seconds: f64,
+    looped: bool,
+    (intro, outro): (bool, bool),
+) -> (f32, f32) {
+    let fade = CARD_FADE.min(seconds / 2.0).max(1e-9);
+    // Rising from 0 at `from` to 1 a fade later.
+    let rise = |from: f64, at: f64| smoothstep(from, from + fade, at);
+    let (opening, closing) = if looped {
+        // Seconds from the join, either way.
+        let at = if now > length / 2.0 {
+            now - length
+        } else {
+            now
+        };
+        let opening = rise(-fade, at).min(1.0 - rise(seconds - fade, at));
+        let gone = if intro { 0.0 } else { fade };
+        let closing = rise(-seconds, at).min(1.0 - rise(gone - fade, at));
+        (opening, closing)
+    } else {
+        (1.0 - rise(seconds - fade, now), rise(length - seconds, now))
+    };
+    (
+        if intro { opening as f32 } else { 0.0 },
+        if outro { closing as f32 } else { 0.0 },
+    )
 }
 
 /// A marker's lines, output pixels.
@@ -1108,7 +1299,8 @@ mod tests {
             mark("edge", 60.0, 150.0, 3.0),
             mark("core", 199.5, 149.5, 80.0),
         ];
-        let mut overlay = Overlay::new(marks, Vec::new(), None, 1.0, 1.0, (200, 150)).unwrap();
+        let mut overlay =
+            Overlay::new(marks, Vec::new(), Decor::default(), 1.0, 1.0, (200, 150)).unwrap();
         assert!(overlay.plan(&shot, &scene, 10.0, &|| false));
         let (first, last) = (&overlay.shown[0], &overlay.shown[39]);
         assert!(first[0] > 0.9 && first[1] > 0.9, "{first:?}");
@@ -1138,7 +1330,8 @@ mod tests {
             .iter()
             .map(|&radius| mark(&format!("r{radius}"), 199.5, 149.5, radius))
             .collect();
-        let overlay = Overlay::new(marks, Vec::new(), None, 1.0, 1.0, (200, 150)).unwrap();
+        let overlay =
+            Overlay::new(marks, Vec::new(), Decor::default(), 1.0, 1.0, (200, 150)).unwrap();
         let (_, within) = overlay.wanted(&shot, &shot.view(&scene, 0));
         let named: Vec<bool> = within.iter().map(|&value| value > 0.0).collect();
         assert_eq!(named, [true, true, false, true, false]);
@@ -1163,7 +1356,15 @@ mod tests {
             mark("big", 200.0, 150.0, 8.0),
             mark("small", 202.0, 150.0, 2.0),
         ];
-        let overlay = Overlay::new(marks.clone(), Vec::new(), None, 1.0, 10.0, (200, 150)).unwrap();
+        let overlay = Overlay::new(
+            marks.clone(),
+            Vec::new(),
+            Decor::default(),
+            1.0,
+            10.0,
+            (200, 150),
+        )
+        .unwrap();
         let (show, _) = overlay.wanted(&shot, &view);
         assert!(show[0] > 0.0 && show[1] == 0.0, "{show:?}");
         // Spread out, with density 0 only the four most prominent show,
@@ -1181,7 +1382,8 @@ mod tests {
         let mut custom = mark("mine", 200.0, 260.0, 0.0);
         custom.object = None;
         marks.push(custom);
-        let overlay = Overlay::new(marks, Vec::new(), None, 0.0, 10.0, (200, 150)).unwrap();
+        let overlay =
+            Overlay::new(marks, Vec::new(), Decor::default(), 0.0, 10.0, (200, 150)).unwrap();
         let (show, _) = overlay.wanted(&shot, &view);
         let shown: Vec<bool> = show.iter().map(|&value| value > 0.0).collect();
         assert_eq!(
@@ -1295,7 +1497,7 @@ mod tests {
         let mut overlay = Overlay::new(
             Vec::new(),
             vec![Some("NGC 7822".into()), None],
-            None,
+            Decor::default(),
             1.0,
             1.0,
             (320, 240),
@@ -1323,5 +1525,182 @@ mod tests {
         let mut later = RgbImage::new(320, 240);
         overlay.draw(40, &shot.view(&scene, 40), &mut later);
         assert!(later.pixels().all(|pixel| pixel[0] == 0));
+    }
+
+    /// A `width` × `height` card of one colour and cover, placed at the
+    /// frame's top-left pixel.
+    fn card(width: u32, height: u32, pixel: [u8; 4]) -> Placed {
+        let artwork = crate::picture::Artwork {
+            image: image::RgbaImage::from_pixel(width, height, image::Rgba(pixel)),
+            transparent: pixel[3] < u8::MAX,
+        };
+        Placed {
+            picture: Arc::new(Picture::new(&artwork, (width, height))),
+            at: (0, 0),
+        }
+    }
+
+    #[test]
+    fn opening_and_closing_cards_fade_and_a_loop_still_joins() {
+        let shares = |now: f64, looped: bool, cards: (bool, bool)| {
+            card_shares(now, 20.0, 3.0, looped, cards)
+        };
+        // The opening card shows whole from the start and is gone after
+        // its seconds; the closing card comes in and shows whole at the end.
+        let both = (true, true);
+        assert_eq!(shares(0.0, false, both), (1.0, 0.0));
+        assert_eq!(shares(2.0, false, both), (1.0, 0.0));
+        assert_eq!(shares(3.0, false, both), (0.0, 0.0));
+        assert_eq!(shares(10.0, false, both), (0.0, 0.0));
+        assert_eq!(shares(17.0, false, both), (0.0, 0.0));
+        assert_eq!(shares(18.0, false, both), (0.0, 1.0));
+        assert_eq!(shares(20.0, false, both), (0.0, 1.0));
+        // Only those asked for show.
+        assert_eq!(shares(0.0, false, (false, true)), (0.0, 0.0));
+        assert_eq!(shares(20.0, false, (true, false)), (0.0, 0.0));
+        // Looped, the frame after the last is the first: the opening card
+        // fades in over the end, and the closing card gives way to it just
+        // before the join.
+        let near_end = shares(19.6, true, both);
+        assert!(near_end.0 > 0.0 && near_end.0 < 1.0, "{near_end:?}");
+        assert!(near_end.1 > 0.0 && near_end.1 < 1.0, "{near_end:?}");
+        assert_eq!(shares(0.0, true, both), (1.0, 0.0));
+        assert_eq!(shares(18.0, true, both), (0.0, 1.0));
+        let (before, after) = (shares(20.0 - 1e-9, true, both), shares(0.0, true, both));
+        assert!((before.0 - after.0).abs() < 1e-3 && (before.1 - after.1).abs() < 1e-3);
+        // Without an opening card, the closing card shows across the join.
+        assert_eq!(shares(0.0, true, (false, true)), (0.0, 1.0));
+        assert_eq!(shares(1.0, true, (false, true)), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_stops_card_shows_as_its_title_would_and_replaces_it() {
+        let scene = scene();
+        let shot = Shot {
+            tour: vec![
+                crate::Stop {
+                    focus: (100.0, 75.0),
+                    hold: 2.0,
+                    ..crate::Stop::default()
+                },
+                crate::Stop {
+                    focus: (100.0, 75.0),
+                    dolly: 0.3,
+                    travel: 2.0,
+                    ..crate::Stop::default()
+                },
+            ],
+            width: 320,
+            height: 240,
+            frames: 41,
+            ..Shot::default()
+        };
+        let titled = |decor: Decor| {
+            let mut overlay = Overlay::new(
+                Vec::new(),
+                vec![Some("NGC 7822".into()), None],
+                decor,
+                1.0,
+                1.0,
+                (320, 240),
+            )
+            .unwrap();
+            assert!(overlay.plan(&shot, &scene, 10.0, &|| false));
+            overlay
+        };
+        let text = titled(Decor::default());
+        let carded = titled(Decor {
+            cards: vec![Some(card(320, 240, [0, 0, 255, 255])), None],
+            ..Decor::default()
+        });
+        assert_eq!(carded.titled, text.titled);
+        let mut canvas = RgbImage::new(320, 240);
+        carded.draw(10, &shot.view(&scene, 10), &mut canvas);
+        // The card covers the frame, and no lettering is drawn over it.
+        assert!(canvas.pixels().all(|pixel| *pixel == Rgb([0, 0, 255])));
+        // A card shows without titles too.
+        let alone = Overlay::new(
+            Vec::new(),
+            vec![None, None],
+            Decor {
+                cards: vec![Some(card(320, 240, [0, 0, 255, 255])), None],
+                ..Decor::default()
+            },
+            1.0,
+            1.0,
+            (320, 240),
+        );
+        let mut alone = alone.unwrap();
+        assert!(alone.plan(&shot, &scene, 10.0, &|| false));
+        assert_eq!(alone.titled, text.titled);
+    }
+
+    #[test]
+    fn the_watermark_image_sits_in_its_corner_inside_the_text() {
+        let lit = |corner: Corner, text: Option<&str>| {
+            let mut overlay = Overlay::new(
+                Vec::new(),
+                Vec::new(),
+                Decor {
+                    watermark: text.map(String::from),
+                    watermark_image: Some(Picture::new(
+                        &crate::picture::Artwork {
+                            image: image::RgbaImage::from_pixel(
+                                40,
+                                20,
+                                image::Rgba([0, 255, 0, 255]),
+                            ),
+                            transparent: false,
+                        },
+                        (40, 20),
+                    )),
+                    corner,
+                    opacity: 1.0,
+                    ..Decor::default()
+                },
+                1.0,
+                1.0,
+                (640, 360),
+            )
+            .unwrap();
+            let shot = Shot {
+                width: 640,
+                height: 360,
+                frames: 2,
+                ..Shot::default()
+            };
+            assert!(overlay.plan(&shot, &scene(), 10.0, &|| false));
+            let mut canvas = RgbImage::new(640, 360);
+            overlay.draw(0, &shot.view(&scene(), 0), &mut canvas);
+            // The image's pixels: pure green, where the text never is.
+            let green: Vec<(u32, u32)> = canvas
+                .enumerate_pixels()
+                .filter(|(_, _, pixel)| **pixel == Rgb([0, 255, 0]))
+                .map(|(x, y, _)| (x, y))
+                .collect();
+            let low = green
+                .iter()
+                .fold((u32::MAX, u32::MAX), |a, &(x, y)| (a.0.min(x), a.1.min(y)));
+            let high = green
+                .iter()
+                .fold((0, 0), |a, &(x, y)| (a.0.max(x), a.1.max(y)));
+            (green.len(), low, high)
+        };
+        // A label's height from the edges: 360 / 42 rounds to 9 pixels.
+        let margin = (360.0_f64 / 42.0).max(14.0) as u32;
+        let (count, low, high) = lit(Corner::BottomRight, None);
+        assert_eq!(count, 800);
+        assert_eq!((high.0, high.1), (639 - margin, 359 - margin));
+        let (_, low_left, _) = lit(Corner::TopLeft, None);
+        assert_eq!(low_left, (margin, margin));
+        let (_, _, high_left) = lit(Corner::BottomLeft, None);
+        assert_eq!(high_left.0, margin + 39);
+        // With text, the image moves in from the edge, above it at the
+        // bottom and below it at the top.
+        let (_, _, above) = lit(Corner::BottomRight, Some("Rendered with seiza.fyi"));
+        assert!(above.1 < high.1 - margin, "{above:?} {high:?}");
+        let (_, below, _) = lit(Corner::TopRight, Some("Rendered with seiza.fyi"));
+        assert!(below.1 > margin + 10, "{below:?}");
+        assert_eq!(low.0, 640 - margin - 40);
     }
 }
