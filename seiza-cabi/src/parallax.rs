@@ -459,6 +459,7 @@ struct FitResponse {
 struct StopFitResponse {
     zoom: AskedUsed,
     pan: AskedUsed,
+    dolly: AskedUsed,
 }
 
 impl From<&FitSummary> for FitResponse {
@@ -474,6 +475,7 @@ impl From<&FitSummary> for FitResponse {
                 .map(|stop| StopFitResponse {
                     zoom: stop.zoom.into(),
                     pan: stop.pan.into(),
+                    dolly: stop.dolly.into(),
                 })
                 .collect(),
             inside: fit.inside,
@@ -1123,10 +1125,10 @@ pub unsafe extern "C" fn seiza_parallax_reconfigure_json(
 /// it, and `starsInFrontOfDust`, the stars it brought in front), objects
 /// labelled, the WCS used, and `fit`, how fitting the camera to the
 /// image changed the framing asked for: `zoom`, `pan`, `lead` and `truck`
-/// for the single move and `stops[].zoom` and `stops[].pan` for a tour,
-/// each `{asked, used}`, and `inside`, false when some frames still show
-/// past the image's edge. Returns a string released with
-/// `seiza_string_free`, or null with `error_out` set.
+/// for the single move and `stops[].zoom`, `stops[].pan` and
+/// `stops[].dolly` for a tour, each `{asked, used}`, and `inside`, false
+/// when some frames still show past the image's edge. Returns a string
+/// released with `seiza_string_free`, or null with `error_out` set.
 ///
 /// # Safety
 ///

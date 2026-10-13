@@ -692,6 +692,7 @@ impl PyParallaxVideo {
                 let entry = PyDict::new(py);
                 entry.set_item("zoom", stop.zoom)?;
                 entry.set_item("pan", stop.pan)?;
+                entry.set_item("dolly", stop.dolly)?;
                 Ok(entry)
             })
             .collect::<PyResult<Vec<_>>>()?;

@@ -2310,10 +2310,10 @@ SeizaParallax *seiza_parallax_reconfigure_json(const SeizaParallax *video,
  it, and `starsInFrontOfDust`, the stars it brought in front), objects
  labelled, the WCS used, and `fit`, how fitting the camera to the
  image changed the framing asked for: `zoom`, `pan`, `lead` and `truck`
- for the single move and `stops[].zoom` and `stops[].pan` for a tour,
- each `{asked, used}`, and `inside`, false when some frames still show
- past the image's edge. Returns a string released with
- `seiza_string_free`, or null with `error_out` set.
+ for the single move and `stops[].zoom`, `stops[].pan` and
+ `stops[].dolly` for a tour, each `{asked, used}`, and `inside`, false
+ when some frames still show past the image's edge. Returns a string
+ released with `seiza_string_free`, or null with `error_out` set.
 
  # Safety
 

@@ -584,8 +584,9 @@ same scene again with another camera, tour, size or quality, call
 nothing is loaded, solved or looked up again, and leaves the first as it
 was; both can draw frames at once. Options that change the scene, such as
 the distances, `distance_focus`, star placement or dust, raise `ValueError`.
-`summary["fit"]` gives each zoom and pan as asked and as used, after the
-camera was fitted to stay inside the image, and `inside`, false when some
+`summary["fit"]` gives each zoom and pan as asked and as used, and each tour
+stop's dolly, after the camera was fitted to stay inside the image and to
+show little of the fill behind depth planes, and `inside`, false when some
 frames still show past the image's edge:
 
 ```python

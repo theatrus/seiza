@@ -17,7 +17,7 @@
 
 use crate::dust::{Dust, MAX_BRIGHTENING};
 use crate::light::{LightImage, Pyramid, floor64};
-use crate::plane::Transmission;
+use crate::plane::{Plane, Transmission};
 use crate::scene::{Scene, Sprite};
 use rayon::prelude::*;
 
@@ -40,6 +40,16 @@ impl Easing {
         }
     }
 }
+
+/// The most of a frame a tour's fit lets show the smooth fill left behind
+/// a depth plane, as [`Shot::fill_shown`] measures it. Past it the fill reads
+/// as a smear where the photograph had texture.
+pub const FILL_SHOWN: f64 = 0.15;
+
+/// Each step of the fit flies a stop showing too much fill this share of
+/// its way in, until it flies no farther than [`LEAST_FLATTENED`].
+const FLATTEN_STEP: f64 = 0.9;
+const LEAST_FLATTENED: f64 = 0.05;
 
 /// How carefully frames are drawn.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -728,7 +738,7 @@ impl Shot {
             // Past half again even without turning, the whole tour zooms in
             // together.
             let fitted = match zoomed(share) {
-                Some(fitted) => fitted,
+                Some(fitted) => self.with_less_fill(scene, &depths, fitted, &panned(share), halted),
                 None => {
                     let zoom = least_zoom(&|zoom| Self {
                         zoom,
@@ -787,6 +797,76 @@ impl Shot {
         )
     }
 
+    /// `fitted`, the tour `asked` with its stops zoomed to keep inside the
+    /// image at `depths`, or one showing less of the fill behind its
+    /// planes: while a frame shows more than [`FILL_SHOWN`] of it, the stop
+    /// it belongs to flies less far and zooms in to keep its plane's size,
+    /// a little at a time, as far as the stops can still be zoomed to keep
+    /// inside the image.
+    fn with_less_fill(
+        &self,
+        scene: &Scene,
+        depths: &[Guard],
+        fitted: Self,
+        asked: &Self,
+        halted: &dyn Fn() -> bool,
+    ) -> Self {
+        if scene.planes.is_empty() {
+            return fitted;
+        }
+        let times = tour_times(&asked.tour);
+        let total = times.last().map_or(0.0, |&(_, leave)| leave);
+        let mut shares = vec![1.0; asked.tour.len()];
+        let mut best = fitted;
+        for _ in 0..200 {
+            if halted() {
+                break;
+            }
+            // The frame showing the most fill, if too much, flies less
+            // far at the stop it is held at, or of the two it travels
+            // between, the nearer that still can.
+            let fill = best.fill_by_frame(scene);
+            let Some((frame, _)) = fill
+                .iter()
+                .enumerate()
+                .filter(|&(_, &shown)| shown > FILL_SHOWN)
+                .max_by(|a, b| a.1.total_cmp(b.1))
+            else {
+                break;
+            };
+            let (nearer, other) = stops_at(&times, best.progress(frame) * total);
+            let can = |index: usize| asked.tour[index].dolly * shares[index] > LEAST_FLATTENED;
+            let Some(index) = [nearer, other].into_iter().find(|&index| can(index)) else {
+                break;
+            };
+            let mut flatten = vec![false; shares.len()];
+            flatten[index] = true;
+            if best.looped {
+                joined(&mut flatten);
+            }
+            for (index, flat) in flatten.into_iter().enumerate() {
+                if flat {
+                    shares[index] *= FLATTEN_STEP;
+                }
+            }
+            let flatter = Self {
+                tour: asked
+                    .tour
+                    .iter()
+                    .zip(&shares)
+                    .map(|(stop, &share)| flattened(stop, share))
+                    .collect(),
+                ..asked.clone()
+            };
+            match self.zoom_stops(scene, depths, flatter, 1.5, halted) {
+                Some(shot) => best = shot,
+                // The image's edges come first.
+                None => break,
+            }
+        }
+        best
+    }
+
     /// `shot`, a tour, with each stop zoomed in by at most `most` times its
     /// own zoom, no further than keeps every view inside the image at
     /// `depths`, or `None` if that is not enough. A view that shows an edge
@@ -813,27 +893,10 @@ impl Shot {
                 .filter(|&frame| !shot.inside(scene, &shot.view(scene, frame), depths))
                 .collect();
             for frame in outside {
-                let now = shot.progress(frame) * total;
-                let next = times
-                    .iter()
-                    .position(|&(arrive, _)| arrive >= now)
-                    .unwrap_or(times.len() - 1);
-                // The stop it is held at, or the nearer of the two it
-                // travels between.
-                let index = if next == 0 || now >= times[next].0 {
-                    next
-                } else if now - times[next - 1].1 < times[next].0 - now {
-                    next - 1
-                } else {
-                    next
-                };
-                bump[index] = true;
+                bump[stops_at(&times, shot.progress(frame) * total).0] = true;
             }
-            // A looped tour's first and last stops are one view.
             if shot.looped {
-                let last = bump.len() - 1;
-                let either = bump[0] || bump[last];
-                (bump[0], bump[last]) = (either, either);
+                joined(&mut bump);
             }
             if !bump.contains(&true) {
                 return Some(shot);
@@ -865,6 +928,106 @@ impl Shot {
             return 0.0;
         }
         self.fade(distance / depth)
+    }
+
+    /// How much of `view`'s frame shows the fill left where a depth plane
+    /// was lifted, 0 to 1. Behind a plane the background keeps only the
+    /// light filled in from about it, which is smooth: where the plane took
+    /// the light the image had, or restored the light its dark cloud hid.
+    /// At each of a grid of points, the share a plane took where the
+    /// background shows counts, less what is left of the plane times the
+    /// share it took where the plane shows: a plane in its own place hides
+    /// its fill, and one slid aside, outgrown by the background or flown
+    /// through uncovers it.
+    pub fn fill_shown(&self, scene: &Scene, view: &View) -> f64 {
+        const COLUMNS: usize = 64;
+        if scene.planes.is_empty() {
+            return 0.0;
+        }
+        let rows = ((COLUMNS * self.height) as f64 / self.width.max(1) as f64)
+            .round()
+            .max(1.0) as usize;
+        let (step_u, step_v) = (
+            self.width as f64 / COLUMNS as f64,
+            self.height as f64 / rows as f64,
+        );
+        let distance = scene.background_distance_pc;
+        // A grid cell's span on the background, image pixels: light is
+        // read at the level of detail that wide.
+        let (x0, y0) = view.unproject(0.0, 0.0, distance);
+        let (x1, y1) = view.unproject(step_u, 0.0, distance);
+        let footprint = (x1 - x0).hypot(y1 - y0) as f32;
+        let light = |(level, scale): (&LightImage, f32), x: f64, y: f64| -> f32 {
+            let pixel = Pyramid::sample_level(level, scale, x as f32, y as f32);
+            pixel[0] + pixel[1] + pixel[2]
+        };
+        let background = scene.background.level_for(footprint);
+        let planes: Vec<_> = scene
+            .planes
+            .iter()
+            .map(|plane| {
+                (
+                    plane,
+                    plane.image.level_for(footprint),
+                    self.plane_fade(view, plane.distance_pc),
+                )
+            })
+            .collect();
+        // The share of the light photographed at image point `(x, y)` that
+        // `plane` took, or that its dark cloud hid.
+        let taken = |&(plane, level, _): &(&Plane, (&LightImage, f32), f64), x: f64, y: f64| {
+            let lifted = if plane.lit {
+                let own = light(level, x - plane.left as f64, y - plane.top as f64);
+                if own > 0.0 {
+                    own / (own + light(background, x, y).max(0.0))
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
+            let hidden = plane.transmission.as_ref().map_or(0.0, |cloud| {
+                let passed = cloud.at(x, y);
+                1.0 - (passed[0] + passed[1] + passed[2]) / 3.0
+            });
+            lifted.max(hidden) as f64
+        };
+        let mut total = 0.0;
+        for row in 0..rows {
+            let v = (row as f64 + 0.5) * step_v;
+            for column in 0..COLUMNS {
+                let u = (column as f64 + 0.5) * step_u;
+                let (bx, by) = view.unproject(u, v, distance);
+                let shown: f64 = planes
+                    .iter()
+                    .map(|plane| {
+                        let under = taken(plane, bx, by);
+                        let fade = plane.2;
+                        if under <= 0.0 {
+                            return 0.0;
+                        }
+                        let over = if fade > 0.0 {
+                            let (px, py) = view.unproject(u, v, plane.0.distance_pc);
+                            fade * taken(plane, px, py)
+                        } else {
+                            0.0
+                        };
+                        (under - over).max(0.0)
+                    })
+                    .sum();
+                total += shown.min(1.0);
+            }
+        }
+        total / (COLUMNS * rows) as f64
+    }
+
+    /// How much of each frame shows the fill behind the depth planes, as
+    /// [`Self::fill_shown`] finds it.
+    pub fn fill_by_frame(&self, scene: &Scene) -> Vec<f64> {
+        (0..self.frames)
+            .into_par_iter()
+            .map(|frame| self.fill_shown(scene, &self.view(scene, frame)))
+            .collect()
     }
 
     /// How much of a layer that has come `growth` times nearer is left.
@@ -1113,6 +1276,53 @@ struct Placement {
     swing: (f64, f64),
     magnification: f64,
     turn: f64,
+}
+
+/// The stops of a tour reaching and leaving its stops at `times` that a
+/// frame `now` seconds in belongs to: the one it is held at, twice, or the
+/// nearer of the two it travels between and then the other.
+fn stops_at(times: &[(f64, f64)], now: f64) -> (usize, usize) {
+    let next = times
+        .iter()
+        .position(|&(arrive, _)| arrive >= now)
+        .unwrap_or(times.len() - 1);
+    if next == 0 || now >= times[next].0 {
+        (next, next)
+    } else if now - times[next - 1].1 < times[next].0 - now {
+        (next - 1, next)
+    } else {
+        (next, next - 1)
+    }
+}
+
+/// A looped tour's first and last stops are one view: either marked marks
+/// both.
+fn joined(marked: &mut [bool]) {
+    let last = marked.len() - 1;
+    let either = marked[0] || marked[last];
+    (marked[0], marked[last]) = (either, either);
+}
+
+/// `stop` flown `share` of its way in, its lens zoomed so the plane it
+/// frames keeps its size, and the camera kept as near that plane's line of
+/// sight from Earth as it was.
+fn flattened(stop: &Stop, share: f64) -> Stop {
+    let dolly = stop.dolly * share;
+    // A plane at `depth` grows as `depth / (depth − dolly)`.
+    let growth = |dolly: f64| stop.depth / (stop.depth - dolly);
+    let on_plane = (stop.depth - 1.0).abs() > 1e-9;
+    Stop {
+        dolly,
+        zoom: stop.zoom * growth(stop.dolly) / growth(dolly),
+        // Turning `1 − dolly` of the way puts the camera on the line of
+        // sight through a stop on a plane; flying less far, it turns more.
+        pan: if on_plane {
+            (stop.pan + stop.dolly - dolly).clamp(0.0, 1.0)
+        } else {
+            stop.pan
+        },
+        ..*stop
+    }
 }
 
 /// When the camera reaches each stop of a tour and leaves it, seconds.
@@ -2168,6 +2378,129 @@ mod tests {
             ..shot.clone()
         };
         assert_eq!(past.plane_fade(&past.view(&near, 2), 100.0), 0.0);
+    }
+
+    /// A 400 × 300 image of a nebula at 400 pc, with a broad glowing cloud
+    /// at its centre lifted onto a plane at `distance`.
+    fn glowing(distance: f64) -> Scene {
+        let (width, height) = (400, 300);
+        let mut starless = LightImage::new(width, height);
+        for (index, pixel) in starless.pixels.iter_mut().enumerate() {
+            let (x, y) = (index % width, index / width);
+            let r2 = (x as f64 - 199.5).powi(2) + (y as f64 - 149.5).powi(2);
+            let cloud = (2.0 * (-r2 / 3200.0).exp()) as f32;
+            *pixel = [0.2 + cloud; 3];
+        }
+        let mask = crate::plane::tests::disc(width, height, (199.5, 149.5), 110.0);
+        let region = crate::Region::from_mask(&mask, width, height)
+            .unwrap()
+            .unwrap();
+        let plane =
+            crate::lift_region(&mut starless, &region, distance, "cloud", false, &[]).unwrap();
+        Scene::new(
+            &starless,
+            &LightImage::new(width, height),
+            &[],
+            400.0,
+            400.0,
+            2000.0,
+            &CutOptions::default(),
+        )
+        .with_planes(vec![plane], 0.02)
+    }
+
+    #[test]
+    fn a_plane_outgrown_slid_aside_or_flown_through_uncovers_its_fill() {
+        // The last frame of a move flying `dolly` of the way in toward the
+        // cloud, its lens magnified `zoom_end` by then.
+        let fill = |scene: &Scene, dolly: f64, zoom_end: f64| {
+            let shot = Shot {
+                focus: (199.5, 149.5),
+                dolly,
+                truck: (0.0, 0.0),
+                zoom_end,
+                width: 160,
+                height: 120,
+                frames: 3,
+                ..Shot::default()
+            };
+            assert_eq!(shot.fill_shown(scene, &shot.view(scene, 0)), 0.0);
+            shot.fill_shown(scene, &shot.view(scene, 2))
+        };
+        let (far, near) = (glowing(1200.0), glowing(200.0));
+        // Flying in, the nebula outgrows a cloud far behind it, and the
+        // fill where the cloud was lifted rings it.
+        let deep = fill(&far, 0.85, 1.0);
+        assert!(deep > FILL_SHOWN, "{deep}");
+        // Flying less far and zooming the lens to show the cloud as large
+        // shows less of it.
+        let growth = |dolly: f64| 3.0 / (3.0 - dolly);
+        let shallow = fill(&far, 0.3, growth(0.85) / growth(0.3));
+        assert!(shallow < deep / 2.0, "{shallow} {deep}");
+        // A cloud in front outgrows its own place, and hides its fill.
+        assert!(fill(&near, 0.4, 1.0) < 0.01);
+        // Swinging aside, at the middle of the move, slides it off its
+        // place.
+        let shot = Shot {
+            focus: (199.5, 149.5),
+            dolly: 0.0,
+            truck: (0.1, 0.0),
+            width: 160,
+            height: 120,
+            frames: 3,
+            ..Shot::default()
+        };
+        let aside = shot.fill_shown(&near, &shot.view(&near, 1));
+        assert!(aside > 0.02, "{aside}");
+        // Flown through, it is gone, and all its fill shows.
+        let through = fill(&near, 0.6, 1.0);
+        assert!(through > 0.3, "{through}");
+    }
+
+    #[test]
+    fn a_tour_stop_showing_much_fill_flies_less_far_and_keeps_its_size() {
+        let scene = glowing(1200.0);
+        let tour = |dolly: f64| Shot {
+            tour: vec![
+                Stop {
+                    focus: (199.5, 149.5),
+                    hold: 1.0,
+                    ..Stop::default()
+                },
+                // On the cloud's plane, from its line of sight from Earth.
+                Stop {
+                    focus: (199.5, 149.5),
+                    dolly,
+                    zoom: 1.5,
+                    pan: 1.0 - dolly,
+                    depth: 3.0,
+                    travel: 2.0,
+                    hold: 2.0,
+                    ..Stop::default()
+                },
+            ],
+            glide: 0.0,
+            width: 160,
+            height: 120,
+            frames: 60,
+            ..Shot::default()
+        };
+        let most = |shot: &Shot| shot.fill_by_frame(&scene).into_iter().fold(0.0, f64::max);
+        let asked = tour(0.85);
+        assert!(most(&asked) > FILL_SHOWN);
+        let (fitted, _) = asked.fitted(&scene);
+        assert!(most(&fitted) <= FILL_SHOWN, "{}", most(&fitted));
+        let (stop, wanted) = (fitted.tour[1], asked.tour[1]);
+        assert!(stop.dolly < 0.85, "{stop:?}");
+        // The cloud shows as large as asked, and the camera stays on its
+        // line of sight.
+        let size = |stop: &Stop| stop.zoom * stop.depth / (stop.depth - stop.dolly);
+        assert!((size(&stop) / size(&wanted) - 1.0).abs() < 1e-9, "{stop:?}");
+        assert!((stop.pan - (1.0 - stop.dolly)).abs() < 1e-9, "{stop:?}");
+        // A tour that shows little fill keeps its stops.
+        let shallow = tour(0.1);
+        assert!(most(&shallow) <= FILL_SHOWN, "{}", most(&shallow));
+        assert_eq!(shallow.fitted(&scene).0.tour, shallow.tour);
     }
 
     #[test]

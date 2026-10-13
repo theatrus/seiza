@@ -119,8 +119,10 @@ pub(crate) struct ParallaxVideoArgs {
     /// `title="..."`, e.g. `--stop
     /// "2700,3400 dolly=0.85 rotate=-20 pan=0.25 travel=6 hold=1.5"`. The
     /// camera glides on slowly through the stops it holds at; the first
-    /// is the opening view. A tour sets the video's length and replaces
-    /// --focus's single move
+    /// is the opening view. A stop that would show much of the smooth fill
+    /// left behind a depth plane flies less far and zooms in to keep its
+    /// target's size. A tour sets the video's length and replaces --focus's
+    /// single move
     #[arg(long = "stop", value_parser = seiza_parallax::parse_stop, allow_hyphen_values = true)]
     stops: Vec<seiza_parallax::TourStop>,
     /// Tour the catalogued objects in the field: every one worth a visit

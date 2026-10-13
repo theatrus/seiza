@@ -702,11 +702,13 @@ pub struct FitSummary {
     pub inside: bool,
 }
 
-/// How the fit changed one tour stop: its zoom and pan, asked and used.
+/// How the fit changed one tour stop: its zoom, pan and dolly, asked and
+/// used.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct StopFit {
     pub zoom: (f64, f64),
     pub pan: (f64, f64),
+    pub dolly: (f64, f64),
 }
 
 /// Tell what `scene`'s dust is and does, and note it in `summary`.
@@ -1502,6 +1504,7 @@ impl Parallax {
                 .map(|(asked, fitted)| StopFit {
                     zoom: (asked.zoom, fitted.zoom),
                     pan: (asked.pan, fitted.pan),
+                    dolly: (asked.dolly, fitted.dolly),
                 })
                 .collect(),
             inside: shot.stays_inside(scene),
@@ -1709,12 +1712,46 @@ fn report_fit(fit: &FitSummary, shot: &Shot, report: &mut dyn FnMut(Event)) {
         }
         return;
     }
+    // A stop flown less far zooms in to keep its plane's size; the rest of
+    // its zoom keeps it inside the image.
+    let kept_size = |index: usize, stop: &StopFit| {
+        let depth = shot.tour[index].depth;
+        let growth = |dolly: f64| depth / (depth - dolly);
+        stop.zoom.0 * growth(stop.dolly.0) / growth(stop.dolly.1)
+    };
+    let flattened: Vec<String> = fit
+        .stops
+        .iter()
+        .enumerate()
+        .filter(|(_, stop)| stop.dolly.1 < stop.dolly.0 - 1e-9)
+        .map(|(index, stop)| {
+            format!(
+                "stop {} {:.2} of the way rather than {:.2}",
+                index + 1,
+                stop.dolly.1,
+                stop.dolly.0
+            )
+        })
+        .collect();
+    if !flattened.is_empty() {
+        report(Event::Note(&format!(
+            "flew less far in, zoomed to keep each target's size, so less of the smooth fill \
+             behind the depth planes shows: {}",
+            flattened.join(", ")
+        )));
+    }
     let zoomed: Vec<String> = fit
         .stops
         .iter()
         .enumerate()
-        .filter(|(_, stop)| stop.zoom.1 > stop.zoom.0 * 1.001)
-        .map(|(index, stop)| format!("stop {} by {:.2}", index + 1, stop.zoom.1 / stop.zoom.0))
+        .filter(|&(index, stop)| stop.zoom.1 > kept_size(index, stop) * 1.001)
+        .map(|(index, stop)| {
+            format!(
+                "stop {} by {:.2}",
+                index + 1,
+                stop.zoom.1 / kept_size(index, stop)
+            )
+        })
         .collect();
     if !zoomed.is_empty() && fit.inside {
         report(Event::Note(&format!(

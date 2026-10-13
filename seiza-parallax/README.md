@@ -37,7 +37,9 @@ both, matching stars to Gaia DR3 for their Bailer-Jones distances.
   `Scene::depth_at` gives the depth under a point. Each plane is drawn in
   perspective over the part of the frame it reaches and fades as the
   camera flies through it, and `Shot::fitted` keeps the edges where the
-  image cuts a plane off out of view. Where a region in front of the
+  image cuts a plane off out of view. Where a tour's frame would show much
+  of the smooth fill behind a plane (`Shot::fill_shown`), the fit flies
+  that stop less far and zooms its lens to keep its target's size. Where a region in front of the
   target is darker than the fill, a dark cloud blocks the light behind: the
   plane keeps a `Transmission`, each colour's, the light behind is
   restored, and everything behind the cloud dims by it at the cloud's own

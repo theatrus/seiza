@@ -289,14 +289,49 @@ A plane's cut edges are judged by its light, not its region: an edge counts
 as cut only where the plane holds more than a twentieth of its body's mean
 light along it.
 
+### Showing little fill
+
+Behind a lifted plane the background keeps only the fill, which is smooth.
+It shows wherever the plane no longer covers its own place: slid aside by a
+sideways move, outgrown by the background as the camera flies toward a
+nearer layer, or flown through. `Shot::fill_shown` measures how much of a
+frame shows it. At each point of a grid 64 columns wide it takes the share
+of the photographed light a plane took where the background shows, less
+what is left of the plane times the share it took where the plane shows. A
+dark cloud counts the light it hid.
+
+On the Big Q, the planned stop at Sh2-170 (2790 pc, behind NGC 7822 at 900
+pc) flew 0.88 of the way to the nebula and took the rest of its growth from
+the lens. The nebula grew eight times and Sh2-170 1.4 times, so the fill
+around Sh2-170 covered 56% of the frame: smooth red where the photograph
+shows filaments and dark sky. The same stop flown 0.7, 0.5 and 0.3 of the
+way, its lens zoomed to keep Sh2-170's size, showed 35%, 22% and 11%. At
+0.5 the filaments were back, and at 0.3 nothing looked smeared.
+
+So the fit keeps every frame of a tour under 15% (`FILL_SHOWN`). While the
+worst frame shows more, its stop flies 0.9 as far: the stop it is held at,
+or of the two it travels between, the nearer that can still fly less far.
+The stop's lens zooms to keep its plane's size, and a stop on a plane turns
+as much more as it flies less, staying on that plane's line of sight. The
+stops are then zoomed to keep inside the image as before, and where they
+cannot be, the edges win and the fit stops. On the Big Q this flies the
+Sh2-170 stop 0.34 of the way, and the fill peaks at 14% of a frame.
+Flying less far widens the view of the background, so near the image's
+bottom edge that stop also zooms in 1.49 times to keep inside the image.
+The WR 134 tour never passes 10% and is unchanged. In the single moves
+tried, with and without a wide truck, the fill stayed under 3%, since the
+fit already keeps the truck small, so a single move has no such step.
+
 ## Risks
 
 - **Cost.** Each plane costs a draw over the share of the frame it covers.
   There is no cap on the number of planes; the notes say how much of the
   image each covers.
-- **Fill quality.** A large near plane on a long sideways move shows much of
-  the fill behind it, which is smooth and can look smeared. `Shot::fitted`
-  could later limit the sideways travel by how much fill would show.
+- **Fill quality.** The fill behind a plane is smooth and looks smeared
+  where the photograph had texture. A tour's fit keeps it under 15% of any
+  frame (above), at the cost of less depth at the stops it flattens. A fill
+  that carried the texture of the light about the hole into it would let
+  the camera fly farther.
 - **Wrong distances look wrong.** A bad catalogue distance gives strong,
   wrong motion. Every plane is reported with its distance and how it was
   found, so the user can see it and override it.
