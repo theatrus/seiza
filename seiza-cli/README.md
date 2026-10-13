@@ -420,7 +420,9 @@ last stop at the first's view unless the tour ends there, so the last frame
 leads into the first and the video loops. A stop on a depth plane (below)
 centres its place on that plane, turning to look along the line of sight
 through it; `depth=PARSECS` names the plane's distance, by default that of
-the plane the image shows there. A stop's `title="TEXT"` names it,
+the plane the image shows there. A warning names any stop whose depth the
+image does not show at its place, as in a tour planned before the planes
+changed: drop its depth, or plan the tour again. A stop's `title="TEXT"` names it,
 and `--tour-titles` shows each title low in the frame while the camera
 drifts through its stop, fading in and out. `--auto-tour[=N]` plans a tour itself from the catalogued objects
 in the field: every one worth a visit (the well-known catalogues, and

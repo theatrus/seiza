@@ -244,6 +244,10 @@ motion at the background's depth hardly shows.
 A tour stop's `dolly` is a share of the way to the background plane. A stop
 on a depth plane centres its place on that plane: the stop's `depth`
 (`depth=PARSECS` in a stop, else the plane under its place) says which. A
+tour file keeps the depths it was planned with, so after the planes change
+a stop can name a depth the image no longer shows at its place, which
+frames its place off centre; a warning names each such stop, more than 15%
+from the depth under it. A
 camera that has moved sideways sees a nearer or farther plane shifted
 against the background, so each stop aims at the background point that
 puts its place at the frame's centre (`aim_through`), and the camera glides

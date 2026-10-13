@@ -1451,6 +1451,26 @@ impl Parallax {
             looped: video.tour_loop,
             ..Shot::default()
         };
+        // A stop framed at a depth the image does not show at its point,
+        // such as one from a tour planned with planes since changed, would
+        // frame its point off the centre of its view.
+        for (index, stop) in video.stops().iter().enumerate() {
+            let (Some(depth), Some((x, y))) = (stop.depth_pc, stop.focus) else {
+                continue;
+            };
+            let shown = scene.depth_at(x, y);
+            if (depth - shown).abs() > AUTO_PLANE_DEPTH * shown {
+                let title = stop
+                    .title
+                    .as_ref()
+                    .map_or(String::new(), |title| format!(" ({title})"));
+                report(Event::Warning(&format!(
+                    "stop {}{title} is framed at {depth:.0} pc, but the image there lies at \
+                     {shown:.0} pc: drop its depth, or plan the tour again",
+                    index + 1
+                )));
+            }
+        }
         if !asked.tour.is_empty() {
             report(Event::Note(&format!(
                 "a tour of {} stops over {:.1} s",
@@ -3278,6 +3298,69 @@ mod tests {
         assert!(
             matches!(&refused, Err(Error::Encode(crate::encode::Error::Sink(message))) if message == "disk full"),
             "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_stop_framed_at_a_depth_the_image_does_not_show_is_reported() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut starless, stars, wcs, distances) = field(directory.path());
+        // A glowing cloud for the plane to lift.
+        for (x, y, pixel) in starless.enumerate_pixels_mut() {
+            let r2 = (x as f64 - 220.0).powi(2) + (y as f64 - 120.0).powi(2);
+            let glow = 0.4 * (-r2 / 800.0).exp();
+            for value in pixel.0.iter_mut() {
+                *value = (*value + glow as f32).min(1.0);
+            }
+        }
+        let mut options = options(distances, directory.path());
+        options.video.size = (320, 240);
+        options.scene.planes = vec![DepthPlane {
+            mask: crate::plane::tests::disc(320, 240, (220.0, 120.0), 40.0),
+            distance_pc: 1200.0,
+            name: "cloud".into(),
+        }];
+        // On the plane at its depth; on it at another; and on the
+        // background, at 400 pc, at a depth from a plane no longer there.
+        let stop = |focus: (f64, f64), depth_pc: f64, title: &str| TourStop {
+            focus: Some(focus),
+            dolly: 0.3,
+            travel: 1.0,
+            hold: 0.5,
+            title: Some(title.into()),
+            depth_pc: Some(depth_pc),
+            ..TourStop::default()
+        };
+        options.video.tour = vec![
+            TourStop::default(),
+            stop((220.0, 120.0), 1200.0, "cloud"),
+            stop((220.0, 120.0), 600.0, "cloud again"),
+            stop((40.0, 40.0), 288.0, "LDN 9001"),
+        ];
+        let mut warnings = Vec::new();
+        Parallax::prepare(
+            &starless,
+            &stars,
+            &wcs,
+            &options,
+            &mut |event| {
+                if let Event::Warning(warning) = event
+                    && warning.contains("is framed at")
+                {
+                    warnings.push(warning.to_string());
+                }
+            },
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(
+            warnings,
+            [
+                "stop 3 (cloud again) is framed at 600 pc, but the image there lies at 1200 pc: \
+                 drop its depth, or plan the tour again",
+                "stop 4 (LDN 9001) is framed at 288 pc, but the image there lies at 400 pc: \
+                 drop its depth, or plan the tour again",
+            ]
         );
     }
 
