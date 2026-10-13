@@ -2171,7 +2171,9 @@ char *seiza_rc_astro_process_file_json(const char *request_json,
  their own; a dark nebula moves with the cloud of dust it lies in, which
  stays with the nebula when it holds it, and moves as one plane when it
  lies at least 15% in front, placed by its dark nebulae or the Gaia star
- counts), `distanceOverrides` (`[{object, distanceParsecs}]`:
+ counts; a nebula or cloud that would cover more than a third of the
+ image stays with the nebula unless given a distance, and so do the
+ nebulae inside a nebula that stays), `distanceOverrides` (`[{object, distanceParsecs}]`:
  distances for catalogued objects, by name, in place of the catalogue's,
  for the nebula's distance and the automatic planes), `start` ("focus",
  "whole"), `dolly`, `truck`, `truckAngleDegrees`,

@@ -515,7 +515,11 @@ of an object's kind never counts, and nor does one whose range takes in the
 nebula's own, as it cannot say which lies nearer. Each plane takes the
 object's outermost catalogued outline, or else its ellipse, grown to where
 the image's light levels off. It takes the nebula's light alone: darkness
-about it is dust, which stays with its cloud.
+about it is dust, which stays with its cloud. A nebula that would cover more
+than a third of the image is the scene's backdrop and stays with the
+nebula, unless you give its distance; so does one that spans most of the
+image or holds the nebula. A nebula inside one of these that the catalogue
+places at its distance stays with it, and the notes name them.
 
 A dark nebula is the thickest part of a cloud of dust, so it moves with
 that cloud rather than on its own. The star counts split the dust into
@@ -528,8 +532,10 @@ that of the nearest cloud measured. A cloud the catalogue gives no distance
 lies where the Gaia stars seen through its thickest part run short: in front
 of a cloud there are as many stars at each distance as over clear sky, and
 behind it fewer, which is how published distances to dark clouds are
-measured. It needs a few stars in front, and a clear fall behind. A dark
-nebula in clear sky gets a plane of its own. The dust mapped from the star
+measured. It needs a few stars in front, and a clear fall behind. A cloud
+that would cover more than a third of the image stays with the nebula,
+unless you give a distance for a dark nebula in it. A dark nebula in clear
+sky gets a plane of its own. The dust mapped from the star
 counts clears where a dark cloud's plane blocks the light itself. The notes
 name each plane, its distance and how that was found. `--object-distance NAME=PARSECS` gives an object's
 distance in place of the catalogue's, for the nebula's distance and for the

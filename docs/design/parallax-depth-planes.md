@@ -115,20 +115,32 @@ with the cloud.
 **Automatic**
 
 - **Catalogued objects** (`--auto-planes`, the C ABI's `autoPlanes`). Take
-  the nebulae in the field that have a distance in the object distance
-  data. The data records how each distance was found (`DistanceBasis`): use
+  the nebulae in the field that have a distance in the object distance data.
+  The data records how each distance was found (`DistanceBasis`): use
   measured distances and those borrowed from an object around them, never
   `KindDefault`, a typical distance for the object's kind. Split an object
   off only when its distance differs from the nebula's by 15% or more
   (`AUTO_PLANE_DEPTH`), and not when its range of distances takes in the
   nebula's. Leave out an object whose ellipse holds the point the nebula's
   distance was taken at: it is the nebula, or holds it, and would carry it
-  off. The region is the outermost brightness level of its OpenNGC outline,
-  softened, or else its catalogue ellipse, moved onto the light and grown
-  ring by ring until the light comes near its surroundings or levels off,
-  at most three times the ellipse (`Region::from_extent`). On the Big Q
-  field this finds Sh2-170 at 2790 pc, behind NGC 7822 at 900 pc, and
-  vdB 2 at 717 pc, in front.
+  off. Leave out too one so large it spans most of the image, one that
+  cannot be cut out, and one whose region would cover more than a third of
+  the image (`AUTO_PLANE_COVERAGE`) unless its distance is given: such a
+  nebula is the scene's backdrop, and lifting it would move most of the
+  picture off the nebula's depth. An object inside one left out, whose
+  distance the catalogue borrows from it, stays with it, so one structure is
+  not torn in two. The region is the outermost brightness level of its
+  OpenNGC outline, softened, or else its catalogue ellipse, moved onto the
+  light and grown ring by ring until the light comes near its surroundings
+  or levels off, at most three times the ellipse (`Region::from_extent`). On
+  the Big Q field this finds Sh2-170 at 2790 pc, behind NGC 7822 at 900 pc,
+  and vdB 2 at 717 pc, in front. On the North America Nebula, given at 800
+  pc, LBN 371 at a kinematic 1500 pc would have covered 85% of the image. On
+  a wide field about WR 134 in Cygnus, given at 1850 pc, Sh2-109 and LBN 205
+  span the image and LBN 162 runs off its edge, yet a dozen nebulae inside
+  them took their distances, 1500, 9300 and 12700 pc, and between them
+  covered most of the image; left with them, three planes remain: Sh2-104 in
+  front, and IC 1310 and SNR G073.9+00.9 behind.
 - **Dust clouds**, dark nebulae among them, by the clouds the star counts
   find and the Gaia stars' distances (below).
 - **Galaxies** still go to the far field.
@@ -194,7 +206,9 @@ dust moves by clouds:
    its region the cloud's cells fading out over a cell, with its dark
    nebulae's regions added: at the distance of its largest dark nebula
    that has one, else where the Gaia stars seen through it run short.
-   Clouds behind the nebula stay, as a plane there blocks nothing.
+   Clouds behind the nebula stay, as a plane there blocks nothing, and so
+   does a cloud that would cover more than a third of the image, unless a
+   distance is given for its dark nebula.
 5. A dark nebula in no cloud stands alone, on a plane of its own as before
    when it lies at least 15% in front of the nebula, by its catalogued
    distance or the Gaia stars seen through it. Its region is its

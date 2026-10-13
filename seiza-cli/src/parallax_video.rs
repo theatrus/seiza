@@ -303,7 +303,9 @@ pub(crate) struct ParallaxVideoArgs {
     /// lies in: a cloud that holds the nebula stays with it, and one at
     /// least 15% in front of it, placed by its dark nebulae's distances or
     /// where the Gaia stars seen through it run short, moves as one
-    /// plane
+    /// plane. A nebula or cloud that would cover more than a third of the
+    /// image stays with the nebula unless given a distance, and the
+    /// nebulae inside a nebula that stays, taking its distance, stay too
     #[arg(long)]
     auto_planes: bool,
     /// A distance for a catalogued object in place of the catalogue's,
