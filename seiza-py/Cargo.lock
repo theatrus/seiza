@@ -1829,7 +1829,7 @@ dependencies = [
 
 [[package]]
 name = "seiza"
-version = "0.31.0"
+version = "0.31.1"
 dependencies = [
  "chrono",
  "directories",
@@ -1862,7 +1862,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-calibration"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "rayon",
  "seiza-imgproc",
@@ -1954,7 +1954,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-py"
-version = "0.31.0"
+version = "0.31.1"
 dependencies = [
  "image",
  "numpy",
@@ -2007,7 +2007,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-stacking"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "multiversion",
  "postcard",
