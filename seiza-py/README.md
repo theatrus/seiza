@@ -582,6 +582,26 @@ title, `intro_card` and `outro_card` over the start and the end for
 "top_left"}` puts a logo in a corner, with `text`, `size` and `opacity`
 keys as well.
 
+Depth planes and dust work as in the command and the C API. `planes=` takes
+`(mask, distance_pc)` or `(mask, distance_pc, name)`, each mask a path or a
+2-D array, white where the image belongs to the plane; `auto_planes=True`
+finds planes from the catalogued objects and the dust; and
+`distance_overrides={"NGC 7822": 900}` gives catalogued objects distances of
+your own. `summary["planes"]` lists the planes found. `dust_map=` (a path or
+a 2-D array, white where the dust is opaque) replaces the dust counted from
+the stars; `video.dust_map()` reads the dust back as an array, so it can be
+painted over, `video.with_dust_map(painted)` swaps a map in without
+preparing again, and `video.write_dust_map("dust.png")` saves it. Once a
+video is made, `video.plan_tour(auto_tour)` plans a tour on its scene, each
+stop framed at the depth of the plane its target lies on, as `auto_tour=`
+would; `plan_parallax_tour` plans from the catalogue alone:
+
+```python
+video = seiza.ParallaxVideo(starless, stars, solution.wcs, auto_planes=True)
+plan = video.plan_tour({"targets": 6})
+toured = video.reconfigure(tour=plan["tour"], tour_titles=True, tour_loop=True)
+```
+
 `distance_focus` is where the nebula's distance is measured; `focus` only
 aims the camera, so moving it never changes the scene's depth. To film the
 same scene again with another camera, tour, size or quality, call

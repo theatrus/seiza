@@ -607,6 +607,13 @@ class ParallaxVideo:
         keep_galaxies: bool = False,
         dust: bool = True,
         dust_opacity: float = 3.0,
+        dust_map: str | Path | npt.NDArray[np.float32] | npt.NDArray[np.uint8] | None = None,
+        planes: Sequence[
+            tuple[str | Path | npt.NDArray[np.float32] | npt.NDArray[np.uint8], float]
+            | tuple[str | Path | npt.NDArray[np.float32] | npt.NDArray[np.uint8], float, str]
+        ] = (),
+        auto_planes: bool = False,
+        distance_overrides: Mapping[str, float] | Sequence[tuple[str, float]] = (),
         start: str = "focus",
         dolly: float = 0.4,
         truck: float = 0.0,
@@ -654,6 +661,23 @@ class ParallaxVideo:
         cancel: Callable[[], bool] | None = None,
         **options: Any,
     ) -> ParallaxVideo: ...
+    def plan_tour(
+        self,
+        auto_tour: bool | int | Mapping[str, Any] | None = None,
+        *,
+        size: str | tuple[int, int] | None = None,
+    ) -> dict[str, Any]: ...
+    def with_dust_map(
+        self,
+        dust_map: str | Path | npt.NDArray[np.float32] | npt.NDArray[np.uint8] | None,
+        *,
+        progress: Callable[[dict[str, Any]], None] | None = None,
+        cancel: Callable[[], bool] | None = None,
+    ) -> ParallaxVideo: ...
+    def dust_map(
+        self, *, counted: bool = False, size: tuple[int, int] | None = None
+    ) -> npt.NDArray[np.float32] | None: ...
+    def write_dust_map(self, path: str | Path, *, counted: bool = False) -> bool: ...
     def render(
         self,
         on_frame: Callable[[npt.NDArray[np.uint8], int], bool | None],

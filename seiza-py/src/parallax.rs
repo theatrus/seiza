@@ -5,14 +5,15 @@
 //! writer), or into a video file.
 
 use crate::PyWcs;
-use numpy::ndarray::Array3;
-use numpy::{IntoPyArray, PyArray3, PyReadonlyArrayDyn, PyUntypedArrayMethods};
+use numpy::ndarray::{Array2, Array3};
+use numpy::{IntoPyArray, PyArray2, PyArray3, PyReadonlyArrayDyn, PyUntypedArrayMethods};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 use seiza_parallax::{
-    Corner, CustomLabel, Easing, Event, FfmpegSink, FrameSink, Parallax, ParallaxOptions,
-    PngSequence, Quality, SmallStars, Start,
+    Corner, CustomLabel, DepthPlane, DistanceOverride, DustMap, Easing, Event, FfmpegSink,
+    FrameSink, Parallax, ParallaxOptions, PlaneMask, PlannedTour, PngSequence, Quality, SmallStars,
+    Start,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -97,6 +98,13 @@ pub(crate) fn plan_parallax_tour<'py>(
             seiza_parallax::plan_tour(&wcs, (width, height), objects.as_deref(), frame, &auto)
         })
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    plan_dict(py, &plan)
+}
+
+/// A planned tour as Python sees it: its stops as dicts `tour=` takes back,
+/// each named for its target, and the focus where the nebula's distance is
+/// best taken.
+fn plan_dict<'py>(py: Python<'py>, plan: &PlannedTour) -> PyResult<Bound<'py, PyDict>> {
     let stops = plan
         .stops
         .iter()
@@ -113,13 +121,20 @@ pub(crate) fn plan_parallax_tour<'py>(
             stop.set_item("spin_deg", planned.stop.spin_deg)?;
             stop.set_item("push", planned.stop.push)?;
             stop.set_item("title", &planned.stop.title)?;
+            stop.set_item("depth_pc", planned.stop.depth_pc)?;
             Ok(stop)
         })
         .collect::<PyResult<Vec<_>>>()?;
+    let seconds = seiza_parallax::VideoOptions {
+        tour: plan.tour(),
+        ..seiza_parallax::VideoOptions::default()
+    }
+    .seconds();
     let result = PyDict::new(py);
     result.set_item("tour", stops)?;
     result.set_item("focus", plan.focus)?;
     result.set_item("focus_name", &plan.focus_name)?;
+    result.set_item("seconds", seconds)?;
     Ok(result)
 }
 
@@ -243,6 +258,113 @@ fn image_argument(value: &Bound<'_, PyAny>, name: &str) -> PyResult<ImageArgumen
     pixels.map(ImageArgument::Pixels).ok_or_else(shape_error)
 }
 
+/// A one-channel image of values 0 to 1, from a 2-D numpy array of float32
+/// 0 to 1 or uint8, as (width, height, values row by row).
+fn unit_array(value: &Bound<'_, PyAny>, name: &str) -> PyResult<(usize, usize, Vec<f32>)> {
+    let shape = |shape: &[usize]| match shape {
+        [height, width] => Ok((*width, *height)),
+        _ => Err(PyValueError::new_err(format!(
+            "{name} must have shape (height, width)"
+        ))),
+    };
+    if let Ok(array) = value.extract::<PyReadonlyArrayDyn<'_, f32>>() {
+        let (width, height) = shape(array.shape())?;
+        return Ok((width, height, array.as_array().iter().copied().collect()));
+    }
+    if let Ok(array) = value.extract::<PyReadonlyArrayDyn<'_, u8>>() {
+        let (width, height) = shape(array.shape())?;
+        let values = array.as_array().iter().map(|&v| v as f32 / 255.0).collect();
+        return Ok((width, height, values));
+    }
+    Err(PyValueError::new_err(format!(
+        "{name} must be a path or a 2-D numpy array of float32 or uint8"
+    )))
+}
+
+/// A dust map from a path (PNG, JPEG, TIFF, FITS or XISF) or a 2-D array,
+/// white where the dust is opaque.
+fn dust_map_argument(value: &Bound<'_, PyAny>) -> PyResult<DustMap> {
+    let map = if let Ok(path) = value.extract::<PathBuf>() {
+        DustMap::open(&path).map_err(PyValueError::new_err)?
+    } else {
+        let (width, height, opacity) = unit_array(value, "dust_map")?;
+        DustMap {
+            width,
+            height,
+            opacity,
+        }
+    };
+    map.check().map_err(PyValueError::new_err)?;
+    Ok(map)
+}
+
+/// Depth planes from `planes=`: (mask, distance_pc) or (mask, distance_pc,
+/// name), each mask a path or a 2-D array, white where the image belongs to
+/// the plane, at any size of the image's shape. A plane takes its mask
+/// file's name, or "plane N", unless named.
+fn planes_argument(value: &Bound<'_, PyAny>) -> PyResult<Vec<DepthPlane>> {
+    value
+        .try_iter()?
+        .enumerate()
+        .map(|(index, plane)| {
+            let plane = plane?;
+            let parts: Vec<Bound<'_, PyAny>> = plane.try_iter()?.collect::<PyResult<_>>()?;
+            let (mask, distance_pc, name) = match parts.as_slice() {
+                [mask, distance] => (mask, distance.extract::<f64>()?, None),
+                [mask, distance, name] => (mask, distance.extract()?, Some(name.extract()?)),
+                _ => {
+                    return Err(PyValueError::new_err(
+                        "a plane is (mask, distance_pc) or (mask, distance_pc, name)",
+                    ));
+                }
+            };
+            let (mask, default_name) = if let Ok(path) = mask.extract::<PathBuf>() {
+                let stem = path.file_stem().map_or_else(
+                    || path.display().to_string(),
+                    |stem| stem.to_string_lossy().into_owned(),
+                );
+                (PlaneMask::open(&path).map_err(PyValueError::new_err)?, stem)
+            } else {
+                let (width, height, coverage) = unit_array(mask, "a plane's mask")?;
+                let mask = PlaneMask {
+                    width,
+                    height,
+                    coverage,
+                };
+                mask.check().map_err(PyValueError::new_err)?;
+                (mask, format!("plane {}", index + 1))
+            };
+            Ok(DepthPlane {
+                mask,
+                distance_pc,
+                name: name.unwrap_or(default_name),
+            })
+        })
+        .collect()
+}
+
+/// Distances for catalogued objects from `distance_overrides=`: a dict of
+/// name to parsecs, or (name, parsecs) pairs.
+fn distance_overrides_argument(value: &Bound<'_, PyAny>) -> PyResult<Vec<DistanceOverride>> {
+    let pairs: Vec<(String, f64)> = match value.downcast::<PyDict>() {
+        Ok(dict) => dict
+            .iter()
+            .map(|(name, distance)| Ok((name.extract()?, distance.extract()?)))
+            .collect::<PyResult<_>>()?,
+        Err(_) => value
+            .try_iter()?
+            .map(|pair| pair?.extract())
+            .collect::<PyResult<_>>()?,
+    };
+    Ok(pairs
+        .into_iter()
+        .map(|(object, distance_pc)| DistanceOverride {
+            object,
+            distance_pc,
+        })
+        .collect())
+}
+
 /// Two numbers from a two-item tuple or list.
 fn pair<'py, T: FromPyObject<'py>>(value: &Bound<'py, PyAny>) -> PyResult<(T, T)> {
     let [a, b]: [T; 2] = value.extract()?;
@@ -273,7 +395,7 @@ fn choice<T: Copy>(value: &str, name: &str, choices: &[(&str, T)]) -> PyResult<T
 
 /// The keyword arguments that make the scene: changing any needs a new
 /// `ParallaxVideo`, and `reconfigure` refuses them.
-const SCENE_KEYS: [&str; 14] = [
+const SCENE_KEYS: [&str; 18] = [
     "distance_pc",
     "distance_focus",
     "unmatched_distance_pc",
@@ -288,6 +410,10 @@ const SCENE_KEYS: [&str; 14] = [
     "keep_galaxies",
     "dust",
     "dust_opacity",
+    "dust_map",
+    "planes",
+    "auto_planes",
+    "distance_overrides",
 ];
 
 /// The video's options from keyword arguments, over the defaults.
@@ -323,6 +449,12 @@ fn options(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ParallaxOptions> {
             "keep_galaxies" => options.scene.keep_galaxies = value.extract()?,
             "dust" => options.scene.dust = value.extract()?,
             "dust_opacity" => options.scene.dust_opacity = value.extract()?,
+            "dust_map" => options.scene.dust_map = Some(dust_map_argument(&value)?),
+            "planes" => options.scene.planes = planes_argument(&value)?,
+            "auto_planes" => options.scene.auto_planes = value.extract()?,
+            "distance_overrides" => {
+                options.scene.distance_overrides = distance_overrides_argument(&value)?
+            }
             "start" => {
                 options.video.start = choice(
                     &value.extract::<String>()?,
@@ -391,6 +523,7 @@ fn options(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ParallaxOptions> {
                                         .filter(|title| !title.is_empty())
                                 }
                                 "card" => parsed.card = value.extract()?,
+                                "depth_pc" => parsed.depth_pc = value.extract()?,
                                 // A plan's name for the stop's target.
                                 "name" => {}
                                 other => {
@@ -688,6 +821,123 @@ impl PyParallaxVideo {
         Ok(Self { video })
     }
 
+    /// A tour of the catalogued objects in the image planned on this
+    /// video's scene, as `auto_tour=` would plan it: each stop frames its
+    /// target at the depth of the plane the scene shows it on.
+    /// `plan_parallax_tour` plans from the catalogue alone. `auto_tour` is
+    /// True, a count, or a dict of `targets`, `hold` and `motion`; `size` is
+    /// the frame the tour is for, this video's own by default. Returns
+    /// `plan_parallax_tour`'s dict, its stops carrying `depth_pc`; its
+    /// `tour`, edited, goes back in through `reconfigure(tour=...)`. The
+    /// scene keeps the distance it was prepared with, so the plan's `focus`
+    /// matters only to a new `ParallaxVideo`.
+    #[pyo3(signature = (auto_tour=None, *, size=None))]
+    fn plan_tour<'py>(
+        &self,
+        py: Python<'py>,
+        auto_tour: Option<&Bound<'py, PyAny>>,
+        size: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let auto = match auto_tour {
+            None => seiza_parallax::AutoTour::default(),
+            Some(value) => auto_tour_argument(value)?
+                .ok_or_else(|| PyValueError::new_err("auto_tour=False plans no tour"))?,
+        };
+        auto.check().map_err(PyValueError::new_err)?;
+        let frame = match size {
+            None => self.video.size(),
+            Some(size) => match size.extract::<String>() {
+                Ok(size) => {
+                    seiza_parallax::parse_frame_size(&size).map_err(PyValueError::new_err)?
+                }
+                Err(_) => pair(size)?,
+            },
+        };
+        let plan = py
+            .allow_threads(|| self.video.plan_tour(&auto, frame))
+            .map_err(video_error)?;
+        plan_dict(py, &plan)
+    }
+
+    /// The same scene and camera with `dust_map` (a path or a 2-D array,
+    /// white where the dust is opaque), or with the dust counted from the
+    /// stars again when None. Only the dust changes: nothing is prepared
+    /// again, and this video is left as it was. A map gives dust even to a
+    /// video prepared without it. `cancel()` returning True, or Ctrl-C,
+    /// stops it.
+    #[pyo3(signature = (dust_map, *, progress=None, cancel=None))]
+    fn with_dust_map(
+        &self,
+        py: Python<'_>,
+        dust_map: Option<&Bound<'_, PyAny>>,
+        progress: Option<PyObject>,
+        cancel: Option<PyObject>,
+    ) -> PyResult<Self> {
+        let map = dust_map.map(dust_map_argument).transpose()?;
+        let raised = Arc::new(Mutex::new(None));
+        let mut report = reporter(progress, Arc::clone(&raised));
+        let stop_raised = Arc::clone(&raised);
+        let swapped = py.allow_threads(|| {
+            self.video.with_dust_map(map.as_ref(), &mut report, &|| {
+                should_stop(&cancel, &stop_raised)
+            })
+        });
+        reraise(&raised)?;
+        let video = swapped.map_err(video_error)?;
+        Ok(Self { video })
+    }
+
+    /// The dust as a (height, width) float32 array over the whole image, 0
+    /// where the sky is clear to 1 where the dust is opaque, the values
+    /// `with_dust_map` takes back: the dust in use, or with `counted=True`
+    /// the dust counted from the stars even while a map takes its place.
+    /// `size` (width, height) defaults to the image's. None when there is
+    /// no such dust: it is off, or too few stars show to count it.
+    #[pyo3(signature = (*, counted=false, size=None))]
+    fn dust_map<'py>(
+        &self,
+        py: Python<'py>,
+        counted: bool,
+        size: Option<(usize, usize)>,
+    ) -> PyResult<Option<Bound<'py, PyArray2<f32>>>> {
+        let dust = if counted {
+            self.video.counted_dust()
+        } else {
+            self.video.dust()
+        };
+        let Some(dust) = dust else {
+            return Ok(None);
+        };
+        let (width, height) = size.unwrap_or_else(|| dust.size());
+        if width == 0 || height == 0 {
+            return Err(PyValueError::new_err("the map needs a width and height"));
+        }
+        let map = py.allow_threads(|| dust.to_map(width, height));
+        let array = Array2::from_shape_vec((height, width), map.opacity)
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        Ok(Some(array.into_pyarray(py)))
+    }
+
+    /// Write the dust to `path`, white where it is opaque, in the format its
+    /// extension names: a 16-bit PNG or TIFF, or a 32-bit float FITS or
+    /// XISF, the size of the image: the dust in use, or with `counted=True`
+    /// the dust counted from the stars. False when there is no such dust.
+    #[pyo3(signature = (path, *, counted=false))]
+    fn write_dust_map(&self, py: Python<'_>, path: PathBuf, counted: bool) -> PyResult<bool> {
+        let dust = if counted {
+            self.video.counted_dust()
+        } else {
+            self.video.dust()
+        };
+        let Some(dust) = dust else {
+            return Ok(false);
+        };
+        let (width, height) = dust.size();
+        py.allow_threads(|| dust.to_map(width, height).save(&path))
+            .map_err(PyRuntimeError::new_err)?;
+        Ok(true)
+    }
+
     /// The number of frames.
     #[getter]
     fn frame_count(&self) -> usize {
@@ -722,7 +972,33 @@ impl PyParallaxVideo {
         dict.set_item("flying_stars", summary.flying_stars)?;
         dict.set_item("galaxies_lifted", summary.galaxies_lifted.clone())?;
         dict.set_item("dust_transmission", summary.dust_transmission)?;
+        dict.set_item("dust_given", summary.dust_given)?;
+        dict.set_item("stars_in_front_of_dust", summary.stars_in_front_of_dust)?;
+        let planes = summary
+            .planes
+            .iter()
+            .map(|plane| {
+                let entry = PyDict::new(py);
+                entry.set_item("name", &plane.name)?;
+                entry.set_item("distance_pc", plane.distance_pc)?;
+                entry.set_item("basis", &plane.basis)?;
+                entry.set_item("coverage", plane.coverage)?;
+                entry.set_item("absorbs", plane.absorbs)?;
+                entry.set_item("object", &plane.object)?;
+                Ok(entry)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        dict.set_item("planes", planes)?;
         dict.set_item("labelled_objects", summary.labelled_objects)?;
+        dict.set_item(
+            "wcs",
+            Py::new(
+                py,
+                PyWcs {
+                    wcs: self.video.wcs().clone(),
+                },
+            )?,
+        )?;
         let fit = PyDict::new(py);
         fit.set_item("zoom", summary.fit.zoom)?;
         fit.set_item("pan", summary.fit.pan)?;

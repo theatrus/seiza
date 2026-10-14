@@ -230,6 +230,75 @@ def test_cards_and_a_watermark_image_are_laid_over_the_frames(tmp_path):
         made.reconfigure(watermark={"corner": "middle"}, size=(160, 120))
 
 
+def test_depth_planes_dust_maps_and_scene_tours_match_the_c_api(tmp_path):
+    starless, stars, wcs = field()
+    height, width, _ = starless.shape
+    y, x = np.mgrid[0:height, 0:width].astype(np.float32)
+    knot = np.exp(-((x - 150) ** 2 + (y - 110) ** 2) / 300.0)
+    starless = (starless + 0.5 * knot[..., None]).astype(np.float32)
+    mask = (np.hypot(x - 150, y - 110) < 30).astype(np.float32)
+    events = []
+    made = seiza.ParallaxVideo(
+        starless,
+        stars,
+        wcs,
+        progress=events.append,
+        distance_pc=400.0,
+        online=False,
+        objects=str(tmp_path / "no-objects.bin"),
+        size=(160, 120),
+        seconds=1.0,
+        fps=5,
+        planes=[(mask, 1200.0, "knot")],
+        auto_planes=False,
+    )
+    summary = made.summary
+    assert [(plane["name"], plane["distance_pc"], plane["basis"]) for plane in summary["planes"]] == [
+        ("knot", 1200.0, "given")
+    ]
+    assert summary["planes"][0]["object"] is None
+    assert isinstance(summary["wcs"], seiza.Wcs)
+    assert summary["dust_given"] is False
+    # A painted dust map swaps in without preparing again, and reads back.
+    painted = np.zeros((height, width), np.float32)
+    painted[:, : width // 2] = 1.0
+    dusty = made.with_dust_map(painted)
+    assert dusty.summary["dust_given"] is True
+    assert dusty.summary["planes"] == summary["planes"]
+    read = dusty.dust_map()
+    assert read.shape == (height, width) and read.dtype == np.float32
+    assert read[60, 10] > 0.9 and read[60, width - 10] < 0.1
+    assert dusty.dust_map(size=(32, 24)).shape == (24, 32)
+    assert dusty.write_dust_map(tmp_path / "dust.png")
+    assert (tmp_path / "dust.png").stat().st_size > 0
+    again = seiza.ParallaxVideo(
+        starless, stars, wcs, distance_pc=400.0, online=False,
+        objects=str(tmp_path / "no-objects.bin"), size=(160, 120), seconds=1.0, fps=5,
+        dust_map=str(tmp_path / "dust.png"),
+    )
+    assert again.summary["dust_given"] is True
+    with pytest.raises(ValueError, match="changes the prepared scene"):
+        made.reconfigure(planes=[(mask, 900.0)])
+    # Distances by object name, as a dict or pairs, need the object catalogue.
+    for overrides in ({"NGC 9001": 800.0}, [("NGC 9001", 800.0)]):
+        with pytest.raises(ValueError, match="object catalog"):
+            seiza.ParallaxVideo(
+                starless, stars, wcs, distance_pc=400.0, online=False,
+                objects=str(tmp_path / "no-objects.bin"), distance_overrides=overrides,
+            )
+    # A stop may name the depth it is framed at.
+    toured = made.reconfigure(
+        size=(160, 120), fps=5,
+        tour=["whole hold=0.5", {"focus": (150.0, 110.0), "dolly": 0.3, "travel": 0.5, "depth_pc": 1200.0}],
+    )
+    assert toured.frame_count == 5
+    # Planning on the scene reads the object catalogue, which is missing here.
+    with pytest.raises(ValueError, match="no-objects"):
+        made.plan_tour({"hold": 1.0})
+    with pytest.raises(ValueError, match="plans no tour"):
+        made.plan_tour(False)
+
+
 def test_a_reconfigured_video_shares_the_scene(tmp_path):
     made, _ = video(tmp_path)
     first_frame = made.frame(2)
