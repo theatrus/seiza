@@ -1,8 +1,8 @@
 use crate::{BayerLayout, Error, FitsFrame, FrameSourceRole, LinearImage, Result};
 use rayon::prelude::*;
 use seiza_calibration::{
-    FrameSignature, MatchTolerances, exposure_matches, optics_consistent, sensor_consistent,
-    temperature_matches,
+    FrameSignature, MatchTolerances, exposure_matches, exposure_tolerance, optics_consistent,
+    sensor_consistent, temperature_matches,
 };
 use std::path::Path;
 
@@ -89,6 +89,8 @@ pub struct CalibrationMasters {
     pub(crate) flat_response: Option<LinearImage>,
     pub(crate) flat_signature: Option<FrameSignature>,
     pub(crate) flat_bayer: Option<BayerLayout>,
+    /// The tolerances a light is judged under when no others are given.
+    pub(crate) tolerances: MatchTolerances,
 }
 
 impl CalibrationMasters {
@@ -287,7 +289,32 @@ impl CalibrationMasters {
             flat_response,
             flat_signature,
             flat_bayer,
+            tolerances: MatchTolerances::default(),
         })
+    }
+
+    /// These masters, judging every light under `tolerances` rather than
+    /// [`MatchTolerances::default`].
+    ///
+    /// A host that matched these masters to their lights under its own
+    /// tolerances — a rig whose rotator scatters more than two degrees, or a
+    /// flat deliberately borrowed from the nearest other angle — must have
+    /// the same tolerances apply when each light is admitted, or a master
+    /// chosen on purpose is refused at the last step. Everything that
+    /// validates a light against these masters without being given
+    /// tolerances uses these: [`Self::validate_light_frame`],
+    /// [`Self::validate_light_signature`], [`Self::compatible_for_light`],
+    /// and so a live stack's every push, its pipelined pushes, its channel
+    /// reference and its reintegration. A saved stack context keeps them.
+    pub fn with_match_tolerances(mut self, tolerances: MatchTolerances) -> Self {
+        self.tolerances = tolerances;
+        self
+    }
+
+    /// The tolerances lights are judged under when none are given; see
+    /// [`Self::with_match_tolerances`].
+    pub fn match_tolerances(&self) -> MatchTolerances {
+        self.tolerances
     }
 
     /// Whether no master is present, so calibration would be a no-op.
@@ -354,13 +381,26 @@ impl CalibrationMasters {
         Ok(())
     }
 
-    /// Validate one decoded light before any master mutates its pixels.
+    /// Validate one decoded light before any master mutates its pixels,
+    /// under the tolerances these masters carry; see
+    /// [`Self::with_match_tolerances`].
     ///
     /// With no active masters this is intentionally a no-op, so callers may
     /// stack already-processed lights. With calibration enabled, masters and
     /// already-calibrated inputs are refused and every master must match the
     /// light under the shared sensor/dark/optics policy.
     pub fn validate_light_frame(&self, frame: &FitsFrame) -> Result<()> {
+        self.validate_light_frame_with(frame, &self.tolerances)
+    }
+
+    /// [`Self::validate_light_frame`] under a caller's own tolerances, for a
+    /// light that has to be judged differently from the rest — a flat taken
+    /// from the nearest other rotator angle, accepted for this light alone.
+    pub fn validate_light_frame_with(
+        &self,
+        frame: &FitsFrame,
+        tolerances: &MatchTolerances,
+    ) -> Result<()> {
         if self.is_empty() {
             return Ok(());
         }
@@ -396,11 +436,12 @@ impl CalibrationMasters {
                 applied.join(", ")
             )));
         }
-        self.validate_light_signature(&metadata.signature)
+        self.validate_light_signature_with(&metadata.signature, tolerances)
     }
 
     /// The subset of these masters this light can actually accept, with a
-    /// reason for everything set aside.
+    /// reason for everything set aside, under the tolerances these masters
+    /// carry.
     ///
     /// [`Self::validate_light_signature`] answers yes or no, which is the
     /// right shape for a caller that must not proceed. A caller in an
@@ -411,89 +452,58 @@ impl CalibrationMasters {
     /// readings — so the warning says what a reader would otherwise have to
     /// go and measure.
     ///
-    /// The dependency order is respected downward: a flat is checked on its
-    /// own, but a dark that fails also has no business scaling, and a bias
-    /// that fails sensor identity casts doubt on nothing else — each master
-    /// is judged only against the light, exactly as validation does.
+    /// Each master is judged only against the light, exactly as validation
+    /// does, and by the same checks: validation passes exactly when nothing
+    /// is dropped here, and the kept set always validates against this
+    /// light.
     pub fn compatible_for_light(&self, light: &FrameSignature) -> (Self, Vec<String>) {
-        self.compatible_for_light_with(light, &MatchTolerances::default())
+        self.compatible_for_light_with(light, &self.tolerances)
     }
 
     /// [`Self::compatible_for_light`] under a caller's own tolerances — the
     /// form the C and Python surfaces bind, since a host that lets its user
     /// widen the rotation gate has to ask this question with that same gate.
+    ///
+    /// The kept set carries `tolerances`, so pushing it to a stack admits
+    /// the light under the gate it was chosen with.
     pub fn compatible_for_light_with(
         &self,
         light: &FrameSignature,
         tolerances: &MatchTolerances,
     ) -> (Self, Vec<String>) {
         let mut kept = self.clone();
+        kept.tolerances = *tolerances;
         let mut dropped = Vec::new();
-
-        if let Some(bias) = &self.bias_signature
-            && self.bias.is_some()
-            && !sensor_consistent(light, bias)
-        {
-            kept.bias = None;
-            kept.bias_signature = None;
+        for refusal in self.refusals(light, tolerances) {
+            match refusal.kind {
+                MasterKind::Bias => {
+                    kept.bias = None;
+                    kept.bias_signature = None;
+                }
+                MasterKind::Dark => {
+                    kept.dark_signal = None;
+                    kept.dark_signature = None;
+                    kept.dark_exposure_seconds = None;
+                    kept.dark_scaling_safe = false;
+                    kept.dark_bayer = None;
+                }
+                MasterKind::Flat => {
+                    kept.flat_response = None;
+                    kept.flat_signature = None;
+                    kept.flat_bayer = None;
+                }
+            }
             dropped.push(format!(
-                "bias set aside: {}",
-                seiza_calibration::describe_sensor_mismatch(light, bias)
+                "{} set aside: {}",
+                refusal.kind.as_str(),
+                refusal.detail
             ));
-        }
-        if let Some(dark) = &self.dark_signature
-            && self.dark_signal.is_some()
-        {
-            let reason = if !sensor_consistent(light, dark) {
-                Some(seiza_calibration::describe_sensor_mismatch(light, dark))
-            } else if !dark_temperature_consistent(light, dark, tolerances) {
-                Some(seiza_calibration::describe_value(
-                    "temperature",
-                    light.camera_temp_c,
-                    dark.camera_temp_c,
-                    "C",
-                ))
-            } else if !self.dark_scaling_safe && !exposure_matches(light, dark, tolerances) {
-                Some(seiza_calibration::describe_value(
-                    "exposure",
-                    light.exposure_seconds,
-                    dark.exposure_seconds,
-                    "s",
-                ))
-            } else {
-                None
-            };
-            if let Some(reason) = reason {
-                kept.dark_signal = None;
-                kept.dark_signature = None;
-                kept.dark_exposure_seconds = None;
-                kept.dark_bayer = None;
-                dropped.push(format!("dark set aside: {reason}"));
-            }
-        }
-        if let Some(flat) = &self.flat_signature
-            && self.flat_response.is_some()
-        {
-            let reason = if !sensor_consistent(light, flat) {
-                Some(seiza_calibration::describe_sensor_mismatch(light, flat))
-            } else if !optics_consistent(light, flat, tolerances) {
-                Some(seiza_calibration::describe_optics_mismatch(
-                    light, flat, tolerances,
-                ))
-            } else {
-                None
-            };
-            if let Some(reason) = reason {
-                kept.flat_response = None;
-                kept.flat_signature = None;
-                kept.flat_bayer = None;
-                dropped.push(format!("flat set aside: {reason}"));
-            }
         }
         (kept, dropped)
     }
 
-    /// Validate acquisition metadata against every active master.
+    /// Validate acquisition metadata against every active master, under the
+    /// tolerances these masters carry; see [`Self::with_match_tolerances`].
     ///
     /// The question here is consistency, not candidacy: two RECORDED readings
     /// must agree, and an unrecorded one proves nothing. Candidate-selection
@@ -511,16 +521,73 @@ impl CalibrationMasters {
     /// its bias pedestal is the exception: it must be known on both sides,
     /// because such a dark cannot be scaled.
     pub fn validate_light_signature(&self, light: &FrameSignature) -> Result<()> {
-        let tolerances = MatchTolerances::default();
+        self.validate_light_signature_with(light, &self.tolerances)
+    }
+
+    /// [`Self::validate_light_signature`] under a caller's own tolerances.
+    ///
+    /// Asks exactly what [`Self::compatible_for_light_with`] asks, so it
+    /// succeeds exactly when that drops nothing. A refusal names the reading
+    /// that failed and, for a measured gap, the tolerance in force.
+    pub fn validate_light_signature_with(
+        &self,
+        light: &FrameSignature,
+        tolerances: &MatchTolerances,
+    ) -> Result<()> {
+        let refusals = self.refusals(light, tolerances);
+        // A sensor that does not match outranks every other reason, as it
+        // did when each kind of check ran over all three masters in turn.
+        let Some(refusal) = refusals
+            .iter()
+            .find(|refusal| matches!(refusal.problem, Problem::NoMetadata | Problem::Sensor))
+            .or_else(|| refusals.first())
+        else {
+            return Ok(());
+        };
+        let kind = refusal.kind.as_str();
+        let detail = &refusal.detail;
+        Err(Error::Calibration(match refusal.problem {
+            Problem::NoMetadata => format!(
+                "master {kind} has no compatibility metadata; reload calibration masters before pushing more lights"
+            ),
+            Problem::Sensor => format!(
+                "master {kind} does not match the light frame's sensor or readout mode: {detail}"
+            ),
+            Problem::Temperature => {
+                format!("master dark temperature does not match the light frame: {detail}")
+            }
+            Problem::UnknownExposure => {
+                "unscaled master dark requires known positive light and master exposures".into()
+            }
+            Problem::Exposure => {
+                format!("unscaled master dark exposure does not match the light frame: {detail}")
+            }
+            Problem::Optics => format!(
+                "master flat does not match the light frame's optical configuration: {detail}"
+            ),
+        }))
+    }
+
+    /// Every active master this light cannot accept, and why: the one
+    /// answer both [`Self::validate_light_signature_with`] and
+    /// [`Self::compatible_for_light_with`] give, so they never disagree.
+    ///
+    /// Each master yields at most one refusal, its first failing check.
+    fn refusals(&self, light: &FrameSignature, tolerances: &MatchTolerances) -> Vec<Refusal> {
+        let mut refusals = Vec::new();
         for (kind, active, signature) in [
-            ("bias", self.bias.is_some(), self.bias_signature.as_ref()),
             (
-                "dark",
+                MasterKind::Bias,
+                self.bias.is_some(),
+                self.bias_signature.as_ref(),
+            ),
+            (
+                MasterKind::Dark,
                 self.dark_signal.is_some(),
                 self.dark_signature.as_ref(),
             ),
             (
-                "flat",
+                MasterKind::Flat,
                 self.flat_response.is_some(),
                 self.flat_signature.as_ref(),
             ),
@@ -528,63 +595,93 @@ impl CalibrationMasters {
             if !active {
                 continue;
             }
+            let refusal = |problem, detail| Refusal {
+                kind,
+                problem,
+                detail,
+            };
+            // Kept only by legacy v1 contexts; fail closed until reloaded.
             let Some(signature) = signature else {
-                return Err(Error::Calibration(format!(
-                    "master {kind} has no compatibility metadata; reload calibration masters before pushing more lights"
-                )));
+                refusals.push(refusal(
+                    Problem::NoMetadata,
+                    "no compatibility metadata; reload calibration masters".into(),
+                ));
+                continue;
             };
             if !sensor_consistent(light, signature) {
-                return Err(Error::Calibration(format!(
-                    "master {kind} does not match the light frame's sensor or readout mode: {}",
-                    seiza_calibration::describe_sensor_mismatch(light, signature)
-                )));
+                refusals.push(refusal(
+                    Problem::Sensor,
+                    seiza_calibration::describe_sensor_mismatch(light, signature),
+                ));
+                continue;
             }
-        }
-        if let Some(dark) = &self.dark_signature {
-            if !dark_temperature_consistent(light, dark, &tolerances) {
-                return Err(Error::Calibration(format!(
-                    "master dark temperature does not match the light frame: {}",
-                    seiza_calibration::describe_value(
-                        "temperature",
-                        light.camera_temp_c,
-                        dark.camera_temp_c,
-                        "C"
+            let problem = match kind {
+                MasterKind::Bias => None,
+                MasterKind::Dark => self.dark_refusal(light, signature, tolerances),
+                MasterKind::Flat => (!optics_consistent(light, signature, tolerances)).then(|| {
+                    (
+                        Problem::Optics,
+                        seiza_calibration::describe_optics_mismatch(light, signature, tolerances),
                     )
-                )));
-            }
-            if !self.dark_scaling_safe {
-                let known_positive = |value: Option<f64>| {
-                    value.is_some_and(|value| value.is_finite() && value > 0.0)
-                };
-                if !known_positive(light.exposure_seconds) || !known_positive(dark.exposure_seconds)
-                {
-                    return Err(Error::Calibration(
-                        "unscaled master dark requires known positive light and master exposures"
-                            .into(),
-                    ));
-                }
-                if !exposure_matches(light, dark, &tolerances) {
-                    return Err(Error::Calibration(format!(
-                        "unscaled master dark exposure does not match the light frame: {}",
-                        seiza_calibration::describe_value(
-                            "exposure",
-                            light.exposure_seconds,
-                            dark.exposure_seconds,
-                            "s"
-                        )
-                    )));
-                }
+                }),
+            };
+            if let Some((problem, detail)) = problem {
+                refusals.push(refusal(problem, detail));
             }
         }
-        if let Some(flat) = &self.flat_signature
-            && !optics_consistent(light, flat, &tolerances)
-        {
-            return Err(Error::Calibration(format!(
-                "master flat does not match the light frame's optical configuration: {}",
-                seiza_calibration::describe_optics_mismatch(light, flat, &tolerances)
-            )));
+        refusals
+    }
+
+    fn dark_refusal(
+        &self,
+        light: &FrameSignature,
+        dark: &FrameSignature,
+        tolerances: &MatchTolerances,
+    ) -> Option<(Problem, String)> {
+        if !dark_temperature_consistent(light, dark, tolerances) {
+            let mut detail = seiza_calibration::describe_value(
+                "temperature",
+                light.camera_temp_c,
+                dark.camera_temp_c,
+                "C",
+            );
+            if let (Some(light), Some(dark)) = (light.camera_temp_c, dark.camera_temp_c) {
+                detail.push_str(&format!(
+                    " ({:.2} C apart, tolerance {:.2})",
+                    (light - dark).abs(),
+                    tolerances.dark_temperature_c
+                ));
+            }
+            return Some((Problem::Temperature, detail));
         }
-        Ok(())
+        if self.dark_scaling_safe {
+            return None;
+        }
+        let exposure = || {
+            seiza_calibration::describe_value(
+                "exposure",
+                light.exposure_seconds,
+                dark.exposure_seconds,
+                "s",
+            )
+        };
+        let known_positive =
+            |value: Option<f64>| value.is_some_and(|value| value.is_finite() && value > 0.0);
+        if !known_positive(light.exposure_seconds) || !known_positive(dark.exposure_seconds) {
+            return Some((Problem::UnknownExposure, exposure()));
+        }
+        if !exposure_matches(light, dark, tolerances) {
+            let mut detail = exposure();
+            if let (Some(light), Some(dark)) = (light.exposure_seconds, dark.exposure_seconds) {
+                detail.push_str(&format!(
+                    " ({:.3} s apart, tolerance {:.3})",
+                    (light - dark).abs(),
+                    exposure_tolerance(Some(light), Some(dark), tolerances)
+                ));
+            }
+            return Some((Problem::Exposure, detail));
+        }
+        None
     }
 
     /// Calibrate one linear frame in its current sampling.
@@ -672,6 +769,44 @@ impl CalibrationMasters {
         }
         Ok(())
     }
+}
+
+/// Which master a [`Refusal`] concerns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MasterKind {
+    Bias,
+    Dark,
+    Flat,
+}
+
+impl MasterKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Bias => "bias",
+            Self::Dark => "dark",
+            Self::Flat => "flat",
+        }
+    }
+}
+
+/// Which check a master failed against a light.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Problem {
+    NoMetadata,
+    Sensor,
+    Temperature,
+    UnknownExposure,
+    Exposure,
+    Optics,
+}
+
+/// One active master a light cannot accept: which, what failed, and the
+/// readings that failed it.
+#[derive(Clone, Debug)]
+struct Refusal {
+    kind: MasterKind,
+    problem: Problem,
+    detail: String,
 }
 
 /// Whether a loaded master dark's sensor temperature agrees with a light's.
@@ -890,6 +1025,334 @@ mod tests {
         let (kept, dropped) = calibration.compatible_for_light(&agreeing);
         assert!(dropped.is_empty());
         assert!(kept.flat_response.is_some());
+    }
+
+    /// A camera's bias, an unscaled dark (no bias to isolate its signal) and
+    /// a flat, each recording what tolerances act on.
+    fn recorded_masters() -> CalibrationMasters {
+        let mut masters = CalibrationMasters::new(
+            None,
+            Some(MasterDark {
+                image: mono(&[5.0; 4]),
+                exposure_seconds: Some(300.0),
+                bias_subtracted: false,
+                bayer: None,
+            }),
+            Some(MasterFlat::raw(mono(&[30.0; 4]))),
+        )
+        .unwrap();
+        let mut sensor = FrameSignature::default();
+        sensor.camera = Some("ZWO ASI2600MM Pro".into());
+        sensor.gain = Some(100);
+        let mut dark = sensor.clone();
+        dark.camera_temp_c = Some(-10.0);
+        dark.exposure_seconds = Some(300.0);
+        let mut flat = sensor;
+        flat.filter = Some("Ha".into());
+        flat.focal_length_mm = Some(530.0);
+        flat.rotation_deg = Some(3.2);
+        masters.dark_signature = Some(dark);
+        masters.flat_signature = Some(flat);
+        masters
+    }
+
+    /// One field a test moves: its name, the change to the light, the change
+    /// to the tolerances, and what the refusal must say.
+    type ToleranceCase = (
+        &'static str,
+        fn(&mut FrameSignature),
+        fn(&mut MatchTolerances),
+        &'static str,
+    );
+
+    /// A light every master in [`recorded_masters`] accepts by default.
+    fn matching_light() -> FrameSignature {
+        let mut light = FrameSignature::default();
+        light.camera = Some("ZWO ASI2600MM Pro".into());
+        light.gain = Some(100);
+        light.camera_temp_c = Some(-10.0);
+        light.exposure_seconds = Some(300.0);
+        light.filter = Some("Ha".into());
+        light.focal_length_mm = Some(530.0);
+        light.rotation_deg = Some(3.2);
+        light
+    }
+
+    #[test]
+    fn caller_tolerances_admit_what_the_defaults_refuse() {
+        // The flat-grouping fallback: a light at 113.8 degrees calibrated
+        // with before-change flats from 3.2 degrees, on a rig whose measured
+        // angle dependence is small, accepted for that light alone.
+        let masters = recorded_masters();
+        let defaults = MatchTolerances::default();
+        let cases: [ToleranceCase; 3] = [
+            (
+                "rotation",
+                |light| light.rotation_deg = Some(113.8),
+                |tolerances| tolerances.rotation_deg = 180.0,
+                "110.60 deg apart, tolerance 2.00",
+            ),
+            (
+                "focal length",
+                |light| light.focal_length_mm = Some(540.0),
+                |tolerances| tolerances.focal_length_mm = 15.0,
+                "10.00 mm apart, tolerance 1.00",
+            ),
+            (
+                "temperature",
+                |light| light.camera_temp_c = Some(-5.0),
+                |tolerances| tolerances.dark_temperature_c = 6.0,
+                "5.00 C apart, tolerance 3.00",
+            ),
+        ];
+        for (field, change_light, widen, refusal) in cases {
+            let mut light = matching_light();
+            change_light(&mut light);
+            let mut wide = defaults;
+            widen(&mut wide);
+
+            let error = masters.validate_light_signature(&light).unwrap_err();
+            assert!(error.to_string().contains(refusal), "{field}: {error}");
+            let error = masters
+                .validate_light_signature_with(&light, &defaults)
+                .unwrap_err();
+            assert!(error.to_string().contains(refusal), "{field}: {error}");
+
+            masters
+                .validate_light_signature_with(&light, &wide)
+                .unwrap_or_else(|error| panic!("{field}: {error}"));
+            let (kept, dropped) = masters.compatible_for_light_with(&light, &wide);
+            assert!(dropped.is_empty(), "{field}: {dropped:?}");
+            assert!(kept.has_dark() && kept.has_flat(), "{field}");
+
+            // Masters that carry the wider gate admit the light without
+            // being told again — the path every push takes.
+            let carried = masters.clone().with_match_tolerances(wide);
+            assert_eq!(carried.match_tolerances(), wide);
+            carried
+                .validate_light_signature(&light)
+                .unwrap_or_else(|error| panic!("{field}: {error}"));
+            assert!(carried.compatible_for_light(&light).1.is_empty(), "{field}");
+        }
+    }
+
+    #[test]
+    fn caller_tolerances_reach_a_decoded_light_frame() {
+        let masters = recorded_masters();
+        let frame = light(
+            Some(300.0),
+            vec![
+                ("IMAGETYP".into(), HeaderValue::String("LIGHT".into())),
+                (
+                    "INSTRUME".into(),
+                    HeaderValue::String("ZWO ASI2600MM Pro".into()),
+                ),
+                ("GAIN".into(), HeaderValue::Integer(100)),
+                ("CCD-TEMP".into(), HeaderValue::Float(-10.0)),
+                ("FILTER".into(), HeaderValue::String("Ha".into())),
+                ("FOCALLEN".into(), HeaderValue::Float(530.0)),
+                ("ROTATANG".into(), HeaderValue::Float(113.8)),
+            ],
+        );
+        let error = masters.validate_light_frame(&frame).unwrap_err();
+        assert!(error.to_string().contains("rotation"), "{error}");
+        let wide = MatchTolerances {
+            rotation_deg: 180.0,
+            ..MatchTolerances::default()
+        };
+        masters.validate_light_frame_with(&frame, &wide).unwrap();
+        masters
+            .clone()
+            .with_match_tolerances(wide)
+            .validate_light_frame(&frame)
+            .unwrap();
+        // A caller's tolerances loosen matching, never the frame checks.
+        let mut calibrated = frame.clone();
+        calibrated
+            .headers
+            .push(("FLATNORM".into(), HeaderValue::Logical(true)));
+        assert!(
+            masters
+                .validate_light_frame_with(&calibrated, &wide)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_tighter_tolerance_refuses_what_the_defaults_accept() {
+        let masters = recorded_masters();
+        let defaults = MatchTolerances::default();
+        let cases: [ToleranceCase; 4] = [
+            (
+                "rotation",
+                |light| light.rotation_deg = Some(4.7),
+                |tolerances| tolerances.rotation_deg = 1.0,
+                "1.50 deg apart, tolerance 1.00",
+            ),
+            (
+                "focal length",
+                |light| light.focal_length_mm = Some(530.8),
+                |tolerances| tolerances.focal_length_mm = 0.5,
+                "0.80 mm apart, tolerance 0.50",
+            ),
+            (
+                "temperature",
+                |light| light.camera_temp_c = Some(-8.0),
+                |tolerances| tolerances.dark_temperature_c = 1.0,
+                "2.00 C apart, tolerance 1.00",
+            ),
+            (
+                "exposure",
+                |light| light.exposure_seconds = Some(300.2),
+                |tolerances| {
+                    tolerances.exposure_seconds = 0.01;
+                    tolerances.exposure_fraction = 0.0;
+                },
+                "0.200 s apart, tolerance 0.010",
+            ),
+        ];
+        for (field, change_light, tighten, refusal) in cases {
+            let mut light = matching_light();
+            change_light(&mut light);
+            let mut tight = defaults;
+            tighten(&mut tight);
+
+            masters
+                .validate_light_signature(&light)
+                .unwrap_or_else(|error| panic!("{field}: {error}"));
+            let error = masters
+                .validate_light_signature_with(&light, &tight)
+                .unwrap_err();
+            assert!(error.to_string().contains(refusal), "{field}: {error}");
+            let (_, dropped) = masters.compatible_for_light_with(&light, &tight);
+            assert_eq!(dropped.len(), 1, "{field}: {dropped:?}");
+            assert!(dropped[0].contains(refusal), "{field}: {dropped:?}");
+        }
+    }
+
+    #[test]
+    fn the_defaults_are_unchanged() {
+        assert_eq!(
+            CalibrationMasters::default().match_tolerances(),
+            MatchTolerances::default()
+        );
+        let masters = recorded_masters();
+        assert_eq!(masters.match_tolerances(), MatchTolerances::default());
+        let mut light = matching_light();
+        light.rotation_deg = Some(5.21);
+        let error = masters.validate_light_signature(&light).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            masters
+                .validate_light_signature_with(&light, &MatchTolerances::default())
+                .unwrap_err()
+                .to_string()
+        );
+        assert!(error.to_string().contains("tolerance 2.00"), "{error}");
+        let (kept, dropped) = masters.compatible_for_light(&light);
+        let (kept_with, dropped_with) =
+            masters.compatible_for_light_with(&light, &MatchTolerances::default());
+        assert_eq!(dropped, dropped_with);
+        assert_eq!(kept.has_flat(), kept_with.has_flat());
+        light.rotation_deg = Some(5.19);
+        masters.validate_light_signature(&light).unwrap();
+    }
+
+    #[test]
+    fn validation_passes_exactly_when_matching_drops_nothing() {
+        // One answer to one question: validation and matching share their
+        // checks, so no light can be kept by one and refused by the other —
+        // under any tolerances, and whichever master is at fault.
+        let lights: Vec<(&str, FrameSignature)> = {
+            let base = matching_light();
+            let vary = |change: fn(&mut FrameSignature)| {
+                let mut light = base.clone();
+                change(&mut light);
+                light
+            };
+            vec![
+                ("matching", base.clone()),
+                ("rotated", vary(|light| light.rotation_deg = Some(113.8))),
+                ("wrapped", vary(|light| light.rotation_deg = Some(359.0))),
+                ("unrotated", vary(|light| light.rotation_deg = None)),
+                (
+                    "refocused",
+                    vary(|light| light.focal_length_mm = Some(545.0)),
+                ),
+                ("warm", vary(|light| light.camera_temp_c = Some(-4.0))),
+                ("no temperature", vary(|light| light.camera_temp_c = None)),
+                ("longer", vary(|light| light.exposure_seconds = Some(301.0))),
+                ("no exposure", vary(|light| light.exposure_seconds = None)),
+                (
+                    "other filter",
+                    vary(|light| light.filter = Some("OIII".into())),
+                ),
+                ("other gain", vary(|light| light.gain = Some(200))),
+            ]
+        };
+        let tolerances = {
+            let mut all = Vec::new();
+            for rotation_deg in [0.5, 2.0, 180.0] {
+                for focal_length_mm in [0.5, 20.0] {
+                    for dark_temperature_c in [1.0, 3.0, 10.0] {
+                        for exposure_seconds in [0.01, 5.0] {
+                            all.push(MatchTolerances {
+                                rotation_deg,
+                                focal_length_mm,
+                                dark_temperature_c,
+                                exposure_seconds,
+                                ..MatchTolerances::default()
+                            });
+                        }
+                    }
+                }
+            }
+            all
+        };
+        let master_sets = {
+            let recorded = recorded_masters();
+            let mut scalable = CalibrationMasters::new(
+                Some(mono(&[1.0; 4])),
+                Some(MasterDark {
+                    image: mono(&[5.0; 4]),
+                    exposure_seconds: Some(300.0),
+                    bias_subtracted: false,
+                    bayer: None,
+                }),
+                Some(MasterFlat::raw(mono(&[30.0; 4]))),
+            )
+            .unwrap();
+            scalable.bias_signature = recorded.dark_signature.clone();
+            scalable.dark_signature = recorded.dark_signature.clone();
+            scalable.flat_signature = recorded.flat_signature.clone();
+            let mut legacy = recorded.clone();
+            legacy.dark_signature = None;
+            vec![
+                ("recorded", recorded),
+                ("scalable", scalable),
+                ("legacy", legacy),
+            ]
+        };
+        let mut refused = 0;
+        for (set, masters) in &master_sets {
+            for (name, light) in &lights {
+                for tolerances in &tolerances {
+                    let valid = masters.validate_light_signature_with(light, tolerances);
+                    let (kept, dropped) = masters.compatible_for_light_with(light, tolerances);
+                    assert_eq!(
+                        valid.is_ok(),
+                        dropped.is_empty(),
+                        "{set} / {name} / {tolerances:?}: {valid:?} vs {dropped:?}"
+                    );
+                    kept.validate_light_signature(light)
+                        .unwrap_or_else(|error| {
+                            panic!("{set} / {name} / {tolerances:?}: kept set refused: {error}")
+                        });
+                    refused += usize::from(valid.is_err());
+                }
+            }
+        }
+        assert!(refused > 0, "the grid must exercise refusals");
     }
 
     #[test]

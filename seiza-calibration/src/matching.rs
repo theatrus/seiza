@@ -485,12 +485,20 @@ pub fn describe_optics_mismatch(
         flat.focal_length_mm,
         tolerances.focal_length_mm,
     ) {
-        reasons.push(describe_value(
+        let mut reason = describe_value(
             "focal length",
             light.focal_length_mm,
             flat.focal_length_mm,
             "mm",
-        ));
+        );
+        if let (Some(light), Some(flat)) = (light.focal_length_mm, flat.focal_length_mm) {
+            reason.push_str(&format!(
+                " ({:.2} mm apart, tolerance {:.2})",
+                (light - flat).abs(),
+                tolerances.focal_length_mm
+            ));
+        }
+        reasons.push(reason);
     }
     if !rotation_matches(
         light.rotation_deg,
@@ -826,6 +834,10 @@ mod tests {
         let reason = describe_optics_mismatch(&light, &flat, &tolerances);
         assert!(reason.contains("focal length"), "{reason}");
         assert!(reason.contains("1645"), "{reason}");
+        assert!(
+            reason.contains("705.00 mm apart, tolerance 1.00"),
+            "{reason}"
+        );
         assert!(reason.contains("rotation"), "{reason}");
 
         // An unrecorded reading says so rather than printing an empty value.

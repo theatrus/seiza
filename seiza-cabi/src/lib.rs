@@ -2268,9 +2268,10 @@ pub unsafe extern "C" fn seiza_live_stacker_save_context(
 /// JSON shape: `{"schemaVersion":1,"kept":["bias","dark"],"dropped":
 /// [{"kind":"flat","reason":"flat set aside: rotation light=..."}]}` — `kept`
 /// lists only masters that are loaded and acceptable; a master that was never
-/// loaded appears in neither list. `tolerances` may be null for the defaults.
-/// Returns a string released with [`seiza_string_free`], or null with
-/// `error_out` set.
+/// loaded appears in neither list. `tolerances` may be null for the stack's
+/// own, which are the defaults unless it was restored from a context saved
+/// under others. Returns a string released with [`seiza_string_free`], or
+/// null with `error_out` set.
 ///
 /// # Safety
 ///
@@ -2290,8 +2291,8 @@ pub unsafe extern "C" fn seiza_live_stacker_compatible_calibration_json(
     ffi_result(error_out, || {
         let stacker = unsafe { required_live_stacker(stacker)? };
         let light = unsafe { frame_signature(signature) }?;
-        let tolerances = unsafe { match_tolerances(tolerances) };
         let masters = stacker.stacker.calibration();
+        let tolerances = unsafe { stack_match_tolerances(masters, tolerances) };
         let (kept, dropped) = masters.compatible_for_light_with(&light, &tolerances);
         let kind_of = |reason: &str| -> &'static str {
             if reason.starts_with("bias") {
@@ -2315,6 +2316,66 @@ pub unsafe extern "C" fn seiza_live_stacker_compatible_calibration_json(
         })
     })
     .unwrap_or(ptr::null_mut())
+}
+
+/// Whether every active master of the stacker accepts a prospective light:
+/// the yes-or-no form of [`seiza_live_stacker_compatible_calibration_json`],
+/// asking exactly the same questions, so it answers 1 exactly when that
+/// drops nothing.
+///
+/// Returns 1 when the light is acceptable (and always with no masters
+/// loaded), 0 when a master refuses it — with `error_out` set to why,
+/// naming the reading and, for a measured gap, the tolerance in force, as
+/// in `master flat does not match the light frame's optical configuration:
+/// rotation light=113.8deg master=3.2deg (110.60 deg apart, tolerance
+/// 2.00)` — and -1 with `error_out` set when an argument is invalid.
+///
+/// `tolerances` may be null for the stack's own, as in
+/// [`seiza_live_stacker_compatible_calibration_json`]. A host that widened
+/// a gate to choose its masters asks with the same gate here.
+///
+/// # Safety
+///
+/// As [`seiza_live_stacker_compatible_calibration_json`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_live_stacker_validate_calibration(
+    stacker: *const SeizaLiveStacker,
+    signature: *const SeizaFrameSignature,
+    tolerances: *const SeizaMatchTolerances,
+    error_out: *mut *mut c_char,
+) -> i32 {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let stacker = unsafe { required_live_stacker(stacker)? };
+        let light = unsafe { frame_signature(signature) }?;
+        let masters = stacker.stacker.calibration();
+        let tolerances = unsafe { stack_match_tolerances(masters, tolerances) };
+        Ok(masters.validate_light_signature_with(&light, &tolerances))
+    })
+    .map_or(-1, |validated| match validated {
+        Ok(()) => 1,
+        Err(error) => {
+            let message = match error {
+                seiza_stacking::Error::Calibration(message) => message,
+                other => other.to_string(),
+            };
+            set_error(error_out, message);
+            0
+        }
+    })
+}
+
+/// A caller's tolerances, or with none given the ones a stack's masters
+/// carry — which are what its pushes are judged under.
+unsafe fn stack_match_tolerances(
+    masters: &seiza_stacking::CalibrationMasters,
+    tolerances: *const SeizaMatchTolerances,
+) -> seiza_calibration::MatchTolerances {
+    if tolerances.is_null() {
+        masters.match_tolerances()
+    } else {
+        unsafe { match_tolerances(tolerances) }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -10519,6 +10580,120 @@ mod tests {
         assert_eq!(parsed["schemaVersion"], 1);
         assert_eq!(parsed["kept"].as_array().unwrap().len(), 0);
         assert_eq!(parsed["dropped"].as_array().unwrap().len(), 0);
+        unsafe { seiza_live_stacker_free(stacker) };
+    }
+
+    #[test]
+    fn a_stacker_validates_a_light_under_the_callers_tolerances() {
+        // A flat from 3.2 degrees and a light at 113.8: refused under the
+        // default two-degree gate, with the gate named; accepted when the
+        // host asks with the gate it chose the flat under. The yes-or-no
+        // answer and the kept/dropped answer agree either way.
+        unsafe fn take_error(error: *mut c_char) -> String {
+            if error.is_null() {
+                return String::new();
+            }
+            let message = unsafe { CStr::from_ptr(error) }
+                .to_str()
+                .unwrap()
+                .to_owned();
+            unsafe { seiza_string_free(error) };
+            message
+        }
+        let (width, height) = (160, 128);
+        let directory = tempfile::tempdir().unwrap();
+        let reference_path = directory.path().join("reference.fits");
+        let flat_path = directory.path().join("master-flat.fits");
+        let rotation =
+            |degrees| seiza_fits::WriteHeaderCard::new("ROTATANG", HeaderValue::Float(degrees));
+        seiza_stacking::write_processed_image_fits_f32(
+            &reference_path,
+            &LinearImage::new(width, height, 1, stacking_star_field(width, height)).unwrap(),
+            &[],
+            &[
+                seiza_fits::WriteHeaderCard::new("IMAGETYP", HeaderValue::String("LIGHT".into())),
+                rotation(3.2),
+            ],
+        )
+        .unwrap();
+        seiza_stacking::write_processed_image_fits_f32(
+            &flat_path,
+            &LinearImage::new(width, height, 1, vec![1.0; width * height]).unwrap(),
+            &[],
+            &[
+                seiza_fits::WriteHeaderCard::new("SEIZAMST", HeaderValue::String("FLAT".into())),
+                rotation(3.2),
+            ],
+        )
+        .unwrap();
+        let reference_c = CString::new(reference_path.to_str().unwrap()).unwrap();
+        let flat_c = CString::new(flat_path.to_str().unwrap()).unwrap();
+        let config = no_adjustment_stack_options();
+        let mut error = ptr::null_mut();
+        let stacker = unsafe {
+            seiza_live_stacker_open_fits(
+                reference_c.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                flat_c.as_ptr(),
+                0.0,
+                config.as_ptr(),
+                &mut error,
+            )
+        };
+        assert!(!stacker.is_null(), "{}", unsafe { take_error(error) });
+
+        let mut light: SeizaFrameSignature = unsafe { std::mem::zeroed() };
+        light.width = width as f64;
+        light.height = height as f64;
+        light.channels = 1.0;
+        light.rotation_deg = 113.8;
+        light.known = SEIZA_FRAME_HAS_WIDTH
+            | SEIZA_FRAME_HAS_HEIGHT
+            | SEIZA_FRAME_HAS_CHANNELS
+            | SEIZA_FRAME_HAS_ROTATION;
+        let wide = SeizaMatchTolerances {
+            known: SEIZA_TOLERANCE_HAS_ROTATION,
+            rotation_deg: 180.0,
+            ..SeizaMatchTolerances::default()
+        };
+        let dropped = |tolerances: *const SeizaMatchTolerances| {
+            let mut error = ptr::null_mut();
+            let json = unsafe {
+                seiza_live_stacker_compatible_calibration_json(
+                    stacker, &light, tolerances, &mut error,
+                )
+            };
+            assert!(!json.is_null());
+            let parsed: Value =
+                serde_json::from_str(unsafe { CStr::from_ptr(json) }.to_str().unwrap()).unwrap();
+            unsafe { seiza_string_free(json) };
+            parsed["dropped"].as_array().unwrap().len()
+        };
+
+        // The stack's own tolerances, which are the defaults.
+        let validated = unsafe {
+            seiza_live_stacker_validate_calibration(stacker, &light, ptr::null(), &mut error)
+        };
+        assert_eq!(validated, 0);
+        let reason = unsafe { take_error(error) };
+        assert!(reason.contains("113.8"), "{reason}");
+        assert!(reason.contains("tolerance 2.00"), "{reason}");
+        assert_eq!(dropped(ptr::null()), 1);
+
+        let mut error = ptr::null_mut();
+        let validated =
+            unsafe { seiza_live_stacker_validate_calibration(stacker, &light, &wide, &mut error) };
+        assert_eq!(validated, 1);
+        assert!(error.is_null());
+        assert_eq!(dropped(&wide), 0);
+
+        // An invalid argument is -1, never mistaken for a refusal.
+        let validated = unsafe {
+            seiza_live_stacker_validate_calibration(ptr::null(), &light, ptr::null(), &mut error)
+        };
+        assert_eq!(validated, -1);
+        assert!(unsafe { take_error(error) }.contains("live stacker is required"));
         unsafe { seiza_live_stacker_free(stacker) };
     }
 

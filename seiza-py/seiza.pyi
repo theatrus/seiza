@@ -250,6 +250,64 @@ class SatelliteCatalog:
         max_element_age_s: float | None = 604_800.0,
     ) -> TrackSearchResult: ...
 
+class FrameSignature:
+    camera: str | None
+    telescope: str | None
+    width: int | None
+    height: int | None
+    channels: int | None
+    binning_x: int | None
+    binning_y: int | None
+    gain: int | None
+    offset: int | None
+    readout_mode: int | None
+    bayer_pattern: str | None
+    filter: str | None
+    focal_length_mm: float | None
+    rotation_deg: float | None
+    exposure_seconds: float | None
+    camera_temp_c: float | None
+    captured_at_unix: int | None
+    def __init__(
+        self,
+        camera: str | None = None,
+        telescope: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        channels: int | None = None,
+        binning_x: int | None = None,
+        binning_y: int | None = None,
+        gain: int | None = None,
+        offset: int | None = None,
+        readout_mode: int | None = None,
+        bayer_pattern: str | None = None,
+        filter: str | None = None,
+        focal_length_mm: float | None = None,
+        rotation_deg: float | None = None,
+        exposure_seconds: float | None = None,
+        camera_temp_c: float | None = None,
+        captured_at_unix: int | None = None,
+    ) -> None: ...
+
+class MatchTolerances:
+    exposure_seconds: float
+    exposure_fraction: float
+    dark_temperature_c: float
+    master_temperature_c: float
+    rotation_deg: float
+    focal_length_mm: float
+    flat_session_seconds: int
+    def __init__(
+        self,
+        exposure_seconds: float | None = None,
+        exposure_fraction: float | None = None,
+        dark_temperature_c: float | None = None,
+        master_temperature_c: float | None = None,
+        rotation_deg: float | None = None,
+        focal_length_mm: float | None = None,
+        flat_session_seconds: int | None = None,
+    ) -> None: ...
+
 class StackOptions:
     normalization: str
     local_tile_size: int | None
@@ -403,6 +461,16 @@ class LiveStacker:
     def rejected_frames(self) -> int: ...
     @property
     def reference_integrated(self) -> bool: ...
+    def compatible_calibration(
+        self,
+        light: FrameSignature,
+        tolerances: MatchTolerances | None = None,
+    ) -> tuple[list[str], list[str]]: ...
+    def validate_calibration(
+        self,
+        light: FrameSignature,
+        tolerances: MatchTolerances | None = None,
+    ) -> None: ...
     def push_fits(self, path: str | Path) -> FrameDisposition: ...
     def push_fits_pipelined(
         self,

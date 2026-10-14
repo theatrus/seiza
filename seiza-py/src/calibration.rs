@@ -286,7 +286,14 @@ impl PyMatchTolerances {
 }
 
 pub(crate) fn tolerances_or_default(tolerances: Option<PyMatchTolerances>) -> MatchTolerances {
-    tolerances.map_or_else(MatchTolerances::default, |value| value.inner)
+    tolerances_or(tolerances, MatchTolerances::default())
+}
+
+pub(crate) fn tolerances_or(
+    tolerances: Option<PyMatchTolerances>,
+    fallback: MatchTolerances,
+) -> MatchTolerances {
+    tolerances.map_or(fallback, |value| value.inner)
 }
 
 /// Whether two frames came off the same sensor in the same mode.

@@ -905,9 +905,10 @@ bool seiza_live_stacker_save_context(const SeizaLiveStacker *stacker,
  JSON shape: `{"schemaVersion":1,"kept":["bias","dark"],"dropped":
  [{"kind":"flat","reason":"flat set aside: rotation light=..."}]}` — `kept`
  lists only masters that are loaded and acceptable; a master that was never
- loaded appears in neither list. `tolerances` may be null for the defaults.
- Returns a string released with [`seiza_string_free`], or null with
- `error_out` set.
+ loaded appears in neither list. `tolerances` may be null for the stack's
+ own, which are the defaults unless it was restored from a context saved
+ under others. Returns a string released with [`seiza_string_free`], or
+ null with `error_out` set.
 
  # Safety
 
@@ -921,6 +922,32 @@ char *seiza_live_stacker_compatible_calibration_json(const SeizaLiveStacker *sta
                                                      const SeizaFrameSignature *signature,
                                                      const SeizaMatchTolerances *tolerances,
                                                      char **error_out);
+
+/*
+ Whether every active master of the stacker accepts a prospective light:
+ the yes-or-no form of [`seiza_live_stacker_compatible_calibration_json`],
+ asking exactly the same questions, so it answers 1 exactly when that
+ drops nothing.
+
+ Returns 1 when the light is acceptable (and always with no masters
+ loaded), 0 when a master refuses it — with `error_out` set to why,
+ naming the reading and, for a measured gap, the tolerance in force, as
+ in `master flat does not match the light frame's optical configuration:
+ rotation light=113.8deg master=3.2deg (110.60 deg apart, tolerance
+ 2.00)` — and -1 with `error_out` set when an argument is invalid.
+
+ `tolerances` may be null for the stack's own, as in
+ [`seiza_live_stacker_compatible_calibration_json`]. A host that widened
+ a gate to choose its masters asks with the same gate here.
+
+ # Safety
+
+ As [`seiza_live_stacker_compatible_calibration_json`].
+ */
+int32_t seiza_live_stacker_validate_calibration(const SeizaLiveStacker *stacker,
+                                                const SeizaFrameSignature *signature,
+                                                const SeizaMatchTolerances *tolerances,
+                                                char **error_out);
 
 /*
  Returns an owned JSON snapshot of the live stack's resumable identity and

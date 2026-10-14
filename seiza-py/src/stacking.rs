@@ -956,6 +956,9 @@ impl PyLiveStacker {
     /// loaded and acceptable (``"bias"``, ``"dark"``, ``"flat"``); ``dropped``
     /// carries one human-readable reason per refused master, each naming the
     /// differing fields and both readings.
+    ///
+    /// ``tolerances=None`` asks under the stack's own, which are the defaults
+    /// unless it was restored from a context saved under others.
     #[pyo3(signature = (light, tolerances=None))]
     fn compatible_calibration(
         &self,
@@ -963,10 +966,9 @@ impl PyLiveStacker {
         tolerances: Option<crate::calibration::PyMatchTolerances>,
     ) -> PyResult<(Vec<&'static str>, Vec<String>)> {
         let stacker = self.active()?;
-        let tolerances = crate::calibration::tolerances_or_default(tolerances);
-        let (kept, dropped) = stacker
-            .calibration()
-            .compatible_for_light_with(&light.inner, &tolerances);
+        let masters = stacker.calibration();
+        let tolerances = crate::calibration::tolerances_or(tolerances, masters.match_tolerances());
+        let (kept, dropped) = masters.compatible_for_light_with(&light.inner, &tolerances);
         let mut kinds = Vec::new();
         if kept.has_bias() {
             kinds.push("bias");
@@ -978,6 +980,28 @@ impl PyLiveStacker {
             kinds.push("flat");
         }
         Ok((kinds, dropped))
+    }
+
+    /// Whether every active master accepts a prospective light: the
+    /// yes-or-no form of :meth:`compatible_calibration`, asking the same
+    /// questions, so it passes exactly when that drops nothing.
+    ///
+    /// Returns ``None`` when the light is acceptable, and always with no
+    /// masters loaded. Raises :class:`StackError` naming why a master
+    /// refuses it — the reading and, for a measured gap, the tolerance in
+    /// force. A host that widened a gate to choose its masters asks with the
+    /// same ``tolerances`` here; ``None`` means the stack's own.
+    #[pyo3(signature = (light, tolerances=None))]
+    fn validate_calibration(
+        &self,
+        light: &crate::calibration::PyFrameSignature,
+        tolerances: Option<crate::calibration::PyMatchTolerances>,
+    ) -> PyResult<()> {
+        let masters = self.active()?.calibration();
+        let tolerances = crate::calibration::tolerances_or(tolerances, masters.match_tolerances());
+        masters
+            .validate_light_signature_with(&light.inner, &tolerances)
+            .map_err(stack_error)
     }
 
     /// Atomically checkpoint this live stack without consuming it.

@@ -1014,6 +1014,15 @@ impl LiveStacker {
         )
     }
 
+    /// The calibration masters currently applied to pushed frames.
+    ///
+    /// Read access so a host can ask questions of the active set — which
+    /// masters a prospective light could accept, and why not — without
+    /// keeping its own copy in sync with every swap.
+    pub fn calibration(&self) -> &CalibrationMasters {
+        &self.calibration
+    }
+
     /// Replace the calibration masters applied to every frame pushed from
     /// now on.
     ///
@@ -1042,15 +1051,10 @@ impl LiveStacker {
     /// check that actually protects the pixels — and a light that fails it
     /// is rejected alone, never the stack. A stack started from prepared
     /// pixels refuses the call: its frames bypass calibration entirely.
-    /// The calibration masters currently applied to pushed frames.
     ///
-    /// Read access so a host can ask questions of the active set — which
-    /// masters a prospective light could accept, and why not — without
-    /// keeping its own copy in sync with every swap.
-    pub fn calibration(&self) -> &CalibrationMasters {
-        &self.calibration
-    }
-
+    /// Each light is judged under the tolerances these masters carry, so
+    /// masters matched under a host's own gate should carry it; see
+    /// [`CalibrationMasters::with_match_tolerances`].
     pub fn set_calibration(&mut self, calibration: CalibrationMasters) -> Result<()> {
         self.require_fits_input_mode()?;
         calibration.validate_master_set_signatures()?;
@@ -1553,6 +1557,17 @@ fn stack_configuration_fingerprint(
     hash_optional_image(&mut hasher, calibration.flat_response.as_ref());
     hash_optional_signature(&mut hasher, calibration.flat_signature.as_ref())?;
     hash_optional_bayer(&mut hasher, calibration.flat_bayer);
+    // Only when changed, so a stack under the defaults keeps the identity
+    // it had before masters carried tolerances.
+    if calibration.tolerances != seiza_calibration::MatchTolerances::default() {
+        let tolerances = serde_json::to_vec(&calibration.tolerances).map_err(|error| {
+            Error::Stack(format!(
+                "failed to fingerprint calibration tolerances: {error}"
+            ))
+        })?;
+        hasher.update(b"match-tolerances\0");
+        hash_bytes(&mut hasher, &tolerances);
+    }
     let digest = hasher.finalize();
     Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
@@ -3029,6 +3044,72 @@ mod tests {
             restored.push(frame()).unwrap(),
             FrameDisposition::Accepted(_)
         ));
+    }
+
+    #[test]
+    fn masters_admit_pushed_lights_under_the_tolerances_they_carry() {
+        // A flat from 3.2 degrees, deliberately chosen for lights at 113.8:
+        // the stack must admit them under the gate the flat was chosen with,
+        // and keep that gate across a saved context.
+        let image = stacking_star_field(160, 128);
+        let frame = |rotation_deg: f64| FitsFrame {
+            image: image.clone(),
+            headers: vec![
+                ("IMAGETYP".into(), HeaderValue::String("LIGHT".into())),
+                ("ROTATANG".into(), HeaderValue::Float(rotation_deg)),
+            ],
+            exposure_seconds: Some(60.0),
+            bayer: None,
+            source: None,
+            bounds: None,
+        };
+        let mut calibration = CalibrationMasters::new(
+            None,
+            None,
+            Some(crate::MasterFlat::raw(
+                LinearImage::new(160, 128, 1, vec![1.0; 160 * 128]).unwrap(),
+            )),
+        )
+        .unwrap();
+        calibration.flat_signature.as_mut().unwrap().rotation_deg = Some(3.2);
+        let wide = seiza_calibration::MatchTolerances {
+            rotation_deg: 180.0,
+            ..seiza_calibration::MatchTolerances::default()
+        };
+
+        let mut stacker =
+            LiveStacker::new(frame(3.2), calibration.clone(), StackOptions::default()).unwrap();
+        let default_fingerprint = stacker.configuration_fingerprint().to_owned();
+        assert!(matches!(
+            stacker.push(frame(113.8)).unwrap(),
+            FrameDisposition::Rejected(FrameRejectionReason::Calibration(ref reason))
+                if reason.contains("tolerance 2.00")
+        ));
+
+        stacker
+            .set_calibration(calibration.clone().with_match_tolerances(wide))
+            .unwrap();
+        let wide_fingerprint = stacker.configuration_fingerprint().to_owned();
+        assert_ne!(wide_fingerprint, default_fingerprint);
+        assert!(matches!(
+            stacker.push(frame(113.8)).unwrap(),
+            FrameDisposition::Accepted(_)
+        ));
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("wide.seiza-stack");
+        stacker.save_context(&path).unwrap();
+        let mut restored = LiveStacker::open_context(&path).unwrap();
+        assert_eq!(restored.calibration().match_tolerances(), wide);
+        assert_eq!(restored.configuration_fingerprint(), wide_fingerprint);
+        assert!(matches!(
+            restored.push(frame(113.8)).unwrap(),
+            FrameDisposition::Accepted(_)
+        ));
+
+        // Back under the defaults, the stack has its old identity.
+        restored.set_calibration(calibration).unwrap();
+        assert_eq!(restored.configuration_fingerprint(), default_fingerprint);
     }
 
     #[test]

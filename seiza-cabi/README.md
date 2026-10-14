@@ -361,6 +361,24 @@ was isolated with a usable bias may scale by exposure. An unscaled dark must
 carry the same known positive exposure as each light. With no masters these
 guards are a no-op, so deliberately preprocessed lights remain stackable.
 
+A host can ask those questions before pushing.
+`seiza_live_stacker_compatible_calibration_json` names the masters a light
+would keep and why each other one would be set aside;
+`seiza_live_stacker_validate_calibration` answers yes (1) or no (0, with the
+refusal in `error_out`), and returns -1 for an invalid argument. Both ask the
+same questions, so validation passes exactly when nothing would be set aside.
+Both take an optional `SeizaMatchTolerances`; a host that widened a gate to
+choose its masters passes the same gate here. Null means the stack's own
+tolerances, the defaults unless the stack was restored from a context saved
+under others.
+
+```c
+SeizaMatchTolerances wide = {0};
+wide.known = SEIZA_TOLERANCE_HAS_ROTATION;
+wide.rotation_deg = 180.0;
+int32_t ok = seiza_live_stacker_validate_calibration(stacker, &light, &wide, &error);
+```
+
 The authoritative state response is owned JSON and is sufficient for a host's
 resume store:
 

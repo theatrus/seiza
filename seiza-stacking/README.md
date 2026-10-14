@@ -286,6 +286,19 @@ may be scaled by exposure; a dark that still contains its pedestal must have
 the same known positive exposure as the light. With no masters, preprocessed
 lights remain valid inputs.
 
+The gates are `seiza_calibration::MatchTolerances`, the defaults unless the
+masters carry others. A host that chose its masters under its own tolerances —
+a rotator that scatters more than two degrees, or a flat borrowed on purpose
+from the nearest other angle — hands the stack
+`masters.with_match_tolerances(tolerances)`, and every push, pipelined push,
+channel reference and reintegration judges its lights under them; a saved
+context keeps them. To judge one light differently from the rest, call
+`validate_light_frame_with` or `validate_light_signature_with`.
+`compatible_for_light_with` asks the same questions and names what it would set
+aside, so validation passes exactly when it sets aside nothing. A refusal
+names the reading that failed and the tolerance in force, as in
+`rotation light=113.8deg master=3.2deg (110.60 deg apart, tolerance 2.00)`.
+
 Darks that caught stray light, such as dawn through an open roof, look like
 ordinary darks in their headers. `MasterBuildOptions::dark_level_screening`
 measures each dark's robust level and sets aside any frame more than a set

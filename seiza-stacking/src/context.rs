@@ -3,7 +3,7 @@ use crate::{
     replay::{FrameWeightRecord, Ledger},
     stack::FrameInputMode,
 };
-use seiza_calibration::FrameSignature;
+use seiza_calibration::{FrameSignature, MatchTolerances};
 use seiza_fits::{BayerPattern, HeaderValue};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -123,6 +123,11 @@ struct CalibrationMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     flat_signature: Option<FrameSignature>,
     flat_bayer: Option<BayerMetadata>,
+    /// The tolerances lights are admitted under, written only when they are
+    /// not the defaults. A reader that predates them refuses the field
+    /// rather than admit later lights under the wrong gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    match_tolerances: Option<MatchTolerances>,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -520,6 +525,7 @@ pub(crate) fn read(path: &Path) -> Result<RestoredContext> {
             .map(BayerLayout::try_from)
             .transpose()
             .map_err(|message| context_read_error(path, message))?,
+        tolerances: metadata.calibration.match_tolerances.unwrap_or_default(),
     };
     calibration
         .validate_master_set_signatures()
@@ -717,6 +723,8 @@ impl From<&CalibrationMasters> for CalibrationMetadata {
             flat_response: calibration.flat_response.as_ref().map(ImageMetadata::from),
             flat_signature: calibration.flat_signature.clone(),
             flat_bayer: calibration.flat_bayer.map(BayerMetadata::from),
+            match_tolerances: (calibration.tolerances != MatchTolerances::default())
+                .then_some(calibration.tolerances),
         }
     }
 }
@@ -1095,6 +1103,28 @@ fn context_write_error(path: &Path, message: impl Into<String>) -> Error {
 mod tests {
     use super::*;
     use crate::FrameWeighting;
+
+    #[test]
+    fn calibration_tolerances_are_written_only_when_they_differ() {
+        // A context under the defaults keeps the shape older readers know;
+        // one under other tolerances names them, and an older reader
+        // refuses it rather than admit lights under the wrong gate.
+        let masters = CalibrationMasters::default();
+        let written = serde_json::to_value(CalibrationMetadata::from(&masters)).unwrap();
+        assert!(written.get("match_tolerances").is_none(), "{written}");
+
+        let wide = MatchTolerances {
+            rotation_deg: 180.0,
+            ..MatchTolerances::default()
+        };
+        let written = serde_json::to_value(CalibrationMetadata::from(
+            &masters.with_match_tolerances(wide),
+        ))
+        .unwrap();
+        assert_eq!(written["match_tolerances"]["rotation_deg"], 180.0);
+        let read: CalibrationMetadata = serde_json::from_value(written).unwrap();
+        assert_eq!(read.match_tolerances, Some(wide));
+    }
 
     #[test]
     fn weight_sums_must_match_coverage_and_weighting() {

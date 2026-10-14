@@ -342,6 +342,19 @@ network, since the library cannot tell a network mount from a local disk, and
 `normalized_full_scale=65535.0` when the set mixes PixInsight XISF frames with
 16-bit camera data.
 
+Before pushing a light under masters you chose yourself, ask whether they
+accept it. `validate_calibration()` raises `StackError` naming the reading that
+failed and the tolerance in force; `compatible_calibration()` answers the same
+question as the masters it would keep and why it would drop the rest. Pass the
+`MatchTolerances` you matched the masters under, so both judge with your gate:
+
+```python
+light = seiza.FrameSignature(width=6248, height=4176, channels=1, rotation_deg=113.8)
+wide = seiza.MatchTolerances(rotation_deg=180.0)
+stacker.validate_calibration(light, wide)        # None, or raises StackError
+kept, dropped = stacker.compatible_calibration(light, wide)
+```
+
 A stacker built from FITS or XISF paths can integrate its admitted frames again
 from their files, with leave-one-out rejection that removes trails the online
 pass kept, and can drizzle that integration onto a finer grid as WBPP's
