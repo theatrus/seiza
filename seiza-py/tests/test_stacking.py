@@ -2,9 +2,12 @@
 
 import numpy as np
 import pytest
-from astropy.io import fits
 
 import seiza
+
+# The fixtures are written as FITS through astropy; where it has no wheel
+# yet, such as on a newly released Python, these tests skip.
+fits = pytest.importorskip("astropy.io.fits")
 
 
 def synthetic_star_field(height=128, width=160, noise=1.5):
