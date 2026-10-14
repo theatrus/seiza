@@ -203,6 +203,13 @@ exposes the **superset** of what both apps need.
   tour of the catalogued objects in the field (`autoTour`) and returns it
   as JSON to edit, each target's stop titled with its name; its `tour`
   goes back into a request as it is, and its `focus` as `distanceFocus`.
+  It plans from the catalogue alone. Once a scene is prepared,
+  `seiza_parallax_plan_scene_tour_json(video, settings_json, error_out)`
+  plans on it instead, as an automatic tour of that scene would: each stop
+  frames its target at the depth of the plane the scene shows it on,
+  carrying that plane's `depthParsecs`. It takes `{"size", "autoTour"}`
+  (the video's own frame if `size` is absent) and returns the same JSON,
+  whose `tour` goes into `seiza_parallax_reconfigure_json` as it is.
   `tourTitles` shows each stop's title low in the frame as the camera
   drifts through it, and `tourLoop` ends the tour where it began so the
   video loops. Frames then come three ways:

@@ -1017,6 +1017,40 @@ struct PlannedTourResponse {
     tour: Vec<PlannedStopResponse>,
 }
 
+impl PlannedTourResponse {
+    fn new(plan: &seiza_parallax::PlannedTour) -> Self {
+        let seconds = VideoOptions {
+            tour: plan.tour(),
+            ..VideoOptions::default()
+        }
+        .seconds();
+        Self {
+            schema_version: 1,
+            focus: [plan.focus.0, plan.focus.1],
+            focus_name: plan.focus_name.clone(),
+            seconds,
+            tour: plan
+                .stops
+                .iter()
+                .map(|planned| PlannedStopResponse {
+                    name: planned.name.clone(),
+                    focus: planned.stop.focus.map(|(x, y)| [x, y]),
+                    dolly: planned.stop.dolly,
+                    zoom: planned.stop.zoom,
+                    rotate_degrees: planned.stop.rotate_deg,
+                    pan: planned.stop.pan,
+                    travel: planned.stop.travel,
+                    hold: planned.stop.hold,
+                    spin_degrees: planned.stop.spin_deg,
+                    push: planned.stop.push,
+                    title: planned.stop.title.clone(),
+                    depth_parsecs: planned.stop.depth_pc,
+                })
+                .collect(),
+        }
+    }
+}
+
 /// Plan a tour of the catalogued objects in an image, for the caller to
 /// edit before making the video. The request is
 /// [`seiza_parallax_prepare_json`]'s: the image (`image`, else `stars` or
@@ -1029,7 +1063,9 @@ struct PlannedTourResponse {
 /// title, depthParsecs}]}`, each target's stop titled with its name. Its `tour`, with any
 /// stops or titles dropped, moved or changed, goes back into a prepare
 /// request as it is, and its `focus` as `distanceFocus`. Null with `error_out` set on failure; `events`
-/// (nullable) hears the solve.
+/// (nullable) hears the solve. It plans from the catalogue alone; once a
+/// scene is prepared, [`seiza_parallax_plan_scene_tour_json`] plans on it,
+/// framing each target at the depth of its plane.
 ///
 /// # Safety
 ///
@@ -1071,35 +1107,74 @@ pub unsafe extern "C" fn seiza_parallax_plan_tour_json(
             &auto,
         )
         .map_err(|error| error.to_string())?;
-        let seconds = VideoOptions {
-            tour: plan.tour(),
-            ..VideoOptions::default()
-        }
-        .seconds();
-        owned_json(&PlannedTourResponse {
-            schema_version: 1,
-            focus: [plan.focus.0, plan.focus.1],
-            focus_name: plan.focus_name.clone(),
-            seconds,
-            tour: plan
-                .stops
-                .iter()
-                .map(|planned| PlannedStopResponse {
-                    name: planned.name.clone(),
-                    focus: planned.stop.focus.map(|(x, y)| [x, y]),
-                    dolly: planned.stop.dolly,
-                    zoom: planned.stop.zoom,
-                    rotate_degrees: planned.stop.rotate_deg,
-                    pan: planned.stop.pan,
-                    travel: planned.stop.travel,
-                    hold: planned.stop.hold,
-                    spin_degrees: planned.stop.spin_deg,
-                    push: planned.stop.push,
-                    title: planned.stop.title.clone(),
-                    depth_parsecs: planned.stop.depth_pc,
-                })
-                .collect(),
-        })
+        owned_json(&PlannedTourResponse::new(&plan))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+/// How to plan a tour on a prepared scene: the frame it is planned for, and
+/// how many targets, how long at each and how much motion.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ScenePlanRequest {
+    /// "720p", "1080p", "1440p" or "4k", each with "-portrait", or
+    /// "WIDTHxHEIGHT"; the video's own frame if absent.
+    size: Option<String>,
+    auto_tour: Option<AutoTourRequest>,
+}
+
+/// Plan a tour of the catalogued objects in a prepared video's image, on
+/// its scene: each stop frames its target at the depth of the plane the
+/// scene shows it on, so a target on a depth plane is centred there and
+/// framed to the size it shows at that depth, as an automatic tour of the
+/// same scene would be. [`seiza_parallax_plan_tour_json`] plans from the
+/// catalogue alone, without the scene's planes.
+///
+/// `settings_json` is `{"size", "autoTour": {targets, hold, motion}}`, each
+/// optional: `size` the frame the tour is for ("720p", "1080p", "1440p",
+/// "4k", each with "-portrait", or "WIDTHxHEIGHT"; the video's own if
+/// absent), and `autoTour` how to plan. Returns
+/// [`seiza_parallax_plan_tour_json`]'s JSON, released with
+/// `seiza_string_free`, its stops carrying their planes' `depthParsecs`.
+/// Its `tour`, with any stops or titles dropped, moved or changed, goes
+/// into [`seiza_parallax_reconfigure_json`] as it is. The scene keeps the
+/// distance it was prepared with, so the plan's `focus`, where an
+/// automatic plan would take the nebula's distance, matters only to a new
+/// preparation. Null with `error_out` set on failure.
+///
+/// # Safety
+///
+/// `video` must be a live pointer from [`seiza_parallax_prepare_json`],
+/// [`seiza_parallax_reconfigure_json`], [`seiza_parallax_with_dust_map`] or
+/// [`seiza_parallax_with_dust_map_json`]. `settings_json` must be a
+/// NUL-terminated UTF-8 string. When non-null, `error_out` must point to
+/// writable storage for one pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_parallax_plan_scene_tour_json(
+    video: *const SeizaParallax,
+    settings_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let video = &unsafe { video.as_ref() }.ok_or("video is null")?.video;
+        let settings_json = required_str(settings_json, "tour plan settings JSON")?;
+        let request: ScenePlanRequest = serde_json::from_str(&settings_json)
+            .map_err(|error| format!("invalid tour plan settings JSON: {error}"))?;
+        let frame = match &request.size {
+            Some(size) => seiza_parallax::parse_frame_size(size)?,
+            None => video.size(),
+        };
+        let auto = request
+            .auto_tour
+            .as_ref()
+            .map(AutoTourRequest::auto_tour)
+            .unwrap_or_default();
+        auto.check()?;
+        let plan = video
+            .plan_tour(&auto, frame)
+            .map_err(|error| error.to_string())?;
+        owned_json(&PlannedTourResponse::new(&plan))
     })
     .unwrap_or(ptr::null_mut())
 }
@@ -2141,6 +2216,145 @@ mod tests {
         unsafe { seiza_string_free(summary) };
         assert_eq!(parsed["frames"], 20);
         unsafe { seiza_parallax_free(toured) };
+    }
+
+    #[test]
+    fn a_tour_planned_on_a_prepared_scene_frames_targets_at_their_planes() {
+        let directory = tempfile::tempdir().unwrap();
+        let wcs = Wcs::from_center_scale_rotation((56.75, 24.12), (160.0, 120.0), 2.0, 0.0, false);
+        let object = |name: &str, x: f64, y: f64| {
+            let (ra, dec) = wcs.pixel_to_world(x, y);
+            seiza::objects::SkyObject {
+                kind: seiza::objects::ObjectKind::Nebula,
+                ra,
+                dec,
+                mag: None,
+                major_arcmin: Some(1.0),
+                minor_arcmin: None,
+                position_angle_deg: None,
+                name: name.into(),
+                common_name: String::new(),
+                metadata: Default::default(),
+            }
+        };
+        seiza::objects::ObjectCatalog::new(vec![
+            object("NGC 9001", 100.0, 80.0),
+            object("IC 9002", 230.0, 170.0),
+        ])
+        .write_to(&directory.path().join("objects.bin"))
+        .unwrap();
+        // A glowing knot about IC 9002, given its own plane at 1200 pc,
+        // behind the nebula at 400.
+        let mask = directory.path().join("knot.png");
+        image::GrayImage::from_fn(320, 240, |x, y| {
+            let inside = (x as f64 - 230.0).hypot(y as f64 - 170.0) < 30.0;
+            image::Luma([if inside { 255 } else { 0 }])
+        })
+        .save(&mask)
+        .unwrap();
+        let asked = request(
+            directory.path(),
+            &format!(
+                "\"planes\": [{{\"mask\": {}, \"distanceParsecs\": 1200}}]",
+                serde_json::json!(mask)
+            ),
+        );
+        image::RgbImage::from_fn(320, 240, |x, y| {
+            let r2 = (x as f64 - 230.0).powi(2) + (y as f64 - 170.0).powi(2);
+            let knot = (120.0 * (-r2 / 300.0).exp()) as u8;
+            image::Rgb([20 + (x / 8) as u8 + knot, 30 + knot, 25 + knot])
+        })
+        .save(directory.path().join("starless.png"))
+        .unwrap();
+        let mut error = ptr::null_mut();
+        let video = unsafe {
+            seiza_parallax_prepare_json(
+                asked.as_ptr(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(!video.is_null(), "{}", take_error(error));
+        assert_eq!(summary(video)["planes"][0]["distanceParsecs"], 1200.0);
+        let plan = |settings: &str| -> Result<serde_json::Value, String> {
+            let settings = CString::new(settings).unwrap();
+            let mut error = ptr::null_mut();
+            let planned = unsafe {
+                seiza_parallax_plan_scene_tour_json(video, settings.as_ptr(), &mut error)
+            };
+            if planned.is_null() {
+                return Err(take_error(error));
+            }
+            let plan = serde_json::from_str(&unsafe { CStr::from_ptr(planned) }.to_string_lossy());
+            unsafe { seiza_string_free(planned) };
+            Ok(plan.unwrap())
+        };
+        let depth_of = |plan: &serde_json::Value, name: &str| {
+            plan["tour"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|stop| stop["name"] == name)
+                .map(|stop| stop["depthParsecs"].clone())
+                .unwrap()
+        };
+        // On the scene, the knot's target is framed at its plane, and the
+        // other on the nebula's.
+        let on_scene = plan(r#"{"autoTour": {"hold": 1.0}}"#).unwrap();
+        assert_eq!(depth_of(&on_scene, "IC 9002"), 1200.0);
+        assert!(depth_of(&on_scene, "NGC 9001").is_null());
+        // From the catalogue alone, neither is.
+        let mut error = ptr::null_mut();
+        let planned = unsafe {
+            seiza_parallax_plan_tour_json(asked.as_ptr(), None, ptr::null_mut(), &mut error)
+        };
+        assert!(!planned.is_null(), "{}", take_error(error));
+        let catalogued: serde_json::Value =
+            serde_json::from_str(&unsafe { CStr::from_ptr(planned) }.to_string_lossy()).unwrap();
+        unsafe { seiza_string_free(planned) };
+        assert!(depth_of(&catalogued, "IC 9002").is_null());
+        // The plan goes back in as the video's tour.
+        let tour = serde_json::to_string(&on_scene["tour"]).unwrap();
+        let settings = CString::new(format!(
+            r#"{{"size": "160x120", "fps": 5, "tour": {tour}}}"#
+        ))
+        .unwrap();
+        let mut error = ptr::null_mut();
+        let toured = unsafe {
+            seiza_parallax_reconfigure_json(
+                video,
+                settings.as_ptr(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(!toured.is_null(), "{}", take_error(error));
+        // A frame of its own size, and bad settings, are answered.
+        let portrait = plan(r#"{"size": "1080p-portrait"}"#).unwrap();
+        assert!(portrait["tour"].as_array().unwrap().len() >= 2);
+        assert!(
+            plan(r#"{"autoTour": {"targets": 0}}"#)
+                .unwrap_err()
+                .contains("target")
+        );
+        assert!(plan(r#"{"frame": 1}"#).unwrap_err().contains("frame"));
+        let mut error = ptr::null_mut();
+        let settings = CString::new("{}").unwrap();
+        assert!(
+            unsafe {
+                seiza_parallax_plan_scene_tour_json(ptr::null(), settings.as_ptr(), &mut error)
+            }
+            .is_null()
+        );
+        assert!(take_error(error).contains("null"));
+        unsafe {
+            seiza_parallax_free(toured);
+            seiza_parallax_free(video);
+        }
     }
 
     #[test]

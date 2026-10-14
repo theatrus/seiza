@@ -45,7 +45,8 @@
  *     seiza_probe_frame_json, seiza_calibration_plan_json,
  *     seiza_calibration_build_master_json, seiza_live_stacker_state_json, and
  *     seiza_live_stacker_push_*_json, seiza_parallax_summary_json,
- *     seiza_parallax_plan_tour_json, plus any
+ *     seiza_parallax_plan_tour_json, seiza_parallax_plan_scene_tour_json, plus
+ *     any
  *     char* stored into an
  *     `error_out` argument on failure
  *       -> release with seiza_string_free().
@@ -2240,7 +2241,9 @@ SeizaParallax *seiza_parallax_prepare_json(const char *request_json,
  title, depthParsecs}]}`, each target's stop titled with its name. Its `tour`, with any
  stops or titles dropped, moved or changed, goes back into a prepare
  request as it is, and its `focus` as `distanceFocus`. Null with `error_out` set on failure; `events`
- (nullable) hears the solve.
+ (nullable) hears the solve. It plans from the catalogue alone; once a
+ scene is prepared, [`seiza_parallax_plan_scene_tour_json`] plans on it,
+ framing each target at the depth of its plane.
 
  # Safety
 
@@ -2251,6 +2254,38 @@ char *seiza_parallax_plan_tour_json(const char *request_json,
                                     SeizaParallaxEventCallback events,
                                     void *context,
                                     char **error_out);
+
+/*
+ Plan a tour of the catalogued objects in a prepared video's image, on
+ its scene: each stop frames its target at the depth of the plane the
+ scene shows it on, so a target on a depth plane is centred there and
+ framed to the size it shows at that depth, as an automatic tour of the
+ same scene would be. [`seiza_parallax_plan_tour_json`] plans from the
+ catalogue alone, without the scene's planes.
+
+ `settings_json` is `{"size", "autoTour": {targets, hold, motion}}`, each
+ optional: `size` the frame the tour is for ("720p", "1080p", "1440p",
+ "4k", each with "-portrait", or "WIDTHxHEIGHT"; the video's own if
+ absent), and `autoTour` how to plan. Returns
+ [`seiza_parallax_plan_tour_json`]'s JSON, released with
+ `seiza_string_free`, its stops carrying their planes' `depthParsecs`.
+ Its `tour`, with any stops or titles dropped, moved or changed, goes
+ into [`seiza_parallax_reconfigure_json`] as it is. The scene keeps the
+ distance it was prepared with, so the plan's `focus`, where an
+ automatic plan would take the nebula's distance, matters only to a new
+ preparation. Null with `error_out` set on failure.
+
+ # Safety
+
+ `video` must be a live pointer from [`seiza_parallax_prepare_json`],
+ [`seiza_parallax_reconfigure_json`], [`seiza_parallax_with_dust_map`] or
+ [`seiza_parallax_with_dust_map_json`]. `settings_json` must be a
+ NUL-terminated UTF-8 string. When non-null, `error_out` must point to
+ writable storage for one pointer.
+ */
+char *seiza_parallax_plan_scene_tour_json(const SeizaParallax *video,
+                                          const char *settings_json,
+                                          char **error_out);
 
 /*
  A new video of the same prepared scene, filmed as `settings_json`
