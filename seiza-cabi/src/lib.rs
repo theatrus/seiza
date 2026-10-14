@@ -1965,8 +1965,11 @@ pub unsafe extern "C" fn seiza_stack_choose_reference_json(
 /// example, `"demosaic": "vng" | "mhc" | "bilinear"`,
 /// `"interpolation": "bilinear" | "lanczos3"`,
 /// `"normalization": {"mode": "local-background", "options": {"tile_size": 256}}`,
-/// `"weighting": {"mode": "inverse-noise-variance"}`, or
-/// `"registration": {"model": "quadratic"}`. All files
+/// `"weighting": {"mode": "inverse-noise-variance"}`,
+/// `"registration": {"model": "quadratic"}`, or
+/// `"match_tolerances": {"rotation_deg": 5.0}`, the gate the reference and
+/// every pushed light are judged under against the masters (tolerances left
+/// out keep their defaults). All files
 /// are fully read during this call and are not kept open afterward.
 ///
 /// # Safety
@@ -2269,9 +2272,10 @@ pub unsafe extern "C" fn seiza_live_stacker_save_context(
 /// [{"kind":"flat","reason":"flat set aside: rotation light=..."}]}` — `kept`
 /// lists only masters that are loaded and acceptable; a master that was never
 /// loaded appears in neither list. `tolerances` may be null for the stack's
-/// own, which are the defaults unless it was restored from a context saved
-/// under others. Returns a string released with [`seiza_string_free`], or
-/// null with `error_out` set.
+/// own: those it opened with (`match_tolerances` in its options JSON) or
+/// was last given by [`seiza_live_stacker_set_match_tolerances`]. Returns a
+/// string released with [`seiza_string_free`], or null with `error_out`
+/// set.
 ///
 /// # Safety
 ///
@@ -2292,7 +2296,7 @@ pub unsafe extern "C" fn seiza_live_stacker_compatible_calibration_json(
         let stacker = unsafe { required_live_stacker(stacker)? };
         let light = unsafe { frame_signature(signature) }?;
         let masters = stacker.stacker.calibration();
-        let tolerances = unsafe { stack_match_tolerances(masters, tolerances) };
+        let tolerances = unsafe { stack_match_tolerances(&stacker.stacker, tolerances) };
         let (kept, dropped) = masters
             .compatible_for_light_with(&light, &tolerances)
             .map_err(|error| error.to_string())?;
@@ -2350,9 +2354,11 @@ pub unsafe extern "C" fn seiza_live_stacker_validate_calibration(
     ffi_result(error_out, || {
         let stacker = unsafe { required_live_stacker(stacker)? };
         let light = unsafe { frame_signature(signature) }?;
-        let masters = stacker.stacker.calibration();
-        let tolerances = unsafe { stack_match_tolerances(masters, tolerances) };
-        Ok(masters.validate_light_signature_with(&light, &tolerances))
+        let tolerances = unsafe { stack_match_tolerances(&stacker.stacker, tolerances) };
+        Ok(stacker
+            .stacker
+            .calibration()
+            .validate_light_signature_with(&light, &tolerances))
     })
     .map_or(-1, |validated| match validated {
         Ok(()) => 1,
@@ -2367,17 +2373,78 @@ pub unsafe extern "C" fn seiza_live_stacker_validate_calibration(
     })
 }
 
-/// A caller's tolerances, or with none given the ones a stack's masters
-/// carry — which are what its pushes are judged under.
+/// A caller's tolerances, or with none given the stack's own, which its
+/// pushes are judged under.
 unsafe fn stack_match_tolerances(
-    masters: &seiza_stacking::CalibrationMasters,
+    stacker: &LiveStacker,
     tolerances: *const SeizaMatchTolerances,
 ) -> seiza_calibration::MatchTolerances {
     if tolerances.is_null() {
-        masters.match_tolerances()
+        stacker.match_tolerances()
     } else {
         unsafe { match_tolerances(tolerances) }
     }
+}
+
+/// Judge the lights pushed from now on under `tolerances`: how close a
+/// light's readings must be to the masters' for them to calibrate it. A
+/// host that widened a gate to choose its masters — a rotator that scatters
+/// more than two degrees, or a flat taken from the nearest other angle on
+/// purpose — sets the same gate here, or the light is refused when it is
+/// pushed. To judge the reference under it too, open the stack with
+/// `match_tolerances` in its options JSON instead.
+///
+/// Frames already admitted keep the gate they were admitted under, and a
+/// reintegration judges each by its own, so a gate can be widened for one
+/// light and narrowed again after it. A saved context keeps it, and the
+/// configuration fingerprint changes with it. Null, a zeroed struct and any
+/// cleared flag mean the defaults, as everywhere a `SeizaMatchTolerances`
+/// is taken. Returns false with `error_out` set for a stack created from
+/// prepared arrays, whose frames are never calibrated.
+///
+/// # Safety
+///
+/// `stacker` must be a live stacker from this library, with this call
+/// externally synchronized against every other operation on it.
+/// `tolerances` must be null or reference an initialized
+/// `SeizaMatchTolerances`. When non-null, `error_out` must point to
+/// writable storage for one pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_live_stacker_set_match_tolerances(
+    stacker: *mut SeizaLiveStacker,
+    tolerances: *const SeizaMatchTolerances,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let stacker = unsafe { required_live_stacker_mut(stacker)? };
+        let tolerances = unsafe { match_tolerances(tolerances) };
+        stacker
+            .stacker
+            .set_match_tolerances(tolerances)
+            .map_err(|error| error.to_string())
+    })
+    .is_some()
+}
+
+/// Fill `tolerances` with the stack's own, every flag set: the gate its
+/// lights are judged under now.
+///
+/// # Safety
+///
+/// `stacker` must be a live stacker from this library, with this read
+/// externally synchronized against mutable operations. `tolerances` must
+/// point at writable storage for one `SeizaMatchTolerances`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_live_stacker_match_tolerances(
+    stacker: *const SeizaLiveStacker,
+    tolerances: *mut SeizaMatchTolerances,
+) -> bool {
+    let (Some(stacker), false) = (unsafe { stacker.as_ref() }, tolerances.is_null()) else {
+        return false;
+    };
+    unsafe { *tolerances = SeizaMatchTolerances::from(stacker.stacker.match_tolerances()) };
+    true
 }
 
 #[unsafe(no_mangle)]
@@ -10711,6 +10778,78 @@ mod tests {
         };
         assert_eq!(validated, -1);
         assert!(unsafe { take_error(error) }.contains("live stacker is required"));
+
+        // The stack's own gate: set, read back, and used wherever a host
+        // gives none.
+        let mut error = ptr::null_mut();
+        assert!(unsafe { seiza_live_stacker_set_match_tolerances(stacker, &wide, &mut error) });
+        let mut own = SeizaMatchTolerances::default();
+        assert!(unsafe { seiza_live_stacker_match_tolerances(stacker, &mut own) });
+        assert_eq!(own.rotation_deg, 180.0);
+        assert_eq!(
+            own.known,
+            SeizaMatchTolerances::from(seiza_calibration::MatchTolerances::default()).known
+        );
+        assert_eq!(
+            unsafe {
+                seiza_live_stacker_validate_calibration(stacker, &light, ptr::null(), &mut error)
+            },
+            1
+        );
+        assert_eq!(dropped(ptr::null()), 0);
+        // Null puts the defaults back.
+        assert!(unsafe {
+            seiza_live_stacker_set_match_tolerances(stacker, ptr::null(), &mut error)
+        });
+        assert_eq!(dropped(ptr::null()), 1);
+        unsafe { seiza_live_stacker_free(stacker) };
+
+        // A reference is judged under the gate in the options it opens
+        // with.
+        let turned_path = directory.path().join("turned.fits");
+        seiza_stacking::write_processed_image_fits_f32(
+            &turned_path,
+            &LinearImage::new(width, height, 1, stacking_star_field(width, height)).unwrap(),
+            &[],
+            &[
+                seiza_fits::WriteHeaderCard::new("IMAGETYP", HeaderValue::String("LIGHT".into())),
+                rotation(113.8),
+            ],
+        )
+        .unwrap();
+        let turned_c = CString::new(turned_path.to_str().unwrap()).unwrap();
+        let open = |options: &CString| {
+            let mut error = ptr::null_mut();
+            let stacker = unsafe {
+                seiza_live_stacker_open_fits(
+                    turned_c.as_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    flat_c.as_ptr(),
+                    0.0,
+                    options.as_ptr(),
+                    &mut error,
+                )
+            };
+            (stacker, unsafe { take_error(error) })
+        };
+        let (refused, reason) = open(&config);
+        assert!(refused.is_null());
+        assert!(reason.contains("tolerance 2.00"), "{reason}");
+        let gated = CString::new(
+            r#"{
+                "normalization": {"mode": "none"},
+                "rejection": {"mode": "none"},
+                "match_tolerances": {"rotation_deg": 180.0}
+            }"#,
+        )
+        .unwrap();
+        let (stacker, reason) = open(&gated);
+        assert!(!stacker.is_null(), "{reason}");
+        let mut own = SeizaMatchTolerances::default();
+        assert!(unsafe { seiza_live_stacker_match_tolerances(stacker, &mut own) });
+        assert_eq!(own.rotation_deg, 180.0);
+        assert_eq!(own.dark_temperature_c, 3.0);
         unsafe { seiza_live_stacker_free(stacker) };
     }
 
@@ -12274,11 +12413,11 @@ pub const SEIZA_TOLERANCE_HAS_EXPOSURE_FRACTION: u32 = 1 << 6;
 ///
 /// Every field is optional: set a `SEIZA_TOLERANCE_HAS_*` bit to override that
 /// tolerance, leave it clear to take the default. A zeroed struct therefore
-/// means "all defaults", and passing a null pointer anywhere one of these is
-/// accepted means the same. An override that is negative, not a number,
-/// infinite, or a rotation above 180 degrees is ignored in favour of the
-/// default. Unset fields always take the built-in defaults, never the
-/// tolerances a stack's masters carry: a non-null struct replaces those
+/// means "all defaults", and so does a null pointer, except where a live
+/// stacker call says null means the stack's own gate. An override that is
+/// negative, not a number, infinite, or a rotation above 180 degrees is
+/// ignored in favour of the default. Unset fields always take the built-in
+/// defaults, never the stack's own gate: a non-null struct replaces it
 /// whole.
 ///
 /// The defaults are what a rig's own scatter needs rather than what a
@@ -12320,9 +12459,15 @@ pub unsafe extern "C" fn seiza_match_tolerances_default(tolerances: *mut SeizaMa
     if tolerances.is_null() {
         return;
     }
-    let defaults = seiza_calibration::MatchTolerances::default();
     unsafe {
-        *tolerances = SeizaMatchTolerances {
+        *tolerances = SeizaMatchTolerances::from(seiza_calibration::MatchTolerances::default());
+    }
+}
+
+impl From<seiza_calibration::MatchTolerances> for SeizaMatchTolerances {
+    /// Every tolerance, with every flag set.
+    fn from(tolerances: seiza_calibration::MatchTolerances) -> Self {
+        Self {
             known: SEIZA_TOLERANCE_HAS_EXPOSURE
                 | SEIZA_TOLERANCE_HAS_EXPOSURE_FRACTION
                 | SEIZA_TOLERANCE_HAS_DARK_TEMPERATURE
@@ -12330,14 +12475,14 @@ pub unsafe extern "C" fn seiza_match_tolerances_default(tolerances: *mut SeizaMa
                 | SEIZA_TOLERANCE_HAS_ROTATION
                 | SEIZA_TOLERANCE_HAS_FOCAL_LENGTH
                 | SEIZA_TOLERANCE_HAS_FLAT_SESSION,
-            exposure_seconds: defaults.exposure_seconds,
-            exposure_fraction: defaults.exposure_fraction,
-            dark_temperature_c: defaults.dark_temperature_c,
-            master_temperature_c: defaults.master_temperature_c,
-            rotation_deg: defaults.rotation_deg,
-            focal_length_mm: defaults.focal_length_mm,
-            flat_session_seconds: defaults.flat_session_seconds,
-        };
+            exposure_seconds: tolerances.exposure_seconds,
+            exposure_fraction: tolerances.exposure_fraction,
+            dark_temperature_c: tolerances.dark_temperature_c,
+            master_temperature_c: tolerances.master_temperature_c,
+            rotation_deg: tolerances.rotation_deg,
+            focal_length_mm: tolerances.focal_length_mm,
+            flat_session_seconds: tolerances.flat_session_seconds,
+        }
     }
 }
 

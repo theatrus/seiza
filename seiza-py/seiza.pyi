@@ -315,6 +315,7 @@ class StackOptions:
     rejection: str
     maximum_drift_pixels: float
     maximum_drift_fraction: float
+    match_tolerances: MatchTolerances
     def __init__(
         self,
         *,
@@ -343,6 +344,7 @@ class StackOptions:
         maximum_normalization_gain: float = 4.0,
         minimum_integrated_fraction: float = 0.50,
         demosaic: str = "vng",
+        match_tolerances: MatchTolerances | None = None,
     ) -> None: ...
 
 class FrameDisposition:
@@ -471,6 +473,8 @@ class LiveStacker:
         light: FrameSignature,
         tolerances: MatchTolerances | None = None,
     ) -> None: ...
+    def match_tolerances(self) -> MatchTolerances: ...
+    def set_match_tolerances(self, tolerances: MatchTolerances | None = None) -> None: ...
     def push_fits(self, path: str | Path) -> FrameDisposition: ...
     def push_fits_pipelined(
         self,

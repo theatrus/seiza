@@ -206,7 +206,7 @@ impl PyFrameSignature {
 #[pyclass(from_py_object, name = "MatchTolerances", module = "seiza")]
 #[derive(Clone, Copy)]
 pub(crate) struct PyMatchTolerances {
-    inner: MatchTolerances,
+    pub(crate) inner: MatchTolerances,
 }
 
 #[pymethods]

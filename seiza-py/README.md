@@ -358,9 +358,21 @@ kept, dropped = stacker.compatible_calibration(light, wide)
 Passing `tolerances` replaces the stack's own whole: a field you leave unset
 takes the built-in default, not the stack's value. Both calls raise
 `StackError` for a tolerance that is NaN, infinite, negative, or a rotation
-above 180 degrees, which already accepts any angle. They answer a question and
-do not change what a push admits: pushes are judged under the stack's own
-tolerances, and masters loaded from paths carry the defaults.
+above 180 degrees, which already accepts any angle.
+
+The stack judges every light it is given under its own gate, so give it the
+same one, or the light is refused when you push it.
+`StackOptions(match_tolerances=...)` sets the gate a stack opens with, which
+also judges the reference. `set_match_tolerances()` changes it for the lights
+pushed after, and `match_tolerances()` reads it back. Each admitted frame keeps
+the gate it was admitted under, and `reintegrate()` judges it by that gate, so
+you can widen the gate for one light and narrow it again after:
+
+```python
+stacker.set_match_tolerances(wide)
+stacker.push_fits("light-113.8deg.fits")
+stacker.set_match_tolerances()                   # the defaults again
+```
 
 A stacker built from FITS or XISF paths can integrate its admitted frames again
 from their files, with leave-one-out rejection that removes trails the online

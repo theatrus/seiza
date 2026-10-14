@@ -875,7 +875,10 @@ fn prepare_decoded(
     }
     // Recorded after the rescale, which a replay repeats.
     let source = crate::replay::FrameSource::of(&frame);
-    if let Err(error) = half.calibration.validate_light_frame(&frame) {
+    if let Err(error) = half
+        .calibration
+        .validate_light_frame_with(&frame, &half.options.match_tolerances)
+    {
         let message = match error {
             Error::Calibration(message) => message,
             other => other.to_string(),

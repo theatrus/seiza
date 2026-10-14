@@ -361,30 +361,40 @@ was isolated with a usable bias may scale by exposure. An unscaled dark must
 carry the same known positive exposure as each light. With no masters these
 guards are a no-op, so deliberately preprocessed lights remain stackable.
 
+How close a light's readings must be to the masters' is the stack's gate. A
+host that widened a gate to choose its masters, for a rotator that scatters
+more than two degrees or a flat taken from the nearest other angle on
+purpose, gives the stack the same gate, or the light is refused when it is
+pushed. Open the stack with `"match_tolerances": {"rotation_deg": 5.0}` in its
+options JSON to judge the reference under it too; tolerances left out keep
+their defaults. `seiza_live_stacker_set_match_tolerances` changes the gate for
+the lights pushed from then on, and `seiza_live_stacker_match_tolerances`
+reads it back. Each admitted frame keeps the gate it was admitted under, and
+a reintegration judges it by that gate, so a host can widen the gate for one
+light and narrow it again after. A saved context keeps every gate.
+
 A host can ask those questions before pushing.
 `seiza_live_stacker_compatible_calibration_json` names the masters a light
 would keep and why each other one would be set aside;
 `seiza_live_stacker_validate_calibration` answers yes (1) or no (0, with the
 refusal in `error_out`), and returns -1 for an invalid argument. Both ask the
 same questions, so validation passes exactly when nothing would be set aside.
-Both take an optional `SeizaMatchTolerances`; a host that widened a gate to
-choose its masters passes the same gate here. Null means the stack's own
-tolerances, the defaults unless the stack was restored from a context saved
-under others. A non-null struct replaces the stack's tolerances whole: a field
-whose `SEIZA_TOLERANCE_HAS_*` flag is clear takes the built-in default, not the
+Both take an optional `SeizaMatchTolerances`; null means the stack's own gate.
+A non-null struct replaces that gate whole: a field whose
+`SEIZA_TOLERANCE_HAS_*` flag is clear takes the built-in default, not the
 stack's value. An override that is NaN, infinite, negative, or a rotation above
 180 degrees also takes the default, as everywhere `SeizaMatchTolerances` is
 accepted; 180 already accepts any angle.
-
-These calls answer a question; they do not change what a push admits. Pushes
-are judged under the stack's own tolerances, and masters loaded from paths
-carry the defaults.
 
 ```c
 SeizaMatchTolerances wide = {0};
 wide.known = SEIZA_TOLERANCE_HAS_ROTATION;
 wide.rotation_deg = 180.0;
-int32_t ok = seiza_live_stacker_validate_calibration(stacker, &light, &wide, &error);
+if (seiza_live_stacker_validate_calibration(stacker, &light, &wide, &error) == 1) {
+    seiza_live_stacker_set_match_tolerances(stacker, &wide, &error);
+    /* push the light, then narrow the gate again */
+    seiza_live_stacker_set_match_tolerances(stacker, NULL, &error);
+}
 ```
 
 The authoritative state response is owned JSON and is sufficient for a host's

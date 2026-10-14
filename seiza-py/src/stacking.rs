@@ -94,7 +94,8 @@ impl PyStackOptions {
         minimum_normalization_gain=0.25,
         maximum_normalization_gain=4.0,
         minimum_integrated_fraction=0.50,
-        demosaic="vng"
+        demosaic="vng",
+        match_tolerances=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -123,6 +124,7 @@ impl PyStackOptions {
         maximum_normalization_gain: f32,
         minimum_integrated_fraction: f32,
         demosaic: &str,
+        match_tolerances: Option<crate::calibration::PyMatchTolerances>,
     ) -> PyResult<Self> {
         let demosaic = match demosaic {
             "vng" => Demosaic::Vng,
@@ -187,6 +189,7 @@ impl PyStackOptions {
         inner.acceptance.maximum_normalization_gain = maximum_normalization_gain;
         inner.acceptance.minimum_integrated_fraction = minimum_integrated_fraction;
         inner.demosaic = demosaic;
+        inner.match_tolerances = crate::calibration::tolerances_or_default(match_tolerances);
         inner
             .validate()
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
@@ -238,6 +241,16 @@ impl PyStackOptions {
     #[getter]
     fn maximum_drift_fraction(&self) -> f64 {
         self.inner.registration.maximum_drift_fraction
+    }
+
+    /// How close a light's readings must be to its masters' for them to
+    /// calibrate it: the gate a stack opened with these options judges its
+    /// reference and every pushed light under.
+    #[getter]
+    fn match_tolerances(&self) -> crate::calibration::PyMatchTolerances {
+        crate::calibration::PyMatchTolerances {
+            inner: self.inner.match_tolerances,
+        }
     }
 
     fn __repr__(&self) -> String {
@@ -957,12 +970,11 @@ impl PyLiveStacker {
     /// carries one human-readable reason per refused master, each naming the
     /// differing fields and both readings.
     ///
-    /// ``tolerances=None`` asks under the stack's own, which are the defaults
-    /// unless it was restored from a context saved under others. Given
-    /// tolerances replace the stack's whole: a field left unset takes the
-    /// built-in default, not the stack's value. Raises :class:`StackError`
-    /// for a tolerance that is NaN, infinite, negative, or a rotation above
-    /// 180 degrees.
+    /// ``tolerances=None`` asks under the stack's own; see
+    /// :meth:`match_tolerances`. Given tolerances replace the stack's whole:
+    /// a field left unset takes the built-in default, not the stack's value.
+    /// Raises :class:`StackError` for a tolerance that is NaN, infinite,
+    /// negative, or a rotation above 180 degrees.
     #[pyo3(signature = (light, tolerances=None))]
     fn compatible_calibration(
         &self,
@@ -970,9 +982,9 @@ impl PyLiveStacker {
         tolerances: Option<crate::calibration::PyMatchTolerances>,
     ) -> PyResult<(Vec<&'static str>, Vec<String>)> {
         let stacker = self.active()?;
-        let masters = stacker.calibration();
-        let tolerances = crate::calibration::tolerances_or(tolerances, masters.match_tolerances());
-        let (kept, dropped) = masters
+        let tolerances = crate::calibration::tolerances_or(tolerances, stacker.match_tolerances());
+        let (kept, dropped) = stacker
+            .calibration()
             .compatible_for_light_with(&light.inner, &tolerances)
             .map_err(stack_error)?;
         let mut kinds = Vec::new();
@@ -1005,10 +1017,42 @@ impl PyLiveStacker {
         light: &crate::calibration::PyFrameSignature,
         tolerances: Option<crate::calibration::PyMatchTolerances>,
     ) -> PyResult<()> {
-        let masters = self.active()?.calibration();
-        let tolerances = crate::calibration::tolerances_or(tolerances, masters.match_tolerances());
-        masters
+        let stacker = self.active()?;
+        let tolerances = crate::calibration::tolerances_or(tolerances, stacker.match_tolerances());
+        stacker
+            .calibration()
             .validate_light_signature_with(&light.inner, &tolerances)
+            .map_err(stack_error)
+    }
+
+    /// The tolerances lights are judged under now: those the stack opened
+    /// with (:attr:`StackOptions.match_tolerances`) or was last given.
+    fn match_tolerances(&self) -> PyResult<crate::calibration::PyMatchTolerances> {
+        Ok(crate::calibration::PyMatchTolerances {
+            inner: self.active()?.match_tolerances(),
+        })
+    }
+
+    /// Judge the lights pushed from now on under ``tolerances``, or the
+    /// defaults when ``None``.
+    ///
+    /// A host that widened a gate to choose its masters — a rotator that
+    /// scatters more than two degrees, or a flat taken from the nearest
+    /// other angle on purpose — sets the same gate here, or the light is
+    /// refused when it is pushed. Frames already admitted keep the gate they
+    /// were admitted under, and :meth:`reintegrate` judges each by its own,
+    /// so the gate can be widened for one light and narrowed after it. A
+    /// saved context keeps every gate. Raises :class:`StackError` for
+    /// tolerances that are negative or not finite, and for a stack started
+    /// from prepared pixels.
+    #[pyo3(signature = (tolerances=None))]
+    fn set_match_tolerances(
+        &mut self,
+        tolerances: Option<crate::calibration::PyMatchTolerances>,
+    ) -> PyResult<()> {
+        let tolerances = crate::calibration::tolerances_or_default(tolerances);
+        self.active_mut()
+            .and_then(|stacker| stacker.set_match_tolerances(tolerances))
             .map_err(stack_error)
     }
 

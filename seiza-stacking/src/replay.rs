@@ -15,6 +15,7 @@
 
 use crate::CancelSignal;
 use crate::batch::PackedFates;
+use crate::calibration::LightGate;
 use crate::drizzle::{DrizzleAccumulator, DrizzleFrame, DrizzleOptions, DrizzleResult};
 use crate::normalization::{BackgroundSamples, RowCoefficients, RowNormalizer};
 use crate::{
@@ -138,6 +139,21 @@ pub(crate) struct AdmittedFrame {
     /// [`Ledger::attach_weights`] move in and out.
     #[serde(skip)]
     weighting: FrameWeightRecord,
+    /// The tolerances the frame was judged under against its masters, which
+    /// a replay judges it under again. Skipped by serde for the same reason
+    /// as `weighting`; a context keeps them in its metadata when any differ
+    /// from the defaults (see [`Ledger::tolerances`]).
+    #[serde(skip)]
+    tolerances: seiza_calibration::MatchTolerances,
+}
+
+/// The tolerances each admitted frame was judged under: each distinct gate
+/// once, and per frame, in admission order, the index of its gate.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FrameTolerances {
+    gates: Vec<LightGate>,
+    frames: Vec<u32>,
 }
 
 /// Per-channel noise and weight recorded for one admitted frame. Both are
@@ -158,14 +174,18 @@ pub(crate) struct Ledger {
 
 impl Ledger {
     /// A ledger holding the reference frame, admitted under the first
-    /// calibration set.
-    pub(crate) fn new(reference: &LinearImage) -> Self {
+    /// calibration set and `tolerances`.
+    pub(crate) fn new(
+        reference: &LinearImage,
+        tolerances: seiza_calibration::MatchTolerances,
+    ) -> Self {
         Self {
             frames: vec![AdmittedFrame {
                 source: None,
                 calibration: 0,
                 mapping: RegisteredFrameMapping::identity(reference),
                 weighting: FrameWeightRecord::default(),
+                tolerances,
             }],
             calibrations: vec![CalibrationRecord::default()],
         }
@@ -217,6 +237,7 @@ impl Ledger {
         source: Option<FrameSource>,
         mapping: RegisteredFrameMapping,
         weighting: FrameWeightRecord,
+        tolerances: seiza_calibration::MatchTolerances,
     ) {
         let calibration = self.current_calibration();
         self.frames.push(AdmittedFrame {
@@ -224,7 +245,65 @@ impl Ledger {
             calibration,
             mapping,
             weighting,
+            tolerances,
         });
+    }
+
+    /// The tolerances each admitted frame was judged under, or `None` when
+    /// every frame was admitted as the defaults admit, so a context saved
+    /// under them keeps the shape older readers know.
+    pub(crate) fn tolerances(&self) -> Option<FrameTolerances> {
+        if self
+            .frames
+            .iter()
+            .all(|frame| LightGate::admits_as_defaults(&frame.tolerances))
+        {
+            return None;
+        }
+        let mut gates = Vec::new();
+        let frames = self
+            .frames
+            .iter()
+            .map(|frame| {
+                let gate = LightGate::of(&frame.tolerances);
+                let index = gates
+                    .iter()
+                    .position(|known| *known == gate)
+                    .unwrap_or_else(|| {
+                        gates.push(gate);
+                        gates.len() - 1
+                    });
+                index as u32
+            })
+            .collect();
+        Some(FrameTolerances { gates, frames })
+    }
+
+    /// Restore the tolerances a context saved for its admitted frames,
+    /// checking one index per frame into sets a stack could have used.
+    pub(crate) fn attach_tolerances(
+        &mut self,
+        tolerances: FrameTolerances,
+    ) -> std::result::Result<(), String> {
+        if tolerances.frames.len() != self.frames.len() {
+            return Err(format!(
+                "context holds match tolerances for {} frames but {} were admitted",
+                tolerances.frames.len(),
+                self.frames.len()
+            ));
+        }
+        let gates = tolerances
+            .gates
+            .into_iter()
+            .map(LightGate::tolerances)
+            .collect::<Result<Vec<_>>>()
+            .map_err(|error| error.to_string())?;
+        for (frame, index) in self.frames.iter_mut().zip(tolerances.frames) {
+            frame.tolerances = *gates
+                .get(index as usize)
+                .ok_or_else(|| "context names match tolerances it does not hold".to_owned())?;
+        }
+        Ok(())
     }
 
     /// Every frame's weight record, in admission order, for a weighted
@@ -2132,7 +2211,7 @@ impl LiveStacker {
         if let Some(full_scale) = source.rescale_to {
             frame.rescale_declared_unit_bounds(full_scale);
         }
-        masters.validate_light_frame(&frame)?;
+        masters.validate_light_frame_with(&frame, &admitted.tolerances)?;
         masters.apply(&mut frame.image, frame.exposure_seconds, frame.bayer)?;
         if let Some(filter) = &self.options.cosmetic {
             crate::cosmetic::suppress_impulses(&mut frame.image, frame.bayer, filter)?;
@@ -2465,13 +2544,73 @@ mod tests {
     }
 
     #[test]
+    fn frame_tolerances_are_kept_only_when_some_differ() {
+        use seiza_calibration::MatchTolerances;
+        let reference = LinearImage::new(4, 4, 1, vec![1.0; 16]).unwrap();
+        let defaults = MatchTolerances::default();
+        let wide = MatchTolerances {
+            rotation_deg: 180.0,
+            ..defaults
+        };
+        let ledger_of = |gates: &[MatchTolerances]| {
+            let mut ledger = Ledger::new(&reference, gates[0]);
+            for gate in &gates[1..] {
+                ledger.admit(
+                    None,
+                    RegisteredFrameMapping::identity(&reference),
+                    FrameWeightRecord::default(),
+                    *gate,
+                );
+            }
+            ledger
+        };
+        assert_eq!(ledger_of(&[defaults, defaults]).tolerances(), None);
+
+        // Each distinct gate once, and an index per frame.
+        let gated = ledger_of(&[defaults, wide, defaults, wide]);
+        let saved = gated.tolerances().unwrap();
+        let written = serde_json::to_value(&saved).unwrap();
+        assert_eq!(written["frames"], serde_json::json!([0, 1, 0, 1]));
+        assert_eq!(written["gates"].as_array().unwrap().len(), 2);
+        let mut restored = ledger_of(&[defaults; 4]);
+        restored.attach_tolerances(saved.clone()).unwrap();
+        assert_eq!(restored, gated);
+
+        // A table that does not fit the ledger, or holds a gate no stack
+        // could use, is refused.
+        assert!(ledger_of(&[defaults; 3]).attach_tolerances(saved).is_err());
+        let unknown = FrameTolerances {
+            gates: vec![LightGate::default()],
+            frames: vec![0, 1],
+        };
+        assert!(
+            ledger_of(&[defaults; 2])
+                .attach_tolerances(unknown)
+                .is_err()
+        );
+        let negative = FrameTolerances {
+            gates: vec![LightGate::of(&MatchTolerances {
+                rotation_deg: -1.0,
+                ..defaults
+            })],
+            frames: vec![0, 0],
+        };
+        assert!(
+            ledger_of(&[defaults; 2])
+                .attach_tolerances(negative)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn weight_records_must_cover_every_frame_with_positive_weights() {
         let reference = LinearImage::new(4, 4, 1, vec![1.0; 16]).unwrap();
-        let mut ledger = Ledger::new(&reference);
+        let mut ledger = Ledger::new(&reference, Default::default());
         ledger.admit(
             None,
             RegisteredFrameMapping::identity(&reference),
             record(4.0, 0.5),
+            Default::default(),
         );
         let valid = vec![record(2.0, 1.0), record(4.0, 0.25)];
         for invalid in [
