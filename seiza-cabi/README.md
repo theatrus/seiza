@@ -370,7 +370,15 @@ same questions, so validation passes exactly when nothing would be set aside.
 Both take an optional `SeizaMatchTolerances`; a host that widened a gate to
 choose its masters passes the same gate here. Null means the stack's own
 tolerances, the defaults unless the stack was restored from a context saved
-under others.
+under others. A non-null struct replaces the stack's tolerances whole: a field
+whose `SEIZA_TOLERANCE_HAS_*` flag is clear takes the built-in default, not the
+stack's value. An override that is NaN, infinite, negative, or a rotation above
+180 degrees also takes the default, as everywhere `SeizaMatchTolerances` is
+accepted; 180 already accepts any angle.
+
+These calls answer a question; they do not change what a push admits. Pushes
+are judged under the stack's own tolerances, and masters loaded from paths
+carry the defaults.
 
 ```c
 SeizaMatchTolerances wide = {0};

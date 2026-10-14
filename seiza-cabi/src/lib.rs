@@ -2293,7 +2293,9 @@ pub unsafe extern "C" fn seiza_live_stacker_compatible_calibration_json(
         let light = unsafe { frame_signature(signature) }?;
         let masters = stacker.stacker.calibration();
         let tolerances = unsafe { stack_match_tolerances(masters, tolerances) };
-        let (kept, dropped) = masters.compatible_for_light_with(&light, &tolerances);
+        let (kept, dropped) = masters
+            .compatible_for_light_with(&light, &tolerances)
+            .map_err(|error| error.to_string())?;
         let kind_of = |reason: &str| -> &'static str {
             if reason.starts_with("bias") {
                 "bias"
@@ -7612,7 +7614,9 @@ mod tests {
         // Neither of these can decide anything, so neither is taken.
         // `(a - b).abs() <= -1.0` is false for every pair, which would match
         // nothing and explain nothing.
-        for nonsense in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        // Past half a turn is a mistake about units, by the rule
+        // `MatchTolerances::validate` holds Rust callers to.
+        for nonsense in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 360.0] {
             tuned.rotation_deg = nonsense;
             assert_eq!(
                 unsafe { match_tolerances(&tuned) }.rotation_deg,
@@ -7620,6 +7624,19 @@ mod tests {
                 "{nonsense} should fall back to the default"
             );
         }
+        // Half a turn itself is "any angle", and is taken.
+        tuned.rotation_deg = 180.0;
+        assert_eq!(unsafe { match_tolerances(&tuned) }.rotation_deg, 180.0);
+        // One bad field costs only itself.
+        let mixed = SeizaMatchTolerances {
+            known: SEIZA_TOLERANCE_HAS_ROTATION | SEIZA_TOLERANCE_HAS_FOCAL_LENGTH,
+            rotation_deg: f64::NAN,
+            focal_length_mm: 15.0,
+            ..Default::default()
+        };
+        let resolved = unsafe { match_tolerances(&mixed) };
+        assert_eq!(resolved.rotation_deg, defaults.rotation_deg);
+        assert_eq!(resolved.focal_length_mm, 15.0);
 
         // The session window is a u64 and cannot be negative or NaN, so it is
         // taken whenever its flag is set — including zero.
@@ -12258,8 +12275,11 @@ pub const SEIZA_TOLERANCE_HAS_EXPOSURE_FRACTION: u32 = 1 << 6;
 /// Every field is optional: set a `SEIZA_TOLERANCE_HAS_*` bit to override that
 /// tolerance, leave it clear to take the default. A zeroed struct therefore
 /// means "all defaults", and passing a null pointer anywhere one of these is
-/// accepted means the same. An override that is negative or not a number is
-/// ignored in favour of the default.
+/// accepted means the same. An override that is negative, not a number,
+/// infinite, or a rotation above 180 degrees is ignored in favour of the
+/// default. Unset fields always take the built-in defaults, never the
+/// tolerances a stack's masters carry: a non-null struct replaces those
+/// whole.
 ///
 /// The defaults are what a rig's own scatter needs rather than what a
 /// specification promises. [`seiza_match_tolerances_default`] fills one in if
@@ -12322,9 +12342,11 @@ pub unsafe extern "C" fn seiza_match_tolerances_default(tolerances: *mut SeizaMa
 }
 
 /// A null pointer, a zeroed struct, or any cleared flag all fall back to the
-/// built-in default for that tolerance. So does an override that is not a
-/// number, or is negative: neither can decide anything, and taking them
-/// literally would quietly match nothing.
+/// built-in default for that tolerance. So does an override
+/// `MatchTolerances::validate` refuses — not a number, infinite, negative, or
+/// a rotation past 180 degrees: taking it literally would quietly match
+/// nothing, or leave a stack context that cannot be reopened. Rust refuses
+/// these with an error; C keeps the fallback it has always had.
 unsafe fn match_tolerances(
     tolerances: *const SeizaMatchTolerances,
 ) -> seiza_calibration::MatchTolerances {
@@ -12332,38 +12354,47 @@ unsafe fn match_tolerances(
     let Some(overrides) = (unsafe { tolerances.as_ref() }) else {
         return resolved;
     };
-    // Finite *and* not negative. `(a - b).abs() <= -1.0` is false for every
-    // pair, so a negative tolerance would match nothing and say nothing about
-    // why — the same silent failure a zeroed signature used to cause, reached
-    // by a different mistake.
-    let set =
-        |flag: u32, value: f64| overrides.known & flag != 0 && value.is_finite() && value >= 0.0;
-    if set(SEIZA_TOLERANCE_HAS_EXPOSURE, overrides.exposure_seconds) {
-        resolved.exposure_seconds = overrides.exposure_seconds;
-    }
-    if set(
-        SEIZA_TOLERANCE_HAS_EXPOSURE_FRACTION,
-        overrides.exposure_fraction,
-    ) {
-        resolved.exposure_fraction = overrides.exposure_fraction;
-    }
-    if set(
-        SEIZA_TOLERANCE_HAS_DARK_TEMPERATURE,
-        overrides.dark_temperature_c,
-    ) {
-        resolved.dark_temperature_c = overrides.dark_temperature_c;
-    }
-    if set(
-        SEIZA_TOLERANCE_HAS_MASTER_TEMPERATURE,
-        overrides.master_temperature_c,
-    ) {
-        resolved.master_temperature_c = overrides.master_temperature_c;
-    }
-    if set(SEIZA_TOLERANCE_HAS_ROTATION, overrides.rotation_deg) {
-        resolved.rotation_deg = overrides.rotation_deg;
-    }
-    if set(SEIZA_TOLERANCE_HAS_FOCAL_LENGTH, overrides.focal_length_mm) {
-        resolved.focal_length_mm = overrides.focal_length_mm;
+    // Each override is judged alone against the defaults, by the same rule
+    // Rust callers are held to, so one bad field does not cost the others.
+    type Set = fn(&mut seiza_calibration::MatchTolerances, f64);
+    let fields: [(u32, f64, Set); 6] = [
+        (
+            SEIZA_TOLERANCE_HAS_EXPOSURE,
+            overrides.exposure_seconds,
+            |tolerances, value| tolerances.exposure_seconds = value,
+        ),
+        (
+            SEIZA_TOLERANCE_HAS_EXPOSURE_FRACTION,
+            overrides.exposure_fraction,
+            |tolerances, value| tolerances.exposure_fraction = value,
+        ),
+        (
+            SEIZA_TOLERANCE_HAS_DARK_TEMPERATURE,
+            overrides.dark_temperature_c,
+            |tolerances, value| tolerances.dark_temperature_c = value,
+        ),
+        (
+            SEIZA_TOLERANCE_HAS_MASTER_TEMPERATURE,
+            overrides.master_temperature_c,
+            |tolerances, value| tolerances.master_temperature_c = value,
+        ),
+        (
+            SEIZA_TOLERANCE_HAS_ROTATION,
+            overrides.rotation_deg,
+            |tolerances, value| tolerances.rotation_deg = value,
+        ),
+        (
+            SEIZA_TOLERANCE_HAS_FOCAL_LENGTH,
+            overrides.focal_length_mm,
+            |tolerances, value| tolerances.focal_length_mm = value,
+        ),
+    ];
+    for (flag, value, set) in fields {
+        let mut candidate = resolved;
+        set(&mut candidate, value);
+        if overrides.known & flag != 0 && candidate.validate().is_ok() {
+            resolved = candidate;
+        }
     }
     if overrides.known & SEIZA_TOLERANCE_HAS_FLAT_SESSION != 0 {
         resolved.flat_session_seconds = overrides.flat_session_seconds;

@@ -290,13 +290,32 @@ The gates are `seiza_calibration::MatchTolerances`, the defaults unless the
 masters carry others. A host that chose its masters under its own tolerances —
 a rotator that scatters more than two degrees, or a flat borrowed on purpose
 from the nearest other angle — hands the stack
-`masters.with_match_tolerances(tolerances)`, and every push, pipelined push,
+`masters.with_match_tolerances(tolerances)?`, and every push, pipelined push,
 channel reference and reintegration judges its lights under them; a saved
-context keeps them. To judge one light differently from the rest, call
-`validate_light_frame_with` or `validate_light_signature_with`.
+context keeps the ones admission reads. Tolerances that are NaN, infinite,
+negative, or a rotation above 180 degrees are refused with an error, never
+clamped: `with_match_tolerances`, `compatible_for_light_with` and the `_with`
+validators return it, and `save_context` will not write such a context.
+`MatchTolerances::validate` is the same check for a host's own input. A
+rotation of 180 already accepts any angle.
+
+Inside a `LiveStacker`, the masters' tolerances are the only ones a push is
+judged under. They apply to every push from `set_calibration` until the next
+swap. To judge one session or group of lights under other tolerances, swap in
+masters carrying them before pushing that group. Masters given to
+`set_calibration` live only in memory, so once they are replaced, frames
+admitted under them can no longer be reintegrated
+(`reintegration_unavailable` says so). `set_calibration_from_fits_paths` keeps
+reintegration, but its masters always carry the defaults.
+
+`validate_light_frame_with` and `validate_light_signature_with` judge one light
+under the tolerances you pass. They are for a host that runs its own pass over
+the lights, such as a final integration that accepts a flat from the nearest
+other angle for one light alone. They do not change what a live stack admits.
 `compatible_for_light_with` asks the same questions and names what it would set
-aside, so validation passes exactly when it sets aside nothing. A refusal
-names the reading that failed and the tolerance in force, as in
+aside, so validation passes exactly when it sets aside nothing. Its kept set
+carries the tolerances it was asked under. A refusal names the reading that
+failed and the tolerance in force, as in
 `rotation light=113.8deg master=3.2deg (110.60 deg apart, tolerance 2.00)`.
 
 Darks that caught stray light, such as dawn through an open roof, look like

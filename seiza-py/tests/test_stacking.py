@@ -503,6 +503,14 @@ def test_validate_calibration_honors_the_callers_tolerances(tmp_path):
     with pytest.raises(seiza.StackError, match="tolerance 1.00"):
         stacker.validate_calibration(near, seiza.MatchTolerances(rotation_deg=1.0))
 
+    # A tolerance no comparison can use is refused, not read as "anything".
+    for unusable in (float("nan"), float("inf"), -1.0, 360.0):
+        tolerances = seiza.MatchTolerances(rotation_deg=unusable)
+        with pytest.raises(seiza.StackError, match="rotation_deg"):
+            stacker.validate_calibration(light, tolerances)
+        with pytest.raises(seiza.StackError, match="rotation_deg"):
+            stacker.compatible_calibration(light, tolerances)
+
 
 def test_reintegrate_and_drizzle_reject_a_reference_trail(tmp_path):
     clean = synthetic_star_field()

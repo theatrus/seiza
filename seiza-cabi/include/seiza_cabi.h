@@ -321,8 +321,11 @@ typedef struct {
  Every field is optional: set a `SEIZA_TOLERANCE_HAS_*` bit to override that
  tolerance, leave it clear to take the default. A zeroed struct therefore
  means "all defaults", and passing a null pointer anywhere one of these is
- accepted means the same. An override that is negative or not a number is
- ignored in favour of the default.
+ accepted means the same. An override that is negative, not a number,
+ infinite, or a rotation above 180 degrees is ignored in favour of the
+ default. Unset fields always take the built-in defaults, never the
+ tolerances a stack's masters carry: a non-null struct replaces those
+ whole.
 
  The defaults are what a rig's own scatter needs rather than what a
  specification promises. [`seiza_match_tolerances_default`] fills one in if

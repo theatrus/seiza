@@ -160,6 +160,10 @@ pub enum Error {
     /// the measurements given cannot form one set.
     #[error("frame quality: {0}")]
     FrameQuality(String),
+    /// A [`MatchTolerances`] value no comparison can use; see
+    /// [`MatchTolerances::validate`].
+    #[error("invalid match tolerance: {0}")]
+    InvalidTolerance(String),
 }
 
 /// Result specialized to this crate's [`Error`].

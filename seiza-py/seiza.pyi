@@ -937,6 +937,53 @@ def build_flat(
     sigma_high: float = 3.0,
     cancel: Callable[[], bool] | None = None,
 ) -> MasterResult: ...
+def sensor_matches(reference: FrameSignature, candidate: FrameSignature) -> bool: ...
+def optics_match(
+    reference: FrameSignature,
+    candidate: FrameSignature,
+    tolerances: MatchTolerances | None = None,
+) -> bool: ...
+def describe_sensor_mismatch(reference: FrameSignature, candidate: FrameSignature) -> str: ...
+def describe_optics_mismatch(
+    reference: FrameSignature,
+    candidate: FrameSignature,
+    tolerances: MatchTolerances | None = None,
+) -> str: ...
+def rotation_matches(
+    reference: float | None,
+    candidate: float | None,
+    tolerance_deg: float | None = None,
+) -> bool: ...
+def exposure_matches(
+    reference: FrameSignature,
+    candidate: FrameSignature,
+    tolerances: MatchTolerances | None = None,
+) -> bool: ...
+def temperature_matches(
+    reference: FrameSignature,
+    candidate: FrameSignature,
+    tolerances: MatchTolerances | None = None,
+) -> bool: ...
+def coherent_subset_indices(
+    candidates: Sequence[FrameSignature],
+    flats: bool = False,
+    minimum: int = 2,
+    tolerances: MatchTolerances | None = None,
+) -> list[int]: ...
+def coherent_subset(
+    candidates: Sequence[FrameSignature],
+    flats: bool = False,
+    minimum: int = 2,
+    tolerances: MatchTolerances | None = None,
+) -> list[FrameSignature]: ...
+def sort_by_proximity(
+    frames: Sequence[FrameSignature],
+    reference_unix: int | None = None,
+) -> list[FrameSignature]: ...
+def fit_flat_pedestal(
+    light: npt.NDArray[np.float32],
+    flat: npt.NDArray[np.float32],
+) -> float | None: ...
 def gaussian_blur(
     image: npt.NDArray[np.uint8] | npt.NDArray[np.float32],
     sigma: float,

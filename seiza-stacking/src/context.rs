@@ -1,9 +1,10 @@
 use crate::{
     BayerLayout, CalibrationMasters, Error, FrameMetadata, LinearImage, Result, StackOptions,
+    calibration::{LightGate, check_tolerances},
     replay::{FrameWeightRecord, Ledger},
     stack::FrameInputMode,
 };
-use seiza_calibration::{FrameSignature, MatchTolerances};
+use seiza_calibration::FrameSignature;
 use seiza_fits::{BayerPattern, HeaderValue};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -125,9 +126,10 @@ struct CalibrationMetadata {
     flat_bayer: Option<BayerMetadata>,
     /// The tolerances lights are admitted under, written only when they are
     /// not the defaults. A reader that predates them refuses the field
-    /// rather than admit later lights under the wrong gate.
+    /// rather than admit later lights under the wrong gate, and
+    /// [`LightGate`] refuses a gate it does not know for the same reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    match_tolerances: Option<MatchTolerances>,
+    match_tolerances: Option<LightGate>,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -208,6 +210,10 @@ fn write_version(path: &Path, state: ContextWriteState<'_>, format_version: u32)
     state
         .options
         .validate()
+        .map_err(|error| context_write_error(path, error.to_string()))?;
+    // Masters only take checked tolerances, but JSON stores a non-finite
+    // one as `null`, which would leave a context that cannot be reopened.
+    check_tolerances(&state.calibration.tolerances)
         .map_err(|error| context_write_error(path, error.to_string()))?;
     validate_calibration(
         state.reference,
@@ -525,7 +531,12 @@ pub(crate) fn read(path: &Path) -> Result<RestoredContext> {
             .map(BayerLayout::try_from)
             .transpose()
             .map_err(|message| context_read_error(path, message))?,
-        tolerances: metadata.calibration.match_tolerances.unwrap_or_default(),
+        tolerances: metadata
+            .calibration
+            .match_tolerances
+            .unwrap_or_default()
+            .tolerances()
+            .map_err(|error| context_read_error(path, error.to_string()))?,
     };
     calibration
         .validate_master_set_signatures()
@@ -723,8 +734,7 @@ impl From<&CalibrationMasters> for CalibrationMetadata {
             flat_response: calibration.flat_response.as_ref().map(ImageMetadata::from),
             flat_signature: calibration.flat_signature.clone(),
             flat_bayer: calibration.flat_bayer.map(BayerMetadata::from),
-            match_tolerances: (calibration.tolerances != MatchTolerances::default())
-                .then_some(calibration.tolerances),
+            match_tolerances: LightGate::of_masters(calibration),
         }
     }
 }
@@ -1106,6 +1116,8 @@ mod tests {
 
     #[test]
     fn calibration_tolerances_are_written_only_when_they_differ() {
+        use seiza_calibration::MatchTolerances;
+
         // A context under the defaults keeps the shape older readers know;
         // one under other tolerances names them, and an older reader
         // refuses it rather than admit lights under the wrong gate.
@@ -1113,17 +1125,59 @@ mod tests {
         let written = serde_json::to_value(CalibrationMetadata::from(&masters)).unwrap();
         assert!(written.get("match_tolerances").is_none(), "{written}");
 
+        // Settings that only decide how a master is built leave the
+        // context alone: no light is admitted by them.
+        let building = MatchTolerances {
+            master_temperature_c: 0.5,
+            flat_session_seconds: 3_600,
+            ..MatchTolerances::default()
+        };
+        let written = serde_json::to_value(CalibrationMetadata::from(
+            &masters.clone().with_match_tolerances(building).unwrap(),
+        ))
+        .unwrap();
+        assert!(written.get("match_tolerances").is_none(), "{written}");
+
         let wide = MatchTolerances {
             rotation_deg: 180.0,
             ..MatchTolerances::default()
         };
         let written = serde_json::to_value(CalibrationMetadata::from(
-            &masters.with_match_tolerances(wide),
+            &masters.with_match_tolerances(wide).unwrap(),
         ))
         .unwrap();
         assert_eq!(written["match_tolerances"]["rotation_deg"], 180.0);
-        let read: CalibrationMetadata = serde_json::from_value(written).unwrap();
-        assert_eq!(read.match_tolerances, Some(wide));
+        assert!(
+            written["match_tolerances"]
+                .get("flat_session_seconds")
+                .is_none(),
+            "{written}"
+        );
+        let read: CalibrationMetadata = serde_json::from_value(written.clone()).unwrap();
+        assert_eq!(read.match_tolerances.unwrap().tolerances().unwrap(), wide);
+
+        // A gate added later reads as its default from a context saved
+        // before it existed.
+        let mut older = written.clone();
+        older["match_tolerances"]
+            .as_object_mut()
+            .unwrap()
+            .remove("focal_length_mm");
+        let read: CalibrationMetadata = serde_json::from_value(older).unwrap();
+        assert_eq!(read.match_tolerances.unwrap().tolerances().unwrap(), wide);
+
+        // A gate this reader does not know is refused, not ignored.
+        let mut newer = written.clone();
+        newer["match_tolerances"]["a_newer_gate"] = 1.0.into();
+        assert!(serde_json::from_value::<CalibrationMetadata>(newer).is_err());
+
+        // A negative tolerance written by hand is refused when read: it
+        // would refuse every light.
+        let mut negative = written;
+        negative["match_tolerances"]["dark_temperature_c"] = (-1.0).into();
+        let read: CalibrationMetadata = serde_json::from_value(negative).unwrap();
+        let error = read.match_tolerances.unwrap().tolerances().unwrap_err();
+        assert!(error.to_string().contains("dark_temperature_c"), "{error}");
     }
 
     #[test]

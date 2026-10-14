@@ -958,7 +958,11 @@ impl PyLiveStacker {
     /// differing fields and both readings.
     ///
     /// ``tolerances=None`` asks under the stack's own, which are the defaults
-    /// unless it was restored from a context saved under others.
+    /// unless it was restored from a context saved under others. Given
+    /// tolerances replace the stack's whole: a field left unset takes the
+    /// built-in default, not the stack's value. Raises :class:`StackError`
+    /// for a tolerance that is NaN, infinite, negative, or a rotation above
+    /// 180 degrees.
     #[pyo3(signature = (light, tolerances=None))]
     fn compatible_calibration(
         &self,
@@ -968,7 +972,9 @@ impl PyLiveStacker {
         let stacker = self.active()?;
         let masters = stacker.calibration();
         let tolerances = crate::calibration::tolerances_or(tolerances, masters.match_tolerances());
-        let (kept, dropped) = masters.compatible_for_light_with(&light.inner, &tolerances);
+        let (kept, dropped) = masters
+            .compatible_for_light_with(&light.inner, &tolerances)
+            .map_err(stack_error)?;
         let mut kinds = Vec::new();
         if kept.has_bias() {
             kinds.push("bias");
@@ -990,7 +996,9 @@ impl PyLiveStacker {
     /// masters loaded. Raises :class:`StackError` naming why a master
     /// refuses it — the reading and, for a measured gap, the tolerance in
     /// force. A host that widened a gate to choose its masters asks with the
-    /// same ``tolerances`` here; ``None`` means the stack's own.
+    /// same ``tolerances`` here; ``None`` means the stack's own, and given
+    /// tolerances replace them as in :meth:`compatible_calibration`.
+    /// Unusable tolerances raise :class:`StackError` too.
     #[pyo3(signature = (light, tolerances=None))]
     fn validate_calibration(
         &self,

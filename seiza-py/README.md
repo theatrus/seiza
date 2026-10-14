@@ -355,6 +355,13 @@ stacker.validate_calibration(light, wide)        # None, or raises StackError
 kept, dropped = stacker.compatible_calibration(light, wide)
 ```
 
+Passing `tolerances` replaces the stack's own whole: a field you leave unset
+takes the built-in default, not the stack's value. Both calls raise
+`StackError` for a tolerance that is NaN, infinite, negative, or a rotation
+above 180 degrees, which already accepts any angle. They answer a question and
+do not change what a push admits: pushes are judged under the stack's own
+tolerances, and masters loaded from paths carry the defaults.
+
 A stacker built from FITS or XISF paths can integrate its admitted frames again
 from their files, with leave-one-out rejection that removes trails the online
 pass kept, and can drizzle that integration onto a finer grid as WBPP's

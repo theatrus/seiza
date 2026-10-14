@@ -63,7 +63,18 @@ pub enum FrameRole {
 /// one is added is the point, not a cost — and it keeps
 /// `MatchTolerances { rotation_deg: 0.5, ..Default::default() }` working,
 /// which is how a config struct wants to be written.
+///
+/// Deserializing fills a missing field with its default, so tolerances saved
+/// before a field was added still load. An unknown field is ignored, as for
+/// any serde struct: these are a host's settings, and a newer file should
+/// still open in an older host. A store where ignoring a newer gate would
+/// match under the wrong one — seiza-stacking's saved context is one — keeps
+/// its own type that refuses unknown fields.
+///
+/// Nothing stops a struct literal holding a value no comparison can use; see
+/// [`Self::validate`] for the API that refuses them.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MatchTolerances {
     /// Dark exposure against light exposure: the floor, in seconds.
     ///
@@ -111,6 +122,51 @@ impl Default for MatchTolerances {
             focal_length_mm: 1.0,
             flat_session_seconds: 24 * 60 * 60,
         }
+    }
+}
+
+impl MatchTolerances {
+    /// The widest rotation tolerance that means anything. Two angles are
+    /// never more than half a turn apart, so this already accepts every
+    /// angle; ask for it to ignore rotation.
+    pub const MAX_ROTATION_DEG: f64 = 180.0;
+
+    /// Refuse tolerances that no comparison can use.
+    ///
+    /// Every distance must be finite and not negative. A negative or NaN
+    /// tolerance matches nothing and does not say why. An infinite one
+    /// cannot be stored as JSON, which writes it as `null`; a large finite
+    /// value does the same job. A rotation above [`Self::MAX_ROTATION_DEG`]
+    /// accepts nothing more than 180 does, so it is refused as a mistake
+    /// about units rather than read as "any angle".
+    ///
+    /// The matching functions here take tolerances as given. Hosts call this
+    /// where tolerances enter, and seiza-stacking calls it wherever it is
+    /// handed tolerances. Nothing is clamped: the error names the field and
+    /// its value.
+    pub fn validate(&self) -> crate::Result<()> {
+        for (name, value) in [
+            ("exposure_seconds", self.exposure_seconds),
+            ("exposure_fraction", self.exposure_fraction),
+            ("dark_temperature_c", self.dark_temperature_c),
+            ("master_temperature_c", self.master_temperature_c),
+            ("rotation_deg", self.rotation_deg),
+            ("focal_length_mm", self.focal_length_mm),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(crate::Error::InvalidTolerance(format!(
+                    "{name} must be finite and not negative, not {value}"
+                )));
+            }
+        }
+        if self.rotation_deg > Self::MAX_ROTATION_DEG {
+            return Err(crate::Error::InvalidTolerance(format!(
+                "rotation_deg {} is more than {}, which already accepts every angle",
+                self.rotation_deg,
+                Self::MAX_ROTATION_DEG
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -675,6 +731,80 @@ mod tests {
             camera_temp_c: Some(-10.0),
             captured_at_unix: Some(1_700_000_000),
         }
+    }
+
+    #[test]
+    fn tolerances_no_comparison_can_use_are_refused() {
+        MatchTolerances::default().validate().unwrap();
+        // Zero asks for equality, and 180 degrees ignores rotation: both
+        // are things a host may mean.
+        MatchTolerances {
+            exposure_seconds: 0.0,
+            exposure_fraction: 0.0,
+            dark_temperature_c: 0.0,
+            master_temperature_c: 0.0,
+            rotation_deg: MatchTolerances::MAX_ROTATION_DEG,
+            focal_length_mm: 0.0,
+            flat_session_seconds: 0,
+        }
+        .validate()
+        .unwrap();
+
+        type Set = fn(&mut MatchTolerances, f64);
+        let fields: [(&str, Set); 6] = [
+            ("exposure_seconds", |t, v| t.exposure_seconds = v),
+            ("exposure_fraction", |t, v| t.exposure_fraction = v),
+            ("dark_temperature_c", |t, v| t.dark_temperature_c = v),
+            ("master_temperature_c", |t, v| t.master_temperature_c = v),
+            ("rotation_deg", |t, v| t.rotation_deg = v),
+            ("focal_length_mm", |t, v| t.focal_length_mm = v),
+        ];
+        for (name, set) in fields {
+            for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+                let mut tolerances = MatchTolerances::default();
+                set(&mut tolerances, value);
+                let error = tolerances.validate().unwrap_err().to_string();
+                assert!(
+                    error.contains(name) && error.contains("finite and not negative"),
+                    "{name}={value}: {error}"
+                );
+            }
+        }
+
+        let past_half_turn = MatchTolerances {
+            rotation_deg: 360.0,
+            ..MatchTolerances::default()
+        };
+        let error = past_half_turn.validate().unwrap_err().to_string();
+        assert!(error.contains("rotation_deg 360"), "{error}");
+    }
+
+    #[test]
+    fn tolerances_saved_before_a_field_existed_still_load() {
+        // A field added later reads as its default rather than refusing
+        // everything saved before it.
+        let mut saved = serde_json::to_value(MatchTolerances {
+            rotation_deg: 5.0,
+            ..MatchTolerances::default()
+        })
+        .unwrap();
+        saved.as_object_mut().unwrap().remove("focal_length_mm");
+        let loaded: MatchTolerances = serde_json::from_value(saved).unwrap();
+        assert_eq!(
+            loaded,
+            MatchTolerances {
+                rotation_deg: 5.0,
+                ..MatchTolerances::default()
+            }
+        );
+        let empty: MatchTolerances = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty, MatchTolerances::default());
+
+        // A field from a newer host is ignored; a store that must refuse
+        // it keeps its own type.
+        let newer: MatchTolerances =
+            serde_json::from_str(r#"{"rotation_deg": 5.0, "a_newer_gate": 1.0}"#).unwrap();
+        assert_eq!(newer.rotation_deg, 5.0);
     }
 
     #[test]

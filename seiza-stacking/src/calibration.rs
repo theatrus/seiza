@@ -4,6 +4,7 @@ use seiza_calibration::{
     FrameSignature, MatchTolerances, exposure_matches, exposure_tolerance, optics_consistent,
     sensor_consistent, temperature_matches,
 };
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// An integrated master dark, with the metadata needed to scale and apply it.
@@ -305,10 +306,25 @@ impl CalibrationMasters {
     /// tolerances uses these: [`Self::validate_light_frame`],
     /// [`Self::validate_light_signature`], [`Self::compatible_for_light`],
     /// and so a live stack's every push, its pipelined pushes, its channel
-    /// reference and its reintegration. A saved stack context keeps them.
-    pub fn with_match_tolerances(mut self, tolerances: MatchTolerances) -> Self {
+    /// reference and its reintegration. A saved stack context keeps the
+    /// ones admission reads, and restores `master_temperature_c` and
+    /// `flat_session_seconds` as their defaults, since no light is judged by
+    /// them.
+    ///
+    /// In a [`crate::LiveStacker`] these are the only tolerances a push is
+    /// judged under: hand the set over with
+    /// [`crate::LiveStacker::set_calibration`], and they apply to every
+    /// later push until the set is replaced. A replaced in-memory set cannot
+    /// be loaded again, so frames admitted under it can no longer be
+    /// reintegrated; see that method.
+    ///
+    /// Refuses tolerances [`MatchTolerances::validate`] refuses — a NaN,
+    /// infinite or negative distance, or a rotation past 180 degrees —
+    /// rather than clamp them.
+    pub fn with_match_tolerances(mut self, tolerances: MatchTolerances) -> Result<Self> {
+        check_tolerances(&tolerances)?;
         self.tolerances = tolerances;
-        self
+        Ok(self)
     }
 
     /// The tolerances lights are judged under when none are given; see
@@ -394,13 +410,23 @@ impl CalibrationMasters {
     }
 
     /// [`Self::validate_light_frame`] under a caller's own tolerances, for a
-    /// light that has to be judged differently from the rest — a flat taken
-    /// from the nearest other rotator angle, accepted for this light alone.
+    /// host that runs its own pass over the lights and judges one of them
+    /// differently from the rest — a flat taken from the nearest other
+    /// rotator angle, accepted for this light alone.
+    ///
+    /// This does not change what a [`crate::LiveStacker`] admits: its pushes
+    /// are judged under the tolerances the masters carry, so a light this
+    /// accepts can still be refused there. See
+    /// [`Self::with_match_tolerances`].
+    ///
+    /// Refuses tolerances [`MatchTolerances::validate`] refuses, before
+    /// looking at the light.
     pub fn validate_light_frame_with(
         &self,
         frame: &FitsFrame,
         tolerances: &MatchTolerances,
     ) -> Result<()> {
+        check_tolerances(tolerances)?;
         if self.is_empty() {
             return Ok(());
         }
@@ -457,7 +483,7 @@ impl CalibrationMasters {
     /// is dropped here, and the kept set always validates against this
     /// light.
     pub fn compatible_for_light(&self, light: &FrameSignature) -> (Self, Vec<String>) {
-        self.compatible_for_light_with(light, &self.tolerances)
+        self.compatible_under(light, &self.tolerances)
     }
 
     /// [`Self::compatible_for_light`] under a caller's own tolerances — the
@@ -465,8 +491,22 @@ impl CalibrationMasters {
     /// widen the rotation gate has to ask this question with that same gate.
     ///
     /// The kept set carries `tolerances`, so pushing it to a stack admits
-    /// the light under the gate it was chosen with.
+    /// the light under the gate it was chosen with. Before 0.34 it carried
+    /// nothing, and a stack judged it under the defaults.
+    ///
+    /// Refuses tolerances [`MatchTolerances::validate`] refuses.
     pub fn compatible_for_light_with(
+        &self,
+        light: &FrameSignature,
+        tolerances: &MatchTolerances,
+    ) -> Result<(Self, Vec<String>)> {
+        check_tolerances(tolerances)?;
+        Ok(self.compatible_under(light, tolerances))
+    }
+
+    /// [`Self::compatible_for_light_with`] once the tolerances are known to
+    /// be usable.
+    fn compatible_under(
         &self,
         light: &FrameSignature,
         tolerances: &MatchTolerances,
@@ -524,16 +564,21 @@ impl CalibrationMasters {
         self.validate_light_signature_with(light, &self.tolerances)
     }
 
-    /// [`Self::validate_light_signature`] under a caller's own tolerances.
+    /// [`Self::validate_light_signature`] under a caller's own tolerances,
+    /// for a host that runs its own pass; as with
+    /// [`Self::validate_light_frame_with`], a live stack's pushes are judged
+    /// under the tolerances the masters carry instead.
     ///
     /// Asks exactly what [`Self::compatible_for_light_with`] asks, so it
     /// succeeds exactly when that drops nothing. A refusal names the reading
     /// that failed and, for a measured gap, the tolerance in force.
+    /// Tolerances [`MatchTolerances::validate`] refuses are refused first.
     pub fn validate_light_signature_with(
         &self,
         light: &FrameSignature,
         tolerances: &MatchTolerances,
     ) -> Result<()> {
+        check_tolerances(tolerances)?;
         let refusals = self.refusals(light, tolerances);
         // A sensor that does not match outranks every other reason, as it
         // did when each kind of check ran over all three masters in turn.
@@ -809,6 +854,78 @@ struct Refusal {
     detail: String,
 }
 
+/// Refuse tolerances no comparison can use, as a calibration error naming
+/// the field. Every API that is handed tolerances calls this, so masters
+/// never carry tolerances that would refuse every light or fail to save.
+pub(crate) fn check_tolerances(tolerances: &MatchTolerances) -> Result<()> {
+    tolerances
+        .validate()
+        .map_err(|error| Error::Calibration(error.to_string()))
+}
+
+/// The tolerances a light is admitted under, as a saved context and the
+/// configuration fingerprint record them.
+///
+/// Only the fields admission reads. `master_temperature_c` and
+/// `flat_session_seconds` decide which frames a master is built from, never
+/// whether a light accepts it, so a host that passes its master-building
+/// settings through does not change a stack's identity or context format.
+///
+/// A missing field reads as its default, so a context saved before a gate
+/// was added still opens. An unknown field is refused: a reader that
+/// ignored a newer gate would admit lights under the wrong one.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct LightGate {
+    exposure_seconds: f64,
+    exposure_fraction: f64,
+    dark_temperature_c: f64,
+    rotation_deg: f64,
+    focal_length_mm: f64,
+}
+
+impl LightGate {
+    fn of(tolerances: &MatchTolerances) -> Self {
+        // `+ 0.0` turns a negative zero, which validation accepts, into the
+        // zero it equals, so the two write and hash alike.
+        Self {
+            exposure_seconds: tolerances.exposure_seconds + 0.0,
+            exposure_fraction: tolerances.exposure_fraction + 0.0,
+            dark_temperature_c: tolerances.dark_temperature_c + 0.0,
+            rotation_deg: tolerances.rotation_deg + 0.0,
+            focal_length_mm: tolerances.focal_length_mm + 0.0,
+        }
+    }
+
+    /// The gate these masters admit lights under, or `None` under the
+    /// defaults, which a context and a fingerprint leave unwritten.
+    pub(crate) fn of_masters(masters: &CalibrationMasters) -> Option<Self> {
+        let gate = Self::of(&masters.tolerances);
+        (gate != Self::default()).then_some(gate)
+    }
+
+    /// Full tolerances admitting lights under this gate, refused when no
+    /// comparison could use them.
+    pub(crate) fn tolerances(self) -> Result<MatchTolerances> {
+        let tolerances = MatchTolerances {
+            exposure_seconds: self.exposure_seconds,
+            exposure_fraction: self.exposure_fraction,
+            dark_temperature_c: self.dark_temperature_c,
+            rotation_deg: self.rotation_deg,
+            focal_length_mm: self.focal_length_mm,
+            ..MatchTolerances::default()
+        };
+        check_tolerances(&tolerances)?;
+        Ok(tolerances)
+    }
+}
+
+impl Default for LightGate {
+    fn default() -> Self {
+        Self::of(&MatchTolerances::default())
+    }
+}
+
 /// Whether a loaded master dark's sensor temperature agrees with a light's.
 ///
 /// Consistency, not candidacy, for the reason
@@ -1079,6 +1196,26 @@ mod tests {
     }
 
     #[test]
+    fn rotation_is_measured_the_short_way_round() {
+        // 359 degrees is 4.2 from a flat at 3.2, not 355.8.
+        let masters = recorded_masters();
+        let mut light = matching_light();
+        light.rotation_deg = Some(359.0);
+        let error = masters
+            .validate_light_signature(&light)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("4.20 deg apart, tolerance 2.00"), "{error}");
+        let five = MatchTolerances {
+            rotation_deg: 5.0,
+            ..MatchTolerances::default()
+        };
+        masters
+            .validate_light_signature_with(&light, &five)
+            .unwrap();
+    }
+
+    #[test]
     fn caller_tolerances_admit_what_the_defaults_refuse() {
         // The flat-grouping fallback: a light at 113.8 degrees calibrated
         // with before-change flats from 3.2 degrees, on a rig whose measured
@@ -1121,13 +1258,13 @@ mod tests {
             masters
                 .validate_light_signature_with(&light, &wide)
                 .unwrap_or_else(|error| panic!("{field}: {error}"));
-            let (kept, dropped) = masters.compatible_for_light_with(&light, &wide);
+            let (kept, dropped) = masters.compatible_for_light_with(&light, &wide).unwrap();
             assert!(dropped.is_empty(), "{field}: {dropped:?}");
             assert!(kept.has_dark() && kept.has_flat(), "{field}");
 
             // Masters that carry the wider gate admit the light without
             // being told again — the path every push takes.
-            let carried = masters.clone().with_match_tolerances(wide);
+            let carried = masters.clone().with_match_tolerances(wide).unwrap();
             assert_eq!(carried.match_tolerances(), wide);
             carried
                 .validate_light_signature(&light)
@@ -1164,6 +1301,7 @@ mod tests {
         masters
             .clone()
             .with_match_tolerances(wide)
+            .unwrap()
             .validate_light_frame(&frame)
             .unwrap();
         // A caller's tolerances loosen matching, never the frame checks.
@@ -1224,7 +1362,7 @@ mod tests {
                 .validate_light_signature_with(&light, &tight)
                 .unwrap_err();
             assert!(error.to_string().contains(refusal), "{field}: {error}");
-            let (_, dropped) = masters.compatible_for_light_with(&light, &tight);
+            let (_, dropped) = masters.compatible_for_light_with(&light, &tight).unwrap();
             assert_eq!(dropped.len(), 1, "{field}: {dropped:?}");
             assert!(dropped[0].contains(refusal), "{field}: {dropped:?}");
         }
@@ -1250,8 +1388,9 @@ mod tests {
         );
         assert!(error.to_string().contains("tolerance 2.00"), "{error}");
         let (kept, dropped) = masters.compatible_for_light(&light);
-        let (kept_with, dropped_with) =
-            masters.compatible_for_light_with(&light, &MatchTolerances::default());
+        let (kept_with, dropped_with) = masters
+            .compatible_for_light_with(&light, &MatchTolerances::default())
+            .unwrap();
         assert_eq!(dropped, dropped_with);
         assert_eq!(kept.has_flat(), kept_with.has_flat());
         light.rotation_deg = Some(5.19);
@@ -1338,7 +1477,9 @@ mod tests {
             for (name, light) in &lights {
                 for tolerances in &tolerances {
                     let valid = masters.validate_light_signature_with(light, tolerances);
-                    let (kept, dropped) = masters.compatible_for_light_with(light, tolerances);
+                    let (kept, dropped) = masters
+                        .compatible_for_light_with(light, tolerances)
+                        .unwrap();
                     assert_eq!(
                         valid.is_ok(),
                         dropped.is_empty(),
