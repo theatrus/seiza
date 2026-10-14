@@ -53,7 +53,19 @@ fn fetch(path: &str, dest: &Path) {
         return;
     }
     let url = format!("{BASE}/{path}");
-    let response = ureq::get(&url).call().unwrap_or_else(|e| {
+    // The system's certificates and aws-lc-rs, as the command's clients use.
+    let agent = ureq::Agent::config_builder()
+        .tls_config(
+            ureq::tls::TlsConfig::builder()
+                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+                .unversioned_rustls_crypto_provider(std::sync::Arc::new(
+                    rustls::crypto::aws_lc_rs::default_provider(),
+                ))
+                .build(),
+        )
+        .build()
+        .new_agent();
+    let response = agent.get(&url).call().unwrap_or_else(|e| {
         panic!("failed to fetch {url}: {e}");
     });
     let mut bytes = Vec::new();

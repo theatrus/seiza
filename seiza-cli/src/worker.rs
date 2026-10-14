@@ -672,6 +672,16 @@ impl RemoteSolver {
             token: token.map(str::to_string),
             agent: ureq::Agent::config_builder()
                 .http_status_as_error(false)
+                // The system's certificates and aws-lc-rs, as reqwest's
+                // downloads use.
+                .tls_config(
+                    ureq::tls::TlsConfig::builder()
+                        .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+                        .unversioned_rustls_crypto_provider(std::sync::Arc::new(
+                            rustls::crypto::aws_lc_rs::default_provider(),
+                        ))
+                        .build(),
+                )
                 .build()
                 .new_agent(),
             upload_format,

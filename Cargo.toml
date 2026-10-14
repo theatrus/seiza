@@ -23,7 +23,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.30.3"
+version = "0.31.0"
 edition = "2024"
 rust-version = "1.89"
 license = "Apache-2.0"
@@ -31,22 +31,22 @@ repository = "https://github.com/theatrus/seiza"
 authors = ["Yann Ramin <github@theatr.us>"]
 
 [workspace.dependencies]
-seiza = { path = "seiza", version = "0.30.3" }
+seiza = { path = "seiza", version = "0.31.0" }
 seiza-background = { path = "seiza-background", version = "0.3.1" }
 seiza-calibration = { path = "seiza-calibration", version = "0.5.0" }
 seiza-deconvolution = { path = "seiza-deconvolution", version = "0.1.1" }
-seiza-download = { path = "seiza-download", version = "0.8.0" }
+seiza-download = { path = "seiza-download", version = "0.9.0" }
 seiza-draw = { path = "seiza-draw", version = "0.1.0" }
 seiza-fits = { path = "seiza-fits", version = "0.3.0" }
-seiza-image-io = { path = "seiza-image-io", version = "0.5.0" }
+seiza-image-io = { path = "seiza-image-io", version = "0.6.0" }
 seiza-imgproc = { path = "seiza-imgproc", version = "0.3.2" }
-seiza-parallax = { path = "seiza-parallax", version = "0.7.0" }
-seiza-satellites = { path = "seiza-satellites", version = "0.19.0" }
-seiza-stacking = { path = "seiza-stacking", version = "0.32.0" }
+seiza-parallax = { path = "seiza-parallax", version = "0.8.0" }
+seiza-satellites = { path = "seiza-satellites", version = "0.20.0" }
+seiza-stacking = { path = "seiza-stacking", version = "0.33.0" }
 seiza-stars = { path = "seiza-stars", version = "0.3.0" }
 seiza-stats = { path = "seiza-stats", version = "0.1.0" }
 seiza-stretch = { path = "seiza-stretch", version = "0.2.2" }
-seiza-sources = { path = "seiza-sources", version = "0.4.0" }
+seiza-sources = { path = "seiza-sources", version = "0.5.0" }
 seiza-xisf = { path = "seiza-xisf", version = "0.4.0" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 kamadak-exif = "0.6.1"
@@ -62,9 +62,12 @@ tar = "0.4"
 fs2 = "0.4"
 futures-util = "0.3"
 directories = "6"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "gzip"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "json", "gzip", "form", "query"] }
 serde = { version = "1", features = ["derive"] }
-ureq = { version = "3", features = ["json", "multipart"] }
+# rustls with the system's certificates and aws-lc-rs, as reqwest's
+# downloads use; ureq takes the crypto provider from rustls.
+ureq = { version = "3", default-features = false, features = ["json", "multipart", "gzip", "rustls-no-provider", "platform-verifier"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "aws_lc_rs"] }
 # float_roundtrip parses every f64 back exactly, so persisted predictions
 # and API payloads survive a JSON round trip unchanged.
 serde_json = { version = "1", features = ["float_roundtrip"] }
