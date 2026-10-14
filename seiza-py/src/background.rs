@@ -97,7 +97,7 @@ impl PyBackgroundModel {
     /// a full-size model image.
     fn render<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
         let values = py
-            .allow_threads(|| self.fit.render_model())
+            .detach(|| self.fit.render_model())
             .map_err(|error| crate::EngineError::new_err(error.to_string()))?;
         float_array(
             py,
@@ -130,7 +130,7 @@ impl PyBackgroundModel {
         }
         let mode = correction_mode(mode)?;
         let corrected = py
-            .allow_threads(|| self.fit.correct_with_strength(image.data, mode, strength))
+            .detach(|| self.fit.correct_with_strength(image.data, mode, strength))
             .map_err(|error| crate::EngineError::new_err(error.to_string()))?;
         float_array(py, image.width, image.height, image.channels, corrected)
     }
@@ -209,7 +209,7 @@ fn fit_background(
         protected_regions: Vec::new(),
     };
     let fit = py
-        .allow_threads(|| {
+        .detach(|| {
             fit_background_masked(
                 image.data,
                 image.width,

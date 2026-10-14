@@ -37,7 +37,7 @@ fn auto_tour_argument(value: &Bound<'_, PyAny>) -> PyResult<Option<seiza_paralla
         auto.targets = Some(count);
         return Ok(Some(auto));
     }
-    let dict = value.downcast::<PyDict>()?;
+    let dict = value.cast::<PyDict>()?;
     for (key, value) in dict.iter() {
         let key: String = key.extract()?;
         match key.as_str() {
@@ -94,7 +94,7 @@ pub(crate) fn plan_parallax_tour<'py>(
         motion,
     };
     let plan = py
-        .allow_threads(|| {
+        .detach(|| {
             seiza_parallax::plan_tour(&wcs, (width, height), objects.as_deref(), frame, &auto)
         })
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
@@ -346,7 +346,7 @@ fn planes_argument(value: &Bound<'_, PyAny>) -> PyResult<Vec<DepthPlane>> {
 /// Distances for catalogued objects from `distance_overrides=`: a dict of
 /// name to parsecs, or (name, parsecs) pairs.
 fn distance_overrides_argument(value: &Bound<'_, PyAny>) -> PyResult<Vec<DistanceOverride>> {
-    let pairs: Vec<(String, f64)> = match value.downcast::<PyDict>() {
+    let pairs: Vec<(String, f64)> = match value.cast::<PyDict>() {
         Ok(dict) => dict
             .iter()
             .map(|(name, distance)| Ok((name.extract()?, distance.extract()?)))
@@ -366,7 +366,9 @@ fn distance_overrides_argument(value: &Bound<'_, PyAny>) -> PyResult<Vec<Distanc
 }
 
 /// Two numbers from a two-item tuple or list.
-fn pair<'py, T: FromPyObject<'py>>(value: &Bound<'py, PyAny>) -> PyResult<(T, T)> {
+fn pair<'py, T: pyo3::conversion::FromPyObjectOwned<'py>>(
+    value: &Bound<'py, PyAny>,
+) -> PyResult<(T, T)> {
     let [a, b]: [T; 2] = value.extract()?;
     Ok((a, b))
 }
@@ -497,7 +499,7 @@ fn options(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ParallaxOptions> {
                             return seiza_parallax::parse_stop(&text)
                                 .map_err(PyValueError::new_err);
                         }
-                        let stop = stop.downcast::<PyDict>()?;
+                        let stop = stop.cast::<PyDict>()?;
                         let mut parsed = seiza_parallax::TourStop::default();
                         for (key, value) in stop.iter() {
                             let key: String = key.extract()?;
@@ -585,7 +587,7 @@ fn options(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ParallaxOptions> {
                     .map_err(PyValueError::new_err)?
                     .0
             }
-            "watermark" => match value.downcast::<PyDict>() {
+            "watermark" => match value.cast::<PyDict>() {
                 Ok(style) => {
                     options.video.watermark = None;
                     for (key, value) in style.iter() {
@@ -662,10 +664,10 @@ fn event_dict<'py>(py: Python<'py>, event: Event) -> PyResult<Bound<'py, PyDict>
 
 /// A reporter that hands events to `progress` and keeps its first error,
 /// re-raised once the work settles.
-fn reporter(progress: Option<PyObject>, raised: Arc<Mutex<Option<PyErr>>>) -> impl FnMut(Event) {
+fn reporter(progress: Option<Py<PyAny>>, raised: Arc<Mutex<Option<PyErr>>>) -> impl FnMut(Event) {
     move |event| {
         if let Some(callback) = &progress {
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 if let Err(error) =
                     event_dict(py, event).and_then(|dict| callback.call1(py, (dict,)))
                     && let Ok(mut slot) = raised.lock()
@@ -687,13 +689,13 @@ fn reraise(raised: &Arc<Mutex<Option<PyErr>>>) -> PyResult<()> {
 
 /// Whether to stop: Ctrl-C, `cancel` returning true, or a callback that has
 /// raised. A raising `cancel` stops too, its error kept for re-raising.
-fn should_stop(cancel: &Option<PyObject>, raised: &Arc<Mutex<Option<PyErr>>>) -> bool {
+fn should_stop(cancel: &Option<Py<PyAny>>, raised: &Arc<Mutex<Option<PyErr>>>) -> bool {
     // A callback has raised already, most often `progress` taking Ctrl-C's
     // KeyboardInterrupt: stop, and let it be raised.
     if raised.lock().is_ok_and(|slot| slot.is_some()) {
         return true;
     }
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let asked = py.check_signals().and_then(|()| match cancel {
             Some(cancel) => cancel
                 .call0(py)
@@ -754,8 +756,8 @@ impl PyParallaxVideo {
         starless: &Bound<'_, PyAny>,
         stars: &Bound<'_, PyAny>,
         wcs: &Bound<'_, PyWcs>,
-        progress: Option<PyObject>,
-        cancel: Option<PyObject>,
+        progress: Option<Py<PyAny>>,
+        cancel: Option<Py<PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         let options = self::options(options)?;
@@ -766,7 +768,7 @@ impl PyParallaxVideo {
         let raised = Arc::new(Mutex::new(None));
         let mut report = reporter(progress, Arc::clone(&raised));
         let stop_raised = Arc::clone(&raised);
-        let prepared = py.allow_threads(|| {
+        let prepared = py.detach(|| {
             let (starless, stars) = (starless.pixels()?, stars.pixels()?);
             Ok::<_, PyErr>(Parallax::prepare(
                 &starless,
@@ -794,8 +796,8 @@ impl PyParallaxVideo {
     fn reconfigure(
         &self,
         py: Python<'_>,
-        progress: Option<PyObject>,
-        cancel: Option<PyObject>,
+        progress: Option<Py<PyAny>>,
+        cancel: Option<Py<PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         if let Some(options) = options {
@@ -812,7 +814,7 @@ impl PyParallaxVideo {
         let raised = Arc::new(Mutex::new(None));
         let mut report = reporter(progress, Arc::clone(&raised));
         let stop_raised = Arc::clone(&raised);
-        let refilmed = py.allow_threads(|| {
+        let refilmed = py.detach(|| {
             self.video
                 .reconfigure(&video, &mut report, &|| should_stop(&cancel, &stop_raised))
         });
@@ -854,7 +856,7 @@ impl PyParallaxVideo {
             },
         };
         let plan = py
-            .allow_threads(|| self.video.plan_tour(&auto, frame))
+            .detach(|| self.video.plan_tour(&auto, frame))
             .map_err(video_error)?;
         plan_dict(py, &plan)
     }
@@ -870,14 +872,14 @@ impl PyParallaxVideo {
         &self,
         py: Python<'_>,
         dust_map: Option<&Bound<'_, PyAny>>,
-        progress: Option<PyObject>,
-        cancel: Option<PyObject>,
+        progress: Option<Py<PyAny>>,
+        cancel: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
         let map = dust_map.map(dust_map_argument).transpose()?;
         let raised = Arc::new(Mutex::new(None));
         let mut report = reporter(progress, Arc::clone(&raised));
         let stop_raised = Arc::clone(&raised);
-        let swapped = py.allow_threads(|| {
+        let swapped = py.detach(|| {
             self.video.with_dust_map(map.as_ref(), &mut report, &|| {
                 should_stop(&cancel, &stop_raised)
             })
@@ -912,7 +914,7 @@ impl PyParallaxVideo {
         if width == 0 || height == 0 {
             return Err(PyValueError::new_err("the map needs a width and height"));
         }
-        let map = py.allow_threads(|| dust.to_map(width, height));
+        let map = py.detach(|| dust.to_map(width, height));
         let array = Array2::from_shape_vec((height, width), map.opacity)
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         Ok(Some(array.into_pyarray(py)))
@@ -933,7 +935,7 @@ impl PyParallaxVideo {
             return Ok(false);
         };
         let (width, height) = dust.size();
-        py.allow_threads(|| dust.to_map(width, height).save(&path))
+        py.detach(|| dust.to_map(width, height).save(&path))
             .map_err(PyRuntimeError::new_err)?;
         Ok(true)
     }
@@ -1044,7 +1046,7 @@ impl PyParallaxVideo {
                 self.video.frames()
             )));
         }
-        let frame = py.allow_threads(|| self.video.frame(index));
+        let frame = py.detach(|| self.video.frame(index));
         frame_array(py, frame, format)
     }
 
@@ -1056,10 +1058,10 @@ impl PyParallaxVideo {
     fn render(
         &self,
         py: Python<'_>,
-        on_frame: PyObject,
+        on_frame: Py<PyAny>,
         format: &str,
-        progress: Option<PyObject>,
-        cancel: Option<PyObject>,
+        progress: Option<Py<PyAny>>,
+        cancel: Option<Py<PyAny>>,
     ) -> PyResult<bool> {
         let total = self.video.frames();
         let raised = Arc::new(Mutex::new(None));
@@ -1069,7 +1071,7 @@ impl PyParallaxVideo {
                 reraise(&raised)?;
                 return Ok(false);
             }
-            let frame = py.allow_threads(|| self.video.frame(index));
+            let frame = py.detach(|| self.video.frame(index));
             let array = frame_array(py, frame, format)?;
             let answer = on_frame.call1(py, (array, index))?;
             report(Event::Frame {
@@ -1098,8 +1100,8 @@ impl PyParallaxVideo {
         encoder: &str,
         codec: &str,
         ffmpeg: Option<PathBuf>,
-        progress: Option<PyObject>,
-        cancel: Option<PyObject>,
+        progress: Option<Py<PyAny>>,
+        cancel: Option<Py<PyAny>>,
     ) -> PyResult<bool> {
         let settings = self.video.video_settings();
         let ffmpeg = ffmpeg.unwrap_or_else(|| PathBuf::from("ffmpeg"));
@@ -1126,7 +1128,7 @@ impl PyParallaxVideo {
         let raised = Arc::new(Mutex::new(None));
         let mut report = reporter(progress, Arc::clone(&raised));
         let stop_raised = Arc::clone(&raised);
-        let written = py.allow_threads(|| {
+        let written = py.detach(|| {
             self.video
                 .render(sink, &mut report, &|| should_stop(&cancel, &stop_raised))
         });

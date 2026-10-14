@@ -41,7 +41,7 @@ pyo3::create_exception!(
 );
 
 /// A detected or externally supplied star in 0-indexed pixel coordinates.
-#[pyclass(frozen, name = "Star", module = "seiza")]
+#[pyclass(from_py_object, frozen, name = "Star", module = "seiza")]
 #[derive(Clone)]
 struct Star {
     #[pyo3(get)]
@@ -170,7 +170,7 @@ impl PyStarCatalog {
         radius_deg: f64,
         limit: usize,
     ) -> Vec<(f64, f64, f32)> {
-        py.allow_threads(|| {
+        py.detach(|| {
             self.backend
                 .as_trait()
                 .cone_search(ra, dec, radius_deg, limit)
@@ -218,7 +218,7 @@ impl PyBlindIndex {
 
 /// A TAN-projection WCS. `crpix` is 0-indexed; FITS keyword output converts
 /// to the 1-indexed FITS convention.
-#[pyclass(frozen, name = "Wcs", module = "seiza")]
+#[pyclass(skip_from_py_object, frozen, name = "Wcs", module = "seiza")]
 #[derive(Clone)]
 pub(crate) struct PyWcs {
     pub(crate) wcs: SeizaWcs,
@@ -549,7 +549,7 @@ fn detect(
         let pixels = array
             .as_slice()
             .map_err(|_| PyValueError::new_err("image array is not contiguous"))?;
-        py.allow_threads(|| detect_stars_luma_f32(pixels, width, height, &config))
+        py.detach(|| detect_stars_luma_f32(pixels, width, height, &config))
     } else if let Ok(array) = image.extract::<PyReadonlyArray2<'_, u8>>() {
         let dims = array.shape();
         let (height, width) = (dims[0] as u32, dims[1] as u32);
@@ -560,7 +560,7 @@ fn detect(
         let buffer = image::GrayImage::from_raw(width, height, pixels)
             .ok_or_else(|| PyValueError::new_err("image dimensions are inconsistent"))?;
         let dynamic = image::DynamicImage::ImageLuma8(buffer);
-        py.allow_threads(|| detect_stars(&dynamic, &config))
+        py.detach(|| detect_stars(&dynamic, &config))
     } else {
         return Err(PyValueError::new_err(
             "image must be a 2D numpy array of float32 or uint8",
@@ -599,9 +599,8 @@ fn solve(
         scale_tolerance,
         sip_order,
     };
-    let solution = py.allow_threads(|| {
-        seiza::solve::solve(&stars, catalog.backend.as_trait(), &hint, (width, height))
-    });
+    let solution = py
+        .detach(|| seiza::solve::solve(&stars, catalog.backend.as_trait(), &hint, (width, height)));
     solution
         .map(|solution| solution_to_py(solution, (width, height)))
         .map_err(|error| SolveError::new_err(error.to_string()))
@@ -635,7 +634,7 @@ fn solve_blind(
         sip_order,
         ..seiza::blind::BlindParams::default()
     };
-    let solution = py.allow_threads(|| {
+    let solution = py.detach(|| {
         seiza::blind::solve_blind(
             &stars,
             catalog.backend.as_trait(),
@@ -716,7 +715,7 @@ fn fetch_catalogs(
         }
     };
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let mut builder = CatalogManager::builder();
         if let Some(cache_dir) = cache_dir {
             builder = builder.cache_dir(cache_dir);
@@ -769,7 +768,7 @@ fn read_photo_metadata(
     path: PathBuf,
     width: Option<u32>,
     height: Option<u32>,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     use seiza::raster::{PhotoMetadata, ScaleSearch};
     let metadata = PhotoMetadata::read(&path);
     let mut value = serde_json::to_value(&metadata)

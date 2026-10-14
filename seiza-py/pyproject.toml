@@ -10,7 +10,7 @@ readme = "README.md"
 license = "Apache-2.0 AND OFL-1.1"
 license-files = ["LICENSE-Inter.txt"]
 authors = [{ name = "Yann Ramin", email = "github@theatr.us" }]
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 keywords = ["astronomy", "astrophotography", "plate-solving", "wcs", "astrometry", "image-stacking", "deconvolution"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -19,7 +19,7 @@ classifiers = [
     "Programming Language :: Rust",
     "Topic :: Scientific/Engineering :: Astronomy",
 ]
-dependencies = ["numpy>=1.21"]
+dependencies = ["numpy>=1.23.2"]
 dynamic = ["version"]
 
 [project.urls]

@@ -16,7 +16,7 @@ use seiza_stars::tilt;
 /// One detected star with its measurements. `eccentricity`, `theta`, and
 /// `r_squared` are present when a PSF model was fitted. `theta` is the
 /// ellipse major-axis orientation in radians over `[0, π)`.
-#[pyclass(name = "MeasuredStar", module = "seiza", frozen)]
+#[pyclass(skip_from_py_object, name = "MeasuredStar", module = "seiza", frozen)]
 #[derive(Clone)]
 pub(crate) struct PyMeasuredStar {
     #[pyo3(get)]
@@ -67,7 +67,7 @@ pub(crate) struct PyStarDetectionResult {
 }
 
 /// One 3×3 grid cell's aggregate star statistics.
-#[pyclass(name = "TiltCell", module = "seiza", frozen)]
+#[pyclass(skip_from_py_object, name = "TiltCell", module = "seiza", frozen)]
 #[derive(Clone)]
 pub(crate) struct PyTiltCell {
     #[pyo3(get)]
@@ -109,7 +109,12 @@ pub(crate) struct PyTiltSummary {
 }
 
 /// Aggregate statistics for the circular center of a triangle tilt analysis.
-#[pyclass(name = "TriangleTiltCenter", module = "seiza", frozen)]
+#[pyclass(
+    skip_from_py_object,
+    name = "TriangleTiltCenter",
+    module = "seiza",
+    frozen
+)]
 #[derive(Clone)]
 pub(crate) struct PyTriangleTiltCenter {
     #[pyo3(get)]
@@ -119,7 +124,12 @@ pub(crate) struct PyTriangleTiltCenter {
 }
 
 /// Aggregate statistics for one triangle adjustment-screw sector.
-#[pyclass(name = "TriangleTiltSector", module = "seiza", frozen)]
+#[pyclass(
+    skip_from_py_object,
+    name = "TriangleTiltSector",
+    module = "seiza",
+    frozen
+)]
 #[derive(Clone)]
 pub(crate) struct PyTriangleTiltSector {
     /// Stable 1-based adjustment-screw identifier.
@@ -254,7 +264,7 @@ fn detect_measured_stars(
         params.sensitivity = value;
     }
 
-    let result = py.allow_threads(move || detect_stars_hocus_focus(&data, width, height, &params));
+    let result = py.detach(move || detect_stars_hocus_focus(&data, width, height, &params));
     Ok(PyStarDetectionResult {
         stars: result
             .stars

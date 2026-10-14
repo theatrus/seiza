@@ -109,8 +109,7 @@ fn gaussian_blur<'py>(
     if let Ok(array) = image.extract::<PyReadonlyArrayDyn<'_, u8>>() {
         let view = gray_view(&array)?;
         let (data, width, height) = (view.data, view.width, view.height);
-        let out =
-            py.allow_threads(move || gaussian_blur_u8(data, width, height, ksize, sigma, border));
+        let out = py.detach(move || gaussian_blur_u8(data, width, height, ksize, sigma, border));
         return Ok(gray_array(py, width, height, out)?.into_any());
     }
     if let Ok(array) = image.extract::<PyReadonlyArrayDyn<'_, f32>>() {
@@ -121,8 +120,7 @@ fn gaussian_blur<'py>(
         } else {
             ksize
         };
-        let out =
-            py.allow_threads(move || gaussian_blur_f32(data, width, height, ksize, sigma, border));
+        let out = py.detach(move || gaussian_blur_f32(data, width, height, ksize, sigma, border));
         return Ok(gray_array(py, width, height, out)?.into_any());
     }
     Err(PyValueError::new_err(
@@ -138,7 +136,7 @@ fn median_blur3<'py>(
 ) -> PyResult<Bound<'py, PyArrayDyn<u8>>> {
     let view = gray_view(&image)?;
     let (data, width, height) = (view.data, view.width, view.height);
-    let out = py.allow_threads(move || median_blur3_u8(data, width, height));
+    let out = py.detach(move || median_blur3_u8(data, width, height));
     gray_array(py, width, height, out)
 }
 
@@ -154,7 +152,7 @@ fn canny<'py>(
 ) -> PyResult<Bound<'py, PyArrayDyn<u8>>> {
     let view = gray_view(&image)?;
     let (data, width, height) = (view.data, view.width, view.height);
-    let out = py.allow_threads(move || canny_rs(data, width, height, low, high));
+    let out = py.detach(move || canny_rs(data, width, height, low, high));
     gray_array(py, width, height, out)
 }
 
@@ -163,7 +161,7 @@ fn canny<'py>(
 fn otsu_threshold(py: Python<'_>, image: PyReadonlyArrayDyn<'_, u8>) -> PyResult<u8> {
     let view = gray_view(&image)?;
     let data = view.data;
-    Ok(py.allow_threads(move || otsu_rs(data)))
+    Ok(py.detach(move || otsu_rs(data)))
 }
 
 /// Binarize a uint8 image with the Otsu threshold: values above the
@@ -175,7 +173,7 @@ fn otsu_binary<'py>(
 ) -> PyResult<Bound<'py, PyArrayDyn<u8>>> {
     let view = gray_view(&image)?;
     let (data, width, height) = (view.data, view.width, view.height);
-    let out = py.allow_threads(move || otsu_binary_rs(data, width, height));
+    let out = py.detach(move || otsu_binary_rs(data, width, height));
     gray_array(py, width, height, out)
 }
 
@@ -194,7 +192,7 @@ fn morph<'py>(
     }
     let view = gray_view(&image)?;
     let (data, width, height) = (view.data, view.width, view.height);
-    let out = py.allow_threads(move || {
+    let out = py.detach(move || {
         let element = StructuringElement::new(shape, ksize);
         op(data, width, height, &element, border)
     });
@@ -239,7 +237,7 @@ fn find_contours<'py>(
 ) -> PyResult<Vec<Bound<'py, PyArrayDyn<i32>>>> {
     let view = gray_view(&image)?;
     let (data, width, height) = (view.data, view.width, view.height);
-    let contours = py.allow_threads(move || find_external_contours(data, width, height));
+    let contours = py.detach(move || find_external_contours(data, width, height));
     contours
         .into_iter()
         .map(|contour| {
@@ -295,7 +293,7 @@ fn dt_filter<'py>(
     }
     let (guide_data, src_data) = (guide.data, src.data);
     let (width, height) = (src.width, src.height);
-    let out = py.allow_threads(move || {
+    let out = py.detach(move || {
         dt_filter_nc(
             guide_data,
             src_data,
@@ -330,7 +328,7 @@ fn remove_structures<'py>(
     };
     let view = gray_view(&image)?;
     let (data, width, height) = (view.data, view.width, view.height);
-    let out = py.allow_threads(move || {
+    let out = py.detach(move || {
         let remover = StructureRemover::new(layers);
         if atrous {
             remover.remove_structures_atrous(data, width, height)

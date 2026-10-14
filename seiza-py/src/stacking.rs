@@ -25,7 +25,7 @@ fn stack_error(error: seiza_stacking::Error) -> PyErr {
 }
 
 /// What one pipelined run did.
-#[pyclass(frozen, name = "PipelineReport", module = "seiza")]
+#[pyclass(skip_from_py_object, frozen, name = "PipelineReport", module = "seiza")]
 #[derive(Clone, Copy)]
 pub(crate) struct PyPipelineReport {
     /// Frames the accumulator took.
@@ -59,7 +59,7 @@ impl PyPipelineReport {
     }
 }
 
-#[pyclass(frozen, name = "StackOptions", module = "seiza")]
+#[pyclass(skip_from_py_object, frozen, name = "StackOptions", module = "seiza")]
 #[derive(Clone, Default)]
 pub(crate) struct PyStackOptions {
     inner: StackOptions,
@@ -251,7 +251,12 @@ impl PyStackOptions {
     }
 }
 
-#[pyclass(frozen, name = "FrameDisposition", module = "seiza")]
+#[pyclass(
+    skip_from_py_object,
+    frozen,
+    name = "FrameDisposition",
+    module = "seiza"
+)]
 #[derive(Clone)]
 pub(crate) struct PyFrameDisposition {
     #[pyo3(get)]
@@ -424,7 +429,7 @@ impl PyStackResult {
 
 /// How good a frame would be as the stack's reference; see
 /// :func:`choose_reference`.
-#[pyclass(frozen, name = "ReferenceScore", module = "seiza")]
+#[pyclass(skip_from_py_object, frozen, name = "ReferenceScore", module = "seiza")]
 #[derive(Clone)]
 pub(crate) struct PyReferenceScore {
     /// Stars detected at five sigma on the half-resolution luminance.
@@ -681,7 +686,7 @@ impl PyDrizzleResult {
                 "output path must not refer to a stack input or calibration master",
             ));
         }
-        py.allow_threads(|| {
+        py.detach(|| {
             write_drizzle_fits_f32(
                 path,
                 &self.inner,
@@ -766,7 +771,7 @@ impl PyLiveStacker {
             .as_ref()
             .map_or_else(StackOptions::default, |options| options.inner.clone());
         let inner = py
-            .allow_threads(move || {
+            .detach(move || {
                 LiveStacker::open_fits(
                     reference,
                     bias.as_deref(),
@@ -792,7 +797,7 @@ impl PyLiveStacker {
             .as_ref()
             .map_or_else(StackOptions::default, |options| options.inner.clone());
         let inner = py
-            .allow_threads(move || LiveStacker::from_linear(reference, options))
+            .detach(move || LiveStacker::from_linear(reference, options))
             .map_err(stack_error)?;
         Ok(Self { inner: Some(inner) })
     }
@@ -840,7 +845,7 @@ impl PyLiveStacker {
             .as_ref()
             .map_or_else(StackOptions::default, |options| options.inner.clone());
         let inner = py
-            .allow_threads(move || {
+            .detach(move || {
                 LiveStacker::open_fits_with_reference_image(
                     reference_image,
                     channel_reference,
@@ -908,7 +913,7 @@ impl PyLiveStacker {
             .as_ref()
             .map_or_else(StackOptions::default, |options| options.inner.clone());
         let (inner, used, skipped) = py
-            .allow_threads(|| {
+            .detach(|| {
                 let mut skipped = Vec::new();
                 LiveStacker::open_fits_with_reference_image_candidates(
                     &reference_image,
@@ -938,7 +943,7 @@ impl PyLiveStacker {
     #[staticmethod]
     fn open_context(py: Python<'_>, path: PathBuf) -> PyResult<Self> {
         let inner = py
-            .allow_threads(|| LiveStacker::open_context(path))
+            .detach(|| LiveStacker::open_context(path))
             .map_err(stack_error)?;
         Ok(Self { inner: Some(inner) })
     }
@@ -978,7 +983,7 @@ impl PyLiveStacker {
     /// Atomically checkpoint this live stack without consuming it.
     fn save_context(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {
         let stacker = self.active()?;
-        py.allow_threads(|| stacker.save_context(path))
+        py.detach(|| stacker.save_context(path))
             .map_err(stack_error)
     }
 
@@ -1012,7 +1017,7 @@ impl PyLiveStacker {
             )));
         }
         let disposition = py
-            .allow_threads(|| self.active_mut()?.push_fits(&path))
+            .detach(|| self.active_mut()?.push_fits(&path))
             .map_err(stack_error)?;
         Ok(PyFrameDisposition::from_rust(Some(path), disposition))
     }
@@ -1060,7 +1065,7 @@ impl PyLiveStacker {
         // stacking loop entirely.
         let mut outcomes: Vec<(PathBuf, Result<FrameDisposition, String>)> = Vec::new();
         let report = py
-            .allow_threads(|| {
+            .detach(|| {
                 let stacker = self.active_mut()?;
                 stacker.push_fits_pipelined(&paths, &options, |path, outcome| {
                     outcomes.push((
@@ -1090,7 +1095,7 @@ impl PyLiveStacker {
     ) -> PyResult<PyFrameDisposition> {
         let image = linear_image(image)?;
         let disposition = py
-            .allow_threads(|| self.active_mut()?.push_linear(image))
+            .detach(|| self.active_mut()?.push_linear(image))
             .map_err(stack_error)?;
         Ok(PyFrameDisposition::from_rust(None, disposition))
     }
@@ -1104,15 +1109,13 @@ impl PyLiveStacker {
     fn measure_depth(&self, py: Python<'_>) -> PyResult<Option<PySnrSample>> {
         let stacker = self.active()?;
         Ok(py
-            .allow_threads(|| measure_depth(stacker.view()))
+            .detach(|| measure_depth(stacker.view()))
             .map(|sample| PySnrSample { inner: sample }))
     }
 
     fn snapshot(&self, py: Python<'_>) -> PyResult<PyStackSnapshot> {
         let stacker = self.active()?;
-        let snapshot = py
-            .allow_threads(|| stacker.snapshot())
-            .map_err(stack_error)?;
+        let snapshot = py.detach(|| stacker.snapshot()).map_err(stack_error)?;
         Ok(PyStackSnapshot { inner: snapshot })
     }
 
@@ -1133,7 +1136,7 @@ impl PyLiveStacker {
         py: Python<'_>,
         scratch_directory: Option<PathBuf>,
     ) -> PyResult<()> {
-        py.allow_threads(|| {
+        py.detach(|| {
             self.active_mut()?
                 .retain_frames_for_reintegration(scratch_directory.as_deref())
         })
@@ -1158,7 +1161,7 @@ impl PyLiveStacker {
         let stacker = self.active()?;
         let options = batch_options(sigma_low, sigma_high, scratch_directory)?;
         let result = py
-            .allow_threads(|| stacker.reintegrate(&options, |_, _, _| {}))
+            .detach(|| stacker.reintegrate(&options, |_, _, _| {}))
             .map_err(stack_error)?;
         Ok(PyStackSnapshot {
             inner: result.snapshot,
@@ -1196,7 +1199,7 @@ impl PyLiveStacker {
             .validate()
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
         let (result, drizzled) = py
-            .allow_threads(|| stacker.reintegrate_drizzled(&options, &drizzle, |_, _, _| {}))
+            .detach(|| stacker.reintegrate_drizzled(&options, &drizzle, |_, _, _| {}))
             .map_err(stack_error)?;
         let drizzled = PyDrizzleResult {
             inner: drizzled,
@@ -1229,7 +1232,7 @@ impl PyLiveStacker {
         }
         let stacker = self.inner.take().ok_or_else(finished_error)?;
         let snapshot = py
-            .allow_threads(move || {
+            .detach(move || {
                 let headers = stacker.reference_headers().to_vec();
                 let snapshot = stacker.into_snapshot()?;
                 if let Some(output) = output {
@@ -1387,7 +1390,7 @@ fn stack_fits(
     let options = options
         .as_ref()
         .map_or_else(StackOptions::default, |options| options.inner.clone());
-    py.allow_threads(move || {
+    py.detach(move || {
         let calibration = load_calibration(bias, dark, flat, dark_exposure_seconds)?;
         let mut images = images;
         // The lights that may become the reference light, best first. With
@@ -1474,7 +1477,7 @@ fn py_choose_reference(
         ));
     }
     let (reference_index, scores) = py
-        .allow_threads(|| seiza_stacking::choose_reference(&images, concurrency))
+        .detach(|| seiza_stacking::choose_reference(&images, concurrency))
         .map_err(stack_error)?;
     Ok(PyReferenceChoice {
         reference_index,
@@ -1495,7 +1498,7 @@ fn build_bias(
     output: PathBuf,
     sigma_low: f32,
     sigma_high: f32,
-    cancel: Option<PyObject>,
+    cancel: Option<Py<PyAny>>,
 ) -> PyResult<PyMasterResult> {
     build_master(
         py,
@@ -1532,7 +1535,7 @@ fn build_dark(
     exposure_seconds: Option<f64>,
     sigma_low: f32,
     sigma_high: f32,
-    cancel: Option<PyObject>,
+    cancel: Option<Py<PyAny>>,
 ) -> PyResult<PyMasterResult> {
     build_master(
         py,
@@ -1573,7 +1576,7 @@ fn build_flat(
     exposure_seconds: Option<f64>,
     sigma_low: f32,
     sigma_high: f32,
-    cancel: Option<PyObject>,
+    cancel: Option<Py<PyAny>>,
 ) -> PyResult<PyMasterResult> {
     validate_exposure_override(dark_flat.as_ref(), dark_flat_exposure_seconds, "dark_flat")?;
     build_master(
@@ -1603,7 +1606,7 @@ fn build_master(
     exposure_seconds: Option<f64>,
     sigma_low: f32,
     sigma_high: f32,
-    cancel: Option<PyObject>,
+    cancel: Option<Py<PyAny>>,
 ) -> PyResult<PyMasterResult> {
     validate_output_path(&images, &output, [bias.as_ref(), dark.as_ref()])?;
     // A master over dozens of frames runs for minutes with the GIL released,
@@ -1613,7 +1616,7 @@ fn build_master(
     let signal = {
         let raised = Arc::clone(&raised);
         CancelSignal::new(move || {
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let asked = py.check_signals().and_then(|()| match &cancel {
                     Some(cancel) => cancel
                         .call0(py)
@@ -1633,7 +1636,7 @@ fn build_master(
             })
         })
     };
-    let built = py.allow_threads(move || {
+    let built = py.detach(move || {
         let bias = bias.map(load_bias).transpose()?;
         let dark = dark
             .map(|path| {
@@ -1758,7 +1761,7 @@ fn validate_exposure_override(
 
 /// One reading of an accumulator, in the stack's own units. Only ratios
 /// between readings of the same stack mean anything.
-#[pyclass(frozen, name = "SnrSample", module = "seiza")]
+#[pyclass(skip_from_py_object, frozen, name = "SnrSample", module = "seiza")]
 #[derive(Clone)]
 pub(crate) struct PySnrSample {
     inner: SnrSample,

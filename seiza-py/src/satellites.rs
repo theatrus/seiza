@@ -48,7 +48,7 @@ fn parse_start(start: &Bound<'_, PyAny>) -> PyResult<sat::UtcTimestamp> {
 }
 
 /// One time-tagged topocentric prediction sample.
-#[pyclass(frozen, name = "TrackSample", module = "seiza")]
+#[pyclass(skip_from_py_object, frozen, name = "TrackSample", module = "seiza")]
 #[derive(Clone)]
 pub struct PyTrackSample {
     /// UTC time as Unix seconds.
@@ -83,7 +83,7 @@ impl PyTrackSample {
 
 /// A predicted satellite crossing. This is a prediction from orbital
 /// elements, never a pixel detection.
-#[pyclass(frozen, name = "SatelliteTrack", module = "seiza")]
+#[pyclass(skip_from_py_object, frozen, name = "SatelliteTrack", module = "seiza")]
 #[derive(Clone)]
 pub struct PySatelliteTrack {
     #[pyo3(get)]
@@ -267,7 +267,7 @@ impl PySatelliteCatalog {
     #[staticmethod]
     #[pyo3(signature = (cache_dir=None))]
     fn fetch_celestrak(py: Python<'_>, cache_dir: Option<PathBuf>) -> PyResult<Self> {
-        py.allow_threads(|| {
+        py.detach(|| {
             let source = match cache_dir {
                 Some(directory) => sat::CelesTrakSource::new(directory),
                 None => sat::CelesTrakSource::platform_default(),
@@ -306,7 +306,7 @@ impl PySatelliteCatalog {
         cache_dir: Option<PathBuf>,
     ) -> PyResult<Self> {
         let time = parse_start(time)?;
-        py.allow_threads(|| {
+        py.detach(|| {
             let source = match cache_dir {
                 Some(directory) => sat::OrbitalCatalogSource::new(directory),
                 None => sat::OrbitalCatalogSource::platform_default(),
@@ -444,7 +444,7 @@ impl PySatelliteCatalog {
         };
         let wcs = wcs.get().wcs.clone();
         let result = py
-            .allow_threads(|| {
+            .detach(|| {
                 self.catalog
                     .tracks_in_footprint(&wcs, (width, height), &exposure, &options)
             })

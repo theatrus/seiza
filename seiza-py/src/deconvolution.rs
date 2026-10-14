@@ -34,7 +34,7 @@ fn deconvolve<'py>(
     };
     let restore = if masked { deconvolve_masked } else { restore };
     let restored = py
-        .allow_threads(|| {
+        .detach(|| {
             restore(
                 image.data,
                 image.width,

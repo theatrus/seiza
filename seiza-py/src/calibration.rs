@@ -19,7 +19,7 @@ use seiza_calibration::{
 /// cannot prove it belongs. Rotation is the exception — unknown on either
 /// side matches, because treating a missing angle as a mismatch would strip
 /// flats from every frame shot before anyone recorded one.
-#[pyclass(name = "FrameSignature", module = "seiza")]
+#[pyclass(from_py_object, name = "FrameSignature", module = "seiza")]
 #[derive(Clone, Default)]
 pub(crate) struct PyFrameSignature {
     pub(crate) inner: FrameSignature,
@@ -203,7 +203,7 @@ impl PyFrameSignature {
 }
 
 /// How close two readings have to be to count as the same.
-#[pyclass(name = "MatchTolerances", module = "seiza")]
+#[pyclass(from_py_object, name = "MatchTolerances", module = "seiza")]
 #[derive(Clone, Copy)]
 pub(crate) struct PyMatchTolerances {
     inner: MatchTolerances,
@@ -495,7 +495,7 @@ fn py_fit_flat_pedestal(
 ) -> PyResult<Option<f32>> {
     let light = linear_image(light)?;
     let flat = linear_image(flat)?;
-    py.allow_threads(|| {
+    py.detach(|| {
         let light = LinearImageRef::new(&light.data, light.width, light.height, light.channels)
             .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
         let flat = LinearImageRef::new(&flat.data, flat.width, flat.height, flat.channels)

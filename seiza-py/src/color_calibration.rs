@@ -25,7 +25,7 @@ fn gaia_photometry_cone(
     max_mag: f32,
 ) -> PyResult<Vec<Py<PyDict>>> {
     let stars = py
-        .allow_threads(|| {
+        .detach(|| {
             let downloader = seiza_sources::SourceDownloader::new()?;
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -70,7 +70,7 @@ fn gaia_photometry_catalog_cone(
     max_mag: f32,
 ) -> PyResult<Vec<Py<PyDict>>> {
     let stars = py
-        .allow_threads(|| {
+        .detach(|| {
             let catalog = seiza::catalog::PhotometryCatalog::open(&path)?;
             Ok::<_, std::io::Error>(catalog.cone_search(ra, dec, radius_deg, max_mag))
         })
@@ -173,7 +173,7 @@ impl PyColorCalibration {
         image: PyReadonlyArrayDyn<'_, f32>,
     ) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
         let mut image = linear_image(image)?;
-        py.allow_threads(|| self.inner.apply(&mut image))
+        py.detach(|| self.inner.apply(&mut image))
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
         image_array(py, &image)
     }
@@ -262,7 +262,7 @@ fn calibrate_color(
         ..ColorCalibrationOptions::default()
     };
     let inner = py
-        .allow_threads(|| {
+        .detach(|| {
             let stars = place_gaia_sources(&wcs, image.width, image.height, epoch, &sources);
             rust_calibrate_color(&image, &stars, &options)
         })

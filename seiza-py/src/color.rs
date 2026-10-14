@@ -87,7 +87,7 @@ fn combine_rgb<'py>(
         crop,
     )?;
     let result = py
-        .allow_threads(move || {
+        .detach(move || {
             if super_luminance {
                 compose_super_rgb(&red, &green, &blue, &options)
             } else {
@@ -147,7 +147,7 @@ fn combine_lrgb<'py>(
         crop,
     )?;
     let result = py
-        .allow_threads(move || {
+        .detach(move || {
             if super_luminance {
                 compose_super_lrgb(&luminance, &red, &green, &blue, &options)
             } else {
@@ -204,9 +204,7 @@ fn combine_narrowband<'py>(
     let oiii = linear_image(oiii)?;
     let sii = sii.map(linear_image).transpose()?;
     let result = py
-        .allow_threads(move || {
-            compose_narrowband(&ha, &oiii, sii.as_ref(), palette, &options, &foraxx)
-        })
+        .detach(move || compose_narrowband(&ha, &oiii, sii.as_ref(), palette, &options, &foraxx))
         .map_err(color_error)?;
     into_image_array(py, result.image)
 }
@@ -240,7 +238,7 @@ fn crop_report<'py>(
         .map(|(name, image)| ChannelSamples::new(name, image))
         .collect::<Vec<_>>();
     let report = py
-        .allow_threads(|| report_crop(&named, crop))
+        .detach(|| report_crop(&named, crop))
         .map_err(color_error)?;
     report_dict(py, &report)
 }

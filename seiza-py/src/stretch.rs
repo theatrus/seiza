@@ -87,7 +87,7 @@ fn stretch<'py>(
         max_analysis_samples,
     };
     let data = py
-        .allow_threads(move || {
+        .detach(move || {
             let plan = config.resolve_for(image.data, image.channels)?;
             plan.apply_f32(image.data, image.channels)
         })

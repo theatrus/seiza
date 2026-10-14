@@ -100,7 +100,7 @@ compiler, formatter, and linter.
   output, verified catalog downloads, and native batch/live image stacking
   with calibration-master construction, robust background extraction,
   parameterized display stretching, and NumPy support. Binary wheels for Linux
-  x86_64 and aarch64, macOS, and Windows cover every CPython from 3.9 up, with
+  x86_64 and aarch64, macOS, and Windows cover every CPython from 3.11 up, with
   type stubs included ([seiza-py](seiza-py/README.md)).
 - **From native applications** — [`seiza-cabi`](seiza-cabi/README.md) exposes
   FITS/XISF/raster rendering, robust background fitting and correction,

@@ -9,6 +9,16 @@ updates:
         patterns:
           - "*"
 
+  # The Python bindings keep their own lockfile outside the workspace.
+  - package-ecosystem: cargo
+    directory: /seiza-py
+    schedule:
+      interval: weekly
+    groups:
+      seiza-py-dependencies:
+        patterns:
+          - "*"
+
   - package-ecosystem: github-actions
     directory: /
     schedule:

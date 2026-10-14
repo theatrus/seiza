@@ -21,7 +21,12 @@ use std::sync::{Arc, Mutex};
 /// One schema parameter: its request name, CLI flag (absent for GUI-only
 /// parameters), display strings, type ("float", "bool", or "int"), default,
 /// and range.
-#[pyclass(name = "RcAstroParameter", module = "seiza", frozen)]
+#[pyclass(
+    skip_from_py_object,
+    name = "RcAstroParameter",
+    module = "seiza",
+    frozen
+)]
 #[derive(Clone)]
 pub(crate) struct PyRcAstroParameter {
     #[pyo3(get)]
@@ -47,7 +52,7 @@ impl PyRcAstroParameter {
     }
 
     #[getter]
-    fn default(&self, py: Python<'_>) -> PyObject {
+    fn default(&self, py: Python<'_>) -> Py<PyAny> {
         match self.kind {
             ExternalParameterKind::Float { default, .. } => {
                 default.into_pyobject(py).unwrap().into()
@@ -188,7 +193,7 @@ pub(crate) fn rc_astro_tool_schema(
     let cli = cli(executable, None)?;
     let tool = tool.to_string();
     let schema = py
-        .allow_threads(move || cli.tool_schema(&tool))
+        .detach(move || cli.tool_schema(&tool))
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
     Ok(schema_class(&schema))
 }
@@ -216,8 +221,8 @@ pub(crate) fn rc_astro_process_file(
     device: Option<String>,
     executable: Option<PathBuf>,
     host: Option<String>,
-    progress: Option<PyObject>,
-    cancel: Option<PyObject>,
+    progress: Option<Py<PyAny>>,
+    cancel: Option<Py<PyAny>>,
 ) -> PyResult<PyRcAstroRun> {
     let cli = cli(executable, host)?;
     let mut values = Vec::new();
@@ -257,7 +262,7 @@ pub(crate) fn rc_astro_process_file(
             if raised.lock().is_ok_and(|slot| slot.is_some()) {
                 return true;
             }
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let asked = py.check_signals().and_then(|()| match &cancel {
                     Some(cancel) => cancel
                         .call0(py)
@@ -278,11 +283,11 @@ pub(crate) fn rc_astro_process_file(
             })
         })
     };
-    let outcome = py.allow_threads(|| {
+    let outcome = py.detach(|| {
         let schema = cli.tool_schema(&tool_name)?;
         let mut report = |fraction: f32| {
             if let Some(callback) = &progress {
-                Python::with_gil(|py| {
+                Python::attach(|py| {
                     if let Err(error) = callback.call1(py, (fraction,))
                         && let Ok(mut slot) = raised.lock()
                         && slot.is_none()
@@ -337,8 +342,8 @@ pub(crate) fn rc_astro_split_stars<'py>(
     image: numpy::PyReadonlyArrayDyn<'py, f32>,
     executable: Option<PathBuf>,
     host: Option<String>,
-    progress: Option<PyObject>,
-    cancel: Option<PyObject>,
+    progress: Option<Py<PyAny>>,
+    cancel: Option<Py<PyAny>>,
 ) -> PyResult<SplitArrays<'py>> {
     let linear = crate::arrays::linear_image(image)?;
     if linear.channels != 3 {
@@ -354,7 +359,7 @@ pub(crate) fn rc_astro_split_stars<'py>(
             if raised.lock().is_ok_and(|slot| slot.is_some()) {
                 return true;
             }
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let asked = py.check_signals().and_then(|()| match &cancel {
                     Some(cancel) => cancel
                         .call0(py)
@@ -375,10 +380,10 @@ pub(crate) fn rc_astro_split_stars<'py>(
             })
         })
     };
-    let split = py.allow_threads(|| {
+    let split = py.detach(|| {
         let mut report = |fraction: f32| {
             if let Some(callback) = &progress {
-                Python::with_gil(|py| {
+                Python::attach(|py| {
                     if let Err(error) = callback.call1(py, (fraction,))
                         && let Ok(mut slot) = raised.lock()
                         && slot.is_none()
