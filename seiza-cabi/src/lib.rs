@@ -2,7 +2,7 @@ use image::DynamicImage;
 mod parallax;
 mod resample;
 use resample::{downsample_interleaved_f32, downsample_rgba};
-use seiza::blind::{BlindIndex, BlindParams, solve_blind_with_limits};
+use seiza::blind::{BlindIndex, BlindParams};
 use seiza::catalog::{StarCatalog, tiles::TileCatalog};
 use seiza::downloads::{CachePolicy, CatalogManager, CatalogSet, Dataset, DownloadEvent};
 use seiza::minor_bodies::{MinorBodyCatalog, MinorBodyKind};
@@ -10,6 +10,7 @@ use seiza::objects::{
     GeometryData, GeometryQuality, GeometryRole, ObjectCatalog, ObjectGeometry, ObjectKind,
     ObjectQuery, SkyRegion,
 };
+use seiza::prior::SolveSource;
 use seiza::wcs::Wcs;
 use seiza::{
     DetectBackend, DetectConfig, Error as SeizaError, SolveLimits, detect_stars,
@@ -1040,6 +1041,10 @@ struct SolveResponse {
     matched_stars: usize,
     rms_arcsec: f64,
     false_match_probability: f64,
+    /// `"header-checked"`, `"header-hint"`, `"blind"`, or
+    /// `"header-unchecked"` when nothing solved and the file's own WCS
+    /// stands unchecked.
+    solved_from: &'static str,
     detected_stars: usize,
     elapsed_milliseconds: u128,
     detected_star_positions: Vec<ImagePointResponse>,
@@ -4145,10 +4150,21 @@ struct BlindSolved {
     catalog: TileCatalog,
     capture_time: Option<String>,
     solution: seiza::solve::Solution,
+    /// Where the solution came from.
+    source: SolveSource,
 }
 
-/// Blind-solve the image at `path`, a FITS, XISF or raster file, retrying
-/// a raster converted from 8-bit colour with float detection.
+/// Solve the image at `path`, a FITS, XISF or raster file, with what the
+/// file says about itself (see [`seiza::prior`]): its own WCS checked, else
+/// a hinted solve around its pointing and scale, else blind; and, when
+/// nothing solves, its own WCS unchecked.
+///
+/// FITS and XISF images are detected first on an MTF stretch, as the CLI
+/// does, which suits processed images, and again on their linear samples
+/// when that does not solve; a raster converted from 8-bit colour is
+/// detected again in float. A raster's EXIF focal length gives the first
+/// scale to try. Only when the second detection also fails does an
+/// unchecked header WCS stand.
 fn blind_solve_path(
     path: &Path,
     catalog_directory: Option<&Path>,
@@ -4157,27 +4173,61 @@ fn blind_solve_path(
     sip_order: u8,
     limits: &SolveLimits,
 ) -> Result<BlindSolved, String> {
+    /// How to detect again when the first detection does not solve.
+    enum Retry {
+        None,
+        Linear(FitsImage),
+        Float(DynamicImage),
+    }
     let detection_config = DetectConfig {
         max_stars: 600,
         ..Default::default()
     };
-    let (width, height, mut stars, raster_fallback, capture_time) = if is_astronomy_image_path(path)
+    let (width, height, first_stars, retry, capture_time, prior) = if is_astronomy_image_path(path)
     {
-        let (image, _) = open_astronomy_image(path)?;
+        let read = seiza_image_io::read_astronomy(path).map_err(|error| error.to_string())?;
+        let prior = read.solve_prior();
+        let image = read.image;
         let width = u32::try_from(image.width).map_err(|_| "image width is too large")?;
         let height = u32::try_from(image.height).map_err(|_| "image height is too large")?;
         let capture_time = fits_capture_time(&image);
-        let luma = image.to_luma_f32();
-        let stars = detect_stars_luma_f32(&luma, width, height, &detection_config);
-        (width, height, stars, None, capture_time)
+        let stretched = image.stretch_to_u8(&StretchParams::default());
+        let stars = image::GrayImage::from_raw(width, height, stretched)
+            .map(|gray| detect_stars(&DynamicImage::ImageLuma8(gray), &detection_config))
+            .unwrap_or_default();
+        (
+            width,
+            height,
+            stars,
+            Retry::Linear(image),
+            capture_time,
+            prior,
+        )
     } else {
         let image = open_raster(path)?;
         let width = image.width();
         let height = image.height();
         let stars = detect_stars(&image, &detection_config);
-        let fallback = is_converted_8bit_color(&image).then_some(image);
-        let capture_time = seiza::raster::PhotoMetadata::read(path).capture_time_utc;
-        (width, height, stars, fallback, capture_time)
+        let metadata = seiza::raster::PhotoMetadata::read(path);
+        let prior = seiza::prior::SolvePrior {
+            scale_arcsec_px: metadata
+                .scale_hint((width, height))
+                .map(|hint| hint.nominal_arcsec_per_pixel),
+            ..seiza::prior::SolvePrior::default()
+        };
+        let retry = if is_converted_8bit_color(&image) {
+            Retry::Float(image)
+        } else {
+            Retry::None
+        };
+        (
+            width,
+            height,
+            stars,
+            retry,
+            metadata.capture_time_utc,
+            prior,
+        )
     };
     let acquisition_jd = capture_time.as_deref().and_then(parse_iso_jd);
 
@@ -4202,26 +4252,60 @@ fn blind_solve_path(
         sip_order: sip_order.min(5),
         ..Default::default()
     };
-    let solution =
-        match solve_blind_with_limits(&stars, &catalog, &index, &params, (width, height), limits) {
-            Ok(solution) => solution,
-            Err(primary_error) => {
-                let Some(image) =
-                    raster_fallback.filter(|_| matches!(primary_error, SeizaError::Solve(_)))
-                else {
-                    return Err(primary_error.to_string());
-                };
-                stars = detect_stars(
+    let dimensions = (width, height);
+    let solve = |stars: &[seiza::DetectedStar], params: &BlindParams| {
+        seiza::prior::solve_with_prior(
+            stars,
+            &catalog,
+            Some(&index),
+            &prior,
+            params,
+            dimensions,
+            limits,
+        )
+    };
+    let stopped =
+        |error: &SeizaError| matches!(error, SeizaError::TimedOut | SeizaError::Cancelled);
+    let unchecked =
+        |found: &seiza::prior::PriorSolution| found.source == SolveSource::HeaderUnchecked;
+
+    // With a second detection to come, the first spends fewer blind
+    // hypotheses, as the CLI's does.
+    let first_params = match retry {
+        Retry::None => params.clone(),
+        _ => BlindParams {
+            max_hypotheses: params.max_hypotheses.min(FIRST_DETECTION_HYPOTHESES),
+            ..params.clone()
+        },
+    };
+    let first = solve(&first_stars, &first_params);
+    let (found, stars) = match (first, retry) {
+        (Err(error), _) if stopped(&error) => return Err(error.to_string()),
+        (Ok(found), _) if !unchecked(&found) => (found, first_stars),
+        (first, Retry::None) => (first.map_err(|error| error.to_string())?, first_stars),
+        (first, retry) => {
+            let stars = match retry {
+                Retry::Linear(image) => {
+                    detect_stars_luma_f32(&image.to_luma_f32(), width, height, &detection_config)
+                }
+                Retry::Float(image) => detect_stars(
                     &image,
                     &DetectConfig {
                         backend: DetectBackend::F32,
                         ..detection_config
                     },
-                );
-                solve_blind_with_limits(&stars, &catalog, &index, &params, (width, height), limits)
-                    .map_err(|error| error.to_string())?
+                ),
+                Retry::None => unreachable!("handled above"),
+            };
+            match (solve(&stars, &params), first) {
+                (Err(error), _) if stopped(&error) => return Err(error.to_string()),
+                (Ok(found), _) if !unchecked(&found) => (found, stars),
+                // Neither detection solved: the header's own WCS stands.
+                (Ok(found), _) | (Err(_), Ok(found)) => (found, stars),
+                (Err(error), Err(_)) => return Err(error.to_string()),
             }
-        };
+        }
+    };
     Ok(BlindSolved {
         width,
         height,
@@ -4229,9 +4313,14 @@ fn blind_solve_path(
         acquisition_jd,
         catalog,
         capture_time,
-        solution,
+        solution: found.solution,
+        source: found.source,
     })
 }
+
+/// Blind hypotheses the first detection of an image spends when a second
+/// detection follows, as the CLI's `--detection-fallback-hypotheses`.
+const FIRST_DETECTION_HYPOTHESES: usize = 64;
 
 #[unsafe(no_mangle)]
 /// Solves an image and returns a JSON string for the C ABI.
@@ -4304,6 +4393,7 @@ pub unsafe extern "C" fn seiza_solve_image_with_limits_json(
             catalog,
             capture_time,
             solution,
+            source,
         } = blind_solve_path(
             &path,
             catalog_directory.as_deref(),
@@ -4468,6 +4558,7 @@ pub unsafe extern "C" fn seiza_solve_image_with_limits_json(
             matched_stars: solution.matched_stars,
             rms_arcsec: solution.rms_arcsec,
             false_match_probability: solution.false_match_probability,
+            solved_from: source.as_str(),
             detected_stars: stars.len(),
             elapsed_milliseconds: started.elapsed().as_millis(),
             detected_star_positions,

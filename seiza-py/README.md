@@ -108,6 +108,20 @@ solution = seiza.solve_blind(stars, catalog, index, width, height,
                              min_scale_arcsec_px=0.5, max_scale_arcsec_px=15.0)
 ```
 
+An image that already knows where it points can say so.
+`read_solve_prior(path)` reads a FITS or XISF file's own WCS (including a
+PixInsight solution), its RA/DEC or OBJCTRA/OBJCTDEC, and its pixel scale
+from PIXSCALE or pixel size over focal length, without decoding the pixels.
+`solve_with_prior` then checks that WCS, else searches around the position,
+else solves blind (given an `index`), and when nothing solves returns the
+file's own WCS with `source == "header-unchecked"`:
+
+```python
+prior = seiza.read_solve_prior("processed.xisf")
+solution = seiza.solve_with_prior(stars, catalog, width, height, prior, index=index)
+print(solution.source)   # header-checked, header-hint, blind or header-unchecked
+```
+
 A field that will not solve can search for a minute or more. Both `solve` and
 `solve_blind` take `time_limit=` in seconds, which raises `TimeoutError`, and
 `cancel=`, a callable that returns true to stop (asked about every 50 ms),

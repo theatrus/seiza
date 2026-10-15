@@ -29,14 +29,20 @@ cargo install seiza-cli
 ## Solving
 
 ```
-# Hinted: approximate center (or FITS RA/DEC headers) plus pixel scale.
-# --data takes a catalog file or a directory of catalogs; after
+# Hinted: approximate center plus pixel scale. A FITS or XISF file's own
+# headers supply either when the flags are missing: RA/DEC or
+# OBJCTRA/OBJCTDEC, and a scale from its WCS, PIXSCALE, or XPIXSZ over
+# FOCALLEN. --data takes a catalog file or a directory of catalogs; after
 # `seiza setup` it can be omitted entirely.
 seiza solve image.jpg --data data --ra 324.8 --dec 57.5 --scale 2.8
 seiza solve light.fits --scale 1.45
+seiza solve light.fits
 
 # Blind: no position, just a plausible scale range. A directory supplies
-# the deepest catalog and the blind index automatically.
+# the deepest catalog and the blind index automatically. A FITS or XISF
+# file's own WCS (FITS cards or a PixInsight solution) is checked first,
+# then its position and scale searched around; if nothing solves, its own
+# WCS is used unchecked, with a warning.
 seiza solve-blind image.jpg --data data --min-scale 0.5 --max-scale 15
 
 # Give up after 30 seconds of solving (detection not counted)

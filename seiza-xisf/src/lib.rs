@@ -742,6 +742,21 @@ pub fn read_header(path: &Path) -> Result<Vec<(String, HeaderValue)>, XisfError>
     Ok(headers)
 }
 
+/// Read the first image's FITS-compatible metadata and its XISF metadata,
+/// such as an astrometric solution, without decoding pixels.
+pub fn read_header_and_metadata(
+    path: &Path,
+) -> Result<(Vec<(String, HeaderValue)>, XisfMetadata), XisfError> {
+    let mut file = std::fs::File::open(path)?;
+    let file_bytes = file.metadata()?.len();
+    let mut parsed = parse_file(&mut file, file_bytes, header_dir(path).as_deref())?;
+    let image = parsed.take(0)?;
+    let mut headers = image.info.headers.clone();
+    add_structural_headers(&mut headers, &image.info);
+    let metadata = image.metadata(&mut file, &parsed);
+    Ok((headers, metadata))
+}
+
 /// Open the first top-level image in a monolithic XISF file.
 pub fn open(path: &Path) -> Result<FitsImage, XisfError> {
     open_image(path, 0)
@@ -2439,6 +2454,20 @@ fn add_structural_headers(headers: &mut Vec<(String, HeaderValue)>, image: &Xisf
             add(header, HeaderValue::Float(value));
         }
     }
+    // XISF gives focal length in metres and pixel size in micrometres;
+    // FITS FOCALLEN is in millimetres and XPIXSZ in micrometres.
+    for (property_id, header, to_fits) in [
+        ("Instrument:Telescope:FocalLength", "FOCALLEN", 1000.0),
+        ("Instrument:Sensor:XPixelSize", "XPIXSZ", 1.0),
+        ("Instrument:Sensor:YPixelSize", "YPIXSZ", 1.0),
+    ] {
+        if let Some(value) = property(property_id)
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value > 0.0)
+        {
+            add(header, HeaderValue::Float(value * to_fits));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3117,6 +3146,33 @@ mod tests {
                 .any(|(name, value)| name == "RA" && *value == HeaderValue::Float(83.822))
         );
         assert!(!image.headers.iter().any(|(name, _)| name == "DEC"));
+    }
+
+    #[test]
+    fn instrument_properties_become_fits_scale_cards() {
+        let raw = [1_u8, 2, 3, 4];
+        let xml = image_element(
+            0,
+            "2:2:1",
+            "UInt8",
+            raw.len(),
+            "",
+            "<Property id=\"Instrument:Telescope:FocalLength\" type=\"Float32\" value=\"0.53\"/>\
+             <Property id=\"Instrument:Sensor:XPixelSize\" type=\"Float32\" value=\"3.76\"/>\
+             <Property id=\"Instrument:Sensor:YPixelSize\" type=\"Float32\" value=\"0\"/>",
+        );
+        let image = from_bytes(&monolithic(xml, &[&raw])).unwrap();
+        let card = |key: &str| {
+            image
+                .headers
+                .iter()
+                .find(|(name, _)| name == key)
+                .and_then(|(_, value)| value.as_f64())
+        };
+        // Metres to millimetres; micrometres as they are; nothing for zero.
+        assert!((card("FOCALLEN").unwrap() - 530.0).abs() < 1e-3);
+        assert!((card("XPIXSZ").unwrap() - 3.76).abs() < 1e-6);
+        assert_eq!(card("YPIXSZ"), None);
     }
 
     #[test]
@@ -3974,6 +4030,31 @@ mod tests {
             .astrometric_solution()
             .unwrap();
         assert_eq!(reread, source.metadata.astrometric_solution().unwrap());
+    }
+
+    #[test]
+    fn a_solution_in_pixinsights_older_namespace_is_read() {
+        // PixInsight wrote `PCL:AstrometricSolution:`, with no Version,
+        // before Revision 1 named the namespace.
+        let current = layer_one("1.0", "Gnomonic");
+        let legacy = current
+            .replace(&text_property("Version", "1.0"), "")
+            .replace("id=\"AstrometricSolution:", "id=\"PCL:AstrometricSolution:");
+        let older = solution(&legacy).unwrap().unwrap();
+        assert_eq!(older.version, (1, 0));
+        assert_eq!(older.projection.reference_celestial, [83.8, -5.4]);
+        assert_eq!(older.projection.reference_image, [100.5, 80.5]);
+
+        // Where both namespaces hold a solution, the current one is read,
+        // whole, and never mixed with the older one.
+        let both = format!(
+            "{current}<Property id=\"PCL:AstrometricSolution:ProjectionSystem\" type=\"String\">Orthographic</Property>"
+        );
+        let read = solution(&both).unwrap().unwrap();
+        assert_eq!(read.projection.system, ProjectionSystem::Gnomonic);
+        // The current namespace still needs its Version.
+        let unversioned = current.replace(&text_property("Version", "1.0"), "");
+        assert!(solution(&unversioned).is_err());
     }
 
     #[test]

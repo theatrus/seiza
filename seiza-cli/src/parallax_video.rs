@@ -1143,7 +1143,7 @@ fn solve(args: &ParallaxVideoArgs, path: &Path) -> Result<(Wcs, (u32, u32))> {
         crate::SolveInvocation::new(path, &image, config, options.detection_fallback);
     let catalog = seiza::catalog::TileCatalog::open(&data)
         .with_context(|| format!("failed to open {}", data.display()))?;
-    let (solution, elapsed) = crate::blind_solve_invocation(
+    let (solution, elapsed, _) = crate::blind_solve_invocation(
         &mut invocation,
         &catalog,
         &search,

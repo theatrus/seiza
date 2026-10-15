@@ -325,15 +325,13 @@ fn blind_params_for_detection_pass(
 }
 
 /// RA/Dec hint from FITS-compatible headers (N.I.N.A. writes RA/DEC in degrees).
-fn fits_hint(path: &std::path::Path) -> Option<(f64, f64)> {
-    let image = open_astronomy_image(path).ok()?;
-    let ra = image
-        .header_f64("RA")
-        .or_else(|| image.header_f64("OBJCTRA"))?;
-    let dec = image
-        .header_f64("DEC")
-        .or_else(|| image.header_f64("OBJCTDEC"))?;
-    Some((ra, dec))
+/// What a FITS or XISF file's headers say about where it points; empty for
+/// other files or unreadable headers. Read without decoding the pixels.
+fn header_prior(path: &std::path::Path) -> seiza::prior::SolvePrior {
+    if !is_astronomy_image_path(path) {
+        return seiza::prior::SolvePrior::default();
+    }
+    seiza_image_io::read_solve_prior(path).unwrap_or_default()
 }
 
 #[derive(Parser)]
@@ -412,9 +410,10 @@ enum Command {
         /// Search radius around the hinted center, degrees
         #[arg(long, default_value_t = 2.0)]
         radius: f64,
-        /// Approximate pixel scale, arcseconds per pixel
+        /// Approximate pixel scale, arcseconds per pixel (default: the
+        /// image's WCS, PIXSCALE, or XPIXSZ over FOCALLEN headers)
         #[arg(long)]
-        scale: f64,
+        scale: Option<f64>,
         /// Allowed relative scale error
         #[arg(long, default_value_t = 0.2)]
         scale_tolerance: f64,
@@ -1315,12 +1314,18 @@ fn main() -> Result<()> {
             satellite_sample_seconds,
             satellite_max_element_age_hours,
         } => {
+            // The headers' pointing: RA/DEC, OBJCTRA/OBJCTDEC, or a WCS's
+            // CRVAL, all well inside the search radius of the field.
+            let prior = header_prior(&image);
             let hint = match (ra, dec) {
                 (Some(ra), Some(dec)) => (ra, dec),
-                _ => fits_hint(&image).ok_or_else(|| {
-                    anyhow::anyhow!("--ra/--dec required (no RA/DEC headers found in the image)")
+                _ => prior.center.ok_or_else(|| {
+                    anyhow::anyhow!("--ra/--dec required (no position in the image's headers)")
                 })?,
             };
+            let scale = scale.or(prior.scale_arcsec_px).ok_or_else(|| {
+                anyhow::anyhow!("--scale required (no pixel scale in the image's headers)")
+            })?;
             let acquisition_jd = resolve_acquisition_jd(&image, time.as_deref())?;
             let satellite_input = match (satellites, satellites_celestrak) {
                 (Some(path), false) => Some(SatelliteInput::File(path)),
@@ -3929,8 +3934,13 @@ fn blind_solve_invocation(
     options: &SolveBlindOptions<'_>,
     can_retry_f32: bool,
     dims: (u32, u32),
-) -> Result<(seiza::solve::Solution, std::time::Duration)> {
+) -> Result<(
+    seiza::solve::Solution,
+    std::time::Duration,
+    seiza::prior::SolveSource,
+)> {
     use seiza::blind::{BlindIndex, BlindParams, solve_blind_with_limits};
+    use seiza::prior::{SolveSource, solve_with_prior};
 
     let mut params = BlindParams {
         min_scale_arcsec_px: search.ranges[0].0,
@@ -3972,6 +3982,63 @@ fn blind_solve_invocation(
         .time_limit
         .map(SolveLimits::within)
         .unwrap_or_default();
+    // A FITS or XISF file's own WCS, pointing and scale come first; see
+    // seiza::prior.
+    let prior = header_prior(invocation.path);
+    if !prior.is_empty() {
+        // An unchecked header WCS is a last resort: hold it back while a
+        // second detection may still solve.
+        let mut unchecked = None;
+        let found = invocation.solve_with_pass(|stars, pass| {
+            let attempt_params = BlindParams {
+                min_scale_arcsec_px: search.ranges[0].0,
+                max_scale_arcsec_px: search.ranges[0].1,
+                ..blind_params_for_detection_pass(
+                    &params,
+                    can_retry_f32,
+                    options.detection_fallback_hypotheses,
+                    pass,
+                )
+            };
+            let found = solve_with_prior(
+                stars,
+                catalog,
+                Some(&index),
+                &prior,
+                &attempt_params,
+                dims,
+                &limits,
+            )?;
+            if found.source == SolveSource::HeaderUnchecked
+                && can_retry_f32
+                && pass == DetectionPass::Primary
+            {
+                unchecked = Some(found);
+                return Err(seiza::Error::Solve(
+                    "only the image's own WCS, unchecked".into(),
+                ));
+            }
+            Ok(found)
+        });
+        let found = match (found, unchecked) {
+            (Ok(found), _) => found,
+            (Err(error), Some(unchecked))
+                if !matches!(
+                    error.downcast_ref::<seiza::Error>(),
+                    Some(seiza::Error::TimedOut | seiza::Error::Cancelled)
+                ) =>
+            {
+                unchecked
+            }
+            (Err(error), _) => return Err(error),
+        };
+        if found.source == SolveSource::HeaderUnchecked {
+            eprintln!(
+                "warning: no solve succeeded; using the image's own WCS, which could not be checked against the catalog"
+            );
+        }
+        return Ok((found.solution, started.elapsed(), found.source));
+    }
     let solution = invocation.solve_with_pass(|stars, pass| {
         let mut attempt_params = blind_params_for_detection_pass(
             &params,
@@ -3985,7 +4052,7 @@ fn blind_solve_invocation(
             solve_blind_with_limits(stars, catalog, &index, &attempt_params, dims, &limits)
         })
     })?;
-    Ok((solution, started.elapsed()))
+    Ok((solution, started.elapsed(), SolveSource::Blind))
 }
 
 struct SolveBlindOptions<'a> {
@@ -4135,7 +4202,7 @@ fn solve_blind_command(
 
     let catalog =
         TileCatalog::open(data).with_context(|| format!("failed to open {}", data.display()))?;
-    let (solution, elapsed) = blind_solve_invocation(
+    let (solution, elapsed, source) = blind_solve_invocation(
         &mut invocation,
         &catalog,
         &search,
@@ -4147,6 +4214,9 @@ fn solve_blind_command(
     let middle = seiza::image_center(dims.0, dims.1);
     let (ra, dec) = wcs.pixel_to_world(middle.0, middle.1);
     println!("Blind-solved in {:.2}s:", elapsed.as_secs_f64());
+    if source != seiza::prior::SolveSource::Blind {
+        println!("  solved from: {}", source.as_str());
+    }
     println!(
         "  center     : {} {}  ({ra:.5}°, {dec:.5}°)",
         hms(ra),

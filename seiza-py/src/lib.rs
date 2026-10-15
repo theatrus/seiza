@@ -391,6 +391,12 @@ struct PySolution {
     /// candidate the search tried. Near 0 for a sure solution.
     #[pyo3(get)]
     false_match_probability: f64,
+    /// Where :func:`solve_with_prior` found the solution:
+    /// ``"header-checked"``, ``"header-hint"``, ``"blind"``, or
+    /// ``"header-unchecked"`` when nothing solved and the image's own WCS
+    /// stands unchecked. ``None`` from the other solves.
+    #[pyo3(get)]
+    source: Option<&'static str>,
     width: u32,
     height: u32,
 }
@@ -470,6 +476,7 @@ fn solution_to_py(solution: seiza::solve::Solution, dimensions: (u32, u32)) -> P
         matched_stars: solution.matched_stars,
         rms_arcsec: solution.rms_arcsec,
         false_match_probability: solution.false_match_probability,
+        source: None,
         width: dimensions.0,
         height: dimensions.1,
     }
@@ -886,6 +893,99 @@ fn read_photo_metadata(
     Ok(json.call_method1("loads", (value.to_string(),))?.unbind())
 }
 
+/// What a FITS or XISF file says about where it points, read without
+/// decoding its pixels: ``{"wcs": Wcs or None, "center": (ra, dec) or None,
+/// "scale_arcsec_px": float or None}``, from its WCS cards or PixInsight
+/// solution, its RA/DEC or OBJCTRA/OBJCTDEC, and its PIXSCALE or pixel size
+/// over focal length. Pass it to :func:`solve_with_prior`.
+#[pyfunction]
+fn read_solve_prior(py: Python<'_>, path: PathBuf) -> PyResult<Py<PyDict>> {
+    let prior = seiza_image_io::read_solve_prior(&path)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let dict = PyDict::new(py);
+    dict.set_item("wcs", prior.wcs.map(|wcs| PyWcs { wcs }))?;
+    dict.set_item("center", prior.center)?;
+    dict.set_item("scale_arcsec_px", prior.scale_arcsec_px)?;
+    Ok(dict.unbind())
+}
+
+/// Solve with what the image says about itself: check its own WCS, else
+/// search around its pointing and scale, else (with an ``index``) solve
+/// blind, trying near its scale first; and when nothing solves, return its
+/// own WCS unchecked, with ``source == "header-unchecked"``. ``prior`` is a
+/// dict like :func:`read_solve_prior` returns; any key may be missing or
+/// ``None``. The other arguments are as for :func:`solve_blind`.
+#[pyfunction]
+#[pyo3(signature = (stars, catalog, width, height, prior, *, index=None,
+    min_scale_arcsec_px=0.1, max_scale_arcsec_px=20.0, sip_order=0, time_limit=None,
+    cancel=None))]
+#[allow(clippy::too_many_arguments)]
+fn solve_with_prior(
+    py: Python<'_>,
+    stars: &Bound<'_, PyAny>,
+    catalog: &Bound<'_, PyStarCatalog>,
+    width: u32,
+    height: u32,
+    prior: &Bound<'_, PyDict>,
+    index: Option<&Bound<'_, PyBlindIndex>>,
+    min_scale_arcsec_px: f64,
+    max_scale_arcsec_px: f64,
+    sip_order: u8,
+    time_limit: Option<f64>,
+    cancel: Option<Py<PyAny>>,
+) -> PyResult<PySolution> {
+    if sip_order > 5 {
+        return Err(PyValueError::new_err("sip_order must be between 0 and 5"));
+    }
+    let stars = extract_stars(stars)?;
+    let item = |key: &str| -> PyResult<Option<Bound<'_, PyAny>>> {
+        Ok(prior.get_item(key)?.filter(|value| !value.is_none()))
+    };
+    let prior = seiza::prior::SolvePrior {
+        wcs: match item("wcs")? {
+            Some(value) => Some(
+                value
+                    .cast::<PyWcs>()
+                    .map_err(|_| PyValueError::new_err("prior[\"wcs\"] must be a seiza.Wcs"))?
+                    .get()
+                    .wcs
+                    .clone(),
+            ),
+            None => None,
+        },
+        center: item("center")?
+            .map(|center| center.extract::<(f64, f64)>())
+            .transpose()?,
+        scale_arcsec_px: item("scale_arcsec_px")?
+            .map(|scale| scale.extract::<f64>())
+            .transpose()?,
+    };
+    let catalog = catalog.get();
+    let index = index.map(|index| index.get());
+    let params = seiza::blind::BlindParams {
+        min_scale_arcsec_px,
+        max_scale_arcsec_px,
+        sip_order,
+        ..seiza::blind::BlindParams::default()
+    };
+    let limits = PySolveLimits::new(time_limit, cancel)?;
+    let found = py.detach(|| {
+        seiza::prior::solve_with_prior(
+            &stars,
+            catalog.backend.as_trait(),
+            index.map(|index| &index.index),
+            &prior,
+            &params,
+            (width, height),
+            &limits.limits,
+        )
+    });
+    let source = found.as_ref().ok().map(|found| found.source.as_str());
+    let mut solution = limits.finish(found.map(|found| found.solution), (width, height))?;
+    solution.source = source;
+    Ok(solution)
+}
+
 #[pymodule]
 #[pyo3(name = "seiza")]
 fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -904,6 +1004,8 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solve_blind, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_catalogs, m)?)?;
     m.add_function(wrap_pyfunction!(read_photo_metadata, m)?)?;
+    m.add_function(wrap_pyfunction!(read_solve_prior, m)?)?;
+    m.add_function(wrap_pyfunction!(solve_with_prior, m)?)?;
     color::register(m)?;
     color_calibration::register(m)?;
     deconvolution::register(m)?;
