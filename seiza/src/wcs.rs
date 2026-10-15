@@ -379,9 +379,25 @@ impl Wcs {
     }
 }
 
+/// The pixel at the middle of a `width` x `height` image, in seiza's pixel
+/// coordinates: counted from 0, with each pixel's center on a whole number,
+/// so the first pixel spans -0.5 to 0.5 and the middle of the image is
+/// `((width - 1) / 2, (height - 1) / 2)`. FITS counts from 1 instead, so
+/// a FITS header's CRPIX is this convention's value plus 1.
+pub fn image_center(width: u32, height: u32) -> (f64, f64) {
+    ((width as f64 - 1.0) / 2.0, (height as f64 - 1.0) / 2.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_image_center_sits_between_the_middle_pixels() {
+        // Four pixels centered on 0, 1, 2 and 3 span -0.5 to 3.5.
+        assert_eq!(image_center(4, 3), (1.5, 1.0));
+        assert_eq!(image_center(1, 1), (0.0, 0.0));
+    }
 
     fn assert_close(a: f64, b: f64, tol: f64) {
         assert!((a - b).abs() < tol, "{a} != {b} (tol {tol})");

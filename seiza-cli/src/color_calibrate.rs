@@ -81,7 +81,9 @@ pub(crate) fn run(args: ColorCalibrateArgs) -> Result<()> {
         .map(|jd| 2000.0 + (jd - 2_451_545.0) / 365.25);
 
     let (width, height) = (frame.image.width, frame.image.height);
-    let center = wcs.pixel_to_world(width as f64 / 2.0, height as f64 / 2.0);
+    // Image sides fit u32: decoders and detection use u32 dimensions.
+    let middle = seiza::image_center(width as u32, height as u32);
+    let center = wcs.pixel_to_world(middle.0, middle.1);
     let radius = [
         (0.0, 0.0),
         (width as f64, 0.0),

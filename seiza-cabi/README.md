@@ -176,6 +176,12 @@ exposes the **superset** of what both apps need.
   `falseMatchProbability` is the chance that a wrong field would match as
   well, counting every candidate the search tried: a true field scores far
   below one in a billion, and a solve that scores above that is refused.
+  The returned `wcs` counts pixels from 0, with each pixel's center on a
+  whole number, and says so with `"pixelOrigin": 0`; add 1 to `crpix` for a
+  FITS header, whose pixels count from 1. The image's middle is
+  `((width - 1) / 2, (height - 1) / 2)`, and `centerRaDegrees` is the sky
+  there. A WCS passed back in, as to `seiza_parallax_prepare_json`, may give
+  `"pixelOrigin": 1` for FITS-style values.
 - **Parallax videos** — `seiza_parallax_prepare_json` makes what `seiza
   parallax-video` makes from a JSON request: an image for StarXTerminator to
   split (through `rc-astro`) or its starless and stars files, an optional WCS

@@ -482,7 +482,8 @@ fn named_stars(
     wcs: &Wcs,
     dims: (u32, u32),
 ) -> std::io::Result<Vec<StarMark>> {
-    let center = wcs.pixel_to_world(dims.0 as f64 / 2.0, dims.1 as f64 / 2.0);
+    let middle = seiza::image_center(dims.0, dims.1);
+    let center = wcs.pixel_to_world(middle.0, middle.1);
     let radius = crate::field_diagonal_deg(wcs, dims) / 2.0 + 0.5;
     let mut named = HashSet::new();
     let mut marks = Vec::new();
@@ -762,7 +763,8 @@ fn footer_text(
     foreground_cut: bool,
 ) -> [String; 3] {
     let scale = wcs.scale_arcsec_per_px();
-    let (ra, dec) = wcs.pixel_to_world(dims.0 as f64 / 2.0, dims.1 as f64 / 2.0);
+    let middle = seiza::image_center(dims.0, dims.1);
+    let (ra, dec) = wcs.pixel_to_world(middle.0, middle.1);
     let mut stats = vec![format!("{} matched stars", summary.matched_stars)];
     if let Some(sip) = &wcs.sip {
         stats.push(format!("SIP order {}", sip.order));

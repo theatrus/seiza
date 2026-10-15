@@ -244,15 +244,21 @@ Fixed with this note:
   code keeps `count / 8 + 1`.
 - The `solve.rs` header promised outlier clipping; refinement only drops
   pairs farther apart than the match radius.
+- The image's middle: seiza counts pixels from 0 with each pixel's center
+  on a whole number, so the middle is `((w - 1) / 2, (h - 1) / 2)`, as
+  Python's `Solution.center` had it. The CLI, worker, C ABI, sky maps,
+  constellation labels and the solver's reference pixel used `(w / 2, h / 2)`,
+  half a pixel away. They now share `seiza::image_center`, so FITS headers
+  put CRPIX at the usual `(w + 1) / 2`. The fitted mapping is unchanged.
+- The C ABI's WCS counts pixels from 0 while the worker and FITS headers
+  count from 1. Both apps already add 1 when they write FITS; the JSON now
+  says `"pixelOrigin": 0`, and a WCS passed back in may give
+  `"pixelOrigin": 1`.
 
 Still to fix:
 
 - Blind solving buckets its votes by `(ra · 2) as i64`, with no wrap at
   0/360 degrees and no `cos(dec)` scaling, so a field across RA 0 splits
-  its votes between buckets that never meet. This goes with item 1, since
-  it changes how hypotheses rank.
-- Python's `Solution.center` is the sky position of pixel
-  `((w - 1) / 2, (h - 1) / 2)`; the CLI, worker and C ABI use `(w / 2, h / 2)`,
-  half a pixel away.
-- The C ABI's solve JSON gives CRPIX counted from 0, while the worker and
-  FITS headers count from 1.
+  its votes between buckets that never meet, and votes near the poles
+  spread across many narrow RA buckets. The fix changes how hypotheses
+  rank, so it needs a run over the blind test images.

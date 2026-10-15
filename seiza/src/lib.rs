@@ -37,7 +37,7 @@ pub mod wcs;
 pub use cancel::CancelSignal;
 pub use detect::{DetectBackend, DetectConfig, DetectedStar, detect_stars, detect_stars_luma_f32};
 pub use solve::SolveLimits;
-pub use wcs::{FitsCardValue, Sip, Wcs};
+pub use wcs::{FitsCardValue, Sip, Wcs, image_center};
 
 /// Host-neutral calibration response kernels.
 pub use seiza_calibration as calibration;

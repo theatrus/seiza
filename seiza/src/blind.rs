@@ -787,7 +787,7 @@ pub fn solve_blind_with_limits(
     // Hypothesis verification deliberately stays linear so acceptance
     // thresholds keep their meaning across the whole-sky search; the one
     // accepted solution is then re-solved at the requested SIP order.
-    let center_px = (dimensions.0 as f64 / 2.0, dimensions.1 as f64 / 2.0);
+    let center_px = crate::wcs::image_center(dimensions.0, dimensions.1);
     let center = solution.wcs.pixel_to_world(center_px.0, center_px.1);
     let hint = SolveHint {
         center,
@@ -889,7 +889,7 @@ fn solve_blind_with_global_ladder(
                                 let Some((implied, coarse_wcs)) = implied_wcs(
                                     &points,
                                     &pattern,
-                                    (dimensions.0 as f64 / 2.0, dimensions.1 as f64 / 2.0),
+                                    crate::wcs::image_center(dimensions.0, dimensions.1),
                                     scale,
                                 ) else {
                                     continue;
@@ -981,7 +981,7 @@ fn solve_blind_with_global_ladder(
                                     let Some((implied, coarse_wcs)) = implied_wcs(
                                         &points,
                                         &pattern,
-                                        (width / 2.0, height / 2.0),
+                                        crate::wcs::image_center(dimensions.0, dimensions.1),
                                         scale,
                                     ) else {
                                         continue;

@@ -1516,7 +1516,8 @@ fn solution_result(
     timings: SolveTimings,
 ) -> WorkerSolveResult {
     let wcs = &solution.wcs;
-    let center = wcs.pixel_to_world(dimensions.0 as f64 / 2.0, dimensions.1 as f64 / 2.0);
+    let middle = seiza::image_center(dimensions.0, dimensions.1);
+    let center = wcs.pixel_to_world(middle.0, middle.1);
     let determinant = wcs.cd[0][0] * wcs.cd[1][1] - wcs.cd[0][1] * wcs.cd[1][0];
     let rotation_deg = north_rotation_deg(wcs);
     let scale = wcs.scale_arcsec_per_px();

@@ -1109,12 +1109,17 @@ struct ObjectContourResponse {
     points: Vec<[f64; 2]>,
 }
 
+/// A WCS as the C ABI returns it. `crpix` counts pixels from 0, with each
+/// pixel's center on a whole number, as `pixelOrigin` says; add 1 for a
+/// FITS header.
 #[derive(Serialize)]
 struct WcsResponse {
     crval: [f64; 2],
     crpix: [f64; 2],
     cd: [[f64; 2]; 2],
     sip: Option<SipResponse>,
+    #[serde(rename = "pixelOrigin")]
+    pixel_origin: u8,
 }
 
 #[derive(Serialize)]
@@ -4307,9 +4312,8 @@ pub unsafe extern "C" fn seiza_solve_image_with_limits_json(
             sip_order,
             &limits,
         )?;
-        let center = solution
-            .wcs
-            .pixel_to_world(width as f64 / 2.0, height as f64 / 2.0);
+        let middle = seiza::image_center(width, height);
+        let center = solution.wcs.pixel_to_world(middle.0, middle.1);
         let detected_star_positions = stars
             .iter()
             .take(300)
@@ -4479,6 +4483,7 @@ pub unsafe extern "C" fn seiza_solve_image_with_limits_json(
                 crpix: [solution.wcs.crpix.0, solution.wcs.crpix.1],
                 cd: solution.wcs.cd,
                 sip,
+                pixel_origin: 0,
             },
         };
         let json = serde_json::to_string(&response).map_err(|error| error.to_string())?;
