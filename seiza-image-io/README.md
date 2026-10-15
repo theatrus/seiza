@@ -11,6 +11,16 @@ Open and save images by their file extension, the same way across Seiza.
   files declare the 0 to 1 range when the samples lie in it.
 - `open_astronomy` reads a FITS or XISF file as Seiza's `FitsImage`, for
   callers that need its headers or stored sample type.
+- `read_solve_prior` reads what a FITS or XISF file says about where it
+  points (`seiza_core::prior::SolvePrior`), without decoding its pixels.
+- `raster` opens JPEG, PNG and TIFF files, or uploaded bytes, upright by
+  their EXIF orientation, so every reader shares one pixel frame.
+  `PhotoMetadata` reads the capture time, GPS position and 35 mm-equivalent
+  focal length, and `ScaleSearch` turns the focal length into pixel-scale
+  ranges for a blind solve.
+
+This crate does not depend on `seiza`, the solver, so `seiza` releases do
+not force releases of it.
 
 ```rust
 let image = seiza_image_io::open(std::path::Path::new("dust.xisf"))?;

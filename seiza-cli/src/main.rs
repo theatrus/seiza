@@ -5,11 +5,11 @@ use seiza::catalog::{StarCatalog, TileCatalog};
 use seiza::data_paths;
 use seiza::minor_bodies::MinorBodyCatalog;
 use seiza::objects::{ObjectCatalog, ObjectKind, ObjectQuery, ObjectSort, SkyRegion};
-use seiza::raster::{PhotoMetadata, ScaleSearch};
 use seiza::solve::SolveHint;
 use seiza::star_ids::{StarIdentifierCatalog, StarLookupMatch};
 use seiza::{DetectBackend, DetectConfig, DetectedStar, SolveLimits};
 use seiza_image_io::Format as ImageFormat;
+use seiza_image_io::raster::{PhotoMetadata, ScaleSearch};
 use seiza_satellites::{
     CacheState, CelesTrakSource, ExposureProvenance, ObserverLocation, OrbitalCatalogSource,
     SatelliteCatalog, SatelliteTrack, SingleExposure, TrackOptions, UtcTimestamp,
@@ -4311,7 +4311,7 @@ fn build_blind_index_command(
 mod cli_tests {
     use super::*;
 
-    use seiza::raster::test_support as exif_jpeg;
+    use seiza_image_io::raster::test_support as exif_jpeg;
 
     fn jpeg_metadata_fixture(dir: &std::path::Path) -> PathBuf {
         use exif_jpeg::field;

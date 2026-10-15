@@ -1,4 +1,4 @@
-use seiza::raster::test_support::{Tag, Value, ascii, field, jpeg_with_exif};
+use seiza_image_io::raster::test_support::{Tag, Value, ascii, field, jpeg_with_exif};
 use std::process::Command;
 
 fn image_info(path: &std::path::Path) -> std::process::Output {

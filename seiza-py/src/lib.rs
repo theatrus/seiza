@@ -877,7 +877,7 @@ fn read_photo_metadata(
     width: Option<u32>,
     height: Option<u32>,
 ) -> PyResult<Py<PyAny>> {
-    use seiza::raster::{PhotoMetadata, ScaleSearch};
+    use seiza_image_io::raster::{PhotoMetadata, ScaleSearch};
     let metadata = PhotoMetadata::read(&path);
     let mut value = serde_json::to_value(&metadata)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;

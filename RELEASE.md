@@ -20,7 +20,7 @@ PyPI**. They are cut from a single "Release `<version>`" PR followed by two tags
   ```
 
   At the time of writing that is `seiza-background`, `seiza-calibration`,
-  `seiza-deconvolution`, `seiza-download`, `seiza-draw`, `seiza-fits`,
+  `seiza-core`, `seiza-deconvolution`, `seiza-download`, `seiza-draw`, `seiza-fits`,
   `seiza-image-io`, `seiza-imgproc`, `seiza-parallax`, `seiza-satellites`,
   `seiza-sources`, `seiza-stacking`, `seiza-stars`, `seiza-stats`,
   `seiza-stretch`, and `seiza-xisf`. A list written down goes
@@ -100,14 +100,14 @@ waits for the index):
 
 ```
 seiza-stats  →  seiza-stretch  →  seiza-imgproc  →  seiza-fits  →  seiza-xisf
-→  seiza-background  →  seiza-calibration  →  seiza-deconvolution
+→  seiza-core  →  seiza-background  →  seiza-calibration  →  seiza-deconvolution
 →  seiza-sources  →  seiza-download  →  seiza  →  seiza-image-io
 →  seiza-satellites  →  seiza-stacking  →  seiza-stars  →  seiza-draw
 →  seiza-parallax  →  seiza-cabi  →  seiza-cli
 ```
 
 `seiza-calibration` sits before `seiza-stacking`, which depends on it, and
-`seiza-image-io`, which needs `seiza`, `seiza-fits` and `seiza-xisf`, sits
+`seiza-image-io`, which needs `seiza-core`, `seiza-fits` and `seiza-xisf`, sits
 before `seiza-stacking` and `seiza-parallax`, which read and write through it. If you
 ever need to re-derive this order rather than trust it, `cargo tree` gives it:
 a crate must be published after everything it depends on.
@@ -145,6 +145,15 @@ git push origin py-v<version>
 ```
 
 ## Invariants / gotchas
+
+- **Depend on `seiza` only for what only it has: the solver, the star
+  detector, or the catalogs.** `seiza` takes a minor release almost every
+  time, and each one forces a release of every published crate that depends
+  on it. For `Wcs`, `CancelSignal` or `SolvePrior`, depend on `seiza-core`,
+  which changes rarely. Where a crate needs one function, take it as a
+  closure, as `seiza-satellites` takes the sky-to-pixel mapping. Image
+  reading, raster orientation and EXIF live in `seiza-image-io`, which does
+  not depend on `seiza` either.
 
 - **Bumping a crate means bumping every published crate that depends on
   it.** A dependent published with the old pin keeps resolving the old

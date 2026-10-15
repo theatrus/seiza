@@ -11,11 +11,18 @@ description = "Open and save images by file extension, the same way across Seiza
 keywords = ["astronomy", "fits", "xisf", "image", "astrophotography"]
 categories = ["science", "multimedia::images"]
 
+[features]
+# EXIF JPEG fixture builders for other crates' tests; not a public API.
+test-support = []
+
 [dependencies]
+chrono.workspace = true
 image = { workspace = true, features = ["png", "jpeg", "tiff"] }
-seiza.workspace = true
+kamadak-exif.workspace = true
+seiza-core.workspace = true
 seiza-fits.workspace = true
 seiza-xisf.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

@@ -4208,7 +4208,7 @@ fn blind_solve_path(
         let width = image.width();
         let height = image.height();
         let stars = detect_stars(&image, &detection_config);
-        let metadata = seiza::raster::PhotoMetadata::read(path);
+        let metadata = seiza_image_io::raster::PhotoMetadata::read(path);
         let prior = seiza::prior::SolvePrior {
             scale_arcsec_px: metadata
                 .scale_hint((width, height))
@@ -11102,7 +11102,7 @@ mod tests {
 
     #[test]
     fn phone_jpegs_render_upright_in_8_and_16_bits() {
-        use seiza::raster::test_support::{Tag, Value, field, jpeg_with_exif};
+        use seiza_image_io::raster::test_support::{Tag, Value, field, jpeg_with_exif};
         let directory = tempfile::tempdir().unwrap();
         // Stored 40×30; orientation 6 means the viewer turns it to 30×40.
         let path = directory.path().join("phone.jpg");

@@ -11,13 +11,25 @@
 //! [`ScaleSearch`] derives a pixel-scale range. All of it is advisory:
 //! missing or damaged EXIF never stops an image from loading.
 
-use crate::Error;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, SecondsFormat, Utc};
 use exif::{Exif, In, Tag, Value};
 use image::{DynamicImage, ImageDecoder, ImageReader};
 use serde::Serialize;
 use std::io::{BufRead, Cursor, Seek};
 use std::path::Path;
+
+/// Why a raster could not be read, or a pixel-scale range was refused.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum RasterError {
+    #[error("image error: {0}")]
+    Image(#[from] image::ImageError),
+    /// Pixel-scale bounds that are not positive, finite and ordered.
+    #[error("{0}")]
+    Scale(String),
+}
+
+use RasterError as Error;
 
 /// How a decoded raster's pixels relate to the stored ones.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -287,7 +299,7 @@ fn check_range((min, max): (f64, f64)) -> Result<(), Error> {
     if min.is_finite() && max.is_finite() && min > 0.0 && max >= min {
         Ok(())
     } else {
-        Err(Error::Solve(format!(
+        Err(Error::Scale(format!(
             "pixel-scale bounds must be positive, finite and ordered; got {min}–{max}\"/px"
         )))
     }

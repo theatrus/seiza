@@ -1,7 +1,7 @@
 //! Open and save images by their file extension, the same way across Seiza.
 //!
 //! PNG, JPEG and TIFF go through the `image` crate, upright by their EXIF
-//! orientation as [`seiza::raster`] reads them; FITS and XISF go through
+//! orientation as [`raster`] reads them; FITS and XISF go through
 //! Seiza's own readers and writers. Three ways in:
 //!
 //! - [`open`] gives any format as floating-point samples. Integer samples
@@ -23,8 +23,11 @@
 //! them. [`save`] writes them top-down with a `ROWORDER` card saying so,
 //! which PixInsight and Siril follow.
 
+pub mod raster;
+
 use image::{DynamicImage, ImageBuffer, ImageFormat, Luma, Rgb, Rgb32FImage};
-use seiza::raster::OrientedRaster;
+use raster::OrientedRaster;
+use seiza_core::prior::SolvePrior;
 use seiza_fits::{F32ImageData, FitsError, FitsImage, HeaderValue, Pixels, WriteHeaderCard};
 use seiza_xisf::{XisfError, XisfImageInfo, XisfMetadata};
 use std::path::{Path, PathBuf};
@@ -152,7 +155,7 @@ pub enum Cause {
     #[error(transparent)]
     Image(#[from] image::ImageError),
     #[error(transparent)]
-    Raster(#[from] seiza::Error),
+    Raster(#[from] raster::RasterError),
     #[error("{0}")]
     Invalid(String),
 }
@@ -367,12 +370,12 @@ pub fn add_xisf_solution_wcs(headers: &mut Vec<(String, HeaderValue)>, metadata:
 
 impl AstronomyImage {
     /// What the file says about where the image points, for
-    /// [`seiza::prior::solve_with_prior`]: its WCS cards, an XISF
+    /// `seiza::prior::solve_with_prior`: its WCS cards, an XISF
     /// astrometric solution, its pointing (`RA`/`DEC`, `OBJCTRA`/`OBJCTDEC`,
     /// or XISF `Observation:Center`), and its pixel scale (`PIXSCALE`, or
     /// pixel size over focal length, from cards or XISF `Instrument`
     /// properties).
-    pub fn solve_prior(&self) -> seiza::prior::SolvePrior {
+    pub fn solve_prior(&self) -> SolvePrior {
         let mut headers = self.image.headers.clone();
         if let Some(metadata) = &self.xisf_metadata {
             add_xisf_solution_wcs(&mut headers, metadata);
@@ -383,7 +386,7 @@ impl AstronomyImage {
 
 /// [`AstronomyImage::solve_prior`] from a FITS or XISF file's headers and
 /// metadata alone, without decoding its pixels.
-pub fn read_solve_prior(path: &Path) -> Result<seiza::prior::SolvePrior, Error> {
+pub fn read_solve_prior(path: &Path) -> Result<SolvePrior, Error> {
     match Format::from_path(path) {
         Some(Format::Xisf) => {
             let (mut headers, metadata) = seiza_xisf::read_header_and_metadata(path)
@@ -399,14 +402,14 @@ pub fn read_solve_prior(path: &Path) -> Result<seiza::prior::SolvePrior, Error> 
 }
 
 /// [`AstronomyImage::solve_prior`] for header cards alone.
-pub fn solve_prior_from_headers(headers: &[(String, HeaderValue)]) -> seiza::prior::SolvePrior {
+pub fn solve_prior_from_headers(headers: &[(String, HeaderValue)]) -> SolvePrior {
     let card = |key: &str| {
         headers
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case(key))
             .map(|(_, value)| value)
     };
-    seiza::prior::SolvePrior::from_header(
+    SolvePrior::from_header(
         |key| card(key).and_then(HeaderValue::as_f64),
         |key| card(key).and_then(HeaderValue::as_str).map(str::to_owned),
     )
@@ -436,7 +439,7 @@ pub fn open_raster(path: &Path) -> Result<OrientedRaster, Error> {
             "it is a FITS or XISF file, not a PNG, JPEG or TIFF",
         ));
     }
-    seiza::raster::open_oriented(path).map_err(|error| Error::open(path, error))
+    raster::open_oriented(path).map_err(|error| Error::open(path, error))
 }
 
 /// Open the image at `path`, its format chosen by its extension: FITS and

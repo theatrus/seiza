@@ -108,11 +108,15 @@ compiler, formatter, and linter.
   generated C header for Swift, .NET, C, and C++ consumers.
 - **From Rust** — use the crates directly: [`seiza`](seiza/README.md)
   (detection, WCS, solving, catalogs),
+  [`seiza-core`](seiza-core/README.md) (the shared types: plate solutions,
+  cancellation and header priors, for crates that need them without the
+  solver),
   [`seiza-fits`](seiza-fits/README.md) (FITS reading and linear `f32` writing),
   [`seiza-xisf`](seiza-xisf/README.md) (XISF reading into the same astronomy
   image representation),
   [`seiza-image-io`](seiza-image-io/README.md) (opening and saving PNG,
-  JPEG, TIFF, FITS and XISF by file extension),
+  JPEG, TIFF, FITS and XISF by file extension, and photos' EXIF orientation
+  and metadata),
   [`seiza-background`](seiza-background/README.md) (robust gradient models),
   [`seiza-calibration`](seiza-calibration/README.md) (host-neutral calibration
   response fitting and application),
@@ -761,13 +765,19 @@ and solves in the table's exact frame. Contract details:
 
 ## Layout
 
-- `seiza/` — library crate: `detect`, `wcs`, `catalog`, `objects`, `solve`
+- `seiza/` — library crate: `detect`, `catalog`, `objects`, `solve`, and
+  `wcs` re-exported from `seiza-core`
+- `seiza-core/` — the types other crates share without the solver: `Wcs`,
+  `CancelSignal` and `SolvePrior`. It changes rarely, so a crate that needs
+  only these does not move with every `seiza` release
 - `seiza-fits/` — FITS reading and atomic linear `f32` writing; re-exports the
   statistics and MTF autostretch that now live in `seiza-stretch`
 - `seiza-xisf/` — XISF metadata and attached-pixel reading into `FitsImage`,
   plus atomic linear `f32` writing
 - `seiza-image-io/` — opening and saving images by file extension, PNG, JPEG,
-  TIFF, FITS and XISF alike, for the CLI, the C ABI, stacking and parallax
+  TIFF, FITS and XISF alike, for the CLI, the C ABI, stacking and parallax;
+  `raster` opens photos upright by their EXIF orientation and reads their
+  capture metadata
 - `seiza-background/` — format-independent robust background sampling,
   polynomial fitting, diagnostics, and linear correction
 - `seiza-calibration/` — format-independent calibration on caller-owned

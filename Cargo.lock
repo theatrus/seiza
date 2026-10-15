@@ -2655,16 +2655,15 @@ dependencies = [
 name = "seiza"
 version = "0.32.0"
 dependencies = [
- "chrono",
  "directories",
  "image",
- "kamadak-exif",
  "memmap2",
  "multiversion",
  "postcard",
  "rayon",
  "rustc-hash",
  "seiza-calibration",
+ "seiza-core",
  "seiza-download",
  "seiza-stats",
  "serde",
@@ -2766,6 +2765,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "seiza-core"
+version = "0.1.0"
+
+[[package]]
 name = "seiza-deconvolution"
 version = "0.1.1"
 dependencies = [
@@ -2818,10 +2821,13 @@ dependencies = [
 name = "seiza-image-io"
 version = "0.7.0"
 dependencies = [
+ "chrono",
  "image",
- "seiza",
+ "kamadak-exif",
+ "seiza-core",
  "seiza-fits",
  "seiza-xisf",
+ "serde",
  "tempfile",
  "thiserror 2.0.21",
 ]

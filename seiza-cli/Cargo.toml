@@ -58,7 +58,7 @@ chrono.workspace = true
 openh264 = ["seiza-parallax/openh264"]
 
 [dev-dependencies]
-seiza = { workspace = true, features = ["test-support"] }
+seiza-image-io = { workspace = true, features = ["test-support"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

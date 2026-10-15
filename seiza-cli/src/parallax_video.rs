@@ -1191,11 +1191,12 @@ fn solve(args: &ParallaxVideoArgs, path: &Path) -> Result<(Wcs, (u32, u32))> {
     let image = crate::load_image(path, options.detection_backend)?;
     let dims = image.dimensions();
     let metadata = if crate::is_astronomy_image_path(path) {
-        seiza::raster::PhotoMetadata::default()
+        seiza_image_io::raster::PhotoMetadata::default()
     } else {
-        seiza::raster::PhotoMetadata::read(path)
+        seiza_image_io::raster::PhotoMetadata::read(path)
     };
-    let search = seiza::raster::ScaleSearch::new(&metadata, dims, args.min_scale, args.max_scale)?;
+    let search =
+        seiza_image_io::raster::ScaleSearch::new(&metadata, dims, args.min_scale, args.max_scale)?;
     let config = DetectConfig {
         backend: options.detection_backend,
         sigma: options.sigma,

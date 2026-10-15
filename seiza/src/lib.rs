@@ -20,7 +20,6 @@
 //! valid solutions.
 
 pub mod blind;
-mod cancel;
 pub mod catalog;
 pub mod constellations;
 pub mod data_paths;
@@ -30,13 +29,14 @@ mod object_catalog_v3;
 mod object_catalog_v4;
 pub mod objects;
 pub mod prior;
-pub mod raster;
 pub mod solve;
 pub mod star_ids;
-pub mod wcs;
 
-pub use cancel::CancelSignal;
 pub use detect::{DetectBackend, DetectConfig, DetectedStar, detect_stars, detect_stars_luma_f32};
+pub use seiza_core::CancelSignal;
+/// Plate solutions, shared with the crates that need them without the
+/// solver; see `seiza-core`.
+pub use seiza_core::wcs;
 pub use solve::SolveLimits;
 pub use wcs::{FitsCardValue, Sip, Wcs, image_center};
 

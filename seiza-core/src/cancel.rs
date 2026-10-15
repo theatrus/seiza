@@ -6,9 +6,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// that run over many input frames.
 ///
 /// Work that accepts a signal checks it at intervals and returns its crate's
-/// `Cancelled` error once the caller asks it to stop, such as
-/// [`crate::Error::Cancelled`]. Partial work is dropped: nothing is written
-/// and no result is returned.
+/// `Cancelled` error once the caller asks it to stop, such as `seiza`'s
+/// `Error::Cancelled`. Partial work is dropped: nothing is written and no
+/// result is returned.
 ///
 /// The check runs between steps (frames of a build, windows and hypotheses
 /// of a solve), so cancellation takes effect within one step's work rather

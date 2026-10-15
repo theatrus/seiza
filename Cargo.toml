@@ -6,6 +6,7 @@ members = [
     "seiza-calibration",
     "seiza-cabi",
     "seiza-cli",
+    "seiza-core",
     "seiza-deconvolution",
     "seiza-download",
     "seiza-draw",
@@ -34,6 +35,7 @@ authors = ["Yann Ramin <github@theatr.us>"]
 seiza = { path = "seiza", version = "0.32.0" }
 seiza-background = { path = "seiza-background", version = "0.3.1" }
 seiza-calibration = { path = "seiza-calibration", version = "0.5.1" }
+seiza-core = { path = "seiza-core", version = "0.1.0" }
 seiza-deconvolution = { path = "seiza-deconvolution", version = "0.1.1" }
 seiza-download = { path = "seiza-download", version = "0.9.0" }
 seiza-draw = { path = "seiza-draw", version = "0.1.0" }
