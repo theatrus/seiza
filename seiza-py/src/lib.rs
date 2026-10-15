@@ -387,6 +387,10 @@ struct PySolution {
     /// RMS of match residuals, arcseconds.
     #[pyo3(get)]
     rms_arcsec: f64,
+    /// The chance that a wrong field would match this well, across every
+    /// candidate the search tried. Near 0 for a sure solution.
+    #[pyo3(get)]
+    false_match_probability: f64,
     width: u32,
     height: u32,
 }
@@ -467,8 +471,96 @@ fn solution_to_py(solution: seiza::solve::Solution, dimensions: (u32, u32)) -> P
         wcs: PyWcs { wcs: solution.wcs },
         matched_stars: solution.matched_stars,
         rms_arcsec: solution.rms_arcsec,
+        false_match_probability: solution.false_match_probability,
         width: dimensions.0,
         height: dimensions.1,
+    }
+}
+
+/// How often a solve asks Python whether to stop. Every check would take
+/// the GIL, and a blind solve checks from every core at once.
+const CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// The limits a Python solve runs under, and any exception its `cancel`
+/// predicate (or Ctrl-C) raised, kept to re-raise once the solve returns.
+struct PySolveLimits {
+    limits: seiza::SolveLimits,
+    raised: std::sync::Arc<std::sync::Mutex<Option<PyErr>>>,
+}
+
+impl PySolveLimits {
+    /// `time_limit` in seconds; `cancel` a callable returning true to stop.
+    /// Without `cancel` the solve still stops on Ctrl-C.
+    fn new(time_limit: Option<f64>, cancel: Option<Py<PyAny>>) -> PyResult<Self> {
+        let limits = match time_limit {
+            None => seiza::SolveLimits::default(),
+            Some(seconds) if seconds.is_finite() && seconds > 0.0 => {
+                seiza::SolveLimits::within(std::time::Duration::from_secs_f64(seconds))
+            }
+            Some(_) => {
+                return Err(PyValueError::new_err(
+                    "time_limit must be a positive number of seconds",
+                ));
+            }
+        };
+        let raised = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let signal = {
+            let raised = std::sync::Arc::clone(&raised);
+            // The last time Python was asked, and whether it said stop.
+            let asked: std::sync::Mutex<(Option<std::time::Instant>, bool)> =
+                std::sync::Mutex::new((None, false));
+            seiza::CancelSignal::new(move || {
+                let Ok(mut asked) = asked.lock() else {
+                    return true;
+                };
+                if asked.1 {
+                    return true;
+                }
+                if asked.0.is_some_and(|last| last.elapsed() < CANCEL_POLL) {
+                    return false;
+                }
+                asked.0 = Some(std::time::Instant::now());
+                asked.1 = Python::attach(|py| {
+                    let stop = py.check_signals().and_then(|()| match &cancel {
+                        Some(cancel) => cancel
+                            .call0(py)
+                            .and_then(|value| value.bind(py).is_truthy()),
+                        None => Ok(false),
+                    });
+                    stop.unwrap_or_else(|error| {
+                        if let Ok(mut slot) = raised.lock() {
+                            slot.get_or_insert(error);
+                        }
+                        true
+                    })
+                });
+                asked.1
+            })
+        };
+        Ok(Self {
+            limits: limits.with_cancel(signal),
+            raised,
+        })
+    }
+
+    /// The solve's result for Python: an exception the predicate raised,
+    /// `TimeoutError` at the time limit, or `SolveError`.
+    fn finish(
+        self,
+        result: Result<seiza::solve::Solution, seiza::Error>,
+        dimensions: (u32, u32),
+    ) -> PyResult<PySolution> {
+        if let Some(error) = self.raised.lock().ok().and_then(|mut slot| slot.take()) {
+            return Err(error);
+        }
+        result
+            .map(|solution| solution_to_py(solution, dimensions))
+            .map_err(|error| match error {
+                seiza::Error::TimedOut => {
+                    pyo3::exceptions::PyTimeoutError::new_err(error.to_string())
+                }
+                other => SolveError::new_err(other.to_string()),
+            })
     }
 }
 
@@ -572,7 +664,7 @@ fn detect(
 /// Plate solve with an approximate position and pixel-scale hint.
 #[pyfunction]
 #[pyo3(signature = (stars, catalog, width, height, *, ra, dec, scale_arcsec_px,
-    radius_deg=2.0, scale_tolerance=0.2, sip_order=0))]
+    radius_deg=2.0, scale_tolerance=0.2, sip_order=0, time_limit=None, cancel=None))]
 #[allow(clippy::too_many_arguments)]
 fn solve(
     py: Python<'_>,
@@ -586,6 +678,8 @@ fn solve(
     radius_deg: f64,
     scale_tolerance: f64,
     sip_order: u8,
+    time_limit: Option<f64>,
+    cancel: Option<Py<PyAny>>,
 ) -> PyResult<PySolution> {
     if sip_order > 5 {
         return Err(PyValueError::new_err("sip_order must be between 0 and 5"));
@@ -599,17 +693,24 @@ fn solve(
         scale_tolerance,
         sip_order,
     };
-    let solution = py
-        .detach(|| seiza::solve::solve(&stars, catalog.backend.as_trait(), &hint, (width, height)));
-    solution
-        .map(|solution| solution_to_py(solution, (width, height)))
-        .map_err(|error| SolveError::new_err(error.to_string()))
+    let limits = PySolveLimits::new(time_limit, cancel)?;
+    let solution = py.detach(|| {
+        seiza::solve::solve_with_limits(
+            &stars,
+            catalog.backend.as_trait(),
+            &hint,
+            (width, height),
+            &limits.limits,
+        )
+    });
+    limits.finish(solution, (width, height))
 }
 
 /// Plate solve with no position hint using a whole-sky pattern index.
 #[pyfunction]
 #[pyo3(signature = (stars, catalog, index, width, height, *,
-    min_scale_arcsec_px=0.1, max_scale_arcsec_px=20.0, sip_order=0))]
+    min_scale_arcsec_px=0.1, max_scale_arcsec_px=20.0, sip_order=0, time_limit=None,
+    cancel=None))]
 #[allow(clippy::too_many_arguments)]
 fn solve_blind(
     py: Python<'_>,
@@ -621,6 +722,8 @@ fn solve_blind(
     min_scale_arcsec_px: f64,
     max_scale_arcsec_px: f64,
     sip_order: u8,
+    time_limit: Option<f64>,
+    cancel: Option<Py<PyAny>>,
 ) -> PyResult<PySolution> {
     if sip_order > 5 {
         return Err(PyValueError::new_err("sip_order must be between 0 and 5"));
@@ -634,18 +737,18 @@ fn solve_blind(
         sip_order,
         ..seiza::blind::BlindParams::default()
     };
+    let limits = PySolveLimits::new(time_limit, cancel)?;
     let solution = py.detach(|| {
-        seiza::blind::solve_blind(
+        seiza::blind::solve_blind_with_limits(
             &stars,
             catalog.backend.as_trait(),
             &index.index,
             &params,
             (width, height),
+            &limits.limits,
         )
     });
-    solution
-        .map(|solution| solution_to_py(solution, (width, height)))
-        .map_err(|error| SolveError::new_err(error.to_string()))
+    limits.finish(solution, (width, height))
 }
 
 fn dataset_by_file_name(name: &str) -> PyResult<seiza::downloads::Dataset> {

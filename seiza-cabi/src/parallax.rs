@@ -973,6 +973,7 @@ fn solution(
         minimum,
         maximum,
         2,
+        &seiza::SolveLimits::default(),
     )?;
     let wcs = solved.solution.wcs;
     send(

@@ -2,7 +2,7 @@ use image::DynamicImage;
 mod parallax;
 mod resample;
 use resample::{downsample_interleaved_f32, downsample_rgba};
-use seiza::blind::{BlindIndex, BlindParams, solve_blind};
+use seiza::blind::{BlindIndex, BlindParams, solve_blind_with_limits};
 use seiza::catalog::{StarCatalog, tiles::TileCatalog};
 use seiza::downloads::{CachePolicy, CatalogManager, CatalogSet, Dataset, DownloadEvent};
 use seiza::minor_bodies::{MinorBodyCatalog, MinorBodyKind};
@@ -11,7 +11,10 @@ use seiza::objects::{
     ObjectQuery, SkyRegion,
 };
 use seiza::wcs::Wcs;
-use seiza::{DetectBackend, DetectConfig, detect_stars, detect_stars_luma_f32};
+use seiza::{
+    DetectBackend, DetectConfig, Error as SeizaError, SolveLimits, detect_stars,
+    detect_stars_luma_f32,
+};
 use seiza_background::{BackgroundConfig, BackgroundFit, CorrectionMode, fit_background_masked};
 use seiza_deconvolution::{DeconvolutionConfig, deconvolve, deconvolve_masked};
 use seiza_fits::{FitsImage, HeaderValue, RgbImage16, Statistics, StretchParams};
@@ -1036,6 +1039,7 @@ struct SolveResponse {
     scale_arcsec_per_pixel: f64,
     matched_stars: usize,
     rms_arcsec: f64,
+    false_match_probability: f64,
     detected_stars: usize,
     elapsed_milliseconds: u128,
     detected_star_positions: Vec<ImagePointResponse>,
@@ -4146,6 +4150,7 @@ fn blind_solve_path(
     minimum_scale_arcsec_per_pixel: f64,
     maximum_scale_arcsec_per_pixel: f64,
     sip_order: u8,
+    limits: &SolveLimits,
 ) -> Result<BlindSolved, String> {
     let detection_config = DetectConfig {
         max_stars: 600,
@@ -4192,23 +4197,26 @@ fn blind_solve_path(
         sip_order: sip_order.min(5),
         ..Default::default()
     };
-    let solution = match solve_blind(&stars, &catalog, &index, &params, (width, height)) {
-        Ok(solution) => solution,
-        Err(primary_error) => {
-            let Some(image) = raster_fallback else {
-                return Err(primary_error.to_string());
-            };
-            stars = detect_stars(
-                &image,
-                &DetectConfig {
-                    backend: DetectBackend::F32,
-                    ..detection_config
-                },
-            );
-            solve_blind(&stars, &catalog, &index, &params, (width, height))
-                .map_err(|error| error.to_string())?
-        }
-    };
+    let solution =
+        match solve_blind_with_limits(&stars, &catalog, &index, &params, (width, height), limits) {
+            Ok(solution) => solution,
+            Err(primary_error) => {
+                let Some(image) =
+                    raster_fallback.filter(|_| matches!(primary_error, SeizaError::Solve(_)))
+                else {
+                    return Err(primary_error.to_string());
+                };
+                stars = detect_stars(
+                    &image,
+                    &DetectConfig {
+                        backend: DetectBackend::F32,
+                        ..detection_config
+                    },
+                );
+                solve_blind_with_limits(&stars, &catalog, &index, &params, (width, height), limits)
+                    .map_err(|error| error.to_string())?
+            }
+        };
     Ok(BlindSolved {
         width,
         height,
@@ -4235,8 +4243,51 @@ pub unsafe extern "C" fn seiza_solve_image_json(
     sip_order: u8,
     error_out: *mut *mut c_char,
 ) -> *mut c_char {
+    unsafe {
+        seiza_solve_image_with_limits_json(
+            path,
+            catalog_directory,
+            minimum_scale_arcsec_per_pixel,
+            maximum_scale_arcsec_per_pixel,
+            sip_order,
+            0.0,
+            ptr::null(),
+            error_out,
+        )
+    }
+}
+
+#[unsafe(no_mangle)]
+/// [`seiza_solve_image_json`] that gives up after `time_limit_seconds`
+/// (zero for no limit) or when `cancel` is cancelled. A solve that stops
+/// returns null with `error_out` set to `solve stopped at its time limit` or
+/// `cancelled by the caller`. Detection and loading are not counted against
+/// the limit; the solve checks it between windows and hypotheses.
+///
+/// # Safety
+/// As [`seiza_solve_image_json`]. `cancel` must be null or a live
+/// [`SeizaCancelSignal`] retained until this call returns.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn seiza_solve_image_with_limits_json(
+    path: *const c_char,
+    catalog_directory: *const c_char,
+    minimum_scale_arcsec_per_pixel: f64,
+    maximum_scale_arcsec_per_pixel: f64,
+    sip_order: u8,
+    time_limit_seconds: f64,
+    cancel: *const SeizaCancelSignal,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
     clear_error(error_out);
     ffi_result(error_out, || {
+        let time_limit = optional_positive_seconds(time_limit_seconds, "solve time limit")?;
+        let limits = time_limit
+            .map(|seconds| SolveLimits::within(std::time::Duration::from_secs_f64(seconds)))
+            .unwrap_or_default();
+        let limits = match unsafe { cancel.as_ref() } {
+            Some(signal) => limits.with_cancel(CancelSignal::from(Arc::clone(&signal.cancelled))),
+            None => limits,
+        };
         let started = Instant::now();
         let path = required_path(path, "image path")?;
         let catalog_directory = optional_path(catalog_directory)?;
@@ -4254,6 +4305,7 @@ pub unsafe extern "C" fn seiza_solve_image_json(
             minimum_scale_arcsec_per_pixel,
             maximum_scale_arcsec_per_pixel,
             sip_order,
+            &limits,
         )?;
         let center = solution
             .wcs
@@ -4411,6 +4463,7 @@ pub unsafe extern "C" fn seiza_solve_image_json(
             scale_arcsec_per_pixel: solution.wcs.scale_arcsec_per_px(),
             matched_stars: solution.matched_stars,
             rms_arcsec: solution.rms_arcsec,
+            false_match_probability: solution.false_match_probability,
             detected_stars: stars.len(),
             elapsed_milliseconds: started.elapsed().as_millis(),
             detected_star_positions,

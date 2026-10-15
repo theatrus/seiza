@@ -23,7 +23,7 @@ use std::process::{Command, Stdio};
 
 use seiza_fits::HeaderValue;
 
-use crate::cancel::CancelSignal;
+use crate::CancelSignal;
 use crate::fits::{FitsFrame, write_processed_image_fits_f32};
 use crate::image::LinearImage;
 use crate::{Error, Result};

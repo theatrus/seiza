@@ -39,6 +39,9 @@ seiza solve light.fits --scale 1.45
 # the deepest catalog and the blind index automatically.
 seiza solve-blind image.jpg --data data --min-scale 0.5 --max-scale 15
 
+# Give up after 30 seconds of solving (detection not counted)
+seiza solve-blind image.jpg --data data --time-limit 30
+
 # JPEG: inspect EXIF and solve a wide field without a pointing hint.
 seiza image-info phone.jpg
 seiza solve-blind phone.jpg --data data --sip-order 2 \
@@ -140,7 +143,13 @@ Blind-solved in 2.02s:
   center     : 03h 19m 42.05s +70° 56′ 13.5″  (49.92521°, 70.93708°)
   pixel scale: 72.0169"/px
   quality    : 106 stars matched, RMS 116.265"
+  by chance  : 4.8e-90 (false-match probability)
 ```
+
+`by chance` is the chance that a wrong field would match as well, counting
+every candidate the search tried. A true field scores far below one in a
+billion; `solve-blind` refuses a field above that, and `solve` one above one
+in a thousand.
 
 ![Cropped phone photo solved after the wide retry](../docs/images/phone/phone-crop-solve.jpg)
 

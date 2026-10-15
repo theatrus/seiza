@@ -169,7 +169,13 @@ exposes the **superset** of what both apps need.
   and reports every written file, StarXTerminator's stars sidecar included.
   Include the schema's `cliVersion`/`mlVersion` in any cache key: a tool
   upgrade changes the output for identical inputs.
-- **Plate solving** — `seiza_solve_image_json`.
+- **Plate solving** — `seiza_solve_image_json`, and
+  `seiza_solve_image_with_limits_json`, which gives up after a time limit in
+  seconds or when a `SeizaCancelSignal` is cancelled, setting `error_out` to
+  `solve stopped at its time limit` or `cancelled by the caller`. The JSON's
+  `falseMatchProbability` is the chance that a wrong field would match as
+  well, counting every candidate the search tried: a true field scores far
+  below one in a billion, and a solve that scores above that is refused.
 - **Parallax videos** — `seiza_parallax_prepare_json` makes what `seiza
   parallax-video` makes from a JSON request: an image for StarXTerminator to
   split (through `rc-astro`) or its starless and stars files, an optional WCS
