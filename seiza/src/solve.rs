@@ -9,8 +9,9 @@
 //! 3. Each triangle correspondence proposes an affine pixel→tangent
 //!    transform; implausible ones (wrong scale, strong shear) are dropped.
 //! 4. Candidates are scored by how many detected stars land on catalog
-//!    stars; the best transform seeds an iterative least-squares fit with
-//!    re-matching and outlier clipping.
+//!    stars; the best transform seeds an iterative least-squares fit that
+//!    re-matches every detection, dropping pairs farther apart than the
+//!    match radius.
 //! 5. The fitted affine is re-centred on the image and converted to a WCS.
 
 use crate::catalog::{CatalogStar, StarCatalog, angular_separation_deg};
@@ -1088,7 +1089,7 @@ fn fov_radius_deg(hint: &SolveHint, dimensions: (u32, u32)) -> f64 {
         * (1.0 + hint.scale_tolerance)
 }
 
-/// The brightest `count` stars, but at most `count / 4 + 1` from any one
+/// The brightest `count` stars, but at most `count / 8 + 1` from any one
 /// cell of a 4×4 grid over the image — bright non-stellar clutter tends to
 /// cluster, real stars don't.
 fn diverse_brightest(

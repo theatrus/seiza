@@ -1,12 +1,13 @@
-//! seiza (星座) — star detection, WCS fitting, and near-field plate solving.
+//! seiza (星座) — star detection, WCS fitting, and plate solving.
 //!
-//! The intended pipeline:
+//! The pipeline:
 //! 1. [`detect`] finds stars (x, y, flux) in a decoded image.
-//! 2. [`catalog`] provides reference stars around a hinted sky position.
-//! 3. [`solve`] matches detected stars to catalog stars and fits a [`wcs::Wcs`].
-//!
-//! Solving is *seeded*: it expects an approximate center (RA/Dec hint) and an
-//! approximate pixel scale. Blind solving is out of scope for now.
+//! 2. [`catalog`] provides reference stars around a sky position.
+//! 3. [`solve`] matches detected stars to catalog stars near a hinted
+//!    center and pixel scale, and fits a [`wcs::Wcs`].
+//! 4. [`blind`] solves with no center: it looks the image's star patterns
+//!    up in a prebuilt [`blind::BlindIndex`] to find candidate fields, then
+//!    checks each with [`solve`].
 //!
 //! # Threads
 //!
