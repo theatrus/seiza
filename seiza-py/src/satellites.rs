@@ -445,8 +445,12 @@ impl PySatelliteCatalog {
         let wcs = wcs.get().wcs.clone();
         let result = py
             .detach(|| {
-                self.catalog
-                    .tracks_in_footprint(&wcs, (width, height), &exposure, &options)
+                self.catalog.tracks_in_footprint(
+                    |ra, dec| wcs.world_to_pixel(ra, dec),
+                    (width, height),
+                    &exposure,
+                    &options,
+                )
             })
             .map_err(map_error)?;
         Ok(PyTrackSearchResult {

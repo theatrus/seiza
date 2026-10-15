@@ -1,8 +1,10 @@
 # seiza-satellites
 
 `seiza-satellites` predicts topocentric satellite paths through an already
-solved Seiza image. It accepts a single shutter-open interval, an observer
-location, a WCS solution, and OMM JSON or TLE orbital elements.
+solved image. It accepts a single shutter-open interval, an observer
+location, the image's sky-to-pixel mapping (from a Seiza WCS, for example),
+and OMM JSON or TLE orbital elements. It does not depend on `seiza`, so it
+need not move with seiza's releases.
 
 The output is a provenance-bearing prediction. It does not claim that a
 satellite was detected in the pixels. Stacked images are deliberately outside
@@ -31,7 +33,7 @@ let exposure = SingleExposure::from_start_and_duration(
     ExposureProvenance::Explicit,
 )?;
 let result = elements.catalog.tracks_in_footprint(
-    wcs,
+    |ra, dec| wcs.world_to_pixel(ra, dec),
     (6000, 4000),
     &exposure,
     &TrackOptions::default(),

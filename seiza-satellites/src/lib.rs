@@ -1,7 +1,8 @@
 //! Optional, provenance-bearing satellite track prediction for solved images.
 //!
 //! This crate consumes one [`SingleExposure`], an observer location, orbital
-//! elements, and a Seiza WCS solution. Results are predictions only; callers
+//! elements, and the image's sky-to-pixel mapping, such as a Seiza WCS's
+//! `world_to_pixel`. Results are predictions only; callers
 //! must not present them as pixel detections without a separate evidence
 //! matcher.
 
@@ -37,7 +38,6 @@ use satkit::lpephem::sun::{pos_gcrf as sun_position_gcrf, shadowfunc};
 use satkit::omm::OMM;
 use satkit::sgp4::{SGP4Error, SGP4State, sgp4};
 use satkit::{ITRFCoord, Instant, TLE, Vector3};
-use seiza::wcs::Wcs;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -939,9 +939,15 @@ impl SatelliteCatalog {
         }
     }
 
+    /// The satellites that cross a `dimensions`-pixel image during
+    /// `exposure`. `sky_to_pixel` places a sky position, right ascension
+    /// and declination in degrees, on the image: pixel `(x, y)` counted
+    /// from 0, or `None` where the projection has no image point. A plate
+    /// solution such as `seiza::wcs::Wcs` gives it as
+    /// `|ra, dec| wcs.world_to_pixel(ra, dec)`.
     pub fn tracks_in_footprint(
         &self,
-        wcs: &Wcs,
+        sky_to_pixel: impl Fn(f64, f64) -> Option<(f64, f64)>,
         dimensions: (u32, u32),
         exposure: &SingleExposure,
         options: &TrackOptions,
@@ -982,7 +988,7 @@ impl SatelliteCatalog {
                 &coarse_state,
                 &coarse_times,
                 &observer,
-                wcs,
+                &sky_to_pixel,
                 f64::NEG_INFINITY,
             );
             if !coarse_path_may_intersect_image(&coarse_samples, dimensions) {
@@ -1000,7 +1006,7 @@ impl SatelliteCatalog {
                 &fine_state,
                 &fine_times,
                 &observer,
-                wcs,
+                &sky_to_pixel,
                 options.minimum_elevation_deg,
             );
             let clipped_segments = clipped_path(&samples, dimensions);
@@ -1090,7 +1096,7 @@ fn project_samples(
     states: &SGP4State,
     times: &[Instant],
     observer: &ITRFCoord,
-    wcs: &Wcs,
+    sky_to_pixel: &dyn Fn(f64, f64) -> Option<(f64, f64)>,
     minimum_elevation_deg: f64,
 ) -> Vec<TrackSample> {
     times
@@ -1127,7 +1133,7 @@ fn project_samples(
             let sunlight_fraction =
                 shadowfunc(&sun_position_gcrf(time), &satellite_gcrf).clamp(0.0, 1.0);
             let pixel = (elevation_deg >= minimum_elevation_deg)
-                .then(|| wcs.world_to_pixel(ra_deg, dec_deg))
+                .then(|| sky_to_pixel(ra_deg, dec_deg))
                 .flatten()
                 .map(|(x, y)| PixelPoint { x, y });
             Some(TrackSample {
@@ -1280,6 +1286,12 @@ fn tle_cospar_id(tle: &TLE) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seiza::wcs::Wcs;
+
+    /// Sky to pixel through a plate solution.
+    fn on(wcs: &Wcs) -> impl Fn(f64, f64) -> Option<(f64, f64)> + '_ {
+        |ra, dec| wcs.world_to_pixel(ra, dec)
+    }
 
     const ISS_TLE: &str = include_str!("../tests/data/iss-2024.tle");
 
@@ -1426,7 +1438,7 @@ mod tests {
         let seed_wcs =
             Wcs::from_center_scale_rotation((0.0, 0.0), (512.0, 512.0), 3600.0, 0.0, false);
         let sample =
-            project_samples(&state, &[midpoint], &observer.itrf(), &seed_wcs, -90.0).remove(0);
+            project_samples(&state, &[midpoint], &observer.itrf(), &on(&seed_wcs), -90.0).remove(0);
         let wcs = Wcs::from_center_scale_rotation(
             (sample.ra_deg, sample.dec_deg),
             (512.0, 512.0),
@@ -1436,7 +1448,7 @@ mod tests {
         );
         let result = catalog
             .tracks_in_footprint(
-                &wcs,
+                on(&wcs),
                 (1024, 1024),
                 &exposure,
                 &TrackOptions {
@@ -1484,7 +1496,7 @@ mod tests {
         .unwrap();
         let wcs = Wcs::from_center_scale_rotation((0.0, 0.0), (50.0, 50.0), 3600.0, 0.0, false);
         let result = catalog
-            .tracks_in_footprint(&wcs, (100, 100), &exposure, &TrackOptions::default())
+            .tracks_in_footprint(on(&wcs), (100, 100), &exposure, &TrackOptions::default())
             .unwrap();
         assert_eq!(result.elements_considered, 1);
         assert_eq!(result.stale_elements, 1);
@@ -1504,7 +1516,7 @@ mod tests {
         .unwrap();
         let wcs = Wcs::from_center_scale_rotation((0.0, 0.0), (50.0, 50.0), 3600.0, 0.0, false);
         let result = catalog.tracks_in_footprint(
-            &wcs,
+            on(&wcs),
             (100, 100),
             &exposure,
             &TrackOptions {
@@ -1691,7 +1703,13 @@ mod tests {
             &state,
             &[midpoint],
             &exposure.observer.itrf(),
-            &Wcs::from_center_scale_rotation((0.0, 0.0), (1.0, 1.0), 3600.0, 0.0, false),
+            &on(&Wcs::from_center_scale_rotation(
+                (0.0, 0.0),
+                (1.0, 1.0),
+                3600.0,
+                0.0,
+                false,
+            )),
             f64::NEG_INFINITY,
         )
         .remove(0);
@@ -1704,7 +1722,7 @@ mod tests {
         );
         let result = catalog
             .tracks_in_footprint(
-                &wcs,
+                on(&wcs),
                 (1024, 1024),
                 &exposure,
                 &TrackOptions {

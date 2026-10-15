@@ -127,7 +127,8 @@ For each element record:
    parallax;
 3. rotate the relative vector to GCRF and derive RA/Dec;
 4. compute local elevation, range, and sunlight fraction;
-5. project samples through `Wcs::world_to_pixel` and clip segments to the image.
+5. project samples through the caller's sky-to-pixel mapping (`Wcs::world_to_pixel`
+   for a plate solution) and clip segments to the image.
 
 The implementation uses SatKit's offline IAU-76/FK5 approximate ITRF/GCRF
 transform, documented at about one arcsecond, so it needs no Earth-orientation
@@ -154,7 +155,7 @@ an archival image; callers doing controlled research may override the policy.
 The library entry point is:
 
 ```rust,ignore
-catalog.tracks_in_footprint(&wcs, dimensions, &exposure, &TrackOptions::default())
+catalog.tracks_in_footprint(|ra, dec| wcs.world_to_pixel(ra, dec), dimensions, &exposure, &TrackOptions::default())
 ```
 
 Each `SatelliteTrack` contains identity, element epoch, source provenance,

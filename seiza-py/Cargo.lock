@@ -1984,7 +1984,6 @@ dependencies = [
  "fs2",
  "reqwest",
  "satkit",
- "seiza",
  "seiza-download",
  "serde",
  "serde_json",

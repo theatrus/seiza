@@ -1,6 +1,6 @@
 [package]
 name = "seiza-satellites"
-description = "Time- and observer-aware satellite track prediction for Seiza WCS solutions"
+description = "Time- and observer-aware satellite track prediction across a plate-solved image"
 version = "0.21.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -16,7 +16,6 @@ directories.workspace = true
 fs2.workspace = true
 reqwest.workspace = true
 satkit.workspace = true
-seiza.workspace = true
 seiza-download.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -29,6 +28,9 @@ tokio.workspace = true
 serde = []
 
 [dev-dependencies]
+# Plate solutions for the tests only: the library takes any sky-to-pixel
+# mapping, so it need not move with seiza's releases.
+seiza.workspace = true
 serde_json.workspace = true
 tempfile = "3"
 zstd.workspace = true

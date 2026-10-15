@@ -3409,7 +3409,7 @@ fn solve_command(
             request.exposure.provenance
         );
         let result = satellite_catalog.tracks_in_footprint(
-            wcs,
+            |ra, dec| wcs.world_to_pixel(ra, dec),
             dims,
             &request.exposure,
             &TrackOptions {
