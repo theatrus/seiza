@@ -1114,6 +1114,7 @@ fn solve(args: &ParallaxVideoArgs, path: &Path) -> Result<(Wcs, (u32, u32))> {
         max_hypotheses: 400,
         max_coarse_hypotheses: 20_000,
         sip_order: 2,
+        time_limit: None,
         sigma: 4.0,
         ignore_border: 0,
         detection_backend: seiza::DetectBackend::Auto,

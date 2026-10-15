@@ -35,9 +35,14 @@ change the client-facing JSON protocol.
   one `solve`, then closes stdin. A persistent client keeps stdin open and
   sends additional `solve` requests.
 - `shutdown` writes its response and exits without waiting for EOF.
-- Protocol version 1 has no in-band cancellation because requests execute
-  synchronously. To cancel an in-flight solve, terminate the child process and
-  start a new worker for the next request.
+- A `cancel` stops the solve in progress. The worker reads requests on a
+  thread of its own, so it sees a `cancel` while a solve runs; the solve
+  returns error `-32012`, and later requests run as usual. A `cancel` stops
+  only solves that arrived before it, never one that arrives after. Send it
+  as a notification (no `id`); one with an `id` is answered with
+  `{"cancel":true}` after the solve's own response. Workers that predate
+  0.32 answer `cancel` with `-32601`; for them, terminate the child process
+  and start a new worker.
 
 ## Initialize
 
@@ -52,8 +57,11 @@ The response reports server identity, supported solve modes and image inputs,
 and the loaded catalog/index metadata:
 
 ```json
-{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"server":{"name":"seiza","version":"0.8.0"},"client":{"name":"N.I.N.A.","version":"4.x"},"capabilities":{"solveModes":["hinted","blind"],"imageInputs":["image_path"],"maxConcurrentRequests":1},"catalog":{"starCount":154100000,"blindIndexLoaded":true,"blindIndexPatternCount":1234567,"blindIndexMagnitudeLimit":16.0}}}
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"server":{"name":"seiza","version":"0.32.0"},"client":{"name":"N.I.N.A.","version":"4.x"},"capabilities":{"solveModes":["hinted","blind"],"imageInputs":["image_path"],"maxConcurrentRequests":1,"timeLimit":true,"cancel":true},"catalog":{"starCount":154100000,"blindIndexLoaded":true,"blindIndexPatternCount":1234567,"blindIndexMagnitudeLimit":16.0}}}
 ```
+
+`timeLimit` and `cancel` say the worker honours a solve's `timeLimitMs` and
+the `cancel` method; workers that predate them omit both.
 
 Protocol version 1 is currently the only supported version.
 
@@ -89,8 +97,14 @@ The CLI's global `--detection-backend`, `--detection-fallback`, and
 ## Solve result
 
 ```json
-{"jsonrpc":"2.0","id":2,"result":{"schemaVersion":1,"mode":"hinted","image":{"width":6248,"height":4176},"center":{"raDeg":328.4308,"decDeg":47.2731},"pixelScaleArcsecPerPixel":0.3265,"rotationDeg":182.4,"parity":"mirrored","radiusDeg":0.341,"matchedStars":81,"rmsArcsec":0.58,"wcs":{"projection":"TAN","pixelOrigin":1,"crval":[328.4308,47.2731],"crpix":[3124.5,2088.5],"cd":[[-0.00009,0.0],[0.0,0.00009]]},"footprint":[{"raDeg":328.1,"decDeg":47.0},{"raDeg":328.8,"decDeg":47.0},{"raDeg":328.8,"decDeg":47.5},{"raDeg":328.1,"decDeg":47.5}],"timings":{"loadMs":72.0,"detectMs":48.0,"indexMs":0.0,"solveMs":90.0,"totalMs":214.0}}}
+{"jsonrpc":"2.0","id":2,"result":{"schemaVersion":1,"mode":"hinted","image":{"width":6248,"height":4176},"center":{"raDeg":328.4308,"decDeg":47.2731},"pixelScaleArcsecPerPixel":0.3265,"rotationDeg":182.4,"parity":"mirrored","radiusDeg":0.341,"matchedStars":81,"rmsArcsec":0.58,"falseMatchProbability":1.2e-180,"wcs":{"projection":"TAN","pixelOrigin":1,"crval":[328.4308,47.2731],"crpix":[3124.5,2088.5],"cd":[[-0.00009,0.0],[0.0,0.00009]]},"footprint":[{"raDeg":328.1,"decDeg":47.0},{"raDeg":328.8,"decDeg":47.0},{"raDeg":328.8,"decDeg":47.5},{"raDeg":328.1,"decDeg":47.5}],"timings":{"loadMs":72.0,"detectMs":48.0,"indexMs":0.0,"solveMs":90.0,"totalMs":214.0}}}
 ```
+
+`falseMatchProbability` is the chance that a wrong field would match as
+well as this one, counting every candidate the search tried. A true field
+scores far below one in a billion; the worker refuses a blind solve above
+that, and a hinted solve above one in a thousand. Remote results omit it when
+the server does not report it.
 
 The WCS uses the FITS TAN/CD convention. `crpix` is one-based as indicated by
 `pixelOrigin`; this differs from Seiza's internal zero-based pixel centers and
@@ -151,6 +165,24 @@ Shutdown:
 {"jsonrpc":"2.0","id":5,"method":"shutdown"}
 ```
 
+Cancel, as a notification:
+
+```json
+{"jsonrpc":"2.0","method":"cancel"}
+```
+
+## Time limits
+
+A solve's `params` may carry `timeLimitMs`, a positive number of
+milliseconds counted from when the worker starts the request. Loading and
+detection count against it but are not interrupted; the solve itself checks
+it between search windows and hypotheses, and returns error `-32011` when it
+runs out. A remote solve stops waiting for the server at the limit.
+
+```json
+{"jsonrpc":"2.0","id":6,"method":"solve","params":{"imagePath":"image.fits","mode":"blind","timeLimitMs":30000}}
+```
+
 ## Errors
 
 Errors use the JSON-RPC error shape and echo the request ID when it was
@@ -164,6 +196,8 @@ available.
 | `-32602` | Invalid parameters or unsupported Seiza protocol version |
 | `-32002` | `solve` sent before `initialize` |
 | `-32010` | Image loading, detection, or plate solving failed |
+| `-32011` | The solve reached its `timeLimitMs` |
+| `-32012` | A `cancel` arrived while the solve ran |
 
 Malformed requests do not stop the worker. A client may continue with the next
 line or terminate and restart the child process.

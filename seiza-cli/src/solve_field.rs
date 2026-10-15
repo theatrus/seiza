@@ -35,6 +35,8 @@ struct SolveFieldArgs {
     radius_deg: Option<f64>,
     /// `-t`: SIP polynomial order; `-T` resets to linear
     sip_order: u8,
+    /// `-l`: give up after this many seconds
+    time_limit: Option<std::time::Duration>,
     /// Positional argument: the star table
     table: Option<PathBuf>,
     version: bool,
@@ -262,11 +264,16 @@ fn parse_args(raw: &[String]) -> SolveFieldArgs {
                     .unwrap_or(0)
             }
             "-T" | "--no-tweak" => args.sip_order = 0,
+            "-l" | "--cpulimit" => {
+                args.time_limit = parse(iter.next())
+                    .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+                    .and_then(|seconds| std::time::Duration::try_from_secs_f64(seconds).ok())
+            }
             // Flags taking a value that seiza accepts and ignores: output
             // suppression (Siril passes "none" for all of them), sort
-            // column (always FLUX), units, time limit, depth, and config.
-            "-N" | "-R" | "-M" | "-B" | "-U" | "-S" | "-s" | "-u" | "-l" | "-d" | "-o" | "-D"
-            | "-b" | "--config" | "--depth" | "-E" | "-P" | "-i" | "-w" | "-e" => {
+            // column (always FLUX), units, depth, and config.
+            "-N" | "-R" | "-M" | "-B" | "-U" | "-S" | "-s" | "-u" | "-d" | "-o" | "-D" | "-b"
+            | "--config" | "--depth" | "-E" | "-P" | "-i" | "-w" | "-e" => {
                 iter.next();
             }
             // Valueless flags: plots, overwrite, crpix conventions, verbosity
@@ -282,20 +289,31 @@ fn parse_args(raw: &[String]) -> SolveFieldArgs {
     args
 }
 
-fn stop_requested(args: &SolveFieldArgs) -> bool {
-    args.stop_file
-        .as_deref()
-        .is_some_and(|stop_file| stop_file.exists())
+/// The `-l` time limit, counted from now, and the `-C` stop file, which
+/// the solver checks as it goes.
+fn solve_limits(args: &SolveFieldArgs) -> seiza::SolveLimits {
+    let limits = args
+        .time_limit
+        .map(seiza::SolveLimits::within)
+        .unwrap_or_default();
+    match args.stop_file.clone() {
+        Some(stop_file) => limits.with_cancel(seiza::CancelSignal::new(move || stop_file.exists())),
+        None => limits,
+    }
+}
+
+/// Whether a solve error means the solve was stopped rather than failed.
+fn stopped(error: &seiza::Error) -> bool {
+    matches!(error, seiza::Error::TimedOut | seiza::Error::Cancelled)
 }
 
 fn solve(args: &SolveFieldArgs, table: &Path) -> Result<(seiza::solve::Solution, (u32, u32))> {
+    let limits = solve_limits(args);
     let (table_stars, dimensions) = read_xyls(table)?;
     if table_stars.len() < 4 {
         anyhow::bail!("only {} stars in {}", table_stars.len(), table.display());
     }
-    if stop_requested(args) {
-        anyhow::bail!("cancelled before solving");
-    }
+    limits.check()?;
     // The table's flux column may not rank stars photometrically (Siril
     // writes PSF amplitudes, which drift far from photometric order on
     // stretched data — see docs/design/rank-robust-matching.md). When the
@@ -333,11 +351,10 @@ fn solve(args: &SolveFieldArgs, table: &Path) -> Result<(seiza::solve::Solution,
             scale_tolerance: ((high - low) / (high + low)).max(0.05),
             sip_order: args.sip_order,
         };
-        if let Ok(solution) = seiza::solve::solve(&stars, &catalog, &hint, dimensions) {
-            return Ok((solution, dimensions));
-        }
-        if stop_requested(args) {
-            anyhow::bail!("cancelled");
+        match seiza::solve::solve_with_limits(&stars, &catalog, &hint, dimensions, &limits) {
+            Ok(solution) => return Ok((solution, dimensions)),
+            Err(error) if stopped(&error) => return Err(error.into()),
+            Err(_) => {}
         }
         // Stale position hints fall back to a blind search while preserving
         // the explicit scale bounds requested by this solve-field protocol.
@@ -360,10 +377,7 @@ fn solve(args: &SolveFieldArgs, table: &Path) -> Result<(seiza::solve::Solution,
     } else {
         seiza::blind::BlindIndex::build(&catalog, &params)
     };
-    if stop_requested(args) {
-        anyhow::bail!("cancelled");
-    }
-    seiza::blind::solve_blind(&stars, &catalog, &index, &params, dimensions)
+    seiza::blind::solve_blind_with_limits(&stars, &catalog, &index, &params, dimensions, &limits)
         .map(|solution| (solution, dimensions))
         .map_err(anyhow::Error::from)
 }
@@ -843,6 +857,7 @@ mod tests {
         assert!(looks_like_solve_field(&raw));
         let args = parse_args(&raw);
         assert_eq!(args.stop_file.as_deref(), Some(Path::new("stop")));
+        assert_eq!(args.time_limit, Some(std::time::Duration::from_secs(60)));
         assert_eq!(args.scale_low, Some(1.827));
         assert_eq!(args.scale_high, Some(2.233));
         assert_eq!(args.ra, Some(150.5));

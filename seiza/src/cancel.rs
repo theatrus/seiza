@@ -2,14 +2,17 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Cooperative cancellation for builds that run over many input frames.
+/// Cooperative cancellation for long work: plate solves, and stacking builds
+/// that run over many input frames.
 ///
-/// A build that accepts a signal checks it between inputs and returns
-/// [`crate::Error::Cancelled`] once the caller asks it to stop. Partial work is
-/// dropped: nothing is written and no result is returned.
+/// Work that accepts a signal checks it at intervals and returns its crate's
+/// `Cancelled` error once the caller asks it to stop, such as
+/// [`crate::Error::Cancelled`]. Partial work is dropped: nothing is written
+/// and no result is returned.
 ///
-/// The check runs between frames, so cancellation takes effect within one
-/// frame's work rather than instantly.
+/// The check runs between steps (frames of a build, windows and hypotheses
+/// of a solve), so cancellation takes effect within one step's work rather
+/// than instantly.
 #[derive(Clone)]
 pub struct CancelSignal(Arc<dyn Fn() -> bool + Send + Sync>);
 

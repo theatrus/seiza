@@ -20,6 +20,7 @@
 //! valid solutions.
 
 pub mod blind;
+mod cancel;
 pub mod catalog;
 pub mod constellations;
 pub mod data_paths;
@@ -33,7 +34,9 @@ pub mod solve;
 pub mod star_ids;
 pub mod wcs;
 
+pub use cancel::CancelSignal;
 pub use detect::{DetectBackend, DetectConfig, DetectedStar, detect_stars, detect_stars_luma_f32};
+pub use solve::SolveLimits;
 pub use wcs::{FitsCardValue, Sip, Wcs};
 
 /// Host-neutral calibration response kernels.
@@ -47,6 +50,7 @@ pub use seiza_calibration as calibration;
 pub use seiza_download as downloads;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     #[error("image error: {0}")]
     Image(#[from] image::ImageError),
@@ -54,4 +58,11 @@ pub enum Error {
     Catalog(String),
     #[error("solve failed: {0}")]
     Solve(String),
+    /// A solve reached the deadline in its [`SolveLimits`] before it found
+    /// a solution.
+    #[error("solve stopped at its time limit")]
+    TimedOut,
+    /// The caller asked a solve to stop through a [`CancelSignal`].
+    #[error("cancelled by the caller")]
+    Cancelled,
 }

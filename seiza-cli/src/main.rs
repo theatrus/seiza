@@ -6,9 +6,9 @@ use seiza::data_paths;
 use seiza::minor_bodies::MinorBodyCatalog;
 use seiza::objects::{ObjectCatalog, ObjectKind, ObjectQuery, ObjectSort, SkyRegion};
 use seiza::raster::{PhotoMetadata, ScaleSearch};
-use seiza::solve::{SolveHint, solve};
+use seiza::solve::SolveHint;
 use seiza::star_ids::{StarIdentifierCatalog, StarLookupMatch};
-use seiza::{DetectBackend, DetectConfig, DetectedStar};
+use seiza::{DetectBackend, DetectConfig, DetectedStar, SolveLimits};
 use seiza_image_io::Format as ImageFormat;
 use seiza_satellites::{
     CacheState, CelesTrakSource, ExposureProvenance, ObserverLocation, OrbitalCatalogSource,
@@ -422,6 +422,10 @@ enum Command {
         /// 2-5 = fit when enough matched stars support it)
         #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=5))]
         sip_order: u8,
+        /// Give up solving after this many seconds (detection not
+        /// counted)
+        #[arg(long, value_parser = parse_time_limit)]
+        time_limit: Option<std::time::Duration>,
         /// Detection threshold in noise sigmas
         #[arg(long, default_value_t = 4.0)]
         sigma: f32,
@@ -558,6 +562,10 @@ enum Command {
         /// support it)
         #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=5))]
         sip_order: u8,
+        /// Give up solving after this many seconds (detection not
+        /// counted)
+        #[arg(long, value_parser = parse_time_limit)]
+        time_limit: Option<std::time::Duration>,
         /// Detection threshold in noise sigmas
         #[arg(long, default_value_t = 4.0)]
         sigma: f32,
@@ -1287,6 +1295,7 @@ fn main() -> Result<()> {
             scale,
             scale_tolerance,
             sip_order,
+            time_limit,
             sigma,
             ignore_border,
             annotate,
@@ -1364,6 +1373,7 @@ fn main() -> Result<()> {
                 scale,
                 scale_tolerance,
                 sip_order,
+                time_limit,
                 sigma,
                 ignore_border,
                 detection_backend,
@@ -1495,6 +1505,7 @@ fn main() -> Result<()> {
             max_hypotheses,
             max_coarse_hypotheses,
             sip_order,
+            time_limit,
             sigma,
             ignore_border,
             annotate,
@@ -1516,6 +1527,7 @@ fn main() -> Result<()> {
                     max_hypotheses,
                     max_coarse_hypotheses,
                     sip_order,
+                    time_limit,
                     sigma,
                     ignore_border,
                     detection_backend,
@@ -2443,6 +2455,17 @@ fn cone(data: &std::path::Path, ra: f64, dec: f64, radius: f64, limit: usize) ->
     Ok(())
 }
 
+/// A time limit in seconds: positive and finite.
+fn parse_time_limit(value: &str) -> std::result::Result<std::time::Duration, String> {
+    let seconds: f64 = value
+        .parse()
+        .map_err(|_| format!("{value:?} is not a number of seconds"))?;
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return Err("a time limit must be a positive number of seconds".into());
+    }
+    std::time::Duration::try_from_secs_f64(seconds).map_err(|error| error.to_string())
+}
+
 fn parse_sky_coordinate(value: &str) -> std::result::Result<SkyCoordinate, String> {
     let (ra, dec) = value
         .split_once(',')
@@ -3204,6 +3227,7 @@ fn solve_command(
     scale: f64,
     scale_tolerance: f64,
     sip_order: u8,
+    time_limit: Option<std::time::Duration>,
     sigma: f32,
     ignore_border: u32,
     detection_backend: DetectBackend,
@@ -3243,7 +3267,9 @@ fn solve_command(
         sip_order,
     };
     let started = std::time::Instant::now();
-    let solution = invocation.solve(|stars| solve(stars, &catalog, &hint, dims))?;
+    let limits = time_limit.map(SolveLimits::within).unwrap_or_default();
+    let solution = invocation
+        .solve(|stars| seiza::solve::solve_with_limits(stars, &catalog, &hint, dims, &limits))?;
     let elapsed = started.elapsed();
 
     let wcs = &solution.wcs;
@@ -3270,6 +3296,10 @@ fn solve_command(
     println!(
         "  quality    : {} stars matched, RMS {:.3}\"",
         solution.matched_stars, solution.rms_arcsec
+    );
+    println!(
+        "  by chance  : {:.1e} (false-match probability)",
+        solution.false_match_probability
     );
     if let Some(sip) = &wcs.sip {
         println!(
@@ -3898,7 +3928,7 @@ fn blind_solve_invocation(
     can_retry_f32: bool,
     dims: (u32, u32),
 ) -> Result<(seiza::solve::Solution, std::time::Duration)> {
-    use seiza::blind::{BlindIndex, BlindParams, solve_blind};
+    use seiza::blind::{BlindIndex, BlindParams, solve_blind_with_limits};
 
     let mut params = BlindParams {
         min_scale_arcsec_px: search.ranges[0].0,
@@ -3936,6 +3966,10 @@ fn blind_solve_invocation(
     };
 
     let started = std::time::Instant::now();
+    let limits = options
+        .time_limit
+        .map(SolveLimits::within)
+        .unwrap_or_default();
     let solution = invocation.solve_with_pass(|stars, pass| {
         let mut attempt_params = blind_params_for_detection_pass(
             &params,
@@ -3946,7 +3980,7 @@ fn blind_solve_invocation(
         solve_over_ranges(&search.ranges, |(min, max)| {
             attempt_params.min_scale_arcsec_px = min;
             attempt_params.max_scale_arcsec_px = max;
-            solve_blind(stars, catalog, &index, &attempt_params, dims)
+            solve_blind_with_limits(stars, catalog, &index, &attempt_params, dims, &limits)
         })
     })?;
     Ok((solution, started.elapsed()))
@@ -3960,6 +3994,7 @@ struct SolveBlindOptions<'a> {
     max_hypotheses: usize,
     max_coarse_hypotheses: usize,
     sip_order: u8,
+    time_limit: Option<std::time::Duration>,
     sigma: f32,
     ignore_border: u32,
     detection_backend: DetectBackend,
@@ -4118,6 +4153,10 @@ fn solve_blind_command(
     println!(
         "  quality    : {} stars matched, RMS {:.3}\"",
         solution.matched_stars, solution.rms_arcsec
+    );
+    println!(
+        "  by chance  : {:.1e} (false-match probability)",
+        solution.false_match_probability
     );
     if let Some(path) = options.wcs_path {
         solve_field::write_wcs_file(path, wcs)?;

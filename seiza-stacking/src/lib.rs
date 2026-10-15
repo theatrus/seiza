@@ -42,7 +42,6 @@
 
 mod batch;
 mod calibration;
-mod cancel;
 mod color;
 mod color_calibration;
 mod context;
@@ -74,7 +73,6 @@ pub use batch::{
     integrate_registered_frames,
 };
 pub use calibration::{CalibrationMasters, MasterDark, MasterFlat};
-pub use cancel::CancelSignal;
 pub use color::{
     ColorComposition, ColorNormalization, ColorOptions, ColorTransfer, ForaxxOptions,
     NarrowbandMatrix, NarrowbandMix, NarrowbandPalette, combine_lrgb, combine_narrowband,
@@ -125,6 +123,8 @@ pub use residual_flat::{
     RESIDUAL_FLAT_ALGORITHM_VERSION, ResidualFlatBuild, ResidualFlatDiagnostics,
     ResidualFlatOptions, ResidualFlatPatch, build_residual_flat_patch,
 };
+/// Defined in `seiza`, so a solve and a stack take the same signal.
+pub use seiza::CancelSignal;
 pub use snr::{SIGNAL_FRACTION, SnrSample, checkpoint_depths, frame_noise, measure_depth};
 pub use stack::{
     CfaIntegration, DeltaSigmaOptions, FrameAcceptanceCriteria, FrameDiagnostics, FrameDisposition,

@@ -7,14 +7,16 @@
 
 use anyhow::{Context, Result};
 use image::ImageEncoder;
-use seiza::blind::{BlindIndex, BlindParams, solve_blind};
+use seiza::blind::{BlindIndex, BlindParams, solve_blind_with_limits};
 use seiza::catalog::TileCatalog;
-use seiza::solve::{Solution, SolveHint, solve};
-use seiza::{DetectBackend, DetectConfig, Wcs};
+use seiza::solve::{Solution, SolveHint, solve_with_limits};
+use seiza::{CancelSignal, DetectBackend, DetectConfig, SolveLimits, Wcs};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use ureq::unversioned::multipart::{Form, Part};
 
@@ -31,6 +33,10 @@ const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 const NOT_INITIALIZED: i64 = -32002;
 const SOLVE_FAILED: i64 = -32010;
+/// The solve reached its `timeLimitMs`.
+const SOLVE_TIMED_OUT: i64 = -32011;
+/// A `cancel` arrived while the solve ran.
+const SOLVE_CANCELLED: i64 = -32012;
 
 /// Run a local or remote-backed worker on the process standard streams.
 pub(crate) struct WorkerOptions<'a> {
@@ -72,10 +78,10 @@ pub(crate) fn run(options: WorkerOptions<'_>) -> Result<()> {
             anyhow::bail!("provide either --data for local solving or --server for remote solving")
         }
     };
-    let stdin = io::stdin();
     let stdout = io::stdout();
+    // The reader thread owns stdin; its lock cannot cross threads.
     run_loop(
-        BufReader::new(stdin.lock()),
+        BufReader::new(io::stdin()),
         BufWriter::new(stdout.lock()),
         service,
     )
@@ -196,17 +202,72 @@ struct HandledResponse {
 }
 
 trait RpcService {
-    fn handle(&mut self, request: RpcRequest) -> HandledResponse;
+    fn handle(&mut self, request: RpcRequest, arrival: &Arrival) -> HandledResponse;
 }
 
-fn run_loop<R, W, S>(mut reader: R, mut writer: W, mut service: S) -> Result<()>
+/// When a request arrived, for telling which solves a `cancel` stops.
+///
+/// A reader thread numbers every request line as it arrives, so it sees a
+/// `cancel` while a solve is still running, and records the latest one's
+/// number. A `cancel` stops every solve that arrived before it, and none
+/// that arrives after.
+struct Arrival {
+    number: u64,
+    cancelled_through: Arc<AtomicU64>,
+}
+
+impl Arrival {
+    /// A signal that a `cancel` has arrived since this request.
+    fn cancel_signal(&self) -> CancelSignal {
+        let (number, cancelled_through) = (self.number, Arc::clone(&self.cancelled_through));
+        CancelSignal::new(move || cancelled_through.load(Ordering::SeqCst) > number)
+    }
+}
+
+/// Whether a request line asks to cancel, read without judging the rest of
+/// it: the main loop answers malformed lines.
+fn is_cancel(line: &[u8]) -> bool {
+    #[derive(Deserialize)]
+    struct Method {
+        method: String,
+    }
+    serde_json::from_slice::<Method>(line).is_ok_and(|request| request.method == "cancel")
+}
+
+fn run_loop<R, W, S>(reader: R, mut writer: W, mut service: S) -> Result<()>
 where
-    R: BufRead,
+    R: BufRead + Send + 'static,
     W: Write,
     S: RpcService,
 {
-    loop {
-        let (handled, respond) = match read_request_line(&mut reader)? {
+    let cancelled_through = Arc::new(AtomicU64::new(0));
+    let (sender, lines) = std::sync::mpsc::channel();
+    {
+        let cancelled_through = Arc::clone(&cancelled_through);
+        // Detached rather than scoped: after `shutdown` the worker returns
+        // while this thread may still be blocked reading stdin.
+        std::thread::spawn(move || {
+            let mut reader = reader;
+            for number in 1u64.. {
+                let line = read_request_line(&mut reader);
+                if let Ok(RequestLine::Line(bytes)) = &line
+                    && is_cancel(bytes)
+                {
+                    cancelled_through.fetch_max(number, Ordering::SeqCst);
+                }
+                let more = matches!(line, Ok(RequestLine::Line(_) | RequestLine::TooLong));
+                if sender.send((number, line)).is_err() || !more {
+                    break;
+                }
+            }
+        });
+    }
+    for (number, line) in lines {
+        let arrival = Arrival {
+            number,
+            cancelled_through: Arc::clone(&cancelled_through),
+        };
+        let (handled, respond) = match line? {
             RequestLine::Eof => break,
             RequestLine::TooLong => (
                 HandledResponse {
@@ -257,7 +318,7 @@ where
                     ),
                     Ok(request) => {
                         let respond = request.id.is_present();
-                        (service.handle(request), respond)
+                        (service.handle(request, &arrival), respond)
                     }
                 },
             },
@@ -428,7 +489,9 @@ impl WorkerService {
                     "solveModes": ["hinted", "blind"],
                     "imageInputs": ["image_path"],
                     "remoteImageEncoding": backend.remote_image_encoding,
-                    "maxConcurrentRequests": 1
+                    "maxConcurrentRequests": 1,
+                    "timeLimit": true,
+                    "cancel": true
                 },
                 "catalog": backend.catalog,
                 "backend": backend.kind
@@ -436,7 +499,7 @@ impl WorkerService {
         )
     }
 
-    fn solve(&mut self, id: Value, params: Value) -> RpcResponse {
+    fn solve(&mut self, id: Value, params: Value, arrival: &Arrival) -> RpcResponse {
         if !self.initialized {
             return RpcResponse::error(
                 id,
@@ -458,9 +521,14 @@ impl WorkerService {
             return RpcResponse::error(id, INVALID_PARAMS, error);
         }
 
+        let limits = params
+            .time_limit_ms
+            .map(|milliseconds| SolveLimits::within(Duration::from_millis(milliseconds)))
+            .unwrap_or_default()
+            .with_cancel(arrival.cancel_signal());
         let result = match &mut self.backend {
-            WorkerBackend::Local(local) => local.solve_path(&params),
-            WorkerBackend::Remote(remote) => remote.solve_path(&params),
+            WorkerBackend::Local(local) => local.solve_path(&params, &limits),
+            WorkerBackend::Remote(remote) => remote.solve_path(&params, &limits),
         };
         match result {
             Ok(result) => match serde_json::to_value(result) {
@@ -471,7 +539,17 @@ impl WorkerService {
                     format!("failed to serialize solution: {error}"),
                 ),
             },
-            Err(error) => RpcResponse::error(id, SOLVE_FAILED, format!("{error:#}")),
+            Err(error) => {
+                let code = match error
+                    .chain()
+                    .find_map(|cause| cause.downcast_ref::<seiza::Error>())
+                {
+                    Some(seiza::Error::TimedOut) => SOLVE_TIMED_OUT,
+                    Some(seiza::Error::Cancelled) => SOLVE_CANCELLED,
+                    _ => SOLVE_FAILED,
+                };
+                RpcResponse::error(id, code, format!("{error:#}"))
+            }
         }
     }
 }
@@ -524,7 +602,11 @@ impl LocalSolver {
         }
     }
 
-    fn solve_path(&mut self, params: &SolveParams) -> Result<WorkerSolveResult> {
+    fn solve_path(
+        &mut self,
+        params: &SolveParams,
+        limits: &SolveLimits,
+    ) -> Result<WorkerSolveResult> {
         let total_started = Instant::now();
 
         let load_started = Instant::now();
@@ -561,7 +643,9 @@ impl LocalSolver {
                     scale_tolerance: hint.scale_tolerance,
                     sip_order: hint.sip_order,
                 };
-                invocation.solve(|stars| solve(stars, &self.catalog, &hint, dimensions))?
+                invocation.solve(|stars| {
+                    solve_with_limits(stars, &self.catalog, &hint, dimensions, limits)
+                })?
             }
             SolveMode::Blind => {
                 let blind = params.blind.clone().unwrap_or_default();
@@ -591,7 +675,14 @@ impl LocalSolver {
                         self.detection_fallback_hypotheses,
                         pass,
                     );
-                    solve_blind(stars, &self.catalog, index, &attempt_params, dimensions)
+                    solve_blind_with_limits(
+                        stars,
+                        &self.catalog,
+                        index,
+                        &attempt_params,
+                        dimensions,
+                        limits,
+                    )
                 })?
             }
         };
@@ -721,7 +812,7 @@ impl RemoteSolver {
         })
     }
 
-    fn solve_path(&self, params: &SolveParams) -> Result<WorkerSolveResult> {
+    fn solve_path(&self, params: &SolveParams, limits: &SolveLimits) -> Result<WorkerSolveResult> {
         let total_started = Instant::now();
         let load_started = Instant::now();
         let source = match self.upload_format {
@@ -787,6 +878,8 @@ impl RemoteSolver {
         loop {
             match job.status {
                 ServerJobStatus::Queued | ServerJobStatus::Solving => {
+                    // The server's job runs on; this worker stops waiting.
+                    limits.check()?;
                     let remaining = self.remaining(transport_started)?;
                     std::thread::sleep(SERVER_POLL_INTERVAL.min(remaining));
                     let mut response = self.get(
@@ -965,6 +1058,9 @@ struct ServerSolution {
     pixel_scale_arcsec_per_pixel: f64,
     matched_stars: usize,
     rms_arcsec: f64,
+    /// Absent from servers that predate it.
+    #[serde(default)]
+    false_match_probability: Option<f64>,
     image_width: u32,
     image_height: u32,
     wcs: ServerWcs,
@@ -981,6 +1077,8 @@ impl ServerSolution {
             },
             matched_stars: self.matched_stars,
             rms_arcsec: self.rms_arcsec,
+            // Unknown, and reported as absent, when the server sends none.
+            false_match_probability: self.false_match_probability.unwrap_or(f64::NAN),
         };
         let mut result = solution_result(
             mode,
@@ -1059,7 +1157,7 @@ fn encode_png(image: &image::GrayImage) -> Result<Vec<u8>> {
 }
 
 impl RpcService for WorkerService {
-    fn handle(&mut self, request: RpcRequest) -> HandledResponse {
+    fn handle(&mut self, request: RpcRequest, arrival: &Arrival) -> HandledResponse {
         let id = request.id.into_value();
         if request.jsonrpc != JSON_RPC_VERSION {
             return HandledResponse {
@@ -1078,7 +1176,13 @@ impl RpcService for WorkerService {
                 shutdown: false,
             },
             "solve" => HandledResponse {
-                response: self.solve(id, request.params),
+                response: self.solve(id, request.params, arrival),
+                shutdown: false,
+            },
+            // The reader thread already stopped any solve this cancels; by
+            // the time it is answered, that solve has returned.
+            "cancel" => HandledResponse {
+                response: RpcResponse::success(id, json!({ "cancel": true })),
                 shutdown: false,
             },
             "ping" => HandledResponse {
@@ -1122,12 +1226,20 @@ struct SolveParams {
     blind: Option<BlindSolveParams>,
     #[serde(default)]
     detection: DetectionParams,
+    /// Give up after this many milliseconds, counted from when the worker
+    /// starts the request. Loading and detection count but are not
+    /// interrupted.
+    #[serde(default)]
+    time_limit_ms: Option<u64>,
 }
 
 impl SolveParams {
     fn validate(&self) -> std::result::Result<(), String> {
         if self.image_path.as_os_str().is_empty() {
             return Err("imagePath must not be empty".to_string());
+        }
+        if self.time_limit_ms == Some(0) {
+            return Err("timeLimitMs must be greater than zero".to_string());
         }
         self.detection.validate()?;
         match self.mode {
@@ -1308,6 +1420,10 @@ struct WorkerSolveResult {
     radius_deg: f64,
     matched_stars: usize,
     rms_arcsec: f64,
+    /// The chance a wrong field would match this well; absent when a
+    /// remote server did not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    false_match_probability: Option<f64>,
     wcs: WorkerWcs,
     footprint: Vec<SkyCoordinate>,
     timings: SolveTimings,
@@ -1433,6 +1549,8 @@ fn solution_result(
         radius_deg,
         matched_stars: solution.matched_stars,
         rms_arcsec: solution.rms_arcsec,
+        false_match_probability: Some(solution.false_match_probability)
+            .filter(|probability| probability.is_finite()),
         wcs: WorkerWcs {
             projection: if wcs.sip.is_some() {
                 "TAN-SIP".to_string()
@@ -1489,7 +1607,7 @@ mod tests {
     }
 
     impl RpcService for TestService {
-        fn handle(&mut self, request: RpcRequest) -> HandledResponse {
+        fn handle(&mut self, request: RpcRequest, _arrival: &Arrival) -> HandledResponse {
             self.calls += 1;
             let shutdown = request.method == "shutdown";
             HandledResponse {
@@ -1500,6 +1618,55 @@ mod tests {
                 shutdown,
             }
         }
+    }
+
+    /// Solves until a `cancel` arrives after them, or a short wait passes.
+    struct WaitingService;
+
+    impl RpcService for WaitingService {
+        fn handle(&mut self, request: RpcRequest, arrival: &Arrival) -> HandledResponse {
+            let mut cancelled = false;
+            if request.method == "solve" {
+                let signal = arrival.cancel_signal();
+                let started = Instant::now();
+                while !signal.is_cancelled() && started.elapsed() < Duration::from_millis(300) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                cancelled = signal.is_cancelled();
+            }
+            HandledResponse {
+                response: RpcResponse::success(
+                    request.id.into_value(),
+                    json!({ "method": request.method, "cancelled": cancelled }),
+                ),
+                shutdown: false,
+            }
+        }
+    }
+
+    #[test]
+    fn a_cancel_stops_the_solves_that_arrived_before_it() {
+        let input = concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"cancel\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"solve\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"method\":\"cancel\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"solve\"}\n"
+        );
+        let mut output = Vec::new();
+        run_loop(Cursor::new(input.as_bytes()), &mut output, WaitingService).unwrap();
+        let responses: Vec<Value> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        // The notification is not answered.
+        assert_eq!(responses.len(), 3, "{responses:?}");
+        // The first cancel came before any solve; the second stops solve 2,
+        // which was running when it arrived, and not solve 3, after it.
+        assert_eq!(responses[1]["id"], 2);
+        assert_eq!(responses[1]["result"]["cancelled"], true);
+        assert_eq!(responses[2]["id"], 3);
+        assert_eq!(responses[2]["result"]["cancelled"], false);
     }
 
     #[test]
@@ -1716,6 +1883,7 @@ mod tests {
             },
             matched_stars: 42,
             rms_arcsec: 0.5,
+            false_match_probability: 1e-30,
         };
         let result = solution_result(
             SolveMode::Hinted,
@@ -1752,6 +1920,7 @@ mod tests {
             }),
             blind: None,
             detection: DetectionParams::default(),
+            time_limit_ms: None,
         };
 
         let png = encode_png(&image).unwrap();

@@ -108,6 +108,22 @@ solution = seiza.solve_blind(stars, catalog, index, width, height,
                              min_scale_arcsec_px=0.5, max_scale_arcsec_px=15.0)
 ```
 
+A field that will not solve can search for a minute or more. Both `solve` and
+`solve_blind` take `time_limit=` in seconds, which raises `TimeoutError`, and
+`cancel=`, a callable that returns true to stop (asked about every 50 ms),
+which raises `SolveError`. Ctrl-C stops a solve either way, and an exception
+from `cancel` reaches you as itself:
+
+```python
+solution = seiza.solve_blind(stars, catalog, index, width, height,
+                             time_limit=30.0, cancel=stop_requested)
+```
+
+`solution.false_match_probability` is the chance that a wrong field would
+match as well, counting every candidate the search tried. A true field scores
+far below one in a billion; a blind solve above that is refused, and a hinted
+one above one in a thousand.
+
 For faint fields, the optional `stars-deep-gaia20.bin` catalog reaches Gaia
 G≤20 (about 9 GB). It is intentionally not included in `fetch_catalogs("all")`,
 so request it explicitly with the same G≤16 blind index:

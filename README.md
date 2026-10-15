@@ -676,6 +676,14 @@ seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-
   Ubuntu debs on GitHub releases, and an integration suite that solves real
   hosted camera frames against known-good solutions on every PR.
 
+Every solution reports its false-match probability: the chance that a wrong
+field would match as well, counting every candidate the search tried. True
+fields score far below one in a billion; blind solving refuses fields above
+that, which stops the chance alignments a fixed match count let through. Both
+solvers take a time limit (`--time-limit`, solve-field's `-l`, the worker's
+`timeLimitMs`, and `time_limit=` in Python) and can be cancelled from the C
+ABI, Python and the worker.
+
 Both solvers can fit SIP distortion polynomials (orders 2-5, forward and
 inverse) on the accepted solution with `--sip-order`; the linear solution is
 kept whenever the polynomial does not improve the residual beyond what its
