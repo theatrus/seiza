@@ -456,7 +456,14 @@ one `--stop` a line, each target's titled with its name, and a `focus
 X,Y` line for the distance focus, and stops; remove, move or change lines,
 then render it with `--tour-file FILE`. `--seconds`, `--fps` and `--size` set the
 video (`--size` takes `720p`, `1080p`, the default, `1440p` or `4k`, any of
-them with `-portrait` for vertical video, or `WIDTHxHEIGHT`), and `--quality high` draws each frame at twice the size and averages it
+them with `-portrait` for vertical video or with `-image` for the image's own
+shape, so `4k-image` films a 4:3 image at 3840x2880, all of it; or
+`WIDTHxHEIGHT`). When the image and the frame differ in shape, the widest
+view fills the frame and cuts the ends of the image's longer side;
+`--framing fit` shows all of it instead, with black beside it until the
+camera flies in far enough to fill the frame. `--crop X,Y,WIDTH,HEIGHT` films part of the
+image; every other image point, such as `--focus`, the stops and a planned
+tour's, counts in the cropped image. `--quality high` draws each frame at twice the size and averages it
 down, blending levels of detail so fine detail neither shimmers nor steps in
 sharpness as the camera moves, for about four times the rendering time. A deep image holds so many faint stars that, each moving on its own,
 they crowd the view: `--max-stars N` lets only the N brightest fly, and

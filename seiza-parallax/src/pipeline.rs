@@ -15,7 +15,7 @@ use crate::lift::Extent;
 use crate::overlay::{self, Corner, CustomLabel, Decor, Mark, Overlay, Placed};
 use crate::picture::{Artwork, Picture};
 use crate::plane::{DepthPlane, Region};
-use crate::render::{Easing, Quality, Shot, Start, Stop};
+use crate::render::{Easing, Framing, Quality, Shot, Start, Stop};
 use crate::scene::{CutOptions, Scene, SmallStars, Star};
 use crate::tour::{self, AutoTour, PlannedStop};
 use crate::{FrameSink, LightImage, VideoSettings};
@@ -346,6 +346,12 @@ pub struct SceneOptions {
     /// Distances to use for catalogued objects in place of the catalogue's:
     /// for the nebula's distance and the automatic planes.
     pub distance_overrides: Vec<DistanceOverride>,
+    /// The part of the image to film, image pixels: left, top, width,
+    /// height. The starless and stars images, the plate solution, and any
+    /// plane masks and dust map (at their own sizes) are cut to it before
+    /// anything else, so every image point the other options give, such as
+    /// focus points and tour stops, counts in the cropped image.
+    pub crop: Option<(usize, usize, usize, usize)>,
 }
 
 impl Default for SceneOptions {
@@ -369,6 +375,7 @@ impl Default for SceneOptions {
             planes: Vec::new(),
             auto_planes: false,
             distance_overrides: Vec::new(),
+            crop: None,
         }
     }
 }
@@ -451,6 +458,10 @@ pub struct VideoOptions {
     /// is magnified by lengthening the lens.
     pub zoom: f64,
     pub zoom_end: f64,
+    /// How the widest view meets an image of another shape: filling the
+    /// frame and cutting the image's longer ends, or showing all of it with
+    /// black beside it. An automatic tour is planned for it.
+    pub framing: Framing,
     /// The frame's turn at the first and last frames, degrees
     /// anticlockwise, taken as given: 0 to 360 turns once anticlockwise and
     /// 0 to -360 once clockwise.
@@ -489,6 +500,11 @@ pub struct VideoOptions {
     pub tour_loop: bool,
     /// Frame size, even sides.
     pub size: (usize, usize),
+    /// The image's shape with this longer side, each side even, in place
+    /// of `size`, from a size such as `4k-image`: a 4:3 image at 3840 is
+    /// filmed at 3840 × 2880, all of it. The image's size is known only
+    /// once it is read (and cropped), so this waits until then.
+    pub image_shaped_size: Option<usize>,
     pub seconds: f64,
     pub fps: u32,
     /// Label the catalogued objects in the field, the most prominent
@@ -533,8 +549,10 @@ impl Default for VideoOptions {
             pan: 0.0,
             zoom: 1.0,
             zoom_end: 1.0,
+            framing: Framing::Fill,
             rotate_deg: (0.0, 0.0),
             easing: Easing::InOut,
+            image_shaped_size: None,
             quality: Quality::Standard,
             growth_limit: 4.0,
             fade_from: 6.0,
@@ -578,10 +596,40 @@ fn check_frame((width, height): (usize, usize)) -> Result<(), Error> {
 }
 
 impl VideoOptions {
+    /// Film at `size`: a fixed `size`, or an [`Self::image_shaped_size`].
+    pub fn set_frame_size(&mut self, size: crate::encode::FrameSize) {
+        match size {
+            crate::encode::FrameSize::Fixed(width, height) => {
+                self.size = (width, height);
+                self.image_shaped_size = None;
+            }
+            crate::encode::FrameSize::ImageShaped(long) => self.image_shaped_size = Some(long),
+        }
+    }
+
+    /// These options with any [`Self::image_shaped_size`] made a `size`
+    /// for an image of `image` pixels.
+    pub fn sized_for(&self, image: (usize, usize)) -> Self {
+        match self.image_shaped_size {
+            Some(long) => Self {
+                size: crate::encode::FrameSize::ImageShaped(long).for_image(image),
+                image_shaped_size: None,
+                ..self.clone()
+            },
+            None => self.clone(),
+        }
+    }
+
     /// Whether these options can film a video.
     pub fn check(&self) -> Result<(), Error> {
         let invalid = |message: &str| Err(Error::Invalid(message.into()));
         let point = |(x, y): (f64, f64)| x.is_finite() && y.is_finite();
+        if self
+            .image_shaped_size
+            .is_some_and(|long| long < 16 || long % 2 != 0)
+        {
+            return invalid("an image-shaped frame's longer side must be even and at least 16");
+        }
         if !(0.0..1.0).contains(&self.dolly) {
             return invalid("the dolly must be at least 0 and below 1");
         }
@@ -919,6 +967,26 @@ impl Parallax {
         stop: &dyn Fn() -> bool,
     ) -> Result<Self, Error> {
         options.check()?;
+        let cropped;
+        let (starless, stars, wcs, options) = match options.scene.crop {
+            Some(crop) => {
+                cropped = crop_inputs(starless, stars, wcs, options, crop)?;
+                (&cropped.0, &cropped.1, &cropped.2, &cropped.3)
+            }
+            None => (starless, stars, wcs, options),
+        };
+        let sized;
+        let options = match options.video.image_shaped_size {
+            Some(_) => {
+                let image = (starless.width() as usize, starless.height() as usize);
+                sized = ParallaxOptions {
+                    video: options.video.sized_for(image),
+                    ..options.clone()
+                };
+                &sized
+            }
+            None => options,
+        };
         let halt = || if stop() { Err(Error::Stopped) } else { Ok(()) };
         let scene_options = &options.scene;
         // An automatic tour's best target may give the nebula's distance.
@@ -932,7 +1000,10 @@ impl Parallax {
                     starless.dimensions(),
                     scene_options.objects.as_deref(),
                     video.size,
-                    auto,
+                    &AutoTour {
+                        framing: video.framing,
+                        ..*auto
+                    },
                 )?
                 .focus,
             ),
@@ -1445,6 +1516,7 @@ impl Parallax {
         report: &mut dyn FnMut(Event),
         stop: &dyn Fn() -> bool,
     ) -> Result<Self, Error> {
+        let video = &video.sized_for(prepared.image_size);
         video.check()?;
         let (width, height) = prepared.image_size;
         let video = match &video.auto_tour {
@@ -1469,6 +1541,7 @@ impl Parallax {
             dolly: video.dolly,
             truck: (video.truck * cos, -video.truck * sin),
             start: video.start,
+            framing: video.framing,
             pan: video.pan,
             rotation: (
                 video.rotate_deg.0.to_radians(),
@@ -1642,6 +1715,11 @@ impl Parallax {
     /// The frame size, pixels.
     pub fn size(&self) -> (usize, usize) {
         (self.shot.width, self.shot.height)
+    }
+
+    /// The size of the image filmed, pixels, after any crop.
+    pub fn image_size(&self) -> (usize, usize) {
+        self.prepared.image_size
     }
 
     /// The camera move as fitted to the image.
@@ -1833,6 +1911,104 @@ impl PlannedTour {
     }
 }
 
+/// The plate solution and size of the part of a `dimensions`-pixel image
+/// that `crop` (left, top, width, height, image pixels) keeps, as
+/// [`SceneOptions::crop`] cuts it: for planning a tour of a crop before
+/// [`prepare`] reads the images.
+pub fn crop_wcs(
+    wcs: &Wcs,
+    (image_width, image_height): (u32, u32),
+    (left, top, width, height): (usize, usize, usize, usize),
+) -> Result<(Wcs, (u32, u32)), Error> {
+    let (image_width, image_height) = (image_width as usize, image_height as usize);
+    if width < 16
+        || height < 16
+        || left
+            .checked_add(width)
+            .is_none_or(|right| right > image_width)
+        || top
+            .checked_add(height)
+            .is_none_or(|bottom| bottom > image_height)
+    {
+        return Err(Error::Invalid(format!(
+            "the crop {width}x{height} at ({left}, {top}) must be at least 16 pixels each way and \
+             lie inside the {image_width}x{image_height} image"
+        )));
+    }
+    // SIP terms count from the reference pixel, which moves with the crop.
+    let wcs = Wcs {
+        crpix: (wcs.crpix.0 - left as f64, wcs.crpix.1 - top as f64),
+        ..wcs.clone()
+    };
+    Ok((wcs, (width as u32, height as u32)))
+}
+
+/// The images, plate solution and options of a video cut to `crop` (left,
+/// top, width, height, image pixels), with the crop then cleared.
+fn crop_inputs(
+    starless: &Rgb32FImage,
+    stars: &Rgb32FImage,
+    wcs: &Wcs,
+    options: &ParallaxOptions,
+    crop: (usize, usize, usize, usize),
+) -> Result<(Rgb32FImage, Rgb32FImage, Wcs, ParallaxOptions), Error> {
+    let (wcs, _) = crop_wcs(wcs, starless.dimensions(), crop)?;
+    let (left, top, width, height) = crop;
+    let (image_width, image_height) = (starless.width() as usize, starless.height() as usize);
+    let cut = |image: &Rgb32FImage| {
+        image::imageops::crop_imm(image, left as u32, top as u32, width as u32, height as u32)
+            .to_image()
+    };
+    // A grid with the image's shape at its own size, cut to the same part.
+    let cut_grid = |grid_width: usize, grid_height: usize, values: &[f32]| {
+        let along = |at: usize, size: usize, grid: usize| {
+            ((at as f64 * grid as f64 / size as f64).round() as usize).min(grid)
+        };
+        let (x0, x1) = (
+            along(left, image_width, grid_width),
+            along(left + width, image_width, grid_width),
+        );
+        let (y0, y1) = (
+            along(top, image_height, grid_height),
+            along(top + height, image_height, grid_height),
+        );
+        let (x1, y1) = (
+            x1.max(x0 + 1).min(grid_width),
+            y1.max(y0 + 1).min(grid_height),
+        );
+        let x0 = x0.min(x1 - 1);
+        let y0 = y0.min(y1 - 1);
+        let kept = (y0..y1)
+            .flat_map(|row| {
+                values[row * grid_width + x0..row * grid_width + x1]
+                    .iter()
+                    .copied()
+            })
+            .collect::<Vec<f32>>();
+        (x1 - x0, y1 - y0, kept)
+    };
+    let mut options = options.clone();
+    options.scene.crop = None;
+    if let Some(map) = &mut options.scene.dust_map {
+        let (width, height, opacity) = cut_grid(map.width, map.height, &map.opacity);
+        *map = DustMap {
+            width,
+            height,
+            opacity,
+        };
+    }
+    for plane in &mut options.scene.planes {
+        let mask = &plane.mask;
+        let (width, height, coverage) = cut_grid(mask.width, mask.height, &mask.coverage);
+        plane.mask = crate::plane::PlaneMask {
+            width,
+            height,
+            coverage,
+        };
+    }
+    Ok((cut(starless), cut(stars), wcs, options))
+}
+
 /// Plan a tour of the catalogued objects in a `width` × `height` image
 /// whose sky `wcs` gives, as `auto` asks, for frames of `frame` output
 /// pixels, from the object catalog at `objects` or the standard places.
@@ -1870,7 +2046,7 @@ fn plan_tour_in(
         .objects_in_footprint(wcs, (width, height))
         .map_err(|error| Error::Invalid(error.to_string()))?;
     let size = (width as usize, height as usize);
-    let mut targets = tour::targets(&placed, size, frame, auto.targets);
+    let mut targets = tour::targets(&placed, size, frame, auto.targets, auto.framing);
     if let Some(scene) = scene {
         for target in &mut targets {
             let depth = scene.depth_at(target.x, target.y);
@@ -2120,7 +2296,11 @@ fn plan_video(
     scene: Option<&Scene>,
     report: &mut dyn FnMut(Event),
 ) -> Result<VideoOptions, Error> {
-    let plan = plan_tour_in(wcs, dimensions, objects, video.size, auto, scene)?;
+    let auto = AutoTour {
+        framing: video.framing,
+        ..*auto
+    };
+    let plan = plan_tour_in(wcs, dimensions, objects, video.size, &auto, scene)?;
     let planned = VideoOptions {
         tour: plan.tour(),
         auto_tour: None,
@@ -2948,6 +3128,55 @@ mod tests {
         // The map in use, written out, is the one given.
         let map = clear.dust().unwrap().to_map(32, 24);
         assert!(map.opacity.iter().all(|&opacity| opacity == 0.0));
+    }
+
+    #[test]
+    fn a_crop_films_part_of_the_image_at_a_size_of_its_shape() {
+        let directory = tempfile::tempdir().unwrap();
+        let (starless, stars, wcs, distances) = field(directory.path());
+        let mut options = options(distances, directory.path());
+        options.scene.crop = Some((40, 30, 200, 150));
+        // A plane mask at half the image's size is cut at its own scale.
+        options.scene.planes = vec![DepthPlane {
+            mask: crate::plane::tests::disc(160, 120, (102.25, 57.25), 8.0),
+            distance_pc: 150.0,
+            name: "knot".into(),
+        }];
+        options.video.image_shaped_size = Some(400);
+        let video =
+            Parallax::prepare(&starless, &stars, &wcs, &options, &mut |_| {}, &|| false).unwrap();
+        // The frame takes the cropped image's 4:3 shape.
+        assert_eq!(video.size(), (400, 300));
+        assert_eq!((video.scene().width(), video.scene().height()), (200, 150));
+        // The sky stays where it was: the crop's corner is the image's
+        // pixel (40, 30).
+        let (ra, dec) = video.wcs().pixel_to_world(0.0, 0.0);
+        let (expected_ra, expected_dec) = wcs.pixel_to_world(40.0, 30.0);
+        assert!((ra - expected_ra).abs() < 1e-9 && (dec - expected_dec).abs() < 1e-9);
+        // The half-size mask is cut to the same part at its own scale: the
+        // disc at (102.25, 57.25) is at (82.25, 42.25) of a 100 × 75 mask.
+        let (_, _, _, cut) =
+            crop_inputs(&starless, &stars, &wcs, &options, (40, 30, 200, 150)).unwrap();
+        let mask = &cut.scene.planes[0].mask;
+        assert_eq!((mask.width, mask.height), (100, 75));
+        let (mut sum, mut x, mut y) = (0.0, 0.0, 0.0);
+        for (index, &cover) in mask.coverage.iter().enumerate() {
+            sum += cover as f64;
+            x += cover as f64 * (index % mask.width) as f64;
+            y += cover as f64 * (index / mask.width) as f64;
+        }
+        let centre = (x / sum, y / sum);
+        assert!(
+            (centre.0 - 82.25).abs() < 1.0 && (centre.1 - 42.25).abs() < 1.0,
+            "{centre:?}"
+        );
+        assert_eq!(cut.scene.crop, None);
+
+        // A crop must lie inside the image.
+        options.scene.crop = Some((300, 0, 100, 100));
+        assert!(
+            Parallax::prepare(&starless, &stars, &wcs, &options, &mut |_| {}, &|| false).is_err()
+        );
     }
 
     #[test]

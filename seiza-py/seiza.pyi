@@ -667,6 +667,8 @@ def plan_parallax_tour(
     targets: int | None = None,
     hold: float = 1.5,
     motion: float = 1.0,
+    crop: tuple[int, int, int, int] | None = None,
+    framing: str = "fill",
 ) -> dict[str, Any]: ...
 
 ParallaxImage = Union[str, Path, npt.NDArray[np.float32], npt.NDArray[np.uint8]]
@@ -706,7 +708,9 @@ class ParallaxVideo:
         ] = (),
         auto_planes: bool = False,
         distance_overrides: Mapping[str, float] | Sequence[tuple[str, float]] = (),
+        crop: tuple[int, int, int, int] | None = None,
         start: str = "focus",
+        framing: str = "fill",
         dolly: float = 0.4,
         truck: float = 0.0,
         truck_angle_deg: float = 0.0,
@@ -758,6 +762,7 @@ class ParallaxVideo:
         auto_tour: bool | int | Mapping[str, Any] | None = None,
         *,
         size: str | tuple[int, int] | None = None,
+        framing: str | None = None,
     ) -> dict[str, Any]: ...
     def with_dust_map(
         self,

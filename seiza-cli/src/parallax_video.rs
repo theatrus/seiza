@@ -104,6 +104,16 @@ pub(crate) struct ParallaxVideoArgs {
     /// then moving to the focus point as the camera flies in
     #[arg(long, value_enum, default_value_t = StartArg::Focus)]
     start: StartArg,
+    /// How the widest view meets an image of another shape than the frame:
+    /// `fill` fills the frame and cuts the ends of the image's longer side;
+    /// `fit` shows all of it, with black beside it
+    #[arg(long, value_enum, default_value_t = FramingArg::Fill)]
+    framing: FramingArg,
+    /// Film part of the image: `X,Y,WIDTH,HEIGHT` in image pixels. Every
+    /// other image point given, such as --focus and tour stops, counts in
+    /// the cropped image
+    #[arg(long, value_parser = parse_crop)]
+    crop: Option<(usize, usize, usize, usize)>,
     /// How far the first frame zooms in: 1 shows the widest view --start
     /// allows inside the image
     #[arg(long, default_value_t = 1.0)]
@@ -183,10 +193,11 @@ pub(crate) struct ParallaxVideoArgs {
     #[arg(long, default_value_t = 30)]
     fps: u32,
     /// Frame size: `720p`, `1080p`, `1440p` or `4k`, any of them with
-    /// `-portrait` for vertical video (`1080p-portrait` is 1080x1920), or
-    /// `WIDTHxHEIGHT` in even numbers
-    #[arg(long, default_value = "1080p", value_parser = seiza_parallax::parse_frame_size)]
-    size: (usize, usize),
+    /// `-portrait` for vertical video (`1080p-portrait` is 1080x1920) or
+    /// `-image` for the image's own shape (`4k-image` films a 4:3 image at
+    /// 3840x2880, all of it), or `WIDTHxHEIGHT` in even numbers
+    #[arg(long, default_value = "1080p", value_parser = seiza_parallax::parse_frame_size_or_shape)]
+    size: seiza_parallax::FrameSize,
     /// How the camera speeds up and slows down
     #[arg(long, value_enum, default_value_t = EasingArg::InOut)]
     easing: EasingArg,
@@ -405,6 +416,12 @@ enum StartArg {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum FramingArg {
+    Fill,
+    Fit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum SmallStarsArg {
     Drop,
     Field,
@@ -422,6 +439,39 @@ enum EncoderArg {
     Ffmpeg,
     Openh264,
     Png,
+}
+
+/// `X,Y,WIDTH,HEIGHT` in whole pixels.
+fn parse_crop(text: &str) -> std::result::Result<(usize, usize, usize, usize), String> {
+    let parts = text
+        .split(',')
+        .map(|part| {
+            part.trim()
+                .parse::<usize>()
+                .map_err(|error| format!("{part}: {error}"))
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    match parts[..] {
+        [x, y, width, height] => Ok((x, y, width, height)),
+        _ => Err(format!("expected X,Y,WIDTH,HEIGHT; got {text}")),
+    }
+}
+
+/// The plate solution and size of the part of the image `--crop` films.
+fn cropped(
+    args: &ParallaxVideoArgs,
+    wcs: &Wcs,
+    dimensions: (u32, u32),
+) -> Result<(Wcs, (u32, u32))> {
+    Ok(match args.crop {
+        Some(crop) => seiza_parallax::crop_wcs(wcs, dimensions, crop)?,
+        None => (wcs.clone(), dimensions),
+    })
+}
+
+/// The frame size for an image of `dimensions` pixels.
+fn frame_for(args: &ParallaxVideoArgs, (width, height): (u32, u32)) -> (usize, usize) {
+    args.size.for_image((width as usize, height as usize))
 }
 
 fn parse_point(text: &str) -> std::result::Result<(f64, f64), String> {
@@ -650,11 +700,12 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
     // take another object for the nebula and find other planes than the
     // render will.
     if args.plan_tour.is_some() && options.scene.distance_focus.is_none() {
+        let (wcs, dimensions) = cropped(&args, &wcs, solved)?;
         let plan = seiza_parallax::plan_tour(
             &wcs,
-            solved,
+            dimensions,
             options.scene.objects.as_deref(),
-            args.size,
+            frame_for(&args, dimensions),
             &auto_tour(&args),
         )?;
         options.scene.distance_focus = Some(plan.focus);
@@ -677,7 +728,7 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
         write_planes(directory, &parallax)?;
     }
     if let Some(path) = &args.plan_tour {
-        let plan = parallax.plan_tour(&auto_tour(&args), args.size)?;
+        let plan = parallax.plan_tour(&auto_tour(&args), parallax.size())?;
         return save_plan(&args, path, &plan);
     }
     if args.output.is_none() {
@@ -804,6 +855,14 @@ fn auto_tour(args: &ParallaxVideoArgs) -> seiza_parallax::AutoTour {
         targets: args.auto_tour.filter(|&targets| targets > 0),
         hold: args.tour_hold,
         motion: args.tour_motion,
+        framing: framing(args),
+    }
+}
+
+fn framing(args: &ParallaxVideoArgs) -> seiza_parallax::Framing {
+    match args.framing {
+        FramingArg::Fill => seiza_parallax::Framing::Fill,
+        FramingArg::Fit => seiza_parallax::Framing::Fit,
     }
 }
 
@@ -816,11 +875,12 @@ fn write_plan(args: &ParallaxVideoArgs, path: &Path) -> Result<()> {
         .or_else(|| args.stars.clone())
         .expect("checked in run");
     let (wcs, dimensions) = solve(args, &solve_path)?;
+    let (wcs, dimensions) = cropped(args, &wcs, dimensions)?;
     let plan = seiza_parallax::plan_tour(
         &wcs,
         dimensions,
         args.objects.as_deref(),
-        args.size,
+        frame_for(args, dimensions),
         &auto_tour(args),
     )?;
     save_plan(args, path, &plan)
@@ -949,7 +1009,7 @@ fn parse_tour(text: &str) -> Result<TourFile> {
 /// and focus if one was given.
 fn options(args: &ParallaxVideoArgs, file: Option<TourFile>) -> ParallaxOptions {
     let (file_stops, file_focus) = file.unwrap_or_default();
-    ParallaxOptions {
+    let mut options = ParallaxOptions {
         scene: SceneOptions {
             distance_pc: args.distance,
             distance_focus: args.distance_focus.or(file_focus),
@@ -972,6 +1032,7 @@ fn options(args: &ParallaxVideoArgs, file: Option<TourFile>) -> ParallaxOptions 
             planes: Vec::new(),
             auto_planes: args.auto_planes,
             distance_overrides: args.object_distances.clone(),
+            crop: args.crop,
         },
         video: VideoOptions {
             focus: args.focus,
@@ -979,6 +1040,7 @@ fn options(args: &ParallaxVideoArgs, file: Option<TourFile>) -> ParallaxOptions 
                 StartArg::Focus => Start::Focus,
                 StartArg::Whole => Start::Whole,
             },
+            framing: framing(args),
             dolly: args.dolly,
             truck: args.truck,
             truck_angle_deg: args.truck_angle,
@@ -1005,7 +1067,6 @@ fn options(args: &ParallaxVideoArgs, file: Option<TourFile>) -> ParallaxOptions 
             tour_glide: args.tour_glide,
             tour_titles: args.tour_titles,
             tour_loop: args.tour_loop,
-            size: args.size,
             seconds: args.seconds,
             fps: args.fps,
             overlay: args.overlay,
@@ -1025,8 +1086,11 @@ fn options(args: &ParallaxVideoArgs, file: Option<TourFile>) -> ParallaxOptions 
             intro_card: args.intro_card.clone(),
             outro_card: args.outro_card.clone(),
             card_seconds: args.card_seconds,
+            ..VideoOptions::default()
         },
-    }
+    };
+    options.video.set_frame_size(args.size);
+    options
 }
 
 /// The starless and stars images, the path to plate-solve, and the
@@ -1341,6 +1405,9 @@ mod tests {
     fn points_parse() {
         assert_eq!(parse_point("10.5, 20"), Ok((10.5, 20.0)));
         assert!(parse_point("10").is_err());
+        assert_eq!(parse_crop("10, 20,300,200"), Ok((10, 20, 300, 200)));
+        assert!(parse_crop("10,20,300").is_err());
+        assert!(parse_crop("-10,20,300,200").is_err());
     }
 
     #[test]

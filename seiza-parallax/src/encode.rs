@@ -89,12 +89,67 @@ pub const FRAME_SIZES: [(&str, (usize, usize)); 5] = [
     ("2160p", (3840, 2160)),
 ];
 
+/// A frame size as [`parse_frame_size_or_shape`] reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameSize {
+    /// These sides, width then height.
+    Fixed(usize, usize),
+    /// The image's shape with this longer side, each side even, as a name
+    /// ending `-image` gives: `4k-image` films a 4:3 image at 3840 × 2880,
+    /// all of it.
+    ImageShaped(usize),
+}
+
+impl FrameSize {
+    /// The frame's width and height for an image of `width` × `height`.
+    pub fn for_image(self, (width, height): (usize, usize)) -> (usize, usize) {
+        match self {
+            Self::Fixed(width, height) => (width, height),
+            Self::ImageShaped(long) => {
+                let short = |along: usize, across: usize| {
+                    let side = long as f64 * along as f64 / across.max(1) as f64;
+                    (((side / 2.0).round() as usize) * 2).clamp(16, long)
+                };
+                if width >= height {
+                    (long, short(height, width))
+                } else {
+                    (short(width, height), long)
+                }
+            }
+        }
+    }
+}
+
+/// A frame size as [`parse_frame_size`] reads it, or a name from
+/// [`FRAME_SIZES`] with `-image` in place of `-portrait`, such as
+/// `4k-image`: that size's longer side, with the image's shape.
+pub fn parse_frame_size_or_shape(text: &str) -> std::result::Result<FrameSize, String> {
+    let lower = text.trim().to_ascii_lowercase();
+    if let Some(name) = lower.strip_suffix("-image") {
+        return FRAME_SIZES
+            .iter()
+            .find(|(known, _)| *known == name)
+            .map(|&(_, (width, height))| FrameSize::ImageShaped(width.max(height)))
+            .ok_or_else(|| {
+                let names: Vec<&str> = FRAME_SIZES.iter().map(|(name, _)| *name).collect();
+                format!("{text}: -image follows one of {}", names.join(", "))
+            });
+    }
+    parse_frame_size(text).map(|(width, height)| FrameSize::Fixed(width, height))
+}
+
 /// A frame size: a name from [`FRAME_SIZES`] such as `1080p` or `4k`, the
 /// same with `-portrait` for its tall form (`1080p-portrait` is 1080 wide
 /// and 1920 high), or `WIDTHxHEIGHT`. Sides must be even, as H.264 needs,
-/// and at least 16.
+/// and at least 16. A name ending `-image` needs the image; see
+/// [`parse_frame_size_or_shape`].
 pub fn parse_frame_size(text: &str) -> std::result::Result<(usize, usize), String> {
     let lower = text.trim().to_ascii_lowercase();
+    if lower.ends_with("-image") {
+        return Err(format!(
+            "{text} takes the image's shape, so it is known only with the image"
+        ));
+    }
     let (name, portrait) = match lower.strip_suffix("-portrait") {
         Some(name) => (name, true),
         None => (lower.as_str(), false),
@@ -641,6 +696,18 @@ mod tests {
         assert_eq!(parse_frame_size("720p-portrait"), Ok((720, 1280)));
         assert_eq!(parse_frame_size("1920x1080"), Ok((1920, 1080)));
         assert_eq!(parse_frame_size("1080X1350"), Ok((1080, 1350)));
+        assert!(parse_frame_size("4k-image").is_err());
+        // The image's shape, at the named size's longer side.
+        let shaped = parse_frame_size_or_shape("4K-image").unwrap();
+        assert_eq!(shaped, FrameSize::ImageShaped(3840));
+        assert_eq!(shaped.for_image((9213, 6943)), (3840, 2894));
+        assert_eq!(shaped.for_image((3000, 4000)), (2880, 3840));
+        assert_eq!(shaped.for_image((8000, 10)), (3840, 16));
+        assert_eq!(
+            parse_frame_size_or_shape("720p-portrait"),
+            Ok(FrameSize::Fixed(720, 1280))
+        );
+        assert!(parse_frame_size_or_shape("8k-image").is_err());
         for bad in ["1921x1080", "8x8", "8k", "1080p-sideways", "big"] {
             assert!(parse_frame_size(bad).is_err(), "{bad}");
         }
