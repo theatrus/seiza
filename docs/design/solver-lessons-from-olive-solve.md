@@ -6,10 +6,9 @@ finder cameras: a Raspberry Pi, one lens, and an IMU that tracks the camera
 between frames. This note lists what seiza can learn from it, and what it
 cannot.
 
-Status: proposed. Work goes in this order: the false-match probability and
-time limits (1 and 2) first, then the detector (3), fuller results (4) and
-horizon pruning (5). The documentation problems at the end are fixed with
-this note.
+Status: 1 and 2 are built, as described under each. The detector (3),
+fuller results (4) and horizon pruning (5) come next. The documentation
+problems at the end are fixed.
 
 ## Why its speed does not carry over
 
@@ -74,14 +73,39 @@ The tail is summed in log space with `ln Γ`, so a strong solve does not
 underflow before it is compared. `Solution` gains
 `false_match_probability`.
 
-Acceptance changes in two steps. First, report the number and measure it on
-the five hosted test images, the local test images, synthetic fields, and
-the FITS, JPEG and annotated JPEG sets from the benchmark notes where they
-are available. Then reject solves above a threshold chosen from those
-numbers (a starting guess is 1e-6), alongside the 6-pair floor that the fit
-needs. That threshold would replace the blind 12-match, 2 px rule, and
-gives the hinted path the check it lacks. The number goes out through the
-CLI, the worker, the C ABI and Python.
+**Built.** Every `Solution` carries `false_match_probability`. The hinted
+search counts the candidate transforms it voted on, the rank-robust search
+the transforms it took a census of, and a blind solve multiplies by the
+fields it scored. The CLI prints it (`by chance`), and the worker, the C ABI
+and Python return it.
+
+Measured on 27 local images (the M45 and Praesepe FITS series, XISF frames,
+ten AstroBin JPEGs and phone photos) with the deep Gaia catalog and the
+G≤16 index:
+
+- The 23 that solve blind scored between 7e-53 (a phone photo, 36
+  matches) and below f64's range (Praesepe, 151 matches); most were below
+  1e-200.
+- Random and stroke-shaped detections (like rendered labels) never passed
+  the 12-match blind floor, and failed after 28 to 108 s each.
+- With the blind floor lowered to 6 matches and 3 px, every one of 12 such
+  trials solved to some field, at probabilities of 0.18 to 1.
+- 51 hinted solves of real images at the right scale but 30 to 300 degrees
+  from the true field, and 40 of random detections, all failed at 4 or 5
+  votes.
+
+So the limits are:
+
+- Blind: at most one in a billion (`BlindParams::max_false_match_probability`),
+  alongside the 12-match and 2 px rules, which stay.
+- Hinted: at most one in a thousand. The hint is itself strong evidence, and
+  a real but sparse field with few matches beyond the fit's three can score
+  near 1e-5; this refuses only matches that chance explains easily.
+- The center-window fast path skips the wider search only below one in a
+  billion.
+
+The annotated JPEGs from the benchmark notes were not on hand; they are the
+next check.
 
 ## 2. Time limits and cancellation
 
@@ -94,7 +118,7 @@ failure on the JPEG set once took 26 s. solve-field's `-l` is parsed and
 ignored, and the worker cannot stop a solve. N.I.N.A. and other ASTAP or
 solve-field callers expect a solver to honour a time limit.
 
-**Proposal.**
+**Built**, as proposed:
 
 - Move `CancelSignal` from seiza-stacking into `seiza`, and re-export it
   from seiza-stacking so its path there still works. The C ABI's
@@ -111,10 +135,15 @@ solve-field callers expect a solver to honour a time limit.
 - `seiza::Error` becomes `#[non_exhaustive]` and gains `TimedOut` and
   `Cancelled`, so callers can tell them from a failed solve.
 - Hosts: `--time-limit` on `seiza solve` and `seiza solve-blind`;
-  solve-field mode honours `-l`; the worker takes `timeLimitMs` per solve,
-  and a `cancel` notification read on its own thread; the C ABI gains a
-  solve call with a time limit and a `SeizaCancelSignal`; Python gains
-  `time_limit=` and `cancel=`.
+  solve-field mode honours `-l`, and its `-C` stop file now stops the solve
+  itself rather than only between phases; the worker takes `timeLimitMs`
+  per solve (error -32011), and a `cancel` notification read on its own
+  thread (error -32012); the C ABI gains
+  `seiza_solve_image_with_limits_json`; Python gains `time_limit=`
+  (`TimeoutError`) and `cancel=` (polled every 50 ms; Ctrl-C works too).
+
+A blind solve of IC 1318 that failed after 48 s stops at 5.4 s with
+`--time-limit 5`.
 
 ## 3. Detector
 
@@ -215,15 +244,21 @@ Fixed with this note:
   code keeps `count / 8 + 1`.
 - The `solve.rs` header promised outlier clipping; refinement only drops
   pairs farther apart than the match radius.
+- The image's middle: seiza counts pixels from 0 with each pixel's center
+  on a whole number, so the middle is `((w - 1) / 2, (h - 1) / 2)`, as
+  Python's `Solution.center` had it. The CLI, worker, C ABI, sky maps,
+  constellation labels and the solver's reference pixel used `(w / 2, h / 2)`,
+  half a pixel away. They now share `seiza::image_center`, so FITS headers
+  put CRPIX at the usual `(w + 1) / 2`. The fitted mapping is unchanged.
+- The C ABI's WCS counts pixels from 0 while the worker and FITS headers
+  count from 1. Both apps already add 1 when they write FITS; the JSON now
+  says `"pixelOrigin": 0`, and a WCS passed back in may give
+  `"pixelOrigin": 1`.
 
 Still to fix:
 
 - Blind solving buckets its votes by `(ra · 2) as i64`, with no wrap at
   0/360 degrees and no `cos(dec)` scaling, so a field across RA 0 splits
-  its votes between buckets that never meet. This goes with item 1, since
-  it changes how hypotheses rank.
-- Python's `Solution.center` is the sky position of pixel
-  `((w - 1) / 2, (h - 1) / 2)`; the CLI, worker and C ABI use `(w / 2, h / 2)`,
-  half a pixel away.
-- The C ABI's solve JSON gives CRPIX counted from 0, while the worker and
-  FITS headers count from 1.
+  its votes between buckets that never meet, and votes near the poles
+  spread across many narrow RA buckets. The fix changes how hypotheses
+  rank, so it needs a run over the blind test images.

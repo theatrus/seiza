@@ -160,6 +160,8 @@ class Solution:
     @property
     def rms_arcsec(self) -> float: ...
     @property
+    def false_match_probability(self) -> float: ...
+    @property
     def center(self) -> tuple[float, float]: ...
     @property
     def ra(self) -> float: ...
@@ -781,6 +783,8 @@ def solve(
     radius_deg: float = 2.0,
     scale_tolerance: float = 0.2,
     sip_order: int = 0,
+    time_limit: float | None = None,
+    cancel: Callable[[], bool] | None = None,
 ) -> Solution: ...
 def solve_blind(
     stars: Sequence[StarInput],
@@ -792,6 +796,8 @@ def solve_blind(
     min_scale_arcsec_px: float = 0.1,
     max_scale_arcsec_px: float = 20.0,
     sip_order: int = 0,
+    time_limit: float | None = None,
+    cancel: Callable[[], bool] | None = None,
 ) -> Solution: ...
 def fetch_catalogs(
     datasets: str | Sequence[str] | None = None,

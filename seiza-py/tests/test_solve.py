@@ -138,6 +138,38 @@ def test_wcs_transform_round_trip():
     assert len(wcs.footprint(1000, 800)) == 4
 
 
+def test_a_solution_reports_how_unlikely_it_is_by_chance():
+    catalog, stars, _ = synthetic_field()
+    solution = seiza.solve(
+        stars, catalog, WIDTH, HEIGHT, ra=CENTER[0], dec=CENTER[1], scale_arcsec_px=SCALE
+    )
+    assert 0.0 <= solution.false_match_probability < 1e-9
+
+
+def test_a_time_limit_or_cancel_stops_a_solve():
+    catalog, stars, _ = synthetic_field()
+    hint = dict(ra=CENTER[0] + 0.5, dec=CENTER[1] - 0.5, scale_arcsec_px=SCALE, radius_deg=3.0)
+    with pytest.raises(TimeoutError):
+        seiza.solve(stars, catalog, WIDTH, HEIGHT, time_limit=1e-9, **hint)
+    with pytest.raises(seiza.SolveError, match="cancelled"):
+        seiza.solve(stars, catalog, WIDTH, HEIGHT, cancel=lambda: True, **hint)
+
+    class Stop(Exception):
+        pass
+
+    def raises():
+        raise Stop
+
+    # An exception from the predicate reaches the caller as itself.
+    with pytest.raises(Stop):
+        seiza.solve(stars, catalog, WIDTH, HEIGHT, cancel=raises, **hint)
+    with pytest.raises(ValueError, match="time_limit"):
+        seiza.solve(stars, catalog, WIDTH, HEIGHT, time_limit=0.0, **hint)
+    # A predicate that never stops leaves the solve alone.
+    solution = seiza.solve(stars, catalog, WIDTH, HEIGHT, cancel=lambda: False, **hint)
+    assert solution.matched_stars >= 20
+
+
 def test_solve_failure_raises():
     catalog = seiza.StarCatalog.from_stars([(10.0, 10.0, 5.0)])
     assert issubclass(seiza.SolveError, RuntimeError)

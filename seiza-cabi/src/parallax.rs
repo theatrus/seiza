@@ -382,6 +382,10 @@ struct WcsRequest {
     cd: [[f64; 2]; 2],
     #[serde(default)]
     sip: Option<SipRequest>,
+    /// What `crpix` counts from: 0, as the C ABI returns a WCS (and the
+    /// default), or 1, as a FITS header does.
+    #[serde(default, rename = "pixelOrigin")]
+    pixel_origin: Option<u8>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -756,10 +760,14 @@ fn video_options(request: &VideoRequest) -> Result<VideoOptions, String> {
 }
 
 impl WcsRequest {
-    fn wcs(&self) -> Wcs {
-        Wcs {
+    fn wcs(&self) -> Result<Wcs, String> {
+        let origin = match self.pixel_origin.unwrap_or(0) {
+            origin @ (0 | 1) => f64::from(origin),
+            other => return Err(format!("wcs pixelOrigin must be 0 or 1, not {other}")),
+        };
+        Ok(Wcs {
             crval: (self.crval[0], self.crval[1]),
-            crpix: (self.crpix[0], self.crpix[1]),
+            crpix: (self.crpix[0] - origin, self.crpix[1] - origin),
             cd: self.cd,
             sip: self.sip.as_ref().map(|sip| Sip {
                 order: sip.order,
@@ -768,7 +776,7 @@ impl WcsRequest {
                 ap: sip.ap.clone(),
                 bp: sip.bp.clone(),
             }),
-        }
+        })
     }
 }
 
@@ -960,7 +968,7 @@ fn solution(
     context: usize,
 ) -> Result<Wcs, String> {
     if let Some(wcs) = &request.scene.wcs {
-        return Ok(wcs.wcs());
+        return wcs.wcs();
     }
     let minimum = request.scene.minimum_scale_arcsec_per_pixel.unwrap_or(0.1);
     let maximum = request
@@ -973,6 +981,7 @@ fn solution(
         minimum,
         maximum,
         2,
+        &seiza::SolveLimits::default(),
     )?;
     let wcs = solved.solution.wcs;
     send(
@@ -1336,6 +1345,7 @@ pub unsafe extern "C" fn seiza_parallax_summary_json(
                     ap: sip.ap.clone(),
                     bp: sip.bp.clone(),
                 }),
+                pixel_origin: 0,
             },
         })
     })
@@ -1876,6 +1886,28 @@ mod tests {
     };
     use seiza::catalog::{DistanceStar, StarDistanceCatalogBuilder};
     use std::ffi::CStr;
+
+    #[test]
+    fn a_wcs_reads_its_pixel_origin() {
+        let read = |json: &str| serde_json::from_str::<WcsRequest>(json).unwrap().wcs();
+        let base = r#""crval":[10.0,20.0],"crpix":[101.0,51.0],"cd":[[0.001,0.0],[0.0,0.001]]"#;
+        // As this ABI returns it, counted from 0, by default or by name.
+        assert_eq!(read(&format!("{{{base}}}")).unwrap().crpix, (101.0, 51.0));
+        assert_eq!(
+            read(&format!("{{{base},\"pixelOrigin\":0}}"))
+                .unwrap()
+                .crpix,
+            (101.0, 51.0)
+        );
+        // As a FITS header gives it, counted from 1.
+        assert_eq!(
+            read(&format!("{{{base},\"pixelOrigin\":1}}"))
+                .unwrap()
+                .crpix,
+            (100.0, 50.0)
+        );
+        assert!(read(&format!("{{{base},\"pixelOrigin\":2}}")).is_err());
+    }
 
     #[test]
     fn a_watermark_and_cards_read_from_their_fields() {

@@ -14,9 +14,11 @@
 //!    match radius.
 //! 5. The fitted affine is re-centred on the image and converted to a WCS.
 
+use crate::CancelSignal;
 use crate::catalog::{CatalogStar, StarCatalog, angular_separation_deg};
 use crate::detect::DetectedStar;
 use crate::wcs::Wcs;
+use std::time::{Duration, Instant};
 
 /// Approximate knowledge required to seed a solve.
 #[derive(Debug, Clone)]
@@ -43,6 +45,70 @@ pub struct Solution {
     pub matched_stars: usize,
     /// RMS of match residuals, arcseconds
     pub rms_arcsec: f64,
+    /// The chance that a wrong field would match this well: that
+    /// `matched_stars` or more detections would land within the match
+    /// radius of catalog stars by accident, given how many of each the
+    /// frame holds, across every candidate the search scored. Near 0 for a
+    /// sure solution; a value near 1 means the matches prove nothing.
+    pub false_match_probability: f64,
+}
+
+/// When a solve must give up: at a deadline, when the caller cancels, or
+/// both. The default sets neither.
+///
+/// A solve checks these between steps — search windows, batches of
+/// candidates, blind hypotheses — so it stops within one step's work, and
+/// returns [`crate::Error::TimedOut`] or [`crate::Error::Cancelled`].
+#[derive(Clone, Debug, Default)]
+pub struct SolveLimits {
+    /// The moment to give up.
+    pub deadline: Option<Instant>,
+    /// The caller's signal to stop.
+    pub cancel: Option<CancelSignal>,
+}
+
+impl SolveLimits {
+    /// Give up `limit` from now.
+    pub fn within(limit: Duration) -> Self {
+        Self {
+            deadline: Instant::now().checked_add(limit),
+            cancel: None,
+        }
+    }
+
+    /// These limits, also stopping when `cancel` says so.
+    pub fn with_cancel(mut self, cancel: CancelSignal) -> Self {
+        self.cancel = Some(cancel);
+        self
+    }
+
+    /// [`crate::Error::Cancelled`] or [`crate::Error::TimedOut`] if work
+    /// under these limits should stop now. Solves check this themselves;
+    /// hosts can too, around work of their own.
+    pub fn check(&self) -> Result<(), crate::Error> {
+        if self.cancel.as_ref().is_some_and(CancelSignal::is_cancelled) {
+            return Err(crate::Error::Cancelled);
+        }
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(crate::Error::TimedOut);
+        }
+        Ok(())
+    }
+
+    /// Whether the solve should stop now, for work that cannot return an
+    /// error where it checks, such as a parallel map.
+    pub(crate) fn stopped(&self) -> bool {
+        self.check().is_err()
+    }
+}
+
+/// Whether an error means the solve was stopped, not that it failed, so
+/// no fallback search should run after it.
+pub(crate) fn is_stop(error: &crate::Error) -> bool {
+    matches!(error, crate::Error::TimedOut | crate::Error::Cancelled)
 }
 
 // Tuning constants. These are deliberately conservative; they can move
@@ -57,12 +123,26 @@ const MAX_CANDIDATES: usize = 4000;
 const MATCH_TOLERANCE_PX: f64 = 4.0;
 const MIN_INLIERS: usize = 6;
 const REFINE_ITERATIONS: usize = 3;
+/// Candidate transforms scored between checks of the [`SolveLimits`].
+const CANDIDATES_PER_CHECK: usize = 1024;
 // A center-window fast path must be stricter than the general hinted floor:
 // if the mount hint is stale, a chance six-star alignment must not prevent
 // the requested surrounding search. These are the same acceptance thresholds
 // used when the blind solver verifies a whole-sky hypothesis.
 const FAST_HINT_MIN_INLIERS: usize = 12;
 const FAST_HINT_MAX_RMS_PX: f64 = 2.0;
+
+/// The largest [`Solution::false_match_probability`] a hinted solve accepts.
+/// The hint is itself strong evidence for the field, so this only refuses
+/// matches that chance explains easily; a real but sparse field, a few
+/// matches beyond the fit, can score near 1e-5.
+pub const HINTED_MAX_FALSE_MATCH_PROBABILITY: f64 = 1e-3;
+
+/// One in a billion: sure enough to accept with no other evidence. Blind
+/// solving's default limit, and what the center-window fast path needs
+/// before it skips the wider search a stale hint may require. True fields
+/// in practice score below 1e-50.
+pub const SURE_FALSE_MATCH_PROBABILITY: f64 = 1e-9;
 
 /// Solve the field for an image of `(width, height)` given detected stars,
 /// a catalog, and a hint.
@@ -72,6 +152,18 @@ pub fn solve(
     hint: &SolveHint,
     dimensions: (u32, u32),
 ) -> Result<Solution, crate::Error> {
+    solve_with_limits(stars, catalog, hint, dimensions, &SolveLimits::default())
+}
+
+/// [`solve`], giving up when `limits` say so.
+pub fn solve_with_limits(
+    stars: &[DetectedStar],
+    catalog: &dyn StarCatalog,
+    hint: &SolveHint,
+    dimensions: (u32, u32),
+    limits: &SolveLimits,
+) -> Result<Solution, crate::Error> {
+    limits.check()?;
     // Mount coordinates are usually already inside the image. Try that one
     // FOV-sized window before constructing triangles for every window in the
     // fallback radius. A 2-degree search on a fine-scale frame can contain
@@ -88,26 +180,57 @@ pub fn solve(
             scale_tolerance: hint.scale_tolerance,
             sip_order: hint.sip_order,
         };
-        if let Ok(solution) = solve_search(stars, catalog, &center_hint, dimensions)
-            && solution.matched_stars >= FAST_HINT_MIN_INLIERS
-            && solution.rms_arcsec < FAST_HINT_MAX_RMS_PX * hint.scale_arcsec_px
-        {
-            return Ok(solution);
+        match solve_search(stars, catalog, &center_hint, dimensions, limits) {
+            Ok(solution)
+                if solution.matched_stars >= FAST_HINT_MIN_INLIERS
+                    && solution.rms_arcsec < FAST_HINT_MAX_RMS_PX * hint.scale_arcsec_px
+                    && solution.false_match_probability <= SURE_FALSE_MATCH_PROBABILITY =>
+            {
+                return Ok(solution);
+            }
+            Err(error) if is_stop(&error) => return Err(error),
+            _ => {}
         }
     }
 
-    match solve_search(stars, catalog, hint, dimensions) {
+    match solve_search(stars, catalog, hint, dimensions, limits) {
         Ok(solution) => Ok(solution),
+        Err(error) if is_stop(&error) => Err(error),
         // Triangle matching assumes the list's flux ordering tracks real
         // brightness; when it fails, retry with the rank-robust quad
         // search that treats ordering as a prior only.
         Err(triangle_error) => {
             let tables = RankRobustTables::build(stars, dimensions);
-            solve_rank_robust(stars, catalog, hint, dimensions, &tables, RR_PROBE_BUDGET).map_err(
-                |robust_error| crate::Error::Solve(format!("{triangle_error}; {robust_error}")),
+            solve_rank_robust(
+                stars,
+                catalog,
+                hint,
+                dimensions,
+                &tables,
+                RR_PROBE_BUDGET,
+                limits,
             )
+            .map_err(|robust_error| joined_error(triangle_error, robust_error))
         }
     }
+}
+
+/// The triangle search's failure and the rank-robust search's, as one
+/// error; a stop passes through as itself.
+fn joined_error(triangle_error: crate::Error, robust_error: crate::Error) -> crate::Error {
+    if is_stop(&robust_error) {
+        return robust_error;
+    }
+    // The reasons alone, so the joined message reads "solve failed: A; B".
+    let reason = |error: crate::Error| match error {
+        crate::Error::Solve(reason) => reason,
+        other => other.to_string(),
+    };
+    crate::Error::Solve(format!(
+        "{}; {}",
+        reason(triangle_error),
+        reason(robust_error)
+    ))
 }
 
 /// [`solve`] for blind hypothesis verification: identical semantics, but
@@ -122,16 +245,25 @@ pub(crate) fn solve_for_blind_hypothesis(
     hint: &SolveHint,
     dimensions: (u32, u32),
     tables: Option<&RankRobustTables>,
+    limits: &SolveLimits,
 ) -> Result<Solution, crate::Error> {
-    match solve_search(stars, catalog, hint, dimensions) {
+    match solve_search(stars, catalog, hint, dimensions, limits) {
         Ok(solution) => Ok(solution),
+        Err(error) if is_stop(&error) => Err(error),
         Err(triangle_error) => {
             let Some(tables) = tables else {
                 return Err(triangle_error);
             };
-            solve_rank_robust(stars, catalog, hint, dimensions, tables, RR_PROBE_BUDGET).map_err(
-                |robust_error| crate::Error::Solve(format!("{triangle_error}; {robust_error}")),
+            solve_rank_robust(
+                stars,
+                catalog,
+                hint,
+                dimensions,
+                tables,
+                RR_PROBE_BUDGET,
+                limits,
             )
+            .map_err(|robust_error| joined_error(triangle_error, robust_error))
         }
     }
 }
@@ -145,6 +277,7 @@ fn solve_search(
     catalog: &dyn StarCatalog,
     hint: &SolveHint,
     dimensions: (u32, u32),
+    limits: &SolveLimits,
 ) -> Result<Solution, crate::Error> {
     if stars.len() < 4 {
         return Err(crate::Error::Solve(format!(
@@ -198,6 +331,7 @@ fn solve_search(
 
     let mut candidates: Vec<(f64, Affine)> = Vec::new();
     for &(ox, oy) in &windows {
+        limits.check()?;
         let mut in_window: Vec<(f64, f64)> = cat
             .iter()
             .filter(|&&(x, y, _)| (x - ox).hypot(y - oy) <= fov_radius_deg)
@@ -253,7 +387,10 @@ fn solve_search(
     let match_tol = MATCH_TOLERANCE_PX * scale_deg;
     let grid = CatGrid::build(&cat, match_tol);
     let mut best: Option<(usize, Affine)> = None;
-    for (_, affine) in &candidates {
+    for (index, (_, affine)) in candidates.iter().enumerate() {
+        if index % CANDIDATES_PER_CHECK == 0 {
+            limits.check()?;
+        }
         let inliers = count_inliers(affine, &vote_stars, &cat, &grid, match_tol);
         if best.as_ref().is_none_or(|(count, _)| inliers > *count) {
             best = Some((inliers, affine.clone()));
@@ -267,9 +404,24 @@ fn solve_search(
         )));
     }
 
-    refine_to_solution(
-        affine, stars, &cat, &grid, match_tol, &tangent, hint, dimensions,
-    )
+    let solution = refine_to_solution(
+        affine,
+        stars,
+        &cat,
+        &grid,
+        match_tol,
+        &tangent,
+        hint,
+        dimensions,
+        candidates.len(),
+    )?;
+    if solution.false_match_probability > HINTED_MAX_FALSE_MATCH_PROBABILITY {
+        return Err(crate::Error::Solve(format!(
+            "best candidate matched {} stars, which chance explains (false-match probability {:.1e})",
+            solution.matched_stars, solution.false_match_probability
+        )));
+    }
+    Ok(solution)
 }
 
 /// Refine one plausible pixel-to-tangent affine into a complete solution:
@@ -286,6 +438,7 @@ fn refine_to_solution(
     tangent: &Wcs,
     hint: &SolveHint,
     dimensions: (u32, u32),
+    trials: usize,
 ) -> Result<Solution, crate::Error> {
     let (width, height) = (dimensions.0 as f64, dimensions.1 as f64);
     // Iterative least-squares refinement with re-matching
@@ -308,7 +461,7 @@ fn refine_to_solution(
     }
 
     // Re-centre: express the solution as a WCS about the image center
-    let center_px = (width / 2.0, height / 2.0);
+    let center_px = crate::wcs::image_center(dimensions.0, dimensions.1);
     let (cx, cy) = affine.apply(center_px.0, center_px.1);
     let crval = tangent.pixel_to_world(cx, cy);
     let recentre = tangent_wcs(crval);
@@ -403,11 +556,97 @@ fn refine_to_solution(
         }
     }
 
+    let catalog_in_frame = cat
+        .iter()
+        .filter(|&&(_, _, star)| {
+            wcs.world_to_pixel(star.ra, star.dec)
+                .is_some_and(|(x, y)| x >= 0.0 && y >= 0.0 && x < width && y < height)
+        })
+        .count();
+    let false_match_probability = false_match_probability(
+        &ChanceMatches {
+            detections: stars.len(),
+            catalog_in_frame,
+            radius_px: MATCH_TOLERANCE_PX,
+            area_px: width * height,
+        },
+        matched_stars,
+        trials,
+    );
+
     Ok(Solution {
         wcs,
         matched_stars,
         rms_arcsec,
+        false_match_probability,
     })
+}
+
+/// What decides how often detections land on catalog stars by accident.
+struct ChanceMatches {
+    /// Detections the match considered.
+    detections: usize,
+    /// Catalog stars inside the frame.
+    catalog_in_frame: usize,
+    /// How close a detection must land to a catalog star to match.
+    radius_px: f64,
+    /// The frame's area.
+    area_px: f64,
+}
+
+/// Pairs that fixing an affine transform takes, which match by
+/// construction and prove nothing.
+const PAIRS_FIXED_BY_FIT: usize = 3;
+
+/// The chance that a wrong transform, the best of `trials`, matches
+/// `matched` pairs or more.
+///
+/// One detection placed at random lands within the radius of some catalog
+/// star with chance `p = M·π·r²/A` (overlapping circles cover less, so this
+/// errs towards refusing). The matches beyond those the fit forces are then
+/// a binomial count, and each of the `trials` candidates was a chance to be
+/// fooled.
+fn false_match_probability(chance: &ChanceMatches, matched: usize, trials: usize) -> f64 {
+    if matched <= PAIRS_FIXED_BY_FIT || chance.area_px <= 0.0 {
+        return 1.0;
+    }
+    let p = (chance.catalog_in_frame as f64 * std::f64::consts::PI * chance.radius_px.powi(2)
+        / chance.area_px)
+        .min(1.0);
+    let ln_one = ln_binomial_tail(
+        chance.detections.saturating_sub(PAIRS_FIXED_BY_FIT),
+        p,
+        matched - PAIRS_FIXED_BY_FIT,
+    );
+    (ln_one + (trials.max(1) as f64).ln()).min(0.0).exp()
+}
+
+/// `ln P(X ≥ k)` for `X ~ Binomial(n, p)`, summed in log space so a tail
+/// far below `f64`'s range still compares and adds correctly.
+fn ln_binomial_tail(n: usize, p: f64, k: usize) -> f64 {
+    if k == 0 || p >= 1.0 {
+        return 0.0;
+    }
+    if k > n || p <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let (ln_p, ln_q) = (p.ln(), (-p).ln_1p());
+    let ln_choose: f64 = (1..=k)
+        .map(|j| ((n - k + j) as f64).ln() - (j as f64).ln())
+        .sum();
+    let mut ln_term = ln_choose + k as f64 * ln_p + (n - k) as f64 * ln_q;
+    let mut ln_sum = ln_term;
+    for i in k..n {
+        ln_term += ((n - i) as f64).ln() - ((i + 1) as f64).ln() + ln_p - ln_q;
+        let (high, low) = (ln_sum.max(ln_term), ln_sum.min(ln_term));
+        ln_sum = high + (low - high).exp().ln_1p();
+        // Past the mean the terms only shrink; stop once they no longer
+        // change the sum.
+        if i as f64 > n as f64 * p && ln_term < ln_sum - 40.0 {
+            break;
+        }
+    }
+    ln_sum.min(0.0)
 }
 
 // --------------------------------------------------------------------------
@@ -483,6 +722,7 @@ fn solve_rank_robust(
     dimensions: (u32, u32),
     tables: &RankRobustTables,
     probe_budget: usize,
+    limits: &SolveLimits,
 ) -> Result<Solution, crate::Error> {
     if stars.len() < RR_MIN_STARS {
         return Err(crate::Error::Solve(format!(
@@ -553,8 +793,12 @@ fn solve_rank_robust(
     let scale_low = hint.scale_arcsec_px * (1.0 - hint.scale_tolerance.min(0.9));
     let scale_high = hint.scale_arcsec_px * (1.0 + hint.scale_tolerance);
     let mut probes_left = probe_budget;
+    // Transforms scored against the catalog window, each a chance to be
+    // fooled.
+    let mut censuses = 0usize;
 
     for quad in &quads {
+        limits.check()?;
         // Backbone: the quad's widest pair; the other two verify.
         let mut backbone = (0, 1);
         let mut widest = 0.0;
@@ -580,7 +824,10 @@ fn solve_rank_robust(
         let from = pairs.partition_point(|pair| pair.0 < low);
         let to = pairs.partition_point(|pair| pair.0 <= high);
 
-        for &(_, i, j) in &pairs[from..to] {
+        for (pair_index, &(_, i, j)) in pairs[from..to].iter().enumerate() {
+            if pair_index % CANDIDATES_PER_CHECK == CANDIDATES_PER_CHECK - 1 {
+                limits.check()?;
+            }
             let image_i = pair_stars[i as usize];
             let image_j = pair_stars[j as usize];
             for (a_img, b_img) in [(image_i, image_j), (image_j, image_i)] {
@@ -608,6 +855,7 @@ fn solve_rank_robust(
                     // can match, so the floor adapts when the hint offset
                     // leaves few of them in view.
                     probes_left = probes_left.saturating_sub(window.len());
+                    censuses += 1;
                     let margin = RR_PROBE_TOL_PX * 1.5;
                     let (width, height) = (dimensions.0 as f64, dimensions.1 as f64);
                     let mut in_frame = 0usize;
@@ -642,8 +890,10 @@ fn solve_rank_robust(
                     let Some(inverse) = inverse else { continue };
                     if let Ok(solution) = refine_to_solution(
                         inverse, stars, &cat, &grid, match_tol, &tangent, hint, dimensions,
+                        censuses,
                     ) && solution.matched_stars >= FAST_HINT_MIN_INLIERS
                         && solution.rms_arcsec < FAST_HINT_MAX_RMS_PX * hint.scale_arcsec_px
+                        && solution.false_match_probability <= HINTED_MAX_FALSE_MATCH_PROBABILITY
                     {
                         return Ok(solution);
                     }
@@ -1515,6 +1765,117 @@ mod tests {
             let sep = angular_separation_deg(ra_t, dec_t, ra_s, dec_s) * 3600.0;
             assert!(sep < 3.0, "corner ({x}, {y}) off by {sep:.2}\"");
         }
+    }
+
+    #[test]
+    fn the_chance_of_matching_follows_the_binomial_tail() {
+        // Against a direct sum, where one fits in f64.
+        let direct = |n: usize, p: f64, k: usize| -> f64 {
+            (k..=n)
+                .map(|i| {
+                    let choose: f64 = (1..=i).map(|j| (n - i + j) as f64 / j as f64).product();
+                    choose * p.powi(i as i32) * (1.0 - p).powi((n - i) as i32)
+                })
+                .sum()
+        };
+        for (n, p, k) in [(10, 0.3, 3), (40, 0.05, 6), (60, 0.5, 30), (25, 0.01, 1)] {
+            let expected = direct(n, p, k);
+            let got = ln_binomial_tail(n, p, k).exp();
+            assert!(
+                (got - expected).abs() <= 1e-12 + 1e-9 * expected,
+                "{n} {p} {k}: {got} vs {expected}"
+            );
+        }
+        // The note's example: 600 detections, a 0.84% chance each.
+        let tail = ln_binomial_tail(600, 0.008377580409572781, 12).exp();
+        assert!((tail / 0.0054640974212591415 - 1.0).abs() < 1e-9, "{tail}");
+        // A tail far below f64's range still compares.
+        let deep = ln_binomial_tail(2000, 1e-4, 500);
+        assert!(deep.is_finite() && deep < -2000.0, "{deep}");
+        assert_eq!(ln_binomial_tail(10, 0.5, 0), 0.0);
+        assert_eq!(ln_binomial_tail(10, 0.5, 11), f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn a_crowded_frame_makes_a_dozen_matches_prove_little() {
+        // 600 detections and 4000 catalog stars in a 6000 x 4000 frame:
+        // about five matches are expected by chance.
+        let crowded = ChanceMatches {
+            detections: 600,
+            catalog_in_frame: 4000,
+            radius_px: 4.0,
+            area_px: 6000.0 * 4000.0,
+        };
+        let one = false_match_probability(&crowded, 12, 1);
+        assert!((0.05..0.1).contains(&one), "{one}");
+        // Across 400 candidates, a dozen is no evidence at all...
+        assert_eq!(false_match_probability(&crowded, 12, 400), 1.0);
+        // ...while sixty is.
+        assert!(false_match_probability(&crowded, 60, 4000) < 1e-30);
+        // A sparse frame makes the same dozen convincing.
+        let sparse = ChanceMatches {
+            catalog_in_frame: 150,
+            detections: 80,
+            ..crowded
+        };
+        assert!(false_match_probability(&sparse, 12, 4000) < 1e-15);
+        // The pairs a fit forces prove nothing.
+        assert_eq!(false_match_probability(&sparse, 3, 1), 1.0);
+    }
+
+    #[test]
+    fn limits_stop_a_hinted_solve() {
+        let dims = (4000u32, 3000u32);
+        let truth =
+            Wcs::from_center_scale_rotation((150.5, 33.2), (2000.0, 1500.0), 2.0, 30.0, false);
+        let mut rng = Lcg(11);
+        let (catalog, detected) = synthetic_scene(&truth, dims, &mut rng);
+        let hint = SolveHint {
+            center: (150.8, 33.0),
+            radius_deg: 1.5,
+            scale_arcsec_px: 2.2,
+            scale_tolerance: 0.2,
+            sip_order: 0,
+        };
+        let solution = solve_with_limits(
+            &detected,
+            &catalog,
+            &hint,
+            dims,
+            &SolveLimits::within(Duration::from_secs(600)),
+        )
+        .unwrap();
+        assert!(
+            solution.false_match_probability < 1e-20,
+            "{}",
+            solution.false_match_probability
+        );
+
+        let passed = SolveLimits {
+            deadline: Some(Instant::now()),
+            cancel: None,
+        };
+        assert!(matches!(
+            solve_with_limits(&detected, &catalog, &hint, dims, &passed),
+            Err(crate::Error::TimedOut)
+        ));
+
+        // A cancel that arrives after the search has begun stops it there,
+        // rather than letting it finish or fall back to another search.
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = std::sync::Arc::clone(&asked);
+        let cancel = CancelSignal::new(move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 3
+        });
+        let result = solve_with_limits(
+            &detected,
+            &catalog,
+            &hint,
+            dims,
+            &SolveLimits::default().with_cancel(cancel),
+        );
+        assert!(matches!(result, Err(crate::Error::Cancelled)), "{result:?}");
+        assert!(asked.load(std::sync::atomic::Ordering::Relaxed) > 3);
     }
 
     #[test]

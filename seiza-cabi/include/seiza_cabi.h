@@ -42,6 +42,7 @@
  *          Videos reconfigured from one preparation share its scene, which
  *          lives until the last of them is freed; free them in any order.
  *   - char* returned by seiza_catalog_status_json, seiza_solve_image_json,
+ *     seiza_solve_image_with_limits_json,
  *     seiza_probe_frame_json, seiza_calibration_plan_json,
  *     seiza_calibration_build_master_json, seiza_live_stacker_state_json, and
  *     seiza_live_stacker_push_*_json, seiza_parallax_summary_json,
@@ -1814,6 +1815,26 @@ char *seiza_solve_image_json(const char *path,
                              double maximum_scale_arcsec_per_pixel,
                              uint8_t sip_order,
                              char **error_out);
+
+/*
+ [`seiza_solve_image_json`] that gives up after `time_limit_seconds`
+ (zero for no limit) or when `cancel` is cancelled. A solve that stops
+ returns null with `error_out` set to `solve stopped at its time limit` or
+ `cancelled by the caller`. Detection and loading are not counted against
+ the limit; the solve checks it between windows and hypotheses.
+
+ # Safety
+ As [`seiza_solve_image_json`]. `cancel` must be null or a live
+ [`SeizaCancelSignal`] retained until this call returns.
+ */
+char *seiza_solve_image_with_limits_json(const char *path,
+                                         const char *catalog_directory,
+                                         double minimum_scale_arcsec_per_pixel,
+                                         double maximum_scale_arcsec_per_pixel,
+                                         uint8_t sip_order,
+                                         double time_limit_seconds,
+                                         const SeizaCancelSignal *cancel,
+                                         char **error_out);
 
 /*
  # Safety

@@ -12,7 +12,7 @@
 
 use crate::catalog::{CatalogStar, StarCatalog};
 use crate::detect::DetectedStar;
-use crate::solve::{Solution, SolveHint, solve};
+use crate::solve::{Solution, SolveHint, SolveLimits};
 use crate::wcs::Wcs;
 use memmap2::{Mmap, MmapOptions};
 use rayon::prelude::*;
@@ -47,6 +47,11 @@ pub struct BlindParams {
     /// Maximum accepted RMS residual, in pixels (scale-relative — an
     /// arcsecond cap would reject coarse-scale images out of hand)
     pub max_rms_px: f64,
+    /// The largest accepted [`Solution::false_match_probability`], counting
+    /// every field the search scored. One in a billion by default: a whole
+    /// sky offers many chances to be fooled, and a true field scores far
+    /// below this.
+    pub max_false_match_probability: f64,
     /// SIP distortion polynomial order for the accepted solution (0 or 1 =
     /// linear only). Hypothesis verification always runs linear; the final
     /// solution is re-fitted at this order when it improves the residual.
@@ -64,6 +69,7 @@ impl Default for BlindParams {
             max_coarse_hypotheses: 20_000,
             min_matches: 12,
             max_rms_px: 2.0,
+            max_false_match_probability: crate::solve::SURE_FALSE_MATCH_PROBABILITY,
             sip_order: 0,
         }
     }
@@ -98,6 +104,9 @@ const BINS: f64 = 128.0;
 const PROBE_EPSILON: f64 = 0.002;
 /// Descriptor match tolerance in bins (probes adjacent bins).
 const N_IMAGE_STARS: usize = 32;
+/// Anchors of local windows enumerated between checks of the
+/// [`SolveLimits`].
+const ANCHORS_PER_CHECK: usize = 64;
 /// Coarse position-only matches a hypothesis needs before verification
 /// engages the rank-robust fallback ([`coarse_match_count`] projects
 /// zero or one for random descriptor collisions).
@@ -709,6 +718,28 @@ pub fn solve_blind(
     params: &BlindParams,
     dimensions: (u32, u32),
 ) -> Result<Solution, crate::Error> {
+    solve_blind_with_limits(
+        stars,
+        catalog,
+        index,
+        params,
+        dimensions,
+        &SolveLimits::default(),
+    )
+}
+
+/// [`solve_blind`], giving up when `limits` say so. If the limits stop the
+/// optional SIP refinement after a field is found, the linear solution is
+/// returned.
+pub fn solve_blind_with_limits(
+    stars: &[DetectedStar],
+    catalog: &(dyn StarCatalog + Sync),
+    index: &BlindIndex,
+    params: &BlindParams,
+    dimensions: (u32, u32),
+    limits: &SolveLimits,
+) -> Result<Solution, crate::Error> {
+    limits.check()?;
     if stars.len() < 6 {
         return Err(crate::Error::Solve(format!(
             "only {} stars detected; need at least 6",
@@ -719,7 +750,7 @@ pub fn solve_blind(
     // Shared by every hypothesis verification: the rank-robust fallback's
     // star-list tables depend only on the image, not the hypothesis.
     let rr_tables = crate::solve::RankRobustTables::build(stars, dimensions);
-    let solution = match solve_blind_with_global_ladder(
+    let (solution, fields) = match solve_blind_with_global_ladder(
         stars,
         catalog,
         index,
@@ -727,6 +758,7 @@ pub fn solve_blind(
         dimensions,
         &[8],
         &rr_tables,
+        limits,
     ) {
         Ok(solution) => solution,
         Err(crate::Error::Solve(_)) => solve_blind_with_global_ladder(
@@ -737,16 +769,25 @@ pub fn solve_blind(
             dimensions,
             &[8, 10, 12, 16, 20, 26, 32],
             &rr_tables,
+            limits,
         )?,
         Err(error) => return Err(error),
     };
+    // Every field scored was a chance to be fooled, beyond the candidates
+    // the verifying solve itself scored.
+    let across_fields = |mut solution: Solution| {
+        solution.false_match_probability =
+            (solution.false_match_probability * fields.max(1) as f64).min(1.0);
+        solution
+    };
+    let solution = across_fields(solution);
     if params.sip_order < 2 {
         return Ok(solution);
     }
     // Hypothesis verification deliberately stays linear so acceptance
     // thresholds keep their meaning across the whole-sky search; the one
     // accepted solution is then re-solved at the requested SIP order.
-    let center_px = (dimensions.0 as f64 / 2.0, dimensions.1 as f64 / 2.0);
+    let center_px = crate::wcs::image_center(dimensions.0, dimensions.1);
     let center = solution.wcs.pixel_to_world(center_px.0, center_px.1);
     let hint = SolveHint {
         center,
@@ -755,8 +796,10 @@ pub fn solve_blind(
         scale_tolerance: 0.05,
         sip_order: params.sip_order,
     };
-    match solve(stars, catalog, &hint, dimensions) {
-        Ok(refined) if refined.matched_stars >= solution.matched_stars => Ok(refined),
+    match crate::solve::solve_with_limits(stars, catalog, &hint, dimensions, limits) {
+        Ok(refined) if refined.matched_stars >= solution.matched_stars => {
+            Ok(across_fields(refined))
+        }
         _ => Ok(solution),
     }
 }
@@ -773,7 +816,8 @@ fn solve_blind_with_global_ladder(
     dimensions: (u32, u32),
     global_ladder: &[usize],
     rr_tables: &crate::solve::RankRobustTables,
-) -> Result<Solution, crate::Error> {
+    limits: &SolveLimits,
+) -> Result<(Solution, usize), crate::Error> {
     // Image patterns: each of the brightest stars with 3-subsets of its
     // nearest bright neighbors, mirroring the index construction. The
     // catalog's bright stars are usually the *locally* brightest
@@ -812,6 +856,7 @@ fn solve_blind_with_global_ladder(
         let picked = &all_picked[..k.min(all_picked.len())];
         let n = picked.len();
         for i in 0..n {
+            limits.check()?;
             for a in i + 1..n {
                 for b in a + 1..n {
                     for c in b + 1..n {
@@ -844,7 +889,7 @@ fn solve_blind_with_global_ladder(
                                 let Some((implied, coarse_wcs)) = implied_wcs(
                                     &points,
                                     &pattern,
-                                    (dimensions.0 as f64 / 2.0, dimensions.1 as f64 / 2.0),
+                                    crate::wcs::image_center(dimensions.0, dimensions.1),
                                     scale,
                                 ) else {
                                     continue;
@@ -878,6 +923,9 @@ fn solve_blind_with_global_ladder(
     let all_stars: Vec<(f64, f64)> = stars.iter().map(|s| (s.x, s.y)).collect();
     let mut seen_windows = FxHashSet::default();
     for anchor in 0..all_stars.len() {
+        if anchor % ANCHORS_PER_CHECK == 0 {
+            limits.check()?;
+        }
         let (ax, ay) = all_stars[anchor];
         for divisor in [16.0, 11.0, 8.0, 5.6, 4.0, 2.8, 2.0] {
             let radius = min_dim / divisor;
@@ -933,7 +981,7 @@ fn solve_blind_with_global_ladder(
                                     let Some((implied, coarse_wcs)) = implied_wcs(
                                         &points,
                                         &pattern,
-                                        (width / 2.0, height / 2.0),
+                                        crate::wcs::image_center(dimensions.0, dimensions.1),
                                         scale,
                                     ) else {
                                         continue;
@@ -1002,6 +1050,11 @@ fn solve_blind_with_global_ladder(
         .into_par_iter()
         .take(score_count)
         .map(|(votes, center, scale, coarse_wcs)| {
+            // A stopped solve scores nothing more; the check after the
+            // map returns the reason.
+            if limits.stopped() {
+                return (0, votes, center, scale, coarse_wcs);
+            }
             let matches = coarse_match_count(
                 &coarse_wcs,
                 center,
@@ -1013,6 +1066,7 @@ fn solve_blind_with_global_ladder(
             (matches, votes, center, scale, coarse_wcs)
         })
         .collect();
+    limits.check()?;
     ranked.par_sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
 
     if let Ok(truth) = std::env::var("SEIZA_DEBUG_TRUTH") {
@@ -1045,6 +1099,7 @@ fn solve_blind_with_global_ladder(
     let mut batch = max_batch.min(4);
     let mut attempted = 0;
     while attempted < ranked.len() {
+        limits.check()?;
         let end = (attempted + batch).min(ranked.len());
         let chunk = &ranked[attempted..end];
         let solution = chunk.par_iter().find_map_any(
@@ -1075,20 +1130,26 @@ fn solve_blind_with_global_ladder(
                     &hint,
                     dimensions,
                     rank_robust,
+                    limits,
                 )
                 .ok()
                 .filter(|s| {
                     s.matched_stars >= params.min_matches
                         && s.rms_arcsec < params.max_rms_px * *scale
+                        && s.false_match_probability * score_count.max(1) as f64
+                            <= params.max_false_match_probability
                 })
             },
         );
         if let Some(solution) = solution {
-            return Ok(solution);
+            return Ok((solution, score_count));
         }
         attempted = end;
         batch = (batch * 2).min(max_batch);
     }
+    // A stop during the last batch reads as a miss inside it; report the
+    // stop instead.
+    limits.check()?;
 
     Err(crate::Error::Solve(format!(
         "no hypothesis verified (tried {})",
@@ -1515,6 +1576,12 @@ pub(crate) mod tests {
         let sep = crate::catalog::angular_separation_deg(ra, dec, 212.4, -35.7);
         assert!(sep < 0.01, "center off by {sep}°");
         assert!((solution.wcs.scale_arcsec_per_px() - 6.0).abs() < 0.05);
+        // Sure, even counting every field the search scored.
+        assert!(
+            solution.false_match_probability < 1e-10,
+            "{}",
+            solution.false_match_probability
+        );
 
         // A requested SIP order refines the accepted solution without
         // regressing it. This undistorted scene must not lose matches, and
@@ -1549,6 +1616,68 @@ pub(crate) mod tests {
             })
             .collect();
         assert!(solve_blind(&detected, &catalog, &index, &params, (4000, 3000)).is_err());
+    }
+
+    #[test]
+    fn noise_is_refused_even_under_a_weak_match_count() {
+        // Against the real Gaia index, a six-match floor and 3 px let noise
+        // solve to some field in every trial tried, at false-match
+        // probabilities of 0.2 to 1; the probability limits refuse them.
+        let mut rng = Lcg(7);
+        let catalog = whole_sky_catalog(&mut rng);
+        let detected: Vec<DetectedStar> = (0..40)
+            .map(|_| DetectedStar {
+                x: rng.next() * 4000.0,
+                y: rng.next() * 3000.0,
+                flux: rng.next() * 1000.0,
+                peak: 0.5,
+                area: 12,
+            })
+            .collect();
+        let weak = BlindParams {
+            min_matches: 6,
+            max_rms_px: 3.0,
+            max_hypotheses: 100,
+            ..BlindParams::default()
+        };
+        let index = BlindIndex::build(&catalog, &weak);
+        assert!(solve_blind(&detected, &catalog, &index, &weak, (4000, 3000)).is_err());
+    }
+
+    #[test]
+    fn limits_stop_a_blind_solve() {
+        let mut rng = Lcg(7);
+        let catalog = whole_sky_catalog(&mut rng);
+        let params = BlindParams::default();
+        let index = BlindIndex::build(&catalog, &params);
+        // Noise, so the search would run through every hypothesis.
+        let detected: Vec<DetectedStar> = (0..40)
+            .map(|_| DetectedStar {
+                x: rng.next() * 4000.0,
+                y: rng.next() * 3000.0,
+                flux: rng.next() * 1000.0,
+                peak: 0.5,
+                area: 12,
+            })
+            .collect();
+        let solve = |limits: &SolveLimits| {
+            solve_blind_with_limits(&detected, &catalog, &index, &params, (4000, 3000), limits)
+        };
+        let passed = SolveLimits {
+            deadline: Some(std::time::Instant::now()),
+            cancel: None,
+        };
+        assert!(matches!(solve(&passed), Err(crate::Error::TimedOut)));
+
+        // Cancelled partway through the search, it stops there.
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = std::sync::Arc::clone(&asked);
+        let cancel = crate::CancelSignal::new(move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 5
+        });
+        let result = solve(&SolveLimits::default().with_cancel(cancel));
+        assert!(matches!(result, Err(crate::Error::Cancelled)), "{result:?}");
+        assert!(asked.load(std::sync::atomic::Ordering::Relaxed) > 5);
     }
 
     #[test]
