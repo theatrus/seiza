@@ -198,8 +198,12 @@ exposes the **superset** of what both apps need.
   split (through `rc-astro`) or its starless and stars files, an optional WCS
   (as `seiza_solve_image_json` returns it; without one the image is
   blind-solved), and the command's options in camelCase, with frame sizes
-  such as `"1080p"`, `"4k"` or `"1080p-portrait"`. An unknown field is an
-  error. It returns an opaque `SeizaParallax`, released with
+  such as `"1080p"`, `"4k"`, `"1080p-portrait"` or `"4k-image"` (the
+  image's own shape at that longer side). `framing` `"fit"` shows all of an
+  image whose shape differs from the frame's, with black beside it, where
+  `"fill"`, the default, cuts its longer side; `crop` (`[x, y, width,
+  height]`) films part of the image, every other image point counting in
+  it. An unknown field is an error. It returns an opaque `SeizaParallax`, released with
   `seiza_parallax_free`, and reports each step as JSON to a
   `SeizaParallaxEventCallback`. `distanceFocus` is where the nebula's
   distance is measured; `focus` only aims the camera, so a new destination

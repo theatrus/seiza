@@ -12,8 +12,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 use seiza_parallax::{
     Corner, CustomLabel, DepthPlane, DistanceOverride, DustMap, Easing, Event, FfmpegSink,
-    FrameSink, Parallax, ParallaxOptions, PlaneMask, PlannedTour, PngSequence, Quality, SmallStars,
-    Start,
+    FrameSink, FrameSize, Framing, Parallax, ParallaxOptions, PlaneMask, PlannedTour, PngSequence,
+    Quality, SmallStars, Start,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -65,9 +65,11 @@ fn auto_tour_argument(value: &Bound<'_, PyAny>) -> PyResult<Option<seiza_paralla
 /// `tour_titles=True` shows), and `focus` with
 /// `focus_name`, the target most worth a visit, where the nebula's distance
 /// is best taken. Drop, move or change stops, then pass `tour=plan["tour"],
-/// distance_focus=plan["focus"]` to `ParallaxVideo`.
+/// distance_focus=plan["focus"]` to `ParallaxVideo`. With `crop` (x, y,
+/// width, height), the plan is of that part of the image, as
+/// `ParallaxVideo(crop=...)` films it; `framing` is the video's.
 #[pyfunction]
-#[pyo3(signature = (width, height, wcs, *, objects=None, size=None, targets=None, hold=1.5, motion=1.0))]
+#[pyo3(signature = (width, height, wcs, *, objects=None, size=None, targets=None, hold=1.5, motion=1.0, crop=None, framing="fill"))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn plan_parallax_tour<'py>(
     py: Python<'py>,
@@ -79,19 +81,23 @@ pub(crate) fn plan_parallax_tour<'py>(
     targets: Option<usize>,
     hold: f64,
     motion: f64,
+    crop: Option<(usize, usize, usize, usize)>,
+    framing: &str,
 ) -> PyResult<Bound<'py, PyDict>> {
+    let wcs = wcs.get().wcs.clone();
+    let (wcs, (width, height)) = match crop {
+        Some(crop) => seiza_parallax::crop_wcs(&wcs, (width, height), crop).map_err(video_error)?,
+        None => (wcs, (width, height)),
+    };
     let frame = match size {
         None => seiza_parallax::VideoOptions::default().size,
-        Some(size) => match size.extract::<String>() {
-            Ok(text) => seiza_parallax::parse_frame_size(&text).map_err(PyValueError::new_err)?,
-            Err(_) => size.extract()?,
-        },
+        Some(size) => frame_size_argument(size)?.for_image((width as usize, height as usize)),
     };
-    let wcs = wcs.get().wcs.clone();
     let auto = seiza_parallax::AutoTour {
         targets,
         hold,
         motion,
+        framing: framing_argument(framing)?,
     };
     let plan = py
         .detach(|| {
@@ -99,6 +105,27 @@ pub(crate) fn plan_parallax_tour<'py>(
         })
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
     plan_dict(py, &plan)
+}
+
+/// A frame size from `size=`: a name such as "1080p", "4k-portrait" or
+/// "4k-image", "WIDTHxHEIGHT", or (width, height).
+fn frame_size_argument(value: &Bound<'_, PyAny>) -> PyResult<FrameSize> {
+    match value.extract::<String>() {
+        Ok(text) => seiza_parallax::parse_frame_size_or_shape(&text).map_err(PyValueError::new_err),
+        Err(_) => {
+            let (width, height) = pair(value)?;
+            Ok(FrameSize::Fixed(width, height))
+        }
+    }
+}
+
+/// "fill" or "fit", from `framing=`.
+fn framing_argument(value: &str) -> PyResult<Framing> {
+    choice(
+        value,
+        "framing",
+        &[("fill", Framing::Fill), ("fit", Framing::Fit)],
+    )
 }
 
 /// A planned tour as Python sees it: its stops as dicts `tour=` takes back,
@@ -153,7 +180,12 @@ fn plan_dict<'py>(py: Python<'py>, plan: &PlannedTour) -> PyResult<Bound<'py, Py
 /// `unmatched_distance_pc`, `objects`,
 /// `object_distances`, `star_distances`, `gaia_max_mag`, `gaia_cache`,
 /// `online`, `max_stars`, `small_stars` ("drop", "field"), `keep_galaxies`,
-/// `dust`, `dust_opacity`, `start` ("focus", "whole"), `dolly`, `truck`,
+/// `dust`, `dust_opacity`, `crop` (x, y, width, height in image pixels:
+/// film that part of the image, every other image point counting in it),
+/// `start` ("focus", "whole"), `framing` ("fill", the default, fills the
+/// frame and cuts the ends of the image's longer side when the image and
+/// frame differ in shape; "fit" shows all the image at the widest, with
+/// black beside it), `dolly`, `truck`,
 /// `truck_angle_deg`, `pan`, `zoom`, `zoom_end`, `rotate_deg` (first,
 /// last), `easing` ("in_out", "linear"), `quality` ("standard", "high"),
 /// `growth_limit`, `fade_from`, `tour` (stops, each a string as `seiza
@@ -165,7 +197,9 @@ fn plan_dict<'py>(py: Python<'py>, plan: &PlannedTour) -> PyResult<Bound<'py, Py
 /// (True, a count, or a dict of `targets`, `hold` and `motion`: plan a
 /// tour of the catalogued objects and render it), `tour_glide`,
 /// `tour_titles`, `tour_loop`, `size` ("720p", "1080p", "1440p", "4k",
-/// each with "-portrait", "WIDTHxHEIGHT", or (width, height)), `seconds`,
+/// each with "-portrait", or with "-image" for the image's own shape with
+/// that longer side, so "4k-image" films a 4:3 image at 3840x2880, all of
+/// it; "WIDTHxHEIGHT", or (width, height)), `seconds`,
 /// `fps`, `overlay`, `overlay_density`, `labels` ((x, y, text) or (x, y,
 /// radius, text) tuples), `label_color` ("#RRGGBB"), `watermark` (True,
 /// the text, or a dict of `text`, `image` (a picture such as a logo, its
@@ -397,7 +431,7 @@ fn choice<T: Copy>(value: &str, name: &str, choices: &[(&str, T)]) -> PyResult<T
 
 /// The keyword arguments that make the scene: changing any needs a new
 /// `ParallaxVideo`, and `reconfigure` refuses them.
-const SCENE_KEYS: [&str; 18] = [
+const SCENE_KEYS: [&str; 19] = [
     "distance_pc",
     "distance_focus",
     "unmatched_distance_pc",
@@ -416,6 +450,7 @@ const SCENE_KEYS: [&str; 18] = [
     "planes",
     "auto_planes",
     "distance_overrides",
+    "crop",
 ];
 
 /// The video's options from keyword arguments, over the defaults.
@@ -457,6 +492,8 @@ fn options(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ParallaxOptions> {
             "distance_overrides" => {
                 options.scene.distance_overrides = distance_overrides_argument(&value)?
             }
+            "crop" => options.scene.crop = Some(value.extract()?),
+            "framing" => options.video.framing = framing_argument(&value.extract::<String>()?)?,
             "start" => {
                 options.video.start = choice(
                     &value.extract::<String>()?,
@@ -540,14 +577,7 @@ fn options(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ParallaxOptions> {
                     .collect::<PyResult<_>>()?
             }
             "fade_from" => options.video.fade_from = value.extract()?,
-            "size" => {
-                options.video.size = match value.extract::<String>() {
-                    Ok(size) => {
-                        seiza_parallax::parse_frame_size(&size).map_err(PyValueError::new_err)?
-                    }
-                    Err(_) => pair(&value)?,
-                }
-            }
+            "size" => options.video.set_frame_size(frame_size_argument(&value)?),
             "seconds" => options.video.seconds = value.extract()?,
             "fps" => options.video.fps = value.extract()?,
             "overlay" => options.video.overlay = value.extract()?,
@@ -828,32 +858,33 @@ impl PyParallaxVideo {
     /// target at the depth of the plane the scene shows it on.
     /// `plan_parallax_tour` plans from the catalogue alone. `auto_tour` is
     /// True, a count, or a dict of `targets`, `hold` and `motion`; `size` is
-    /// the frame the tour is for, this video's own by default. Returns
+    /// the frame the tour is for and `framing` "fill" or "fit", this
+    /// video's own by default. Returns
     /// `plan_parallax_tour`'s dict, its stops carrying `depth_pc`; its
     /// `tour`, edited, goes back in through `reconfigure(tour=...)`. The
     /// scene keeps the distance it was prepared with, so the plan's `focus`
     /// matters only to a new `ParallaxVideo`.
-    #[pyo3(signature = (auto_tour=None, *, size=None))]
+    #[pyo3(signature = (auto_tour=None, *, size=None, framing=None))]
     fn plan_tour<'py>(
         &self,
         py: Python<'py>,
         auto_tour: Option<&Bound<'py, PyAny>>,
         size: Option<&Bound<'py, PyAny>>,
+        framing: Option<&str>,
     ) -> PyResult<Bound<'py, PyDict>> {
-        let auto = match auto_tour {
+        let mut auto = match auto_tour {
             None => seiza_parallax::AutoTour::default(),
             Some(value) => auto_tour_argument(value)?
                 .ok_or_else(|| PyValueError::new_err("auto_tour=False plans no tour"))?,
         };
+        auto.framing = match framing {
+            Some(framing) => framing_argument(framing)?,
+            None => self.video.shot().framing,
+        };
         auto.check().map_err(PyValueError::new_err)?;
         let frame = match size {
             None => self.video.size(),
-            Some(size) => match size.extract::<String>() {
-                Ok(size) => {
-                    seiza_parallax::parse_frame_size(&size).map_err(PyValueError::new_err)?
-                }
-                Err(_) => pair(size)?,
-            },
+            Some(size) => frame_size_argument(size)?.for_image(self.video.image_size()),
         };
         let plan = py
             .detach(|| self.video.plan_tour(&auto, frame))

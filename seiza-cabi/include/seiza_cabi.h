@@ -2273,8 +2273,13 @@ char *seiza_rc_astro_process_file_json(const char *request_json,
  image stays with the nebula unless given a distance, and so do the
  nebulae inside a nebula that stays), `distanceOverrides` (`[{object, distanceParsecs}]`:
  distances for catalogued objects, by name, in place of the catalogue's,
- for the nebula's distance and the automatic planes), `start` ("focus",
- "whole"), `dolly`, `truck`, `truckAngleDegrees`,
+ for the nebula's distance and the automatic planes), `crop` (`[x, y,
+ width, height]` in image pixels: film that part of the image, every
+ other image point counting in it), `start` ("focus", "whole"),
+ `framing` ("fill", the default, fills the frame and cuts the ends of
+ the image's longer side when the image and frame differ in shape;
+ "fit" shows all the image at the widest, with black beside it),
+ `dolly`, `truck`, `truckAngleDegrees`,
  `pan`, `zoom`, `zoomEnd`, `rotateDegrees` `[first, last]`, `easing`
  ("inOut", "linear"), `quality` ("standard", "high"), `growthLimit`,
  `fadeFrom`, `tour` (stops `[{focus, dolly, zoom, rotateDegrees, pan,
@@ -2291,7 +2296,9 @@ char *seiza_rc_astro_process_file_json(const char *request_json,
  and out), `tourLoop` (end where the tour began, adding a last stop at
  the first's view unless it ends there, so the last frame leads into the
  first), `size` ("720p", "1080p", "1440p", "4k", each with
- "-portrait", or "WIDTHxHEIGHT"), `seconds`, `fps`, `overlay`,
+ "-portrait", or with "-image" for the image's own shape with that
+ longer side, so "4k-image" films a 4:3 image at 3840x2880, all of it;
+ or "WIDTHxHEIGHT"), `seconds`, `fps`, `overlay`,
  `overlayDensity`, `labels` (`[{x, y, radius, text}]`), `labelColor`
  ("#RRGGBB"), `watermark` (true, the text, or `{text, image, corner,
  size, opacity}`: `text` true or the text, `image` a picture such as a
@@ -2329,8 +2336,9 @@ SeizaParallax *seiza_parallax_prepare_json(const char *request_json,
  Plan a tour of the catalogued objects in an image, for the caller to
  edit before making the video. The request is
  [`seiza_parallax_prepare_json`]'s: the image (`image`, else `stars` or
- `starless`) gives the size, and is blind-solved without `wcs`; `size`
- is the video's frame; `objects` or `catalogDirectory` the object
+ `starless`) gives the size, and is blind-solved without `wcs`; `crop`
+ the part filmed; `size` and `framing` the video's frame; `objects` or
+ `catalogDirectory` the object
  catalog; and `autoTour` (`{targets, hold, motion}`, each optional) how
  to plan. Returns JSON, released with `seiza_string_free`:
  `{"focus": [x, y], "focusName", "seconds", "tour": [{name, focus,
@@ -2360,10 +2368,11 @@ char *seiza_parallax_plan_tour_json(const char *request_json,
  same scene would be. [`seiza_parallax_plan_tour_json`] plans from the
  catalogue alone, without the scene's planes.
 
- `settings_json` is `{"size", "autoTour": {targets, hold, motion}}`, each
- optional: `size` the frame the tour is for ("720p", "1080p", "1440p",
- "4k", each with "-portrait", or "WIDTHxHEIGHT"; the video's own if
- absent), and `autoTour` how to plan. Returns
+ `settings_json` is `{"size", "framing", "autoTour": {targets, hold,
+ motion}}`, each optional: `size` the frame the tour is for ("720p",
+ "1080p", "1440p", "4k", each with "-portrait" or "-image", or
+ "WIDTHxHEIGHT"; the video's own if absent), `framing` "fill" or "fit"
+ (the video's own if absent), and `autoTour` how to plan. Returns
  [`seiza_parallax_plan_tour_json`]'s JSON, released with
  `seiza_string_free`, its stops carrying their planes' `depthParsecs`.
  Its `tour`, with any stops or titles dropped, moved or changed, goes
@@ -2391,8 +2400,8 @@ char *seiza_parallax_plan_scene_tour_json(const SeizaParallax *video,
 
  `settings_json` is a complete set of the video's settings, as in
  [`seiza_parallax_prepare_json`] but for the scene's: the single move
- (`focus`, `start`, `dolly`, `truck`, `truckAngleDegrees`, `pan`, `zoom`,
- `zoomEnd`, `rotateDegrees`, `easing`), a tour (`tour`, `autoTour`,
+ (`focus`, `start`, `framing`, `dolly`, `truck`, `truckAngleDegrees`,
+ `pan`, `zoom`, `zoomEnd`, `rotateDegrees`, `easing`), a tour (`tour`, `autoTour`,
  `tourGlide`, `tourTitles`, `tourLoop`), the output (`size`, `seconds`, `fps`, `quality`,
  `growthLimit`, `fadeFrom`), the labels (`overlay`, `overlayDensity`,
  `labels`, `labelColor`, `watermark`) and the cards (`introCard`,
@@ -2400,7 +2409,7 @@ char *seiza_parallax_plan_scene_tour_json(const SeizaParallax *video,
  defaults, not the first video's. Turns are taken as given, unwrapped:
  `rotateDegrees` [0, 360] turns once anticlockwise and [0, -360] once
  clockwise, and a stop's `rotateDegrees` likewise. A field that would
- change the scene (the images, plate solution, catalogs, distances,
+ change the scene (the images, crop, plate solution, catalogs, distances,
  `distanceFocus`, star placement, galaxies, depth planes or dust) is
  refused: those
  need a new preparation, except a dust map, which

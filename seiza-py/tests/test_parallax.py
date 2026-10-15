@@ -112,6 +112,9 @@ def test_uint8_images_and_named_sizes_are_accepted(tmp_path):
     [
         ({"dollly": 0.5}, "unknown parallax video option"),
         ({"size": "8k"}, "WIDTHxHEIGHT"),
+        ({"size": "8k-image"}, "-image follows one of"),
+        ({"framing": "stretch"}, "framing must be one of"),
+        ({"crop": (300, 0, 100, 100)}, "lie inside"),
         ({"start": "middle"}, "start must be one of"),
         ({"dolly": 1.5}, "dolly"),
     ],
@@ -120,6 +123,38 @@ def test_bad_options_are_refused(tmp_path, options, message):
     starless, stars, wcs = field()
     with pytest.raises(ValueError, match=message):
         seiza.ParallaxVideo(starless, stars, wcs, online=False, **options)
+
+
+def test_a_crop_films_at_its_own_shape_and_fit_shows_all_of_it(tmp_path):
+    starless, stars, wcs = field()
+    made = seiza.ParallaxVideo(
+        starless,
+        stars,
+        wcs,
+        distance_pc=400.0,
+        online=False,
+        objects=str(tmp_path / "no-objects.bin"),
+        crop=(40, 30, 200, 100),
+        size="720p-image",
+        start="whole",
+        seconds=0.2,
+        fps=10,
+    )
+    # The 2:1 crop at the 720p frame's longer side.
+    assert made.size == (1280, 640)
+    # A square frame fits the 2:1 crop whole, black above and below it.
+    square = made.reconfigure(size=(160, 160), framing="fit", start="whole", seconds=0.2, fps=10)
+    first = square.frame(0)
+    assert first[:20].max() == 0 and first[-20:].max() == 0
+    assert first[70:90].min() > 0
+    # Filled, the crop covers the frame.
+    assert made.reconfigure(size=(160, 160), start="whole", seconds=0.2, fps=10).frame(0)[:20].min() > 0
+    with pytest.raises(ValueError, match="changes the prepared scene"):
+        made.reconfigure(crop=(0, 0, 100, 100))
+    with pytest.raises(ValueError, match="framing must be one of"):
+        made.reconfigure(framing="stretch")
+    with pytest.raises(ValueError, match="lie inside"):
+        seiza.plan_parallax_tour(320, 240, wcs, crop=(300, 0, 100, 100))
 
 
 def test_a_tour_sets_the_length_and_takes_strings_or_dicts(tmp_path):

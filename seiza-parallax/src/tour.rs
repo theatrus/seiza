@@ -4,6 +4,7 @@
 
 use crate::overlay::{numbered, sharpless, word};
 use crate::pipeline::TourStop;
+use crate::render::Framing;
 use seiza::objects::{ObjectKind, PlacedObject, SkyObject};
 
 /// The least worth (see [`targets`]) a target needs when the tour takes
@@ -23,6 +24,9 @@ pub struct AutoTour {
     /// How much the camera turns and pans on the way, 0 for none, 1 for
     /// the gentle default, 2 for twice that.
     pub motion: f64,
+    /// How the video will frame the image, which sets how wide the whole
+    /// view is that targets are sized against.
+    pub framing: Framing,
 }
 
 impl Default for AutoTour {
@@ -31,6 +35,7 @@ impl Default for AutoTour {
             targets: None,
             hold: 1.5,
             motion: 1.0,
+            framing: Framing::Fill,
         }
     }
 }
@@ -132,6 +137,7 @@ pub fn targets(
     (width, height): (usize, usize),
     frame: (usize, usize),
     count: Option<usize>,
+    framing: Framing,
 ) -> Vec<Target> {
     let (count, least) = match count {
         Some(count) => (count, f64::NEG_INFINITY),
@@ -168,7 +174,7 @@ pub fn targets(
             distance_pc: None,
         })
         .filter(|target| target.prominence >= least)
-        .filter(|target| nearness(target, (width, height), frame).is_some())
+        .filter(|target| nearness(target, (width, height), frame, framing).is_some())
         .collect();
     candidates.sort_by(|a, b| b.prominence.total_cmp(&a.prominence));
     let mut chosen: Vec<Target> = Vec::new();
@@ -187,9 +193,19 @@ pub fn targets(
 }
 
 /// The whole view's image pixels per output pixel, and the frame's half
-/// sides in image pixels, for a `width` × `height` image filmed at `frame`.
-fn whole_view((width, height): (f64, f64), frame: (usize, usize)) -> (f64, (f64, f64)) {
-    let whole = (width / frame.0 as f64).min(height / frame.1 as f64);
+/// sides in image pixels, for a `width` × `height` image filmed at `frame`:
+/// the widest view inside the image, or with [`Framing::Fit`] the one
+/// that shows all of it.
+fn whole_view(
+    (width, height): (f64, f64),
+    frame: (usize, usize),
+    framing: Framing,
+) -> (f64, (f64, f64)) {
+    let (across, down) = (width / frame.0 as f64, height / frame.1 as f64);
+    let whole = match framing {
+        Framing::Fill => across.min(down),
+        Framing::Fit => across.max(down),
+    };
     (
         whole,
         (whole * frame.0 as f64 / 2.0, whole * frame.1 as f64 / 2.0),
@@ -203,9 +219,14 @@ fn whole_view((width, height): (f64, f64), frame: (usize, usize)) -> (f64, (f64,
 /// middle four fifths of the frame. A region larger than the whole view,
 /// away from the edges, has no view of its own (`None`): the whole view
 /// shows it.
-fn nearness(target: &Target, (width, height): (f64, f64), frame: (usize, usize)) -> Option<f64> {
+fn nearness(
+    target: &Target,
+    (width, height): (f64, f64),
+    frame: (usize, usize),
+    framing: Framing,
+) -> Option<f64> {
     let diagonal = width.hypot(height);
-    let (_, half) = whole_view((width, height), frame);
+    let (_, half) = whole_view((width, height), frame, framing);
     let fill = (target.radius.max(0.01 * diagonal) / 0.6) / half.0.min(half.1);
     let edge = (target.x.min(width - 1.0 - target.x) / half.0)
         .min(target.y.min(height - 1.0 - target.y) / half.1)
@@ -286,7 +307,7 @@ pub fn plan(
     let diagonal = width.hypot(height);
     // Image pixels per output pixel in the whole view, and the frame's
     // half sides in those pixels.
-    let (_, half) = whole_view((width, height), frame);
+    let (_, half) = whole_view((width, height), frame, auto.framing);
     // Where to aim to see `place` from `near` of the way: on it, or moved
     // in from the image's edge until the frame, with room to turn a
     // little, stays inside.
@@ -301,7 +322,7 @@ pub fn plan(
         };
         (axis(place.0, half.0, width), axis(place.1, half.1, height))
     };
-    let nearness = |target: &Target| nearness(target, (width, height), frame);
+    let nearness = |target: &Target| nearness(target, (width, height), frame, auto.framing);
     let targets: Vec<Target> = targets
         .iter()
         .filter(|target| nearness(target).is_some())
@@ -583,11 +604,23 @@ mod tests {
             targets.into_iter().map(|target| target.name).collect()
         };
         assert_eq!(
-            names(targets(&placed, (2000, 1600), (1920, 1080), None)),
+            names(targets(
+                &placed,
+                (2000, 1600),
+                (1920, 1080),
+                None,
+                Framing::Fill
+            )),
             ["NGC 7822", "NGC 7762"]
         );
         assert_eq!(
-            names(targets(&placed, (2000, 1600), (1920, 1080), Some(3))),
+            names(targets(
+                &placed,
+                (2000, 1600),
+                (1920, 1080),
+                Some(3),
+                Framing::Fill
+            )),
             ["NGC 7822", "NGC 7762", "LDN 1267"]
         );
         // A region with no view of its own crowds out nothing: the small
@@ -597,7 +630,13 @@ mod tests {
             self::placed("NGC 2", ObjectKind::OpenCluster, 3300.0, 2000.0, 60.0),
         ];
         assert_eq!(
-            names(targets(&beside, (6000, 4000), (1920, 1080), None)),
+            names(targets(
+                &beside,
+                (6000, 4000),
+                (1920, 1080),
+                None,
+                Framing::Fill
+            )),
             ["NGC 2"]
         );
     }

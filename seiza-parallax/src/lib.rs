@@ -45,8 +45,8 @@ pub use dust::{Dust, DustMap};
 #[cfg(feature = "openh264")]
 pub use encode::OpenH264Sink;
 pub use encode::{
-    Codec, FRAME_SIZES, FfmpegSink, FrameFn, FrameSink, PngSequence, VideoSettings,
-    parse_frame_size,
+    Codec, FRAME_SIZES, FfmpegSink, FrameFn, FrameSink, FrameSize, PngSequence, VideoSettings,
+    parse_frame_size, parse_frame_size_or_shape,
 };
 pub use field::default_gaia_cache;
 pub use lift::{Extent, lift_object};
@@ -55,10 +55,10 @@ pub use overlay::{Corner, CustomLabel, DEFAULT_WATERMARK, parse_color, parse_lab
 pub use pipeline::{
     AUTO_PLANE_COVERAGE, AUTO_PLANE_DEPTH, DistanceOverride, Event, FitSummary, Parallax,
     ParallaxOptions, PlaneSummary, PlannedTour, SceneOptions, StopFit, Summary, TourStop,
-    VideoOptions, format_stop, parse_stop, plan_tour,
+    VideoOptions, crop_wcs, format_stop, parse_stop, plan_tour,
 };
 pub use plane::{DepthPlane, Plane, PlaneMask, Region, lift_region};
-pub use render::{Easing, Quality, Shot, Start, Stop, View};
+pub use render::{Easing, Framing, Quality, Shot, Start, Stop, View};
 pub use scene::{CutOptions, Scene, SmallStars, Sprite, Star};
 pub use seiza_stars::PeakStar;
 pub use tour::{AutoTour, PlannedStop};

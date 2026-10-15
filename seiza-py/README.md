@@ -681,10 +681,24 @@ wide = video.reconfigure(size="4k", quality="high", rotate_deg=(0, -360))
 print(wide.summary["fit"]["zoom"])      # (asked, used)
 ```
 
+An image of another shape than the frame is cut to fill it by default.
+`framing="fit"` shows all of it at the widest, with black beside it, and a
+size ending `-image` takes the image's own shape: `"4k-image"` films a 4:3
+image at 3840x2880, all of it. `crop=(x, y, width, height)` films part of
+the image, and every other image point, such as `focus` and tour stops,
+counts in the cropped image; pass the same `crop` to `plan_parallax_tour`:
+
+```python
+video = seiza.ParallaxVideo(starless, stars, solution.wcs,
+                            crop=(800, 400, 6000, 4000), size="4k-image")
+square = video.reconfigure(size=(1080, 1080), framing="fit", start="whole")
+```
+
 Images may be paths (PNG, JPEG, TIFF, FITS or XISF) or arrays, float32 from
 0 to 1 or uint8; 16-bit or float files make the best videos, as 8 bits flatten bright star
 cores and band smooth nebula. Options are the command's, in snake case,
-with frame sizes such as `"720p"`, `"1080p"`, `"4k"` or `"1080p-portrait"`.
+with frame sizes such as `"720p"`, `"1080p"`, `"4k"`, `"1080p-portrait"` or
+`"4k-image"`.
 Distances come from the star distance file when installed, or the archives
 unless `online=False`. `render` stops when its callback returns `False`;
 Ctrl-C or `cancel` stop preparing, `reconfigure`, `render` and `write`.
