@@ -891,7 +891,11 @@ struct Prepared {
     /// The dust mapped from the star counts, kept when a given map takes
     /// its place so that it can come back.
     counted_dust: Option<Arc<Dust>>,
+    /// The plate solution of the image filmed, after any crop.
     wcs: Wcs,
+    /// The plate solution of the image as given, and the crop cut from it.
+    source_wcs: Wcs,
+    crop: Option<(usize, usize, usize, usize)>,
     image_size: (usize, usize),
     /// Galaxies lifted onto the far field.
     lifted: Vec<overlay::Lifted>,
@@ -967,6 +971,7 @@ impl Parallax {
         stop: &dyn Fn() -> bool,
     ) -> Result<Self, Error> {
         options.check()?;
+        let (source_wcs, crop) = (wcs.clone(), options.scene.crop);
         let cropped;
         let (starless, stars, wcs, options) = match options.scene.crop {
             Some(crop) => {
@@ -1414,6 +1419,8 @@ impl Parallax {
             scene,
             counted_dust,
             wcs: wcs.clone(),
+            source_wcs,
+            crop,
             image_size: (width, height),
             lifted,
             objects: scene_options.objects.clone(),
@@ -1473,6 +1480,8 @@ impl Parallax {
             scene,
             counted_dust: prepared.counted_dust.clone(),
             wcs: prepared.wcs.clone(),
+            source_wcs: prepared.source_wcs.clone(),
+            crop: prepared.crop,
             image_size: prepared.image_size,
             lifted: prepared.lifted.clone(),
             objects: prepared.objects.clone(),
@@ -1732,9 +1741,22 @@ impl Parallax {
         &self.prepared.scene
     }
 
-    /// The image's plate solution.
+    /// The plate solution of the image filmed: with a crop, the crop's,
+    /// its pixels counting from the crop's corner.
     pub fn wcs(&self) -> &Wcs {
         &self.prepared.wcs
+    }
+
+    /// The plate solution of the image as given, before any crop: the one
+    /// to pass back to [`Self::prepare`] with the same images.
+    pub fn source_wcs(&self) -> &Wcs {
+        &self.prepared.source_wcs
+    }
+
+    /// The part of the image filmed, (left, top, width, height) in the
+    /// image as given, if cropped.
+    pub fn crop(&self) -> Option<(usize, usize, usize, usize)> {
+        self.prepared.crop
     }
 
     /// The video options this video was filmed with, an automatic tour as
@@ -3153,6 +3175,9 @@ mod tests {
         let (ra, dec) = video.wcs().pixel_to_world(0.0, 0.0);
         let (expected_ra, expected_dec) = wcs.pixel_to_world(40.0, 30.0);
         assert!((ra - expected_ra).abs() < 1e-9 && (dec - expected_dec).abs() < 1e-9);
+        // The solution given and the crop come back, to prepare again with.
+        assert_eq!(video.source_wcs().crpix, wcs.crpix);
+        assert_eq!(video.crop(), Some((40, 30, 200, 150)));
         // The half-size mask is cut to the same part at its own scale: the
         // disc at (102.25, 57.25) is at (82.25, 42.25) of a 100 × 75 mask.
         let (_, _, _, cut) =

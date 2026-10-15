@@ -465,7 +465,11 @@ struct SummaryResponse {
     labelled_objects: usize,
     /// How the fit changed the framing asked for.
     fit: FitResponse,
+    /// The plate solution of the image as given, before any crop, to pass
+    /// back as `wcs` with the same images.
     wcs: WcsResponse,
+    /// The part of the image filmed, `[x, y, width, height]`, or null.
+    crop: Option<[usize; 4]>,
 }
 
 /// A depth plane lifted: its name, distance, how that was found, the
@@ -1329,7 +1333,10 @@ pub unsafe extern "C" fn seiza_parallax_reconfigure_json(
 /// the dust
 /// (`dustTransmission` `{median, thickest}`, `dustGiven` when a map gave
 /// it, and `starsInFrontOfDust`, the stars it brought in front), objects
-/// labelled, the WCS used, and `fit`, how fitting the camera to the
+/// labelled, `wcs`, the plate solution of the image as given (before any
+/// crop, so it goes back into a request with the same images as it is),
+/// `crop`, the part filmed (`[x, y, width, height]`, or null), and `fit`,
+/// how fitting the camera to the
 /// image changed the framing asked for: `zoom`, `pan`, `lead` and `truck`
 /// for the single move and `stops[].zoom`, `stops[].pan` and
 /// `stops[].dolly` for a tour, each `{asked, used}`, and `inside`, false
@@ -1354,7 +1361,7 @@ pub unsafe extern "C" fn seiza_parallax_summary_json(
         let video = &owner.video;
         let summary = video.summary();
         let (width, height) = video.size();
-        let wcs = video.wcs();
+        let wcs = video.source_wcs();
         owned_json(&SummaryResponse {
             schema_version: 1,
             frames: video.frames(),
@@ -1404,6 +1411,9 @@ pub unsafe extern "C" fn seiza_parallax_summary_json(
                 }),
                 pixel_origin: 0,
             },
+            crop: video
+                .crop()
+                .map(|(x, y, width, height)| [x, y, width, height]),
         })
     })
     .unwrap_or(ptr::null_mut())
@@ -1983,6 +1993,41 @@ mod tests {
             (plain.size, plain.image_shaped_size, plain.framing),
             ((1280, 720), None, Framing::Fill)
         );
+    }
+
+    #[test]
+    fn a_cropped_video_sizes_to_the_crop_and_gives_back_the_given_solution() {
+        let directory = tempfile::tempdir().unwrap();
+        let request = request(
+            directory.path(),
+            r#""crop": [20, 30, 200, 100], "size": "720p-image", "framing": "fit",
+               "labels": []"#,
+        );
+        let mut error = ptr::null_mut();
+        let video = unsafe {
+            seiza_parallax_prepare_json(
+                request.as_ptr(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(!video.is_null(), "{}", take_error(error));
+        let summary = unsafe { seiza_parallax_summary_json(video, &mut error) };
+        let parsed: serde_json::Value =
+            serde_json::from_str(&unsafe { CStr::from_ptr(summary) }.to_string_lossy()).unwrap();
+        unsafe { seiza_string_free(summary) };
+        // The 2:1 crop at the 720p frame's longer side.
+        assert_eq!(
+            (parsed["width"].as_u64(), parsed["height"].as_u64()),
+            (Some(1280), Some(640))
+        );
+        assert_eq!(parsed["crop"], serde_json::json!([20, 30, 200, 100]));
+        // The solution is the one given, so it goes back in as it is.
+        let given: serde_json::Value = serde_json::from_str(request.to_str().unwrap()).unwrap();
+        assert_eq!(parsed["wcs"]["crpix"], given["wcs"]["crpix"]);
+        unsafe { seiza_parallax_free(video) };
     }
 
     #[test]

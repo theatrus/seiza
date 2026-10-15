@@ -2459,7 +2459,10 @@ SeizaParallax *seiza_parallax_reconfigure_json(const SeizaParallax *video,
  the dust
  (`dustTransmission` `{median, thickest}`, `dustGiven` when a map gave
  it, and `starsInFrontOfDust`, the stars it brought in front), objects
- labelled, the WCS used, and `fit`, how fitting the camera to the
+ labelled, `wcs`, the plate solution of the image as given (before any
+ crop, so it goes back into a request with the same images as it is),
+ `crop`, the part filmed (`[x, y, width, height]`, or null), and `fit`,
+ how fitting the camera to the
  image changed the framing asked for: `zoom`, `pan`, `lead` and `truck`
  for the single move and `stops[].zoom`, `stops[].pan` and
  `stops[].dolly` for a tour, each `{asked, used}`, and `inside`, false
