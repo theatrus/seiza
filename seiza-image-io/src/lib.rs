@@ -311,6 +311,107 @@ pub fn read_astronomy(path: &Path) -> Result<AstronomyImage, Error> {
     })
 }
 
+/// Add FITS WCS cards for an XISF image's astrometric solution, when its
+/// headers carry no WCS of their own. PixInsight keeps a solution only as
+/// `AstrometricSolution` (or, before XISF Revision 1,
+/// `PCL:AstrometricSolution`) properties and drops the cards when it saves.
+///
+/// XISF image coordinates put the top-left corner of the first stored row
+/// at (0, 0), so a pixel's centre is at index + 0.5, and rows are read in
+/// stored order: `CRPIX` is the reference image point plus 0.5 and `CD` is
+/// the linear transformation unchanged. Only a gnomonic solution in the WCS
+/// default orientation (reference at native (0, 90), pole at native
+/// longitude 180) and ICRS is carried over; its projective and distortion
+/// layers, which have no TAN-SIP equivalent, are left out, so positions far
+/// from the centre of a distorted field are approximate.
+pub fn add_xisf_solution_wcs(headers: &mut Vec<(String, HeaderValue)>, metadata: &XisfMetadata) {
+    if headers
+        .iter()
+        .any(|(key, _)| matches!(key.as_str(), "CTYPE1" | "CTYPE2" | "CRVAL1" | "CRVAL2"))
+    {
+        return;
+    }
+    let Ok(Some(solution)) = metadata.astrometric_solution() else {
+        return;
+    };
+    let projection = &solution.projection;
+    let pole_default = projection
+        .celestial_pole_native
+        .is_none_or(|pole| (pole[0] - 180.0).abs() < 1e-9);
+    if projection.system != seiza_xisf::ProjectionSystem::Gnomonic
+        || projection.reference_native != [0.0, 90.0]
+        || !pole_default
+        || projection.celestial_reference_system != "ICRS"
+    {
+        return;
+    }
+    let [ra, dec] = projection.reference_celestial;
+    let [x, y] = projection.reference_image;
+    let [[cd11, cd12], [cd21, cd22]] = projection.linear;
+    for (key, value) in [
+        ("CTYPE1", HeaderValue::String("RA---TAN".into())),
+        ("CTYPE2", HeaderValue::String("DEC--TAN".into())),
+        ("CRVAL1", HeaderValue::Float(ra)),
+        ("CRVAL2", HeaderValue::Float(dec)),
+        ("CRPIX1", HeaderValue::Float(x + 0.5)),
+        ("CRPIX2", HeaderValue::Float(y + 0.5)),
+        ("CD1_1", HeaderValue::Float(cd11)),
+        ("CD1_2", HeaderValue::Float(cd12)),
+        ("CD2_1", HeaderValue::Float(cd21)),
+        ("CD2_2", HeaderValue::Float(cd22)),
+        ("RADESYS", HeaderValue::String("ICRS".into())),
+    ] {
+        headers.push((key.to_owned(), value));
+    }
+}
+
+impl AstronomyImage {
+    /// What the file says about where the image points, for
+    /// [`seiza::prior::solve_with_prior`]: its WCS cards, an XISF
+    /// astrometric solution, its pointing (`RA`/`DEC`, `OBJCTRA`/`OBJCTDEC`,
+    /// or XISF `Observation:Center`), and its pixel scale (`PIXSCALE`, or
+    /// pixel size over focal length, from cards or XISF `Instrument`
+    /// properties).
+    pub fn solve_prior(&self) -> seiza::prior::SolvePrior {
+        let mut headers = self.image.headers.clone();
+        if let Some(metadata) = &self.xisf_metadata {
+            add_xisf_solution_wcs(&mut headers, metadata);
+        }
+        solve_prior_from_headers(&headers)
+    }
+}
+
+/// [`AstronomyImage::solve_prior`] from a FITS or XISF file's headers and
+/// metadata alone, without decoding its pixels.
+pub fn read_solve_prior(path: &Path) -> Result<seiza::prior::SolvePrior, Error> {
+    match Format::from_path(path) {
+        Some(Format::Xisf) => {
+            let (mut headers, metadata) = seiza_xisf::read_header_and_metadata(path)
+                .map_err(|error| Error::open(path, error))?;
+            add_xisf_solution_wcs(&mut headers, &metadata);
+            Ok(solve_prior_from_headers(&headers))
+        }
+        Some(Format::Fits) => seiza_fits::read_header(path)
+            .map(|headers| solve_prior_from_headers(&headers))
+            .map_err(|error| Error::open(path, error)),
+        _ => Err(Error::open(path, "it is not a FITS or XISF file")),
+    }
+}
+
+/// [`AstronomyImage::solve_prior`] for header cards alone.
+pub fn solve_prior_from_headers(headers: &[(String, HeaderValue)]) -> seiza::prior::SolvePrior {
+    let card = |key: &str| {
+        headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(key))
+            .map(|(_, value)| value)
+    };
+    seiza::prior::SolvePrior::from_header(
+        |key| card(key).and_then(HeaderValue::as_f64),
+        |key| card(key).and_then(HeaderValue::as_str).map(str::to_owned),
+    )
+}
+
 /// Read a FITS or XISF file as Seiza's [`FitsImage`], with its headers and
 /// stored sample type, and its format; an error for any other extension.
 pub fn open_astronomy(path: &Path) -> Result<(FitsImage, Format), Error> {
@@ -569,6 +670,62 @@ pub fn save_display(path: &Path, image: &DynamicImage) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_solve_prior_is_read_from_headers_without_pixels() {
+        let directory = tempfile::tempdir().unwrap();
+        let card = |key: &str, value: HeaderValue| WriteHeaderCard::new(key, value);
+        let pixels = [0.0_f32; 4];
+
+        // A FITS mount position and optics scale.
+        let fits = directory.path().join("light.fits");
+        seiza_fits::write_f32_image(
+            &fits,
+            2,
+            2,
+            F32ImageData::Mono(&pixels),
+            &[
+                card("OBJCTRA", HeaderValue::String("05 35 17.3".into())),
+                card("OBJCTDEC", HeaderValue::String("-05 23 28".into())),
+                card("XPIXSZ", HeaderValue::Float(3.76)),
+                card("FOCALLEN", HeaderValue::Float(530.0)),
+            ],
+        )
+        .unwrap();
+        let prior = read_solve_prior(&fits).unwrap();
+        assert!(prior.wcs.is_none());
+        assert!((prior.center.unwrap().0 - 83.822).abs() < 1e-3);
+        assert!((prior.scale_arcsec_px.unwrap() - 1.4633).abs() < 1e-3);
+
+        // An XISF carrying a WCS as FITS keywords.
+        let xisf = directory.path().join("solved.xisf");
+        seiza_xisf::write_f32_image(
+            &xisf,
+            2,
+            2,
+            F32ImageData::Mono(&pixels),
+            &[
+                card("CTYPE1", HeaderValue::String("RA---TAN".into())),
+                card("CTYPE2", HeaderValue::String("DEC--TAN".into())),
+                card("CRVAL1", HeaderValue::Float(150.5)),
+                card("CRVAL2", HeaderValue::Float(33.2)),
+                card("CRPIX1", HeaderValue::Float(1.5)),
+                card("CRPIX2", HeaderValue::Float(1.5)),
+                card("CD1_1", HeaderValue::Float(-5e-4)),
+                card("CD1_2", HeaderValue::Float(0.0)),
+                card("CD2_1", HeaderValue::Float(0.0)),
+                card("CD2_2", HeaderValue::Float(5e-4)),
+            ],
+        )
+        .unwrap();
+        let prior = read_solve_prior(&xisf).unwrap();
+        assert_eq!(prior.wcs.as_ref().unwrap().crval, (150.5, 33.2));
+        assert!((prior.scale_arcsec_px.unwrap() - 1.8).abs() < 1e-9);
+        // The same as reading the whole file.
+        assert_eq!(read_astronomy(&xisf).unwrap().solve_prior(), prior);
+
+        assert!(read_solve_prior(&directory.path().join("photo.jpg")).is_err());
+    }
 
     /// A gray ramp across, and an RGB image whose channels differ.
     fn gray() -> FloatImage {

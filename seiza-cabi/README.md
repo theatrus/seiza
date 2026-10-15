@@ -170,7 +170,18 @@ exposes the **superset** of what both apps need.
   Include the schema's `cliVersion`/`mlVersion` in any cache key: a tool
   upgrade changes the output for identical inputs.
 - **Plate solving** — `seiza_solve_image_json`, and
-  `seiza_solve_image_with_limits_json`, which gives up after a time limit in
+  `seiza_solve_image_with_limits_json`. Both start from what the file says
+  about itself: a FITS or XISF image's own WCS (FITS cards, or a PixInsight
+  solution in either `AstrometricSolution` namespace) is checked with a
+  quick hinted solve; else a hinted solve searches around its `RA`/`DEC` or
+  `OBJCTRA`/`OBJCTDEC` at a scale from its WCS, `PIXSCALE`, or `XPIXSZ`
+  over `FOCALLEN`; else a blind solve runs, near that scale first (a
+  raster's EXIF focal length gives one too). FITS and XISF stars are
+  detected on an MTF stretch first, then on linear samples. When nothing
+  solves but the file holds a WCS, that WCS is returned unchecked.
+  `solvedFrom` says which: `header-checked`, `header-hint`, `blind`, or
+  `header-unchecked`, which comes with `matchedStars` 0 and
+  `falseMatchProbability` 1. The limits call gives up after a time limit in
   seconds or when a `SeizaCancelSignal` is cancelled, setting `error_out` to
   `solve stopped at its time limit` or `cancelled by the caller`. The JSON's
   `falseMatchProbability` is the chance that a wrong field would match as

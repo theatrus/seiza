@@ -138,7 +138,7 @@ impl FitsFrame {
         // The metadata carries the astrometric solution, which a PixInsight
         // file keeps as properties rather than WCS cards.
         if let Some(metadata) = &read.xisf_metadata {
-            add_xisf_solution_wcs(&mut image.headers, metadata);
+            seiza_image_io::add_xisf_solution_wcs(&mut image.headers, metadata);
         }
         let bounds = read.xisf_info.and_then(|info| info.bounds);
         let mut frame = Self::from_fits(image, Some(path.to_path_buf()))?;
@@ -281,62 +281,6 @@ impl FitsFrame {
             self.image = self.image.debayer_with(layout, demosaic)?;
         }
         Ok((self, layout))
-    }
-}
-
-/// FITS WCS cards for an XISF image's astrometric solution, when its
-/// headers carry no WCS of their own. PixInsight keeps a solution only as
-/// `AstrometricSolution` properties and drops the cards when it saves.
-///
-/// XISF image coordinates put the top-left corner of the first stored row
-/// at (0, 0), so a pixel's centre is at index + 0.5, and rows are read in
-/// stored order: `CRPIX` is the reference image point plus 0.5 and `CD` is
-/// the linear transformation unchanged. Only a gnomonic solution in the WCS
-/// default orientation (reference at native (0, 90), pole at native
-/// longitude 180) and ICRS is carried over; its projective and distortion
-/// layers, which have no TAN-SIP equivalent, are left out, so positions far
-/// from the centre of a distorted field are approximate.
-fn add_xisf_solution_wcs(
-    headers: &mut Vec<(String, HeaderValue)>,
-    metadata: &seiza_xisf::XisfMetadata,
-) {
-    if headers
-        .iter()
-        .any(|(key, _)| matches!(key.as_str(), "CTYPE1" | "CTYPE2" | "CRVAL1" | "CRVAL2"))
-    {
-        return;
-    }
-    let Ok(Some(solution)) = metadata.astrometric_solution() else {
-        return;
-    };
-    let projection = &solution.projection;
-    let pole_default = projection
-        .celestial_pole_native
-        .is_none_or(|pole| (pole[0] - 180.0).abs() < 1e-9);
-    if projection.system != seiza_xisf::ProjectionSystem::Gnomonic
-        || projection.reference_native != [0.0, 90.0]
-        || !pole_default
-        || projection.celestial_reference_system != "ICRS"
-    {
-        return;
-    }
-    let [ra, dec] = projection.reference_celestial;
-    let [x, y] = projection.reference_image;
-    let [[cd11, cd12], [cd21, cd22]] = projection.linear;
-    for (key, value) in [
-        ("CTYPE1", HeaderValue::String("RA---TAN".into())),
-        ("CTYPE2", HeaderValue::String("DEC--TAN".into())),
-        ("CRVAL1", HeaderValue::Float(ra)),
-        ("CRVAL2", HeaderValue::Float(dec)),
-        ("CRPIX1", HeaderValue::Float(x + 0.5)),
-        ("CRPIX2", HeaderValue::Float(y + 0.5)),
-        ("CD1_1", HeaderValue::Float(cd11)),
-        ("CD1_2", HeaderValue::Float(cd12)),
-        ("CD2_1", HeaderValue::Float(cd21)),
-        ("CD2_2", HeaderValue::Float(cd22)),
-        ("RADESYS", HeaderValue::String("ICRS".into())),
-    ] {
-        headers.push((key.to_owned(), value));
     }
 }
 

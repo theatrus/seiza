@@ -984,17 +984,22 @@ fn solution(
         &seiza::SolveLimits::default(),
     )?;
     let wcs = solved.solution.wcs;
+    let message = if solved.source == crate::SolveSource::HeaderUnchecked {
+        format!(
+            "using the image's own astrometric solution ({:.3}\"/px); it could not be checked against the catalog",
+            wcs.scale_arcsec_per_px()
+        )
+    } else {
+        format!(
+            "solved: {:.3}\"/px, {} stars matched",
+            wcs.scale_arcsec_per_px(),
+            solved.solution.matched_stars
+        )
+    };
     send(
         events,
         context,
-        serde_json::json!({
-            "kind": "note",
-            "message": format!(
-                "solved: {:.3}\"/px, {} stars matched",
-                wcs.scale_arcsec_per_px(),
-                solved.solution.matched_stars
-            ),
-        }),
+        serde_json::json!({ "kind": "note", "message": message }),
     );
     Ok(wcs)
 }

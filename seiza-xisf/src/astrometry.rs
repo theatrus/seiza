@@ -8,6 +8,9 @@ use crate::{ByteOrder, XisfElement, XisfError, XisfMetadata, element_block_bytes
 use std::collections::BTreeMap;
 
 const PREFIX: &str = "AstrometricSolution:";
+/// The namespace PixInsight wrote solutions in before Revision 1 named
+/// one, with the same identifiers after the prefix.
+const LEGACY_PREFIX: &str = "PCL:AstrometricSolution:";
 
 /// The projection systems of the projection vocabulary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -197,20 +200,25 @@ impl XisfMetadata {
     /// back as the specification requires, with the reason in
     /// [`AstrometricSolution::unavailable`].
     ///
-    /// Solutions written by PixInsight before Revision 1 use the
-    /// `PCL:AstrometricSolution` namespace, which is not read here.
+    /// When an image has none, a solution in PixInsight's older
+    /// `PCL:AstrometricSolution` namespace is read instead, as version 1.0
+    /// when it names no version: its identifiers are the same.
     pub fn astrometric_solution(&self) -> Result<Option<AstrometricSolution>, XisfError> {
         let properties = Properties::new(self);
         if properties.elements.is_empty() {
             return Ok(None);
         }
-        let version = properties
-            .text("Version")
-            .map_err(XisfError::Malformed)?
-            .ok_or_else(|| XisfError::Malformed("astrometric solution has no Version".into()))?;
-        let version = parse_version(&version).ok_or_else(|| {
-            XisfError::Malformed(format!("invalid astrometric solution version {version:?}"))
-        })?;
+        let version = match properties.text("Version").map_err(XisfError::Malformed)? {
+            Some(version) => parse_version(&version).ok_or_else(|| {
+                XisfError::Malformed(format!("invalid astrometric solution version {version:?}"))
+            })?,
+            None if properties.legacy => (1, 0),
+            None => {
+                return Err(XisfError::Malformed(
+                    "astrometric solution has no Version".into(),
+                ));
+            }
+        };
         if version.0 != 1 {
             return Err(XisfError::Unsupported(format!(
                 "astrometric solution version {}.{}",
@@ -263,6 +271,8 @@ type Layer<T> = Result<T, String>;
 /// the namespace prefix.
 struct Properties<'a> {
     elements: BTreeMap<&'a str, &'a XisfElement>,
+    /// Read from PixInsight's older `PCL:AstrometricSolution` namespace.
+    legacy: bool,
 }
 
 /// A decoded vector or matrix property.
@@ -273,17 +283,31 @@ struct Array {
 }
 
 impl<'a> Properties<'a> {
+    /// The solution under `AstrometricSolution:`, or else under the older
+    /// `PCL:AstrometricSolution:`; never a mixture of the two.
     fn new(metadata: &'a XisfMetadata) -> Self {
-        let elements = metadata
-            .image_elements
-            .iter()
-            .filter(|element| element.local_name() == "Property")
-            .filter_map(|element| {
-                let id = element.attribute("id")?.trim().strip_prefix(PREFIX)?;
-                Some((id, element))
-            })
-            .collect();
-        Self { elements }
+        let under = |prefix: &str| -> BTreeMap<&'a str, &'a XisfElement> {
+            metadata
+                .image_elements
+                .iter()
+                .filter(|element| element.local_name() == "Property")
+                .filter_map(|element| {
+                    let id = element.attribute("id")?.trim().strip_prefix(prefix)?;
+                    Some((id, element))
+                })
+                .collect()
+        };
+        let elements = under(PREFIX);
+        if !elements.is_empty() {
+            return Self {
+                elements,
+                legacy: false,
+            };
+        }
+        Self {
+            elements: under(LEGACY_PREFIX),
+            legacy: true,
+        }
     }
 
     fn has(&self, id: &str) -> bool {

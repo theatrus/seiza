@@ -162,6 +162,8 @@ class Solution:
     @property
     def false_match_probability(self) -> float: ...
     @property
+    def source(self) -> str | None: ...
+    @property
     def center(self) -> tuple[float, float]: ...
     @property
     def ra(self) -> float: ...
@@ -809,6 +811,21 @@ def solve_blind(
     width: int,
     height: int,
     *,
+    min_scale_arcsec_px: float = 0.1,
+    max_scale_arcsec_px: float = 20.0,
+    sip_order: int = 0,
+    time_limit: float | None = None,
+    cancel: Callable[[], bool] | None = None,
+) -> Solution: ...
+def read_solve_prior(path: str | Path) -> dict[str, Any]: ...
+def solve_with_prior(
+    stars: Sequence[StarInput],
+    catalog: StarCatalog,
+    width: int,
+    height: int,
+    prior: Mapping[str, Any],
+    *,
+    index: BlindIndex | None = None,
     min_scale_arcsec_px: float = 0.1,
     max_scale_arcsec_px: float = 20.0,
     sip_order: int = 0,
