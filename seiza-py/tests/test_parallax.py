@@ -142,6 +142,11 @@ def test_a_crop_films_at_its_own_shape_and_fit_shows_all_of_it(tmp_path):
     )
     # The 2:1 crop at the 720p frame's longer side.
     assert made.size == (1280, 640)
+    # The summary gives back the solution of the image as given, so it can
+    # go into another ParallaxVideo of the same images, and the crop.
+    summary = made.summary
+    assert summary["crop"] == (40, 30, 200, 100)
+    assert summary["wcs"].crpix == wcs.crpix
     # A square frame fits the 2:1 crop whole, black above and below it.
     square = made.reconfigure(size=(160, 160), framing="fit", start="whole", seconds=0.2, fps=10)
     first = square.frame(0)

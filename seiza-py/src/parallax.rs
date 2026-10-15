@@ -988,7 +988,9 @@ impl PyParallaxVideo {
         self.video.size()
     }
 
-    /// What preparing the video found, as a dict.
+    /// What preparing the video found, as a dict. Its `wcs` is the plate
+    /// solution of the image as given, before any crop, and `crop` the
+    /// part filmed, (x, y, width, height), or None.
     #[getter]
     fn summary<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let summary = self.video.summary();
@@ -1028,10 +1030,11 @@ impl PyParallaxVideo {
             Py::new(
                 py,
                 PyWcs {
-                    wcs: self.video.wcs().clone(),
+                    wcs: self.video.source_wcs().clone(),
                 },
             )?,
         )?;
+        dict.set_item("crop", self.video.crop())?;
         let fit = PyDict::new(py);
         fit.set_item("zoom", summary.fit.zoom)?;
         fit.set_item("pan", summary.fit.pan)?;
