@@ -460,8 +460,9 @@ them with `-portrait` for vertical video or with `-image` for the image's own
 shape, so `4k-image` films a 4:3 image at 3840x2880, all of it; or
 `WIDTHxHEIGHT`). When the image and the frame differ in shape, the widest
 view fills the frame and cuts the ends of the image's longer side;
-`--framing fit` shows all of it instead, with black beside it until the
-camera flies in far enough to fill the frame. `--crop X,Y,WIDTH,HEIGHT` films part of the
+`--framing fit` shows all of it instead, with black beside it. The picture
+ends where the far stars end, and they grow little as the camera flies in,
+so the bars stay nearly fixed, as in a letterboxed film. `--crop X,Y,WIDTH,HEIGHT` films part of the
 image; every other image point, such as `--focus`, the stops and a planned
 tour's, counts in the cropped image. `--quality high` draws each frame at twice the size and averages it
 down, blending levels of detail so fine detail neither shimmers nor steps in
