@@ -583,7 +583,8 @@ impl<'a> Projector<'a> {
 
     fn new(wcs: &'a Wcs, dimensions: (u32, u32)) -> Self {
         let (width, height) = (dimensions.0 as f64, dimensions.1 as f64);
-        let (ra, dec) = wcs.pixel_to_world(width / 2.0, height / 2.0);
+        let center = crate::wcs::image_center(dimensions.0, dimensions.1);
+        let (ra, dec) = wcs.pixel_to_world(center.0, center.1);
         let center = unit_vector(ra, dec);
         let radius_rad = wcs
             .footprint(dimensions.0, dimensions.1)

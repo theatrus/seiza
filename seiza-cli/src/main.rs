@@ -3273,7 +3273,8 @@ fn solve_command(
     let elapsed = started.elapsed();
 
     let wcs = &solution.wcs;
-    let (ra, dec) = wcs.pixel_to_world(dims.0 as f64 / 2.0, dims.1 as f64 / 2.0);
+    let middle = seiza::image_center(dims.0, dims.1);
+    let (ra, dec) = wcs.pixel_to_world(middle.0, middle.1);
     let det = wcs.cd[0][0] * wcs.cd[1][1] - wcs.cd[0][1] * wcs.cd[1][0];
     // Position angle of north, measured in the image
     let north = wcs.world_to_pixel(wcs.crval.0, wcs.crval.1 + 0.01);
@@ -3891,7 +3892,8 @@ fn catalog_stars_in_image(
     dims: (u32, u32),
     limit: usize,
 ) -> Vec<(f64, f64)> {
-    let (ra, dec) = wcs.pixel_to_world(dims.0 as f64 / 2.0, dims.1 as f64 / 2.0);
+    let middle = seiza::image_center(dims.0, dims.1);
+    let (ra, dec) = wcs.pixel_to_world(middle.0, middle.1);
     catalog
         .cone_search(ra, dec, field_diagonal_deg(wcs, dims) / 2.0, limit)
         .into_iter()
@@ -4142,7 +4144,8 @@ fn solve_blind_command(
         dims,
     )?;
     let wcs = &solution.wcs;
-    let (ra, dec) = wcs.pixel_to_world(dims.0 as f64 / 2.0, dims.1 as f64 / 2.0);
+    let middle = seiza::image_center(dims.0, dims.1);
+    let (ra, dec) = wcs.pixel_to_world(middle.0, middle.1);
     println!("Blind-solved in {:.2}s:", elapsed.as_secs_f64());
     println!(
         "  center     : {} {}  ({ra:.5}°, {dec:.5}°)",

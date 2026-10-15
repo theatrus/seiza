@@ -400,10 +400,8 @@ impl PySolution {
     /// Sky coordinates of the image center, `(ra_deg, dec_deg)`.
     #[getter]
     fn center(&self) -> (f64, f64) {
-        self.wcs.wcs.pixel_to_world(
-            (self.width as f64 - 1.0) / 2.0,
-            (self.height as f64 - 1.0) / 2.0,
-        )
+        let middle = seiza::image_center(self.width, self.height);
+        self.wcs.wcs.pixel_to_world(middle.0, middle.1)
     }
 
     #[getter]

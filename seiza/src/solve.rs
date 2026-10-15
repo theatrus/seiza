@@ -461,7 +461,7 @@ fn refine_to_solution(
     }
 
     // Re-centre: express the solution as a WCS about the image center
-    let center_px = (width / 2.0, height / 2.0);
+    let center_px = crate::wcs::image_center(dimensions.0, dimensions.1);
     let (cx, cy) = affine.apply(center_px.0, center_px.1);
     let crval = tangent.pixel_to_world(cx, cy);
     let recentre = tangent_wcs(crval);
