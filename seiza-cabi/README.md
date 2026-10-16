@@ -61,6 +61,20 @@ exposes the **superset** of what both apps need.
   covers of the shared grid, including any channel sitting far enough from the
   others to look like a pointing error. It reads the caller's buffers in place
   and returns owned JSON.
+- **Colour from mono stacks** — `seiza_color_combine_rgb_json`,
+  `..._lrgb_json`, `..._narrowband_json` and `..._narrowband_matrix_json`
+  read aligned FITS or XISF mono stacks from the paths in a JSON request, compose them
+  as `seiza color` and Python's `combine_*` do, and write the colour image as
+  32-bit float FITS, or XISF for a `.xisf` name. RGB and LRGB take a
+  `luminanceMode` (`super` for a luminance of R + G + B, or L + R + G + B);
+  narrowband takes one of the nine palettes, Foraxx included, and the matrix
+  call takes the caller's own SII, H-alpha and OIII weights for each output
+  channel. Each takes the same `normalization` and `crop` settings, and the
+  output keeps the first stack's WCS, moved by any crop. They do not register
+  the channels to each other. The owned JSON gives the label written to
+  `SEIZACLR`, whether the samples are linear or display-referred, the region
+  of the grid kept, and the crop report when a crop was asked for. A
+  `SeizaCancelSignal` stops the call between reads.
 - **Light deconvolution** — `seiza_deconvolve_in_place` applies the same
   conservative damped Richardson-Lucy operation as the Rust and Python APIs to
   caller-owned linear mono or interleaved RGB `float` samples. The synchronous
@@ -80,7 +94,15 @@ exposes the **superset** of what both apps need.
   array of channel references, best first, and uses the first that aligns to
   the reference image, as the CLI's `--reference auto` does. Its optional
   selection JSON names the light it used and why each earlier one was
-  skipped. Array and path-based pushes
+  skipped. `seiza_live_stacker_open_fits_expanding` takes a JSON array of
+  overlapping lights, anchor first, and plans a canvas that holds every one
+  that connects to it, as the CLI's `--reference expand` does: mosaic panels,
+  or a dithered stack whose edges should be kept. It reads every light while
+  planning, checking a `SeizaCancelSignal` before each, and starts empty, so
+  every light is then pushed, the anchor included.
+  `seiza_live_stacker_expanded_lens_json` gives the lens distortion planning
+  undid, or `null`, and `..._expansion_planning_notes_json` what planning
+  noted along the way. Array and path-based pushes
   return owned admission JSON. Borrowed
   mean/coverage/rejection views support copy-free live display, snapshots add
   variance, and `seiza_live_stacker_finish` moves the final accumulator into an

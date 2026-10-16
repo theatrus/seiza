@@ -1444,6 +1444,15 @@ impl PyLiveStacker {
         Ok(Some(dict))
     }
 
+    /// What planning an expanded canvas noted: why it skipped fitting one
+    /// lens to every panel (their camera or optics differ, or their headers
+    /// do not say), or why it kept its first plan when the lens-corrected
+    /// one failed. Empty for an ordinary stack and a reopened context.
+    #[getter]
+    fn expansion_planning_notes(&self) -> PyResult<Vec<String>> {
+        Ok(self.active()?.expansion_planning_notes().to_vec())
+    }
+
     fn snapshot(&self, py: Python<'_>) -> PyResult<PyStackSnapshot> {
         let stacker = self.active()?;
         let snapshot = py.detach(|| stacker.snapshot()).map_err(stack_error)?;

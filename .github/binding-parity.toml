@@ -182,6 +182,15 @@ core = "seiza-stacking::CropReport"
 grid_width = { c = "grid" }
 grid_height = { c = "grid" }
 
+[rust.NarrowbandMatrixRequest]
+core = "seiza-stacking::NarrowbandMatrix"
+
+[rust.NarrowbandMixRequest]
+core = "seiza-stacking::NarrowbandMix"
+
+[rust.ExpandedLensResponse]
+core = "seiza-stacking::ExpandedLens"
+
 [rust.ColorFitJson]
 core = "seiza-stacking::ColorFit"
 
@@ -307,10 +316,7 @@ objects = [
 # stacking
 "seiza-stacking::ColorCalibration::apply" = { none = "C hosts keep only the gains and offsets, so seiza_color_calibration_apply calls apply_color_gains, which apply uses, on the caller's buffer" }
 "seiza-stacking::LiveStacker::effective_maximum_drift_pixels" = { none = "part of registration" }
-"seiza-stacking::LiveStacker::open_fits_expanding" = { gap = "the expanding reference canvas for overlapping panels (#253), which Python has" }
-"seiza-stacking::LiveStacker::with_expanding_reference" = { gap = "the expanding reference canvas for overlapping panels (#253), which Python has" }
-"seiza-stacking::LiveStacker::expanded_lens" = { gap = "the expanding reference canvas for overlapping panels (#253), which Python has" }
-"seiza-stacking::LiveStacker::expansion_planning_notes" = { gap = "the expanding reference canvas for overlapping panels (#253), which Python has" }
+"seiza-stacking::LiveStacker::with_expanding_reference" = { none = "the C ABI opens from paths (open_fits_expanding)" }
 "seiza-stacking::LiveStacker::open_fits_with_reference_image" = { none = "the C ABI's call uses open_fits_with_reference_image_candidates, with one candidate" }
 "seiza-stacking::LiveStacker::with_reference_image" = { none = "the C ABI opens from paths (open_fits_with_reference_image_candidates)" }
 "seiza-stacking::LiveStacker::with_reference_image_candidates" = { none = "the C ABI opens from paths (open_fits_with_reference_image_candidates)" }
@@ -318,13 +324,6 @@ objects = [
 "seiza-stacking::LiveStacker::push_fits_sequential_with_pool" = { none = "the C ABI runs in the calling thread's pool (push_fits)" }
 "seiza-stacking::LiveStacker::set_calibration" = { none = "the C ABI replaces masters from FITS paths (set_calibration_from_fits_paths)" }
 "seiza-stacking::build_residual_flat_patch" = { none = "kept for one release; seiza-calibration::build_residual_flat_patch replaces it" }
-"seiza-stacking::combine_rgb" = { gap = "composing mono stacks into colour, which Python has (combine_rgb, combine_lrgb, combine_narrowband)" }
-"seiza-stacking::combine_lrgb" = { gap = "composing mono stacks into colour, which Python has (combine_rgb, combine_lrgb, combine_narrowband)" }
-"seiza-stacking::combine_super_rgb" = { gap = "composing mono stacks into colour, which Python has (combine_rgb, combine_lrgb, combine_narrowband)" }
-"seiza-stacking::combine_super_lrgb" = { gap = "composing mono stacks into colour, which Python has (combine_rgb, combine_lrgb, combine_narrowband)" }
-"seiza-stacking::combine_narrowband" = { gap = "composing mono stacks into colour, which Python has (combine_rgb, combine_lrgb, combine_narrowband)" }
-"seiza-stacking::combine_narrowband_matrix" = { gap = "composing mono stacks into colour, which Python has (combine_rgb, combine_lrgb, combine_narrowband)" }
-"seiza-stacking::write_color_fits_f32" = { gap = "writing a composed colour image, with combine_rgb and the rest" }
 "seiza-stacking::write_linear_image_fits_f32" = { none = "the C ABI writes stacks through write_fits_f32 and drizzles through write_drizzle_fits_f32" }
 "seiza-stacking::write_processed_image_fits_f32" = { none = "the C ABI writes stacks through write_fits_f32 and drizzles through write_drizzle_fits_f32" }
 "seiza-stacking::drizzle_reference_headers" = { none = "the C drizzle result carries its reference headers already" }
@@ -386,6 +385,9 @@ seiza_live_stacker_create = "LiveStacker.from_array"
 seiza_live_stacker_open_fits = "LiveStacker.__init__"
 seiza_live_stacker_open_fits_with_reference_image = "LiveStacker.open_fits_with_reference_image"
 seiza_live_stacker_open_fits_with_reference_image_candidates = "LiveStacker.open_fits_with_reference_image_candidates"
+seiza_live_stacker_open_fits_expanding = "LiveStacker.open_fits_expanding"
+seiza_live_stacker_expanded_lens_json = "LiveStacker.expanded_lens"
+seiza_live_stacker_expansion_planning_notes_json = "LiveStacker.expansion_planning_notes"
 seiza_live_stacker_open_context = "LiveStacker.open_context"
 seiza_live_stacker_open_prepared_fits = "LiveStacker.open_prepared_fits"
 seiza_live_stacker_reference_noise_json = "LiveStacker.reference_noise"
@@ -518,6 +520,12 @@ seiza_gaia_photometry_cone_json = "gaia_photometry_cone"
 seiza_color_calibrate_json = "calibrate_color"
 seiza_color_calibration_apply = "ColorCalibration.apply"
 seiza_color_crop_report_json = "crop_report"
+# The C calls read the stacks from files and always write the output;
+# Python composes arrays and writes when given output= (and header=).
+seiza_color_combine_rgb_json = "combine_rgb"
+seiza_color_combine_lrgb_json = "combine_lrgb"
+seiza_color_combine_narrowband_json = "combine_narrowband"
+seiza_color_combine_narrowband_matrix_json = "combine_narrowband_matrix"
 
 # --- rc-astro ---------------------------------------------------------------
 seiza_rc_astro_locate = "rc_astro_locate"
@@ -567,10 +575,6 @@ triangle_tilt_analysis = { c = "seiza_stars_detect_luma_u16_json" }
 StackOptions = { none = "stack options; C calls take them as JSON fields" }
 FlatStarMasking = { none = "flat star masking options; C takes them as JSON (MasterBuildRequest.flatStarMasking)" }
 stack_fits = { none = "C hosts take the same steps with the live stacker: seiza_stack_choose_reference_json, open, push_fits_pipelined and finish" }
-"LiveStacker.open_fits_expanding" = { gap = "the expanding reference canvas for overlapping panels (#253)" }
-combine_rgb = { gap = "composing mono stacks into colour" }
-combine_lrgb = { gap = "composing mono stacks into colour" }
-combine_narrowband = { gap = "composing mono stacks into colour" }
 gaia_photometry_catalog_cone = { gap = "Gaia photometry from the local catalog fetch_catalogs installs; C reads only the online archive (seiza_gaia_photometry_cone_json)" }
 
 # calibration
@@ -726,6 +730,7 @@ CatalogSetupProgressResponse = { none = "download progress for the apps' setup s
 
 # color
 "ColorCalibrationOptionsJson.observation_epoch" = { python = "epoch" }
+"ColorCompositionResponse.transfer" = { none = "Python's combine functions return the image array alone; the Foraxx palettes give display-referred samples and the rest linear light, and an output's SEIZATRF card records it" }
 "ChannelCoverageResponse.center_offset_x" = { python = "center_offset" }
 "ChannelCoverageResponse.center_offset_y" = { python = "center_offset" }
 "CropReportResponse.off_center_limit_pixels" = { gap = "not in Python yet: crop_report does not give the distance past which a channel counts as off centre" }

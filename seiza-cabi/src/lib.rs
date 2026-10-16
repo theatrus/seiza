@@ -20,17 +20,20 @@ use seiza_background::{BackgroundConfig, BackgroundFit, CorrectionMode, fit_back
 use seiza_deconvolution::{DeconvolutionConfig, deconvolve, deconvolve_masked};
 use seiza_fits::{FitsImage, HeaderValue, RgbImage16, Statistics, StretchParams};
 use seiza_stacking::{
-    CancelSignal, ChannelCoverage, ChannelSamples, ColorCrop, CropReport, DarkLevelScreening,
-    ExternalParameterKind, ExternalParameterValue, ExternalToolRequest, ExternalToolSchema,
-    FitsFrame, FlatStarMaskingOptions, FlatStarMaskingStatistics, FrameDiagnostics,
-    FrameDisposition, FrameInputMode, FrameSourceRole, ImpulseFilterOptions, LinearImage,
-    LiveStacker, MasterBuildOptions, MasterDark, MasterFrame, MasterFrameKind,
-    MasterRejectionOptions, RcAstroCli, ReferenceRegion, RegisteredFrameMapping,
+    CancelSignal, ChannelCoverage, ChannelSamples, ColorComposition, ColorCrop, ColorNormalization,
+    ColorOptions, CropReport, DarkLevelScreening, ExternalParameterKind, ExternalParameterValue,
+    ExternalToolRequest, ExternalToolSchema, FitsFrame, FlatStarMaskingOptions,
+    FlatStarMaskingStatistics, ForaxxOptions, FrameDiagnostics, FrameDisposition, FrameInputMode,
+    FrameSourceRole, ImpulseFilterOptions, LinearImage, LiveStacker, MasterBuildOptions,
+    MasterDark, MasterFrame, MasterFrameKind, MasterRejectionOptions, NarrowbandMatrix,
+    NarrowbandMix, NarrowbandPalette, RcAstroCli, ReferenceRegion, RegisteredFrameMapping,
     StackExportSnapshot as RustStackExportSnapshot, StackOptions,
     StackSnapshot as RustStackSnapshot, build_master_from_fits,
-    build_master_from_fits_with_scratch, checkpoint_depths as rust_checkpoint_depths, crop_report,
-    measure_depth as rust_measure_depth, path_identity, paths_refer_to_same_file, write_fits_f32,
-    write_master_fits_f32, write_stack_export_fits_f32,
+    build_master_from_fits_with_scratch, checkpoint_depths as rust_checkpoint_depths, combine_lrgb,
+    combine_narrowband, combine_narrowband_matrix, combine_rgb, combine_super_lrgb,
+    combine_super_rgb, crop_report, measure_depth as rust_measure_depth, path_identity,
+    paths_refer_to_same_file, write_color_fits_f32, write_fits_f32, write_master_fits_f32,
+    write_stack_export_fits_f32,
 };
 use seiza_stretch::{
     ResolvedSampleDomain, SampleDomain, StretchAnalysis, StretchConfig, StretchStack,
@@ -1474,6 +1477,531 @@ pub unsafe extern "C" fn seiza_color_crop_report_json(
     .unwrap_or(ptr::null_mut())
 }
 
+/// [`seiza_color_combine_rgb_json`]'s request. Paths are FITS or XISF mono
+/// stacks on one pixel grid; `output` is the colour image to write.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ColorRgbRequest {
+    red: String,
+    green: String,
+    blue: String,
+    output: String,
+    luminance_mode: Option<String>,
+    normalization: Option<String>,
+    black_percentile: Option<f32>,
+    white_percentile: Option<f32>,
+    normalization_samples: Option<usize>,
+    crop: Option<String>,
+}
+
+/// [`seiza_color_combine_lrgb_json`]'s request.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ColorLrgbRequest {
+    luminance: String,
+    red: String,
+    green: String,
+    blue: String,
+    output: String,
+    luminance_weight: Option<f32>,
+    luminance_mode: Option<String>,
+    normalization: Option<String>,
+    black_percentile: Option<f32>,
+    white_percentile: Option<f32>,
+    normalization_samples: Option<usize>,
+    crop: Option<String>,
+}
+
+/// [`seiza_color_combine_narrowband_json`]'s request.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ColorNarrowbandRequest {
+    ha: String,
+    oiii: String,
+    sii: Option<String>,
+    output: String,
+    palette: Option<String>,
+    foraxx_target_median: Option<f32>,
+    foraxx_shadows_clip: Option<f32>,
+    normalization: Option<String>,
+    black_percentile: Option<f32>,
+    white_percentile: Option<f32>,
+    normalization_samples: Option<usize>,
+    crop: Option<String>,
+}
+
+/// [`seiza_color_combine_narrowband_matrix_json`]'s request.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ColorNarrowbandMatrixRequest {
+    ha: String,
+    oiii: String,
+    sii: Option<String>,
+    output: String,
+    matrix: NarrowbandMatrixRequest,
+    normalization: Option<String>,
+    black_percentile: Option<f32>,
+    white_percentile: Option<f32>,
+    normalization_samples: Option<usize>,
+    crop: Option<String>,
+}
+
+/// The filter weights of each output channel.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NarrowbandMatrixRequest {
+    red: NarrowbandMixRequest,
+    green: NarrowbandMixRequest,
+    blue: NarrowbandMixRequest,
+}
+
+/// One output channel's weights; a filter left out weighs zero.
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+struct NarrowbandMixRequest {
+    sii: f32,
+    ha: f32,
+    oiii: f32,
+}
+
+impl From<NarrowbandMixRequest> for NarrowbandMix {
+    fn from(mix: NarrowbandMixRequest) -> Self {
+        Self {
+            sii: mix.sii,
+            ha: mix.ha,
+            oiii: mix.oiii,
+        }
+    }
+}
+
+impl From<NarrowbandMatrixRequest> for NarrowbandMatrix {
+    fn from(matrix: NarrowbandMatrixRequest) -> Self {
+        Self {
+            red: matrix.red.into(),
+            green: matrix.green.into(),
+            blue: matrix.blue.into(),
+        }
+    }
+}
+
+/// What a colour composition wrote.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ColorCompositionResponse<'a> {
+    schema_version: u32,
+    label: &'a str,
+    transfer: String,
+    region: RegionResponse,
+    crop: Option<CropReportResponse<'a>>,
+}
+
+/// The shared composition settings, with the core's defaults for those left
+/// out.
+fn color_options(
+    normalization: Option<&str>,
+    black_percentile: Option<f32>,
+    white_percentile: Option<f32>,
+    normalization_samples: Option<usize>,
+    crop: Option<&str>,
+) -> Result<ColorOptions, String> {
+    let normalization = match normalization.map(str::to_ascii_lowercase).as_deref() {
+        None | Some("percentile") => match ColorNormalization::default() {
+            ColorNormalization::Percentile {
+                black_percentile: black,
+                white_percentile: white,
+                max_samples,
+            } => ColorNormalization::Percentile {
+                black_percentile: black_percentile.unwrap_or(black),
+                white_percentile: white_percentile.unwrap_or(white),
+                max_samples: normalization_samples.unwrap_or(max_samples),
+            },
+            ColorNormalization::None => ColorNormalization::None,
+        },
+        Some("none") => ColorNormalization::None,
+        Some(other) => {
+            return Err(format!(
+                "normalization must be \"none\" or \"percentile\", not {other:?}"
+            ));
+        }
+    };
+    let crop = crop
+        .unwrap_or("none")
+        .parse::<ColorCrop>()
+        .map_err(|error| error.to_string())?;
+    Ok(ColorOptions {
+        normalization,
+        crop,
+        ..ColorOptions::default()
+    })
+}
+
+/// Read the channel stacks `inputs` (role and path), compose them, and write
+/// the result to `output` with the first channel's WCS. Every input and the
+/// output must be a different file. `cancel` is checked before each read and
+/// before the write.
+fn compose_color_files(
+    inputs: &[(&str, &str)],
+    output: &str,
+    label: &str,
+    options: &ColorOptions,
+    cancel: *const SeizaCancelSignal,
+    compose: impl FnOnce(&[LinearImage]) -> seiza_stacking::Result<ColorComposition>,
+) -> Result<*mut c_char, String> {
+    let cancelled = || {
+        unsafe { cancel.as_ref() }.is_some_and(|signal| signal.cancelled.load(Ordering::Relaxed))
+    };
+    let output = Path::new(output);
+    let mut seen = HashMap::new();
+    for (role, path) in inputs
+        .iter()
+        .map(|(role, path)| (*role, Path::new(*path)))
+        .chain(std::iter::once(("output", output)))
+    {
+        if path.as_os_str().is_empty() {
+            return Err(format!("the {role} path is required"));
+        }
+        if let Some(other) = seen.insert(path_identity(path), role) {
+            return Err(format!(
+                "the {other} and {role} paths refer to the same file {}",
+                path.display()
+            ));
+        }
+    }
+    let mut images = Vec::with_capacity(inputs.len());
+    let mut reference_headers = Vec::new();
+    for (index, (role, path)) in inputs.iter().enumerate() {
+        if cancelled() {
+            return Err(seiza_stacking::Error::Cancelled.to_string());
+        }
+        let frame = FitsFrame::open(path)
+            .map_err(|error| format!("failed to read the {role} stack {path}: {error}"))?;
+        if index == 0 {
+            reference_headers = frame.headers;
+        }
+        images.push(frame.image);
+    }
+    let composition = compose(&images).map_err(|error| error.to_string())?;
+    if cancelled() {
+        return Err(seiza_stacking::Error::Cancelled.to_string());
+    }
+    write_color_fits_f32(output, &composition, &reference_headers, label)
+        .map_err(|error| error.to_string())?;
+    owned_json(&ColorCompositionResponse {
+        schema_version: 1,
+        label,
+        transfer: composition.transfer.fits_name().to_ascii_lowercase(),
+        region: RegionResponse::new(composition.region),
+        crop: composition
+            .crop
+            .as_ref()
+            .map(|report| CropReportResponse::new(options.crop, report)),
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Combines aligned red, green and blue mono stacks into one RGB image and
+/// writes it, as `seiza color rgb` does without registering the channels.
+///
+/// `request_json` is an object with the `red`, `green` and `blue` FITS or
+/// XISF paths, all on one pixel grid, and the `output` path, written as XISF
+/// for a `.xisf` name and FITS otherwise. The output carries the red stack's
+/// WCS, moved by any crop. Optional fields:
+/// - `luminanceMode`: `"native"` (the default) keeps the channels as they
+///   are; `"super"` scales each pixel to a synthetic luminance of R + G + B,
+///   which may exceed one.
+/// - `normalization`: `"percentile"` (the default) maps each channel's
+///   `blackPercentile` (0.001) and `whitePercentile` (0.995), estimated from
+///   up to `normalizationSamples` (1000000) samples, to 0 and 1; `"none"`
+///   keeps the samples.
+/// - `crop`: `"none"` (the default), `"bounds"` or `"inscribed"`, as in
+///   [`seiza_color_crop_report_json`].
+///
+/// Returns owned schema-1 JSON: the `label` written to `SEIZACLR` (`RGB` or
+/// `SUPER-RGB`), the `transfer` of the samples (`"linear"` here), the
+/// `region` of the grid the output covers, and `crop`, the object
+/// [`seiza_color_crop_report_json`] returns, when a crop was asked for (null
+/// otherwise). Free it with [`seiza_string_free`]. `cancel` is checked before
+/// each stack is read and before the output is written.
+///
+/// # Safety
+/// `request_json` must be a valid NUL-terminated string. `cancel` must be
+/// null or a live [`SeizaCancelSignal`] retained until this call returns.
+/// When non-null, `error_out` must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_color_combine_rgb_json(
+    request_json: *const c_char,
+    cancel: *const SeizaCancelSignal,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let request: ColorRgbRequest = parse_request(request_json, "RGB composition")?;
+        let super_luminance = match request
+            .luminance_mode
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            None | Some("native") => false,
+            Some("super") => true,
+            Some(other) => {
+                return Err(format!(
+                    "luminanceMode must be \"native\" or \"super\", not {other:?}"
+                ));
+            }
+        };
+        let options = color_options(
+            request.normalization.as_deref(),
+            request.black_percentile,
+            request.white_percentile,
+            request.normalization_samples,
+            request.crop.as_deref(),
+        )?;
+        let label = if super_luminance { "SUPER-RGB" } else { "RGB" };
+        compose_color_files(
+            &[
+                ("red", &request.red),
+                ("green", &request.green),
+                ("blue", &request.blue),
+            ],
+            &request.output,
+            label,
+            &options,
+            cancel,
+            |images| {
+                if super_luminance {
+                    combine_super_rgb(&images[0], &images[1], &images[2], &options)
+                } else {
+                    combine_rgb(&images[0], &images[1], &images[2], &options)
+                }
+            },
+        )
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// Combines aligned luminance, red, green and blue mono stacks into one LRGB
+/// image and writes it, as `seiza color lrgb` does without registering the
+/// channels.
+///
+/// `request_json` is an object with the `luminance`, `red`, `green` and
+/// `blue` paths and the `output` path, as in
+/// [`seiza_color_combine_rgb_json`]; the output carries the luminance
+/// stack's WCS. `luminanceMode` `"replace"` (the default) swaps in the
+/// luminance, weighted by `luminanceWeight` from 0 (RGB alone) to 1 (the
+/// default, L alone); `"super"` targets the additive L + R + G + B, which may
+/// exceed one, and takes no weight. `normalization`, `blackPercentile`,
+/// `whitePercentile`, `normalizationSamples` and `crop` are those of
+/// [`seiza_color_combine_rgb_json`], and so are the returned JSON (with the
+/// label `LRGB` or `SUPER-LRGB`) and `cancel`.
+///
+/// # Safety
+/// As [`seiza_color_combine_rgb_json`].
+pub unsafe extern "C" fn seiza_color_combine_lrgb_json(
+    request_json: *const c_char,
+    cancel: *const SeizaCancelSignal,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let request: ColorLrgbRequest = parse_request(request_json, "LRGB composition")?;
+        let super_luminance = match request
+            .luminance_mode
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            None | Some("replace") => false,
+            Some("super") => true,
+            Some(other) => {
+                return Err(format!(
+                    "luminanceMode must be \"replace\" or \"super\", not {other:?}"
+                ));
+            }
+        };
+        if super_luminance && request.luminance_weight.is_some_and(|weight| weight != 1.0) {
+            return Err("luminanceWeight only applies when luminanceMode is \"replace\"".into());
+        }
+        let luminance_weight = request.luminance_weight.unwrap_or(1.0);
+        let options = color_options(
+            request.normalization.as_deref(),
+            request.black_percentile,
+            request.white_percentile,
+            request.normalization_samples,
+            request.crop.as_deref(),
+        )?;
+        let label = if super_luminance {
+            "SUPER-LRGB"
+        } else {
+            "LRGB"
+        };
+        compose_color_files(
+            &[
+                ("luminance", &request.luminance),
+                ("red", &request.red),
+                ("green", &request.green),
+                ("blue", &request.blue),
+            ],
+            &request.output,
+            label,
+            &options,
+            cancel,
+            |images| {
+                let [luminance, red, green, blue] = images else {
+                    unreachable!("four channels were read")
+                };
+                if super_luminance {
+                    combine_super_lrgb(luminance, red, green, blue, &options)
+                } else {
+                    combine_lrgb(luminance, red, green, blue, luminance_weight, &options)
+                }
+            },
+        )
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// Maps aligned H-alpha, OIII and, for most palettes, SII mono stacks onto an
+/// RGB palette and writes the result, as `seiza color narrowband` does
+/// without registering the channels.
+///
+/// `request_json` is an object with the `ha` and `oiii` paths, `sii` when the
+/// palette uses it, and the `output` path, as in
+/// [`seiza_color_combine_rgb_json`]; the output carries the H-alpha stack's
+/// WCS. `palette` is one of `SHO` (the default), `SOH`, `HSO`, `HOS`, `OSH`,
+/// `OHS`, `HOO`, `Foraxx-SHO` or `Foraxx-HOO`, in any case; `HOO` and
+/// `Foraxx-HOO` take no `sii`, and the rest need one. The Foraxx palettes
+/// stretch each channel first, setting its median to `foraxxTargetMedian`
+/// (0.2) and its black point `foraxxShadowsClip` (-2.8) normal-equivalent
+/// MADs below the median, so their output is display-referred. The other
+/// fields are those of [`seiza_color_combine_rgb_json`], and so are the
+/// returned JSON (with the palette's upper-case name as the label and
+/// `"display"` as the Foraxx palettes' transfer) and `cancel`.
+///
+/// # Safety
+/// As [`seiza_color_combine_rgb_json`].
+pub unsafe extern "C" fn seiza_color_combine_narrowband_json(
+    request_json: *const c_char,
+    cancel: *const SeizaCancelSignal,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let request: ColorNarrowbandRequest =
+            parse_request(request_json, "narrowband composition")?;
+        let palette = request
+            .palette
+            .as_deref()
+            .unwrap_or("sho")
+            .parse::<NarrowbandPalette>()
+            .map_err(|error| error.to_string())?;
+        match (palette.requires_sii(), request.sii.is_some()) {
+            (true, false) => return Err(format!("{} requires an SII channel", palette.name())),
+            (false, true) => {
+                return Err(format!("{} does not use an SII channel", palette.name()));
+            }
+            _ => {}
+        }
+        let defaults = ForaxxOptions::default();
+        let foraxx = ForaxxOptions {
+            target_median: request
+                .foraxx_target_median
+                .unwrap_or(defaults.target_median),
+            shadows_clip: request.foraxx_shadows_clip.unwrap_or(defaults.shadows_clip),
+        };
+        let options = color_options(
+            request.normalization.as_deref(),
+            request.black_percentile,
+            request.white_percentile,
+            request.normalization_samples,
+            request.crop.as_deref(),
+        )?;
+        let mut inputs = vec![("H-alpha", request.ha.as_str()), ("OIII", &request.oiii)];
+        if let Some(sii) = &request.sii {
+            inputs.push(("SII", sii));
+        }
+        compose_color_files(
+            &inputs,
+            &request.output,
+            palette.name(),
+            &options,
+            cancel,
+            |images| {
+                combine_narrowband(
+                    &images[0],
+                    &images[1],
+                    images.get(2),
+                    palette,
+                    &options,
+                    &foraxx,
+                )
+            },
+        )
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// Mixes aligned H-alpha, OIII and optional SII mono stacks into RGB through
+/// a caller's own linear matrix, and writes the result.
+///
+/// `request_json` is an object with the `ha` and `oiii` paths, an optional
+/// `sii` path, the `output` path, and `matrix`: `{"red": {...}, "green":
+/// {...}, "blue": {...}}`, each output channel giving its `sii`, `ha` and
+/// `oiii` weights (a weight left out is zero). Weights must be finite and
+/// some must be non-zero. A matrix that weights SII needs an `sii` stack; one
+/// that does not ignores any given. The output carries the H-alpha stack's
+/// WCS and the label `NARROWBAND-MATRIX`, and is linear light. The other
+/// fields are those of [`seiza_color_combine_rgb_json`], and so are the
+/// returned JSON and `cancel`.
+///
+/// # Safety
+/// As [`seiza_color_combine_rgb_json`].
+pub unsafe extern "C" fn seiza_color_combine_narrowband_matrix_json(
+    request_json: *const c_char,
+    cancel: *const SeizaCancelSignal,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let request: ColorNarrowbandMatrixRequest =
+            parse_request(request_json, "narrowband matrix composition")?;
+        let matrix = NarrowbandMatrix::from(request.matrix);
+        let options = color_options(
+            request.normalization.as_deref(),
+            request.black_percentile,
+            request.white_percentile,
+            request.normalization_samples,
+            request.crop.as_deref(),
+        )?;
+        let mut inputs = vec![("H-alpha", request.ha.as_str()), ("OIII", &request.oiii)];
+        if let Some(sii) = &request.sii {
+            inputs.push(("SII", sii));
+        }
+        compose_color_files(
+            &inputs,
+            &request.output,
+            NarrowbandMatrix::LABEL,
+            &options,
+            cancel,
+            |images| {
+                combine_narrowband_matrix(&images[0], &images[1], images.get(2), matrix, &options)
+            },
+        )
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Parse a required JSON request object.
+fn parse_request<T: serde::de::DeserializeOwned>(
+    request_json: *const c_char,
+    name: &str,
+) -> Result<T, String> {
+    let request_json = required_str(request_json, &format!("{name} request"))?;
+    serde_json::from_str(&request_json).map_err(|error| format!("invalid {name} request: {error}"))
+}
+
 #[unsafe(no_mangle)]
 /// Fits a compact background model to interleaved linear `float` samples.
 ///
@@ -2367,6 +2895,203 @@ fn open_with_reference_image(
         used,
         skipped,
     })
+}
+
+#[unsafe(no_mangle)]
+/// Plans a canvas that holds a connected set of overlapping lights, such as
+/// mosaic panels or a dithered stack whose edges should be kept, and starts
+/// an empty stack on it, as the CLI's `--reference expand` does.
+///
+/// `paths_json` is a JSON array of FITS or XISF light paths; the first
+/// anchors the WCS and photometric scale, so put the choice of
+/// [`seiza_stack_choose_reference_json`] first to anchor on the clearest
+/// light. Panels may connect through other panels, and lights may differ in
+/// rotation by any amount. A light that cannot join is rejected, with the
+/// reason, when pushed; this call fails only when nothing joins the anchor,
+/// a light cannot be read, or the canvas would exceed
+/// `max_canvas_megasamples` million samples (pixels times channels; zero
+/// uses 256). A run peaks at about 40 bytes per sample. With
+/// `"registration": {"model": "quadratic"}` in `options_json`, a light lying
+/// mostly within one panel is warped onto it, which follows lens distortion
+/// across a meridian flip. For panels, set
+/// `"acceptance": {"minimum_overlap_fraction": 0.1}` or near it.
+/// Bayer drizzle and drizzled reintegration are not supported on the canvas.
+///
+/// The masters, `dark_exposure_seconds` and `options_json` are those of
+/// [`seiza_live_stacker_open_fits`]; every light must differ from every
+/// master. `cancel` is checked before each light is read. The stack starts
+/// with no accepted frames: push every light, the anchor included.
+/// [`seiza_live_stacker_expanded_lens_json`] and
+/// [`seiza_live_stacker_expansion_planning_notes_json`] report what planning
+/// found.
+///
+/// # Safety
+/// `paths_json` must be a valid NUL-terminated string. Optional paths and
+/// `options_json` may be null; when non-null they must be NUL-terminated.
+/// `cancel` must be null or a live [`SeizaCancelSignal`] retained until this
+/// call returns. When non-null, `error_out` must point to writable storage
+/// for one pointer.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn seiza_live_stacker_open_fits_expanding(
+    paths_json: *const c_char,
+    bias_path: *const c_char,
+    dark_path: *const c_char,
+    flat_path: *const c_char,
+    dark_exposure_seconds: f64,
+    options_json: *const c_char,
+    max_canvas_megasamples: usize,
+    cancel: *const SeizaCancelSignal,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaLiveStacker {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let paths_json = required_str(paths_json, "expanding stack light paths")?;
+        let paths: Vec<PathBuf> = serde_json::from_str::<Vec<String>>(&paths_json)
+            .map_err(|error| {
+                format!("expanding stack light paths must be a JSON array of strings: {error}")
+            })?
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+        if paths.is_empty() {
+            return Err("at least one light is required".into());
+        }
+        let bias_path = optional_path(bias_path)?;
+        let dark_path = optional_path(dark_path)?;
+        let flat_path = optional_path(flat_path)?;
+        for light in &paths {
+            let inputs = std::iter::once(light.clone())
+                .chain(
+                    [bias_path.clone(), dark_path.clone(), flat_path.clone()]
+                        .into_iter()
+                        .flatten(),
+                )
+                .collect::<Vec<_>>();
+            validate_distinct_stack_paths(&inputs)?;
+        }
+        if dark_path.is_none() && dark_exposure_seconds != 0.0 {
+            return Err("a master-dark exposure override requires a dark path".into());
+        }
+        let dark_exposure_seconds =
+            optional_positive_seconds(dark_exposure_seconds, "master-dark exposure override")?;
+        let megasamples = if max_canvas_megasamples == 0 {
+            256
+        } else {
+            max_canvas_megasamples
+        };
+        let maximum_samples = megasamples
+            .checked_mul(1_000_000)
+            .ok_or_else(|| "max_canvas_megasamples is too large".to_string())?;
+        let options = stack_options(options_json)?;
+        let cancel = unsafe { cancel.as_ref() };
+        let stacker = LiveStacker::open_fits_expanding(
+            &paths,
+            bias_path.as_deref(),
+            dark_path.as_deref(),
+            flat_path.as_deref(),
+            dark_exposure_seconds,
+            options,
+            maximum_samples,
+            |_, _, _, _| {
+                if cancel.is_some_and(|signal| signal.cancelled.load(Ordering::Relaxed)) {
+                    seiza_stacking::Continue::No
+                } else {
+                    seiza_stacking::Continue::Yes
+                }
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(SeizaLiveStacker { stacker })
+    })
+    .map_or(ptr::null_mut(), |stacker| Box::into_raw(Box::new(stacker)))
+}
+
+/// The lens distortion an expanded canvas was planned through.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExpandedLensResponse {
+    schema_version: u32,
+    center_x: f64,
+    center_y: f64,
+    decenter_pixels: f64,
+    k1: f64,
+    k2: f64,
+    largest_shift_pixels: f64,
+    overlap_rms_pixels: Option<f64>,
+    undistorted_overlap_rms_pixels: Option<f64>,
+    focal_length_pixels: Option<f64>,
+}
+
+#[unsafe(no_mangle)]
+/// The lens distortion a canvas from
+/// [`seiza_live_stacker_open_fits_expanding`] was planned through, as owned
+/// JSON, or the JSON text `null` when planning measured none, as for any
+/// stack not opened on an expanding canvas.
+///
+/// The object is schema 1: the distortion's axis `centerX` and `centerY` in
+/// sensor pixels, counted from 0, and its `decenterPixels` from the sensor's
+/// centre; `k1` and `k2`, the coefficients of `q` and `q²`, where `q` is a
+/// position's squared distance from the axis over the frame's half diagonal
+/// squared; `largestShiftPixels`, the largest shift it makes within that half
+/// diagonal; `overlapRmsPixels` and `undistortedOverlapRmsPixels`, the RMS
+/// distance between the stars the panels' first frames pair where they
+/// overlap, through the lens and fitted without it (null for a reopened
+/// context); and `focalLengthPixels`, by which panels were placed on the
+/// anchor's tangent plane, when the anchor's headers gave one (null
+/// otherwise). Free the string with [`seiza_string_free`].
+///
+/// # Safety
+/// `stacker` must be a live `SeizaLiveStacker` pointer, with this read
+/// externally synchronized against mutable operations. When non-null,
+/// `error_out` must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_live_stacker_expanded_lens_json(
+    stacker: *const SeizaLiveStacker,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let stacker = unsafe { required_live_stacker(stacker)? };
+        owned_json(
+            &stacker
+                .stacker
+                .expanded_lens()
+                .map(|lens| ExpandedLensResponse {
+                    schema_version: 1,
+                    center_x: lens.center_x,
+                    center_y: lens.center_y,
+                    decenter_pixels: lens.decenter_pixels,
+                    k1: lens.k1,
+                    k2: lens.k2,
+                    largest_shift_pixels: lens.largest_shift_pixels,
+                    overlap_rms_pixels: lens.overlap_rms_pixels,
+                    undistorted_overlap_rms_pixels: lens.undistorted_overlap_rms_pixels,
+                    focal_length_pixels: lens.focal_length_pixels,
+                }),
+        )
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// What planning a canvas from [`seiza_live_stacker_open_fits_expanding`]
+/// noted, as an owned JSON array of strings: why it skipped fitting one lens
+/// to every panel (their camera or optics differ, or their headers do not
+/// say), or why it kept its first plan when the lens-corrected one failed.
+/// The array is empty for an ordinary stack and for a reopened context,
+/// which does not plan again. Free the string with [`seiza_string_free`].
+///
+/// # Safety
+/// As [`seiza_live_stacker_expanded_lens_json`].
+pub unsafe extern "C" fn seiza_live_stacker_expansion_planning_notes_json(
+    stacker: *const SeizaLiveStacker,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let stacker = unsafe { required_live_stacker(stacker)? };
+        owned_json(&stacker.stacker.expansion_planning_notes())
+    })
+    .unwrap_or(ptr::null_mut())
 }
 
 #[unsafe(no_mangle)]
@@ -8383,6 +9108,457 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    fn wcs_headers() -> Vec<(String, HeaderValue)> {
+        [
+            ("CTYPE1", HeaderValue::String("RA---TAN".into())),
+            ("CTYPE2", HeaderValue::String("DEC--TAN".into())),
+            ("CRPIX1", HeaderValue::Float(16.5)),
+            ("CRPIX2", HeaderValue::Float(12.5)),
+            ("CRVAL1", HeaderValue::Float(83.8)),
+            ("CRVAL2", HeaderValue::Float(-5.4)),
+            ("CD1_1", HeaderValue::Float(-0.0003)),
+            ("CD1_2", HeaderValue::Float(0.0)),
+            ("CD2_1", HeaderValue::Float(0.0)),
+            ("CD2_2", HeaderValue::Float(0.0003)),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect()
+    }
+
+    /// Write a 32 by 24 mono stack of `value`, blank above row `blank_rows`.
+    fn color_channel(
+        directory: &Path,
+        name: &str,
+        value: f32,
+        blank_rows: usize,
+        headers: &[(String, HeaderValue)],
+    ) -> String {
+        let (width, height) = (32, 24);
+        let data = (0..width * height)
+            .map(|index| {
+                if index / width < blank_rows {
+                    f32::NAN
+                } else {
+                    value
+                }
+            })
+            .collect();
+        let image = LinearImage::new(width, height, 1, data).unwrap();
+        let path = directory.join(name);
+        seiza_stacking::write_processed_image_fits_f32(&path, &image, headers, &[]).unwrap();
+        path.to_str().unwrap().to_owned()
+    }
+
+    fn compose(
+        call: unsafe extern "C" fn(
+            *const c_char,
+            *const SeizaCancelSignal,
+            *mut *mut c_char,
+        ) -> *mut c_char,
+        request: &Value,
+        cancel: *const SeizaCancelSignal,
+    ) -> Result<Value, String> {
+        let request = CString::new(request.to_string()).unwrap();
+        let mut error = ptr::null_mut();
+        let json = unsafe { call(request.as_ptr(), cancel, &mut error) };
+        if json.is_null() {
+            let message = unsafe { CStr::from_ptr(error) }
+                .to_str()
+                .unwrap()
+                .to_owned();
+            unsafe { seiza_string_free(error) };
+            return Err(message);
+        }
+        assert!(error.is_null());
+        let value =
+            serde_json::from_str(unsafe { CStr::from_ptr(json) }.to_str().unwrap()).unwrap();
+        unsafe { seiza_string_free(json) };
+        Ok(value)
+    }
+
+    fn rgb_pixels(path: &str) -> Vec<f32> {
+        let image = FitsFrame::open(path).unwrap().image;
+        assert_eq!(image.channels, 3);
+        image.data
+    }
+
+    #[test]
+    fn color_cabi_composes_writes_and_reports_a_crop() {
+        let directory = tempfile::tempdir().unwrap();
+        let headers = wcs_headers();
+        let red = color_channel(directory.path(), "red.fits", 0.2, 0, &headers);
+        let green = color_channel(directory.path(), "green.xisf", 0.4, 2, &[]);
+        let blue = color_channel(directory.path(), "blue.fits", 0.6, 4, &[]);
+        let output = directory.path().join("rgb.fits");
+        let output = output.to_str().unwrap();
+
+        let report = compose(
+            seiza_color_combine_rgb_json,
+            &json!({
+                "red": red, "green": green, "blue": blue, "output": output,
+                "normalization": "none", "crop": "inscribed",
+            }),
+            ptr::null(),
+        )
+        .unwrap();
+        assert_eq!(report["schemaVersion"], 1);
+        assert_eq!(report["label"], "RGB");
+        assert_eq!(report["transfer"], "linear");
+        assert_eq!(
+            report["region"],
+            json!({"x": 0, "y": 4, "width": 32, "height": 20})
+        );
+        assert_eq!(report["crop"]["mode"], "inscribed");
+        assert_eq!(report["crop"]["channels"].as_array().unwrap().len(), 3);
+
+        let written = FitsImage::open(Path::new(output)).unwrap();
+        assert_eq!(written.header_str("SEIZACLR"), Some("RGB"));
+        assert_eq!(written.header_str("SEIZATRF"), Some("LINEAR"));
+        // The crop moves the red stack's reference pixel by its origin.
+        assert_eq!(written.header_f64("CRPIX2"), Some(12.5 - 4.0));
+        let pixels = rgb_pixels(output);
+        assert_eq!(pixels.len(), 32 * 20 * 3);
+        assert_eq!(&pixels[..3], &[0.2, 0.4, 0.6]);
+
+        // Super-luminance scales each pixel to R + G + B, uncropped.
+        let output = directory.path().join("super.xisf");
+        let output = output.to_str().unwrap();
+        let report = compose(
+            seiza_color_combine_rgb_json,
+            &json!({
+                "red": red, "green": green, "blue": blue, "output": output,
+                "normalization": "none", "luminanceMode": "super",
+            }),
+            ptr::null(),
+        )
+        .unwrap();
+        assert_eq!(report["label"], "SUPER-RGB");
+        assert!(report["crop"].is_null());
+        assert_eq!(report["region"]["height"], 24);
+        let pixels = rgb_pixels(output);
+        let sum = pixels[pixels.len() - 3..].iter().sum::<f32>();
+        assert!(sum > 1.2, "super-luminance lifts the triplet: {sum}");
+    }
+
+    #[test]
+    fn color_cabi_composes_lrgb_and_narrowband_palettes_and_matrices() {
+        let directory = tempfile::tempdir().unwrap();
+        let headers = wcs_headers();
+        let path =
+            |name: &str, value: f32| color_channel(directory.path(), name, value, 0, &headers);
+        let (luminance, red, green, blue) = (
+            path("l.fits", 0.5),
+            path("r.fits", 0.2),
+            path("g.fits", 0.4),
+            path("b.fits", 0.6),
+        );
+        let output = directory.path().join("lrgb.fits");
+        let output = output.to_str().unwrap();
+        let report = compose(
+            seiza_color_combine_lrgb_json,
+            &json!({
+                "luminance": luminance, "red": red, "green": green, "blue": blue,
+                "output": output, "normalization": "none", "luminanceWeight": 0.5,
+            }),
+            ptr::null(),
+        )
+        .unwrap();
+        assert_eq!(report["label"], "LRGB");
+        assert_eq!(
+            FitsImage::open(Path::new(output))
+                .unwrap()
+                .header_str("SEIZACLR"),
+            Some("LRGB")
+        );
+        let error = compose(
+            seiza_color_combine_lrgb_json,
+            &json!({
+                "luminance": luminance, "red": red, "green": green, "blue": blue,
+                "output": output, "luminanceMode": "super", "luminanceWeight": 0.5,
+            }),
+            ptr::null(),
+        )
+        .unwrap_err();
+        assert!(error.contains("luminanceWeight"), "{error}");
+
+        let (ha, oiii, sii) = (
+            path("ha.fits", 0.3),
+            path("oiii.fits", 0.6),
+            path("sii.fits", 0.1),
+        );
+        let output = directory.path().join("sho.fits");
+        let output = output.to_str().unwrap();
+        let report = compose(
+            seiza_color_combine_narrowband_json,
+            &json!({
+                "ha": ha, "oiii": oiii, "sii": sii, "output": output,
+                "normalization": "none",
+            }),
+            ptr::null(),
+        )
+        .unwrap();
+        assert_eq!(report["label"], "SHO");
+        assert_eq!(&rgb_pixels(output)[..3], &[0.1, 0.3, 0.6]);
+        let error = compose(
+            seiza_color_combine_narrowband_json,
+            &json!({"ha": ha, "oiii": oiii, "output": output, "palette": "sho"}),
+            ptr::null(),
+        )
+        .unwrap_err();
+        assert!(error.contains("requires an SII channel"), "{error}");
+        let error = compose(
+            seiza_color_combine_narrowband_json,
+            &json!({"ha": ha, "oiii": oiii, "sii": sii, "output": output, "palette": "hoo"}),
+            ptr::null(),
+        )
+        .unwrap_err();
+        assert!(error.contains("does not use an SII channel"), "{error}");
+        let report = compose(
+            seiza_color_combine_narrowband_json,
+            &json!({"ha": ha, "oiii": oiii, "output": output, "palette": "Foraxx-HOO", "normalization": "none"}),
+            ptr::null(),
+        )
+        .unwrap();
+        assert_eq!(report["label"], "FORAXX-HOO");
+        assert_eq!(report["transfer"], "display");
+
+        let output = directory.path().join("matrix.fits");
+        let output = output.to_str().unwrap();
+        let report = compose(
+            seiza_color_combine_narrowband_matrix_json,
+            &json!({
+                "ha": ha, "oiii": oiii, "output": output, "normalization": "none",
+                "matrix": {
+                    "red": {"ha": 1.0},
+                    "green": {"ha": 0.5, "oiii": 0.5},
+                    "blue": {"oiii": 1.0},
+                },
+            }),
+            ptr::null(),
+        )
+        .unwrap();
+        assert_eq!(report["label"], NarrowbandMatrix::LABEL);
+        let pixels = rgb_pixels(output);
+        assert!((pixels[0] - 0.3).abs() < 1e-6);
+        assert!((pixels[1] - 0.45).abs() < 1e-6);
+        assert!((pixels[2] - 0.6).abs() < 1e-6);
+        let error = compose(
+            seiza_color_combine_narrowband_matrix_json,
+            &json!({
+                "ha": ha, "oiii": oiii, "output": output,
+                "matrix": {"red": {"sii": 1.0}, "green": {"ha": 1.0}, "blue": {"oiii": 1.0}},
+            }),
+            ptr::null(),
+        )
+        .unwrap_err();
+        assert!(error.contains("SII"), "{error}");
+    }
+
+    #[test]
+    fn color_cabi_refuses_shared_paths_unknown_fields_and_a_cancelled_signal() {
+        let directory = tempfile::tempdir().unwrap();
+        let red = color_channel(directory.path(), "red.fits", 0.2, 0, &[]);
+        let green = color_channel(directory.path(), "green.fits", 0.4, 0, &[]);
+        let blue = color_channel(directory.path(), "blue.fits", 0.6, 0, &[]);
+        let error = compose(
+            seiza_color_combine_rgb_json,
+            &json!({"red": red, "green": green, "blue": blue, "output": red}),
+            ptr::null(),
+        )
+        .unwrap_err();
+        assert!(error.contains("same file"), "{error}");
+        let output = directory.path().join("rgb.fits");
+        let output = output.to_str().unwrap();
+        let error = compose(
+            seiza_color_combine_rgb_json,
+            &json!({"red": red, "green": green, "blue": blue, "output": output, "palette": "sho"}),
+            ptr::null(),
+        )
+        .unwrap_err();
+        assert!(error.contains("palette"), "{error}");
+        let error = compose(
+            seiza_color_combine_rgb_json,
+            &json!({"red": red, "green": green, "blue": blue, "output": output, "crop": "tight"}),
+            ptr::null(),
+        )
+        .unwrap_err();
+        assert!(error.contains("tight"), "{error}");
+
+        let cancel = seiza_cancel_signal_create();
+        unsafe { seiza_cancel_signal_cancel(cancel) };
+        let error = compose(
+            seiza_color_combine_rgb_json,
+            &json!({"red": red, "green": green, "blue": blue, "output": output}),
+            cancel,
+        )
+        .unwrap_err();
+        assert!(error.contains("cancel"), "{error}");
+        assert!(!Path::new(output).exists());
+        unsafe { seiza_cancel_signal_free(cancel) };
+    }
+
+    /// Three panels across one star field, each overlapping the next by 80
+    /// pixels; the first and third share no sky.
+    fn overlapping_panels(directory: &Path) -> Vec<String> {
+        let (width, height, step) = (192, 160, 112);
+        let sky_width = width + 2 * step;
+        let mut state = 41_u64;
+        let mut random = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        let stars = (0..140)
+            .map(|_| {
+                (
+                    8.0 + random() * (sky_width - 16) as f64,
+                    8.0 + random() * (height - 16) as f64,
+                    400.0 + 3600.0 * random(),
+                )
+            })
+            .collect::<Vec<_>>();
+        (0..3)
+            .map(|panel| {
+                let offset = (panel * step) as f64;
+                let mut data = vec![100.0_f32; width * height];
+                for &(sx, sy, peak) in &stars {
+                    let x = sx - offset;
+                    for py in (sy as isize - 5).max(0)..(sy as isize + 6).min(height as isize) {
+                        for px in (x as isize - 5).max(0)..(x as isize + 6).min(width as isize) {
+                            let d2 = (px as f64 - x).powi(2) + (py as f64 - sy).powi(2);
+                            data[py as usize * width + px as usize] +=
+                                (peak * (-d2 / 3.2).exp()) as f32;
+                        }
+                    }
+                }
+                let image = LinearImage::new(width, height, 1, data).unwrap();
+                let path = directory.join(format!("panel-{panel}.fits"));
+                seiza_stacking::write_processed_image_fits_f32(&path, &image, &[], &[]).unwrap();
+                path.to_str().unwrap().to_owned()
+            })
+            .collect()
+    }
+
+    fn open_expanding(
+        paths: &Value,
+        flat: Option<&str>,
+        cancel: *const SeizaCancelSignal,
+    ) -> Result<*mut SeizaLiveStacker, String> {
+        let paths = CString::new(paths.to_string()).unwrap();
+        let flat = flat.map(|flat| CString::new(flat).unwrap());
+        let options = CString::new(
+            r#"{"normalization": {"mode": "none"}, "rejection": {"mode": "none"},
+                "acceptance": {"minimum_overlap_fraction": 0.1}}"#,
+        )
+        .unwrap();
+        let mut error = ptr::null_mut();
+        let stacker = unsafe {
+            seiza_live_stacker_open_fits_expanding(
+                paths.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                flat.as_ref().map_or(ptr::null(), |flat| flat.as_ptr()),
+                0.0,
+                options.as_ptr(),
+                0,
+                cancel,
+                &mut error,
+            )
+        };
+        if stacker.is_null() {
+            let message = unsafe { CStr::from_ptr(error) }
+                .to_str()
+                .unwrap()
+                .to_owned();
+            unsafe { seiza_string_free(error) };
+            return Err(message);
+        }
+        assert!(error.is_null());
+        Ok(stacker)
+    }
+
+    fn stacker_json(
+        call: unsafe extern "C" fn(*const SeizaLiveStacker, *mut *mut c_char) -> *mut c_char,
+        stacker: *const SeizaLiveStacker,
+    ) -> Value {
+        let mut error = ptr::null_mut();
+        let json = unsafe { call(stacker, &mut error) };
+        assert!(error.is_null());
+        let value =
+            serde_json::from_str(unsafe { CStr::from_ptr(json) }.to_str().unwrap()).unwrap();
+        unsafe { seiza_string_free(json) };
+        value
+    }
+
+    #[test]
+    fn expanding_stack_cabi_holds_every_panel() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = overlapping_panels(directory.path());
+        // Anchored on the last panel, the first joins only through the middle.
+        let order = [&paths[2], &paths[0], &paths[1]];
+        let stacker = open_expanding(&json!(order), None, ptr::null()).unwrap();
+        assert_eq!(unsafe { seiza_live_stacker_accepted_frames(stacker) }, 0);
+        for path in order {
+            let path = CString::new(path.as_str()).unwrap();
+            let mut error = ptr::null_mut();
+            let json =
+                unsafe { seiza_live_stacker_push_fits_json(stacker, path.as_ptr(), &mut error) };
+            assert!(error.is_null());
+            let disposition: Value =
+                serde_json::from_str(unsafe { CStr::from_ptr(json) }.to_str().unwrap()).unwrap();
+            unsafe { seiza_string_free(json) };
+            assert_eq!(disposition["accepted"], true, "{disposition}");
+        }
+        assert_eq!(unsafe { seiza_live_stacker_accepted_frames(stacker) }, 3);
+        let width = unsafe { seiza_live_stacker_width(stacker) };
+        assert!((412..=420).contains(&width), "canvas width {width}");
+        // Undistorted panels leave the lens nothing to explain.
+        assert!(stacker_json(seiza_live_stacker_expanded_lens_json, stacker).is_null());
+        assert!(stacker_json(seiza_live_stacker_expansion_planning_notes_json, stacker).is_array());
+        unsafe { seiza_live_stacker_free(stacker) };
+
+        // An ordinary stack has no lens and no notes.
+        let image = stacking_star_field(160, 128);
+        let options = no_adjustment_stack_options();
+        let mut error = ptr::null_mut();
+        let ordinary = unsafe {
+            seiza_live_stacker_create(
+                image.as_ptr(),
+                image.len(),
+                160,
+                128,
+                1,
+                options.as_ptr(),
+                &mut error,
+            )
+        };
+        assert!(stacker_json(seiza_live_stacker_expanded_lens_json, ordinary).is_null());
+        assert_eq!(
+            stacker_json(seiza_live_stacker_expansion_planning_notes_json, ordinary),
+            json!([])
+        );
+        unsafe { seiza_live_stacker_free(ordinary) };
+    }
+
+    #[test]
+    fn expanding_stack_cabi_refuses_bad_inputs_and_honours_cancel() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = overlapping_panels(directory.path());
+        let error = open_expanding(&json!([]), None, ptr::null()).unwrap_err();
+        assert!(error.contains("at least one light"), "{error}");
+        let error = open_expanding(&json!(paths), Some(&paths[1]), ptr::null()).unwrap_err();
+        assert!(error.contains("duplicate"), "{error}");
+        let error = open_expanding(&json!([&paths[0], &paths[2]]), None, ptr::null()).unwrap_err();
+        assert!(error.contains("could not join"), "{error}");
+        let cancel = seiza_cancel_signal_create();
+        unsafe { seiza_cancel_signal_cancel(cancel) };
+        let error = open_expanding(&json!(paths), None, cancel).unwrap_err();
+        assert!(error.contains("cancel"), "{error}");
+        unsafe { seiza_cancel_signal_free(cancel) };
     }
 
     #[test]

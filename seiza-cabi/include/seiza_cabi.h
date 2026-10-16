@@ -523,6 +523,109 @@ char *seiza_color_crop_report_json(const char *const *names,
                                    char **error_out);
 
 /*
+ Combines aligned red, green and blue mono stacks into one RGB image and
+ writes it, as `seiza color rgb` does without registering the channels.
+
+ `request_json` is an object with the `red`, `green` and `blue` FITS or
+ XISF paths, all on one pixel grid, and the `output` path, written as XISF
+ for a `.xisf` name and FITS otherwise. The output carries the red stack's
+ WCS, moved by any crop. Optional fields:
+ - `luminanceMode`: `"native"` (the default) keeps the channels as they
+   are; `"super"` scales each pixel to a synthetic luminance of R + G + B,
+   which may exceed one.
+ - `normalization`: `"percentile"` (the default) maps each channel's
+   `blackPercentile` (0.001) and `whitePercentile` (0.995), estimated from
+   up to `normalizationSamples` (1000000) samples, to 0 and 1; `"none"`
+   keeps the samples.
+ - `crop`: `"none"` (the default), `"bounds"` or `"inscribed"`, as in
+   [`seiza_color_crop_report_json`].
+
+ Returns owned schema-1 JSON: the `label` written to `SEIZACLR` (`RGB` or
+ `SUPER-RGB`), the `transfer` of the samples (`"linear"` here), the
+ `region` of the grid the output covers, and `crop`, the object
+ [`seiza_color_crop_report_json`] returns, when a crop was asked for (null
+ otherwise). Free it with [`seiza_string_free`]. `cancel` is checked before
+ each stack is read and before the output is written.
+
+ # Safety
+ `request_json` must be a valid NUL-terminated string. `cancel` must be
+ null or a live [`SeizaCancelSignal`] retained until this call returns.
+ When non-null, `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_color_combine_rgb_json(const char *request_json,
+                                   const SeizaCancelSignal *cancel,
+                                   char **error_out);
+
+/*
+ Combines aligned luminance, red, green and blue mono stacks into one LRGB
+ image and writes it, as `seiza color lrgb` does without registering the
+ channels.
+
+ `request_json` is an object with the `luminance`, `red`, `green` and
+ `blue` paths and the `output` path, as in
+ [`seiza_color_combine_rgb_json`]; the output carries the luminance
+ stack's WCS. `luminanceMode` `"replace"` (the default) swaps in the
+ luminance, weighted by `luminanceWeight` from 0 (RGB alone) to 1 (the
+ default, L alone); `"super"` targets the additive L + R + G + B, which may
+ exceed one, and takes no weight. `normalization`, `blackPercentile`,
+ `whitePercentile`, `normalizationSamples` and `crop` are those of
+ [`seiza_color_combine_rgb_json`], and so are the returned JSON (with the
+ label `LRGB` or `SUPER-LRGB`) and `cancel`.
+
+ # Safety
+ As [`seiza_color_combine_rgb_json`].
+ */
+char *seiza_color_combine_lrgb_json(const char *request_json,
+                                    const SeizaCancelSignal *cancel,
+                                    char **error_out);
+
+/*
+ Maps aligned H-alpha, OIII and, for most palettes, SII mono stacks onto an
+ RGB palette and writes the result, as `seiza color narrowband` does
+ without registering the channels.
+
+ `request_json` is an object with the `ha` and `oiii` paths, `sii` when the
+ palette uses it, and the `output` path, as in
+ [`seiza_color_combine_rgb_json`]; the output carries the H-alpha stack's
+ WCS. `palette` is one of `SHO` (the default), `SOH`, `HSO`, `HOS`, `OSH`,
+ `OHS`, `HOO`, `Foraxx-SHO` or `Foraxx-HOO`, in any case; `HOO` and
+ `Foraxx-HOO` take no `sii`, and the rest need one. The Foraxx palettes
+ stretch each channel first, setting its median to `foraxxTargetMedian`
+ (0.2) and its black point `foraxxShadowsClip` (-2.8) normal-equivalent
+ MADs below the median, so their output is display-referred. The other
+ fields are those of [`seiza_color_combine_rgb_json`], and so are the
+ returned JSON (with the palette's upper-case name as the label and
+ `"display"` as the Foraxx palettes' transfer) and `cancel`.
+
+ # Safety
+ As [`seiza_color_combine_rgb_json`].
+ */
+char *seiza_color_combine_narrowband_json(const char *request_json,
+                                          const SeizaCancelSignal *cancel,
+                                          char **error_out);
+
+/*
+ Mixes aligned H-alpha, OIII and optional SII mono stacks into RGB through
+ a caller's own linear matrix, and writes the result.
+
+ `request_json` is an object with the `ha` and `oiii` paths, an optional
+ `sii` path, the `output` path, and `matrix`: `{"red": {...}, "green":
+ {...}, "blue": {...}}`, each output channel giving its `sii`, `ha` and
+ `oiii` weights (a weight left out is zero). Weights must be finite and
+ some must be non-zero. A matrix that weights SII needs an `sii` stack; one
+ that does not ignores any given. The output carries the H-alpha stack's
+ WCS and the label `NARROWBAND-MATRIX`, and is linear light. The other
+ fields are those of [`seiza_color_combine_rgb_json`], and so are the
+ returned JSON and `cancel`.
+
+ # Safety
+ As [`seiza_color_combine_rgb_json`].
+ */
+char *seiza_color_combine_narrowband_matrix_json(const char *request_json,
+                                                 const SeizaCancelSignal *cancel,
+                                                 char **error_out);
+
+/*
  Fits a compact background model to interleaved linear `float` samples.
 
  `channels` must be one or three and `data_length` must equal
@@ -883,6 +986,90 @@ SeizaLiveStacker *seiza_live_stacker_open_fits_with_reference_image_candidates(c
                                                                                const char *options_json,
                                                                                char **selection_json_out,
                                                                                char **error_out);
+
+/*
+ Plans a canvas that holds a connected set of overlapping lights, such as
+ mosaic panels or a dithered stack whose edges should be kept, and starts
+ an empty stack on it, as the CLI's `--reference expand` does.
+
+ `paths_json` is a JSON array of FITS or XISF light paths; the first
+ anchors the WCS and photometric scale, so put the choice of
+ [`seiza_stack_choose_reference_json`] first to anchor on the clearest
+ light. Panels may connect through other panels, and lights may differ in
+ rotation by any amount. A light that cannot join is rejected, with the
+ reason, when pushed; this call fails only when nothing joins the anchor,
+ a light cannot be read, or the canvas would exceed
+ `max_canvas_megasamples` million samples (pixels times channels; zero
+ uses 256). A run peaks at about 40 bytes per sample. With
+ `"registration": {"model": "quadratic"}` in `options_json`, a light lying
+ mostly within one panel is warped onto it, which follows lens distortion
+ across a meridian flip. For panels, set
+ `"acceptance": {"minimum_overlap_fraction": 0.1}` or near it.
+ Bayer drizzle and drizzled reintegration are not supported on the canvas.
+
+ The masters, `dark_exposure_seconds` and `options_json` are those of
+ [`seiza_live_stacker_open_fits`]; every light must differ from every
+ master. `cancel` is checked before each light is read. The stack starts
+ with no accepted frames: push every light, the anchor included.
+ [`seiza_live_stacker_expanded_lens_json`] and
+ [`seiza_live_stacker_expansion_planning_notes_json`] report what planning
+ found.
+
+ # Safety
+ `paths_json` must be a valid NUL-terminated string. Optional paths and
+ `options_json` may be null; when non-null they must be NUL-terminated.
+ `cancel` must be null or a live [`SeizaCancelSignal`] retained until this
+ call returns. When non-null, `error_out` must point to writable storage
+ for one pointer.
+ */
+SeizaLiveStacker *seiza_live_stacker_open_fits_expanding(const char *paths_json,
+                                                         const char *bias_path,
+                                                         const char *dark_path,
+                                                         const char *flat_path,
+                                                         double dark_exposure_seconds,
+                                                         const char *options_json,
+                                                         size_t max_canvas_megasamples,
+                                                         const SeizaCancelSignal *cancel,
+                                                         char **error_out);
+
+/*
+ The lens distortion a canvas from
+ [`seiza_live_stacker_open_fits_expanding`] was planned through, as owned
+ JSON, or the JSON text `null` when planning measured none, as for any
+ stack not opened on an expanding canvas.
+
+ The object is schema 1: the distortion's axis `centerX` and `centerY` in
+ sensor pixels, counted from 0, and its `decenterPixels` from the sensor's
+ centre; `k1` and `k2`, the coefficients of `q` and `q²`, where `q` is a
+ position's squared distance from the axis over the frame's half diagonal
+ squared; `largestShiftPixels`, the largest shift it makes within that half
+ diagonal; `overlapRmsPixels` and `undistortedOverlapRmsPixels`, the RMS
+ distance between the stars the panels' first frames pair where they
+ overlap, through the lens and fitted without it (null for a reopened
+ context); and `focalLengthPixels`, by which panels were placed on the
+ anchor's tangent plane, when the anchor's headers gave one (null
+ otherwise). Free the string with [`seiza_string_free`].
+
+ # Safety
+ `stacker` must be a live `SeizaLiveStacker` pointer, with this read
+ externally synchronized against mutable operations. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_live_stacker_expanded_lens_json(const SeizaLiveStacker *stacker, char **error_out);
+
+/*
+ What planning a canvas from [`seiza_live_stacker_open_fits_expanding`]
+ noted, as an owned JSON array of strings: why it skipped fitting one lens
+ to every panel (their camera or optics differ, or their headers do not
+ say), or why it kept its first plan when the lens-corrected one failed.
+ The array is empty for an ordinary stack and for a reopened context,
+ which does not plan again. Free the string with [`seiza_string_free`].
+
+ # Safety
+ As [`seiza_live_stacker_expanded_lens_json`].
+ */
+char *seiza_live_stacker_expansion_planning_notes_json(const SeizaLiveStacker *stacker,
+                                                       char **error_out);
 
 /*
  Reopens a versioned live-stack context previously written by

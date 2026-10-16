@@ -390,7 +390,9 @@ channels; a run peaks at about 40 bytes per sample. When the panels' overlaps
 show one lens distortion bending them all, planning undoes it and
 `stacker.expanded_lens` describes it as a dict (its axis, coefficients,
 largest shift in pixels, and the overlaps' residual with and without it);
-otherwise it is `None`. `cancel`, a callable, is
+otherwise it is `None`. `stacker.expansion_planning_notes` lists what planning
+noted: why it skipped fitting one lens to every panel, or why it kept its first
+plan when the lens-corrected one failed. `cancel`, a callable, is
 asked before each light is planned, and Ctrl-C also stops planning. Drizzle is
 not supported on an expanded canvas. See the CLI documentation for how panels
 are matched and what the result looks like on real data.
@@ -526,6 +528,29 @@ super_rgb = seiza.combine_rgb(red, green, blue, luminance_mode="super")
 sho = seiza.combine_narrowband(ha, oiii, sii, palette="sho")
 hoo = seiza.combine_narrowband(ha, oiii, palette="hoo")
 foraxx = seiza.combine_narrowband(ha, oiii, sii, palette="foraxx-sho")
+custom = seiza.combine_narrowband_matrix(
+    ha, oiii, sii,
+    matrix={"red": {"sii": 0.7, "ha": 0.3}, "green": {"ha": 1.0},
+            "blue": {"oiii": 1.0}},
+)
+```
+
+`combine_narrowband_matrix` mixes the filters through your own weights: each
+output channel maps `"sii"`, `"ha"` and `"oiii"` to a weight, and a weight
+left out is zero. A matrix that weights SII needs `sii`.
+
+Each `combine_*` also writes its result when given `output=`: 32-bit float
+FITS, or XISF for a `.xisf` name, labelled in `SEIZACLR` and with `SEIZATRF`
+saying whether the samples are linear or display-referred. Pass the first
+channel's FITS header (an astropy `Header` or a dict) as `header=` and the
+output keeps its WCS, moved by any crop:
+
+```python
+from astropy.io import fits
+
+red, red_header = fits.getdata("red.fits", header=True)
+seiza.combine_rgb(red.astype(np.float32), green, blue,
+                  output="rgb.fits", header=red_header)
 ```
 
 Pass `crop="bounds"` or `crop="inscribed"` to trim the blank edges that

@@ -536,6 +536,8 @@ class LiveStacker:
     def save_context(self, path: str | Path) -> None: ...
     @property
     def expanded_lens(self) -> dict[str, float | None] | None: ...
+    @property
+    def expansion_planning_notes(self) -> list[str]: ...
     def measure_depth(self) -> SnrSample | None: ...
     def snapshot(self) -> StackSnapshot: ...
     def retain_frames_for_reintegration(
@@ -934,6 +936,8 @@ def combine_rgb(
     white_percentile: float = 0.995,
     normalization_samples: int = 1_000_000,
     crop: str = "none",
+    output: str | Path | None = None,
+    header: Mapping[str, Any] | None = None,
 ) -> npt.NDArray[np.float32]: ...
 def combine_lrgb(
     luminance: npt.NDArray[np.float32],
@@ -948,6 +952,8 @@ def combine_lrgb(
     white_percentile: float = 0.995,
     normalization_samples: int = 1_000_000,
     crop: str = "none",
+    output: str | Path | None = None,
+    header: Mapping[str, Any] | None = None,
 ) -> npt.NDArray[np.float32]: ...
 def combine_narrowband(
     ha: npt.NDArray[np.float32],
@@ -962,6 +968,22 @@ def combine_narrowband(
     foraxx_target_median: float = 0.2,
     foraxx_shadows_clip: float = -2.8,
     crop: str = "none",
+    output: str | Path | None = None,
+    header: Mapping[str, Any] | None = None,
+) -> npt.NDArray[np.float32]: ...
+def combine_narrowband_matrix(
+    ha: npt.NDArray[np.float32],
+    oiii: npt.NDArray[np.float32],
+    sii: npt.NDArray[np.float32] | None = None,
+    *,
+    matrix: Mapping[str, Mapping[str, float]],
+    normalization: str = "percentile",
+    black_percentile: float = 0.001,
+    white_percentile: float = 0.995,
+    normalization_samples: int = 1_000_000,
+    crop: str = "none",
+    output: str | Path | None = None,
+    header: Mapping[str, Any] | None = None,
 ) -> npt.NDArray[np.float32]: ...
 def crop_report(
     channels: dict[str, npt.NDArray[np.float32]],

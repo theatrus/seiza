@@ -774,6 +774,10 @@ def test_expanding_stack_holds_every_panel(tmp_path):
     assert np.isfinite(snapshot.image).mean() > 0.95
     # Undistorted panels leave the lens nothing to explain.
     assert stacker.expanded_lens is None
+    assert isinstance(stacker.expansion_planning_notes, list)
+    ordinary = seiza.LiveStacker(paths[0], options=options)
+    assert ordinary.expanded_lens is None
+    assert ordinary.expansion_planning_notes == []
 
 
 def lens_panels(tmp_path, width=600, height=400, step=300):

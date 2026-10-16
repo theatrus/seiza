@@ -129,6 +129,12 @@ pub struct NarrowbandMatrix {
     pub blue: NarrowbandMix,
 }
 
+impl NarrowbandMatrix {
+    /// The label [`write_color_fits_f32`](crate::write_color_fits_f32) is
+    /// given for a composition through a custom matrix.
+    pub const LABEL: &'static str = "NARROWBAND-MATRIX";
+}
+
 /// Common false-color assignments. A three-letter name lists the source used
 /// for red, green, and blue respectively.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
