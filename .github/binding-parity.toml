@@ -534,6 +534,83 @@ seiza_cancel_signal_free = { none = "frees a C handle; Python's garbage collecto
 seiza_string_free = { none = "frees a string the C ABI returned; Python manages its own memory" }
 seiza_core_version = "__version__"
 
+# Every Python function, constructor and method (not properties) that no C
+# export above gives as its twin: the C export that does the same job
+# ({ c = "..." }), or why there is none.
+[python_functions]
+
+# solving
+Star = { none = "a detected star; C hosts receive stars as JSON" }
+detect = { none = "C hosts solve a file, and seiza_solve_image_json detects its stars; Python detects and solves in steps" }
+solve = { none = "C hosts solve a file (seiza_solve_image_json); Python solves stars it detected, near a given position" }
+solve_blind = { none = "C hosts solve a file (seiza_solve_image_json); Python solves stars it detected" }
+read_solve_prior = { none = "seiza_solve_image_json reads the prior itself" }
+"StarCatalog.open" = { none = "C hosts give a catalog directory, and seiza_solve_image_json opens the catalogs" }
+"StarCatalog.from_stars" = { none = "C hosts give a catalog directory, and seiza_solve_image_json opens the catalogs" }
+"StarCatalog.star_count" = { none = "C hosts give a catalog directory, and seiza_solve_image_json opens the catalogs" }
+"StarCatalog.cone_search" = { none = "C hosts get the catalog stars in a field from the solve's overlay points" }
+"BlindIndex.open" = { none = "C hosts give a catalog directory, and seiza_solve_image_json opens the index" }
+"BlindIndex.pattern_count" = { none = "C hosts give a catalog directory, and seiza_solve_image_json opens the index" }
+"Solution.fits_header_cards" = { gap = "a solution as FITS header cards; C hosts build the cards from the WCS JSON themselves" }
+"Solution.fits_header_text" = { gap = "a solution as FITS header cards; C hosts build the cards from the WCS JSON themselves" }
+"Wcs.fits_header_cards" = { gap = "a solution as FITS header cards; C hosts build the cards from the WCS JSON themselves" }
+"Wcs.from_header" = { none = "WCS arithmetic for Python callers; C hosts get the WCS as JSON, and overlay positions from the solve" }
+"Wcs.from_center_scale_rotation" = { none = "WCS arithmetic for Python callers; C hosts get the WCS as JSON, and overlay positions from the solve" }
+"Wcs.sip_coefficients" = { none = "WCS arithmetic for Python callers; C hosts get the WCS as JSON, and overlay positions from the solve" }
+"Wcs.pixel_to_world" = { none = "WCS arithmetic for Python callers; C hosts get the WCS as JSON, and overlay positions from the solve" }
+"Wcs.world_to_pixel" = { none = "WCS arithmetic for Python callers; C hosts get the WCS as JSON, and overlay positions from the solve" }
+"Wcs.footprint" = { none = "WCS arithmetic for Python callers; C hosts get the WCS as JSON, and overlay positions from the solve" }
+read_photo_metadata = { gap = "a photo's EXIF capture time, GPS position and focal length; seiza_solve_image_json reads them only for its own use" }
+
+# stars
+tilt_analysis = { c = "seiza_stars_detect_luma_u16_json" }
+triangle_tilt_analysis = { c = "seiza_stars_detect_luma_u16_json" }
+
+# stacking and colour
+StackOptions = { none = "stack options; C calls take them as JSON fields" }
+stack_fits = { none = "C hosts take the same steps with the live stacker: seiza_stack_choose_reference_json, open, push_fits_pipelined and finish" }
+"LiveStacker.open_fits_expanding" = { gap = "the expanding reference canvas for overlapping panels (#253)" }
+combine_rgb = { gap = "composing mono stacks into colour" }
+combine_lrgb = { gap = "composing mono stacks into colour" }
+combine_narrowband = { gap = "composing mono stacks into colour" }
+gaia_photometry_catalog_cone = { gap = "Gaia photometry from the local catalog fetch_catalogs installs; C reads only the online archive (seiza_gaia_photometry_cone_json)" }
+
+# calibration
+build_bias = { c = "seiza_calibration_build_master_json" }
+build_dark = { c = "seiza_calibration_build_master_json" }
+temperature_matches = { c = "seiza_calibration_dark_matches" }
+coherent_subset = { c = "seiza_calibration_plan_json" }
+coherent_subset_indices = { c = "seiza_calibration_plan_json" }
+sort_by_proximity = { c = "seiza_calibration_plan_json" }
+
+# background and display
+"BackgroundModel.samples" = { c = "seiza_background_model_diagnostics_json" }
+stretch = { none = "C stretches as it renders a file for display (seiza_rendered_image*_open_with_stretch_config); Python stretches an array" }
+
+# image processing: seiza-imgproc's primitives for Python callers; the C ABI's calls use them inside
+gaussian_blur = { none = "an image-processing primitive for Python callers" }
+median_blur3 = { none = "an image-processing primitive for Python callers" }
+canny = { none = "an image-processing primitive for Python callers" }
+otsu_threshold = { none = "an image-processing primitive for Python callers" }
+otsu_binary = { none = "an image-processing primitive for Python callers" }
+erode = { none = "an image-processing primitive for Python callers" }
+dilate = { none = "an image-processing primitive for Python callers" }
+find_contours = { none = "an image-processing primitive for Python callers" }
+contour_area = { none = "an image-processing primitive for Python callers" }
+dt_filter = { none = "an image-processing primitive for Python callers" }
+remove_structures = { none = "an image-processing primitive for Python callers" }
+
+# rc-astro
+rc_astro_split_stars = { c = "seiza_rc_astro_process_file_json" }
+
+# satellites: seiza-satellites has no C ABI
+"SatelliteCatalog.open" = { gap = "satellite track prediction (seiza-satellites)" }
+"SatelliteCatalog.from_omm_json" = { gap = "satellite track prediction (seiza-satellites)" }
+"SatelliteCatalog.from_tle_text" = { gap = "satellite track prediction (seiza-satellites)" }
+"SatelliteCatalog.fetch_celestrak" = { gap = "satellite track prediction (seiza-satellites)" }
+"SatelliteCatalog.resolve" = { gap = "satellite track prediction (seiza-satellites)" }
+"SatelliteCatalog.tracks_in_footprint" = { gap = "satellite track prediction (seiza-satellites)" }
+
 # Whole JSON types with no Python counterpart (field checks skipped).
 [types]
 

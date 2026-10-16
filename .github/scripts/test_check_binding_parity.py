@@ -191,8 +191,10 @@ class BindingParityTests(unittest.TestCase):
 
     def test_a_mapping_to_a_name_python_lacks_fails(self):
         manifest = MANIFEST.replace('"ParallaxVideo"', '"ParallaxVideo.prepare"')
-        [problem] = self.problems(manifest=manifest)
-        self.assertIn("ParallaxVideo.prepare, which seiza.pyi does not declare", problem)
+        problems = self.problems(manifest=manifest)
+        self.assertTrue(any("ParallaxVideo.prepare, which seiza.pyi does not declare" in p for p in problems), problems)
+        # The constructor has lost its twin, too.
+        self.assertTrue(any("Python's ParallaxVideo is no C export's twin" in p for p in problems), problems)
 
     def test_a_new_c_field_without_a_python_name_fails(self):
         c = C_SOURCE.replace("    framing: Option<String>,", "    framing: Option<String>,\n    crop: Option<[usize; 4]>,")
@@ -266,6 +268,21 @@ class BindingParityTests(unittest.TestCase):
         self.assertIn("seiza-parallax::plan_tour says the C ABI does not call it, but it does now", problem)
         manifest = MANIFEST.replace('"seiza-parallax::parse_stop" =', '"seiza-parallax::*" =')
         self.assertEqual(self.problems(manifest=manifest), [])
+
+    def test_every_python_callable_needs_a_c_twin(self):
+        stub = STUB + "    def frame(self, index: int) -> bytes: ...\n"
+        [problem] = self.problems(stub=stub)
+        self.assertIn("Python's ParallaxVideo.frame is no C export's twin", problem)
+        manifest = MANIFEST + '\n[python_functions]\n"ParallaxVideo.frame" = { c = "seiza_string_free" }\n'
+        self.assertEqual(self.problems(stub=stub, manifest=manifest), [])
+        manifest = MANIFEST + '\n[python_functions]\n"ParallaxVideo.frame" = { c = "seiza_parallax_render" }\n'
+        [problem] = self.problems(stub=stub, manifest=manifest)
+        self.assertIn("gives seiza_parallax_render, which the C ABI does not export", problem)
+        # The constructor is the prepare call's twin already, and a stale entry fails.
+        manifest = MANIFEST + '\n[python_functions]\nParallaxVideo = { none = "x" }\nrender_all = { none = "x" }\n'
+        problems = self.problems(manifest=manifest)
+        self.assertTrue(any("ParallaxVideo: [functions] maps a C export to it now" in p for p in problems), problems)
+        self.assertTrue(any("lists render_all, which seiza.pyi does not declare" in p for p in problems), problems)
 
     def test_one_binding_alone_needs_a_reason(self):
         report = MODULE.Report()

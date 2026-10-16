@@ -10,7 +10,8 @@ Against `.github/binding-parity.toml`, this checks that:
    called by the C ABI; or an entry says why not;
 
 1. every exported C function maps to a Python name that `seiza-py/seiza.pyi`
-   declares, or says why Python has none;
+   declares, or says why Python has none; and every Python function,
+   constructor and method is some C export's twin, or says why it has none;
 2. every field of the C ABI's JSON types (its serde structs) has a Python
    name, after the naming conventions, or an entry saying why not;
 3. each Python call driven by keyword arguments accepts exactly the
@@ -383,6 +384,63 @@ def check_functions(report: Report, manifest: dict, exports: set[str], surface: 
             report.gaps.append(f"{name}: {value}")
 
 
+def python_callables(stub: str) -> list[str]:
+    """seiza.pyi's functions, the classes it gives a constructor, and their
+    methods (not properties): what Python callers can call."""
+    def decorated(node: ast.FunctionDef, name: str) -> bool:
+        return any(getattr(d, "id", getattr(d, "attr", None)) == name for d in node.decorator_list)
+
+    names: set[str] = set()
+    for node in ast.parse(stub).body:
+        if isinstance(node, ast.FunctionDef) and not node.name.startswith("_"):
+            names.add(node.name)
+        elif isinstance(node, ast.ClassDef):
+            members = [item for item in node.body if isinstance(item, ast.FunctionDef)]
+            if any(item.name == "__init__" for item in members):
+                names.add(node.name)
+            names |= {
+                f"{node.name}.{item.name}"
+                for item in members
+                if not item.name.startswith("_") and not decorated(item, "property")
+            }
+    return sorted(names)
+
+
+def check_python_functions(report: Report, manifest: dict, exports: set[str], stub: str) -> None:
+    targets: set[str] = set()
+    for entry in manifest.get("functions", {}).values():
+        try:
+            kind, value = entry_kind(entry)
+        except ValueError:
+            continue
+        if kind == "python":
+            targets |= {value, value.removesuffix(".__init__")}
+    entries = manifest.get("python_functions", {})
+    callables = python_callables(stub)
+    for name in callables:
+        twinned = name in targets
+        if name not in entries:
+            if not twinned:
+                report.problem(
+                    f"Python's {name} is no C export's twin: add a C export that does the same (and "
+                    f"map it in [functions]), or add {name} to [python_functions]"
+                )
+            continue
+        try:
+            kind, value = entry_kind(entries[name], "c")
+        except ValueError as error:
+            report.problem(f"[python_functions] {name}: {error}")
+            continue
+        if twinned:
+            report.problem(f"[python_functions] {name}: [functions] maps a C export to it now: remove the entry")
+        elif kind == "c" and value not in exports:
+            report.problem(f"[python_functions] {name} gives {value}, which the C ABI does not export")
+        elif kind == "gap":
+            report.gaps.append(f"{name} in C: {value}")
+    for name in sorted(entries.keys() - set(callables)):
+        report.problem(f"[python_functions] lists {name}, which seiza.pyi does not declare: remove it")
+
+
 def check_fields(report: Report, manifest: dict, types: dict[str, list[str]], surface: PythonSurface) -> None:
     conventions = manifest.get("conventions", {}).get("suffixes", {})
     whole = manifest.get("types", {})
@@ -504,7 +562,9 @@ def run(root: Path, base: str | None) -> Report:
     surface = python_surface((root / STUB).read_text(), rust_sources)
     check_core(report, manifest, root, c_structs(c_sources))
     check_core_functions(report, manifest, root, "\n".join(without_tests(source) for source in c_sources))
-    check_functions(report, manifest, c_exports(c_sources), surface)
+    exports = c_exports(c_sources)
+    check_functions(report, manifest, exports, surface)
+    check_python_functions(report, manifest, exports, (root / STUB).read_text())
     check_fields(report, manifest, json_types(c_sources), surface)
     check_keywords(report, manifest, root, surface)
     if base:
