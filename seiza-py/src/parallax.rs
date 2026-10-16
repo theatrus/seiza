@@ -139,7 +139,10 @@ fn plan_dict<'py>(py: Python<'py>, plan: &PlannedTour) -> PyResult<Bound<'py, Py
             let stop = PyDict::new(py);
             stop.set_item("name", &planned.name)?;
             stop.set_item("focus", planned.stop.focus)?;
-            stop.set_item("pull_back_to_whole_image", planned.stop.pull_back_to_whole_image)?;
+            stop.set_item(
+                "pull_back_to_whole_image",
+                planned.stop.pull_back_to_whole_image,
+            )?;
             stop.set_item("dolly", planned.stop.dolly)?;
             stop.set_item("zoom", planned.stop.zoom)?;
             stop.set_item("rotate_deg", planned.stop.rotate_deg)?;
@@ -553,7 +556,9 @@ fn options(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ParallaxOptions> {
                                 }
                                 "dolly" => parsed.dolly = value.extract()?,
                                 "zoom" => parsed.zoom = value.extract()?,
-                                "pull_back_to_whole_image" => parsed.pull_back_to_whole_image = value.extract()?,
+                                "pull_back_to_whole_image" => {
+                                    parsed.pull_back_to_whole_image = value.extract()?
+                                }
                                 "rotate_deg" => parsed.rotate_deg = value.extract()?,
                                 "pan" => parsed.pan = value.extract()?,
                                 "travel" => parsed.travel = value.extract()?,
