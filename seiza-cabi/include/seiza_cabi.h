@@ -2710,10 +2710,11 @@ char *seiza_calibration_measure_dark_json(const char *request_json, char **error
  `height`, `fullScale`, `level`, `channelLevels`, `clippedFraction`,
  `noise`, `detectionDepth`, `illumination` (`columns`, `rows` and a
  row-major `response` of cell medians, 1 for a typical cell),
- `featureCount`, the `features` — large disks, donuts and irregular
- shadows first, then compact dips, each with `x`, `y`, `left`, `top`,
+ `featureCount`, the `features` — large disks, donuts and patches first,
+ then compact and irregular dips, each with `x`, `y`, `left`, `top`,
  `right`, `bottom`, `pixels`, `depth`, `shape` (`compact`, `irregular`,
- `disk` or `donut`), `radius`, and when known `hole` and `distance_mm` —
+ `disk`, `donut` or `patch`), `radius`, and when known `hole` and
+ `distanceMm` —
  and `vignetting` (`edge`, `x`, `y`, `area`, `depth`). Optional
  `largeFeatures` (default true) turns the search for large ones off;
  optional `focalRatio`, `pixelSizeUm` and `obstruction` describe the light

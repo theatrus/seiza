@@ -425,6 +425,7 @@ class FlatFeature:
     radius: float
     hole: float | None
     distance_mm: float | None
+    seen_in: tuple[int, int] | None
 
 class FlatMeasurement:
     algorithm_version: int

@@ -152,7 +152,7 @@ impl PyIlluminationProfile {
 }
 
 /// One dust feature of a flat, in image pixels: a compact or irregular dip,
-/// or an out-of-focus disk or donut.
+/// or an out-of-focus disk, donut or patch.
 #[pyclass(skip_from_py_object, frozen, name = "FlatFeature", module = "seiza")]
 pub(crate) struct PyFlatFeature {
     inner: FlatFeature,
@@ -193,7 +193,7 @@ impl PyFlatFeature {
     fn depth(&self) -> f32 {
         self.inner.depth
     }
-    /// ``"compact"``, ``"irregular"``, ``"disk"`` or ``"donut"``.
+    /// ``"compact"``, ``"irregular"``, ``"disk"``, ``"donut"`` or ``"patch"``.
     #[getter]
     fn shape(&self) -> &'static str {
         shape_name(self.inner.shape)
@@ -215,6 +215,12 @@ impl PyFlatFeature {
     fn distance_mm(&self) -> Option<f32> {
         self.inner.distance_mm
     }
+    /// In how many of a session's flats it shows, and of how many, as
+    /// ``(frames, of)``: only for dust found on a session's stack.
+    #[getter]
+    fn seen_in(&self) -> Option<(u32, u32)> {
+        self.inner.seen_in.map(|seen| (seen.frames, seen.of))
+    }
 
     fn __repr__(&self) -> String {
         format!(
@@ -234,6 +240,8 @@ fn shape_name(shape: seiza_calibration::dust::DustShape) -> &'static str {
         DustShape::Irregular => "irregular",
         DustShape::Disk => "disk",
         DustShape::Donut => "donut",
+        DustShape::Patch => "patch",
+        _ => "unknown",
     }
 }
 
@@ -248,6 +256,7 @@ fn edge_name(edge: seiza_calibration::dust::Edge) -> &'static str {
         Edge::TopRight => "top_right",
         Edge::BottomLeft => "bottom_left",
         Edge::BottomRight => "bottom_right",
+        _ => "unknown",
     }
 }
 

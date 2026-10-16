@@ -11486,6 +11486,10 @@ mod tests {
         }
         assert_eq!(flats[0]["channelLevels"].as_array().unwrap().len(), 1);
         assert!(flats[0]["illumination"]["response"].is_array());
+        assert_eq!(
+            flats[0]["algorithmVersion"],
+            seiza_calibration::FLAT_QUALITY_ALGORITHM_VERSION
+        );
         let report = call_json(
             seiza_calibration_screen_flats_json,
             &json!({"measurements": flats}),
@@ -11515,6 +11519,31 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("cannot form one set"), "{error}");
+    }
+
+    #[test]
+    fn flat_features_are_camel_case_both_ways() {
+        let feature = seiza_calibration::FlatFeature {
+            x: 10.0,
+            y: 20.0,
+            left: 0,
+            top: 0,
+            right: 40,
+            bottom: 40,
+            pixels: 1257,
+            depth: 0.003,
+            shape: seiza_calibration::dust::DustShape::Disk,
+            radius: 20.0,
+            hole: None,
+            distance_mm: Some(1.5),
+            seen_in: Some(seiza_calibration::dust::SeenIn { frames: 9, of: 10 }),
+        };
+        let json = serde_json::to_value(FlatFeatureJson::from(feature)).unwrap();
+        assert_eq!(json["distanceMm"], 1.5);
+        assert_eq!(json["seenIn"]["frames"], 9);
+        assert!(json.get("distance_mm").is_none() && json.get("hole").is_none());
+        let back: FlatFeatureJson = serde_json::from_value(json).unwrap();
+        assert_eq!(seiza_calibration::FlatFeature::from(back), feature);
     }
 
     /// A 32x32 crop of sky with a ring of lost light at its centre and a
@@ -16027,7 +16056,7 @@ struct DarkMeasurementJson {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct FlatMeasurementJson {
-    #[serde(default = "frame_quality_algorithm_version")]
+    #[serde(default = "first_flat_quality_algorithm_version")]
     algorithm_version: u32,
     width: usize,
     height: usize,
@@ -16039,13 +16068,81 @@ struct FlatMeasurementJson {
     detection_depth: f32,
     illumination: seiza_calibration::IlluminationProfile,
     feature_count: usize,
-    features: Vec<seiza_calibration::FlatFeature>,
+    features: Vec<FlatFeatureJson>,
     #[serde(default)]
     vignetting: Vec<seiza_calibration::dust::Vignetting>,
 }
 
+/// `seiza_calibration::FlatFeature` in camelCase, both ways.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FlatFeatureJson {
+    x: f32,
+    y: f32,
+    left: u32,
+    top: u32,
+    right: u32,
+    bottom: u32,
+    pixels: u32,
+    depth: f32,
+    #[serde(default)]
+    shape: seiza_calibration::dust::DustShape,
+    #[serde(default)]
+    radius: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hole: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    distance_mm: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    seen_in: Option<seiza_calibration::dust::SeenIn>,
+}
+
+impl From<seiza_calibration::FlatFeature> for FlatFeatureJson {
+    fn from(feature: seiza_calibration::FlatFeature) -> Self {
+        Self {
+            x: feature.x,
+            y: feature.y,
+            left: feature.left,
+            top: feature.top,
+            right: feature.right,
+            bottom: feature.bottom,
+            pixels: feature.pixels,
+            depth: feature.depth,
+            shape: feature.shape,
+            radius: feature.radius,
+            hole: feature.hole,
+            distance_mm: feature.distance_mm,
+            seen_in: feature.seen_in,
+        }
+    }
+}
+
+impl From<FlatFeatureJson> for seiza_calibration::FlatFeature {
+    fn from(feature: FlatFeatureJson) -> Self {
+        Self {
+            x: feature.x,
+            y: feature.y,
+            left: feature.left,
+            top: feature.top,
+            right: feature.right,
+            bottom: feature.bottom,
+            pixels: feature.pixels,
+            depth: feature.depth,
+            shape: feature.shape,
+            radius: feature.radius,
+            hole: feature.hole,
+            distance_mm: feature.distance_mm,
+            seen_in: feature.seen_in,
+        }
+    }
+}
+
 const fn frame_quality_algorithm_version() -> u32 {
     seiza_calibration::FRAME_QUALITY_ALGORITHM_VERSION
+}
+
+const fn first_flat_quality_algorithm_version() -> u32 {
+    1
 }
 
 impl From<seiza_calibration::DarkMeasurement> for DarkMeasurementJson {
@@ -16096,7 +16193,7 @@ impl From<seiza_calibration::FlatMeasurement> for FlatMeasurementJson {
             detection_depth: measurement.detection_depth,
             illumination: measurement.illumination,
             feature_count: measurement.feature_count,
-            features: measurement.features,
+            features: measurement.features.into_iter().map(Into::into).collect(),
             vignetting: measurement.vignetting,
         }
     }
@@ -16116,7 +16213,7 @@ impl From<FlatMeasurementJson> for seiza_calibration::FlatMeasurement {
             detection_depth: measurement.detection_depth,
             illumination: measurement.illumination,
             feature_count: measurement.feature_count,
-            features: measurement.features,
+            features: measurement.features.into_iter().map(Into::into).collect(),
             vignetting: measurement.vignetting,
         }
     }
@@ -16265,10 +16362,11 @@ pub unsafe extern "C" fn seiza_calibration_measure_dark_json(
 /// `height`, `fullScale`, `level`, `channelLevels`, `clippedFraction`,
 /// `noise`, `detectionDepth`, `illumination` (`columns`, `rows` and a
 /// row-major `response` of cell medians, 1 for a typical cell),
-/// `featureCount`, the `features` — large disks, donuts and irregular
-/// shadows first, then compact dips, each with `x`, `y`, `left`, `top`,
+/// `featureCount`, the `features` — large disks, donuts and patches first,
+/// then compact and irregular dips, each with `x`, `y`, `left`, `top`,
 /// `right`, `bottom`, `pixels`, `depth`, `shape` (`compact`, `irregular`,
-/// `disk` or `donut`), `radius`, and when known `hole` and `distance_mm` —
+/// `disk`, `donut` or `patch`), `radius`, and when known `hole` and
+/// `distanceMm` —
 /// and `vignetting` (`edge`, `x`, `y`, `area`, `depth`). Optional
 /// `largeFeatures` (default true) turns the search for large ones off;
 /// optional `focalRatio`, `pixelSizeUm` and `obstruction` describe the light

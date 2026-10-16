@@ -756,7 +756,6 @@ CatalogSetupProgressResponse = { none = "download progress for the apps' setup s
 "SceneRequest.catalog_directory" = { none = "Python takes each catalog's path itself: objects=, star_distances=, and StarCatalog.open and BlindIndex.open for the solve" }
 "SceneRequest.minimum_scale_arcsec_per_pixel" = { python = "min_scale_arcsec_px" }
 "SceneRequest.maximum_scale_arcsec_per_pixel" = { python = "max_scale_arcsec_px" }
-"LabelRequest.radius" = { none = "Python takes a label as an (x, y, radius, text) tuple" }
 
 # WCS
 "WcsRequest.sip" = { python = "sip_coefficients" }

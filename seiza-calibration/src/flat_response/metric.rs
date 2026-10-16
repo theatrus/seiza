@@ -30,6 +30,9 @@ use serde::{Deserialize, Serialize};
 pub const RESPONSE_ALGORITHM_VERSION: u32 = 1;
 /// Bump when equal responses may compare differently.
 pub const COMPARE_ALGORITHM_VERSION: u32 = 2;
+/// Bump when equal responses may give a different [`change_map`], so a host
+/// that keeps maps can tell they are stale.
+pub const CHANGE_MAP_ALGORITHM_VERSION: u32 = 2;
 /// The longest side of a response, in response pixels.
 pub const MAX_SIDE: usize = 1024;
 /// The most flats one response combines, evenly spaced.
@@ -677,7 +680,8 @@ pub struct Comparison {
     /// The deepest spot's peak, leaving out dust that moved within
     /// tolerance: 0 with no spot.
     pub dust: f32,
-    /// Robust spread of the smoothed residual.
+    /// Robust noise of the ratio's residual after one pixel of smoothing,
+    /// as [`crate::dust::find_changes`] reads it.
     pub sigma: f32,
     /// Deepest first, at most [`MAX_SPOTS`].
     pub spots: Vec<Spot>,
@@ -1147,7 +1151,9 @@ pub(crate) mod tests {
             c.spots
                 .iter()
                 .take(2)
-                .all(|spot| spot.kind == SpotKind::Moved)
+                .all(|spot| spot.kind == SpotKind::Moved),
+            "{:?}",
+            c.spots
         );
     }
 

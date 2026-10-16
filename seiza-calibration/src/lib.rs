@@ -40,9 +40,10 @@ pub use matching::{
 pub use pedestal::fit_flat_pedestal;
 pub use quality::{
     BiasScreening, DarkMeasureOptions, DarkMeasurement, DarkScreening,
-    FRAME_QUALITY_ALGORITHM_VERSION, Finding, FindingCode, FlatFeature, FlatMeasureOptions,
-    FlatMeasurement, FlatScreening, FlatSetReport, FrameVerdict, Grade, IlluminationProfile,
-    Limits, measure_dark, measure_flat, screen_bias, screen_darks, screen_flats,
+    FLAT_QUALITY_ALGORITHM_VERSION, FRAME_QUALITY_ALGORITHM_VERSION, Finding, FindingCode,
+    FlatFeature, FlatMeasureOptions, FlatMeasurement, FlatScreening, FlatSetReport, FrameVerdict,
+    Grade, IlluminationProfile, Limits, measure_dark, measure_flat, screen_bias, screen_darks,
+    screen_flats,
 };
 
 pub use residual_flat::{

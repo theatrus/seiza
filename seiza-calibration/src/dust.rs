@@ -18,6 +18,8 @@
 //!   RASA, Newtonian): a dark ring around the secondary's bright shadow. The
 //!   bright centre belongs to the donut; it is neither a separate spot nor
 //!   allowed to cancel the ring's depth.
+//! - **Patches**: large shadows that are not one circle, such as several
+//!   overlapping disks the rim vote could not tell apart.
 //!
 //! **Vignetting** ([`Vignetting`]) is reported apart from dust: a large,
 //! smooth shadow anchored to an edge or corner, such as an off-axis guider's
@@ -105,6 +107,9 @@ const BORDER_FRACTION: f32 = 0.02;
 const MIN_RING_SAMPLES: usize = 3;
 /// Most dust features one map keeps, largest and deepest first.
 const MAX_FEATURES: usize = 400;
+/// A compact dip inside a disk or donut, once the shadow's profile is taken
+/// out, counts only when it is this many times as deep as the shadow.
+const INSIDE_SHADOW_DEPTH: f32 = 1.5;
 
 /// The light cone at the sensor, to size dust shadows and say where the dust
 /// sits.
@@ -147,6 +152,7 @@ impl Optics {
 /// What a dust feature looks like.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum DustShape {
     /// A small dip, a few pixels to a few dozen across.
     #[default]
@@ -158,11 +164,21 @@ pub enum DustShape {
     Disk,
     /// An out-of-focus ring around a central obstruction's bright shadow.
     Donut,
+    /// A large shadow that is not one circle: overlapping out-of-focus
+    /// shadows, each with a rim, that do not separate. Its radius is that of
+    /// a disc of the same area.
+    Patch,
 }
 
 impl DustShape {
-    /// A disk or a donut: an out-of-focus shadow with a measured rim.
+    /// A disk, donut or patch: the out-of-focus shadow of dust up the train,
+    /// found on the binned plane, rather than a dip of window dust.
     pub fn is_large(self) -> bool {
+        matches!(self, Self::Disk | Self::Donut | Self::Patch)
+    }
+
+    /// A disk or a donut: one shadow with a measured circular rim.
+    pub fn is_round(self) -> bool {
         matches!(self, Self::Disk | Self::Donut)
     }
 }
@@ -263,6 +279,7 @@ impl DustFeature {
 /// Which part of the border a vignetting shadow hangs from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Edge {
     Top,
     Bottom,
@@ -320,9 +337,9 @@ pub struct DustOptions {
     /// A compact dip reaches this many robust sigmas of the smoothed
     /// residual.
     pub compact_sigma: f32,
-    /// How many noise dips a plane may report. Dips of four plane pixels or
-    /// fewer must clear the threshold this implies for the number of pixels
-    /// tried.
+    /// How many noise dips a plane may report. Dips of up to four plane
+    /// pixels, or twice [`Self::min_compact_area`] if that is more, must
+    /// clear the threshold this implies for the number of pixels tried.
     pub false_dips: f64,
     /// Smallest compact dip, in sensor pixels.
     pub min_compact_area: f32,
@@ -403,6 +420,7 @@ pub struct FrameDust {
 /// What became of one shadow between two sessions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ChangeKind {
     /// The later session is darker here: dust that arrived.
     New,
@@ -482,50 +500,33 @@ pub struct FeatureMatch {
 /// (same dust, within tolerance) or within half the radius (moved). Compact
 /// and irregular dips pair when their boxes, widened by
 /// [`DustOptions::move_tolerance`], overlap: window dust is not round, and
-/// its centre wanders with noise. Closest pairs are taken first; what is
-/// left is new or gone.
+/// its centre wanders with noise. A patch, or a disk one session saw as a
+/// dip, pairs with whatever its box overlaps of a radius within a factor of
+/// two and a centre within the larger radius: the same shadow, measured
+/// another way.
+///
+/// The pairing is the one with the most pairs and, among those, the least
+/// total distance, so one close pair never leaves two others unpaired. What
+/// is left is new or gone.
 pub fn match_features(
     earlier: &[DustFeature],
     later: &[DustFeature],
     options: &DustOptions,
 ) -> Vec<FeatureMatch> {
-    let mut pairs: Vec<(f32, usize, usize, bool)> = Vec::new();
+    let mut pairs: Vec<(usize, usize, f32, bool)> = Vec::new();
     for (i, a) in earlier.iter().enumerate() {
         for (j, b) in later.iter().enumerate() {
-            if a.shape.is_large() != b.shape.is_large() {
-                continue;
-            }
-            let distance = (a.x - b.x).hypot(a.y - b.y);
-            if a.shape.is_large() {
-                let ratio = a.radius.max(b.radius) / a.radius.min(b.radius).max(1e-3);
-                if ratio > 1.3 {
-                    continue;
-                }
-                if distance <= options.tolerance_for(a.radius.max(b.radius)) {
-                    pairs.push((distance, i, j, true));
-                } else if distance <= 0.5 * a.radius.max(b.radius) {
-                    pairs.push((distance, i, j, false));
-                }
-            } else {
-                let t = options.move_tolerance.max(0.0);
-                let overlap = a.left as f32 - t <= b.right as f32
-                    && b.left as f32 <= a.right as f32 + t
-                    && a.top as f32 - t <= b.bottom as f32
-                    && b.top as f32 <= a.bottom as f32 + t;
-                if overlap {
-                    pairs.push((distance, i, j, true));
-                }
+            if let Some((distance, within)) = pairing(a, b, options) {
+                pairs.push((i, j, distance, within));
             }
         }
     }
-    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let assigned = optimal_pairs(earlier.len(), later.len(), &pairs);
     let mut used_earlier = vec![false; earlier.len()];
     let mut used_later = vec![false; later.len()];
     let mut out = Vec::new();
-    for (distance, i, j, within) in pairs {
-        if used_earlier[i] || used_later[j] {
-            continue;
-        }
+    for index in assigned {
+        let (i, j, distance, within) = pairs[index];
         used_earlier[i] = true;
         used_later[j] = true;
         out.push(FeatureMatch {
@@ -556,6 +557,166 @@ pub fn match_features(
         }
     }
     out
+}
+
+/// Whether two features may be the same dust: how far apart their centres
+/// are, and whether that is within tolerance.
+fn pairing(a: &DustFeature, b: &DustFeature, options: &DustOptions) -> Option<(f32, bool)> {
+    let distance = (a.x - b.x).hypot(a.y - b.y);
+    let larger = a.radius.max(b.radius);
+    let size_ratio = larger / a.radius.min(b.radius).max(1e-3);
+    let t = options.move_tolerance.max(0.0);
+    let boxes_overlap = a.left as f32 - t <= b.right as f32
+        && b.left as f32 <= a.right as f32 + t
+        && a.top as f32 - t <= b.bottom as f32
+        && b.top as f32 <= a.bottom as f32 + t;
+    if a.shape.is_round() && b.shape.is_round() {
+        if size_ratio > 1.3 {
+            None
+        } else if distance <= options.tolerance_for(larger) {
+            Some((distance, true))
+        } else if distance <= 0.5 * larger {
+            Some((distance, false))
+        } else {
+            None
+        }
+    } else if !a.shape.is_large() && !b.shape.is_large() {
+        boxes_overlap.then_some((distance, true))
+    } else {
+        // A patch's centre is its circles' mean, and a dip's that of the part
+        // that cleared the threshold: neither is a rim's centre, so a pair
+        // is within tolerance up to half the smaller radius.
+        let smaller = a.radius.min(b.radius);
+        (boxes_overlap && size_ratio <= 2.0 && distance <= larger).then_some((
+            distance,
+            distance <= options.tolerance_for(larger).max(0.5 * smaller),
+        ))
+    }
+}
+
+/// The candidate pairs `(earlier, later, distance, _)` to keep: as many as
+/// can be taken without using a feature twice, and among those the least
+/// total distance. Indices into `pairs`, by earlier feature.
+fn optimal_pairs(earlier: usize, later: usize, pairs: &[(usize, usize, f32, bool)]) -> Vec<usize> {
+    // Features that share no candidate cannot affect each other's pairing:
+    // each connected group is solved on its own, and most are one pair.
+    let mut group: Vec<usize> = (0..earlier + later).collect();
+    fn root(group: &mut [usize], mut i: usize) -> usize {
+        while group[i] != i {
+            group[i] = group[group[i]];
+            i = group[i];
+        }
+        i
+    }
+    for (i, j, _, _) in pairs {
+        let (a, b) = (root(&mut group, *i), root(&mut group, earlier + j));
+        group[a.max(b)] = a.min(b);
+    }
+    let mut members: std::collections::BTreeMap<usize, Vec<usize>> = Default::default();
+    for (index, (i, _, _, _)) in pairs.iter().enumerate() {
+        let r = root(&mut group, *i);
+        members.entry(r).or_default().push(index);
+    }
+    let mut chosen = Vec::new();
+    for list in members.values() {
+        if list.len() == 1 {
+            chosen.push(list[0]);
+            continue;
+        }
+        let mut rows: Vec<usize> = list.iter().map(|k| pairs[*k].0).collect();
+        let mut cols: Vec<usize> = list.iter().map(|k| pairs[*k].1).collect();
+        rows.sort_unstable();
+        rows.dedup();
+        cols.sort_unstable();
+        cols.dedup();
+        // Each pair costs its distance less a sum larger than all of them,
+        // so one more pair always beats a shorter total; a row may also take
+        // one of its own spare columns, at no cost, to stay unpaired.
+        let big = 1.0 + list.iter().map(|k| f64::from(pairs[*k].2)).sum::<f64>();
+        let width = cols.len() + rows.len();
+        let mut cost = vec![vec![0.0_f64; width]; rows.len()];
+        let mut which = vec![vec![None; width]; rows.len()];
+        for k in list {
+            let (i, j, distance, _) = pairs[*k];
+            let r = rows.binary_search(&i).unwrap_or(0);
+            let c = cols.binary_search(&j).unwrap_or(0);
+            cost[r][c] = f64::from(distance) - big;
+            which[r][c] = Some(*k);
+        }
+        for (r, column) in assignment(&cost).into_iter().enumerate() {
+            if let Some(k) = which[r][column] {
+                chosen.push(k);
+            }
+        }
+    }
+    chosen.sort_by_key(|k| (pairs[*k].0, pairs[*k].1));
+    chosen
+}
+
+/// The least-cost assignment of each row of `cost` to its own column, with
+/// at least as many columns as rows (the Hungarian method with potentials).
+/// The column each row takes.
+fn assignment(cost: &[Vec<f64>]) -> Vec<usize> {
+    let rows = cost.len();
+    let cols = cost.first().map_or(0, Vec::len);
+    // One-based, with row and column 0 as the method's sentinel.
+    let mut u = vec![0.0_f64; rows + 1];
+    let mut v = vec![0.0_f64; cols + 1];
+    let mut owner = vec![0usize; cols + 1];
+    let mut way = vec![0usize; cols + 1];
+    for row in 1..=rows {
+        owner[0] = row;
+        let mut column = 0usize;
+        let mut least = vec![f64::INFINITY; cols + 1];
+        let mut used = vec![false; cols + 1];
+        loop {
+            used[column] = true;
+            let current = owner[column];
+            let mut delta = f64::INFINITY;
+            let mut next = 0usize;
+            for j in 1..=cols {
+                if used[j] {
+                    continue;
+                }
+                let reduced = cost[current - 1][j - 1] - u[current] - v[j];
+                if reduced < least[j] {
+                    least[j] = reduced;
+                    way[j] = column;
+                }
+                if least[j] < delta {
+                    delta = least[j];
+                    next = j;
+                }
+            }
+            for j in 0..=cols {
+                if used[j] {
+                    u[owner[j]] += delta;
+                    v[j] -= delta;
+                } else {
+                    least[j] -= delta;
+                }
+            }
+            column = next;
+            if owner[column] == 0 {
+                break;
+            }
+        }
+        loop {
+            let previous = way[column];
+            owner[column] = owner[previous];
+            column = previous;
+            if column == 0 {
+                break;
+            }
+        }
+    }
+    let mut taken = vec![0usize; rows];
+    for j in 1..=cols {
+        if owner[j] != 0 {
+            taken[owner[j] - 1] = j - 1;
+        }
+    }
+    taken
 }
 
 /// Find the dust in one plane: a flat session's response or one flat
@@ -752,7 +913,7 @@ fn shows_in(
     feature: &DustFeature,
 ) -> bool {
     let scale = bin as f32;
-    if feature.shape.is_large() {
+    if feature.shape.is_round() {
         let (contrast, share, samples) = rim_sharpness(
             residual,
             width,
@@ -773,6 +934,10 @@ fn shows_in(
         ((feature.right / bin as u32) as usize).min(width.saturating_sub(1)),
         ((feature.bottom / bin as u32) as usize).min(height.saturating_sub(1)),
     );
+    // A feature beyond this frame, such as one of a larger session's.
+    if left > right || top > bottom {
+        return false;
+    }
     let margin = ((right - left).max(bottom - top) / 2).max(2);
     let (outer_left, outer_top) = (left.saturating_sub(margin), top.saturating_sub(margin));
     let (outer_right, outer_bottom) = (
@@ -941,26 +1106,23 @@ pub fn find_changes(
     let later_local = local(later);
 
     let matches = match_features(&earlier_map.features, &later_map.features, options);
-    // Dust both sessions hold: where it is, how far it reaches, how far it
-    // moved, and whether that is within tolerance.
-    let held: Vec<(f32, f32, f32, f32, bool)> = matches
+    // Dust both sessions hold.
+    let held: Vec<Held> = matches
         .iter()
         .filter_map(|m| {
             let (a, b) = (
                 &earlier_map.features[m.earlier?],
                 &later_map.features[m.later?],
             );
-            let reach = a.radius.max(b.radius).max(
-                0.5 * ((a.right - a.left).max(b.right - b.left) as f32)
-                    .max((a.bottom - a.top).max(b.bottom - b.top) as f32),
-            );
-            Some((
-                0.5 * (a.x + b.x),
-                0.5 * (a.y + b.y),
-                reach,
-                m.offset.unwrap_or(0.0),
-                m.within_tolerance,
-            ))
+            Some(Held {
+                x: 0.5 * (a.x + b.x),
+                y: 0.5 * (a.y + b.y),
+                reach: reach(a).max(reach(b)),
+                offset: m.offset.unwrap_or(0.0),
+                within_tolerance: m.within_tolerance,
+                depth: a.depth.max(b.depth),
+                hole: a.hole.or(b.hole),
+            })
         })
         .collect();
 
@@ -993,22 +1155,14 @@ pub fn find_changes(
                     continue;
                 }
             }
-            // Dust both sessions hold leaves, where it moved, a crescent on
-            // its rim (a compact or irregular feature of the ratio) or, if it
-            // also changed depth, a disk on the same centre.
-            let near = held.iter().find(|(x, y, reach, offset, _)| {
-                let distance = (feature.x - x).hypot(feature.y - y);
-                if feature.shape.is_large() {
-                    distance <= 0.5 * feature.radius.max(*reach) + offset
-                } else {
-                    distance <= reach + offset + options.move_tolerance
-                }
-            });
+            let near = held
+                .iter()
+                .find(|held| held.explains(&feature, options.move_tolerance));
             // A disk or donut in the ratio is new or gone dust only when the
             // darker session shows its rim on its own, darker inside, if more
             // faintly than its map can count: two sessions' mottle can differ
             // by a rim-like edge too.
-            if near.is_none() && feature.shape.is_large() {
+            if near.is_none() && feature.shape.is_round() {
                 let own = if side_darker {
                     &later_own
                 } else {
@@ -1028,7 +1182,7 @@ pub fn find_changes(
                 }
             }
             let (kind, within_tolerance, offset) = match near {
-                Some((_, _, _, offset, within)) => (ChangeKind::Moved, *within, Some(*offset)),
+                Some(held) => (ChangeKind::Moved, held.within_tolerance, Some(held.offset)),
                 None if side_darker => (ChangeKind::New, false, None),
                 None => (ChangeKind::Gone, false, None),
             };
@@ -1098,8 +1252,6 @@ pub fn find_changes(
         ));
     }
 
-    // A new and a gone shadow of like size and depth within three radii are
-    // one shadow that moved further than the maps could pair.
     pair_moved(&mut changes);
     changes.sort_by(|a, b| {
         b.0.feature
@@ -1158,39 +1310,104 @@ pub fn find_changes(
     })
 }
 
+/// Dust both sessions of a comparison hold: where it is, how far it reaches,
+/// how far it moved and whether that is within tolerance, how deep it is,
+/// and a donut's hole as a share of its radius.
+struct Held {
+    x: f32,
+    y: f32,
+    reach: f32,
+    offset: f32,
+    within_tolerance: bool,
+    depth: f32,
+    hole: Option<f32>,
+}
+
+/// A crescent a moved shadow leaves on its rim can be this many times as
+/// deep as the shadow's depth, which is a median over its ring: a donut is
+/// darkest at its hole's edge.
+const CRESCENT_DEPTH: f32 = 4.0;
+
+impl Held {
+    /// Whether a feature of the ratio is this dust's doing rather than dust
+    /// of its own. Where held dust moved it leaves a crescent on its rim (or
+    /// a donut's hole's rim), within the move (plus `slack`) of it; where it
+    /// changed depth, the same shadow on nearly the same centre, or pieces of
+    /// it inside, shallower than the dust. Anything else, such as window dust
+    /// in front of a filter's disk, is new or gone.
+    fn explains(&self, feature: &DustFeature, slack: f32) -> bool {
+        let distance = (feature.x - self.x).hypot(feature.y - self.y);
+        let extent = reach(feature);
+        if feature.shape.is_large() {
+            let size = extent.max(self.reach) / extent.min(self.reach).max(1e-3);
+            return size <= 1.5 && distance <= 0.5 * extent.max(self.reach) + self.offset;
+        }
+        let band = self.offset + slack + extent;
+        let on_rim = |rim: f32| (distance - rim).abs() <= band;
+        let crescent = (on_rim(self.reach)
+            || self.hole.is_some_and(|hole| on_rim(hole * self.reach)))
+            && feature.depth <= CRESCENT_DEPTH * self.depth;
+        let inside = distance <= self.reach && feature.depth <= self.depth;
+        crescent || inside
+    }
+}
+
+/// How far a feature reaches from its centre: its radius, or half its box's
+/// longer side if that is more.
+fn reach(feature: &DustFeature) -> f32 {
+    let wide = feature.right.saturating_sub(feature.left);
+    let tall = feature.bottom.saturating_sub(feature.top);
+    feature.radius.max(0.5 * wide.max(tall) as f32)
+}
+
+/// A new and a gone shadow of like size and depth within three radii are one
+/// shadow that moved further than the maps could pair. The disks of one
+/// surface share a size and often a depth, so a disk or donut pairs only when
+/// each is the other's sole candidate: with two alike nearby there is no
+/// telling which went where, and they stay new and gone.
 fn pair_moved(found: &mut [(DustChange, Vec<usize>)]) {
+    let like = |a: &DustFeature, b: &DustFeature| {
+        let distance = (a.x - b.x).hypot(a.y - b.y);
+        let ratio = |p: f32, q: f32| p.max(q) / p.min(q).max(1e-9);
+        let size = if a.shape.is_large() { 1.3 } else { 1.75 };
+        a.shape.is_large() == b.shape.is_large()
+            && distance <= 3.0 * a.radius.max(b.radius)
+            && ratio(a.depth, b.depth) <= 2.0
+            && ratio(a.radius, b.radius) <= size
+    };
     let mut taken = vec![false; found.len()];
     for i in 0..found.len() {
         if taken[i] || found[i].0.kind != ChangeKind::New {
             continue;
         }
-        let best = (0..found.len())
-            .filter(|j| !taken[*j] && found[*j].0.kind == ChangeKind::Gone)
-            .filter(|j| {
-                let (a, b) = (&found[i].0.feature, &found[*j].0.feature);
-                let distance = (a.x - b.x).hypot(a.y - b.y);
-                let ratio = |p: f32, q: f32| p.max(q) / p.min(q).max(1e-9);
-                distance <= 3.0 * a.radius.max(b.radius)
-                    && ratio(a.depth, b.depth) <= 2.0
-                    && ratio(a.pixels as f32, b.pixels as f32) <= 3.0
-            })
-            .min_by(|a, b| {
-                let d = |j: usize| {
-                    let (p, q) = (&found[i].0.feature, &found[j].0.feature);
-                    (p.x - q.x).hypot(p.y - q.y)
-                };
-                d(*a).total_cmp(&d(*b))
-            });
-        if let Some(j) = best {
-            let offset = {
-                let (p, q) = (&found[i].0.feature, &found[j].0.feature);
-                (p.x - q.x).hypot(p.y - q.y)
-            };
-            for k in [i, j] {
-                taken[k] = true;
-                found[k].0.kind = ChangeKind::Moved;
-                found[k].0.offset = Some(offset);
-            }
+        let candidates = |kind: ChangeKind, of: usize, taken: &[bool]| -> Vec<usize> {
+            (0..found.len())
+                .filter(|j| !taken[*j] && found[*j].0.kind == kind)
+                .filter(|j| like(&found[of].0.feature, &found[*j].0.feature))
+                .collect()
+        };
+        let gone = candidates(ChangeKind::Gone, i, &taken);
+        let distance = |j: usize| {
+            let (p, q) = (&found[i].0.feature, &found[j].0.feature);
+            (p.x - q.x).hypot(p.y - q.y)
+        };
+        let Some(j) = gone
+            .iter()
+            .copied()
+            .min_by(|a, b| distance(*a).total_cmp(&distance(*b)))
+        else {
+            continue;
+        };
+        if found[i].0.feature.shape.is_large()
+            && (gone.len() > 1 || candidates(ChangeKind::New, j, &taken).len() > 1)
+        {
+            continue;
+        }
+        let offset = distance(j);
+        for k in [i, j] {
+            taken[k] = true;
+            found[k].0.kind = ChangeKind::Moved;
+            found[k].0.offset = Some(offset);
         }
     }
 }
@@ -1287,7 +1504,6 @@ fn detect(
         .map(|index| residual[index] - wider[index])
         .collect();
     let pixel_noise = (1.1 * metric::robust_sigma(&high)).max(1e-7);
-    let smoothed_noise = pixel_noise * SMOOTHED_NOISE;
 
     let mut circles = rim_circles(residual, &usable, width, height, options);
     circles.truncate(MAX_CANDIDATES);
@@ -1298,18 +1514,25 @@ fn detect(
         .collect();
     sizes.sort_unstable();
     sizes.dedup();
-    let null_rims: std::collections::HashMap<u32, f32> = sizes
-        .par_iter()
-        .map(|size| {
-            (
-                *size,
-                null_rim_spread(residual, width, height, *size as f32 / 4.0),
-            )
-        })
-        .collect();
+    let null_rims_of = |plane: &[f32], sizes: &[u32]| -> std::collections::HashMap<u32, f32> {
+        sizes
+            .par_iter()
+            .map(|size| {
+                (
+                    *size,
+                    null_rim_spread(plane, width, height, *size as f32 / 4.0),
+                )
+            })
+            .collect()
+    };
+    let null_rims = null_rims_of(residual, &sizes);
     // Each candidate measured on its own, in parallel; the best are then
-    // kept one by one.
-    let verified: Vec<Option<(f32, CircleDepth)>> = circles
+    // kept one by one. A shadow's rim is sharp at any size; the edge of a
+    // patch of mottle is soft. The contrast a few pixels either side of the
+    // rim must stand clear of the white noise and of what circles of this
+    // size drawn anywhere on the plane read; that is judged once all else
+    // has passed.
+    let measured: Vec<Option<Candidate>> = circles
         .par_iter()
         .map(|circle| {
             let measured =
@@ -1322,17 +1545,8 @@ fn detect(
                 return None;
             }
             let radius = refine_radius(residual, width, height, circle.x, circle.y, circle.radius);
-            // A shadow's rim is sharp at any size; the edge of a patch of
-            // mottle is soft. Read the contrast a few pixels either side of
-            // the rim. It must also stand clear of the white noise and of
-            // what circles of this size drawn anywhere on the plane read.
             let (sharp, sharp_share, samples) =
                 rim_sharpness(residual, width, height, circle.x, circle.y, radius);
-            let null = null_rims
-                .get(&((circle.radius * 4.0).round() as u32))
-                .copied()
-                .unwrap_or(0.0);
-            let significance = sharp / rim_noise(pixel_noise, samples).max(null);
             let (fill, spill) = shape_fit(
                 &filled,
                 &usable,
@@ -1344,18 +1558,84 @@ fn detect(
                 measured.ring,
                 measured.depth,
             );
-            let accepted = sharp >= options.rim_contrast * measured.depth
+            let shaped = sharp >= options.rim_contrast * measured.depth
                 && sharp_share >= 0.75
-                && significance >= options.rim_significance
                 && fill >= 0.6
                 && spill <= 0.55;
-            accepted.then_some((radius, measured))
+            shaped.then_some(Candidate {
+                radius,
+                measured,
+                sharp,
+                samples,
+                size: (circle.radius * 4.0).round() as u32,
+            })
         })
         .collect();
+    let significant = |candidate: &Candidate, nulls: &std::collections::HashMap<u32, f32>| {
+        let null = nulls.get(&candidate.size).copied().unwrap_or(0.0);
+        candidate.sharp / rim_noise(pixel_noise, candidate.samples).max(null)
+            >= options.rim_significance
+    };
+    let mut accepted: Vec<bool> = measured
+        .iter()
+        .map(|candidate| {
+            candidate
+                .as_ref()
+                .is_some_and(|candidate| significant(candidate, &null_rims))
+        })
+        .collect();
+    // Clear shadows of one size lie under many of the circles the null is
+    // read on, and inflate it for a faint shadow of that size: read it again
+    // with them taken out for the candidates it held back, those that are not
+    // the clear shadows over again.
+    let clear: Vec<(f32, f32, f32)> = circles
+        .iter()
+        .zip(&measured)
+        .zip(&accepted)
+        .filter_map(|((circle, candidate), ok)| {
+            candidate
+                .as_ref()
+                .filter(|_| *ok)
+                .map(|candidate| (circle.x, circle.y, candidate.radius))
+        })
+        .collect();
+    let pending: Vec<usize> = (0..circles.len())
+        .filter(|k| {
+            measured[*k].is_some()
+                && !accepted[*k]
+                && clear
+                    .iter()
+                    .all(|(x, y, r)| (circles[*k].x - x).hypot(circles[*k].y - y) > *r)
+        })
+        .collect();
+    if !pending.is_empty() && !clear.is_empty() {
+        let mut masked = residual.to_vec();
+        for (x, y, r) in &clear {
+            for index in disc_footprint(width, height, *x, *y, 1.3 * r) {
+                masked[index] = f32::NAN;
+            }
+        }
+        let mut sizes: Vec<u32> = pending
+            .iter()
+            .filter_map(|k| measured[*k].as_ref().map(|candidate| candidate.size))
+            .collect();
+        sizes.sort_unstable();
+        sizes.dedup();
+        let nulls = null_rims_of(&masked, &sizes);
+        for k in pending {
+            if let Some(candidate) = &measured[k] {
+                accepted[k] = significant(candidate, &nulls);
+            }
+        }
+    }
     let mut features: Vec<(DustFeature, Vec<usize>)> = Vec::new();
     let mut kept: Vec<(f32, f32, f32)> = Vec::new();
-    for (circle, verified) in circles.iter().zip(verified) {
-        let Some((radius, measured)) = verified else {
+    let mut kept_depth: Vec<f32> = Vec::new();
+    for ((circle, candidate), ok) in circles.iter().zip(measured).zip(accepted) {
+        let Some(Candidate {
+            radius, measured, ..
+        }) = candidate.filter(|_| ok)
+        else {
             continue;
         };
         // The same shadow again, or a circle inside one already found.
@@ -1368,6 +1648,7 @@ fn detect(
             continue;
         }
         kept.push((circle.x, circle.y, radius));
+        kept_depth.push(measured.depth);
         // A donut's hole is lit nearly as well as the background outside:
         // the central obstruction's shadow of the shadow. Off axis it sits
         // off centre, so it is looked for anywhere inside the ring. Optics
@@ -1388,7 +1669,7 @@ fn detect(
                 radius,
                 measured.ring,
                 measured.depth,
-                smoothed_noise,
+                pixel_noise,
             )
             .map(|ratio| match options.optics {
                 Some(optics) if optics.is_usable() && optics.obstruction > 0.0 => {
@@ -1438,12 +1719,17 @@ fn detect(
     features.retain(|(f, _)| !inside_larger(&circles_found, f.x, f.y, f.radius));
     merge_clusters(&mut features);
 
-    // Compact dips: what a wide local median leaves.
+    // Compact dips: what a wide local median leaves once each disk and
+    // donut found is taken out by its own radial profile, so window dust in
+    // front of one is still seen.
     let mut local = residual
         .iter()
         .zip(&usable)
         .map(|(value, ok)| if *ok { *value } else { 0.0 })
         .collect::<Vec<f32>>();
+    for (x, y, r) in &kept {
+        subtract_profile(&mut local, &usable, width, height, *x, *y, *r);
+    }
     metric::subtract_local_median(&mut local, width, height);
     let smoothed = fill_smooth(&local, &usable, width, height, 1.0);
     let local_interior: Vec<f32> = (0..width * height)
@@ -1458,6 +1744,9 @@ fn detect(
         options.false_dips,
     ));
     let min_area = (options.min_compact_area / (bin * bin) as f32).max(1.0);
+    // Dips this small are what noise leaves: up to four plane pixels, or
+    // twice the smallest counted, whichever is more.
+    let small_area = (2.0 * min_area).max(4.0);
     let mask: Vec<u8> = (0..width * height)
         .map(|index| u8::from(compact_usable[index] && smoothed[index] < -threshold))
         .collect();
@@ -1475,14 +1764,16 @@ fn detect(
             .iter()
             .map(|index| -smoothed[*index])
             .fold(0.0_f32, f32::max);
-        if area <= 4.0 && deepest < small_threshold {
+        if area <= small_area && deepest < small_threshold {
             continue;
         }
-        // A piece of a disk or donut already found.
-        if kept
-            .iter()
-            .any(|(x, y, r)| (component.centroid_x - x).hypot(component.centroid_y - y) <= 1.15 * r)
-        {
+        // Inside a disk or donut already found, what its profile leaves (a
+        // blurred rim, an off-centre hole's other side, mottle) is no deeper
+        // than the shadow itself; window dust in front of it is.
+        if kept.iter().zip(&kept_depth).any(|((x, y, r), depth)| {
+            (component.centroid_x - x).hypot(component.centroid_y - y) <= 1.15 * r
+                && deepest < INSIDE_SHADOW_DEPTH * depth
+        }) {
             continue;
         }
         let shape = if component.fill_fraction() < 0.5 || component.elongation > 2.5 {
@@ -1872,6 +2163,18 @@ fn vote(
     out
 }
 
+/// A rim candidate that passed every test but its rim's significance.
+struct Candidate {
+    /// Refined radius, plane pixels.
+    radius: f32,
+    measured: CircleDepth,
+    /// Rim contrast on thin rings, and the samples each side of a sector.
+    sharp: f32,
+    samples: f32,
+    /// The tried radius in quarter pixels, which keys the null rim spread.
+    size: u32,
+}
+
 /// What a candidate circle holds, ring inside against ring outside.
 struct CircleDepth {
     /// Median of the sector depths: the broad rings, 0.6–0.88 against
@@ -1975,9 +2278,10 @@ fn measure_circle(
 
 /// A donut's hole: a bright patch inside the ring (within 0.6 radii of the
 /// centre, not necessarily on it), at least three quarters of the way from
-/// the ring's level back to the background outside and clear of the noise,
-/// whose size is a plausible obstruction. Returns its radius as a fraction
-/// of the ring's.
+/// the ring's level back to the background outside, whose mean clears the
+/// noise of that many pixels (`pixel_noise` is the residual's, unsmoothed)
+/// and whose size is a plausible obstruction. Returns its radius as a
+/// fraction of the ring's.
 #[allow(clippy::too_many_arguments)]
 fn bright_core(
     smoothed: &[f32],
@@ -1989,7 +2293,7 @@ fn bright_core(
     radius: f32,
     ring: f32,
     depth: f32,
-    sigma: f32,
+    pixel_noise: f32,
 ) -> Option<f32> {
     let reach = 0.6 * radius;
     let (x0, x1) = (
@@ -2011,7 +2315,7 @@ fn bright_core(
         }
     }
     let lift = peak.0 - ring;
-    if !(lift >= 0.75 * depth && lift > 4.0 * sigma) {
+    if !(lift >= 0.75 * depth && lift > 4.0 * SMOOTHED_NOISE * pixel_noise) {
         return None;
     }
     // The patch around the peak above halfway between ring and peak.
@@ -2020,9 +2324,10 @@ fn bright_core(
     let local = |index: usize| (index / width - y0) * (x1 - x0 + 1) + (index % width - x0);
     let mut stack = vec![peak.1];
     seen[local(peak.1)] = true;
-    let mut area = 0usize;
+    let (mut area, mut sum) = (0usize, 0.0_f32);
     while let Some(index) = stack.pop() {
         area += 1;
+        sum += smoothed[index];
         let (px, py) = (index % width, index / width);
         for (dx, dy) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
             let (nx, ny) = (px as i64 + dx, py as i64 + dy);
@@ -2047,7 +2352,10 @@ fn bright_core(
     let plausible = core_radius >= 2.0
         && ((0.12..=0.6).contains(&ratio)
             || ((0.06..0.12).contains(&ratio) && radius < 30.0 && lift >= depth));
-    plausible.then_some(ratio)
+    // The patch as a whole must stand clear of the noise, not only its
+    // brightest pixel: the peak of hundreds of pixels is the noise's tail.
+    let clear = sum / area as f32 - ring > 4.0 * pixel_noise / (area as f32).sqrt();
+    (plausible && clear).then_some(ratio)
 }
 
 /// The rim's contrast on rings a few pixels wide either side of it, by
@@ -2109,7 +2417,7 @@ fn rim_sharpness(
 
 /// Three or more circles that all overlap closely are one irregular shadow
 /// the rim vote tiled with circles, not three shadows of the aperture: they
-/// become one irregular feature covering them all.
+/// become one [`DustShape::Patch`] covering them all.
 fn merge_clusters(features: &mut Vec<(DustFeature, Vec<usize>)>) {
     let count = features.len();
     let close = |a: &DustFeature, b: &DustFeature| {
@@ -2178,7 +2486,7 @@ fn merge_clusters(features: &mut Vec<(DustFeature, Vec<usize>)>) {
         feature.pixels = (footprint.len() as f32 * first.pixels as f32
             / features[list[0]].1.len().max(1) as f32) as u32;
         feature.radius = (feature.pixels as f32 / std::f32::consts::PI).sqrt();
-        feature.shape = DustShape::Irregular;
+        feature.shape = DustShape::Patch;
         feature.hole = None;
         feature.distance_mm = None;
         merged.push((feature, footprint));
@@ -2318,6 +2626,72 @@ fn radial_profile(
             }
         })
         .collect()
+}
+
+/// Take a disk's or donut's radial profile out of `values` within 1.3 radii
+/// of its centre, against the level just outside it: the shadow goes, and
+/// what lies in front of it stays.
+fn subtract_profile(
+    values: &mut [f32],
+    usable: &[bool],
+    width: usize,
+    height: usize,
+    x: f32,
+    y: f32,
+    radius: f32,
+) {
+    let reach = 1.4 * radius;
+    let (x0, x1) = (
+        (x - reach).floor().max(0.0) as usize,
+        ((x + reach).ceil().max(0.0) as usize).min(width.saturating_sub(1)),
+    );
+    let (y0, y1) = (
+        (y - reach).floor().max(0.0) as usize,
+        ((y + reach).ceil().max(0.0) as usize).min(height.saturating_sub(1)),
+    );
+    let mut rings: Vec<Vec<f32>> = vec![Vec::new(); reach.ceil() as usize + 1];
+    for py in y0..=y1 {
+        for px in x0..=x1 {
+            let index = py * width + px;
+            let d = (px as f32 - x).hypot(py as f32 - y);
+            if usable[index] && values[index].is_finite() && d <= reach {
+                rings[d as usize].push(values[index]);
+            }
+        }
+    }
+    let profile: Vec<f32> = rings
+        .into_iter()
+        .map(|mut ring| {
+            if ring.len() < MIN_RING_SAMPLES {
+                f32::NAN
+            } else {
+                metric::median_in_place(&mut ring)
+            }
+        })
+        .collect();
+    let mut outside: Vec<f32> = profile
+        .iter()
+        .enumerate()
+        .filter(|(r, v)| v.is_finite() && *r as f32 >= 1.15 * radius)
+        .map(|(_, v)| *v)
+        .collect();
+    if outside.is_empty() {
+        return;
+    }
+    let level = metric::median_in_place(&mut outside);
+    let limit = 1.3 * radius;
+    for py in y0..=y1 {
+        for px in x0..=x1 {
+            let index = py * width + px;
+            let d = (px as f32 - x).hypot(py as f32 - y);
+            if usable[index] && d <= limit {
+                let shadow = profile[d as usize];
+                if shadow.is_finite() {
+                    values[index] -= shadow - level;
+                }
+            }
+        }
+    }
 }
 
 /// Where between 0.7 and 1.3 radii the profile crosses halfway from the

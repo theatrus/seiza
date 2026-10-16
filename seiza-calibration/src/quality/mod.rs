@@ -30,12 +30,22 @@ pub use flat::{
 
 use serde::{Deserialize, Serialize};
 
-/// Bump when equal frames and options may measure differently, so a host can
-/// tell its stored measurements are stale.
-pub const FRAME_QUALITY_ALGORITHM_VERSION: u32 = 2;
+/// Bump when equal dark or bias frames and options may measure differently,
+/// so a host can tell its stored measurements are stale.
+pub const FRAME_QUALITY_ALGORITHM_VERSION: u32 = 1;
+
+/// The same for flats ([`measure_flat`]), whose dust measures change on
+/// their own: a new one need not re-measure every dark.
+pub const FLAT_QUALITY_ALGORITHM_VERSION: u32 = 2;
 
 const fn frame_quality_algorithm_version() -> u32 {
     FRAME_QUALITY_ALGORITHM_VERSION
+}
+
+/// A flat measurement stored before measurements carried a version was made
+/// by the first.
+const fn first_flat_quality_algorithm_version() -> u32 {
+    1
 }
 
 /// Fewest frames a set needs before a frame is compared with its peers.

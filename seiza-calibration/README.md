@@ -79,8 +79,10 @@ What each screen looks for:
 - **Bias:** a level or noise out of line with the set, and row or column
   banding.
 
-`FRAME_QUALITY_ALGORITHM_VERSION` changes whenever equal frames may measure
-differently, so stored measurements can be checked for staleness.
+`FRAME_QUALITY_ALGORITHM_VERSION` changes whenever equal darks or bias
+frames may measure differently, and `FLAT_QUALITY_ALGORITHM_VERSION`
+whenever equal flats may, so stored measurements can be checked for
+staleness without re-measuring frames whose measure did not change.
 `seiza-stacking`'s `calibration_frame_quality` example runs the measures and
 screens on real files.
 
@@ -100,22 +102,26 @@ own pixels which flats it follows. Flats judged against each other
 `flat_response`'s comparisons share, so a flat's spots and a session
 comparison always agree. A shadow is the light cone where it meets the
 dust, so its size says how far in front of the sensor the dust sits
-(`Optics::distance_mm`), and it comes in four shapes:
+(`Optics::distance_mm`), and it comes in five shapes:
 
 - **compact** and **irregular** dips: dust on or near the sensor window;
 - **disks**: dust far up an unobstructed train, such as a refractor's
   filter, often under 0.5% deep and hundreds of pixels across;
 - **donuts**: the same through a central obstruction (SCT, RASA,
   Newtonian), whose lit hole belongs to the donut and is not a spot of its
-  own.
+  own;
+- **patches**: overlapping disks or donuts the rim vote could not tell
+  apart, reported as one large shadow.
 
 Large, smooth shadows hanging from the border are **vignetting**, reported
 apart and never as dust. Disks and donuts are found by their rim — sharp,
 and darker inside most of the way round — which large-scale mottle and
 gradients do not have; each candidate is then checked against the rim
-contrast that circles of its size show anywhere on the plane. Small dips
-must clear a threshold raised for the number of pixels tried, so a large
-frame does not report its own noise.
+contrast that circles of its size show anywhere on the plane, with the
+clear shadows already found taken out. Small dips must clear a threshold
+raised for the number of pixels tried, so a large frame does not report its
+own noise, and are looked for with each disk's own profile taken out, so
+window dust in front of a filter's disk is still seen.
 
 - `dust::find_dust` finds the dust in one plane (a binned flat or a
   session's response).
@@ -129,7 +135,12 @@ frame does not report its own noise.
   with dust that moved no further than focus travel explains
   (`DustOptions::move_tolerance`) marked as within tolerance rather than
   new, stars a tracked sky flat kept left out, and vignetting changes
-  apart. `dust::match_features` pairs two feature lists the same way.
+  apart. A feature of the ratio counts as held dust's only where that dust
+  explains it: a crescent on its rim no deeper than the dust, or a change of
+  its own depth; window dust that arrives in front of a held disk is new.
+  `dust::match_features` pairs two feature lists the same way, taking the
+  most pairs and then the least total distance. `DUST_ALGORITHM_VERSION`
+  versions all of these.
 
 ## Flat responses: same light path, and which one a light follows
 
@@ -140,9 +151,10 @@ frame does not report its own noise.
   response by another and reports the smooth difference (`broad`), the
   deepest change of dust (`dust`) and the spots behind it, and any change of
   vignetting, in fractions of the sky background. Its spots are
-  `dust::find_changes`'s, below. `metric::change_map` is the part of the
-  difference those changes cover, and `metric::apply_change_map` carries a
-  flat across it.
+  `dust::find_changes`'s, above, and its `sigma` is the noise of their
+  ratio's residual. `metric::change_map` is the part of the difference those
+  changes cover (`CHANGE_MAP_ALGORITHM_VERSION`), and
+  `metric::apply_change_map` carries a flat across it.
 - `evidence::fit` asks whether a few lights' background
   (`evidence::background`) carries a change, weighing each shadow of the
   change against placebo positions where nothing changed, so nebular

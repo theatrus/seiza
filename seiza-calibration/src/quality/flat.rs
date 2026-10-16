@@ -23,8 +23,8 @@
 //! filter pattern and keeps features a few pixels wide.
 
 use super::{
-    FRAME_QUALITY_ALGORITHM_VERSION, Finding, FindingCode, FrameVerdict, Limits, MIN_PEERS,
-    frame_quality_algorithm_version, median_of,
+    FLAT_QUALITY_ALGORITHM_VERSION, Finding, FindingCode, FrameVerdict, Limits, MIN_PEERS,
+    first_flat_quality_algorithm_version, median_of,
 };
 use crate::dust::{self, DustOptions, DustShape, Optics, Vignetting};
 use crate::flat_response::metric;
@@ -128,8 +128,8 @@ impl FlatMeasureOptions {
     }
 }
 
-/// One dust feature of a flat: a compact dip, or a large disk, donut or
-/// irregular shadow. The definition is [`crate::dust::DustFeature`]'s, so a
+/// One dust feature of a flat: a compact or irregular dip, or a large disk,
+/// donut or patch. The definition is [`crate::dust::DustFeature`]'s, so a
 /// flat's spots and a comparison's agree.
 pub type FlatFeature = dust::DustFeature;
 
@@ -149,8 +149,9 @@ pub struct IlluminationProfile {
 /// What [`measure_flat`] found in one flat frame.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FlatMeasurement {
-    /// [`FRAME_QUALITY_ALGORITHM_VERSION`] when this was measured.
-    #[serde(default = "frame_quality_algorithm_version")]
+    /// [`FLAT_QUALITY_ALGORITHM_VERSION`] when this was measured; 1 when
+    /// stored without one.
+    #[serde(default = "first_flat_quality_algorithm_version")]
     pub algorithm_version: u32,
     /// Image width in pixels.
     pub width: usize,
@@ -177,8 +178,8 @@ pub struct FlatMeasurement {
     pub illumination: IlluminationProfile,
     /// Features found, including any beyond the kept list.
     pub feature_count: usize,
-    /// Large features (disks, donuts, irregular shadows) first, deepest
-    /// first, then compact dips, deepest first; at most 100,000.
+    /// Large features (disks, donuts, patches) first, deepest first, then
+    /// compact and irregular dips, deepest first; at most 100,000.
     pub features: Vec<FlatFeature>,
     /// Shadows hanging from the border that are not the image circle's own
     /// fall-off: an off-axis guider's prism, a filter holder.
@@ -258,10 +259,12 @@ pub fn measure_flat(
     if options.large_features
         && let Some(map) = large_dust(image, cfa, &dust_options)
     {
+        // Compact and irregular dips are found pixel by pixel above; the
+        // binned plane adds what only it can see.
         let mut large: Vec<FlatFeature> = map
             .features
             .into_iter()
-            .filter(|feature| feature.shape != DustShape::Compact)
+            .filter(|feature| feature.shape.is_large())
             .collect();
         large.sort_by(|a, b| b.depth.total_cmp(&a.depth));
         large.extend(features);
@@ -272,7 +275,7 @@ pub fn measure_flat(
     features.truncate(MAX_FEATURES);
 
     Ok(FlatMeasurement {
-        algorithm_version: FRAME_QUALITY_ALGORITHM_VERSION,
+        algorithm_version: FLAT_QUALITY_ALGORITHM_VERSION,
         width: image.width(),
         height: image.height(),
         full_scale: options.full_scale,
@@ -1407,6 +1410,26 @@ mod tests {
     }
 
     #[test]
+    fn an_irregular_dip_is_reported_once() {
+        // Window dust 60 x 5 pixels, 10% deep: found pixel by pixel, and on
+        // the binned plane as an irregular dip too.
+        let mut data = flat(4);
+        for y in 120..125 {
+            for x in 150..210 {
+                data[y * WIDTH + x] *= 0.9;
+            }
+        }
+        let measurement = measure(&data);
+        let near: Vec<_> = measurement
+            .features
+            .iter()
+            .filter(|f| (f.x - 180.0).abs() < 10.0 && (f.y - 122.0).abs() < 10.0)
+            .collect();
+        assert_eq!(near.len(), 1, "{near:?}");
+        assert_eq!(measurement.feature_count, 1, "{:?}", measurement.features);
+    }
+
+    #[test]
     fn a_wide_shallow_disk_is_reported_before_the_compact_dips() {
         // Filter dust: 0.5% deep and 80 pixels across, far below the 2%
         // compact threshold, beside a droplet.
@@ -1417,7 +1440,11 @@ mod tests {
         assert_eq!(measurement.feature_count, 2, "{:?}", measurement.features);
         let disk = measurement.features[0];
         assert!(disk.shape.is_large(), "{disk:?}");
-        assert!((disk.x - 150.0).abs() < 3.0 && (disk.radius - 40.0).abs() < 4.0);
+        assert!(
+            (disk.x - 150.0).abs() < 3.0 && (disk.radius - 40.0).abs() < 4.0,
+            "{:?}",
+            measurement.features
+        );
         assert!(!measurement.features[1].shape.is_large());
         // Screening counts only the droplet.
         let report = screen_flats(&[measurement], &FlatScreening::default()).unwrap();

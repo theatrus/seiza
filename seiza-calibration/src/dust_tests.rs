@@ -259,3 +259,341 @@ fn lone_dips_need_more_than_five_sigma_on_a_large_frame() {
     assert!(lone_dip_floor(500_000, 1.0, 0.05) < floor);
     assert!((upper_tail_sigma(0.001_349_9) - 3.0).abs() < 0.01);
 }
+
+#[test]
+fn new_window_dust_in_front_of_a_held_disk_is_new() {
+    // A filter disk both sessions hold, and new compact dust inside it.
+    let earlier = plane(&[(200.0, 150.0, 40.0, 0.004)], 0.0005, 7);
+    let later = plane(
+        &[(200.0, 150.0, 40.0, 0.004), (215.0, 160.0, 4.0, 0.03)],
+        0.0005,
+        8,
+    );
+    // The later session's own map holds it too, beside the disk.
+    let later_map = find_dust(&later, BIN, &DustOptions::default()).unwrap();
+    assert!(
+        later_map.features.iter().any(|f| !f.shape.is_large()
+            && (f.x / BIN as f32 - 215.0).hypot(f.y / BIN as f32 - 160.0) < 4.0),
+        "{:?}",
+        later_map.features
+    );
+    let changes = find_changes(&earlier, &later, BIN, &DustOptions::default()).unwrap();
+    let counted: Vec<_> = changes
+        .changes
+        .iter()
+        .filter(|c| !c.within_tolerance)
+        .collect();
+    assert_eq!(counted.len(), 1, "{:?}", changes.changes);
+    assert_eq!(counted[0].kind, ChangeKind::New);
+}
+
+#[test]
+fn new_window_dust_beside_held_window_dust_is_new() {
+    // Compact dust both sessions hold, and new compact dust 25 plane px
+    // (175 sensor px) away.
+    let earlier = plane(&[(200.0, 150.0, 4.0, 0.03)], 0.0005, 7);
+    let later = plane(
+        &[(200.0, 150.0, 4.0, 0.03), (200.0, 175.0, 4.0, 0.03)],
+        0.0005,
+        8,
+    );
+    let changes = find_changes(&earlier, &later, BIN, &DustOptions::default()).unwrap();
+    let counted: Vec<_> = changes
+        .changes
+        .iter()
+        .filter(|c| !c.within_tolerance)
+        .collect();
+    assert_eq!(counted.len(), 1, "{:?}", changes.changes);
+    assert_eq!(counted[0].kind, ChangeKind::New);
+}
+
+fn disk_at(x: f32, y: f32, radius: f32, shape: DustShape) -> DustFeature {
+    DustFeature {
+        x,
+        y,
+        left: (x - radius).max(0.0) as u32,
+        top: (y - radius).max(0.0) as u32,
+        right: (x + radius) as u32,
+        bottom: (y + radius) as u32,
+        pixels: (std::f32::consts::PI * radius * radius) as u32,
+        depth: 0.003,
+        shape,
+        radius,
+        hole: None,
+        distance_mm: None,
+        seen_in: None,
+    }
+}
+
+#[test]
+fn matching_takes_the_most_pairs_not_the_closest_first() {
+    let disk = |x: f32| disk_at(x, 1000.0, 100.0, DustShape::Disk);
+    // E0 at 980 and E1 at 1010; L0 at 1000 and L1 at 1034. E1-L0 is closest
+    // (10), but taking it leaves E0 (only near L0) and L1 (only near E1)
+    // unpaired: one gone and one new where two pairs exist.
+    let matches = match_features(
+        &[disk(980.0), disk(1010.0)],
+        &[disk(1000.0), disk(1034.0)],
+        &DustOptions::default(),
+    );
+    let pair = |i: usize| matches.iter().find(|m| m.earlier == Some(i)).unwrap();
+    assert_eq!(pair(0).later, Some(0), "{matches:?}");
+    assert_eq!(pair(1).later, Some(1), "{matches:?}");
+    assert_eq!(matches.len(), 2, "{matches:?}");
+}
+
+#[test]
+fn a_patch_pairs_with_the_disk_another_session_saw() {
+    // One session resolved a disk; the other merged it with its neighbours
+    // into a patch. A dip far from both pairs with neither.
+    let options = DustOptions::default();
+    let matches = match_features(
+        &[disk_at(1000.0, 1000.0, 200.0, DustShape::Disk)],
+        &[
+            disk_at(1080.0, 1010.0, 300.0, DustShape::Patch),
+            disk_at(3000.0, 1000.0, 10.0, DustShape::Compact),
+        ],
+        &options,
+    );
+    let pair = matches.iter().find(|m| m.earlier == Some(0)).unwrap();
+    assert_eq!(pair.later, Some(0), "{matches:?}");
+    assert!(pair.within_tolerance, "{matches:?}");
+    assert!(
+        matches
+            .iter()
+            .any(|m| m.later == Some(1) && m.earlier.is_none())
+    );
+}
+
+#[test]
+fn alike_disks_gone_and_new_nearby_are_not_called_moved() {
+    // Two filter disks of one size go and two arrive between them: which
+    // went where cannot be told, so none is called moved. One alone is.
+    // Each gone disk is 2.4 radii from each new one: no overlap, within the
+    // three radii a lone moved shadow may travel.
+    let options = DustOptions::default();
+    let large = |earlier: &[(f32, f32, f32, f32)], later: &[(f32, f32, f32, f32)]| {
+        let changes = find_changes(
+            &plane(earlier, 0.0005, 50),
+            &plane(later, 0.0005, 51),
+            BIN,
+            &options,
+        )
+        .unwrap();
+        changes
+            .changes
+            .into_iter()
+            .filter(|c| c.feature.shape.is_large())
+            .collect::<Vec<_>>()
+    };
+    let gone = [(180.0, 150.0, 30.0, 0.004), (300.0, 150.0, 30.0, 0.004)];
+    let new = [(240.0, 110.0, 30.0, 0.004), (240.0, 190.0, 30.0, 0.004)];
+    let both = large(&gone, &new);
+    assert_eq!(both.len(), 4, "{both:?}");
+    assert!(both.iter().all(|c| c.kind != ChangeKind::Moved), "{both:?}");
+    let one = large(&gone[..1], &new[..1]);
+    assert_eq!(one.len(), 2, "{one:?}");
+    assert!(one.iter().all(|c| c.kind == ChangeKind::Moved), "{one:?}");
+}
+
+#[test]
+fn changes_do_not_depend_on_the_thread_count() {
+    let earlier = plane(
+        &[(200.0, 150.0, 40.0, 0.002), (330.0, 230.0, 30.0, 0.0015)],
+        0.001,
+        31,
+    );
+    let later = plane(
+        &[(203.0, 150.0, 40.0, 0.002), (100.0, 300.0, 25.0, 0.002)],
+        0.001,
+        32,
+    );
+    let run = |threads: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| find_changes(&earlier, &later, BIN, &DustOptions::default()).unwrap())
+    };
+    assert_eq!(run(1), run(8));
+}
+
+#[test]
+fn non_finite_and_tiny_planes_do_not_panic() {
+    let options = DustOptions::default();
+    let mut p = plane(&[(200.0, 150.0, 40.0, 0.004)], 0.0005, 40);
+    for i in 0..2000 {
+        p.data[i * 37 % (W * H)] = f32::NAN;
+    }
+    for i in 0..500 {
+        p.data[(i * 101 + 7) % (W * H)] = f32::INFINITY;
+    }
+    for i in 0..500 {
+        p.data[(i * 53 + 3) % (W * H)] = f32::NEG_INFINITY;
+    }
+    let _ = find_dust(&p, BIN, &options);
+    let clean = plane(&[], 0.0005, 41);
+    let _ = find_changes(&clean, &p, BIN, &options);
+    // An all-NaN half.
+    let mut half = clean.clone();
+    for v in half.data.iter_mut().take(W * H / 2) {
+        *v = f32::NAN;
+    }
+    let _ = find_dust(&half, BIN, &options);
+    let _ = find_changes(&clean, &half, BIN, &options);
+    // Tiny and degenerate planes.
+    for (w, h) in [(32, 32), (33, 400), (400, 33), (31, 31), (1, 1)] {
+        let tiny = synthetic(w, h, &[], 0.0, &[], 0.001, 3);
+        let _ = find_dust(&tiny, 1, &options);
+        let _ = find_changes(&tiny, &tiny, 1, &options);
+        let _ = metric::change_map(&tiny, &tiny);
+    }
+    let constant = Plane {
+        width: 64,
+        height: 64,
+        data: vec![1.0; 64 * 64],
+    };
+    let _ = find_dust(&constant, 1, &options);
+    let zero = Plane {
+        width: 64,
+        height: 64,
+        data: vec![0.0; 64 * 64],
+    };
+    assert!(find_dust(&zero, 1, &options).is_none());
+    // bin 0 and a huge bin.
+    let _ = find_dust(&clean, 0, &options);
+    let _ = find_dust(&clean, 1 << 20, &options);
+}
+
+#[test]
+fn a_frame_smaller_than_its_session_does_not_panic() {
+    let session = DustMap {
+        algorithm_version: DUST_ALGORITHM_VERSION,
+        bin: BIN,
+        features: vec![DustFeature::compact(
+            3000.0,
+            2000.0,
+            (2990, 1990, 3010, 2010),
+            400,
+            0.02,
+            DustShape::Compact,
+        )],
+        vignetting: Vec::new(),
+        sigma: 0.0,
+        star_fraction: 0.0,
+        frames: 6,
+    };
+    let mut small = synthetic(256, 192, &[], 0.0, &[], 0.001, 3);
+    for v in &mut small.data {
+        *v = *v * 30_000.0 + 300.0;
+    }
+    let found = frame_dust(&small, 300.0, &session, &DustOptions::default()).unwrap();
+    assert!(found.seen.is_empty(), "{found:?}");
+}
+
+#[test]
+fn faint_disks_without_optics_are_not_donuts() {
+    // Faint plain disks (no hole) at about one session's noise: without
+    // optics nothing rules a donut out, so its hole must stand clear of the
+    // noise.
+    let (mut disks, mut donuts) = (0, 0);
+    for seed in 0..12 {
+        let map = find_dust(
+            &plane(&[(200.0, 150.0, 45.0, 0.0012)], 0.0012, 100 + seed),
+            BIN,
+            &DustOptions::default(),
+        )
+        .unwrap();
+        for f in large(&map) {
+            match f.shape {
+                DustShape::Disk => disks += 1,
+                DustShape::Donut => donuts += 1,
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(donuts, 0, "{disks} disks, {donuts} donuts");
+    assert!(disks >= 6, "{disks} disks");
+}
+
+#[test]
+fn clear_disks_of_one_size_do_not_hide_a_faint_one() {
+    // A filter's disks all share one radius. The null rim spread is read on
+    // a 7 x 7 grid of circles of that radius, many of which cross the clear
+    // disks, so the null would grow with the dust it is meant to judge.
+    let faint = (400.0, 300.0, 30.0, 0.0006);
+    let clear: Vec<(f32, f32, f32, f32)> = [
+        (70.0, 70.0),
+        (180.0, 60.0),
+        (300.0, 80.0),
+        (430.0, 70.0),
+        (80.0, 200.0),
+        (200.0, 190.0),
+        (320.0, 200.0),
+        (90.0, 320.0),
+        (220.0, 310.0),
+    ]
+    .iter()
+    .map(|(x, y)| (*x, *y, 30.0, 0.004))
+    .collect();
+    let found = |disks: &[(f32, f32, f32, f32)], seed: u64| {
+        let map = find_dust(&plane(disks, 0.0012, seed), BIN, &DustOptions::default()).unwrap();
+        map.features.iter().any(|f| {
+            f.shape.is_large() && (f.x / BIN as f32 - 400.0).hypot(f.y / BIN as f32 - 300.0) < 6.0
+        })
+    };
+    let (mut alone, mut crowd) = (0, 0);
+    for seed in 0..8 {
+        alone += usize::from(found(&[faint], 200 + seed));
+        let mut all = clear.clone();
+        all.push(faint);
+        crowd += usize::from(found(&all, 200 + seed));
+    }
+    assert_eq!(alone, crowd, "alone {alone}/8, among clear ones {crowd}/8");
+}
+
+#[test]
+fn wide_faint_new_dust_is_not_taken_for_a_star() {
+    // New dust 16 plane pixels across and 0.25% deep: wider than the 9-pixel
+    // median the star veto reads, so the darker session shows no local dip
+    // there and the brighter session's noise peak could pass for a star.
+    for seed in 0..8 {
+        let earlier = plane(&[], 0.0005, 300 + seed);
+        let later = plane(&[(250.0, 200.0, 8.0, 0.0025)], 0.0005, 400 + seed);
+        let changes = find_changes(&earlier, &later, BIN, &DustOptions::default()).unwrap();
+        assert!(
+            changes.changes.iter().any(|c| {
+                (c.feature.x / BIN as f32 - 250.0).hypot(c.feature.y / BIN as f32 - 200.0) < 6.0
+            }),
+            "seed {seed}: {:?}",
+            changes.changes
+        );
+    }
+}
+
+#[test]
+fn a_faint_disk_survives_the_candidate_cap() {
+    // A noisy 1,024 x 680 plane yields thousands of rim candidates; only the
+    // best 800 are measured, and a faint disk's circle must be among them.
+    let (w, h) = (1024, 680);
+    let p = synthetic(w, h, &[(700.0, 300.0, 60.0, 0.0015)], 0.02, &[], 0.0012, 77);
+    let (residual, _) = own_residual(&p).unwrap();
+    let usable: Vec<bool> = residual.iter().map(|v| v.is_finite()).collect();
+    let circles = rim_circles(&residual, &usable, w, h, &DustOptions::default());
+    let rank = circles
+        .iter()
+        .position(|c| (c.x - 700.0).hypot(c.y - 300.0) < 6.0 && (c.radius - 60.0).abs() < 8.0);
+    assert!(
+        rank.is_some_and(|rank| rank < MAX_CANDIDATES),
+        "rank {rank:?} of {}",
+        circles.len()
+    );
+    let bin = 6;
+    let map = find_dust(&p, bin, &DustOptions::default()).unwrap();
+    assert!(
+        map.features.iter().any(|f| f.shape.is_large()
+            && (f.x / bin as f32 - 700.0).hypot(f.y / bin as f32 - 300.0) < 6.0),
+        "{:?}",
+        map.features
+    );
+}
