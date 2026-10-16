@@ -12,6 +12,7 @@ keywords = ["astronomy", "astrophotography", "calibration", "flat-field"]
 categories = ["science", "multimedia::images"]
 
 [dependencies]
+nalgebra.workspace = true
 rayon.workspace = true
 serde.workspace = true
 seiza-imgproc.workspace = true

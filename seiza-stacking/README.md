@@ -352,6 +352,18 @@ return it, and `save_context` will not write such a context.
 `MatchTolerances::validate` is the same check for a host's own input. A
 rotation of 180 already accepts any angle.
 
+A light's recorded rotator angle can be wrong for the question a flat asks:
+a rotator that re-homed reads the same angle for another position, and two
+angles far apart can share one light path. A host that measured which flats a
+light follows — from a plate solve, or by fitting its sky against each
+candidate flat set (`seiza_calibration::flat_response`) — says so in
+`MatchTolerances::light_rotation`: `LightRotation::Measured { degrees }`
+compares the master flat with that angle in place of the light's recorded
+one, and `LightRotation::Unknown` compares it at no angle, as for a rig
+without a rotator. The default, `Recorded`, is unwritten, so existing
+options, contexts and fingerprints keep their bytes; a measured angle is part
+of the gate each frame is admitted and reintegrated under.
+
 Masters given to `set_calibration` live only in memory, so once they are
 replaced, frames admitted under them can no longer be reintegrated
 (`reintegration_unavailable` says so). `set_calibration_from_fits_paths` keeps

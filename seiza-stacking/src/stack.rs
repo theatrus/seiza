@@ -3737,6 +3737,32 @@ mod tests {
             restored.configuration_fingerprint(),
             stacker.configuration_fingerprint()
         );
+
+        // A light angle the host measured: the gate follows it, refuses a
+        // light measured elsewhere, and a saved context keeps it.
+        let measured = |degrees| seiza_calibration::MatchTolerances {
+            light_rotation: seiza_calibration::LightRotation::Measured { degrees },
+            ..seiza_calibration::MatchTolerances::default()
+        };
+        let any_angle_fingerprint = stacker.configuration_fingerprint().to_owned();
+        stacker.set_match_tolerances(measured(60.0)).unwrap();
+        assert!(matches!(
+            stacker.push(frame(3.2)).unwrap(),
+            FrameDisposition::Rejected(FrameRejectionReason::Calibration(_))
+        ));
+        stacker.set_match_tolerances(measured(3.0)).unwrap();
+        assert_ne!(stacker.configuration_fingerprint(), any_angle_fingerprint);
+        assert!(matches!(
+            stacker.push(frame(113.8)).unwrap(),
+            FrameDisposition::Accepted(_)
+        ));
+        stacker.save_context(&path).unwrap();
+        let restored = LiveStacker::open_context(&path).unwrap();
+        assert_eq!(restored.match_tolerances(), measured(3.0));
+        assert_eq!(
+            restored.configuration_fingerprint(),
+            stacker.configuration_fingerprint()
+        );
     }
 
     #[test]

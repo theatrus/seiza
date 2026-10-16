@@ -1863,6 +1863,7 @@ dependencies = [
 name = "seiza-calibration"
 version = "0.5.1"
 dependencies = [
+ "nalgebra",
  "rayon",
  "seiza-imgproc",
  "seiza-stats",

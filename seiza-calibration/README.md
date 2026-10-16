@@ -83,3 +83,46 @@ What each screen looks for:
 differently, so stored measurements can be checked for staleness.
 `seiza-stacking`'s `calibration_frame_quality` example runs the measures and
 screens on real files.
+
+## Matching a light by its measured angle
+
+`optics_match` compares a flat's rotator angle with the light's within
+`MatchTolerances::rotation_deg`. The light's recorded angle is the default;
+`MatchTolerances::light_rotation` replaces it with an angle the host
+measured (`LightRotation::Measured { degrees }`) or compares the light at no
+angle (`LightRotation::Unknown`), as when the host has shown from the light's
+own pixels which flats it follows. Flats judged against each other
+(`optics_consistent`, `coherent_subset`) keep their recorded angles.
+
+## Flat responses: same light path, and which one a light follows
+
+`flat_response` measures flat sets rather than single frames:
+
+- `metric::build_response` reduces a session's flats (two or more, binned to
+  at most 1,024 px) to one normalized response. `metric::compare` divides one
+  response by another and reports the smooth difference (`broad`), compact
+  dips (`dust`) and the spots behind them, in fractions of the sky
+  background, with stars a tracked sky-flat set kept masked first.
+  `metric::change_map` is the compact part of that difference, and
+  `metric::apply_change_map` carries a flat across it.
+- `evidence::fit` asks whether a few lights' background
+  (`evidence::background`) carries a change, weighing each shadow of the
+  change against placebo positions where nothing changed, so nebular
+  structure leaves the answer undecided rather than wrong.
+- `choice::choose_response` asks which of several candidate responses a
+  light's background follows: every pair is told apart by its change map and
+  fitted the same way, and a candidate wins when it beats every candidate it
+  can be told apart from and loses to none.
+
+```rust
+use seiza_calibration::flat_response::{choose_response, evidence, metric::Plane};
+
+# fn example(lights: &[Plane], candidates: &[Plane]) {
+let Some(background) = evidence::background(lights, 0.0, 6) else { return };
+let choice = choose_response(&background, candidates, |_, _| false);
+match choice.chosen() {
+    Some(index) => { /* the lights follow candidates[index] */ }
+    None => { /* nothing stands clear: fall back, and say so */ }
+}
+# }
+```

@@ -1,8 +1,8 @@
 use crate::{BayerLayout, Error, FitsFrame, FrameSourceRole, LinearImage, Result};
 use rayon::prelude::*;
 use seiza_calibration::{
-    FrameSignature, MatchTolerances, exposure_matches, exposure_tolerance, optics_consistent,
-    sensor_consistent, temperature_matches,
+    FrameSignature, LightRotation, MatchTolerances, exposure_matches, exposure_tolerance,
+    optics_consistent, sensor_consistent, temperature_matches,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -610,7 +610,15 @@ impl CalibrationMasters {
             let problem = match kind {
                 MasterKind::Bias => None,
                 MasterKind::Dark => self.dark_refusal(light, signature, tolerances),
-                MasterKind::Flat => (!optics_consistent(light, signature, tolerances)).then(|| {
+                // The light's angle as the host measured it, when it did:
+                // the flat was chosen for the light path its pixels
+                // follow, not for the angle it recorded.
+                MasterKind::Flat => (!optics_consistent(
+                    &tolerances.light_rotation.apply(light),
+                    signature,
+                    tolerances,
+                ))
+                .then(|| {
                     (
                         Problem::Optics,
                         seiza_calibration::describe_optics_mismatch(light, signature, tolerances),
@@ -829,6 +837,10 @@ pub(crate) struct LightGate {
     dark_temperature_c: f64,
     rotation_deg: f64,
     focal_length_mm: f64,
+    /// How the light's own angle is read; unwritten when it is recorded,
+    /// so gates saved before it existed keep their bytes.
+    #[serde(skip_serializing_if = "LightRotation::is_recorded")]
+    light_rotation: LightRotation,
 }
 
 impl LightGate {
@@ -841,6 +853,12 @@ impl LightGate {
             dark_temperature_c: tolerances.dark_temperature_c + 0.0,
             rotation_deg: tolerances.rotation_deg + 0.0,
             focal_length_mm: tolerances.focal_length_mm + 0.0,
+            light_rotation: match tolerances.light_rotation {
+                LightRotation::Measured { degrees } => LightRotation::Measured {
+                    degrees: degrees + 0.0,
+                },
+                other => other,
+            },
         }
     }
 
@@ -859,6 +877,7 @@ impl LightGate {
             dark_temperature_c: self.dark_temperature_c,
             rotation_deg: self.rotation_deg,
             focal_length_mm: self.focal_length_mm,
+            light_rotation: self.light_rotation,
             ..MatchTolerances::default()
         };
         check_tolerances(&tolerances)?;
@@ -1233,6 +1252,76 @@ mod tests {
             kept.validate_light_signature_with(&light, &wide)
                 .unwrap_or_else(|error| panic!("{field}: {error}"));
         }
+    }
+
+    #[test]
+    fn the_gate_follows_a_measured_light_angle() {
+        // A light recorded at 72.6 degrees whose own sky follows the rig's
+        // flats at 3.2 degrees, which the host measured: the master flat
+        // is accepted at the measured angle, and still refused at others.
+        let masters = recorded_masters();
+        let mut light = matching_light();
+        light.rotation_deg = Some(72.6);
+        let error = masters.validate_light_signature(&light).unwrap_err();
+        assert!(error.to_string().contains("rotation"), "{error}");
+        let measured = MatchTolerances {
+            light_rotation: LightRotation::Measured { degrees: 3.5 },
+            ..MatchTolerances::default()
+        };
+        masters
+            .validate_light_signature_with(&light, &measured)
+            .unwrap();
+        let (kept, dropped) = masters
+            .compatible_for_light_with(&light, &measured)
+            .unwrap();
+        assert!(dropped.is_empty() && kept.has_flat(), "{dropped:?}");
+        let elsewhere = MatchTolerances {
+            light_rotation: LightRotation::Measured { degrees: 60.0 },
+            ..MatchTolerances::default()
+        };
+        let error = masters
+            .validate_light_signature_with(&light, &elsewhere)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("light=60deg") && error.contains("as measured"),
+            "{error}"
+        );
+        // Unknown: no angle is compared, as for a rig without a rotator.
+        let unknown = MatchTolerances {
+            light_rotation: LightRotation::Unknown,
+            ..MatchTolerances::default()
+        };
+        masters
+            .validate_light_signature_with(&light, &unknown)
+            .unwrap();
+        // The defaults still read the recorded angle.
+        assert!(
+            masters
+                .validate_light_signature_with(&light, &MatchTolerances::default())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_light_gate_keeps_its_bytes_unless_the_light_angle_was_measured() {
+        let recorded = LightGate::of(&MatchTolerances::default());
+        let written = serde_json::to_value(recorded).unwrap();
+        assert!(written.get("light_rotation").is_none(), "{written}");
+        assert!(LightGate::admits_as_defaults(&MatchTolerances::default()));
+        let measured = MatchTolerances {
+            light_rotation: LightRotation::Measured { degrees: 82.2 },
+            ..MatchTolerances::default()
+        };
+        assert!(!LightGate::admits_as_defaults(&measured));
+        let gate = LightGate::of(&measured);
+        let written = serde_json::to_value(gate).unwrap();
+        assert_eq!(written["light_rotation"]["degrees"], 82.2);
+        let read: LightGate = serde_json::from_value(written).unwrap();
+        assert_eq!(
+            read.tolerances().unwrap().light_rotation,
+            measured.light_rotation
+        );
     }
 
     #[test]

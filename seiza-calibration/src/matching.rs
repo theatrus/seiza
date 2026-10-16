@@ -109,6 +109,69 @@ pub struct MatchTolerances {
     /// Flats are a session's dust and vignetting; a week-old flat describes a
     /// different optical train even when every setting agrees.
     pub flat_session_seconds: u64,
+    /// How the light's own rotator angle is read when a flat is matched to
+    /// it: as recorded (the default), as the host measured it, or not at
+    /// all. Only the light's side of a light-against-flat question reads
+    /// it ([`optics_match`], [`describe_optics_mismatch`], and the
+    /// stacker's gate); flats judged against each other keep their
+    /// recorded angles. Not written when it is the default, so tolerances
+    /// saved before it existed read and write the same.
+    #[serde(skip_serializing_if = "LightRotation::is_recorded")]
+    pub light_rotation: LightRotation,
+}
+
+/// How a light's rotator angle takes part in matching it to flats.
+///
+/// A recorded angle is the rotator's own reading. It is usually right, and
+/// it is what [`MatchTolerances::rotation_deg`] compares by default. It can
+/// also be wrong for the question a flat asks: a rotator re-homed or a
+/// camera re-seated reads the same angle for a different position, and two
+/// angles far apart can describe one light path when nothing ahead of the
+/// rotator casts a shadow that turns. A host that measured which flats a
+/// light's pixels follow — by plate solving it, or by fitting its sky
+/// background against each candidate flat set — passes what it measured
+/// here, so the stacker's gate follows that measurement rather than
+/// refusing the flats it chose on the light's recorded angle.
+///
+/// Serialized as `{"basis": "recorded"}`, `{"basis": "measured",
+/// "degrees": 82.2}` or `{"basis": "unknown"}`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "basis", rename_all = "snake_case")]
+pub enum LightRotation {
+    /// The angle the light recorded, as for any frame.
+    #[default]
+    Recorded,
+    /// An angle the host measured for the light, in degrees, compared in
+    /// place of the one it recorded: the light's flats must lie within
+    /// [`MatchTolerances::rotation_deg`] of it.
+    Measured { degrees: f64 },
+    /// The host has measured that the angle does not decide this light's
+    /// flats: it is compared at no angle, as a light from a rig without a
+    /// rotator is ([`rotation_matches`]), and any flat angle passes.
+    Unknown,
+}
+
+impl LightRotation {
+    /// Whether this is the default, which tolerances leave unwritten.
+    pub fn is_recorded(&self) -> bool {
+        *self == Self::Recorded
+    }
+
+    /// The angle a light that recorded `recorded` is compared at.
+    pub fn angle(self, recorded: Option<f64>) -> Option<f64> {
+        match self {
+            Self::Recorded => recorded,
+            Self::Measured { degrees } => Some(degrees),
+            Self::Unknown => None,
+        }
+    }
+
+    /// `light` as it is compared: its rotation replaced as this says.
+    pub fn apply(self, light: &FrameSignature) -> FrameSignature {
+        let mut compared = light.clone();
+        compared.rotation_deg = self.angle(light.rotation_deg);
+        compared
+    }
 }
 
 impl Default for MatchTolerances {
@@ -121,6 +184,7 @@ impl Default for MatchTolerances {
             rotation_deg: 2.0,
             focal_length_mm: 1.0,
             flat_session_seconds: 24 * 60 * 60,
+            light_rotation: LightRotation::Recorded,
         }
     }
 }
@@ -158,6 +222,13 @@ impl MatchTolerances {
                     "{name} must be finite and not negative, not {value}"
                 )));
             }
+        }
+        if let LightRotation::Measured { degrees } = self.light_rotation
+            && !degrees.is_finite()
+        {
+            return Err(crate::Error::InvalidTolerance(format!(
+                "a measured light rotation must be finite, not {degrees}"
+            )));
         }
         if self.rotation_deg > Self::MAX_ROTATION_DEG {
             return Err(crate::Error::InvalidTolerance(format!(
@@ -262,6 +333,9 @@ pub fn sensor_consistent(left: &FrameSignature, right: &FrameSignature) -> bool 
 /// A flat records the dust and vignetting of one train at one angle. Change
 /// the filter, the telescope, the focal length or the rotator and it is
 /// describing something else.
+///
+/// `reference` is the light: its angle is read as
+/// [`MatchTolerances::light_rotation`] says.
 pub fn optics_match(
     reference: &FrameSignature,
     candidate: &FrameSignature,
@@ -278,7 +352,7 @@ pub fn optics_match(
             tolerances.focal_length_mm,
         )
         && rotation_matches(
-            reference.rotation_deg,
+            tolerances.light_rotation.angle(reference.rotation_deg),
             candidate.rotation_deg,
             tolerances.rotation_deg,
         )
@@ -521,6 +595,7 @@ pub fn describe_optics_mismatch(
     flat: &FrameSignature,
     tolerances: &MatchTolerances,
 ) -> String {
+    let light = &tolerances.light_rotation.apply(light);
     let mut reasons = Vec::new();
     if !text_equal_if_known(light.filter.as_deref(), flat.filter.as_deref()) {
         reasons.push(describe_text(
@@ -562,6 +637,9 @@ pub fn describe_optics_mismatch(
         tolerances.rotation_deg,
     ) {
         let mut reason = describe_value("rotation", light.rotation_deg, flat.rotation_deg, "deg");
+        if let LightRotation::Measured { .. } = tolerances.light_rotation {
+            reason.push_str(" (the light's angle as measured)");
+        }
         if let (Some(light), Some(flat)) = (light.rotation_deg, flat.rotation_deg) {
             let mut apart = (light - flat).abs() % 360.0;
             if apart > 180.0 {
@@ -746,6 +824,7 @@ mod tests {
             rotation_deg: MatchTolerances::MAX_ROTATION_DEG,
             focal_length_mm: 0.0,
             flat_session_seconds: 0,
+            light_rotation: LightRotation::Unknown,
         }
         .validate()
         .unwrap();
@@ -1210,5 +1289,79 @@ mod tests {
                 None
             ]
         );
+    }
+
+    #[test]
+    fn a_measured_light_angle_replaces_the_recorded_one_for_flats() {
+        // C925: an OIII light recorded at 72.6 deg whose own sky follows the
+        // rig's 82.2 deg flats, measured alike with its 72.6 deg flats.
+        let mut light = signature();
+        light.rotation_deg = Some(72.6);
+        let mut flat = signature();
+        flat.rotation_deg = Some(82.2);
+        let recorded = MatchTolerances::default();
+        assert!(!optics_match(&light, &flat, &recorded));
+        let measured = MatchTolerances {
+            light_rotation: LightRotation::Measured { degrees: 82.0 },
+            ..MatchTolerances::default()
+        };
+        assert!(optics_match(&light, &flat, &measured));
+        // The measurement is an angle, not a pass: flats elsewhere are
+        // still refused, and the reason says whose angle it compared.
+        flat.rotation_deg = Some(101.5);
+        assert!(!optics_match(&light, &flat, &measured));
+        let reason = describe_optics_mismatch(&light, &flat, &measured);
+        assert!(reason.contains("82"), "{reason}");
+        assert!(reason.contains("as measured"), "{reason}");
+        // Unknown: the light is compared at no angle, any flat passes.
+        let unknown = MatchTolerances {
+            light_rotation: LightRotation::Unknown,
+            ..MatchTolerances::default()
+        };
+        assert!(optics_match(&light, &flat, &unknown));
+    }
+
+    #[test]
+    fn flats_judged_against_each_other_keep_their_recorded_angles() {
+        // The light's measured angle says nothing of two flats' agreement.
+        let mut left = signature();
+        left.rotation_deg = Some(82.2);
+        let mut right = signature();
+        right.rotation_deg = Some(72.6);
+        let tolerances = MatchTolerances {
+            light_rotation: LightRotation::Unknown,
+            ..MatchTolerances::default()
+        };
+        assert!(!optics_consistent(&left, &right, &tolerances));
+        assert_eq!(
+            coherent_subset(&[left, right], FrameRole::Flat, 2, &tolerances).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_light_rotation_is_written_only_when_it_is_not_the_default() {
+        let written = serde_json::to_value(MatchTolerances::default()).unwrap();
+        assert!(written.get("light_rotation").is_none(), "{written}");
+        let measured = MatchTolerances {
+            light_rotation: LightRotation::Measured { degrees: 82.2 },
+            ..MatchTolerances::default()
+        };
+        let written = serde_json::to_value(measured).unwrap();
+        assert_eq!(
+            written["light_rotation"],
+            serde_json::json!({"basis": "measured", "degrees": 82.2})
+        );
+        let read: MatchTolerances = serde_json::from_value(written).unwrap();
+        assert_eq!(read, measured);
+        let unknown: MatchTolerances =
+            serde_json::from_str(r#"{"light_rotation": {"basis": "unknown"}}"#).unwrap();
+        assert_eq!(unknown.light_rotation, LightRotation::Unknown);
+        // A measured angle that is not a number is refused, not matched.
+        let broken = MatchTolerances {
+            light_rotation: LightRotation::Measured { degrees: f64::NAN },
+            ..MatchTolerances::default()
+        };
+        assert!(broken.validate().is_err());
     }
 }

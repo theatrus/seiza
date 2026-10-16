@@ -1,10 +1,12 @@
 //! Host-neutral calibration for linear image buffers.
 //!
-//! Three things live here: the pixel kernels that apply a calibration
+//! Four things live here: the pixel kernels that apply a calibration
 //! response; the rules for deciding which frames belong together in the first
 //! place — whether a dark suits a light, whether a flat still corrects it,
-//! which candidates can be averaged into one master; and grades for the bias,
-//! dark, and flat frames that go into a master.
+//! which candidates can be averaged into one master; grades for the bias,
+//! dark, and flat frames that go into a master; and [`flat_response`], which
+//! measures whether flat sets describe the same light path and which one a
+//! light's own sky follows.
 //!
 //! All are pure. Hosts retain file loading, detector evidence, cache policy,
 //! and user confirmation; they hand this crate values and act on what comes
@@ -20,16 +22,17 @@
 //! three or more frames. The screens say what the pixels show, never why, and
 //! never judge a flat by its temperature.
 
+pub mod flat_response;
 mod matching;
 mod pedestal;
 mod quality;
 mod residual_flat;
 
 pub use matching::{
-    FrameRole, FrameSignature, MatchTolerances, coherent_subset, coherent_subset_indices,
-    describe_optics_mismatch, describe_sensor_mismatch, describe_text, describe_value,
-    exposure_matches, exposure_tolerance, optics_consistent, optics_match, rotation_matches,
-    sensor_consistent, sensor_matches, sort_by_proximity, temperature_matches,
+    FrameRole, FrameSignature, LightRotation, MatchTolerances, coherent_subset,
+    coherent_subset_indices, describe_optics_mismatch, describe_sensor_mismatch, describe_text,
+    describe_value, exposure_matches, exposure_tolerance, optics_consistent, optics_match,
+    rotation_matches, sensor_consistent, sensor_matches, sort_by_proximity, temperature_matches,
 };
 pub use pedestal::fit_flat_pedestal;
 pub use quality::{

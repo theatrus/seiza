@@ -108,9 +108,11 @@ core = "seiza-calibration::FrameSignature"
 
 [rust.SeizaMatchTolerances]
 core = "seiza-calibration::MatchTolerances"
+light_rotation = { gap = "a light angle the host measured (LightRotation): SeizaMatchTolerances is a fixed C layout callers allocate, so it needs a call of its own rather than a new field" }
 
 [rust.CalibrationPlanTolerancesRequest]
 core = "seiza-calibration::MatchTolerances"
+light_rotation = { gap = "a light angle the host measured (LightRotation), for planning a light's flats by it" }
 
 [rust.FrameCalibrationStateResponse]
 core = "seiza-stacking::FrameCalibrationState"
