@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-"""Keep the C ABI (seiza-cabi) and the Python bindings (seiza-py) in step.
+"""Keep the core crates, the C ABI (seiza-cabi) and Python (seiza-py) in step.
 
 Against `.github/binding-parity.toml`, this checks that:
+
+0. every public field of a core type the C ABI carries (a `[rust.<C type>]`
+   entry: `seiza-parallax::VideoOptions` for `VideoRequest`) reaches the C
+   type, or says why not;
 
 1. every exported C function maps to a Python name that `seiza-py/seiza.pyi`
    declares, or says why Python has none;
@@ -12,9 +16,10 @@ Against `.github/binding-parity.toml`, this checks that:
 4. with `--base SHA`, a change to one binding's source comes with a change
    to the other's, or a commit says why not with a `Binding-parity:` line.
 
-Entries are `python` (Python has it under that name), `none` (Python has no
-counterpart by design) or `gap` (Python lacks it and should not). Gaps pass,
-and are counted, so the list of them is the work left.
+Entries are `python` (Python has it under that name), `c` (the C type has
+it under that name), `none` (no counterpart by design) or `gap` (missing,
+and should not be). Gaps pass, and are counted, so the list of them is the
+work left.
 """
 
 from __future__ import annotations
@@ -43,6 +48,8 @@ SERDE_STRUCT = re.compile(
     re.S,
 )
 FIELD = re.compile(r"\s*(?:pub(?:\([a-z]+\))?\s+)?(?:r#)?([a-z_][a-z0-9_]*)\s*:")
+ANY_STRUCT = re.compile(r"struct\s+(\w+)(?:<[^>]*>)?\s*\{(.*?)\n\}", re.S)
+PUB_FIELD = re.compile(r"^\s*pub\s+(?:r#)?([a-z_][a-z0-9_]*)\s*:", re.M)
 NOT_IN_JSON = re.compile(r"\bskip\b|\bskip_serializing\b(?!_if)|\bskip_deserializing\b|\bflatten\b")
 
 
@@ -190,15 +197,78 @@ def python_name(field_name: str, conventions: dict[str, str]) -> str:
     return field_name
 
 
-def entry_kind(entry: object) -> tuple[str, str]:
-    """An entry's kind and value: ("python", name), ("none", why) or ("gap", what)."""
-    if isinstance(entry, str):
+def entry_kind(entry: object, counterpart: str = "python") -> tuple[str, str]:
+    """An entry's kind and value: (`counterpart`, name), ("none", why) or ("gap", what)."""
+    if isinstance(entry, str) and counterpart == "python":
         return "python", entry
     if isinstance(entry, dict) and len(entry) == 1:
         kind, value = next(iter(entry.items()))
-        if kind in ("python", "none", "gap") and isinstance(value, str) and value.strip():
+        if kind in (counterpart, "none", "gap") and isinstance(value, str) and value.strip():
             return kind, value
-    raise ValueError(f"expected a Python name or one of python/none/gap with text, got {entry!r}")
+    raise ValueError(f"expected one of {counterpart}/none/gap with text, got {entry!r}")
+
+
+def c_structs(sources: list[str]) -> dict[str, list[str]]:
+    """Every struct with named fields in the C ABI's source, JSON or not."""
+    structs: dict[str, list[str]] = {}
+    for source in sources:
+        for name, body in ANY_STRUCT.findall(without_tests(source)):
+            fields = [match.group(1) for line in body.split("\n") if (match := FIELD.match(line))]
+            structs.setdefault(name, fields)
+    return structs
+
+
+def core_struct(root: Path, spec: str) -> tuple[list[str] | None, str]:
+    """The public fields of the core type `crate::Type`, or None and why."""
+    crate, _, name = spec.partition("::")
+    sources = sorted((root / crate / "src").rglob("*.rs"))
+    if not sources:
+        return None, f"no crate {crate}"
+    found = []
+    for path in sources:
+        source = without_tests(path.read_text())
+        for match in re.finditer(rf"\bpub\s+struct\s+{re.escape(name)}\b(?:<[^>]*>)?\s*\{{", source):
+            body = source[match.end(): block_end(source, match.end() - 1)]
+            found.append(PUB_FIELD.findall(body))
+    if len(found) != 1:
+        return None, f"{len(found)} definitions of pub struct {name} in {crate}"
+    return found[0], ""
+
+
+def check_core(report: Report, manifest: dict, root: Path, structs: dict[str, list[str]]) -> None:
+    conventions = manifest.get("conventions", {}).get("suffixes", {})
+    for c_type, spec in sorted(manifest.get("rust", {}).items()):
+        entries = {key: value for key, value in spec.items() if key != "core"}
+        if c_type not in structs:
+            report.problem(f"[rust.{c_type}]: the C ABI has no struct {c_type}: remove the entry")
+            continue
+        core_fields, why = core_struct(root, spec.get("core", ""))
+        if core_fields is None:
+            report.problem(f"[rust.{c_type}] core = {spec.get('core')!r}: {why}")
+            continue
+        carried = {python_name(name, conventions) for name in structs[c_type]}
+        for name in core_fields:
+            present = python_name(name, conventions) in carried
+            if name not in entries:
+                if not present:
+                    report.problem(
+                        f"{spec['core']}.{name} does not reach the C ABI's {c_type}: add it there "
+                        f"(and to Python), or add {name} to [rust.{c_type}]"
+                    )
+                continue
+            try:
+                kind, value = entry_kind(entries[name], "c")
+            except ValueError as error:
+                report.problem(f"[rust.{c_type}] {name}: {error}")
+                continue
+            if kind == "c" and value not in structs[c_type]:
+                report.problem(f"[rust.{c_type}] {name} says {c_type}.{value} carries it, but {c_type} has no {value}")
+            elif kind != "c" and present:
+                report.problem(f"[rust.{c_type}] {name} says the C ABI lacks it, but {c_type} has it now: remove the entry")
+            elif kind == "gap":
+                report.gaps.append(f"{spec['core']}.{name} in C: {value}")
+        for name in sorted(entries.keys() - set(core_fields)):
+            report.problem(f"[rust.{c_type}] lists {name}, which {spec['core']} no longer has: remove it")
 
 
 def check_functions(report: Report, manifest: dict, exports: set[str], surface: PythonSurface) -> None:
@@ -341,6 +411,7 @@ def run(root: Path, base: str | None) -> Report:
     c_sources = [(root / path).read_text() for path in C_SOURCES]
     rust_sources = [path.read_text() for path in sorted((root / PY_SOURCES).glob("*.rs"))]
     surface = python_surface((root / STUB).read_text(), rust_sources)
+    check_core(report, manifest, root, c_structs(c_sources))
     check_functions(report, manifest, c_exports(c_sources), surface)
     check_fields(report, manifest, json_types(c_sources), surface)
     check_keywords(report, manifest, root, surface)
@@ -361,7 +432,8 @@ def main() -> int:
     if report.problems:
         print(f"{len(report.problems)} binding parity problem(s); see .github/binding-parity.toml", file=sys.stderr)
         return 1
-    print(f"binding parity check passed ({len(report.gaps)} known gaps in Python)")
+    in_c = sum(1 for gap in report.gaps if " in C: " in gap)
+    print(f"binding parity check passed ({in_c} known gaps in the C ABI, {len(report.gaps) - in_c} in Python)")
     return 0
 
 

@@ -80,9 +80,24 @@ fn summary(dict: &PyDict) {
 }
 """
 
+CORE = """
+/// What a video is filmed with.
+pub struct VideoOptions {
+    pub focus: Option<(f64, f64)>,
+    pub rotate_deg: f64,
+    pub framing: Framing,
+    pub watermark_size: f64,
+    hidden: usize,
+}
+"""
+
 MANIFEST = """
 [conventions]
 suffixes = { "_degrees" = "_deg" }
+
+[rust.VideoRequest]
+core = "seiza-parallax::VideoOptions"
+watermark_size = { none = "inside the watermark object" }
 
 [functions]
 seiza_parallax_prepare_json = "ParallaxVideo"
@@ -99,7 +114,7 @@ ignore = ["starless", "tour"]
 
 
 class BindingParityTests(unittest.TestCase):
-    def tree(self, *, c=C_SOURCE, stub=STUB, python=PY_SOURCE, manifest=MANIFEST):
+    def tree(self, *, c=C_SOURCE, stub=STUB, python=PY_SOURCE, manifest=MANIFEST, core=CORE):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         root = Path(directory.name)
@@ -109,6 +124,7 @@ class BindingParityTests(unittest.TestCase):
             "seiza-py/seiza.pyi": textwrap.dedent(stub),
             "seiza-py/src/parallax.rs": python,
             ".github/binding-parity.toml": manifest,
+            "seiza-parallax/src/pipeline.rs": core,
         }
         for path, text in files.items():
             (root / path).parent.mkdir(parents=True, exist_ok=True)
@@ -172,6 +188,26 @@ class BindingParityTests(unittest.TestCase):
     def test_nested_match_arms_are_not_keywords(self):
         body = MODULE.rust_function(PY_SOURCE, "options")
         self.assertEqual(MODULE.outer_arms(body), {"focus", "rotate_deg", "framing", "tour"})
+
+    def test_a_new_core_field_must_reach_the_c_abi(self):
+        core = CORE.replace("    pub framing: Framing,", "    pub framing: Framing,\n    pub crop: Option<(usize, usize, usize, usize)>,")
+        [problem] = self.problems(core=core)
+        self.assertIn("seiza-parallax::VideoOptions.crop does not reach the C ABI's VideoRequest", problem)
+
+    def test_core_entries_must_stay_true(self):
+        # A C name the C type lacks.
+        manifest = MANIFEST.replace('watermark_size = { none = "inside the watermark object" }', 'watermark_size = { c = "watermark" }')
+        [problem] = self.problems(manifest=manifest)
+        self.assertIn("VideoRequest has no watermark", problem)
+        # An exemption the C type has outgrown.
+        c = C_SOURCE.replace("    framing: Option<String>,", "    framing: Option<String>,\n    watermark_size: Option<f64>,")
+        problems = self.problems(c=c)
+        self.assertTrue(any("the C ABI lacks it, but VideoRequest has it now" in p for p in problems), problems)
+        # A field the core type no longer has, and a core type that is gone.
+        [problem] = self.problems(core=CORE.replace("    pub watermark_size: f64,\n", ""))
+        self.assertIn("lists watermark_size, which seiza-parallax::VideoOptions no longer has", problem)
+        [problem] = self.problems(core="")
+        self.assertIn("0 definitions of pub struct VideoOptions", problem)
 
     def test_one_binding_alone_needs_a_reason(self):
         report = MODULE.Report()

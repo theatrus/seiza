@@ -1,12 +1,14 @@
-# Binding parity: the C ABI (seiza-cabi) against Python (seiza-py, as
-# seiza-py/seiza.pyi declares it). .github/scripts/check_binding_parity.py
-# holds the two to this file in CI; AGENTS.md says how to keep them in step.
+# Binding parity: the core crates against the C ABI (seiza-cabi), and the C
+# ABI against Python (seiza-py, as seiza-py/seiza.pyi declares it).
+# .github/scripts/check_binding_parity.py holds all three to this file in CI;
+# AGENTS.md says how to keep them in step.
 #
-# A string or { python = "..." } names the Python counterpart; { none = "..." }
-# says Python has none by design; { gap = "..." } records something Python
+# A string or { python = "..." } gives the Python counterpart, and
+# { c = "..." } the C field that carries a core field; { none = "..." } says
+# there is none by design; { gap = "..." } records something the binding
 # should offer but does not yet. Gaps pass, and are the work left.
 
-# C field names are compared with Python's after these suffixes change.
+# The checks compare field names after changing these suffixes.
 [conventions]
 suffixes = { "_arcsec_per_pixel" = "_arcsec_px", "_parsecs" = "_pc", "_degrees" = "_deg", "_magnitude" = "_mag" }
 
@@ -16,6 +18,230 @@ suffixes = { "_arcsec_per_pixel" = "_arcsec_px", "_parsecs" = "_pc", "_degrees" 
 source = "seiza-py/src/parallax.rs"
 function = "options"
 ignore = ["starless", "stars", "wcs", "progress", "cancel"]
+
+# The core type each C type carries. Every public field of the core type
+# must reach the C type: under its own name (after the conventions above),
+# under the C name given here ({ c = "..." }), or with a reason it does not
+# ({ none = "..." }, or { gap = "..." } for a field the C ABI should carry).
+
+
+# parallax
+[rust.SceneRequest]
+core = "seiza-parallax::SceneOptions"
+
+[rust.VideoRequest]
+core = "seiza-parallax::VideoOptions"
+image_shaped_size = { c = "size" }
+watermark_image = { c = "watermark" }
+watermark_corner = { c = "watermark" }
+watermark_size = { c = "watermark" }
+watermark_opacity = { c = "watermark" }
+
+[rust.StopRequest]
+core = "seiza-parallax::TourStop"
+
+[rust.AutoTourRequest]
+core = "seiza-parallax::AutoTour"
+framing = { none = "the C ABI takes the framing from the video (VideoRequest.framing) or a scene plan's settings (ScenePlanRequest.framing)" }
+
+[rust.PlaneRequest]
+core = "seiza-parallax::DepthPlane"
+
+[rust.DistanceOverrideRequest]
+core = "seiza-parallax::DistanceOverride"
+
+[rust.LabelRequest]
+core = "seiza-parallax::CustomLabel"
+
+[rust.SummaryResponse]
+core = "seiza-parallax::Summary"
+
+[rust.FitResponse]
+core = "seiza-parallax::FitSummary"
+
+[rust.StopFitResponse]
+core = "seiza-parallax::StopFit"
+
+[rust.PlaneResponse]
+core = "seiza-parallax::PlaneSummary"
+
+[rust.PlannedStopResponse]
+core = "seiza-parallax::TourStop"
+card = { none = "a plan never sets a card; the caller adds one" }
+
+[rust.PlannedTourResponse]
+core = "seiza-parallax::PlannedTour"
+stops = { c = "tour" }
+
+
+# solving
+[rust.WcsRequest]
+core = "seiza-core::Wcs"
+
+[rust.WcsResponse]
+core = "seiza-core::Wcs"
+
+[rust.SipRequest]
+core = "seiza-core::Sip"
+
+[rust.SipResponse]
+core = "seiza-core::Sip"
+
+[rust.ObjectOutlineResponse]
+core = "seiza::ObjectGeometry"
+id = { c = "geometry_id" }
+data = { c = "contours" }
+method = { gap = "how the outline was made" }
+evidence = { gap = "what the outline rests on" }
+
+[rust.ObjectContourResponse]
+core = "seiza::ObjectContour"
+vertices = { c = "points" }
+
+
+# calibration and stacking
+[rust.SeizaFrameSignature]
+core = "seiza-calibration::FrameSignature"
+
+[rust.FrameProbeSignature]
+core = "seiza-calibration::FrameSignature"
+
+[rust.SeizaMatchTolerances]
+core = "seiza-calibration::MatchTolerances"
+
+[rust.CalibrationPlanTolerancesRequest]
+core = "seiza-calibration::MatchTolerances"
+
+[rust.FrameCalibrationStateResponse]
+core = "seiza-stacking::FrameCalibrationState"
+
+[rust.FrameProbeResponse]
+core = "seiza-stacking::FrameMetadata"
+
+[rust.LiveStackReferenceResponse]
+core = "seiza-stacking::FrameMetadata"
+
+[rust.MasterBuildRequest]
+core = "seiza-stacking::MasterBuildOptions"
+cancel = { none = "the C call takes a cancel signal as an argument" }
+progress = { none = "the C call takes a progress callback as an argument" }
+flat_star_masking = { gap = "masking stars out of sky flats" }
+dark_level_screening = { gap = "screening darks whose level does not match" }
+
+[rust.MasterRejectionRequest]
+core = "seiza-stacking::MasterRejectionOptions"
+
+[rust.MasterBuildRejectionResponse]
+core = "seiza-stacking::MasterRejectionOptions"
+
+[rust.MasterBuildResponse]
+core = "seiza-stacking::MasterFrame"
+image = { none = "the C call writes the master to its output file" }
+exposure_seconds = { c = "output_exposure_seconds" }
+bayer = { none = "written to the output file's headers" }
+masked_samples = { gap = "the samples flat star masking set aside" }
+flat_star_masking = { gap = "whether flat star masking ran, and how much it masked" }
+input_statistics = { c = "inputs" }
+rejection_method = { gap = "which rejection the build used" }
+reference_headers = { none = "written to the output file's headers" }
+
+[rust.MasterBuildInputResponse]
+core = "seiza-stacking::MasterInputStatistics"
+masked_samples = { gap = "the samples flat star masking set aside, per input" }
+
+[rust.MasterBuildSkippedInputResponse]
+core = "seiza-stacking::SkippedInput"
+
+[rust.CalibrationPlanExclusionResponse]
+core = "seiza-stacking::SkippedInput"
+
+[rust.StackReferenceScoreResponse]
+core = "seiza-stacking::ReferenceScore"
+
+[rust.StackPipelineResponse]
+core = "seiza-stacking::PipelineReport"
+
+[rust.StackDiagnosticsResponse]
+core = "seiza-stacking::FrameDiagnostics"
+transform = { none = "flattened into scale, rotation_degrees, translation_x and translation_y" }
+mapping = { gap = "the lens mapping a frame was registered through" }
+noise = { gap = "a frame's measured noise" }
+weight = { gap = "a frame's integration weight" }
+
+[rust.RegionResponse]
+core = "seiza-stacking::ReferenceRegion"
+
+[rust.SeizaSnrSample]
+core = "seiza-stacking::SnrSample"
+
+[rust.ChannelCoverageResponse]
+core = "seiza-stacking::ChannelCoverage"
+
+[rust.CropReportResponse]
+core = "seiza-stacking::CropReport"
+grid_width = { c = "grid" }
+grid_height = { c = "grid" }
+
+[rust.ColorFitJson]
+core = "seiza-stacking::ColorFit"
+
+[rust.ColorCalibrationJson]
+core = "seiza-stacking::ColorCalibration"
+measurements = { gap = "the per-star measurements behind the fit" }
+
+[rust.ColorCalibrationOptionsJson]
+core = "seiza-stacking::ColorCalibrationOptions"
+fit_bp_rp_range = { gap = "the colour range of the stars the fit uses" }
+rejection_sigma = { gap = "the outlier rejection of the fit" }
+minimum_stars = { gap = "the fewest stars a fit accepts" }
+calibrator_max_g = { gap = "the faintest Gaia magnitude used as a calibrator" }
+
+[rust.GaiaSourceJson]
+core = "seiza-sources::GaiaPhotometry"
+
+[rust.RcAstroSchemaResponse]
+core = "seiza-stacking::ExternalToolSchema"
+
+[rust.RcAstroParameterResponse]
+core = "seiza-stacking::ExternalToolParameter"
+kind = { c = "type" }
+
+[rust.RcAstroProcessRequest]
+core = "seiza-stacking::ExternalToolRequest"
+
+[rust.RcAstroProcessResponse]
+core = "seiza-stacking::ExternalToolRun"
+
+
+# background, deconvolution, stars
+[rust.DeconvolutionRenderRequest]
+core = "seiza-deconvolution::DeconvolutionConfig"
+
+[rust.DetectedStarJson]
+core = "seiza-stars::HocusFocusStar"
+position = { c = "x" }
+psf_model = { none = "flattened into eccentricity, theta and r_squared" }
+
+[rust.StarDetectResponse]
+core = "seiza-stars::HocusFocusDetectionResult"
+
+[rust.TiltCellJson]
+core = "seiza-stars::CellStats"
+
+[rust.TiltCornerJson]
+core = "seiza-stars::CornerHfr"
+
+[rust.TiltSummaryJson]
+core = "seiza-stars::TiltSummary"
+
+[rust.TriangleCenterJson]
+core = "seiza-stars::TriangleCenterStats"
+
+[rust.TriangleSectorJson]
+core = "seiza-stars::TriangleSectorStats"
+
+[rust.TriangleTiltJson]
+core = "seiza-stars::TriangleTiltSummary"
 
 # Every exported C function (`extern "C" fn seiza_*`, outside `mod tests`): the Python
 # name that does the same job, as seiza.pyi declares it — a top-level function or class
@@ -116,7 +342,7 @@ seiza_drizzle_result_free = { none = "frees a C handle; Python's garbage collect
 
 # --- calibration ------------------------------------------------------------
 seiza_probe_frame_json = { gap = "not in Python yet: reading a FITS or XISF header into a FrameSignature, with the frame's role, master flag and calibration state" }
-seiza_calibration_plan_json = { gap = "not in Python yet: a planner that applies the whole matching policy to frame records and names why each candidate was left out; Python has only the single tests and coherent_subset" }
+seiza_calibration_plan_json = { gap = "not in Python yet: a planner that applies the whole matching policy to frame records and says why each candidate was left out; Python has only the single tests and coherent_subset" }
 # One request covers bias, dark and flat; Python has build_bias, build_dark and build_flat.
 seiza_calibration_build_master_json = "build_flat"
 seiza_frame_signature_init = "FrameSignature.__init__"
@@ -237,7 +463,7 @@ CatalogSetupProgressResponse = { none = "download progress for the apps' setup s
 # parallax: Python splits with rc_astro_split_stars and solves before ParallaxVideo
 "SceneRequest.rc_astro_executable" = { python = "executable" }
 "SceneRequest.rc_astro_host" = { python = "host" }
-"SceneRequest.catalog_directory" = { none = "Python names each catalog itself: objects=, star_distances=, and StarCatalog.open and BlindIndex.open for the solve" }
+"SceneRequest.catalog_directory" = { none = "Python takes each catalog's path itself: objects=, star_distances=, and StarCatalog.open and BlindIndex.open for the solve" }
 "SceneRequest.minimum_scale_arcsec_per_pixel" = { python = "min_scale_arcsec_px" }
 "SceneRequest.maximum_scale_arcsec_per_pixel" = { python = "max_scale_arcsec_px" }
 "LabelRequest.radius" = { none = "Python takes a label as an (x, y, radius, text) tuple" }
