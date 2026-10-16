@@ -1,0 +1,312 @@
+# Binding parity: the C ABI (seiza-cabi) against Python (seiza-py, as
+# seiza-py/seiza.pyi declares it). .github/scripts/check_binding_parity.py
+# holds the two to this file in CI; AGENTS.md says how to keep them in step.
+#
+# A string or { python = "..." } names the Python counterpart; { none = "..." }
+# says Python has none by design; { gap = "..." } records something Python
+# should offer but does not yet. Gaps pass, and are the work left.
+
+# C field names are compared with Python's after these suffixes change.
+[conventions]
+suffixes = { "_arcsec_per_pixel" = "_arcsec_px", "_parsecs" = "_pc", "_degrees" = "_deg", "_magnitude" = "_mag" }
+
+# Python calls that read keyword arguments themselves (**options): the
+# keywords seiza.pyi declares must be the ones the Rust function accepts.
+[keywords."ParallaxVideo.__init__"]
+source = "seiza-py/src/parallax.rs"
+function = "options"
+ignore = ["starless", "stars", "wcs", "progress", "cancel"]
+
+# Every exported C function (`extern "C" fn seiza_*`, outside `mod tests`): the Python
+# name that does the same job, as seiza.pyi declares it — a top-level function or class
+# ("solve_blind", "ParallaxVideo") or "Class.member" ("ParallaxVideo.reconfigure",
+# "LiveStacker.accepted_frames") — or why Python has none.
+[functions]
+
+# --- parallax ---------------------------------------------------------------
+# Python's ParallaxVideo takes the split images and a Wcs; it does not split or
+# solve, so a Python caller runs rc_astro_split_stars and a solve first.
+seiza_parallax_prepare_json = "ParallaxVideo"
+seiza_parallax_reconfigure_json = "ParallaxVideo.reconfigure"
+seiza_parallax_summary_json = "ParallaxVideo.summary"
+seiza_parallax_plan_tour_json = "plan_parallax_tour"
+seiza_parallax_plan_scene_tour_json = "ParallaxVideo.plan_tour"
+seiza_parallax_dust_map = "ParallaxVideo.dust_map"
+seiza_parallax_with_dust_map = "ParallaxVideo.with_dust_map"
+seiza_parallax_with_dust_map_json = "ParallaxVideo.with_dust_map"
+seiza_parallax_write_dust_map_json = "ParallaxVideo.write_dust_map"
+seiza_parallax_render_frame = "ParallaxVideo.frame"
+seiza_parallax_render_frames = "ParallaxVideo.render"
+seiza_parallax_write_video_json = "ParallaxVideo.write"
+seiza_parallax_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
+
+# --- solving ----------------------------------------------------------------
+# The C call reads the file, detects stars and reads its own prior; a Python
+# caller detects, calls read_solve_prior, then solve_with_prior.
+seiza_solve_image_json = "solve_with_prior"
+seiza_solve_image_with_limits_json = "solve_with_prior"
+
+# --- stacking ---------------------------------------------------------------
+seiza_live_stacker_create = "LiveStacker.from_array"
+seiza_live_stacker_open_fits = "LiveStacker.__init__"
+seiza_live_stacker_open_fits_with_reference_image = "LiveStacker.open_fits_with_reference_image"
+seiza_live_stacker_open_fits_with_reference_image_candidates = "LiveStacker.open_fits_with_reference_image_candidates"
+seiza_live_stacker_open_context = "LiveStacker.open_context"
+seiza_live_stacker_save_context = "LiveStacker.save_context"
+seiza_live_stacker_push_linear_json = "LiveStacker.push"
+seiza_live_stacker_push_fits_json = "LiveStacker.push_fits"
+seiza_live_stacker_push_fits_pipelined_json = "LiveStacker.push_fits_pipelined"
+seiza_live_stacker_compatible_calibration_json = "LiveStacker.compatible_calibration"
+seiza_live_stacker_validate_calibration = "LiveStacker.validate_calibration"
+seiza_live_stacker_match_tolerances = "LiveStacker.match_tolerances"
+seiza_live_stacker_set_match_tolerances = "LiveStacker.set_match_tolerances"
+seiza_live_stacker_set_calibration_fits = { gap = "not in Python yet: replacing a live stack's masters part way through; Python fixes them when the stack opens" }
+seiza_live_stacker_state_json = { gap = "not in Python yet: a live stack's state (configuration fingerprint, input mode, input paths, reference frame and image, why it cannot be reintegrated); Python has only accepted_frames, rejected_frames and reference_integrated" }
+seiza_live_stacker_accepted_frames = "LiveStacker.accepted_frames"
+seiza_live_stacker_rejected_frames = "LiveStacker.rejected_frames"
+seiza_live_stacker_width = { none = "C handle accessor; Python reads it from LiveStacker.snapshot().width" }
+seiza_live_stacker_height = { none = "C handle accessor; Python reads it from LiveStacker.snapshot().height" }
+seiza_live_stacker_channels = { none = "C handle accessor; Python reads it from LiveStacker.snapshot().channels" }
+seiza_live_stacker_data_length = { none = "C buffer length; numpy arrays carry their own size" }
+# The C calls borrow the live buffers without a copy; Python copies them into a
+# StackSnapshot and reads image, coverage and rejected_samples there.
+seiza_live_stacker_mean = "LiveStacker.snapshot"
+seiza_live_stacker_coverage = "LiveStacker.snapshot"
+seiza_live_stacker_rejected_samples = "LiveStacker.snapshot"
+seiza_live_stacker_snapshot = "LiveStacker.snapshot"
+# A lighter copy (mean and counts only) for writing on a worker thread.
+seiza_live_stacker_export_snapshot = "LiveStacker.snapshot"
+seiza_live_stacker_retain_frames_for_reintegration = "LiveStacker.retain_frames_for_reintegration"
+# Python's reintegrate and reintegrate_drizzled take neither cancel= nor a
+# progress callback, which the C calls do.
+seiza_live_stacker_reintegrate = "LiveStacker.reintegrate"
+seiza_live_stacker_reintegrate_drizzled = "LiveStacker.reintegrate_drizzled"
+seiza_live_stacker_measure_depth = "LiveStacker.measure_depth"
+seiza_checkpoint_depths = "checkpoint_depths"
+seiza_live_stacker_finish = "LiveStacker.finish"
+seiza_live_stacker_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
+seiza_stack_choose_reference_json = "choose_reference"
+
+seiza_stack_snapshot_width = "StackSnapshot.width"
+seiza_stack_snapshot_height = "StackSnapshot.height"
+seiza_stack_snapshot_channels = "StackSnapshot.channels"
+seiza_stack_snapshot_data_length = { none = "C buffer length; numpy arrays carry their own size" }
+seiza_stack_snapshot_accepted_frames = "StackSnapshot.accepted_frames"
+seiza_stack_snapshot_rejected_frames = "StackSnapshot.rejected_frames"
+seiza_stack_snapshot_image = "StackSnapshot.image"
+seiza_stack_snapshot_variance = "StackSnapshot.variance"
+seiza_stack_snapshot_coverage = "StackSnapshot.coverage"
+seiza_stack_snapshot_rejected_samples = "StackSnapshot.rejected_samples"
+seiza_stack_snapshot_write_fits = { gap = "not in Python yet: StackSnapshot has no write_fits, so a mid-stack or reintegrated snapshot cannot be saved with the reference headers; only LiveStacker.finish writes" }
+seiza_stack_snapshot_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
+seiza_stack_export_snapshot_write_fits = { gap = "not in Python yet: writing the running stack to FITS without finishing it (see seiza_stack_snapshot_write_fits)" }
+seiza_stack_export_snapshot_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
+
+seiza_drizzle_result_width = "DrizzleResult.width"
+seiza_drizzle_result_height = "DrizzleResult.height"
+seiza_drizzle_result_channels = "DrizzleResult.channels"
+seiza_drizzle_result_scale = "DrizzleResult.scale"
+seiza_drizzle_result_data_length = { none = "C buffer length; numpy arrays carry their own size" }
+seiza_drizzle_result_accepted_frames = "DrizzleResult.accepted_frames"
+seiza_drizzle_result_rejected_frames = "DrizzleResult.rejected_frames"
+seiza_drizzle_result_image = "DrizzleResult.image"
+seiza_drizzle_result_weight = "DrizzleResult.weight"
+seiza_drizzle_result_write_fits = "DrizzleResult.write_fits"
+seiza_drizzle_result_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
+
+# --- calibration ------------------------------------------------------------
+seiza_probe_frame_json = { gap = "not in Python yet: reading a FITS or XISF header into a FrameSignature, with the frame's role, master flag and calibration state" }
+seiza_calibration_plan_json = { gap = "not in Python yet: a planner that applies the whole matching policy to frame records and names why each candidate was left out; Python has only the single tests and coherent_subset" }
+# One request covers bias, dark and flat; Python has build_bias, build_dark and build_flat.
+seiza_calibration_build_master_json = "build_flat"
+seiza_frame_signature_init = "FrameSignature.__init__"
+seiza_match_tolerances_default = "MatchTolerances.__init__"
+seiza_calibration_sensor_matches = "sensor_matches"
+seiza_calibration_optics_match = "optics_match"
+# The C call asks both questions; Python asks exposure_matches and temperature_matches apart.
+seiza_calibration_dark_matches = "exposure_matches"
+seiza_calibration_describe_sensor_mismatch = "describe_sensor_mismatch"
+seiza_calibration_describe_optics_mismatch = "describe_optics_mismatch"
+seiza_calibration_rotation_matches = "rotation_matches"
+seiza_calibration_fit_flat_pedestal = "fit_flat_pedestal"
+
+# --- background and deconvolution -------------------------------------------
+seiza_background_fit = "fit_background"
+seiza_background_model_width = "BackgroundModel.width"
+seiza_background_model_height = "BackgroundModel.height"
+seiza_background_model_channels = "BackgroundModel.channels"
+seiza_background_model_data_length = { none = "C buffer length; numpy arrays carry their own size" }
+seiza_background_model_diagnostics_json = "BackgroundModel.diagnostics"
+seiza_background_model_render = "BackgroundModel.render"
+seiza_background_model_correct_in_place = "BackgroundModel.correct"
+seiza_background_model_correct_in_place_with_strength = "BackgroundModel.correct"
+seiza_background_model_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
+seiza_deconvolve_in_place = "deconvolve"
+
+# --- rendering (display images for the desktop viewers) ---------------------
+seiza_rendered_image_open = { none = "renders a file to an 8-bit display image for the desktop viewers; Python stretches arrays with stretch()" }
+seiza_rendered_image_open_with_rgb_stretch = { none = "renders a file to an 8-bit display image for the desktop viewers; Python stretches arrays with stretch()" }
+seiza_rendered_image_open_with_stretch_config = { none = "display render for the desktop viewers; Python runs fit_background, deconvolve and stretch on arrays" }
+seiza_rendered_image_width = { none = "accessor of a display image for the desktop viewers" }
+seiza_rendered_image_height = { none = "accessor of a display image for the desktop viewers" }
+seiza_rendered_image_rgba = { none = "accessor of a display image for the desktop viewers" }
+seiza_rendered_image_rgba_length = { none = "accessor of a display image for the desktop viewers" }
+seiza_rendered_image_bgra = { none = "BGRA bytes for Direct2D and WinUI in the Windows app" }
+seiza_rendered_image_bgra_length = { none = "BGRA bytes for Direct2D and WinUI in the Windows app" }
+seiza_rendered_image_metadata_json = { none = "accessor of a display image for the desktop viewers" }
+seiza_rendered_image_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
+seiza_rendered_image16_open = { none = "16-bit display render for the apps' image export; Python's stretch() returns float32 to write as the caller likes" }
+seiza_rendered_image16_open_with_rgb_stretch = { none = "16-bit display render for the apps' image export; Python's stretch() returns float32 to write as the caller likes" }
+seiza_rendered_image16_open_with_stretch_config = { none = "16-bit display render for the apps' image export; Python runs fit_background, deconvolve and stretch on arrays" }
+seiza_rendered_image16_width = { none = "accessor of a display image for the desktop viewers" }
+seiza_rendered_image16_height = { none = "accessor of a display image for the desktop viewers" }
+seiza_rendered_image16_rgba = { none = "accessor of a display image for the desktop viewers" }
+seiza_rendered_image16_rgba_length = { none = "accessor of a display image for the desktop viewers" }
+seiza_rendered_image16_metadata_json = { none = "accessor of a display image for the desktop viewers" }
+seiza_rendered_image16_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
+seiza_live_stacker_render_preview = { none = "live display preview for the desktop viewers; Python stretches snapshot().image itself" }
+
+# --- catalogs ---------------------------------------------------------------
+seiza_catalog_setup = "fetch_catalogs"
+seiza_catalog_status_json = { none = "catalog readiness for the apps' setup screen; Python's StarCatalog.open and BlindIndex.open find the files or raise FileNotFoundError" }
+
+# --- stars ------------------------------------------------------------------
+seiza_stars_detect_luma_u16_json = "detect_measured_stars"
+seiza_stars_detect_path_json = { gap = "not in Python yet: measuring the stars in a FITS or XISF file by path, with focal length and pixel size from its headers; detect_measured_stars needs a uint16 array" }
+
+# --- color ------------------------------------------------------------------
+seiza_gaia_photometry_cone_json = "gaia_photometry_cone"
+seiza_color_calibrate_json = "calibrate_color"
+seiza_color_calibration_apply = "ColorCalibration.apply"
+seiza_color_crop_report_json = "crop_report"
+
+# --- rc-astro ---------------------------------------------------------------
+seiza_rc_astro_locate = "rc_astro_locate"
+seiza_rc_astro_tool_schema_json = "rc_astro_tool_schema"
+seiza_rc_astro_process_file_json = "rc_astro_process_file"
+
+# --- cancel, memory and version ---------------------------------------------
+seiza_cancel_signal_create = { none = "C cancel handle; Python takes a cancel= callable" }
+seiza_cancel_signal_cancel = { none = "C cancel handle; Python takes a cancel= callable" }
+seiza_cancel_signal_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
+seiza_string_free = { none = "frees a string the C ABI returned; Python manages its own memory" }
+seiza_core_version = "__version__"
+
+# Whole JSON types with no Python counterpart (field checks skipped).
+[types]
+
+# parallax
+AskedUsed = { none = "Python's summary gives each fit setting as an (asked, used) tuple" }
+DustResponse = { none = "Python's summary gives dust_transmission as a (median, thickest) tuple" }
+
+# solving
+CatalogStarPointResponse = { none = "overlay points for the desktop viewers; Python uses StarCatalog.cone_search and Wcs.world_to_pixel" }
+ObjectPointResponse = { gap = "not in Python yet: catalogued objects in a solved field (see SolveResponse.object_positions)" }
+ObjectOutlineResponse = { gap = "not in Python yet: outlines of catalogued objects in a solved field (see SolveResponse.object_positions)" }
+ObjectContourResponse = { gap = "not in Python yet: outlines of catalogued objects in a solved field (see SolveResponse.object_positions)" }
+
+# stacking
+CompatibleCalibrationResponse = { none = "LiveStacker.compatible_calibration returns a (kept, dropped) tuple" }
+LiveStackReferenceResponse = { gap = "not in Python yet: a live stack's reference frame, with its role, master flag, signature and calibration state" }
+LivePreviewMetadata = { none = "metadata of the live display preview for the desktop viewers" }
+
+# calibration
+FrameProbeResponse = { gap = "not in Python yet: the header probe of seiza_probe_frame_json" }
+FrameCalibrationStateResponse = { gap = "not in Python yet: a frame's calibration state read from its header" }
+CalibrationPlanRecord = { gap = "not in Python yet: the calibration planner of seiza_calibration_plan_json" }
+CalibrationPlanRequest = { gap = "not in Python yet: the calibration planner of seiza_calibration_plan_json" }
+CalibrationPlanDependenciesRequest = { gap = "not in Python yet: the calibration planner of seiza_calibration_plan_json" }
+CalibrationPlanResponse = { gap = "not in Python yet: the calibration planner of seiza_calibration_plan_json" }
+ImpulseFilterRequest = { gap = "not in Python yet: defect suppression for flat masters (see MasterBuildRequest.defect_suppression)" }
+
+# rendering
+ProcessedRenderRequest = { none = "render request of the desktop viewers' display; Python runs fit_background, deconvolve and stretch itself" }
+
+# catalogs
+CatalogStatusResponse = { none = "catalog readiness for the apps' setup screen" }
+CatalogComponentStatus = { none = "catalog readiness for the apps' setup screen" }
+CatalogSetupProgressResponse = { none = "download progress for the apps' setup screen" }
+
+# Single fields of JSON types whose (snake_case Rust) name has no Python name:
+# "Type.field", or "*.field" for the same field in every type.
+[fields]
+
+"*.schema_version" = { none = "versions the JSON for C hosts; Python returns objects" }
+"*.core_version" = { python = "__version__" }
+
+# parallax: Python splits with rc_astro_split_stars and solves before ParallaxVideo
+"SceneRequest.rc_astro_executable" = { python = "executable" }
+"SceneRequest.rc_astro_host" = { python = "host" }
+"SceneRequest.catalog_directory" = { none = "Python names each catalog itself: objects=, star_distances=, and StarCatalog.open and BlindIndex.open for the solve" }
+"SceneRequest.minimum_scale_arcsec_per_pixel" = { python = "min_scale_arcsec_px" }
+"SceneRequest.maximum_scale_arcsec_per_pixel" = { python = "max_scale_arcsec_px" }
+"LabelRequest.radius" = { none = "Python takes a label as an (x, y, radius, text) tuple" }
+
+# WCS
+"WcsRequest.sip" = { python = "sip_coefficients" }
+"WcsRequest.pixel_origin" = { none = "lets a C host send a 1-based FITS crpix; Python's Wcs always counts from 0 (from_header converts)" }
+"WcsResponse.sip" = { python = "sip_coefficients" }
+"WcsResponse.pixel_origin" = { none = "C-only marker that crpix counts from 0; Python's Wcs.crpix always does" }
+"SipRequest.order" = { python = "sip_order" }
+"SipRequest.a" = { python = "sip_coefficients" }
+"SipRequest.b" = { python = "sip_coefficients" }
+"SipRequest.ap" = { python = "sip_coefficients" }
+"SipResponse.order" = { python = "sip_order" }
+"SipResponse.a" = { python = "sip_coefficients" }
+"SipResponse.b" = { python = "sip_coefficients" }
+"SipResponse.ap" = { python = "sip_coefficients" }
+
+# solving
+"SolveResponse.center_ra_degrees" = { python = "ra" }
+"SolveResponse.center_dec_degrees" = { python = "dec" }
+"SolveResponse.solved_from" = { python = "source" }
+"SolveResponse.elapsed_milliseconds" = { none = "the call's own timing, for the apps; Python callers time the call themselves" }
+"SolveResponse.detected_star_positions" = { none = "overlay points for the desktop viewers; Python callers hold the stars they passed" }
+"SolveResponse.catalog_star_positions" = { none = "overlay points for the desktop viewers; Python uses StarCatalog.cone_search and Wcs.world_to_pixel" }
+"SolveResponse.object_positions" = { gap = "not in Python yet: the catalogued objects in a solved field (deep-sky objects, named stars, transients, minor bodies), though fetch_catalogs downloads their data" }
+"SolveResponse.object_catalog_error" = { gap = "not in Python yet: goes with object_positions" }
+"SolveResponse.capture_time" = { gap = "not in Python yet: an image's capture time from its FITS or XISF header (read_photo_metadata reads photos only); minor bodies need it" }
+"SolveResponse.overlay_availability" = { none = "overlay layer state for the desktop viewers" }
+"SolveResponse.overlay_unavailable_reasons" = { none = "overlay layer state for the desktop viewers" }
+"SolveResponse.overlay_counts" = { none = "overlay layer state for the desktop viewers" }
+
+# stacking
+"ChannelReferenceSelectionResponse.channel_reference_index" = { python = "index" }
+"ChannelReferenceSelectionResponse.channel_reference_path" = { python = "path" }
+"LiveStackStateResponse.configuration_fingerprint" = { gap = "not in Python yet: the fingerprint of a stack's options, masters and input mode, to check a resumed stack" }
+"LiveStackStateResponse.input_mode" = { gap = "not in Python yet: whether a stack calibrates files or takes prepared arrays" }
+"LiveStackStateResponse.input_paths" = { gap = "not in Python yet: the files a live stack has used" }
+"LiveStackStateResponse.reference_frame" = { gap = "not in Python yet: a live stack's reference frame (see LiveStackReferenceResponse)" }
+"LiveStackStateResponse.reference_image_path" = { gap = "not in Python yet: the reference image a stack is aligned to" }
+"LiveStackStateResponse.reintegration_unavailable" = { gap = "not in Python yet: why a stack cannot be reintegrated, before trying" }
+
+# calibration masters
+"MasterBuildRequest.inputs" = { python = "images" }
+"MasterBuildRequest.defect_suppression" = { gap = "not in Python yet: build_flat cannot suppress hot and cold pixels in a flat master" }
+"MasterRejectionRequest.low_sigma" = { python = "sigma_low" }
+"MasterRejectionRequest.high_sigma" = { python = "sigma_high" }
+"MasterBuildRejectionResponse.low_sigma" = { python = "sigma_low" }
+"MasterBuildRejectionResponse.high_sigma" = { python = "sigma_high" }
+"MasterBuildResponse.requested_frames" = { none = "the caller knows len(images)" }
+"MasterBuildResponse.defect_pixels_replaced" = { gap = "not in Python yet: goes with MasterBuildRequest.defect_suppression" }
+"MasterBuildResponse.output_exposure_seconds" = { python = "exposure_seconds" }
+"MasterBuildResponse.inputs" = { python = "input_statistics" }
+"MasterBuildResponse.skipped_inputs" = { gap = "not in Python yet: MasterResult does not name the inputs the build set aside or why, so input_statistics cannot be matched to paths when it skips any" }
+
+# background, deconvolution and rendering
+"BackgroundRenderRequest.config" = { none = "Python passes the BackgroundConfig fields to fit_background as keyword arguments" }
+"DeconvolutionRenderRequest.psf_fwhm_pixels" = { python = "psf_fwhm" }
+
+# stars
+"StarDetectOptions.triangle_angle_degrees" = { python = "angle_degrees" }
+"StarDetectOptions.target_star_count" = { gap = "not in Python yet: detect_measured_stars cannot retry with looser settings until it finds a target number of stars" }
+"StarDetectResponse.major_axis_orientations_normalized" = { none = "C marker that theta is normalized over [0, pi); MeasuredStar.theta always is" }
+"StarDetectResponse.cells" = { python = "tilt_analysis" }
+"StarDetectResponse.tilt" = { python = "tilt_analysis" }
+"StarDetectResponse.triangle_tilt" = { python = "triangle_tilt_analysis" }
+
+# color
+"ColorCalibrationOptionsJson.observation_epoch" = { python = "epoch" }
+"ChannelCoverageResponse.center_offset_x" = { python = "center_offset" }
+"ChannelCoverageResponse.center_offset_y" = { python = "center_offset" }
+"CropReportResponse.off_center_limit_pixels" = { gap = "not in Python yet: crop_report does not give the distance past which a channel counts as off centre" }

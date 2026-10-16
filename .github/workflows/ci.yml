@@ -70,6 +70,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2.9.2
       - name: Test release dependency-chain guard
         run: python3 .github/scripts/test_check_release_version_chain.py
+      - name: Test the binding parity check
+        run: python3 .github/scripts/test_check_binding_parity.py
+      # The C ABI and Python offer the same things; see AGENTS.md.
+      - name: Check C ABI and Python parity
+        run: >-
+          python3 .github/scripts/check_binding_parity.py
+          ${{ github.event_name == 'pull_request' && format('--base {0}', github.event.pull_request.base.sha) || '' }}
       - name: Verify release dependency version chain
         if: github.event_name == 'pull_request'
         run: python3 .github/scripts/check_release_version_chain.py "${{ github.event.pull_request.base.sha }}"

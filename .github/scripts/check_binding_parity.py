@@ -1,0 +1,369 @@
+#!/usr/bin/env python3
+"""Keep the C ABI (seiza-cabi) and the Python bindings (seiza-py) in step.
+
+Against `.github/binding-parity.toml`, this checks that:
+
+1. every exported C function maps to a Python name that `seiza-py/seiza.pyi`
+   declares, or says why Python has none;
+2. every field of the C ABI's JSON types (its serde structs) has a Python
+   name, after the naming conventions, or an entry saying why not;
+3. each Python call driven by keyword arguments accepts exactly the
+   keywords `seiza.pyi` declares for it;
+4. with `--base SHA`, a change to one binding's source comes with a change
+   to the other's, or a commit says why not with a `Binding-parity:` line.
+
+Entries are `python` (Python has it under that name), `none` (Python has no
+counterpart by design) or `gap` (Python lacks it and should not). Gaps pass,
+and are counted, so the list of them is the work left.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import re
+import subprocess
+import sys
+import tomllib
+from dataclasses import dataclass, field
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+MANIFEST = Path(".github/binding-parity.toml")
+C_SOURCES = ("seiza-cabi/src/lib.rs", "seiza-cabi/src/parallax.rs")
+STUB = Path("seiza-py/seiza.pyi")
+PY_SOURCES = Path("seiza-py/src")
+TRAILER = "Binding-parity:"
+
+EXPORT = re.compile(r'extern\s+"C"\s+fn\s+(seiza_\w+)')
+SERDE_STRUCT = re.compile(
+    r"#\[derive\(([^)]*)\)\]\s*((?:#\[[^\]]*\]\s*)*)"
+    r"(?:pub(?:\([a-z]+\))?\s+)?struct\s+(\w+)(?:<[^>]*>)?\s*\{(.*?)\n\}",
+    re.S,
+)
+FIELD = re.compile(r"\s*(?:pub(?:\([a-z]+\))?\s+)?(?:r#)?([a-z_][a-z0-9_]*)\s*:")
+NOT_IN_JSON = re.compile(r"\bskip\b|\bskip_serializing\b(?!_if)|\bskip_deserializing\b|\bflatten\b")
+
+
+@dataclass
+class Report:
+    problems: list[str] = field(default_factory=list)
+    gaps: list[str] = field(default_factory=list)
+
+    def problem(self, message: str) -> None:
+        self.problems.append(message)
+
+
+def block_end(source: str, start: int) -> int:
+    """The index just past the `}` closing the block whose `{` is at
+    `start`, stepping over strings, characters and comments."""
+    depth, at = 0, start
+    while at < len(source):
+        if source.startswith("//", at):
+            at = source.find("\n", at)
+            at = len(source) if at < 0 else at
+            continue
+        if source.startswith("/*", at):
+            at = source.find("*/", at) + 2
+            continue
+        raw = re.match(r'r(#*)"', source[at:])
+        if raw and (at == 0 or not (source[at - 1].isalnum() or source[at - 1] == "_")):
+            closing = '"' + raw.group(1)
+            at = source.find(closing, at + raw.end()) + len(closing)
+            continue
+        character = source[at]
+        if character == '"':
+            at += 1
+            while at < len(source) and source[at] != '"':
+                at += 2 if source[at] == "\\" else 1
+            at += 1
+            continue
+        if character == "'":
+            literal = re.match(r"'(?:\\.|[^\\'])'", source[at:])
+            if literal:
+                at += literal.end()
+                continue
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return at + 1
+        at += 1
+    return len(source)
+
+
+def without_tests(source: str) -> str:
+    """Rust source without its `#[cfg(test)]` modules, wherever they sit."""
+    while True:
+        match = re.search(r"#\[cfg\(test\)\]\s*(?:pub(?:\([a-z]+\))?\s+)?mod\s+\w+\s*\{", source)
+        if match is None:
+            return source
+        source = source[: match.start()] + source[block_end(source, match.end() - 1):]
+
+
+def c_exports(sources: list[str]) -> set[str]:
+    return {name for source in sources for name in EXPORT.findall(without_tests(source))}
+
+
+def json_types(sources: list[str]) -> dict[str, list[str]]:
+    """Each serde struct's JSON fields, by their Rust (snake_case) names."""
+    types: dict[str, list[str]] = {}
+    for source in sources:
+        for derive, _attrs, name, body in SERDE_STRUCT.findall(without_tests(source)):
+            if "Serialize" not in derive and "Deserialize" not in derive:
+                continue
+            fields, attributes = [], ""
+            for line in body.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith("#["):
+                    attributes += stripped
+                    continue
+                if stripped.startswith("//") or not stripped:
+                    continue
+                match = FIELD.match(line)
+                if match and not NOT_IN_JSON.search(attributes):
+                    fields.append(match.group(1))
+                attributes = ""
+            types[name] = fields
+    return types
+
+
+@dataclass
+class PythonSurface:
+    """What Python declares and uses: qualified names for functions, and
+    every name a field may go by."""
+
+    qualified: set[str]
+    names: set[str]
+    signatures: dict[str, list[str]]
+
+
+def python_surface(stub: str, rust_sources: list[str]) -> PythonSurface:
+    tree = ast.parse(stub)
+    qualified: set[str] = set()
+    names: set[str] = set()
+    signatures: dict[str, list[str]] = {}
+
+    def parameters(function: ast.FunctionDef) -> list[str]:
+        arguments = function.args
+        every = arguments.posonlyargs + arguments.args + arguments.kwonlyargs
+        return [argument.arg for argument in every if argument.arg not in ("self", "cls")]
+
+    for node in tree.body:
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            qualified.add(node.target.id)
+        elif isinstance(node, ast.Assign):
+            qualified |= {target.id for target in node.targets if isinstance(target, ast.Name)}
+        elif isinstance(node, ast.FunctionDef):
+            qualified.add(node.name)
+            signatures[node.name] = parameters(node)
+        elif isinstance(node, ast.ClassDef):
+            qualified.add(node.name)
+            for item in node.body:
+                if isinstance(item, ast.FunctionDef):
+                    qualified.add(f"{node.name}.{item.name}")
+                    signatures[f"{node.name}.{item.name}"] = parameters(item)
+                elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+                    qualified.add(f"{node.name}.{item.target.id}")
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.arg):
+            names.add(node.arg)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+    for source in rust_sources:
+        names |= set(re.findall(r'set_item\(\s*"([A-Za-z_0-9]+)"', source))
+        names |= set(re.findall(r'"([a-z_0-9]+)"\s*(?:\|\s*"[a-z_0-9]+"\s*)*=>', source))
+        names |= set(re.findall(r'#\[pyo3\(get[^\]]*\)\]\s*(?:pub\s+)?([a-z_0-9]+)', source))
+        names |= set(re.findall(r'name\s*=\s*"([A-Za-z_0-9]+)"', source))
+    return PythonSurface(qualified, names, signatures)
+
+
+def python_name(field_name: str, conventions: dict[str, str]) -> str:
+    """A C field's name as Python would spell it."""
+    for c_suffix, python_suffix in conventions.items():
+        if field_name.endswith(c_suffix):
+            return field_name[: -len(c_suffix)] + python_suffix
+    return field_name
+
+
+def entry_kind(entry: object) -> tuple[str, str]:
+    """An entry's kind and value: ("python", name), ("none", why) or ("gap", what)."""
+    if isinstance(entry, str):
+        return "python", entry
+    if isinstance(entry, dict) and len(entry) == 1:
+        kind, value = next(iter(entry.items()))
+        if kind in ("python", "none", "gap") and isinstance(value, str) and value.strip():
+            return kind, value
+    raise ValueError(f"expected a Python name or one of python/none/gap with text, got {entry!r}")
+
+
+def check_functions(report: Report, manifest: dict, exports: set[str], surface: PythonSurface) -> None:
+    entries = manifest.get("functions", {})
+    for name in sorted(exports - entries.keys()):
+        report.problem(
+            f"{name} is exported but not in [functions]: map it to the Python name that does "
+            f"the same (and add that to seiza-py), or say why Python has none"
+        )
+    for name in sorted(entries.keys() - exports):
+        report.problem(f"[functions] lists {name}, which the C ABI no longer exports: remove it")
+    for name in sorted(entries.keys() & exports):
+        try:
+            kind, value = entry_kind(entries[name])
+        except ValueError as error:
+            report.problem(f"[functions] {name}: {error}")
+            continue
+        if kind == "python" and value not in surface.qualified:
+            report.problem(f"[functions] {name} maps to {value}, which seiza.pyi does not declare")
+        elif kind == "gap":
+            report.gaps.append(f"{name}: {value}")
+
+
+def check_fields(report: Report, manifest: dict, types: dict[str, list[str]], surface: PythonSurface) -> None:
+    conventions = manifest.get("conventions", {}).get("suffixes", {})
+    whole = manifest.get("types", {})
+    fields = manifest.get("fields", {})
+    used: set[str] = set()
+    for type_name in sorted(whole):
+        if type_name not in types:
+            report.problem(f"[types] lists {type_name}, which is no longer a JSON type: remove it")
+            continue
+        try:
+            kind, value = entry_kind(whole[type_name])
+        except ValueError as error:
+            report.problem(f"[types] {type_name}: {error}")
+            continue
+        if kind == "python":
+            report.problem(f"[types] {type_name}: whole types take none or gap, not a Python name")
+        elif kind == "gap":
+            report.gaps.append(f"{type_name}: {value}")
+    for type_name, names in sorted(types.items()):
+        if type_name in whole:
+            continue
+        for name in names:
+            key = f"{type_name}.{name}"
+            entry_key = key if key in fields else f"*.{name}" if f"*.{name}" in fields else None
+            present = name in surface.names or python_name(name, conventions) in surface.names
+            if entry_key is None:
+                if not present:
+                    report.problem(
+                        f"{key} has no Python name: add it to seiza-py (spelt "
+                        f"{python_name(name, conventions)}), or add \"{key}\" to [fields]"
+                    )
+                continue
+            used.add(entry_key)
+            try:
+                kind, value = entry_kind(fields[entry_key])
+            except ValueError as error:
+                report.problem(f"[fields] {entry_key}: {error}")
+                continue
+            if kind == "python":
+                if value not in surface.names:
+                    report.problem(f"[fields] {entry_key} maps to {value}, which Python does not use")
+            elif present and not entry_key.startswith("*."):
+                report.problem(f"[fields] {entry_key} says Python lacks it, but Python has it now: remove the entry")
+            elif kind == "gap" and not present:
+                report.gaps.append(f"{key}: {value}")
+    for key in sorted(fields.keys() - used):
+        report.problem(f"[fields] lists {key}, which no JSON type has: remove it")
+
+
+def rust_function(source: str, name: str) -> str:
+    """The text of top-level Rust function `name`, to the next item."""
+    start = re.search(rf"^(?:pub(?:\([a-z]+\))?\s+)?fn {re.escape(name)}\b", source, re.M)
+    if start is None:
+        return ""
+    end = re.search(r"^(?:pub(?:\([a-z]+\))?\s+)?(?:fn|struct|enum|impl|const|static|#\[)", source[start.end():], re.M)
+    return source[start.start(): start.end() + (end.start() if end else len(source))]
+
+
+def outer_arms(body: str) -> set[str]:
+    """The string patterns of the first `match` in `body` that has any, at
+    its own indentation: arms of matches nested inside them are left out."""
+    arms = re.findall(r'^(\s*)"([a-z_0-9]+)"\s*=>', body, re.M)
+    if not arms:
+        return set()
+    indent = arms[0][0]
+    return {name for spaces, name in arms if spaces == indent}
+
+
+def check_keywords(report: Report, manifest: dict, root: Path, surface: PythonSurface) -> None:
+    for qualified, spec in sorted(manifest.get("keywords", {}).items()):
+        if qualified not in surface.signatures:
+            report.problem(f"[keywords] {qualified} is not a function seiza.pyi declares")
+            continue
+        ignored = set(spec.get("ignore", []))
+        declared = set(surface.signatures[qualified]) - ignored
+        body = rust_function((root / spec["source"]).read_text(), spec["function"])
+        if not body:
+            report.problem(f"[keywords] {qualified}: no fn {spec['function']} in {spec['source']}")
+            continue
+        accepted = outer_arms(body) - ignored
+        for name in sorted(declared - accepted):
+            report.problem(f"{qualified} declares {name} in seiza.pyi, but {spec['function']}() does not accept it")
+        for name in sorted(accepted - declared):
+            report.problem(f"{spec['function']}() accepts {name}, but seiza.pyi does not declare it on {qualified}")
+
+
+def binding_sides(paths: list[str]) -> tuple[bool, bool]:
+    """Whether `paths` change the C ABI's source, and Python's."""
+    c_side = any(path.startswith("seiza-cabi/src/") for path in paths)
+    python_side = any(path.startswith("seiza-py/src/") or path == str(STUB) for path in paths)
+    return c_side, python_side
+
+
+def check_both_sides(report: Report, paths: list[str], messages: str) -> None:
+    c_side, python_side = binding_sides(paths)
+    if c_side == python_side:
+        return
+    if re.search(rf"^{re.escape(TRAILER)}\s*\S", messages, re.M):
+        return
+    changed, unchanged = ("the C ABI", "Python") if c_side else ("Python", "the C ABI")
+    report.problem(
+        f"this change touches {changed}'s source but not {unchanged}'s. Make the same change "
+        f"there (see .github/binding-parity.toml for each function's twin), or add a line "
+        f"'{TRAILER} <why the other binding needs nothing>' to a commit message"
+    )
+
+
+def git(root: Path, *arguments: str) -> str:
+    return subprocess.run(
+        ["git", *arguments], cwd=root, check=True, capture_output=True, text=True
+    ).stdout
+
+
+def run(root: Path, base: str | None) -> Report:
+    report = Report()
+    manifest = tomllib.loads((root / MANIFEST).read_text())
+    c_sources = [(root / path).read_text() for path in C_SOURCES]
+    rust_sources = [path.read_text() for path in sorted((root / PY_SOURCES).glob("*.rs"))]
+    surface = python_surface((root / STUB).read_text(), rust_sources)
+    check_functions(report, manifest, c_exports(c_sources), surface)
+    check_fields(report, manifest, json_types(c_sources), surface)
+    check_keywords(report, manifest, root, surface)
+    if base:
+        paths = git(root, "diff", "--name-only", f"{base}...HEAD").split()
+        messages = git(root, "log", "--format=%B", f"{base}..HEAD")
+        check_both_sides(report, paths, messages)
+    return report
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--base", help="also require both bindings to change together since this commit")
+    arguments = parser.parse_args()
+    report = run(REPO_ROOT, arguments.base)
+    for problem in report.problems:
+        print(f"binding parity: {problem}", file=sys.stderr)
+    if report.problems:
+        print(f"{len(report.problems)} binding parity problem(s); see .github/binding-parity.toml", file=sys.stderr)
+        return 1
+    print(f"binding parity check passed ({len(report.gaps)} known gaps in Python)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
