@@ -209,6 +209,34 @@ exposes the **superset** of what both apps need.
   divides one out of a caller-owned light in place at a pixel offset. The host
   shows that the dip stays fixed on the detector first; these calls do not say
   what it is.
+- **Constellation figures** — `seiza_constellation_figures_json` returns every
+  stick figure (its star pairs and label positions) with the 697 stars its
+  lines use, for a host that draws figures its own way, and
+  `seiza_constellations_project_json` projects them into a solved image as
+  pixel polylines clipped to it, with a label position for each. The figures
+  are the Constellation Lines dataset (Marc van der Sluys, CC BY 4.0):
+  anything that shows them must carry the `attribution` both calls return.
+- **Flat sessions and their dust** — a flat set reduces to one response:
+  `seiza_flat_bin_frame` bins each flat (`seiza_flat_bin_factor` gives the
+  factor) and `seiza_flat_build_response_json` combines them into the
+  caller's buffer. `seiza_flat_compare_json` compares two sessions'
+  responses (the broad change, the dust, and the spots that came, went or
+  moved); `seiza_flat_change_map` makes the change between them, which
+  `seiza_flat_apply_change_map` divides out of a light shot before it, or
+  multiplies into one shot after. `seiza_flat_lights_background` combines a
+  few lights' sky, and `seiza_flat_fit_change_json` says which side of a
+  change they were shot on, or `seiza_flat_choose_response_json` which of
+  several responses they follow; `seiza_flat_combine_verdicts_json` merges
+  a session's filters' verdicts. For the dust itself,
+  `seiza_dust_find_session_json` stacks a session's flats and counts each
+  feature across them, `seiza_dust_frame_json` checks one flat against that
+  map, `seiza_dust_find_json` reads one plane, `seiza_dust_find_changes_json`
+  compares two sessions' dust, and `seiza_dust_match_features_json` pairs
+  two lists of features. Planes are caller-owned `float` buffers (several of
+  one size laid end to end); results are the core's own JSON, which it also
+  caches, so their keys are snake_case; options are `DustOptions` JSON, any
+  field left out taking its default. `seiza_flat_encode_plane` and
+  `seiza_flat_decode_plane` keep planes compactly in a host's cache.
 - **Stack-depth analysis** — `seiza_live_stacker_measure_depth` measures the
   borrowed live accumulator without a snapshot, and `seiza_checkpoint_depths`
   returns the doubling ladder at which a host should sample a finite batch.

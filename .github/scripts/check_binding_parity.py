@@ -5,9 +5,10 @@ Against `.github/binding-parity.toml`, this checks that:
 
 0. every public field of a core type the C ABI carries (a `[rust.<C type>]`
    entry: `seiza-parallax::VideoOptions` for `VideoRequest`) reaches the C
-   type, and every function a core crate exports from its root, with every
-   public method of the objects hosts hold (`[core_functions] objects`), is
-   called by the C ABI; or an entry says why not;
+   type, and every function a core crate exports from its root or a public
+   module, with every public method of the objects hosts hold
+   (`[core_functions] objects`), is called by the C ABI; or an entry says
+   why not;
 
 1. every exported C function maps to a Python name that `seiza-py/seiza.pyi`
    declares, or says why Python has none; and every Python function,
@@ -268,6 +269,37 @@ def crate_functions(root: Path, crate: str) -> list[str]:
     return sorted(names)
 
 
+def module_functions(root: Path, crate: str) -> list[str]:
+    """The functions a core crate's public modules hold: `module::name` for
+    each `pub fn` in a module reached through `pub mod` declarations from
+    lib.rs. A public module's functions are as public as the root's."""
+    found: list[str] = []
+
+    def module_file(directory: Path, name: str) -> Path | None:
+        for candidate in (directory / f"{name}.rs", directory / name / "mod.rs"):
+            if candidate.exists():
+                return candidate
+        return None
+
+    def walk(path: list[str], file: Path) -> None:
+        source = without_tests(file.read_text())
+        if path:
+            found.extend(
+                "::".join(path + [name])
+                for name in re.findall(r"^pub\s+(?:const\s+)?(?:async\s+)?fn\s+(\w+)", source, re.M)
+            )
+        directory = file.parent if file.name in ("lib.rs", "mod.rs") else file.parent / file.stem
+        for name in re.findall(r"^pub\s+mod\s+(\w+)\s*;", source, re.M):
+            child = module_file(directory, name)
+            if child is not None:
+                walk(path + [name], child)
+
+    lib = root / crate / "src" / "lib.rs"
+    if lib.exists():
+        walk([], lib)
+    return sorted(found)
+
+
 def object_methods(root: Path, spec: str) -> tuple[list[str] | None, str]:
     """The public methods of core type `crate::Type`, from its inherent impls."""
     crate, _, name = spec.partition("::")
@@ -293,8 +325,13 @@ def check_core_functions(report: Report, manifest: dict, root: Path, c_source: s
         crate = lib.parent.parent.name
         if crate in BINDING_CRATES:
             continue
-        for name in crate_functions(root, crate):
+        at_root = crate_functions(root, crate)
+        for name in at_root:
             wanted[f"{crate}::{name}"] = rf"(?<![\w.]){re.escape(name)}\s*(?:::<[^>]*>)?\("
+        for path in module_functions(root, crate):
+            name = path.rsplit("::", 1)[1]
+            if name not in at_root:
+                wanted[f"{crate}::{path}"] = rf"(?<![\w.]){re.escape(name)}\s*(?:::<[^>]*>)?\("
     for spec in config.get("objects", []):
         methods, why = object_methods(root, spec)
         if methods is None:
@@ -309,8 +346,11 @@ def check_core_functions(report: Report, manifest: dict, root: Path, c_source: s
             aliases.setdefault(name, set()).add(alias)
     used: set[str] = set()
     for qualified, pattern in sorted(wanted.items()):
-        crate_wide = qualified.split("::", 1)[0] + "::*"
-        key = qualified if qualified in entries else crate_wide if crate_wide in entries else None
+        # The entry for this function, or for the nearest module or crate
+        # holding it: "seiza-imgproc::blur::*", then "seiza-imgproc::*".
+        parts = qualified.split("::")
+        candidates = [qualified] + ["::".join(parts[:end]) + "::*" for end in range(len(parts) - 1, 0, -1)]
+        key = next((candidate for candidate in candidates if candidate in entries), None)
         name = qualified.rsplit("::", 1)[1]
         called = re.search(pattern, c_source) is not None or any(
             re.search(rf"(?<![\w.]){re.escape(alias)}\s*\(", c_source) for alias in aliases.get(name, ())
@@ -333,7 +373,7 @@ def check_core_functions(report: Report, manifest: dict, root: Path, c_source: s
         elif called and key == qualified:
             report.problem(f"[core_functions] {key} says the C ABI does not call it, but it does now: remove the entry")
     for key in sorted(entries.keys() - used):
-        report.problem(f"[core_functions] lists {key}, which no core crate exports: remove it")
+        report.problem(f"[core_functions] lists {key}, which no core crate or public module exports: remove it")
 
 
 def check_core(report: Report, manifest: dict, root: Path, structs: dict[str, list[str]]) -> None:

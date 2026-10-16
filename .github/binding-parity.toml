@@ -346,6 +346,38 @@ objects = [
     "seiza-stacking::ColorCalibration",
 ]
 
+# Public modules' functions that are building blocks, or that the bindings
+# reach through a larger call.
+"seiza::blind::*" = { none = "blind solving; the C ABI solves through solve_with_prior, which calls it" }
+"seiza::solve::solve_with_limits" = { none = "hinted solving; the C ABI solves through solve_with_prior, which calls it" }
+"seiza::catalog::*" = { none = "catalog arithmetic for the solver, field objects and parallax" }
+"seiza::constellations::project_figures" = { none = "project, which both bindings call, wraps it with the attribution" }
+"seiza::constellations::line_stars" = { none = "dataset, which both bindings call, carries every line star" }
+"seiza::constellations::figure" = { none = "a lookup in the figures dataset carries" }
+"seiza::constellations::line_star" = { none = "a lookup in the stars dataset carries" }
+"seiza::constellations::constellation_name" = { none = "a lookup in the figures dataset carries" }
+"seiza::constellations::separation_deg" = { none = "angular arithmetic for the figures' labels" }
+"seiza::constellations::parse_lines_csv" = { none = "parses the embedded figure data" }
+"seiza::constellations::parse_line_stars_tsv" = { none = "parses the embedded star data" }
+"seiza::data_paths::*" = { none = "finding installed catalog files; C hosts pass catalog paths, and the CLI looks them up" }
+"seiza::field_objects::*" = { none = "steps inside field_objects, which both bindings call" }
+"seiza::minor_bodies::julian_date" = { none = "date arithmetic inside field_objects" }
+"seiza::objects::predicted_prominence" = { none = "used by parallax labels and tours" }
+"seiza::star_ids::normalize_star_name" = { none = "used inside catalog lookups" }
+"seiza-download::bundle::*" = { none = "download internals behind seiza_catalog_setup" }
+"seiza-image-io::raster::*" = { none = "reached through seiza_image_io::open and the photo metadata call" }
+"seiza-imgproc::*" = { none = "image-processing primitives inside the other crates; Python offers some for its callers (gaussian_blur and the rest)" }
+"seiza-parallax::light::*" = { none = "display conversions inside rendering" }
+"seiza-parallax::tour::*" = { none = "the tour planner's steps; plan_tour reaches them" }
+"seiza-stars::debug::*" = { none = "diagnostic switches for development" }
+"seiza-stars::nina_star_detection::*" = { none = "a NINA-compatible detection variant; hosts measure stars through MeasurementOptions" }
+"seiza-stars::psf_fitting::*" = { none = "PSF fitting steps inside star measurement" }
+"seiza-calibration::flat_response::metric::compare" = { none = "compare_with with the default options; both bindings call compare_with" }
+"seiza-calibration::flat_response::metric::map_at" = { none = "one point of a change map; apply_change_map applies a whole map" }
+"seiza-calibration::flat_response::metric::sampled_median" = { none = "a step inside build_response and background" }
+"seiza-calibration::flat_response::metric::star_mask" = { none = "a step inside compare and find_dust" }
+"seiza-calibration::flat_response::metric::star_mask_grown" = { none = "a step inside compare and find_dust" }
+
 # Building blocks: whole crates the hosts reach through others.
 "seiza-xisf::*" = { none = "XISF reading and writing; hosts read and write files through seiza-image-io" }
 "seiza-fits::*" = { none = "FITS reading, writing, header editing and debayering; hosts read and write files through seiza-image-io, and the CLI edits headers" }
@@ -432,6 +464,29 @@ objects = [
 # ("solve_blind", "ParallaxVideo") or "Class.member" ("ParallaxVideo.reconfigure",
 # "LiveStacker.accepted_frames") — or why Python has none.
 [functions]
+
+# --- constellation figures --------------------------------------------------
+seiza_constellation_figures_json = "constellation_figures"
+seiza_constellations_project_json = "project_constellations"
+
+# --- flat sessions and their dust -------------------------------------------
+seiza_flat_bin_factor = "flat_bin_factor"
+seiza_flat_bin_frame = "flat_bin_frame"
+seiza_flat_build_response_json = "flat_build_response"
+seiza_flat_compare_json = "flat_compare"
+seiza_flat_change_map = "flat_change_map"
+seiza_flat_apply_change_map = "flat_apply_change_map"
+seiza_flat_lights_background = "flat_lights_background"
+seiza_flat_fit_change_json = "flat_fit_change"
+seiza_flat_combine_verdicts_json = "flat_combine_verdicts"
+seiza_flat_choose_response_json = "flat_choose_response"
+seiza_flat_encode_plane = "flat_encode_plane"
+seiza_flat_decode_plane = "flat_decode_plane"
+seiza_dust_find_json = "dust_find"
+seiza_dust_find_session_json = "dust_find_session"
+seiza_dust_frame_json = "dust_frame"
+seiza_dust_find_changes_json = "dust_find_changes"
+seiza_dust_match_features_json = "dust_match_features"
 
 # --- parallax ---------------------------------------------------------------
 # Python's ParallaxVideo takes the split images and a Wcs; it does not split or

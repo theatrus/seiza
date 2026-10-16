@@ -150,7 +150,7 @@ ignore = ["starless", "tour"]
 
 
 class BindingParityTests(unittest.TestCase):
-    def tree(self, *, c=C_SOURCE, stub=STUB, python=PY_SOURCE, manifest=MANIFEST, core=CORE, core_lib=CORE_LIB):
+    def tree(self, *, c=C_SOURCE, stub=STUB, python=PY_SOURCE, manifest=MANIFEST, core=CORE, core_lib=CORE_LIB, extra=None):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         root = Path(directory.name)
@@ -163,6 +163,7 @@ class BindingParityTests(unittest.TestCase):
             "seiza-parallax/src/pipeline.rs": core + CORE_OBJECT,
             "seiza-parallax/src/lib.rs": core_lib,
             "seiza-parallax/src/plan.rs": CORE_PLAN,
+            **(extra or {}),
         }
         for path, text in files.items():
             (root / path).parent.mkdir(parents=True, exist_ok=True)
@@ -282,6 +283,29 @@ class BindingParityTests(unittest.TestCase):
         problems = self.problems(manifest=manifest)
         self.assertTrue(any("ParallaxVideo: [functions] maps a C export to it now" in p for p in problems), problems)
         self.assertTrue(any("lists render_all, which seiza.pyi does not declare" in p for p in problems), problems)
+
+    def test_functions_in_public_modules_count_too(self):
+        # A public module's functions are as public as the root's: #289's
+        # session dust sat in `pub mod dust` and no binding reached it.
+        core_lib = CORE_LIB + "\npub mod dust;\nmod private;\n"
+        extra = {
+            "seiza-parallax/src/dust.rs": "pub mod session;\npub fn find_dust() {}\nfn helper() {}\npub fn render() {}\n",
+            "seiza-parallax/src/dust/session.rs": "pub fn find_session_dust() {}\n",
+            "seiza-parallax/src/private.rs": "pub fn hidden() {}\n",
+        }
+        root = self.tree(core_lib=core_lib, extra=extra)
+        self.assertEqual(
+            MODULE.module_functions(root, "seiza-parallax"),
+            ["dust::find_dust", "dust::render", "dust::session::find_session_dust"],
+        )
+        problems = MODULE.run(root, None).problems
+        self.assertEqual(len(problems), 2, problems)
+        self.assertIn("seiza-parallax::dust::find_dust is not called by the C ABI", problems[0])
+        self.assertIn("seiza-parallax::dust::session::find_session_dust is not called", problems[1])
+        # `render` is the root's function too, which C calls: checked once,
+        # under its root name. A module's entry covers its submodules.
+        manifest = MANIFEST.replace('[core_functions]\n', '[core_functions]\n"seiza-parallax::dust::*" = { none = "x" }\n', 1)
+        self.assertEqual(MODULE.run(self.tree(core_lib=core_lib, extra=extra, manifest=manifest), None).problems, [])
 
     def test_one_binding_alone_needs_a_reason(self):
         report = MODULE.Report()

@@ -1522,3 +1522,72 @@ def calibrate_color(
     neutralize_background: bool = True,
     calibrator_max_g: float | None = None,
 ) -> ColorCalibration: ...
+
+# Flat sessions and their dust. Planes are 2-D float32 arrays; results are
+# dicts of the core's own JSON, as the C ABI's seiza_flat_* and seiza_dust_*
+# calls return it; options are a dict of DustOptions fields.
+def flat_bin_factor(width: int, height: int, cfa: bool = False) -> int: ...
+def flat_bin_frame(image: npt.NDArray[np.float32], factor: int) -> npt.NDArray[np.float32]: ...
+def flat_build_response(
+    planes: Sequence[npt.NDArray[np.float32]], bin: int
+) -> dict[str, Any] | None: ...
+def flat_compare(
+    earlier: npt.NDArray[np.float32],
+    later: npt.NDArray[np.float32],
+    bin: int,
+    options: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None: ...
+def flat_change_map(
+    before: npt.NDArray[np.float32], after: npt.NDArray[np.float32]
+) -> npt.NDArray[np.float32] | None: ...
+def flat_apply_change_map(
+    image: npt.NDArray[np.float32], map: npt.NDArray[np.float32], bin: int, divide: bool
+) -> None: ...
+def flat_lights_background(
+    planes: Sequence[npt.NDArray[np.float32]], pedestal: float, bin: int
+) -> npt.NDArray[np.float32] | None: ...
+def flat_fit_change(
+    background: npt.NDArray[np.float32],
+    reference: npt.NDArray[np.float32],
+    map: npt.NDArray[np.float32],
+    reference_side: str,
+) -> dict[str, Any]: ...
+def flat_combine_verdicts(verdicts: Sequence[str]) -> str: ...
+def flat_choose_response(
+    background: npt.NDArray[np.float32],
+    candidates: Sequence[npt.NDArray[np.float32]],
+    alike: Sequence[tuple[int, int]] | None = None,
+) -> dict[str, Any]: ...
+def flat_encode_plane(plane: npt.NDArray[np.float32]) -> bytes: ...
+def flat_decode_plane(data: bytes) -> npt.NDArray[np.float32] | None: ...
+def dust_find(
+    plane: npt.NDArray[np.float32], bin: int, options: Mapping[str, Any] | None = None
+) -> dict[str, Any] | None: ...
+def dust_find_session(
+    planes: Sequence[npt.NDArray[np.float32]],
+    bin: int,
+    pedestal: float,
+    options: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None: ...
+def dust_frame(
+    frame: npt.NDArray[np.float32],
+    pedestal: float,
+    session: Mapping[str, Any],
+    options: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None: ...
+def dust_find_changes(
+    earlier: npt.NDArray[np.float32],
+    later: npt.NDArray[np.float32],
+    bin: int,
+    options: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None: ...
+def dust_match_features(
+    earlier: Sequence[Mapping[str, Any]],
+    later: Sequence[Mapping[str, Any]],
+    options: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]: ...
+
+# Constellation stick figures (Constellation Lines, Marc van der Sluys, CC BY
+# 4.0): anything that shows them must carry the returned "attribution".
+def constellation_figures() -> dict[str, Any]: ...
+def project_constellations(wcs: Wcs, width: int, height: int) -> dict[str, Any]: ...

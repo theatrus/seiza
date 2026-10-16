@@ -20,6 +20,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::OnceLock;
 
 use crate::Wcs;
+use serde::Serialize;
 
 /// Credit line the CC BY 4.0 licence of the line data requires: author,
 /// copyright notice, source and licence link.
@@ -134,7 +135,7 @@ pub fn constellation_name(abbr: &str) -> Option<&'static str> {
 }
 
 /// One star a figure line touches, at the embedded epoch.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct LineStar {
     /// Bright Star Catalogue (Harvard Revised) number.
     pub hr: u32,
@@ -149,7 +150,7 @@ pub struct LineStar {
 pub const LINE_STAR_EPOCH: f64 = 2025.5;
 
 /// One constellation's stick figure.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Constellation {
     /// IAU abbreviation, e.g. `Cas`.
     pub abbr: &'static str,
@@ -482,7 +483,7 @@ pub fn line_stars() -> impl Iterator<Item = &'static LineStar> {
 }
 
 /// A constellation figure projected into an image.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProjectedFigure {
     pub abbr: &'static str,
     pub name: &'static str,
@@ -554,6 +555,45 @@ pub fn project_figures(wcs: &Wcs, dimensions: (u32, u32)) -> Vec<ProjectedFigure
 
 /// Project one great-circle segment between two sky positions (degrees)
 /// into clipped pixel polylines; see [`project_figures`].
+/// Every figure with the stars its lines use and the attribution any
+/// display must carry: what a host keeps to draw figures its own way. The C
+/// ABI and Python both return it as JSON.
+#[derive(Debug, Clone, Serialize)]
+pub struct Dataset {
+    pub attribution: &'static str,
+    /// Julian epoch of the stars' positions.
+    pub epoch: f64,
+    pub figures: &'static [Constellation],
+    pub stars: Vec<LineStar>,
+}
+
+/// The embedded figures and their stars.
+pub fn dataset() -> Dataset {
+    Dataset {
+        attribution: ATTRIBUTION,
+        epoch: LINE_STAR_EPOCH,
+        figures: figures(),
+        stars: line_stars().copied().collect(),
+    }
+}
+
+/// The figures of a solved image, as pixel polylines clipped to it, with
+/// the attribution any display must carry.
+#[derive(Debug, Clone, Serialize)]
+pub struct Projection {
+    pub attribution: &'static str,
+    pub figures: Vec<ProjectedFigure>,
+}
+
+/// [`project_figures`] with the attribution: the figures of an image of
+/// `dimensions` through `wcs`.
+pub fn project(wcs: &Wcs, dimensions: (u32, u32)) -> Projection {
+    Projection {
+        attribution: ATTRIBUTION,
+        figures: project_figures(wcs, dimensions),
+    }
+}
+
 #[cfg(test)]
 fn project_segment(
     wcs: &Wcs,

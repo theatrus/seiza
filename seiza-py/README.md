@@ -810,6 +810,41 @@ The response is 1 where nothing is corrected and never gains more than
 `maximum_gain` (1.2). `apply_residual_flat_response` returns a corrected copy
 with the response's top-left corner at pixel `(x, y)`.
 
+### Flat sessions and their dust
+
+A flat set reduces to one response: its flats binned and combined. Two
+responses of one light path compare by their ratio, and the change between
+them carries a flat across, as when dust moved between two sessions. The
+same calls as the C ABI's `seiza_flat_*` and `seiza_dust_*`; planes are 2-D
+float32 arrays, and results are dicts of the core's own JSON:
+
+```python
+factor = seiza.flat_bin_factor(width, height)
+planes = [seiza.flat_bin_frame(flat - pedestal, factor) for flat in flats]
+response = seiza.flat_build_response(planes, factor)        # {"plane", "level", ...}
+comparison = seiza.flat_compare(earlier["plane"], later["plane"], factor)
+change = seiza.flat_change_map(earlier["plane"], later["plane"])
+seiza.flat_apply_change_map(light, change, factor, divide=True)   # in place
+
+session = seiza.dust_find_session(raw_planes, factor, pedestal)   # dust, counted per flat
+seiza.dust_frame(raw_planes[0], pedestal, session)                # one flat against it
+seiza.dust_find_changes(earlier["plane"], later["plane"], factor) # what came, went, moved
+```
+
+`flat_lights_background`, `flat_fit_change` and `flat_choose_response` weigh
+a few lights' own sky against a change or a set of candidate responses;
+`flat_encode_plane` and `flat_decode_plane` keep planes in a cache. Options
+are a dict of `DustOptions` fields, such as `{"edge_sigma": 3.0}`.
+
+### Constellation figures
+
+`project_constellations(wcs, width, height)` gives a solved image's
+constellation stick figures as pixel polylines clipped to it, with a label
+position for each; `constellation_figures()` gives every figure and the
+stars its lines use, for drawing them another way. The figures are the
+Constellation Lines dataset (Marc van der Sluys, CC BY 4.0): anything that
+shows them must carry the returned `attribution`.
+
 ## Image processing primitives
 
 OpenCV-compatible building blocks from `seiza-imgproc`, for detection
