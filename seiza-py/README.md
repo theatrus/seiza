@@ -713,7 +713,12 @@ the distances, `distance_focus`, star placement or dust, raise `ValueError`.
 `summary["fit"]` gives each zoom and pan as asked and as used, and each tour
 stop's dolly, after the camera was fitted to stay inside the image and to
 show little of the fill behind depth planes, and `inside`, false when some
-frames still show past the image's edge:
+frames still show past the image's edge. `motion_zoom` gives the peak extra
+magnification fitted during a transition when both endpoint views already fit;
+the endpoint lenses stay unchanged. Held spins can still increase their own
+stop's fitted zoom. For stops with `pull_back_to_whole_image=True`, pull-back
+centering uses overall zoom multiplied by the stop's zoom:
+
 
 ```python
 wide = video.reconfigure(size="4k", quality="high", rotate_deg=(0, -360))

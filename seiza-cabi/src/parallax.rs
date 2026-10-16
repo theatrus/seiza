@@ -509,6 +509,7 @@ impl From<(f64, f64)> for AskedUsed {
 #[serde(rename_all = "camelCase")]
 struct FitResponse {
     zoom: AskedUsed,
+    motion_zoom: AskedUsed,
     pan: AskedUsed,
     lead: AskedUsed,
     truck: AskedUsed,
@@ -528,6 +529,7 @@ impl From<&FitSummary> for FitResponse {
     fn from(fit: &FitSummary) -> Self {
         Self {
             zoom: fit.zoom.into(),
+            motion_zoom: fit.motion_zoom.into(),
             pan: fit.pan.into(),
             lead: fit.lead.into(),
             truck: fit.truck.into(),
@@ -1350,7 +1352,8 @@ pub unsafe extern "C" fn seiza_parallax_reconfigure_json(
 /// how fitting the camera to the
 /// image changed the framing asked for: `zoom`, `pan`, `lead` and `truck`
 /// for the single move and `stops[].zoom`, `stops[].pan` and
-/// `stops[].dolly` for a tour, each `{asked, used}`, and `inside`, false
+/// `stops[].dolly` for a tour, each `{asked, used}`. `motionZoom` is the
+/// peak extra zoom fitted between fixed tour endpoints. `inside` is false
 /// when some frames still show past the image's edge. Returns a string
 /// released with `seiza_string_free`, or null with `error_out` set.
 ///
@@ -2921,6 +2924,38 @@ mod tests {
         for video in [video, repainted, cleared, counted] {
             unsafe { seiza_parallax_free(video) };
         }
+    }
+
+    #[test]
+    fn transition_fit_is_reported_without_changing_endpoint_zooms() {
+        let directory = tempfile::tempdir().unwrap();
+        let request = self::request(
+            directory.path(),
+            r#"
+            "tourGlide": 0,
+            "tour": [{"hold": 1}, {"travel": 3, "hold": 1, "rotateDegrees": 180}]
+        "#,
+        );
+        let mut error = ptr::null_mut();
+        let video = unsafe {
+            seiza_parallax_prepare_json(
+                request.as_ptr(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(!video.is_null(), "{}", take_error(error));
+        let fit = summary(video)["fit"].clone();
+        assert_eq!(fit["inside"], true);
+        assert_eq!(fit["zoom"]["used"], 1.0);
+        assert_eq!(fit["motionZoom"]["asked"], 1.0);
+        assert!(fit["motionZoom"]["used"].as_f64().unwrap() > 1.0);
+        for stop in fit["stops"].as_array().unwrap() {
+            assert_eq!(stop["zoom"]["used"], 1.0);
+        }
+        unsafe { seiza_parallax_free(video) };
     }
 
     #[test]

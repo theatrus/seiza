@@ -168,12 +168,12 @@ impl TourStop {
     /// its displacement from the image centre to the room the requested
     /// magnification creates, so pulling back is continuous and does not
     /// depend on a catalogue target having an extent.
-    fn camera_focus(&self, centre: (f64, f64)) -> Option<(f64, f64)> {
+    fn camera_focus(&self, centre: (f64, f64), overall_zoom: f64) -> Option<(f64, f64)> {
         let target = self.focus?;
         if !self.pull_back_to_whole_image {
             return Some(target);
         }
-        let room = (1.0 - (1.0 - self.dolly) / self.zoom).clamp(0.0, 1.0);
+        let room = (1.0 - (1.0 - self.dolly) / (self.zoom * overall_zoom.max(1.0))).clamp(0.0, 1.0);
         if room == 0.0 {
             return None;
         }
@@ -820,6 +820,8 @@ impl ParallaxOptions {
 pub struct FitSummary {
     /// The first frame's zoom.
     pub zoom: (f64, f64),
+    /// Extra magnification during a tour transition, leaving its endpoints unchanged.
+    pub motion_zoom: (f64, f64),
     /// The single move's pan.
     pub pan: (f64, f64),
     /// How early the single move's sideways travel toward the focus comes,
@@ -1608,7 +1610,7 @@ impl Parallax {
                 .stops()
                 .iter()
                 .map(|stop| {
-                    let focus = stop.camera_focus(centre);
+                    let focus = stop.camera_focus(centre, video.zoom);
                     Stop {
                         focus: focus.unwrap_or(centre),
                         dolly: stop.dolly,
@@ -1666,6 +1668,7 @@ impl Parallax {
         let (shot, share) = asked.fitted_until(scene, stop).ok_or(Error::Stopped)?;
         let fit = FitSummary {
             zoom: (video.zoom, shot.zoom),
+            motion_zoom: (asked.motion_zoom, shot.motion_zoom),
             pan: (video.pan, shot.pan),
             lead: (1.0, shot.lead),
             truck: (video.truck, video.truck * share),
@@ -1900,6 +1903,13 @@ fn report_fit(fit: &FitSummary, shot: &Shot, report: &mut dyn FnMut(Event)) {
             )));
         }
         return;
+    }
+    if fit.motion_zoom.1 > fit.motion_zoom.0 * 1.001 && fit.inside {
+        report(Event::Note(&format!(
+            "zoomed in by up to {:.2} during the transition to keep its edges inside the image; \
+             the opening and closing magnification stay unchanged",
+            fit.motion_zoom.1
+        )));
     }
     // A stop flown less far zooms in to keep its plane's size; the rest of
     // its zoom keeps it inside the image.
@@ -4235,11 +4245,11 @@ mod tests {
             pull_back_to_whole_image: true,
             ..TourStop::default()
         };
-        assert_eq!(stop.camera_focus(centre), None);
+        assert_eq!(stop.camera_focus(centre, 1.0), None);
         let mut previous = centre;
         for dolly in [0.1, 0.2, 0.4, 0.6, 0.8] {
             stop.dolly = dolly;
-            let focus = stop.camera_focus(centre).unwrap();
+            let focus = stop.camera_focus(centre, 1.0).unwrap();
             assert!(focus.0 >= previous.0 && focus.1 <= previous.1);
             assert!(focus.0 <= target.0 && focus.1 >= target.1);
             previous = focus;
@@ -4247,13 +4257,27 @@ mod tests {
         assert_eq!(previous, target);
         stop.dolly = 0.0;
         stop.zoom = 0.5;
-        assert_eq!(stop.camera_focus(centre), None);
+        assert_eq!(stop.camera_focus(centre, 1.0), None);
         stop.zoom = 8.0;
-        assert_eq!(stop.camera_focus(centre), Some(target));
+        assert_eq!(stop.camera_focus(centre, 1.0), Some(target));
         assert_eq!(stop.focus, Some(target));
         stop.pull_back_to_whole_image = false;
         stop.zoom = 1.0;
-        assert_eq!(stop.camera_focus(centre), Some(target));
+        assert_eq!(stop.camera_focus(centre, 1.0), Some(target));
+    }
+
+    #[test]
+    fn pull_back_uses_the_combined_overall_and_stop_zoom() {
+        let centre = (159.5, 119.5);
+        let mut stop = TourStop {
+            focus: Some((280.0, 119.5)),
+            pull_back_to_whole_image: true,
+            ..TourStop::default()
+        };
+        let overall = stop.camera_focus(centre, 4.0);
+        assert!(overall.unwrap().0 > centre.0);
+        stop.zoom = 4.0;
+        assert_eq!(overall, stop.camera_focus(centre, 1.0));
     }
 
     #[test]

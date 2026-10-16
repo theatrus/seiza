@@ -2469,7 +2469,8 @@ SeizaParallax *seiza_parallax_reconfigure_json(const SeizaParallax *video,
  how fitting the camera to the
  image changed the framing asked for: `zoom`, `pan`, `lead` and `truck`
  for the single move and `stops[].zoom`, `stops[].pan` and
- `stops[].dolly` for a tour, each `{asked, used}`, and `inside`, false
+ `stops[].dolly` for a tour, each `{asked, used}`. `motionZoom` is the
+ peak extra zoom fitted between fixed tour endpoints. `inside` is false
  when some frames still show past the image's edge. Returns a string
  released with `seiza_string_free`, or null with `error_out` set.
 

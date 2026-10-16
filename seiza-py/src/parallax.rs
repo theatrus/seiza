@@ -1046,6 +1046,7 @@ impl PyParallaxVideo {
         dict.set_item("crop", self.video.crop())?;
         let fit = PyDict::new(py);
         fit.set_item("zoom", summary.fit.zoom)?;
+        fit.set_item("motion_zoom", summary.fit.motion_zoom)?;
         fit.set_item("pan", summary.fit.pan)?;
         fit.set_item("lead", summary.fit.lead)?;
         fit.set_item("truck", summary.fit.truck)?;
