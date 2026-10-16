@@ -715,13 +715,11 @@ pub(crate) fn run(args: ParallaxVideoArgs) -> Result<()> {
         write_layers(directory, parallax.scene())?;
     }
     if let Some(path) = &args.export_dust_map {
-        let Some(dust) = parallax.dust() else {
+        let (width, height) = parallax.source_size();
+        let Some(map) = parallax.source_dust_map(false, width, height) else {
             bail!("too few stars show to map the dust; give one with --dust-map to export it");
         };
-        let (width, height) = dust.size();
-        dust.to_map(width, height)
-            .save(path)
-            .map_err(anyhow::Error::msg)?;
+        map.save(path).map_err(anyhow::Error::msg)?;
         println!("wrote the dust map to {}", path.display());
     }
     if let Some(directory) = &args.export_planes {

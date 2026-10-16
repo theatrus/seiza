@@ -896,6 +896,7 @@ struct Prepared {
     /// The plate solution of the image as given, and the crop cut from it.
     source_wcs: Wcs,
     crop: Option<(usize, usize, usize, usize)>,
+    source_size: (usize, usize),
     image_size: (usize, usize),
     /// Galaxies lifted onto the far field.
     lifted: Vec<overlay::Lifted>,
@@ -972,6 +973,7 @@ impl Parallax {
     ) -> Result<Self, Error> {
         options.check()?;
         let (source_wcs, crop) = (wcs.clone(), options.scene.crop);
+        let source_size = (starless.width() as usize, starless.height() as usize);
         let cropped;
         let (starless, stars, wcs, options) = match options.scene.crop {
             Some(crop) => {
@@ -1028,7 +1030,7 @@ impl Parallax {
         let given_dust = scene_options
             .dust_map
             .as_ref()
-            .map(|map| Dust::from_map(map, width, height).map(Arc::new))
+            .map(|map| Dust::from_source_map(map, source_size, crop).map(Arc::new))
             .transpose()
             .map_err(Error::Invalid)?;
         let mut regions = Vec::new();
@@ -1421,6 +1423,7 @@ impl Parallax {
             wcs: wcs.clone(),
             source_wcs,
             crop,
+            source_size,
             image_size: (width, height),
             lifted,
             objects: scene_options.objects.clone(),
@@ -1451,6 +1454,7 @@ impl Parallax {
     /// painted over this one. Only the dust changes; the planes and sprites
     /// are shared, and this video is left as it was. A map gives dust even
     /// to a video prepared without it; `None` then leaves it without.
+    /// Maps span the original source image, even when only a crop is filmed.
     pub fn with_dust_map(
         &self,
         map: Option<&DustMap>,
@@ -1458,10 +1462,10 @@ impl Parallax {
         stop: &dyn Fn() -> bool,
     ) -> Result<Self, Error> {
         let prepared = &self.prepared;
-        let (width, height) = prepared.image_size;
         let dust = match map {
             Some(map) => Some(Arc::new(
-                Dust::from_map(map, width, height).map_err(Error::Invalid)?,
+                Dust::from_source_map(map, prepared.source_size, prepared.crop)
+                    .map_err(Error::Invalid)?,
             )),
             None => prepared.counted_dust.clone(),
         };
@@ -1482,6 +1486,7 @@ impl Parallax {
             wcs: prepared.wcs.clone(),
             source_wcs: prepared.source_wcs.clone(),
             crop: prepared.crop,
+            source_size: prepared.source_size,
             image_size: prepared.image_size,
             lifted: prepared.lifted.clone(),
             objects: prepared.objects.clone(),
@@ -1500,6 +1505,24 @@ impl Parallax {
     /// took its place: `None` when the dust is off or too few stars show.
     pub fn counted_dust(&self) -> Option<&Dust> {
         self.prepared.counted_dust.as_deref()
+    }
+
+    /// The original image's dimensions, before any crop.
+    pub fn source_size(&self) -> (usize, usize) {
+        self.prepared.source_size
+    }
+
+    /// Dust as a map over the original source image, at the requested size.
+    /// Set `counted` to read the star-count estimate rather than the dust in
+    /// use. Pixels outside the filmed crop are clear (no estimate exists).
+    /// This map can be painted and passed back to [`Self::with_dust_map`].
+    pub fn source_dust_map(&self, counted: bool, width: usize, height: usize) -> Option<DustMap> {
+        let dust = if counted {
+            self.counted_dust()
+        } else {
+            self.dust()
+        }?;
+        Some(dust.to_source_map(width, height, self.prepared.source_size, self.prepared.crop))
     }
 
     /// Plan a tour of the catalogued objects in the image as `auto` asks,
@@ -2011,14 +2034,8 @@ fn crop_inputs(
     };
     let mut options = options.clone();
     options.scene.crop = None;
-    if let Some(map) = &mut options.scene.dust_map {
-        let (width, height, opacity) = cut_grid(map.width, map.height, &map.opacity);
-        *map = DustMap {
-            width,
-            height,
-            opacity,
-        };
-    }
+    // Dust stays source-relative and is sampled directly over the crop in
+    // Dust::from_source_map, including maps too coarse for integer cropping.
     for plane in &mut options.scene.planes {
         let mask = &plane.mask;
         let (width, height, coverage) = cut_grid(mask.width, mask.height, &mask.coverage);
@@ -3150,6 +3167,52 @@ mod tests {
         // The map in use, written out, is the one given.
         let map = clear.dust().unwrap().to_map(32, 24);
         assert!(map.opacity.iter().all(|&opacity| opacity == 0.0));
+    }
+
+    #[test]
+    fn cropped_dust_keeps_source_coordinates_through_prepare_paint_and_reload() {
+        let directory = tempfile::tempdir().unwrap();
+        let (starless, stars, wcs, distances) = field(directory.path());
+        let mut options = options(distances, directory.path());
+        options.scene.crop = Some((40, 30, 160, 160));
+        options.video.focus = None;
+        options.video.tour.clear();
+        // A coarse, source-shaped map, half clear. A crop of this grid would
+        // be 4x5, the wrong shape for a square scene; sample source coordinates.
+        let map = DustMap {
+            width: 8,
+            height: 6,
+            opacity: (0..48).map(|i| if i % 8 < 4 { 0.0 } else { 1.0 }).collect(),
+        };
+        options.scene.dust_map = Some(map.clone());
+        let video =
+            Parallax::prepare(&starless, &stars, &wcs, &options, &mut |_| {}, &|| false).unwrap();
+        let swapped = video
+            .with_dust_map(Some(&map), &mut |_| {}, &|| false)
+            .unwrap();
+        assert_eq!(video.frame(2), swapped.frame(2));
+        let dust = swapped.dust().unwrap();
+        assert!(!dust.is_opaque(40.0, 80.0));
+        assert!(dust.is_opaque(155.0, 80.0));
+        assert_eq!(video.source_size(), (320, 240));
+        let read = video.source_dust_map(false, 320, 240).unwrap();
+        assert_eq!(read.opacity[0], 0.0); // unfilmed, not a stretched crop
+        assert_eq!(read.opacity[100 * 320 + 80], 0.0);
+        assert!(read.opacity[100 * 320 + 195] > 0.99);
+        let repainted = video
+            .with_dust_map(Some(&read), &mut |_| {}, &|| false)
+            .unwrap();
+        assert!(repainted.dust().unwrap().is_opaque(155.0, 80.0));
+        assert!(!repainted.dust().unwrap().is_opaque(40.0, 80.0));
+        // Crop-shaped maps cannot silently replace source-shaped maps.
+        assert!(
+            video
+                .with_dust_map(Some(&even_map(32, 32, 0.5)), &mut |_| {}, &|| false)
+                .is_err()
+        );
+        let removed = video.with_dust_map(None, &mut |_| {}, &|| false).unwrap();
+        assert!(removed.dust().is_none());
+        assert!(video.dust().is_some());
     }
 
     #[test]

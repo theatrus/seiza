@@ -17,9 +17,9 @@ use super::{
 use image::{Rgb32FImage, RgbImage};
 use seiza::wcs::{Sip, Wcs};
 use seiza_parallax::{
-    Corner, CustomLabel, DepthPlane, DistanceOverride, Dust, DustMap, Easing, Event, FfmpegSink,
-    FrameFn, FrameSink, Framing, Parallax, ParallaxOptions, PlaneMask, PngSequence, Quality,
-    SmallStars, Start,
+    Corner, CustomLabel, DepthPlane, DistanceOverride, DustMap, Easing, Event, FfmpegSink, FrameFn,
+    FrameSink, Framing, Parallax, ParallaxOptions, PlaneMask, PngSequence, Quality, SmallStars,
+    Start,
 };
 use seiza_parallax::{FitSummary, SceneOptions, VideoOptions};
 use serde::{Deserialize, Serialize};
@@ -1427,10 +1427,15 @@ pub const SEIZA_DUST_MAP_IN_USE: u32 = 0;
 pub const SEIZA_DUST_MAP_COUNTED: u32 = 1;
 
 /// The dust `which` names, or `None` when the video has none.
-fn which_dust(video: &Parallax, which: u32) -> Result<Option<&Dust>, String> {
+fn which_dust(
+    video: &Parallax,
+    which: u32,
+    width: usize,
+    height: usize,
+) -> Result<Option<DustMap>, String> {
     match which {
-        SEIZA_DUST_MAP_IN_USE => Ok(video.dust()),
-        SEIZA_DUST_MAP_COUNTED => Ok(video.counted_dust()),
+        SEIZA_DUST_MAP_IN_USE => Ok(video.source_dust_map(false, width, height)),
+        SEIZA_DUST_MAP_COUNTED => Ok(video.source_dust_map(true, width, height)),
         other => Err(format!("{other} is not a SEIZA_DUST_MAP_* value")),
     }
 }
@@ -1444,6 +1449,8 @@ fn which_dust(video: &Parallax, which: u32) -> Result<Option<&Dust>, String> {
 /// or too few stars show to count it), and -1 with `error_out` set on
 /// failure. Any size works; the image's own shape keeps the map square to
 /// it.
+/// With a crop, the map still spans the original source image; unfilmed
+/// pixels are clear. Reading, painting and replacing a map use the same coordinates.
 ///
 /// # Safety
 ///
@@ -1479,10 +1486,9 @@ pub unsafe extern "C" fn seiza_parallax_dust_map(
                 "the map needs {needed} values; the buffer holds {length}"
             ));
         }
-        let Some(dust) = which_dust(video, which)? else {
+        let Some(map) = which_dust(video, which, width, height)? else {
             return Ok(0);
         };
-        let map = dust.to_map(width, height);
         let out = unsafe { std::slice::from_raw_parts_mut(opacity as *mut f32, needed) };
         out.copy_from_slice(&map.opacity);
         Ok(1)
@@ -1499,6 +1505,7 @@ pub unsafe extern "C" fn seiza_parallax_dust_map(
 /// [`seiza_parallax_dust_map`]'s map, pass it here, and draw frames from
 /// the new video; [`seiza_parallax_with_dust_map_json`] reads the map from
 /// a file instead. A map gives dust even to a video prepared without it.
+/// With a crop, give a map of the original source image's shape, not the crop's.
 ///
 /// Only the dust changes. The planes and stars are shared, not copied, so
 /// this takes about as long as fitting the camera again
@@ -1637,6 +1644,8 @@ struct DustMapWriteRequest {
 /// `counted` true for the dust mapped from the star counts rather than the
 /// dust in use. Returns 1 when written, 0 when
 /// the video has no such dust, and -1 with `error_out` set on failure.
+/// The size defaults to the original source image's, even with a crop.
+/// Unfilmed pixels are clear; the saved map can be loaded back directly.
 ///
 /// # Safety
 ///
@@ -1662,10 +1671,7 @@ pub unsafe extern "C" fn seiza_parallax_write_dust_map_json(
         } else {
             SEIZA_DUST_MAP_IN_USE
         };
-        let Some(dust) = which_dust(video, which)? else {
-            return Ok(0);
-        };
-        let (image_width, image_height) = dust.size();
+        let (image_width, image_height) = video.source_size();
         let width = request.width.map_or(image_width, |width| width as usize);
         let height = request
             .height
@@ -1673,7 +1679,10 @@ pub unsafe extern "C" fn seiza_parallax_write_dust_map_json(
         if width == 0 || height == 0 {
             return Err("the map needs a width and height".into());
         }
-        dust.to_map(width, height).save(&request.path)?;
+        let Some(map) = which_dust(video, which, width, height)? else {
+            return Ok(0);
+        };
+        map.save(&request.path)?;
         Ok(1)
     })
     .unwrap_or(-1)
@@ -2703,6 +2712,91 @@ mod tests {
         };
         assert!(written >= 0, "{}", take_error(error));
         (written == 1).then_some(opacity)
+    }
+
+    #[test]
+    fn cropped_dust_ffi_reads_paints_exports_and_reloads_in_source_coordinates() {
+        let directory = tempfile::tempdir().unwrap();
+        let painted = directory.path().join("painted.png");
+        image::GrayImage::from_pixel(64, 48, image::Luma([255]))
+            .save(&painted)
+            .unwrap();
+        let request = request(
+            directory.path(),
+            &format!(
+                "\"dustMap\": {}, \"crop\": [40,30,160,160], \"labels\": []",
+                serde_json::json!(painted)
+            ),
+        );
+        let mut error = ptr::null_mut();
+        let video = unsafe {
+            seiza_parallax_prepare_json(
+                request.as_ptr(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(!video.is_null(), "{}", take_error(error));
+        let map = dust_map(video, SEIZA_DUST_MAP_IN_USE, 320, 240).unwrap();
+        assert_eq!(map[0], 0.0);
+        assert_eq!(map[100 * 320 + 100], 1.0);
+        let painted_again = unsafe {
+            seiza_parallax_with_dust_map(
+                video,
+                map.as_ptr(),
+                320,
+                240,
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(!painted_again.is_null(), "{}", take_error(error));
+        assert_eq!(
+            dust_map(painted_again, SEIZA_DUST_MAP_IN_USE, 320, 240).unwrap(),
+            map
+        );
+        let written = directory.path().join("written.png");
+        let request = CString::new(serde_json::json!({"path": written}).to_string()).unwrap();
+        assert_eq!(
+            unsafe { seiza_parallax_write_dust_map_json(video, request.as_ptr(), &mut error) },
+            1,
+            "{}",
+            take_error(error)
+        );
+        let saved = image::open(&written).unwrap();
+        assert_eq!((saved.width(), saved.height()), (320, 240));
+        let reloaded = unsafe {
+            seiza_parallax_with_dust_map_json(
+                video,
+                request.as_ptr(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(!reloaded.is_null(), "{}", take_error(error));
+        assert_eq!(
+            dust_map(reloaded, SEIZA_DUST_MAP_IN_USE, 320, 240).unwrap(),
+            map
+        );
+        // Editing a derived video does not mutate the original, and it lives
+        // independently after the original is freed.
+        unsafe {
+            seiza_parallax_free(video);
+            seiza_parallax_free(painted_again);
+        }
+        assert_eq!(
+            dust_map(reloaded, SEIZA_DUST_MAP_IN_USE, 320, 240).unwrap(),
+            map
+        );
+        unsafe {
+            seiza_parallax_free(reloaded);
+        }
     }
 
     #[test]

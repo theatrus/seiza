@@ -268,28 +268,43 @@ impl Dust {
     /// kept at its own size and smoothed between its pixels; a finer one is
     /// averaged into cells of a few pixels.
     pub fn from_map(map: &DustMap, width: usize, height: usize) -> Result<Self, String> {
+        Self::from_source_map(map, (width, height), None)
+    }
+
+    /// Read a full-source map over the filmed region without rounding a
+    /// coarse map's crop to whole map pixels (which can change its shape).
+    pub(crate) fn from_source_map(
+        map: &DustMap,
+        source: (usize, usize),
+        crop: Option<(usize, usize, usize, usize)>,
+    ) -> Result<Self, String> {
         map.check()?;
+        let (source_width, source_height) = source;
+        let (offset_x, offset_y, width, height) =
+            crop.unwrap_or((0, 0, source_width, source_height));
         if width == 0 || height == 0 {
             return Err("the image is empty".into());
         }
-        if !same_shape((map.width, map.height), (width, height)) {
+        if !same_shape((map.width, map.height), source) {
             return Err(format!(
-                "the dust map is {}×{}, not the shape of the {width}×{height} image",
+                "the dust map is {}×{}, not the shape of the {source_width}×{source_height} image",
                 map.width, map.height
             ));
         }
-        let cell = (width as f64 / map.width as f64).max(GIVEN_CELL);
+        let cell = (source_width as f64 / map.width as f64).max(GIVEN_CELL);
         let (columns, rows) = (cells(width, cell), cells(height, cell));
         // Map pixels per image pixel, each way.
         let (across, down) = (
-            map.width as f64 / width as f64,
-            map.height as f64 / height as f64,
+            map.width as f64 / source_width as f64,
+            map.height as f64 / source_height as f64,
         );
         let transmission = (0..rows * columns)
             .into_par_iter()
             .map(|index| {
                 let (left, right) = span(index % columns, columns, width, cell);
                 let (top, bottom) = span(index / columns, rows, height, cell);
+                let (left, right) = (left + offset_x, right + offset_x);
+                let (top, bottom) = (top + offset_y, bottom + offset_y);
                 // The map pixels whose centres the cell covers, or the one
                 // under its centre when it covers none.
                 let first = |start: usize, scale: f64| (start as f64 * scale - 0.5).ceil().max(0.0);
@@ -337,15 +352,33 @@ impl Dust {
 
     /// This dust as a `width` × `height` map over the image, white opaque.
     pub fn to_map(&self, width: usize, height: usize) -> DustMap {
+        self.to_source_map(width, height, self.size(), None)
+    }
+
+    /// Project the filmed dust back onto the source image. Unfilmed pixels
+    /// are clear: no dust was estimated there.
+    pub(crate) fn to_source_map(
+        &self,
+        width: usize,
+        height: usize,
+        source: (usize, usize),
+        crop: Option<(usize, usize, usize, usize)>,
+    ) -> DustMap {
         let (across, down) = (
-            self.width as f64 / width.max(1) as f64,
-            self.height as f64 / height.max(1) as f64,
+            source.0 as f64 / width.max(1) as f64,
+            source.1 as f64 / height.max(1) as f64,
         );
+        let (left, top, kept_width, kept_height) = crop.unwrap_or((0, 0, source.0, source.1));
         let opacity = (0..width * height)
             .into_par_iter()
             .map(|index| {
                 let (x, y) = ((index % width) as f64 + 0.5, (index / width) as f64 + 0.5);
-                opacity_of(self.at(x * across, y * down))
+                let (x, y) = (x * across - left as f64, y * down - top as f64);
+                if x < 0.0 || y < 0.0 || x >= kept_width as f64 || y >= kept_height as f64 {
+                    0.0
+                } else {
+                    opacity_of(self.at(x, y))
+                }
             })
             .collect();
         DustMap {

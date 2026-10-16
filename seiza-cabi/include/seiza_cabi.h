@@ -2489,6 +2489,8 @@ char *seiza_parallax_summary_json(const SeizaParallax *video, char **error_out);
  or too few stars show to count it), and -1 with `error_out` set on
  failure. Any size works; the image's own shape keeps the map square to
  it.
+ With a crop, the map still spans the original source image; unfilmed
+ pixels are clear. Reading, painting and replacing a map use the same coordinates.
 
  # Safety
 
@@ -2516,6 +2518,7 @@ int32_t seiza_parallax_dust_map(const SeizaParallax *video,
  [`seiza_parallax_dust_map`]'s map, pass it here, and draw frames from
  the new video; [`seiza_parallax_with_dust_map_json`] reads the map from
  a file instead. A map gives dust even to a video prepared without it.
+ With a crop, give a map of the original source image's shape, not the crop's.
 
  Only the dust changes. The planes and stars are shared, not copied, so
  this takes about as long as fitting the camera again
@@ -2577,6 +2580,8 @@ SeizaParallax *seiza_parallax_with_dust_map_json(const SeizaParallax *video,
  `counted` true for the dust mapped from the star counts rather than the
  dust in use. Returns 1 when written, 0 when
  the video has no such dust, and -1 with `error_out` set on failure.
+ The size defaults to the original source image's, even with a crop.
+ Unfilmed pixels are clear; the saved map can be loaded back directly.
 
  # Safety
 
