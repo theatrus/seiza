@@ -3,12 +3,14 @@ use numpy::{PyArrayDyn, PyReadonlyArrayDyn};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use seiza_stacking::{
-    BatchStackOptions, CalibrationMasters, CancelSignal, DeltaSigmaOptions, Demosaic,
-    DrizzleOptions, DrizzleResult, FitsFrame, FrameDisposition, LinearImage, LiveStacker,
+    BatchStackOptions, CalibrationMasters, CancelSignal, DarkLevelScreening, DeltaSigmaOptions,
+    Demosaic, DrizzleOptions, DrizzleResult, FitsFrame, FlatStarMaskingOptions,
+    FlatStarMaskingStatistics, FrameDisposition, FrameWeighting, LinearImage, LiveStacker,
     MasterBuildOptions, MasterDark, MasterFrameKind, MasterRejectionOptions, NormalizationMode,
     PipelineOptions, PipelineReport, RegistrationModel, RejectionMode, SnrSample, StackOptions,
-    StackSnapshot, build_master_from_fits, checkpoint_depths, measure_depth, path_identity,
-    paths_refer_to_same_file, write_drizzle_fits_f32, write_fits_f32, write_master_fits_f32,
+    StackSnapshot, build_master_from_fits, build_master_from_fits_with_scratch, checkpoint_depths,
+    measure_depth, path_identity, paths_refer_to_same_file, write_drizzle_fits_f32, write_fits_f32,
+    write_master_fits_f32,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -96,7 +98,8 @@ impl PyStackOptions {
         minimum_integrated_fraction=0.50,
         demosaic="vng",
         match_tolerances=None,
-        registration_model="similarity"
+        registration_model="similarity",
+        weighting="equal"
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -127,7 +130,19 @@ impl PyStackOptions {
         demosaic: &str,
         match_tolerances: Option<crate::calibration::PyMatchTolerances>,
         registration_model: &str,
+        weighting: &str,
     ) -> PyResult<Self> {
+        let weighting = match weighting {
+            "equal" => FrameWeighting::Equal,
+            "inverse-noise-variance" | "inverse_noise_variance" => {
+                FrameWeighting::inverse_noise_variance()
+            }
+            value => {
+                return Err(PyValueError::new_err(format!(
+                    "weighting must be 'equal' or 'inverse-noise-variance', not {value:?}"
+                )));
+            }
+        };
         let registration_model = match registration_model {
             "similarity" => RegistrationModel::Similarity,
             "affine" => RegistrationModel::Affine,
@@ -182,6 +197,7 @@ impl PyStackOptions {
         let mut inner = StackOptions {
             normalization,
             rejection,
+            weighting,
             ..StackOptions::default()
         };
         inner.registration.detection_sigma = detection_sigma;
@@ -247,6 +263,18 @@ impl PyStackOptions {
             NormalizationMode::Local { tile_size }
             | NormalizationMode::LocalBackground { tile_size } => Some(tile_size),
             _ => None,
+        }
+    }
+
+    /// How frames are weighted in the mean: "equal", or
+    /// "inverse-noise-variance", which weights each frame by the reference
+    /// frame's noise over its own, squared.
+    #[getter]
+    fn weighting(&self) -> &'static str {
+        if self.inner.weighting.is_equal() {
+            "equal"
+        } else {
+            "inverse-noise-variance"
         }
     }
 
@@ -329,6 +357,14 @@ pub(crate) struct PyFrameDisposition {
     accepted_samples: Option<usize>,
     #[pyo3(get)]
     rejected_samples: Option<usize>,
+    /// Each channel's measured noise; empty under equal weighting.
+    #[pyo3(get)]
+    noise: Option<Vec<f32>>,
+    /// Each channel's weight in the stack mean; empty under equal weighting.
+    #[pyo3(get)]
+    weight: Option<Vec<f32>>,
+    /// The core's JSON of the frame's mapping, read by the `mapping` getter.
+    mapping_json: Option<String>,
 }
 
 impl PyFrameDisposition {
@@ -351,6 +387,9 @@ impl PyFrameDisposition {
                 integrated_fraction: Some(diagnostics.integrated_fraction),
                 accepted_samples: Some(diagnostics.accepted_samples),
                 rejected_samples: Some(diagnostics.rejected_samples),
+                mapping_json: serde_json::to_string(&diagnostics.mapping).ok(),
+                noise: Some(diagnostics.noise),
+                weight: Some(diagnostics.weight),
             },
             FrameDisposition::Rejected(reason) => Self {
                 source,
@@ -369,6 +408,9 @@ impl PyFrameDisposition {
                 integrated_fraction: None,
                 accepted_samples: None,
                 rejected_samples: None,
+                noise: None,
+                weight: None,
+                mapping_json: None,
             },
         }
     }
@@ -394,14 +436,33 @@ impl PyFrameDisposition {
             integrated_fraction: None,
             accepted_samples: None,
             rejected_samples: None,
+            noise: None,
+            weight: None,
+            mapping_json: None,
         }
     }
+}
+
+/// Turn JSON the core wrote into Python objects.
+fn json_object(py: Python<'_>, json: &str) -> PyResult<Py<PyAny>> {
+    Ok(py.import("json")?.call_method1("loads", (json,))?.unbind())
 }
 
 #[pymethods]
 impl PyFrameDisposition {
     fn __bool__(&self) -> bool {
         self.accepted
+    }
+
+    /// How an accepted frame maps onto the reference grid, its
+    /// registration and normalization, as a dict in the core's versioned
+    /// form; `None` for a rejected frame.
+    #[getter]
+    fn mapping(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.mapping_json
+            .as_deref()
+            .map(|json| json_object(py, json))
+            .transpose()
     }
 
     fn __repr__(&self) -> String {
@@ -840,6 +901,26 @@ impl PyLiveStacker {
         Ok(Self { inner: Some(inner) })
     }
 
+    /// Open a stack from a FITS or XISF frame already calibrated and
+    /// debayered, keeping its header cards for the outputs, so a caller can
+    /// correct a frame between calibration and registration. A raw CFA frame
+    /// is refused. Later frames go in as arrays, through :meth:`push`.
+    #[staticmethod]
+    #[pyo3(signature = (path, *, options=None))]
+    fn open_prepared_fits(
+        py: Python<'_>,
+        path: PathBuf,
+        options: Option<PyRef<'_, PyStackOptions>>,
+    ) -> PyResult<Self> {
+        let options = options
+            .as_ref()
+            .map_or_else(StackOptions::default, |options| options.inner.clone());
+        let inner = py
+            .detach(move || LiveStacker::from_prepared_frame(FitsFrame::open(path)?, options))
+            .map_err(stack_error)?;
+        Ok(Self { inner: Some(inner) })
+    }
+
     /// Open a stack aligned to ``reference_image``, an image shared by the
     /// stacks of several filters so their outputs share one pixel grid and
     /// WCS. ``channel_reference``, one of this filter's lights, sets
@@ -1212,6 +1293,22 @@ impl PyLiveStacker {
         Ok(self.active()?.reference_is_integrated())
     }
 
+    /// The reference frame's noise in each channel, measured as each pushed
+    /// frame's is: the unit of frame weights. Empty under equal weighting.
+    #[getter]
+    fn reference_noise(&self) -> PyResult<Vec<f32>> {
+        Ok(self.active()?.reference_noise().to_vec())
+    }
+
+    /// The reference frame's mapping onto the stack grid, the identity, in
+    /// the same form as :attr:`FrameDisposition.mapping`.
+    #[getter]
+    fn reference_mapping(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let json = serde_json::to_string(&self.active()?.reference_mapping())
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        json_object(py, &json)
+    }
+
     fn push_fits(&mut self, py: Python<'_>, path: PathBuf) -> PyResult<PyFrameDisposition> {
         if self
             .active()?
@@ -1541,6 +1638,104 @@ pub(crate) struct PyMasterResult {
     #[pyo3(get)]
     exposure_seconds: Option<f64>,
     input_statistics: Vec<(u64, u64)>,
+    /// Samples star masking left out, across every input.
+    #[pyo3(get)]
+    masked_samples: u64,
+    /// The samples star masking left out of each accepted input, in the
+    /// order of `input_statistics`.
+    #[pyo3(get)]
+    input_masked_samples: Vec<u64>,
+    /// The rejection the build used: `NONE`, `MEDIAN_MAD` or `LEAVE_ONE_OUT`.
+    #[pyo3(get)]
+    rejection_method: &'static str,
+    flat_star_masking_statistics: Option<FlatStarMaskingStatistics>,
+}
+
+/// Star masking for sky flats: what :func:`build_flat` leaves out of each
+/// flat before it normalizes and combines them.
+///
+/// Stars brighter than `detection_sigma` above the sky are masked out to
+/// `halo_radius_factor` times their size, and at least
+/// `minimum_radius_pixels`. `saturation_level`, in the inputs' raw units,
+/// marks saturated patches; by default it comes from `SATURATE`, `SATLEVEL`
+/// or the FITS encoding. Every pixel must keep at least
+/// `minimum_clean_samples` unmasked inputs (two or more).
+#[pyclass(frozen, name = "FlatStarMasking", module = "seiza")]
+pub(crate) struct PyFlatStarMasking {
+    #[pyo3(get)]
+    detection_sigma: f32,
+    #[pyo3(get)]
+    halo_radius_factor: f32,
+    #[pyo3(get)]
+    minimum_radius_pixels: f32,
+    #[pyo3(get)]
+    saturation_level: Option<f32>,
+    #[pyo3(get)]
+    minimum_clean_samples: usize,
+}
+
+impl From<&FlatStarMaskingOptions> for PyFlatStarMasking {
+    fn from(options: &FlatStarMaskingOptions) -> Self {
+        Self {
+            detection_sigma: options.detection_sigma,
+            halo_radius_factor: options.halo_radius_factor,
+            minimum_radius_pixels: options.minimum_radius_pixels,
+            saturation_level: options.saturation_level,
+            minimum_clean_samples: options.minimum_clean_samples,
+        }
+    }
+}
+
+impl From<&PyFlatStarMasking> for FlatStarMaskingOptions {
+    fn from(options: &PyFlatStarMasking) -> Self {
+        Self {
+            detection_sigma: options.detection_sigma,
+            halo_radius_factor: options.halo_radius_factor,
+            minimum_radius_pixels: options.minimum_radius_pixels,
+            saturation_level: options.saturation_level,
+            minimum_clean_samples: options.minimum_clean_samples,
+        }
+    }
+}
+
+#[pymethods]
+impl PyFlatStarMasking {
+    #[new]
+    #[pyo3(signature = (
+        *,
+        detection_sigma=None,
+        halo_radius_factor=None,
+        minimum_radius_pixels=None,
+        saturation_level=None,
+        minimum_clean_samples=None
+    ))]
+    fn new(
+        detection_sigma: Option<f32>,
+        halo_radius_factor: Option<f32>,
+        minimum_radius_pixels: Option<f32>,
+        saturation_level: Option<f32>,
+        minimum_clean_samples: Option<usize>,
+    ) -> Self {
+        let defaults = FlatStarMaskingOptions::default();
+        Self {
+            detection_sigma: detection_sigma.unwrap_or(defaults.detection_sigma),
+            halo_radius_factor: halo_radius_factor.unwrap_or(defaults.halo_radius_factor),
+            minimum_radius_pixels: minimum_radius_pixels.unwrap_or(defaults.minimum_radius_pixels),
+            saturation_level: saturation_level.or(defaults.saturation_level),
+            minimum_clean_samples: minimum_clean_samples.unwrap_or(defaults.minimum_clean_samples),
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "FlatStarMasking(detection_sigma={}, halo_radius_factor={}, minimum_radius_pixels={}, saturation_level={:?}, minimum_clean_samples={})",
+            self.detection_sigma,
+            self.halo_radius_factor,
+            self.minimum_radius_pixels,
+            self.saturation_level,
+            self.minimum_clean_samples
+        )
+    }
 }
 
 #[pymethods]
@@ -1548,6 +1743,37 @@ impl PyMasterResult {
     #[getter]
     fn input_statistics(&self) -> Vec<(u64, u64)> {
         self.input_statistics.clone()
+    }
+
+    /// What flat star masking did, or `None` when it did not run: a dict
+    /// with the `options` used (a :class:`FlatStarMasking`),
+    /// `masked_samples`, `masked_pixels`, the `minimum_clean_samples` and
+    /// `maximum_clean_samples` any pixel kept, `low_coverage_samples`,
+    /// `unmasked_saturation_samples` and `unknown_saturation_inputs`.
+    #[getter]
+    fn flat_star_masking<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Option<Bound<'py, pyo3::types::PyDict>>> {
+        let Some(statistics) = &self.flat_star_masking_statistics else {
+            return Ok(None);
+        };
+        let dict = pyo3::types::PyDict::new(py);
+        dict.set_item("options", PyFlatStarMasking::from(&statistics.options))?;
+        dict.set_item("masked_samples", statistics.masked_samples)?;
+        dict.set_item("masked_pixels", statistics.masked_pixels)?;
+        dict.set_item("minimum_clean_samples", statistics.minimum_clean_samples)?;
+        dict.set_item("maximum_clean_samples", statistics.maximum_clean_samples)?;
+        dict.set_item("low_coverage_samples", statistics.low_coverage_samples)?;
+        dict.set_item(
+            "unmasked_saturation_samples",
+            statistics.unmasked_saturation_samples,
+        )?;
+        dict.set_item(
+            "unknown_saturation_inputs",
+            statistics.unknown_saturation_inputs,
+        )?;
+        Ok(Some(dict))
     }
 
     fn __repr__(&self) -> String {
@@ -1746,6 +1972,7 @@ fn build_bias(
         sigma_low,
         sigma_high,
         cancel,
+        MasterExtras::default(),
     )
 }
 
@@ -1758,7 +1985,8 @@ fn build_bias(
     exposure_seconds=None,
     sigma_low=3.0,
     sigma_high=3.0,
-    cancel=None
+    cancel=None,
+    dark_level_screening=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn build_dark(
@@ -1770,6 +1998,7 @@ fn build_dark(
     sigma_low: f32,
     sigma_high: f32,
     cancel: Option<Py<PyAny>>,
+    dark_level_screening: Option<f32>,
 ) -> PyResult<PyMasterResult> {
     build_master(
         py,
@@ -1783,6 +2012,11 @@ fn build_dark(
         sigma_low,
         sigma_high,
         cancel,
+        MasterExtras {
+            dark_level_screening: dark_level_screening
+                .map(|max_excess_sigma| DarkLevelScreening { max_excess_sigma }),
+            ..MasterExtras::default()
+        },
     )
 }
 
@@ -1797,7 +2031,9 @@ fn build_dark(
     exposure_seconds=None,
     sigma_low=3.0,
     sigma_high=3.0,
-    cancel=None
+    cancel=None,
+    flat_star_masking=None,
+    scratch_directory=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn build_flat(
@@ -1811,6 +2047,8 @@ fn build_flat(
     sigma_low: f32,
     sigma_high: f32,
     cancel: Option<Py<PyAny>>,
+    flat_star_masking: Option<PyRef<'_, PyFlatStarMasking>>,
+    scratch_directory: Option<PathBuf>,
 ) -> PyResult<PyMasterResult> {
     validate_exposure_override(dark_flat.as_ref(), dark_flat_exposure_seconds, "dark_flat")?;
     build_master(
@@ -1825,7 +2063,22 @@ fn build_flat(
         sigma_low,
         sigma_high,
         cancel,
+        MasterExtras {
+            flat_star_masking: flat_star_masking
+                .as_deref()
+                .map(FlatStarMaskingOptions::from),
+            scratch_directory,
+            ..MasterExtras::default()
+        },
     )
+}
+
+/// Master build options only some kinds take.
+#[derive(Default)]
+struct MasterExtras {
+    flat_star_masking: Option<FlatStarMaskingOptions>,
+    dark_level_screening: Option<DarkLevelScreening>,
+    scratch_directory: Option<PathBuf>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1841,6 +2094,7 @@ fn build_master(
     sigma_low: f32,
     sigma_high: f32,
     cancel: Option<Py<PyAny>>,
+    extras: MasterExtras,
 ) -> PyResult<PyMasterResult> {
     validate_output_path(&images, &output, [bias.as_ref(), dark.as_ref()])?;
     // A master over dozens of frames runs for minutes with the GIL released,
@@ -1889,10 +2143,15 @@ fn build_master(
             cancel: Some(signal),
             progress: None,
             defect_suppression: None,
-            flat_star_masking: None,
-            dark_level_screening: None,
+            flat_star_masking: extras.flat_star_masking,
+            dark_level_screening: extras.dark_level_screening,
         };
-        let master = build_master_from_fits(&images, kind, &options)?;
+        let master = match &extras.scratch_directory {
+            Some(directory) => {
+                build_master_from_fits_with_scratch(&images, kind, &options, directory)?
+            }
+            None => build_master_from_fits(&images, kind, &options)?,
+        };
         write_master_fits_f32(&output, &master)?;
         Ok(PyMasterResult {
             output,
@@ -1913,6 +2172,14 @@ fn build_master(
                 .iter()
                 .map(|stats| (stats.accepted_samples, stats.rejected_samples))
                 .collect(),
+            masked_samples: master.masked_samples,
+            input_masked_samples: master
+                .input_statistics
+                .iter()
+                .map(|stats| stats.masked_samples)
+                .collect(),
+            rejection_method: master.rejection_method.as_str(),
+            flat_star_masking_statistics: master.flat_star_masking,
         })
     });
     if let Some(error) = raised.lock().unwrap().take() {
@@ -2068,6 +2335,17 @@ pub(crate) fn py_checkpoint_depths(total: usize) -> Vec<usize> {
     checkpoint_depths(total)
 }
 
+/// Measure a linear image's noise in each channel, the estimator behind
+/// frame weights: the median absolute deviation of second differences along
+/// each axis, as a Gaussian standard deviation in the image's own units,
+/// keeping the noisier axis. Returns ``None`` when the image is too small or
+/// has too few finite samples to measure.
+#[pyfunction]
+fn frame_noise(py: Python<'_>, image: PyReadonlyArrayDyn<'_, f32>) -> PyResult<Option<Vec<f32>>> {
+    let image = linear_image(image)?;
+    Ok(py.detach(|| seiza_stacking::frame_noise(&image)))
+}
+
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyStackOptions>()?;
     module.add_class::<PyFrameDisposition>()?;
@@ -2082,6 +2360,8 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyLiveStacker>()?;
     module.add_class::<PyDrizzleResult>()?;
     module.add_class::<PyMasterResult>()?;
+    module.add_class::<PyFlatStarMasking>()?;
+    module.add_function(wrap_pyfunction!(frame_noise, module)?)?;
     module.add_function(wrap_pyfunction!(stack_fits, module)?)?;
     module.add_function(wrap_pyfunction!(py_choose_reference, module)?)?;
     module.add_function(wrap_pyfunction!(build_bias, module)?)?;

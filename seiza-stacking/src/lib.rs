@@ -80,7 +80,7 @@ pub use color::{
 };
 pub use color_calibration::{
     ColorCalibration, ColorCalibrationOptions, ColorFit, ColorReferenceStar, ColorStarMeasurement,
-    GaiaColorSource, SOLAR_BP_RP, calibrate_color, place_gaia_sources,
+    GaiaColorSource, SOLAR_BP_RP, apply_color_gains, calibrate_color, place_gaia_sources,
 };
 pub use cosmetic::{ImpulseFilterOptions, suppress_impulses};
 pub use crop::{

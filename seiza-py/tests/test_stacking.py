@@ -439,6 +439,101 @@ def test_build_bias_writes_master_metadata_and_statistics(tmp_path):
         np.testing.assert_allclose(hdus[0].data, 101.0)
 
 
+def test_build_flat_masks_stars_in_sky_flats_in_a_chosen_scratch_directory(tmp_path):
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    height, width = 80, 96
+    yy, xx = np.mgrid[:height, :width].astype(np.float32)
+    grain = (((yy * width + xx) * 37 + 11) % 17) * 0.002 - 0.016
+    paths = []
+    for frame in range(6):
+        star = 8.0 * np.exp(-((xx - (20.0 + frame * 11.0)) ** 2 + (yy - 40.0) ** 2) / 8.0)
+        illumination = 1000.0 + frame * 300.0
+        path = tmp_path / f"sky-flat-{frame}.fits"
+        header = fits.Header({"IMAGETYP": "FLAT"})
+        data = (illumination * (1.0 + grain + star) + 200.0).astype(np.float32)
+        fits.writeto(path, data, header)
+        paths.append(path)
+
+    masking = seiza.FlatStarMasking(detection_sigma=5.0)
+    assert masking.halo_radius_factor == 3.0
+    assert masking.minimum_clean_samples == 2
+    result = seiza.build_flat(
+        paths,
+        tmp_path / "master-flat.fits",
+        flat_star_masking=masking,
+        scratch_directory=scratch,
+    )
+    assert result.rejection_method == "MEDIAN_MAD"
+    assert result.masked_samples > 0
+    assert sum(result.input_masked_samples) == result.masked_samples
+    assert len(result.input_masked_samples) == len(result.input_statistics)
+    statistics = result.flat_star_masking
+    assert statistics["masked_samples"] == result.masked_samples
+    assert statistics["options"].detection_sigma == 5.0
+    assert (
+        result.accepted_samples + result.rejected_samples + result.masked_samples
+        == width * height * len(paths)
+    )
+    assert list(scratch.iterdir()) == []
+
+    with pytest.raises(seiza.StackError):
+        seiza.build_flat(
+            paths, tmp_path / "unwritten.fits", scratch_directory=tmp_path / "missing"
+        )
+    plain = seiza.build_flat(paths, tmp_path / "plain-flat.fits")
+    assert plain.flat_star_masking is None
+    assert plain.masked_samples == 0
+
+
+def test_build_dark_screens_darks_that_caught_stray_light(tmp_path):
+    yy, xx = np.mgrid[:32, :32].astype(np.float32)
+    noise = (((yy * 32 + xx) * 37 + 11) % 17) * 0.6 - 4.8
+    falloff = 1.0 - 0.06 * ((xx - 15.5) ** 2 + (yy - 15.5) ** 2) / (2.0 * 15.5 * 15.5)
+    paths = []
+    for index, leak in enumerate([0.0, 0.5, 0.0, 40.0, 400.0]):
+        path = tmp_path / f"dark-{index}.fits"
+        fits.writeto(path, (503.0 + noise + leak * falloff).astype(np.float32))
+        paths.append(path)
+
+    result = seiza.build_dark(paths, tmp_path / "master-dark.fits", dark_level_screening=1.0)
+    assert result.input_frames == 3
+    assert result.rejection_method == "LEAVE_ONE_OUT"
+    unscreened = seiza.build_dark(paths, tmp_path / "unscreened.fits")
+    assert unscreened.input_frames == 5
+    with pytest.raises(seiza.StackError, match="level screening"):
+        seiza.build_dark(paths, tmp_path / "bad.fits", dark_level_screening=0.0)
+
+
+def test_prepared_stack_reports_noise_weights_and_mappings(tmp_path):
+    image = synthetic_star_field()
+    prepared = tmp_path / "prepared.fits"
+    fits.writeto(prepared, image, fits.Header({"OBJECT": "M 31"}))
+    options = seiza.StackOptions(normalization="none", rejection="none", weighting="inverse-noise-variance")
+    stacker = seiza.LiveStacker.open_prepared_fits(prepared, options=options)
+    assert stacker.accepted_frames == 1
+
+    reference_noise = stacker.reference_noise
+    assert len(reference_noise) == 1 and reference_noise[0] > 0
+    assert seiza.frame_noise(image) == pytest.approx(reference_noise)
+    assert seiza.frame_noise(np.ones((2, 2), np.float32)) is None
+    assert stacker.reference_mapping["schema_version"] == 1
+
+    disposition = stacker.push(image)
+    assert disposition.accepted
+    assert len(disposition.noise) == 1
+    assert disposition.weight == pytest.approx([1.0], abs=1e-3)
+    assert disposition.mapping["schema_version"] == 1
+    assert "transform" in disposition.mapping
+    with pytest.raises(seiza.StackError, match="push_linear"):
+        stacker.push_fits(prepared)
+
+    raw = tmp_path / "raw.fits"
+    fits.writeto(raw, image, fits.Header({"BAYERPAT": "RGGB"}))
+    with pytest.raises(seiza.StackError, match="Bayer"):
+        seiza.LiveStacker.open_prepared_fits(raw)
+
+
 def test_compatible_calibration_names_what_a_light_could_accept():
     """The warn-don't-fail question, asked from Python.
 

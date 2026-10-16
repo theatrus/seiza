@@ -707,16 +707,23 @@ char *seiza_gaia_photometry_cone_json(double ra,
  `CRVAL1`, `CRPIX1`, `CD1_1` or `CDELT1`, SIP terms, …) with numeric or
  string values; `gaia_json` is an array of sources as
  [`seiza_gaia_photometry_cone_json`] returns. `options_json` may be null
- or an object with `whiteBpRp` (default 0.82, the Sun), `apertureRadius`
- (pixels; default twice the measured FWHM), `neutralizeBackground`
- (default true) and `observationEpoch` (a Julian year, for proper motion).
+ or an object with `whiteBpRp` (default 0.82, the Sun), `fitBpRpRange`
+ (the `[bluest, reddest]` BP − RP of the stars the fits use; default
+ `[0, 1.8]`), `apertureRadius` (pixels; default twice the measured FWHM),
+ `rejectionSigma` (default 3), `minimumStars` (the fewest stars either fit
+ may rest on; default 20, at least 3), `neutralizeBackground` (default
+ true), `calibratorMaxG` (the faintest Gaia G a calibrator may have;
+ default two magnitudes brighter than the faintest source given) and
+ `observationEpoch` (a Julian year, for proper motion).
 
  Returns owned schema-1 JSON with `gains` and `offsets` for R, G, B (apply
  them with [`seiza_color_calibration_apply`]), each channel's
  `background`, the `redFit` and `blueFit` lines of instrumental colour
- against BP − RP, the `apertureRadius` and `apertureCorrection` used, and
- star counts. The image is not changed. Free the result, or an
- `error_out` string, with [`seiza_string_free`].
+ against BP − RP, the `apertureRadius` and `apertureCorrection` used, star
+ counts, and `measurements`: each cleanly measured star's `x`, `y`, `g`,
+ `bpRp`, R, G, B `flux`, and `used`, whether the red and the blue fit kept
+ it. The image is not changed. Free the result, or an `error_out` string,
+ with [`seiza_string_free`].
 
  # Safety
  `data` must point to `length` readable floats, `width * height * 3` of
@@ -1015,6 +1022,75 @@ bool seiza_live_stacker_match_tolerances(const SeizaLiveStacker *stacker,
  synchronize this read with every mutable operation on the same stacker.
  */
 char *seiza_live_stacker_state_json(const SeizaLiveStacker *stacker, char **error_out);
+
+/*
+ Returns the reference frame's per-channel noise as an owned JSON array of
+ numbers, measured the way each pushed frame's `diagnostics.noise` is. It
+ is the unit of frame weights: the reference frame has weight 1 in every
+ channel. The array is empty when the stack weights frames equally. Free
+ it, or an `error_out` string, with [`seiza_string_free`].
+
+ # Safety
+ `stacker` must be a live `SeizaLiveStacker` pointer. When non-null,
+ `error_out` must point to writable storage for one pointer. Externally
+ synchronize this read with every mutable operation on the same stacker.
+ */
+char *seiza_live_stacker_reference_noise_json(const SeizaLiveStacker *stacker, char **error_out);
+
+/*
+ Returns the reference frame's mapping onto the stack grid, the identity,
+ as owned JSON in the same versioned form as each pushed frame's
+ `diagnostics.mapping`, so a host can keep one record per frame, the
+ reference included. Free it, or an `error_out` string, with
+ [`seiza_string_free`].
+
+ # Safety
+ `stacker` must be a live `SeizaLiveStacker` pointer. When non-null,
+ `error_out` must point to writable storage for one pointer. Externally
+ synchronize this read with every mutable operation on the same stacker.
+ */
+char *seiza_live_stacker_reference_mapping_json(const SeizaLiveStacker *stacker, char **error_out);
+
+/*
+ Opens a stack from a FITS or XISF frame the host has already calibrated
+ and debayered, keeping its header cards for the stack's outputs. This
+ lets a host correct a frame between calibration and registration. A raw
+ CFA frame (one with a Bayer layout) is refused. The stack takes later
+ frames only as arrays, through [`seiza_live_stacker_push_linear_json`].
+ Pass null or empty `options_json` for defaults, as for
+ [`seiza_live_stacker_open_fits`].
+
+ # Safety
+ `prepared_path` must be a valid NUL-terminated string. A non-null
+ `options_json` must be NUL-terminated. When non-null, `error_out` must
+ point to writable storage for one pointer.
+ */
+SeizaLiveStacker *seiza_live_stacker_open_prepared_fits(const char *prepared_path,
+                                                        const char *options_json,
+                                                        char **error_out);
+
+/*
+ Measures a linear image's per-channel pixel noise, the estimator behind
+ frame weights: the median absolute deviation of second differences along
+ each axis, as a Gaussian standard deviation in the image's own units,
+ keeping the noisier axis. `channels` is 1 for mono or 3 for interleaved
+ RGB.
+
+ Returns an owned JSON array with one number per channel, or `null` when
+ the image is too small or too empty of finite samples to measure. Free
+ it, or an `error_out` string, with [`seiza_string_free`].
+
+ # Safety
+ `data` must point to `length` readable floats, `width * height *
+ channels` of them. When non-null, `error_out` must point to writable
+ storage for one pointer.
+ */
+char *seiza_frame_noise_json(const float *data,
+                             size_t length,
+                             size_t width,
+                             size_t height,
+                             size_t channels,
+                             char **error_out);
 
 /*
  Load and atomically replace the masters used by later FITS/XISF pushes.
@@ -1880,10 +1956,25 @@ char *seiza_calibration_plan_json(const char *request_json, char **error_out);
 
  The camelCase request has `kind`, at least two `inputs`, and `output`;
  optional fields are `bias`, `dark`, `darkExposureSeconds`,
- `exposureSeconds`, `rejection` (`lowSigma`, `highSigma`), and
- `defectSuppression` (`lowSigma`, `highSigma`). `dark` is a dark-flat when
+ `exposureSeconds`, `rejection` (`lowSigma`, `highSigma`),
+ `defectSuppression` (`lowSigma`, `highSigma`), `flatStarMasking`,
+ `darkLevelScreening` and `scratchDirectory`. `dark` is a dark-flat when
  building a flat. Defect suppression is accepted only for flats, because a
  dark master must retain the hot pixels it is meant to subtract.
+
+ `flatStarMasking` (flats only) leaves stars and broad saturated patches
+ out of each sky flat before it is normalized and combined. Its fields,
+ each optional, are `detectionSigma` (default 4), `haloRadiusFactor`
+ (default 3), `minimumRadiusPixels` (default 6), `saturationLevel` (in the
+ inputs' raw units; default from `SATURATE`, `SATLEVEL` or the FITS
+ encoding) and `minimumCleanSamples` (the fewest unmasked inputs every
+ pixel must keep; default 2); `{}` takes every default.
+ `darkLevelScreening` (darks only) sets aside darks whose level sits more
+ than `maxExcessSigma` (default 1) times the quietest dark's pixel noise
+ above it, the mark of stray light; they appear in `skippedInputs`.
+ `scratchDirectory`, an existing directory, holds a flat build's temporary
+ pixels in place of the system's temporary directory; bias and dark
+ builds need none.
 
  Construction is a two-pass leave-one-out sigma-clipped mean and may take
  minutes. Run it off the UI thread. `cancel` may be null; otherwise another
@@ -1894,10 +1985,17 @@ char *seiza_calibration_plan_json(const char *request_json, char **error_out);
  [`seiza_string_free`].
 
  Response schema 2 reports `requestedFrames`, accepted `inputFrames` and
- accepted-only per-frame `inputs`, plus `skippedInputs` entries with `path`
- and `reason` for metadata disagreements the integrator set aside. The
- accepted and skipped paths are disjoint and account for every requested
- input in request order.
+ accepted-only per-frame `inputs` (`path`, `acceptedSamples`,
+ `rejectedSamples`, `maskedSamples`), plus `skippedInputs` entries with
+ `path` and `reason` for frames the integrator set aside. The accepted and
+ skipped paths are disjoint and account for every requested input in
+ request order. `maskedSamples` counts the samples star masking left out,
+ `rejectionMethod` is the rejection the build used (`NONE`, `MEDIAN_MAD`
+ or `LEAVE_ONE_OUT`), and `flatStarMasking` is null unless masking ran;
+ then it holds the `options` used, `maskedSamples`, `maskedPixels`, the
+ `minimumCleanSamples` and `maximumCleanSamples` any pixel kept,
+ `lowCoverageSamples`, `unmaskedSaturationSamples` and
+ `unknownSaturationInputs`.
 
  # Safety
  `request_json` must be a valid NUL-terminated string. `cancel` must be null

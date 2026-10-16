@@ -20,16 +20,17 @@ use seiza_background::{BackgroundConfig, BackgroundFit, CorrectionMode, fit_back
 use seiza_deconvolution::{DeconvolutionConfig, deconvolve, deconvolve_masked};
 use seiza_fits::{FitsImage, HeaderValue, RgbImage16, Statistics, StretchParams};
 use seiza_stacking::{
-    CancelSignal, ChannelCoverage, ChannelSamples, ColorCrop, CropReport, ExternalParameterKind,
-    ExternalParameterValue, ExternalToolRequest, ExternalToolSchema, FitsFrame, FrameDiagnostics,
+    CancelSignal, ChannelCoverage, ChannelSamples, ColorCrop, CropReport, DarkLevelScreening,
+    ExternalParameterKind, ExternalParameterValue, ExternalToolRequest, ExternalToolSchema,
+    FitsFrame, FlatStarMaskingOptions, FlatStarMaskingStatistics, FrameDiagnostics,
     FrameDisposition, FrameInputMode, FrameSourceRole, ImpulseFilterOptions, LinearImage,
     LiveStacker, MasterBuildOptions, MasterDark, MasterFrame, MasterFrameKind,
-    MasterRejectionOptions, RcAstroCli, ReferenceRegion,
+    MasterRejectionOptions, RcAstroCli, ReferenceRegion, RegisteredFrameMapping,
     StackExportSnapshot as RustStackExportSnapshot, StackOptions,
     StackSnapshot as RustStackSnapshot, build_master_from_fits,
-    checkpoint_depths as rust_checkpoint_depths, crop_report, measure_depth as rust_measure_depth,
-    path_identity, paths_refer_to_same_file, write_fits_f32, write_master_fits_f32,
-    write_stack_export_fits_f32,
+    build_master_from_fits_with_scratch, checkpoint_depths as rust_checkpoint_depths, crop_report,
+    measure_depth as rust_measure_depth, path_identity, paths_refer_to_same_file, write_fits_f32,
+    write_master_fits_f32, write_stack_export_fits_f32,
 };
 use seiza_stretch::{
     ResolvedSampleDomain, SampleDomain, StretchAnalysis, StretchConfig, StretchStack,
@@ -622,6 +623,13 @@ struct StackDiagnosticsResponse {
     integrated_fraction: f32,
     accepted_samples: usize,
     rejected_samples: usize,
+    /// The frame's registration and normalization, in the core's own
+    /// versioned JSON, for a host to keep beside the frame.
+    mapping: Box<RegisteredFrameMapping>,
+    /// Each channel's measured noise; empty under equal weighting.
+    noise: Vec<f32>,
+    /// Each channel's weight in the stack mean; empty under equal weighting.
+    weight: Vec<f32>,
 }
 
 #[derive(Serialize)]
@@ -936,6 +944,62 @@ impl Default for ImpulseFilterRequest {
     }
 }
 
+/// Star masking for sky flats; each field left out keeps the core's default.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+struct FlatStarMaskingRequest {
+    detection_sigma: f32,
+    halo_radius_factor: f32,
+    minimum_radius_pixels: f32,
+    saturation_level: Option<f32>,
+    minimum_clean_samples: usize,
+}
+
+impl Default for FlatStarMaskingRequest {
+    fn default() -> Self {
+        Self::from(&FlatStarMaskingOptions::default())
+    }
+}
+
+impl From<&FlatStarMaskingOptions> for FlatStarMaskingRequest {
+    fn from(options: &FlatStarMaskingOptions) -> Self {
+        Self {
+            detection_sigma: options.detection_sigma,
+            halo_radius_factor: options.halo_radius_factor,
+            minimum_radius_pixels: options.minimum_radius_pixels,
+            saturation_level: options.saturation_level,
+            minimum_clean_samples: options.minimum_clean_samples,
+        }
+    }
+}
+
+impl From<FlatStarMaskingRequest> for FlatStarMaskingOptions {
+    fn from(request: FlatStarMaskingRequest) -> Self {
+        Self {
+            detection_sigma: request.detection_sigma,
+            halo_radius_factor: request.halo_radius_factor,
+            minimum_radius_pixels: request.minimum_radius_pixels,
+            saturation_level: request.saturation_level,
+            minimum_clean_samples: request.minimum_clean_samples,
+        }
+    }
+}
+
+/// Dark level screening; a field left out keeps the core's default.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+struct DarkLevelScreeningRequest {
+    max_excess_sigma: f32,
+}
+
+impl Default for DarkLevelScreeningRequest {
+    fn default() -> Self {
+        Self {
+            max_excess_sigma: DarkLevelScreening::default().max_excess_sigma,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct MasterBuildRequest {
@@ -954,6 +1018,14 @@ struct MasterBuildRequest {
     rejection: MasterRejectionRequest,
     #[serde(default)]
     defect_suppression: Option<ImpulseFilterRequest>,
+    #[serde(default)]
+    flat_star_masking: Option<FlatStarMaskingRequest>,
+    #[serde(default)]
+    dark_level_screening: Option<DarkLevelScreeningRequest>,
+    /// An existing directory for a flat build's temporary pixels, in place
+    /// of the system's temporary directory.
+    #[serde(default)]
+    scratch_directory: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -962,6 +1034,36 @@ struct MasterBuildInputResponse {
     path: String,
     accepted_samples: u64,
     rejected_samples: u64,
+    masked_samples: u64,
+}
+
+/// What flat star masking did, when it ran.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FlatStarMaskingResponse {
+    options: FlatStarMaskingRequest,
+    masked_samples: u64,
+    masked_pixels: u64,
+    minimum_clean_samples: usize,
+    maximum_clean_samples: usize,
+    low_coverage_samples: u64,
+    unmasked_saturation_samples: u64,
+    unknown_saturation_inputs: usize,
+}
+
+impl From<&FlatStarMaskingStatistics> for FlatStarMaskingResponse {
+    fn from(statistics: &FlatStarMaskingStatistics) -> Self {
+        Self {
+            options: FlatStarMaskingRequest::from(&statistics.options),
+            masked_samples: statistics.masked_samples,
+            masked_pixels: statistics.masked_pixels,
+            minimum_clean_samples: statistics.minimum_clean_samples,
+            maximum_clean_samples: statistics.maximum_clean_samples,
+            low_coverage_samples: statistics.low_coverage_samples,
+            unmasked_saturation_samples: statistics.unmasked_saturation_samples,
+            unknown_saturation_inputs: statistics.unknown_saturation_inputs,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -991,6 +1093,7 @@ struct MasterBuildResponse {
     input_frames: usize,
     accepted_samples: u64,
     rejected_samples: u64,
+    masked_samples: u64,
     fallback_pixels: u64,
     defect_pixels_replaced: u64,
     bias_subtracted: bool,
@@ -998,6 +1101,8 @@ struct MasterBuildResponse {
     normalized: bool,
     output_exposure_seconds: Option<f64>,
     rejection: MasterBuildRejectionResponse,
+    rejection_method: &'static str,
+    flat_star_masking: Option<FlatStarMaskingResponse>,
     inputs: Vec<MasterBuildInputResponse>,
     skipped_inputs: Vec<MasterBuildSkippedInputResponse>,
 }
@@ -1678,8 +1783,16 @@ struct GaiaSourceJson {
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 struct ColorCalibrationOptionsJson {
     white_bp_rp: Option<f32>,
+    /// The BP − RP range of the stars the fits use, as `[bluest, reddest]`.
+    fit_bp_rp_range: Option<[f32; 2]>,
     aperture_radius: Option<f64>,
+    /// Robust sigma beyond which a star leaves a fit.
+    rejection_sigma: Option<f64>,
+    /// The fewest stars either fit may rest on.
+    minimum_stars: Option<usize>,
     neutralize_background: Option<bool>,
+    /// The faintest Gaia G magnitude a calibrator may have.
+    calibrator_max_g: Option<f32>,
     /// Julian year of the observation, for proper motion.
     observation_epoch: Option<f64>,
 }
@@ -1691,6 +1804,20 @@ struct ColorFitJson {
     slope: f64,
     scatter: f64,
     stars: usize,
+}
+
+/// One star a colour calibration measured.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ColorStarMeasurementJson {
+    x: f64,
+    y: f64,
+    g: f32,
+    bp_rp: f32,
+    /// Background-subtracted, aperture-corrected fluxes in R, G, B.
+    flux: [f64; 3],
+    /// Whether the red and the blue fit kept the star.
+    used: [bool; 2],
 }
 
 #[derive(Serialize)]
@@ -1707,6 +1834,7 @@ struct ColorCalibrationJson {
     aperture_correction: [f64; 3],
     stars_offered: usize,
     stars_measured: usize,
+    measurements: Vec<ColorStarMeasurementJson>,
 }
 
 #[unsafe(no_mangle)]
@@ -1766,16 +1894,23 @@ pub unsafe extern "C" fn seiza_gaia_photometry_cone_json(
 /// `CRVAL1`, `CRPIX1`, `CD1_1` or `CDELT1`, SIP terms, …) with numeric or
 /// string values; `gaia_json` is an array of sources as
 /// [`seiza_gaia_photometry_cone_json`] returns. `options_json` may be null
-/// or an object with `whiteBpRp` (default 0.82, the Sun), `apertureRadius`
-/// (pixels; default twice the measured FWHM), `neutralizeBackground`
-/// (default true) and `observationEpoch` (a Julian year, for proper motion).
+/// or an object with `whiteBpRp` (default 0.82, the Sun), `fitBpRpRange`
+/// (the `[bluest, reddest]` BP − RP of the stars the fits use; default
+/// `[0, 1.8]`), `apertureRadius` (pixels; default twice the measured FWHM),
+/// `rejectionSigma` (default 3), `minimumStars` (the fewest stars either fit
+/// may rest on; default 20, at least 3), `neutralizeBackground` (default
+/// true), `calibratorMaxG` (the faintest Gaia G a calibrator may have;
+/// default two magnitudes brighter than the faintest source given) and
+/// `observationEpoch` (a Julian year, for proper motion).
 ///
 /// Returns owned schema-1 JSON with `gains` and `offsets` for R, G, B (apply
 /// them with [`seiza_color_calibration_apply`]), each channel's
 /// `background`, the `redFit` and `blueFit` lines of instrumental colour
-/// against BP − RP, the `apertureRadius` and `apertureCorrection` used, and
-/// star counts. The image is not changed. Free the result, or an
-/// `error_out` string, with [`seiza_string_free`].
+/// against BP − RP, the `apertureRadius` and `apertureCorrection` used, star
+/// counts, and `measurements`: each cleanly measured star's `x`, `y`, `g`,
+/// `bpRp`, R, G, B `flux`, and `used`, whether the red and the blue fit kept
+/// it. The image is not changed. Free the result, or an `error_out` string,
+/// with [`seiza_string_free`].
 ///
 /// # Safety
 /// `data` must point to `length` readable floats, `width * height * 3` of
@@ -1841,11 +1976,18 @@ pub unsafe extern "C" fn seiza_color_calibrate_json(
             &stars,
             &seiza_stacking::ColorCalibrationOptions {
                 white_bp_rp: options.white_bp_rp.unwrap_or(defaults.white_bp_rp),
+                fit_bp_rp_range: options
+                    .fit_bp_rp_range
+                    .map_or(defaults.fit_bp_rp_range, |[bluest, reddest]| {
+                        (bluest, reddest)
+                    }),
                 aperture_radius: options.aperture_radius,
+                rejection_sigma: options.rejection_sigma.unwrap_or(defaults.rejection_sigma),
+                minimum_stars: options.minimum_stars.unwrap_or(defaults.minimum_stars),
                 neutralize_background: options
                     .neutralize_background
                     .unwrap_or(defaults.neutralize_background),
-                ..defaults
+                calibrator_max_g: options.calibrator_max_g,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -1867,6 +2009,18 @@ pub unsafe extern "C" fn seiza_color_calibrate_json(
             aperture_correction: calibration.aperture_correction,
             stars_offered: calibration.stars_offered,
             stars_measured: calibration.stars_measured,
+            measurements: calibration
+                .measurements
+                .iter()
+                .map(|star| ColorStarMeasurementJson {
+                    x: star.x,
+                    y: star.y,
+                    g: star.g,
+                    bp_rp: star.bp_rp,
+                    flux: star.flux,
+                    used: star.used,
+                })
+                .collect(),
         })
     })
     .unwrap_or(ptr::null_mut())
@@ -1894,23 +2048,10 @@ pub unsafe extern "C" fn seiza_color_calibration_apply(
         if data.is_null() || gains.is_null() || offsets.is_null() {
             return Err("image, gains and offsets are required".into());
         }
-        if length == 0 || !length.is_multiple_of(3) {
-            return Err("an RGB image has a nonzero multiple of three samples".into());
-        }
-        let gains = unsafe { std::slice::from_raw_parts(gains, 3) };
-        let offsets = unsafe { std::slice::from_raw_parts(offsets, 3) };
-        if gains.iter().chain(offsets).any(|value| !value.is_finite()) {
-            return Err("gains and offsets must be finite".into());
-        }
+        let gains = unsafe { gains.cast::<[f32; 3]>().read_unaligned() };
+        let offsets = unsafe { offsets.cast::<[f32; 3]>().read_unaligned() };
         let data = unsafe { std::slice::from_raw_parts_mut(data, length) };
-        for pixel in data.chunks_exact_mut(3) {
-            for ((value, gain), offset) in pixel.iter_mut().zip(gains).zip(offsets) {
-                if value.is_finite() {
-                    *value = value.mul_add(*gain, *offset);
-                }
-            }
-        }
-        Ok(())
+        seiza_stacking::apply_color_gains(data, gains, offsets).map_err(|error| error.to_string())
     })
     .is_some()
 }
@@ -2517,6 +2658,114 @@ pub unsafe extern "C" fn seiza_live_stacker_state_json(
                 .map(|path| path.to_string_lossy().into_owned()),
             reintegration_unavailable: stacker.stacker.reintegration_unavailable(),
         })
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// Returns the reference frame's per-channel noise as an owned JSON array of
+/// numbers, measured the way each pushed frame's `diagnostics.noise` is. It
+/// is the unit of frame weights: the reference frame has weight 1 in every
+/// channel. The array is empty when the stack weights frames equally. Free
+/// it, or an `error_out` string, with [`seiza_string_free`].
+///
+/// # Safety
+/// `stacker` must be a live `SeizaLiveStacker` pointer. When non-null,
+/// `error_out` must point to writable storage for one pointer. Externally
+/// synchronize this read with every mutable operation on the same stacker.
+pub unsafe extern "C" fn seiza_live_stacker_reference_noise_json(
+    stacker: *const SeizaLiveStacker,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let stacker = unsafe { required_live_stacker(stacker)? };
+        owned_json(&stacker.stacker.reference_noise())
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// Returns the reference frame's mapping onto the stack grid, the identity,
+/// as owned JSON in the same versioned form as each pushed frame's
+/// `diagnostics.mapping`, so a host can keep one record per frame, the
+/// reference included. Free it, or an `error_out` string, with
+/// [`seiza_string_free`].
+///
+/// # Safety
+/// `stacker` must be a live `SeizaLiveStacker` pointer. When non-null,
+/// `error_out` must point to writable storage for one pointer. Externally
+/// synchronize this read with every mutable operation on the same stacker.
+pub unsafe extern "C" fn seiza_live_stacker_reference_mapping_json(
+    stacker: *const SeizaLiveStacker,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let stacker = unsafe { required_live_stacker(stacker)? };
+        owned_json(&stacker.stacker.reference_mapping())
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// Opens a stack from a FITS or XISF frame the host has already calibrated
+/// and debayered, keeping its header cards for the stack's outputs. This
+/// lets a host correct a frame between calibration and registration. A raw
+/// CFA frame (one with a Bayer layout) is refused. The stack takes later
+/// frames only as arrays, through [`seiza_live_stacker_push_linear_json`].
+/// Pass null or empty `options_json` for defaults, as for
+/// [`seiza_live_stacker_open_fits`].
+///
+/// # Safety
+/// `prepared_path` must be a valid NUL-terminated string. A non-null
+/// `options_json` must be NUL-terminated. When non-null, `error_out` must
+/// point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_live_stacker_open_prepared_fits(
+    prepared_path: *const c_char,
+    options_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaLiveStacker {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let prepared_path = required_path(prepared_path, "prepared reference path")?;
+        let options = stack_options(options_json)?;
+        let frame = FitsFrame::open(&prepared_path).map_err(|error| error.to_string())?;
+        let stacker =
+            LiveStacker::from_prepared_frame(frame, options).map_err(|error| error.to_string())?;
+        Ok(SeizaLiveStacker { stacker })
+    })
+    .map_or(ptr::null_mut(), |stacker| Box::into_raw(Box::new(stacker)))
+}
+
+#[unsafe(no_mangle)]
+/// Measures a linear image's per-channel pixel noise, the estimator behind
+/// frame weights: the median absolute deviation of second differences along
+/// each axis, as a Gaussian standard deviation in the image's own units,
+/// keeping the noisier axis. `channels` is 1 for mono or 3 for interleaved
+/// RGB.
+///
+/// Returns an owned JSON array with one number per channel, or `null` when
+/// the image is too small or too empty of finite samples to measure. Free
+/// it, or an `error_out` string, with [`seiza_string_free`].
+///
+/// # Safety
+/// `data` must point to `length` readable floats, `width * height *
+/// channels` of them. When non-null, `error_out` must point to writable
+/// storage for one pointer.
+pub unsafe extern "C" fn seiza_frame_noise_json(
+    data: *const f32,
+    length: usize,
+    width: usize,
+    height: usize,
+    channels: usize,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let image =
+            unsafe { linear_image_from_ffi(data, length, width, height, channels, "image")? };
+        owned_json(&seiza_stacking::frame_noise(&image))
     })
     .unwrap_or(ptr::null_mut())
 }
@@ -6486,6 +6735,9 @@ fn stack_diagnostics_response(diagnostics: FrameDiagnostics) -> StackDiagnostics
         integrated_fraction: diagnostics.integrated_fraction,
         accepted_samples: diagnostics.accepted_samples,
         rejected_samples: diagnostics.rejected_samples,
+        mapping: diagnostics.mapping,
+        noise: diagnostics.noise,
+        weight: diagnostics.weight,
     }
 }
 
@@ -6939,11 +7191,20 @@ fn build_master_request(
         cancel: cancellation,
         progress: None,
         defect_suppression,
-        flat_star_masking: None,
-        dark_level_screening: None,
+        flat_star_masking: request.flat_star_masking.map(FlatStarMaskingOptions::from),
+        dark_level_screening: request
+            .dark_level_screening
+            .map(|screening| DarkLevelScreening {
+                max_excess_sigma: screening.max_excess_sigma,
+            }),
     };
-    let master = build_master_from_fits(&request.inputs, kind, &options)
-        .map_err(|error| error.to_string())?;
+    let master = match &request.scratch_directory {
+        Some(directory) => {
+            build_master_from_fits_with_scratch(&request.inputs, kind, &options, directory)
+        }
+        None => build_master_from_fits(&request.inputs, kind, &options),
+    }
+    .map_err(|error| error.to_string())?;
     let (inputs, skipped_inputs) = master_build_provenance(&request.inputs, &master)?;
     // Validate every piece of provenance before publishing the output. A
     // response that cannot account for its requested inputs must not leave a
@@ -6960,6 +7221,7 @@ fn build_master_request(
         input_frames: master.input_frames,
         accepted_samples: master.accepted_samples,
         rejected_samples: master.rejected_samples,
+        masked_samples: master.masked_samples,
         fallback_pixels: master.fallback_pixels,
         defect_pixels_replaced: master.defect_pixels_replaced,
         bias_subtracted: master.bias_subtracted,
@@ -6970,6 +7232,11 @@ fn build_master_request(
             low_sigma: master.rejection.low_sigma,
             high_sigma: master.rejection.high_sigma,
         },
+        rejection_method: master.rejection_method.as_str(),
+        flat_star_masking: master
+            .flat_star_masking
+            .as_ref()
+            .map(FlatStarMaskingResponse::from),
         inputs,
         skipped_inputs,
     })
@@ -7050,6 +7317,7 @@ fn master_build_provenance(
             path: path.to_string_lossy().into_owned(),
             accepted_samples: tally.accepted_samples,
             rejected_samples: tally.rejected_samples,
+            masked_samples: tally.masked_samples,
         });
     }
     if statistics.next().is_some() || inputs.len() != master.input_frames {
@@ -8299,6 +8567,125 @@ mod tests {
         assert!(!error.is_null());
         let message = unsafe { CStr::from_ptr(error) }.to_str().unwrap();
         assert!(message.contains("zero or one"));
+        unsafe { seiza_string_free(error) };
+    }
+
+    fn owned_json_value(json: *mut c_char) -> Value {
+        assert!(!json.is_null());
+        let value = serde_json::from_str(unsafe { CStr::from_ptr(json) }.to_str().unwrap());
+        unsafe { seiza_string_free(json) };
+        value.unwrap()
+    }
+
+    #[test]
+    fn stacking_cabi_opens_a_prepared_frame_and_reports_noise_weights_and_mappings() {
+        let (width, height) = (160, 128);
+        let image = stacking_star_field(width, height);
+        let directory = tempfile::tempdir().unwrap();
+        let prepared = directory.path().join("prepared.fits");
+        seiza_stacking::write_processed_image_fits_f32(
+            &prepared,
+            &LinearImage::new(width, height, 1, image.clone()).unwrap(),
+            &[],
+            &[seiza_fits::WriteHeaderCard::new(
+                "OBJECT",
+                HeaderValue::String("M 31".into()),
+            )],
+        )
+        .unwrap();
+        let path = CString::new(prepared.to_str().unwrap()).unwrap();
+        let options = CString::new(
+            r#"{
+                "normalization": {"mode": "none"},
+                "rejection": {"mode": "none"},
+                "weighting": {"mode": "inverse-noise-variance"}
+            }"#,
+        )
+        .unwrap();
+        let mut error = ptr::null_mut();
+        let mut stacker = unsafe {
+            seiza_live_stacker_open_prepared_fits(path.as_ptr(), options.as_ptr(), &mut error)
+        };
+        assert!(!stacker.is_null());
+        assert!(error.is_null());
+        let state = owned_json_value(unsafe { seiza_live_stacker_state_json(stacker, &mut error) });
+        assert_eq!(state["inputMode"], "prepared-only");
+        assert_eq!(state["acceptedFrames"], 1);
+
+        let reference_noise = owned_json_value(unsafe {
+            seiza_live_stacker_reference_noise_json(stacker, &mut error)
+        });
+        let reference_noise = reference_noise.as_array().unwrap();
+        assert_eq!(reference_noise.len(), 1);
+        assert!(reference_noise[0].as_f64().unwrap() > 0.0);
+        let reference_mapping = owned_json_value(unsafe {
+            seiza_live_stacker_reference_mapping_json(stacker, &mut error)
+        });
+        assert_eq!(reference_mapping["schema_version"], 1);
+        assert_eq!(reference_mapping["reference_width"], width);
+
+        let measured = owned_json_value(unsafe {
+            seiza_frame_noise_json(image.as_ptr(), image.len(), width, height, 1, &mut error)
+        });
+        assert_eq!(&measured, &Value::Array(reference_noise.clone()));
+        let tiny = [1.0_f32; 4];
+        let unmeasured = owned_json_value(unsafe {
+            seiza_frame_noise_json(tiny.as_ptr(), 4, 2, 2, 1, &mut error)
+        });
+        assert_eq!(unmeasured, Value::Null);
+        assert!(unsafe { seiza_frame_noise_json(tiny.as_ptr(), 4, 4, 4, 1, &mut error) }.is_null());
+        unsafe { seiza_string_free(error) };
+        error = ptr::null_mut();
+
+        let disposition = owned_json_value(unsafe {
+            seiza_live_stacker_push_linear_json(
+                stacker,
+                image.as_ptr(),
+                image.len(),
+                width,
+                height,
+                1,
+                &mut error,
+            )
+        });
+        assert_eq!(disposition["accepted"], true);
+        let diagnostics = &disposition["diagnostics"];
+        assert_eq!(diagnostics["noise"].as_array().unwrap().len(), 1);
+        let weight = diagnostics["weight"].as_array().unwrap();
+        assert_eq!(weight.len(), 1);
+        assert!(
+            (weight[0].as_f64().unwrap() - 1.0).abs() < 1e-3,
+            "{weight:?}"
+        );
+        assert_eq!(diagnostics["mapping"]["schema_version"], 1);
+        assert!(diagnostics["mapping"]["transform"].is_object());
+
+        let snapshot = unsafe { seiza_live_stacker_finish(&mut stacker, &mut error) };
+        assert!(!snapshot.is_null());
+        unsafe { seiza_stack_snapshot_free(snapshot) };
+
+        // A raw CFA frame cannot skip preparation.
+        let raw = directory.path().join("raw.fits");
+        seiza_stacking::write_processed_image_fits_f32(
+            &raw,
+            &LinearImage::new(width, height, 1, image).unwrap(),
+            &[],
+            &[seiza_fits::WriteHeaderCard::new(
+                "BAYERPAT",
+                HeaderValue::String("RGGB".into()),
+            )],
+        )
+        .unwrap();
+        let raw = CString::new(raw.to_str().unwrap()).unwrap();
+        let refused =
+            unsafe { seiza_live_stacker_open_prepared_fits(raw.as_ptr(), ptr::null(), &mut error) };
+        assert!(refused.is_null());
+        assert!(
+            unsafe { CStr::from_ptr(error) }
+                .to_str()
+                .unwrap()
+                .contains("Bayer")
+        );
         unsafe { seiza_string_free(error) };
     }
 
@@ -10257,6 +10644,181 @@ mod tests {
         unsafe { seiza_string_free(error) };
     }
 
+    fn build_master_report(request: Value) -> Result<Value, String> {
+        let request = CString::new(request.to_string()).unwrap();
+        let mut error = ptr::null_mut();
+        let result = unsafe {
+            seiza_calibration_build_master_json(request.as_ptr(), ptr::null(), &mut error)
+        };
+        if result.is_null() {
+            let message = unsafe { CStr::from_ptr(error) }
+                .to_str()
+                .unwrap()
+                .to_owned();
+            unsafe { seiza_string_free(error) };
+            return Err(message);
+        }
+        let report = serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap());
+        unsafe { seiza_string_free(result) };
+        Ok(report.unwrap())
+    }
+
+    #[test]
+    fn master_builder_masks_stars_in_sky_flats_in_a_chosen_scratch_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let (width, height) = (96, 80);
+        let paths = (0..6)
+            .map(|frame| {
+                let path = directory.path().join(format!("sky-flat-{frame}.fits"));
+                let illumination = 1000.0 + frame as f32 * 300.0;
+                let (star_x, star_y) = (20.0 + frame as f32 * 11.0, 40.0);
+                let data = (0..width * height)
+                    .map(|index| {
+                        let (x, y) = ((index % width) as f32, (index / width) as f32);
+                        let grain = ((index * 37 + 11) % 17) as f32 * 0.002 - 0.016;
+                        let radius = (x - star_x).powi(2) + (y - star_y).powi(2);
+                        let star = 8.0 * (-radius / 8.0).exp();
+                        illumination * (1.0 + grain + star) + 200.0
+                    })
+                    .collect();
+                seiza_stacking::write_processed_image_fits_f32(
+                    &path,
+                    &LinearImage::new(width, height, 1, data).unwrap(),
+                    &[],
+                    &[seiza_fits::WriteHeaderCard::new(
+                        "IMAGETYP",
+                        HeaderValue::String("FLAT".into()),
+                    )],
+                )
+                .unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+        let output = directory.path().join("master-flat.fits");
+        let report = build_master_report(json!({
+            "kind": "flat",
+            "inputs": &paths,
+            "output": &output,
+            "flatStarMasking": {"detectionSigma": 5.0},
+            "scratchDirectory": scratch.path(),
+        }))
+        .unwrap();
+        assert_eq!(report["rejectionMethod"], "MEDIAN_MAD");
+        let masking = &report["flatStarMasking"];
+        assert_eq!(masking["options"]["detectionSigma"], 5.0);
+        assert_eq!(masking["options"]["minimumCleanSamples"], 2);
+        assert_eq!(masking["maskedSamples"], report["maskedSamples"]);
+        let masked = report["maskedSamples"].as_u64().unwrap();
+        assert!(masked > 0, "{report}");
+        let per_input: u64 = report["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|input| input["maskedSamples"].as_u64().unwrap())
+            .sum();
+        assert_eq!(per_input, masked);
+        assert_eq!(
+            report["acceptedSamples"].as_u64().unwrap()
+                + report["rejectedSamples"].as_u64().unwrap()
+                + masked,
+            (width * height * paths.len()) as u64
+        );
+        // The build cleans up its scratch file.
+        assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
+
+        // The scratch directory reaches the core: one that does not exist fails.
+        let missing = directory.path().join("no-such-directory");
+        assert!(
+            build_master_report(json!({
+                "kind": "flat",
+                "inputs": &paths,
+                "output": directory.path().join("unwritten.fits"),
+                "scratchDirectory": missing,
+            }))
+            .is_err()
+        );
+        // Without masking, the response says so.
+        let plain = build_master_report(json!({
+            "kind": "flat",
+            "inputs": &paths,
+            "output": directory.path().join("plain-flat.fits"),
+        }))
+        .unwrap();
+        assert_eq!(plain["flatStarMasking"], Value::Null);
+        assert_eq!(plain["maskedSamples"], 0);
+        // Masking is for flats only; the core refuses it on a bias.
+        let error = build_master_report(json!({
+            "kind": "bias",
+            "inputs": &paths,
+            "output": directory.path().join("bias.fits"),
+            "flatStarMasking": {},
+        }))
+        .unwrap_err();
+        assert!(error.contains("star masking"), "{error}");
+    }
+
+    #[test]
+    fn master_builder_screens_darks_that_caught_stray_light() {
+        let directory = tempfile::tempdir().unwrap();
+        let leaks = [0.0_f32, 0.5, 0.0, 40.0, 400.0];
+        let paths = leaks
+            .iter()
+            .enumerate()
+            .map(|(index, &leak)| {
+                let path = directory.path().join(format!("dark-{index}.fits"));
+                let data = (0..32 * 32)
+                    .map(|pixel| {
+                        let (x, y) = ((pixel % 32) as f32 - 15.5, (pixel / 32) as f32 - 15.5);
+                        let noise = ((pixel * 37 + 11) % 17) as f32 * 0.6 - 4.8;
+                        let falloff = 1.0 - 0.06 * (x * x + y * y) / (2.0 * 15.5 * 15.5);
+                        503.0 + noise + leak * falloff
+                    })
+                    .collect();
+                seiza_stacking::write_processed_image_fits_f32(
+                    &path,
+                    &LinearImage::new(32, 32, 1, data).unwrap(),
+                    &[],
+                    &[],
+                )
+                .unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+        let report = build_master_report(json!({
+            "kind": "dark",
+            "inputs": &paths,
+            "output": directory.path().join("master-dark.fits"),
+            "darkLevelScreening": {"maxExcessSigma": 1.0},
+        }))
+        .unwrap();
+        assert_eq!(report["inputFrames"], 3);
+        assert_eq!(report["rejectionMethod"], "LEAVE_ONE_OUT");
+        let skipped = report["skippedInputs"].as_array().unwrap();
+        assert_eq!(
+            skipped
+                .iter()
+                .map(|entry| entry["path"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [paths[3].to_str().unwrap(), paths[4].to_str().unwrap()]
+        );
+        assert!(
+            skipped[0]["reason"]
+                .as_str()
+                .unwrap()
+                .starts_with("stray light")
+        );
+        // `{}` takes the default limit; screening is for darks only.
+        let error = build_master_report(json!({
+            "kind": "bias",
+            "inputs": &paths,
+            "output": directory.path().join("bias.fits"),
+            "darkLevelScreening": {},
+        }))
+        .unwrap_err();
+        assert!(error.contains("level screening"), "{error}");
+    }
+
     #[test]
     fn master_builder_reports_a_skipped_middle_input_without_mislabeling_tallies() {
         let directory = tempfile::tempdir().unwrap();
@@ -12187,10 +12749,25 @@ pub unsafe extern "C" fn seiza_calibration_plan_json(
 ///
 /// The camelCase request has `kind`, at least two `inputs`, and `output`;
 /// optional fields are `bias`, `dark`, `darkExposureSeconds`,
-/// `exposureSeconds`, `rejection` (`lowSigma`, `highSigma`), and
-/// `defectSuppression` (`lowSigma`, `highSigma`). `dark` is a dark-flat when
+/// `exposureSeconds`, `rejection` (`lowSigma`, `highSigma`),
+/// `defectSuppression` (`lowSigma`, `highSigma`), `flatStarMasking`,
+/// `darkLevelScreening` and `scratchDirectory`. `dark` is a dark-flat when
 /// building a flat. Defect suppression is accepted only for flats, because a
 /// dark master must retain the hot pixels it is meant to subtract.
+///
+/// `flatStarMasking` (flats only) leaves stars and broad saturated patches
+/// out of each sky flat before it is normalized and combined. Its fields,
+/// each optional, are `detectionSigma` (default 4), `haloRadiusFactor`
+/// (default 3), `minimumRadiusPixels` (default 6), `saturationLevel` (in the
+/// inputs' raw units; default from `SATURATE`, `SATLEVEL` or the FITS
+/// encoding) and `minimumCleanSamples` (the fewest unmasked inputs every
+/// pixel must keep; default 2); `{}` takes every default.
+/// `darkLevelScreening` (darks only) sets aside darks whose level sits more
+/// than `maxExcessSigma` (default 1) times the quietest dark's pixel noise
+/// above it, the mark of stray light; they appear in `skippedInputs`.
+/// `scratchDirectory`, an existing directory, holds a flat build's temporary
+/// pixels in place of the system's temporary directory; bias and dark
+/// builds need none.
 ///
 /// Construction is a two-pass leave-one-out sigma-clipped mean and may take
 /// minutes. Run it off the UI thread. `cancel` may be null; otherwise another
@@ -12201,10 +12778,17 @@ pub unsafe extern "C" fn seiza_calibration_plan_json(
 /// [`seiza_string_free`].
 ///
 /// Response schema 2 reports `requestedFrames`, accepted `inputFrames` and
-/// accepted-only per-frame `inputs`, plus `skippedInputs` entries with `path`
-/// and `reason` for metadata disagreements the integrator set aside. The
-/// accepted and skipped paths are disjoint and account for every requested
-/// input in request order.
+/// accepted-only per-frame `inputs` (`path`, `acceptedSamples`,
+/// `rejectedSamples`, `maskedSamples`), plus `skippedInputs` entries with
+/// `path` and `reason` for frames the integrator set aside. The accepted and
+/// skipped paths are disjoint and account for every requested input in
+/// request order. `maskedSamples` counts the samples star masking left out,
+/// `rejectionMethod` is the rejection the build used (`NONE`, `MEDIAN_MAD`
+/// or `LEAVE_ONE_OUT`), and `flatStarMasking` is null unless masking ran;
+/// then it holds the `options` used, `maskedSamples`, `maskedPixels`, the
+/// `minimumCleanSamples` and `maximumCleanSamples` any pixel kept,
+/// `lowCoverageSamples`, `unmaskedSaturationSamples` and
+/// `unknownSaturationInputs`.
 ///
 /// # Safety
 /// `request_json` must be a valid NUL-terminated string. `cancel` must be null
@@ -13580,6 +14164,62 @@ fi
         let (gains, offsets) = (triple("gains"), triple("offsets"));
         assert!((gains[0] - 1.0 / 0.6).abs() < 0.03, "{gains:?}");
         assert!((gains[2] - 1.0 / 1.4).abs() < 0.02, "{gains:?}");
+        let measurements = report["measurements"].as_array().unwrap();
+        assert_eq!(
+            measurements.len() as u64,
+            report["starsMeasured"].as_u64().unwrap()
+        );
+        let star = &measurements[0];
+        for key in ["x", "y", "g", "bpRp"] {
+            assert!(star[key].is_number(), "{star}");
+        }
+        assert_eq!(star["flux"].as_array().unwrap().len(), 3);
+        assert_eq!(star["used"].as_array().unwrap().len(), 2);
+
+        // The fit's own options reach the core.
+        let calibrate = |options: &str, error: &mut *mut c_char| {
+            let options = CString::new(options).unwrap();
+            let response = unsafe {
+                seiza_color_calibrate_json(
+                    data.as_ptr(),
+                    data.len(),
+                    width,
+                    height,
+                    wcs_c.as_ptr(),
+                    gaia_c.as_ptr(),
+                    options.as_ptr(),
+                    error,
+                )
+            };
+            (!response.is_null()).then(|| {
+                let report: Value =
+                    serde_json::from_str(unsafe { CStr::from_ptr(response) }.to_str().unwrap())
+                        .unwrap();
+                unsafe { seiza_string_free(response) };
+                report
+            })
+        };
+        assert!(calibrate(r#"{"minimumStars": 500}"#, &mut error).is_none());
+        unsafe { seiza_string_free(error) };
+        error = ptr::null_mut();
+        let narrow = calibrate(
+            r#"{"fitBpRpRange": [0.3, 1.4], "rejectionSigma": 2.5, "minimumStars": 5, "calibratorMaxG": 10.0}"#,
+            &mut error,
+        )
+        .expect("narrowed fit");
+        let narrow_stars = narrow["measurements"].as_array().unwrap();
+        assert!(!narrow_stars.is_empty());
+        assert!(narrow_stars.len() < measurements.len());
+        assert!(
+            narrow_stars
+                .iter()
+                .all(|star| star["g"].as_f64().unwrap() <= 10.0)
+        );
+        assert!(narrow_stars.iter().all(|star| {
+            let bp_rp = star["bpRp"].as_f64().unwrap();
+            let used = star["used"].as_array().unwrap();
+            (0.3 - 1e-6..=1.4 + 1e-6).contains(&bp_rp) || used.iter().all(|used| used == false)
+        }));
 
         let before = data[0..3].to_vec();
         assert!(unsafe {
@@ -13595,6 +14235,18 @@ fi
             let expected = before[channel].mul_add(gains[channel], offsets[channel]);
             assert_eq!(data[channel], expected);
         }
+        // The core refuses a buffer that is not whole RGB pixels.
+        assert!(!unsafe {
+            seiza_color_calibration_apply(
+                data.as_mut_ptr(),
+                4,
+                gains.as_ptr(),
+                offsets.as_ptr(),
+                &mut error,
+            )
+        });
+        unsafe { seiza_string_free(error) };
+        error = ptr::null_mut();
         // Malformed input is refused rather than guessed at.
         let bad = CString::new("{\"CTYPE1\": \"RA---SIN\"}").unwrap();
         let refused = unsafe {

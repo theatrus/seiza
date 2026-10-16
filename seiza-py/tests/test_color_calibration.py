@@ -78,6 +78,40 @@ def test_calibrate_color_takes_a_bp_rp_colour_as_the_offline_catalog_gives():
     assert seiza.calibrate_color(image, wcs, offline).gains == pytest.approx(online)
 
 
+def test_calibrate_color_reports_its_stars_and_takes_the_fit_options():
+    image, wcs, gaia = synthetic_field()
+    calibration = seiza.calibrate_color(image, wcs, gaia)
+    measurements = calibration.measurements
+    assert len(measurements) == calibration.stars_measured
+    star = measurements[0]
+    assert set(star) == {"x", "y", "g", "bp_rp", "flux", "used"}
+    assert len(star["flux"]) == 3 and len(star["used"]) == 2
+
+    with pytest.raises(ValueError):
+        seiza.calibrate_color(image, wcs, gaia, minimum_stars=500)
+    narrow = seiza.calibrate_color(
+        image,
+        wcs,
+        gaia,
+        fit_bp_rp_range=(0.3, 1.4),
+        rejection_sigma=2.5,
+        minimum_stars=5,
+        calibrator_max_g=10.0,
+    )
+    assert 0 < len(narrow.measurements) < len(measurements)
+    assert all(star["g"] <= 10.0 for star in narrow.measurements)
+    for star in narrow.measurements:
+        if not 0.3 - 1e-6 <= star["bp_rp"] <= 1.4 + 1e-6:
+            assert star["used"] == (False, False)
+
+
+def test_color_calibration_apply_refuses_a_mono_image():
+    image, wcs, gaia = synthetic_field()
+    calibration = seiza.calibrate_color(image, wcs, gaia)
+    with pytest.raises(ValueError):
+        calibration.apply(image[..., 0].copy())
+
+
 def test_gaia_photometry_catalog_cone_reports_a_missing_catalog(tmp_path):
     with pytest.raises(ValueError):
         seiza.gaia_photometry_catalog_cone(tmp_path / "absent.bin", 56.75, 24.1, 1.0)

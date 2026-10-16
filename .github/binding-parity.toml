@@ -125,8 +125,15 @@ core = "seiza-stacking::FrameMetadata"
 core = "seiza-stacking::MasterBuildOptions"
 cancel = { none = "the C call takes a cancel signal as an argument" }
 progress = { none = "the C call takes a progress callback as an argument" }
-flat_star_masking = { gap = "masking stars out of sky flats" }
-dark_level_screening = { gap = "screening darks whose level does not match" }
+
+[rust.FlatStarMaskingRequest]
+core = "seiza-stacking::FlatStarMaskingOptions"
+
+[rust.FlatStarMaskingResponse]
+core = "seiza-stacking::FlatStarMaskingStatistics"
+
+[rust.DarkLevelScreeningRequest]
+core = "seiza-stacking::DarkLevelScreening"
 
 [rust.MasterRejectionRequest]
 core = "seiza-stacking::MasterRejectionOptions"
@@ -139,15 +146,11 @@ core = "seiza-stacking::MasterFrame"
 image = { none = "the C call writes the master to its output file" }
 exposure_seconds = { c = "output_exposure_seconds" }
 bayer = { none = "written to the output file's headers" }
-masked_samples = { gap = "the samples flat star masking set aside" }
-flat_star_masking = { gap = "whether flat star masking ran, and how much it masked" }
 input_statistics = { c = "inputs" }
-rejection_method = { gap = "which rejection the build used" }
 reference_headers = { none = "written to the output file's headers" }
 
 [rust.MasterBuildInputResponse]
 core = "seiza-stacking::MasterInputStatistics"
-masked_samples = { gap = "the samples flat star masking set aside, per input" }
 
 [rust.MasterBuildSkippedInputResponse]
 core = "seiza-stacking::SkippedInput"
@@ -164,9 +167,6 @@ core = "seiza-stacking::PipelineReport"
 [rust.StackDiagnosticsResponse]
 core = "seiza-stacking::FrameDiagnostics"
 transform = { none = "flattened into scale, rotation_degrees, translation_x and translation_y" }
-mapping = { gap = "the lens mapping a frame was registered through" }
-noise = { gap = "a frame's measured noise" }
-weight = { gap = "a frame's integration weight" }
 
 [rust.RegionResponse]
 core = "seiza-stacking::ReferenceRegion"
@@ -187,14 +187,12 @@ core = "seiza-stacking::ColorFit"
 
 [rust.ColorCalibrationJson]
 core = "seiza-stacking::ColorCalibration"
-measurements = { gap = "the per-star measurements behind the fit" }
+
+[rust.ColorStarMeasurementJson]
+core = "seiza-stacking::ColorStarMeasurement"
 
 [rust.ColorCalibrationOptionsJson]
 core = "seiza-stacking::ColorCalibrationOptions"
-fit_bp_rp_range = { gap = "the colour range of the stars the fit uses" }
-rejection_sigma = { gap = "the outlier rejection of the fit" }
-minimum_stars = { gap = "the fewest stars a fit accepts" }
-calibrator_max_g = { gap = "the faintest Gaia magnitude used as a calibrator" }
 
 [rust.GaiaSourceJson]
 core = "seiza-sources::GaiaPhotometry"
@@ -307,22 +305,18 @@ objects = [
 "seiza-parallax::parse_frame_size" = { none = "the C ABI reads sizes through parse_frame_size_or_shape" }
 
 # stacking
-"seiza-stacking::ColorCalibration::apply" = { gap = "the C ABI applies gains and offsets itself in seiza_color_calibration_apply instead of calling this, so it ignores a raw CFA layout" }
+"seiza-stacking::ColorCalibration::apply" = { none = "C hosts keep only the gains and offsets, so seiza_color_calibration_apply calls apply_color_gains, which apply uses, on the caller's buffer" }
 "seiza-stacking::LiveStacker::effective_maximum_drift_pixels" = { none = "part of registration" }
 "seiza-stacking::LiveStacker::open_fits_expanding" = { gap = "the expanding reference canvas for overlapping panels (#253), which Python has" }
 "seiza-stacking::LiveStacker::with_expanding_reference" = { gap = "the expanding reference canvas for overlapping panels (#253), which Python has" }
 "seiza-stacking::LiveStacker::expanded_lens" = { gap = "the expanding reference canvas for overlapping panels (#253), which Python has" }
 "seiza-stacking::LiveStacker::expansion_planning_notes" = { gap = "the expanding reference canvas for overlapping panels (#253), which Python has" }
-"seiza-stacking::LiveStacker::from_prepared_frame" = { gap = "starting a stack from a frame the host calibrated, keeping its FITS headers" }
 "seiza-stacking::LiveStacker::open_fits_with_reference_image" = { none = "the C ABI's call uses open_fits_with_reference_image_candidates, with one candidate" }
 "seiza-stacking::LiveStacker::with_reference_image" = { none = "the C ABI opens from paths (open_fits_with_reference_image_candidates)" }
 "seiza-stacking::LiveStacker::with_reference_image_candidates" = { none = "the C ABI opens from paths (open_fits_with_reference_image_candidates)" }
 "seiza-stacking::LiveStacker::push_fits_pipelined_with_pool" = { none = "the C ABI runs in the calling thread's pool (push_fits_pipelined)" }
 "seiza-stacking::LiveStacker::push_fits_sequential_with_pool" = { none = "the C ABI runs in the calling thread's pool (push_fits)" }
 "seiza-stacking::LiveStacker::set_calibration" = { none = "the C ABI replaces masters from FITS paths (set_calibration_from_fits_paths)" }
-"seiza-stacking::LiveStacker::reference_mapping" = { gap = "the reference frame's processing mapping, which hosts keep beside later frames' mappings" }
-"seiza-stacking::LiveStacker::reference_noise" = { gap = "the reference frame's noise, the unit of frame weights" }
-"seiza-stacking::build_master_from_fits_with_scratch" = { gap = "choosing where a flat build keeps its temporary pixels" }
 "seiza-stacking::build_residual_flat_patch" = { none = "kept for one release; seiza-calibration::build_residual_flat_patch replaces it" }
 "seiza-stacking::combine_rgb" = { gap = "composing mono stacks into colour, which Python has (combine_rgb, combine_lrgb, combine_narrowband)" }
 "seiza-stacking::combine_lrgb" = { gap = "composing mono stacks into colour, which Python has (combine_rgb, combine_lrgb, combine_narrowband)" }
@@ -335,7 +329,6 @@ objects = [
 "seiza-stacking::write_processed_image_fits_f32" = { none = "the C ABI writes stacks through write_fits_f32 and drizzles through write_drizzle_fits_f32" }
 "seiza-stacking::drizzle_reference_headers" = { none = "the C drizzle result carries its reference headers already" }
 "seiza-stacking::covered_region" = { none = "crop_report gives the region and more; the C ABI calls crop_report" }
-"seiza-stacking::frame_noise" = { gap = "a frame's noise, the estimator behind frame weights" }
 "seiza-stacking::integrate_registered_frames" = { gap = "integrating frames registered elsewhere, with leave-one-out rejection" }
 "seiza-stacking::reference_score" = { none = "choose_reference scores each frame; the C ABI calls choose_reference" }
 "seiza-stacking::resample_to_reference" = { none = "a registration building block the stacker uses" }
@@ -345,7 +338,7 @@ objects = [
 "seiza-stacking::resample_region_to_reference_with" = { none = "a registration building block the stacker uses" }
 "seiza-stacking::resample_region_warped" = { none = "a registration building block the stacker uses" }
 "seiza-stacking::resample_region_photosites" = { none = "a registration building block the stacker uses" }
-"seiza-stacking::screen_dark_levels" = { gap = "screening darks by level (MasterBuildOptions.dark_level_screening)" }
+"seiza-stacking::screen_dark_levels" = { none = "master builds call it for dark level screening (MasterBuildRequest.darkLevelScreening)" }
 "seiza-stacking::suppress_impulses" = { none = "master builds call it for defect suppression" }
 
 # stars
@@ -394,6 +387,10 @@ seiza_live_stacker_open_fits = "LiveStacker.__init__"
 seiza_live_stacker_open_fits_with_reference_image = "LiveStacker.open_fits_with_reference_image"
 seiza_live_stacker_open_fits_with_reference_image_candidates = "LiveStacker.open_fits_with_reference_image_candidates"
 seiza_live_stacker_open_context = "LiveStacker.open_context"
+seiza_live_stacker_open_prepared_fits = "LiveStacker.open_prepared_fits"
+seiza_live_stacker_reference_noise_json = "LiveStacker.reference_noise"
+seiza_live_stacker_reference_mapping_json = "LiveStacker.reference_mapping"
+seiza_frame_noise_json = "frame_noise"
 seiza_live_stacker_save_context = "LiveStacker.save_context"
 seiza_live_stacker_push_linear_json = "LiveStacker.push"
 seiza_live_stacker_push_fits_json = "LiveStacker.push_fits"
@@ -568,6 +565,7 @@ triangle_tilt_analysis = { c = "seiza_stars_detect_luma_u16_json" }
 
 # stacking and colour
 StackOptions = { none = "stack options; C calls take them as JSON fields" }
+FlatStarMasking = { none = "flat star masking options; C takes them as JSON (MasterBuildRequest.flatStarMasking)" }
 stack_fits = { none = "C hosts take the same steps with the live stacker: seiza_stack_choose_reference_json, open, push_fits_pipelined and finish" }
 "LiveStacker.open_fits_expanding" = { gap = "the expanding reference canvas for overlapping panels (#253)" }
 combine_rgb = { gap = "composing mono stacks into colour" }
@@ -710,6 +708,8 @@ CatalogSetupProgressResponse = { none = "download progress for the apps' setup s
 "MasterBuildResponse.defect_pixels_replaced" = { gap = "not in Python yet: goes with MasterBuildRequest.defect_suppression" }
 "MasterBuildResponse.output_exposure_seconds" = { python = "exposure_seconds" }
 "MasterBuildResponse.inputs" = { python = "input_statistics" }
+"DarkLevelScreeningRequest.max_excess_sigma" = { python = "dark_level_screening" }
+"MasterBuildInputResponse.masked_samples" = { python = "input_masked_samples" }
 "MasterBuildResponse.skipped_inputs" = { gap = "not in Python yet: MasterResult does not name the inputs the build set aside or why, so input_statistics cannot be matched to paths when it skips any" }
 
 # background, deconvolution and rendering

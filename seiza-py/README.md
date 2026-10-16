@@ -260,6 +260,14 @@ print(calibration.gains, calibration.red_fit, calibration.blue_fit)
 calibrated = calibration.apply(rgb)
 ```
 
+`fit_bp_rp_range` (default `(0.0, 1.8)`) sets the colour range of the stars
+the fits use, `rejection_sigma` (default 3) their outlier rejection,
+`minimum_stars` (default 20) the fewest stars a fit accepts, and
+`calibrator_max_g` the faintest Gaia G a calibrator may have (by default two
+magnitudes brighter than the faintest row given). `calibration.measurements`
+lists every star measured, with its position, `g`, `bp_rp`, R, G, B `flux`,
+and `used`, whether the red and the blue fit kept it.
+
 ## Image stacking
 
 The wheel includes the same linear calibration, registration, normalization,
@@ -294,8 +302,22 @@ star's colour across its profile, `"mhc"` gives slightly sharper stars but rings
 around small ones, and `"bilinear"` is fastest. `registration_model` is
 `"similarity"` (the default here), `"affine"`, or `"quadratic"`, which fits a
 polynomial to follow lens distortion, for example across a meridian flip; the
-CLI defaults to `"quadratic"`. The CLI's other stacking options (interpolation,
-weighting, Bayer drizzle) are not yet exposed here.
+CLI defaults to `"quadratic"`. `weighting` is `"equal"` (the default) or
+`"inverse-noise-variance"`, which weights each frame by the reference frame's
+noise over its own, squared. The CLI's other stacking options (interpolation,
+Bayer drizzle) are not yet exposed here.
+
+Under noise weighting, each accepted frame's `noise` and `weight` list one
+value per channel, and `LiveStacker.reference_noise` gives the reference
+frame's noise, the unit of the weights; under equal weighting they are empty.
+`seiza.frame_noise(image)` measures any linear array the same way. Each
+accepted frame's `mapping`, and `LiveStacker.reference_mapping` for the
+reference, is a dict of its registration and normalization, to keep beside
+the frame.
+
+`LiveStacker.open_prepared_fits(path)` opens a stack from a frame already
+calibrated and debayered, keeping its FITS header cards, so you can correct a
+frame between calibration and registration; push later frames as arrays.
 
 The first light is the reference unless `reference="auto"`, which scores every
 light and takes the best, as the CLI's `--reference auto` does. The result's
@@ -571,6 +593,15 @@ the same points, without a predicate.
 stop = threading.Event()
 dark = seiza.build_dark(dark_paths, "master-dark.fits", cancel=stop.is_set)
 ```
+
+`build_flat(..., flat_star_masking=seiza.FlatStarMasking())` leaves stars and
+broad saturated patches out of each sky flat before it is normalized, and
+`scratch_directory=` keeps the build's temporary pixels in a directory you
+choose. `build_dark(..., dark_level_screening=1.0)` sets aside darks whose
+level sits more than that many times the quietest dark's pixel noise above
+it, the mark of stray light. The result's `masked_samples`,
+`input_masked_samples` and `flat_star_masking` say what masking left out, and
+`rejection_method` which rejection the build used.
 
 ## Image processing primitives
 

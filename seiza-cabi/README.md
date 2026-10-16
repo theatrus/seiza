@@ -108,11 +108,25 @@ exposes the **superset** of what both apps need.
   and returns a `SeizaDrizzleResult` (image, weight, scale, and
   `seiza_drizzle_result_write_fits` with the WCS scaled to the grid) along
   with the reintegrated snapshot.
+  `seiza_live_stacker_open_prepared_fits` opens a stack from a FITS or XISF
+  frame the host has already calibrated and debayered, keeping its header
+  cards for the outputs, so a host can correct a frame between calibration and
+  registration; later frames go in as arrays. An accepted frame's
+  `diagnostics` carry its `mapping` onto the reference grid (the core's own
+  versioned JSON, for a host to keep beside the frame), and its per-channel
+  `noise` and `weight`, which are empty when frames are weighted equally.
+  `seiza_live_stacker_reference_noise_json` and
+  `seiza_live_stacker_reference_mapping_json` give the same for the reference
+  frame, whose weight is 1; `seiza_frame_noise_json` measures any linear
+  buffer's noise with the same estimator.
 - **Photometric colour calibration** — `seiza_gaia_photometry_cone_json` fetches
   Gaia DR3 photometry for a field, `seiza_color_calibrate_json` fits per-channel
   gains and background offsets for an interleaved RGB buffer from its FITS WCS
   keywords and those Gaia rows, and `seiza_color_calibration_apply` applies
-  them in place.
+  them in place through the core, as Python's `ColorCalibration.apply` does.
+  The options also set the colour range of the stars the fits use, their
+  outlier rejection, the fewest stars a fit accepts and the faintest
+  calibrator, and the result lists every star it measured.
 - **Automatic stack reference** — `seiza_stack_choose_reference_json` scores
   an ordered JSON array of FITS/XISF paths using the native stacking algorithm.
   It chooses the flattest background among frames with nearly the best star
@@ -133,7 +147,9 @@ exposes the **superset** of what both apps need.
   core sensor/optics/exposure/temperature/proximity/coherence rules, and
   `seiza_calibration_build_master_json` atomically publishes a two-pass
   sigma-clipped bias, dark, or flat master from raw paths while reporting any
-  metadata outliers it set aside. Long builds accept the thread-safe
+  metadata outliers it set aside. It can mask stars out of sky flats, set
+  aside darks that caught stray light, and keep a flat build's temporary
+  pixels in a directory the host chooses. Long builds accept the thread-safe
   `SeizaCancelSignal` owner.
 - **Stack-depth analysis** — `seiza_live_stacker_measure_depth` measures the
   borrowed live accumulator without a snapshot, and `seiza_checkpoint_depths`
@@ -672,20 +688,37 @@ Raw master construction uses one synchronous JSON call:
   "darkExposureSeconds": 2.0,
   "exposureSeconds": null,
   "rejection": {"lowSigma": 3.0, "highSigma": 3.0},
-  "defectSuppression": {"lowSigma": 16.0, "highSigma": 16.0}
+  "defectSuppression": {"lowSigma": 16.0, "highSigma": 16.0},
+  "flatStarMasking": {"detectionSigma": 4.0, "minimumCleanSamples": 2},
+  "scratchDirectory": "/Volumes/Data/seiza-scratch"
 }
 ```
 
 `bias` is valid for dark/flat builds; `dark` is valid only for flat builds.
 Defect suppression is restricted to flats so a dark retains the hot pixels it
-must subtract. Response schema 2 reports dimensions, all integration/rejection
-tallies, calibration state, exposure, and this input provenance:
+must subtract. `flatStarMasking`, for flats only, leaves stars and broad
+saturated patches out of each sky flat before it is normalized; its fields
+(`detectionSigma`, `haloRadiusFactor`, `minimumRadiusPixels`,
+`saturationLevel`, `minimumCleanSamples`) are optional, and `{}` takes every
+default. `darkLevelScreening`, for darks only, sets aside darks whose level
+sits more than `maxExcessSigma` (default 1) times the quietest dark's pixel
+noise above it, the mark of stray light. `scratchDirectory`, an existing
+directory, holds a flat build's temporary pixels in place of the system's
+temporary directory. Response schema 2 reports dimensions, all
+integration/rejection tallies, calibration state, exposure, and this input
+provenance:
 
 - `requestedFrames` is the number of paths supplied by the caller.
 - `inputFrames` and `inputs` cover only the paths actually integrated, in
-  request order; each input includes its accepted/rejected sample counts.
-- `skippedInputs` names every metadata disagreement set aside by the
-  integrator, with its `path` and human-readable `reason`.
+  request order; each input includes its accepted, rejected and masked sample
+  counts.
+- `skippedInputs` names every input the integrator set aside, for a metadata
+  disagreement or stray light, with its `path` and human-readable `reason`.
+- `maskedSamples` counts the samples star masking left out, and
+  `flatStarMasking` (null unless masking ran) holds the options used and what
+  they masked.
+- `rejectionMethod` is the rejection the build used: `NONE` for two inputs,
+  `MEDIAN_MAD` for flats, or `LEAVE_ONE_OUT` for bias and darks.
 
 The accepted and skipped paths are disjoint and together account for every
 requested path. This accounting is validated before the writer publishes, so

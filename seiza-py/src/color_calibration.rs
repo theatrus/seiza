@@ -166,6 +166,29 @@ impl PyColorCalibration {
         self.inner.stars_measured
     }
 
+    /// Every cleanly measured star: a dict with `x`, `y`, `g`, `bp_rp`,
+    /// `flux` (background-subtracted, aperture-corrected R, G, B) and `used`
+    /// (whether the red and the blue fit kept it).
+    #[getter]
+    fn measurements<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        self.inner
+            .measurements
+            .iter()
+            .map(|star| {
+                let row = PyDict::new(py);
+                row.set_item("x", star.x)?;
+                row.set_item("y", star.y)?;
+                row.set_item("g", star.g)?;
+                row.set_item("bp_rp", star.bp_rp)?;
+                let [r, g, b] = star.flux;
+                row.set_item("flux", (r, g, b))?;
+                let [red, blue] = star.used;
+                row.set_item("used", (red, blue))?;
+                Ok(row)
+            })
+            .collect()
+    }
+
     /// Return a calibrated copy of a linear `(height, width, 3)` image.
     fn apply<'py>(
         &self,
@@ -197,6 +220,12 @@ impl PyColorCalibration {
 /// year, for proper motion. The fit renders a star of Gaia BP - RP
 /// `white_bp_rp` (the Sun's by default) neutral; use the result's
 /// :meth:`ColorCalibration.apply` to calibrate the image.
+///
+/// The fits use stars whose BP - RP lies in `fit_bp_rp_range`, reject stars
+/// more than `rejection_sigma` robust sigmas off the line, and fail with
+/// fewer than `minimum_stars` left. `calibrator_max_g` is the faintest G
+/// magnitude a calibrator may have; by default, two magnitudes brighter than
+/// the faintest source given.
 #[pyfunction]
 #[pyo3(signature = (
     image,
@@ -205,8 +234,12 @@ impl PyColorCalibration {
     *,
     epoch=None,
     white_bp_rp=SOLAR_BP_RP,
+    fit_bp_rp_range=(0.0, 1.8),
     aperture_radius=None,
-    neutralize_background=true
+    rejection_sigma=3.0,
+    minimum_stars=20,
+    neutralize_background=true,
+    calibrator_max_g=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn calibrate_color(
@@ -216,8 +249,12 @@ fn calibrate_color(
     gaia: Vec<Bound<'_, PyDict>>,
     epoch: Option<f64>,
     white_bp_rp: f32,
+    fit_bp_rp_range: (f32, f32),
     aperture_radius: Option<f64>,
+    rejection_sigma: f64,
+    minimum_stars: usize,
     neutralize_background: bool,
+    calibrator_max_g: Option<f32>,
 ) -> PyResult<PyColorCalibration> {
     let image = linear_image(image)?;
     let number = |row: &Bound<'_, PyDict>, key: &str| -> PyResult<Option<f64>> {
@@ -257,9 +294,12 @@ fn calibrate_color(
     let wcs = wcs.wcs.clone();
     let options = ColorCalibrationOptions {
         white_bp_rp,
+        fit_bp_rp_range,
         aperture_radius,
+        rejection_sigma,
+        minimum_stars,
         neutralize_background,
-        ..ColorCalibrationOptions::default()
+        calibrator_max_g,
     };
     let inner = py
         .detach(|| {

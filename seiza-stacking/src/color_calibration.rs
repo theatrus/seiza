@@ -230,17 +230,37 @@ impl ColorCalibration {
                 "colour calibration needs a three-channel image".into(),
             ));
         }
-        image.data.par_chunks_mut(3 * 4096).for_each(|pixels| {
-            for pixel in pixels.chunks_exact_mut(3) {
-                for (channel, value) in pixel.iter_mut().enumerate() {
-                    if value.is_finite() {
-                        *value = value.mul_add(self.gains[channel], self.offsets[channel]);
-                    }
+        apply_color_gains(&mut image.data, self.gains, self.offsets)
+    }
+}
+
+/// Scale and offset each channel of interleaved linear RGB samples in place:
+/// each finite sample becomes `sample * gain + offset` for its channel, and
+/// non-finite samples are left as they are. This is what
+/// [`ColorCalibration::apply`] does, for a caller that holds only the gains
+/// and offsets, or the samples in its own buffer.
+///
+/// Fails when `samples` is empty or not a multiple of three, or when a gain
+/// or offset is not finite.
+pub fn apply_color_gains(samples: &mut [f32], gains: [f32; 3], offsets: [f32; 3]) -> Result<()> {
+    if samples.is_empty() || !samples.len().is_multiple_of(3) {
+        return Err(Error::Color(
+            "an RGB image has a nonzero multiple of three samples".into(),
+        ));
+    }
+    if gains.iter().chain(&offsets).any(|value| !value.is_finite()) {
+        return Err(Error::Color("gains and offsets must be finite".into()));
+    }
+    samples.par_chunks_mut(3 * 4096).for_each(|pixels| {
+        for pixel in pixels.chunks_exact_mut(3) {
+            for (channel, value) in pixel.iter_mut().enumerate() {
+                if value.is_finite() {
+                    *value = value.mul_add(gains[channel], offsets[channel]);
                 }
             }
-        });
-        Ok(())
-    }
+        }
+    });
+    Ok(())
 }
 
 /// Fit channel gains (and background offsets) that render a star of the
@@ -969,6 +989,18 @@ mod tests {
         assert!(calibrate_color(&image, &stars[..5], &ColorCalibrationOptions::default()).is_err());
         let mono = LinearImage::new(10, 10, 1, vec![1.0; 100]).unwrap();
         assert!(calibrate_color(&mono, &stars, &ColorCalibrationOptions::default()).is_err());
+    }
+
+    #[test]
+    fn gains_and_offsets_scale_each_channel_and_skip_non_finite_samples() {
+        let mut samples = [1.0, 2.0, 3.0, f32::NAN, 4.0, 5.0];
+        apply_color_gains(&mut samples, [2.0, 1.0, 0.5], [0.1, 0.0, -0.1]).unwrap();
+        assert_eq!(samples[..3], [2.1, 2.0, 1.4]);
+        assert!(samples[3].is_nan());
+        assert_eq!(samples[4..], [4.0, 2.4]);
+        assert!(apply_color_gains(&mut [1.0, 2.0], [1.0; 3], [0.0; 3]).is_err());
+        assert!(apply_color_gains(&mut [], [1.0; 3], [0.0; 3]).is_err());
+        assert!(apply_color_gains(&mut [1.0; 3], [f32::INFINITY, 1.0, 1.0], [0.0; 3]).is_err());
     }
 
     #[test]

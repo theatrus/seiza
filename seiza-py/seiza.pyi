@@ -317,6 +317,7 @@ class StackOptions:
     local_tile_size: int | None
     demosaic: str
     registration_model: str
+    weighting: str
     rejection: str
     maximum_drift_pixels: float
     maximum_drift_fraction: float
@@ -351,6 +352,7 @@ class StackOptions:
         demosaic: str = "vng",
         match_tolerances: MatchTolerances | None = None,
         registration_model: str = "similarity",
+        weighting: str = "equal",
     ) -> None: ...
 
 class FrameDisposition:
@@ -370,6 +372,10 @@ class FrameDisposition:
     integrated_fraction: float | None
     accepted_samples: int | None
     rejected_samples: int | None
+    noise: list[float] | None
+    weight: list[float] | None
+    @property
+    def mapping(self) -> dict[str, Any] | None: ...
     def __bool__(self) -> bool: ...
 
 class StackResult:
@@ -455,6 +461,12 @@ class LiveStacker:
         options: StackOptions | None = None,
     ) -> LiveStacker: ...
     @staticmethod
+    def open_prepared_fits(
+        path: str | Path,
+        *,
+        options: StackOptions | None = None,
+    ) -> LiveStacker: ...
+    @staticmethod
     def open_fits_with_reference_image(
         reference_image: str | Path,
         channel_reference: str | Path,
@@ -496,6 +508,10 @@ class LiveStacker:
     def rejected_frames(self) -> int: ...
     @property
     def reference_integrated(self) -> bool: ...
+    @property
+    def reference_noise(self) -> list[float]: ...
+    @property
+    def reference_mapping(self) -> dict[str, Any]: ...
     def compatible_calibration(
         self,
         light: FrameSignature,
@@ -565,6 +581,26 @@ class MasterResult:
     normalized: bool
     exposure_seconds: float | None
     input_statistics: list[tuple[int, int]]
+    masked_samples: int
+    input_masked_samples: list[int]
+    rejection_method: str
+    flat_star_masking: dict[str, Any] | None
+
+class FlatStarMasking:
+    detection_sigma: float
+    halo_radius_factor: float
+    minimum_radius_pixels: float
+    saturation_level: float | None
+    minimum_clean_samples: int
+    def __init__(
+        self,
+        *,
+        detection_sigma: float | None = None,
+        halo_radius_factor: float | None = None,
+        minimum_radius_pixels: float | None = None,
+        saturation_level: float | None = None,
+        minimum_clean_samples: int | None = None,
+    ) -> None: ...
 
 class BackgroundModel:
     width: int
@@ -989,6 +1025,7 @@ def build_dark(
     sigma_low: float = 3.0,
     sigma_high: float = 3.0,
     cancel: Callable[[], bool] | None = None,
+    dark_level_screening: float | None = None,
 ) -> MasterResult: ...
 def build_flat(
     images: Sequence[str | Path],
@@ -1001,7 +1038,10 @@ def build_flat(
     sigma_low: float = 3.0,
     sigma_high: float = 3.0,
     cancel: Callable[[], bool] | None = None,
+    flat_star_masking: FlatStarMasking | None = None,
+    scratch_directory: str | Path | None = None,
 ) -> MasterResult: ...
+def frame_noise(image: npt.NDArray[np.float32]) -> list[float] | None: ...
 def sensor_matches(reference: FrameSignature, candidate: FrameSignature) -> bool: ...
 def optics_match(
     reference: FrameSignature,
@@ -1108,6 +1148,7 @@ class ColorCalibration:
     aperture_correction: tuple[float, float, float]
     stars_offered: int
     stars_measured: int
+    measurements: list[dict[str, Any]]
     def apply(self, image: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]: ...
 
 def gaia_photometry_cone(
@@ -1130,6 +1171,10 @@ def calibrate_color(
     *,
     epoch: float | None = None,
     white_bp_rp: float = ...,
+    fit_bp_rp_range: tuple[float, float] = (0.0, 1.8),
     aperture_radius: float | None = None,
+    rejection_sigma: float = 3.0,
+    minimum_stars: int = 20,
     neutralize_background: bool = True,
+    calibrator_max_g: float | None = None,
 ) -> ColorCalibration: ...
