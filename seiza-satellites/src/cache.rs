@@ -47,6 +47,19 @@ pub enum CacheState {
     Cached,
 }
 
+impl CacheState {
+    /// The state as the bindings report it: `"fresh"`, `"downloaded"`,
+    /// `"stale-fallback"` or `"cache-only"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::Downloaded => "downloaded",
+            Self::StaleFallback => "stale-fallback",
+            Self::Cached => "cache-only",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum LockMode {
     Shared,

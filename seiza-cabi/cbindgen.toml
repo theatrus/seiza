@@ -44,12 +44,18 @@ after_includes = """
  *       -> release with seiza_parallax_free() once no call using it runs.
  *          Videos reconfigured from one preparation share its scene, which
  *          lives until the last of them is freed; free them in any order.
+ *   - SeizaSatelliteCatalog* returned by the seiza_satellite_catalog_open,
+ *     _from_omm_json, _from_tle_text, _fetch_celestrak and _resolve_json
+ *     functions -> release with seiza_satellite_catalog_free() once no call
+ *     using it runs.
  *   - char* returned by seiza_catalog_status_json, seiza_solve_image_json,
  *     seiza_solve_image_with_limits_json,
  *     seiza_probe_frame_json, seiza_calibration_plan_json,
  *     seiza_calibration_build_master_json, seiza_live_stacker_state_json, and
  *     seiza_live_stacker_push_*_json, seiza_parallax_summary_json,
- *     seiza_parallax_plan_tour_json, seiza_parallax_plan_scene_tour_json, plus
+ *     seiza_parallax_plan_tour_json, seiza_parallax_plan_scene_tour_json,
+ *     seiza_satellite_catalog_info_json, seiza_satellite_catalog_tracks_json,
+ *     plus
  *     any
  *     char* stored into an
  *     `error_out` argument on failure

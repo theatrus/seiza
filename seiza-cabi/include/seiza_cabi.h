@@ -41,12 +41,18 @@
  *       -> release with seiza_parallax_free() once no call using it runs.
  *          Videos reconfigured from one preparation share its scene, which
  *          lives until the last of them is freed; free them in any order.
+ *   - SeizaSatelliteCatalog* returned by the seiza_satellite_catalog_open,
+ *     _from_omm_json, _from_tle_text, _fetch_celestrak and _resolve_json
+ *     functions -> release with seiza_satellite_catalog_free() once no call
+ *     using it runs.
  *   - char* returned by seiza_catalog_status_json, seiza_solve_image_json,
  *     seiza_solve_image_with_limits_json,
  *     seiza_probe_frame_json, seiza_calibration_plan_json,
  *     seiza_calibration_build_master_json, seiza_live_stacker_state_json, and
  *     seiza_live_stacker_push_*_json, seiza_parallax_summary_json,
- *     seiza_parallax_plan_tour_json, seiza_parallax_plan_scene_tour_json, plus
+ *     seiza_parallax_plan_tour_json, seiza_parallax_plan_scene_tour_json,
+ *     seiza_satellite_catalog_info_json, seiza_satellite_catalog_tracks_json,
+ *     plus
  *     any
  *     char* stored into an
  *     `error_out` argument on failure
@@ -250,6 +256,14 @@ typedef struct SeizaRenderedImage SeizaRenderedImage;
  pointer; release it with [`seiza_rendered_image16_free`].
  */
 typedef struct SeizaRenderedImage16 SeizaRenderedImage16;
+
+/*
+ An opaque set of satellite orbital elements, with where they came from.
+ Release it with [`seiza_satellite_catalog_free`]. It is read-only once
+ made, so several threads may predict tracks from it at once; do not free
+ it while any call using it is running.
+ */
+typedef struct SeizaSatelliteCatalog SeizaSatelliteCatalog;
 
 /*
  A compact immutable live-stack result for non-destructive output. It owns
@@ -2971,6 +2985,166 @@ int32_t seiza_parallax_write_video_json(const SeizaParallax *video,
  that has not already been freed, with no call using it still running.
  */
 void seiza_parallax_free(SeizaParallax *video);
+
+/*
+ Open a file of satellite orbital elements: CCSDS OMM JSON (an array or
+ one object) or two- or three-line TLE text. Use it for images older than
+ a few days, with elements from near their time. Returns an owned catalog
+ to release with [`seiza_satellite_catalog_free`], or null with an owned
+ `error_out` string to free with `seiza_string_free`.
+
+ # Safety
+ `path` must be a NUL-terminated UTF-8 string. When non-null, `error_out`
+ must point to writable storage for one pointer.
+ */
+SeizaSatelliteCatalog *seiza_satellite_catalog_open(const char *path, char **error_out);
+
+/*
+ Parse OMM JSON text (an array or one object). `source`, which the
+ catalog and its tracks report, may be null for `"inline"`. Returns an
+ owned catalog to release with [`seiza_satellite_catalog_free`], or null
+ with an owned `error_out` string.
+
+ # Safety
+ `text` must be a NUL-terminated UTF-8 string, and `source` null or one.
+ When non-null, `error_out` must point to writable storage for one pointer.
+ */
+SeizaSatelliteCatalog *seiza_satellite_catalog_from_omm_json(const char *text,
+                                                             const char *source,
+                                                             char **error_out);
+
+/*
+ Parse two- or three-line TLE text. Records that do not parse are
+ skipped; text with none that do fails. `source` may be null for
+ `"inline"`. Returns an owned catalog to release with
+ [`seiza_satellite_catalog_free`], or null with an owned `error_out`
+ string.
+
+ # Safety
+ `text` must be a NUL-terminated UTF-8 string, and `source` null or one.
+ When non-null, `error_out` must point to writable storage for one pointer.
+ */
+SeizaSatelliteCatalog *seiza_satellite_catalog_from_tle_text(const char *text,
+                                                             const char *source,
+                                                             char **error_out);
+
+/*
+ Download CelesTrak's current set of active satellites, or reuse a cached
+ copy. The cache refreshes at most every two hours and falls back to the
+ newest good copy when a refresh fails; CelesTrak blocks clients that
+ download too often, so keep to one cache directory. `cache_dir` may be
+ null or empty for the platform's satellite cache. The call blocks on the
+ network; run it off the UI thread. `cancel` may be null; raising it stops
+ the download at once, failing the call, and leaves no half-written file
+ in the cache. Read the provider, cache state and any warning with
+ [`seiza_satellite_catalog_info_json`]. Current elements suit only recent
+ images; for an older one use [`seiza_satellite_catalog_resolve_json`] or
+ open a file of elements from its time.
+
+ Returns an owned catalog to release with [`seiza_satellite_catalog_free`],
+ or null with an owned `error_out` string.
+
+ # Safety
+ `cache_dir` must be null or a NUL-terminated UTF-8 string. `cancel` must
+ be null or a live [`SeizaCancelSignal`] retained until this call returns.
+ When non-null, `error_out` must point to writable storage for one pointer.
+ */
+SeizaSatelliteCatalog *seiza_satellite_catalog_fetch_celestrak(const char *cache_dir,
+                                                               const SeizaCancelSignal *cancel,
+                                                               char **error_out);
+
+/*
+ Find the elements that suit an image's time, choosing the provider so
+ the caller need not: a recent time uses CelesTrak's current set; an
+ older one a nearby cached copy, then the Seiza satellite mirror, then
+ IAU SatChecker.
+
+ `request_json` is `{"time": ..., "cacheDir": ...}`: `time` is Unix
+ seconds or RFC 3339 text (UTC when it has no offset), best the
+ exposure's midpoint; `cacheDir` may be absent for the platform's
+ satellite cache. A recent time may refresh CelesTrak, which blocks
+ clients that download too often, so keep to one cache directory. The
+ call blocks on the network; `cancel` may be null, and raising it stops
+ the load at once, failing the call. Read the provider, cache state and
+ any warning with [`seiza_satellite_catalog_info_json`].
+
+ Returns an owned catalog to release with [`seiza_satellite_catalog_free`],
+ or null with an owned `error_out` string.
+
+ # Safety
+ `request_json` must be a NUL-terminated UTF-8 string. `cancel` must be
+ null or a live [`SeizaCancelSignal`] retained until this call returns.
+ When non-null, `error_out` must point to writable storage for one pointer.
+ */
+SeizaSatelliteCatalog *seiza_satellite_catalog_resolve_json(const char *request_json,
+                                                            const SeizaCancelSignal *cancel,
+                                                            char **error_out);
+
+/*
+ Describe a catalog as owned JSON: `records` (how many), `source` (a path,
+ a URL or the caller's text), `retrievedAtUnix`, and after a fetch or
+ resolve `provider` (`"celestrak-active"`, `"seiza-mirror"` or
+ `"iau-satchecker"`), `cacheState` (`"fresh"`, `"downloaded"`,
+ `"stale-fallback"` or `"cache-only"`), `cachePath` and `warning`, a
+ problem that did not stop the load. Those four are null for a file or
+ text. Free the result, or an `error_out` string, with
+ `seiza_string_free`.
+
+ # Safety
+ `catalog` must be a live pointer from a `seiza_satellite_catalog_*`
+ constructor. When non-null, `error_out` must point to writable storage
+ for one pointer.
+ */
+char *seiza_satellite_catalog_info_json(const SeizaSatelliteCatalog *catalog, char **error_out);
+
+/*
+ Predict which satellites crossed a solved `width` by `height` image while
+ the shutter was open. The tracks are predictions from orbital elements,
+ never detections in the pixels.
+
+ `wcs_json` is the image's WCS as the C ABI's solve returns it (`crval`,
+ `crpix`, `cd`, `sip`, and `pixelOrigin`, 0 or 1, for what `crpix` counts
+ from). `request_json` gives one exposure, one continuous time with the
+ shutter open (never a stack's total): `start`, as Unix seconds or RFC 3339
+ text, and either `durationSeconds` or `end`; the observer as `latitude`
+ and `longitude` in degrees (east positive) with `altitudeM` above the
+ ellipsoid, or as `observerItrf`, `[x, y, z]` in metres; and optionally
+ `sampleIntervalSeconds` (1), `coarseIntervalSeconds` (10),
+ `minimumElevationDeg` (0) and `maximumElementAgeSeconds` (seven days;
+ null allows any age).
+
+ Returns owned JSON: `tracks`, highest elevation first, each with its
+ satellite (`noradId`, `cosparId`, `name`, `label`), `elementEpochUnix`,
+ `elementAgeSeconds`, `source`, `sampleIntervalSeconds`, `samples` (each
+ `timeUnix`, `raDeg`, `decDeg`, `pixel` as `{x, y}` counted from 0 or null,
+ `elevationDeg`, `rangeKm`, `sunlightFraction`), `clippedSegments` (the
+ path inside the image, each `{start, end}`), `maxElevationDeg`,
+ `maxSunlightFraction`, `maxApparentRateArcsecPerS`,
+ `maxPixelRatePxPerS` and `clippedLengthPx`; then `elementsConsidered`,
+ `propagationFailures` and `staleElements`, the records skipped for age.
+ Free it, or an `error_out` string, with `seiza_string_free`.
+
+ # Safety
+ `catalog` must be a live pointer from a `seiza_satellite_catalog_*`
+ constructor; `wcs_json` and `request_json` NUL-terminated UTF-8 strings.
+ When non-null, `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_satellite_catalog_tracks_json(const SeizaSatelliteCatalog *catalog,
+                                          const char *wcs_json,
+                                          uint32_t width,
+                                          uint32_t height,
+                                          const char *request_json,
+                                          char **error_out);
+
+/*
+ Release a catalog from a `seiza_satellite_catalog_*` constructor.
+
+ # Safety
+ `catalog` must be null or a pointer from a `seiza_satellite_catalog_*`
+ constructor that has not already been freed, with no call using it
+ still running.
+ */
+void seiza_satellite_catalog_free(SeizaSatelliteCatalog *catalog);
 
 #ifdef __cplusplus
 }  // extern "C"

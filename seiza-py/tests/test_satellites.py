@@ -133,6 +133,26 @@ def test_start_accepts_string_and_aware_datetime():
         )
 
 
+def test_end_gives_the_same_exposure_as_duration():
+    catalog = iss_catalog()
+    by_duration = locate_iss(catalog, EPOCH_UNIX, 2.0)
+    sample = by_duration.samples[0]
+    wcs = seiza.Wcs.from_center_scale_rotation(
+        (sample.ra_deg, sample.dec_deg), (512.0, 512.0), 10.0
+    )
+    common = dict(start=EPOCH_UNIX, min_elevation_deg=-90.0, **OBSERVER)
+    expected = catalog.tracks_in_footprint(wcs, 1024, 1024, duration_s=2.0, **common)
+    result = catalog.tracks_in_footprint(
+        wcs, 1024, 1024, end="2024-05-02T12:00:02Z", **common
+    )
+    assert len(result.tracks) == len(expected.tracks) == 1
+    assert result.tracks[0].clipped_segments == expected.tracks[0].clipped_segments
+
+    for lengths in ({}, dict(duration_s=2.0, end=EPOCH_UNIX + 2.0)):
+        with pytest.raises(ValueError, match="exactly one"):
+            catalog.tracks_in_footprint(wcs, 1024, 1024, **lengths, **common)
+
+
 def test_naive_datetime_is_rejected():
     catalog = iss_catalog()
     wcs = seiza.Wcs.from_center_scale_rotation((0.0, 0.0), (50.0, 50.0), 3600.0)

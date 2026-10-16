@@ -39,7 +39,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = Path(".github/binding-parity.toml")
-C_SOURCES = ("seiza-cabi/src/lib.rs", "seiza-cabi/src/parallax.rs")
+C_SOURCES = Path("seiza-cabi/src")
 STUB = Path("seiza-py/seiza.pyi")
 PY_SOURCES = Path("seiza-py/src")
 TRAILER = "Binding-parity:"
@@ -112,6 +112,11 @@ def without_tests(source: str) -> str:
         if match is None:
             return source
         source = source[: match.start()] + source[block_end(source, match.end() - 1):]
+
+
+def c_source_paths(root: Path) -> list[Path]:
+    """The C ABI's Rust sources: every module in seiza-cabi/src."""
+    return sorted((root / C_SOURCES).glob("*.rs"))
 
 
 def c_exports(sources: list[str]) -> set[str]:
@@ -557,7 +562,7 @@ def git(root: Path, *arguments: str) -> str:
 def run(root: Path, base: str | None) -> Report:
     report = Report()
     manifest = tomllib.loads((root / MANIFEST).read_text())
-    c_sources = [(root / path).read_text() for path in C_SOURCES]
+    c_sources = [path.read_text() for path in c_source_paths(root)]
     rust_sources = [path.read_text() for path in sorted((root / PY_SOURCES).glob("*.rs"))]
     surface = python_surface((root / STUB).read_text(), rust_sources)
     check_core(report, manifest, root, c_structs(c_sources))

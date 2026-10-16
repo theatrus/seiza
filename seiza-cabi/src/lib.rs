@@ -1,6 +1,7 @@
 use image::DynamicImage;
 mod parallax;
 mod resample;
+mod satellites;
 use resample::{downsample_interleaved_f32, downsample_rgba};
 use seiza::blind::{BlindIndex, BlindParams};
 use seiza::catalog::{StarCatalog, tiles::TileCatalog};

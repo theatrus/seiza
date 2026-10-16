@@ -293,6 +293,28 @@ exposes the **superset** of what both apps need.
   (with a progress callback). Preset `3` installs only the Gaia photometry
   catalog that colour calibration reads. The install path delegates to
   `seiza-download`'s `materialize_with`; the shim carries no download logic.
+- **Satellite tracks** — predictions, from orbital elements, of the
+  satellites that crossed a solved image while the shutter was open; never
+  detections in the pixels. A `SeizaSatelliteCatalog` holds the elements:
+  `seiza_satellite_catalog_open` reads an OMM JSON or TLE file,
+  `..._from_omm_json` and `..._from_tle_text` parse text,
+  `..._fetch_celestrak` downloads CelesTrak's current set (or reuses a copy
+  under two hours old, falling back to an older good copy when a refresh
+  fails), and `..._resolve_json` takes `{"time", "cacheDir"}` and picks the
+  provider for that time: CelesTrak when recent, else a cached copy, the
+  Seiza satellite mirror or IAU SatChecker. The two network calls block and
+  take a `SeizaCancelSignal`, which stops them at once. CelesTrak blocks
+  clients that download too often, so keep to one cache directory.
+  `..._info_json` reports the record count, source, retrieval time, provider,
+  cache state, cache path and any warning. `..._tracks_json` takes the
+  image's WCS JSON (as the solve returns it, with `pixelOrigin`), its width
+  and height, and a request giving `start` (Unix seconds or RFC 3339),
+  `durationSeconds` or `end`, the observer (`latitude`, `longitude`,
+  `altitudeM`, or `observerItrf` in metres) and optional sampling settings;
+  it returns each track's satellite, samples and path inside the image, with
+  counts of the records considered, failed and skipped as stale (over seven
+  days from the exposure by default). Release the catalog with
+  `seiza_satellite_catalog_free`. Python's `SatelliteCatalog` is the twin.
 - **Memory** — `seiza_core_version`, `seiza_string_free`.
 
 Rendered-image metadata includes input and display histograms plus the requested

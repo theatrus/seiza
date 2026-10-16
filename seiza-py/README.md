@@ -878,7 +878,7 @@ sats = seiza.SatelliteCatalog.fetch_celestrak()   # cached; ~2h refresh floor
 result = sats.tracks_in_footprint(
     solution.wcs, width, height,
     start="2026-07-19T06:12:00Z",     # Unix seconds, RFC 3339, or tz-aware datetime
-    duration_s=120.0,
+    duration_s=120.0,                 # or end=, in the same forms as start
     latitude=42.466, longitude=-71.1516, altitude_m=150.0,
 )
 for track in result.tracks:           # highest elevation first

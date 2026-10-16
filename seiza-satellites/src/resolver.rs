@@ -19,6 +19,18 @@ pub enum OrbitalCatalogProvider {
     IauSatChecker,
 }
 
+impl OrbitalCatalogProvider {
+    /// The provider as the bindings report it: `"celestrak-active"`,
+    /// `"seiza-mirror"` or `"iau-satchecker"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CelesTrakActive => "celestrak-active",
+            Self::SeizaMirror => "seiza-mirror",
+            Self::IauSatChecker => "iau-satchecker",
+        }
+    }
+}
+
 /// Provider-neutral provenance for one resolved orbital catalog.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

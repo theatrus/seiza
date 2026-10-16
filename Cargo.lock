@@ -2698,6 +2698,7 @@ dependencies = [
  "seiza-fits",
  "seiza-image-io",
  "seiza-parallax",
+ "seiza-satellites",
  "seiza-sources",
  "seiza-stacking",
  "seiza-stars",

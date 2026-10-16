@@ -14,6 +14,7 @@ fn main() {
     // Regenerate when the FFI surface or the cbindgen config changes.
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=src/parallax.rs");
+    println!("cargo:rerun-if-changed=src/satellites.rs");
     println!("cargo:rerun-if-changed=cbindgen.toml");
     println!("cargo:rerun-if-changed=build.rs");
 

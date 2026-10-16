@@ -6,6 +6,7 @@
 //! must not present them as pixel detections without a separate evidence
 //! matcher.
 
+mod blocking;
 mod cache;
 mod history;
 mod mirror;
@@ -121,6 +122,10 @@ pub enum Error {
     CacheLock(String),
     #[error("no platform cache directory is available")]
     NoCacheDirectory,
+    #[error("failed to start the async runtime: {0}")]
+    Runtime(#[source] std::io::Error),
+    #[error("the satellite element load was cancelled")]
+    Cancelled,
 }
 
 /// Translate a `seiza-download` bundle-transfer error into the satellite error

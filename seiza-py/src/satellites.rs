@@ -210,15 +210,6 @@ struct CatalogMeta {
     warning: Option<String>,
 }
 
-fn cache_state_label(state: sat::CacheState) -> &'static str {
-    match state {
-        sat::CacheState::Fresh => "fresh",
-        sat::CacheState::Downloaded => "downloaded",
-        sat::CacheState::StaleFallback => "stale-fallback",
-        sat::CacheState::Cached => "cache-only",
-    }
-}
-
 /// Parsed OMM or TLE satellite orbital elements with source provenance.
 #[pyclass(frozen, name = "SatelliteCatalog", module = "seiza")]
 pub struct PySatelliteCatalog {
@@ -273,16 +264,12 @@ impl PySatelliteCatalog {
                 None => sat::CelesTrakSource::platform_default(),
             }
             .map_err(map_error)?;
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-            let load = runtime.block_on(source.load_active()).map_err(map_error)?;
+            let load = source.load_active_blocking(None).map_err(map_error)?;
             Ok(Self {
                 catalog: load.catalog,
                 meta: Some(CatalogMeta {
-                    provider: "celestrak-active",
-                    state: cache_state_label(load.state),
+                    provider: sat::OrbitalCatalogProvider::CelesTrakActive.as_str(),
+                    state: load.state.as_str(),
                     cache_path: load.cache_path,
                     warning: load.warning,
                 }),
@@ -312,21 +299,12 @@ impl PySatelliteCatalog {
                 None => sat::OrbitalCatalogSource::platform_default(),
             }
             .map_err(map_error)?;
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-            let load = runtime.block_on(source.load_at(time)).map_err(map_error)?;
-            let provider = match load.snapshot.provider {
-                sat::OrbitalCatalogProvider::CelesTrakActive => "celestrak-active",
-                sat::OrbitalCatalogProvider::SeizaMirror => "seiza-mirror",
-                sat::OrbitalCatalogProvider::IauSatChecker => "iau-satchecker",
-            };
+            let load = source.load_at_blocking(time, None).map_err(map_error)?;
             Ok(Self {
                 catalog: load.catalog,
                 meta: Some(CatalogMeta {
-                    provider,
-                    state: cache_state_label(load.state),
+                    provider: load.snapshot.provider.as_str(),
+                    state: load.state.as_str(),
                     cache_path: load.cache_path,
                     warning: load.warning,
                 }),
@@ -381,12 +359,14 @@ impl PySatelliteCatalog {
 
     /// Predict which satellites crossed the solved image while the shutter
     /// was open. `start` is the exposure start as Unix seconds, an RFC 3339
-    /// string, or a timezone-aware datetime; the exposure must be one
-    /// continuous shutter-open interval (never a stack's total integration).
+    /// string, or a timezone-aware datetime; give its length as `duration_s`
+    /// or its close as `end`, in the same forms as `start`. The exposure must
+    /// be one continuous shutter-open interval (never a stack's total
+    /// integration).
     /// Give the observer as `latitude`/`longitude` (degrees, east-positive)
     /// with optional `altitude_m`, or as an ITRF `observer_itrf=(x, y, z)`
     /// in meters. `max_element_age_s=None` permits unlimited extrapolation.
-    #[pyo3(signature = (wcs, width, height, *, start, duration_s,
+    #[pyo3(signature = (wcs, width, height, *, start, duration_s=None, end=None,
         latitude=None, longitude=None, altitude_m=0.0, observer_itrf=None,
         sample_interval_s=1.0, coarse_interval_s=10.0, min_elevation_deg=0.0,
         max_element_age_s=Some(604_800.0)))]
@@ -398,7 +378,8 @@ impl PySatelliteCatalog {
         width: u32,
         height: u32,
         start: &Bound<'_, PyAny>,
-        duration_s: f64,
+        duration_s: Option<f64>,
+        end: Option<&Bound<'_, PyAny>>,
         latitude: Option<f64>,
         longitude: Option<f64>,
         altitude_m: f64,
@@ -429,12 +410,26 @@ impl PySatelliteCatalog {
                 ));
             }
         };
-        let exposure = sat::SingleExposure::from_start_and_duration(
-            parse_start(start)?,
-            duration_s,
-            observer,
-            sat::ExposureProvenance::Explicit,
-        )
+        let start = parse_start(start)?;
+        let exposure = match (duration_s, end) {
+            (Some(duration), None) => sat::SingleExposure::from_start_and_duration(
+                start,
+                duration,
+                observer,
+                sat::ExposureProvenance::Explicit,
+            ),
+            (None, Some(end)) => sat::SingleExposure::new(
+                start,
+                parse_start(end)?,
+                observer,
+                sat::ExposureProvenance::Explicit,
+            ),
+            _ => {
+                return Err(PyValueError::new_err(
+                    "give exactly one of duration_s (the exposure's length) and end (its close)",
+                ));
+            }
+        }
         .map_err(map_error)?;
         let options = sat::TrackOptions {
             sample_interval_seconds: sample_interval_s,

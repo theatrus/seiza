@@ -262,6 +262,30 @@ core = "seiza-stars::TriangleSectorStats"
 [rust.TriangleTiltJson]
 core = "seiza-stars::TriangleTiltSummary"
 
+
+# satellites
+[rust.SatelliteTracksRequest]
+core = "seiza-satellites::TrackOptions"
+
+[rust.SatelliteTrackSearchResponse]
+core = "seiza-satellites::TrackSearchResult"
+
+[rust.SatelliteTrackResponse]
+core = "seiza-satellites::SatelliteTrack"
+identity = { none = "flattened into norad_id, cospar_id, name and label" }
+association = { none = "always Predicted: the tracks are predictions, never detections" }
+element_epoch_utc = { c = "element_epoch_unix" }
+
+[rust.SatelliteTrackSampleResponse]
+core = "seiza-satellites::TrackSample"
+time_utc = { c = "time_unix" }
+
+[rust.PixelPointResponse]
+core = "seiza-satellites::PixelPoint"
+
+[rust.PixelSegmentResponse]
+core = "seiza-satellites::PixelSegment"
+
 # Core functions hosts use. Every function a core crate exports from its
 # root, and every public method of these objects hosts hold, must be called
 # by the C ABI; otherwise an entry says why not. "crate::*" covers a whole
@@ -550,6 +574,19 @@ seiza_rc_astro_locate = "rc_astro_locate"
 seiza_rc_astro_tool_schema_json = "rc_astro_tool_schema"
 seiza_rc_astro_process_file_json = "rc_astro_process_file"
 
+# --- satellites -------------------------------------------------------------
+# Python's fetch_celestrak and resolve take no cancel=, which the C calls do.
+seiza_satellite_catalog_open = "SatelliteCatalog.open"
+seiza_satellite_catalog_from_omm_json = "SatelliteCatalog.from_omm_json"
+seiza_satellite_catalog_from_tle_text = "SatelliteCatalog.from_tle_text"
+seiza_satellite_catalog_fetch_celestrak = "SatelliteCatalog.fetch_celestrak"
+seiza_satellite_catalog_resolve_json = "SatelliteCatalog.resolve"
+# One call gives what Python reads as properties (source, retrieved_at_unix,
+# provider, cache_state, cache_path, warning) and len().
+seiza_satellite_catalog_info_json = "SatelliteCatalog.source"
+seiza_satellite_catalog_tracks_json = "SatelliteCatalog.tracks_in_footprint"
+seiza_satellite_catalog_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
+
 # --- cancel, memory and version ---------------------------------------------
 seiza_cancel_signal_create = { none = "C cancel handle; Python takes a cancel= callable" }
 seiza_cancel_signal_cancel = { none = "C cancel handle; Python takes a cancel= callable" }
@@ -623,14 +660,6 @@ remove_structures = { none = "an image-processing primitive for Python callers" 
 
 # rc-astro
 rc_astro_split_stars = { c = "seiza_rc_astro_process_file_json" }
-
-# satellites: seiza-satellites has no C ABI
-"SatelliteCatalog.open" = { gap = "satellite track prediction (seiza-satellites)" }
-"SatelliteCatalog.from_omm_json" = { gap = "satellite track prediction (seiza-satellites)" }
-"SatelliteCatalog.from_tle_text" = { gap = "satellite track prediction (seiza-satellites)" }
-"SatelliteCatalog.fetch_celestrak" = { gap = "satellite track prediction (seiza-satellites)" }
-"SatelliteCatalog.resolve" = { gap = "satellite track prediction (seiza-satellites)" }
-"SatelliteCatalog.tracks_in_footprint" = { gap = "satellite track prediction (seiza-satellites)" }
 
 # Whole JSON types with no Python counterpart (field checks skipped).
 [types]
@@ -738,3 +767,13 @@ CatalogSetupProgressResponse = { none = "download progress for the apps' setup s
 "ColorCompositionResponse.transfer" = { none = "Python's combine functions return the image array alone; the Foraxx palettes give display-referred samples and the rest linear light, and an output's SEIZATRF card records it" }
 "ChannelCoverageResponse.center_offset_x" = { python = "center_offset" }
 "ChannelCoverageResponse.center_offset_y" = { python = "center_offset" }
+
+# satellites
+"SatelliteCatalogInfoResponse.records" = { python = "__len__" }
+"SatelliteTracksRequest.duration_seconds" = { python = "duration_s" }
+"SatelliteTracksRequest.sample_interval_seconds" = { python = "sample_interval_s" }
+"SatelliteTracksRequest.coarse_interval_seconds" = { python = "coarse_interval_s" }
+"SatelliteTracksRequest.minimum_elevation_deg" = { python = "min_elevation_deg" }
+"SatelliteTracksRequest.maximum_element_age_seconds" = { python = "max_element_age_s" }
+"SatelliteTrackResponse.element_age_seconds" = { python = "element_age_s" }
+"SatelliteTrackResponse.sample_interval_seconds" = { python = "sample_interval_s" }

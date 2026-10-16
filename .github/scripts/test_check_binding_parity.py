@@ -177,7 +177,7 @@ class BindingParityTests(unittest.TestCase):
 
     def test_tests_and_skipped_fields_are_not_surface(self):
         root = self.tree()
-        sources = [(root / path).read_text() for path in MODULE.C_SOURCES]
+        sources = [path.read_text() for path in MODULE.c_source_paths(root)]
         self.assertEqual(MODULE.c_exports(sources), {"seiza_parallax_prepare_json", "seiza_string_free"})
         self.assertNotIn("internal", MODULE.json_types(sources)["VideoRequest"])
 

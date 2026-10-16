@@ -395,7 +395,7 @@ struct WatermarkStyle {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WcsRequest {
+pub(crate) struct WcsRequest {
     crval: [f64; 2],
     crpix: [f64; 2],
     cd: [[f64; 2]; 2],
@@ -788,7 +788,7 @@ fn video_options(request: &VideoRequest) -> Result<VideoOptions, String> {
 }
 
 impl WcsRequest {
-    fn wcs(&self) -> Result<Wcs, String> {
+    pub(crate) fn wcs(&self) -> Result<Wcs, String> {
         let origin = match self.pixel_origin.unwrap_or(0) {
             origin @ (0 | 1) => f64::from(origin),
             other => return Err(format!("wcs pixelOrigin must be 0 or 1, not {other}")),

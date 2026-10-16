@@ -78,6 +78,11 @@ the returned `OrbitalCatalogSnapshot` and `CatalogFingerprint` alongside
 derived results. The lower-level `CelesTrakSource`, `SeizaMirrorSource`, and
 `SatCheckerSource` remain available for explicit provider integrations.
 
+Callers with no async runtime of their own, such as the C and Python
+bindings, use `CelesTrakSource::load_active_blocking` and
+`OrbitalCatalogSource::load_at_blocking`. Each runs its load on a private
+runtime and, given a cancel flag, stops as soon as the flag is raised.
+
 To prewarm the same cache for known observing nights, the Seiza CLI is a thin
 consumer of this API:
 
