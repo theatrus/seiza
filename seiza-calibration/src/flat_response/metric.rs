@@ -10,25 +10,26 @@
 //! - **Broad**: the largest departure of a smooth surface fitted to `Q`
 //!   from its best plane. A straight gradient is what twilight flats differ
 //!   by and what background extraction removes.
-//! - **Dust**: the deepest compact spot left after the smooth part and a
-//!   wide local median are taken out, counted only where one of the two
-//!   responses holds a dip of its own. Dust and dew take light away; a star
-//!   adds it.
+//! - **Dust**: the deepest change of dust between the two, as
+//!   [`crate::dust::find_changes`] finds it: compact dips, out-of-focus
+//!   disks and donuts that arrived, left or moved further than focus travel
+//!   explains. A star a tracked sky flat kept is not dust, and neither is a
+//!   change of vignetting, which is reported on its own.
 //!
 //! Stars come first. A session median keeps the stars of a sky-flat set
 //! shot while the mount tracks, so compact bright sources are masked in
 //! both responses before anything is measured ([`star_mask`]).
 
+use crate::dust::{self, ChangeKind, DustOptions, DustShape, VignettingChange};
 use rayon::prelude::*;
 use seiza_imgproc::BorderMode;
 use seiza_imgproc::blur::{auto_ksize_f32, gaussian_blur_f32};
-use seiza_imgproc::components::{Connectivity, connected_components};
 use serde::{Deserialize, Serialize};
 
 /// Bump when equal frames may build a different response.
 pub const RESPONSE_ALGORITHM_VERSION: u32 = 1;
 /// Bump when equal responses may compare differently.
-pub const COMPARE_ALGORITHM_VERSION: u32 = 1;
+pub const COMPARE_ALGORITHM_VERSION: u32 = 2;
 /// The longest side of a response, in response pixels.
 pub const MAX_SIDE: usize = 1024;
 /// The most flats one response combines, evenly spaced.
@@ -60,11 +61,6 @@ const SURFACE_ROUNDS: usize = 3;
 /// The local median that follows a sky gradient bending into a corner spans
 /// this fraction of the long side: several times wider than any dust shadow.
 const LOCAL_FRACTION: usize = 6;
-/// A spot is this many robust sigmas of the smoothed residual.
-const SPOT_SIGMA: f32 = 5.0;
-/// A spot covers at least this many sensor pixels; smaller is a star, a hot
-/// cluster or noise.
-const MIN_SPOT_SENSOR_PIXELS: f64 = 200.0;
 /// Edge band left out of both metrics, as a fraction of each side.
 const BORDER_FRACTION: f64 = 0.02;
 /// Most spots one comparison keeps, deepest first.
@@ -210,7 +206,7 @@ pub fn sampled_median(data: &[f32]) -> f32 {
     median_in_place(&mut values)
 }
 
-fn median_in_place(values: &mut [f32]) -> f32 {
+pub(crate) fn median_in_place(values: &mut [f32]) -> f32 {
     if values.is_empty() {
         return f32::NAN;
     }
@@ -220,7 +216,7 @@ fn median_in_place(values: &mut [f32]) -> f32 {
 }
 
 /// The normal-equivalent median absolute deviation of finite samples.
-fn robust_sigma(values: &[f32]) -> f32 {
+pub(crate) fn robust_sigma(values: &[f32]) -> f32 {
     let mut finite: Vec<f32> = values.iter().copied().filter(|v| v.is_finite()).collect();
     let middle = median_in_place(&mut finite);
     let mut deviations: Vec<f32> = finite.iter().map(|v| (v - middle).abs()).collect();
@@ -351,13 +347,13 @@ pub(crate) fn grow(mask: &[bool], width: usize, height: usize, radius: usize) ->
 }
 
 /// The median of each pixel's `size × size` neighbourhood, NaNs left out.
-fn median_filter(plane: &Plane, size: usize) -> Plane {
+pub(crate) fn median_filter(plane: &Plane, size: usize) -> Plane {
     quantile_filter(plane, size, 0.5)
 }
 
 /// The `quantile` of each pixel's `size × size` neighbourhood, NaNs left
 /// out.
-fn quantile_filter(plane: &Plane, size: usize, quantile: f32) -> Plane {
+pub(crate) fn quantile_filter(plane: &Plane, size: usize, quantile: f32) -> Plane {
     let half = size / 2;
     let (width, height) = (plane.width, plane.height);
     let data: Vec<f32> = (0..width * height)
@@ -431,7 +427,7 @@ pub fn star_mask_grown(plane: &Plane, by: usize) -> Vec<bool> {
     grow(&bright, plane.width, plane.height, by)
 }
 
-fn gaussian(plane: &[f32], width: usize, height: usize, sigma: f64) -> Vec<f32> {
+pub(crate) fn gaussian(plane: &[f32], width: usize, height: usize, sigma: f64) -> Vec<f32> {
     gaussian_blur_f32(
         plane,
         width,
@@ -467,7 +463,7 @@ fn least_squares(rows: &[Vec<f64>], values: &[f64]) -> Option<Vec<f64>> {
 /// A robust smooth surface over a plane, and its best plane: a degree-4
 /// polynomial fitted to block medians, clipping blocks that hold dust. NaN
 /// pixels take no part. `None` when too few blocks hold data.
-fn smooth_surface(plane: &Plane) -> Option<(Vec<f32>, Vec<f32>)> {
+pub(crate) fn smooth_surface(plane: &Plane) -> Option<(Vec<f32>, Vec<f32>)> {
     let (width, height) = (plane.width, plane.height);
     let block = (width.max(height) / SURFACE_BLOCKS).max(1);
     let (grid_w, grid_h) = (width / block, height / block);
@@ -579,29 +575,10 @@ fn smooth_surface(plane: &Plane) -> Option<(Vec<f32>, Vec<f32>)> {
     Some((surface, flat))
 }
 
-/// A plane's own compact residual against its own smooth surface, smoothed
-/// by one pixel: negative where it holds a dip.
-fn own_residual(plane: &Plane) -> Option<Vec<f32>> {
-    let (surface, _) = smooth_surface(plane)?;
-    let residual: Vec<f32> = plane
-        .data
-        .iter()
-        .zip(&surface)
-        .map(|(value, smooth)| {
-            if value.is_finite() && *smooth != 0.0 {
-                value / smooth - 1.0
-            } else {
-                0.0
-            }
-        })
-        .collect();
-    Some(gaussian(&residual, plane.width, plane.height, 1.0))
-}
-
 /// Subtract a wide local median: what the polynomial cannot follow, such as
 /// a sky gradient bending into a corner. Worked out on every fourth pixel
 /// and spread back bilinearly.
-fn subtract_local_median(map: &mut [f32], width: usize, height: usize) {
+pub(crate) fn subtract_local_median(map: &mut [f32], width: usize, height: usize) {
     const STEP: usize = 4;
     let window = (width.max(height) / LOCAL_FRACTION) | 1;
     let size = ((window / STEP).max(3)) | 1;
@@ -645,7 +622,7 @@ pub enum SpotKind {
     Moved,
 }
 
-/// One compact difference between two sessions.
+/// One difference of dust between two sessions.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Spot {
     /// New, gone or moved.
@@ -657,12 +634,33 @@ pub struct Spot {
     pub x: f32,
     /// Centre row, in sensor pixels.
     pub y: f32,
-    /// Radius of a disc of the same area, in sensor pixels.
+    /// A disk's or donut's radius; a compact spot's, of a disc of the same
+    /// area. Sensor pixels.
     pub radius: f32,
     /// Area in sensor pixels.
     pub area: f32,
     /// Deepest departure, as a fraction of the background.
     pub peak: f32,
+    /// Compact, irregular, disk or donut.
+    #[serde(default)]
+    pub shape: DustShape,
+    /// A donut's hole as a fraction of its radius.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hole: Option<f32>,
+    /// The box it covers, sensor pixels: left, top, right, bottom.
+    #[serde(default)]
+    pub bounds: [u32; 4],
+    /// Dust both sessions hold that moved no further than focus travel
+    /// explains: reported, but not counted as dust.
+    #[serde(default)]
+    pub within_tolerance: bool,
+    /// How far the matched dust moved, sensor pixels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<f32>,
+    /// How far in front of the sensor the dust sits, when the optics are
+    /// known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distance_mm: Option<f32>,
 }
 
 /// How two sessions differ, in fractions of the sky background.
@@ -676,7 +674,8 @@ pub struct Comparison {
     /// Where the broad maximum lies, as fractions of the width and height.
     pub broad_x: f32,
     pub broad_y: f32,
-    /// The deepest spot's peak: 0 with no spot.
+    /// The deepest spot's peak, leaving out dust that moved within
+    /// tolerance: 0 with no spot.
     pub dust: f32,
     /// Robust spread of the smoothed residual.
     pub sigma: f32,
@@ -684,6 +683,14 @@ pub struct Comparison {
     pub spots: Vec<Spot>,
     /// Share of pixels masked as stars.
     pub star_fraction: f32,
+    /// The deepest change of vignetting: 0 with none.
+    #[serde(default)]
+    pub vignetting: f32,
+    /// Changes of vignetting: shadows hanging from the border that moved or
+    /// changed depth, such as a guider's prism turned with the camera. They
+    /// change the flat, but they are not dust.
+    #[serde(default)]
+    pub vignetting_changes: Vec<VignettingChange>,
 }
 
 /// The ratio of two responses, and the masks and maps the metrics share.
@@ -786,7 +793,7 @@ fn ratio(earlier: &Plane, later: &Plane, star_grow: usize) -> Option<Ratio> {
     })
 }
 
-fn inner_band(width: usize, height: usize) -> impl Fn(usize) -> bool {
+pub(crate) fn inner_band(width: usize, height: usize) -> impl Fn(usize) -> bool {
     let bx = (width as f64 * BORDER_FRACTION) as usize;
     let by = (height as f64 * BORDER_FRACTION) as usize;
     move |index| {
@@ -796,10 +803,20 @@ fn inner_band(width: usize, height: usize) -> impl Fn(usize) -> bool {
 }
 
 /// Compare two responses of one light path, their pedestals already
-/// removed.
+/// removed, with [`DustOptions::default`].
 /// `bin` converts response pixels to sensor pixels. `None` when the
 /// responses differ in size or hold too little to fit.
 pub fn compare(earlier: &Plane, later: &Plane, bin: usize) -> Option<Comparison> {
+    compare_with(earlier, later, bin, &DustOptions::default())
+}
+
+/// [`compare`] with the dust settings, such as the optics, given.
+pub fn compare_with(
+    earlier: &Plane,
+    later: &Plane,
+    bin: usize,
+    options: &DustOptions,
+) -> Option<Comparison> {
     let ratio = ratio(earlier, later, STAR_GROW)?;
     let (width, height) = (ratio.width, ratio.height);
     let inner = inner_band(width, height);
@@ -818,75 +835,46 @@ pub fn compare(earlier: &Plane, later: &Plane, bin: usize) -> Option<Comparison>
         }
     }
 
-    // Dust: what is left after the surface and a wide local median.
-    let smoothed = ratio.compact_residual();
-    let core: Vec<f32> = (0..width * height)
-        .filter(|index| inner(*index))
-        .map(|index| smoothed[index])
-        .collect();
-    let sigma = robust_sigma(&core).max(1e-6);
-    let own_earlier = own_residual(earlier)?;
-    let own_later = own_residual(later)?;
-
-    let pixel_area = (bin * bin) as f64;
-    let mut found: Vec<(Spot, f32)> = Vec::new();
-    for sign in [-1f32, 1f32] {
-        let mask: Vec<u8> = (0..width * height)
-            .map(|index| u8::from(inner(index) && sign * smoothed[index] > SPOT_SIGMA * sigma))
-            .collect();
-        for component in connected_components(&mask, width, height, Connectivity::Eight) {
-            let area = component.pixels.len() as f64 * pixel_area;
-            if area < MIN_SPOT_SENSOR_PIXELS {
-                continue;
-            }
-            // Dust is dark: one response must hold a dip here deeper than
-            // any bump the other holds. A star left in either is a bump.
-            let (dipping, bumping) = if sign < 0.0 {
-                (&own_later, &own_earlier)
-            } else {
-                (&own_earlier, &own_later)
-            };
-            let dip = component
-                .pixels
-                .iter()
-                .map(|index| dipping[*index])
-                .fold(f32::INFINITY, f32::min);
-            let bump = component
-                .pixels
-                .iter()
-                .map(|index| bumping[*index])
-                .fold(f32::NEG_INFINITY, f32::max);
-            if bump > -dip {
-                continue;
-            }
-            let peak = component
-                .pixels
-                .iter()
-                .map(|index| sign * smoothed[*index])
-                .fold(0f32, f32::max);
-            found.push((
-                Spot {
-                    kind: if sign < 0.0 {
-                        SpotKind::New
-                    } else {
-                        SpotKind::Gone
-                    },
-                    darker: sign < 0.0,
-                    x: (component.centroid_x + 0.5) * bin as f32,
-                    y: (component.centroid_y + 0.5) * bin as f32,
-                    radius: (area / std::f64::consts::PI).sqrt() as f32,
-                    area: area as f32,
-                    peak,
+    // Dust: the one definition in `crate::dust`.
+    let changes = dust::find_changes(earlier, later, bin, options)?;
+    let mut spots: Vec<Spot> = changes
+        .changes
+        .iter()
+        .map(|change| {
+            let f = &change.feature;
+            Spot {
+                kind: match change.kind {
+                    ChangeKind::New => SpotKind::New,
+                    ChangeKind::Gone => SpotKind::Gone,
+                    ChangeKind::Moved => SpotKind::Moved,
                 },
-                sign,
-            ));
-        }
-    }
-    pair_moved(&mut found);
-    let mut spots: Vec<Spot> = found.into_iter().map(|(spot, _)| spot).collect();
+                darker: change.darker,
+                x: f.x,
+                y: f.y,
+                radius: f.radius,
+                area: f.pixels as f32,
+                peak: f.depth,
+                shape: f.shape,
+                hole: f.hole,
+                bounds: [f.left, f.top, f.right, f.bottom],
+                within_tolerance: change.within_tolerance,
+                offset: change.offset,
+                distance_mm: f.distance_mm,
+            }
+        })
+        .collect();
     spots.sort_by(|a, b| b.peak.total_cmp(&a.peak).then(a.x.total_cmp(&b.x)));
-    let dust = spots.first().map_or(0.0, |spot| spot.peak);
+    let dust = spots
+        .iter()
+        .filter(|spot| !spot.within_tolerance)
+        .map(|spot| spot.peak)
+        .fold(0f32, f32::max);
     spots.truncate(MAX_SPOTS);
+    let vignetting = changes
+        .vignetting
+        .iter()
+        .map(|change| change.vignetting.depth)
+        .fold(0f32, f32::max);
     let star_fraction =
         ratio.stars.iter().filter(|star| **star).count() as f32 / (width * height) as f32;
     Some(Comparison {
@@ -895,43 +883,12 @@ pub fn compare(earlier: &Plane, later: &Plane, bin: usize) -> Option<Comparison>
         broad_x: (broad_at % width) as f32 / width as f32,
         broad_y: (broad_at / width) as f32 / height as f32,
         dust,
-        sigma,
+        sigma: changes.sigma,
         spots,
         star_fraction,
+        vignetting,
+        vignetting_changes: changes.vignetting,
     })
-}
-
-/// A new spot and a gone spot of like size and depth within three radii are
-/// one shadow that moved.
-fn pair_moved(found: &mut [(Spot, f32)]) {
-    let mut taken = vec![false; found.len()];
-    for i in 0..found.len() {
-        if taken[i] || found[i].0.kind != SpotKind::New {
-            continue;
-        }
-        let best = (0..found.len())
-            .filter(|j| !taken[*j] && found[*j].0.kind == SpotKind::Gone)
-            .filter(|j| {
-                let (a, b) = (&found[i].0, &found[*j].0);
-                let distance = ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
-                let ratio = |p: f32, q: f32| p.max(q) / p.min(q).max(1e-9);
-                distance <= 3.0 * a.radius.max(b.radius)
-                    && ratio(a.peak, b.peak) <= 2.0
-                    && ratio(a.area, b.area) <= 3.0
-            })
-            .min_by(|a, b| {
-                let d = |j: usize| {
-                    (found[i].0.x - found[j].0.x).powi(2) + (found[i].0.y - found[j].0.y).powi(2)
-                };
-                d(*a).total_cmp(&d(*b))
-            });
-        if let Some(j) = best {
-            taken[i] = true;
-            taken[j] = true;
-            found[i].0.kind = SpotKind::Moved;
-            found[j].0.kind = SpotKind::Moved;
-        }
-    }
 }
 
 /// The compact change between a session before an event and one after it,
@@ -953,7 +910,30 @@ pub fn change_map(before: &Plane, after: &Plane) -> Option<Plane> {
     let deviation: Vec<f32> = shape.iter().map(|v| v - 1.0).collect();
     let smoothed = gaussian(&deviation, width, height, 1.0);
     let sigma = robust_sigma(&smoothed).max(1e-6);
-    let support: Vec<bool> = smoothed.iter().map(|v| v.abs() > 3.0 * sigma).collect();
+    // Only where `crate::dust` finds a change of dust or vignetting: a star
+    // or a patch of mottle is no shadow to carry.
+    let mut found = vec![false; width * height];
+    // The map is on the response grid and its bin unknown here: compact
+    // changes count from four response pixels, as at the usual bin of 7.
+    let options = DustOptions {
+        min_compact_area: 4.0,
+        ..DustOptions::default()
+    };
+    if let Some(changes) = dust::find_changes(before, after, 1, &options) {
+        for footprint in &changes.footprints {
+            for index in footprint {
+                if *index < found.len() {
+                    found[*index] = true;
+                }
+            }
+        }
+    }
+    let found = grow(&found, width, height, 3);
+    let support: Vec<bool> = smoothed
+        .iter()
+        .zip(&found)
+        .map(|(v, near)| *near && v.abs() > 3.0 * sigma)
+        .collect();
     let support = grow(&support, width, height, 3);
     // Unsmoothed inside the support: a shadow's rim is where a blurred map
     // would leave its own print.

@@ -4,9 +4,11 @@
 //! response; the rules for deciding which frames belong together in the first
 //! place — whether a dark suits a light, whether a flat still corrects it,
 //! which candidates can be averaged into one master; grades for the bias,
-//! dark, and flat frames that go into a master; and [`flat_response`], which
+//! dark, and flat frames that go into a master; [`flat_response`], which
 //! measures whether flat sets describe the same light path and which one a
-//! light's own sky follows.
+//! light's own sky follows; and [`dust`], the one definition of the dust a
+//! flat holds and of how it changes between sessions, which the flat grades
+//! and the comparisons share.
 //!
 //! All are pure. Hosts retain file loading, detector evidence, cache policy,
 //! and user confirmation; they hand this crate values and act on what comes
@@ -22,6 +24,7 @@
 //! three or more frames. The screens say what the pixels show, never why, and
 //! never judge a flat by its temperature.
 
+pub mod dust;
 pub mod flat_response;
 mod matching;
 mod pedestal;

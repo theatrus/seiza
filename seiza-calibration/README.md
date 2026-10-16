@@ -94,17 +94,55 @@ angle (`LightRotation::Unknown`), as when the host has shown from the light's
 own pixels which flats it follows. Flats judged against each other
 (`optics_consistent`, `coherent_subset`) keep their recorded angles.
 
+## Dust in flats
+
+`dust` is the one definition of dust that `measure_flat`'s features and
+`flat_response`'s comparisons share, so a flat's spots and a session
+comparison always agree. A shadow is the light cone where it meets the
+dust, so its size says how far in front of the sensor the dust sits
+(`Optics::distance_mm`), and it comes in four shapes:
+
+- **compact** and **irregular** dips: dust on or near the sensor window;
+- **disks**: dust far up an unobstructed train, such as a refractor's
+  filter, often under 0.5% deep and hundreds of pixels across;
+- **donuts**: the same through a central obstruction (SCT, RASA,
+  Newtonian), whose lit hole belongs to the donut and is not a spot of its
+  own.
+
+Large, smooth shadows hanging from the border are **vignetting**, reported
+apart and never as dust. Disks and donuts are found by their rim — sharp,
+and darker inside most of the way round — which large-scale mottle and
+gradients do not have; each candidate is then checked against the rim
+contrast that circles of its size show anywhere on the plane. Small dips
+must clear a threshold raised for the number of pixels tried, so a large
+frame does not report its own noise.
+
+- `dust::find_dust` finds the dust in one plane (a binned flat or a
+  session's response).
+- `dust::find_session_dust` finds it on a session's stack, where noise is
+  about √n lower, and says in how many of the session's flats each feature
+  shows (`seen_in`): dust holds still across flats shot a minute apart,
+  noise does not. `dust::frame_dust` splits one flat's view into the
+  session's features it shows and transients (dew drying, a passing
+  particle) that are not the light path's.
+- `dust::find_changes` compares two sessions: new, gone and moved dust,
+  with dust that moved no further than focus travel explains
+  (`DustOptions::move_tolerance`) marked as within tolerance rather than
+  new, stars a tracked sky flat kept left out, and vignetting changes
+  apart. `dust::match_features` pairs two feature lists the same way.
+
 ## Flat responses: same light path, and which one a light follows
 
 `flat_response` measures flat sets rather than single frames:
 
 - `metric::build_response` reduces a session's flats (two or more, binned to
   at most 1,024 px) to one normalized response. `metric::compare` divides one
-  response by another and reports the smooth difference (`broad`), compact
-  dips (`dust`) and the spots behind them, in fractions of the sky
-  background, with stars a tracked sky-flat set kept masked first.
-  `metric::change_map` is the compact part of that difference, and
-  `metric::apply_change_map` carries a flat across it.
+  response by another and reports the smooth difference (`broad`), the
+  deepest change of dust (`dust`) and the spots behind it, and any change of
+  vignetting, in fractions of the sky background. Its spots are
+  `dust::find_changes`'s, below. `metric::change_map` is the part of the
+  difference those changes cover, and `metric::apply_change_map` carries a
+  flat across it.
 - `evidence::fit` asks whether a few lights' background
   (`evidence::background`) carries a change, weighing each shadow of the
   change against placebo positions where nothing changed, so nebular

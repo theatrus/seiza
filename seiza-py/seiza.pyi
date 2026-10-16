@@ -421,6 +421,10 @@ class FlatFeature:
     bottom: int
     pixels: int
     depth: float
+    shape: str
+    radius: float
+    hole: float | None
+    distance_mm: float | None
 
 class FlatMeasurement:
     algorithm_version: int
@@ -435,6 +439,7 @@ class FlatMeasurement:
     illumination: IlluminationProfile
     feature_count: int
     features: list[FlatFeature]
+    vignetting: list[dict[str, str | float]]
     def to_json(self) -> str: ...
     @staticmethod
     def from_json(text: str) -> FlatMeasurement: ...
@@ -1373,6 +1378,10 @@ def measure_flat(
     full_scale: float | None = None,
     feature_depth: float | None = None,
     feature_sigma: float | None = None,
+    large_features: bool | None = None,
+    focal_ratio: float | None = None,
+    pixel_size_um: float | None = None,
+    obstruction: float | None = None,
 ) -> FlatMeasurement: ...
 def screen_bias(
     measurements: Sequence[DarkMeasurement],

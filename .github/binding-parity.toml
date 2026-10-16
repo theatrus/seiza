@@ -127,6 +127,7 @@ core = "seiza-calibration::DarkMeasureOptions"
 
 [rust.FlatMeasureRequest]
 core = "seiza-calibration::FlatMeasureOptions"
+optics = { none = "flattened into focal_ratio, pixel_size_um and obstruction, in both bindings" }
 
 [rust.DarkMeasurementJson]
 core = "seiza-calibration::DarkMeasurement"

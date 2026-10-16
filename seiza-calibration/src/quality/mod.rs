@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bump when equal frames and options may measure differently, so a host can
 /// tell its stored measurements are stale.
-pub const FRAME_QUALITY_ALGORITHM_VERSION: u32 = 1;
+pub const FRAME_QUALITY_ALGORITHM_VERSION: u32 = 2;
 
 const fn frame_quality_algorithm_version() -> u32 {
     FRAME_QUALITY_ALGORITHM_VERSION
