@@ -897,7 +897,8 @@ impl PyParallaxVideo {
     /// stars again when None. Only the dust changes: nothing is prepared
     /// again, and this video is left as it was. A map gives dust even to a
     /// video prepared without it. `cancel()` returning True, or Ctrl-C,
-    /// stops it.
+    /// stops it. With a crop, the map spans the whole source image, as
+    /// `dust_map` gives it.
     #[pyo3(signature = (dust_map, *, progress=None, cancel=None))]
     fn with_dust_map(
         &self,
@@ -924,8 +925,10 @@ impl PyParallaxVideo {
     /// where the sky is clear to 1 where the dust is opaque, the values
     /// `with_dust_map` takes back: the dust in use, or with `counted=True`
     /// the dust counted from the stars even while a map takes its place.
-    /// `size` (width, height) defaults to the image's. None when there is
-    /// no such dust: it is off, or too few stars show to count it.
+    /// `size` (width, height) defaults to the image's. With a crop, the map
+    /// still spans the whole source image, clear outside the part filmed.
+    /// None when there is no such dust: it is off, or too few stars show to
+    /// count it.
     #[pyo3(signature = (*, counted=false, size=None))]
     fn dust_map<'py>(
         &self,
@@ -933,19 +936,13 @@ impl PyParallaxVideo {
         counted: bool,
         size: Option<(usize, usize)>,
     ) -> PyResult<Option<Bound<'py, PyArray2<f32>>>> {
-        let dust = if counted {
-            self.video.counted_dust()
-        } else {
-            self.video.dust()
-        };
-        let Some(dust) = dust else {
-            return Ok(None);
-        };
-        let (width, height) = size.unwrap_or_else(|| dust.size());
+        let (width, height) = size.unwrap_or_else(|| self.video.source_size());
         if width == 0 || height == 0 {
             return Err(PyValueError::new_err("the map needs a width and height"));
         }
-        let map = py.detach(|| dust.to_map(width, height));
+        let Some(map) = py.detach(|| self.video.source_dust_map(counted, width, height)) else {
+            return Ok(None);
+        };
         let array = Array2::from_shape_vec((height, width), map.opacity)
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         Ok(Some(array.into_pyarray(py)))
@@ -953,20 +950,16 @@ impl PyParallaxVideo {
 
     /// Write the dust to `path`, white where it is opaque, in the format its
     /// extension names: a 16-bit PNG or TIFF, or a 32-bit float FITS or
-    /// XISF, the size of the image: the dust in use, or with `counted=True`
-    /// the dust counted from the stars. False when there is no such dust.
+    /// XISF, the size of the image (the whole source image, with a crop):
+    /// the dust in use, or with `counted=True` the dust counted from the
+    /// stars. False when there is no such dust.
     #[pyo3(signature = (path, *, counted=false))]
     fn write_dust_map(&self, py: Python<'_>, path: PathBuf, counted: bool) -> PyResult<bool> {
-        let dust = if counted {
-            self.video.counted_dust()
-        } else {
-            self.video.dust()
-        };
-        let Some(dust) = dust else {
+        let (width, height) = self.video.source_size();
+        let Some(map) = py.detach(|| self.video.source_dust_map(counted, width, height)) else {
             return Ok(false);
         };
-        let (width, height) = dust.size();
-        py.detach(|| dust.to_map(width, height).save(&path))
+        py.detach(|| map.save(&path))
             .map_err(PyRuntimeError::new_err)?;
         Ok(true)
     }

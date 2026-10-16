@@ -156,6 +156,21 @@ def test_a_crop_films_at_its_own_shape_and_fit_shows_all_of_it(tmp_path):
     assert made.reconfigure(size=(160, 160), start="whole", seconds=0.2, fps=10).frame(0)[:20].min() > 0
     with pytest.raises(ValueError, match="changes the prepared scene"):
         made.reconfigure(crop=(0, 0, 100, 100))
+    # A cropped scene's dust map spans the whole source image, clear outside
+    # the crop, and goes back in as it came out.
+    dust = made.dust_map(counted=True)
+    if dust is not None:
+        assert dust.shape == (240, 320)
+        assert (dust[:30] == 0).all() and (dust[:, :40] == 0).all()
+        assert made.with_dust_map(dust).dust_map().shape == (240, 320)
+    painted = np.zeros((240, 320), np.float32)
+    painted[:, 160:] = 1.0
+    swapped = made.with_dust_map(painted)
+    assert swapped.dust_map().shape == (240, 320)
+    with pytest.raises(ValueError):
+        made.with_dust_map(np.zeros((100, 200), np.float32))
+    written = tmp_path / "dust.png"
+    assert swapped.write_dust_map(written)
     with pytest.raises(ValueError, match="framing must be one of"):
         made.reconfigure(framing="stretch")
     with pytest.raises(ValueError, match="lie inside"):
