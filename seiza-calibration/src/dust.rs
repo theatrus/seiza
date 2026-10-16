@@ -147,6 +147,29 @@ impl Optics {
     pub fn distance_mm(&self, diameter_px: f32) -> f32 {
         diameter_px * self.focal_ratio * self.pixel_size_um / 1000.0
     }
+
+    /// The light cone from parts a host may each leave out: none gives
+    /// `None`; a focal ratio and a pixel size give the cone, unobstructed
+    /// when `obstruction` is left out. Any other mix, such as an obstruction
+    /// alone, is refused rather than quietly ignored.
+    pub fn from_parts(
+        focal_ratio: Option<f32>,
+        pixel_size_um: Option<f32>,
+        obstruction: Option<f32>,
+    ) -> crate::Result<Option<Self>> {
+        match (focal_ratio, pixel_size_um) {
+            (None, None) if obstruction.is_none() => Ok(None),
+            (Some(focal_ratio), Some(pixel_size_um)) => Ok(Some(Self {
+                focal_ratio,
+                pixel_size_um,
+                obstruction: obstruction.unwrap_or(0.0),
+            })),
+            _ => Err(crate::Error::FrameQuality(
+                "optics need both a focal ratio and a pixel size, and an obstruction needs both"
+                    .into(),
+            )),
+        }
+    }
 }
 
 /// What a dust feature looks like.
@@ -184,7 +207,11 @@ impl DustShape {
 }
 
 /// One dust shadow. Positions and sizes are in sensor pixels.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// Construct with [`Default::default`] and set what is known; more fields may
+/// be added without a major version.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct DustFeature {
     /// Centre column: the centroid of a compact dip, the rim's centre of a
     /// disk or donut.
@@ -309,6 +336,10 @@ pub struct Vignetting {
 
 /// Settings for [`find_dust`] and [`find_changes`]. One set serves every
 /// caller, so a flat's spots and a comparison's agree.
+///
+/// Deliberately not `#[non_exhaustive]`, like
+/// [`crate::MatchTolerances`]: a new setting changes what is found, and
+/// `DustOptions { optics, ..Default::default() }` is how a host writes it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DustOptions {
@@ -1122,6 +1153,7 @@ pub fn find_changes(
                 within_tolerance: m.within_tolerance,
                 depth: a.depth.max(b.depth),
                 hole: a.hole.or(b.hole),
+                depth_change: (a.depth - b.depth).abs(),
             })
         })
         .collect();
@@ -1312,7 +1344,8 @@ pub fn find_changes(
 
 /// Dust both sessions of a comparison hold: where it is, how far it reaches,
 /// how far it moved and whether that is within tolerance, how deep it is,
-/// and a donut's hole as a share of its radius.
+/// a donut's hole as a share of its radius, and how much its depth changed
+/// between the two sessions' maps.
 struct Held {
     x: f32,
     y: f32,
@@ -1321,20 +1354,23 @@ struct Held {
     within_tolerance: bool,
     depth: f32,
     hole: Option<f32>,
+    depth_change: f32,
 }
 
-/// A crescent a moved shadow leaves on its rim can be this many times as
-/// deep as the shadow's depth, which is a median over its ring: a donut is
-/// darkest at its hole's edge.
-const CRESCENT_DEPTH: f32 = 4.0;
+/// A crescent a moved donut leaves can be this many times as deep as the
+/// donut's depth, which is a median over its ring: a donut is darkest at its
+/// hole's edge. A disk's crescents are no deeper than
+/// [`INSIDE_SHADOW_DEPTH`] times the disk.
+const DONUT_CRESCENT_DEPTH: f32 = 4.0;
 
 impl Held {
     /// Whether a feature of the ratio is this dust's doing rather than dust
     /// of its own. Where held dust moved it leaves a crescent on its rim (or
-    /// a donut's hole's rim), within the move (plus `slack`) of it; where it
-    /// changed depth, the same shadow on nearly the same centre, or pieces of
-    /// it inside, shallower than the dust. Anything else, such as window dust
-    /// in front of a filter's disk, is new or gone.
+    /// a donut's hole's rim), within the move (plus `slack`) of it and about
+    /// as deep as the dust; where it changed depth, the same shadow on nearly
+    /// the same centre, or pieces of it inside no deeper than that change.
+    /// Anything else, such as window dust in front of a filter's disk or on
+    /// its rim, is new or gone.
     fn explains(&self, feature: &DustFeature, slack: f32) -> bool {
         let distance = (feature.x - self.x).hypot(feature.y - self.y);
         let extent = reach(feature);
@@ -1344,10 +1380,16 @@ impl Held {
         }
         let band = self.offset + slack + extent;
         let on_rim = |rim: f32| (distance - rim).abs() <= band;
+        let deepest = if self.hole.is_some() {
+            DONUT_CRESCENT_DEPTH
+        } else {
+            INSIDE_SHADOW_DEPTH
+        };
         let crescent = (on_rim(self.reach)
             || self.hole.is_some_and(|hole| on_rim(hole * self.reach)))
-            && feature.depth <= CRESCENT_DEPTH * self.depth;
-        let inside = distance <= self.reach && feature.depth <= self.depth;
+            && feature.depth <= deepest * self.depth;
+        let inside = distance <= self.reach
+            && feature.depth <= self.depth.min(INSIDE_SHADOW_DEPTH * self.depth_change);
         crescent || inside
     }
 }
@@ -2442,8 +2484,8 @@ fn merge_clusters(features: &mut Vec<(DustFeature, Vec<usize>)>) {
             }
         }
     }
-    let mut members: std::collections::HashMap<usize, Vec<usize>> =
-        std::collections::HashMap::new();
+    let mut members: std::collections::BTreeMap<usize, Vec<usize>> =
+        std::collections::BTreeMap::new();
     for i in 0..count {
         let r = root(&mut group, i);
         members.entry(r).or_default().push(i);

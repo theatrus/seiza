@@ -85,6 +85,35 @@ def test_flats_are_measured_from_files_and_screened_as_a_set(tmp_path):
         seiza.measure_dark(tmp_path / "missing.fits")
 
 
+def test_a_wide_shallow_disk_is_a_large_feature_with_a_distance(tmp_path):
+    # Filter dust: 0.5% deep and 80 pixels across, far below the compact
+    # threshold, on a vignetted flat.
+    height, width = 256, 384
+    y, x = np.mgrid[0:height, 0:width].astype(np.float32)
+    cx, cy = width / 2.0, height / 2.0
+    response = 30000.0 * (1.0 - 0.25 * ((x - cx) ** 2 + (y - cy) ** 2) / (cx * cx + cy * cy))
+    image = response * (1.0 + 0.01 * np.random.default_rng(4).standard_normal((height, width)))
+    image = np.where(np.hypot(x - 150.0, y - 120.0) <= 40.0, image * 0.995, image)
+    path = write(tmp_path / "filter-dust.fits", image)
+
+    flat = seiza.measure_flat(path, focal_ratio=4.9, pixel_size_um=3.76)
+    disks = [feature for feature in flat.features if feature.shape == "disk"]
+    assert len(disks) == 1, flat.features
+    disk = disks[0]
+    assert abs(disk.x - 150.0) < 3.0 and abs(disk.radius - 40.0) < 4.0
+    # 80 pixels at f/4.9 and 3.76 µm: about 1.5 mm in front of the sensor.
+    assert disk.distance_mm == pytest.approx(80.0 * 4.9 * 3.76 / 1000.0, rel=0.15)
+    assert disk.hole is None
+    assert disk.seen_in is None, "seen_in is only for dust found on a session's stack"
+    assert isinstance(flat.vignetting, list)
+    assert seiza.FlatMeasurement.from_json(flat.to_json()).features[0].shape == "disk"
+
+    # Without the optics there is no distance; an obstruction alone is refused.
+    assert seiza.measure_flat(path).features[0].distance_mm is None
+    with pytest.raises(ValueError, match="focal ratio"):
+        seiza.measure_flat(path, obstruction=0.35)
+
+
 def residual_crop(size, offset, shadow):
     y, x = np.mgrid[0:size, 0:size].astype(np.float32)
     background = 1000.0 + 1.5 * x + 0.75 * y + offset

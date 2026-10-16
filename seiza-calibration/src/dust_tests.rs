@@ -597,3 +597,84 @@ fn a_faint_disk_survives_the_candidate_cap() {
         map.features
     );
 }
+
+/// Counted (not within tolerance) new changes near (x, y) plane pixels.
+fn counted_new_near(changes: &DustChanges, x: f32, y: f32) -> usize {
+    changes
+        .changes
+        .iter()
+        .filter(|c| !c.within_tolerance && c.kind == ChangeKind::New)
+        .filter(|c| (c.feature.x / BIN as f32 - x).hypot(c.feature.y / BIN as f32 - y) < 6.0)
+        .count()
+}
+
+#[test]
+fn new_window_dust_on_a_held_disks_rim_is_new() {
+    // A filter disk both sessions hold, unmoved, and new compact window dust
+    // 1.2% deep on its rim. The disk did not move, so it leaves no crescent;
+    // the dip is new dust. Control: the same dip away from the disk.
+    let earlier = plane(&[(200.0, 150.0, 40.0, 0.004)], 0.0005, 7);
+    let later = plane(
+        &[
+            (200.0, 150.0, 40.0, 0.004),
+            (240.0, 150.0, 4.0, 0.012),
+            (400.0, 280.0, 4.0, 0.012),
+        ],
+        0.0005,
+        8,
+    );
+    let changes = find_changes(&earlier, &later, BIN, &DustOptions::default()).unwrap();
+    assert_eq!(
+        counted_new_near(&changes, 400.0, 280.0),
+        1,
+        "{:?}",
+        changes.changes
+    );
+    assert_eq!(
+        counted_new_near(&changes, 240.0, 150.0),
+        1,
+        "{:?}",
+        changes.changes
+    );
+}
+
+#[test]
+fn faint_new_window_dust_inside_a_held_disk_is_new() {
+    // New compact dust 0.35% deep inside a held 0.4% disk. Control: the same
+    // dip away from the disk.
+    let earlier = plane(&[(200.0, 150.0, 40.0, 0.004)], 0.0005, 7);
+    let later = plane(
+        &[
+            (200.0, 150.0, 40.0, 0.004),
+            (210.0, 150.0, 4.0, 0.0035),
+            (400.0, 280.0, 4.0, 0.0035),
+        ],
+        0.0005,
+        8,
+    );
+    let changes = find_changes(&earlier, &later, BIN, &DustOptions::default()).unwrap();
+    assert_eq!(
+        counted_new_near(&changes, 400.0, 280.0),
+        1,
+        "{:?}",
+        changes.changes
+    );
+    assert_eq!(
+        counted_new_near(&changes, 210.0, 150.0),
+        1,
+        "{:?}",
+        changes.changes
+    );
+}
+
+#[test]
+fn optics_from_parts_refuse_what_they_would_ignore() {
+    assert_eq!(Optics::from_parts(None, None, None).unwrap(), None);
+    let optics = Optics::from_parts(Some(4.9), Some(3.76), None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(optics.obstruction, 0.0);
+    assert!(Optics::from_parts(None, None, Some(0.35)).is_err());
+    assert!(Optics::from_parts(Some(10.0), None, Some(0.35)).is_err());
+    assert!(Optics::from_parts(None, Some(3.76), None).is_err());
+}

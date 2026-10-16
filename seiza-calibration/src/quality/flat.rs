@@ -66,6 +66,9 @@ const CLIP_TOLERANCE: f32 = 0.001;
 const LEVEL_STRIDE: usize = 16;
 /// Smallest plane, in pixels along each side, that can be measured.
 const MIN_PLANE_SIDE: usize = 32;
+/// A pixel-pass dip and a large feature on one centre whose radii are within
+/// this factor are one shadow.
+const SAME_SHADOW_SIZE: f32 = 1.5;
 
 /// Settings for [`measure_flat`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -267,6 +270,16 @@ pub fn measure_flat(
             .filter(|feature| feature.shape.is_large())
             .collect();
         large.sort_by(|a, b| b.depth.total_cmp(&a.depth));
+        // A round shadow deep enough for the pixel pass is found by both:
+        // the dip on a large feature's centre and of about its size is that
+        // feature again. Clearly smaller dips on it are dust of their own.
+        features.retain(|dip| {
+            !large.iter().any(|shadow| {
+                (dip.x - shadow.x).hypot(dip.y - shadow.y) <= 0.5 * shadow.radius
+                    && dip.radius * SAME_SHADOW_SIZE >= shadow.radius
+                    && dip.radius <= SAME_SHADOW_SIZE * shadow.radius
+            })
+        });
         large.extend(features);
         features = large;
         vignetting = map.vignetting;
@@ -1430,6 +1443,21 @@ mod tests {
     }
 
     #[test]
+    fn a_deep_round_shadow_is_reported_once() {
+        // A round shadow deep enough for the pixel pass (8%, 24 px across)
+        // is also a disk on the binned plane.
+        let mut data = flat(4);
+        dip(&mut data, 150.0, 120.0, 12.0, 0.08);
+        let measurement = measure(&data);
+        let near: Vec<_> = measurement
+            .features
+            .iter()
+            .filter(|f| (f.x - 150.0).abs() < 12.0 && (f.y - 120.0).abs() < 12.0)
+            .collect();
+        assert_eq!(near.len(), 1, "{near:?}");
+    }
+
+    #[test]
     fn a_wide_shallow_disk_is_reported_before_the_compact_dips() {
         // Filter dust: 0.5% deep and 80 pixels across, far below the 2%
         // compact threshold, beside a droplet.
@@ -1636,7 +1664,17 @@ mod tests {
             report.frames
         );
         assert_eq!(report.master.grade, Grade::Ok);
-        assert!(report.steady_features >= 3, "{report:?}");
+        // The wide round shadows are disks and donuts, reported once as large
+        // dust, which the light path holds and screening leaves alone; the
+        // speck is a steady dip.
+        assert!(
+            frames
+                .iter()
+                .all(|frame| frame.features.iter().filter(|f| f.shape.is_large()).count() >= 2),
+            "{:?}",
+            frames[0].features
+        );
+        assert!(report.steady_features >= 1, "{report:?}");
         assert_eq!(report.changing_features, 0);
     }
 

@@ -2713,14 +2713,14 @@ char *seiza_calibration_measure_dark_json(const char *request_json, char **error
  `featureCount`, the `features` — large disks, donuts and patches first,
  then compact and irregular dips, each with `x`, `y`, `left`, `top`,
  `right`, `bottom`, `pixels`, `depth`, `shape` (`compact`, `irregular`,
- `disk`, `donut` or `patch`), `radius`, and when known `hole` and
- `distanceMm` —
- and `vignetting` (`edge`, `x`, `y`, `area`, `depth`). Optional
- `largeFeatures` (default true) turns the search for large ones off;
- optional `focalRatio`, `pixelSizeUm` and `obstruction` describe the light
- cone, so each disk gets a distance from the sensor. Keep it and pass it
- back to a screen whenever the set changes. Free it with
- [`seiza_string_free`].
+ `disk`, `donut` or `patch`), `radius`, and when known `hole`,
+ `distanceMm` and `seenIn` — and `vignetting` (`edge`, `x`, `y`, `area`,
+ `depth`). Optional `largeFeatures` (default true) turns the search for
+ large ones off. Optional `focalRatio` and `pixelSizeUm`, given together,
+ with an optional `obstruction`, describe the light cone, so each disk gets
+ a distance from the sensor; any of them without both of the first two is
+ refused. Keep the response and pass it back to a screen whenever the set
+ changes. Free it with [`seiza_string_free`].
 
  # Safety
  As [`seiza_calibration_measure_dark_json`].

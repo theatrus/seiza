@@ -523,6 +523,10 @@ fn measure_dark(
 }
 
 /// Measure one raw flat frame from a FITS or XISF file.
+///
+/// ``focal_ratio`` and ``pixel_size_um`` together, with an optional
+/// ``obstruction``, describe the light cone; any of them without both of the
+/// first two raises ``ValueError``.
 #[pyfunction]
 #[pyo3(signature = (
     path,
@@ -562,13 +566,9 @@ fn measure_flat(
     if let Some(value) = large_features {
         options.large_features = value;
     }
-    if let (Some(focal_ratio), Some(pixel_size_um)) = (focal_ratio, pixel_size_um) {
-        options.optics = Some(seiza_calibration::dust::Optics {
-            focal_ratio,
-            pixel_size_um,
-            obstruction: obstruction.unwrap_or(0.0),
-        });
-    }
+    options.optics =
+        seiza_calibration::dust::Optics::from_parts(focal_ratio, pixel_size_um, obstruction)
+            .map_err(value_error)?;
     let frame = open_frame(py, path)?;
     let cfa = cfa.unwrap_or(frame.bayer.is_some());
     let image = view(&frame)?;

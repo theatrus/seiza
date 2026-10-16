@@ -637,14 +637,14 @@ pub struct Spot {
     pub x: f32,
     /// Centre row, in sensor pixels.
     pub y: f32,
-    /// A disk's or donut's radius; a compact spot's, of a disc of the same
+    /// A disk's or donut's radius; a dip's or patch's, of a disc of the same
     /// area. Sensor pixels.
     pub radius: f32,
     /// Area in sensor pixels.
     pub area: f32,
     /// Deepest departure, as a fraction of the background.
     pub peak: f32,
-    /// Compact, irregular, disk or donut.
+    /// Compact, irregular, disk, donut or patch.
     #[serde(default)]
     pub shape: DustShape,
     /// A donut's hole as a fraction of its radius.

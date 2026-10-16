@@ -11490,6 +11490,14 @@ mod tests {
             flats[0]["algorithmVersion"],
             seiza_calibration::FLAT_QUALITY_ALGORITHM_VERSION
         );
+        // An obstruction without the rest of the light cone is refused, not
+        // ignored.
+        let refused = call_json(
+            seiza_calibration_measure_flat_json,
+            &json!({"path": directory.path().join("flat-0.fits"), "obstruction": 0.35}),
+        )
+        .unwrap_err();
+        assert!(refused.contains("focal ratio"), "{refused}");
         let report = call_json(
             seiza_calibration_screen_flats_json,
             &json!({"measurements": flats}),
@@ -11523,21 +11531,17 @@ mod tests {
 
     #[test]
     fn flat_features_are_camel_case_both_ways() {
-        let feature = seiza_calibration::FlatFeature {
-            x: 10.0,
-            y: 20.0,
-            left: 0,
-            top: 0,
-            right: 40,
-            bottom: 40,
-            pixels: 1257,
-            depth: 0.003,
-            shape: seiza_calibration::dust::DustShape::Disk,
-            radius: 20.0,
-            hole: None,
-            distance_mm: Some(1.5),
-            seen_in: Some(seiza_calibration::dust::SeenIn { frames: 9, of: 10 }),
-        };
+        let mut feature = seiza_calibration::FlatFeature::default();
+        feature.x = 10.0;
+        feature.y = 20.0;
+        feature.right = 40;
+        feature.bottom = 40;
+        feature.pixels = 1257;
+        feature.depth = 0.003;
+        feature.shape = seiza_calibration::dust::DustShape::Disk;
+        feature.radius = 20.0;
+        feature.distance_mm = Some(1.5);
+        feature.seen_in = Some(seiza_calibration::dust::SeenIn { frames: 9, of: 10 });
         let json = serde_json::to_value(FlatFeatureJson::from(feature)).unwrap();
         assert_eq!(json["distanceMm"], 1.5);
         assert_eq!(json["seenIn"]["frames"], 9);
@@ -16020,18 +16024,16 @@ struct FlatMeasureRequest {
     obstruction: Option<f32>,
 }
 
-/// The light cone from a request's optional numbers: `None` unless both the
-/// focal ratio and the pixel size are given.
+/// The light cone from a request's optional numbers: `None` when none is
+/// given; an error when some are given without both the focal ratio and the
+/// pixel size.
 fn optics(
     focal_ratio: Option<f32>,
     pixel_size_um: Option<f32>,
     obstruction: Option<f32>,
-) -> Option<seiza_calibration::dust::Optics> {
-    Some(seiza_calibration::dust::Optics {
-        focal_ratio: focal_ratio?,
-        pixel_size_um: pixel_size_um?,
-        obstruction: obstruction.unwrap_or(0.0),
-    })
+) -> Result<Option<seiza_calibration::dust::Optics>, String> {
+    seiza_calibration::dust::Optics::from_parts(focal_ratio, pixel_size_um, obstruction)
+        .map_err(calibration_message)
 }
 
 /// `seiza_calibration::DarkMeasurement` in camelCase, both ways: hosts keep
@@ -16119,21 +16121,21 @@ impl From<seiza_calibration::FlatFeature> for FlatFeatureJson {
 
 impl From<FlatFeatureJson> for seiza_calibration::FlatFeature {
     fn from(feature: FlatFeatureJson) -> Self {
-        Self {
-            x: feature.x,
-            y: feature.y,
-            left: feature.left,
-            top: feature.top,
-            right: feature.right,
-            bottom: feature.bottom,
-            pixels: feature.pixels,
-            depth: feature.depth,
-            shape: feature.shape,
-            radius: feature.radius,
-            hole: feature.hole,
-            distance_mm: feature.distance_mm,
-            seen_in: feature.seen_in,
-        }
+        let mut core = Self::default();
+        core.x = feature.x;
+        core.y = feature.y;
+        core.left = feature.left;
+        core.top = feature.top;
+        core.right = feature.right;
+        core.bottom = feature.bottom;
+        core.pixels = feature.pixels;
+        core.depth = feature.depth;
+        core.shape = feature.shape;
+        core.radius = feature.radius;
+        core.hole = feature.hole;
+        core.distance_mm = feature.distance_mm;
+        core.seen_in = feature.seen_in;
+        core
     }
 }
 
@@ -16365,14 +16367,14 @@ pub unsafe extern "C" fn seiza_calibration_measure_dark_json(
 /// `featureCount`, the `features` — large disks, donuts and patches first,
 /// then compact and irregular dips, each with `x`, `y`, `left`, `top`,
 /// `right`, `bottom`, `pixels`, `depth`, `shape` (`compact`, `irregular`,
-/// `disk`, `donut` or `patch`), `radius`, and when known `hole` and
-/// `distanceMm` —
-/// and `vignetting` (`edge`, `x`, `y`, `area`, `depth`). Optional
-/// `largeFeatures` (default true) turns the search for large ones off;
-/// optional `focalRatio`, `pixelSizeUm` and `obstruction` describe the light
-/// cone, so each disk gets a distance from the sensor. Keep it and pass it
-/// back to a screen whenever the set changes. Free it with
-/// [`seiza_string_free`].
+/// `disk`, `donut` or `patch`), `radius`, and when known `hole`,
+/// `distanceMm` and `seenIn` — and `vignetting` (`edge`, `x`, `y`, `area`,
+/// `depth`). Optional `largeFeatures` (default true) turns the search for
+/// large ones off. Optional `focalRatio` and `pixelSizeUm`, given together,
+/// with an optional `obstruction`, describe the light cone, so each disk gets
+/// a distance from the sensor; any of them without both of the first two is
+/// refused. Keep the response and pass it back to a screen whenever the set
+/// changes. Free it with [`seiza_string_free`].
 ///
 /// # Safety
 /// As [`seiza_calibration_measure_dark_json`].
@@ -16400,7 +16402,7 @@ pub unsafe extern "C" fn seiza_calibration_measure_flat_json(
             request.focal_ratio,
             request.pixel_size_um,
             request.obstruction,
-        );
+        )?;
         let frame = open_calibration_frame(&request.path)?;
         let cfa = request.cfa.unwrap_or(frame.bayer.is_some());
         let measurement = seiza_calibration::measure_flat(frame_view(&frame)?, cfa, &options)
