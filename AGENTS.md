@@ -17,6 +17,10 @@ type the C ABI carries, or either binding:
    - A new public field on a core type the C ABI carries (each such pair is
      a `[rust.<C type>]` entry, such as `seiza-parallax::VideoOptions` for
      `VideoRequest`): the C field, then the Python keyword or attribute.
+   - A new public function a core crate exports from its root, or a new
+     public method of an object hosts hold (`Parallax`, `LiveStacker` and
+     the others under `[core_functions] objects`): a C export that calls it,
+     then its Python twin.
    - A new C export: the Python function, method or property that does the
      same, declared in `seiza-py/seiza.pyi`, described in
      `seiza-py/README.md` and tested in `seiza-py/tests/`.

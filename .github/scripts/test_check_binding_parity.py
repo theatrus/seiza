@@ -37,7 +37,14 @@ struct SummaryResponse {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn seiza_parallax_prepare_json() {}
+pub unsafe extern "C" fn seiza_parallax_prepare_json() {
+    let video = Parallax::prepare();
+    video.frame();
+    rendering(&video);
+    planned();
+}
+
+use seiza_parallax::{plan_tour as planned, render as rendering};
 #[unsafe(no_mangle)]
 pub extern "C" fn seiza_string_free() {}
 
@@ -91,7 +98,36 @@ pub struct VideoOptions {
 }
 """
 
+CORE_LIB = """
+mod pipeline;
+mod plan;
+pub use pipeline::{Parallax, VideoOptions};
+pub use plan::{plan_tour, parse_stop};
+
+/// Film it.
+pub fn render(video: &Parallax) {}
+"""
+
+CORE_PLAN = """
+pub fn plan_tour() {}
+pub fn parse_stop(text: &str) {}
+"""
+
+CORE_OBJECT = """
+pub struct Parallax {}
+
+impl Parallax {
+    pub fn prepare() -> Self { Self {} }
+    pub fn frame(&self) {}
+    fn private(&self) {}
+}
+"""
+
 MANIFEST = """
+[core_functions]
+objects = ["seiza-parallax::Parallax"]
+"seiza-parallax::parse_stop" = { none = "the CLI's text form; the C ABI takes JSON" }
+
 [conventions]
 suffixes = { "_degrees" = "_deg" }
 
@@ -114,7 +150,7 @@ ignore = ["starless", "tour"]
 
 
 class BindingParityTests(unittest.TestCase):
-    def tree(self, *, c=C_SOURCE, stub=STUB, python=PY_SOURCE, manifest=MANIFEST, core=CORE):
+    def tree(self, *, c=C_SOURCE, stub=STUB, python=PY_SOURCE, manifest=MANIFEST, core=CORE, core_lib=CORE_LIB):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         root = Path(directory.name)
@@ -124,7 +160,9 @@ class BindingParityTests(unittest.TestCase):
             "seiza-py/seiza.pyi": textwrap.dedent(stub),
             "seiza-py/src/parallax.rs": python,
             ".github/binding-parity.toml": manifest,
-            "seiza-parallax/src/pipeline.rs": core,
+            "seiza-parallax/src/pipeline.rs": core + CORE_OBJECT,
+            "seiza-parallax/src/lib.rs": core_lib,
+            "seiza-parallax/src/plan.rs": CORE_PLAN,
         }
         for path, text in files.items():
             (root / path).parent.mkdir(parents=True, exist_ok=True)
@@ -208,6 +246,26 @@ class BindingParityTests(unittest.TestCase):
         self.assertIn("lists watermark_size, which seiza-parallax::VideoOptions no longer has", problem)
         [problem] = self.problems(core="")
         self.assertIn("0 definitions of pub struct VideoOptions", problem)
+
+    def test_core_functions_are_found_from_the_root_and_objects(self):
+        root = self.tree()
+        self.assertEqual(MODULE.crate_functions(root, "seiza-parallax"), ["parse_stop", "plan_tour", "render"])
+        self.assertEqual(MODULE.object_methods(root, "seiza-parallax::Parallax"), (["frame", "prepare"], ""))
+
+    def test_a_core_function_the_c_abi_does_not_call_fails(self):
+        core_lib = CORE_LIB + "\n/// Save it.\npub fn export(video: &Parallax) {}\n"
+        [problem] = self.problems(core_lib=core_lib)
+        self.assertIn("seiza-parallax::export is not called by the C ABI", problem)
+        core = CORE.replace("pub struct VideoOptions", "impl Parallax {\n    pub fn dust(&self) {}\n}\n\npub struct VideoOptions")
+        [problem] = self.problems(core=core)
+        self.assertIn("seiza-parallax::Parallax::dust is not called by the C ABI", problem)
+
+    def test_function_entries_stay_true_and_crates_can_be_covered_whole(self):
+        manifest = MANIFEST.replace('"seiza-parallax::parse_stop" = { none', '"seiza-parallax::plan_tour" = { gap = "x" }\n"seiza-parallax::parse_stop" = { none')
+        [problem] = self.problems(manifest=manifest)
+        self.assertIn("seiza-parallax::plan_tour says the C ABI does not call it, but it does now", problem)
+        manifest = MANIFEST.replace('"seiza-parallax::parse_stop" =', '"seiza-parallax::*" =')
+        self.assertEqual(self.problems(manifest=manifest), [])
 
     def test_one_binding_alone_needs_a_reason(self):
         report = MODULE.Report()

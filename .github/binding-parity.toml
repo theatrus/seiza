@@ -243,6 +243,122 @@ core = "seiza-stars::TriangleSectorStats"
 [rust.TriangleTiltJson]
 core = "seiza-stars::TriangleTiltSummary"
 
+# Core functions hosts use. Every function a core crate exports from its
+# root, and every public method of these objects hosts hold, must be called
+# by the C ABI; otherwise an entry says why not. "crate::*" covers a whole
+# crate of building blocks.
+[core_functions]
+objects = [
+    "seiza-parallax::Parallax",
+    "seiza-stacking::LiveStacker",
+    "seiza-background::BackgroundFit",
+    "seiza-stacking::ColorCalibration",
+]
+
+# Building blocks: whole crates the hosts reach through others.
+"seiza-xisf::*" = { none = "XISF reading and writing; hosts read and write files through seiza-image-io" }
+"seiza-fits::*" = { none = "FITS reading, writing, header editing and debayering; hosts read and write files through seiza-image-io, and the CLI edits headers" }
+"seiza-stats::*" = { none = "statistics building blocks for the other crates" }
+"seiza-sources::*" = { none = "building catalogs from raw survey data, which the CLI's build-data runs" }
+"seiza-draw::*" = { none = "text and shape drawing for the parallax overlays" }
+
+# background
+"seiza-background::fit_background" = { none = "the C ABI calls fit_background_masked, with or without a mask" }
+"seiza-background::BackgroundFit::correct" = { none = "the C ABI uses correct_in_place, which writes into the caller's buffer" }
+"seiza-background::BackgroundFit::correct_with_strength" = { none = "the C ABI uses correct_in_place_with_strength, which writes into the caller's buffer" }
+"seiza-background::BackgroundFit::render_model" = { none = "the C ABI uses render_model_into, which writes into the caller's buffer" }
+"seiza-background::BackgroundFit::value_at" = { none = "one point; the C ABI renders the whole model" }
+"seiza-background::select_shared_model" = { gap = "choosing one background surface for the channels of a colour image fitted one at a time" }
+
+# calibration
+"seiza-calibration::apply_residual_flat_response_at" = { gap = "residual flat responses: building, checking and applying them" }
+"seiza-calibration::build_residual_flat_patch" = { gap = "residual flat responses: building, checking and applying them" }
+"seiza-calibration::validate_residual_flat_response" = { gap = "residual flat responses: building, checking and applying them" }
+"seiza-calibration::coherent_subset_indices" = { none = "C hosts get it through the planner, seiza_calibration_plan_json" }
+"seiza-calibration::describe_text" = { none = "a building block of the mismatch messages the C ABI returns" }
+"seiza-calibration::describe_value" = { none = "a building block of the mismatch messages the C ABI returns" }
+"seiza-calibration::exposure_tolerance" = { none = "part of the matching rules the C ABI calls" }
+"seiza-calibration::measure_dark" = { gap = "screening calibration frames before a master is built" }
+"seiza-calibration::measure_flat" = { gap = "screening calibration frames before a master is built" }
+"seiza-calibration::screen_bias" = { gap = "screening calibration frames before a master is built" }
+"seiza-calibration::screen_darks" = { gap = "screening calibration frames before a master is built" }
+"seiza-calibration::screen_flats" = { gap = "screening calibration frames before a master is built" }
+
+# image I/O
+"seiza-image-io::add_xisf_solution_wcs" = { none = "the C ABI reads a prior from the image it has opened (AstronomyImage::solve_prior)" }
+"seiza-image-io::read_solve_prior" = { none = "the C ABI reads a prior from the image it has opened (AstronomyImage::solve_prior)" }
+"seiza-image-io::solve_prior_from_headers" = { none = "the C ABI reads a prior from the image it has opened (AstronomyImage::solve_prior)" }
+"seiza-image-io::save" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io" }
+"seiza-image-io::save_display" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io" }
+"seiza-image-io::save_f32" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io" }
+
+# parallax
+"seiza-parallax::Parallax::dust" = { none = "the C ABI reads dust through source_dust_map, which uses it" }
+"seiza-parallax::Parallax::counted_dust" = { none = "the C ABI reads dust through source_dust_map, which uses it" }
+"seiza-parallax::Parallax::scene" = { none = "the scene's layers; the summary and dust maps report what hosts use" }
+"seiza-parallax::Parallax::video_options" = { none = "hosts keep the settings they sent; plan_scene_tour returns a planned tour" }
+"seiza-parallax::default_gaia_cache" = { none = "the C ABI takes gaiaCache from the host" }
+"seiza-parallax::find_stars" = { none = "preparing a scene finds its stars" }
+"seiza-parallax::lift_object" = { none = "preparing a scene lifts objects (planes and autoPlanes)" }
+"seiza-parallax::lift_region" = { none = "preparing a scene lifts regions (planes and autoPlanes)" }
+"seiza-parallax::format_stop" = { none = "the CLI's text form of a stop; the C ABI takes stops as JSON" }
+"seiza-parallax::parse_stop" = { none = "the CLI's text form of a stop; the C ABI takes stops as JSON" }
+"seiza-parallax::parse_label" = { none = "the CLI's text form of a label; the C ABI takes labels as JSON" }
+"seiza-parallax::parse_frame_size" = { none = "the C ABI reads sizes through parse_frame_size_or_shape" }
+
+# stacking
+"seiza-stacking::ColorCalibration::apply" = { gap = "the C ABI applies gains and offsets itself in seiza_color_calibration_apply instead of calling this, so it ignores a raw CFA layout" }
+"seiza-stacking::LiveStacker::effective_maximum_drift_pixels" = { none = "part of registration" }
+"seiza-stacking::LiveStacker::open_fits_expanding" = { gap = "the expanding reference canvas for overlapping panels (#253), which Python has" }
+"seiza-stacking::LiveStacker::with_expanding_reference" = { gap = "the expanding reference canvas for overlapping panels (#253), which Python has" }
+"seiza-stacking::LiveStacker::expanded_lens" = { gap = "the expanding reference canvas for overlapping panels (#253), which Python has" }
+"seiza-stacking::LiveStacker::expansion_planning_notes" = { gap = "the expanding reference canvas for overlapping panels (#253), which Python has" }
+"seiza-stacking::LiveStacker::from_prepared_frame" = { gap = "starting a stack from a frame the host calibrated, keeping its FITS headers" }
+"seiza-stacking::LiveStacker::open_fits_with_reference_image" = { none = "the C ABI's call uses open_fits_with_reference_image_candidates, with one candidate" }
+"seiza-stacking::LiveStacker::with_reference_image" = { none = "the C ABI opens from paths (open_fits_with_reference_image_candidates)" }
+"seiza-stacking::LiveStacker::with_reference_image_candidates" = { none = "the C ABI opens from paths (open_fits_with_reference_image_candidates)" }
+"seiza-stacking::LiveStacker::push_fits_pipelined_with_pool" = { none = "the C ABI runs in the calling thread's pool (push_fits_pipelined)" }
+"seiza-stacking::LiveStacker::push_fits_sequential_with_pool" = { none = "the C ABI runs in the calling thread's pool (push_fits)" }
+"seiza-stacking::LiveStacker::set_calibration" = { none = "the C ABI replaces masters from FITS paths (set_calibration_from_fits_paths)" }
+"seiza-stacking::LiveStacker::reference_mapping" = { gap = "the reference frame's processing mapping, which hosts keep beside later frames' mappings" }
+"seiza-stacking::LiveStacker::reference_noise" = { gap = "the reference frame's noise, the unit of frame weights" }
+"seiza-stacking::build_master_from_fits_with_scratch" = { gap = "choosing where a flat build keeps its temporary pixels" }
+"seiza-stacking::build_residual_flat_patch" = { none = "kept for one release; seiza-calibration::build_residual_flat_patch replaces it" }
+"seiza-stacking::combine_rgb" = { gap = "composing mono stacks into colour, which Python has (combine_rgb, combine_lrgb, combine_narrowband)" }
+"seiza-stacking::combine_lrgb" = { gap = "composing mono stacks into colour, which Python has (combine_rgb, combine_lrgb, combine_narrowband)" }
+"seiza-stacking::combine_super_rgb" = { gap = "composing mono stacks into colour, which Python has (combine_rgb, combine_lrgb, combine_narrowband)" }
+"seiza-stacking::combine_super_lrgb" = { gap = "composing mono stacks into colour, which Python has (combine_rgb, combine_lrgb, combine_narrowband)" }
+"seiza-stacking::combine_narrowband" = { gap = "composing mono stacks into colour, which Python has (combine_rgb, combine_lrgb, combine_narrowband)" }
+"seiza-stacking::combine_narrowband_matrix" = { gap = "composing mono stacks into colour, which Python has (combine_rgb, combine_lrgb, combine_narrowband)" }
+"seiza-stacking::write_color_fits_f32" = { gap = "writing a composed colour image, with combine_rgb and the rest" }
+"seiza-stacking::write_linear_image_fits_f32" = { none = "the C ABI writes stacks through write_fits_f32 and drizzles through write_drizzle_fits_f32" }
+"seiza-stacking::write_processed_image_fits_f32" = { none = "the C ABI writes stacks through write_fits_f32 and drizzles through write_drizzle_fits_f32" }
+"seiza-stacking::drizzle_reference_headers" = { none = "the C drizzle result carries its reference headers already" }
+"seiza-stacking::covered_region" = { none = "crop_report gives the region and more; the C ABI calls crop_report" }
+"seiza-stacking::frame_noise" = { gap = "a frame's noise, the estimator behind frame weights" }
+"seiza-stacking::integrate_registered_frames" = { gap = "integrating frames registered elsewhere, with leave-one-out rejection" }
+"seiza-stacking::reference_score" = { none = "choose_reference scores each frame; the C ABI calls choose_reference" }
+"seiza-stacking::resample_to_reference" = { none = "a registration building block the stacker uses" }
+"seiza-stacking::resample_to_reference_affine" = { none = "a registration building block the stacker uses" }
+"seiza-stacking::resample_region_to_reference" = { none = "a registration building block the stacker uses" }
+"seiza-stacking::resample_region_to_reference_affine" = { none = "a registration building block the stacker uses" }
+"seiza-stacking::resample_region_to_reference_with" = { none = "a registration building block the stacker uses" }
+"seiza-stacking::resample_region_warped" = { none = "a registration building block the stacker uses" }
+"seiza-stacking::resample_region_photosites" = { none = "a registration building block the stacker uses" }
+"seiza-stacking::screen_dark_levels" = { gap = "screening darks by level (MasterBuildOptions.dark_level_screening)" }
+"seiza-stacking::suppress_impulses" = { none = "master builds call it for defect suppression" }
+
+# stars
+"seiza-stars::find_peak_stars" = { none = "parallax star finding uses it" }
+"seiza-stars::fold_core_fragments" = { none = "parallax star finding uses it" }
+"seiza-stars::classify_pixel_scale" = { gap = "pixel-scale advice for focusing hosts: a rig's class and a detection binning" }
+"seiza-stars::pixel_scale_arcsec" = { gap = "pixel-scale advice for focusing hosts: a rig's class and a detection binning" }
+"seiza-stars::recommend_detection_binning" = { gap = "pixel-scale advice for focusing hosts: a rig's class and a detection binning" }
+
+# stretch
+"seiza-stretch::auto_stretch_f32_to_u8" = { none = "the C ABI renders through its stretch configuration" }
+"seiza-stretch::midtones_transfer_function" = { none = "a building block of the stretches the C ABI renders" }
+
 # Every exported C function (`extern "C" fn seiza_*`, outside `mod tests`): the Python
 # name that does the same job, as seiza.pyi declares it — a top-level function or class
 # ("solve_blind", "ParallaxVideo") or "Class.member" ("ParallaxVideo.reconfigure",

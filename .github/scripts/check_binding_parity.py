@@ -5,7 +5,9 @@ Against `.github/binding-parity.toml`, this checks that:
 
 0. every public field of a core type the C ABI carries (a `[rust.<C type>]`
    entry: `seiza-parallax::VideoOptions` for `VideoRequest`) reaches the C
-   type, or says why not;
+   type, and every function a core crate exports from its root, with every
+   public method of the objects hosts hold (`[core_functions] objects`), is
+   called by the C ABI; or an entry says why not;
 
 1. every exported C function maps to a Python name that `seiza-py/seiza.pyi`
    declares, or says why Python has none;
@@ -40,6 +42,7 @@ C_SOURCES = ("seiza-cabi/src/lib.rs", "seiza-cabi/src/parallax.rs")
 STUB = Path("seiza-py/seiza.pyi")
 PY_SOURCES = Path("seiza-py/src")
 TRAILER = "Binding-parity:"
+BINDING_CRATES = ("seiza-cabi", "seiza-cli", "seiza-py")
 
 EXPORT = re.compile(r'extern\s+"C"\s+fn\s+(seiza_\w+)')
 SERDE_STRUCT = re.compile(
@@ -235,6 +238,94 @@ def core_struct(root: Path, spec: str) -> tuple[list[str] | None, str]:
     return found[0], ""
 
 
+def crate_functions(root: Path, crate: str) -> list[str]:
+    """The functions a core crate exports from its root: `pub fn` in its
+    lib.rs, and functions it `pub use`s from its own modules."""
+    sources = {path: without_tests(path.read_text()) for path in sorted((root / crate / "src").rglob("*.rs"))}
+    lib = sources.get(root / crate / "src" / "lib.rs", "")
+    names = set(re.findall(r"^pub\s+(?:const\s+)?(?:async\s+)?fn\s+(\w+)", lib, re.M))
+    used: set[str] = set()
+    for group in re.findall(r"^pub\s+use\s+(?:crate::|self::)?[\w:]+::\{([^}]*)\}", lib, re.M):
+        used |= {item.strip().split(" as ")[-1].strip() for item in group.split(",")}
+    used |= set(re.findall(r"^pub\s+use\s+(?:crate::|self::)?[\w:]+::([a-z_][a-z0-9_]*)\s*;", lib, re.M))
+    for name in used:
+        if name and name[0].islower() and any(
+            re.search(rf"^pub\s+(?:const\s+)?(?:async\s+)?fn\s+{re.escape(name)}\b", source, re.M) for source in sources.values()
+        ):
+            names.add(name)
+    return sorted(names)
+
+
+def object_methods(root: Path, spec: str) -> tuple[list[str] | None, str]:
+    """The public methods of core type `crate::Type`, from its inherent impls."""
+    crate, _, name = spec.partition("::")
+    sources = sorted((root / crate / "src").rglob("*.rs"))
+    if not sources:
+        return None, f"no crate {crate}"
+    methods: set[str] = set()
+    for path in sources:
+        source = without_tests(path.read_text())
+        for match in re.finditer(rf"^impl(?:<[^>]*>)?\s+{re.escape(name)}(?:<[^>]*>)?\s*\{{", source, re.M):
+            body = source[match.end() - 1: block_end(source, match.end() - 1)]
+            methods |= set(re.findall(r"^\s{4}pub\s+(?:const\s+)?(?:async\s+)?fn\s+(\w+)", body, re.M))
+    if not methods:
+        return None, f"no public methods of {name} in {crate}"
+    return sorted(methods), ""
+
+
+def check_core_functions(report: Report, manifest: dict, root: Path, c_source: str) -> None:
+    config = manifest.get("core_functions", {})
+    entries = {key: value for key, value in config.items() if key != "objects"}
+    wanted: dict[str, str] = {}
+    for lib in sorted(root.glob("seiza*/src/lib.rs")):
+        crate = lib.parent.parent.name
+        if crate in BINDING_CRATES:
+            continue
+        for name in crate_functions(root, crate):
+            wanted[f"{crate}::{name}"] = rf"(?<![\w.]){re.escape(name)}\s*(?:::<[^>]*>)?\("
+    for spec in config.get("objects", []):
+        methods, why = object_methods(root, spec)
+        if methods is None:
+            report.problem(f"[core_functions] objects: {spec}: {why}")
+            continue
+        for name in methods:
+            wanted[f"{spec}::{name}"] = rf"(?:\.|::){re.escape(name)}\s*(?:::<[^>]*>)?\("
+    # Imports under another name: `use seiza_stacking::{checkpoint_depths as rust_checkpoint_depths}`.
+    aliases: dict[str, set[str]] = {}
+    for statement in re.findall(r"^\s*use\s+[^;]*;", c_source, re.M):
+        for name, alias in re.findall(r"\b([a-z_][a-z0-9_]*)\s+as\s+([a-z_][a-z0-9_]*)\b", statement):
+            aliases.setdefault(name, set()).add(alias)
+    used: set[str] = set()
+    for qualified, pattern in sorted(wanted.items()):
+        crate_wide = qualified.split("::", 1)[0] + "::*"
+        key = qualified if qualified in entries else crate_wide if crate_wide in entries else None
+        name = qualified.rsplit("::", 1)[1]
+        called = re.search(pattern, c_source) is not None or any(
+            re.search(rf"(?<![\w.]){re.escape(alias)}\s*\(", c_source) for alias in aliases.get(name, ())
+        )
+        if key is None:
+            if not called:
+                report.problem(
+                    f"{qualified} is not called by the C ABI: add a C export that calls it (and a "
+                    f"Python twin), or add \"{qualified}\" to [core_functions]"
+                )
+            continue
+        used.add(key)
+        try:
+            kind, value = entry_kind(entries[key], "c")
+        except ValueError as error:
+            report.problem(f"[core_functions] {key}: {error}")
+            continue
+        if kind == "c":
+            report.problem(f"[core_functions] {key}: give none or gap; a function the C ABI calls needs no entry")
+        elif called and key == qualified:
+            report.problem(f"[core_functions] {key} says the C ABI does not call it, but it does now: remove the entry")
+        elif kind == "gap" and not called:
+            report.gaps.append(f"{qualified} in C: {value}")
+    for key in sorted(entries.keys() - used):
+        report.problem(f"[core_functions] lists {key}, which no core crate exports: remove it")
+
+
 def check_core(report: Report, manifest: dict, root: Path, structs: dict[str, list[str]]) -> None:
     conventions = manifest.get("conventions", {}).get("suffixes", {})
     for c_type, spec in sorted(manifest.get("rust", {}).items()):
@@ -412,6 +503,7 @@ def run(root: Path, base: str | None) -> Report:
     rust_sources = [path.read_text() for path in sorted((root / PY_SOURCES).glob("*.rs"))]
     surface = python_surface((root / STUB).read_text(), rust_sources)
     check_core(report, manifest, root, c_structs(c_sources))
+    check_core_functions(report, manifest, root, "\n".join(without_tests(source) for source in c_sources))
     check_functions(report, manifest, c_exports(c_sources), surface)
     check_fields(report, manifest, json_types(c_sources), surface)
     check_keywords(report, manifest, root, surface)
