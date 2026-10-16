@@ -377,6 +377,7 @@ objects = [
 "seiza-calibration::flat_response::metric::sampled_median" = { none = "a step inside build_response and background" }
 "seiza-calibration::flat_response::metric::star_mask" = { none = "a step inside compare and find_dust" }
 "seiza-calibration::flat_response::metric::star_mask_grown" = { none = "a step inside compare and find_dust" }
+"seiza-calibration::dust::session_dust_from_lists" = { none = "Rust-only: hosts that keep features already hold Rust DustFeature lists" }
 
 # Building blocks: whole crates the hosts reach through others.
 "seiza-xisf::*" = { none = "XISF reading and writing; hosts read and write files through seiza-image-io" }

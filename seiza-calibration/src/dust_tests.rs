@@ -808,3 +808,382 @@ fn a_feature_too_few_flats_show_is_dropped_and_a_steady_one_is_no_transient() {
         "{frames:?}"
     );
 }
+
+/// `session_dust_from_lists` as first written, checking every feature of
+/// every other flat for recurrence: the reference the indexed one must
+/// equal.
+fn session_dust_from_lists_by_scan(
+    stack: &Plane,
+    bin: usize,
+    frames: &[&[DustFeature]],
+    options: &DustOptions,
+) -> Option<(DustMap, Vec<FrameDust>)> {
+    let mut map = find_dust(stack, bin, options)?;
+    map.frames = frames.len();
+    let t = options.move_tolerance.max(0.0);
+    let overlap = |a: &DustFeature, b: &DustFeature| {
+        a.left as f32 - t <= b.right as f32
+            && b.left as f32 <= a.right as f32 + t
+            && a.top as f32 - t <= b.bottom as f32
+            && b.top as f32 <= a.bottom as f32 + t
+    };
+    let mut seen_by: Vec<Vec<usize>> = Vec::new();
+    let mut transients: Vec<Vec<DustFeature>> = Vec::new();
+    for (index, features) in frames.iter().enumerate() {
+        let matches = match_features(&map.features, features, options);
+        seen_by.push(
+            matches
+                .iter()
+                .filter(|m| m.later.is_some())
+                .filter_map(|m| m.earlier)
+                .collect(),
+        );
+        let others = frames.len().saturating_sub(1) as f32;
+        transients.push(
+            matches
+                .iter()
+                .filter(|m| m.earlier.is_none())
+                .filter_map(|m| m.later.map(|j| features[j]))
+                .filter(|f| {
+                    !map.features
+                        .iter()
+                        .any(|own| (own.x - f.x).hypot(own.y - f.y) < own.radius.max(f.radius))
+                })
+                .filter(|f| {
+                    let recurs = frames
+                        .iter()
+                        .enumerate()
+                        .filter(|(other, list)| {
+                            *other != index && list.iter().any(|g| overlap(f, g))
+                        })
+                        .count();
+                    (recurs as f32) < STEADY_SHARE * others
+                })
+                .collect(),
+        );
+    }
+    let renumber = keep_persistent(&mut map, &seen_by);
+    let views = seen_by
+        .into_iter()
+        .zip(transients)
+        .map(|(seen, transients)| FrameDust {
+            seen: seen.iter().filter_map(|index| renumber[*index]).collect(),
+            transients,
+        })
+        .collect();
+    Some((map, views))
+}
+
+/// A small deterministic generator for large synthetic lists.
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> u32 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (self.0 >> 33) as u32
+    }
+
+    fn below(&mut self, n: u32) -> u32 {
+        self.next() % n.max(1)
+    }
+}
+
+/// A compact dip with its box `size` pixels across at `(left, top)`.
+fn speck(left: u32, top: u32, size: u32) -> DustFeature {
+    let half = size as f32 / 2.0;
+    DustFeature {
+        x: left as f32 + half,
+        y: top as f32 + half,
+        left,
+        top,
+        right: left + size,
+        bottom: top + size,
+        pixels: size * size,
+        depth: 0.01,
+        shape: DustShape::Compact,
+        radius: half,
+        ..Default::default()
+    }
+}
+
+/// `frames` lists of about `per_frame` features each over a sensor as large
+/// as the synthetic stack's: specks that recur in most flats, a little
+/// displaced, among specks of noise, a wide patch, and the session's
+/// own dust in every flat.
+fn large_lists(
+    session: &[DustFeature],
+    frames: usize,
+    per_frame: usize,
+    seed: u64,
+) -> Vec<Vec<DustFeature>> {
+    let (width, height) = ((W * BIN) as u32, (H * BIN) as u32);
+    let mut rng = Lcg(seed);
+    let steady: Vec<DustFeature> = (0..per_frame / 10)
+        .map(|_| {
+            speck(
+                rng.below(width - 20),
+                rng.below(height - 20),
+                3 + rng.below(8),
+            )
+        })
+        .collect();
+    (0..frames)
+        .map(|_| {
+            let mut list = session.to_vec();
+            for s in &steady {
+                if rng.below(10) < 7 {
+                    let (dx, dy) = (rng.below(5), rng.below(5));
+                    list.push(speck(
+                        (s.left + dx).saturating_sub(2),
+                        (s.top + dy).saturating_sub(2),
+                        s.right - s.left,
+                    ));
+                }
+            }
+            while list.len() < per_frame - 1 {
+                list.push(speck(
+                    rng.below(width - 20),
+                    rng.below(height - 20),
+                    1 + rng.below(12),
+                ));
+            }
+            let size = 50 + rng.below(250);
+            list.push(speck(
+                rng.below(width - size),
+                rng.below(height - size),
+                size,
+            ));
+            list
+        })
+        .collect()
+}
+
+/// The stack of [`session_flats`], pedestal out.
+fn session_stack() -> Plane {
+    metric::build_response(&session_flats(), BIN)
+        .unwrap()
+        .without_pedestal(300.0)
+}
+
+#[test]
+fn session_dust_from_lists_needs_two_flats() {
+    let options = DustOptions::default();
+    let stack = session_stack();
+    let session = find_dust(&stack, BIN, &options).unwrap().features;
+    assert!(session_dust_from_lists(&stack, BIN, &[], &options).is_none());
+    assert!(session_dust_from_lists(&stack, BIN, &[&session], &options).is_none());
+    assert!(session_dust_from_lists(&stack, BIN, &[&[]], &options).is_none());
+    assert!(session_dust_from_lists(&stack, BIN, &[&session, &session], &options).is_some());
+}
+
+#[test]
+fn flats_that_found_nothing_count_as_flats_without_the_dust() {
+    let options = DustOptions::default();
+    let stack = session_stack();
+    // Two flats that looked and found nothing: too few to say for the
+    // disk, which stays; the window dust needs both.
+    let (map, frames) = session_dust_from_lists(&stack, BIN, &[&[], &[]], &options).unwrap();
+    assert_eq!(map.frames, 2);
+    assert_eq!(map.features.len(), 1, "{:?}", map.features);
+    assert!(map.features[0].shape.is_large());
+    assert_eq!(map.features[0].seen_in, Some(SeenIn { frames: 0, of: 2 }));
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame.seen.is_empty() && frame.transients.is_empty()),
+        "{frames:?}"
+    );
+    // Six such flats are enough to say neither is there.
+    let empty: Vec<&[DustFeature]> = vec![&[]; 6];
+    let (map, frames) = session_dust_from_lists(&stack, BIN, &empty, &options).unwrap();
+    assert_eq!(map.frames, 6);
+    assert!(map.features.is_empty(), "{:?}", map.features);
+    assert_eq!(frames.len(), 6);
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame.seen.is_empty() && frame.transients.is_empty()),
+        "{frames:?}"
+    );
+}
+
+#[test]
+fn indexed_recurrence_equals_a_full_scan_on_large_lists() {
+    let stack = session_stack();
+    let session = find_dust(&stack, BIN, &DustOptions::default())
+        .unwrap()
+        .features;
+    for (seed, frames, per_frame, tolerance) in [
+        (1, 8, 2_000, None),
+        (2, 10, 1_000, Some(0.0)),
+        (3, 5, 1_500, Some(40.0)),
+    ] {
+        let mut options = DustOptions::default();
+        if let Some(t) = tolerance {
+            options.move_tolerance = t;
+        }
+        let lists = large_lists(&session, frames, per_frame, seed);
+        let views: Vec<&[DustFeature]> = lists.iter().map(Vec::as_slice).collect();
+        let indexed = session_dust_from_lists(&stack, BIN, &views, &options).unwrap();
+        let scanned = session_dust_from_lists_by_scan(&stack, BIN, &views, &options).unwrap();
+        assert_eq!(indexed, scanned, "seed {seed}");
+        // Both kinds of leftover occur: specks of noise that pass as
+        // transients, and steady specks held back because they recur.
+        let transients: usize = indexed.1.iter().map(|f| f.transients.len()).sum();
+        let steady = frames * (per_frame / 10) / 2;
+        eprintln!("seed {seed}: {transients} transients");
+        assert!(transients > 0, "seed {seed}");
+        assert!(transients < frames * per_frame - steady, "seed {seed}");
+    }
+}
+
+#[test]
+fn the_box_index_finds_what_a_full_scan_finds() {
+    let mut rng = Lcg(7);
+    let mut features: Vec<DustFeature> = (0..3_000)
+        .map(|_| speck(rng.below(4_000), rng.below(3_000), rng.below(30)))
+        .collect();
+    // Boxes at the origin, wider than the grid takes, and reversed.
+    features.push(speck(0, 0, 0));
+    features.push(speck(10, 10, 3_000));
+    let mut reversed = speck(500, 500, 10);
+    std::mem::swap(&mut reversed.left, &mut reversed.right);
+    features.push(reversed);
+    let mut tall = speck(2_000, 0, 4);
+    tall.bottom = u32::MAX;
+    features.push(tall);
+    let index = BoxIndex::new(&features);
+    let mut queries: Vec<DustFeature> = (0..3_000)
+        .map(|_| speck(rng.below(4_200), rng.below(3_200), rng.below(60)))
+        .collect();
+    queries.extend(features.iter().copied());
+    queries.push(speck(u32::MAX - 10, u32::MAX - 10, 5));
+    for t in [0.0, 0.5, 2.0, 64.0, 1e6, f32::INFINITY] {
+        for query in &queries {
+            let scanned = features.iter().any(|g| boxes_touch(query, g, t));
+            assert_eq!(index.any_touching(query, t), scanned, "{query:?} t={t}");
+        }
+    }
+}
+
+/// The recurrence check on a long session's lists; run with
+/// `cargo test --release -p seiza-calibration -- --ignored --nocapture`.
+/// With the default 25 px tolerance most specks of a dense list recur; with
+/// none, most do not, and each is checked against every other flat.
+#[test]
+#[ignore = "a benchmark"]
+fn bench_session_dust_from_lists() {
+    let stack = session_stack();
+    let session = find_dust(&stack, BIN, &DustOptions::default())
+        .unwrap()
+        .features;
+    for (frames, per_frame, tolerance) in [
+        (30, 3_000, None),
+        (30, 3_000, Some(0.0)),
+        (30, 20_000, None),
+        (30, 20_000, Some(0.0)),
+        (30, 100_000, Some(0.0)),
+    ] {
+        let mut options = DustOptions::default();
+        if let Some(t) = tolerance {
+            options.move_tolerance = t;
+        }
+        let lists = large_lists(&session, frames, per_frame, 11);
+        let start = std::time::Instant::now();
+        let (_, views) = session_dust_from_lists(&stack, BIN, &views_of(&lists), &options).unwrap();
+        let transients: usize = views.iter().map(|f| f.transients.len()).sum();
+        println!(
+            "{frames} flats x {per_frame} features, tolerance {} px: {:.3} s, {transients} transients",
+            options.move_tolerance,
+            start.elapsed().as_secs_f64()
+        );
+        if per_frame <= 3_000 {
+            let start = std::time::Instant::now();
+            session_dust_from_lists_by_scan(&stack, BIN, &views_of(&lists), &options).unwrap();
+            println!("  a full scan: {:.3} s", start.elapsed().as_secs_f64());
+        }
+    }
+}
+
+fn views_of(lists: &[Vec<DustFeature>]) -> Vec<&[DustFeature]> {
+    lists.iter().map(Vec::as_slice).collect()
+}
+
+#[test]
+fn find_session_dust_drops_what_too_few_flats_show() {
+    // A filter disk in every flat; window dust in four flats of six, which
+    // is enough, and other window dust in two, which is not.
+    let level = 30_000.0_f32;
+    let flats: Vec<Plane> = (0..6)
+        .map(|frame| {
+            let mut disks = vec![(200.0, 150.0, 40.0, 0.004)];
+            if frame < 4 {
+                disks.push((400.0, 90.0, 4.0, 0.03));
+            }
+            if frame < 2 {
+                disks.push((100.0, 300.0, 4.0, 0.03));
+            }
+            let mut p = plane(&disks, 0.0015, 40 + frame);
+            for value in &mut p.data {
+                *value = *value * level + 300.0;
+            }
+            p
+        })
+        .collect();
+    let options = DustOptions::default();
+    let stack = metric::build_response(&flats, BIN)
+        .unwrap()
+        .without_pedestal(300.0);
+    // The stack holds all three.
+    let held = find_dust(&stack, BIN, &options).unwrap().features;
+    assert_eq!(held.len(), 3, "{held:?}");
+    assert!(held.iter().any(|f| (f.x / BIN as f32 - 100.0).abs() < 3.0));
+    // The rare window dust is dropped, and each kept feature counts its
+    // flats exactly.
+    let map = find_session_dust(&flats, BIN, 300.0, &options).unwrap();
+    let kept: Vec<(DustShape, f32, f32, Option<SeenIn>)> = map
+        .features
+        .iter()
+        .map(|f| {
+            let at = |v: f32| (v / BIN as f32).round();
+            (f.shape, at(f.x), at(f.y), f.seen_in)
+        })
+        .collect();
+    assert_eq!(
+        kept,
+        vec![
+            (
+                DustShape::Disk,
+                201.0,
+                151.0,
+                Some(SeenIn { frames: 6, of: 6 })
+            ),
+            (
+                DustShape::Compact,
+                401.0,
+                90.0,
+                Some(SeenIn { frames: 4, of: 6 })
+            ),
+        ],
+        "{:?}",
+        map.features
+    );
+    // Read from each flat's own features, the same dust is kept.
+    let lists: Vec<Vec<DustFeature>> = flats
+        .iter()
+        .map(|flat| {
+            let own = Plane {
+                width: flat.width,
+                height: flat.height,
+                data: flat.data.iter().map(|v| v - 300.0).collect(),
+            };
+            find_dust(&own, BIN, &options).unwrap().features
+        })
+        .collect();
+    let (from_lists, _) =
+        session_dust_from_lists(&stack, BIN, &views_of(&lists), &options).unwrap();
+    assert_eq!(from_lists.features, map.features);
+}

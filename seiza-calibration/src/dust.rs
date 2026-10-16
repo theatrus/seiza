@@ -437,7 +437,7 @@ pub struct DustMap {
 }
 
 /// One flat of a session against the session's dust
-/// ([`frame_dust`]).
+/// ([`frame_dust`], [`session_dust_from_lists`]).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FrameDust {
     /// Indices into the session's features of those this flat shows.
@@ -445,6 +445,11 @@ pub struct FrameDust {
     /// Features this flat holds that the session's stack does not: a drop
     /// of dew drying, a passing particle, a satellite in a sky flat. They
     /// are not dust of the light path.
+    ///
+    /// [`session_dust_from_lists`], which sees every flat's features, also
+    /// leaves out those that recur in 60% of the other flats: dust the
+    /// stack is too coarse to hold. [`frame_dust`] sees one flat and does
+    /// not.
     pub transients: Vec<DustFeature>,
 }
 
@@ -850,15 +855,23 @@ pub fn find_session_dust(
 /// measured features ([`crate::measure_flat`]'s, or [`find_dust`]'s on the
 /// flat binned), but not the flats.
 ///
+/// `frames` holds one list per flat, in sensor pixels like every
+/// [`DustFeature`]. A list may come from any binning: [`crate::measure_flat`]
+/// measures at full resolution. `bin` is the stack's binning alone, as
+/// [`find_dust`] takes it. Leave out a flat whose features are unknown (not
+/// measured, or its measurement lost): an empty list says the flat was
+/// looked at and holds no dust, and counts against every feature.
+///
 /// The stack's dust is found as [`find_dust`] finds it. A flat shows a
 /// feature when one of its own features pairs with it ([`match_features`]);
 /// what is kept is what [`find_session_dust`] keeps, by the same rule. Each
 /// flat's view says which of the kept features it shows, and its
 /// transients: features of its own that pair with none of the stack's, lie
 /// on none of them, and do not recur in most of the other flats (dust the
-/// stack is too coarse to hold is not a passing thing). One list per flat,
-/// in the order given. `None` when the stack is too small or too empty to
-/// fit a surface to.
+/// stack is too coarse to hold is not a passing thing). One view per list,
+/// in the order given. `None` with fewer than two lists, as
+/// [`find_session_dust`] with fewer than two flats, or when the stack is
+/// too small or too empty to fit a surface to.
 ///
 /// Persistence read this way counts only the flats that find a feature on
 /// their own, where [`find_session_dust`] measures each feature in each
@@ -870,29 +883,30 @@ pub fn session_dust_from_lists(
     frames: &[&[DustFeature]],
     options: &DustOptions,
 ) -> Option<(DustMap, Vec<FrameDust>)> {
+    if frames.len() < 2 {
+        return None;
+    }
     let mut map = find_dust(stack, bin, options)?;
     map.frames = frames.len();
     let t = options.move_tolerance.max(0.0);
-    let overlap = |a: &DustFeature, b: &DustFeature| {
-        a.left as f32 - t <= b.right as f32
-            && b.left as f32 <= a.right as f32 + t
-            && a.top as f32 - t <= b.bottom as f32
-            && b.top as f32 <= a.bottom as f32 + t
-    };
-    let mut seen_by: Vec<Vec<usize>> = Vec::with_capacity(frames.len());
-    let mut transients: Vec<Vec<DustFeature>> = Vec::with_capacity(frames.len());
-    for (index, features) in frames.iter().enumerate() {
-        let matches = match_features(&map.features, features, options);
-        seen_by.push(
-            matches
+    let indexes: Vec<BoxIndex> = frames.par_iter().map(|list| BoxIndex::new(list)).collect();
+    // The fewest other flats a feature recurs in to be no transient: the
+    // least count not under `STEADY_SHARE` of them.
+    let others = (frames.len() - 1) as f32;
+    let steady = (0..frames.len())
+        .find(|count| *count as f32 >= STEADY_SHARE * others)
+        .unwrap_or(frames.len());
+    let views: Vec<(Vec<usize>, Vec<DustFeature>)> = frames
+        .par_iter()
+        .enumerate()
+        .map(|(index, features)| {
+            let matches = match_features(&map.features, features, options);
+            let seen = matches
                 .iter()
                 .filter(|m| m.later.is_some())
                 .filter_map(|m| m.earlier)
-                .collect(),
-        );
-        let others = frames.len().saturating_sub(1) as f32;
-        transients.push(
-            matches
+                .collect();
+            let transients = matches
                 .iter()
                 .filter(|m| m.earlier.is_none())
                 .filter_map(|m| m.later.map(|j| features[j]))
@@ -902,18 +916,29 @@ pub fn session_dust_from_lists(
                         .any(|own| (own.x - f.x).hypot(own.y - f.y) < own.radius.max(f.radius))
                 })
                 .filter(|f| {
-                    let recurs = frames
-                        .iter()
-                        .enumerate()
-                        .filter(|(other, list)| {
-                            *other != index && list.iter().any(|g| overlap(f, g))
-                        })
-                        .count();
-                    (recurs as f32) < STEADY_SHARE * others
+                    // It recurs when `steady` other flats hold it; stop
+                    // counting once that is reached or out of reach.
+                    let (mut recurs, mut left) = (0, frames.len() - 1);
+                    for (other, list) in indexes.iter().enumerate() {
+                        if other == index {
+                            continue;
+                        }
+                        left -= 1;
+                        recurs += usize::from(list.any_touching(f, t));
+                        if recurs >= steady {
+                            return false;
+                        }
+                        if recurs + left < steady {
+                            return true;
+                        }
+                    }
+                    recurs < steady
                 })
-                .collect(),
-        );
-    }
+                .collect();
+            (seen, transients)
+        })
+        .collect();
+    let (seen_by, transients): (Vec<Vec<usize>>, Vec<Vec<DustFeature>>) = views.into_iter().unzip();
     let renumber = keep_persistent(&mut map, &seen_by);
     let views = seen_by
         .into_iter()
@@ -924,6 +949,172 @@ pub fn session_dust_from_lists(
         })
         .collect();
     Some((map, views))
+}
+
+/// Whether `b`'s box overlaps `a`'s widened by `t` pixels each way.
+fn boxes_touch(a: &DustFeature, b: &DustFeature, t: f32) -> bool {
+    a.left as f32 - t <= b.right as f32
+        && b.left as f32 <= a.right as f32 + t
+        && a.top as f32 - t <= b.bottom as f32
+        && b.top as f32 <= a.bottom as f32 + t
+}
+
+/// One flat's features on a coarse grid, so whether a box touches any of
+/// them is answered from the cells it covers rather than from all of them:
+/// a long session's flats hold thousands of features each.
+///
+/// Each feature is filed under every cell its box covers. A box that covers
+/// too many cells, or whose edges are reversed, is checked against every
+/// query instead, so the answer is always [`boxes_touch`]'s over the whole
+/// list.
+struct BoxIndex<'a> {
+    features: &'a [DustFeature],
+    /// Cell side in pixels: a power of two, so dividing by it is exact.
+    cell: f32,
+    columns: usize,
+    rows: usize,
+    /// Where each cell's entries start in `entries`; one more than cells.
+    starts: Vec<u32>,
+    entries: Vec<u32>,
+    /// Features checked against every query.
+    wide: Vec<u32>,
+}
+
+impl<'a> BoxIndex<'a> {
+    /// The finest and coarsest cell sides, in pixels, before the grid's
+    /// size bounds it. Between them the side is chosen for about two
+    /// features a cell.
+    const FINEST: f32 = 16.0;
+    const COARSEST: f32 = 64.0;
+    /// A box covering more cells than this is checked on every query.
+    const MAX_CELLS: usize = 64;
+
+    fn new(features: &'a [DustFeature]) -> Self {
+        let span = |lo: u32, hi: u32, cell: f32| {
+            (
+                (lo as f32 / cell).floor() as usize,
+                (hi as f32 / cell).floor() as usize,
+            )
+        };
+        let cells = |f: &DustFeature, cell: f32| {
+            let (c0, c1) = span(f.left, f.right, cell);
+            let (r0, r1) = span(f.top, f.bottom, cell);
+            (c0, c1, r0, r1)
+        };
+        let fits = |f: &DustFeature, cell: f32| {
+            let (c0, c1, r0, r1) = cells(f, cell);
+            f.left <= f.right
+                && f.top <= f.bottom
+                && (c1 - c0 + 1).saturating_mul(r1 - r0 + 1) <= Self::MAX_CELLS
+        };
+        let reach = |cell: f32| {
+            features
+                .iter()
+                .filter(|f| fits(f, cell))
+                .fold((0u32, 0u32), |(r, b), f| (r.max(f.right), b.max(f.bottom)))
+        };
+        let grid = |(right, bottom): (u32, u32), cell: f32| {
+            (right as f64 / cell as f64 + 1.0) * (bottom as f64 / cell as f64 + 1.0)
+        };
+        // About two features a cell, over the area the boxes reach.
+        let (right, bottom) = reach(Self::COARSEST);
+        let mut cell = Self::FINEST;
+        while cell < Self::COARSEST
+            && (right as f64 + 1.0) * (bottom as f64 + 1.0) / (cell as f64 * cell as f64)
+                > features.len() as f64 / 2.0
+        {
+            cell *= 2.0;
+        }
+        // Coarser still when the boxes reach far, so the grid holds no more
+        // cells than twice the features (and at least 64k); a coarser cell
+        // takes every box a finer one did.
+        let budget = (2 * features.len()).max(1 << 16) as f64;
+        while grid(reach(cell), cell) > budget {
+            cell *= 2.0;
+        }
+        let (mut placed, mut wide) = (Vec::with_capacity(features.len()), Vec::new());
+        for (index, f) in features.iter().enumerate() {
+            if fits(f, cell) {
+                let (c0, c1, r0, r1) = cells(f, cell);
+                placed.push((c0, c1, r0, r1, index as u32));
+            } else {
+                wide.push(index as u32);
+            }
+        }
+        let (right, bottom) = reach(cell);
+        let columns = span(0, right, cell).1 + 1;
+        let rows = span(0, bottom, cell).1 + 1;
+        let mut counts = vec![0u32; columns * rows + 1];
+        for &(c0, c1, r0, r1, _) in &placed {
+            for row in r0..=r1 {
+                for column in c0..=c1 {
+                    counts[row * columns + column + 1] += 1;
+                }
+            }
+        }
+        for at in 1..counts.len() {
+            counts[at] += counts[at - 1];
+        }
+        let starts = counts;
+        let mut fill = starts.clone();
+        let mut entries = vec![0u32; *starts.last().unwrap_or(&0) as usize];
+        for &(c0, c1, r0, r1, index) in &placed {
+            for row in r0..=r1 {
+                for column in c0..=c1 {
+                    let at = &mut fill[row * columns + column];
+                    entries[*at as usize] = index;
+                    *at += 1;
+                }
+            }
+        }
+        Self {
+            features,
+            cell,
+            columns,
+            rows,
+            starts,
+            entries,
+            wide,
+        }
+    }
+
+    /// Whether `query`'s box, widened by `t`, touches any feature's.
+    ///
+    /// A well-formed box touches `query` when their spans meet on both
+    /// axes, at some point no less than 0 (the box starts there or later)
+    /// and within the widened query; that point's cell holds the box, and
+    /// is among the cells the widened query covers.
+    fn any_touching(&self, query: &DustFeature, t: f32) -> bool {
+        let touches = |index: &u32| boxes_touch(query, &self.features[*index as usize], t);
+        let scan = || self.features.iter().any(|g| boxes_touch(query, g, t));
+        let (x0, x1) = (query.left as f32 - t, query.right as f32 + t);
+        let (y0, y1) = (query.top as f32 - t, query.bottom as f32 + t);
+        if !(x0 <= x1 && y0 <= y1 && x1.is_finite() && y1.is_finite()) {
+            return scan();
+        }
+        let cells = |lo: f32, hi: f32, limit: usize| {
+            let first = (lo.max(0.0) / self.cell).floor() as f64;
+            let last = ((hi / self.cell).floor() as f64).min(limit as f64 - 1.0);
+            (first, last)
+        };
+        let (c0, c1) = cells(x0, x1, self.columns);
+        let (r0, r1) = cells(y0, y1, self.rows);
+        if c1 >= c0 && r1 >= r0 {
+            if (c1 - c0 + 1.0) * (r1 - r0 + 1.0) > self.features.len() as f64 {
+                return scan();
+            }
+            for row in r0 as usize..=r1 as usize {
+                for column in c0 as usize..=c1 as usize {
+                    let cell = row * self.columns + column;
+                    let (from, to) = (self.starts[cell] as usize, self.starts[cell + 1] as usize);
+                    if self.entries[from..to].iter().any(touches) {
+                        return true;
+                    }
+                }
+            }
+        }
+        self.wide.iter().any(touches)
+    }
 }
 
 /// A compact dip must show in this share of a session's flats to be dust
