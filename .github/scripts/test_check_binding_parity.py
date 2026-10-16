@@ -206,16 +206,15 @@ class BindingParityTests(unittest.TestCase):
         self.assertEqual(MODULE.python_name("distance_parsecs", {"_parsecs": "_pc"}), "distance_pc")
 
     def test_an_exemption_python_has_outgrown_fails(self):
-        manifest = MANIFEST.replace('[fields]\n', '[fields]\n"VideoRequest.framing" = { gap = "not in Python yet" }\n', 1)
+        manifest = MANIFEST.replace('[fields]\n', '[fields]\n"VideoRequest.framing" = { none = "not needed" }\n', 1)
         [problem] = self.problems(manifest=manifest)
         self.assertIn("Python has it now: remove the entry", problem)
 
-    def test_gaps_pass_and_are_counted(self):
+    def test_a_gap_entry_is_refused(self):
         c = C_SOURCE.replace("    framing: Option<String>,", "    framing: Option<String>,\n    crop: Option<[usize; 4]>,")
         manifest = MANIFEST.replace('[fields]\n', '[fields]\n"VideoRequest.crop" = { gap = "crop is C-only for now" }\n', 1)
-        report = MODULE.run(self.tree(c=c, manifest=manifest), None)
-        self.assertEqual(report.problems, [])
-        self.assertEqual(report.gaps, ["VideoRequest.crop: crop is C-only for now"])
+        [problem] = self.problems(c=c, manifest=manifest)
+        self.assertIn("gap entries are no longer allowed", problem)
 
     def test_keywords_must_match_the_stub_both_ways(self):
         python = PY_SOURCE.replace('            "framing" => {}\n', "")
@@ -263,7 +262,7 @@ class BindingParityTests(unittest.TestCase):
         self.assertIn("seiza-parallax::Parallax::dust is not called by the C ABI", problem)
 
     def test_function_entries_stay_true_and_crates_can_be_covered_whole(self):
-        manifest = MANIFEST.replace('"seiza-parallax::parse_stop" = { none', '"seiza-parallax::plan_tour" = { gap = "x" }\n"seiza-parallax::parse_stop" = { none')
+        manifest = MANIFEST.replace('"seiza-parallax::parse_stop" = { none', '"seiza-parallax::plan_tour" = { none = "x" }\n"seiza-parallax::parse_stop" = { none')
         [problem] = self.problems(manifest=manifest)
         self.assertIn("seiza-parallax::plan_tour says the C ABI does not call it, but it does now", problem)
         manifest = MANIFEST.replace('"seiza-parallax::parse_stop" =', '"seiza-parallax::*" =')

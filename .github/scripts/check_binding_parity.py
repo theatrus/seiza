@@ -20,9 +20,9 @@ Against `.github/binding-parity.toml`, this checks that:
    to the other's, or a commit says why not with a `Binding-parity:` line.
 
 Entries are `python` (Python has it under that name), `c` (the C type has
-it under that name), `none` (no counterpart by design) or `gap` (missing,
-and should not be). Gaps pass, and are counted, so the list of them is the
-work left.
+it under that name) or `none` (no counterpart by design, with the reason).
+There is no entry for a missing counterpart: add it to the binding that
+lacks it.
 """
 
 from __future__ import annotations
@@ -62,7 +62,6 @@ NOT_IN_JSON = re.compile(r"\bskip\b|\bskip_serializing\b(?!_if)|\bskip_deseriali
 @dataclass
 class Report:
     problems: list[str] = field(default_factory=list)
-    gaps: list[str] = field(default_factory=list)
 
     def problem(self, message: str) -> None:
         self.problems.append(message)
@@ -210,14 +209,18 @@ def python_name(field_name: str, conventions: dict[str, str]) -> str:
 
 
 def entry_kind(entry: object, counterpart: str = "python") -> tuple[str, str]:
-    """An entry's kind and value: (`counterpart`, name), ("none", why) or ("gap", what)."""
+    """An entry's kind and value: (`counterpart`, name) or ("none", why)."""
     if isinstance(entry, str) and counterpart == "python":
         return "python", entry
     if isinstance(entry, dict) and len(entry) == 1:
         kind, value = next(iter(entry.items()))
-        if kind in (counterpart, "none", "gap") and isinstance(value, str) and value.strip():
+        if kind == "gap":
+            raise ValueError(
+                "gap entries are no longer allowed: add the missing counterpart to the binding that lacks it"
+            )
+        if kind in (counterpart, "none") and isinstance(value, str) and value.strip():
             return kind, value
-    raise ValueError(f"expected one of {counterpart}/none/gap with text, got {entry!r}")
+    raise ValueError(f"expected {counterpart} or none, with text, got {entry!r}")
 
 
 def c_structs(sources: list[str]) -> dict[str, list[str]]:
@@ -326,11 +329,9 @@ def check_core_functions(report: Report, manifest: dict, root: Path, c_source: s
             report.problem(f"[core_functions] {key}: {error}")
             continue
         if kind == "c":
-            report.problem(f"[core_functions] {key}: give none or gap; a function the C ABI calls needs no entry")
+            report.problem(f"[core_functions] {key}: give none; a function the C ABI calls needs no entry")
         elif called and key == qualified:
             report.problem(f"[core_functions] {key} says the C ABI does not call it, but it does now: remove the entry")
-        elif kind == "gap" and not called:
-            report.gaps.append(f"{qualified} in C: {value}")
     for key in sorted(entries.keys() - used):
         report.problem(f"[core_functions] lists {key}, which no core crate exports: remove it")
 
@@ -365,8 +366,6 @@ def check_core(report: Report, manifest: dict, root: Path, structs: dict[str, li
                 report.problem(f"[rust.{c_type}] {name} says {c_type}.{value} carries it, but {c_type} has no {value}")
             elif kind != "c" and present:
                 report.problem(f"[rust.{c_type}] {name} says the C ABI lacks it, but {c_type} has it now: remove the entry")
-            elif kind == "gap":
-                report.gaps.append(f"{spec['core']}.{name} in C: {value}")
         for name in sorted(entries.keys() - set(core_fields)):
             report.problem(f"[rust.{c_type}] lists {name}, which {spec['core']} no longer has: remove it")
 
@@ -388,8 +387,6 @@ def check_functions(report: Report, manifest: dict, exports: set[str], surface: 
             continue
         if kind == "python" and value not in surface.qualified:
             report.problem(f"[functions] {name} maps to {value}, which seiza.pyi does not declare")
-        elif kind == "gap":
-            report.gaps.append(f"{name}: {value}")
 
 
 def python_callables(stub: str) -> list[str]:
@@ -443,8 +440,6 @@ def check_python_functions(report: Report, manifest: dict, exports: set[str], st
             report.problem(f"[python_functions] {name}: [functions] maps a C export to it now: remove the entry")
         elif kind == "c" and value not in exports:
             report.problem(f"[python_functions] {name} gives {value}, which the C ABI does not export")
-        elif kind == "gap":
-            report.gaps.append(f"{name} in C: {value}")
     for name in sorted(entries.keys() - set(callables)):
         report.problem(f"[python_functions] lists {name}, which seiza.pyi does not declare: remove it")
 
@@ -464,9 +459,7 @@ def check_fields(report: Report, manifest: dict, types: dict[str, list[str]], su
             report.problem(f"[types] {type_name}: {error}")
             continue
         if kind == "python":
-            report.problem(f"[types] {type_name}: whole types take none or gap, not a Python name")
-        elif kind == "gap":
-            report.gaps.append(f"{type_name}: {value}")
+            report.problem(f"[types] {type_name}: whole types take none, not a Python name")
     for type_name, names in sorted(types.items()):
         if type_name in whole:
             continue
@@ -492,8 +485,6 @@ def check_fields(report: Report, manifest: dict, types: dict[str, list[str]], su
                     report.problem(f"[fields] {entry_key} maps to {value}, which Python does not use")
             elif present and not entry_key.startswith("*."):
                 report.problem(f"[fields] {entry_key} says Python lacks it, but Python has it now: remove the entry")
-            elif kind == "gap" and not present:
-                report.gaps.append(f"{key}: {value}")
     for key in sorted(fields.keys() - used):
         report.problem(f"[fields] lists {key}, which no JSON type has: remove it")
 
@@ -592,8 +583,7 @@ def main() -> int:
     if report.problems:
         print(f"{len(report.problems)} binding parity problem(s); see .github/binding-parity.toml", file=sys.stderr)
         return 1
-    in_c = sum(1 for gap in report.gaps if " in C: " in gap)
-    print(f"binding parity check passed ({in_c} known gaps in the C ABI, {len(report.gaps) - in_c} in Python)")
+    print("binding parity check passed")
     return 0
 
 

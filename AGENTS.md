@@ -29,11 +29,11 @@ type the C ABI carries, or either binding:
    - A behaviour change in a C function: the same change in its Python twin.
      `.github/binding-parity.toml` lists each C function's twin.
    - A Python change: the same in the C ABI, the other way round.
-3. **Record what a binding lacks** in `.github/binding-parity.toml`: `none`
-   where it does without by design (C handle lifetimes, the apps' display
-   rendering, a cancel signal passed as an argument), `gap` where it should
-   have it but does not yet. The gaps are the work left; close them rather
-   than adding to them.
+3. **Record only deliberate differences** in `.github/binding-parity.toml`:
+   `none`, with the reason, where a binding does without by design (C handle
+   lifetimes, the apps' display rendering, a cancel signal passed as an
+   argument). There is no way to record a missing counterpart: the check
+   fails until both bindings have it.
 4. **Run the check:**
    `python3 .github/scripts/check_binding_parity.py --base origin/main`.
    CI runs it on every PR. A PR that changes one binding's source and not

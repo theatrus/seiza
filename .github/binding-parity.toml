@@ -5,8 +5,8 @@
 #
 # A string or { python = "..." } gives the Python counterpart, and
 # { c = "..." } the C field that carries a core field; { none = "..." } says
-# there is none by design; { gap = "..." } records something the binding
-# should offer but does not yet. Gaps pass, and are the work left.
+# there is none by design, and why. Nothing records a missing counterpart:
+# add it to the binding that lacks it.
 
 # The checks compare field names after changing these suffixes.
 [conventions]
@@ -22,7 +22,7 @@ ignore = ["starless", "stars", "wcs", "progress", "cancel"]
 # The core type each C type carries. Every public field of the core type
 # must reach the C type: under its own name (after the conventions above),
 # under the C name given here ({ c = "..." }), or with a reason it does not
-# ({ none = "..." }, or { gap = "..." } for a field the C ABI should carry).
+# ({ none = "..." }).
 
 
 # parallax
