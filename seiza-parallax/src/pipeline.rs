@@ -102,8 +102,15 @@ pub enum Error {
 /// A stop on a tour, as the options give it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TourStop {
-    /// The image point the camera centres, or the image's centre if
-    /// `None`.
+    /// As the view widens, move its centre toward the whole image rather
+    /// than translating the camera to keep an edge target centred. The
+    /// target in `focus` is retained, and becomes centred when the view
+    /// is tight enough to frame it. At dolly 0 and zoom 1, frame the image
+    /// centre. Authored tours keep the original point-centred behaviour
+    /// unless they opt in.
+    pub pull_back_to_whole_image: bool,
+    /// The selected image point, or the image's centre if `None`.
+    /// Centred directly unless `pull_back_to_whole_image` is enabled.
     pub focus: Option<(f64, f64)>,
     /// Fraction of the way to the nebula the camera has flown, 0 to below 1.
     pub dolly: f64,
@@ -139,6 +146,7 @@ pub struct TourStop {
 impl Default for TourStop {
     fn default() -> Self {
         Self {
+            pull_back_to_whole_image: false,
             focus: None,
             dolly: 0.0,
             zoom: 1.0,
@@ -155,11 +163,37 @@ impl Default for TourStop {
     }
 }
 
+impl TourStop {
+    /// The camera's focus, keeping `focus` as the selected target. Limit
+    /// its displacement from the image centre to the room the requested
+    /// magnification creates, so pulling back is continuous and does not
+    /// depend on a catalogue target having an extent.
+    fn camera_focus(&self, centre: (f64, f64)) -> Option<(f64, f64)> {
+        let target = self.focus?;
+        if !self.pull_back_to_whole_image {
+            return Some(target);
+        }
+        let room = (1.0 - (1.0 - self.dolly) / self.zoom).clamp(0.0, 1.0);
+        if room == 0.0 {
+            return None;
+        }
+        Some((
+            target
+                .0
+                .clamp(centre.0 * (1.0 - room), centre.0 * (1.0 + room)),
+            target
+                .1
+                .clamp(centre.1 * (1.0 - room), centre.1 * (1.0 + room)),
+        ))
+    }
+}
+
 /// A [`TourStop`] written `X,Y` or `whole` (the image's centre), then any
 /// of `dolly=`, `zoom=`, `rotate=` (degrees), `pan=`, `travel=` and
 /// `hold=` (seconds), `spin=` (degrees turned while holding), `push=`
 /// (the share of the remaining way flown in while holding), `depth=`
-/// (parsecs, the plane the focus point is centred on) and `title=`,
+/// (parsecs, the plane the focus point is centred on), `pullback=`
+/// (true to widen toward the image centre) and `title=`,
 /// separated by spaces: `2700,3400 dolly=0.85 rotate=-20 travel=6
 /// hold=1.5 title="Sh2-170"`. A value in double quotes may hold spaces,
 /// and `\"` or `\\` within them a quote or backslash.
@@ -195,6 +229,11 @@ pub fn parse_stop(text: &str) -> Result<TourStop, String> {
         }
         if key == "card" {
             stop.card = (!value.is_empty()).then(|| PathBuf::from(value));
+            continue;
+        }
+        if key == "pullback" {
+            stop.pull_back_to_whole_image =
+                value.parse().map_err(|error| format!("{part}: {error}"))?;
             continue;
         }
         let value: f64 = value.parse().map_err(|error| format!("{part}: {error}"))?;
@@ -1568,24 +1607,29 @@ impl Parallax {
             tour: video
                 .stops()
                 .iter()
-                .map(|stop| Stop {
-                    focus: stop.focus.unwrap_or(centre),
-                    dolly: stop.dolly,
-                    zoom: stop.zoom,
-                    rotation: stop.rotate_deg.to_radians(),
-                    pan: stop.pan,
-                    travel: stop.travel,
-                    hold: stop.hold,
-                    spin: stop.spin_deg.to_radians(),
-                    push: stop.push,
-                    // A stop on a depth plane centres its focus point there,
-                    // at the depth it gives or the image shows there; the
-                    // whole view centres the image.
-                    depth: match (stop.depth_pc, stop.focus) {
-                        (Some(depth), _) => depth / scene.background_distance_pc,
-                        (None, Some((x, y))) => scene.depth_at(x, y) / scene.background_distance_pc,
-                        (None, None) => 1.0,
-                    },
+                .map(|stop| {
+                    let focus = stop.camera_focus(centre);
+                    Stop {
+                        focus: focus.unwrap_or(centre),
+                        dolly: stop.dolly,
+                        zoom: stop.zoom,
+                        rotation: stop.rotate_deg.to_radians(),
+                        pan: stop.pan,
+                        travel: stop.travel,
+                        hold: stop.hold,
+                        spin: stop.spin_deg.to_radians(),
+                        push: stop.push,
+                        // A stop on a depth plane centres its focus point there,
+                        // at the depth it gives or the image shows there; the
+                        // whole view centres the image.
+                        depth: match (stop.depth_pc.filter(|_| focus == stop.focus), focus) {
+                            (Some(depth), _) => depth / scene.background_distance_pc,
+                            (None, Some((x, y))) => {
+                                scene.depth_at(x, y) / scene.background_distance_pc
+                            }
+                            (None, None) => 1.0,
+                        },
+                    }
                 })
                 .collect(),
             glide: video.tour_glide,
@@ -2109,6 +2153,7 @@ fn close_loop(tour: &[TourStop]) -> Vec<TourStop> {
     let last = tour.last().expect("a first stop is a last");
     let home = tour.len() >= 2
         && last.focus == first.focus
+        && last.pull_back_to_whole_image == first.pull_back_to_whole_image
         && last.dolly == first.dolly
         && last.zoom == first.zoom
         && last.pan == first.pan;
@@ -2193,6 +2238,9 @@ pub fn format_stop(stop: &TourStop) -> String {
         None => "whole".to_string(),
     };
     let defaults = TourStop::default();
+    if stop.pull_back_to_whole_image {
+        text.push_str(" pullback=true");
+    }
     for (key, value, default) in [
         ("dolly", stop.dolly, defaults.dolly),
         ("zoom", stop.zoom, defaults.zoom),
@@ -4179,10 +4227,41 @@ mod tests {
     }
 
     #[test]
+    fn a_manual_stop_pulls_back_toward_whole_image_without_losing_its_target() {
+        let centre = (299.5, 199.5);
+        let target = (520.0, 65.0);
+        let mut stop = TourStop {
+            focus: Some(target),
+            pull_back_to_whole_image: true,
+            ..TourStop::default()
+        };
+        assert_eq!(stop.camera_focus(centre), None);
+        let mut previous = centre;
+        for dolly in [0.1, 0.2, 0.4, 0.6, 0.8] {
+            stop.dolly = dolly;
+            let focus = stop.camera_focus(centre).unwrap();
+            assert!(focus.0 >= previous.0 && focus.1 <= previous.1);
+            assert!(focus.0 <= target.0 && focus.1 >= target.1);
+            previous = focus;
+        }
+        assert_eq!(previous, target);
+        stop.dolly = 0.0;
+        stop.zoom = 0.5;
+        assert_eq!(stop.camera_focus(centre), None);
+        stop.zoom = 8.0;
+        assert_eq!(stop.camera_focus(centre), Some(target));
+        assert_eq!(stop.focus, Some(target));
+        stop.pull_back_to_whole_image = false;
+        stop.zoom = 1.0;
+        assert_eq!(stop.camera_focus(centre), Some(target));
+    }
+
+    #[test]
     fn a_stop_written_out_reads_back() {
         for stop in [
             TourStop::default(),
             TourStop {
+                pull_back_to_whole_image: true,
                 focus: Some((2700.0, 3400.0)),
                 dolly: 0.85,
                 zoom: 1.2,

@@ -2283,7 +2283,11 @@ char *seiza_rc_astro_process_file_json(const char *request_json,
  `pan`, `zoom`, `zoomEnd`, `rotateDegrees` `[first, last]`, `easing`
  ("inOut", "linear"), `quality` ("standard", "high"), `growthLimit`,
  `fadeFrom`, `tour` (stops `[{focus, dolly, zoom, rotateDegrees, pan,
- travel, hold, spinDegrees, push, title, card, depthParsecs}]`, `card`
+ travel, hold, spinDegrees, push, title, card, depthParsecs,
+ pullBackToWholeImage}]`, `pullBackToWholeImage` (false by default)
+ moves a wide view toward the image centre while retaining `focus`
+ as the target; dolly 0 and zoom 1 frame the image centre, and tighter
+ views approach the target. `card` is
  an image shown as the title would be, in its place, each centring
  its focus point on the plane at `depthParsecs`, or on the plane the
  image shows there if absent, gliding through held stops

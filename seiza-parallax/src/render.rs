@@ -752,24 +752,27 @@ impl Shot {
             let share = if zoomed(1.0).is_some() {
                 1.0
             } else if zoomed(0.0).is_none() {
-                // Even without turning some stop needs more than half
-                // again, which the pan is not to blame for: the whole tour
-                // zooms in together, keeping what pan fits at that zoom.
-                let zoom = least_zoom(&|zoom| Self {
-                    zoom,
-                    ..panned(0.0)
-                });
-                let share = largest(&|share| Self {
-                    zoom,
-                    ..panned(share)
-                });
-                return (
-                    Self {
-                        zoom,
-                        ..panned(share)
-                    },
-                    share,
-                );
+                // A stop needing more than half again must not magnify
+                // the opening or unrelated stops. Keep fitting locally,
+                // with the same generous search limit as the single move.
+                // If even that cannot fit, leave an explicit failed fit
+                // rather than changing the entire tour's lens.
+                let wide = |share| self.zoom_stops(scene, &depths, panned(share), 64.0, halted);
+                let share = if wide(1.0).is_some() {
+                    1.0
+                } else {
+                    let (mut low, mut high) = (0.0, 1.0);
+                    for _ in 0..20 {
+                        let middle = (low + high) / 2.0;
+                        if wide(middle).is_some() {
+                            low = middle;
+                        } else {
+                            high = middle;
+                        }
+                    }
+                    low
+                };
+                return (wide(share).unwrap_or_else(|| panned(0.0)), share);
             } else {
                 let (mut low, mut high) = (0.0, 1.0);
                 for _ in 0..20 {
@@ -782,20 +785,11 @@ impl Shot {
                 }
                 low
             };
-            // Past half again even without turning, the whole tour zooms in
-            // together.
             let fitted = match zoomed(share) {
                 Some(fitted) => self.with_less_fill(scene, &depths, fitted, &panned(share), halted),
-                None => {
-                    let zoom = least_zoom(&|zoom| Self {
-                        zoom,
-                        ..panned(share)
-                    });
-                    Self {
-                        zoom,
-                        ..panned(share)
-                    }
-                }
+                None => self
+                    .zoom_stops(scene, &depths, panned(share), 64.0, halted)
+                    .unwrap_or_else(|| panned(0.0)),
             };
             return (fitted, share);
         }
@@ -930,6 +924,18 @@ impl Shot {
         let asked: Vec<f64> = shot.tour.iter().map(|stop| stop.zoom).collect();
         let times = tour_times(&shot.tour);
         let total = times.last().map_or(0.0, |&(_, leave)| leave);
+        // On an unlooped tour, an opening/closing view that already fits
+        // need not change for an edge exposed on the way to another stop.
+        // Lengthen the other stop's lens instead. The endpoint's hold
+        // drifts toward that neighbour too, so this also gives the hold
+        // room without magnifying the endpoint itself.
+        let keep_first = !shot.looped && shot.inside(scene, &shot.view(scene, 0), depths);
+        let keep_last = !shot.looped
+            && shot.inside(
+                scene,
+                &shot.view(scene, shot.frames.saturating_sub(1)),
+                depths,
+            );
         for _ in 0..400 {
             if halted() {
                 return None;
@@ -940,7 +946,16 @@ impl Shot {
                 .filter(|&frame| !shot.inside(scene, &shot.view(scene, frame), depths))
                 .collect();
             for frame in outside {
-                bump[stops_at(&times, shot.progress(frame) * total).0] = true;
+                let (nearer, other) = stops_at(&times, shot.progress(frame) * total);
+                let last = shot.tour.len() - 1;
+                let index = if nearer == 0 && keep_first {
+                    other.max(1)
+                } else if nearer == last && keep_last {
+                    other.min(last - 1)
+                } else {
+                    nearer
+                };
+                bump[index] = true;
             }
             if shot.looped {
                 joined(&mut bump);
@@ -3980,6 +3995,40 @@ mod tour_tests {
         let into = state(1.0)[4] - state(1.0 - step)[4];
         let out = state(step)[4] - state(0.0)[4];
         assert!(into > 0.0 && (into - out).abs() < 1e-6, "{into} {out}");
+    }
+
+    #[test]
+    fn a_wide_off_centre_stop_does_not_magnify_the_whole_tour() {
+        let scene = scene();
+        for glide in [0.0, 0.2] {
+            let mut shot = tour();
+            shot.glide = glide;
+            shot.tour[1].focus = (520.0, 65.0);
+            shot.tour[1].dolly = 0.35;
+            shot.tour[1].pan = 0.0;
+            shot.tour[1].rotation = 11_f64.to_radians();
+            let (before, _) = shot.fitted(&scene);
+            assert!(before.stays_inside(&scene));
+            assert_eq!(before.zoom, shot.zoom);
+            assert_eq!(before.tour[0].zoom, shot.tour[0].zoom);
+            assert!(before.tour[1].zoom > shot.tour[1].zoom * 1.5);
+
+            // Pull back to the original camera distance, framing the
+            // whole image instead of keeping an edge target centred.
+            shot.tour[1].dolly = 0.0;
+            shot.tour[1].focus = shot.tour[0].focus;
+            let (after, _) = shot.fitted(&scene);
+            assert!(after.stays_inside(&scene));
+            assert_eq!(after.zoom, before.zoom);
+            assert_eq!(after.tour[0].zoom, before.tour[0].zoom);
+            assert!(after.tour[1].zoom < before.tour[1].zoom);
+            for (x, y) in [(100.0, 100.0), (299.5, 199.5), (500.0, 300.0)] {
+                let a = before.view(&scene, 0).project(x, y, 400.0).unwrap();
+                let b = after.view(&scene, 0).project(x, y, 400.0).unwrap();
+                assert!((a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9);
+                assert!((a.2 - b.2).abs() < 1e-9);
+            }
+        }
     }
 
     #[test]

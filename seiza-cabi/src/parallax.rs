@@ -310,6 +310,10 @@ struct LabelRequest {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StopRequest {
+    /// Pull a wide view toward the image centre while retaining `focus`
+    /// as the target, rather than zooming in to keep it centred.
+    #[serde(default)]
+    pull_back_to_whole_image: bool,
     /// The target the stop visits, as a plan names it; not used.
     #[serde(default)]
     #[allow(dead_code)]
@@ -719,6 +723,7 @@ fn video_options(request: &VideoRequest) -> Result<VideoOptions, String> {
             .map(|stop| {
                 let base = seiza_parallax::TourStop::default();
                 seiza_parallax::TourStop {
+                    pull_back_to_whole_image: stop.pull_back_to_whole_image,
                     focus: stop.focus.map(|[x, y]| (x, y)),
                     dolly: stop.dolly.unwrap_or(base.dolly),
                     zoom: stop.zoom.unwrap_or(base.zoom),
@@ -915,7 +920,11 @@ fn split(
 /// `pan`, `zoom`, `zoomEnd`, `rotateDegrees` `[first, last]`, `easing`
 /// ("inOut", "linear"), `quality` ("standard", "high"), `growthLimit`,
 /// `fadeFrom`, `tour` (stops `[{focus, dolly, zoom, rotateDegrees, pan,
-/// travel, hold, spinDegrees, push, title, card, depthParsecs}]`, `card`
+/// travel, hold, spinDegrees, push, title, card, depthParsecs,
+/// pullBackToWholeImage}]`, `pullBackToWholeImage` (false by default)
+/// moves a wide view toward the image centre while retaining `focus`
+/// as the target; dolly 0 and zoom 1 frame the image centre, and tighter
+/// views approach the target. `card` is
 /// an image shown as the title would be, in its place, each centring
 /// its focus point on the plane at `depthParsecs`, or on the plane the
 /// image shows there if absent, gliding through held stops
@@ -2047,7 +2056,7 @@ mod tests {
             r#"{"watermark": {"image": "logo.png", "corner": "topLeft", "size": 0.1,
                 "opacity": 0.5},
                "introCard": "start.png", "outroCard": "end.png", "cardSeconds": 4,
-               "tour": [{"hold": 1}, {"focus": [10, 20], "card": "stop.png"}]}"#,
+               "tour": [{"hold": 1}, {"focus": [10, 20], "card": "stop.png", "pullBackToWholeImage": true}]}"#,
         )
         .unwrap();
         assert_eq!(styled.watermark, None);
@@ -2061,6 +2070,8 @@ mod tests {
         assert_eq!(styled.outro_card, Some(PathBuf::from("end.png")));
         assert_eq!(styled.card_seconds, 4.0);
         assert_eq!(styled.tour[1].card, Some(PathBuf::from("stop.png")));
+        assert!(!styled.tour[0].pull_back_to_whole_image);
+        assert!(styled.tour[1].pull_back_to_whole_image);
         let both = video(r#"{"watermark": {"text": true, "image": "logo.png"}}"#).unwrap();
         assert!(both.watermark.is_some() && both.watermark_image.is_some());
         assert_eq!(both.watermark_corner, Corner::BottomRight);

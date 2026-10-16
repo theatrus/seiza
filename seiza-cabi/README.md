@@ -220,7 +220,12 @@ exposes the **superset** of what both apps need.
   scene again from a JSON object of camera and output settings (focus, start,
   dolly, pan, rotation, zoom, tour stops, glide, length, frame rate, size,
   quality, labels), fitting the camera anew. Settings left out take their
-  defaults, not the first video's. It loads, splits, solves and looks up
+  defaults, not the first video's. A stop can set `pullBackToWholeImage: true` to keep its selected
+  `focus` while widening toward whole-image framing: dolly 0 and zoom 1
+  frame the image centre, and increasing either moves the view back toward
+  the target. The default remains point-centred for existing tours. Tour
+  fitting adjusts stops independently instead of magnifying the whole
+  tour when one stop needs a wider fit. It loads, splits, solves and looks up
   nothing: the new `SeizaParallax` shares the prepared scene and the
   catalogue labels with the first, which stays valid and can draw frames at
   the same time; the scene is freed with the last handle. Fields that change
