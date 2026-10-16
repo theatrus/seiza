@@ -11,6 +11,7 @@ mod imgproc;
 mod parallax;
 mod rc_astro;
 mod satellites;
+mod screening;
 mod stacking;
 mod stars;
 mod stretch;
@@ -1015,6 +1016,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     rc_astro::register(m)?;
     parallax::register(m)?;
     calibration::register(m)?;
+    screening::register(m)?;
     stretch::register(m)?;
     m.add("SolveError", m.py().get_type::<SolveError>())?;
     m.add("EngineError", m.py().get_type::<EngineError>())?;

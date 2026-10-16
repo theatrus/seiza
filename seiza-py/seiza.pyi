@@ -302,6 +302,7 @@ class MatchTolerances:
     rotation_deg: float
     focal_length_mm: float
     flat_session_seconds: int
+    light_rotation: float | str
     def __init__(
         self,
         exposure_seconds: float | None = None,
@@ -311,6 +312,7 @@ class MatchTolerances:
         rotation_deg: float | None = None,
         focal_length_mm: float | None = None,
         flat_session_seconds: int | None = None,
+        light_rotation: float | str | None = None,
     ) -> None: ...
 
 class FrameCalibrationState:
@@ -344,6 +346,84 @@ class CalibrationRecord:
         *,
         role: str = "unknown",
     ) -> None: ...
+
+class DarkMeasurement:
+    algorithm_version: int
+    width: int
+    height: int
+    level: float
+    sigma: float
+    noise: float
+    row_banding: float
+    column_banding: float
+    hot_pixels: int
+    hot_threshold: float
+    def to_json(self) -> str: ...
+    @staticmethod
+    def from_json(text: str) -> DarkMeasurement: ...
+
+class IlluminationProfile:
+    columns: int
+    rows: int
+    response: npt.NDArray[np.float32]
+
+class FlatFeature:
+    x: float
+    y: float
+    left: int
+    top: int
+    right: int
+    bottom: int
+    pixels: int
+    depth: float
+
+class FlatMeasurement:
+    algorithm_version: int
+    width: int
+    height: int
+    full_scale: float
+    level: float
+    channel_levels: list[float]
+    clipped_fraction: float
+    noise: float
+    detection_depth: float
+    illumination: IlluminationProfile
+    feature_count: int
+    features: list[FlatFeature]
+    def to_json(self) -> str: ...
+    @staticmethod
+    def from_json(text: str) -> FlatMeasurement: ...
+
+class Finding:
+    code: str
+    grade: str
+    value: float
+    limit: float
+
+class FrameVerdict:
+    grade: str
+    findings: list[Finding]
+
+class FlatSetReport:
+    frames: list[FrameVerdict]
+    master: FrameVerdict
+    steady_features: int
+    changing_features: int
+    carried_features: int
+
+class ResidualFlatDiagnostics:
+    algorithm_version: int
+    sample_count: int
+    corrected_samples: int
+    total_samples: int
+    largest_connected_pixels: int
+    minimum_response: float
+    maximum_applied_gain: float
+
+class IntegratedFrame:
+    path: Path
+    finite_samples: int
+    integrated_samples: int
 
 class CalibrationPlan:
     kind: str
@@ -984,6 +1064,16 @@ def fit_background(
     fit_rejection_iterations: int = 3,
     border_fraction: float = 0.03,
 ) -> BackgroundModel: ...
+def select_shared_model(
+    models: Sequence[BackgroundModel],
+    *,
+    degree: int = 2,
+    ridge: float = 1.0e-8,
+    rbf_smoothing: float = 0.01,
+    max_control_points: int = 192,
+    allow_radial_basis: bool = False,
+    minimum_improvement: float = 0.12,
+) -> dict[str, Any] | None: ...
 def deconvolve(
     image: npt.NDArray[np.float32],
     *,
@@ -1135,6 +1225,15 @@ def build_flat(
     defect_sigma_low: float | None = None,
     defect_sigma_high: float | None = None,
 ) -> MasterResult: ...
+def integrate_registered_frames(
+    images: Sequence[str | Path],
+    *,
+    sigma_low: float = 3.0,
+    sigma_high: float = 3.0,
+    minimum_sigma: float | None = None,
+    frame_weights: Sequence[Sequence[float]] | None = None,
+    cancel: Callable[[], bool] | None = None,
+) -> tuple[StackSnapshot, list[IntegratedFrame]]: ...
 def frame_noise(image: npt.NDArray[np.float32]) -> list[float] | None: ...
 def probe_frame(path: str | Path) -> FrameProbe: ...
 def plan_calibration(
@@ -1194,6 +1293,64 @@ def fit_flat_pedestal(
     light: npt.NDArray[np.float32],
     flat: npt.NDArray[np.float32],
 ) -> float | None: ...
+def measure_dark(path: str | Path, *, hot_sigma: float | None = None) -> DarkMeasurement: ...
+def measure_flat(
+    path: str | Path,
+    *,
+    cfa: bool | None = None,
+    full_scale: float | None = None,
+    feature_depth: float | None = None,
+    feature_sigma: float | None = None,
+) -> FlatMeasurement: ...
+def screen_bias(
+    measurements: Sequence[DarkMeasurement],
+    *,
+    level: tuple[float, float] | None = None,
+    noise: tuple[float, float] | None = None,
+    banding: tuple[float, float] | None = None,
+) -> list[FrameVerdict]: ...
+def screen_darks(
+    measurements: Sequence[DarkMeasurement],
+    *,
+    level_excess: tuple[float, float] | None = None,
+    noise: tuple[float, float] | None = None,
+    hot_pixels: tuple[float, float] | None = None,
+    banding: tuple[float, float] | None = None,
+) -> list[FrameVerdict]: ...
+def screen_flats(
+    measurements: Sequence[FlatMeasurement],
+    *,
+    clipped: tuple[float, float] | None = None,
+    bright: tuple[float, float] | None = None,
+    dim: tuple[float, float] | None = None,
+    illumination: tuple[float, float] | None = None,
+    features: tuple[float, float] | None = None,
+    changing_features: tuple[float, float] | None = None,
+    carried_features: tuple[float, float] | None = None,
+    steady_presence: float | None = None,
+    steady_depth_range: float | None = None,
+    match_distance: int | None = None,
+) -> FlatSetReport: ...
+def build_residual_flat(
+    samples: Sequence[npt.NDArray[np.float32]],
+    *,
+    minimum_samples: int | None = None,
+    minimum_depth: float | None = None,
+    minimum_consensus: float | None = None,
+    maximum_gain: float | None = None,
+    background_edge_fraction: float | None = None,
+    smoothing_sigma: float | None = None,
+    edge_feather_fraction: float | None = None,
+    minimum_corrected_samples: int | None = None,
+    minimum_connected_pixels: int | None = None,
+) -> tuple[npt.NDArray[np.float32], ResidualFlatDiagnostics]: ...
+def validate_residual_flat_response(response: npt.NDArray[np.float32]) -> None: ...
+def apply_residual_flat_response(
+    response: npt.NDArray[np.float32],
+    image: npt.NDArray[np.float32],
+    x: int,
+    y: int,
+) -> npt.NDArray[np.float32]: ...
 def gaussian_blur(
     image: npt.NDArray[np.uint8] | npt.NDArray[np.float32],
     sigma: float,

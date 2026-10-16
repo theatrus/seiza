@@ -6,7 +6,7 @@ use numpy::PyReadonlyArrayDyn;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use seiza_calibration::{
-    FrameRole, FrameSignature, LinearImageRef, MatchTolerances, coherent_subset,
+    FrameRole, FrameSignature, LightRotation, LinearImageRef, MatchTolerances, coherent_subset,
     coherent_subset_indices, exposure_matches, fit_flat_pedestal, optics_match, rotation_matches,
     sensor_matches, sort_by_proximity, temperature_matches,
 };
@@ -227,7 +227,9 @@ impl PyMatchTolerances {
         rotation_deg=None,
         focal_length_mm=None,
         flat_session_seconds=None,
+        light_rotation=None,
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         exposure_seconds: Option<f64>,
         exposure_fraction: Option<f64>,
@@ -236,7 +238,8 @@ impl PyMatchTolerances {
         rotation_deg: Option<f64>,
         focal_length_mm: Option<f64>,
         flat_session_seconds: Option<u64>,
-    ) -> Self {
+        light_rotation: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
         let mut inner = MatchTolerances::default();
         if let Some(value) = exposure_seconds {
             inner.exposure_seconds = value;
@@ -259,7 +262,10 @@ impl PyMatchTolerances {
         if let Some(value) = flat_session_seconds {
             inner.flat_session_seconds = value;
         }
-        Self { inner }
+        if let Some(value) = light_rotation {
+            inner.light_rotation = parse_light_rotation(value)?;
+        }
+        Ok(Self { inner })
     }
 
     #[getter]
@@ -290,6 +296,41 @@ impl PyMatchTolerances {
     fn flat_session_seconds(&self) -> u64 {
         self.inner.flat_session_seconds
     }
+    /// How a light's own rotator angle is read when a flat is matched to
+    /// it: ``"recorded"``, an angle the host measured in degrees, or
+    /// ``"unknown"`` when the angle does not decide the light's flats.
+    #[getter]
+    fn light_rotation(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(match self.inner.light_rotation {
+            LightRotation::Recorded => "recorded".into_pyobject(py)?.into_any().unbind(),
+            LightRotation::Measured { degrees } => degrees.into_pyobject(py)?.into_any().unbind(),
+            LightRotation::Unknown => "unknown".into_pyobject(py)?.into_any().unbind(),
+        })
+    }
+}
+
+/// ``"recorded"``, ``"unknown"``, or a measured angle in degrees.
+fn parse_light_rotation(value: &Bound<'_, PyAny>) -> PyResult<LightRotation> {
+    if let Ok(text) = value.extract::<String>() {
+        return match text.as_str() {
+            "recorded" => Ok(LightRotation::Recorded),
+            "unknown" => Ok(LightRotation::Unknown),
+            _ => Err(PyValueError::new_err(
+                "light_rotation must be \"recorded\", \"unknown\" or an angle in degrees",
+            )),
+        };
+    }
+    let degrees: f64 = value.extract().map_err(|_| {
+        PyTypeError::new_err(
+            "light_rotation must be \"recorded\", \"unknown\" or an angle in degrees",
+        )
+    })?;
+    if !degrees.is_finite() {
+        return Err(PyValueError::new_err(
+            "a measured light rotation must be finite",
+        ));
+    }
+    Ok(LightRotation::Measured { degrees })
 }
 
 pub(crate) fn tolerances_or_default(tolerances: Option<PyMatchTolerances>) -> MatchTolerances {

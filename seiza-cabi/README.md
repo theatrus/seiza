@@ -55,7 +55,11 @@ exposes the **superset** of what both apps need.
   polynomial, radial-basis, and automatic model selection, so the ABI stays
   stable as model options grow. The JSON config can carry normalized ellipses
   or polygons projected from solved catalog bounds, including stored OpenNGC
-  contours.
+  contours. Channels of a colour image fitted one at a time can each pick a
+  different automatic surface, which leaves a colour cast toward the edges;
+  `seiza_background_select_shared_model_json` takes their models and returns
+  the `BackgroundConfig` to fit every channel again with, or the JSON `null`
+  when they share no choice.
 - **Color crop diagnostics** — `seiza_color_crop_report_json` reports the
   region a crop would keep across aligned channels and what each channel
   covers of the shared grid, including any channel sitting far enough from the
@@ -130,6 +134,12 @@ exposes the **superset** of what both apps need.
   and returns a `SeizaDrizzleResult` (image, weight, scale, and
   `seiza_drizzle_result_write_fits` with the WCS scaled to the grid) along
   with the reintegrated snapshot.
+  `seiza_stack_integrate_registered_json` gives the same three-pass
+  rejection to FITS or XISF frames calibrated, registered and normalized
+  elsewhere, onto one grid: it reads each file once per pass, takes optional
+  per-frame weights, a cancel signal and the same progress callback, and
+  returns a `SeizaStackSnapshot` with an optional JSON report of what each
+  frame kept.
   `seiza_live_stacker_open_prepared_fits` opens a stack from a FITS or XISF
   frame the host has already calibrated and debayered, keeping its header
   cards for the outputs, so a host can correct a frame between calibration and
@@ -172,7 +182,31 @@ exposes the **superset** of what both apps need.
   metadata outliers it set aside. It can mask stars out of sky flats, set
   aside darks that caught stray light, and keep a flat build's temporary
   pixels in a directory the host chooses. Long builds accept the thread-safe
-  `SeizaCancelSignal` owner.
+  `SeizaCancelSignal` owner. A planner request's `tolerances.lightRotation`
+  plans a light's flats by an angle the host measured for it, or at no angle;
+  `seiza_live_stacker_set_light_rotation` and `seiza_live_stacker_light_rotation`
+  set and read the same for a stack's gate, since `SeizaMatchTolerances` is a
+  fixed layout with no room for it.
+- **Screening calibration frames** — before a master is built,
+  `seiza_calibration_measure_dark_json` and `seiza_calibration_measure_flat_json`
+  read one raw FITS or XISF frame each into a small JSON measurement, which a
+  host keeps and passes back whenever the set changes.
+  `seiza_calibration_screen_bias_json`, `..._screen_darks_json` and
+  `..._screen_flats_json` judge one set and return a verdict per frame: a
+  `grade` (`ok`, `suspect` or `poor`) and the `findings` behind it, each with
+  its `code`, measured `value` and the `limit` it reached. Flats also get a
+  verdict on the master they would make. Each limit is a `{suspect, poor}`
+  pair the request may replace. The verdicts say what the pixels show, never
+  why.
+- **Residual flat responses** — `seiza_calibration_build_residual_flat_json`
+  takes crops of several lights cut at one place on the detector, writes the
+  light most of them lose into the caller's buffer as a response (1 where
+  nothing is corrected, never gaining more than `maximumGain`), and returns
+  its evidence as JSON. `seiza_calibration_validate_residual_flat_response`
+  checks a stored response, and `seiza_calibration_apply_residual_flat_response`
+  divides one out of a caller-owned light in place at a pixel offset. The host
+  shows that the dip stays fixed on the detector first; these calls do not say
+  what it is.
 - **Stack-depth analysis** — `seiza_live_stacker_measure_depth` measures the
   borrowed live accumulator without a snapshot, and `seiza_checkpoint_depths`
   returns the doubling ladder at which a host should sample a finite batch.

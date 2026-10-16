@@ -1023,3 +1023,78 @@ def test_a_master_reports_the_inputs_it_set_aside(tmp_path):
     assert [path for path, _ in result.skipped_inputs] == [paths[1]]
     assert result.input_paths == [paths[0], paths[2]]
     assert "optical" in result.skipped_inputs[0][1]
+
+
+def test_registered_frames_integrate_with_leave_one_out_rejection(tmp_path):
+    rng = np.random.default_rng(7)
+    paths = []
+    for index in range(5):
+        frame = (10.0 + rng.uniform(-0.5, 0.5, (16, 16))).astype(np.float32)
+        if index == 2:
+            frame[2, 8] = 1000.0
+            frame[0, 0] = np.nan
+        path = tmp_path / f"registered-{index}.fits"
+        fits.writeto(path, frame)
+        paths.append(path)
+
+    stack, frames = seiza.integrate_registered_frames(paths)
+    assert stack.accepted_frames == 5
+    assert stack.image[2, 8] < 11.0
+    assert [frame.path for frame in frames] == paths
+    assert frames[2].finite_samples == 16 * 16 - 1
+    assert frames[2].integrated_samples < frames[2].finite_samples
+    assert frames[0].finite_samples == 16 * 16
+
+    output = tmp_path / "stack.fits"
+    stack.write_fits(output)
+    assert output.exists()
+    with pytest.raises(ValueError, match="stack input"):
+        stack.write_fits(paths[0])
+
+    weighted, _ = seiza.integrate_registered_frames(
+        paths, frame_weights=[[1.0]] * 5, minimum_sigma=1e-3, sigma_low=4.0, sigma_high=4.0
+    )
+    assert weighted.image.shape == (16, 16)
+    small = tmp_path / "small.fits"
+    fits.writeto(small, np.full((8, 8), 10.0, dtype=np.float32))
+    with pytest.raises(seiza.StackError):
+        seiza.integrate_registered_frames([paths[0], paths[1], small])
+
+    def stop():
+        raise KeyError("stop")
+
+    with pytest.raises(KeyError):
+        seiza.integrate_registered_frames(paths, cancel=stop)
+
+
+def test_a_stack_reads_a_light_at_the_angle_the_host_measured(tmp_path):
+    flat = tmp_path / "master-flat.fits"
+    header = fits.Header()
+    header["SEIZAMST"] = "FLAT"
+    header["ROTATANG"] = 3.2
+    fits.writeto(flat, np.ones((128, 160), dtype=np.float32), header, overwrite=True)
+    reference = tmp_path / "reference.fits"
+    header = fits.Header()
+    header["IMAGETYP"] = "LIGHT"
+    header["ROTATANG"] = 3.2
+    fits.writeto(reference, synthetic_star_field(), header, overwrite=True)
+    stacker = seiza.LiveStacker(reference, flat=flat, options=no_adjustment_options())
+    assert stacker.match_tolerances().light_rotation == "recorded"
+
+    # The rotator reads 113.8 degrees; the host measured the light at 3.5.
+    light = seiza.FrameSignature(width=160, height=128, channels=1, rotation_deg=113.8)
+    with pytest.raises(seiza.StackError, match="113.8"):
+        stacker.validate_calibration(light)
+    stacker.set_match_tolerances(seiza.MatchTolerances(light_rotation=3.5))
+    assert stacker.match_tolerances().light_rotation == 3.5
+    assert stacker.validate_calibration(light) is None
+    stacker.set_match_tolerances(seiza.MatchTolerances(light_rotation="unknown"))
+    assert stacker.match_tolerances().light_rotation == "unknown"
+    assert stacker.validate_calibration(light) is None
+    stacker.set_match_tolerances()
+    assert stacker.match_tolerances().light_rotation == "recorded"
+
+    with pytest.raises(ValueError, match="light_rotation"):
+        seiza.MatchTolerances(light_rotation="sideways")
+    with pytest.raises(ValueError, match="finite"):
+        seiza.MatchTolerances(light_rotation=float("nan"))

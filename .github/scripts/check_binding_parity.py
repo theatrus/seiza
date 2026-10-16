@@ -54,6 +54,8 @@ SERDE_STRUCT = re.compile(
 FIELD = re.compile(r"\s*(?:pub(?:\([a-z]+\))?\s+)?(?:r#)?([a-z_][a-z0-9_]*)\s*:")
 ANY_STRUCT = re.compile(r"struct\s+(\w+)(?:<[^>]*>)?\s*\{(.*?)\n\}", re.S)
 PUB_FIELD = re.compile(r"^\s*pub\s+(?:r#)?([a-z_][a-z0-9_]*)\s*:", re.M)
+RAW_STRING = re.compile(r'r(#*)"')
+CHAR_LITERAL = re.compile(r"'(?:\\.|[^\\'])'")
 NOT_IN_JSON = re.compile(r"\bskip\b|\bskip_serializing\b(?!_if)|\bskip_deserializing\b|\bflatten\b")
 
 
@@ -78,10 +80,11 @@ def block_end(source: str, start: int) -> int:
         if source.startswith("/*", at):
             at = source.find("*/", at) + 2
             continue
-        raw = re.match(r'r(#*)"', source[at:])
+        # Matched in place: a slice per character makes long files quadratic.
+        raw = RAW_STRING.match(source, at)
         if raw and (at == 0 or not (source[at - 1].isalnum() or source[at - 1] == "_")):
             closing = '"' + raw.group(1)
-            at = source.find(closing, at + raw.end()) + len(closing)
+            at = source.find(closing, raw.end()) + len(closing)
             continue
         character = source[at]
         if character == '"':
@@ -91,9 +94,9 @@ def block_end(source: str, start: int) -> int:
             at += 1
             continue
         if character == "'":
-            literal = re.match(r"'(?:\\.|[^\\'])'", source[at:])
+            literal = CHAR_LITERAL.match(source, at)
             if literal:
-                at += literal.end()
+                at = literal.end()
                 continue
         if character == "{":
             depth += 1

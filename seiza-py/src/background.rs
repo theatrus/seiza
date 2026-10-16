@@ -252,6 +252,62 @@ fn background_model(
     }
 }
 
+/// Choose one background surface for the channels of one image that were
+/// fitted one at a time with ``model="automatic"``.
+///
+/// Automatic selection runs per fit, so channels fitted apart can each land
+/// on a different surface, and correcting them with different shapes leaves
+/// a colour cast that grows toward the edges. This averages each candidate's
+/// held-out error over every fit and chooses as one fit would. Pass the
+/// automatic settings the fits used. Returns the :func:`fit_background`
+/// keyword arguments of the chosen surface, to fit every channel again
+/// with, or ``None`` when the fits share no choice.
+#[pyfunction]
+#[pyo3(signature = (models, *, degree=2, ridge=1.0e-8, rbf_smoothing=0.01, max_control_points=192, allow_radial_basis=false, minimum_improvement=0.12))]
+#[allow(clippy::too_many_arguments)]
+fn select_shared_model<'py>(
+    py: Python<'py>,
+    models: Vec<PyRef<'py, PyBackgroundModel>>,
+    degree: u8,
+    ridge: f64,
+    rbf_smoothing: f64,
+    max_control_points: usize,
+    allow_radial_basis: bool,
+    minimum_improvement: f64,
+) -> PyResult<Option<Bound<'py, PyDict>>> {
+    let automatic = background_model(
+        "automatic",
+        degree,
+        ridge,
+        rbf_smoothing,
+        max_control_points,
+        allow_radial_basis,
+        minimum_improvement,
+    )?;
+    let fits: Vec<&BackgroundFit> = models.iter().map(|model| &model.fit).collect();
+    let Some(shared) = seiza_background::select_shared_model(&automatic, &fits) else {
+        return Ok(None);
+    };
+    let keywords = PyDict::new(py);
+    match shared {
+        ModelConfig::Polynomial { degree, ridge } => {
+            keywords.set_item("model", "polynomial")?;
+            keywords.set_item("degree", degree)?;
+            keywords.set_item("ridge", ridge)?;
+        }
+        ModelConfig::RadialBasis {
+            smoothing,
+            max_control_points,
+        } => {
+            keywords.set_item("model", "radial_basis")?;
+            keywords.set_item("rbf_smoothing", smoothing)?;
+            keywords.set_item("max_control_points", max_control_points)?;
+        }
+        _ => return Ok(None),
+    }
+    Ok(Some(keywords))
+}
+
 fn correction_mode(mode: &str) -> PyResult<CorrectionMode> {
     match mode.to_ascii_lowercase().as_str() {
         "subtract" => Ok(CorrectionMode::Subtract),
@@ -265,5 +321,6 @@ fn correction_mode(mode: &str) -> PyResult<CorrectionMode> {
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyBackgroundModel>()?;
     module.add_function(wrap_pyfunction!(fit_background, module)?)?;
+    module.add_function(wrap_pyfunction!(select_shared_model, module)?)?;
     Ok(())
 }

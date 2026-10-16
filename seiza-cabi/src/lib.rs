@@ -857,6 +857,11 @@ struct CalibrationPlanTolerancesRequest {
     rotation_deg: Option<f64>,
     focal_length_mm: Option<f64>,
     flat_session_seconds: Option<u64>,
+    /// How a light's own rotator angle is read when flats are matched to
+    /// it: `{"basis": "recorded"}` (the default), `{"basis": "measured",
+    /// "degrees": 82.2}` for an angle the host measured, or `{"basis":
+    /// "unknown"}` when the angle does not decide the light's flats.
+    light_rotation: Option<seiza_calibration::LightRotation>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -916,6 +921,9 @@ impl CalibrationPlanTolerancesRequest {
         }
         if let Some(seconds) = self.flat_session_seconds {
             tolerances.flat_session_seconds = seconds;
+        }
+        if let Some(light_rotation) = self.light_rotation {
+            tolerances.light_rotation = light_rotation;
         }
         tolerances
     }
@@ -11425,6 +11433,729 @@ mod tests {
         assert_eq!(plan["selectedPaths"].as_array().unwrap().len(), 1);
     }
 
+    /// Deterministic noise in [-0.5, 0.5) for test frames.
+    fn screening_noise(seed: u64, count: usize) -> Vec<f32> {
+        let mut state = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (0..count)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                ((state >> 40) as f32 / (1u64 << 24) as f32) - 0.5
+            })
+            .collect()
+    }
+
+    /// Call a JSON-in, JSON-out C export and parse its answer, or return its
+    /// error.
+    fn call_json(
+        call: unsafe extern "C" fn(*const c_char, *mut *mut c_char) -> *mut c_char,
+        request: &Value,
+    ) -> Result<Value, String> {
+        let request = CString::new(request.to_string()).unwrap();
+        let mut error = ptr::null_mut();
+        let result = unsafe { call(request.as_ptr(), &mut error) };
+        if result.is_null() {
+            let message = unsafe { CStr::from_ptr(error) }
+                .to_str()
+                .unwrap()
+                .to_owned();
+            unsafe { seiza_string_free(error) };
+            return Err(message);
+        }
+        assert!(error.is_null());
+        let parsed = serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap());
+        unsafe { seiza_string_free(result) };
+        Ok(parsed.unwrap())
+    }
+
+    #[test]
+    fn calibration_frames_are_measured_from_files_and_screened_as_sets() {
+        let directory = tempfile::tempdir().unwrap();
+        let (width, height) = (64, 64);
+        // Four darks at one level; the last caught light and sits well above.
+        let mut dark_paths = Vec::new();
+        for index in 0..4 {
+            let lift = if index == 3 { 40.0 } else { 0.0 };
+            let data = screening_noise(index, width * height)
+                .into_iter()
+                .map(|noise| 500.0 + lift + 8.0 * noise)
+                .collect();
+            let path = directory.path().join(format!("dark-{index}.fits"));
+            seiza_stacking::write_processed_image_fits_f32(
+                &path,
+                &LinearImage::new(width, height, 1, data).unwrap(),
+                &[],
+                &[],
+            )
+            .unwrap();
+            dark_paths.push(path);
+        }
+        let darks: Vec<Value> = dark_paths
+            .iter()
+            .map(|path| {
+                call_json(
+                    seiza_calibration_measure_dark_json,
+                    &json!({"path": path, "hotSigma": 10.0}),
+                )
+                .unwrap()
+            })
+            .collect();
+        // The C measurement is the core's, in camelCase.
+        let frame = FitsFrame::open(&dark_paths[0]).unwrap();
+        let core = seiza_calibration::measure_dark(
+            seiza_calibration::LinearImageRef::new(&frame.image.data, width, height, 1).unwrap(),
+            &seiza_calibration::DarkMeasureOptions::default(),
+        )
+        .unwrap();
+        let expected: Value =
+            serde_json::from_str(&serde_json::to_string(&DarkMeasurementJson::from(core)).unwrap())
+                .unwrap();
+        assert_eq!(darks[0], expected);
+        assert_eq!(darks[0]["width"], 64);
+        assert!(darks[0]["rowBanding"].is_number());
+        assert_eq!(
+            darks[0]["algorithmVersion"],
+            seiza_calibration::FRAME_QUALITY_ALGORITHM_VERSION
+        );
+
+        let screened = call_json(
+            seiza_calibration_screen_darks_json,
+            &json!({"measurements": darks}),
+        )
+        .unwrap();
+        assert_eq!(screened["schemaVersion"], 1);
+        let frames = screened["frames"].as_array().unwrap();
+        assert_eq!(frames.len(), 4);
+        assert_eq!(frames[0]["grade"], "ok");
+        assert_eq!(frames[3]["grade"], "poor");
+        assert_eq!(frames[3]["findings"][0]["code"], "level_excess");
+        // A limit the host gives replaces the default.
+        let lenient = call_json(
+            seiza_calibration_screen_darks_json,
+            &json!({"measurements": darks, "levelExcess": {"suspect": 1.0e9, "poor": 2.0e9}}),
+        )
+        .unwrap();
+        assert!(
+            lenient["frames"][3]["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|finding| finding["code"] != "level_excess")
+        );
+        // Measurements of a dark set read as bias too; the odd level shows.
+        let bias = call_json(
+            seiza_calibration_screen_bias_json,
+            &json!({"measurements": darks}),
+        )
+        .unwrap();
+        assert_eq!(bias["frames"][3]["findings"][0]["code"], "level");
+        // An unknown limit is refused rather than ignored.
+        let refused = call_json(
+            seiza_calibration_screen_bias_json,
+            &json!({"measurements": darks, "levelExcess": {"suspect": 1.0, "poor": 2.0}}),
+        );
+        assert!(refused.unwrap_err().contains("levelExcess"));
+
+        // Three good flats and one clipped.
+        let mut flats = Vec::new();
+        for index in 0..4 {
+            let data = if index == 3 {
+                vec![65535.0; width * height]
+            } else {
+                screening_noise(10 + index, width * height)
+                    .into_iter()
+                    .map(|noise| 30000.0 + 100.0 * noise)
+                    .collect()
+            };
+            let path = directory.path().join(format!("flat-{index}.fits"));
+            seiza_stacking::write_processed_image_fits_f32(
+                &path,
+                &LinearImage::new(width, height, 1, data).unwrap(),
+                &[],
+                &[],
+            )
+            .unwrap();
+            flats.push(
+                call_json(
+                    seiza_calibration_measure_flat_json,
+                    &json!({"path": path, "fullScale": 65535.0}),
+                )
+                .unwrap(),
+            );
+        }
+        assert_eq!(flats[0]["channelLevels"].as_array().unwrap().len(), 1);
+        assert!(flats[0]["illumination"]["response"].is_array());
+        let report = call_json(
+            seiza_calibration_screen_flats_json,
+            &json!({"measurements": flats}),
+        )
+        .unwrap();
+        assert_eq!(report["schemaVersion"], 1);
+        assert_eq!(report["frames"][0]["grade"], "ok");
+        assert_eq!(report["frames"][3]["grade"], "poor");
+        assert_eq!(report["frames"][3]["findings"][0]["code"], "clipped");
+        assert!(report["master"]["grade"].is_string());
+        assert!(report["steadyFeatures"].is_number());
+
+        // A missing file and a flat set of mixed sizes fail with a reason.
+        let missing = directory.path().join("missing.fits");
+        assert!(
+            call_json(
+                seiza_calibration_measure_dark_json,
+                &json!({"path": missing})
+            )
+            .is_err()
+        );
+        let mut mixed = flats[0].clone();
+        mixed["width"] = json!(32);
+        let error = call_json(
+            seiza_calibration_screen_flats_json,
+            &json!({"measurements": [flats[0].clone(), mixed]}),
+        )
+        .unwrap_err();
+        assert!(error.contains("cannot form one set"), "{error}");
+    }
+
+    /// A 32x32 crop of sky with a ring of lost light at its centre and a
+    /// star that moves from crop to crop, as seiza-calibration's own test
+    /// builds it.
+    fn residual_crop(width: usize, offset: f32, shadow: bool) -> Vec<f32> {
+        (0..width)
+            .flat_map(|y| {
+                (0..width).map(move |x| {
+                    let background = 1_000.0 + 1.5 * x as f32 + 0.75 * y as f32 + offset;
+                    let radius = (x as f32 - 15.5).hypot(y as f32 - 15.5);
+                    let response = if shadow && (6.0..=9.0).contains(&radius) {
+                        0.8
+                    } else {
+                        1.0
+                    };
+                    let star = if (x + offset as usize) % width == y {
+                        2_000.0
+                    } else {
+                        0.0
+                    };
+                    background * response + star
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn residual_flat_responses_are_built_checked_and_applied_as_the_core_does() {
+        let crops: Vec<Vec<f32>> = (0..7)
+            .map(|index| residual_crop(32, index as f32 * 3.0, true))
+            .collect();
+        let pointers: Vec<*const f32> = crops.iter().map(|crop| crop.as_ptr()).collect();
+        let options =
+            CString::new(r#"{"smoothingSigma": 0.8, "edgeFeatherFraction": 0.0}"#).unwrap();
+        let mut response = vec![0.0f32; 32 * 32];
+        let mut error = ptr::null_mut();
+        let diagnostics = unsafe {
+            seiza_calibration_build_residual_flat_json(
+                pointers.as_ptr(),
+                pointers.len(),
+                32,
+                32,
+                1,
+                options.as_ptr(),
+                response.as_mut_ptr(),
+                response.len(),
+                &mut error,
+            )
+        };
+        assert!(!diagnostics.is_null());
+        let parsed: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(diagnostics) }.to_str().unwrap()).unwrap();
+        unsafe { seiza_string_free(diagnostics) };
+
+        // The same pixels and evidence as the core.
+        let views: Vec<_> = crops
+            .iter()
+            .map(|crop| seiza_calibration::LinearImageRef::new(crop, 32, 32, 1).unwrap())
+            .collect();
+        let core = seiza_calibration::build_residual_flat_patch(
+            &views,
+            &seiza_calibration::ResidualFlatOptions {
+                smoothing_sigma: 0.8,
+                edge_feather_fraction: 0.0,
+                ..seiza_calibration::ResidualFlatOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            response
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            core.patch
+                .response()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(parsed["sampleCount"], 7);
+        assert_eq!(
+            parsed["correctedSamples"],
+            core.diagnostics.corrected_samples
+        );
+        assert_eq!(
+            parsed["algorithmVersion"],
+            seiza_calibration::RESIDUAL_FLAT_ALGORITHM_VERSION
+        );
+
+        assert!(unsafe {
+            seiza_calibration_validate_residual_flat_response(
+                response.as_ptr(),
+                response.len(),
+                32,
+                32,
+                1,
+                &mut error,
+            )
+        });
+        let mut light = residual_crop(40, 0.0, false);
+        let mut expected = light.clone();
+        core.patch
+            .apply_at(
+                seiza_calibration::LinearImageMut::new(&mut expected, 40, 40, 1).unwrap(),
+                4,
+                4,
+            )
+            .unwrap();
+        assert!(unsafe {
+            seiza_calibration_apply_residual_flat_response(
+                response.as_ptr(),
+                response.len(),
+                32,
+                32,
+                light.as_mut_ptr(),
+                light.len(),
+                40,
+                40,
+                1,
+                4,
+                4,
+                &mut error,
+            )
+        });
+        assert_eq!(light, expected);
+
+        // A response past the light's edge leaves the light alone.
+        let before = light.clone();
+        assert!(!unsafe {
+            seiza_calibration_apply_residual_flat_response(
+                response.as_ptr(),
+                response.len(),
+                32,
+                32,
+                light.as_mut_ptr(),
+                light.len(),
+                40,
+                40,
+                1,
+                20,
+                20,
+                &mut error,
+            )
+        });
+        assert!(!error.is_null());
+        unsafe { seiza_string_free(error) };
+        assert_eq!(light, before);
+        // A gain above one is not a response.
+        let mut bad = response.clone();
+        bad[0] = 1.5;
+        let mut error = ptr::null_mut();
+        assert!(!unsafe {
+            seiza_calibration_validate_residual_flat_response(
+                bad.as_ptr(),
+                bad.len(),
+                32,
+                32,
+                1,
+                &mut error,
+            )
+        });
+        assert!(!error.is_null());
+        unsafe { seiza_string_free(error) };
+        // Crops without a shared shadow give no response.
+        let plain: Vec<Vec<f32>> = (0..7)
+            .map(|index| residual_crop(32, index as f32 * 3.0, false))
+            .collect();
+        let pointers: Vec<*const f32> = plain.iter().map(|crop| crop.as_ptr()).collect();
+        let mut error = ptr::null_mut();
+        let none = unsafe {
+            seiza_calibration_build_residual_flat_json(
+                pointers.as_ptr(),
+                pointers.len(),
+                32,
+                32,
+                1,
+                ptr::null(),
+                response.as_mut_ptr(),
+                response.len(),
+                &mut error,
+            )
+        };
+        assert!(none.is_null());
+        assert!(!error.is_null());
+        unsafe { seiza_string_free(error) };
+    }
+
+    #[test]
+    fn registered_frames_are_integrated_with_leave_one_out_rejection() {
+        unsafe extern "C" fn count(pass: u32, index: usize, total: usize, context: *mut c_void) {
+            let calls = unsafe { &mut *(context as *mut Vec<(u32, usize, usize)>) };
+            calls.push((pass, index, total));
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let (width, height) = (16, 16);
+        let mut inputs = Vec::new();
+        for index in 0..5 {
+            let mut data: Vec<f32> = screening_noise(20 + index, width * height)
+                .into_iter()
+                .map(|noise| 10.0 + noise)
+                .collect();
+            if index == 2 {
+                // A trail in one frame, and an edge it does not cover.
+                data[40] = 1_000.0;
+                data[0] = f32::NAN;
+            }
+            let path = directory.path().join(format!("registered-{index}.fits"));
+            seiza_stacking::write_processed_image_fits_f32(
+                &path,
+                &LinearImage::new(width, height, 1, data).unwrap(),
+                &[],
+                &[seiza_fits::WriteHeaderCard::new(
+                    "OBJECT",
+                    HeaderValue::String(format!("frame {index}")),
+                )],
+            )
+            .unwrap();
+            inputs.push(path);
+        }
+        let request = CString::new(json!({"inputs": inputs}).to_string()).unwrap();
+        let mut calls: Vec<(u32, usize, usize)> = Vec::new();
+        let mut report = ptr::null_mut();
+        let mut error = ptr::null_mut();
+        let snapshot = unsafe {
+            seiza_stack_integrate_registered_json(
+                request.as_ptr(),
+                ptr::null(),
+                Some(count),
+                &mut calls as *mut _ as *mut c_void,
+                &mut report,
+                &mut error,
+            )
+        };
+        assert!(!snapshot.is_null());
+        assert!(error.is_null());
+        let stacked = unsafe { &*snapshot };
+        assert!(stacked.snapshot.image.data[40] < 11.0);
+        assert_eq!(stacked.snapshot.accepted_frames, 5);
+        assert!(
+            calls
+                .iter()
+                .any(|&(pass, _, total)| pass == 2 && total == 5)
+        );
+        let parsed: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(report) }.to_str().unwrap()).unwrap();
+        unsafe { seiza_string_free(report) };
+        let frames = parsed["frames"].as_array().unwrap();
+        assert_eq!(frames.len(), 5);
+        assert_eq!(frames[2]["path"], inputs[2].to_str().unwrap());
+        assert_eq!(frames[2]["finiteSamples"], width * height - 1);
+        assert!(frames[2]["integratedSamples"].as_u64().unwrap() < (width * height - 1) as u64);
+        assert_eq!(frames[0]["finiteSamples"], width * height);
+
+        // It writes, and never over an input.
+        let output = directory.path().join("stack.fits");
+        let output_c = CString::new(output.to_str().unwrap()).unwrap();
+        assert!(unsafe {
+            seiza_stack_snapshot_write_fits(snapshot, output_c.as_ptr(), &mut error)
+        });
+        assert_eq!(FitsFrame::open(&output).unwrap().image.width, width);
+        let input_c = CString::new(inputs[0].to_str().unwrap()).unwrap();
+        assert!(!unsafe {
+            seiza_stack_snapshot_write_fits(snapshot, input_c.as_ptr(), &mut error)
+        });
+        unsafe { seiza_string_free(error) };
+        unsafe { seiza_stack_snapshot_free(snapshot) };
+
+        // Frames of different shapes are refused.
+        let small = directory.path().join("small.fits");
+        seiza_stacking::write_processed_image_fits_f32(
+            &small,
+            &LinearImage::new(8, 8, 1, vec![10.0; 64]).unwrap(),
+            &[],
+            &[],
+        )
+        .unwrap();
+        let request =
+            CString::new(json!({"inputs": [inputs[0], inputs[1], small]}).to_string()).unwrap();
+        let mut error = ptr::null_mut();
+        let mut report = ptr::null_mut();
+        let refused = unsafe {
+            seiza_stack_integrate_registered_json(
+                request.as_ptr(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                &mut report,
+                &mut error,
+            )
+        };
+        assert!(refused.is_null() && report.is_null() && !error.is_null());
+        unsafe { seiza_string_free(error) };
+    }
+
+    #[test]
+    fn channels_fitted_apart_share_one_background_surface() {
+        let (width, height) = (96, 64);
+        let channel = |tilt: f32, curve: f32| -> Vec<f32> {
+            (0..height)
+                .flat_map(|y| {
+                    (0..width).map(move |x| {
+                        let u = x as f32 / width as f32 - 0.5;
+                        let v = y as f32 / height as f32 - 0.5;
+                        100.0 + tilt * u + curve * (u * u + v * v)
+                    })
+                })
+                .collect()
+        };
+        let channels = [channel(0.0, 0.0), channel(8.0, 0.0), channel(4.0, 30.0)];
+        let config = CString::new(
+            json!({"model": {"kind": "automatic", "max_degree": 2}, "search_steps": 0}).to_string(),
+        )
+        .unwrap();
+        let mut error = ptr::null_mut();
+        let models: Vec<*mut SeizaBackgroundModel> = channels
+            .iter()
+            .map(|data| {
+                let model = unsafe {
+                    seiza_background_fit(
+                        data.as_ptr(),
+                        data.len(),
+                        width,
+                        height,
+                        1,
+                        ptr::null(),
+                        0,
+                        config.as_ptr(),
+                        &mut error,
+                    )
+                };
+                assert!(!model.is_null());
+                model
+            })
+            .collect();
+        let pointers: Vec<*const SeizaBackgroundModel> =
+            models.iter().map(|&model| model as *const _).collect();
+        let shared = unsafe {
+            seiza_background_select_shared_model_json(
+                pointers.as_ptr(),
+                pointers.len(),
+                config.as_ptr(),
+                &mut error,
+            )
+        };
+        assert!(!shared.is_null());
+        let text = unsafe { CStr::from_ptr(shared) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        unsafe { seiza_string_free(shared) };
+        let shared: Value = serde_json::from_str(&text).unwrap();
+        let automatic: BackgroundConfig = serde_json::from_str(config.to_str().unwrap()).unwrap();
+        let fits: Vec<&BackgroundFit> = models
+            .iter()
+            .map(|&model| unsafe { &(*model).fit })
+            .collect();
+        let expected =
+            seiza_background::select_shared_model(&automatic.model, &fits).map(|model| {
+                BackgroundConfig {
+                    model,
+                    ..automatic.clone()
+                }
+            });
+        assert!(expected.is_some());
+        assert_eq!(shared, serde_json::to_value(&expected).unwrap());
+        assert_ne!(shared["model"]["kind"], "automatic");
+
+        // A config that is not automatic has no shared choice.
+        let fixed = CString::new(
+            json!({"model": {"kind": "polynomial", "degree": 1, "ridge": 1.0e-8}}).to_string(),
+        )
+        .unwrap();
+        let none = unsafe {
+            seiza_background_select_shared_model_json(
+                pointers.as_ptr(),
+                pointers.len(),
+                fixed.as_ptr(),
+                &mut error,
+            )
+        };
+        assert!(!none.is_null());
+        assert_eq!(unsafe { CStr::from_ptr(none) }.to_str().unwrap(), "null");
+        unsafe { seiza_string_free(none) };
+        for model in models {
+            unsafe { seiza_background_model_free(model) };
+        }
+    }
+
+    #[test]
+    fn a_stack_and_the_planner_read_a_light_at_the_angle_the_host_measured() {
+        let (width, height) = (160, 128);
+        let directory = tempfile::tempdir().unwrap();
+        let reference_path = directory.path().join("reference.fits");
+        let flat_path = directory.path().join("master-flat.fits");
+        let rotation =
+            |degrees| seiza_fits::WriteHeaderCard::new("ROTATANG", HeaderValue::Float(degrees));
+        seiza_stacking::write_processed_image_fits_f32(
+            &reference_path,
+            &LinearImage::new(width, height, 1, stacking_star_field(width, height)).unwrap(),
+            &[],
+            &[
+                seiza_fits::WriteHeaderCard::new("IMAGETYP", HeaderValue::String("LIGHT".into())),
+                rotation(3.2),
+            ],
+        )
+        .unwrap();
+        seiza_stacking::write_processed_image_fits_f32(
+            &flat_path,
+            &LinearImage::new(width, height, 1, vec![1.0; width * height]).unwrap(),
+            &[],
+            &[
+                seiza_fits::WriteHeaderCard::new("SEIZAMST", HeaderValue::String("FLAT".into())),
+                rotation(3.2),
+            ],
+        )
+        .unwrap();
+        let reference_c = CString::new(reference_path.to_str().unwrap()).unwrap();
+        let flat_c = CString::new(flat_path.to_str().unwrap()).unwrap();
+        let config = no_adjustment_stack_options();
+        let mut error = ptr::null_mut();
+        let stacker = unsafe {
+            seiza_live_stacker_open_fits(
+                reference_c.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                flat_c.as_ptr(),
+                0.0,
+                config.as_ptr(),
+                &mut error,
+            )
+        };
+        assert!(!stacker.is_null());
+
+        // A light whose rotator reads 113.8 degrees, though the host
+        // measured it at 3.5: the flat's angle.
+        let mut light: SeizaFrameSignature = unsafe { std::mem::zeroed() };
+        light.width = width as f64;
+        light.height = height as f64;
+        light.channels = 1.0;
+        light.rotation_deg = 113.8;
+        light.known = SEIZA_FRAME_HAS_WIDTH
+            | SEIZA_FRAME_HAS_HEIGHT
+            | SEIZA_FRAME_HAS_CHANNELS
+            | SEIZA_FRAME_HAS_ROTATION;
+        let validate = || {
+            let mut error = ptr::null_mut();
+            let validated = unsafe {
+                seiza_live_stacker_validate_calibration(stacker, &light, ptr::null(), &mut error)
+            };
+            if !error.is_null() {
+                unsafe { seiza_string_free(error) };
+            }
+            validated
+        };
+        let read = || {
+            let (mut basis, mut degrees) = (u32::MAX, f64::NAN);
+            assert!(unsafe {
+                seiza_live_stacker_light_rotation(stacker, &mut basis, &mut degrees)
+            });
+            (basis, degrees)
+        };
+        assert_eq!(read(), (SEIZA_LIGHT_ROTATION_RECORDED, 0.0));
+        assert_eq!(validate(), 0);
+
+        assert!(unsafe {
+            seiza_live_stacker_set_light_rotation(
+                stacker,
+                SEIZA_LIGHT_ROTATION_MEASURED,
+                3.5,
+                &mut error,
+            )
+        });
+        assert_eq!(read(), (SEIZA_LIGHT_ROTATION_MEASURED, 3.5));
+        assert_eq!(validate(), 1);
+        // The other tolerances stay as they were.
+        let mut own = SeizaMatchTolerances::default();
+        assert!(unsafe { seiza_live_stacker_match_tolerances(stacker, &mut own) });
+        assert_eq!(own.rotation_deg, 2.0);
+
+        assert!(unsafe {
+            seiza_live_stacker_set_light_rotation(
+                stacker,
+                SEIZA_LIGHT_ROTATION_UNKNOWN,
+                0.0,
+                &mut error,
+            )
+        });
+        assert_eq!(read(), (SEIZA_LIGHT_ROTATION_UNKNOWN, 0.0));
+        assert_eq!(validate(), 1);
+
+        // Setting the whole gate reads the recorded angle again.
+        assert!(unsafe {
+            seiza_live_stacker_set_match_tolerances(stacker, ptr::null(), &mut error)
+        });
+        assert_eq!(read().0, SEIZA_LIGHT_ROTATION_RECORDED);
+
+        // A bad basis or angle is refused and changes nothing.
+        for (basis, degrees) in [(7, 0.0), (SEIZA_LIGHT_ROTATION_MEASURED, f64::NAN)] {
+            let mut error = ptr::null_mut();
+            assert!(!unsafe {
+                seiza_live_stacker_set_light_rotation(stacker, basis, degrees, &mut error)
+            });
+            assert!(!error.is_null());
+            unsafe { seiza_string_free(error) };
+        }
+        assert_eq!(read().0, SEIZA_LIGHT_ROTATION_RECORDED);
+        assert!(!unsafe {
+            seiza_live_stacker_light_rotation(ptr::null(), ptr::null_mut(), ptr::null_mut())
+        });
+        unsafe { seiza_live_stacker_free(stacker) };
+
+        // The planner picks the flat for a light at its measured angle.
+        let plan = |light_rotation: Value| {
+            call_json(
+                seiza_calibration_plan_json,
+                &json!({
+                    "kind": "flat", "minimum": 1,
+                    "reference": {"path": "light.fits", "role": "light",
+                                  "signature": {"camera": "ASI2600MM", "width": 100,
+                                                "height": 80, "channels": 1,
+                                                "rotationDeg": 113.8}},
+                    "candidates": [{"path": "flat.fits", "role": "flat",
+                                    "signature": {"camera": "ASI2600MM", "width": 100,
+                                                  "height": 80, "channels": 1,
+                                                  "rotationDeg": 3.2}}],
+                    "tolerances": {"lightRotation": light_rotation}
+                }),
+            )
+        };
+        let recorded = plan(json!({"basis": "recorded"})).unwrap();
+        assert_eq!(recorded["selectedPaths"].as_array().unwrap().len(), 0);
+        let measured = plan(json!({"basis": "measured", "degrees": 3.5})).unwrap();
+        assert_eq!(measured["selectedPaths"][0], "flat.fits");
+        let unknown = plan(json!({"basis": "unknown"})).unwrap();
+        assert_eq!(unknown["selectedPaths"][0], "flat.fits");
+        assert!(plan(json!({"basis": "measured"})).is_err());
+    }
+
     #[test]
     fn master_builder_publishes_atomically_reports_stats_and_can_cancel() {
         let directory = tempfile::tempdir().unwrap();
@@ -13580,7 +14311,11 @@ pub unsafe extern "C" fn seiza_probe_frame_json(
 /// optional camelCase tolerances. Dark flats use dark exposure/temperature
 /// matching and should reference the selected flat they will calibrate. Each
 /// record has `path`, `role`, and the `signature` object returned by
-/// [`seiza_probe_frame_json`]; extra probe fields are ignored.
+/// [`seiza_probe_frame_json`]; extra probe fields are ignored. To plan a
+/// light's flats by an angle the host measured for it, give
+/// `tolerances.lightRotation` as `{"basis": "measured", "degrees": 82.2}`,
+/// or `{"basis": "unknown"}` when its angle does not decide its flats; the
+/// flats keep their recorded angles.
 /// The owned response reports `matchedPaths`, coherent `selectedPaths`,
 /// `ready`, and one stable exclusion reason per omitted candidate. Free it
 /// with [`seiza_string_free`].
@@ -15125,4 +15860,1033 @@ fi
         assert!(refused.is_null() && !error.is_null());
         unsafe { seiza_string_free(error) };
     }
+}
+
+// ---------------------------------------------------------------------------
+// Screening bias, dark and flat frames before a master is built
+// ---------------------------------------------------------------------------
+
+/// Settings for measuring one bias or dark; each left out keeps the core's
+/// default.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DarkMeasureRequest {
+    path: String,
+    #[serde(default)]
+    hot_sigma: Option<f32>,
+}
+
+/// Settings for measuring one flat; each left out keeps the core's default.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FlatMeasureRequest {
+    path: String,
+    #[serde(default)]
+    cfa: Option<bool>,
+    #[serde(default)]
+    full_scale: Option<f32>,
+    #[serde(default)]
+    feature_depth: Option<f32>,
+    #[serde(default)]
+    feature_sigma: Option<f32>,
+}
+
+/// `seiza_calibration::DarkMeasurement` in camelCase, both ways: hosts keep
+/// what a measure call returned and hand it back to a screen.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DarkMeasurementJson {
+    #[serde(default = "frame_quality_algorithm_version")]
+    algorithm_version: u32,
+    width: usize,
+    height: usize,
+    level: f32,
+    sigma: f32,
+    noise: f32,
+    row_banding: f32,
+    column_banding: f32,
+    hot_pixels: u64,
+    hot_threshold: f32,
+}
+
+/// `seiza_calibration::FlatMeasurement` in camelCase, both ways.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FlatMeasurementJson {
+    #[serde(default = "frame_quality_algorithm_version")]
+    algorithm_version: u32,
+    width: usize,
+    height: usize,
+    full_scale: f32,
+    level: f32,
+    channel_levels: Vec<f32>,
+    clipped_fraction: f64,
+    noise: f32,
+    detection_depth: f32,
+    illumination: seiza_calibration::IlluminationProfile,
+    feature_count: usize,
+    features: Vec<seiza_calibration::FlatFeature>,
+}
+
+const fn frame_quality_algorithm_version() -> u32 {
+    seiza_calibration::FRAME_QUALITY_ALGORITHM_VERSION
+}
+
+impl From<seiza_calibration::DarkMeasurement> for DarkMeasurementJson {
+    fn from(measurement: seiza_calibration::DarkMeasurement) -> Self {
+        Self {
+            algorithm_version: measurement.algorithm_version,
+            width: measurement.width,
+            height: measurement.height,
+            level: measurement.level,
+            sigma: measurement.sigma,
+            noise: measurement.noise,
+            row_banding: measurement.row_banding,
+            column_banding: measurement.column_banding,
+            hot_pixels: measurement.hot_pixels,
+            hot_threshold: measurement.hot_threshold,
+        }
+    }
+}
+
+impl From<DarkMeasurementJson> for seiza_calibration::DarkMeasurement {
+    fn from(measurement: DarkMeasurementJson) -> Self {
+        Self {
+            algorithm_version: measurement.algorithm_version,
+            width: measurement.width,
+            height: measurement.height,
+            level: measurement.level,
+            sigma: measurement.sigma,
+            noise: measurement.noise,
+            row_banding: measurement.row_banding,
+            column_banding: measurement.column_banding,
+            hot_pixels: measurement.hot_pixels,
+            hot_threshold: measurement.hot_threshold,
+        }
+    }
+}
+
+impl From<seiza_calibration::FlatMeasurement> for FlatMeasurementJson {
+    fn from(measurement: seiza_calibration::FlatMeasurement) -> Self {
+        Self {
+            algorithm_version: measurement.algorithm_version,
+            width: measurement.width,
+            height: measurement.height,
+            full_scale: measurement.full_scale,
+            level: measurement.level,
+            channel_levels: measurement.channel_levels,
+            clipped_fraction: measurement.clipped_fraction,
+            noise: measurement.noise,
+            detection_depth: measurement.detection_depth,
+            illumination: measurement.illumination,
+            feature_count: measurement.feature_count,
+            features: measurement.features,
+        }
+    }
+}
+
+impl From<FlatMeasurementJson> for seiza_calibration::FlatMeasurement {
+    fn from(measurement: FlatMeasurementJson) -> Self {
+        Self {
+            algorithm_version: measurement.algorithm_version,
+            width: measurement.width,
+            height: measurement.height,
+            full_scale: measurement.full_scale,
+            level: measurement.level,
+            channel_levels: measurement.channel_levels,
+            clipped_fraction: measurement.clipped_fraction,
+            noise: measurement.noise,
+            detection_depth: measurement.detection_depth,
+            illumination: measurement.illumination,
+            feature_count: measurement.feature_count,
+            features: measurement.features,
+        }
+    }
+}
+
+/// Limits for screening a bias set; each left out keeps the core's default.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BiasScreeningRequest {
+    measurements: Vec<DarkMeasurementJson>,
+    #[serde(default)]
+    level: Option<seiza_calibration::Limits>,
+    #[serde(default)]
+    noise: Option<seiza_calibration::Limits>,
+    #[serde(default)]
+    banding: Option<seiza_calibration::Limits>,
+}
+
+/// Limits for screening a dark set; each left out keeps the core's default.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DarkScreeningRequest {
+    measurements: Vec<DarkMeasurementJson>,
+    #[serde(default)]
+    level_excess: Option<seiza_calibration::Limits>,
+    #[serde(default)]
+    noise: Option<seiza_calibration::Limits>,
+    #[serde(default)]
+    hot_pixels: Option<seiza_calibration::Limits>,
+    #[serde(default)]
+    banding: Option<seiza_calibration::Limits>,
+}
+
+/// Limits for screening a flat set; each left out keeps the core's default.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FlatScreeningRequest {
+    measurements: Vec<FlatMeasurementJson>,
+    #[serde(default)]
+    clipped: Option<seiza_calibration::Limits>,
+    #[serde(default)]
+    bright: Option<seiza_calibration::Limits>,
+    #[serde(default)]
+    dim: Option<seiza_calibration::Limits>,
+    #[serde(default)]
+    illumination: Option<seiza_calibration::Limits>,
+    #[serde(default)]
+    features: Option<seiza_calibration::Limits>,
+    #[serde(default)]
+    changing_features: Option<seiza_calibration::Limits>,
+    #[serde(default)]
+    carried_features: Option<seiza_calibration::Limits>,
+    #[serde(default)]
+    steady_presence: Option<f64>,
+    #[serde(default)]
+    steady_depth_range: Option<f64>,
+    #[serde(default)]
+    match_distance: Option<u32>,
+}
+
+/// One verdict per frame of a bias or dark set, in request order.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FrameScreeningResponse {
+    schema_version: u32,
+    frames: Vec<seiza_calibration::FrameVerdict>,
+}
+
+/// `seiza_calibration::FlatSetReport` in camelCase.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FlatScreeningResponse {
+    schema_version: u32,
+    frames: Vec<seiza_calibration::FrameVerdict>,
+    master: seiza_calibration::FrameVerdict,
+    steady_features: usize,
+    changing_features: usize,
+    carried_features: usize,
+}
+
+fn calibration_message(error: seiza_calibration::Error) -> String {
+    error.to_string()
+}
+
+/// A raw frame read through seiza-image-io, as the master builder reads it.
+fn open_calibration_frame(path: &str) -> Result<FitsFrame, String> {
+    FitsFrame::open(path).map_err(stacking_message)
+}
+
+fn frame_view(frame: &FitsFrame) -> Result<seiza_calibration::LinearImageRef<'_>, String> {
+    let image = &frame.image;
+    seiza_calibration::LinearImageRef::new(&image.data, image.width, image.height, image.channels)
+        .map_err(calibration_message)
+}
+
+#[unsafe(no_mangle)]
+/// Measure one raw bias or dark frame, as a step toward judging its set
+/// with [`seiza_calibration_screen_bias_json`] or
+/// [`seiza_calibration_screen_darks_json`].
+///
+/// `request_json` is `{"path": ..., "hotSigma": 10}`; `hotSigma`, the
+/// height above the level in units of pixel noise at which a sample counts
+/// as hot, may be left out. The file is read through seiza-image-io, FITS
+/// or XISF, before any calibration. The owned response holds the
+/// measurement: `algorithmVersion`, `width`, `height`, `level`, `sigma`,
+/// `noise`, `rowBanding`, `columnBanding`, `hotPixels` and `hotThreshold`,
+/// in the frame's own units. It is small: keep it, and pass it back to a
+/// screen whenever the set changes rather than reading the frame again. A
+/// stored measurement whose `algorithmVersion` differs from a new one's is
+/// stale. Free the response with [`seiza_string_free`].
+///
+/// # Safety
+/// `request_json` must be a valid NUL-terminated string. When non-null,
+/// `error_out` must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_calibration_measure_dark_json(
+    request_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let request: DarkMeasureRequest = parse_request(request_json, "dark measure")?;
+        let mut options = seiza_calibration::DarkMeasureOptions::default();
+        if let Some(hot_sigma) = request.hot_sigma {
+            options.hot_sigma = hot_sigma;
+        }
+        let frame = open_calibration_frame(&request.path)?;
+        let measurement = seiza_calibration::measure_dark(frame_view(&frame)?, &options)
+            .map_err(calibration_message)?;
+        owned_json(&DarkMeasurementJson::from(measurement))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// Measure one raw flat frame, as a step toward judging its set with
+/// [`seiza_calibration_screen_flats_json`].
+///
+/// `request_json` is `{"path": ...}` with optional `cfa` (true for a raw
+/// colour frame with one channel; left out, true when the header records a
+/// Bayer pattern), `fullScale` (the value a saturated sample reads, 65535 by
+/// default), `featureDepth` (the shallowest dip counted, as a fraction of
+/// the light around it, 0.02 by default) and `featureSigma` (how far above
+/// the noise a dip must reach, 5 by default). Give the raw samples, before
+/// bias or dark subtraction: levels and clipping are judged against
+/// `fullScale`. The owned response holds `algorithmVersion`, `width`,
+/// `height`, `fullScale`, `level`, `channelLevels`, `clippedFraction`,
+/// `noise`, `detectionDepth`, `illumination` (`columns`, `rows` and a
+/// row-major `response` of cell medians, 1 for a typical cell),
+/// `featureCount` and the deepest `features` (`x`, `y`, `left`, `top`,
+/// `right`, `bottom`, `pixels`, `depth`). Keep it and pass it back to a
+/// screen whenever the set changes. Free it with [`seiza_string_free`].
+///
+/// # Safety
+/// As [`seiza_calibration_measure_dark_json`].
+pub unsafe extern "C" fn seiza_calibration_measure_flat_json(
+    request_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let request: FlatMeasureRequest = parse_request(request_json, "flat measure")?;
+        let mut options = seiza_calibration::FlatMeasureOptions::default();
+        if let Some(full_scale) = request.full_scale {
+            options.full_scale = full_scale;
+        }
+        if let Some(feature_depth) = request.feature_depth {
+            options.feature_depth = feature_depth;
+        }
+        if let Some(feature_sigma) = request.feature_sigma {
+            options.feature_sigma = feature_sigma;
+        }
+        let frame = open_calibration_frame(&request.path)?;
+        let cfa = request.cfa.unwrap_or(frame.bayer.is_some());
+        let measurement = seiza_calibration::measure_flat(frame_view(&frame)?, cfa, &options)
+            .map_err(calibration_message)?;
+        owned_json(&FlatMeasurementJson::from(measurement))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// Judge a set of bias frames that should match: one camera, gain, offset,
+/// readout mode and binning.
+///
+/// `request_json` holds `measurements`, each as
+/// [`seiza_calibration_measure_dark_json`] returned it, and optional limits
+/// `level`, `noise` and `banding`, each `{"suspect": ..., "poor": ...}`:
+/// the value at which a frame turns suspect, then poor (higher is worse).
+/// Banding is judged on each frame alone; with three or more frames, each
+/// is also compared with the set's median level and noise. The owned
+/// response holds `frames`, one verdict per measurement in request order:
+/// `grade` (`ok`, `suspect` or `poor`) and `findings`, each with `code`
+/// (`level`, `noise`, `row_banding` or `column_banding`), `grade`, the
+/// measured `value` and the `limit` it reached. The verdicts say what the
+/// pixels show, never why. Free it with [`seiza_string_free`].
+///
+/// # Safety
+/// As [`seiza_calibration_measure_dark_json`].
+pub unsafe extern "C" fn seiza_calibration_screen_bias_json(
+    request_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let request: BiasScreeningRequest = parse_request(request_json, "bias screening")?;
+        let mut screening = seiza_calibration::BiasScreening::default();
+        if let Some(limits) = request.level {
+            screening.level = limits;
+        }
+        if let Some(limits) = request.noise {
+            screening.noise = limits;
+        }
+        if let Some(limits) = request.banding {
+            screening.banding = limits;
+        }
+        let measurements: Vec<_> = request.measurements.into_iter().map(Into::into).collect();
+        owned_json(&FrameScreeningResponse {
+            schema_version: 1,
+            frames: seiza_calibration::screen_bias(&measurements, &screening),
+        })
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// Judge a set of darks that should match: one camera mode, one exposure,
+/// one sensor temperature.
+///
+/// `request_json` holds `measurements`, each as
+/// [`seiza_calibration_measure_dark_json`] returned it, and optional limits
+/// `levelExcess`, `noise`, `hotPixels` and `banding`, each `{"suspect":
+/// ..., "poor": ...}` (higher is worse). With two or more frames each
+/// frame's level is compared with the quietest frame's, since light can only
+/// add to a dark; with three or more, noise and hot pixels are compared with
+/// the median of the frames whose level passed. The response is shaped as
+/// [`seiza_calibration_screen_bias_json`]'s, with the codes `level_excess`,
+/// `noise`, `hot_pixels`, `row_banding` and `column_banding`. Free it with
+/// [`seiza_string_free`].
+///
+/// # Safety
+/// As [`seiza_calibration_measure_dark_json`].
+pub unsafe extern "C" fn seiza_calibration_screen_darks_json(
+    request_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let request: DarkScreeningRequest = parse_request(request_json, "dark screening")?;
+        let mut screening = seiza_calibration::DarkScreening::default();
+        if let Some(limits) = request.level_excess {
+            screening.level_excess = limits;
+        }
+        if let Some(limits) = request.noise {
+            screening.noise = limits;
+        }
+        if let Some(limits) = request.hot_pixels {
+            screening.hot_pixels = limits;
+        }
+        if let Some(limits) = request.banding {
+            screening.banding = limits;
+        }
+        let measurements: Vec<_> = request.measurements.into_iter().map(Into::into).collect();
+        owned_json(&FrameScreeningResponse {
+            schema_version: 1,
+            frames: seiza_calibration::screen_darks(&measurements, &screening),
+        })
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// Judge a set of flats that should match: one filter, one session, one
+/// rotation, one optical train.
+///
+/// `request_json` holds `measurements`, each as
+/// [`seiza_calibration_measure_flat_json`] returned it, and optional limits
+/// `clipped`, `bright`, `dim` (lower is worse), `illumination`, `features`,
+/// `changingFeatures` and `carriedFeatures`, each `{"suspect": ...,
+/// "poor": ...}`, with `steadyPresence` (the share of frames a steady
+/// feature is found in, 0.9 by default), `steadyDepthRange` (how much its
+/// depth may vary, 0.5 by default) and `matchDistance` (pixels between
+/// boxes that are one feature, 2 by default). Every frame is checked alone
+/// for clipping, exposure and clear compact features; with three or more,
+/// each is also compared with the set. The owned response holds `frames`,
+/// one verdict per measurement in request order, as
+/// [`seiza_calibration_screen_bias_json`] gives them; `master`, the verdict
+/// on a master built from every frame (whether changing features would
+/// survive into it); and the counts `steadyFeatures`, `changingFeatures`
+/// and `carriedFeatures`. Fails when the measurements differ in size. Free
+/// it with [`seiza_string_free`].
+///
+/// # Safety
+/// As [`seiza_calibration_measure_dark_json`].
+pub unsafe extern "C" fn seiza_calibration_screen_flats_json(
+    request_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let request: FlatScreeningRequest = parse_request(request_json, "flat screening")?;
+        let mut screening = seiza_calibration::FlatScreening::default();
+        let limits = [
+            (request.clipped, &mut screening.clipped),
+            (request.bright, &mut screening.bright),
+            (request.dim, &mut screening.dim),
+            (request.illumination, &mut screening.illumination),
+            (request.features, &mut screening.features),
+            (request.changing_features, &mut screening.changing_features),
+            (request.carried_features, &mut screening.carried_features),
+        ];
+        for (given, target) in limits {
+            if let Some(value) = given {
+                *target = value;
+            }
+        }
+        if let Some(value) = request.steady_presence {
+            screening.steady_presence = value;
+        }
+        if let Some(value) = request.steady_depth_range {
+            screening.steady_depth_range = value;
+        }
+        if let Some(value) = request.match_distance {
+            screening.match_distance = value;
+        }
+        let measurements: Vec<_> = request.measurements.into_iter().map(Into::into).collect();
+        let report = seiza_calibration::screen_flats(&measurements, &screening)
+            .map_err(calibration_message)?;
+        owned_json(&FlatScreeningResponse {
+            schema_version: 1,
+            frames: report.frames,
+            master: report.master,
+            steady_features: report.steady_features,
+            changing_features: report.changing_features,
+            carried_features: report.carried_features,
+        })
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+// ---------------------------------------------------------------------------
+// Residual flat responses
+// ---------------------------------------------------------------------------
+
+/// Settings for building a residual flat response; each left out keeps the
+/// core's default.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ResidualFlatOptionsRequest {
+    minimum_samples: Option<usize>,
+    minimum_depth: Option<f32>,
+    minimum_consensus: Option<f32>,
+    maximum_gain: Option<f32>,
+    background_edge_fraction: Option<f32>,
+    smoothing_sigma: Option<f32>,
+    edge_feather_fraction: Option<f32>,
+    minimum_corrected_samples: Option<usize>,
+    minimum_connected_pixels: Option<usize>,
+}
+
+impl ResidualFlatOptionsRequest {
+    fn into_core(self) -> seiza_calibration::ResidualFlatOptions {
+        let mut options = seiza_calibration::ResidualFlatOptions::default();
+        let counts = [
+            (self.minimum_samples, &mut options.minimum_samples),
+            (
+                self.minimum_corrected_samples,
+                &mut options.minimum_corrected_samples,
+            ),
+            (
+                self.minimum_connected_pixels,
+                &mut options.minimum_connected_pixels,
+            ),
+        ];
+        for (given, target) in counts {
+            if let Some(value) = given {
+                *target = value;
+            }
+        }
+        let fractions = [
+            (self.minimum_depth, &mut options.minimum_depth),
+            (self.minimum_consensus, &mut options.minimum_consensus),
+            (self.maximum_gain, &mut options.maximum_gain),
+            (
+                self.background_edge_fraction,
+                &mut options.background_edge_fraction,
+            ),
+            (self.smoothing_sigma, &mut options.smoothing_sigma),
+            (
+                self.edge_feather_fraction,
+                &mut options.edge_feather_fraction,
+            ),
+        ];
+        for (given, target) in fractions {
+            if let Some(value) = given {
+                *target = value;
+            }
+        }
+        options
+    }
+}
+
+/// `seiza_calibration::ResidualFlatDiagnostics` in camelCase.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResidualFlatDiagnosticsResponse {
+    schema_version: u32,
+    algorithm_version: u32,
+    sample_count: usize,
+    corrected_samples: usize,
+    total_samples: usize,
+    largest_connected_pixels: usize,
+    minimum_response: f32,
+    maximum_applied_gain: f32,
+}
+
+/// The number of samples in a `width` x `height` x `channels` buffer.
+fn residual_flat_samples(width: usize, height: usize, channels: usize) -> Result<usize, String> {
+    width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(channels))
+        .ok_or_else(|| "residual flat dimensions overflow".to_string())
+}
+
+#[unsafe(no_mangle)]
+/// Build a residual flat response from crops of light frames that share one
+/// place on the detector, and write it into the caller's buffer.
+///
+/// A residual flat corrects a dip the flat left behind, such as dust that
+/// moved after the flats were taken. Each of the `sample_count` pointers in
+/// `samples` is one crop of `width` x `height` x `channels` interleaved
+/// linear samples, every crop cut from the same detector position of a
+/// different light. The host must first show that the dip stays fixed on the
+/// detector while the sky moves; this call does not decide what the dip is.
+/// Each crop's own edge sets a local background, and only a loss of light
+/// most crops share is kept. `options_json` may be null or empty for the
+/// defaults, or hold any of `minimumSamples` (5), `minimumDepth` (0.005),
+/// `minimumConsensus` (0.7), `maximumGain` (1.2), `backgroundEdgeFraction`
+/// (0.2), `smoothingSigma` (2), `edgeFeatherFraction` (0.12),
+/// `minimumCorrectedSamples` (16) and `minimumConnectedPixels` (64).
+///
+/// `response_out` receives `response_length` samples, which must equal one
+/// crop's: the response, 1 where nothing is corrected and lower where light
+/// is lost, never below `1 / maximumGain`. Apply it with
+/// [`seiza_calibration_apply_residual_flat_response`]. Returns owned JSON
+/// with `algorithmVersion` (keep it with a stored response), `sampleCount`,
+/// `correctedSamples`, `totalSamples`, `largestConnectedPixels`,
+/// `minimumResponse` and `maximumAppliedGain`, or null with `error_out` set
+/// when the crops show too little to correct. Free it with
+/// [`seiza_string_free`].
+///
+/// # Safety
+/// `samples` must point to `sample_count` pointers, each to one crop's
+/// readable floats. `response_out` must point to `response_length` writable
+/// floats. A non-null `options_json` must be NUL-terminated. When non-null,
+/// `error_out` must point to writable storage for one pointer.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn seiza_calibration_build_residual_flat_json(
+    samples: *const *const f32,
+    sample_count: usize,
+    width: usize,
+    height: usize,
+    channels: usize,
+    options_json: *const c_char,
+    response_out: *mut f32,
+    response_length: usize,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        if samples.is_null() {
+            return Err("residual flat crops are required".into());
+        }
+        let length = residual_flat_samples(width, height, channels)?;
+        if response_length != length {
+            return Err(format!(
+                "residual flat response buffer has {response_length} floats; expected {length}"
+            ));
+        }
+        let options = if options_json.is_null() {
+            ResidualFlatOptionsRequest::default()
+        } else {
+            let text = required_str(options_json, "residual flat options JSON")?;
+            if text.trim().is_empty() {
+                ResidualFlatOptionsRequest::default()
+            } else {
+                serde_json::from_str(&text)
+                    .map_err(|error| format!("invalid residual flat options JSON: {error}"))?
+            }
+        }
+        .into_core();
+        let pointers = unsafe { std::slice::from_raw_parts(samples, sample_count) };
+        let views = pointers
+            .iter()
+            .map(|&data| {
+                let data = unsafe { required_f32_slice(data, length, "residual flat crop")? };
+                seiza_calibration::LinearImageRef::new(data, width, height, channels)
+                    .map_err(calibration_message)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let built = seiza_calibration::build_residual_flat_patch(&views, &options)
+            .map_err(calibration_message)?;
+        let response_out =
+            unsafe { required_f32_slice_mut(response_out, length, "residual flat response")? };
+        response_out.copy_from_slice(built.patch.response());
+        let diagnostics = built.diagnostics;
+        owned_json(&ResidualFlatDiagnosticsResponse {
+            schema_version: 1,
+            algorithm_version: diagnostics.algorithm_version,
+            sample_count: diagnostics.sample_count,
+            corrected_samples: diagnostics.corrected_samples,
+            total_samples: diagnostics.total_samples,
+            largest_connected_pixels: diagnostics.largest_connected_pixels,
+            minimum_response: diagnostics.minimum_response,
+            maximum_applied_gain: diagnostics.maximum_applied_gain,
+        })
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// Check a residual flat response the host stored or made itself before it
+/// keeps or applies it: every value must be finite and in (0, 1]. Returns
+/// true when it is, or false with `error_out` set.
+///
+/// # Safety
+/// `response` must point to `response_length` readable floats, which must
+/// equal `width * height * channels`. When non-null, `error_out` must point
+/// to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_calibration_validate_residual_flat_response(
+    response: *const f32,
+    response_length: usize,
+    width: usize,
+    height: usize,
+    channels: usize,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let data =
+            unsafe { required_f32_slice(response, response_length, "residual flat response")? };
+        let view = seiza_calibration::LinearImageRef::new(data, width, height, channels)
+            .map_err(calibration_message)?;
+        seiza_calibration::validate_residual_flat_response(view).map_err(calibration_message)
+    })
+    .is_some()
+}
+
+#[unsafe(no_mangle)]
+/// Divide a residual flat response out of a light, in place, with the
+/// response's top-left corner at pixel (`x`, `y`) of the light.
+///
+/// The response is `response_width` x `response_height` with the light's
+/// channel count, as [`seiza_calibration_build_residual_flat_json`] wrote
+/// it or as the host stored it; it is checked first as
+/// [`seiza_calibration_validate_residual_flat_response`] does. The light
+/// must be sampled as the crops were, and the response must lie inside it.
+/// Returns true, or false with `error_out` set and the light unchanged.
+///
+/// # Safety
+/// `response` must point to `response_length` readable floats and `image`
+/// to `image_length` writable floats, each equal to its width times height
+/// times channels. When non-null, `error_out` must point to writable storage
+/// for one pointer.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn seiza_calibration_apply_residual_flat_response(
+    response: *const f32,
+    response_length: usize,
+    response_width: usize,
+    response_height: usize,
+    image: *mut f32,
+    image_length: usize,
+    image_width: usize,
+    image_height: usize,
+    channels: usize,
+    x: usize,
+    y: usize,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let response =
+            unsafe { required_f32_slice(response, response_length, "residual flat response")? };
+        let response = seiza_calibration::LinearImageRef::new(
+            response,
+            response_width,
+            response_height,
+            channels,
+        )
+        .map_err(calibration_message)?;
+        let image = unsafe { required_f32_slice_mut(image, image_length, "light image")? };
+        let image =
+            seiza_calibration::LinearImageMut::new(image, image_width, image_height, channels)
+                .map_err(calibration_message)?;
+        seiza_calibration::apply_residual_flat_response_at(response, image, x, y)
+            .map_err(calibration_message)
+    })
+    .is_some()
+}
+
+// ---------------------------------------------------------------------------
+// Integrating frames registered elsewhere
+// ---------------------------------------------------------------------------
+
+/// Frames already calibrated, registered and normalized onto one grid.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RegisteredIntegrationRequest {
+    inputs: Vec<String>,
+    #[serde(default)]
+    rejection: MasterRejectionRequest,
+    #[serde(default)]
+    minimum_sigma: Option<f32>,
+    #[serde(default)]
+    frame_weights: Option<Vec<Vec<f32>>>,
+}
+
+/// What the final pass did with each input, in request order.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisteredIntegrationResponse {
+    schema_version: u32,
+    frames: Vec<RegisteredFrameResponse>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisteredFrameResponse {
+    path: String,
+    finite_samples: usize,
+    integrated_samples: usize,
+}
+
+#[unsafe(no_mangle)]
+/// Integrate FITS or XISF frames that were calibrated, registered and
+/// normalized elsewhere, with the three-pass leave-one-out rejection
+/// [`seiza_live_stacker_reintegrate`] uses, and return the result as a new
+/// snapshot.
+///
+/// `request_json` holds `inputs`, the paths of the frames, all one size on
+/// one pixel grid, with samples a frame does not cover stored as NaN; and
+/// optional `rejection` (`lowSigma`, `highSigma`, 3 by default),
+/// `minimumSigma` (a noise floor in the frames' units, 1e-6 by default) and
+/// `frameWeights` (one list per input with one positive weight per channel,
+/// as a live stack's diagnostics give them; left out, every frame weighs
+/// the same). Each input is read through seiza-image-io once per pass, and
+/// must read the same each time. Nothing is registered or normalized again,
+/// and every input takes part. Pixels with fewer than three samples are
+/// averaged without rejection. Memory is about 40 bytes per output sample
+/// plus one frame.
+///
+/// When `report_out` is non-null it receives owned JSON holding `frames`,
+/// one per input in request order, with its `path`, `finiteSamples` (the
+/// samples it covers) and `integratedSamples` (those rejection kept); free
+/// it with [`seiza_string_free`]. `cancel` and `progress` work as for
+/// [`seiza_live_stacker_reintegrate`], with the input's index and the input
+/// count. The snapshot writes with the first input's WCS, and
+/// refuses to write over an input. Release it with
+/// [`seiza_stack_snapshot_free`]. On failure the snapshot and report are
+/// null and `error_out` says why.
+///
+/// # Safety
+/// `request_json` must be a valid NUL-terminated string. `cancel` must be
+/// null or a live [`SeizaCancelSignal`] retained until this call returns.
+/// `context` is passed through untouched to `progress`. When non-null,
+/// `report_out` and `error_out` must each point to writable storage for one
+/// pointer.
+pub unsafe extern "C" fn seiza_stack_integrate_registered_json(
+    request_json: *const c_char,
+    cancel: *const SeizaCancelSignal,
+    progress: SeizaStackReintegrateProgressCallback,
+    context: *mut c_void,
+    report_out: *mut *mut c_char,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaStackSnapshot {
+    clear_error(error_out);
+    clear_error(report_out);
+    // Raw pointers are not UnwindSafe; the callback runs on this thread and
+    // the context's lifetime is the caller's promise.
+    let context = context as usize;
+    ffi_result(error_out, || {
+        let request: RegisteredIntegrationRequest =
+            parse_request(request_json, "registered integration")?;
+        let paths: Vec<PathBuf> = request.inputs.iter().map(PathBuf::from).collect();
+        let mut options = seiza_stacking::BatchStackOptions {
+            rejection: MasterRejectionOptions {
+                low_sigma: request.rejection.low_sigma,
+                high_sigma: request.rejection.high_sigma,
+            },
+            cancel: unsafe { cancel.as_ref() }
+                .map(|signal| CancelSignal::from(Arc::clone(&signal.cancelled))),
+            frame_weights: request.frame_weights,
+            ..seiza_stacking::BatchStackOptions::default()
+        };
+        if let Some(minimum_sigma) = request.minimum_sigma {
+            options.minimum_sigma = minimum_sigma;
+        }
+        let count = paths.len();
+        let mut reference_headers = None;
+        let result = seiza_stacking::integrate_registered_frames(count, &options, |pass, index| {
+            if let Some(callback) = progress {
+                let pass = match pass {
+                    seiza_stacking::BatchStackPass::Estimate => 0,
+                    seiza_stacking::BatchStackPass::Refine => 1,
+                    seiza_stacking::BatchStackPass::Integrate => 2,
+                };
+                unsafe { callback(pass, index, count, context as *mut c_void) };
+            }
+            let frame = FitsFrame::open(&paths[index])?;
+            if reference_headers.is_none() && index == 0 {
+                reference_headers = Some(frame.headers);
+            }
+            Ok(frame.image)
+        })
+        .map_err(stacking_message)?;
+        if !report_out.is_null() {
+            let report = RegisteredIntegrationResponse {
+                schema_version: 1,
+                frames: request
+                    .inputs
+                    .iter()
+                    .zip(&result.frames)
+                    .map(|(path, frame)| RegisteredFrameResponse {
+                        path: path.clone(),
+                        finite_samples: frame.finite_samples,
+                        integrated_samples: frame.integrated_samples,
+                    })
+                    .collect(),
+            };
+            let report = owned_json(&report)?;
+            unsafe { *report_out = report };
+        }
+        Ok(SeizaStackSnapshot {
+            snapshot: result.snapshot,
+            reference_headers: reference_headers.unwrap_or_default(),
+            input_paths: paths,
+        })
+    })
+    .map_or(ptr::null_mut(), |snapshot| {
+        Box::into_raw(Box::new(snapshot))
+    })
+}
+
+// ---------------------------------------------------------------------------
+// One background surface for the channels of a colour image
+// ---------------------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+/// Choose one background surface for the channels of one image that were
+/// fitted one at a time.
+///
+/// Automatic model selection runs per fit, so channels fitted apart can
+/// each land on a different surface, a constant in one and a curve in
+/// another, and correcting them with different shapes leaves a colour cast
+/// that grows toward the edges. `models` holds `model_count` models from
+/// [`seiza_background_fit`], each fitted with an automatic `model` in
+/// `config_json`, the same `BackgroundConfig` JSON the fits took (null or
+/// empty for the default). This averages each candidate surface's held-out
+/// error over every fit and chooses as automatic selection does for one.
+///
+/// Returns owned `BackgroundConfig` JSON: `config_json` with its `model`
+/// replaced by the chosen surface. Fit each channel again with it. Returns
+/// the JSON `null` when there is no shared choice: the config is not
+/// automatic, a fit holds no selection diagnostics, or no candidate was
+/// scored in every fit; keep the fits as they are then. Null with
+/// `error_out` set means the arguments were wrong. Free the string with
+/// [`seiza_string_free`].
+///
+/// # Safety
+/// `models` must point to `model_count` live model pointers. A non-null
+/// `config_json` must be NUL-terminated. When non-null, `error_out` must
+/// point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_background_select_shared_model_json(
+    models: *const *const SeizaBackgroundModel,
+    model_count: usize,
+    config_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        if models.is_null() {
+            return Err("background models are required".into());
+        }
+        let config = background_config(config_json)?;
+        let pointers = unsafe { std::slice::from_raw_parts(models, model_count) };
+        let fits = pointers
+            .iter()
+            .map(|&model| unsafe { required_background_model(model) }.map(|model| &model.fit))
+            .collect::<Result<Vec<_>, String>>()?;
+        let shared = seiza_background::select_shared_model(&config.model, &fits)
+            .map(|model| BackgroundConfig { model, ..config });
+        owned_json(&shared)
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+// ---------------------------------------------------------------------------
+// A light angle the host measured
+// ---------------------------------------------------------------------------
+
+/// The light's recorded rotator angle is compared, as for any frame.
+pub const SEIZA_LIGHT_ROTATION_RECORDED: u32 = 0;
+/// An angle the host measured is compared in place of the recorded one.
+pub const SEIZA_LIGHT_ROTATION_MEASURED: u32 = 1;
+/// The host has measured that the angle does not decide the light's flats:
+/// any flat angle passes.
+pub const SEIZA_LIGHT_ROTATION_UNKNOWN: u32 = 2;
+
+#[unsafe(no_mangle)]
+/// Set how the stack's gate reads a light's rotator angle when it matches
+/// the master flat to the lights pushed from now on, keeping its other
+/// tolerances.
+///
+/// `basis` is [`SEIZA_LIGHT_ROTATION_RECORDED`] (the default),
+/// [`SEIZA_LIGHT_ROTATION_MEASURED`], with `degrees` the angle the host
+/// measured for the light (by plate solving it, or by fitting its sky
+/// background against the candidate flats), or
+/// [`SEIZA_LIGHT_ROTATION_UNKNOWN`] when the host has shown the angle does
+/// not decide which flats the light follows; `degrees` is read only for a
+/// measured angle. The flat's own angle is always the recorded one.
+/// [`SeizaMatchTolerances`] is a fixed layout with no room for this, so it
+/// has its own call: [`seiza_live_stacker_set_match_tolerances`] replaces
+/// the whole gate and reads the recorded angle again, so call this after
+/// it. A saved context keeps the setting, and the configuration fingerprint
+/// changes with it. Returns false with `error_out` set for an unknown basis,
+/// a measured angle that is not finite, or a stack created from prepared
+/// arrays.
+///
+/// # Safety
+/// `stacker` must be a live stacker from this library, with this call
+/// externally synchronized against every other operation on it. When
+/// non-null, `error_out` must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_live_stacker_set_light_rotation(
+    stacker: *mut SeizaLiveStacker,
+    basis: u32,
+    degrees: f64,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let stacker = unsafe { required_live_stacker_mut(stacker)? };
+        let light_rotation = match basis {
+            SEIZA_LIGHT_ROTATION_RECORDED => seiza_calibration::LightRotation::Recorded,
+            SEIZA_LIGHT_ROTATION_MEASURED => seiza_calibration::LightRotation::Measured { degrees },
+            SEIZA_LIGHT_ROTATION_UNKNOWN => seiza_calibration::LightRotation::Unknown,
+            other => return Err(format!("unknown light rotation basis {other}")),
+        };
+        let tolerances = seiza_calibration::MatchTolerances {
+            light_rotation,
+            ..stacker.stacker.match_tolerances()
+        };
+        stacker
+            .stacker
+            .set_match_tolerances(tolerances)
+            .map_err(stacking_message)
+    })
+    .is_some()
+}
+
+#[unsafe(no_mangle)]
+/// Read how the stack's gate reads a light's rotator angle now: one of the
+/// `SEIZA_LIGHT_ROTATION_*` values into `basis_out`, and into `degrees_out`
+/// the measured angle, or zero for the other bases. Either output may be
+/// null. Returns false when `stacker` is null.
+///
+/// # Safety
+/// `stacker` must be null or a live stacker from this library, with this
+/// read externally synchronized against mutable operations. Each non-null
+/// output must point to writable storage for one value.
+pub unsafe extern "C" fn seiza_live_stacker_light_rotation(
+    stacker: *const SeizaLiveStacker,
+    basis_out: *mut u32,
+    degrees_out: *mut f64,
+) -> bool {
+    let Some(stacker) = (unsafe { stacker.as_ref() }) else {
+        return false;
+    };
+    let (basis, degrees) = match stacker.stacker.match_tolerances().light_rotation {
+        seiza_calibration::LightRotation::Recorded => (SEIZA_LIGHT_ROTATION_RECORDED, 0.0),
+        seiza_calibration::LightRotation::Measured { degrees } => {
+            (SEIZA_LIGHT_ROTATION_MEASURED, degrees)
+        }
+        seiza_calibration::LightRotation::Unknown => (SEIZA_LIGHT_ROTATION_UNKNOWN, 0.0),
+    };
+    if !basis_out.is_null() {
+        unsafe { *basis_out = basis };
+    }
+    if !degrees_out.is_null() {
+        unsafe { *degrees_out = degrees };
+    }
+    true
 }

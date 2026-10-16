@@ -216,6 +216,19 @@ for x, y, values, dispersion, weight, status in model.samples():
     print(x, y, values, status)
 ```
 
+Fitted one channel at a time, the channels of a colour image can each pick
+a different automatic surface, and the mismatch shows as a colour cast toward
+the edges. `select_shared_model` chooses one surface from the held-out errors
+of every fit, and returns the `fit_background` keyword arguments to fit each
+channel again with, or `None` when the fits share no choice:
+
+```python
+models = [seiza.fit_background(channel, model="automatic") for channel in channels]
+shared = seiza.select_shared_model(models)       # the same automatic settings
+if shared is not None:
+    models = [seiza.fit_background(channel, **shared) for channel in channels]
+```
+
 The output remains linear and may retain negative or greater-than-one values.
 Background extraction is not display stretching or color calibration.
 
@@ -490,6 +503,19 @@ stacker.push_fits("light-113.8deg.fits")
 stacker.set_match_tolerances()                   # the defaults again
 ```
 
+A rotator's angle can be wrong for the question a flat asks: after a re-home
+it can read the same angle for another position. When you have measured which
+flats a light's pixels follow, by plate solving it or fitting its sky against
+the candidate flats, give that angle as `light_rotation`, and the gate compares
+it in place of the light's recorded angle. `"unknown"` compares the light at no
+angle, so any flat angle passes; `"recorded"` is the default. The flats keep
+their recorded angles, and `plan_calibration` reads it the same way:
+
+```python
+stacker.set_match_tolerances(seiza.MatchTolerances(light_rotation=3.5))
+stacker.match_tolerances().light_rotation        # 3.5
+```
+
 A stacker built from FITS or XISF paths can integrate its admitted frames again
 from their files, with leave-one-out rejection that removes trails the online
 pass kept, and can drizzle that integration onto a finer grid as WBPP's
@@ -508,6 +534,18 @@ Each of those reads every frame from its file and prepares it again. Calling
 frames keeps each admitted frame's registered image on disk as it is stacked,
 about four bytes per pixel per channel for each frame, so a reintegration reads
 that instead and gives the same result sooner.
+
+Frames calibrated, registered and normalized somewhere else, one size on one
+pixel grid with uncovered samples as NaN, take the same rejection through
+`integrate_registered_frames`. It reads each file once per pass and registers
+nothing again; `frame_weights` gives one weight per channel for each frame:
+
+```python
+stack, frames = seiza.integrate_registered_frames(registered_paths, sigma_high=3.0)
+stack.write_fits("stack.fits")                   # with the first frame's WCS
+for frame in frames:
+    print(frame.path, frame.finite_samples, frame.integrated_samples)
+```
 
 
 Checkpointing is non-consuming. Reopening preserves the original registration
@@ -693,6 +731,50 @@ planned against the flat they will calibrate rather than a light. Pass
 that darks of another exposure can be scaled. A `seiza.CalibrationRecord(path,
 signature, role=...)` stands in for a probe when your records come from
 elsewhere. A bad request raises `ValueError`.
+
+### Screening calibration frames
+
+Before a master is built, judge its frames as a set. `measure_dark` and
+`measure_flat` read one raw FITS or XISF frame each and return a small
+measurement; keep it (`to_json()`, `DarkMeasurement.from_json()`) and judge it
+again whenever its set changes. `screen_bias`, `screen_darks` and
+`screen_flats` give each frame a `FrameVerdict`: a `grade` (`"ok"`,
+`"suspect"` or `"poor"`) and the `findings` behind it, each with its `code`,
+`value` and the `limit` it reached. Most checks compare a frame with its peers
+and need three or more frames. The verdicts say what the pixels show, never
+why:
+
+```python
+darks = [seiza.measure_dark(path) for path in dark_paths]
+for path, verdict in zip(dark_paths, seiza.screen_darks(darks)):
+    print(path, verdict.grade, [finding.code for finding in verdict.findings])
+
+flats = [seiza.measure_flat(path) for path in flat_paths]   # raw, before calibration
+report = seiza.screen_flats(flats, clipped=(0.001, 0.01))   # (suspect, poor)
+print(report.master.grade, report.changing_features)
+```
+
+A flat is measured against `full_scale` (65535 by default), and is read as a
+raw colour frame when its header records a Bayer pattern (`cfa=` decides
+otherwise). Each limit is a `(suspect, poor)` pair.
+
+### Residual flat responses
+
+A flat cannot correct dust that moved after it was taken. Given crops of
+several lights cut at the same place on the detector, `build_residual_flat`
+keeps only the light most of them lose, and returns that response with its
+evidence. Show first that the dip stays put on the detector while the sky
+moves; this does not decide what it is:
+
+```python
+response, diagnostics = seiza.build_residual_flat(crops)   # one crop per light
+seiza.validate_residual_flat_response(stored_response)      # raises ValueError
+corrected = seiza.apply_residual_flat_response(response, light, x, y)
+```
+
+The response is 1 where nothing is corrected and never gains more than
+`maximum_gain` (1.2). `apply_residual_flat_response` returns a corrected copy
+with the response's top-left corner at pixel `(x, y)`.
 
 ## Image processing primitives
 

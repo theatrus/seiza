@@ -108,11 +108,49 @@ core = "seiza-calibration::FrameSignature"
 
 [rust.SeizaMatchTolerances]
 core = "seiza-calibration::MatchTolerances"
-light_rotation = { gap = "a light angle the host measured (LightRotation): SeizaMatchTolerances is a fixed C layout callers allocate, so it needs a call of its own rather than a new field; until then seiza_live_stacker_match_tolerances reports a stack saved with a measured angle as reading the recorded one" }
+light_rotation = { none = "SeizaMatchTolerances is a fixed C layout callers allocate: seiza_live_stacker_set_light_rotation and seiza_live_stacker_light_rotation carry a stack's light angle, and a host matching one light by hand puts the angle it measured in the light's signature" }
 
 [rust.CalibrationPlanTolerancesRequest]
 core = "seiza-calibration::MatchTolerances"
-light_rotation = { gap = "a light angle the host measured (LightRotation), for planning a light's flats by it" }
+
+[rust.DarkMeasureRequest]
+core = "seiza-calibration::DarkMeasureOptions"
+
+[rust.FlatMeasureRequest]
+core = "seiza-calibration::FlatMeasureOptions"
+
+[rust.DarkMeasurementJson]
+core = "seiza-calibration::DarkMeasurement"
+
+[rust.FlatMeasurementJson]
+core = "seiza-calibration::FlatMeasurement"
+
+[rust.BiasScreeningRequest]
+core = "seiza-calibration::BiasScreening"
+
+[rust.DarkScreeningRequest]
+core = "seiza-calibration::DarkScreening"
+
+[rust.FlatScreeningRequest]
+core = "seiza-calibration::FlatScreening"
+
+[rust.FlatScreeningResponse]
+core = "seiza-calibration::FlatSetReport"
+
+[rust.ResidualFlatOptionsRequest]
+core = "seiza-calibration::ResidualFlatOptions"
+
+[rust.ResidualFlatDiagnosticsResponse]
+core = "seiza-calibration::ResidualFlatDiagnostics"
+
+[rust.RegisteredIntegrationRequest]
+core = "seiza-stacking::BatchStackOptions"
+cancel = { none = "the C call takes a cancel signal as an argument" }
+scratch_directory = { none = "only reintegration keeps frames in scratch files; registered inputs are read from their own files" }
+band_memory_bytes = { none = "only reintegration reads frames in bands" }
+
+[rust.RegisteredFrameResponse]
+core = "seiza-stacking::BatchFrameDiagnostics"
 
 [rust.FrameCalibrationStateResponse]
 core = "seiza-stacking::FrameCalibrationState"
@@ -311,12 +349,8 @@ objects = [
 "seiza-background::BackgroundFit::correct_with_strength" = { none = "the C ABI uses correct_in_place_with_strength, which writes into the caller's buffer" }
 "seiza-background::BackgroundFit::render_model" = { none = "the C ABI uses render_model_into, which writes into the caller's buffer" }
 "seiza-background::BackgroundFit::value_at" = { none = "one point; the C ABI renders the whole model" }
-"seiza-background::select_shared_model" = { gap = "choosing one background surface for the channels of a colour image fitted one at a time" }
 
 # calibration
-"seiza-calibration::apply_residual_flat_response_at" = { gap = "residual flat responses: building, checking and applying them" }
-"seiza-calibration::build_residual_flat_patch" = { gap = "residual flat responses: building, checking and applying them" }
-"seiza-calibration::validate_residual_flat_response" = { gap = "residual flat responses: building, checking and applying them" }
 "seiza-calibration::coherent_subset_indices" = { none = "C hosts get it through the planner, seiza_calibration_plan_json" }
 "seiza-calibration::coherent_subset" = { none = "C hosts get it through the planner, seiza_calibration_plan_json" }
 "seiza-calibration::sensor_consistent" = { none = "C hosts get it through the planner, seiza_calibration_plan_json" }
@@ -325,11 +359,6 @@ objects = [
 "seiza-calibration::describe_text" = { none = "a building block of the mismatch messages the C ABI returns" }
 "seiza-calibration::describe_value" = { none = "a building block of the mismatch messages the C ABI returns" }
 "seiza-calibration::exposure_tolerance" = { none = "part of the matching rules the C ABI calls" }
-"seiza-calibration::measure_dark" = { gap = "screening calibration frames before a master is built" }
-"seiza-calibration::measure_flat" = { gap = "screening calibration frames before a master is built" }
-"seiza-calibration::screen_bias" = { gap = "screening calibration frames before a master is built" }
-"seiza-calibration::screen_darks" = { gap = "screening calibration frames before a master is built" }
-"seiza-calibration::screen_flats" = { gap = "screening calibration frames before a master is built" }
 
 # image I/O
 "seiza-image-io::add_xisf_solution_wcs" = { none = "the C ABI reads a prior from the image it has opened (AstronomyImage::solve_prior)" }
@@ -363,12 +392,10 @@ objects = [
 "seiza-stacking::LiveStacker::push_fits_pipelined_with_pool" = { none = "the C ABI runs in the calling thread's pool (push_fits_pipelined)" }
 "seiza-stacking::LiveStacker::push_fits_sequential_with_pool" = { none = "the C ABI runs in the calling thread's pool (push_fits)" }
 "seiza-stacking::LiveStacker::set_calibration" = { none = "the C ABI replaces masters from FITS paths (set_calibration_from_fits_paths)" }
-"seiza-stacking::build_residual_flat_patch" = { none = "kept for one release; seiza-calibration::build_residual_flat_patch replaces it" }
 "seiza-stacking::write_linear_image_fits_f32" = { none = "the C ABI writes stacks through write_fits_f32 and drizzles through write_drizzle_fits_f32" }
 "seiza-stacking::write_processed_image_fits_f32" = { none = "the C ABI writes stacks through write_fits_f32 and drizzles through write_drizzle_fits_f32" }
 "seiza-stacking::drizzle_reference_headers" = { none = "the C drizzle result carries its reference headers already" }
 "seiza-stacking::covered_region" = { none = "crop_report gives the region and more; the C ABI calls crop_report" }
-"seiza-stacking::integrate_registered_frames" = { gap = "integrating frames registered elsewhere, with leave-one-out rejection" }
 "seiza-stacking::reference_score" = { none = "choose_reference scores each frame; the C ABI calls choose_reference" }
 "seiza-stacking::resample_to_reference" = { none = "a registration building block the stacker uses" }
 "seiza-stacking::resample_to_reference_affine" = { none = "a registration building block the stacker uses" }
@@ -441,6 +468,9 @@ seiza_live_stacker_compatible_calibration_json = "LiveStacker.compatible_calibra
 seiza_live_stacker_validate_calibration = "LiveStacker.validate_calibration"
 seiza_live_stacker_match_tolerances = "LiveStacker.match_tolerances"
 seiza_live_stacker_set_match_tolerances = "LiveStacker.set_match_tolerances"
+# Python's MatchTolerances carries the light angle, so a stack's whole gate is set and read at once.
+seiza_live_stacker_set_light_rotation = "LiveStacker.set_match_tolerances"
+seiza_live_stacker_light_rotation = "LiveStacker.match_tolerances"
 seiza_live_stacker_set_calibration_fits = "LiveStacker.set_calibration_fits"
 seiza_live_stacker_state_json = "LiveStacker.state"
 seiza_live_stacker_accepted_frames = "LiveStacker.accepted_frames"
@@ -467,6 +497,7 @@ seiza_checkpoint_depths = "checkpoint_depths"
 seiza_live_stacker_finish = "LiveStacker.finish"
 seiza_live_stacker_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
 seiza_stack_choose_reference_json = "choose_reference"
+seiza_stack_integrate_registered_json = "integrate_registered_frames"
 
 seiza_stack_snapshot_width = "StackSnapshot.width"
 seiza_stack_snapshot_height = "StackSnapshot.height"
@@ -512,6 +543,14 @@ seiza_calibration_describe_sensor_mismatch = "describe_sensor_mismatch"
 seiza_calibration_describe_optics_mismatch = "describe_optics_mismatch"
 seiza_calibration_rotation_matches = "rotation_matches"
 seiza_calibration_fit_flat_pedestal = "fit_flat_pedestal"
+seiza_calibration_measure_dark_json = "measure_dark"
+seiza_calibration_measure_flat_json = "measure_flat"
+seiza_calibration_screen_bias_json = "screen_bias"
+seiza_calibration_screen_darks_json = "screen_darks"
+seiza_calibration_screen_flats_json = "screen_flats"
+seiza_calibration_build_residual_flat_json = "build_residual_flat"
+seiza_calibration_validate_residual_flat_response = "validate_residual_flat_response"
+seiza_calibration_apply_residual_flat_response = "apply_residual_flat_response"
 
 # --- background and deconvolution -------------------------------------------
 seiza_background_fit = "fit_background"
@@ -524,6 +563,7 @@ seiza_background_model_render = "BackgroundModel.render"
 seiza_background_model_correct_in_place = "BackgroundModel.correct"
 seiza_background_model_correct_in_place_with_strength = "BackgroundModel.correct"
 seiza_background_model_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
+seiza_background_select_shared_model_json = "select_shared_model"
 seiza_deconvolve_in_place = "deconvolve"
 
 # --- rendering (display images for the desktop viewers) ---------------------
@@ -640,6 +680,10 @@ coherent_subset = { c = "seiza_calibration_plan_json" }
 coherent_subset_indices = { c = "seiza_calibration_plan_json" }
 sort_by_proximity = { c = "seiza_calibration_plan_json" }
 CalibrationRecord = { c = "seiza_calibration_plan_json" }
+"DarkMeasurement.to_json" = { none = "C measurements are JSON already" }
+"DarkMeasurement.from_json" = { none = "C measurements are JSON already" }
+"FlatMeasurement.to_json" = { none = "C measurements are JSON already" }
+"FlatMeasurement.from_json" = { none = "C measurements are JSON already" }
 
 # background and display
 "BackgroundModel.samples" = { c = "seiza_background_model_diagnostics_json" }
@@ -738,6 +782,7 @@ CatalogSetupProgressResponse = { none = "download progress for the apps' setup s
 
 # calibration masters
 "MasterBuildRequest.inputs" = { python = "images" }
+"RegisteredIntegrationRequest.inputs" = { python = "images" }
 "ImpulseFilterRequest.low_sigma" = { python = "defect_sigma_low" }
 "ImpulseFilterRequest.high_sigma" = { python = "defect_sigma_high" }
 "MasterRejectionRequest.low_sigma" = { python = "sigma_low" }

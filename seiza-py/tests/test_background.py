@@ -86,3 +86,22 @@ def test_background_model_exposes_automatic_selection_and_strength() -> None:
     assert np.array_equal(unchanged, image)
     full = model.correct(image, strength=1.0)
     assert np.std(full) < np.std(image) * 0.1
+
+
+def test_channels_fitted_apart_share_one_surface():
+    y, x = np.mgrid[0:64, 0:96].astype(np.float32)
+    u, v = x / 96 - 0.5, y / 64 - 0.5
+    channels = [
+        np.full((64, 96), 100.0, dtype=np.float32),
+        (100.0 + 8.0 * u).astype(np.float32),
+        (100.0 + 4.0 * u + 30.0 * (u * u + v * v)).astype(np.float32),
+    ]
+    models = [seiza.fit_background(channel, model="automatic", search_steps=0) for channel in channels]
+    shared = seiza.select_shared_model(models)
+    assert shared is not None
+    assert shared["model"] in ("polynomial", "radial_basis")
+    refit = [seiza.fit_background(channel, search_steps=0, **shared) for channel in channels]
+    assert len({model.model_kind for model in refit}) == 1
+
+    fixed = [seiza.fit_background(channel, model="polynomial", degree=1) for channel in channels]
+    assert seiza.select_shared_model(fixed) is None

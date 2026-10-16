@@ -166,3 +166,22 @@ def test_a_record_keeps_what_it_was_given():
     assert record.path == Path("dark.fits")
     assert record.role == "unknown"
     assert record.signature.camera == "ASI2600MM"
+
+
+def test_a_light_is_planned_flats_at_the_angle_the_host_measured():
+    def record(path, role, rotation_deg):
+        signature = seiza.FrameSignature(
+            camera="ASI2600MM", width=100, height=80, channels=1, rotation_deg=rotation_deg
+        )
+        return seiza.CalibrationRecord(path, signature, role=role)
+
+    light = record("light.fits", "light", 113.8)
+    flat = record("flat.fits", "flat", 3.2)
+
+    def plan(rotation):
+        tolerances = seiza.MatchTolerances(light_rotation=rotation)
+        return seiza.plan_calibration("flat", light, [flat], minimum=1, tolerances=tolerances)
+
+    assert plan("recorded").selected_paths == []
+    assert [str(path) for path in plan(3.5).selected_paths] == ["flat.fits"]
+    assert [str(path) for path in plan("unknown").selected_paths] == ["flat.fits"]

@@ -2276,6 +2276,141 @@ struct MasterExtras {
     defect_suppression: Option<ImpulseFilterOptions>,
 }
 
+/// A cancel signal for work that runs for minutes with the GIL released: it
+/// takes the GIL back each time it is asked whether to stop, which covers
+/// Ctrl-C as well as an explicit `cancel` predicate. An error either raises
+/// is kept in the second value, to raise once the work unwinds, so the
+/// caller sees KeyboardInterrupt or their own exception rather than a
+/// generic StackError.
+fn python_cancel_signal(cancel: Option<Py<PyAny>>) -> (CancelSignal, Arc<Mutex<Option<PyErr>>>) {
+    let raised: Arc<Mutex<Option<PyErr>>> = Arc::new(Mutex::new(None));
+    let signal = {
+        let raised = Arc::clone(&raised);
+        CancelSignal::new(move || {
+            Python::attach(|py| {
+                let asked = py.check_signals().and_then(|()| match &cancel {
+                    Some(cancel) => cancel
+                        .call0(py)
+                        .and_then(|value| value.bind(py).is_truthy()),
+                    None => Ok(false),
+                });
+                match asked {
+                    Ok(stop) => stop,
+                    Err(error) => {
+                        *raised.lock().unwrap() = Some(error);
+                        true
+                    }
+                }
+            })
+        })
+    };
+    (signal, raised)
+}
+
+/// What :func:`integrate_registered_frames` did with one input.
+#[pyclass(
+    skip_from_py_object,
+    frozen,
+    name = "IntegratedFrame",
+    module = "seiza"
+)]
+pub(crate) struct PyIntegratedFrame {
+    #[pyo3(get)]
+    path: PathBuf,
+    /// Samples the frame covers.
+    #[pyo3(get)]
+    finite_samples: usize,
+    /// Of those, the samples rejection kept.
+    #[pyo3(get)]
+    integrated_samples: usize,
+}
+
+#[pymethods]
+impl PyIntegratedFrame {
+    fn __repr__(&self) -> String {
+        format!(
+            "IntegratedFrame(path={:?}, finite_samples={}, integrated_samples={})",
+            self.path.display().to_string(),
+            self.finite_samples,
+            self.integrated_samples
+        )
+    }
+}
+
+/// Integrate FITS or XISF frames that were calibrated, registered and
+/// normalized elsewhere, with the three-pass leave-one-out rejection
+/// :meth:`LiveStacker.reintegrate` uses.
+///
+/// Every input must be one size on one pixel grid, with samples it does not
+/// cover stored as NaN; each is read once per pass and must read the same
+/// each time. ``frame_weights`` gives one list per input with one positive
+/// weight per channel; left out, every frame weighs the same.
+/// ``minimum_sigma`` is a noise floor in the frames' units. Returns the
+/// stack, which writes with the first input's WCS, and what
+/// rejection did with each input. Raises :class:`StackError` when the
+/// inputs differ in shape or change between passes.
+#[pyfunction]
+#[pyo3(signature = (
+    images,
+    *,
+    sigma_low=3.0,
+    sigma_high=3.0,
+    minimum_sigma=None,
+    frame_weights=None,
+    cancel=None
+))]
+fn integrate_registered_frames(
+    py: Python<'_>,
+    images: Vec<PathBuf>,
+    sigma_low: f32,
+    sigma_high: f32,
+    minimum_sigma: Option<f32>,
+    frame_weights: Option<Vec<Vec<f32>>>,
+    cancel: Option<Py<PyAny>>,
+) -> PyResult<(PyStackSnapshot, Vec<PyIntegratedFrame>)> {
+    let (signal, raised) = python_cancel_signal(cancel);
+    let mut options = batch_options(sigma_low, sigma_high, None)?;
+    options.cancel = Some(signal);
+    options.frame_weights = frame_weights;
+    if let Some(minimum_sigma) = minimum_sigma {
+        options.minimum_sigma = minimum_sigma;
+    }
+    let paths = images.clone();
+    let integrated = py.detach(move || {
+        let mut reference_headers = None;
+        let result =
+            seiza_stacking::integrate_registered_frames(paths.len(), &options, |_, index| {
+                let frame = FitsFrame::open(&paths[index])?;
+                if reference_headers.is_none() && index == 0 {
+                    reference_headers = Some(frame.headers);
+                }
+                Ok(frame.image)
+            })?;
+        Ok::<_, seiza_stacking::Error>((result, reference_headers.unwrap_or_default()))
+    });
+    if let Some(error) = raised.lock().unwrap().take() {
+        return Err(error);
+    }
+    let (result, reference_headers) = integrated.map_err(stack_error)?;
+    let frames = images
+        .iter()
+        .zip(&result.frames)
+        .map(|(path, frame)| PyIntegratedFrame {
+            path: path.clone(),
+            finite_samples: frame.finite_samples,
+            integrated_samples: frame.integrated_samples,
+        })
+        .collect();
+    Ok((
+        PyStackSnapshot {
+            inner: result.snapshot,
+            reference_headers,
+            input_paths: images,
+        },
+        frames,
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_master(
     py: Python<'_>,
@@ -2292,33 +2427,7 @@ fn build_master(
     extras: MasterExtras,
 ) -> PyResult<PyMasterResult> {
     validate_output_path(&images, &output, [bias.as_ref(), dark.as_ref()])?;
-    // A master over dozens of frames runs for minutes with the GIL released,
-    // so the build takes the GIL back once per input to ask whether it should
-    // stop. That covers Ctrl-C as well as an explicit `cancel` predicate.
-    let raised: Arc<Mutex<Option<PyErr>>> = Arc::new(Mutex::new(None));
-    let signal = {
-        let raised = Arc::clone(&raised);
-        CancelSignal::new(move || {
-            Python::attach(|py| {
-                let asked = py.check_signals().and_then(|()| match &cancel {
-                    Some(cancel) => cancel
-                        .call0(py)
-                        .and_then(|value| value.bind(py).is_truthy()),
-                    None => Ok(false),
-                });
-                match asked {
-                    Ok(stop) => stop,
-                    Err(error) => {
-                        // Re-raised once the build unwinds, so the caller sees
-                        // KeyboardInterrupt or their own exception rather than
-                        // a generic StackError.
-                        *raised.lock().unwrap() = Some(error);
-                        true
-                    }
-                }
-            })
-        })
-    };
+    let (signal, raised) = python_cancel_signal(cancel);
     let built = py.detach(move || {
         let bias = bias.map(load_bias).transpose()?;
         let dark = dark
@@ -2572,6 +2681,8 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(build_bias, module)?)?;
     module.add_function(wrap_pyfunction!(build_dark, module)?)?;
     module.add_function(wrap_pyfunction!(build_flat, module)?)?;
+    module.add_class::<PyIntegratedFrame>()?;
+    module.add_function(wrap_pyfunction!(integrate_registered_frames, module)?)?;
     module.add("StackError", module.py().get_type::<StackError>())?;
     Ok(())
 }
