@@ -176,6 +176,19 @@ def test_a_tour_sets_the_length_and_takes_strings_or_dicts(tmp_path):
         video(tmp_path, tour=["whole", {"dolli": 0.5}])
 
 
+def test_pulling_back_an_edge_target_keeps_the_opening_unchanged(tmp_path):
+    scene, _ = video(tmp_path)
+    opening = {"focus": None, "hold": 0.2}
+    target = {"focus": (280.0, 40.0), "dolly": 0.35, "rotate_deg": 11.0, "travel": 0.8, "hold": 0.3}
+    closing = {"focus": None, "travel": 0.8, "hold": 0.2}
+    before = scene.reconfigure(tour=[opening, target, closing], size=(160, 120), fps=10)
+    pulled = {**target, "dolly": 0.0, "pull_back_to_whole_image": True}
+    after = scene.reconfigure(tour=[opening, pulled, closing], size=(160, 120), fps=10)
+    np.testing.assert_array_equal(before.frame(0), after.frame(0))
+    assert not np.array_equal(before.frame(10), after.frame(10))
+    assert pulled["focus"] == target["focus"]
+
+
 def test_a_tour_plan_comes_back_editable_and_goes_back_in(tmp_path):
     # With no object catalog there is nothing to tour.
     _, _, wcs = field()

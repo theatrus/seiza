@@ -139,6 +139,7 @@ fn plan_dict<'py>(py: Python<'py>, plan: &PlannedTour) -> PyResult<Bound<'py, Py
             let stop = PyDict::new(py);
             stop.set_item("name", &planned.name)?;
             stop.set_item("focus", planned.stop.focus)?;
+            stop.set_item("pull_back_to_whole_image", planned.stop.pull_back_to_whole_image)?;
             stop.set_item("dolly", planned.stop.dolly)?;
             stop.set_item("zoom", planned.stop.zoom)?;
             stop.set_item("rotate_deg", planned.stop.rotate_deg)?;
@@ -192,7 +193,9 @@ fn plan_dict<'py>(py: Python<'py>, plan: &PlannedTour) -> PyResult<Bound<'py, Py
 /// parallax-video --stop` takes, "X,Y dolly=0.8 rotate=-10 travel=6
 /// hold=1" or "whole ...", or a dict of `focus`, `dolly`, `zoom`,
 /// `rotate_deg`, `pan`, `travel`, `hold`, `spin_deg`, `push`, `title` and
-/// `card` (an image shown as the title would be, in its place), as
+/// `card` (an image shown as the title would be, in its place), plus
+/// `pull_back_to_whole_image` (false by default; widen toward the image
+/// centre while retaining the target in `focus`), as
 /// `plan_parallax_tour` gives them, with its `name`), `auto_tour`
 /// (True, a count, or a dict of `targets`, `hold` and `motion`: plan a
 /// tour of the catalogued objects and render it), `tour_glide`,
@@ -550,6 +553,7 @@ fn options(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ParallaxOptions> {
                                 }
                                 "dolly" => parsed.dolly = value.extract()?,
                                 "zoom" => parsed.zoom = value.extract()?,
+                                "pull_back_to_whole_image" => parsed.pull_back_to_whole_image = value.extract()?,
                                 "rotate_deg" => parsed.rotate_deg = value.extract()?,
                                 "pan" => parsed.pan = value.extract()?,
                                 "travel" => parsed.travel = value.extract()?,

@@ -1051,6 +1051,7 @@ fn solution(
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PlannedStopResponse {
+    pull_back_to_whole_image: bool,
     name: Option<String>,
     focus: Option<[f64; 2]>,
     dolly: f64,
@@ -1091,6 +1092,7 @@ impl PlannedTourResponse {
                 .stops
                 .iter()
                 .map(|planned| PlannedStopResponse {
+                    pull_back_to_whole_image: planned.stop.pull_back_to_whole_image,
                     name: planned.name.clone(),
                     focus: planned.stop.focus.map(|(x, y)| [x, y]),
                     dolly: planned.stop.dolly,
