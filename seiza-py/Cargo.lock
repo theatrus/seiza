@@ -1829,7 +1829,7 @@ dependencies = [
 
 [[package]]
 name = "seiza"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "directories",
  "image",
@@ -1861,7 +1861,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-calibration"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "nalgebra",
  "rayon",
@@ -1944,7 +1944,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-parallax"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "ab_glyph",
  "image",
@@ -1961,7 +1961,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-py"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "image",
  "numpy",
@@ -2013,7 +2013,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-stacking"
-version = "0.36.0"
+version = "0.37.0"
 dependencies = [
  "multiversion",
  "postcard",
