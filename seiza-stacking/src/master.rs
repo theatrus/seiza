@@ -369,6 +369,114 @@ impl MasterFrame {
             bayer: self.bayer,
         })
     }
+
+    /// Pair each input the build used with its tally, in the order of
+    /// `requested_inputs`, the paths the build was given.
+    ///
+    /// This also checks the build's accounting: at least two frames used,
+    /// one tally for each, every requested path either used or set aside
+    /// exactly once, and per-input tallies that add up to the master's
+    /// totals. Run it before publishing a master, so a caller is never left
+    /// with one whose provenance cannot be told.
+    pub fn accepted_inputs(
+        &self,
+        requested_inputs: &[PathBuf],
+    ) -> Result<Vec<(PathBuf, MasterInputStatistics)>> {
+        let invalid = |message: String| Error::Calibration(message);
+        if self.input_frames < MINIMUM_MASTER_INPUTS {
+            return Err(invalid(format!(
+                "master input accounting is invalid: only {} accepted frame(s)",
+                self.input_frames
+            )));
+        }
+        if self.input_frames != self.input_statistics.len() {
+            return Err(invalid(format!(
+                "master input accounting is invalid: {} accepted frames but {} per-input tallies",
+                self.input_frames,
+                self.input_statistics.len()
+            )));
+        }
+        let accounted_frames = self
+            .input_frames
+            .checked_add(self.skipped_inputs.len())
+            .ok_or_else(|| invalid("master input accounting overflowed".into()))?;
+        if accounted_frames != requested_inputs.len() {
+            return Err(invalid(format!(
+                "master input accounting is invalid: {} requested, {} accepted, and {} skipped",
+                requested_inputs.len(),
+                self.input_frames,
+                self.skipped_inputs.len()
+            )));
+        }
+        for (index, skipped) in self.skipped_inputs.iter().enumerate() {
+            let requested_matches = requested_inputs
+                .iter()
+                .filter(|path| **path == skipped.path)
+                .count();
+            if requested_matches != 1 {
+                return Err(invalid(format!(
+                    "master input accounting is invalid: skipped path {} occurs {requested_matches} times in the request",
+                    skipped.path.display()
+                )));
+            }
+            if self.skipped_inputs[..index]
+                .iter()
+                .any(|previous| previous.path == skipped.path)
+            {
+                return Err(invalid(format!(
+                    "master input accounting is invalid: skipped path {} was reported more than once",
+                    skipped.path.display()
+                )));
+            }
+        }
+
+        let mut statistics = self.input_statistics.iter();
+        let mut inputs = Vec::with_capacity(self.input_frames);
+        for path in requested_inputs {
+            if self
+                .skipped_inputs
+                .iter()
+                .any(|skipped| skipped.path == *path)
+            {
+                continue;
+            }
+            let tally = statistics.next().ok_or_else(|| {
+                invalid(
+                    "master input accounting is invalid: an accepted path has no per-input tally"
+                        .into(),
+                )
+            })?;
+            inputs.push((path.clone(), *tally));
+        }
+        if statistics.next().is_some() || inputs.len() != self.input_frames {
+            return Err(invalid(format!(
+                "master input accounting is invalid: mapped {} accepted paths for {} frames",
+                inputs.len(),
+                self.input_frames
+            )));
+        }
+        let accepted_samples = self
+            .input_statistics
+            .iter()
+            .try_fold(0_u64, |total, tally| {
+                total.checked_add(tally.accepted_samples)
+            })
+            .ok_or_else(|| invalid("master accepted-sample accounting overflowed".into()))?;
+        let rejected_samples = self
+            .input_statistics
+            .iter()
+            .try_fold(0_u64, |total, tally| {
+                total.checked_add(tally.rejected_samples)
+            })
+            .ok_or_else(|| invalid("master rejected-sample accounting overflowed".into()))?;
+        if accepted_samples != self.accepted_samples || rejected_samples != self.rejected_samples {
+            return Err(invalid(format!(
+                "master sample accounting is invalid: per-input totals are {accepted_samples} accepted/{rejected_samples} rejected but the master reports {}/{}",
+                self.accepted_samples, self.rejected_samples
+            )));
+        }
+        Ok(inputs)
+    }
 }
 
 /// Fewest frames that can make a master. Below this, sigma rejection has
@@ -1656,6 +1764,26 @@ mod tests {
             3,
             "per-input statistics cover exactly the frames that combined"
         );
+
+        // Each used path pairs with its own tally; the stray has none.
+        let inputs = master.accepted_inputs(&paths).unwrap();
+        assert_eq!(
+            inputs.iter().map(|(path, _)| path).collect::<Vec<_>>(),
+            [&paths[0], &paths[1], &paths[3]]
+        );
+        assert_eq!(inputs[2].1, master.input_statistics[2]);
+        // A request the build did not make cannot be accounted for.
+        let error = master.accepted_inputs(&paths[..3]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("3 requested, 3 accepted, and 1 skipped"),
+            "{error}"
+        );
+        let mut swapped = paths.clone();
+        swapped[2] = directory.path().join("elsewhere.fits");
+        let error = master.accepted_inputs(&swapped).unwrap_err();
+        assert!(error.to_string().contains("occurs 0 times"), "{error}");
     }
 
     #[test]

@@ -653,9 +653,10 @@ it, the mark of stray light. The result's `masked_samples`,
 
 A build sets aside an input whose header contradicts the first one, such as a
 flat from another rotator angle, rather than failing.
-`result.skipped_inputs` lists each as `(path, reason)`, and
-`result.input_statistics` holds the `(accepted, rejected)` sample counts of the
-inputs used, in order.
+`result.skipped_inputs` lists each as `(path, reason)`. `result.input_paths`
+lists the inputs used, and `result.input_statistics` their `(accepted,
+rejected)` sample counts, in the same order. The build checks that these
+account for every input before it writes the master.
 
 `build_flat(..., defect_suppression=True)` replaces hot and cold pixels in the
 flat master with their neighbours' median. A defective pixel repeats in every

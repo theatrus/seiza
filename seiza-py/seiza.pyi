@@ -654,6 +654,7 @@ class MasterResult:
     rejection_method: str
     flat_star_masking: dict[str, Any] | None
     skipped_inputs: list[tuple[Path, str]]
+    input_paths: list[Path]
 
 class FlatStarMasking:
     detection_sigma: float

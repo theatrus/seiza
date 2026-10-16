@@ -7738,102 +7738,17 @@ fn master_build_provenance(
     ),
     String,
 > {
-    if master.input_frames < 2 {
-        return Err(format!(
-            "master input accounting is invalid: only {} accepted frame(s)",
-            master.input_frames
-        ));
-    }
-    if master.input_frames != master.input_statistics.len() {
-        return Err(format!(
-            "master input accounting is invalid: {} accepted frames but {} per-input tallies",
-            master.input_frames,
-            master.input_statistics.len()
-        ));
-    }
-    let accounted_frames = master
-        .input_frames
-        .checked_add(master.skipped_inputs.len())
-        .ok_or_else(|| "master input accounting overflowed".to_string())?;
-    if accounted_frames != requested_inputs.len() {
-        return Err(format!(
-            "master input accounting is invalid: {} requested, {} accepted, and {} skipped",
-            requested_inputs.len(),
-            master.input_frames,
-            master.skipped_inputs.len()
-        ));
-    }
-    for (index, skipped) in master.skipped_inputs.iter().enumerate() {
-        let requested_matches = requested_inputs
-            .iter()
-            .filter(|path| **path == skipped.path)
-            .count();
-        if requested_matches != 1 {
-            return Err(format!(
-                "master input accounting is invalid: skipped path {} occurs {requested_matches} times in the request",
-                skipped.path.display()
-            ));
-        }
-        if master.skipped_inputs[..index]
-            .iter()
-            .any(|previous| previous.path == skipped.path)
-        {
-            return Err(format!(
-                "master input accounting is invalid: skipped path {} was reported more than once",
-                skipped.path.display()
-            ));
-        }
-    }
-
-    let mut statistics = master.input_statistics.iter();
-    let mut inputs = Vec::with_capacity(master.input_frames);
-    for path in requested_inputs {
-        if master
-            .skipped_inputs
-            .iter()
-            .any(|skipped| skipped.path == *path)
-        {
-            continue;
-        }
-        let tally = statistics.next().ok_or_else(|| {
-            "master input accounting is invalid: an accepted path has no per-input tally"
-                .to_string()
-        })?;
-        inputs.push(MasterBuildInputResponse {
+    let inputs = master
+        .accepted_inputs(requested_inputs)
+        .map_err(stacking_message)?
+        .into_iter()
+        .map(|(path, tally)| MasterBuildInputResponse {
             path: path.to_string_lossy().into_owned(),
             accepted_samples: tally.accepted_samples,
             rejected_samples: tally.rejected_samples,
             masked_samples: tally.masked_samples,
-        });
-    }
-    if statistics.next().is_some() || inputs.len() != master.input_frames {
-        return Err(format!(
-            "master input accounting is invalid: mapped {} accepted paths for {} frames",
-            inputs.len(),
-            master.input_frames
-        ));
-    }
-    let accepted_samples = master
-        .input_statistics
-        .iter()
-        .try_fold(0_u64, |total, tally| {
-            total.checked_add(tally.accepted_samples)
         })
-        .ok_or_else(|| "master accepted-sample accounting overflowed".to_string())?;
-    let rejected_samples = master
-        .input_statistics
-        .iter()
-        .try_fold(0_u64, |total, tally| {
-            total.checked_add(tally.rejected_samples)
-        })
-        .ok_or_else(|| "master rejected-sample accounting overflowed".to_string())?;
-    if accepted_samples != master.accepted_samples || rejected_samples != master.rejected_samples {
-        return Err(format!(
-            "master sample accounting is invalid: per-input totals are {accepted_samples} accepted/{rejected_samples} rejected but the master reports {}/{}",
-            master.accepted_samples, master.rejected_samples
-        ));
-    }
-
+        .collect();
     let skipped_inputs = master
         .skipped_inputs
         .iter()

@@ -1801,6 +1801,9 @@ pub(crate) struct PyMasterResult {
     /// The inputs the build set aside, each as `(path, reason)`.
     #[pyo3(get)]
     skipped_inputs: Vec<(PathBuf, String)>,
+    /// The inputs the build used, in the order of `input_statistics`.
+    #[pyo3(get)]
+    input_paths: Vec<PathBuf>,
 }
 
 /// Star masking for sky flats: what :func:`build_flat` leaves out of each
@@ -2344,6 +2347,10 @@ fn build_master(
             }
             None => build_master_from_fits(&images, kind, &options)?,
         };
+        // Check the build's accounting before publishing the master, as the
+        // C ABI does: a caller must not be left with a master whose inputs
+        // cannot be told.
+        let inputs = master.accepted_inputs(&images)?;
         write_master_fits_f32(&output, &master)?;
         Ok(PyMasterResult {
             output,
@@ -2360,17 +2367,16 @@ fn build_master(
             dark_subtracted: master.dark_subtracted,
             normalized: master.normalized,
             exposure_seconds: master.exposure_seconds,
-            input_statistics: master
-                .input_statistics
+            input_statistics: inputs
                 .iter()
-                .map(|stats| (stats.accepted_samples, stats.rejected_samples))
+                .map(|(_, stats)| (stats.accepted_samples, stats.rejected_samples))
                 .collect(),
             masked_samples: master.masked_samples,
-            input_masked_samples: master
-                .input_statistics
+            input_masked_samples: inputs
                 .iter()
-                .map(|stats| stats.masked_samples)
+                .map(|(_, stats)| stats.masked_samples)
                 .collect(),
+            input_paths: inputs.into_iter().map(|(path, _)| path).collect(),
             rejection_method: master.rejection_method.as_str(),
             flat_star_masking_statistics: master.flat_star_masking,
             skipped_inputs: master

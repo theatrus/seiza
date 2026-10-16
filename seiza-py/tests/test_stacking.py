@@ -1021,4 +1021,5 @@ def test_a_master_reports_the_inputs_it_set_aside(tmp_path):
     assert result.input_frames == 2
     assert len(result.input_statistics) == 2
     assert [path for path, _ in result.skipped_inputs] == [paths[1]]
+    assert result.input_paths == [paths[0], paths[2]]
     assert "optical" in result.skipped_inputs[0][1]
