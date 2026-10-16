@@ -75,8 +75,9 @@ pub use batch::{
 pub use calibration::{CalibrationMasters, MasterDark, MasterFlat};
 pub use color::{
     ColorComposition, ColorNormalization, ColorOptions, ColorTransfer, ForaxxOptions,
-    NarrowbandMatrix, NarrowbandMix, NarrowbandPalette, combine_lrgb, combine_narrowband,
-    combine_narrowband_matrix, combine_rgb, combine_super_lrgb, combine_super_rgb,
+    LrgbLuminance, NarrowbandMatrix, NarrowbandMix, NarrowbandPalette, RgbLuminance, combine_lrgb,
+    combine_narrowband, combine_narrowband_matrix, combine_rgb, combine_super_lrgb,
+    combine_super_rgb,
 };
 pub use color_calibration::{
     ColorCalibration, ColorCalibrationOptions, ColorFit, ColorReferenceStar, ColorStarMeasurement,

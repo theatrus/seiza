@@ -4,9 +4,9 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand, ValueEnum};
 use seiza_stacking::{
     ColorComposition, ColorCrop, ColorNormalization, ColorOptions, ColorTransfer, FitsFrame,
-    ForaxxOptions, LinearImage, NarrowbandPalette, Registrar, RegistrationOptions, combine_lrgb,
-    combine_narrowband, combine_rgb, combine_super_lrgb, combine_super_rgb, resample_to_reference,
-    write_color_fits_f32,
+    ForaxxOptions, LinearImage, LrgbLuminance, NarrowbandPalette, Registrar, RegistrationOptions,
+    RgbLuminance, combine_lrgb, combine_narrowband, combine_rgb, combine_super_lrgb,
+    combine_super_rgb, resample_to_reference, write_color_fits_f32,
 };
 use std::path::{Path, PathBuf};
 
@@ -224,21 +224,23 @@ fn run_rgb(args: RgbArgs) -> Result<()> {
         .common
         .align(registrar.as_ref(), blue.image, &red.image, "blue")?;
     let options = args.common.options();
-    let (composition, label) = match args.luminance_mode {
-        RgbLuminanceModeArg::Native => (combine_rgb(&red.image, &green, &blue, &options)?, "RGB"),
-        RgbLuminanceModeArg::Super => (
-            combine_super_rgb(&red.image, &green, &blue, &options)?,
-            "SUPER-RGB",
-        ),
+    let mode = match args.luminance_mode {
+        RgbLuminanceModeArg::Native => RgbLuminance::Native,
+        RgbLuminanceModeArg::Super => RgbLuminance::Super,
+    };
+    let composition = match mode {
+        RgbLuminance::Native => combine_rgb(&red.image, &green, &blue, &options)?,
+        RgbLuminance::Super => combine_super_rgb(&red.image, &green, &blue, &options)?,
     };
     report_crop(&composition);
-    write_outputs(&args.common, &composition, &red.headers, label)
+    write_outputs(&args.common, &composition, &red.headers, mode.label())
 }
 
 fn run_lrgb(args: LrgbArgs) -> Result<()> {
-    if args.luminance_mode == LuminanceModeArg::Super && args.luminance_weight != 1.0 {
-        anyhow::bail!("--luminance-weight only applies to --luminance-mode replace");
-    }
+    let mode = LrgbLuminance::new(
+        args.luminance_mode == LuminanceModeArg::Super,
+        Some(args.luminance_weight),
+    )?;
     validate_paths(
         &args.common,
         &[
@@ -263,35 +265,28 @@ fn run_lrgb(args: LrgbArgs) -> Result<()> {
         .common
         .align(registrar.as_ref(), blue.image, &luminance.image, "blue")?;
     let options = args.common.options();
-    let (composition, label) = match args.luminance_mode {
-        LuminanceModeArg::Replace => (
-            combine_lrgb(
-                &luminance.image,
-                &red,
-                &green,
-                &blue,
-                args.luminance_weight,
-                &options,
-            )?,
-            "LRGB",
-        ),
-        LuminanceModeArg::Super => (
-            combine_super_lrgb(&luminance.image, &red, &green, &blue, &options)?,
-            "SUPER-LRGB",
-        ),
+    let composition = match mode {
+        LrgbLuminance::Replace { luminance_weight } => combine_lrgb(
+            &luminance.image,
+            &red,
+            &green,
+            &blue,
+            luminance_weight,
+            &options,
+        )?,
+        LrgbLuminance::Super => {
+            combine_super_lrgb(&luminance.image, &red, &green, &blue, &options)?
+        }
     };
     report_crop(&composition);
-    write_outputs(&args.common, &composition, &luminance.headers, label)
+    write_outputs(&args.common, &composition, &luminance.headers, mode.label())
 }
 
 fn run_narrowband(args: NarrowbandArgs) -> Result<()> {
     let palette = NarrowbandPalette::from(args.palette);
-    if palette.requires_sii() && args.sii.is_none() {
-        anyhow::bail!("{} requires --sii", palette.name());
-    }
-    if !palette.requires_sii() && args.sii.is_some() {
-        anyhow::bail!("{} does not use --sii", palette.name());
-    }
+    palette
+        .check_sii(args.sii.is_some())
+        .context("--palette and --sii disagree")?;
     let sii_path = if palette.requires_sii() {
         args.sii.as_ref()
     } else {

@@ -24,11 +24,11 @@ use seiza_stacking::{
     ColorOptions, CropReport, DarkLevelScreening, ExternalParameterKind, ExternalParameterValue,
     ExternalToolRequest, ExternalToolSchema, FitsFrame, FlatStarMaskingOptions,
     FlatStarMaskingStatistics, ForaxxOptions, FrameDiagnostics, FrameDisposition, FrameInputMode,
-    FrameSourceRole, ImpulseFilterOptions, LinearImage, LiveStacker, MasterBuildOptions,
-    MasterDark, MasterFrame, MasterFrameKind, MasterRejectionOptions, NarrowbandMatrix,
-    NarrowbandMix, NarrowbandPalette, RcAstroCli, ReferenceRegion, RegisteredFrameMapping,
-    StackExportSnapshot as RustStackExportSnapshot, StackOptions,
-    StackSnapshot as RustStackSnapshot, build_master_from_fits,
+    FrameSourceRole, ImpulseFilterOptions, LinearImage, LiveStacker, LrgbLuminance,
+    MasterBuildOptions, MasterDark, MasterFrame, MasterFrameKind, MasterRejectionOptions,
+    NarrowbandMatrix, NarrowbandMix, NarrowbandPalette, RcAstroCli, ReferenceRegion,
+    RegisteredFrameMapping, RgbLuminance, StackExportSnapshot as RustStackExportSnapshot,
+    StackOptions, StackSnapshot as RustStackSnapshot, build_master_from_fits,
     build_master_from_fits_with_scratch, checkpoint_depths as rust_checkpoint_depths, combine_lrgb,
     combine_narrowband, combine_narrowband_matrix, combine_rgb, combine_super_lrgb,
     combine_super_rgb, crop_report, measure_depth as rust_measure_depth, path_identity,
@@ -1735,14 +1735,14 @@ pub unsafe extern "C" fn seiza_color_combine_rgb_json(
     clear_error(error_out);
     ffi_result(error_out, || {
         let request: ColorRgbRequest = parse_request(request_json, "RGB composition")?;
-        let super_luminance = match request
+        let mode = match request
             .luminance_mode
             .as_deref()
             .map(str::to_ascii_lowercase)
             .as_deref()
         {
-            None | Some("native") => false,
-            Some("super") => true,
+            None | Some("native") => RgbLuminance::Native,
+            Some("super") => RgbLuminance::Super,
             Some(other) => {
                 return Err(format!(
                     "luminanceMode must be \"native\" or \"super\", not {other:?}"
@@ -1756,7 +1756,6 @@ pub unsafe extern "C" fn seiza_color_combine_rgb_json(
             request.normalization_samples,
             request.crop.as_deref(),
         )?;
-        let label = if super_luminance { "SUPER-RGB" } else { "RGB" };
         compose_color_files(
             &[
                 ("red", &request.red),
@@ -1764,14 +1763,13 @@ pub unsafe extern "C" fn seiza_color_combine_rgb_json(
                 ("blue", &request.blue),
             ],
             &request.output,
-            label,
+            mode.label(),
             &options,
             cancel,
-            |images| {
-                if super_luminance {
+            |images| match mode {
+                RgbLuminance::Native => combine_rgb(&images[0], &images[1], &images[2], &options),
+                RgbLuminance::Super => {
                     combine_super_rgb(&images[0], &images[1], &images[2], &options)
-                } else {
-                    combine_rgb(&images[0], &images[1], &images[2], &options)
                 }
             },
         )
@@ -1819,10 +1817,8 @@ pub unsafe extern "C" fn seiza_color_combine_lrgb_json(
                 ));
             }
         };
-        if super_luminance && request.luminance_weight.is_some_and(|weight| weight != 1.0) {
-            return Err("luminanceWeight only applies when luminanceMode is \"replace\"".into());
-        }
-        let luminance_weight = request.luminance_weight.unwrap_or(1.0);
+        let mode = LrgbLuminance::new(super_luminance, request.luminance_weight)
+            .map_err(color_request_error)?;
         let options = color_options(
             request.normalization.as_deref(),
             request.black_percentile,
@@ -1830,11 +1826,6 @@ pub unsafe extern "C" fn seiza_color_combine_lrgb_json(
             request.normalization_samples,
             request.crop.as_deref(),
         )?;
-        let label = if super_luminance {
-            "SUPER-LRGB"
-        } else {
-            "LRGB"
-        };
         compose_color_files(
             &[
                 ("luminance", &request.luminance),
@@ -1843,17 +1834,20 @@ pub unsafe extern "C" fn seiza_color_combine_lrgb_json(
                 ("blue", &request.blue),
             ],
             &request.output,
-            label,
+            mode.label(),
             &options,
             cancel,
             |images| {
                 let [luminance, red, green, blue] = images else {
                     unreachable!("four channels were read")
                 };
-                if super_luminance {
-                    combine_super_lrgb(luminance, red, green, blue, &options)
-                } else {
-                    combine_lrgb(luminance, red, green, blue, luminance_weight, &options)
+                match mode {
+                    LrgbLuminance::Replace { luminance_weight } => {
+                        combine_lrgb(luminance, red, green, blue, luminance_weight, &options)
+                    }
+                    LrgbLuminance::Super => {
+                        combine_super_lrgb(luminance, red, green, blue, &options)
+                    }
                 }
             },
         )
@@ -1896,13 +1890,9 @@ pub unsafe extern "C" fn seiza_color_combine_narrowband_json(
             .unwrap_or("sho")
             .parse::<NarrowbandPalette>()
             .map_err(|error| error.to_string())?;
-        match (palette.requires_sii(), request.sii.is_some()) {
-            (true, false) => return Err(format!("{} requires an SII channel", palette.name())),
-            (false, true) => {
-                return Err(format!("{} does not use an SII channel", palette.name()));
-            }
-            _ => {}
-        }
+        palette
+            .check_sii(request.sii.is_some())
+            .map_err(color_request_error)?;
         let defaults = ForaxxOptions::default();
         let foraxx = ForaxxOptions {
             target_median: request
@@ -1991,6 +1981,14 @@ pub unsafe extern "C" fn seiza_color_combine_narrowband_matrix_json(
         )
     })
     .unwrap_or(ptr::null_mut())
+}
+
+/// A request the core refused before any work, in the core's own words.
+fn color_request_error(error: seiza_stacking::Error) -> String {
+    match error {
+        seiza_stacking::Error::Color(message) => message,
+        other => other.to_string(),
+    }
 }
 
 /// Parse a required JSON request object.
@@ -9282,7 +9280,7 @@ mod tests {
             ptr::null(),
         )
         .unwrap_err();
-        assert!(error.contains("luminanceWeight"), "{error}");
+        assert!(error.contains("luminance weight only applies"), "{error}");
 
         let (ha, oiii, sii) = (
             path("ha.fits", 0.3),

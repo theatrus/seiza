@@ -539,7 +539,9 @@ fn narrowband_cli_validates_and_uses_only_palette_inputs() {
         .output()
         .unwrap();
     assert!(!missing_required.status.success());
-    assert!(String::from_utf8_lossy(&missing_required.stderr).contains("SHO requires --sii"));
+    assert!(
+        String::from_utf8_lossy(&missing_required.stderr).contains("SHO requires an SII channel")
+    );
 
     let ha = directory.path().join("ha.fits");
     let oiii = directory.path().join("oiii.fits");
@@ -564,5 +566,7 @@ fn narrowband_cli_validates_and_uses_only_palette_inputs() {
         .output()
         .unwrap();
     assert!(!rejects_unused.status.success());
-    assert!(String::from_utf8_lossy(&rejects_unused.stderr).contains("HOO does not use --sii"));
+    assert!(
+        String::from_utf8_lossy(&rejects_unused.stderr).contains("HOO does not use an SII channel")
+    );
 }

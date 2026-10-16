@@ -135,6 +135,68 @@ impl NarrowbandMatrix {
     pub const LABEL: &'static str = "NARROWBAND-MATRIX";
 }
 
+/// How an RGB composition forms its luminance.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RgbLuminance {
+    /// Keep the composed channels as they are ([`combine_rgb`]).
+    #[default]
+    Native,
+    /// Scale the triplet to a synthetic luminance of `R + G + B`
+    /// ([`combine_super_rgb`]).
+    Super,
+}
+
+impl RgbLuminance {
+    /// The label [`write_color_fits_f32`](crate::write_color_fits_f32) is
+    /// given for the composition: `RGB` or `SUPER-RGB`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Native => "RGB",
+            Self::Super => "SUPER-RGB",
+        }
+    }
+}
+
+/// How an LRGB composition forms its luminance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LrgbLuminance {
+    /// Swap in L, weighted from 0 (RGB alone) to 1 (L alone)
+    /// ([`combine_lrgb`]).
+    Replace {
+        /// The weight of L in the output luminance.
+        luminance_weight: f32,
+    },
+    /// Target the additive `L + R + G + B` ([`combine_super_lrgb`]).
+    Super,
+}
+
+impl LrgbLuminance {
+    /// The mode a host asked for: super-luminance or replacement, with the
+    /// luminance weight it gave, if any (1 when it gave none). A weight
+    /// only applies to replacement, so super-luminance refuses any weight
+    /// but 1.
+    pub fn new(super_luminance: bool, luminance_weight: Option<f32>) -> Result<Self> {
+        match (super_luminance, luminance_weight) {
+            (true, Some(weight)) if weight != 1.0 => Err(Error::Color(
+                "the luminance weight only applies when the luminance mode is replace".into(),
+            )),
+            (true, _) => Ok(Self::Super),
+            (false, weight) => Ok(Self::Replace {
+                luminance_weight: weight.unwrap_or(1.0),
+            }),
+        }
+    }
+
+    /// The label [`write_color_fits_f32`](crate::write_color_fits_f32) is
+    /// given for the composition: `LRGB` or `SUPER-LRGB`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Replace { .. } => "LRGB",
+            Self::Super => "SUPER-LRGB",
+        }
+    }
+}
+
 /// Common false-color assignments. A three-letter name lists the source used
 /// for red, green, and blue respectively.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,6 +240,22 @@ impl NarrowbandPalette {
     /// Whether the palette needs an SII channel supplied.
     pub fn requires_sii(self) -> bool {
         !matches!(self, Self::Hoo | Self::ForaxxHoo)
+    }
+
+    /// Check whether an SII channel was `supplied` as the palette needs:
+    /// the three-filter palettes need one, and HOO and Foraxx-HOO use none.
+    pub fn check_sii(self, supplied: bool) -> Result<()> {
+        match (self.requires_sii(), supplied) {
+            (true, false) => Err(Error::Color(format!(
+                "{} requires an SII channel",
+                self.name()
+            ))),
+            (false, true) => Err(Error::Color(format!(
+                "{} does not use an SII channel",
+                self.name()
+            ))),
+            _ => Ok(()),
+        }
     }
 
     /// Transfer semantics of the palette's output.
@@ -425,10 +503,11 @@ pub fn combine_narrowband(
     foraxx: &ForaxxOptions,
 ) -> Result<ColorComposition> {
     validate_options(options)?;
+    // An SII channel a palette does not use is set aside here rather than
+    // refused; hosts refuse it first with check_sii.
     let sii = if palette.requires_sii() {
-        Some(
-            sii.ok_or_else(|| Error::Color(format!("{} requires an SII channel", palette.name())))?,
-        )
+        palette.check_sii(sii.is_some())?;
+        sii
     } else {
         None
     };
@@ -1371,6 +1450,53 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("no pixel is covered"));
+    }
+
+    #[test]
+    fn modes_carry_their_labels_and_refuse_a_weight_super_luminance_ignores() {
+        assert_eq!(RgbLuminance::Native.label(), "RGB");
+        assert_eq!(RgbLuminance::Super.label(), "SUPER-RGB");
+        assert_eq!(
+            LrgbLuminance::new(false, None).unwrap(),
+            LrgbLuminance::Replace {
+                luminance_weight: 1.0
+            }
+        );
+        assert_eq!(
+            LrgbLuminance::new(false, Some(0.4)).unwrap(),
+            LrgbLuminance::Replace {
+                luminance_weight: 0.4
+            }
+        );
+        assert_eq!(
+            LrgbLuminance::new(true, Some(1.0)).unwrap(),
+            LrgbLuminance::Super
+        );
+        assert_eq!(
+            LrgbLuminance::new(true, None).unwrap().label(),
+            "SUPER-LRGB"
+        );
+        assert_eq!(LrgbLuminance::new(false, None).unwrap().label(), "LRGB");
+        let error = LrgbLuminance::new(true, Some(0.5)).unwrap_err();
+        assert!(error.to_string().contains("only applies"), "{error}");
+    }
+
+    #[test]
+    fn palettes_check_the_sii_channel() {
+        assert!(NarrowbandPalette::Sho.check_sii(true).is_ok());
+        assert!(NarrowbandPalette::Hoo.check_sii(false).is_ok());
+        let missing = NarrowbandPalette::ForaxxSho.check_sii(false).unwrap_err();
+        assert!(
+            missing
+                .to_string()
+                .contains("FORAXX-SHO requires an SII channel")
+        );
+        let unused = NarrowbandPalette::Hoo.check_sii(true).unwrap_err();
+        assert!(
+            unused
+                .to_string()
+                .contains("HOO does not use an SII channel")
+        );
     }
 
     #[test]

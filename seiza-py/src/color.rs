@@ -6,8 +6,9 @@ use pyo3::types::{PyBool, PyDict, PyList};
 use seiza_fits::HeaderValue;
 use seiza_stacking::{
     ChannelSamples, ColorComposition, ColorCrop, ColorNormalization, ColorOptions, CropReport,
-    ForaxxOptions, NarrowbandMatrix, NarrowbandMix, NarrowbandPalette, ReferenceRegion,
-    combine_lrgb as compose_lrgb, combine_narrowband as compose_narrowband,
+    ForaxxOptions, LrgbLuminance, NarrowbandMatrix, NarrowbandMix, NarrowbandPalette,
+    ReferenceRegion, RgbLuminance, combine_lrgb as compose_lrgb,
+    combine_narrowband as compose_narrowband,
     combine_narrowband_matrix as compose_narrowband_matrix, combine_rgb as compose_rgb,
     combine_super_lrgb as compose_super_lrgb, combine_super_rgb as compose_super_rgb,
     crop_report as report_crop, write_color_fits_f32,
@@ -16,6 +17,15 @@ use std::path::PathBuf;
 
 fn color_error(error: seiza_stacking::Error) -> PyErr {
     crate::EngineError::new_err(error.to_string())
+}
+
+/// A request the core refused before any work, as a `ValueError` in the
+/// core's own words.
+fn invalid(error: seiza_stacking::Error) -> PyErr {
+    match error {
+        seiza_stacking::Error::Color(message) => PyValueError::new_err(message),
+        other => color_error(other),
+    }
 }
 
 fn parse_crop(crop: &str) -> PyResult<ColorCrop> {
@@ -137,9 +147,9 @@ fn combine_rgb<'py>(
     header: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
     let output = ColorOutput::new(output, header)?;
-    let super_luminance = match luminance_mode.to_ascii_lowercase().as_str() {
-        "native" => false,
-        "super" => true,
+    let mode = match luminance_mode.to_ascii_lowercase().as_str() {
+        "native" => RgbLuminance::Native,
+        "super" => RgbLuminance::Super,
         _ => {
             return Err(PyValueError::new_err(
                 "luminance_mode must be 'native' or 'super'",
@@ -156,13 +166,9 @@ fn combine_rgb<'py>(
         normalization_samples,
         crop,
     )?;
-    let label = if super_luminance { "SUPER-RGB" } else { "RGB" };
-    finish_composition(py, output, label, move || {
-        if super_luminance {
-            compose_super_rgb(&red, &green, &blue, &options)
-        } else {
-            compose_rgb(&red, &green, &blue, &options)
-        }
+    finish_composition(py, output, mode.label(), move || match mode {
+        RgbLuminance::Native => compose_rgb(&red, &green, &blue, &options),
+        RgbLuminance::Super => compose_super_rgb(&red, &green, &blue, &options),
     })
 }
 
@@ -193,20 +199,14 @@ fn combine_lrgb<'py>(
     let output = ColorOutput::new(output, header)?;
     let super_luminance = match luminance_mode.to_ascii_lowercase().as_str() {
         "replace" => false,
-        "super" => {
-            if luminance_weight != 1.0 {
-                return Err(PyValueError::new_err(
-                    "luminance_weight only applies when luminance_mode='replace'",
-                ));
-            }
-            true
-        }
+        "super" => true,
         _ => {
             return Err(PyValueError::new_err(
                 "luminance_mode must be 'replace' or 'super'",
             ));
         }
     };
+    let mode = LrgbLuminance::new(super_luminance, Some(luminance_weight)).map_err(invalid)?;
     let luminance = linear_image(luminance)?;
     let red = linear_image(red)?;
     let green = linear_image(green)?;
@@ -218,17 +218,11 @@ fn combine_lrgb<'py>(
         normalization_samples,
         crop,
     )?;
-    let label = if super_luminance {
-        "SUPER-LRGB"
-    } else {
-        "LRGB"
-    };
-    finish_composition(py, output, label, move || {
-        if super_luminance {
-            compose_super_lrgb(&luminance, &red, &green, &blue, &options)
-        } else {
+    finish_composition(py, output, mode.label(), move || match mode {
+        LrgbLuminance::Replace { luminance_weight } => {
             compose_lrgb(&luminance, &red, &green, &blue, luminance_weight, &options)
         }
+        LrgbLuminance::Super => compose_super_lrgb(&luminance, &red, &green, &blue, &options),
     })
 }
 
@@ -256,18 +250,7 @@ fn combine_narrowband<'py>(
 ) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
     let output = ColorOutput::new(output, header)?;
     let palette = parse_palette(palette)?;
-    if palette.requires_sii() && sii.is_none() {
-        return Err(PyValueError::new_err(format!(
-            "{} requires an SII channel",
-            palette.name()
-        )));
-    }
-    if !palette.requires_sii() && sii.is_some() {
-        return Err(PyValueError::new_err(format!(
-            "{} does not use an SII channel",
-            palette.name()
-        )));
-    }
+    palette.check_sii(sii.is_some()).map_err(invalid)?;
     let options = options(
         normalization,
         black_percentile,
