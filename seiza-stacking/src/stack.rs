@@ -3496,6 +3496,85 @@ mod tests {
     }
 
     #[test]
+    fn a_light_admitted_at_its_measured_angle_replays_at_it() {
+        // A light recorded at 113.8 degrees whose own pixels showed it
+        // follows the flat at 3.2: admitted under a gate that reads it at
+        // its measured angle, and replayed under that gate after the stack
+        // narrows again, and after a saved context.
+        use seiza_calibration::{LightRotation, MatchTolerances};
+        let directory = tempfile::tempdir().unwrap();
+        let star_field = stacking_star_field(160, 128);
+        let write = |name: &str, image: &LinearImage, cards: Vec<seiza_fits::WriteHeaderCard>| {
+            let path = directory.path().join(name);
+            crate::write_processed_image_fits_f32(&path, image, &[], &cards).unwrap();
+            path
+        };
+        let rotation =
+            |degrees| seiza_fits::WriteHeaderCard::new("ROTATANG", HeaderValue::Float(degrees));
+        let light = |name: &str, offset: f32, degrees: f64| {
+            write(
+                name,
+                &offset_image(&star_field, offset),
+                vec![
+                    seiza_fits::WriteHeaderCard::new(
+                        "IMAGETYP",
+                        HeaderValue::String("LIGHT".into()),
+                    ),
+                    rotation(degrees),
+                ],
+            )
+        };
+        let flat = write(
+            "flat.fits",
+            &LinearImage::new(160, 128, 1, vec![1.0; 160 * 128]).unwrap(),
+            vec![
+                seiza_fits::WriteHeaderCard::new("SEIZAMST", HeaderValue::String("FLAT".into())),
+                rotation(3.2),
+            ],
+        );
+        let reference = light("reference.fits", 0.0, 3.2);
+        let mut stacker = LiveStacker::open_fits(
+            &reference,
+            None,
+            None,
+            Some(&flat),
+            None,
+            StackOptions::default(),
+        )
+        .unwrap();
+        let measured = MatchTolerances {
+            light_rotation: LightRotation::Measured { degrees: 3.0 },
+            ..MatchTolerances::default()
+        };
+        stacker.set_match_tolerances(measured).unwrap();
+        assert!(matches!(
+            stacker.push_fits(light("turned.fits", 1.0, 113.8)).unwrap(),
+            FrameDisposition::Accepted(_)
+        ));
+        stacker
+            .set_match_tolerances(MatchTolerances::default())
+            .unwrap();
+        assert!(matches!(
+            stacker
+                .push_fits(light("turned-2.fits", 2.0, 113.8))
+                .unwrap(),
+            FrameDisposition::Rejected(FrameRejectionReason::Calibration(_))
+        ));
+        let batch = crate::BatchStackOptions::default();
+        let replayed = stacker.reintegrate(&batch, |_, _, _| {}).unwrap();
+        assert_eq!(replayed.snapshot.accepted_frames, 2);
+
+        let path = directory.path().join("measured.seiza-stack");
+        stacker.save_context(&path).unwrap();
+        let restored = LiveStacker::open_context(&path).unwrap();
+        assert_eq!(restored.match_tolerances(), MatchTolerances::default());
+        // The stack's own gate would refuse the turned light: it replays
+        // because the context kept the gate it was admitted under.
+        let replayed = restored.reintegrate(&batch, |_, _, _| {}).unwrap();
+        assert_eq!(replayed.snapshot.accepted_frames, 2);
+    }
+
+    #[test]
     fn a_stack_judges_each_light_under_its_gate_and_replays_it_so() {
         // A flat from 3.2 degrees, chosen on purpose for a light at 113.8:
         // the stack admits it under a gate opened for that light, judges

@@ -24,13 +24,12 @@
 //!
 //! Everything here is pure: planes and numbers in, plain values out. A host
 //! reads the frames, keeps the responses and comparisons, and decides what
-//! a verdict means for its library. PSF Guard's flat grouping is built on
-//! it.
+//! a verdict means for its library.
 
 pub mod choice;
 pub mod evidence;
 pub mod metric;
 
-pub use choice::{PairFit, ResponseChoice, choose_response};
-pub use evidence::{Fit, Side, Verdict};
+pub use choice::{PairFit, PairOutcome, ResponseChoice, choose_response};
+pub use evidence::{Fit, FitOutcome, Side, Verdict};
 pub use metric::{Comparison, FlatResponse, Plane, Spot, SpotKind};

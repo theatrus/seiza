@@ -9,14 +9,18 @@
 //! difference with placebos ([`super::evidence::fit`]): a weight near 0 says
 //! the background follows the first of the pair, near 1 the second, and the
 //! placebos say whether the weight stands clear of what the sky's own
-//! structure does at places where nothing differs.
+//! structure does at places where nothing differs. Each pair is fitted from
+//! both of its candidates, and decides only when both fits agree, so the
+//! order the candidates come in changes nothing.
 //!
 //! A candidate wins when it beats every candidate it can be told apart from
 //! and loses to none. Two candidates whose responses hold nothing compact
 //! apart cannot be told apart, and need not be: either corrects the light
-//! the same way. Over a nebula the fits usually stay undecided, and nothing
-//! wins; the host then falls back on what it knew before, such as the
-//! recorded angle, and should say so.
+//! the same way. A pair the background could not be weighed against at all
+//! (no data over the shadows, planes too small) is not alike: nothing is
+//! known of it, and neither candidate wins past it. Over a nebula the fits
+//! usually stay undecided, and nothing wins; the host then falls back on
+//! what it knew before, such as the recorded angle, and should say so.
 //!
 //! The pairwise fit, not a residual per candidate, is what decides. A
 //! residual measures the sky's structure as much as the flat's, and over a
@@ -24,39 +28,62 @@
 //! under the faintest part of it. A pair's fit asks only about the pixels
 //! where the two candidates differ, and its placebos measure the sky there.
 
-use super::evidence::{self, Fit, Side, Verdict};
+use super::evidence::{self, BackgroundRatio, Fit, FitOutcome, Side, Verdict};
 use super::metric::{self, Plane};
 use serde::{Deserialize, Serialize};
 
 /// Bump when equal backgrounds and candidates may choose differently.
 pub const CHOICE_ALGORITHM_VERSION: u32 = 1;
 
+/// What the background said of one pair of candidates.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum PairOutcome {
+    /// The two hold nothing compact apart, or the host measured them
+    /// alike: they cannot be told apart, and correct a light alike.
+    Alike,
+    /// The background could not be weighed against their difference.
+    /// Nothing is known: neither may win past the other.
+    Unfitted,
+    /// The fit, `second` over `first`, weighed from `first`'s side: a
+    /// weight of 0 follows `first`, 1 follows `second`. Its verdict is
+    /// `Before` for `first` and `After` for `second` only when the fit
+    /// from `second`'s side agrees; otherwise undecided.
+    Fit(Fit),
+}
+
 /// How the background fared between two candidates.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PairFit {
-    /// The two candidates, by index, `first < second`.
+    /// The first candidate of the pair, by index.
     pub first: usize,
+    /// The second candidate of the pair, by index; `first < second`.
     pub second: usize,
-    /// The background fitted against the pair's difference, `second` over
-    /// `first`: a weight of 0 follows `first`, 1 follows `second`. `None`
-    /// when the two hold nothing compact apart, so they cannot be told
-    /// apart, and correct a light alike.
-    pub fit: Option<Fit>,
+    /// What the background said of them.
+    pub outcome: PairOutcome,
 }
 
 impl PairFit {
+    /// The fit, when the background could be weighed against the pair.
+    pub fn fit(&self) -> Option<Fit> {
+        match self.outcome {
+            PairOutcome::Fit(fit) => Some(fit),
+            _ => None,
+        }
+    }
+
     /// The candidate the fit decided for, when it decided.
     pub fn favours(&self) -> Option<usize> {
-        match self.fit?.verdict {
+        match self.fit()?.verdict {
             Verdict::Before => Some(self.first),
             Verdict::After => Some(self.second),
             Verdict::Undecided => None,
         }
     }
 
-    /// Whether the pair could not be told apart at all.
+    /// Whether the two cannot be told apart: alike, not merely unfitted.
     pub fn alike(&self) -> bool {
-        self.fit.is_none()
+        self.outcome == PairOutcome::Alike
     }
 }
 
@@ -64,12 +91,12 @@ impl PairFit {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ResponseChoice {
     /// Candidates that beat every candidate they can be told apart from and
-    /// lose to none, in index order. More than one only when they cannot be
-    /// told apart from each other. Empty when nothing stands clear: the
-    /// background could not tell, as over a nebula, or every candidate is
-    /// alike. A lone candidate wins unopposed.
+    /// lose to none, in index order. More than one only when they are alike
+    /// with each other. Empty when nothing stands clear: the background
+    /// could not tell, as over a nebula, a pair could not be fitted, or
+    /// every candidate is alike. A lone candidate wins unopposed.
     pub winners: Vec<usize>,
-    /// Every pair's fit, in index order.
+    /// Every pair's outcome, in index order.
     pub pairs: Vec<PairFit>,
 }
 
@@ -83,9 +110,17 @@ impl ResponseChoice {
     }
 
     /// Whether every pair was alike: nothing compact tells the candidates
-    /// apart, so any of them corrects the light the same way.
+    /// apart, so any of them corrects the light the same way. A pair that
+    /// could not be fitted is not alike.
     pub fn all_alike(&self) -> bool {
         !self.pairs.is_empty() && self.pairs.iter().all(PairFit::alike)
+    }
+
+    /// Whether some pair could not be fitted at all.
+    pub fn any_unfitted(&self) -> bool {
+        self.pairs
+            .iter()
+            .any(|pair| pair.outcome == PairOutcome::Unfitted)
     }
 
     /// The pair of `a` and `b`, either way round.
@@ -103,7 +138,8 @@ impl ResponseChoice {
 /// `background` is a light background with its pedestal removed
 /// ([`super::evidence::background`]); `candidates` are flat responses with
 /// theirs removed ([`super::metric::FlatResponse::without_pedestal`]), all
-/// on the background's grid. A candidate of another size is never chosen.
+/// on the background's grid. A candidate of another size is never chosen,
+/// and its pairs are unfitted.
 ///
 /// `alike(a, b)` says which pairs the host already measured alike, flat
 /// against flat, by its own limits: they are not fitted, and count as
@@ -115,22 +151,45 @@ pub fn choose_response(
     candidates: &[Plane],
     alike: impl Fn(usize, usize) -> bool,
 ) -> ResponseChoice {
-    let usable =
-        |plane: &Plane| plane.width == background.width && plane.height == background.height;
+    let usable = |plane: &Plane| {
+        plane.width == background.width
+            && plane.height == background.height
+            && plane.data.len() == plane.width * plane.height
+    };
+    // The background over each candidate, once: every pair it is in
+    // weighs the same residual.
+    let ratios: Vec<Option<BackgroundRatio>> = candidates
+        .iter()
+        .map(|candidate| {
+            usable(candidate)
+                .then(|| evidence::background_ratio(candidate, background))
+                .flatten()
+        })
+        .collect();
     let mut pairs = Vec::new();
     for first in 0..candidates.len() {
         for second in first + 1..candidates.len() {
-            if !usable(&candidates[first]) || !usable(&candidates[second]) {
-                continue;
-            }
-            let fit = if alike(first, second) {
-                None
+            let outcome = if alike(first, second) {
+                PairOutcome::Alike
             } else {
-                pair_fit(background, &candidates[first], &candidates[second])
+                match (&ratios[first], &ratios[second]) {
+                    (Some(from_first), Some(from_second)) => pair_outcome(
+                        &candidates[first],
+                        &candidates[second],
+                        from_first,
+                        from_second,
+                    ),
+                    _ => PairOutcome::Unfitted,
+                }
             };
-            pairs.push(PairFit { first, second, fit });
+            pairs.push(PairFit {
+                first,
+                second,
+                outcome,
+            });
         }
     }
+    let lone = candidates.len() == 1 && usable(&candidates[0]);
     let winners = (0..candidates.len())
         .filter(|candidate| usable(&candidates[*candidate]))
         .filter(|candidate| {
@@ -139,8 +198,7 @@ pub fn choose_response(
                 .filter(|pair| pair.first == *candidate || pair.second == *candidate)
                 .collect();
             if mine.is_empty() {
-                // Unopposed: the only usable candidate.
-                return candidates.iter().filter(|plane| usable(plane)).count() == 1;
+                return lone;
             }
             let beats = mine
                 .iter()
@@ -155,11 +213,60 @@ pub fn choose_response(
     ResponseChoice { winners, pairs }
 }
 
-/// The background against the difference between two candidates, `second`
-/// over `first`, weighed from `first`'s side.
-fn pair_fit(background: &Plane, first: &Plane, second: &Plane) -> Option<Fit> {
-    let map = metric::change_map(first, second)?;
-    evidence::fit(background, first, Side::Before, &map)
+/// The background against the difference between two candidates, fitted
+/// from each side: `second` over `first` weighed from `first`, and its
+/// inverse weighed from `second`. A side is taken only when both agree.
+fn pair_outcome(
+    first: &Plane,
+    second: &Plane,
+    from_first: &BackgroundRatio,
+    from_second: &BackgroundRatio,
+) -> PairOutcome {
+    let Some(map) = metric::change_map(first, second) else {
+        return PairOutcome::Unfitted;
+    };
+    // The same difference seen from `second`: first over second.
+    let inverse = Plane {
+        width: map.width,
+        height: map.height,
+        data: map
+            .data
+            .iter()
+            .map(|value| {
+                if *value > 0.0 && value.is_finite() {
+                    value.recip()
+                } else {
+                    1.0
+                }
+            })
+            .collect(),
+    };
+    let forward = evidence::fit_ratio(from_first, Side::Before, &map);
+    let backward = evidence::fit_ratio(from_second, Side::Before, &inverse);
+    match (forward, backward) {
+        (FitOutcome::NoShadows, FitOutcome::NoShadows) => PairOutcome::Alike,
+        (FitOutcome::Unfitted, _) | (_, FitOutcome::Unfitted) => PairOutcome::Unfitted,
+        (FitOutcome::Fit(forward), FitOutcome::Fit(backward)) => {
+            let verdict = match (forward.verdict, backward.verdict) {
+                // From `first`: the lights lack the change, so follow
+                // `first`; from `second`, they carry the inverse change.
+                (Verdict::Before, Verdict::After) => Verdict::Before,
+                (Verdict::After, Verdict::Before) => Verdict::After,
+                _ => Verdict::Undecided,
+            };
+            PairOutcome::Fit(Fit { verdict, ..forward })
+        }
+        // One side sees shadows the other does not: nothing to agree on.
+        (FitOutcome::Fit(fit), _) => PairOutcome::Fit(Fit {
+            verdict: Verdict::Undecided,
+            ..fit
+        }),
+        (_, FitOutcome::Fit(fit)) => PairOutcome::Fit(Fit {
+            carried: 1.0 - fit.carried,
+            verdict: Verdict::Undecided,
+            ..fit
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -245,10 +352,13 @@ mod tests {
             choose_response(&background, std::slice::from_ref(&first), |_, _| false).winners,
             vec![0]
         );
+        // A candidate of another size cannot be weighed: its pair is
+        // unfitted, and neither wins past it.
         let small = synthetic(120, 80, &[], 0.0, &[], 0.0003, 5);
         let choice = choose_response(&background, &[small, first], |_, _| false);
-        assert_eq!(choice.winners, vec![1], "{choice:?}");
-        assert!(choice.pairs.is_empty());
+        assert!(choice.winners.is_empty(), "{choice:?}");
+        assert!(choice.any_unfitted());
+        assert!(!choice.all_alike());
     }
 
     #[test]

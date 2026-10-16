@@ -27,7 +27,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Side {
+    /// Before the change: the earlier state.
     Before,
+    /// After the change: the later state.
     After,
 }
 
@@ -99,7 +101,8 @@ const RING_RADII: [f64; 3] = [1.0, 1.5, 2.0];
 /// frame. One pixel takes the cores and leaves the change room to show.
 const LIGHT_STAR_GROW: usize = 1;
 
-/// One fit.
+/// A background weighed against one change: how much of it the background
+/// carries, how sure that is, and the side that says.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Fit {
     /// How much of the change the lights carry: 0 none, 1 all of it.
@@ -108,6 +111,7 @@ pub struct Fit {
     /// shadow had room for enough placebos (written as `null`).
     #[serde(with = "spread")]
     pub spread: f64,
+    /// The side the fit decides for, or undecided.
     pub verdict: Verdict,
 }
 
@@ -339,22 +343,85 @@ fn combine_shadows(fits: &[ShadowFit]) -> Option<ShadowFit> {
     })
 }
 
+/// What fitting a background against a change came to.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum FitOutcome {
+    /// The change's map holds nothing compact to fit: the two sides it
+    /// was measured from cannot be told apart by their shadows.
+    NoShadows,
+    /// The map holds shadows, but the background could not be weighed
+    /// against them: planes of different sizes or too small to compare, or
+    /// a background with no data over the shadows (masked, clipped, or
+    /// beyond the frame). Nothing is known, which is not the same as
+    /// "alike".
+    Unfitted,
+    /// The fit, with its verdict.
+    Fit(Fit),
+}
+
+impl FitOutcome {
+    /// The fit, when there is one.
+    pub fn fit(self) -> Option<Fit> {
+        match self {
+            Self::Fit(fit) => Some(fit),
+            _ => None,
+        }
+    }
+}
+
 /// Fit the background against a change. `reference` is a flat response,
 /// pedestal removed, from `reference_side` of the change; `map` is the
-/// change's map, after over before, 1 away from it.
+/// change's map, after over before, 1 away from it. `None` both when the
+/// map holds no shadows and when the background could not be weighed
+/// against them; [`fit_outcome`] tells the two apart.
 pub fn fit(
     background: &Plane,
     reference: &Plane,
     reference_side: Side,
     map: &Plane,
 ) -> Option<Fit> {
+    fit_outcome(background, reference, reference_side, map).fit()
+}
+
+/// [`fit`], saying why there is no fit when there is none.
+pub fn fit_outcome(
+    background: &Plane,
+    reference: &Plane,
+    reference_side: Side,
+    map: &Plane,
+) -> FitOutcome {
     if background.width != map.width || background.height != map.height {
-        return None;
+        return FitOutcome::Unfitted;
     }
+    let Some(ratio) = background_ratio(reference, background) else {
+        return FitOutcome::Unfitted;
+    };
+    fit_ratio(&ratio, reference_side, map)
+}
+
+/// The compact part of a background over a reference response, with the
+/// pixels that take no part: what a fit weighs. Worked out once per
+/// reference when one background is fitted against several changes.
+pub(crate) struct BackgroundRatio {
+    residual: Vec<f32>,
+    excluded: Vec<bool>,
+}
+
+pub(crate) fn background_ratio(reference: &Plane, background: &Plane) -> Option<BackgroundRatio> {
     let (residual, excluded) = metric::compact_ratio(reference, background, LIGHT_STAR_GROW)?;
+    Some(BackgroundRatio { residual, excluded })
+}
+
+/// Fit a background's ratio to its reference against a change's map.
+pub(crate) fn fit_ratio(ratio: &BackgroundRatio, reference_side: Side, map: &Plane) -> FitOutcome {
+    let (residual, excluded) = (&ratio.residual, &ratio.excluded);
+    if residual.len() != map.data.len() || map.width == 0 {
+        return FitOutcome::Unfitted;
+    }
     let shadows = shadows(map);
     if shadows.is_empty() {
-        return None;
+        return FitOutcome::NoShadows;
     }
     // The background over the reference: a weight of 0 means the lights
     // share the reference's side.
@@ -375,21 +442,26 @@ pub fn fit(
                     }
                 }
             }
-            fit_shadow(&residual, &excluded, &others, map.width, template)
+            fit_shadow(residual, excluded, &others, map.width, template)
         })
         .collect();
     let Some(combined) = combine_shadows(&fits) else {
         // No shadow could be weighed against placebos: say what the whole
         // change weighs, and decide nothing.
         let whole: Vec<(usize, f32)> = shadows.into_iter().flatten().collect();
-        let alpha = weight(&residual, &excluded, map.width, &whole, (0, 0))?;
-        return Some(Fit {
+        let Some(alpha) = weight(residual, excluded, map.width, &whole, (0, 0)) else {
+            return FitOutcome::Unfitted;
+        };
+        return FitOutcome::Fit(Fit {
             carried: alpha + offset,
             spread: f64::INFINITY,
             verdict: Verdict::Undecided,
         });
     };
     let (carried, spread) = (combined.weight + offset, combined.spread);
+    if !(carried.is_finite() && spread.is_finite()) {
+        return FitOutcome::Unfitted;
+    }
     let decides = |side: f64, other: f64| {
         spread <= MAX_SPREAD
             && (carried - side).abs() <= NEAR_SPREADS * spread.max(0.05)
@@ -402,7 +474,7 @@ pub fn fit(
     } else {
         Verdict::Undecided
     };
-    Some(Fit {
+    FitOutcome::Fit(Fit {
         carried,
         spread,
         verdict,
@@ -479,8 +551,8 @@ mod tests {
         assert_eq!(fitted.verdict, Verdict::Undecided, "{fitted:?}");
     }
 
-    /// Four shadows from one edge of the frame to the other, as C925's
-    /// 2026 donut change: the whole template has no room to move.
+    /// Four shadows from one edge of the frame to the other, as one real
+    /// rig's window change spread: the whole template has no room to move.
     fn spread_out() -> (Plane, Plane, Plane) {
         let dust = [
             (7.0, 40.0, 6.0, 0.02),

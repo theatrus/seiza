@@ -73,12 +73,16 @@ const MAX_SPOTS: usize = 40;
 /// A single-channel image in row-major order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plane {
+    /// Columns.
     pub width: usize,
+    /// Rows.
     pub height: usize,
+    /// `width × height` values, row by row; NaN where there is no data.
     pub data: Vec<f32>,
 }
 
 impl Plane {
+    /// A plane of `width × height` holding `value` everywhere.
     pub fn filled(width: usize, height: usize, value: f32) -> Self {
         Self {
             width,
@@ -104,6 +108,7 @@ pub struct FlatResponse {
     pub level: f32,
     /// Noise of one response pixel, as a fraction of the response.
     pub noise: f32,
+    /// How many flats it combines.
     pub frames: usize,
 }
 
@@ -242,7 +247,7 @@ pub fn build_response(binned: &[Plane], bin: usize) -> Option<FlatResponse> {
     }
     let count = binned.len();
     let pixels = first.width * first.height;
-    let combined: Vec<(f32, f32)> = (0..pixels)
+    let combined: Vec<f32> = (0..pixels)
         .into_par_iter()
         .map_init(
             || Vec::with_capacity(count),
@@ -256,7 +261,7 @@ pub fn build_response(binned: &[Plane], bin: usize) -> Option<FlatResponse> {
                         .filter(|value| value.is_finite()),
                 );
                 if samples.is_empty() {
-                    return (f32::NAN, f32::NAN);
+                    return f32::NAN;
                 }
                 let middle = median_in_place(samples);
                 let mut deviations: Vec<f32> =
@@ -271,31 +276,54 @@ pub fn build_response(binned: &[Plane], bin: usize) -> Option<FlatResponse> {
                     .fold((0f64, 0u32), |(sum, kept), value| {
                         (sum + f64::from(*value), kept + 1)
                     });
-                let value = if kept > 0 {
+                if kept > 0 {
                     (sum / f64::from(kept)) as f32
                 } else {
                     middle
-                };
-                (value, mad)
+                }
             },
         )
         .collect();
-    let mads: Vec<f32> = combined.iter().map(|(_, mad)| *mad).collect();
-    let mut mads = mads;
-    // The median of n samples is noisier than their mean by √(π/2).
-    let noise = median_in_place(&mut mads) * 1.2533 / (count as f32).sqrt();
+    let noise = frame_noise(binned, &levels) / (count as f32).sqrt();
     let mut levels = levels;
     Some(FlatResponse {
         plane: Plane {
             width: first.width,
             height: first.height,
-            data: combined.into_iter().map(|(value, _)| value).collect(),
+            data: combined,
         },
         bin,
         level: median_in_place(&mut levels),
         noise,
         frames: count,
     })
+}
+
+/// The noise of one normalized flat, from the differences of neighbouring
+/// frames in capture order: two frames of one flat field differ by noise
+/// alone (and whatever moved), so the robust spread of their difference is
+/// √2 times one frame's. The median over pairs, so one frame with a
+/// satellite does not set it. The combination is a mean of the samples a
+/// clip keeps, so the response's noise is this over √n.
+fn frame_noise(binned: &[Plane], levels: &[f32]) -> f32 {
+    let mut estimates: Vec<f32> = binned
+        .windows(2)
+        .zip(levels.windows(2))
+        .map(|(pair, level)| {
+            let step = (pair[0].data.len() / (1 << 20)).max(1);
+            let differences: Vec<f32> = pair[0]
+                .data
+                .iter()
+                .zip(&pair[1].data)
+                .step_by(step)
+                .map(|(a, b)| a / level[0] - b / level[1])
+                .filter(|d| d.is_finite())
+                .collect();
+            robust_sigma(&differences) / std::f32::consts::SQRT_2
+        })
+        .filter(|sigma| sigma.is_finite())
+        .collect();
+    median_in_place(&mut estimates)
 }
 
 /// A square max filter of radius `radius` on a mask.
@@ -620,12 +648,14 @@ pub enum SpotKind {
 /// One compact difference between two sessions.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Spot {
+    /// New, gone or moved.
     pub kind: SpotKind,
     /// Whether the later session is darker here. A moved shadow has one
     /// spot of each.
     pub darker: bool,
-    /// Centre, in sensor pixels.
+    /// Centre column, in sensor pixels.
     pub x: f32,
+    /// Centre row, in sensor pixels.
     pub y: f32,
     /// Radius of a disc of the same area, in sensor pixels.
     pub radius: f32,
@@ -638,11 +668,15 @@ pub struct Spot {
 /// How two sessions differ, in fractions of the sky background.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Comparison {
+    /// [`COMPARE_ALGORITHM_VERSION`] when it was made.
     pub algorithm_version: u32,
+    /// The largest departure of the smooth part of the ratio from its best
+    /// plane, inside a 2% border.
     pub broad: f32,
     /// Where the broad maximum lies, as fractions of the width and height.
     pub broad_x: f32,
     pub broad_y: f32,
+    /// The deepest spot's peak: 0 with no spot.
     pub dust: f32,
     /// Robust spread of the smoothed residual.
     pub sigma: f32,
@@ -761,7 +795,8 @@ fn inner_band(width: usize, height: usize) -> impl Fn(usize) -> bool {
     }
 }
 
-/// Compare two responses of one family, their pedestals already removed.
+/// Compare two responses of one light path, their pedestals already
+/// removed.
 /// `bin` converts response pixels to sensor pixels. `None` when the
 /// responses differ in size or hold too little to fit.
 pub fn compare(earlier: &Plane, later: &Plane, bin: usize) -> Option<Comparison> {
@@ -901,7 +936,8 @@ fn pair_moved(found: &mut [(Spot, f32)]) {
 
 /// The compact change between a session before an event and one after it,
 /// in the responses' own (sensor-aligned) pixels: `after / before` with the
-/// smooth part and stars taken out, and exactly 1 away from the change. Dividing an after-flat by it gives a before-flat.
+/// smooth part and stars taken out, and exactly 1 away from the change.
+/// Dividing an after-flat by it gives a before-flat.
 pub fn change_map(before: &Plane, after: &Plane) -> Option<Plane> {
     let ratio = ratio(before, after, STAR_GROW)?;
     let (width, height) = (ratio.width, ratio.height);
@@ -951,6 +987,9 @@ pub fn apply_change_map(
     divide: bool,
 ) {
     let channels = channels.max(1);
+    if width == 0 || map.width == 0 || map.height == 0 || data.len() < width * channels {
+        return;
+    }
     data.par_chunks_mut(width * channels)
         .enumerate()
         .for_each(|(y, row)| {
@@ -971,7 +1010,13 @@ pub fn apply_change_map(
 }
 
 /// The value of a map at a sensor pixel, bilinear between map pixels.
+///
+/// 1 (no change) on a map with no pixels.
 pub fn map_at(map: &Plane, bin: usize, x: f32, y: f32) -> f32 {
+    if map.width == 0 || map.height == 0 || map.data.len() < map.width * map.height {
+        return 1.0;
+    }
+    let bin = bin.max(1);
     let fx = ((x + 0.5) / bin as f32 - 0.5).clamp(0.0, (map.width - 1) as f32);
     let fy = ((y + 0.5) / bin as f32 - 0.5).clamp(0.0, (map.height - 1) as f32);
     let (x0, y0) = (fx.floor() as usize, fy.floor() as usize);
@@ -1000,6 +1045,7 @@ pub fn encode_plane(plane: &Plane) -> Vec<u8> {
     out
 }
 
+/// Read a plane [`encode_plane`] wrote; `None` when the bytes are not one.
 pub fn decode_plane(bytes: &[u8]) -> Option<Plane> {
     let width = u32::from_le_bytes(bytes.get(0..4)?.try_into().ok()?) as usize;
     let height = u32::from_le_bytes(bytes.get(4..8)?.try_into().ok()?) as usize;
@@ -1231,6 +1277,31 @@ pub(crate) mod tests {
         };
         let c = compare_plain(&before, &corrected);
         assert!(c.dust < 0.004, "left {}", c.dust);
+    }
+
+    /// The robust spread of a plane's values.
+    fn spread(plane: &Plane) -> f32 {
+        robust_sigma(&plane.data)
+    }
+
+    #[test]
+    fn the_reported_noise_is_the_responses_own() {
+        // Flats of a perfectly flat field with 1% noise each: the
+        // response's own spread is its noise, at every count of flats.
+        for count in [2usize, 3, 4, 5, 8, 16] {
+            let frames: Vec<Plane> = (0..count as u64)
+                .map(|seed| Plane {
+                    width: 400,
+                    height: 300,
+                    data: (0..400 * 300)
+                        .map(|i| 20_000.0 * (1.0 + 0.01 * noise(i % 400, i / 400, seed + 1)))
+                        .collect(),
+                })
+                .collect();
+            let response = build_response(&frames, 1).unwrap();
+            let ratio = response.noise / spread(&response.plane);
+            assert!((0.8..1.25).contains(&ratio), "{count} flats: {ratio:.2}");
+        }
     }
 
     #[test]

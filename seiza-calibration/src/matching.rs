@@ -1293,7 +1293,7 @@ mod tests {
 
     #[test]
     fn a_measured_light_angle_replaces_the_recorded_one_for_flats() {
-        // C925: an OIII light recorded at 72.6 deg whose own sky follows the
+        // An OIII light recorded at 72.6 deg whose own sky follows the
         // rig's 82.2 deg flats, measured alike with its 72.6 deg flats.
         let mut light = signature();
         light.rotation_deg = Some(72.6);

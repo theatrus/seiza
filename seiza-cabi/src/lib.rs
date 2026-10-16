@@ -2444,6 +2444,12 @@ pub unsafe extern "C" fn seiza_live_stacker_set_match_tolerances(
 /// Fill `tolerances` with the stack's own, every flag set: the gate its
 /// lights are judged under now.
 ///
+/// `SeizaMatchTolerances` has no field for how the light's angle is read
+/// (`MatchTolerances::light_rotation`): a stack whose gate reads lights at
+/// an angle the host measured, as one opened from a context saved that
+/// way, reports its other tolerances here as if it read the recorded
+/// angle, and setting these back gives it the recorded reading.
+///
 /// # Safety
 ///
 /// `stacker` must be a live stacker from this library, with this read
@@ -12614,7 +12620,9 @@ pub unsafe extern "C" fn seiza_match_tolerances_default(tolerances: *mut SeizaMa
 }
 
 impl From<seiza_calibration::MatchTolerances> for SeizaMatchTolerances {
-    /// Every tolerance, with every flag set.
+    /// Every tolerance, with every flag set. How the light's angle is read
+    /// (`light_rotation`) has no field here and is dropped: the result
+    /// reads the recorded angle.
     fn from(tolerances: seiza_calibration::MatchTolerances) -> Self {
         Self {
             known: SEIZA_TOLERANCE_HAS_EXPOSURE
