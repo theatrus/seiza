@@ -42,6 +42,7 @@
 
 mod batch;
 mod calibration;
+mod calibration_plan;
 mod color;
 mod color_calibration;
 mod context;
@@ -73,6 +74,10 @@ pub use batch::{
     integrate_registered_frames,
 };
 pub use calibration::{CalibrationMasters, MasterDark, MasterFlat};
+pub use calibration_plan::{
+    CalibrationExclusion, CalibrationExclusionReason, CalibrationPlan, CalibrationPlanKind,
+    CalibrationPlanRequest, CalibrationRecord, FrameProbe, plan_calibration, probe_frame,
+};
 pub use color::{
     ColorComposition, ColorNormalization, ColorOptions, ColorTransfer, ForaxxOptions,
     LrgbLuminance, NarrowbandMatrix, NarrowbandMix, NarrowbandPalette, RgbLuminance, combine_lrgb,

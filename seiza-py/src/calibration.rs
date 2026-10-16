@@ -3,12 +3,19 @@
 
 use crate::arrays::linear_image;
 use numpy::PyReadonlyArrayDyn;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use seiza_calibration::{
     FrameRole, FrameSignature, LinearImageRef, MatchTolerances, coherent_subset,
     coherent_subset_indices, exposure_matches, fit_flat_pedestal, optics_match, rotation_matches,
     sensor_matches, sort_by_proximity, temperature_matches,
 };
+use seiza_stacking::{
+    CalibrationPlan, CalibrationPlanKind, CalibrationPlanRequest, CalibrationRecord,
+    FrameCalibrationState, FrameMetadata, FrameProbe, FrameSourceRole, plan_calibration,
+    probe_frame,
+};
+use std::path::PathBuf;
 
 /// What a frame was shot with, as far as matching cares.
 ///
@@ -512,6 +519,360 @@ fn py_fit_flat_pedestal(
     })
 }
 
+/// Calibration steps a frame's header says are already done.
+#[pyclass(
+    skip_from_py_object,
+    frozen,
+    name = "FrameCalibrationState",
+    module = "seiza"
+)]
+#[derive(Clone, Copy)]
+pub(crate) struct PyFrameCalibrationState {
+    inner: FrameCalibrationState,
+}
+
+#[pymethods]
+impl PyFrameCalibrationState {
+    #[getter]
+    fn bias_subtracted(&self) -> bool {
+        self.inner.bias_subtracted
+    }
+    #[getter]
+    fn dark_subtracted(&self) -> bool {
+        self.inner.dark_subtracted
+    }
+    #[getter]
+    fn flat_normalized(&self) -> bool {
+        self.inner.flat_normalized
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "FrameCalibrationState(bias_subtracted={}, dark_subtracted={}, flat_normalized={})",
+            python_bool(self.inner.bias_subtracted),
+            python_bool(self.inner.dark_subtracted),
+            python_bool(self.inner.flat_normalized),
+        )
+    }
+}
+
+fn python_bool(value: bool) -> &'static str {
+    if value { "True" } else { "False" }
+}
+
+/// What a frame's header says it is: its role, whether it is a master, what
+/// it was shot with, and which calibration it has had.
+#[pyclass(skip_from_py_object, frozen, name = "FrameMetadata", module = "seiza")]
+#[derive(Clone)]
+pub(crate) struct PyFrameMetadata {
+    pub(crate) inner: FrameMetadata,
+}
+
+#[pymethods]
+impl PyFrameMetadata {
+    /// ``"bias"``, ``"dark"``, ``"dark-flat"``, ``"flat"``, ``"light"`` or
+    /// ``"unknown"``.
+    #[getter]
+    fn role(&self) -> &'static str {
+        self.inner.role.as_str()
+    }
+    #[getter]
+    fn is_master(&self) -> bool {
+        self.inner.is_master
+    }
+    #[getter]
+    fn signature(&self) -> PyFrameSignature {
+        PyFrameSignature {
+            inner: self.inner.signature.clone(),
+        }
+    }
+    #[getter]
+    fn calibration_state(&self) -> PyFrameCalibrationState {
+        PyFrameCalibrationState {
+            inner: self.inner.calibration_state,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "FrameMetadata(role={:?}, is_master={})",
+            self.role(),
+            python_bool(self.inner.is_master),
+        )
+    }
+}
+
+/// A FITS or XISF header read by :func:`probe_frame`.
+#[pyclass(skip_from_py_object, frozen, name = "FrameProbe", module = "seiza")]
+#[derive(Clone)]
+pub(crate) struct PyFrameProbe {
+    inner: FrameProbe,
+}
+
+#[pymethods]
+impl PyFrameProbe {
+    #[getter]
+    fn path(&self) -> PathBuf {
+        self.inner.path.clone()
+    }
+    /// ``"FITS"`` or ``"XISF"``.
+    #[getter]
+    fn format(&self) -> &'static str {
+        self.inner.format.name()
+    }
+    /// The frame type as the file wrote it (``IMAGETYP``, ``OBSTYPE`` or
+    /// ``FRAME``), before it was read as a role.
+    #[getter]
+    fn raw_image_type(&self) -> Option<String> {
+        self.inner.raw_image_type.clone()
+    }
+    #[getter]
+    fn role(&self) -> &'static str {
+        self.inner.metadata.role.as_str()
+    }
+    #[getter]
+    fn is_master(&self) -> bool {
+        self.inner.metadata.is_master
+    }
+    #[getter]
+    fn signature(&self) -> PyFrameSignature {
+        PyFrameSignature {
+            inner: self.inner.metadata.signature.clone(),
+        }
+    }
+    #[getter]
+    fn calibration_state(&self) -> PyFrameCalibrationState {
+        PyFrameCalibrationState {
+            inner: self.inner.metadata.calibration_state,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "FrameProbe(path={:?}, format={:?}, role={:?}, is_master={})",
+            self.inner.path.display().to_string(),
+            self.format(),
+            self.role(),
+            python_bool(self.inner.metadata.is_master),
+        )
+    }
+}
+
+/// Read a FITS or XISF header into a :class:`FrameProbe`: the frame's role,
+/// whether it is a master, its :class:`FrameSignature` and its calibration
+/// state. No pixels are decoded.
+#[pyfunction]
+#[pyo3(name = "probe_frame")]
+fn py_probe_frame(py: Python<'_>, path: PathBuf) -> PyResult<PyFrameProbe> {
+    py.detach(|| probe_frame(&path))
+        .map(|inner| PyFrameProbe { inner })
+        .map_err(|error| crate::stacking::StackError::new_err(calibration_message(error)))
+}
+
+/// One frame :func:`plan_calibration` weighs, for a caller that holds its
+/// own records rather than :class:`FrameProbe` results.
+#[pyclass(
+    skip_from_py_object,
+    frozen,
+    name = "CalibrationRecord",
+    module = "seiza"
+)]
+#[derive(Clone)]
+pub(crate) struct PyCalibrationRecord {
+    inner: CalibrationRecord,
+}
+
+#[pymethods]
+impl PyCalibrationRecord {
+    #[new]
+    #[pyo3(signature = (path, signature, *, role="unknown"))]
+    fn new(path: PathBuf, signature: PyFrameSignature, role: &str) -> PyResult<Self> {
+        let role = role
+            .parse::<FrameSourceRole>()
+            .map_err(|error| PyValueError::new_err(calibration_message(error)))?;
+        Ok(Self {
+            inner: CalibrationRecord {
+                path,
+                role,
+                signature: signature.inner,
+            },
+        })
+    }
+    #[getter]
+    fn path(&self) -> PathBuf {
+        self.inner.path.clone()
+    }
+    #[getter]
+    fn role(&self) -> &'static str {
+        self.inner.role.as_str()
+    }
+    #[getter]
+    fn signature(&self) -> PyFrameSignature {
+        PyFrameSignature {
+            inner: self.inner.signature.clone(),
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "CalibrationRecord(path={:?}, role={:?})",
+            self.inner.path.display().to_string(),
+            self.role(),
+        )
+    }
+}
+
+/// A :class:`CalibrationRecord`, or a :class:`FrameProbe` read as one.
+fn calibration_record(value: &Bound<'_, PyAny>) -> PyResult<CalibrationRecord> {
+    if let Ok(record) = value.cast::<PyCalibrationRecord>() {
+        return Ok(record.get().inner.clone());
+    }
+    if let Ok(probe) = value.cast::<PyFrameProbe>() {
+        let probe = &probe.get().inner;
+        return Ok(CalibrationRecord {
+            path: probe.path.clone(),
+            role: probe.metadata.role,
+            signature: probe.metadata.signature.clone(),
+        });
+    }
+    Err(PyTypeError::new_err(
+        "calibration records must be CalibrationRecord or FrameProbe objects",
+    ))
+}
+
+/// The calibration frames :func:`plan_calibration` chose.
+#[pyclass(
+    skip_from_py_object,
+    frozen,
+    name = "CalibrationPlan",
+    module = "seiza"
+)]
+pub(crate) struct PyCalibrationPlan {
+    inner: CalibrationPlan,
+}
+
+#[pymethods]
+impl PyCalibrationPlan {
+    /// ``"bias"``, ``"dark"``, ``"dark-flat"`` or ``"flat"``.
+    #[getter]
+    fn kind(&self) -> &'static str {
+        self.inner.kind.as_str()
+    }
+    /// The fewest frames a usable set holds, at least one.
+    #[getter]
+    fn minimum(&self) -> usize {
+        self.inner.minimum
+    }
+    /// Whether :attr:`selected_paths` holds at least :attr:`minimum` frames.
+    #[getter]
+    fn ready(&self) -> bool {
+        self.inner.ready
+    }
+    /// Every candidate that suits all the frames served, nearest in time
+    /// first.
+    #[getter]
+    fn matched_paths(&self) -> Vec<PathBuf> {
+        self.inner.matched_paths.clone()
+    }
+    /// The matched candidates that can be combined into one master.
+    #[getter]
+    fn selected_paths(&self) -> Vec<PathBuf> {
+        self.inner.selected_paths.clone()
+    }
+    /// Each candidate left out, as ``(path, reason)``: ``"role-mismatch"``,
+    /// ``"sensor-mismatch"``, ``"missing-exposure"``, ``"exposure-mismatch"``,
+    /// ``"temperature-mismatch"``, ``"optics-mismatch"`` or
+    /// ``"outside-coherent-set"``.
+    #[getter]
+    fn excluded(&self) -> Vec<(PathBuf, &'static str)> {
+        self.inner
+            .excluded
+            .iter()
+            .map(|exclusion| (exclusion.path.clone(), exclusion.reason.as_str()))
+            .collect()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "CalibrationPlan(kind={:?}, ready={}, selected={}, excluded={})",
+            self.kind(),
+            python_bool(self.inner.ready),
+            self.inner.selected_paths.len(),
+            self.inner.excluded.len(),
+        )
+    }
+}
+
+/// Choose the calibration frames that suit every frame they serve, and can
+/// be combined with each other, under the whole matching policy.
+///
+/// ``kind`` is ``"bias"``, ``"dark"``, ``"dark-flat"`` or ``"flat"``.
+/// ``reference`` is the light the frames serve (for dark flats, the flat
+/// they calibrate); its capture time orders the candidates. ``references``
+/// lists every frame served, ``reference`` among them, when there are
+/// several. Records are :class:`FrameProbe` results or
+/// :class:`CalibrationRecord` objects. ``bias_available`` says a usable bias
+/// master exists, so darks of another exposure can be scaled.
+///
+/// Raises ``ValueError`` for a bad request: an unknown kind, references of
+/// the wrong role, repeated paths, or tolerances that are negative or not
+/// finite.
+#[pyfunction]
+#[pyo3(
+    name = "plan_calibration",
+    signature = (
+        kind,
+        reference,
+        candidates,
+        *,
+        references=None,
+        minimum=2,
+        tolerances=None,
+        bias_available=false
+    )
+)]
+#[allow(clippy::too_many_arguments)]
+fn py_plan_calibration(
+    py: Python<'_>,
+    kind: &str,
+    reference: &Bound<'_, PyAny>,
+    candidates: Vec<Bound<'_, PyAny>>,
+    references: Option<Vec<Bound<'_, PyAny>>>,
+    minimum: usize,
+    tolerances: Option<PyMatchTolerances>,
+    bias_available: bool,
+) -> PyResult<PyCalibrationPlan> {
+    let bad_request = |error| PyValueError::new_err(calibration_message(error));
+    let request = CalibrationPlanRequest {
+        kind: kind.parse::<CalibrationPlanKind>().map_err(bad_request)?,
+        reference: calibration_record(reference)?,
+        references: references
+            .unwrap_or_default()
+            .iter()
+            .map(calibration_record)
+            .collect::<PyResult<_>>()?,
+        candidates: candidates
+            .iter()
+            .map(calibration_record)
+            .collect::<PyResult<_>>()?,
+        minimum,
+        tolerances: tolerances_or_default(tolerances),
+        bias_available,
+    };
+    py.detach(|| plan_calibration(request))
+        .map(|inner| PyCalibrationPlan { inner })
+        .map_err(bad_request)
+}
+
+/// A calibration error's own words, without the "calibration error: " its
+/// display adds.
+fn calibration_message(error: seiza_stacking::Error) -> String {
+    match error {
+        seiza_stacking::Error::Calibration(message) => message,
+        other => other.to_string(),
+    }
+}
+
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyFrameSignature>()?;
     module.add_class::<PyMatchTolerances>()?;
@@ -526,5 +887,12 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(py_coherent_subset_indices, module)?)?;
     module.add_function(wrap_pyfunction!(py_sort_by_proximity, module)?)?;
     module.add_function(wrap_pyfunction!(py_fit_flat_pedestal, module)?)?;
+    module.add_class::<PyFrameCalibrationState>()?;
+    module.add_class::<PyFrameMetadata>()?;
+    module.add_class::<PyFrameProbe>()?;
+    module.add_class::<PyCalibrationRecord>()?;
+    module.add_class::<PyCalibrationPlan>()?;
+    module.add_function(wrap_pyfunction!(py_probe_frame, module)?)?;
+    module.add_function(wrap_pyfunction!(py_plan_calibration, module)?)?;
     Ok(())
 }

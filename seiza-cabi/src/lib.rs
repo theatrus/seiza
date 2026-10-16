@@ -690,6 +690,19 @@ enum CalibrationFrameRole {
     Unknown,
 }
 
+impl From<CalibrationFrameRole> for FrameSourceRole {
+    fn from(value: CalibrationFrameRole) -> Self {
+        match value {
+            CalibrationFrameRole::Bias => Self::Bias,
+            CalibrationFrameRole::Dark => Self::Dark,
+            CalibrationFrameRole::DarkFlat => Self::DarkFlat,
+            CalibrationFrameRole::Flat => Self::Flat,
+            CalibrationFrameRole::Light => Self::Light,
+            CalibrationFrameRole::Unknown => Self::Unknown,
+        }
+    }
+}
+
 impl From<FrameSourceRole> for CalibrationFrameRole {
     fn from(value: FrameSourceRole) -> Self {
         match value {
@@ -781,6 +794,16 @@ struct FrameCalibrationStateResponse {
     flat_normalized: bool,
 }
 
+impl From<seiza_stacking::FrameCalibrationState> for FrameCalibrationStateResponse {
+    fn from(state: seiza_stacking::FrameCalibrationState) -> Self {
+        Self {
+            bias_subtracted: state.bias_subtracted,
+            dark_subtracted: state.dark_subtracted,
+            flat_normalized: state.flat_normalized,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct FrameProbeResponse {
@@ -804,26 +827,13 @@ enum CalibrationPlanKind {
 }
 
 impl CalibrationPlanKind {
-    fn role(self) -> CalibrationFrameRole {
+    fn into_core(self) -> seiza_stacking::CalibrationPlanKind {
         match self {
-            Self::Bias => CalibrationFrameRole::Bias,
-            Self::Dark => CalibrationFrameRole::Dark,
-            Self::DarkFlat => CalibrationFrameRole::DarkFlat,
-            Self::Flat => CalibrationFrameRole::Flat,
+            Self::Bias => seiza_stacking::CalibrationPlanKind::Bias,
+            Self::Dark => seiza_stacking::CalibrationPlanKind::Dark,
+            Self::DarkFlat => seiza_stacking::CalibrationPlanKind::DarkFlat,
+            Self::Flat => seiza_stacking::CalibrationPlanKind::Flat,
         }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Bias => "bias",
-            Self::Dark => "dark",
-            Self::DarkFlat => "dark-flat",
-            Self::Flat => "flat",
-        }
-    }
-
-    fn uses_dark_matching(self) -> bool {
-        matches!(self, Self::Dark | Self::DarkFlat)
     }
 }
 
@@ -870,6 +880,44 @@ struct CalibrationPlanDependenciesRequest {
     /// An actually built, usable bias master will isolate dark current and
     /// make exposure scaling safe. This is a fact, not user intent.
     bias_available: bool,
+}
+
+impl CalibrationPlanRecord {
+    fn into_core(self) -> seiza_stacking::CalibrationRecord {
+        seiza_stacking::CalibrationRecord {
+            path: PathBuf::from(self.path),
+            role: self.role.into(),
+            signature: seiza_calibration::FrameSignature::from(&self.signature),
+        }
+    }
+}
+
+impl CalibrationPlanTolerancesRequest {
+    /// The defaults, with each given tolerance in place of its default. The
+    /// planner checks that every one is finite and not negative.
+    fn into_core(self) -> seiza_calibration::MatchTolerances {
+        let mut tolerances = seiza_calibration::MatchTolerances::default();
+        let fields = [
+            (self.exposure_seconds, &mut tolerances.exposure_seconds),
+            (self.exposure_fraction, &mut tolerances.exposure_fraction),
+            (self.dark_temperature_c, &mut tolerances.dark_temperature_c),
+            (
+                self.master_temperature_c,
+                &mut tolerances.master_temperature_c,
+            ),
+            (self.rotation_deg, &mut tolerances.rotation_deg),
+            (self.focal_length_mm, &mut tolerances.focal_length_mm),
+        ];
+        for (given, target) in fields {
+            if let Some(value) = given {
+                *target = value;
+            }
+        }
+        if let Some(seconds) = self.flat_session_seconds {
+            tolerances.flat_session_seconds = seconds;
+        }
+        tolerances
+    }
 }
 
 const fn default_calibration_plan_minimum() -> usize {
@@ -3357,7 +3405,7 @@ pub unsafe extern "C" fn seiza_live_stacker_state_json(
             channels: view.channels,
             accepted_frames: view.accepted_frames,
             rejected_frames: view.rejected_frames,
-            input_mode: live_stack_input_mode_name(stacker.stacker.input_mode()),
+            input_mode: stacker.stacker.input_mode().as_str(),
             input_paths: stacker
                 .stacker
                 .input_paths()
@@ -3368,11 +3416,9 @@ pub unsafe extern "C" fn seiza_live_stacker_state_json(
                 role: CalibrationFrameRole::from(reference_metadata.role),
                 is_master: reference_metadata.is_master,
                 signature: FrameProbeSignature::from(&reference_metadata.signature),
-                calibration_state: FrameCalibrationStateResponse {
-                    bias_subtracted: reference_metadata.calibration_state.bias_subtracted,
-                    dark_subtracted: reference_metadata.calibration_state.dark_subtracted,
-                    flat_normalized: reference_metadata.calibration_state.flat_normalized,
-                },
+                calibration_state: FrameCalibrationStateResponse::from(
+                    reference_metadata.calibration_state,
+                ),
             },
             reference_integrated: stacker.stacker.reference_is_integrated(),
             reference_image_path: stacker
@@ -6300,7 +6346,7 @@ fn prepare_live_stack_render(
             schema_version: 1,
             accepted_frames: state.accepted_frames,
             rejected_frames: state.rejected_frames,
-            input_mode: live_stack_input_mode_name(stacker.input_mode()),
+            input_mode: stacker.input_mode().as_str(),
         }),
     })
 }
@@ -7464,13 +7510,6 @@ fn stack_diagnostics_response(diagnostics: FrameDiagnostics) -> StackDiagnostics
     }
 }
 
-fn live_stack_input_mode_name(mode: FrameInputMode) -> &'static str {
-    match mode {
-        FrameInputMode::CalibrateAndPrepare => "calibrate-and-prepare",
-        FrameInputMode::PreparedOnly => "prepared-only",
-    }
-}
-
 fn default_live_preview_sample_domain(mode: FrameInputMode) -> SampleDomain {
     match mode {
         FrameInputMode::CalibrateAndPrepare => SampleDomain::PhysicalLinear {
@@ -7481,343 +7520,67 @@ fn default_live_preview_sample_domain(mode: FrameInputMode) -> SampleDomain {
 }
 
 fn probe_frame_header(path: &Path) -> Result<FrameProbeResponse, String> {
-    let format = astronomy_image_format(path)
-        .ok_or_else(|| format!("{} is not a FITS or XISF path", path.display()))?;
-    let headers = match format {
-        AstronomyImageFormat::Fits => seiza_fits::read_header(path)
-            .map_err(|error| format!("failed to read FITS header {}: {error}", path.display()))?,
-        _ => seiza_xisf::read_header(path)
-            .map_err(|error| format!("failed to read XISF header {}: {error}", path.display()))?,
-    };
-    let metadata = seiza_stacking::FrameMetadata::from_headers(&headers);
-    let raw_image_type = probe_header_text(&headers, &["IMAGETYP", "OBSTYPE", "FRAME"]);
-
+    let probe = seiza_stacking::probe_frame(path).map_err(stacking_message)?;
+    let metadata = probe.metadata;
     Ok(FrameProbeResponse {
         schema_version: 1,
-        path: path.to_string_lossy().into_owned(),
-        format: format.name(),
+        path: probe.path.to_string_lossy().into_owned(),
+        format: probe.format.name(),
         role: CalibrationFrameRole::from(metadata.role),
-        raw_image_type,
+        raw_image_type: probe.raw_image_type,
         is_master: metadata.is_master,
         signature: FrameProbeSignature::from(&metadata.signature),
-        calibration_state: FrameCalibrationStateResponse {
-            bias_subtracted: metadata.calibration_state.bias_subtracted,
-            dark_subtracted: metadata.calibration_state.dark_subtracted,
-            flat_normalized: metadata.calibration_state.flat_normalized,
-        },
+        calibration_state: FrameCalibrationStateResponse::from(metadata.calibration_state),
     })
 }
 
-fn probe_header_text(headers: &[(String, HeaderValue)], keys: &[&str]) -> Option<String> {
-    let value = keys.iter().find_map(|key| {
-        headers
-            .iter()
-            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
-            .map(|(_, value)| value)
-    })?;
-    let value = match value {
-        HeaderValue::String(value) | HeaderValue::Raw(value) => value.trim(),
-        _ => return None,
-    };
-    (!value.is_empty()).then(|| value.to_owned())
+/// A stacking error's own words, without the "calibration error: " that
+/// its display adds.
+fn stacking_message(error: seiza_stacking::Error) -> String {
+    match error {
+        seiza_stacking::Error::Calibration(message) => message,
+        other => other.to_string(),
+    }
 }
 
 fn build_calibration_plan(
     request: CalibrationPlanRequest,
 ) -> Result<CalibrationPlanResponse, String> {
-    let CalibrationPlanRequest {
-        kind,
-        reference: primary_record,
-        references,
-        candidates,
-        minimum,
-        tolerances,
-        dependencies,
-    } = request;
-    let minimum = minimum.max(1);
-    let tolerances = resolve_calibration_plan_tolerances(tolerances)?;
-    if primary_record.path.trim().is_empty() {
-        return Err("primary calibration reference path must not be empty".into());
-    }
-    let expected_reference_role = if kind == CalibrationPlanKind::DarkFlat {
-        CalibrationFrameRole::Flat
-    } else {
-        CalibrationFrameRole::Light
-    };
-    let references = if references.is_empty() {
-        vec![primary_record.clone()]
-    } else {
-        references
-    };
-    let reference_paths = references
-        .iter()
-        .map(|record| PathBuf::from(&record.path))
-        .collect::<Vec<_>>();
-    if reference_paths
-        .iter()
-        .any(|path| path.as_os_str().is_empty())
-    {
-        return Err("calibration reference paths must not be empty".into());
-    }
-    validate_distinct_stack_paths(&reference_paths)
-        .map_err(|error| error.replace("stack input", "calibration reference"))?;
-    let primary_in_references = references.iter().find(|record| {
-        paths_refer_to_same_file(Path::new(&record.path), Path::new(&primary_record.path))
-    });
-    let Some(primary_in_references) = primary_in_references else {
-        return Err("calibration references must include the primary reference path".into());
-    };
-    if primary_in_references.role != primary_record.role
-        || primary_in_references.signature != primary_record.signature
-    {
-        return Err("the primary calibration reference must match its record in references".into());
-    }
-    if primary_record.role != expected_reference_role
-        || references
-            .iter()
-            .any(|record| record.role != expected_reference_role)
-    {
-        return Err(format!(
-            "{} calibration references must all have role {}",
-            kind.as_str(),
-            match expected_reference_role {
-                CalibrationFrameRole::Flat => "flat",
-                _ => "light",
-            }
-        ));
-    }
-    let reference = seiza_calibration::FrameSignature::from(&primary_record.signature);
-    let reference_signatures = references
-        .iter()
-        .map(|record| seiza_calibration::FrameSignature::from(&record.signature))
-        .collect::<Vec<_>>();
-    let scalable_dark = kind.uses_dark_matching() && dependencies.bias_available;
-    let dark_targets_have_exposure = !kind.uses_dark_matching()
-        || reference_signatures
-            .iter()
-            .all(has_positive_signature_exposure);
-
-    let paths = candidates
-        .iter()
-        .map(|candidate| PathBuf::from(&candidate.path))
-        .collect::<Vec<_>>();
-    if paths.iter().any(|path| path.as_os_str().is_empty()) {
-        return Err("calibration candidate paths must not be empty".into());
-    }
-    validate_distinct_stack_paths(&paths)
-        .map_err(|error| error.replace("stack input", "calibration candidate"))?;
-
-    let mut excluded = Vec::new();
-    let mut matched = Vec::new();
-    for record in candidates {
-        let signature = seiza_calibration::FrameSignature::from(&record.signature);
-        let reason = if record.role != kind.role() {
-            Some("role-mismatch")
-        } else if !reference_signatures
-            .iter()
-            .all(|light| seiza_calibration::sensor_matches(light, &signature))
-        {
-            Some("sensor-mismatch")
-        } else if kind.uses_dark_matching()
-            && (!dark_targets_have_exposure || !has_positive_signature_exposure(&signature))
-        {
-            Some("missing-exposure")
-        } else if kind.uses_dark_matching()
-            && !scalable_dark
-            && !reference_signatures
-                .iter()
-                .all(|light| seiza_calibration::exposure_matches(light, &signature, &tolerances))
-        {
-            Some("exposure-mismatch")
-        } else if kind.uses_dark_matching()
-            && !reference_signatures
-                .iter()
-                .all(|light| seiza_calibration::temperature_matches(light, &signature, &tolerances))
-        {
-            Some("temperature-mismatch")
-        } else if kind == CalibrationPlanKind::Flat
-            && !reference_signatures
-                .iter()
-                .all(|light| seiza_calibration::optics_match(light, &signature, &tolerances))
-        {
-            Some("optics-mismatch")
-        } else {
-            None
-        };
-        if let Some(reason) = reason {
-            excluded.push(CalibrationPlanExclusionResponse {
-                path: record.path,
-                reason,
-            });
-        } else {
-            matched.push((record, signature));
-        }
-    }
-
-    let mut ordered_signatures = matched
-        .iter()
-        .map(|(_, signature)| signature.clone())
-        .collect::<Vec<_>>();
-    seiza_calibration::sort_by_proximity(&mut ordered_signatures, reference.captured_at_unix);
-    let mut unordered = matched;
-    let mut ordered = Vec::with_capacity(unordered.len());
-    for signature in ordered_signatures {
-        let index = unordered
-            .iter()
-            .position(|(_, candidate)| *candidate == signature)
-            .ok_or_else(|| "calibration plan ordering lost a candidate".to_string())?;
-        ordered.push(unordered.remove(index));
-    }
-    let matched_paths = ordered
-        .iter()
-        .map(|(record, _)| record.path.clone())
-        .collect::<Vec<_>>();
-    let ordered_signatures = ordered
-        .iter()
-        .map(|(_, signature)| signature.clone())
-        .collect::<Vec<_>>();
-    let coherent = coherent_calibration_signatures(&ordered_signatures, kind, minimum, &tolerances);
-    let mut selected = vec![false; ordered.len()];
-    for signature in coherent {
-        if let Some(index) = ordered
-            .iter()
-            .enumerate()
-            .find(|(index, (_, candidate))| !selected[*index] && *candidate == signature)
-            .map(|(index, _)| index)
-        {
-            selected[index] = true;
-        }
-    }
-    let mut selected_paths = Vec::new();
-    for (index, (record, _)) in ordered.into_iter().enumerate() {
-        if selected[index] {
-            selected_paths.push(record.path);
-        } else {
-            excluded.push(CalibrationPlanExclusionResponse {
-                path: record.path,
-                reason: "outside-coherent-set",
-            });
-        }
-    }
-
+    let plan = seiza_stacking::plan_calibration(seiza_stacking::CalibrationPlanRequest {
+        kind: request.kind.into_core(),
+        reference: request.reference.into_core(),
+        references: request
+            .references
+            .into_iter()
+            .map(CalibrationPlanRecord::into_core)
+            .collect(),
+        candidates: request
+            .candidates
+            .into_iter()
+            .map(CalibrationPlanRecord::into_core)
+            .collect(),
+        minimum: request.minimum,
+        tolerances: request.tolerances.into_core(),
+        bias_available: request.dependencies.bias_available,
+    })
+    .map_err(stacking_message)?;
+    let path_text = |path: PathBuf| path.to_string_lossy().into_owned();
     Ok(CalibrationPlanResponse {
         schema_version: 1,
-        kind: kind.as_str(),
-        minimum,
-        ready: selected_paths.len() >= minimum,
-        matched_paths,
-        selected_paths,
-        excluded,
-    })
-}
-
-fn has_positive_signature_exposure(signature: &seiza_calibration::FrameSignature) -> bool {
-    signature
-        .exposure_seconds
-        .is_some_and(|value| value.is_finite() && value > 0.0)
-}
-
-fn coherent_calibration_signatures(
-    signatures: &[seiza_calibration::FrameSignature],
-    kind: CalibrationPlanKind,
-    minimum: usize,
-    tolerances: &seiza_calibration::MatchTolerances,
-) -> Vec<seiza_calibration::FrameSignature> {
-    let mut first = None;
-    for anchor in signatures {
-        let compatible_group = signatures
-            .iter()
-            .filter(|candidate| {
-                internally_compatible_calibration_signatures(anchor, candidate, kind, tolerances)
+        kind: plan.kind.as_str(),
+        minimum: plan.minimum,
+        ready: plan.ready,
+        matched_paths: plan.matched_paths.into_iter().map(path_text).collect(),
+        selected_paths: plan.selected_paths.into_iter().map(path_text).collect(),
+        excluded: plan
+            .excluded
+            .into_iter()
+            .map(|exclusion| CalibrationPlanExclusionResponse {
+                path: path_text(exclusion.path),
+                reason: exclusion.reason.as_str(),
             })
-            .cloned()
-            .collect::<Vec<_>>();
-        let cluster = seiza_calibration::coherent_subset(
-            &compatible_group,
-            if kind == CalibrationPlanKind::Flat {
-                seiza_calibration::FrameRole::Flat
-            } else {
-                seiza_calibration::FrameRole::Other
-            },
-            minimum,
-            tolerances,
-        );
-        if cluster.len() >= minimum.max(1) {
-            return cluster;
-        }
-        if first.is_none() {
-            first = Some(cluster);
-        }
-    }
-    first.unwrap_or_default()
-}
-
-fn internally_compatible_calibration_signatures(
-    left: &seiza_calibration::FrameSignature,
-    right: &seiza_calibration::FrameSignature,
-    kind: CalibrationPlanKind,
-    tolerances: &seiza_calibration::MatchTolerances,
-) -> bool {
-    // Light-to-calibration matching is deliberately asymmetric: unknown
-    // metadata on a light cannot rule a candidate out. A master set needs the
-    // stricter answer, because two candidates with conflicting known settings
-    // must never be averaged merely because every target omitted that field.
-    seiza_calibration::sensor_consistent(left, right)
-        && (!kind.uses_dark_matching()
-            || seiza_calibration::exposure_matches(left, right, tolerances))
-        && (kind != CalibrationPlanKind::Flat
-            || seiza_calibration::optics_consistent(left, right, tolerances))
-}
-
-fn resolve_calibration_plan_tolerances(
-    request: CalibrationPlanTolerancesRequest,
-) -> Result<seiza_calibration::MatchTolerances, String> {
-    let mut tolerances = seiza_calibration::MatchTolerances::default();
-    let finite_nonnegative = |name: &str, value: Option<f64>, target: &mut f64| {
-        if let Some(value) = value {
-            if !value.is_finite() || value < 0.0 {
-                return Err(format!(
-                    "calibration {name} tolerance must be finite and non-negative"
-                ));
-            }
-            *target = value;
-        }
-        Ok(())
-    };
-    finite_nonnegative(
-        "exposure-seconds",
-        request.exposure_seconds,
-        &mut tolerances.exposure_seconds,
-    )?;
-    finite_nonnegative(
-        "exposure-fraction",
-        request.exposure_fraction,
-        &mut tolerances.exposure_fraction,
-    )?;
-    finite_nonnegative(
-        "dark-temperature",
-        request.dark_temperature_c,
-        &mut tolerances.dark_temperature_c,
-    )?;
-    finite_nonnegative(
-        "master-temperature",
-        request.master_temperature_c,
-        &mut tolerances.master_temperature_c,
-    )?;
-    finite_nonnegative(
-        "rotation",
-        request.rotation_deg,
-        &mut tolerances.rotation_deg,
-    )?;
-    finite_nonnegative(
-        "focal-length",
-        request.focal_length_mm,
-        &mut tolerances.focal_length_mm,
-    )?;
-    if let Some(seconds) = request.flat_session_seconds {
-        tolerances.flat_session_seconds = seconds;
-    }
-    Ok(tolerances)
+            .collect(),
+    })
 }
 
 fn build_master_request(

@@ -857,3 +857,168 @@ def test_expanding_stack_refuses_bad_inputs_and_honours_cancel(tmp_path):
 
     with pytest.raises(KeyError, match="stop planning"):
         seiza.LiveStacker.open_fits_expanding(paths, options=options, cancel=interrupt)
+
+
+def lights_with_a_header(tmp_path, count=3):
+    image = synthetic_star_field()
+    header = fits.Header()
+    header["IMAGETYP"] = "LIGHT"
+    header["CTYPE1"] = "RA---TAN"
+    header["CTYPE2"] = "DEC--TAN"
+    header["CRVAL1"] = 83.8
+    header["CRVAL2"] = -5.4
+    header["CRPIX1"] = 80.5
+    header["CRPIX2"] = 64.5
+    header["CDELT1"] = -0.0003
+    header["CDELT2"] = 0.0003
+    paths = []
+    for index in range(count):
+        path = tmp_path / f"light-{index:03d}.fits"
+        fits.writeto(path, image, header, overwrite=True)
+        paths.append(path)
+    return image, paths
+
+
+def test_snapshots_write_with_the_reference_headers(tmp_path):
+    image, paths = lights_with_a_header(tmp_path)
+    stacker = seiza.LiveStacker(paths[0], options=no_adjustment_options())
+    assert stacker.push_fits(paths[1]).accepted
+
+    snapshot_output = tmp_path / "snapshot.fits"
+    stacker.snapshot().write_fits(snapshot_output)
+    running_output = tmp_path / "running.fits"
+    stacker.write_fits(running_output)
+    reintegrated_output = tmp_path / "reintegrated.fits"
+    stacker.reintegrate().write_fits(reintegrated_output)
+
+    for output in (snapshot_output, running_output, reintegrated_output):
+        with fits.open(output) as hdus:
+            assert hdus[0].header["CRVAL1"] == 83.8
+            assert hdus[0].data.shape == image.shape
+            np.testing.assert_allclose(hdus[0].data, image, rtol=0.0, atol=1.0e-2)
+
+    # Writing the running stack leaves it open for more frames.
+    assert stacker.push_fits(paths[2]).accepted
+    assert stacker.accepted_frames == 3
+
+    for write in (stacker.snapshot().write_fits, stacker.write_fits):
+        with pytest.raises(ValueError, match="must not refer"):
+            write(paths[1])
+    finished = stacker.finish()
+    with pytest.raises(ValueError, match="must not refer"):
+        finished.write_fits(paths[0])
+    finished_output = tmp_path / "finished.fits"
+    finished.write_fits(finished_output)
+    with fits.open(finished_output) as hdus:
+        assert hdus[0].header["CRVAL1"] == 83.8
+
+
+def test_live_stacker_state_describes_the_stack(tmp_path):
+    _, paths = lights_with_a_header(tmp_path, count=2)
+    stacker = seiza.LiveStacker(paths[0], options=no_adjustment_options())
+    assert stacker.push_fits(paths[1]).accepted
+
+    state = stacker.state()
+    assert len(state.configuration_fingerprint) == 64
+    assert (state.width, state.height, state.channels) == (160, 128, 1)
+    assert (state.accepted_frames, state.rejected_frames) == (2, 0)
+    assert state.input_mode == "calibrate-and-prepare"
+    assert state.input_paths == paths
+    assert state.reference_integrated
+    assert state.reference_image_path is None
+    assert state.reintegration_unavailable is None
+    assert state.reference_frame.role == "light"
+    assert not state.reference_frame.is_master
+    assert state.reference_frame.signature.width == 160
+    assert not state.reference_frame.calibration_state.bias_subtracted
+
+    from_array = seiza.LiveStacker.from_array(
+        synthetic_star_field(), options=no_adjustment_options()
+    ).state()
+    assert from_array.input_mode == "prepared-only"
+    assert from_array.input_paths == []
+    assert from_array.reference_frame.role == "unknown"
+
+
+def test_masters_can_be_replaced_part_way_through(tmp_path):
+    _, paths = lights_with_a_header(tmp_path, count=2)
+    biases = []
+    for index in range(2):
+        path = tmp_path / f"bias-{index:03d}.fits"
+        fits.writeto(path, np.full((128, 160), 10.0, dtype=np.float32), overwrite=True)
+        biases.append(path)
+    bias = tmp_path / "master-bias.fits"
+    seiza.build_bias(biases, bias)
+
+    stacker = seiza.LiveStacker(paths[0], options=no_adjustment_options())
+    before = stacker.state().configuration_fingerprint
+    stacker.set_calibration_fits(bias=bias)
+    after = stacker.state()
+    assert after.configuration_fingerprint != before
+    assert bias in after.input_paths
+    assert stacker.push_fits(paths[1]).accepted
+
+    stacker.set_calibration_fits()
+    assert stacker.state().configuration_fingerprint == before
+
+    with pytest.raises(ValueError, match="dark_exposure_seconds requires dark"):
+        stacker.set_calibration_fits(dark_exposure_seconds=30.0)
+    with pytest.raises(seiza.StackError):
+        stacker.set_calibration_fits(bias=tmp_path / "missing.fits")
+    from_array = seiza.LiveStacker.from_array(
+        synthetic_star_field(), options=no_adjustment_options()
+    )
+    with pytest.raises(seiza.StackError):
+        from_array.set_calibration_fits(bias=bias)
+
+
+def test_flat_defect_suppression_replaces_a_hot_pixel(tmp_path):
+    width, height = 16, 16
+    rng = np.random.default_rng(7)
+    paths = []
+    for index in range(2):
+        flat = (200.0 + rng.random((height, width))).astype(np.float32)
+        flat[7, 9] = 5000.0
+        path = tmp_path / f"flat-{index}.fits"
+        fits.writeto(path, flat, overwrite=True)
+        paths.append(path)
+
+    plain = seiza.build_flat(paths, tmp_path / "plain.fits")
+    assert plain.defect_pixels_replaced == 0
+    assert plain.skipped_inputs == []
+
+    suppressed = seiza.build_flat(
+        paths, tmp_path / "suppressed.fits", defect_suppression=True
+    )
+    assert suppressed.defect_pixels_replaced >= 1
+    with fits.open(tmp_path / "suppressed.fits") as hdus:
+        assert abs(hdus[0].data[7, 9] - 1.0) < 0.1
+
+    with pytest.raises(ValueError, match="defect_suppression=True"):
+        seiza.build_flat(paths, tmp_path / "unused.fits", defect_sigma_low=5.0)
+    with pytest.raises(ValueError, match="positive finite"):
+        seiza.build_flat(
+            paths,
+            tmp_path / "unused.fits",
+            defect_suppression=True,
+            defect_sigma_high=-1.0,
+        )
+
+
+def test_a_master_reports_the_inputs_it_set_aside(tmp_path):
+    paths = []
+    for name, rotation in [("first", 10.0), ("stray", 90.0), ("third", 10.0)]:
+        header = fits.Header()
+        header["IMAGETYP"] = "FLAT"
+        header["FILTER"] = "R"
+        header["ROTATANG"] = rotation
+        path = tmp_path / f"flat-{name}.fits"
+        fits.writeto(path, np.full((8, 8), 100.0, dtype=np.float32), header, overwrite=True)
+        paths.append(path)
+
+    result = seiza.build_flat(paths, tmp_path / "master-flat.fits")
+
+    assert result.input_frames == 2
+    assert len(result.input_statistics) == 2
+    assert [path for path, _ in result.skipped_inputs] == [paths[1]]
+    assert "optical" in result.skipped_inputs[0][1]

@@ -417,6 +417,29 @@ coverage = preview_state.coverage
 final = stacker.finish("stack.fits")  # consumes the live accumulator
 ```
 
+To save the stack so far and keep going, call `stacker.write_fits(path)`,
+which copies only the mean, or `write_fits(path)` on any `StackSnapshot`,
+including one from `reintegrate()`. Both write linear `float32` FITS (XISF for
+a `.xisf` path) with the reference frame's WCS, and refuse a path that is one
+of the stack's inputs or masters.
+
+`stacker.state()` describes the stack: its size and counts, a
+`configuration_fingerprint` of its options, masters and input mode (to check
+that a resumed stack is the one you meant), its `input_mode`, the
+`input_paths` it has used, its `reference_frame` (role, master flag, signature
+and calibration state), its `reference_image_path`, and
+`reintegration_unavailable`, which says why `reintegrate()` would fail, or is
+`None`. `stacker.set_calibration_fits(bias=..., dark=..., flat=...)` replaces
+the masters for frames pushed from then on; frames already stacked keep the
+calibration they had. Every file is read and checked against the reference
+before anything changes, and passing none clears the masters:
+
+```python
+stacker.set_calibration_fits(dark="master-dark-300s.fits", flat="master-flat.fits")
+print(stacker.state().configuration_fingerprint)
+stacker.write_fits("so-far.fits")
+```
+
 When the paths are all known — a finished session rather than a live one —
 `push_fits_pipelined()` prepares several frames at once while integrating in
 the order given, so the result is identical to pushing them one at a time. It
@@ -557,8 +580,8 @@ Pass `crop="bounds"` or `crop="inscribed"` to trim the blank edges that
 registering one channel onto another leaves behind. `bounds` keeps the box
 every channel covers; `inscribed` keeps the largest rectangle they all cover in
 full, so nothing stays `NaN`. `seiza.crop_report` measures the same thing
-without composing, and names any channel whose coverage sits far from the
-others:
+without composing, and flags any channel whose coverage sits more than
+`report["off_center_limit_pixels"]` from the others:
 
 ```python
 report = seiza.crop_report({"red": red, "green": green, "blue": blue})
@@ -627,6 +650,48 @@ level sits more than that many times the quietest dark's pixel noise above
 it, the mark of stray light. The result's `masked_samples`,
 `input_masked_samples` and `flat_star_masking` say what masking left out, and
 `rejection_method` which rejection the build used.
+
+A build sets aside an input whose header contradicts the first one, such as a
+flat from another rotator angle, rather than failing.
+`result.skipped_inputs` lists each as `(path, reason)`, and
+`result.input_statistics` holds the `(accepted, rejected)` sample counts of the
+inputs used, in order.
+
+`build_flat(..., defect_suppression=True)` replaces hot and cold pixels in the
+flat master with their neighbours' median. A defective pixel repeats in every
+flat, so rejection across frames keeps it. `defect_sigma_low` and
+`defect_sigma_high` (16 by default) set how many sigma from its neighbourhood a
+pixel must sit; the default leaves star cores alone.
+`result.defect_pixels_replaced` counts the pixels it replaced.
+
+### Choosing calibration frames
+
+`seiza.probe_frame(path)` reads a FITS or XISF header, without its pixels, into
+the frame's `role` (`"bias"`, `"dark"`, `"dark-flat"`, `"flat"`, `"light"` or
+`"unknown"`), whether it `is_master`, its `FrameSignature` and its
+`calibration_state`. `seiza.plan_calibration` applies the whole matching
+policy to those probes, as the desktop apps do. It keeps the candidates that
+suit every light, orders them by capture time, nearest the reference light
+first, and takes the first set of `minimum` frames that agree with each other.
+It says why it left out each of the rest:
+
+```python
+light = seiza.probe_frame("light-001.fits")
+darks = [seiza.probe_frame(path) for path in dark_paths]
+plan = seiza.plan_calibration("dark", light, darks, minimum=5)
+if plan.ready:
+    seiza.build_dark(plan.selected_paths, "master-dark.fits")
+for path, reason in plan.excluded:
+    print(path, reason)  # for example "exposure-mismatch"
+```
+
+`kind` is `"bias"`, `"dark"`, `"dark-flat"` or `"flat"`. Dark flats are
+planned against the flat they will calibrate rather than a light. Pass
+`references=` to choose one set for several lights, `tolerances=` a
+`MatchTolerances`, and `bias_available=True` once you have a bias master, so
+that darks of another exposure can be scaled. A `seiza.CalibrationRecord(path,
+signature, role=...)` stands in for a probe when your records come from
+elsewhere. A bad request raises `ValueError`.
 
 ## Image processing primitives
 

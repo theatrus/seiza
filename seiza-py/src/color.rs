@@ -353,9 +353,10 @@ fn parse_matrix(matrix: &Bound<'_, PyDict>) -> PyResult<NarrowbandMatrix> {
 ///
 /// `channels` maps a name to a `float32` array; every array must share one
 /// grid. The returned dict carries the kept `region` as `(x, y, width,
-/// height)` on that grid, the fraction of it retained, and one entry per
-/// channel including whether the channel sits far enough from the others to
-/// look like a pointing error.
+/// height)` on that grid, the fraction of it retained, the
+/// `off_center_limit_pixels` past which a channel counts as off centre, and
+/// one entry per channel including whether the channel sits that far from
+/// the others, which looks like a pointing error.
 #[pyfunction]
 #[pyo3(signature = (channels, *, crop="inscribed"))]
 fn crop_report<'py>(
@@ -402,6 +403,10 @@ fn report_dict<'py>(py: Python<'py>, report: &CropReport) -> PyResult<Bound<'py,
     dict.set_item("grid", (report.grid_width, report.grid_height))?;
     dict.set_item("region", region_tuple(report.region))?;
     dict.set_item("retained_fraction", report.retained_fraction())?;
+    dict.set_item(
+        "off_center_limit_pixels",
+        CropReport::off_center_limit_pixels(report.grid_width, report.grid_height),
+    )?;
     dict.set_item("channels", channels)?;
     Ok(dict)
 }

@@ -62,6 +62,25 @@ impl FrameSourceRole {
     }
 }
 
+impl std::str::FromStr for FrameSourceRole {
+    type Err = Error;
+
+    /// Read the spelling [`FrameSourceRole::as_str`] writes.
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "bias" => Ok(Self::Bias),
+            "dark" => Ok(Self::Dark),
+            "dark-flat" => Ok(Self::DarkFlat),
+            "flat" => Ok(Self::Flat),
+            "light" => Ok(Self::Light),
+            "unknown" => Ok(Self::Unknown),
+            other => Err(Error::Calibration(format!(
+                "frame role must be bias, dark, dark-flat, flat, light or unknown, not {other:?}"
+            ))),
+        }
+    }
+}
+
 impl FrameCalibrationState {
     /// Whether any calibration stage is already declared complete.
     pub fn is_calibrated(self) -> bool {

@@ -155,8 +155,18 @@ core = "seiza-stacking::MasterInputStatistics"
 [rust.MasterBuildSkippedInputResponse]
 core = "seiza-stacking::SkippedInput"
 
+[rust.CalibrationPlanRecord]
+core = "seiza-stacking::CalibrationRecord"
+
+[rust.CalibrationPlanRequest]
+core = "seiza-stacking::CalibrationPlanRequest"
+bias_available = { c = "dependencies" }
+
+[rust.CalibrationPlanResponse]
+core = "seiza-stacking::CalibrationPlan"
+
 [rust.CalibrationPlanExclusionResponse]
-core = "seiza-stacking::SkippedInput"
+core = "seiza-stacking::CalibrationExclusion"
 
 [rust.StackReferenceScoreResponse]
 core = "seiza-stacking::ReferenceScore"
@@ -282,6 +292,10 @@ objects = [
 "seiza-calibration::build_residual_flat_patch" = { gap = "residual flat responses: building, checking and applying them" }
 "seiza-calibration::validate_residual_flat_response" = { gap = "residual flat responses: building, checking and applying them" }
 "seiza-calibration::coherent_subset_indices" = { none = "C hosts get it through the planner, seiza_calibration_plan_json" }
+"seiza-calibration::coherent_subset" = { none = "C hosts get it through the planner, seiza_calibration_plan_json" }
+"seiza-calibration::sensor_consistent" = { none = "C hosts get it through the planner, seiza_calibration_plan_json" }
+"seiza-calibration::optics_consistent" = { none = "C hosts get it through the planner, seiza_calibration_plan_json" }
+"seiza-calibration::sort_by_proximity" = { none = "C hosts get it through the planner, seiza_calibration_plan_json" }
 "seiza-calibration::describe_text" = { none = "a building block of the mismatch messages the C ABI returns" }
 "seiza-calibration::describe_value" = { none = "a building block of the mismatch messages the C ABI returns" }
 "seiza-calibration::exposure_tolerance" = { none = "part of the matching rules the C ABI calls" }
@@ -401,8 +415,8 @@ seiza_live_stacker_compatible_calibration_json = "LiveStacker.compatible_calibra
 seiza_live_stacker_validate_calibration = "LiveStacker.validate_calibration"
 seiza_live_stacker_match_tolerances = "LiveStacker.match_tolerances"
 seiza_live_stacker_set_match_tolerances = "LiveStacker.set_match_tolerances"
-seiza_live_stacker_set_calibration_fits = { gap = "not in Python yet: replacing a live stack's masters part way through; Python fixes them when the stack opens" }
-seiza_live_stacker_state_json = { gap = "not in Python yet: a live stack's state (configuration fingerprint, input mode, input paths, reference frame and image, why it cannot be reintegrated); Python has only accepted_frames, rejected_frames and reference_integrated" }
+seiza_live_stacker_set_calibration_fits = "LiveStacker.set_calibration_fits"
+seiza_live_stacker_state_json = "LiveStacker.state"
 seiza_live_stacker_accepted_frames = "LiveStacker.accepted_frames"
 seiza_live_stacker_rejected_frames = "LiveStacker.rejected_frames"
 seiza_live_stacker_width = { none = "C handle accessor; Python reads it from LiveStacker.snapshot().width" }
@@ -438,9 +452,11 @@ seiza_stack_snapshot_image = "StackSnapshot.image"
 seiza_stack_snapshot_variance = "StackSnapshot.variance"
 seiza_stack_snapshot_coverage = "StackSnapshot.coverage"
 seiza_stack_snapshot_rejected_samples = "StackSnapshot.rejected_samples"
-seiza_stack_snapshot_write_fits = { gap = "not in Python yet: StackSnapshot has no write_fits, so a mid-stack or reintegrated snapshot cannot be saved with the reference headers; only LiveStacker.finish writes" }
+seiza_stack_snapshot_write_fits = "StackSnapshot.write_fits"
 seiza_stack_snapshot_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
-seiza_stack_export_snapshot_write_fits = { gap = "not in Python yet: writing the running stack to FITS without finishing it (see seiza_stack_snapshot_write_fits)" }
+# Python writes the running stack straight from the stacker, with no export
+# object to hold: LiveStacker.write_fits takes the same light copy.
+seiza_stack_export_snapshot_write_fits = "LiveStacker.write_fits"
 seiza_stack_export_snapshot_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
 
 seiza_drizzle_result_width = "DrizzleResult.width"
@@ -456,8 +472,8 @@ seiza_drizzle_result_write_fits = "DrizzleResult.write_fits"
 seiza_drizzle_result_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
 
 # --- calibration ------------------------------------------------------------
-seiza_probe_frame_json = { gap = "not in Python yet: reading a FITS or XISF header into a FrameSignature, with the frame's role, master flag and calibration state" }
-seiza_calibration_plan_json = { gap = "not in Python yet: a planner that applies the whole matching policy to frame records and says why each candidate was left out; Python has only the single tests and coherent_subset" }
+seiza_probe_frame_json = "probe_frame"
+seiza_calibration_plan_json = "plan_calibration"
 # One request covers bias, dark and flat; Python has build_bias, build_dark and build_flat.
 seiza_calibration_build_master_json = "build_flat"
 seiza_frame_signature_init = "FrameSignature.__init__"
@@ -584,6 +600,7 @@ temperature_matches = { c = "seiza_calibration_dark_matches" }
 coherent_subset = { c = "seiza_calibration_plan_json" }
 coherent_subset_indices = { c = "seiza_calibration_plan_json" }
 sort_by_proximity = { c = "seiza_calibration_plan_json" }
+CalibrationRecord = { c = "seiza_calibration_plan_json" }
 
 # background and display
 "BackgroundModel.samples" = { c = "seiza_background_model_diagnostics_json" }
@@ -628,17 +645,7 @@ ObjectContourResponse = { gap = "not in Python yet: outlines of catalogued objec
 
 # stacking
 CompatibleCalibrationResponse = { none = "LiveStacker.compatible_calibration returns a (kept, dropped) tuple" }
-LiveStackReferenceResponse = { gap = "not in Python yet: a live stack's reference frame, with its role, master flag, signature and calibration state" }
 LivePreviewMetadata = { none = "metadata of the live display preview for the desktop viewers" }
-
-# calibration
-FrameProbeResponse = { gap = "not in Python yet: the header probe of seiza_probe_frame_json" }
-FrameCalibrationStateResponse = { gap = "not in Python yet: a frame's calibration state read from its header" }
-CalibrationPlanRecord = { gap = "not in Python yet: the calibration planner of seiza_calibration_plan_json" }
-CalibrationPlanRequest = { gap = "not in Python yet: the calibration planner of seiza_calibration_plan_json" }
-CalibrationPlanDependenciesRequest = { gap = "not in Python yet: the calibration planner of seiza_calibration_plan_json" }
-CalibrationPlanResponse = { gap = "not in Python yet: the calibration planner of seiza_calibration_plan_json" }
-ImpulseFilterRequest = { gap = "not in Python yet: defect suppression for flat masters (see MasterBuildRequest.defect_suppression)" }
 
 # rendering
 ProcessedRenderRequest = { none = "render request of the desktop viewers' display; Python runs fit_background, deconvolve and stretch itself" }
@@ -694,27 +701,23 @@ CatalogSetupProgressResponse = { none = "download progress for the apps' setup s
 # stacking
 "ChannelReferenceSelectionResponse.channel_reference_index" = { python = "index" }
 "ChannelReferenceSelectionResponse.channel_reference_path" = { python = "path" }
-"LiveStackStateResponse.configuration_fingerprint" = { gap = "not in Python yet: the fingerprint of a stack's options, masters and input mode, to check a resumed stack" }
-"LiveStackStateResponse.input_mode" = { gap = "not in Python yet: whether a stack calibrates files or takes prepared arrays" }
-"LiveStackStateResponse.input_paths" = { gap = "not in Python yet: the files a live stack has used" }
-"LiveStackStateResponse.reference_frame" = { gap = "not in Python yet: a live stack's reference frame (see LiveStackReferenceResponse)" }
-"LiveStackStateResponse.reference_image_path" = { gap = "not in Python yet: the reference image a stack is aligned to" }
-"LiveStackStateResponse.reintegration_unavailable" = { gap = "not in Python yet: why a stack cannot be reintegrated, before trying" }
+
+# calibration planning
+"CalibrationPlanRequest.dependencies" = { python = "bias_available" }
 
 # calibration masters
 "MasterBuildRequest.inputs" = { python = "images" }
-"MasterBuildRequest.defect_suppression" = { gap = "not in Python yet: build_flat cannot suppress hot and cold pixels in a flat master" }
+"ImpulseFilterRequest.low_sigma" = { python = "defect_sigma_low" }
+"ImpulseFilterRequest.high_sigma" = { python = "defect_sigma_high" }
 "MasterRejectionRequest.low_sigma" = { python = "sigma_low" }
 "MasterRejectionRequest.high_sigma" = { python = "sigma_high" }
 "MasterBuildRejectionResponse.low_sigma" = { python = "sigma_low" }
 "MasterBuildRejectionResponse.high_sigma" = { python = "sigma_high" }
 "MasterBuildResponse.requested_frames" = { none = "the caller knows len(images)" }
-"MasterBuildResponse.defect_pixels_replaced" = { gap = "not in Python yet: goes with MasterBuildRequest.defect_suppression" }
 "MasterBuildResponse.output_exposure_seconds" = { python = "exposure_seconds" }
 "MasterBuildResponse.inputs" = { python = "input_statistics" }
 "DarkLevelScreeningRequest.max_excess_sigma" = { python = "dark_level_screening" }
 "MasterBuildInputResponse.masked_samples" = { python = "input_masked_samples" }
-"MasterBuildResponse.skipped_inputs" = { gap = "not in Python yet: MasterResult does not name the inputs the build set aside or why, so input_statistics cannot be matched to paths when it skips any" }
 
 # background, deconvolution and rendering
 "BackgroundRenderRequest.config" = { none = "Python passes the BackgroundConfig fields to fit_background as keyword arguments" }
@@ -733,4 +736,3 @@ CatalogSetupProgressResponse = { none = "download progress for the apps' setup s
 "ColorCompositionResponse.transfer" = { none = "Python's combine functions return the image array alone; the Foraxx palettes give display-referred samples and the rest linear light, and an output's SEIZATRF card records it" }
 "ChannelCoverageResponse.center_offset_x" = { python = "center_offset" }
 "ChannelCoverageResponse.center_offset_y" = { python = "center_offset" }
-"CropReportResponse.off_center_limit_pixels" = { gap = "not in Python yet: crop_report does not give the distance past which a channel counts as off centre" }

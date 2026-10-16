@@ -5,12 +5,13 @@ use pyo3::prelude::*;
 use seiza_stacking::{
     BatchStackOptions, CalibrationMasters, CancelSignal, DarkLevelScreening, DeltaSigmaOptions,
     Demosaic, DrizzleOptions, DrizzleResult, FitsFrame, FlatStarMaskingOptions,
-    FlatStarMaskingStatistics, FrameDisposition, FrameWeighting, LinearImage, LiveStacker,
-    MasterBuildOptions, MasterDark, MasterFrameKind, MasterRejectionOptions, NormalizationMode,
-    PipelineOptions, PipelineReport, RegistrationModel, RejectionMode, SnrSample, StackOptions,
-    StackSnapshot, build_master_from_fits, build_master_from_fits_with_scratch, checkpoint_depths,
-    measure_depth, path_identity, paths_refer_to_same_file, write_drizzle_fits_f32, write_fits_f32,
-    write_master_fits_f32,
+    FlatStarMaskingStatistics, FrameDisposition, FrameWeighting, ImpulseFilterOptions, LinearImage,
+    LiveStacker, MasterBuildOptions, MasterDark, MasterFrameKind, MasterRejectionOptions,
+    NormalizationMode, PipelineOptions, PipelineReport, RegistrationModel, RejectionMode,
+    SnrSample, StackOptions, StackSnapshot, build_master_from_fits,
+    build_master_from_fits_with_scratch, checkpoint_depths, measure_depth, path_identity,
+    paths_refer_to_same_file, write_drizzle_fits_f32, write_fits_f32, write_master_fits_f32,
+    write_stack_export_fits_f32,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -639,6 +640,33 @@ const CHANNEL_REFERENCE_ATTEMPTS: usize = 5;
 #[pyclass(frozen, name = "StackSnapshot", module = "seiza")]
 pub(crate) struct PyStackSnapshot {
     inner: StackSnapshot,
+    reference_headers: Vec<(String, seiza_fits::HeaderValue)>,
+    input_paths: Vec<PathBuf>,
+}
+
+impl PyStackSnapshot {
+    /// A snapshot that writes with `stacker`'s reference headers and keeps
+    /// clear of its inputs.
+    fn of(stacker: &LiveStacker, inner: StackSnapshot) -> Self {
+        Self {
+            inner,
+            reference_headers: stacker.reference_headers().to_vec(),
+            input_paths: stacker.protected_paths(),
+        }
+    }
+}
+
+/// An error unless `path` is clear of every input and master of a stack.
+fn check_output_path(inputs: &[PathBuf], path: &Path) -> PyResult<()> {
+    if inputs
+        .iter()
+        .any(|input| paths_refer_to_same_file(input, path))
+    {
+        return Err(PyValueError::new_err(
+            "output path must not refer to a stack input or calibration master",
+        ));
+    }
+    Ok(())
 }
 
 #[pymethods]
@@ -702,6 +730,15 @@ impl PyStackSnapshot {
             self.inner.image.height,
             self.inner.image.channels,
         )
+    }
+
+    /// Write the stack as linear 32-bit FITS (or XISF for a ``.xisf``
+    /// path), with the reference frame's headers. The path may not be one
+    /// of the stack's inputs or masters.
+    fn write_fits(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {
+        check_output_path(&self.input_paths, &path)?;
+        py.detach(|| write_fits_f32(path, &self.inner, &self.reference_headers))
+            .map_err(stack_error)
     }
 
     fn __repr__(&self) -> String {
@@ -776,15 +813,7 @@ impl PyDrizzleResult {
     /// Write the drizzled image as linear FITS (or XISF for a ``.xisf``
     /// path), with the reference WCS scaled to the drizzle grid.
     fn write_fits(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {
-        if self
-            .input_paths
-            .iter()
-            .any(|input| paths_refer_to_same_file(input, &path))
-        {
-            return Err(PyValueError::new_err(
-                "output path must not refer to a stack input or calibration master",
-            ));
-        }
+        check_output_path(&self.input_paths, &path)?;
         py.detach(|| {
             write_drizzle_fits_f32(
                 path,
@@ -827,6 +856,60 @@ fn batch_options(
         scratch_directory,
         ..BatchStackOptions::default()
     })
+}
+
+/// What a live stack is, from :meth:`LiveStacker.state`.
+#[pyclass(frozen, name = "LiveStackState", module = "seiza")]
+pub(crate) struct PyLiveStackState {
+    /// A SHA-256 of the stack's options, masters and input mode, in
+    /// lowercase hex. It leaves out counts and paths, changes when the
+    /// masters change, and survives saving and reopening the context.
+    #[pyo3(get)]
+    configuration_fingerprint: String,
+    #[pyo3(get)]
+    width: usize,
+    #[pyo3(get)]
+    height: usize,
+    #[pyo3(get)]
+    channels: usize,
+    #[pyo3(get)]
+    accepted_frames: u32,
+    #[pyo3(get)]
+    rejected_frames: u32,
+    /// ``"calibrate-and-prepare"`` for a stack of files, or
+    /// ``"prepared-only"`` for one started from arrays.
+    #[pyo3(get)]
+    input_mode: &'static str,
+    /// The frames and masters the stack has used, in order.
+    #[pyo3(get)]
+    input_paths: Vec<PathBuf>,
+    reference_frame: crate::calibration::PyFrameMetadata,
+    #[pyo3(get)]
+    reference_integrated: bool,
+    /// The separate image the stack is aligned to, if any.
+    #[pyo3(get)]
+    reference_image_path: Option<PathBuf>,
+    /// Why :meth:`LiveStacker.reintegrate` cannot replay the stack, or
+    /// ``None`` when it can.
+    #[pyo3(get)]
+    reintegration_unavailable: Option<String>,
+}
+
+#[pymethods]
+impl PyLiveStackState {
+    /// The reference frame's role, master flag, signature and calibration
+    /// state.
+    #[getter]
+    fn reference_frame(&self) -> crate::calibration::PyFrameMetadata {
+        self.reference_frame.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "LiveStackState(shape={}x{}x{}, accepted_frames={}, input_mode={:?})",
+            self.width, self.height, self.channels, self.accepted_frames, self.input_mode,
+        )
+    }
 }
 
 #[pyclass(name = "LiveStacker", module = "seiza")]
@@ -1456,7 +1539,72 @@ impl PyLiveStacker {
     fn snapshot(&self, py: Python<'_>) -> PyResult<PyStackSnapshot> {
         let stacker = self.active()?;
         let snapshot = py.detach(|| stacker.snapshot()).map_err(stack_error)?;
-        Ok(PyStackSnapshot { inner: snapshot })
+        Ok(PyStackSnapshot::of(stacker, snapshot))
+    }
+
+    /// Write the running stack as linear 32-bit FITS (or XISF for a
+    /// ``.xisf`` path), with the reference frame's headers, and carry on
+    /// stacking. Lighter than ``snapshot().write_fits(path)``: it copies only
+    /// the mean. The path may not be one of the stack's inputs or masters.
+    fn write_fits(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {
+        let stacker = self.active()?;
+        check_output_path(&stacker.protected_paths(), &path)?;
+        py.detach(|| {
+            let snapshot = stacker.export_snapshot()?;
+            write_stack_export_fits_f32(path, &snapshot, stacker.reference_headers())
+        })
+        .map_err(stack_error)
+    }
+
+    /// What the stack is: its size and counts, the fingerprint of its
+    /// options, masters and input mode, the files it has used, its
+    /// reference frame, and whether it can be reintegrated.
+    fn state(&self) -> PyResult<PyLiveStackState> {
+        let stacker = self.active()?;
+        let view = stacker.view();
+        Ok(PyLiveStackState {
+            configuration_fingerprint: stacker.configuration_fingerprint().to_owned(),
+            width: view.width,
+            height: view.height,
+            channels: view.channels,
+            accepted_frames: view.accepted_frames,
+            rejected_frames: view.rejected_frames,
+            input_mode: stacker.input_mode().as_str(),
+            input_paths: stacker.input_paths().to_vec(),
+            reference_frame: crate::calibration::PyFrameMetadata {
+                inner: stacker.reference_metadata().clone(),
+            },
+            reference_integrated: stacker.reference_is_integrated(),
+            reference_image_path: stacker.reference_image_path().map(Path::to_path_buf),
+            reintegration_unavailable: stacker.reintegration_unavailable(),
+        })
+    }
+
+    /// Replace the masters that calibrate frames pushed from now on. Each
+    /// is optional; passing none clears them. ``dark_exposure_seconds``
+    /// overrides the dark's own exposure. Every file is read and checked
+    /// against the reference before anything changes, and frames already
+    /// stacked are not calibrated again. Raises :class:`StackError` for a
+    /// stack started from arrays.
+    #[pyo3(signature = (*, bias=None, dark=None, flat=None, dark_exposure_seconds=None))]
+    fn set_calibration_fits(
+        &mut self,
+        py: Python<'_>,
+        bias: Option<PathBuf>,
+        dark: Option<PathBuf>,
+        flat: Option<PathBuf>,
+        dark_exposure_seconds: Option<f64>,
+    ) -> PyResult<()> {
+        validate_exposure_override(dark.as_ref(), dark_exposure_seconds, "dark")?;
+        py.detach(|| {
+            self.active_mut()?.set_calibration_from_fits_paths(
+                bias.as_deref(),
+                dark.as_deref(),
+                flat.as_deref(),
+                dark_exposure_seconds,
+            )
+        })
+        .map_err(stack_error)
     }
 
     /// Keep each frame admitted from now on in a scratch file, registered but
@@ -1503,9 +1651,7 @@ impl PyLiveStacker {
         let result = py
             .detach(|| stacker.reintegrate(&options, |_, _, _| {}))
             .map_err(stack_error)?;
-        Ok(PyStackSnapshot {
-            inner: result.snapshot,
-        })
+        Ok(PyStackSnapshot::of(stacker, result.snapshot))
     }
 
     /// :meth:`reintegrate`, also drizzling every admitted frame onto a grid
@@ -1548,40 +1694,32 @@ impl PyLiveStacker {
             reference_headers: stacker.reference_headers().to_vec(),
             input_paths: stacker.protected_paths(),
         };
-        Ok((
-            PyStackSnapshot {
-                inner: result.snapshot,
-            },
-            drizzled,
-        ))
+        Ok((PyStackSnapshot::of(stacker, result.snapshot), drizzled))
     }
 
     /// Consume the accumulator, optionally write a linear FITS file, and return its arrays.
     #[pyo3(signature = (output=None))]
     fn finish(&mut self, py: Python<'_>, output: Option<PathBuf>) -> PyResult<PyStackSnapshot> {
-        if let Some(output) = &output
-            && self
-                .active()?
-                .protected_paths()
-                .iter()
-                .any(|input| paths_refer_to_same_file(input, output))
-        {
-            return Err(PyValueError::new_err(
-                "output path must not refer to a stack input or calibration master",
-            ));
+        let input_paths = self.active()?.protected_paths();
+        if let Some(output) = &output {
+            check_output_path(&input_paths, output)?;
         }
         let stacker = self.inner.take().ok_or_else(finished_error)?;
+        let reference_headers = stacker.reference_headers().to_vec();
         let snapshot = py
-            .detach(move || {
-                let headers = stacker.reference_headers().to_vec();
+            .detach(|| {
                 let snapshot = stacker.into_snapshot()?;
                 if let Some(output) = output {
-                    write_fits_f32(output, &snapshot, &headers)?;
+                    write_fits_f32(output, &snapshot, &reference_headers)?;
                 }
                 Ok::<_, seiza_stacking::Error>(snapshot)
             })
             .map_err(stack_error)?;
-        Ok(PyStackSnapshot { inner: snapshot })
+        Ok(PyStackSnapshot {
+            inner: snapshot,
+            reference_headers,
+            input_paths,
+        })
     }
 
     fn __repr__(&self) -> String {
@@ -1639,6 +1777,8 @@ pub(crate) struct PyMasterResult {
     #[pyo3(get)]
     fallback_pixels: u64,
     #[pyo3(get)]
+    defect_pixels_replaced: u64,
+    #[pyo3(get)]
     bias_subtracted: bool,
     #[pyo3(get)]
     dark_subtracted: bool,
@@ -1658,6 +1798,9 @@ pub(crate) struct PyMasterResult {
     #[pyo3(get)]
     rejection_method: &'static str,
     flat_star_masking_statistics: Option<FlatStarMaskingStatistics>,
+    /// The inputs the build set aside, each as `(path, reason)`.
+    #[pyo3(get)]
+    skipped_inputs: Vec<(PathBuf, String)>,
 }
 
 /// Star masking for sky flats: what :func:`build_flat` leaves out of each
@@ -2042,7 +2185,10 @@ fn build_dark(
     sigma_high=3.0,
     cancel=None,
     flat_star_masking=None,
-    scratch_directory=None
+    scratch_directory=None,
+    defect_suppression=false,
+    defect_sigma_low=None,
+    defect_sigma_high=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn build_flat(
@@ -2058,8 +2204,13 @@ fn build_flat(
     cancel: Option<Py<PyAny>>,
     flat_star_masking: Option<PyRef<'_, PyFlatStarMasking>>,
     scratch_directory: Option<PathBuf>,
+    defect_suppression: bool,
+    defect_sigma_low: Option<f32>,
+    defect_sigma_high: Option<f32>,
 ) -> PyResult<PyMasterResult> {
     validate_exposure_override(dark_flat.as_ref(), dark_flat_exposure_seconds, "dark_flat")?;
+    let defect_suppression =
+        defect_filter(defect_suppression, defect_sigma_low, defect_sigma_high)?;
     build_master(
         py,
         images,
@@ -2077,9 +2228,40 @@ fn build_flat(
                 .as_deref()
                 .map(FlatStarMaskingOptions::from),
             scratch_directory,
+            defect_suppression,
             ..MasterExtras::default()
         },
     )
+}
+
+/// The defect filter `build_flat` was asked for: the core's defaults, with
+/// any sigma given in place of its default.
+fn defect_filter(
+    enabled: bool,
+    sigma_low: Option<f32>,
+    sigma_high: Option<f32>,
+) -> PyResult<Option<ImpulseFilterOptions>> {
+    if !enabled {
+        if sigma_low.is_some() || sigma_high.is_some() {
+            return Err(PyValueError::new_err(
+                "defect_sigma_low and defect_sigma_high require defect_suppression=True",
+            ));
+        }
+        return Ok(None);
+    }
+    let defaults = ImpulseFilterOptions::default();
+    let filter = ImpulseFilterOptions {
+        low_sigma: sigma_low.unwrap_or(defaults.low_sigma),
+        high_sigma: sigma_high.unwrap_or(defaults.high_sigma),
+    };
+    for sigma in [filter.low_sigma, filter.high_sigma] {
+        if !(sigma.is_finite() && sigma > 0.0) {
+            return Err(PyValueError::new_err(
+                "defect-suppression sigmas must be positive finite numbers",
+            ));
+        }
+    }
+    Ok(Some(filter))
 }
 
 /// Master build options only some kinds take.
@@ -2088,6 +2270,7 @@ struct MasterExtras {
     flat_star_masking: Option<FlatStarMaskingOptions>,
     dark_level_screening: Option<DarkLevelScreening>,
     scratch_directory: Option<PathBuf>,
+    defect_suppression: Option<ImpulseFilterOptions>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2151,7 +2334,7 @@ fn build_master(
             dark,
             cancel: Some(signal),
             progress: None,
-            defect_suppression: None,
+            defect_suppression: extras.defect_suppression,
             flat_star_masking: extras.flat_star_masking,
             dark_level_screening: extras.dark_level_screening,
         };
@@ -2172,6 +2355,7 @@ fn build_master(
             accepted_samples: master.accepted_samples,
             rejected_samples: master.rejected_samples,
             fallback_pixels: master.fallback_pixels,
+            defect_pixels_replaced: master.defect_pixels_replaced,
             bias_subtracted: master.bias_subtracted,
             dark_subtracted: master.dark_subtracted,
             normalized: master.normalized,
@@ -2189,6 +2373,11 @@ fn build_master(
                 .collect(),
             rejection_method: master.rejection_method.as_str(),
             flat_star_masking_statistics: master.flat_star_masking,
+            skipped_inputs: master
+                .skipped_inputs
+                .iter()
+                .map(|skipped| (skipped.path.clone(), skipped.reason.clone()))
+                .collect(),
         })
     });
     if let Some(error) = raised.lock().unwrap().take() {
@@ -2367,6 +2556,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PySnrSample>()?;
     module.add_function(wrap_pyfunction!(py_checkpoint_depths, module)?)?;
     module.add_class::<PyLiveStacker>()?;
+    module.add_class::<PyLiveStackState>()?;
     module.add_class::<PyDrizzleResult>()?;
     module.add_class::<PyMasterResult>()?;
     module.add_class::<PyFlatStarMasking>()?;

@@ -167,6 +167,11 @@ def test_crop_report_flags_a_channel_far_from_the_others() -> None:
     ]
     assert [channel["name"] for channel in flagged] == ["blue"]
     assert flagged[0]["center_offset_pixels"] > 32.0
+    # The limit is the larger of 32 pixels and 2% of the grid's long side.
+    assert report["off_center_limit_pixels"] == 32.0
+    for channel in report["channels"]:
+        beyond = channel["center_offset_pixels"] > report["off_center_limit_pixels"]
+        assert channel["off_center"] == beyond
 
 
 def test_crop_report_rejects_an_unknown_mode() -> None:

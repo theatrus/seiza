@@ -525,6 +525,16 @@ pub enum FrameInputMode {
     PreparedOnly,
 }
 
+impl FrameInputMode {
+    /// `calibrate-and-prepare` or `prepared-only`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CalibrateAndPrepare => "calibrate-and-prepare",
+            Self::PreparedOnly => "prepared-only",
+        }
+    }
+}
+
 /// Incremental, bounded-memory image stack. Frames are registered to the
 /// immutable first accepted frame and integrated immediately.
 pub struct LiveStacker {

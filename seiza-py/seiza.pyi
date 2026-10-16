@@ -312,6 +312,46 @@ class MatchTolerances:
         flat_session_seconds: int | None = None,
     ) -> None: ...
 
+class FrameCalibrationState:
+    bias_subtracted: bool
+    dark_subtracted: bool
+    flat_normalized: bool
+
+class FrameMetadata:
+    role: str
+    is_master: bool
+    signature: FrameSignature
+    calibration_state: FrameCalibrationState
+
+class FrameProbe:
+    path: Path
+    format: str
+    raw_image_type: str | None
+    role: str
+    is_master: bool
+    signature: FrameSignature
+    calibration_state: FrameCalibrationState
+
+class CalibrationRecord:
+    path: Path
+    role: str
+    signature: FrameSignature
+    def __init__(
+        self,
+        path: str | Path,
+        signature: FrameSignature,
+        *,
+        role: str = "unknown",
+    ) -> None: ...
+
+class CalibrationPlan:
+    kind: str
+    minimum: int
+    ready: bool
+    matched_paths: list[Path]
+    selected_paths: list[Path]
+    excluded: list[tuple[Path, str]]
+
 class StackOptions:
     normalization: str
     local_tile_size: int | None
@@ -431,6 +471,7 @@ class StackSnapshot:
     variance: npt.NDArray[np.float32]
     coverage: npt.NDArray[np.uint32]
     rejected_samples: npt.NDArray[np.uint32]
+    def write_fits(self, path: str | Path) -> None: ...
 
 class DrizzleResult:
     width: int
@@ -442,6 +483,20 @@ class DrizzleResult:
     image: npt.NDArray[np.float32]
     weight: npt.NDArray[np.float32]
     def write_fits(self, path: str | Path) -> None: ...
+
+class LiveStackState:
+    configuration_fingerprint: str
+    width: int
+    height: int
+    channels: int
+    accepted_frames: int
+    rejected_frames: int
+    input_mode: str
+    input_paths: list[Path]
+    reference_frame: FrameMetadata
+    reference_integrated: bool
+    reference_image_path: Path | None
+    reintegration_unavailable: str | None
 
 class LiveStacker:
     def __init__(
@@ -524,6 +579,15 @@ class LiveStacker:
     ) -> None: ...
     def match_tolerances(self) -> MatchTolerances: ...
     def set_match_tolerances(self, tolerances: MatchTolerances | None = None) -> None: ...
+    def set_calibration_fits(
+        self,
+        *,
+        bias: str | Path | None = None,
+        dark: str | Path | None = None,
+        flat: str | Path | None = None,
+        dark_exposure_seconds: float | None = None,
+    ) -> None: ...
+    def state(self) -> LiveStackState: ...
     def push_fits(self, path: str | Path) -> FrameDisposition: ...
     def push_fits_pipelined(
         self,
@@ -540,6 +604,7 @@ class LiveStacker:
     def expansion_planning_notes(self) -> list[str]: ...
     def measure_depth(self) -> SnrSample | None: ...
     def snapshot(self) -> StackSnapshot: ...
+    def write_fits(self, path: str | Path) -> None: ...
     def retain_frames_for_reintegration(
         self,
         *,
@@ -578,6 +643,7 @@ class MasterResult:
     accepted_samples: int
     rejected_samples: int
     fallback_pixels: int
+    defect_pixels_replaced: int
     bias_subtracted: bool
     dark_subtracted: bool
     normalized: bool
@@ -587,6 +653,7 @@ class MasterResult:
     input_masked_samples: list[int]
     rejection_method: str
     flat_star_masking: dict[str, Any] | None
+    skipped_inputs: list[tuple[Path, str]]
 
 class FlatStarMasking:
     detection_sigma: float
@@ -1062,8 +1129,22 @@ def build_flat(
     cancel: Callable[[], bool] | None = None,
     flat_star_masking: FlatStarMasking | None = None,
     scratch_directory: str | Path | None = None,
+    defect_suppression: bool = False,
+    defect_sigma_low: float | None = None,
+    defect_sigma_high: float | None = None,
 ) -> MasterResult: ...
 def frame_noise(image: npt.NDArray[np.float32]) -> list[float] | None: ...
+def probe_frame(path: str | Path) -> FrameProbe: ...
+def plan_calibration(
+    kind: str,
+    reference: FrameProbe | CalibrationRecord,
+    candidates: Sequence[FrameProbe | CalibrationRecord],
+    *,
+    references: Sequence[FrameProbe | CalibrationRecord] | None = None,
+    minimum: int = 2,
+    tolerances: MatchTolerances | None = None,
+    bias_available: bool = False,
+) -> CalibrationPlan: ...
 def sensor_matches(reference: FrameSignature, candidate: FrameSignature) -> bool: ...
 def optics_match(
     reference: FrameSignature,
