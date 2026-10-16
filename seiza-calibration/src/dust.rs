@@ -829,36 +829,145 @@ pub fn find_session_dust(
         .map(|frame| frame_residual(frame, pedestal))
         .collect();
     let (width, height) = (stack.width, stack.height);
-    let count = residuals.iter().flatten().count() as u32;
-    for feature in &mut map.features {
-        let frames = residuals
-            .iter()
-            .flatten()
-            .filter(|(residual, noise)| shows_in(residual, *noise, width, height, bin, feature))
-            .count() as u32;
-        feature.seen_in = Some(SeenIn { frames, of: count });
-    }
-    let needed = |of: u32| {
-        if (of as usize) < MIN_PERSISTENCE_FRAMES {
-            of
-        } else {
-            ((0.6 * of as f32).ceil() as u32).max(2)
-        }
+    let seen_by: Vec<Vec<usize>> = residuals
+        .iter()
+        .flatten()
+        .map(|(residual, noise)| {
+            (0..map.features.len())
+                .filter(|index| {
+                    shows_in(residual, *noise, width, height, bin, &map.features[*index])
+                })
+                .collect()
+        })
+        .collect();
+    keep_persistent(&mut map, &seen_by);
+    Some(map)
+}
+
+/// Find the dust of one flat session from its stack and each flat's own
+/// features, reading no flat again: for a host that keeps a session's
+/// stack (a [`metric::FlatResponse`], pedestal out) and each flat's
+/// measured features ([`crate::measure_flat`]'s, or [`find_dust`]'s on the
+/// flat binned), but not the flats.
+///
+/// The stack's dust is found as [`find_dust`] finds it. A flat shows a
+/// feature when one of its own features pairs with it ([`match_features`]);
+/// what is kept is what [`find_session_dust`] keeps, by the same rule. Each
+/// flat's view says which of the kept features it shows, and its
+/// transients: features of its own that pair with none of the stack's, lie
+/// on none of them, and do not recur in most of the other flats (dust the
+/// stack is too coarse to hold is not a passing thing). One list per flat,
+/// in the order given. `None` when the stack is too small or too empty to
+/// fit a surface to.
+///
+/// Persistence read this way counts only the flats that find a feature on
+/// their own, where [`find_session_dust`] measures each feature in each
+/// flat at its known place: a faint disk the stack shows may be dropped
+/// here that it keeps.
+pub fn session_dust_from_lists(
+    stack: &Plane,
+    bin: usize,
+    frames: &[&[DustFeature]],
+    options: &DustOptions,
+) -> Option<(DustMap, Vec<FrameDust>)> {
+    let mut map = find_dust(stack, bin, options)?;
+    map.frames = frames.len();
+    let t = options.move_tolerance.max(0.0);
+    let overlap = |a: &DustFeature, b: &DustFeature| {
+        a.left as f32 - t <= b.right as f32
+            && b.left as f32 <= a.right as f32 + t
+            && a.top as f32 - t <= b.bottom as f32
+            && b.top as f32 <= a.bottom as f32 + t
     };
-    map.features.retain(|feature| {
-        let Some(seen) = feature.seen_in else {
-            return false;
-        };
-        if feature.shape.is_large() {
+    let mut seen_by: Vec<Vec<usize>> = Vec::with_capacity(frames.len());
+    let mut transients: Vec<Vec<DustFeature>> = Vec::with_capacity(frames.len());
+    for (index, features) in frames.iter().enumerate() {
+        let matches = match_features(&map.features, features, options);
+        seen_by.push(
+            matches
+                .iter()
+                .filter(|m| m.later.is_some())
+                .filter_map(|m| m.earlier)
+                .collect(),
+        );
+        let others = frames.len().saturating_sub(1) as f32;
+        transients.push(
+            matches
+                .iter()
+                .filter(|m| m.earlier.is_none())
+                .filter_map(|m| m.later.map(|j| features[j]))
+                .filter(|f| {
+                    !map.features
+                        .iter()
+                        .any(|own| (own.x - f.x).hypot(own.y - f.y) < own.radius.max(f.radius))
+                })
+                .filter(|f| {
+                    let recurs = frames
+                        .iter()
+                        .enumerate()
+                        .filter(|(other, list)| {
+                            *other != index && list.iter().any(|g| overlap(f, g))
+                        })
+                        .count();
+                    (recurs as f32) < STEADY_SHARE * others
+                })
+                .collect(),
+        );
+    }
+    let renumber = keep_persistent(&mut map, &seen_by);
+    let views = seen_by
+        .into_iter()
+        .zip(transients)
+        .map(|(seen, transients)| FrameDust {
+            seen: seen.iter().filter_map(|index| renumber[*index]).collect(),
+            transients,
+        })
+        .collect();
+    Some((map, views))
+}
+
+/// A compact dip must show in this share of a session's flats to be dust
+/// (all of them with fewer than [`MIN_PERSISTENCE_FRAMES`]); a flat's own
+/// feature that recurs in this share of the other flats is no transient.
+const STEADY_SHARE: f32 = 0.6;
+/// A disk, donut or patch, which the stack may show when no single flat
+/// can, needs this share of the flats.
+const LARGE_SHARE: f32 = 0.3;
+
+/// Count in how many flats each feature of `map` shows (`seen_by`: for each
+/// flat looked at, the indices of the features it shows), and keep those
+/// that persist: a compact dip in [`STEADY_SHARE`] of the flats (all of
+/// them with fewer than [`MIN_PERSISTENCE_FRAMES`]), a large shadow in
+/// [`LARGE_SHARE`] (any, with too few flats to say). Returns each old
+/// index's new one.
+fn keep_persistent(map: &mut DustMap, seen_by: &[Vec<usize>]) -> Vec<Option<usize>> {
+    let of = seen_by.len() as u32;
+    let mut renumber = Vec::with_capacity(map.features.len());
+    let mut kept = Vec::with_capacity(map.features.len());
+    for (index, feature) in map.features.iter().enumerate() {
+        let frames = seen_by.iter().filter(|seen| seen.contains(&index)).count() as u32;
+        let seen = SeenIn { frames, of };
+        let persists = if feature.shape.is_large() {
             // A shadow most flats do not show on their own is mottle the
             // stack happened to line up, unless there are too few flats to
             // say.
-            !seen.is_reliable() || seen.frames as f32 >= 0.3 * seen.of as f32
+            !seen.is_reliable() || frames as f32 >= LARGE_SHARE * of as f32
+        } else if !seen.is_reliable() {
+            frames >= of
         } else {
-            seen.frames >= needed(seen.of)
+            frames >= ((STEADY_SHARE * of as f32).ceil() as u32).max(2)
+        };
+        if persists {
+            let mut feature = *feature;
+            feature.seen_in = Some(seen);
+            renumber.push(Some(kept.len()));
+            kept.push(feature);
+        } else {
+            renumber.push(None);
         }
-    });
-    Some(map)
+    }
+    map.features = kept;
+    renumber
 }
 
 /// One flat of a session against the session's dust: which of the

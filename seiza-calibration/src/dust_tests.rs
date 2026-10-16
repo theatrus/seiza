@@ -678,3 +678,133 @@ fn optics_from_parts_refuse_what_they_would_ignore() {
     assert!(Optics::from_parts(Some(10.0), None, Some(0.35)).is_err());
     assert!(Optics::from_parts(None, Some(3.76), None).is_err());
 }
+
+/// Six flats of one session, raw ADU over a 300 ADU pedestal: a filter disk
+/// in each, window dust in each, and a drop of dew in the first only.
+fn session_flats() -> Vec<Plane> {
+    let level = 30_000.0_f32;
+    (0..6)
+        .map(|frame| {
+            let mut p = plane(
+                &[(200.0, 150.0, 40.0, 0.004), (400.0, 90.0, 4.0, 0.03)],
+                0.0015,
+                20 + frame,
+            );
+            if frame == 0 {
+                for (index, value) in p.data.iter_mut().enumerate() {
+                    let (x, y) = ((index % W) as f32, (index / W) as f32);
+                    if (x - 380.0).hypot(y - 260.0) <= 4.0 {
+                        *value *= 0.9;
+                    }
+                }
+            }
+            for value in &mut p.data {
+                *value = *value * level + 300.0;
+            }
+            p
+        })
+        .collect()
+}
+
+#[test]
+fn session_dust_from_lists_keeps_what_the_flats_show() {
+    let options = DustOptions::default();
+    let flats = session_flats();
+    let stack = metric::build_response(&flats, BIN)
+        .unwrap()
+        .without_pedestal(300.0);
+    // Each flat's own dust, as a host stores it.
+    let lists: Vec<Vec<DustFeature>> = flats
+        .iter()
+        .map(|flat| {
+            let own = Plane {
+                width: flat.width,
+                height: flat.height,
+                data: flat.data.iter().map(|v| v - 300.0).collect(),
+            };
+            find_dust(&own, BIN, &options).unwrap().features
+        })
+        .collect();
+    let views: Vec<&[DustFeature]> = lists.iter().map(Vec::as_slice).collect();
+    let (map, frames) = session_dust_from_lists(&stack, BIN, &views, &options).unwrap();
+    assert_eq!(map.frames, 6);
+    assert_eq!(frames.len(), 6);
+    // The disk and the window dust, each in every flat; the dew is no dust
+    // of the session's.
+    assert_eq!(map.features.len(), 2, "{:?}", map.features);
+    for feature in &map.features {
+        assert_eq!(
+            feature.seen_in,
+            Some(SeenIn { frames: 6, of: 6 }),
+            "{feature:?}"
+        );
+    }
+    assert!(
+        frames.iter().all(|frame| frame.seen.len() == 2),
+        "{frames:?}"
+    );
+    assert_eq!(frames[0].transients.len(), 1, "{:?}", frames[0].transients);
+    assert!(frames[1..].iter().all(|frame| frame.transients.is_empty()));
+    // The same session read flat by flat keeps the same dust.
+    let pixels = find_session_dust(&flats, BIN, 300.0, &options).unwrap();
+    assert_eq!(
+        pixels.features.len(),
+        map.features.len(),
+        "{:?}",
+        pixels.features
+    );
+}
+
+#[test]
+fn a_feature_too_few_flats_show_is_dropped_and_a_steady_one_is_no_transient() {
+    let options = DustOptions::default();
+    let flats = session_flats();
+    let stack = metric::build_response(&flats, BIN)
+        .unwrap()
+        .without_pedestal(300.0);
+    let stack_map = find_dust(&stack, BIN, &options).unwrap();
+    let window = *stack_map
+        .features
+        .iter()
+        .find(|f| !f.shape.is_large())
+        .expect("the window dust");
+    let disk = *stack_map
+        .features
+        .iter()
+        .find(|f| f.shape.is_large())
+        .expect("the disk");
+    // The window dust found in two flats of six (under 60%); a speck the
+    // stack does not hold, in five of six (steady, not passing); the disk
+    // in two (over 30%).
+    let speck = {
+        let mut f = window;
+        f.x += 700.0;
+        f.left += 700;
+        f.right += 700;
+        f
+    };
+    let lists: Vec<Vec<DustFeature>> = (0..6)
+        .map(|frame| {
+            let mut list = Vec::new();
+            if frame < 2 {
+                list.push(window);
+                list.push(disk);
+            }
+            if frame < 5 {
+                list.push(speck);
+            }
+            list
+        })
+        .collect();
+    let views: Vec<&[DustFeature]> = lists.iter().map(Vec::as_slice).collect();
+    let (map, frames) = session_dust_from_lists(&stack, BIN, &views, &options).unwrap();
+    assert_eq!(map.features.len(), 1, "{:?}", map.features);
+    assert!(map.features[0].shape.is_large());
+    assert_eq!(map.features[0].seen_in, Some(SeenIn { frames: 2, of: 6 }));
+    assert_eq!(frames[0].seen, vec![0]);
+    assert!(frames[5].seen.is_empty());
+    assert!(
+        frames.iter().all(|frame| frame.transients.is_empty()),
+        "{frames:?}"
+    );
+}
