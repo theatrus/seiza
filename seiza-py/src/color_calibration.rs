@@ -53,7 +53,8 @@ fn gaia_photometry_cone(
 
 /// Read Gaia DR3 photometry within `radius_deg` of `(ra, dec)` (degrees)
 /// down to G `max_mag` from an offline catalog (`stars-gaia-photometry.bin`,
-/// from :func:`fetch_catalogs`).
+/// from :func:`fetch_catalogs`). `path` is the catalog file or the
+/// directory that holds it.
 ///
 /// Returns dicts like :func:`gaia_photometry_cone`'s, but with positions
 /// already at the catalog's epoch, so `pmra` and `pmdec` are None, and the
@@ -71,10 +72,14 @@ fn gaia_photometry_catalog_cone(
 ) -> PyResult<Vec<Py<PyDict>>> {
     let stars = py
         .detach(|| {
-            let catalog = seiza::catalog::PhotometryCatalog::open(&path)?;
-            Ok::<_, std::io::Error>(catalog.cone_search(ra, dec, radius_deg, max_mag))
+            let path = seiza::data_paths::gaia_photometry(Some(&path))
+                .map_err(|error| error.to_string())?
+                .ok_or("no Gaia photometry catalog is installed")?;
+            let catalog = seiza::catalog::PhotometryCatalog::open(&path)
+                .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
+            Ok::<_, String>(catalog.cone_search(ra, dec, radius_deg, max_mag))
         })
-        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        .map_err(PyValueError::new_err)?;
     stars
         .into_iter()
         .map(|star| {
@@ -84,7 +89,7 @@ fn gaia_photometry_catalog_cone(
             row.set_item("pmra", py.None())?;
             row.set_item("pmdec", py.None())?;
             row.set_item("g", star.g)?;
-            row.set_item("bp_rp", star.bp_rp.filter(|_| star.reliable))?;
+            row.set_item("bp_rp", star.calibration_bp_rp())?;
             Ok(row.unbind())
         })
         .collect()

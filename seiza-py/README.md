@@ -95,6 +95,18 @@ and 240°. Per-sector medians remain available for sparse data, but `ready`,
 stars per sector. `overall_median_hfr` is the median of every selected annular
 star, not the median of the sector medians.
 
+`detect_measured_stars_file(path, ...)` measures a FITS or XISF file
+directly: its linear 16-bit luminance, with a Bayer mosaic debayered first,
+and with the focal length (`FOCALLEN`, `FOCALLENGTH` or `FOCAL`) and pixel
+size (`XPIXSZ`) read from its header when not given. Both calls take
+`target_star_count`, which retries with looser settings until that many
+stars are measured and otherwise returns the best pass.
+
+For focusing tools, `pixel_scale_arcsec(focal_length_mm, pixel_size_um)`
+gives a rig's pixel scale, `classify_pixel_scale(scale)` the `preset` for
+it, and `recommend_detection_binning(hfr)` the `detection_binning` for a
+measured in-focus HFR.
+
 ## Blind solve
 
 No position hint, only a plausible scale range. Uses the prebuilt whole-sky
@@ -183,6 +195,28 @@ The header text form is suitable for header-injection APIs — for example
 Siril's `sirilpy` scripting interface (`set_image_header`), which makes a
 seiza solve usable from a Siril Python script.
 
+## Objects in a solved field
+
+`field_objects` lists the catalogued objects in a solved image: deep-sky
+objects and named stars, transients, and comets and asteroids, placed in its
+pixels with the outlines the catalog holds for them. It reads the catalogs
+`fetch_catalogs` installs (`objects.bin`, `transients.bin`,
+`minor-bodies.bin`); one that is missing gives no objects and an error that
+says why. `read_capture_time` reads when a FITS or XISF image (or a photo)
+was taken, which comets and asteroids need:
+
+```python
+found = seiza.field_objects(
+    solution.wcs, width, height,
+    capture_time=seiza.read_capture_time("light.fits"),
+)
+for item in found.objects:
+    print(item.name, item.kind, item.layer, item.x, item.y)
+    for outline in item.outlines:
+        print(" ", outline.role, outline.method, len(outline.contours))
+print(found.object_catalog_error, found.minor_body_error)
+```
+
 ## Background extraction
 
 Fit a compact background model to a C-contiguous mono `(H, W)` or RGB
@@ -267,7 +301,7 @@ wcs = seiza.Wcs.from_header(header)
 gaia = seiza.gaia_photometry_cone(56.75, 24.10, radius_deg=4.8)  # ESA archive; keep it
 # Or offline, from the hosted catalog (about 460 MB, fetched once):
 path = seiza.fetch_catalogs(["stars-gaia-photometry.bin"])["stars-gaia-photometry.bin"]
-gaia = seiza.gaia_photometry_catalog_cone(path, 56.75, 24.10, radius_deg=4.8)
+gaia = seiza.gaia_photometry_catalog_cone(path, 56.75, 24.10, radius_deg=4.8)  # file or directory
 calibration = seiza.calibrate_color(rgb, wcs, gaia)               # rgb: (h, w, 3) float32
 print(calibration.gains, calibration.red_fit, calibration.blue_fit)
 calibrated = calibration.apply(rgb)

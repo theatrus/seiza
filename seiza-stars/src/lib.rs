@@ -49,9 +49,9 @@ pub mod star_contours;
 pub mod tilt;
 
 pub use hocus_focus_star_detection::{
-    HocusFocusDetectionResult, HocusFocusParams, TelescopeClass, classify_pixel_scale,
-    detect_stars_hocus_focus, detect_stars_hocus_focus_adaptive, pixel_scale_arcsec,
-    recommend_detection_binning,
+    HocusFocusDetectionResult, HocusFocusParams, MeasurementOptions, TelescopeClass,
+    classify_pixel_scale, detect_stars_hocus_focus, detect_stars_hocus_focus_adaptive,
+    pixel_scale_arcsec, recommend_detection_binning,
 };
 pub use peak_star_detection::{PeakStar, find_peak_stars, fold_core_fragments};
 pub use psf_fitting::{PSFModel, PSFType};

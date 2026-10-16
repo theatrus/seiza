@@ -415,6 +415,77 @@ pub fn solve_prior_from_headers(headers: &[(String, HeaderValue)]) -> SolvePrior
     )
 }
 
+/// When an image was taken, as its header cards write it: `DATE-OBS`, else
+/// `DATE-BEG`, else `DATE-AVG`, as written (ISO 8601, in UTC by the FITS
+/// standard). An XISF file's `Observation:Time:Start` reaches the cards as
+/// `DATE-OBS`.
+pub fn capture_time_from_headers(headers: &[(String, HeaderValue)]) -> Option<String> {
+    ["DATE-OBS", "DATE-BEG", "DATE-AVG"]
+        .into_iter()
+        .find_map(|key| {
+            headers
+                .iter()
+                .find(|(name, _)| name == key)
+                .and_then(|(_, value)| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        })
+}
+
+/// When the image at `path` was taken: from a FITS or XISF file's header
+/// ([`capture_time_from_headers`]), read without decoding its pixels, or
+/// from a photo's EXIF ([`raster::PhotoMetadata::capture_time_utc`]).
+/// `None` when the file does not say; an error when it cannot be read.
+pub fn read_capture_time(path: &Path) -> Result<Option<String>, Error> {
+    match Format::from_path(path) {
+        Some(Format::Xisf) => seiza_xisf::read_header_and_metadata(path)
+            .map(|(headers, _)| capture_time_from_headers(&headers))
+            .map_err(|error| Error::open(path, error)),
+        Some(Format::Fits) => seiza_fits::read_header(path)
+            .map(|headers| capture_time_from_headers(&headers))
+            .map_err(|error| Error::open(path, error)),
+        _ => {
+            std::fs::metadata(path).map_err(|error| Error::open(path, error.to_string()))?;
+            Ok(raster::PhotoMetadata::read(path).capture_time_utc)
+        }
+    }
+}
+
+/// The first finite, positive value among `keys`, matched without regard
+/// to case, as FITS-derived XISF keywords need not keep FITS casing.
+fn first_positive_card(headers: &[(String, HeaderValue)], keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|key| {
+        headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case(key))
+            .filter_map(|(_, value)| value.as_f64())
+            .find(|value| value.is_finite() && *value > 0.0)
+    })
+}
+
+/// The telescope's focal length in millimetres, from `FOCALLEN`,
+/// `FOCALLENGTH` or `FOCAL`: the first that holds a positive number.
+pub fn header_focal_length_mm(headers: &[(String, HeaderValue)]) -> Option<f64> {
+    first_positive_card(headers, &["FOCALLEN", "FOCALLENGTH", "FOCAL"])
+}
+
+/// The pixel size in micrometres, binning included, from `XPIXSZ`.
+pub fn header_pixel_size_um(headers: &[(String, HeaderValue)]) -> Option<f64> {
+    first_positive_card(headers, &["XPIXSZ"])
+}
+
+/// An image's linear 16-bit luminance, for measuring its stars: mono
+/// 16-bit samples as stored, without a copy; planar RGB collapsed to
+/// luminance; a raw Bayer mosaic debayered first; other sample types mapped
+/// to 16 bits as [`FitsImage::to_u16`] maps them.
+pub fn luma_u16(image: &FitsImage) -> std::borrow::Cow<'_, [u16]> {
+    match image.debayer() {
+        Some(rgb) => std::borrow::Cow::Owned(rgb.to_luma_u16()),
+        None => image.to_u16(),
+    }
+}
+
 /// Read a FITS or XISF file as Seiza's [`FitsImage`], with its headers and
 /// stored sample type, and its format; an error for any other extension.
 pub fn open_astronomy(path: &Path) -> Result<(FitsImage, Format), Error> {
@@ -673,6 +744,66 @@ pub fn save_display(path: &Path, image: &DynamicImage) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_time_and_optics_come_from_the_header() {
+        let directory = tempfile::tempdir().unwrap();
+        let card = |key: &str, value: HeaderValue| WriteHeaderCard::new(key, value);
+        let pixels = [0.0_f32; 4];
+        let fits = directory.path().join("dated.fits");
+        seiza_fits::write_f32_image(
+            &fits,
+            2,
+            2,
+            F32ImageData::Mono(&pixels),
+            &[
+                card(
+                    "DATE-BEG",
+                    HeaderValue::String("2025-07-20T12:00:00".into()),
+                ),
+                card(
+                    "DATE-OBS",
+                    HeaderValue::String(" 2025-07-20T12:34:56.5Z ".into()),
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            read_capture_time(&fits).unwrap().as_deref(),
+            Some("2025-07-20T12:34:56.5Z")
+        );
+
+        let xisf = directory.path().join("dated.xisf");
+        seiza_xisf::write_f32_image(
+            &xisf,
+            2,
+            2,
+            F32ImageData::Mono(&pixels),
+            &[card(
+                "DATE-AVG",
+                HeaderValue::String("2026-01-02T03:04:05".into()),
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            read_capture_time(&xisf).unwrap().as_deref(),
+            Some("2026-01-02T03:04:05")
+        );
+
+        let undated = directory.path().join("undated.fits");
+        seiza_fits::write_f32_image(&undated, 2, 2, F32ImageData::Mono(&pixels), &[]).unwrap();
+        assert_eq!(read_capture_time(&undated).unwrap(), None);
+        assert!(read_capture_time(&directory.path().join("missing.jpg")).is_err());
+
+        let headers = vec![
+            ("FOCALLEN".to_string(), HeaderValue::Float(-1.0)),
+            ("focallength".to_string(), HeaderValue::Float(2000.0)),
+            ("xpixsz".to_string(), HeaderValue::Float(3.76)),
+        ];
+        assert_eq!(header_focal_length_mm(&headers), Some(2000.0));
+        assert_eq!(header_pixel_size_um(&headers), Some(3.76));
+        assert_eq!(header_pixel_size_um(&[]), None);
+    }
 
     #[test]
     fn a_solve_prior_is_read_from_headers_without_pixels() {

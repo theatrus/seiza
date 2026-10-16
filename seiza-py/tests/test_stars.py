@@ -85,3 +85,44 @@ def test_triangle_tilt_analysis_rejects_a_non_finite_angle():
 def test_a_bad_knob_is_an_error_not_a_default():
     with pytest.raises(ValueError, match="psf_type"):
         seiza.detect_measured_stars(synthetic_field(), psf_type="parabolic")
+
+
+def test_a_target_star_count_is_accepted():
+    image = synthetic_field()
+    once = seiza.detect_measured_stars(image)
+    retried = seiza.detect_measured_stars(image, target_star_count=10_000)
+    # No pass can reach the target, so the best one comes back.
+    assert len(retried.stars) >= len(once.stars)
+
+
+def test_a_fits_file_measures_like_its_array(tmp_path):
+    fits = pytest.importorskip("astropy.io.fits")
+    image = synthetic_field()
+    path = tmp_path / "light.fits"
+    header = fits.Header()
+    header["FOCALLEN"] = 2000.0
+    header["XPIXSZ"] = 3.76
+    fits.writeto(path, image, header)
+
+    from_file = seiza.detect_measured_stars_file(path, psf_type="gaussian")
+    from_array = seiza.detect_measured_stars(
+        image, psf_type="gaussian", focal_length_mm=2000.0, pixel_size_um=3.76
+    )
+    assert (from_file.width, from_file.height) == (image.shape[1], image.shape[0])
+    assert len(from_file.stars) == len(from_array.stars)
+    assert from_file.average_hfr == pytest.approx(from_array.average_hfr)
+
+    raster = tmp_path / "frame.png"
+    raster.write_bytes(b"not an image")
+    with pytest.raises(ValueError):
+        seiza.detect_measured_stars_file(raster)
+
+
+def test_pixel_scale_advice():
+    assert seiza.pixel_scale_arcsec(518.0, 3.76) == pytest.approx(1.497, abs=0.01)
+    assert seiza.pixel_scale_arcsec(0.0, 3.76) is None
+    assert seiza.classify_pixel_scale(1.5) == "widefield"
+    assert seiza.classify_pixel_scale(1.0) == "standard"
+    assert seiza.classify_pixel_scale(0.36) == "longfocal"
+    assert seiza.recommend_detection_binning(6.2) == 2
+    assert seiza.recommend_detection_binning(-1.0) == 1

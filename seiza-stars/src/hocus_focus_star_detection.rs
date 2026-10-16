@@ -43,6 +43,27 @@ pub enum TelescopeClass {
     LongFocalLength,
 }
 
+impl TelescopeClass {
+    /// The preset name hosts use: `widefield`, `standard` or `longfocal`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WideField => "widefield",
+            Self::Standard => "standard",
+            Self::LongFocalLength => "longfocal",
+        }
+    }
+
+    /// The class a preset name stands for ([`Self::as_str`]), or `None`.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "widefield" => Some(Self::WideField),
+            "standard" => Some(Self::Standard),
+            "longfocal" => Some(Self::LongFocalLength),
+            _ => None,
+        }
+    }
+}
+
 /// Classify a rig from its pixel scale in arcseconds per pixel.
 pub fn classify_pixel_scale(arcsec_per_px: f64) -> TelescopeClass {
     if !arcsec_per_px.is_finite() || arcsec_per_px <= 0.0 {
@@ -145,6 +166,106 @@ impl HocusFocusParams {
             .map(classify_pixel_scale)
             .unwrap_or(TelescopeClass::Standard);
         (Self::for_telescope_class(class), class)
+    }
+}
+
+/// What a host asks of a measurement detection, as the C ABI and Python
+/// take it: a rig class, or the optics to classify one from, and the knobs
+/// that override the class's settings.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MeasurementOptions {
+    /// The rig class. When set, it is the whole classification, and the
+    /// optics below are not consulted.
+    pub preset: Option<TelescopeClass>,
+    /// Focal length in millimetres, for classifying the rig with
+    /// `pixel_size_um` when no preset is given.
+    pub focal_length_mm: Option<f64>,
+    /// Pixel size in micrometres, binning included.
+    pub pixel_size_um: Option<f64>,
+    /// The PSF model each star is fitted with; Moffat by default.
+    pub psf_type: PSFType,
+    pub structure_removal: Option<StructureRemovalMethod>,
+    /// At least 1; a 0 counts as 1.
+    pub detection_binning: Option<usize>,
+    pub keep_saturated: Option<bool>,
+    pub noise_reduction_radius: Option<usize>,
+    pub sensitivity: Option<f64>,
+    /// When present and positive, detection retries with looser settings
+    /// until it measures at least this many stars
+    /// ([`detect_stars_hocus_focus_adaptive`]); otherwise one pass runs.
+    pub target_star_count: Option<usize>,
+}
+
+impl Default for MeasurementOptions {
+    fn default() -> Self {
+        Self {
+            preset: None,
+            focal_length_mm: None,
+            pixel_size_um: None,
+            psf_type: PSFType::Moffat4,
+            structure_removal: None,
+            detection_binning: None,
+            keep_saturated: None,
+            noise_reduction_radius: None,
+            sensitivity: None,
+            target_star_count: None,
+        }
+    }
+}
+
+impl MeasurementOptions {
+    /// Fill in the optics a frame's headers give, where the caller gave
+    /// none: a value the caller set wins, each on its own, and an explicit
+    /// preset leaves both alone.
+    pub fn with_frame_optics(
+        mut self,
+        focal_length_mm: Option<f64>,
+        pixel_size_um: Option<f64>,
+    ) -> Self {
+        if self.preset.is_none() {
+            self.focal_length_mm = self.focal_length_mm.or(focal_length_mm);
+            self.pixel_size_um = self.pixel_size_um.or(pixel_size_um);
+        }
+        self
+    }
+
+    /// The detector parameters: the preset's, else those of the class the
+    /// optics give ([`HocusFocusParams::for_frame_headers`]), with every
+    /// knob the caller set laid over them.
+    pub fn params(&self) -> HocusFocusParams {
+        let mut params = match self.preset {
+            Some(class) => HocusFocusParams::for_telescope_class(class),
+            None => HocusFocusParams::for_frame_headers(self.focal_length_mm, self.pixel_size_um).0,
+        };
+        params.psf_type = self.psf_type;
+        if let Some(method) = self.structure_removal {
+            params.structure_removal = method;
+        }
+        if let Some(binning) = self.detection_binning {
+            params.detection_binning = binning.max(1);
+        }
+        if let Some(keep) = self.keep_saturated {
+            params.keep_saturated_stars = keep;
+        }
+        if let Some(radius) = self.noise_reduction_radius {
+            params.noise_reduction_radius = radius;
+        }
+        if let Some(value) = self.sensitivity {
+            params.sensitivity = value;
+        }
+        params
+    }
+
+    /// Detect and measure the stars in a mono 16-bit frame: one pass, or
+    /// the retry ladder when `target_star_count` is positive.
+    pub fn detect(&self, data: &[u16], width: usize, height: usize) -> HocusFocusDetectionResult {
+        let params = self.params();
+        match self.target_star_count {
+            Some(target) if target > 0 => {
+                detect_stars_hocus_focus_adaptive(data, width, height, &params, target)
+            }
+            _ => detect_stars_hocus_focus(data, width, height, &params),
+        }
     }
 }
 
@@ -1700,6 +1821,50 @@ mod tests {
         let (params, class) = HocusFocusParams::for_frame_headers(None, Some(3.76));
         assert_eq!(class, TelescopeClass::Standard);
         assert_eq!(params.min_star_size, standard.min_star_size);
+    }
+
+    #[test]
+    fn preset_names_go_both_ways() {
+        for class in [
+            TelescopeClass::WideField,
+            TelescopeClass::Standard,
+            TelescopeClass::LongFocalLength,
+        ] {
+            assert_eq!(TelescopeClass::from_name(class.as_str()), Some(class));
+        }
+        assert_eq!(TelescopeClass::from_name("wide"), None);
+    }
+
+    #[test]
+    fn measurement_options_take_frame_optics_only_where_the_caller_gave_none() {
+        // 3.76 µm at 2000 mm is 0.39"/px: long focal length.
+        let from_frame = MeasurementOptions::default().with_frame_optics(Some(2000.0), Some(3.76));
+        assert_eq!(from_frame.params().structure_layers, 5);
+        assert_eq!(from_frame.params().psf_type, PSFType::Moffat4);
+
+        // The caller's pixel size wins; 12 µm at 2000 mm is wide field.
+        let caller_pixel = MeasurementOptions {
+            pixel_size_um: Some(12.0),
+            ..MeasurementOptions::default()
+        }
+        .with_frame_optics(Some(2000.0), Some(3.76));
+        assert_eq!(caller_pixel.params().structure_layers, 3);
+
+        // A preset is the whole classification; the knobs still land on it.
+        let preset = MeasurementOptions {
+            preset: Some(TelescopeClass::Standard),
+            detection_binning: Some(0),
+            sensitivity: Some(7.5),
+            structure_removal: Some(StructureRemovalMethod::Atrous),
+            ..MeasurementOptions::default()
+        }
+        .with_frame_optics(Some(2000.0), Some(3.76));
+        assert_eq!(preset.focal_length_mm, None);
+        let params = preset.params();
+        assert_eq!(params.structure_layers, 4);
+        assert_eq!(params.detection_binning, 1);
+        assert_eq!(params.sensitivity, 7.5);
+        assert_eq!(params.structure_removal, StructureRemovalMethod::Atrous);
     }
 
     /// A field of small stars in the regime the ladder exists for: after

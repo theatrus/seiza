@@ -327,6 +327,31 @@ pub enum GeometryQuality {
     Derived,
 }
 
+impl GeometryRole {
+    /// The role's kebab-case name, as the catalog's JSON writes it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CatalogExtent => "catalog-extent",
+            Self::PreferredRender => "preferred-render",
+            Self::FallbackExtent => "fallback-extent",
+            Self::BrightnessLevel => "brightness-level",
+            Self::Component => "component",
+        }
+    }
+}
+
+impl GeometryQuality {
+    /// The quality's kebab-case name, as the catalog's JSON writes it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Catalog => "catalog",
+            Self::Curated => "curated",
+            Self::Estimated => "estimated",
+            Self::Derived => "derived",
+        }
+    }
+}
+
 /// Source-qualified render or indexing geometry. Ellipse members are atomic:
 /// the writer never fills missing members from a different source record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -87,16 +87,25 @@ core = "seiza-core::Sip"
 [rust.SipResponse]
 core = "seiza-core::Sip"
 
+[rust.ObjectPointResponse]
+core = "seiza::FieldObject"
+semi_major_px = { c = "semi_major_pixels" }
+semi_minor_px = { c = "semi_minor_pixels" }
+
 [rust.ObjectOutlineResponse]
 core = "seiza::ObjectGeometry"
 id = { c = "geometry_id" }
 data = { c = "contours" }
-method = { gap = "how the outline was made" }
-evidence = { gap = "what the outline rests on" }
 
 [rust.ObjectContourResponse]
 core = "seiza::ObjectContour"
 vertices = { c = "points" }
+
+[rust.PhotoMetadataResponse]
+core = "seiza-image-io::PhotoMetadata"
+
+[rust.ScaleHintResponse]
+core = "seiza-image-io::ScaleHint"
 
 
 # calibration and stacking
@@ -410,9 +419,8 @@ objects = [
 # stars
 "seiza-stars::find_peak_stars" = { none = "parallax star finding uses it" }
 "seiza-stars::fold_core_fragments" = { none = "parallax star finding uses it" }
-"seiza-stars::classify_pixel_scale" = { gap = "pixel-scale advice for focusing hosts: a rig's class and a detection binning" }
-"seiza-stars::pixel_scale_arcsec" = { gap = "pixel-scale advice for focusing hosts: a rig's class and a detection binning" }
-"seiza-stars::recommend_detection_binning" = { gap = "pixel-scale advice for focusing hosts: a rig's class and a detection binning" }
+"seiza-stars::detect_stars_hocus_focus" = { none = "the C ABI detects through MeasurementOptions::detect, which calls it" }
+"seiza-stars::detect_stars_hocus_focus_adaptive" = { none = "the C ABI detects through MeasurementOptions::detect, which calls it when a target star count is set" }
 
 # stretch
 "seiza-stretch::auto_stretch_f32_to_u8" = { none = "the C ABI renders through its stretch configuration" }
@@ -446,6 +454,9 @@ seiza_parallax_free = { none = "frees a C handle; Python's garbage collector fre
 # caller detects, calls read_solve_prior, then solve_with_prior.
 seiza_solve_image_json = "solve_with_prior"
 seiza_solve_image_with_limits_json = "solve_with_prior"
+seiza_read_capture_time_json = "read_capture_time"
+seiza_read_photo_metadata_json = "read_photo_metadata"
+seiza_wcs_fits_header_json = "Wcs.fits_header_cards"
 
 # --- stacking ---------------------------------------------------------------
 seiza_live_stacker_create = "LiveStacker.from_array"
@@ -595,10 +606,14 @@ seiza_catalog_status_json = { none = "catalog readiness for the apps' setup scre
 
 # --- stars ------------------------------------------------------------------
 seiza_stars_detect_luma_u16_json = "detect_measured_stars"
-seiza_stars_detect_path_json = { gap = "not in Python yet: measuring the stars in a FITS or XISF file by path, with focal length and pixel size from its headers; detect_measured_stars needs a uint16 array" }
+seiza_stars_detect_path_json = "detect_measured_stars_file"
+seiza_stars_pixel_scale_arcsec = "pixel_scale_arcsec"
+seiza_stars_classify_pixel_scale = "classify_pixel_scale"
+seiza_stars_recommend_detection_binning = "recommend_detection_binning"
 
 # --- color ------------------------------------------------------------------
 seiza_gaia_photometry_cone_json = "gaia_photometry_cone"
+seiza_gaia_photometry_catalog_cone_json = "gaia_photometry_catalog_cone"
 seiza_color_calibrate_json = "calibrate_color"
 seiza_color_calibration_apply = "ColorCalibration.apply"
 seiza_color_crop_report_json = "crop_report"
@@ -651,16 +666,15 @@ read_solve_prior = { none = "seiza_solve_image_json reads the prior itself" }
 "StarCatalog.cone_search" = { none = "C hosts get the catalog stars in a field from the solve's overlay points" }
 "BlindIndex.open" = { none = "C hosts give a catalog directory, and seiza_solve_image_json opens the index" }
 "BlindIndex.pattern_count" = { none = "C hosts give a catalog directory, and seiza_solve_image_json opens the index" }
-"Solution.fits_header_cards" = { gap = "a solution as FITS header cards; C hosts build the cards from the WCS JSON themselves" }
-"Solution.fits_header_text" = { gap = "a solution as FITS header cards; C hosts build the cards from the WCS JSON themselves" }
-"Wcs.fits_header_cards" = { gap = "a solution as FITS header cards; C hosts build the cards from the WCS JSON themselves" }
+"Solution.fits_header_cards" = { c = "seiza_wcs_fits_header_json" }
+"Solution.fits_header_text" = { c = "seiza_wcs_fits_header_json" }
 "Wcs.from_header" = { none = "WCS arithmetic for Python callers; C hosts get the WCS as JSON, and overlay positions from the solve" }
 "Wcs.from_center_scale_rotation" = { none = "WCS arithmetic for Python callers; C hosts get the WCS as JSON, and overlay positions from the solve" }
 "Wcs.sip_coefficients" = { none = "WCS arithmetic for Python callers; C hosts get the WCS as JSON, and overlay positions from the solve" }
 "Wcs.pixel_to_world" = { none = "WCS arithmetic for Python callers; C hosts get the WCS as JSON, and overlay positions from the solve" }
 "Wcs.world_to_pixel" = { none = "WCS arithmetic for Python callers; C hosts get the WCS as JSON, and overlay positions from the solve" }
 "Wcs.footprint" = { none = "WCS arithmetic for Python callers; C hosts get the WCS as JSON, and overlay positions from the solve" }
-read_photo_metadata = { gap = "a photo's EXIF capture time, GPS position and focal length; seiza_solve_image_json reads them only for its own use" }
+field_objects = { c = "seiza_solve_image_json" }
 
 # stars
 tilt_analysis = { c = "seiza_stars_detect_luma_u16_json" }
@@ -670,7 +684,6 @@ triangle_tilt_analysis = { c = "seiza_stars_detect_luma_u16_json" }
 StackOptions = { none = "stack options; C calls take them as JSON fields" }
 FlatStarMasking = { none = "flat star masking options; C takes them as JSON (MasterBuildRequest.flatStarMasking)" }
 stack_fits = { none = "C hosts take the same steps with the live stacker: seiza_stack_choose_reference_json, open, push_fits_pipelined and finish" }
-gaia_photometry_catalog_cone = { gap = "Gaia photometry from the local catalog fetch_catalogs installs; C reads only the online archive (seiza_gaia_photometry_cone_json)" }
 
 # calibration
 build_bias = { c = "seiza_calibration_build_master_json" }
@@ -714,9 +727,8 @@ DustResponse = { none = "Python's summary gives dust_transmission as a (median, 
 
 # solving
 CatalogStarPointResponse = { none = "overlay points for the desktop viewers; Python uses StarCatalog.cone_search and Wcs.world_to_pixel" }
-ObjectPointResponse = { gap = "not in Python yet: catalogued objects in a solved field (see SolveResponse.object_positions)" }
-ObjectOutlineResponse = { gap = "not in Python yet: outlines of catalogued objects in a solved field (see SolveResponse.object_positions)" }
-ObjectContourResponse = { gap = "not in Python yet: outlines of catalogued objects in a solved field (see SolveResponse.object_positions)" }
+PhotoMetadataResponse = { none = "Python's read_photo_metadata returns these fields as a dict under seiza-image-io's own snake_case keys, which this check cannot see; [rust.PhotoMetadataResponse] holds the C fields to seiza-image-io::PhotoMetadata" }
+ScaleHintResponse = { none = "read_photo_metadata's scale_hint, a dict under seiza-image-io's own snake_case keys; [rust.ScaleHintResponse] holds the C fields to seiza-image-io::ScaleHint" }
 
 # stacking
 CompatibleCalibrationResponse = { none = "LiveStacker.compatible_calibration returns a (kept, dropped) tuple" }
@@ -750,6 +762,8 @@ CatalogSetupProgressResponse = { none = "download progress for the apps' setup s
 "WcsRequest.pixel_origin" = { none = "lets a C host send a 1-based FITS crpix; Python's Wcs always counts from 0 (from_header converts)" }
 "WcsResponse.sip" = { python = "sip_coefficients" }
 "WcsResponse.pixel_origin" = { none = "C-only marker that crpix counts from 0; Python's Wcs.crpix always does" }
+"WcsFitsHeaderResponse.cards" = { python = "fits_header_cards" }
+"WcsFitsHeaderResponse.text" = { python = "fits_header_text" }
 "SipRequest.order" = { python = "sip_order" }
 "SipRequest.a" = { python = "sip_coefficients" }
 "SipRequest.b" = { python = "sip_coefficients" }
@@ -766,9 +780,7 @@ CatalogSetupProgressResponse = { none = "download progress for the apps' setup s
 "SolveResponse.elapsed_milliseconds" = { none = "the call's own timing, for the apps; Python callers time the call themselves" }
 "SolveResponse.detected_star_positions" = { none = "overlay points for the desktop viewers; Python callers hold the stars they passed" }
 "SolveResponse.catalog_star_positions" = { none = "overlay points for the desktop viewers; Python uses StarCatalog.cone_search and Wcs.world_to_pixel" }
-"SolveResponse.object_positions" = { gap = "not in Python yet: the catalogued objects in a solved field (deep-sky objects, named stars, transients, minor bodies), though fetch_catalogs downloads their data" }
-"SolveResponse.object_catalog_error" = { gap = "not in Python yet: goes with object_positions" }
-"SolveResponse.capture_time" = { gap = "not in Python yet: an image's capture time from its FITS or XISF header (read_photo_metadata reads photos only); minor bodies need it" }
+"SolveResponse.object_positions" = { python = "field_objects" }
 "SolveResponse.overlay_availability" = { none = "overlay layer state for the desktop viewers" }
 "SolveResponse.overlay_unavailable_reasons" = { none = "overlay layer state for the desktop viewers" }
 "SolveResponse.overlay_counts" = { none = "overlay layer state for the desktop viewers" }
@@ -801,7 +813,6 @@ CatalogSetupProgressResponse = { none = "download progress for the apps' setup s
 
 # stars
 "StarDetectOptions.triangle_angle_degrees" = { python = "angle_degrees" }
-"StarDetectOptions.target_star_count" = { gap = "not in Python yet: detect_measured_stars cannot retry with looser settings until it finds a target number of stars" }
 "StarDetectResponse.major_axis_orientations_normalized" = { none = "C marker that theta is normalized over [0, pi); MeasuredStar.theta always is" }
 "StarDetectResponse.cells" = { python = "tilt_analysis" }
 "StarDetectResponse.tilt" = { python = "tilt_analysis" }

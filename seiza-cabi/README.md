@@ -152,7 +152,9 @@ exposes the **superset** of what both apps need.
   frame, whose weight is 1; `seiza_frame_noise_json` measures any linear
   buffer's noise with the same estimator.
 - **Photometric colour calibration** — `seiza_gaia_photometry_cone_json` fetches
-  Gaia DR3 photometry for a field, `seiza_color_calibrate_json` fits per-channel
+  Gaia DR3 photometry for a field from the ESA archive, and
+  `seiza_gaia_photometry_catalog_cone_json` reads it from the local catalog
+  `seiza_catalog_setup` installs; `seiza_color_calibrate_json` fits per-channel
   gains and background offsets for an interleaved RGB buffer from its FITS WCS
   keywords and those Gaia rows, and `seiza_color_calibration_apply` applies
   them in place through the core, as Python's `ColorCalibration.apply` does.
@@ -225,6 +227,10 @@ exposes the **superset** of what both apps need.
   `FOCALLEN`/`FOCALLENGTH`/`FOCAL` and `XPIXSZ`; explicit caller choices win.
   PSF directions are normalized ellipse major-axis orientations over `[0, π)`
   and are advertised by `majorAxisOrientationsNormalized: true`.
+  For focusing hosts, `seiza_stars_pixel_scale_arcsec` gives a rig's pixel
+  scale from its focal length and pixel size, `seiza_stars_classify_pixel_scale`
+  the `preset` for that scale, and `seiza_stars_recommend_detection_binning`
+  the `detectionBinning` for a measured in-focus HFR.
 - **RC-Astro external tools** — `seiza_rc_astro_locate` finds the CLI on
   `PATH` (null without an error when absent), `seiza_rc_astro_tool_schema_json`
   reads one tool's live contract (`rc-astro <tool> --json`: parameters with
@@ -265,6 +271,20 @@ exposes the **superset** of what both apps need.
   `((width - 1) / 2, (height - 1) / 2)`, and `centerRaDegrees` is the sky
   there. A WCS passed back in, as to `seiza_parallax_prepare_json`, may give
   `"pixelOrigin": 1` for FITS-style values.
+  `objectPositions` lists the catalogued objects in the field (deep-sky
+  objects, named stars, transients, comets and asteroids) through the same
+  core code as Python's `field_objects`; each outline carries the `method`
+  that made it and the `evidence` it rests on. `captureTime` is the time
+  that dates transients and places comets and asteroids.
+- **Solving helpers** — `seiza_read_capture_time_json` reads when an image
+  was taken (FITS or XISF `DATE-OBS`, `DATE-BEG` or `DATE-AVG`, or a photo's
+  EXIF) without decoding its pixels. `seiza_read_photo_metadata_json` gives a
+  photo's EXIF capture time, GPS position and focal length, and, given the
+  decoded size, the pixel-scale ranges to try. `seiza_wcs_fits_header_json`
+  turns a WCS, as the solve returns it, into FITS header `cards` (a JSON
+  object, in header order, that `seiza_color_calibrate_json` takes as its WCS
+  keywords) and header `text`, as Python's `Solution.fits_header_cards` and
+  `fits_header_text` do.
 - **Parallax videos** — `seiza_parallax_prepare_json` makes what `seiza
   parallax-video` makes from a JSON request: an image for StarXTerminator to
   split (through `rc-astro`) or its starless and stars files, an optional WCS

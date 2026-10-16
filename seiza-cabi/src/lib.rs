@@ -6,13 +6,8 @@ use resample::{downsample_interleaved_f32, downsample_rgba};
 use seiza::blind::{BlindIndex, BlindParams};
 use seiza::catalog::{StarCatalog, tiles::TileCatalog};
 use seiza::downloads::{CachePolicy, CatalogManager, CatalogSet, Dataset, DownloadEvent};
-use seiza::minor_bodies::{MinorBodyCatalog, MinorBodyKind};
-use seiza::objects::{
-    GeometryData, GeometryQuality, GeometryRole, ObjectCatalog, ObjectGeometry, ObjectKind,
-    ObjectQuery, SkyRegion,
-};
+use seiza::field_objects::{FieldObject, FieldObjects, FieldOutline};
 use seiza::prior::SolveSource;
-use seiza::wcs::Wcs;
 use seiza::{
     DetectBackend, DetectConfig, Error as SeizaError, SolveLimits, detect_stars,
     detect_stars_luma_f32,
@@ -1262,6 +1257,38 @@ struct ObjectPointResponse {
     outlines: Vec<ObjectOutlineResponse>,
 }
 
+impl From<FieldObject> for ObjectPointResponse {
+    fn from(object: FieldObject) -> Self {
+        Self {
+            stable_id: object.stable_id,
+            name: object.name,
+            common_name: object.common_name,
+            kind: object.kind.into(),
+            source: object.source.into(),
+            catalog_source: object.catalog_source,
+            x: object.x,
+            y: object.y,
+            semi_major_pixels: object.semi_major_px,
+            semi_minor_pixels: object.semi_minor_px,
+            angle_degrees: object.angle_deg,
+            prominence: object.prominence,
+            ra_degrees: Some(object.ra_deg),
+            dec_degrees: Some(object.dec_deg),
+            discovered: object.discovered,
+            near_capture: object.near_capture,
+            distance_au: object.distance_au,
+            motion_arcsec_per_hour: object.motion_arcsec_per_hour,
+            direction_position_angle_degrees: object.direction_position_angle_deg,
+            direction_image_angle_degrees: object.direction_image_angle_deg,
+            outlines: object
+                .outlines
+                .into_iter()
+                .map(ObjectOutlineResponse::from)
+                .collect(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ObjectOutlineResponse {
@@ -1269,8 +1296,34 @@ struct ObjectOutlineResponse {
     source_record_id: String,
     role: String,
     quality: String,
+    /// How the outline was made.
+    method: String,
+    /// What the outline rests on.
+    evidence: String,
     level: Option<String>,
     contours: Vec<ObjectContourResponse>,
+}
+
+impl From<FieldOutline> for ObjectOutlineResponse {
+    fn from(outline: FieldOutline) -> Self {
+        Self {
+            geometry_id: outline.geometry_id,
+            source_record_id: outline.source_record_id,
+            role: outline.role.as_str().into(),
+            quality: outline.quality.as_str().into(),
+            method: outline.method,
+            evidence: outline.evidence,
+            level: outline.level,
+            contours: outline
+                .contours
+                .into_iter()
+                .map(|contour| ObjectContourResponse {
+                    closed: contour.closed,
+                    points: contour.points.into_iter().map(|(x, y)| [x, y]).collect(),
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -2360,6 +2413,10 @@ struct GaiaSourceJson {
     rp: Option<f32>,
     #[serde(default)]
     ruwe: Option<f32>,
+    /// BP − RP, used in place of `bp` and `rp`: what
+    /// [`seiza_gaia_photometry_catalog_cone_json`] gives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bp_rp: Option<f32>,
 }
 
 #[derive(Default, Deserialize)]
@@ -2462,6 +2519,61 @@ pub unsafe extern "C" fn seiza_gaia_photometry_cone_json(
                     bp: star.bp,
                     rp: star.rp,
                     ruwe: star.ruwe,
+                    bp_rp: None,
+                })
+                .collect::<Vec<_>>(),
+        )
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// Read Gaia DR3 photometry within `radius_deg` of `(ra, dec)` (degrees)
+/// down to G `max_mag` from the local catalog [`seiza_catalog_setup`]
+/// installs (`stars-gaia-photometry.bin`), for
+/// [`seiza_color_calibrate_json`]. `catalog_path` is the catalog file or the
+/// directory that holds it; null looks in the standard places.
+///
+/// Returns an owned JSON array of sources like
+/// [`seiza_gaia_photometry_cone_json`]'s, but with positions already at the
+/// catalog's epoch, so `pmra` and `pmdec` are null, and the colour as
+/// `bpRp` in place of `bp` and `rp`; `bpRp` is left out when Gaia's is
+/// missing or its astrometry is unreliable. Free the result, or an
+/// `error_out` string, with [`seiza_string_free`].
+///
+/// # Safety
+/// `catalog_path` must be null or a valid NUL-terminated string. When
+/// non-null, `error_out` must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_gaia_photometry_catalog_cone_json(
+    catalog_path: *const c_char,
+    ra: f64,
+    dec: f64,
+    radius_deg: f64,
+    max_mag: f32,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let catalog_path = optional_path(catalog_path)?;
+        let path = seiza::data_paths::gaia_photometry(catalog_path.as_deref())
+            .map_err(|error| error.to_string())?
+            .ok_or("no Gaia photometry catalog is installed")?;
+        let catalog = seiza::catalog::PhotometryCatalog::open(&path)
+            .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
+        owned_json(
+            &catalog
+                .cone_search(ra, dec, radius_deg, max_mag)
+                .into_iter()
+                .map(|star| GaiaSourceJson {
+                    ra: star.ra,
+                    dec: star.dec,
+                    pmra: None,
+                    pmdec: None,
+                    g: star.g,
+                    bp: None,
+                    rp: None,
+                    ruwe: None,
+                    bp_rp: star.calibration_bp_rp(),
                 })
                 .collect::<Vec<_>>(),
         )
@@ -2476,7 +2588,9 @@ pub unsafe extern "C" fn seiza_gaia_photometry_cone_json(
 /// `wcs_json` is a JSON object of the image's FITS WCS keywords (`CTYPE1`,
 /// `CRVAL1`, `CRPIX1`, `CD1_1` or `CDELT1`, SIP terms, …) with numeric or
 /// string values; `gaia_json` is an array of sources as
-/// [`seiza_gaia_photometry_cone_json`] returns. `options_json` may be null
+/// [`seiza_gaia_photometry_cone_json`] or
+/// [`seiza_gaia_photometry_catalog_cone_json`] returns; a `bpRp` value is
+/// used in place of `bp` and `rp`. `options_json` may be null
 /// or an object with `whiteBpRp` (default 0.82, the Sun), `fitBpRpRange`
 /// (the `[bluest, reddest]` BP − RP of the stars the fits use; default
 /// `[0, 1.8]`), `apertureRadius` (pixels; default twice the measured FWHM),
@@ -2542,7 +2656,9 @@ pub unsafe extern "C" fn seiza_color_calibrate_json(
                 pmra: source.pmra,
                 pmdec: source.pmdec,
                 g: source.g,
-                bp_rp: source.bp.zip(source.rp).map(|(bp, rp)| bp - rp),
+                bp_rp: source
+                    .bp_rp
+                    .or_else(|| source.bp.zip(source.rp).map(|(bp, rp)| bp - rp)),
                 ruwe: source.ruwe,
             })
             .collect::<Vec<_>>();
@@ -5179,7 +5295,6 @@ struct BlindSolved {
     width: u32,
     height: u32,
     stars: Vec<seiza::DetectedStar>,
-    acquisition_jd: Option<f64>,
     catalog: TileCatalog,
     capture_time: Option<String>,
     solution: seiza::solve::Solution,
@@ -5223,7 +5338,7 @@ fn blind_solve_path(
         let image = read.image;
         let width = u32::try_from(image.width).map_err(|_| "image width is too large")?;
         let height = u32::try_from(image.height).map_err(|_| "image height is too large")?;
-        let capture_time = fits_capture_time(&image);
+        let capture_time = seiza_image_io::capture_time_from_headers(&image.headers);
         let stretched = image.stretch_to_u8(&StretchParams::default());
         let stars = image::GrayImage::from_raw(width, height, stretched)
             .map(|gray| detect_stars(&DynamicImage::ImageLuma8(gray), &detection_config))
@@ -5262,8 +5377,6 @@ fn blind_solve_path(
             prior,
         )
     };
-    let acquisition_jd = capture_time.as_deref().and_then(parse_iso_jd);
-
     let star_path =
         seiza::data_paths::star_data(catalog_directory).map_err(|error| error.to_string())?;
     let index_path = seiza::data_paths::blind_index_beside(catalog_directory, &star_path)
@@ -5343,7 +5456,6 @@ fn blind_solve_path(
         width,
         height,
         stars,
-        acquisition_jd,
         catalog,
         capture_time,
         solution: found.solution,
@@ -5422,7 +5534,6 @@ pub unsafe extern "C" fn seiza_solve_image_with_limits_json(
             width,
             height,
             stars,
-            acquisition_jd,
             catalog,
             capture_time,
             solution,
@@ -5464,99 +5575,33 @@ pub unsafe extern "C" fn seiza_solve_image_with_limits_json(
             })
             .take(300)
             .collect();
-        let mut object_positions = Vec::new();
-        let mut overlay_availability = BTreeMap::from([
-            ("deep_sky".into(), false),
-            ("named_stars".into(), false),
-            ("field_stars".into(), true),
-            ("transients".into(), false),
-            ("historical_transients".into(), false),
-            ("minor_bodies".into(), false),
-            ("grid".into(), true),
-        ]);
+        let FieldObjects {
+            objects,
+            object_catalog_error,
+            transient_catalog_error,
+            minor_body_error,
+        } = seiza::field_objects::field_objects(
+            catalog_directory.as_deref(),
+            &solution.wcs,
+            (width, height),
+            capture_time.as_deref(),
+        );
+        let mut overlay_availability =
+            BTreeMap::from([("field_stars".into(), true), ("grid".into(), true)]);
         let mut overlay_unavailable_reasons = BTreeMap::new();
-
-        let object_catalog_result = (|| -> Result<ObjectCatalog, String> {
-            let object_path = seiza::data_paths::objects(catalog_directory.as_deref())
-                .map_err(|error| error.to_string())?;
-            ObjectCatalog::open(&object_path)
-                .map_err(|error| format!("failed to open {}: {error}", object_path.display()))
-        })();
-        let object_catalog_error = match object_catalog_result {
-            Ok(object_catalog) => {
-                overlay_availability.insert("deep_sky".into(), true);
-                overlay_availability.insert("named_stars".into(), true);
-                if let Err(error) = append_object_catalog(
-                    &mut object_positions,
-                    &object_catalog,
-                    &solution.wcs,
-                    (width, height),
-                    acquisition_jd,
-                    false,
-                ) {
-                    overlay_availability.insert("deep_sky".into(), false);
-                    overlay_availability.insert("named_stars".into(), false);
-                    overlay_unavailable_reasons.insert("deep_sky".into(), error.clone());
-                    overlay_unavailable_reasons.insert("named_stars".into(), error.clone());
-                    Some(error)
-                } else {
-                    None
+        for (layers, error) in [
+            (&["deep_sky", "named_stars"][..], &object_catalog_error),
+            (
+                &["transients", "historical_transients"][..],
+                &transient_catalog_error,
+            ),
+            (&["minor_bodies"][..], &minor_body_error),
+        ] {
+            for &layer in layers {
+                overlay_availability.insert(layer.into(), error.is_none());
+                if let Some(error) = error {
+                    overlay_unavailable_reasons.insert(layer.into(), error.clone());
                 }
-            }
-            Err(error) => {
-                overlay_unavailable_reasons.insert("deep_sky".into(), error.clone());
-                overlay_unavailable_reasons.insert("named_stars".into(), error.clone());
-                Some(error)
-            }
-        };
-
-        match open_object_catalog(
-            seiza::data_paths::transients(catalog_directory.as_deref()),
-            "transient",
-        ) {
-            Ok(transient_catalog) => {
-                overlay_availability.insert("transients".into(), true);
-                overlay_availability.insert("historical_transients".into(), true);
-                if let Err(error) = append_object_catalog(
-                    &mut object_positions,
-                    &transient_catalog,
-                    &solution.wcs,
-                    (width, height),
-                    acquisition_jd,
-                    true,
-                ) {
-                    overlay_availability.insert("transients".into(), false);
-                    overlay_availability.insert("historical_transients".into(), false);
-                    overlay_unavailable_reasons.insert("transients".into(), error.clone());
-                    overlay_unavailable_reasons.insert("historical_transients".into(), error);
-                }
-            }
-            Err(error) => {
-                overlay_unavailable_reasons.insert("transients".into(), error.clone());
-                overlay_unavailable_reasons.insert("historical_transients".into(), error);
-            }
-        }
-
-        match open_minor_body_catalog(catalog_directory.as_deref()) {
-            Ok(minor_body_catalog) => {
-                if let Some(jd) = acquisition_jd {
-                    overlay_availability.insert("minor_bodies".into(), true);
-                    append_minor_bodies(
-                        &mut object_positions,
-                        &minor_body_catalog,
-                        &solution.wcs,
-                        (width, height),
-                        jd,
-                    );
-                } else {
-                    overlay_unavailable_reasons.insert(
-                        "minor_bodies".into(),
-                        "Solar-system positions require a FITS DATE-OBS acquisition time".into(),
-                    );
-                }
-            }
-            Err(error) => {
-                overlay_unavailable_reasons.insert("minor_bodies".into(), error);
             }
         }
 
@@ -5568,15 +5613,15 @@ pub unsafe extern "C" fn seiza_solve_image_with_limits_json(
             ("historical_transients".into(), 0),
             ("minor_bodies".into(), 0),
         ]);
-        for object in &object_positions {
-            let layer = overlay_layer_name(&object.kind);
-            *overlay_counts.entry(layer.into()).or_insert(0) += 1;
+        for object in &objects {
+            *overlay_counts.entry(object.layer().into()).or_insert(0) += 1;
             if object.kind == "transient" && object.near_capture == Some(false) {
                 *overlay_counts
                     .entry("historical_transients".into())
                     .or_insert(0) += 1;
             }
         }
+        let object_positions = objects.into_iter().map(ObjectPointResponse::from).collect();
         let sip = solution.wcs.sip.as_ref().map(|sip| SipResponse {
             order: sip.order,
             a: sip.a.clone(),
@@ -5616,290 +5661,198 @@ pub unsafe extern "C" fn seiza_solve_image_with_limits_json(
     .map_or(ptr::null_mut(), CString::into_raw)
 }
 
-fn open_object_catalog(
-    path: Result<PathBuf, seiza::data_paths::DataPathError>,
-    label: &str,
-) -> Result<ObjectCatalog, String> {
-    let path = path.map_err(|error| error.to_string())?;
-    ObjectCatalog::open(&path)
-        .map_err(|error| format!("failed to open {label} catalog {}: {error}", path.display()))
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CaptureTimeResponse {
+    capture_time: Option<String>,
 }
 
-fn open_minor_body_catalog(catalog_directory: Option<&Path>) -> Result<MinorBodyCatalog, String> {
-    let path =
-        seiza::data_paths::minor_bodies(catalog_directory).map_err(|error| error.to_string())?;
-    MinorBodyCatalog::open(&path).map_err(|error| {
-        format!(
-            "failed to open minor-body catalog {}: {error}",
-            path.display()
-        )
+#[unsafe(no_mangle)]
+/// When the image at `path` was taken, as `{"captureTime": "..."}`: from a
+/// FITS or XISF header's `DATE-OBS`, `DATE-BEG` or `DATE-AVG`, read without
+/// decoding the pixels, or from a photo's EXIF, in UTC. `captureTime` is
+/// null when the file does not say. It is the time
+/// [`seiza_solve_image_json`] dates transients and places comets and
+/// asteroids by. Free the result, or an `error_out` string, with
+/// [`seiza_string_free`].
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated string. When non-null, `error_out`
+/// must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_read_capture_time_json(
+    path: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let path = required_path(path, "image path")?;
+        let capture_time =
+            seiza_image_io::read_capture_time(&path).map_err(|error| error.to_string())?;
+        owned_json(&CaptureTimeResponse { capture_time })
     })
+    .unwrap_or(ptr::null_mut())
 }
 
-fn append_object_catalog(
-    output: &mut Vec<ObjectPointResponse>,
-    catalog: &ObjectCatalog,
-    wcs: &Wcs,
-    dimensions: (u32, u32),
-    capture_jd: Option<f64>,
-    force_transient: bool,
-) -> Result<(), String> {
-    let prominence_by_id: HashMap<String, f64> = catalog
-        .query_region(
-            &SkyRegion::Polygon {
-                vertices: wcs.footprint(dimensions.0, dimensions.1).to_vec(),
-            },
-            &ObjectQuery::default(),
-        )
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .map(|hit| (hit.object.metadata.id, hit.predicted_prominence))
-        .collect();
-    let placed = catalog
-        .objects_in_footprint(wcs, dimensions)
-        .map_err(|error| error.to_string())?;
-    for placed in placed {
-        let transient = force_transient || placed.object.kind == ObjectKind::Transient;
-        let stable_id =
-            (!placed.object.metadata.id.is_empty()).then(|| placed.object.metadata.id.clone());
-        let prominence = stable_id
-            .as_ref()
-            .and_then(|id| prominence_by_id.get(id))
-            .copied();
-        let outlines = stable_id
-            .as_deref()
-            .map(|id| projected_outlines(catalog, id, wcs))
-            .unwrap_or_default();
-        let discovered = transient
-            .then(|| transient_discovery_date(&placed.object.common_name))
-            .flatten();
-        let near_capture =
-            transient.then(|| transient_near_capture(discovered.as_deref(), capture_jd));
-        let catalog_source = (!placed.object.metadata.source.is_empty())
-            .then(|| placed.object.metadata.source.clone());
-        output.push(ObjectPointResponse {
-            stable_id,
-            name: placed.object.name,
-            common_name: placed.object.common_name,
-            kind: if force_transient {
-                "transient".into()
-            } else {
-                placed.object.kind.as_str().into()
-            },
-            source: if transient {
-                "transient".into()
-            } else {
-                "deep_sky".into()
-            },
-            catalog_source,
-            x: placed.x,
-            y: placed.y,
-            semi_major_pixels: placed.semi_major_px,
-            semi_minor_pixels: placed.semi_minor_px,
-            angle_degrees: placed.angle_deg,
-            prominence,
-            ra_degrees: Some(placed.object.ra),
-            dec_degrees: Some(placed.object.dec),
-            discovered,
-            near_capture,
-            distance_au: None,
-            motion_arcsec_per_hour: None,
-            direction_position_angle_degrees: None,
-            direction_image_angle_degrees: None,
-            outlines,
-        });
-    }
-    Ok(())
-}
+/// FITS header cards in the order they are written, as a JSON object of
+/// keyword to value.
+struct FitsCardsJson(Vec<(String, seiza::FitsCardValue)>);
 
-fn append_minor_bodies(
-    output: &mut Vec<ObjectPointResponse>,
-    catalog: &MinorBodyCatalog,
-    wcs: &Wcs,
-    dimensions: (u32, u32),
-    acquisition_jd: f64,
-) {
-    for placed in catalog.objects_in_footprint(wcs, dimensions, acquisition_jd, 18.0) {
-        let kind = match placed.body.kind {
-            MinorBodyKind::Comet => "comet",
-            MinorBodyKind::Asteroid => "asteroid",
-        };
-        output.push(ObjectPointResponse {
-            stable_id: None,
-            name: placed.body.name,
-            common_name: format!("V~{:.1}, {:.2} AU", placed.mag, placed.delta_au),
-            kind: kind.into(),
-            source: "minor_body".into(),
-            catalog_source: None,
-            x: placed.x,
-            y: placed.y,
-            semi_major_pixels: 0.0,
-            semi_minor_pixels: 0.0,
-            angle_degrees: Some(0.0),
-            prominence: None,
-            ra_degrees: Some(placed.ra),
-            dec_degrees: Some(placed.dec),
-            discovered: None,
-            near_capture: Some(true),
-            distance_au: Some(placed.delta_au),
-            motion_arcsec_per_hour: placed.motion_arcsec_per_hour,
-            direction_position_angle_degrees: placed.direction_pa_deg,
-            direction_image_angle_degrees: placed
-                .direction_pa_deg
-                .and_then(|angle| direction_image_angle(wcs, placed.ra, placed.dec, angle)),
-            outlines: Vec::new(),
-        });
-    }
-}
-
-fn direction_image_angle(wcs: &Wcs, ra: f64, dec: f64, pa_deg: f64) -> Option<f64> {
-    let (x, y) = wcs.world_to_pixel(ra, dec)?;
-    let epsilon = 1.0 / 60.0;
-    let north = wcs.world_to_pixel(ra, (dec + epsilon).min(90.0))?;
-    let east = wcs.world_to_pixel(ra + epsilon / dec.to_radians().cos().abs().max(1e-6), dec)?;
-    let normalize = |point: (f64, f64)| {
-        let vector = (point.0 - x, point.1 - y);
-        let length = vector.0.hypot(vector.1).max(1e-12);
-        (vector.0 / length, vector.1 / length)
-    };
-    let north = normalize(north);
-    let east = normalize(east);
-    let (sin, cos) = pa_deg.to_radians().sin_cos();
-    Some(
-        (north.1 * cos + east.1 * sin)
-            .atan2(north.0 * cos + east.0 * sin)
-            .to_degrees(),
-    )
-}
-
-fn fits_capture_time(fits: &FitsImage) -> Option<String> {
-    ["DATE-OBS", "DATE-BEG", "DATE-AVG"]
-        .into_iter()
-        .find_map(|key| {
-            fits.headers
-                .iter()
-                .find(|(name, _)| name == key)
-                .and_then(|(_, value)| value.as_str())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-        })
-}
-
-/// Parse the FITS ISO-8601 forms used by Seiza into a Julian date.
-fn parse_iso_jd(value: &str) -> Option<f64> {
-    let value = value.trim().trim_end_matches('Z');
-    let (date, clock) = value.split_once('T').unwrap_or((value, "0:0:0"));
-    let mut date_parts = date.split('-');
-    let year: i32 = date_parts.next()?.parse().ok()?;
-    let month: u32 = date_parts.next()?.parse().ok()?;
-    let day: u32 = date_parts.next()?.parse().ok()?;
-    let mut clock_parts = clock.split(':');
-    let hour: f64 = clock_parts.next()?.parse().ok()?;
-    let minute: f64 = clock_parts.next().unwrap_or("0").parse().ok()?;
-    let second: f64 = clock_parts.next().unwrap_or("0").parse().ok()?;
-    let day_fraction = day as f64 + (hour + minute / 60.0 + second / 3_600.0) / 24.0;
-    Some(seiza::minor_bodies::julian_date(year, month, day_fraction))
-}
-
-fn transient_discovery_date(details: &str) -> Option<String> {
-    let value = details
-        .split(", ")
-        .find_map(|part| part.strip_prefix("disc. "))?;
-    let mut parts = value.split('/');
-    let year: i32 = parts.next()?.trim().parse().ok()?;
-    let month: u32 = parts.next()?.trim().parse().ok()?;
-    let day: u32 = parts.next()?.trim().parse().ok()?;
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return None;
-    }
-    Some(format!("{year:04}-{month:02}-{day:02}"))
-}
-
-fn transient_near_capture(discovered: Option<&str>, capture_jd: Option<f64>) -> bool {
-    let (Some(discovered), Some(capture_jd)) = (discovered, capture_jd) else {
-        return true;
-    };
-    let Some(discovered_jd) = parse_iso_jd(discovered) else {
-        return true;
-    };
-    discovered_jd >= capture_jd - 365.0 && discovered_jd <= capture_jd + 30.0
-}
-
-fn overlay_layer_name(kind: &str) -> &'static str {
-    match kind {
-        "star" | "double-star" => "named_stars",
-        "transient" => "transients",
-        "comet" | "asteroid" => "minor_bodies",
-        _ => "deep_sky",
-    }
-}
-
-fn projected_outlines(
-    catalog: &ObjectCatalog,
-    canonical_id: &str,
-    wcs: &Wcs,
-) -> Vec<ObjectOutlineResponse> {
-    let Ok(geometries) = catalog.geometries(canonical_id) else {
-        return Vec::new();
-    };
-    project_outline_geometries(geometries, wcs)
-}
-
-fn project_outline_geometries(
-    geometries: Vec<ObjectGeometry>,
-    wcs: &Wcs,
-) -> Vec<ObjectOutlineResponse> {
-    geometries
-        .into_iter()
-        .filter_map(|geometry| {
-            let GeometryData::OutlineSet { level, contours } = geometry.data else {
-                return None;
+impl Serialize for FitsCardsJson {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(self.0.iter().map(|(keyword, value)| {
+            let value = match value {
+                seiza::FitsCardValue::Text(text) => json!(text),
+                seiza::FitsCardValue::Integer(number) => json!(number),
+                seiza::FitsCardValue::Number(number) => json!(number),
             };
-            let contours = contours
-                .into_iter()
-                .filter_map(|contour| {
-                    let points = contour
-                        .vertices
-                        .into_iter()
-                        .map(|(ra, dec)| wcs.world_to_pixel(ra, dec).map(|(x, y)| [x, y]))
-                        .collect::<Option<Vec<_>>>()?;
-                    let minimum_points = if contour.closed { 3 } else { 2 };
-                    (points.len() >= minimum_points).then_some(ObjectContourResponse {
-                        closed: contour.closed,
-                        points,
-                    })
-                })
-                .collect::<Vec<_>>();
-            (!contours.is_empty()).then_some(ObjectOutlineResponse {
-                geometry_id: geometry.id,
-                source_record_id: geometry.source_record_id,
-                role: geometry_role_name(geometry.role).into(),
-                quality: geometry_quality_name(geometry.quality).into(),
-                level,
-                contours,
-            })
+            (keyword, value)
+        }))
+    }
+}
+
+#[derive(Serialize)]
+struct WcsFitsHeaderResponse {
+    cards: FitsCardsJson,
+    text: String,
+}
+
+#[unsafe(no_mangle)]
+/// A WCS as FITS header cards. `wcs_json` is a WCS as
+/// [`seiza_solve_image_json`] returns it: `crval`, `crpix`, `cd`, an
+/// optional `sip` and an optional `pixelOrigin` (0, the default, when
+/// `crpix` counts pixels from 0; 1 when it counts from 1, as a FITS header
+/// does).
+///
+/// Returns `{"cards": {...}, "text": "..."}`: `cards` holds each keyword
+/// and its value in the order a header writes them (`CTYPE1` and `CTYPE2`,
+/// TAN or TAN-SIP; `CUNIT`, `EQUINOX`, `CRVAL`, 1-based `CRPIX`, the `CD`
+/// matrix, and every SIP keyword when the WCS has SIP terms), and `text`
+/// the same cards as a minimal FITS header: 80-column cards ending with
+/// `END`. `cards` can be passed as the WCS keywords of
+/// [`seiza_color_calibrate_json`]. Free the result, or an `error_out`
+/// string, with [`seiza_string_free`].
+///
+/// # Safety
+/// `wcs_json` must be a valid NUL-terminated UTF-8 string. When non-null,
+/// `error_out` must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_wcs_fits_header_json(
+    wcs_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let request: parallax::WcsRequest = serde_json::from_str(&required_str(wcs_json, "WCS")?)
+            .map_err(|error| format!("invalid WCS: {error}"))?;
+        let wcs = request.wcs()?;
+        owned_json(&WcsFitsHeaderResponse {
+            cards: FitsCardsJson(wcs.fits_header_cards()),
+            text: wcs.fits_header_text(),
         })
-        .collect()
+    })
+    .unwrap_or(ptr::null_mut())
 }
 
-fn geometry_role_name(role: GeometryRole) -> &'static str {
-    match role {
-        GeometryRole::CatalogExtent => "catalog-extent",
-        GeometryRole::PreferredRender => "preferred-render",
-        GeometryRole::FallbackExtent => "fallback-extent",
-        GeometryRole::BrightnessLevel => "brightness-level",
-        GeometryRole::Component => "component",
-    }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScaleHintResponse {
+    nominal_arcsec_per_pixel: f64,
+    min_arcsec_per_pixel: f64,
+    max_arcsec_per_pixel: f64,
 }
 
-fn geometry_quality_name(quality: GeometryQuality) -> &'static str {
-    match quality {
-        GeometryQuality::Catalog => "catalog",
-        GeometryQuality::Curated => "curated",
-        GeometryQuality::Estimated => "estimated",
-        GeometryQuality::Derived => "derived",
-    }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PhotoMetadataResponse {
+    make: Option<String>,
+    model: Option<String>,
+    date_time_original: Option<String>,
+    sub_sec_time_original: Option<String>,
+    offset_time_original: Option<String>,
+    capture_time_utc: Option<String>,
+    capture_time_source: Option<seiza_image_io::raster::CaptureTimeSource>,
+    exposure_seconds: Option<f64>,
+    gps_latitude_deg: Option<f64>,
+    gps_longitude_deg: Option<f64>,
+    gps_altitude_m: Option<f64>,
+    gps_altitude_ref: Option<u32>,
+    gps_image_direction_deg: Option<f64>,
+    gps_image_direction_ref: Option<String>,
+    focal_length_mm: Option<f64>,
+    focal_length_35mm: Option<f64>,
+    exif_orientation: Option<u32>,
+    warnings: Vec<String>,
+    scale_hint: Option<ScaleHintResponse>,
+    scale_ranges: Option<Vec<[f64; 2]>>,
+}
+
+#[unsafe(no_mangle)]
+/// The EXIF fields of a JPEG, TIFF, HEIF, PNG or WebP file that help a
+/// plate solve: `captureTimeUtc` (from the original time and its offset,
+/// or from the GPS stamps, as `captureTimeSource` says:
+/// `date_time_original` or `gps`), the GPS position, and the focal length
+/// with its 35 mm equivalent, with the camera, exposure and orientation.
+/// Missing or damaged EXIF gives null fields and `warnings`, never an error.
+///
+/// Given the decoded image's `width` and `height` (after its EXIF
+/// orientation; 0 for either leaves them out), `scaleHint` is the pixel
+/// scale the 35 mm-equivalent focal length implies (null without one), and
+/// `scaleRanges` the `[min, max]` pixel-scale ranges, in arcseconds per
+/// pixel, to try in order with a blind solve. Without them both are null.
+/// Free the result, or an `error_out` string, with [`seiza_string_free`].
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated string. When non-null, `error_out`
+/// must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_read_photo_metadata_json(
+    path: *const c_char,
+    width: u32,
+    height: u32,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        use seiza_image_io::raster::{PhotoMetadata, ScaleSearch};
+        let path = required_path(path, "photo path")?;
+        let metadata = PhotoMetadata::read(&path);
+        let (scale_hint, scale_ranges) = if width > 0 && height > 0 {
+            let search = ScaleSearch::new(&metadata, (width, height), None, None)
+                .map_err(|error| error.to_string())?;
+            let hint = metadata
+                .scale_hint((width, height))
+                .map(|hint| ScaleHintResponse {
+                    nominal_arcsec_per_pixel: hint.nominal_arcsec_per_pixel,
+                    min_arcsec_per_pixel: hint.min_arcsec_per_pixel,
+                    max_arcsec_per_pixel: hint.max_arcsec_per_pixel,
+                });
+            let ranges = search.ranges.iter().map(|&(min, max)| [min, max]).collect();
+            (hint, Some(ranges))
+        } else {
+            (None, None)
+        };
+        owned_json(&PhotoMetadataResponse {
+            make: metadata.make,
+            model: metadata.model,
+            date_time_original: metadata.date_time_original,
+            sub_sec_time_original: metadata.sub_sec_time_original,
+            offset_time_original: metadata.offset_time_original,
+            capture_time_utc: metadata.capture_time_utc,
+            capture_time_source: metadata.capture_time_source,
+            exposure_seconds: metadata.exposure_seconds,
+            gps_latitude_deg: metadata.gps_latitude_deg,
+            gps_longitude_deg: metadata.gps_longitude_deg,
+            gps_altitude_m: metadata.gps_altitude_m,
+            gps_altitude_ref: metadata.gps_altitude_ref,
+            gps_image_direction_deg: metadata.gps_image_direction_deg,
+            gps_image_direction_ref: metadata.gps_image_direction_ref,
+            focal_length_mm: metadata.focal_length_mm,
+            focal_length_35mm: metadata.focal_length_35mm,
+            exif_orientation: metadata.exif_orientation,
+            warnings: metadata.warnings,
+            scale_hint,
+            scale_ranges,
+        })
+    })
+    .unwrap_or(ptr::null_mut())
 }
 
 #[unsafe(no_mangle)]
@@ -7836,79 +7789,52 @@ struct StarDetectOptions {
     target_star_count: Option<usize>,
 }
 
-const STAR_FOCAL_LENGTH_HEADER_KEYS: &[&str] = &["FOCALLEN", "FOCALLENGTH", "FOCAL"];
-const STAR_PIXEL_SIZE_HEADER_KEYS: &[&str] = &["XPIXSZ"];
-
 impl StarDetectOptions {
-    /// Fill only the detector classification inputs the caller omitted.
-    /// An explicit preset is a complete classification choice and therefore
-    /// never consults frame metadata.
-    fn with_frame_headers(mut self, image: &FitsImage) -> Self {
-        if self.preset.is_some() {
-            return self;
-        }
-        if self.focal_length_mm.is_none() {
-            self.focal_length_mm = first_positive_header(image, STAR_FOCAL_LENGTH_HEADER_KEYS);
-        }
-        if self.pixel_size_um.is_none() {
-            self.pixel_size_um = first_positive_header(image, STAR_PIXEL_SIZE_HEADER_KEYS);
-        }
-        self
-    }
-
-    fn into_params(
-        self,
-    ) -> Result<seiza_stars::hocus_focus_star_detection::HocusFocusParams, String> {
-        use seiza_stars::hocus_focus_star_detection::{
-            HocusFocusParams, StructureRemovalMethod, TelescopeClass,
-        };
-        let mut params = match self.preset.as_deref() {
-            Some("widefield") => HocusFocusParams::for_telescope_class(TelescopeClass::WideField),
-            Some("standard") => HocusFocusParams::for_telescope_class(TelescopeClass::Standard),
-            Some("longfocal") => {
-                HocusFocusParams::for_telescope_class(TelescopeClass::LongFocalLength)
-            }
-            Some(other) => {
-                return Err(format!(
-                    "unknown preset {other:?} (widefield, standard, longfocal)"
-                ));
-            }
-            None => HocusFocusParams::for_frame_headers(self.focal_length_mm, self.pixel_size_um).0,
-        };
-        params.psf_type = match self.psf_type.as_deref() {
-            None | Some("moffat4") => seiza_stars::psf_fitting::PSFType::Moffat4,
-            Some("gaussian") => seiza_stars::psf_fitting::PSFType::Gaussian,
-            Some("none") => seiza_stars::psf_fitting::PSFType::None,
+    /// The core's measurement options: names checked, the rest carried
+    /// over as given.
+    fn measurement(&self) -> Result<seiza_stars::MeasurementOptions, String> {
+        use seiza_stars::hocus_focus_star_detection::StructureRemovalMethod;
+        let preset = self
+            .preset
+            .as_deref()
+            .map(|name| {
+                seiza_stars::TelescopeClass::from_name(name).ok_or_else(|| {
+                    format!("unknown preset {name:?} (widefield, standard, longfocal)")
+                })
+            })
+            .transpose()?;
+        let psf_type = match self.psf_type.as_deref() {
+            None | Some("moffat4") => seiza_stars::PSFType::Moffat4,
+            Some("gaussian") => seiza_stars::PSFType::Gaussian,
+            Some("none") => seiza_stars::PSFType::None,
             Some(other) => {
                 return Err(format!(
                     "unknown psfType {other:?} (none, gaussian, moffat4)"
                 ));
             }
         };
-        if let Some(method) = self.structure_removal.as_deref() {
-            params.structure_removal = match method {
-                "filtered" => StructureRemovalMethod::Filtered,
-                "atrous" => StructureRemovalMethod::Atrous,
-                other => {
-                    return Err(format!(
-                        "unknown structureRemoval {other:?} (filtered, atrous)"
-                    ));
-                }
-            };
-        }
-        if let Some(binning) = self.detection_binning {
-            params.detection_binning = binning.max(1);
-        }
-        if let Some(keep) = self.keep_saturated {
-            params.keep_saturated_stars = keep;
-        }
-        if let Some(radius) = self.noise_reduction_radius {
-            params.noise_reduction_radius = radius;
-        }
-        if let Some(value) = self.sensitivity {
-            params.sensitivity = value;
-        }
-        Ok(params)
+        let structure_removal = match self.structure_removal.as_deref() {
+            None => None,
+            Some("filtered") => Some(StructureRemovalMethod::Filtered),
+            Some("atrous") => Some(StructureRemovalMethod::Atrous),
+            Some(other) => {
+                return Err(format!(
+                    "unknown structureRemoval {other:?} (filtered, atrous)"
+                ));
+            }
+        };
+        Ok(seiza_stars::MeasurementOptions {
+            preset,
+            focal_length_mm: self.focal_length_mm,
+            pixel_size_um: self.pixel_size_um,
+            psf_type,
+            structure_removal,
+            detection_binning: self.detection_binning,
+            keep_saturated: self.keep_saturated,
+            noise_reduction_radius: self.noise_reduction_radius,
+            sensitivity: self.sensitivity,
+            target_star_count: self.target_star_count,
+        })
     }
 }
 
@@ -8014,17 +7940,6 @@ struct StarDetectResponse {
     triangle_tilt: Option<TriangleTiltJson>,
 }
 
-fn first_positive_header(image: &FitsImage, keys: &[&str]) -> Option<f64> {
-    keys.iter().find_map(|key| {
-        image
-            .headers
-            .iter()
-            .filter(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
-            .filter_map(|(_, value)| value.as_f64())
-            .find(|value| value.is_finite() && *value > 0.0)
-    })
-}
-
 unsafe fn parse_star_detect_options(
     options_json: *const c_char,
 ) -> Result<StarDetectOptions, String> {
@@ -8037,21 +7952,12 @@ unsafe fn parse_star_detect_options(
     serde_json::from_str(text).map_err(|error| error.to_string())
 }
 
-/// Linear 16-bit luminance for measurement. Mono u16 stays borrowed; planar
-/// RGB is collapsed to luminance, and a raw Bayer mosaic is debayered before
-/// its luminance is measured.
-fn astronomy_luma_u16(image: &FitsImage) -> Cow<'_, [u16]> {
-    match image.debayer() {
-        Some(rgb) => Cow::Owned(rgb.to_luma_u16()),
-        None => image.to_u16(),
-    }
-}
-
 fn detect_stars_response(
     samples: &[u16],
     width: usize,
     height: usize,
     options: StarDetectOptions,
+    frame_optics: (Option<f64>, Option<f64>),
 ) -> Result<StarDetectResponse, String> {
     let expected = width
         .checked_mul(height)
@@ -8063,18 +7969,10 @@ fn detect_stars_response(
         ));
     }
     let triangle_angle_degrees = options.triangle_angle_degrees;
-    let target_star_count = options.target_star_count;
-    let params = options.into_params()?;
-    let result = match target_star_count {
-        Some(target) if target > 0 => {
-            seiza_stars::hocus_focus_star_detection::detect_stars_hocus_focus_adaptive(
-                samples, width, height, &params, target,
-            )
-        }
-        _ => seiza_stars::hocus_focus_star_detection::detect_stars_hocus_focus(
-            samples, width, height, &params,
-        ),
-    };
+    let result = options
+        .measurement()?
+        .with_frame_optics(frame_optics.0, frame_optics.1)
+        .detect(samples, width, height);
     let stars: Vec<DetectedStarJson> = result
         .stars
         .iter()
@@ -12831,41 +12729,42 @@ mod tests {
                 ("xpixsz".into(), HeaderValue::Float(3.76)),
             ],
         };
+        let params = |options: StarDetectOptions| {
+            options
+                .measurement()
+                .unwrap()
+                .with_frame_optics(
+                    seiza_image_io::header_focal_length_mm(&image.headers),
+                    seiza_image_io::header_pixel_size_um(&image.headers),
+                )
+                .params()
+        };
 
         // The usable aliases are case-insensitive, as FITS-derived XISF
         // metadata is not required to preserve FITS keyword casing.
-        let from_headers = StarDetectOptions::default()
-            .with_frame_headers(&image)
-            .into_params()
-            .unwrap();
+        let from_headers = params(StarDetectOptions::default());
         assert_eq!(from_headers.structure_layers, 5);
         assert_eq!(from_headers.noise_reduction_radius, 0);
 
         // Caller pixel size wins while the missing focal length still comes
         // from the frame, yielding the wide-field class.
-        let caller_pixel = StarDetectOptions {
+        let caller_pixel = params(StarDetectOptions {
             pixel_size_um: Some(12.0),
             ..Default::default()
-        }
-        .with_frame_headers(&image)
-        .into_params()
-        .unwrap();
+        });
         assert_eq!(caller_pixel.structure_layers, 3);
 
         // Caller focal length also wins independently while pixel size comes
         // from the frame.
-        let caller_focal = StarDetectOptions {
+        let caller_focal = params(StarDetectOptions {
             focal_length_mm: Some(500.0),
             ..Default::default()
-        }
-        .with_frame_headers(&image)
-        .into_params()
-        .unwrap();
+        });
         assert_eq!(caller_focal.structure_layers, 3);
 
         // An explicit preset is complete and all explicit fine tuning still
         // lands after it.
-        let explicit = StarDetectOptions {
+        let explicit = params(StarDetectOptions {
             preset: Some("standard".into()),
             focal_length_mm: Some(50.0),
             pixel_size_um: Some(50.0),
@@ -12873,16 +12772,13 @@ mod tests {
             detection_binning: Some(3),
             sensitivity: Some(7.5),
             ..Default::default()
-        }
-        .with_frame_headers(&image)
-        .into_params()
-        .unwrap();
+        });
         assert_eq!(explicit.structure_layers, 4);
         assert_eq!(explicit.structure_removal, StructureRemovalMethod::Atrous);
         assert_eq!(explicit.detection_binning, 3);
         assert_eq!(explicit.sensitivity, 7.5);
 
-        let luma = astronomy_luma_u16(&image);
+        let luma = seiza_image_io::luma_u16(&image);
         assert!(matches!(luma, Cow::Borrowed(_)), "mono u16 should not copy");
         assert_eq!(luma.as_ref(), [1, 2, 3, 4]);
 
@@ -12893,7 +12789,7 @@ mod tests {
             pixels: seiza_fits::Pixels::U16(vec![10, 40, 20, 50, 30, 60]),
             headers: vec![],
         };
-        assert_eq!(astronomy_luma_u16(&planar_rgb).as_ref(), [20, 50]);
+        assert_eq!(seiza_image_io::luma_u16(&planar_rgb).as_ref(), [20, 50]);
 
         let bayer = FitsImage {
             width: 2,
@@ -12903,7 +12799,7 @@ mod tests {
             headers: vec![("BAYERPAT".into(), HeaderValue::String("RGGB".into()))],
         };
         let expected = bayer.debayer().unwrap().to_luma_u16();
-        assert_eq!(astronomy_luma_u16(&bayer).as_ref(), expected);
+        assert_eq!(seiza_image_io::luma_u16(&bayer).as_ref(), expected);
     }
 
     #[test]
@@ -14148,41 +14044,32 @@ mod tests {
     }
 
     #[test]
-    fn projects_catalog_outline_geometry_into_image_pixels() {
-        let wcs = Wcs::from_center_scale_rotation((10.0, 20.0), (100.0, 100.0), 3.6, 0.0, false);
-        let expected = [(30.0, 40.0), (70.0, 40.0), (50.0, 80.0)];
-        let vertices = expected
-            .iter()
-            .map(|&(x, y)| wcs.pixel_to_world(x, y))
-            .collect();
-        let outlines = project_outline_geometries(
-            vec![ObjectGeometry {
-                id: "openngc:NGC1#outline-1".into(),
-                source_record_id: "openngc:NGC1".into(),
-                role: GeometryRole::BrightnessLevel,
-                quality: GeometryQuality::Catalog,
-                method: "OpenNGC outline".into(),
-                evidence: String::new(),
-                data: GeometryData::OutlineSet {
-                    level: Some("1".into()),
-                    contours: vec![seiza::objects::ObjectContour {
-                        closed: true,
-                        vertices,
-                    }],
-                },
-            }],
-            &wcs,
-        );
+    fn object_outlines_carry_how_they_were_made() {
+        use seiza::field_objects::FieldContour;
+        use seiza::objects::{GeometryQuality, GeometryRole};
 
-        assert_eq!(outlines.len(), 1);
-        assert_eq!(outlines[0].role, "brightness-level");
-        assert_eq!(outlines[0].quality, "catalog");
-        assert_eq!(outlines[0].level.as_deref(), Some("1"));
-        assert!(outlines[0].contours[0].closed);
-        for (actual, expected) in outlines[0].contours[0].points.iter().zip(expected) {
-            assert!((actual[0] - expected.0).abs() < 1e-6);
-            assert!((actual[1] - expected.1).abs() < 1e-6);
-        }
+        let outline = ObjectOutlineResponse::from(FieldOutline {
+            geometry_id: "openngc:NGC1#outline-1".into(),
+            source_record_id: "openngc:NGC1".into(),
+            role: GeometryRole::BrightnessLevel,
+            quality: GeometryQuality::Catalog,
+            method: "OpenNGC outline".into(),
+            evidence: "survey isophote".into(),
+            level: Some("1".into()),
+            contours: vec![FieldContour {
+                closed: true,
+                points: vec![(30.0, 40.0), (70.0, 40.0), (50.0, 80.0)],
+            }],
+        });
+        let json = serde_json::to_value(&outline).unwrap();
+        assert_eq!(json["geometryId"], "openngc:NGC1#outline-1");
+        assert_eq!(json["role"], "brightness-level");
+        assert_eq!(json["quality"], "catalog");
+        assert_eq!(json["method"], "OpenNGC outline");
+        assert_eq!(json["evidence"], "survey isophote");
+        assert_eq!(json["level"], "1");
+        assert_eq!(json["contours"][0]["closed"], true);
+        assert_eq!(json["contours"][0]["points"][2], json!([50.0, 80.0]));
     }
 
     #[test]
@@ -14207,74 +14094,234 @@ mod tests {
     }
 
     #[test]
-    fn parses_fits_acquisition_time_for_dynamic_catalogs() {
+    fn reads_the_capture_time_a_solve_dates_objects_by() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("dated.fits");
         std::fs::write(&path, synthetic_fits()).unwrap();
         let fits = FitsImage::open(&path).unwrap();
 
         assert_eq!(
-            fits_capture_time(&fits).as_deref(),
+            seiza_image_io::capture_time_from_headers(&fits.headers).as_deref(),
             Some("2025-07-20T12:34:56.5Z")
         );
-        assert!(parse_iso_jd("2025-07-20T12:34:56.5Z").is_some());
-        assert!(parse_iso_jd("not-a-date").is_none());
+        let c_path = CString::new(path.to_str().unwrap()).unwrap();
+        let mut error = ptr::null_mut();
+        let json = unsafe { seiza_read_capture_time_json(c_path.as_ptr(), &mut error) };
+        assert!(error.is_null());
+        let value: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(json) }.to_str().unwrap()).unwrap();
+        unsafe { seiza_string_free(json) };
+        assert_eq!(value["captureTime"], "2025-07-20T12:34:56.5Z");
+
+        let missing =
+            CString::new(directory.path().join("missing.fits").to_str().unwrap()).unwrap();
+        let json = unsafe { seiza_read_capture_time_json(missing.as_ptr(), &mut error) };
+        assert!(json.is_null());
+        assert!(!error.is_null());
+        unsafe { seiza_string_free(error) };
     }
 
     #[test]
-    fn object_overlay_keeps_named_stars_and_dates_transients() {
-        use seiza::objects::{ObjectMetadata, SkyObject};
+    fn object_points_keep_their_names_and_dates() {
+        let point = ObjectPointResponse::from(FieldObject {
+            stable_id: Some("test:SN 2020abc".into()),
+            name: "SN 2020abc".into(),
+            common_name: "disc. 2020/01/01".into(),
+            kind: "transient",
+            source: "transient",
+            catalog_source: Some("test-catalog".into()),
+            x: 50.0,
+            y: 49.0,
+            semi_major_px: 0.0,
+            semi_minor_px: 0.0,
+            angle_deg: None,
+            prominence: Some(0.5),
+            ra_deg: 10.0,
+            dec_deg: 20.0,
+            discovered: Some("2020-01-01".into()),
+            near_capture: Some(false),
+            distance_au: None,
+            motion_arcsec_per_hour: None,
+            direction_position_angle_deg: None,
+            direction_image_angle_deg: None,
+            outlines: Vec::new(),
+        });
+        let json = serde_json::to_value(&point).unwrap();
+        assert_eq!(json["stableId"], "test:SN 2020abc");
+        assert_eq!(json["kind"], "transient");
+        assert_eq!(json["catalogSource"], "test-catalog");
+        assert_eq!(json["raDegrees"], 10.0);
+        assert_eq!(json["discovered"], "2020-01-01");
+        assert_eq!(json["nearCapture"], false);
+        assert_eq!(json["outlines"], json!([]));
+    }
 
-        let object = |name: &str, common_name: &str, kind: ObjectKind| SkyObject {
-            kind,
-            ra: 10.0,
-            dec: 20.0,
-            mag: Some(4.0),
-            major_arcmin: None,
-            minor_arcmin: None,
-            position_angle_deg: None,
-            name: name.into(),
-            common_name: common_name.into(),
-            metadata: ObjectMetadata {
-                id: format!("test:{name}"),
-                source: "test-catalog".into(),
-                aliases: Vec::new(),
-                parent_ids: Vec::new(),
-                alternate_ids: Vec::new(),
-                alternate_sources: Vec::new(),
-            },
+    /// What a C call returned: its JSON, or its error, freed either way.
+    fn returned_json(json: *mut c_char, error: *mut c_char) -> Result<Value, String> {
+        let take = |text: *mut c_char| {
+            let owned = unsafe { CStr::from_ptr(text) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { seiza_string_free(text) };
+            owned
         };
-        let wcs = Wcs::from_center_scale_rotation((10.0, 20.0), (50.0, 50.0), 3.6, 0.0, false);
-        let catalog = ObjectCatalog::new(vec![
-            object("Sirius", "Dog Star", ObjectKind::Star),
-            object("NGC 1", "Test Galaxy", ObjectKind::Galaxy),
-        ]);
-        let mut output = Vec::new();
+        if json.is_null() {
+            assert!(!error.is_null());
+            return Err(take(error));
+        }
+        assert!(error.is_null());
+        Ok(serde_json::from_str(&take(json)).unwrap())
+    }
 
-        append_object_catalog(&mut output, &catalog, &wcs, (100, 100), None, false).unwrap();
+    #[test]
+    fn a_wcs_becomes_fits_header_cards() {
+        let wcs =
+            seiza::Wcs::from_center_scale_rotation((150.0, 35.0), (99.0, 49.0), 2.0, 15.0, false);
+        let header = |request: Value| {
+            let text = CString::new(request.to_string()).unwrap();
+            let mut error = ptr::null_mut();
+            let json = unsafe { seiza_wcs_fits_header_json(text.as_ptr(), &mut error) };
+            returned_json(json, error)
+        };
+        let from_zero = header(json!({
+            "crval": [wcs.crval.0, wcs.crval.1],
+            "crpix": [99.0, 49.0],
+            "cd": wcs.cd,
+        }))
+        .unwrap();
+        assert_eq!(from_zero["cards"]["CTYPE1"], "RA---TAN");
+        assert_eq!(from_zero["cards"]["CRPIX1"], 100.0);
+        assert_eq!(from_zero["cards"]["CRPIX2"], 50.0);
+        assert_eq!(from_zero["cards"]["CD1_2"], wcs.cd[0][1]);
+        assert_eq!(from_zero["text"], wcs.fits_header_text());
 
-        assert_eq!(output.len(), 2);
-        assert!(output.iter().any(|object| object.kind == "star"));
-        assert!(output.iter().any(|object| object.kind == "galaxy"));
+        let from_one = header(json!({
+            "crval": [wcs.crval.0, wcs.crval.1],
+            "crpix": [100.0, 50.0],
+            "cd": wcs.cd,
+            "pixelOrigin": 1,
+        }))
+        .unwrap();
+        assert_eq!(from_one, from_zero);
 
-        let transient_catalog = ObjectCatalog::new(vec![object(
-            "SN 2020abc",
-            "disc. 2020/01/01",
-            ObjectKind::Galaxy,
-        )]);
-        let mut transients = Vec::new();
-        append_object_catalog(
-            &mut transients,
-            &transient_catalog,
-            &wcs,
-            (100, 100),
-            parse_iso_jd("2025-07-20T12:00:00Z"),
-            true,
+        let message = header(json!({"crval": [1.0, 2.0]})).unwrap_err();
+        assert!(message.contains("invalid WCS"), "{message}");
+    }
+
+    #[test]
+    fn a_photo_gives_its_exif_and_scale_ranges() {
+        use seiza_image_io::raster::test_support::{
+            Tag, Value as ExifValue, ascii, field, jpeg_with_exif,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("phone.jpg");
+        std::fs::write(
+            &path,
+            jpeg_with_exif(
+                &image::DynamicImage::new_rgb8(40, 30),
+                &[
+                    ascii(Tag::Make, "Seiza"),
+                    field(Tag::FocalLengthIn35mmFilm, ExifValue::Short(vec![24])),
+                ],
+            ),
         )
         .unwrap();
-        assert_eq!(transients[0].kind, "transient");
-        assert_eq!(transients[0].discovered.as_deref(), Some("2020-01-01"));
-        assert_eq!(transients[0].near_capture, Some(false));
+        let metadata = |width: u32, height: u32| {
+            let path = CString::new(path.to_str().unwrap()).unwrap();
+            let mut error = ptr::null_mut();
+            let json =
+                unsafe { seiza_read_photo_metadata_json(path.as_ptr(), width, height, &mut error) };
+            returned_json(json, error).unwrap()
+        };
+
+        let alone = metadata(0, 0);
+        assert_eq!(alone["make"], "Seiza");
+        assert_eq!(alone["focalLength35mm"], 24.0);
+        assert_eq!(alone["captureTimeUtc"], Value::Null);
+        assert_eq!(alone["scaleHint"], Value::Null);
+        assert_eq!(alone["scaleRanges"], Value::Null);
+
+        let sized = metadata(4000, 3000);
+        let nominal = sized["scaleHint"]["nominalArcsecPerPixel"]
+            .as_f64()
+            .unwrap();
+        assert!(nominal > 10.0 && nominal < 100.0, "{nominal}");
+        assert_eq!(
+            sized["scaleRanges"][0][0].as_f64().unwrap(),
+            sized["scaleHint"]["minArcsecPerPixel"].as_f64().unwrap()
+        );
+    }
+
+    #[test]
+    fn the_local_gaia_catalog_answers_a_cone() {
+        use seiza::catalog::{PhotometricStar, PhotometryCatalogBuilder};
+        let directory = tempfile::tempdir().unwrap();
+        let mut builder = PhotometryCatalogBuilder::new(90, 2016.0, "test");
+        for (ra, g, bp_rp, reliable) in [
+            (10.0, 8.0, Some(0.8), true),
+            (10.01, 9.0, Some(1.2), false),
+            (10.02, 16.0, Some(0.5), true),
+            (40.0, 8.0, Some(0.8), true),
+        ] {
+            builder.add(PhotometricStar {
+                ra,
+                dec: 20.0,
+                g,
+                bp_rp,
+                reliable,
+            });
+        }
+        builder
+            .write_to(&directory.path().join("stars-gaia-photometry.bin"))
+            .unwrap();
+
+        let cone = |path: &Path| {
+            let path = CString::new(path.to_str().unwrap()).unwrap();
+            let mut error = ptr::null_mut();
+            let json = unsafe {
+                seiza_gaia_photometry_catalog_cone_json(
+                    path.as_ptr(),
+                    10.0,
+                    20.0,
+                    0.5,
+                    15.0,
+                    &mut error,
+                )
+            };
+            returned_json(json, error)
+        };
+        let stars = cone(directory.path()).unwrap();
+        let stars = stars.as_array().unwrap();
+        assert_eq!(stars.len(), 2);
+        let bright = stars.iter().find(|star| star["g"] == 8.0).unwrap();
+        assert!((bright["bpRp"].as_f64().unwrap() - 0.8).abs() < 0.01);
+        assert_eq!(bright["pmra"], Value::Null);
+        let unreliable = stars.iter().find(|star| star["g"] == 9.0).unwrap();
+        assert!(unreliable.get("bpRp").is_none());
+
+        // The sources read back as colour calibration's input.
+        let sources: Vec<GaiaSourceJson> = serde_json::from_value(json!(stars)).unwrap();
+        assert!(sources.iter().any(|source| source.bp_rp.is_some()));
+
+        assert!(cone(&directory.path().join("missing")).is_err());
+    }
+
+    #[test]
+    fn pixel_scale_advice_follows_the_core() {
+        let scale = seiza_stars_pixel_scale_arcsec(518.0, 3.76);
+        assert!((scale - 1.497).abs() < 0.01, "{scale}");
+        assert!(seiza_stars_pixel_scale_arcsec(0.0, 3.76).is_nan());
+        let class = |scale: f64| {
+            unsafe { CStr::from_ptr(seiza_stars_classify_pixel_scale(scale)) }
+                .to_str()
+                .unwrap()
+        };
+        assert_eq!(class(1.5), "widefield");
+        assert_eq!(class(1.0), "standard");
+        assert_eq!(class(0.36), "longfocal");
+        assert_eq!(class(f64::NAN), "standard");
+        assert_eq!(seiza_stars_recommend_detection_binning(6.2), 2);
+        assert_eq!(seiza_stars_recommend_detection_binning(-1.0), 1);
     }
 }
 
@@ -15028,7 +15075,13 @@ pub unsafe extern "C" fn seiza_stars_detect_luma_u16_json(
         }
         let samples = unsafe { std::slice::from_raw_parts(data, len) };
         let options = unsafe { parse_star_detect_options(options_json) }?;
-        owned_json(&detect_stars_response(samples, width, height, options)?)
+        owned_json(&detect_stars_response(
+            samples,
+            width,
+            height,
+            options,
+            (None, None),
+        )?)
     })
     .unwrap_or(ptr::null_mut())
 }
@@ -15067,16 +15120,55 @@ pub unsafe extern "C" fn seiza_stars_detect_path_json(
         // megabyte astronomy frame.
         let options = unsafe { parse_star_detect_options(options_json) }?;
         let (image, _) = open_astronomy_image(&path)?;
-        let options = options.with_frame_headers(&image);
-        let samples = astronomy_luma_u16(&image);
+        let frame_optics = (
+            seiza_image_io::header_focal_length_mm(&image.headers),
+            seiza_image_io::header_pixel_size_um(&image.headers),
+        );
+        let samples = seiza_image_io::luma_u16(&image);
         owned_json(&detect_stars_response(
             &samples,
             image.width,
             image.height,
             options,
+            frame_optics,
         )?)
     })
     .unwrap_or(ptr::null_mut())
+}
+
+/// The pixel scale, in arcseconds per pixel, of a camera with pixels
+/// `pixel_size_um` micrometres across (binning included) behind a
+/// telescope of focal length `focal_length_mm` millimetres; NaN unless
+/// both are finite and positive. [`seiza_stars_classify_pixel_scale`]
+/// turns it into a detection preset.
+#[unsafe(no_mangle)]
+pub extern "C" fn seiza_stars_pixel_scale_arcsec(focal_length_mm: f64, pixel_size_um: f64) -> f64 {
+    seiza_stars::pixel_scale_arcsec(focal_length_mm, pixel_size_um).unwrap_or(f64::NAN)
+}
+
+/// The star detection preset for a rig of `arcsec_per_pixel`, as the
+/// `preset` option of [`seiza_stars_detect_luma_u16_json`] takes it:
+/// `widefield` from 1.2"/px up, `longfocal` at 0.6"/px and below, and
+/// `standard` between, or for a scale that is not a positive number. The
+/// string is static: do not free it.
+#[unsafe(no_mangle)]
+pub extern "C" fn seiza_stars_classify_pixel_scale(arcsec_per_pixel: f64) -> *const c_char {
+    use seiza_stars::TelescopeClass;
+    match seiza_stars::classify_pixel_scale(arcsec_per_pixel) {
+        TelescopeClass::WideField => c"widefield".as_ptr(),
+        TelescopeClass::Standard => c"standard".as_ptr(),
+        TelescopeClass::LongFocalLength => c"longfocal".as_ptr(),
+    }
+}
+
+/// The detection binning, 1 to 4, for the `detectionBinning` option of
+/// [`seiza_stars_detect_luma_u16_json`], from an in-focus star's measured
+/// HFR in captured pixels: the factor that brings it nearest the
+/// detector's calibrated 3 pixels. 1 for an HFR that is not a positive
+/// number.
+#[unsafe(no_mangle)]
+pub extern "C" fn seiza_stars_recommend_detection_binning(measured_hfr_pixels: f64) -> usize {
+    seiza_stars::recommend_detection_binning(measured_hfr_pixels)
 }
 
 /// Why two frames' sensor readings refuse to match, as a human-readable

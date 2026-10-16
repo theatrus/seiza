@@ -45,6 +45,14 @@ pub struct PhotometricStar {
     pub reliable: bool,
 }
 
+impl PhotometricStar {
+    /// The BP − RP colour to calibrate with: `bp_rp` when the source is
+    /// reliable, else `None`.
+    pub fn calibration_bp_rp(&self) -> Option<f32> {
+        self.bp_rp.filter(|_| self.reliable)
+    }
+}
+
 /// Move a position `years` along its proper motion (mas/yr, `pmra` times
 /// cos(dec)) on the sphere: along the great circle the motion starts on,
 /// which stays right near the poles where stepping RA would not.

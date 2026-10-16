@@ -833,13 +833,40 @@ char *seiza_gaia_photometry_cone_json(double ra,
                                       char **error_out);
 
 /*
+ Read Gaia DR3 photometry within `radius_deg` of `(ra, dec)` (degrees)
+ down to G `max_mag` from the local catalog [`seiza_catalog_setup`]
+ installs (`stars-gaia-photometry.bin`), for
+ [`seiza_color_calibrate_json`]. `catalog_path` is the catalog file or the
+ directory that holds it; null looks in the standard places.
+
+ Returns an owned JSON array of sources like
+ [`seiza_gaia_photometry_cone_json`]'s, but with positions already at the
+ catalog's epoch, so `pmra` and `pmdec` are null, and the colour as
+ `bpRp` in place of `bp` and `rp`; `bpRp` is left out when Gaia's is
+ missing or its astrometry is unreliable. Free the result, or an
+ `error_out` string, with [`seiza_string_free`].
+
+ # Safety
+ `catalog_path` must be null or a valid NUL-terminated string. When
+ non-null, `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_gaia_photometry_catalog_cone_json(const char *catalog_path,
+                                              double ra,
+                                              double dec,
+                                              double radius_deg,
+                                              float max_mag,
+                                              char **error_out);
+
+/*
  Fit photometric colour calibration for an interleaved linear RGB image
  against Gaia DR3 star colours.
 
  `wcs_json` is a JSON object of the image's FITS WCS keywords (`CTYPE1`,
  `CRVAL1`, `CRPIX1`, `CD1_1` or `CDELT1`, SIP terms, …) with numeric or
  string values; `gaia_json` is an array of sources as
- [`seiza_gaia_photometry_cone_json`] returns. `options_json` may be null
+ [`seiza_gaia_photometry_cone_json`] or
+ [`seiza_gaia_photometry_catalog_cone_json`] returns; a `bpRp` value is
+ used in place of `bp` and `rp`. `options_json` may be null
  or an object with `whiteBpRp` (default 0.82, the Sun), `fitBpRpRange`
  (the `[bluest, reddest]` BP − RP of the stars the fits use; default
  `[0, 1.8]`), `apertureRadius` (pixels; default twice the measured FWHM),
@@ -2136,6 +2163,67 @@ char *seiza_solve_image_with_limits_json(const char *path,
                                          char **error_out);
 
 /*
+ When the image at `path` was taken, as `{"captureTime": "..."}`: from a
+ FITS or XISF header's `DATE-OBS`, `DATE-BEG` or `DATE-AVG`, read without
+ decoding the pixels, or from a photo's EXIF, in UTC. `captureTime` is
+ null when the file does not say. It is the time
+ [`seiza_solve_image_json`] dates transients and places comets and
+ asteroids by. Free the result, or an `error_out` string, with
+ [`seiza_string_free`].
+
+ # Safety
+ `path` must be a valid NUL-terminated string. When non-null, `error_out`
+ must point to writable storage for one pointer.
+ */
+char *seiza_read_capture_time_json(const char *path, char **error_out);
+
+/*
+ A WCS as FITS header cards. `wcs_json` is a WCS as
+ [`seiza_solve_image_json`] returns it: `crval`, `crpix`, `cd`, an
+ optional `sip` and an optional `pixelOrigin` (0, the default, when
+ `crpix` counts pixels from 0; 1 when it counts from 1, as a FITS header
+ does).
+
+ Returns `{"cards": {...}, "text": "..."}`: `cards` holds each keyword
+ and its value in the order a header writes them (`CTYPE1` and `CTYPE2`,
+ TAN or TAN-SIP; `CUNIT`, `EQUINOX`, `CRVAL`, 1-based `CRPIX`, the `CD`
+ matrix, and every SIP keyword when the WCS has SIP terms), and `text`
+ the same cards as a minimal FITS header: 80-column cards ending with
+ `END`. `cards` can be passed as the WCS keywords of
+ [`seiza_color_calibrate_json`]. Free the result, or an `error_out`
+ string, with [`seiza_string_free`].
+
+ # Safety
+ `wcs_json` must be a valid NUL-terminated UTF-8 string. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_wcs_fits_header_json(const char *wcs_json, char **error_out);
+
+/*
+ The EXIF fields of a JPEG, TIFF, HEIF, PNG or WebP file that help a
+ plate solve: `captureTimeUtc` (from the original time and its offset,
+ or from the GPS stamps, as `captureTimeSource` says:
+ `date_time_original` or `gps`), the GPS position, and the focal length
+ with its 35 mm equivalent, with the camera, exposure and orientation.
+ Missing or damaged EXIF gives null fields and `warnings`, never an error.
+
+ Given the decoded image's `width` and `height` (after its EXIF
+ orientation; 0 for either leaves them out), `scaleHint` is the pixel
+ scale the 35 mm-equivalent focal length implies (null without one), and
+ `scaleRanges` the `[min, max]` pixel-scale ranges, in arcseconds per
+ pixel, to try in order with a blind solve. Without them both are null.
+ Free the result, or an `error_out` string, with [`seiza_string_free`].
+
+ # Safety
+ `path` must be a valid NUL-terminated string. When non-null, `error_out`
+ must point to writable storage for one pointer.
+ */
+char *seiza_read_photo_metadata_json(const char *path,
+                                     uint32_t width,
+                                     uint32_t height,
+                                     char **error_out);
+
+/*
  # Safety
  `value` must be null or a string returned by this library that has not
  already been freed.
@@ -2425,6 +2513,33 @@ char *seiza_stars_detect_luma_u16_json(const uint16_t *data,
  must be null or point to writable storage for one pointer.
  */
 char *seiza_stars_detect_path_json(const char *path, const char *options_json, char **error_out);
+
+/*
+ The pixel scale, in arcseconds per pixel, of a camera with pixels
+ `pixel_size_um` micrometres across (binning included) behind a
+ telescope of focal length `focal_length_mm` millimetres; NaN unless
+ both are finite and positive. [`seiza_stars_classify_pixel_scale`]
+ turns it into a detection preset.
+ */
+double seiza_stars_pixel_scale_arcsec(double focal_length_mm, double pixel_size_um);
+
+/*
+ The star detection preset for a rig of `arcsec_per_pixel`, as the
+ `preset` option of [`seiza_stars_detect_luma_u16_json`] takes it:
+ `widefield` from 1.2"/px up, `longfocal` at 0.6"/px and below, and
+ `standard` between, or for a scale that is not a positive number. The
+ string is static: do not free it.
+ */
+const char *seiza_stars_classify_pixel_scale(double arcsec_per_pixel);
+
+/*
+ The detection binning, 1 to 4, for the `detectionBinning` option of
+ [`seiza_stars_detect_luma_u16_json`], from an in-focus star's measured
+ HFR in captured pixels: the factor that brings it nearest the
+ detector's calibrated 3 pixels. 1 for an HFR that is not a positive
+ number.
+ */
+size_t seiza_stars_recommend_detection_binning(double measured_hfr_pixels);
 
 /*
  Why two frames' sensor readings refuse to match, as a human-readable

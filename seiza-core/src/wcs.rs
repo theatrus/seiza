@@ -267,6 +267,24 @@ impl Wcs {
         cards
     }
 
+    /// [`Self::fits_header_cards`] as a minimal FITS header: 80-column
+    /// cards ending with `END`, numbers written to 14 significant figures.
+    /// Header-injection APIs such as sirilpy's `set_image_header` take it.
+    pub fn fits_header_text(&self) -> String {
+        let mut header = String::new();
+        for (keyword, value) in self.fits_header_cards() {
+            let formatted = match value {
+                FitsCardValue::Text(text) => format!("'{text}'"),
+                FitsCardValue::Integer(value) => value.to_string(),
+                FitsCardValue::Number(value) => format!("{value:.13E}"),
+            };
+            header.push_str(&format!("{keyword:<8}= {formatted:>20}"));
+            header.push_str(&" ".repeat(80 - 30));
+        }
+        header.push_str(&format!("{:<80}", "END"));
+        header
+    }
+
     /// Read a TAN or TAN-SIP solution from FITS WCS keywords, the inverse of
     /// [`Self::fits_header_cards`]. `number` looks up a numeric card and
     /// `text` a string card by keyword.
@@ -536,6 +554,12 @@ mod tests {
                 })
         };
         assert_eq!(Wcs::from_fits_values(number, text), Some(wcs.clone()));
+
+        let header = wcs.fits_header_text();
+        assert_eq!(header.len() % 80, 0);
+        assert_eq!(header.len() / 80, cards.len() + 1);
+        assert!(header.starts_with("CTYPE1  =       'RA---TAN-SIP'"));
+        assert!(header.ends_with(&format!("{:<80}", "END")));
 
         // CDELT with CROTA2 describes the same linear part as a CD matrix.
         let plain = Wcs::from_center_scale_rotation((10.0, -20.0), (5.0, 7.0), 3.0, 30.0, false);

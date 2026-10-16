@@ -8,10 +8,11 @@ use numpy::{PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use seiza_stars::hocus_focus_star_detection::{
-    HocusFocusParams, StructureRemovalMethod, TelescopeClass, detect_stars_hocus_focus,
+    HocusFocusDetectionResult, MeasurementOptions, StructureRemovalMethod, TelescopeClass,
 };
 use seiza_stars::psf_fitting::PSFType;
 use seiza_stars::tilt;
+use std::path::PathBuf;
 
 /// One detected star with its measurements. `eccentricity`, `theta`, and
 /// `r_squared` are present when a PSF model was fitted. `theta` is the
@@ -193,42 +194,16 @@ fn parse_structure_removal(name: &str) -> PyResult<StructureRemovalMethod> {
 }
 
 fn parse_preset(name: &str) -> PyResult<TelescopeClass> {
-    match name {
-        "widefield" => Ok(TelescopeClass::WideField),
-        "standard" => Ok(TelescopeClass::Standard),
-        "longfocal" => Ok(TelescopeClass::LongFocalLength),
-        other => Err(PyValueError::new_err(format!(
-            "unknown preset {other:?} (widefield, standard, longfocal)"
-        ))),
-    }
+    TelescopeClass::from_name(name).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "unknown preset {name:?} (widefield, standard, longfocal)"
+        ))
+    })
 }
 
-/// Detect and measure stars in a mono ``uint16`` frame with the HocusFocus
-/// detector: wavelet structure removal, kappa-sigma thresholds, hot-pixel
-/// filtering, multi-criteria validation, and optional PSF fitting.
-///
-/// The preset resolves in this order: explicit ``preset``; else
-/// ``focal_length_mm`` + ``pixel_size_um`` classify the pixel scale the way
-/// the FITS-header path does; else the standard defaults. Explicit knobs
-/// always override the preset they land on.
-#[pyfunction]
-#[pyo3(signature = (
-    image,
-    *,
-    preset=None,
-    focal_length_mm=None,
-    pixel_size_um=None,
-    psf_type="moffat4",
-    structure_removal=None,
-    detection_binning=None,
-    keep_saturated=None,
-    noise_reduction_radius=None,
-    sensitivity=None,
-))]
+/// The keyword arguments both detection calls take, as the core's options.
 #[allow(clippy::too_many_arguments)]
-fn detect_measured_stars(
-    py: Python<'_>,
-    image: PyReadonlyArray2<'_, u16>,
+fn measurement_options(
     preset: Option<&str>,
     focal_length_mm: Option<f64>,
     pixel_size_um: Option<f64>,
@@ -238,34 +213,28 @@ fn detect_measured_stars(
     keep_saturated: Option<bool>,
     noise_reduction_radius: Option<usize>,
     sensitivity: Option<f64>,
-) -> PyResult<PyStarDetectionResult> {
-    let shape = image.shape();
-    let (height, width) = (shape[0], shape[1]);
-    let data = image.as_array().iter().copied().collect::<Vec<u16>>();
+    target_star_count: Option<usize>,
+) -> PyResult<MeasurementOptions> {
+    Ok(MeasurementOptions {
+        preset: preset.map(parse_preset).transpose()?,
+        focal_length_mm,
+        pixel_size_um,
+        psf_type: parse_psf_type(psf_type)?,
+        structure_removal: structure_removal.map(parse_structure_removal).transpose()?,
+        detection_binning,
+        keep_saturated,
+        noise_reduction_radius,
+        sensitivity,
+        target_star_count,
+    })
+}
 
-    let mut params = match preset {
-        Some(name) => HocusFocusParams::for_telescope_class(parse_preset(name)?),
-        None => HocusFocusParams::for_frame_headers(focal_length_mm, pixel_size_um).0,
-    };
-    params.psf_type = parse_psf_type(psf_type)?;
-    if let Some(method) = structure_removal {
-        params.structure_removal = parse_structure_removal(method)?;
-    }
-    if let Some(binning) = detection_binning {
-        params.detection_binning = binning.max(1);
-    }
-    if let Some(keep) = keep_saturated {
-        params.keep_saturated_stars = keep;
-    }
-    if let Some(radius) = noise_reduction_radius {
-        params.noise_reduction_radius = radius;
-    }
-    if let Some(value) = sensitivity {
-        params.sensitivity = value;
-    }
-
-    let result = py.detach(move || detect_stars_hocus_focus(&data, width, height, &params));
-    Ok(PyStarDetectionResult {
+fn detection_result(
+    result: HocusFocusDetectionResult,
+    width: usize,
+    height: usize,
+) -> PyStarDetectionResult {
+    PyStarDetectionResult {
         stars: result
             .stars
             .iter()
@@ -294,7 +263,159 @@ fn detect_measured_stars(
         background_mean: result.background_mean,
         width,
         height,
-    })
+    }
+}
+
+/// Detect and measure stars in a mono ``uint16`` frame with the HocusFocus
+/// detector: wavelet structure removal, kappa-sigma thresholds, hot-pixel
+/// filtering, multi-criteria validation, and optional PSF fitting.
+///
+/// The preset resolves in this order: explicit ``preset``; else
+/// ``focal_length_mm`` + ``pixel_size_um`` classify the pixel scale the way
+/// the FITS-header path does; else the standard defaults. Explicit knobs
+/// always override the preset they land on. A positive
+/// ``target_star_count`` retries with looser settings (a lower SNR gate,
+/// then native resolution with no blur) until that many stars are
+/// measured, and returns the best pass otherwise.
+#[pyfunction]
+#[pyo3(signature = (
+    image,
+    *,
+    preset=None,
+    focal_length_mm=None,
+    pixel_size_um=None,
+    psf_type="moffat4",
+    structure_removal=None,
+    detection_binning=None,
+    keep_saturated=None,
+    noise_reduction_radius=None,
+    sensitivity=None,
+    target_star_count=None,
+))]
+#[allow(clippy::too_many_arguments)]
+fn detect_measured_stars(
+    py: Python<'_>,
+    image: PyReadonlyArray2<'_, u16>,
+    preset: Option<&str>,
+    focal_length_mm: Option<f64>,
+    pixel_size_um: Option<f64>,
+    psf_type: &str,
+    structure_removal: Option<&str>,
+    detection_binning: Option<usize>,
+    keep_saturated: Option<bool>,
+    noise_reduction_radius: Option<usize>,
+    sensitivity: Option<f64>,
+    target_star_count: Option<usize>,
+) -> PyResult<PyStarDetectionResult> {
+    let shape = image.shape();
+    let (height, width) = (shape[0], shape[1]);
+    let data = image.as_array().iter().copied().collect::<Vec<u16>>();
+    let options = measurement_options(
+        preset,
+        focal_length_mm,
+        pixel_size_um,
+        psf_type,
+        structure_removal,
+        detection_binning,
+        keep_saturated,
+        noise_reduction_radius,
+        sensitivity,
+        target_star_count,
+    )?;
+    let result = py.detach(move || options.detect(&data, width, height));
+    Ok(detection_result(result, width, height))
+}
+
+/// :func:`detect_measured_stars` on a FITS or XISF file: its linear 16-bit
+/// luminance, with planar RGB collapsed to luminance and a raw Bayer mosaic
+/// debayered first. When no ``preset`` is given, a ``focal_length_mm`` left
+/// out is read from ``FOCALLEN``, ``FOCALLENGTH`` or ``FOCAL``, and a
+/// ``pixel_size_um`` left out from ``XPIXSZ``; a value given wins, each on
+/// its own. Other formats are refused.
+#[pyfunction]
+#[pyo3(signature = (
+    path,
+    *,
+    preset=None,
+    focal_length_mm=None,
+    pixel_size_um=None,
+    psf_type="moffat4",
+    structure_removal=None,
+    detection_binning=None,
+    keep_saturated=None,
+    noise_reduction_radius=None,
+    sensitivity=None,
+    target_star_count=None,
+))]
+#[allow(clippy::too_many_arguments)]
+fn detect_measured_stars_file(
+    py: Python<'_>,
+    path: PathBuf,
+    preset: Option<&str>,
+    focal_length_mm: Option<f64>,
+    pixel_size_um: Option<f64>,
+    psf_type: &str,
+    structure_removal: Option<&str>,
+    detection_binning: Option<usize>,
+    keep_saturated: Option<bool>,
+    noise_reduction_radius: Option<usize>,
+    sensitivity: Option<f64>,
+    target_star_count: Option<usize>,
+) -> PyResult<PyStarDetectionResult> {
+    let options = measurement_options(
+        preset,
+        focal_length_mm,
+        pixel_size_um,
+        psf_type,
+        structure_removal,
+        detection_binning,
+        keep_saturated,
+        noise_reduction_radius,
+        sensitivity,
+        target_star_count,
+    )?;
+    let (result, width, height) = py
+        .detach(move || {
+            let (image, _) = seiza_image_io::open_astronomy(&path)?;
+            let options = options.with_frame_optics(
+                seiza_image_io::header_focal_length_mm(&image.headers),
+                seiza_image_io::header_pixel_size_um(&image.headers),
+            );
+            let samples = seiza_image_io::luma_u16(&image);
+            Ok::<_, seiza_image_io::Error>((
+                options.detect(&samples, image.width, image.height),
+                image.width,
+                image.height,
+            ))
+        })
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    Ok(detection_result(result, width, height))
+}
+
+/// The pixel scale, in arcseconds per pixel, of a camera with pixels
+/// ``pixel_size_um`` micrometres across (binning included) behind a
+/// telescope of focal length ``focal_length_mm`` millimetres; ``None``
+/// unless both are positive.
+#[pyfunction]
+fn pixel_scale_arcsec(focal_length_mm: f64, pixel_size_um: f64) -> Option<f64> {
+    seiza_stars::pixel_scale_arcsec(focal_length_mm, pixel_size_um)
+}
+
+/// The detection ``preset`` for a rig of ``scale_arcsec_px``:
+/// ``"widefield"`` from 1.2"/px up, ``"longfocal"`` at 0.6"/px and below,
+/// and ``"standard"`` between, or for a scale that is not a positive
+/// number.
+#[pyfunction]
+fn classify_pixel_scale(scale_arcsec_px: f64) -> &'static str {
+    seiza_stars::classify_pixel_scale(scale_arcsec_px).as_str()
+}
+
+/// The ``detection_binning``, 1 to 4, from an in-focus star's measured HFR
+/// in captured pixels: the factor that brings it nearest the detector's
+/// calibrated 3 pixels. 1 for an HFR that is not a positive number.
+#[pyfunction]
+fn recommend_detection_binning(measured_hfr_px: f64) -> usize {
+    seiza_stars::recommend_detection_binning(measured_hfr_px)
 }
 
 fn tilt_stars(result: &PyStarDetectionResult) -> Vec<tilt::TiltStar> {
@@ -407,6 +528,10 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyTriangleTiltSector>()?;
     module.add_class::<PyTriangleTiltSummary>()?;
     module.add_function(wrap_pyfunction!(detect_measured_stars, module)?)?;
+    module.add_function(wrap_pyfunction!(detect_measured_stars_file, module)?)?;
+    module.add_function(wrap_pyfunction!(pixel_scale_arcsec, module)?)?;
+    module.add_function(wrap_pyfunction!(classify_pixel_scale, module)?)?;
+    module.add_function(wrap_pyfunction!(recommend_detection_binning, module)?)?;
     module.add_function(wrap_pyfunction!(tilt_analysis, module)?)?;
     module.add_function(wrap_pyfunction!(triangle_tilt_analysis, module)?)?;
     Ok(())

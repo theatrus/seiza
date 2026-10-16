@@ -7,6 +7,7 @@ mod calibration;
 mod color;
 mod color_calibration;
 mod deconvolution;
+mod field_objects;
 mod imgproc;
 mod parallax;
 mod rc_astro;
@@ -446,18 +447,7 @@ impl PySolution {
     /// was fitted. Suitable for header-injection APIs such as sirilpy's
     /// `set_image_header`.
     fn fits_header_text(&self) -> String {
-        let mut header = String::new();
-        for (keyword, value) in self.wcs.wcs.fits_header_cards() {
-            let formatted = match value {
-                seiza::FitsCardValue::Text(text) => format!("'{text}'"),
-                seiza::FitsCardValue::Integer(value) => value.to_string(),
-                seiza::FitsCardValue::Number(value) => format!("{value:.13E}"),
-            };
-            header.push_str(&format!("{keyword:<8}= {formatted:>20}"));
-            header.push_str(&" ".repeat(80 - 30));
-        }
-        header.push_str(&format!("{:<80}", "END"));
-        header
+        self.wcs.wcs.fits_header_text()
     }
 
     fn __repr__(&self) -> String {
@@ -894,6 +884,17 @@ fn read_photo_metadata(
     Ok(json.call_method1("loads", (value.to_string(),))?.unbind())
 }
 
+/// When the image at `path` was taken, ISO 8601 in UTC: from a FITS or
+/// XISF header's ``DATE-OBS``, ``DATE-BEG`` or ``DATE-AVG``, read without
+/// decoding the pixels, or from a photo's EXIF. ``None`` when the file does
+/// not say. Pass it to :func:`field_objects` to place comets and asteroids
+/// and date transients.
+#[pyfunction]
+fn read_capture_time(path: PathBuf) -> PyResult<Option<String>> {
+    seiza_image_io::read_capture_time(&path)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// What a FITS or XISF file says about where it points, read without
 /// decoding its pixels: ``{"wcs": Wcs or None, "center": (ra, dec) or None,
 /// "scale_arcsec_px": float or None}``, from its WCS cards or PixInsight
@@ -1005,11 +1006,13 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solve_blind, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_catalogs, m)?)?;
     m.add_function(wrap_pyfunction!(read_photo_metadata, m)?)?;
+    m.add_function(wrap_pyfunction!(read_capture_time, m)?)?;
     m.add_function(wrap_pyfunction!(read_solve_prior, m)?)?;
     m.add_function(wrap_pyfunction!(solve_with_prior, m)?)?;
     color::register(m)?;
     color_calibration::register(m)?;
     deconvolution::register(m)?;
+    field_objects::register(m)?;
     imgproc::register(m)?;
     stacking::register(m)?;
     stars::register(m)?;

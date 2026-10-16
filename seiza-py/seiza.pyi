@@ -178,6 +178,51 @@ class Solution:
     def fits_header_cards(self) -> dict[str, float | int | str]: ...
     def fits_header_text(self) -> str: ...
 
+class ObjectContour:
+    closed: bool
+    points: list[tuple[float, float]]
+
+class ObjectOutline:
+    geometry_id: str
+    source_record_id: str
+    role: str
+    quality: str
+    method: str
+    evidence: str
+    level: str | None
+    contours: list[ObjectContour]
+
+class FieldObject:
+    stable_id: str | None
+    name: str
+    common_name: str
+    kind: str
+    source: str
+    catalog_source: str | None
+    x: float
+    y: float
+    semi_major_pixels: float
+    semi_minor_pixels: float
+    angle_deg: float | None
+    prominence: float | None
+    ra_deg: float
+    dec_deg: float
+    discovered: str | None
+    near_capture: bool | None
+    distance_au: float | None
+    motion_arcsec_per_hour: float | None
+    direction_position_angle_deg: float | None
+    direction_image_angle_deg: float | None
+    outlines: list[ObjectOutline]
+    @property
+    def layer(self) -> str: ...
+
+class FieldObjects:
+    objects: list[FieldObject]
+    object_catalog_error: str | None
+    transient_catalog_error: str | None
+    minor_body_error: str | None
+
 class TrackSample:
     time_unix: float
     ra_deg: float
@@ -795,7 +840,25 @@ def detect_measured_stars(
     keep_saturated: bool | None = None,
     noise_reduction_radius: int | None = None,
     sensitivity: float | None = None,
+    target_star_count: int | None = None,
 ) -> StarDetectionResult: ...
+def detect_measured_stars_file(
+    path: str | Path,
+    *,
+    preset: str | None = None,
+    focal_length_mm: float | None = None,
+    pixel_size_um: float | None = None,
+    psf_type: str = "moffat4",
+    structure_removal: str | None = None,
+    detection_binning: int | None = None,
+    keep_saturated: bool | None = None,
+    noise_reduction_radius: int | None = None,
+    sensitivity: float | None = None,
+    target_star_count: int | None = None,
+) -> StarDetectionResult: ...
+def pixel_scale_arcsec(focal_length_mm: float, pixel_size_um: float) -> float | None: ...
+def classify_pixel_scale(scale_arcsec_px: float) -> str: ...
+def recommend_detection_binning(measured_hfr_px: float) -> int: ...
 def tilt_analysis(
     result: StarDetectionResult,
 ) -> tuple[list[TiltCell], TiltSummary]: ...
@@ -1026,6 +1089,15 @@ def solve_blind(
     cancel: Callable[[], bool] | None = None,
 ) -> Solution: ...
 def read_solve_prior(path: str | Path) -> dict[str, Any]: ...
+def read_capture_time(path: str | Path) -> str | None: ...
+def field_objects(
+    wcs: Wcs,
+    width: int,
+    height: int,
+    *,
+    catalog_dir: str | Path | None = None,
+    capture_time: str | None = None,
+) -> FieldObjects: ...
 def solve_with_prior(
     stars: Sequence[StarInput],
     catalog: StarCatalog,
