@@ -1257,8 +1257,12 @@ pub enum Interpolation {
     Bilinear,
     /// Lanczos-3 over the 6x6 nearest samples, dropping the negative lobes
     /// where they would ring at a high-contrast edge, as PixInsight's
-    /// clamping does. Sharper: on a 98-frame M45 stack it took FWHM from
-    /// 2.63 to 2.47px, at about twice the resampling cost. Falls
+    /// clamping does. Only an edge well above the frame's noise counts, so
+    /// sky noise is never clamped: that would bias a faint background by an
+    /// amount that follows each frame's sub-pixel phase, and draw bands
+    /// across a stack of rotated frames. Sharper: on a 98-frame M45 stack
+    /// it took FWHM from 2.63 to 2.47px, at about twice the resampling
+    /// cost. Falls
     /// back to bilinear within three pixels of the source edge and where
     /// a tap is not finite.
     Lanczos3,
@@ -1484,6 +1488,10 @@ fn resample_region_with_inverse(
         .width
         .checked_mul(channels)
         .ok_or_else(|| Error::Registration("resampling row dimensions overflow".into()))?;
+    let clamp_spans = match sampling {
+        Sampling::Lanczos3 => lanczos_clamp_spans(source),
+        _ => vec![0.0; channels],
+    };
     let mut data = vec![f32::NAN; sample_count];
     data.par_chunks_mut(row_samples)
         .enumerate()
@@ -1494,6 +1502,7 @@ fn resample_region_with_inverse(
                 region.y + y,
                 &inverse,
                 sampling,
+                &clamp_spans,
                 output_row,
             );
         });
@@ -1501,7 +1510,8 @@ fn resample_region_with_inverse(
 }
 
 /// One output row of [`resample_region_with_inverse`]: reference row
-/// `reference_y` from column `first_x` on.
+/// `reference_y` from column `first_x` on. `clamp_spans` holds each
+/// channel's [`lanczos_clamp_spans`].
 ///
 /// An RGB pixel's Lanczos taps run four wide, which baseline SSE2 holds in
 /// one register; an AVX2 build of this loop measured only 1-4% faster, so
@@ -1512,6 +1522,7 @@ fn resample_row<F>(
     reference_y: usize,
     inverse: &F,
     sampling: Sampling,
+    clamp_spans: &[f32],
     output_row: &mut [f32],
 ) where
     F: Fn(f64, f64) -> (f64, f64),
@@ -1579,6 +1590,12 @@ fn resample_row<F>(
             // the image's last pixel lacks.
             let last_tap = ((y0 + 3) * source.width + x0 + 3) * channels;
             if channels == 3 && last_tap + 4 <= source.data.len() {
+                let spans = [
+                    clamp_spans[0],
+                    clamp_spans[1],
+                    clamp_spans[2],
+                    clamp_spans[0],
+                ];
                 let mut rows = [[0.0_f32; 4]; 6];
                 for (row, value) in rows.iter_mut().enumerate() {
                     let start = ((y0 + row - 2) * source.width + x0 - 2) * channels;
@@ -1587,10 +1604,10 @@ fn resample_row<F>(
                         let tap = &window[column * 3..column * 3 + 4];
                         [tap[0], tap[1], tap[2], tap[3]]
                     });
-                    *value = clamped_lanczos_lanes(&weights_x, &taps);
+                    *value = clamped_lanczos_lanes(&weights_x, &taps, &spans);
                 }
                 // A non-finite tap carries through to the result.
-                let values = clamped_lanczos_lanes(&weights_y, &rows);
+                let values = clamped_lanczos_lanes(&weights_y, &rows, &spans);
                 for ((channel, output_sample), &value) in output.iter_mut().enumerate().zip(&values)
                 {
                     if value.is_finite() {
@@ -1608,10 +1625,10 @@ fn resample_row<F>(
                     let taps: [f32; 6] = std::array::from_fn(|column| {
                         source.data[start + column * channels + channel]
                     });
-                    *value = clamped_lanczos(&weights_x, &taps);
+                    *value = clamped_lanczos(&weights_x, &taps, clamp_spans[channel]);
                 }
                 // A non-finite tap carries through to the result.
-                let value = clamped_lanczos(&weights_y, &rows);
+                let value = clamped_lanczos(&weights_y, &rows, clamp_spans[channel]);
                 if value.is_finite() {
                     *output_sample = value;
                 } else if let Some(value) = bilinear(channel) {
@@ -1633,32 +1650,89 @@ fn resample_row<F>(
 /// threshold does.
 const LANCZOS_CLAMPING: f32 = 0.3;
 
-/// One 1-D Lanczos-3 pass. Where the negative lobes would contribute more
-/// than [`LANCZOS_CLAMPING`] of what the positive lobes do, the taps straddle
-/// a high-contrast edge such as a bright star beside the sky, and the
-/// negative lobes would ring; then only the positive lobes are used,
-/// renormalized. Elsewhere, including at a star's peak, the full kernel
-/// keeps its sharpness.
-fn clamped_lanczos(weights: &[f32; 6], taps: &[f32; 6]) -> f32 {
+/// How many times a frame's noise the taps of a 1-D Lanczos pass must span,
+/// highest to lowest, before [`LANCZOS_CLAMPING`] may drop the negative
+/// lobes.
+///
+/// The share test alone compares sample values with zero, so on a faint
+/// calibrated background, a few times its noise above zero, it fires on
+/// noise: on Sh2 140 OIII lights, 34 ADU of sky with 12.8 ADU of noise, it
+/// clamped up to a fifth of the passes. Dropping the negative lobes there
+/// is not neutral. It fires when the negative-lobe samples happen to be
+/// high, so it raised the background by up to 4% and smoothed its noise,
+/// both by an amount set by the sub-pixel phase. A frame rotated against
+/// the reference sweeps that phase through a whole pixel every
+/// `1 / sin(angle)` pixels, so a stack of frames rotated 0.3 degrees showed
+/// bands 190 pixels apart. Six samples of plain noise span more than five
+/// times its standard deviation in about one pass in 200, and then the
+/// share test must fire too, so noise is left alone; a star, or any edge
+/// whose ringing could stand out of the noise, spans far more and is
+/// clamped as before.
+const LANCZOS_CLAMPING_NOISE_SPAN: f32 = 5.0;
+
+/// The span, per channel, that a 1-D Lanczos pass's taps must exceed before
+/// it may clamp: [`LANCZOS_CLAMPING_NOISE_SPAN`] times the source's
+/// [`crate::frame_noise`], or zero, clamping as the share test alone says,
+/// where the image is too small to measure its noise.
+fn lanczos_clamp_spans(source: &LinearImage) -> Vec<f32> {
+    match crate::snr::frame_noise(source) {
+        Some(noise) => noise
+            .into_iter()
+            .map(|sigma| {
+                if sigma.is_finite() {
+                    LANCZOS_CLAMPING_NOISE_SPAN * sigma
+                } else {
+                    0.0
+                }
+            })
+            .collect(),
+        None => vec![0.0; source.channels],
+    }
+}
+
+/// One 1-D Lanczos-3 pass. Where the taps span more than `noise_span` and
+/// the negative lobes would contribute more than [`LANCZOS_CLAMPING`] of
+/// what the positive lobes do, the taps straddle a high-contrast edge such
+/// as a bright star beside the sky, and the negative lobes would ring; then
+/// only the positive lobes are used, renormalized. Elsewhere, including at a
+/// star's peak and on the noise of a faint sky, the full kernel keeps its
+/// sharpness and its mean.
+fn clamped_lanczos(weights: &[f32; 6], taps: &[f32; 6], noise_span: f32) -> f32 {
     // Between two samples the Lanczos-3 taps at offsets -2..=3 always carry
     // the signs + - + + - +, so the lobes need no per-tap test.
     let positive =
         weights[0] * taps[0] + weights[2] * taps[2] + weights[3] * taps[3] + weights[5] * taps[5];
     let negative = weights[1] * taps[1] + weights[4] * taps[4];
-    if negative.abs() > LANCZOS_CLAMPING * positive.abs() {
+    if tap_span(taps) > noise_span && negative.abs() > LANCZOS_CLAMPING * positive.abs() {
         positive / (weights[0] + weights[2] + weights[3] + weights[5])
     } else {
         positive + negative
     }
 }
 
+/// The highest tap less the lowest, skipping non-finite taps.
+#[inline(always)]
+fn tap_span(taps: &[f32; 6]) -> f32 {
+    let mut highest = f32::NEG_INFINITY;
+    let mut lowest = f32::INFINITY;
+    for &tap in taps {
+        highest = highest.max(tap);
+        lowest = lowest.min(tap);
+    }
+    highest - lowest
+}
+
 /// [`clamped_lanczos`] on four lanes at once: lane `k` of the result is
-/// `clamped_lanczos(weights, taps[..][k])`, from the same operations in the
+/// `clamped_lanczos(weights, taps[..][k], noise_spans[k])`, from the same operations in the
 /// same order, so each lane matches it bit for bit. Both branches are formed
 /// and one is selected per lane, which the compiler turns into vector
 /// arithmetic and a blend.
 #[inline(always)]
-fn clamped_lanczos_lanes(weights: &[f32; 6], taps: &[[f32; 4]; 6]) -> [f32; 4] {
+fn clamped_lanczos_lanes(
+    weights: &[f32; 6],
+    taps: &[[f32; 4]; 6],
+    noise_spans: &[f32; 4],
+) -> [f32; 4] {
     let denominator = weights[0] + weights[2] + weights[3] + weights[5];
     let mut result = [0.0_f32; 4];
     for (lane, result) in result.iter_mut().enumerate() {
@@ -1669,7 +1743,9 @@ fn clamped_lanczos_lanes(weights: &[f32; 6], taps: &[[f32; 4]; 6]) -> [f32; 4] {
         let negative = weights[1] * taps[1][lane] + weights[4] * taps[4][lane];
         let clamped = positive / denominator;
         let full = positive + negative;
-        *result = if negative.abs() > LANCZOS_CLAMPING * positive.abs() {
+        let span = tap_span(&std::array::from_fn(|tap| taps[tap][lane]));
+        *result = if span > noise_spans[lane] && negative.abs() > LANCZOS_CLAMPING * positive.abs()
+        {
             clamped
         } else {
             full
@@ -2253,6 +2329,110 @@ mod tests {
         assert!(finite.clone().all(|&value| value >= 100.0 - 1.0e-3));
     }
 
+    /// A faint calibrated sky: Gaussian noise of `sigma` about `sky`, as on
+    /// the Sh2 140 OIII lights (34 ADU of sky, 12.8 ADU of noise), plus
+    /// `extra` at each pixel.
+    fn noisy_sky(
+        width: usize,
+        height: usize,
+        sky: f64,
+        sigma: f64,
+        extra: impl Fn(f64, f64) -> f64,
+    ) -> LinearImage {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut uniform = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 11) as f64 + 0.5) / (1_u64 << 53) as f64
+        };
+        let data = (0..width * height)
+            .map(|index| {
+                // Box-Muller.
+                let gaussian =
+                    (-2.0 * uniform().ln()).sqrt() * (2.0 * std::f64::consts::PI * uniform()).cos();
+                let (x, y) = ((index % width) as f64, (index / width) as f64);
+                (sky + sigma * gaussian + extra(x, y)) as f32
+            })
+            .collect();
+        LinearImage::new(width, height, 1, data).unwrap()
+    }
+
+    #[test]
+    fn lanczos_leaves_a_faint_noisy_sky_unbiased_at_every_subpixel_phase() {
+        // A frame rotated 0.3 degrees against the reference: the sub-pixel
+        // phase it is sampled at sweeps a whole pixel every 1 / sin(0.3
+        // degrees), 191 pixels, so anything that depends on the phase draws
+        // bands that far apart across the stack. Clamping the noise of a sky
+        // only 2.7 sigma above zero did: it fired when the negative-lobe
+        // samples happened to be high, lifting the sky about 0.1 sigma at
+        // half-pixel phases and leaving it at whole ones.
+        let (width, height, sky, sigma) = (512, 512, 34.0, 12.8);
+        let source = noisy_sky(width, height, sky, sigma, |_, _| 0.0);
+        let transform = SimilarityTransform {
+            scale: 1.0,
+            rotation_radians: 0.3_f64.to_radians(),
+            translation_x: 0.37,
+            translation_y: -0.21,
+        };
+        let resampled = lanczos(&source, transform);
+        let inverse = transform.inverse_map();
+        // Mean sky where both phases lie within a tenth of a pixel of a
+        // sample, and where both lie within a tenth of the midpoint.
+        let (mut whole, mut half) = ((0.0, 0), (0.0, 0));
+        for y in 0..height {
+            for x in 0..width {
+                let (source_x, source_y) = inverse(x as f64, y as f64);
+                let inside = |value: f64, size: usize| value >= 3.0 && value < size as f64 - 4.0;
+                if !inside(source_x, width) || !inside(source_y, height) {
+                    continue;
+                }
+                let off_sample = |value: f64| {
+                    let phase = value - value.floor();
+                    phase.min(1.0 - phase)
+                };
+                let (phase_x, phase_y) = (off_sample(source_x), off_sample(source_y));
+                let value = f64::from(resampled.data[y * width + x]);
+                if phase_x < 0.1 && phase_y < 0.1 {
+                    whole = (whole.0 + value, whole.1 + 1);
+                } else if phase_x > 0.4 && phase_y > 0.4 {
+                    half = (half.0 + value, half.1 + 1);
+                }
+            }
+        }
+        assert!(whole.1 > 5000 && half.1 > 5000, "{whole:?} {half:?}");
+        let (whole, half) = (whole.0 / whole.1 as f64, half.0 / half.1 as f64);
+        // Each mean is good to about 0.01 sigma; the clamped noise put
+        // 0.1 sigma between them.
+        assert!(
+            (half - whole).abs() < 0.04 * sigma,
+            "sky {whole:.3} at whole-pixel phases against {half:.3} at half-pixel ones"
+        );
+        assert!((whole - sky).abs() < 0.04 * sigma, "{whole}");
+    }
+
+    #[test]
+    fn lanczos_still_clamps_a_bright_star_on_a_faint_noisy_sky() {
+        // The noise threshold must not let a star ring: unclamped, its
+        // negative lobes would dig hundreds of ADU below the sky.
+        let (width, height, sky, sigma) = (64, 64, 34.0, 12.8);
+        let source = noisy_sky(width, height, sky, sigma, |x, y| {
+            let (dx, dy) = (x - 31.5, y - 32.0);
+            20_000.0 * (-(dx * dx + dy * dy) / (2.0 * 0.8 * 0.8)).exp()
+        });
+        let sharp = lanczos(&source, shift(0.5, 0.5));
+        for y in 26..39 {
+            for x in 26..39 {
+                let value = sharp.data[y * width + x];
+                assert!(
+                    value > (sky - 5.0 * sigma) as f32,
+                    "({x}, {y}) rang to {value}"
+                );
+            }
+        }
+        assert!(sharp.data[32 * width + 32] > 5_000.0);
+    }
+
     #[test]
     fn polynomial_warp_fit_recovers_a_quadratic_exactly() {
         let pairs = (0..10)
@@ -2759,6 +2939,7 @@ mod tests {
     ) -> Vec<f32> {
         const COORDINATE_EPSILON: f64 = 1.0e-9;
         let channels = source.channels;
+        let clamp_spans = lanczos_clamp_spans(source);
         let mut data = vec![f32::NAN; region.width * region.height * channels];
         let maximum_source_x = (source.width - 1) as f64;
         let maximum_source_y = (source.height - 1) as f64;
@@ -2818,9 +2999,9 @@ mod tests {
                             let taps: [f32; 6] = std::array::from_fn(|column| {
                                 source.data[start + column * channels + channel]
                             });
-                            *value = clamped_lanczos(&weights_x, &taps);
+                            *value = clamped_lanczos(&weights_x, &taps, clamp_spans[channel]);
                         }
-                        let value = clamped_lanczos(&weights_y, &rows);
+                        let value = clamped_lanczos(&weights_y, &rows, clamp_spans[channel]);
                         if value.is_finite() {
                             *output_sample = value;
                         } else if let Some(value) = bilinear(channel) {

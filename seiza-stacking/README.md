@@ -610,7 +610,11 @@ Registration resamples each frame bilinearly by default.
 `StackOptions::interpolation` set to `Interpolation::Lanczos3` (the CLI's
 `--interpolation lanczos3`) uses Lanczos-3 over the 6x6 nearest samples,
 dropping the negative lobes where they would ring at a high-contrast edge, as
-PixInsight's clamping does. On the M45 stack it took FWHM from 2.63 to 2.47px
+PixInsight's clamping does. Only taps spanning more than five times the frame's
+noise can clamp: on a faint sky a few times its noise above zero, clamping the
+noise itself raised the background by an amount set by each frame's sub-pixel
+phase, which frames rotated 0.3 degrees against the reference turned into bands
+190 px apart. On the M45 stack it took FWHM from 2.63 to 2.47px
 and SNR from 345 to 354, against 2.60px and 368 for WBPP, and with
 reintegration reached 376; stacking took 66 s instead of 39 s. Reintegration
 resamples with the same choice.
