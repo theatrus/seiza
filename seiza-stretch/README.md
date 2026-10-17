@@ -20,6 +20,10 @@ The crate consolidates Seiza's existing behavior:
 - explicit PixInsight/N.I.N.A.-family midtones transfer functions;
 - manual Generalized Hyperbolic Stretch with symmetry and protection controls;
 - the existing median/MAD Auto-MTF model;
+- a median anchor stretch that places the background median exactly on a target
+  with one closed-form curve, from a black point a number of robust sigmas
+  below the median, with optional curves boost, soft-knee highlight
+  compression and normalization;
 - the existing exact-histogram `u16` Auto-MTF fast path.
 
 Analysis and application are intentionally separate. A caller can analyze an

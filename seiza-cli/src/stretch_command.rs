@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand, ValueEnum};
-use seiza_stretch::{ColorStrategy, GhsParams, StretchConfig, StretchModel, StretchParams};
+use seiza_stretch::{
+    ColorStrategy, GhsParams, MedianAnchorParams, StretchConfig, StretchModel, StretchParams,
+};
 use std::path::PathBuf;
 
 #[derive(Args)]
@@ -119,6 +121,31 @@ enum StretchModelArgs {
         #[arg(long, default_value_t = -2.8, allow_negative_numbers = true)]
         shadows_clip: f64,
     },
+    /// Place the median exactly on a target with a closed-form curve from a
+    /// robust black point
+    MedianAnchor {
+        /// Where the background median lands, between 0 and 1
+        #[arg(long, default_value_t = 0.25)]
+        target_median: f64,
+        /// Black point in robust sigmas below the median
+        #[arg(long, default_value_t = 2.7)]
+        black_point_sigma: f64,
+        /// Use the image minimum as the black point and clip no black
+        #[arg(long)]
+        no_black_clip: bool,
+        /// Lift the tones above the target, from 0 through 0.9
+        #[arg(long, default_value_t = 0.0)]
+        curves_boost: f64,
+        /// Compress highlights above the knee, from 0 through 1
+        #[arg(long, default_value_t = 0.0)]
+        hdr_amount: f64,
+        /// Where highlight compression starts, between 0 and 1
+        #[arg(long, default_value_t = 0.75)]
+        hdr_knee: f64,
+        /// Rescale so the brightest sample reaches 1
+        #[arg(long)]
+        normalize: bool,
+    },
 }
 
 impl StretchModelArgs {
@@ -177,6 +204,22 @@ impl StretchModelArgs {
                 target_median,
                 shadows_clip,
             }),
+            Self::MedianAnchor {
+                target_median,
+                black_point_sigma,
+                no_black_clip,
+                curves_boost,
+                hdr_amount,
+                hdr_knee,
+                normalize,
+            } => StretchModel::MedianAnchor(MedianAnchorParams {
+                target_median,
+                black_point_sigma: (!no_black_clip).then_some(black_point_sigma),
+                curves_boost,
+                hdr_amount,
+                hdr_knee,
+                normalize,
+            }),
         }
     }
 
@@ -216,6 +259,23 @@ impl StretchModelArgs {
                 target_median,
                 shadows_clip,
             } => format!("auto MTF target median {target_median}, shadows clip {shadows_clip}"),
+            Self::MedianAnchor {
+                target_median,
+                black_point_sigma,
+                no_black_clip,
+                curves_boost,
+                hdr_amount,
+                hdr_knee,
+                normalize,
+            } => format!(
+                "median anchor target median {target_median}, black point {}, curves boost {curves_boost}, highlight compression {hdr_amount} above {hdr_knee}{}",
+                if no_black_clip {
+                    "at the minimum".to_string()
+                } else {
+                    format!("{black_point_sigma} sigma below the median")
+                },
+                if normalize { ", normalized" } else { "" }
+            ),
         }
     }
 }

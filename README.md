@@ -643,7 +643,8 @@ seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-
   Atomic `Float32` XISF output mirrors the FITS writer; a `.xisf` output path
   selects it in every CLI save command.
 - **Parameterized stretching** — reusable identity, linear, asinh,
-  percentile-asinh, MTF, manual GHS, and existing median/MAD Auto-MTF models in
+  percentile-asinh, MTF, manual GHS, median/MAD Auto-MTF, and median anchor
+  (median placed exactly on a target from a robust black point) models in
   `seiza-stretch`. Analysis, curve resolution, and application are separate so
   interactive and full-resolution pipeline stages can share an exact plan.
 - **Background extraction** — deterministic low-noise sample selection,

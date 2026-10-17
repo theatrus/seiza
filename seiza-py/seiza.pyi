@@ -1246,8 +1246,13 @@ def stretch(
     symmetry_point: float = 0.0,
     protect_shadows: float = 0.0,
     protect_highlights: float = 1.0,
-    target_median: float = 0.2,
+    target_median: float | None = None,
     shadows_clip: float = -2.8,
+    black_point_sigma: float | None = 2.7,
+    curves_boost: float = 0.0,
+    hdr_amount: float = 0.0,
+    hdr_knee: float = 0.75,
+    normalize: bool = False,
 ) -> npt.NDArray[np.float32]: ...
 def checkpoint_depths(total: int) -> list[int]: ...
 def stack_fits(

@@ -70,6 +70,20 @@ pipeline instead of one indeterminate spinner.
   [GHS process documentation](https://www.ghsastro.co.uk/doc/tools/GeneralizedHyperbolicStretch/GeneralizedHyperbolicStretch.html).
 - `AutoMtf` is the existing N.I.N.A./PixInsight-family median/MAD autostretch:
   a shadow clipping distance and target median resolve an explicit MTF curve.
+- `MedianAnchor` places the background median exactly on a target with one
+  closed-form midtones-family curve. The black point sits a number of robust
+  sigmas below the median, the noise taken as 1.4826 times the MAD of the
+  samples at or below the median so stars cannot inflate it, or at the image
+  minimum. Samples are
+  rescaled so the black point maps to 0 and 1 stays at 1, and with the
+  rescaled median `M` and target `T`,
+  `S(r) = (M - 1)·T·r / (M·(T + r - 1) - T·r)`, so `S(0) = 0`, `S(1) = 1` and
+  `S(M) = T` exactly. Optional steps follow in order: a curves boost that lifts
+  the quarter tones above the target (pinned at the target and 1), a
+  soft-knee highlight compression (a cubic Hermite from slope 1 at the knee to
+  at most 2.8 at 1, which stays monotonic), and a rescale so the brightest
+  analysed sample reaches 1. With `LuminancePreserving` it stretches Rec.709
+  luminance and scales each pixel's RGB by one factor.
 
 The exact-histogram `statistics_u16` and 65,536-entry `stretch_u16_to_u8` LUT
 also live in this crate. `seiza-fits` re-exports them and keeps
@@ -112,7 +126,7 @@ an explicit output-format decision, not an incidental refactor.
 ## Future automatic modes
 
 Automatic selection is policy layered above deterministic models. A future
-statistical or Auto-GHS selector may inspect the reusable analysis and produce
+Auto-GHS selector may inspect the reusable analysis and produce
 an ordinary, inspectable model or resolved plan. It must report its selected
 parameters and must not introduce an opaque transfer variant. The manual GHS
 model is already available; an informed selector can resolve its parameters

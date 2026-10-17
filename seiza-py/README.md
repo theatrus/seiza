@@ -687,11 +687,18 @@ preview = seiza.stretch(linear_rgb, model="auto-mtf",
 preview = seiza.stretch(linear, model="ghs", stretch_factor=4,
                         local_intensity=-1, symmetry_point=0.35,
                         protect_shadows=0.1, protect_highlights=0.8)
+preview = seiza.stretch(linear, model="median-anchor", target_median=0.25,
+                        black_point_sigma=2.7, hdr_amount=0.3)
 ```
 
 Available models are `identity`, `linear`, `asinh`, `percentile-asinh`, `mtf`,
-manual `ghs`, and `auto-mtf`; color strategies are `linked`, `unlinked`, and
-`luminance-preserving`. Analysis and application release the GIL.
+manual `ghs`, `auto-mtf`, and `median-anchor`; color strategies are `linked`,
+`unlinked`, and `luminance-preserving`. `median-anchor` places the background
+median exactly on `target_median` (default 0.25; `auto-mtf` defaults to 0.2),
+with the black point `black_point_sigma` robust sigmas below the median
+(`None` uses the image minimum), then optional `curves_boost`, `hdr_amount`
+and `hdr_knee` highlight compression, and `normalize`. Analysis and
+application release the GIL.
 
 Calibration masters use the same bounded-memory two-pass builder:
 

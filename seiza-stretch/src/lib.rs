@@ -299,6 +299,57 @@ pub struct GhsParams {
     pub white: f64,
 }
 
+/// Parameters for the median anchor stretch: a closed-form midtones-family curve
+/// that places the background median exactly on a target.
+///
+/// The black point sits `black_point_sigma` robust sigmas below the median,
+/// the noise taken from the lower half of the distribution so stars cannot
+/// inflate it (`None` uses the image minimum and clips no black). Samples are
+/// rescaled so the black point maps to 0 and 1 stays at 1, then
+/// `S(r) = (M - 1)·T·r / (M·(T + r - 1) - T·r)` maps the rescaled median `M`
+/// to the target `T` exactly, with `S(0) = 0` and `S(1) = 1`. Optional
+/// steps follow in order: a curves boost that lifts the tones above the
+/// target, a soft-knee highlight compression, and a rescale so the brightest
+/// analysed sample reaches 1.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MedianAnchorParams {
+    /// Where the background median lands, in `(0, 1)` (default 0.25).
+    pub target_median: f64,
+    /// Black point in robust sigmas below the median, at least 0 (default
+    /// 2.7); `None` uses the image minimum.
+    pub black_point_sigma: Option<f64>,
+    /// Curves boost strength in `[0, 0.9]`: lifts the quarter tones above
+    /// the target while black, the target and white stay put (default 0).
+    #[serde(default)]
+    pub curves_boost: f64,
+    /// Highlight compression in `[0, 1]` above `hdr_knee` (default 0).
+    #[serde(default)]
+    pub hdr_amount: f64,
+    /// Where highlight compression starts, in `(0, 1)` (default 0.75).
+    #[serde(default = "default_hdr_knee")]
+    pub hdr_knee: f64,
+    /// Rescale so the brightest analysed sample reaches 1 (default off).
+    #[serde(default)]
+    pub normalize: bool,
+}
+
+const fn default_hdr_knee() -> f64 {
+    0.75
+}
+
+impl Default for MedianAnchorParams {
+    fn default() -> Self {
+        Self {
+            target_median: 0.25,
+            black_point_sigma: Some(2.7),
+            curves_boost: 0.0,
+            hdr_amount: 0.0,
+            hdr_knee: default_hdr_knee(),
+            normalize: false,
+        }
+    }
+}
+
 /// A parameterized stretch request, before image-dependent values are resolved.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -329,6 +380,9 @@ pub enum StretchModel {
     Ghs(GhsParams),
     /// Resolve the existing median/MAD Auto-MTF model from image statistics.
     AutoMtf(StretchParams),
+    /// Place the median exactly on a target with a closed-form curve, from
+    /// a robust black point; see [`MedianAnchorParams`].
+    MedianAnchor(MedianAnchorParams),
 }
 
 /// Complete pipeline request for analysis and stretch resolution.
@@ -672,6 +726,20 @@ impl Distribution {
         })
     }
 
+    /// Robust noise from the samples at or below the median: the normal
+    /// scale times their median absolute deviation from their own median,
+    /// which stars and bright structure cannot inflate.
+    fn lower_half_noise(&self) -> f64 {
+        let lower = &self.sorted[..=self.sorted.len() / 2];
+        let center = lower[lower.len() / 2];
+        let mut deviations = lower
+            .iter()
+            .map(|value| (*value - center).abs())
+            .collect::<Vec<_>>();
+        deviations.sort_unstable_by(f32::total_cmp);
+        f64::from(deviations[deviations.len() / 2]) * NORMAL_MAD_SCALE
+    }
+
     fn percentile(&self, percentile: f64) -> f32 {
         let index =
             ((self.sorted.len() as f64 * percentile).floor() as usize).min(self.sorted.len() - 1);
@@ -799,6 +867,159 @@ pub enum ResolvedCurve {
         highlights: f32,
     },
     Ghs(ResolvedGhs),
+    MedianAnchor(ResolvedMedianAnchor),
+}
+
+/// A median anchor stretch with its image-dependent values resolved.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct ResolvedMedianAnchor {
+    /// Input black point.
+    pub black: f32,
+    /// The median after the black point is taken off, in `(0, 1)`.
+    pub median: f64,
+    /// Where the median lands.
+    pub target: f64,
+    /// Curves boost knots from the target up, as `(x, y)`, or none.
+    pub boost: Option<[(f64, f64); 3]>,
+    /// Highlight compression knee and the curve's end slope, or none.
+    pub highlights: Option<(f64, f64)>,
+    /// Factor that brings the brightest analysed sample to 1, else 1.
+    pub scale: f64,
+}
+
+impl ResolvedMedianAnchor {
+    fn new(statistics: RobustStatistics, noise: f64, params: MedianAnchorParams) -> Result<Self> {
+        validate_median_anchor(params)?;
+        let median = statistics.median;
+        let black = match params.black_point_sigma {
+            Some(sigma) => (median - sigma * noise).max(statistics.min),
+            None => statistics.min,
+        }
+        .min(0.99);
+        // A median at or past the black point leaves nothing to place: the
+        // rescaled median is held just inside the curve's domain.
+        let rescaled = ((median - black) / (1.0 - black)).clamp(1e-6, 1.0 - 1e-6);
+        let boost = (params.curves_boost > 0.0).then(|| {
+            let target = params.target_median;
+            let lift = 1.0 - params.curves_boost;
+            let quarter = 0.25 * (1.0 - target) + target;
+            let three_quarters = 0.75 * (1.0 - target) + target;
+            [
+                (target, target),
+                (quarter, quarter.powf(lift)),
+                (three_quarters, three_quarters.powf(lift * lift)),
+            ]
+        });
+        let highlights = (params.hdr_amount > 0.0).then_some((
+            params.hdr_knee,
+            1.0 + HDR_MAX_EXTRA_SLOPE * params.hdr_amount,
+        ));
+        let mut resolved = Self {
+            black: black as f32,
+            median: rescaled,
+            target: params.target_median,
+            boost,
+            highlights,
+            scale: 1.0,
+        };
+        if params.normalize {
+            let brightest = resolved.map(statistics.max);
+            if brightest > f64::EPSILON {
+                resolved.scale = 1.0 / brightest;
+            }
+        }
+        Ok(resolved)
+    }
+
+    fn map(&self, value: f64) -> f64 {
+        let black = f64::from(self.black);
+        let rescaled = ((value - black) / (1.0 - black)).clamp(0.0, 1.0);
+        let (m, t) = (self.median, self.target);
+        let denominator = m * (t + rescaled - 1.0) - t * rescaled;
+        let mut out = if denominator.abs() <= f64::EPSILON {
+            rescaled
+        } else {
+            (m - 1.0) * t * rescaled / denominator
+        };
+        if let Some(knots) = self.boost {
+            out = boost_curve(knots, out);
+        }
+        if let Some((knee, end_slope)) = self.highlights {
+            out = compress_highlights(out, knee, end_slope);
+        }
+        out * self.scale
+    }
+}
+
+/// The most a full highlight compression steepens the curve's end above 1:
+/// a cubic Hermite from slope 1 to slope `1 + 1.8` stays monotonic.
+const HDR_MAX_EXTRA_SLOPE: f64 = 1.8;
+
+/// Piecewise-linear lift of the tones above the target, through `knots` and
+/// on to `(1, 1)`; below the target the curve is unchanged.
+fn boost_curve(knots: [(f64, f64); 3], value: f64) -> f64 {
+    if value <= knots[0].0 {
+        return value;
+    }
+    let points = [knots[0], knots[1], knots[2], (1.0, 1.0)];
+    for pair in points.windows(2) {
+        let ((x0, y0), (x1, y1)) = (pair[0], pair[1]);
+        if value <= x1 {
+            let share = if x1 > x0 {
+                (value - x0) / (x1 - x0)
+            } else {
+                1.0
+            };
+            return y0 + share * (y1 - y0);
+        }
+    }
+    1.0
+}
+
+/// Soft-knee highlight compression: unchanged up to `knee`, then a cubic
+/// Hermite from slope 1 at the knee to `end_slope` at 1, which keeps 1 at 1
+/// and lowers what lies between.
+fn compress_highlights(value: f64, knee: f64, end_slope: f64) -> f64 {
+    if value <= knee {
+        return value;
+    }
+    let width = 1.0 - knee;
+    let t = ((value - knee) / width).min(1.0);
+    let (t2, t3) = (t * t, t * t * t);
+    let shape = (t3 - 2.0 * t2 + t) + (-2.0 * t3 + 3.0 * t2) + end_slope * (t3 - t2);
+    knee + width * shape
+}
+
+fn validate_median_anchor(params: MedianAnchorParams) -> Result<()> {
+    let open_unit = |value: f64| value.is_finite() && value > 0.0 && value < 1.0;
+    if !open_unit(params.target_median) {
+        return Err(StretchError::Invalid(
+            "target median must be finite and between zero and one".into(),
+        ));
+    }
+    if let Some(sigma) = params.black_point_sigma
+        && (!sigma.is_finite() || sigma < 0.0)
+    {
+        return Err(StretchError::Invalid(
+            "black point sigma must be finite and non-negative".into(),
+        ));
+    }
+    if !params.curves_boost.is_finite() || !(0.0..=0.9).contains(&params.curves_boost) {
+        return Err(StretchError::Invalid(
+            "curves boost must be between 0 and 0.9".into(),
+        ));
+    }
+    if !params.hdr_amount.is_finite() || !(0.0..=1.0).contains(&params.hdr_amount) {
+        return Err(StretchError::Invalid(
+            "highlight compression must be between 0 and 1".into(),
+        ));
+    }
+    if !open_unit(params.hdr_knee) {
+        return Err(StretchError::Invalid(
+            "highlight knee must be between zero and one".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Precomputed GHS transfer state used by a resolved plan.
@@ -935,6 +1156,7 @@ impl CurveMapper {
                 midtones_transfer_function(midtone, input)
             }
             ResolvedCurve::Ghs(ghs) => ghs.map(f64::from(value)),
+            ResolvedCurve::MedianAnchor(anchor) => anchor.map(f64::from(value)),
         };
         mapped.clamp(0.0, 1.0) as f32
     }
@@ -959,6 +1181,7 @@ impl CurveMapper {
             ResolvedCurve::Asinh { .. } => run(input, output, |value| convert(self.map(value))),
             ResolvedCurve::Mtf { .. } => run(input, output, |value| convert(self.map(value))),
             ResolvedCurve::Ghs(_) => run(input, output, |value| convert(self.map(value))),
+            ResolvedCurve::MedianAnchor(_) => run(input, output, |value| convert(self.map(value))),
         }
     }
 }
@@ -1106,7 +1329,10 @@ fn map_luminance_pixel(curve: CurveMapper, pixel: &[f32]) -> [f32; 3] {
 impl StretchModel {
     /// Whether this model needs an image analysis before it can be resolved.
     pub fn requires_analysis(&self) -> bool {
-        matches!(self, Self::PercentileAsinh { .. } | Self::AutoMtf(_))
+        matches!(
+            self,
+            Self::PercentileAsinh { .. } | Self::AutoMtf(_) | Self::MedianAnchor(_)
+        )
     }
 
     fn resolve(&self, distribution: &Distribution) -> Result<ResolvedCurve> {
@@ -1129,6 +1355,11 @@ impl StretchModel {
                 }
             }
             Self::AutoMtf(params) => auto_mtf_curve(distribution.statistics, params)?,
+            Self::MedianAnchor(params) => ResolvedCurve::MedianAnchor(ResolvedMedianAnchor::new(
+                distribution.statistics,
+                distribution.lower_half_noise(),
+                params,
+            )?),
             _ => self.resolve_explicit()?,
         };
         Ok(curve)
@@ -1177,7 +1408,7 @@ impl StretchModel {
                     ResolvedCurve::Ghs(ResolvedGhs::new(params)?)
                 }
             }
-            Self::PercentileAsinh { .. } | Self::AutoMtf(_) => {
+            Self::PercentileAsinh { .. } | Self::AutoMtf(_) | Self::MedianAnchor(_) => {
                 return Err(StretchError::Invalid(
                     "data-driven stretch model requires image analysis".into(),
                 ));
@@ -1909,6 +2140,7 @@ mod tests {
                 midtones_transfer_function(midtone, input)
             }
             ResolvedCurve::Ghs(ghs) => ghs.map(f64::from(value)),
+            ResolvedCurve::MedianAnchor(anchor) => anchor.map(f64::from(value)),
         };
         mapped.clamp(0.0, 1.0) as f32
     }
@@ -2746,5 +2978,243 @@ mod tests {
             max_analysis_samples: 2,
         };
         assert!(config.resolve(&analysis).is_err());
+    }
+
+    /// A dim, noisy background with a few bright stars, in `[0, 1]`.
+    fn sky() -> Vec<f32> {
+        let mut data = (0..10_000)
+            .map(|index| 0.05 + ((index * 7919) % 101) as f32 * 0.0002)
+            .collect::<Vec<_>>();
+        for star in data.iter_mut().step_by(997) {
+            *star = 0.9;
+        }
+        data
+    }
+
+    fn median_anchor(params: MedianAnchorParams) -> StretchConfig {
+        StretchConfig {
+            model: StretchModel::MedianAnchor(params),
+            color_strategy: ColorStrategy::Linked,
+            max_analysis_samples: 20_000,
+        }
+    }
+
+    fn median_anchor_curve(data: &[f32], params: MedianAnchorParams) -> ResolvedCurve {
+        median_anchor(params).resolve_for(data, 1).unwrap().curves()[0]
+    }
+
+    #[test]
+    fn median_anchor_places_the_median_exactly_on_the_target() {
+        let data = sky();
+        let median = StretchAnalysis::analyze(&data, 1, 20_000)
+            .unwrap()
+            .linked_statistics()
+            .median as f32;
+        for target in [0.1, 0.25, 0.5] {
+            let curve = median_anchor_curve(
+                &data,
+                MedianAnchorParams {
+                    target_median: target,
+                    ..MedianAnchorParams::default()
+                },
+            );
+            assert!(
+                (curve.map(median) - target as f32).abs() < 1.0e-5,
+                "{target}"
+            );
+        }
+    }
+
+    #[test]
+    fn median_anchor_black_point_sits_sigmas_below_the_median_or_at_the_minimum() {
+        let data = sky();
+        // One sigma lands inside this narrow background; 2.7 would pass its
+        // minimum, where the black point stops.
+        let ResolvedCurve::MedianAnchor(clipped) = median_anchor_curve(
+            &data,
+            MedianAnchorParams {
+                black_point_sigma: Some(1.0),
+                ..MedianAnchorParams::default()
+            },
+        ) else {
+            panic!("a median anchor curve");
+        };
+        let statistics = StretchAnalysis::analyze(&data, 1, 20_000)
+            .unwrap()
+            .linked_statistics();
+        // The black point is under the median, above the minimum, and maps to 0.
+        assert!(f64::from(clipped.black) < statistics.median);
+        assert!(f64::from(clipped.black) > statistics.min);
+        assert_eq!(ResolvedCurve::MedianAnchor(clipped).map(clipped.black), 0.0);
+        let ResolvedCurve::MedianAnchor(unclipped) = median_anchor_curve(
+            &data,
+            MedianAnchorParams {
+                black_point_sigma: None,
+                ..MedianAnchorParams::default()
+            },
+        ) else {
+            panic!("a median anchor curve");
+        };
+        assert_eq!(f64::from(unclipped.black), statistics.min);
+    }
+
+    #[test]
+    fn median_anchor_curves_stay_pinned_and_in_order_with_every_option() {
+        let data = sky();
+        let options = [
+            MedianAnchorParams::default(),
+            MedianAnchorParams {
+                curves_boost: 0.5,
+                ..MedianAnchorParams::default()
+            },
+            MedianAnchorParams {
+                hdr_amount: 1.0,
+                hdr_knee: 0.6,
+                ..MedianAnchorParams::default()
+            },
+            MedianAnchorParams {
+                curves_boost: 0.9,
+                hdr_amount: 1.0,
+                ..MedianAnchorParams::default()
+            },
+        ];
+        for params in options {
+            let curve = median_anchor_curve(&data, params);
+            assert_eq!(curve.map(1.0), 1.0, "{params:?}");
+            let mut previous = curve.map(0.0);
+            assert_eq!(previous, 0.0);
+            for step in 1..=2_000 {
+                let value = curve.map(step as f32 / 2_000.0);
+                assert!(value >= previous, "{params:?} at step {step}");
+                previous = value;
+            }
+        }
+    }
+
+    #[test]
+    fn median_anchor_boost_lifts_only_above_the_target_and_compression_only_above_the_knee() {
+        let data = sky();
+        let plain = median_anchor_curve(&data, MedianAnchorParams::default());
+        let boosted = median_anchor_curve(
+            &data,
+            MedianAnchorParams {
+                curves_boost: 0.5,
+                ..MedianAnchorParams::default()
+            },
+        );
+        let compressed = median_anchor_curve(
+            &data,
+            MedianAnchorParams {
+                hdr_amount: 1.0,
+                ..MedianAnchorParams::default()
+            },
+        );
+        for step in 0..=1_000 {
+            let input = step as f32 / 1_000.0;
+            let (base, lifted, lowered) =
+                (plain.map(input), boosted.map(input), compressed.map(input));
+            if base <= 0.25 {
+                assert_eq!(lifted, base);
+            } else {
+                assert!(lifted >= base);
+            }
+            if base <= 0.75 {
+                assert_eq!(lowered, base);
+            } else {
+                assert!(lowered <= base);
+            }
+        }
+        assert!(boosted.map(0.5) > plain.map(0.5));
+        assert!(compressed.map(0.95) < plain.map(0.95));
+    }
+
+    #[test]
+    fn median_anchor_normalize_brings_the_brightest_sample_to_one() {
+        let data = sky()
+            .into_iter()
+            .map(|value| value * 0.5)
+            .collect::<Vec<_>>();
+        let plain = median_anchor_curve(&data, MedianAnchorParams::default());
+        let normalized = median_anchor_curve(
+            &data,
+            MedianAnchorParams {
+                normalize: true,
+                ..MedianAnchorParams::default()
+            },
+        );
+        assert!(plain.map(0.45) < 1.0);
+        assert!((normalized.map(0.45) - 1.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn median_anchor_works_unlinked_and_preserving_luminance() {
+        let mono = sky();
+        let rgb = mono
+            .iter()
+            .flat_map(|&value| [value, value * 0.8, value * 1.1])
+            .collect::<Vec<_>>();
+        for color_strategy in [ColorStrategy::Unlinked, ColorStrategy::LuminancePreserving] {
+            let config = StretchConfig {
+                color_strategy,
+                ..median_anchor(MedianAnchorParams::default())
+            };
+            let plan = config.resolve_for(&rgb, 3).unwrap();
+            let out = plan.apply_f32(&rgb, 3).unwrap();
+            assert_eq!(out.len(), rgb.len());
+            assert!(out.iter().all(|value| (0.0..=1.0).contains(value)));
+        }
+    }
+
+    #[test]
+    fn median_anchor_refuses_settings_out_of_range_and_round_trips_as_json() {
+        let data = sky();
+        for params in [
+            MedianAnchorParams {
+                target_median: 1.0,
+                ..MedianAnchorParams::default()
+            },
+            MedianAnchorParams {
+                black_point_sigma: Some(-1.0),
+                ..MedianAnchorParams::default()
+            },
+            MedianAnchorParams {
+                curves_boost: 0.95,
+                ..MedianAnchorParams::default()
+            },
+            MedianAnchorParams {
+                hdr_amount: 1.5,
+                ..MedianAnchorParams::default()
+            },
+            MedianAnchorParams {
+                hdr_knee: 1.0,
+                ..MedianAnchorParams::default()
+            },
+        ] {
+            assert!(
+                median_anchor(params).resolve_for(&data, 1).is_err(),
+                "{params:?}"
+            );
+        }
+        let model = StretchModel::MedianAnchor(MedianAnchorParams {
+            black_point_sigma: None,
+            curves_boost: 0.3,
+            ..MedianAnchorParams::default()
+        });
+        let json = serde_json::to_string(&model).unwrap();
+        assert!(json.contains("\"type\":\"median-anchor\""), "{json}");
+        assert_eq!(serde_json::from_str::<StretchModel>(&json).unwrap(), model);
+        // The optional settings may be left out.
+        let terse: StretchModel = serde_json::from_str(
+            r#"{"type":"median-anchor","target_median":0.2,"black_point_sigma":3.0}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            terse,
+            StretchModel::MedianAnchor(MedianAnchorParams {
+                target_median: 0.2,
+                black_point_sigma: Some(3.0),
+                ..MedianAnchorParams::default()
+            })
+        );
     }
 }

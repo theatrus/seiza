@@ -1208,6 +1208,9 @@ seiza stretch stack.fits --output preview.png percentile-asinh \
 seiza stretch stack.fits --output preview.png auto-mtf \
   --target-median 0.2 --shadows-clip -2.8
 
+seiza stretch stack.fits --output preview.png median-anchor \
+  --target-median 0.25 --black-point-sigma 2.7 --hdr-amount 0.3
+
 seiza stretch color.fits --output preview.png \
   --color-strategy luminance-preserving asinh \
   --black 0 --white 1 --strength 8
@@ -1217,7 +1220,11 @@ seiza stretch stack.fits --output preview.png ghs \
   --protect-shadows 0.1 --protect-highlights 0.8
 ```
 
-Other model subcommands are `identity`, `linear`, and explicit `mtf`. The `ghs`
+`median-anchor` places the background median exactly on `--target-median`,
+with the black point `--black-point-sigma` robust sigmas below the median
+(`--no-black-clip` uses the image minimum), then optional `--curves-boost`,
+`--hdr-amount`/`--hdr-knee` highlight compression, and `--normalize`. Other
+model subcommands are `identity`, `linear`, and explicit `mtf`. The `ghs`
 subcommand exposes the deterministic GHS parameters; informed automatic
 selection can be layered over it later. RGB may use `linked`, `unlinked`, or
 `luminance-preserving` analysis/application.
