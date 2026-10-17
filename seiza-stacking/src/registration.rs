@@ -1673,10 +1673,13 @@ const LANCZOS_CLAMPING: f32 = 0.3;
 /// unlike noise it does not average down across a stack: but for a star of
 /// 2 px FWHM or wider it is under 1% of the peak, and for an undersampled
 /// 1.5 px star about 2-4%, so a star that never clears five times the
-/// noise in one frame rings by at most a fifth of that frame's noise. That
-/// is the ringing a sky bright enough to keep the share test quiet gave
-/// every faint star before this gate existed, as it does in PixInsight.
-/// Brighter stars span far more and are clamped as before.
+/// noise in one frame rings by about a fifth of that frame's noise at
+/// most. In a crowded field, a star to every 100-200 pixels, the stars
+/// lift [`crate::snr::photosite_noise`] by a fifth to a half, the gate
+/// sits nearer six or seven times the true noise, and that bound nearer
+/// 0.3 of it. That is the ringing a sky bright enough to keep the share
+/// test quiet gave every faint star before this gate existed, as it does in
+/// PixInsight. Brighter stars span far more and are clamped as before.
 const LANCZOS_CLAMPING_NOISE_SPAN: f32 = 5.0;
 
 /// The span, per channel, that a 1-D Lanczos pass's taps must exceed before
@@ -2517,6 +2520,41 @@ mod tests {
             }
         }
         assert!(sharp.data[48 * width + 48] > 5_000.0);
+    }
+
+    #[test]
+    fn lanczos_clamps_a_star_at_twenty_times_the_noise() {
+        // Pins the gate's threshold: a 1.6 px FWHM star twenty times the
+        // noise above a faint sky must still clamp where it falls under a
+        // negative lobe. The 20 000 ADU star above would clamp under almost
+        // any threshold, and the six-sigma one passes clamped or not.
+        let (size, sky, sigma) = (96, 34.0, 12.8);
+        let (peak, psf_sigma) = (20.0 * sigma, 1.6 / 2.3548);
+        let source = noisy_sky(size, size, sky, sigma, 4, |x, y| {
+            let (x, y) = (x - 48.0, y - 48.0);
+            peak * (-(x * x + y * y) / (2.0 * psf_sigma * psf_sigma)).exp()
+        });
+        let span = lanczos_clamp_spans(&source)[0];
+        assert!(span > 0.0);
+        let weights = lanczos3_weights(0.5);
+        let row = &source.data[48 * size..49 * size];
+        // A pass from sample x0 reads x0 - 2 ..= x0 + 3, its negative lobes
+        // at x0 - 1 and x0 + 2: the star's column under one or the other.
+        for x0 in [49, 46] {
+            let taps: [f32; 6] = std::array::from_fn(|tap| row[x0 - 2 + tap]);
+            let positive = weights[0] * taps[0]
+                + weights[2] * taps[2]
+                + weights[3] * taps[3]
+                + weights[5] * taps[5];
+            let positive_only = positive / (weights[0] + weights[2] + weights[3] + weights[5]);
+            let full = positive + weights[1] * taps[1] + weights[4] * taps[4];
+            let value = clamped_lanczos(&weights, &taps, span);
+            assert!(
+                (value - positive_only).abs() < 1.0e-3 && (full - positive_only).abs() > 10.0,
+                "pass from {x0} gave {value}: clamped {positive_only}, full {full}, \
+                 taps {taps:?}, gate {span}"
+            );
+        }
     }
 
     #[test]

@@ -619,7 +619,9 @@ the background by an amount set by each frame's sub-pixel phase; frames
 rotated 0.3 degrees against the reference turned that into bands about 190 px
 apart (Sh2 140, PSF Guard). A star too faint to clear the gate rings as
 unclamped Lanczos-3 does, by under 1% of its peak at 2 px FWHM, and that
-ringing does not average down across frames as noise does. The gate costs
+ringing does not average down across frames as noise does. In a crowded field
+the stars lift the noise reading by a fifth to a half, so there the gate sits
+nearer six or seven times the true noise. The gate costs
 noisier backgrounds than the old clamp gave on such skies, 8-11% on Sh2 140,
 because the old clamp was smoothing their noise. On the M45 stack, before the
 gate, Lanczos-3 took FWHM from 2.63 to 2.47px and SNR from 345 to 354, against
