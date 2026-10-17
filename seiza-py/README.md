@@ -689,15 +689,26 @@ preview = seiza.stretch(linear, model="ghs", stretch_factor=4,
                         protect_shadows=0.1, protect_highlights=0.8)
 preview = seiza.stretch(linear, model="median-anchor", target_median=0.25,
                         black_point_sigma=2.7, hdr_amount=0.3)
+preview = seiza.stretch(linear_rgb, model="layered", target_background=0.15,
+                        contrast_recovery=0.6, dynamic_range_compression=0.5,
+                        saturation_amount=0.4)
 ```
 
 Available models are `identity`, `linear`, `asinh`, `percentile-asinh`, `mtf`,
-manual `ghs`, `auto-mtf`, and `median-anchor`; color strategies are `linked`,
+manual `ghs`, `auto-mtf`, `median-anchor`, and `layered`; color strategies are `linked`,
 `unlinked`, and `luminance-preserving`. `median-anchor` places the background
 median exactly on `target_median` (default 0.25; `auto-mtf` defaults to 0.2),
 with the black point `black_point_sigma` robust sigmas below the median
 (`None` uses the image minimum), then optional `curves_boost`, `hdr_amount`
-and `hdr_knee` highlight compression, and `normalize`. Analysis and
+and `hdr_knee` highlight compression, and `normalize`. `layered` stretches
+luminance with the same curve, `target_background` (default 0.15) and a black
+point set by `aggressiveness` (0 to 1, default 0.5), and treats large and fine
+structure apart: `scale_separation` (8 to 1024 pixels, default 256) splits
+them, `contrast_recovery` (0 to 1) keeps detail on bright structure,
+`dynamic_range_compression` (0 to 1) shrinks star cores, and
+`saturation_amount`, `saturation_boost` (both 0 to 1) and `lightness_mask`
+lift colour. It reads the array's height and width, and carries colour by
+luminance, so it takes `linked` or `luminance-preserving`. Analysis and
 application release the GIL.
 
 Calibration masters use the same bounded-memory two-pass builder:

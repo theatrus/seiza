@@ -1253,6 +1253,14 @@ def stretch(
     hdr_amount: float = 0.0,
     hdr_knee: float = 0.75,
     normalize: bool = False,
+    target_background: float = 0.15,
+    aggressiveness: float = 0.5,
+    dynamic_range_compression: float = 0.0,
+    scale_separation: int = 256,
+    contrast_recovery: float = 0.0,
+    saturation_amount: float = 0.0,
+    saturation_boost: float = 0.5,
+    lightness_mask: bool = True,
 ) -> npt.NDArray[np.float32]: ...
 def checkpoint_depths(total: int) -> list[int]: ...
 def stack_fits(

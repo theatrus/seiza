@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand, ValueEnum};
 use seiza_stretch::{
-    ColorStrategy, GhsParams, MedianAnchorParams, StretchConfig, StretchModel, StretchParams,
+    ColorStrategy, GhsParams, ImageShape, LayeredParams, MedianAnchorParams, StretchConfig,
+    StretchModel, StretchParams,
 };
 use std::path::PathBuf;
 
@@ -146,6 +147,35 @@ enum StretchModelArgs {
         #[arg(long)]
         normalize: bool,
     },
+    /// Stretch luminance with a median anchor curve, treating large and fine
+    /// structure apart
+    Layered {
+        /// Where the background median lands, between 0 and 1
+        #[arg(long, default_value_t = 0.15)]
+        target_background: f64,
+        /// How close the black point sits to the median, from 0 through 1
+        #[arg(long, default_value_t = 0.5)]
+        aggressiveness: f64,
+        /// How far star cores are compressed, from 0 through 1
+        #[arg(long, default_value_t = 0.0)]
+        dynamic_range_compression: f64,
+        /// Size in pixels that splits large structure from detail, 8 through 1024
+        #[arg(long, default_value_t = 256)]
+        scale_separation: u32,
+        /// How much of the background's slope detail on bright structure
+        /// keeps, from 0 through 1
+        #[arg(long, default_value_t = 0.0)]
+        contrast_recovery: f64,
+        /// Saturation lift, from 0 through 1
+        #[arg(long, default_value_t = 0.0)]
+        saturation_amount: f64,
+        /// How much the lift favours weakly coloured pixels, from 0 through 1
+        #[arg(long, default_value_t = 0.5)]
+        saturation_boost: f64,
+        /// Lift saturation evenly instead of scaling it by each pixel's value
+        #[arg(long)]
+        no_lightness_mask: bool,
+    },
 }
 
 impl StretchModelArgs {
@@ -220,6 +250,25 @@ impl StretchModelArgs {
                 hdr_knee,
                 normalize,
             }),
+            Self::Layered {
+                target_background,
+                aggressiveness,
+                dynamic_range_compression,
+                scale_separation,
+                contrast_recovery,
+                saturation_amount,
+                saturation_boost,
+                no_lightness_mask,
+            } => StretchModel::Layered(LayeredParams {
+                target_background,
+                aggressiveness,
+                dynamic_range_compression,
+                scale_separation,
+                contrast_recovery,
+                saturation_amount,
+                saturation_boost,
+                lightness_mask: !no_lightness_mask,
+            }),
         }
     }
 
@@ -276,6 +325,23 @@ impl StretchModelArgs {
                 },
                 if normalize { ", normalized" } else { "" }
             ),
+            Self::Layered {
+                target_background,
+                aggressiveness,
+                dynamic_range_compression,
+                scale_separation,
+                contrast_recovery,
+                saturation_amount,
+                saturation_boost,
+                no_lightness_mask,
+            } => format!(
+                "layered target background {target_background}, aggressiveness {aggressiveness}, dynamic range compression {dynamic_range_compression}, scale separation {scale_separation} px, contrast recovery {contrast_recovery}, saturation {saturation_amount} (boost {saturation_boost}{})",
+                if no_lightness_mask {
+                    ", no lightness mask"
+                } else {
+                    ""
+                }
+            ),
         }
     }
 }
@@ -294,8 +360,9 @@ pub(crate) fn run(args: StretchArgs) -> Result<()> {
     let plan = config
         .resolve_for(&frame.image.data, frame.image.channels)
         .context("could not resolve stretch model")?;
+    let shape = ImageShape::new(frame.image.width, frame.image.height, frame.image.channels);
     let pixels = plan
-        .apply_u8(&frame.image.data, frame.image.channels)
+        .apply_u8_image(&frame.image.data, shape)
         .context("could not apply stretch model")?;
     crate::preview::write_display_image(
         &args.output,

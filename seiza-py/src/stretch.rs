@@ -3,7 +3,8 @@ use numpy::{PyArrayDyn, PyReadonlyArrayDyn};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use seiza_stretch::{
-    ColorStrategy, GhsParams, MedianAnchorParams, StretchConfig, StretchModel, StretchParams,
+    ColorStrategy, GhsParams, ImageShape, LayeredParams, MedianAnchorParams, StretchConfig,
+    StretchModel, StretchParams,
 };
 
 /// Stretch a linear image with the selected model and color strategy.
@@ -11,7 +12,7 @@ use seiza_stretch::{
 /// The input array is read in place while the GIL is released; do not mutate
 /// it from another thread until the call returns.
 #[pyfunction]
-#[pyo3(signature = (image, *, model="percentile-asinh", color_strategy="linked", max_analysis_samples=200_000, black=0.0, white=1.0, strength=10.0, black_percentile=0.01, white_percentile=0.995, shadows=0.0, midtone=0.5, highlights=1.0, stretch_factor=1.0, local_intensity=0.0, symmetry_point=0.0, protect_shadows=0.0, protect_highlights=1.0, target_median=None, shadows_clip=-2.8, black_point_sigma=Some(2.7), curves_boost=0.0, hdr_amount=0.0, hdr_knee=0.75, normalize=false))]
+#[pyo3(signature = (image, *, model="percentile-asinh", color_strategy="linked", max_analysis_samples=200_000, black=0.0, white=1.0, strength=10.0, black_percentile=0.01, white_percentile=0.995, shadows=0.0, midtone=0.5, highlights=1.0, stretch_factor=1.0, local_intensity=0.0, symmetry_point=0.0, protect_shadows=0.0, protect_highlights=1.0, target_median=None, shadows_clip=-2.8, black_point_sigma=Some(2.7), curves_boost=0.0, hdr_amount=0.0, hdr_knee=0.75, normalize=false, target_background=0.15, aggressiveness=0.5, dynamic_range_compression=0.0, scale_separation=256, contrast_recovery=0.0, saturation_amount=0.0, saturation_boost=0.5, lightness_mask=true))]
 #[allow(clippy::too_many_arguments)]
 fn stretch<'py>(
     py: Python<'py>,
@@ -39,6 +40,14 @@ fn stretch<'py>(
     hdr_amount: f64,
     hdr_knee: f64,
     normalize: bool,
+    target_background: f64,
+    aggressiveness: f64,
+    dynamic_range_compression: f64,
+    scale_separation: u32,
+    contrast_recovery: f64,
+    saturation_amount: f64,
+    saturation_boost: f64,
+    lightness_mask: bool,
 ) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
     let model = match model.to_ascii_lowercase().as_str() {
         "identity" => StretchModel::Identity,
@@ -79,9 +88,19 @@ fn stretch<'py>(
             hdr_knee,
             normalize,
         }),
+        "layered" => StretchModel::Layered(LayeredParams {
+            target_background,
+            aggressiveness,
+            dynamic_range_compression,
+            scale_separation,
+            contrast_recovery,
+            saturation_amount,
+            saturation_boost,
+            lightness_mask,
+        }),
         _ => {
             return Err(PyValueError::new_err(
-                "model must be identity, linear, asinh, percentile-asinh, mtf, ghs, auto-mtf, or median-anchor",
+                "model must be identity, linear, asinh, percentile-asinh, mtf, ghs, auto-mtf, median-anchor, or layered",
             ));
         }
     };
@@ -104,7 +123,8 @@ fn stretch<'py>(
     let data = py
         .detach(move || {
             let plan = config.resolve_for(image.data, image.channels)?;
-            plan.apply_f32(image.data, image.channels)
+            let shape = ImageShape::new(image.width, image.height, image.channels);
+            plan.apply_f32_image(image.data, shape)
         })
         .map_err(|error| crate::EngineError::new_err(error.to_string()))?;
     float_array(py, image.width, image.height, image.channels, data)

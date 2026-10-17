@@ -1211,6 +1211,10 @@ seiza stretch stack.fits --output preview.png auto-mtf \
 seiza stretch stack.fits --output preview.png median-anchor \
   --target-median 0.25 --black-point-sigma 2.7 --hdr-amount 0.3
 
+seiza stretch color.fits --output preview.png layered \
+  --target-background 0.15 --contrast-recovery 0.6 \
+  --dynamic-range-compression 0.5 --saturation-amount 0.4
+
 seiza stretch color.fits --output preview.png \
   --color-strategy luminance-preserving asinh \
   --black 0 --white 1 --strength 8
@@ -1223,7 +1227,16 @@ seiza stretch stack.fits --output preview.png ghs \
 `median-anchor` places the background median exactly on `--target-median`,
 with the black point `--black-point-sigma` robust sigmas below the median
 (`--no-black-clip` uses the image minimum), then optional `--curves-boost`,
-`--hdr-amount`/`--hdr-knee` highlight compression, and `--normalize`. Other
+`--hdr-amount`/`--hdr-knee` highlight compression, and `--normalize`.
+`layered` stretches luminance with the same curve, the background on
+`--target-background` (default 0.15) and the black point set by
+`--aggressiveness` (0 to 1, default 0.5). `--scale-separation` (8 to 1024
+pixels, default 256) splits large structure from detail;
+`--contrast-recovery` (0 to 1) keeps detail on bright structure,
+`--dynamic-range-compression` (0 to 1) shrinks star cores, and
+`--saturation-amount` and `--saturation-boost` (both 0 to 1) lift colour,
+scaled by each pixel's value unless `--no-lightness-mask` is given. It carries
+colour by luminance, so it takes `linked` or `luminance-preserving`. Other
 model subcommands are `identity`, `linear`, and explicit `mtf`. The `ghs`
 subcommand exposes the deterministic GHS parameters; informed automatic
 selection can be layered over it later. RGB may use `linked`, `unlinked`, or

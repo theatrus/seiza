@@ -34,7 +34,7 @@ use seiza_stacking::{
     write_stack_export_fits_f32,
 };
 use seiza_stretch::{
-    ResolvedSampleDomain, SampleDomain, StretchAnalysis, StretchConfig, StretchStack,
+    ImageShape, ResolvedSampleDomain, SampleDomain, StretchAnalysis, StretchConfig, StretchStack,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -6518,8 +6518,13 @@ fn render_prepared_fits(
         deconvolution_metadata,
         sample_domain: resolved_sample_domain,
     } = prepare_stretch_input(prepared, deconvolution, requested_sample_domain)?;
+    let shape = ImageShape::new(
+        prepared.render_width,
+        prepared.render_height,
+        prepared.channels,
+    );
     let stretched = stack
-        .apply_u8(&data, prepared.channels)
+        .apply_u8_image(&data, shape)
         .map_err(|error| error.to_string())?
         .data;
     let mut rgba: Vec<u8> = if prepared.channels == 3 {
@@ -6594,8 +6599,13 @@ fn render_prepared_fits16(
         deconvolution_metadata,
         sample_domain: resolved_sample_domain,
     } = prepare_stretch_input(prepared, deconvolution, requested_sample_domain)?;
+    let shape = ImageShape::new(
+        prepared.render_width,
+        prepared.render_height,
+        prepared.channels,
+    );
     let stretched = stack
-        .apply_u16(&data, prepared.channels)
+        .apply_u16_image(&data, shape)
         .map_err(|error| error.to_string())?
         .data;
     let rgba: Vec<u16> = if prepared.channels == 3 {
@@ -13249,6 +13259,63 @@ mod tests {
         let metadata: Value = serde_json::from_str(image.metadata_json.to_str().unwrap()).unwrap();
         assert_eq!(metadata["format"], "FITS");
         assert!(metadata["displayHistogram"].is_object());
+    }
+
+    #[test]
+    fn renders_the_layered_stretch_with_the_image_shape() {
+        let (width, height) = (48, 32);
+        let pixels = (0..width * height)
+            .map(|index| {
+                if index % 97 == 0 {
+                    0.9
+                } else {
+                    0.05 + (index * 7919 % 101) as f32 * 0.0002
+                }
+            })
+            .collect::<Vec<_>>();
+        let fits = FitsImage {
+            width,
+            height,
+            planes: 1,
+            pixels: seiza_fits::Pixels::F32(pixels),
+            headers: Vec::new(),
+        };
+        let request: StretchConfigRequest = serde_json::from_value(json!({
+            "model": {
+                "type": "layered",
+                "target_background": 0.2,
+                "aggressiveness": 0.5,
+                "contrast_recovery": 0.5,
+                "dynamic_range_compression": 0.5,
+                "scale_separation": 16
+            },
+            "color_strategy": "linked",
+            "max_analysis_samples": 4096
+        }))
+        .unwrap();
+        let stack = request.into_stack();
+        let options = || RenderPipelineOptions {
+            background: None,
+            deconvolution: None,
+            sample_domain: &SampleDomain::UnitLinear,
+            max_dimension: 0,
+            interactive_preview: false,
+        };
+        let image8 = render_astronomy_with_pipeline(
+            fits.clone(),
+            AstronomyImageFormat::Fits,
+            &stack,
+            options(),
+        )
+        .unwrap();
+        let image16 =
+            render_astronomy_with_pipeline16(fits, AstronomyImageFormat::Fits, &stack, options())
+                .unwrap();
+        assert_eq!((image8.width, image8.height), (48, 32));
+        assert_eq!(image16.rgba.len(), image8.rgba.len());
+        // The stars stand out from the background in both renders.
+        assert!(image8.rgba[0] > image8.rgba[4]);
+        assert!(image16.rgba[0] > image16.rgba[4]);
     }
 
     #[test]

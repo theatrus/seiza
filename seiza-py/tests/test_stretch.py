@@ -69,6 +69,41 @@ def test_median_anchor_places_the_median_on_the_target() -> None:
         seiza.stretch(image, model="median-anchor", curves_boost=2.0)
 
 
+def test_layered_places_the_background_and_keeps_rgb_in_range() -> None:
+    rng = np.random.default_rng(11)
+    mono = (0.05 + 0.005 * rng.standard_normal((96, 128))).astype(np.float32)
+    mono[::13, ::17] = 0.9
+    stretched = seiza.stretch(mono, model="layered", target_background=0.2)
+    assert stretched.shape == mono.shape
+    assert float(np.median(stretched)) == pytest.approx(0.2, abs=0.02)
+    # With no contrast recovery or compression it is the plain curve.
+    anchor = seiza.stretch(
+        mono, model="median-anchor", target_median=0.2, black_point_sigma=3.75
+    )
+    np.testing.assert_array_equal(stretched, anchor)
+
+    rgb = np.stack([mono * 0.9, mono, mono * 1.1], axis=-1).astype(np.float32)
+    rgb[3, 4] = np.nan
+    lifted = seiza.stretch(
+        rgb,
+        model="layered",
+        contrast_recovery=0.6,
+        dynamic_range_compression=0.5,
+        scale_separation=32,
+        saturation_amount=0.4,
+        saturation_boost=0.3,
+        lightness_mask=False,
+    )
+    assert lifted.shape == rgb.shape
+    assert lifted.dtype == np.float32
+    assert float(lifted.min()) >= 0.0 and float(lifted.max()) <= 1.0
+    assert np.all(lifted[3, 4] == 0.0)
+    with pytest.raises(seiza.EngineError):
+        seiza.stretch(rgb, model="layered", color_strategy="unlinked")
+    with pytest.raises(seiza.EngineError):
+        seiza.stretch(mono, model="layered", scale_separation=4)
+
+
 def test_stretch_rejects_unknown_models() -> None:
     with pytest.raises(ValueError, match="model must be"):
         seiza.stretch(np.zeros((2, 2), dtype=np.float32), model="future-auto")

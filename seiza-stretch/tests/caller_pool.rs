@@ -8,9 +8,9 @@
 
 use rayon::ThreadPoolBuilder;
 use seiza_stretch::{
-    ColorStrategy, RobustStatistics, SampleDomain, SampleNormalization, StretchAnalysis,
-    StretchConfig, StretchParams, StretchStack, statistics_u16, stretch_u16_to_u8,
-    stretch_u16_to_u16,
+    ColorStrategy, ImageShape, LayeredParams, RobustStatistics, SampleDomain, SampleNormalization,
+    StretchAnalysis, StretchConfig, StretchModel, StretchParams, StretchStack, statistics_u16,
+    stretch_u16_to_u8, stretch_u16_to_u16,
 };
 
 /// More than one of the 262,144-sample chunks the `u16` paths split into.
@@ -142,6 +142,33 @@ fn run(pool: &rayon::ThreadPool) -> Vec<(&'static str, Vec<u32>)> {
         let mono = data.iter().step_by(3).copied().collect::<Vec<_>>();
         let single = StretchStack::single(StretchConfig::auto_mtf(params, 200_000));
         results.push(("mono", bits(&single.apply_f32(&mono, 1).unwrap().data)));
+
+        // The layered stretch blurs along rows and columns.
+        let layered = StretchStack::single(StretchConfig {
+            model: StretchModel::Layered(LayeredParams {
+                contrast_recovery: 0.6,
+                dynamic_range_compression: 0.5,
+                scale_separation: 64,
+                saturation_amount: 0.4,
+                ..LayeredParams::default()
+            }),
+            color_strategy: ColorStrategy::Linked,
+            max_analysis_samples: 200_000,
+        });
+        let side = PIXELS.isqrt();
+        let mut out = bits(
+            &layered
+                .apply_f32_image(&data, ImageShape::new(side, side, 3))
+                .unwrap()
+                .data,
+        );
+        out.extend(bits(
+            &layered
+                .apply_f32_image(&mono, ImageShape::new(side, side, 1))
+                .unwrap()
+                .data,
+        ));
+        results.push(("layered", out));
         results
     })
 }

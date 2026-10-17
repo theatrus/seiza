@@ -24,6 +24,11 @@ The crate consolidates Seiza's existing behavior:
   with one closed-form curve, from a black point a number of robust sigmas
   below the median, with optional curves boost, soft-knee highlight
   compression and normalization;
+- a layered stretch that applies the median anchor curve to luminance and
+  treats large and fine structure apart: optional contrast recovery on bright
+  structure, star-core compression, and a saturation lift. It needs the
+  image's width and height, so it runs through the `*_image` methods with an
+  `ImageShape`; the shape-less methods refuse it;
 - the existing exact-histogram `u16` Auto-MTF fast path.
 
 Analysis and application are intentionally separate. A caller can analyze an

@@ -18,6 +18,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use seiza_stats::NORMAL_MAD_SCALE;
+
+mod layered;
+pub use layered::{LayeredParams, ResolvedLayered};
+
 const LUMA_RED: f64 = 0.2126;
 const LUMA_GREEN: f64 = 0.7152;
 const LUMA_BLUE: f64 = 0.0722;
@@ -380,6 +384,45 @@ pub enum StretchModel {
     /// Place the median exactly on a target with a closed-form curve, from
     /// a robust black point; see [`MedianAnchorParams`].
     MedianAnchor(MedianAnchorParams),
+    /// Stretch luminance with the median anchor curve while treating large
+    /// and fine structure apart; see [`LayeredParams`]. It needs the image's
+    /// width and height, so it runs only through the `*_image` methods.
+    Layered(LayeredParams),
+}
+
+/// Why a shape-less method refuses a layered stage.
+const LAYERED_NEEDS_SHAPE: &str = "the layered stretch needs the image's width and height; \
+     apply it with apply_f32_image, apply_u8_image or apply_u16_image";
+
+/// The width, height and channel count of interleaved samples.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImageShape {
+    pub width: usize,
+    pub height: usize,
+    pub channels: usize,
+}
+
+impl ImageShape {
+    pub fn new(width: usize, height: usize, channels: usize) -> Self {
+        Self {
+            width,
+            height,
+            channels,
+        }
+    }
+
+    fn validate(self, data: &[f32]) -> Result<()> {
+        let samples = self
+            .width
+            .checked_mul(self.height)
+            .and_then(|pixels| pixels.checked_mul(self.channels));
+        if self.width == 0 || self.height == 0 || samples != Some(data.len()) {
+            return Err(StretchError::Invalid(
+                "image width, height and channels do not match the samples".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Complete pipeline request for analysis and stretch resolution.
@@ -467,7 +510,7 @@ impl StretchStack {
         channel_count: usize,
         progress: impl FnMut(StretchStageProgress),
     ) -> Result<StretchStackOutput<f32>> {
-        apply_stack_f32(&self.stages, data, channel_count, progress)
+        apply_stack_f32(&self.stages, data, channel_count, None, progress)
     }
 
     /// Apply every stage and convert the final display result to `u8`.
@@ -483,7 +526,7 @@ impl StretchStack {
         channel_count: usize,
         mut progress: impl FnMut(StretchStageProgress),
     ) -> Result<StretchStackOutput<u8>> {
-        let output = apply_stack_f32(&self.stages, data, channel_count, &mut progress)?;
+        let output = apply_stack_f32(&self.stages, data, channel_count, None, &mut progress)?;
         let data = output.data.into_par_iter().map(to_u8).collect::<Vec<_>>();
         Ok(StretchStackOutput {
             data,
@@ -504,7 +547,91 @@ impl StretchStack {
         channel_count: usize,
         mut progress: impl FnMut(StretchStageProgress),
     ) -> Result<StretchStackOutput<u16>> {
-        let output = apply_stack_f32(&self.stages, data, channel_count, &mut progress)?;
+        let output = apply_stack_f32(&self.stages, data, channel_count, None, &mut progress)?;
+        let data = output.data.into_par_iter().map(to_u16).collect::<Vec<_>>();
+        Ok(StretchStackOutput {
+            data,
+            plans: output.plans,
+        })
+    }
+
+    /// Apply every stage to an image of a known shape, the layered stretch
+    /// included, and retain a display-referred `f32` result. Other models
+    /// give the same samples as [`Self::apply_f32`].
+    pub fn apply_f32_image(
+        &self,
+        data: &[f32],
+        shape: ImageShape,
+    ) -> Result<StretchStackOutput<f32>> {
+        self.apply_f32_image_with_progress(data, shape, |_| {})
+    }
+
+    /// [`Self::apply_f32_image`], reporting resolve/apply/completion
+    /// boundaries.
+    pub fn apply_f32_image_with_progress(
+        &self,
+        data: &[f32],
+        shape: ImageShape,
+        progress: impl FnMut(StretchStageProgress),
+    ) -> Result<StretchStackOutput<f32>> {
+        apply_stack_f32(&self.stages, data, shape.channels, Some(shape), progress)
+    }
+
+    /// [`Self::apply_f32_image`], converted to `u8` after the final stage.
+    pub fn apply_u8_image(
+        &self,
+        data: &[f32],
+        shape: ImageShape,
+    ) -> Result<StretchStackOutput<u8>> {
+        self.apply_u8_image_with_progress(data, shape, |_| {})
+    }
+
+    /// [`Self::apply_u8_image`], reporting resolve/apply/completion
+    /// boundaries.
+    pub fn apply_u8_image_with_progress(
+        &self,
+        data: &[f32],
+        shape: ImageShape,
+        mut progress: impl FnMut(StretchStageProgress),
+    ) -> Result<StretchStackOutput<u8>> {
+        let output = apply_stack_f32(
+            &self.stages,
+            data,
+            shape.channels,
+            Some(shape),
+            &mut progress,
+        )?;
+        let data = output.data.into_par_iter().map(to_u8).collect::<Vec<_>>();
+        Ok(StretchStackOutput {
+            data,
+            plans: output.plans,
+        })
+    }
+
+    /// [`Self::apply_f32_image`], converted to `u16` after the final stage.
+    pub fn apply_u16_image(
+        &self,
+        data: &[f32],
+        shape: ImageShape,
+    ) -> Result<StretchStackOutput<u16>> {
+        self.apply_u16_image_with_progress(data, shape, |_| {})
+    }
+
+    /// [`Self::apply_u16_image`], reporting resolve/apply/completion
+    /// boundaries.
+    pub fn apply_u16_image_with_progress(
+        &self,
+        data: &[f32],
+        shape: ImageShape,
+        mut progress: impl FnMut(StretchStageProgress),
+    ) -> Result<StretchStackOutput<u16>> {
+        let output = apply_stack_f32(
+            &self.stages,
+            data,
+            shape.channels,
+            Some(shape),
+            &mut progress,
+        )?;
         let data = output.data.into_par_iter().map(to_u16).collect::<Vec<_>>();
         Ok(StretchStackOutput {
             data,
@@ -531,8 +658,24 @@ fn apply_stack_f32(
     stages: &[StretchConfig],
     data: &[f32],
     channel_count: usize,
+    shape: Option<ImageShape>,
     mut progress: impl FnMut(StretchStageProgress),
 ) -> Result<StretchStackOutput<f32>> {
+    match shape {
+        Some(shape) => shape.validate(data)?,
+        None => {
+            if let Some(index) = stages
+                .iter()
+                .position(|config| matches!(config.model, StretchModel::Layered(_)))
+            {
+                return Err(StretchError::Invalid(format!(
+                    "stretch stage {}/{}: {LAYERED_NEEDS_SHAPE}",
+                    index + 1,
+                    stages.len()
+                )));
+            }
+        }
+    }
     let mut current = data.to_vec();
     let mut plans = Vec::with_capacity(stages.len());
     for (stage_index, config) in stages.iter().enumerate() {
@@ -552,7 +695,11 @@ fn apply_stack_f32(
                 ))
             })?;
         progress(event(StretchStageState::Applying));
-        current = plan.apply_f32(&current, channel_count).map_err(|error| {
+        let applied = match shape {
+            Some(shape) => plan.apply_f32_image(&current, shape),
+            None => plan.apply_f32(&current, channel_count),
+        };
+        current = applied.map_err(|error| {
             StretchError::Invalid(format!(
                 "failed to apply stretch stage {}/{}: {error}",
                 stage_index + 1,
@@ -619,6 +766,9 @@ impl StretchConfig {
                 "maximum analysis samples must be greater than zero".into(),
             ));
         }
+        if let StretchModel::Layered(params) = self.model {
+            return self.resolve_layered(analysis, params);
+        }
         let distributions = match self.color_strategy {
             ColorStrategy::Linked => vec![&analysis.linked],
             ColorStrategy::Unlinked if analysis.channel_count == 1 => vec![&analysis.linked],
@@ -645,6 +795,40 @@ impl StretchConfig {
             .map(|distribution| self.model.resolve(distribution))
             .collect::<Result<Vec<_>>>()?;
         StretchPlan::from_resolved(analysis.channel_count, self.color_strategy, curves)
+    }
+
+    /// The layered stretch works on luminance and carries colour itself, so
+    /// it takes one curve, from the channel of a mono image or the luminance
+    /// of an RGB one.
+    fn resolve_layered(
+        &self,
+        analysis: &StretchAnalysis,
+        params: LayeredParams,
+    ) -> Result<StretchPlan> {
+        if self.color_strategy == ColorStrategy::Unlinked {
+            return Err(StretchError::Invalid(
+                "the layered stretch carries colour by luminance; use the linked or \
+                 luminance-preserving color strategy"
+                    .into(),
+            ));
+        }
+        let distribution = match analysis.channel_count {
+            1 => &analysis.linked,
+            3 => analysis.luminance.as_ref().ok_or_else(|| {
+                StretchError::Invalid("luminance contains no finite samples".into())
+            })?,
+            _ => {
+                return Err(StretchError::Invalid(
+                    "the layered stretch takes mono or RGB images".into(),
+                ));
+            }
+        };
+        let curve = ResolvedCurve::Layered(ResolvedLayered::new(
+            distribution.statistics,
+            distribution.lower_half_noise(),
+            params,
+        )?);
+        StretchPlan::from_resolved(analysis.channel_count, self.color_strategy, vec![curve])
     }
 
     /// Resolve a deterministic model without collecting image statistics.
@@ -861,6 +1045,10 @@ pub enum ResolvedCurve {
     },
     Ghs(ResolvedGhs),
     MedianAnchor(ResolvedMedianAnchor),
+    /// A layered stretch. As a per-sample curve it maps only through its
+    /// global curve; the full stretch needs the image, through
+    /// [`StretchPlan::apply_f32_image`] and its twins.
+    Layered(ResolvedLayered),
 }
 
 /// A median anchor stretch with its image-dependent values resolved.
@@ -1152,6 +1340,7 @@ impl CurveMapper {
             }
             ResolvedCurve::Ghs(ghs) => ghs.map(f64::from(value)),
             ResolvedCurve::MedianAnchor(anchor) => anchor.map(f64::from(value)),
+            ResolvedCurve::Layered(layered) => layered.curve.map(f64::from(value)),
         };
         mapped.clamp(0.0, 1.0) as f32
     }
@@ -1177,6 +1366,7 @@ impl CurveMapper {
             ResolvedCurve::Mtf { .. } => run(input, output, |value| convert(self.map(value))),
             ResolvedCurve::Ghs(_) => run(input, output, |value| convert(self.map(value))),
             ResolvedCurve::MedianAnchor(_) => run(input, output, |value| convert(self.map(value))),
+            ResolvedCurve::Layered(_) => run(input, output, |value| convert(self.map(value))),
         }
     }
 }
@@ -1237,12 +1427,45 @@ impl StretchPlan {
         self.apply_mapped(data, channel_count, to_u16)
     }
 
+    /// Apply this plan to an image of a known shape, which a layered plan
+    /// needs. Other plans give the same samples as [`Self::apply_f32`].
+    pub fn apply_f32_image(&self, data: &[f32], shape: ImageShape) -> Result<Vec<f32>> {
+        self.apply_image(data, shape, std::convert::identity)
+    }
+
+    /// [`Self::apply_f32_image`], converted to `u8`.
+    pub fn apply_u8_image(&self, data: &[f32], shape: ImageShape) -> Result<Vec<u8>> {
+        self.apply_image(data, shape, to_u8)
+    }
+
+    /// [`Self::apply_f32_image`], converted to `u16`.
+    pub fn apply_u16_image(&self, data: &[f32], shape: ImageShape) -> Result<Vec<u16>> {
+        self.apply_image(data, shape, to_u16)
+    }
+
+    fn apply_image<T, F>(&self, data: &[f32], shape: ImageShape, convert: F) -> Result<Vec<T>>
+    where
+        T: Copy + Default + Send,
+        F: Fn(f32) -> T + Copy + Send + Sync,
+    {
+        shape.validate(data)?;
+        let ResolvedCurve::Layered(layered) = self.curves[0] else {
+            return self.apply_mapped(data, shape.channels, convert);
+        };
+        self.validate_input(data, shape.channels)?;
+        let stretched = layered::apply(&layered, data, shape);
+        Ok(stretched.into_par_iter().map(convert).collect())
+    }
+
     fn apply_mapped<T, F>(&self, data: &[f32], channel_count: usize, convert: F) -> Result<Vec<T>>
     where
         T: Copy + Default + Send,
         F: Fn(f32) -> T + Copy + Send + Sync,
     {
         self.validate_input(data, channel_count)?;
+        if matches!(self.curves[0], ResolvedCurve::Layered(_)) {
+            return Err(StretchError::Invalid(LAYERED_NEEDS_SHAPE.into()));
+        }
         let mappers = self
             .curves
             .iter()
@@ -1326,7 +1549,10 @@ impl StretchModel {
     pub fn requires_analysis(&self) -> bool {
         matches!(
             self,
-            Self::PercentileAsinh { .. } | Self::AutoMtf(_) | Self::MedianAnchor(_)
+            Self::PercentileAsinh { .. }
+                | Self::AutoMtf(_)
+                | Self::MedianAnchor(_)
+                | Self::Layered(_)
         )
     }
 
@@ -1403,7 +1629,10 @@ impl StretchModel {
                     ResolvedCurve::Ghs(ResolvedGhs::new(params)?)
                 }
             }
-            Self::PercentileAsinh { .. } | Self::AutoMtf(_) | Self::MedianAnchor(_) => {
+            Self::PercentileAsinh { .. }
+            | Self::AutoMtf(_)
+            | Self::MedianAnchor(_)
+            | Self::Layered(_) => {
                 return Err(StretchError::Invalid(
                     "data-driven stretch model requires image analysis".into(),
                 ));
@@ -2136,6 +2365,7 @@ mod tests {
             }
             ResolvedCurve::Ghs(ghs) => ghs.map(f64::from(value)),
             ResolvedCurve::MedianAnchor(anchor) => anchor.map(f64::from(value)),
+            ResolvedCurve::Layered(layered) => layered.curve.map(f64::from(value)),
         };
         mapped.clamp(0.0, 1.0) as f32
     }
@@ -3285,5 +3515,393 @@ mod tests {
         };
         assert_eq!(anchor.black, 0.02);
         assert!((curve.map(0.1) - 0.25).abs() < 1.0e-5);
+    }
+
+    const FIELD: (usize, usize) = (128, 96);
+
+    /// Background near 0.05 with some noise, a bright plateau at 0.5 holding
+    /// a fine checkerboard, and a small star peaking at 0.5 on the background.
+    fn field() -> Vec<f32> {
+        let (width, height) = FIELD;
+        (0..width * height)
+            .map(|index| {
+                let (x, y) = (index % width, index / width);
+                let noise = ((index * 7919) % 101) as f32 / 101.0 - 0.5;
+                let mut value = 0.05 + 0.004 * noise;
+                if (70..110).contains(&x) && (30..70).contains(&y) {
+                    value = 0.5 + if (x + y) % 2 == 0 { 0.01 } else { -0.01 };
+                }
+                let (dx, dy) = (x as f32 - 30.0, y as f32 - 48.0);
+                value + 0.45 * (-(dx * dx + dy * dy) / (2.0 * 1.5 * 1.5)).exp()
+            })
+            .collect()
+    }
+
+    fn field_shape(channels: usize) -> ImageShape {
+        ImageShape::new(FIELD.0, FIELD.1, channels)
+    }
+
+    fn layered(params: LayeredParams) -> StretchConfig {
+        StretchConfig {
+            model: StretchModel::Layered(params),
+            color_strategy: ColorStrategy::Linked,
+            max_analysis_samples: 200_000,
+        }
+    }
+
+    fn layered_output(data: &[f32], channels: usize, params: LayeredParams) -> Vec<f32> {
+        StretchStack::single(layered(params))
+            .apply_f32_image(data, field_shape(channels))
+            .unwrap()
+            .data
+    }
+
+    /// Mean step between neighbouring pixels inside the plateau, where the
+    /// checkerboard alternates.
+    fn plateau_contrast(output: &[f32]) -> f64 {
+        let steps = (40..60)
+            .flat_map(|y| {
+                (80..100).map(move |x| {
+                    let index = y * FIELD.0 + x;
+                    f64::from((output[index + 1] - output[index]).abs())
+                })
+            })
+            .collect::<Vec<_>>();
+        steps.iter().sum::<f64>() / steps.len() as f64
+    }
+
+    #[test]
+    fn layered_without_recovery_or_compression_is_the_median_anchor_curve() {
+        let data = field();
+        let params = LayeredParams {
+            aggressiveness: 0.2,
+            ..LayeredParams::default()
+        };
+        let plain = median_anchor(MedianAnchorParams {
+            target_median: params.target_background,
+            black_point_sigma: Some(6.0 - 4.5 * params.aggressiveness),
+            ..MedianAnchorParams::default()
+        });
+        let config = StretchConfig {
+            max_analysis_samples: 200_000,
+            ..plain
+        };
+        let expected = config
+            .resolve_for(&data, 1)
+            .unwrap()
+            .apply_f32(&data, 1)
+            .unwrap();
+        assert_eq!(layered_output(&data, 1, params), expected);
+
+        // A grey RGB image keeps its luminance curve on every channel.
+        let grey = data.iter().flat_map(|&v| [v; 3]).collect::<Vec<_>>();
+        let output = layered_output(&grey, 3, params);
+        for (pixel, &value) in output.chunks_exact(3).zip(&expected) {
+            for channel in pixel {
+                assert!((channel - value).abs() < 1.0e-5, "{pixel:?} {value}");
+            }
+        }
+    }
+
+    #[test]
+    fn layered_places_the_background_median_near_the_target() {
+        let data = field();
+        for target in [0.1, 0.15, 0.3] {
+            for params in [
+                LayeredParams {
+                    target_background: target,
+                    ..LayeredParams::default()
+                },
+                LayeredParams {
+                    target_background: target,
+                    contrast_recovery: 0.5,
+                    dynamic_range_compression: 1.0,
+                    ..LayeredParams::default()
+                },
+            ] {
+                let mut output = layered_output(&data, 1, params);
+                output.sort_unstable_by(f32::total_cmp);
+                let median = output[output.len() / 2];
+                assert!(
+                    (median - target as f32).abs() < 0.01,
+                    "{params:?}: {median}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn contrast_recovery_raises_fine_contrast_on_bright_structure() {
+        let data = field();
+        let base = LayeredParams {
+            scale_separation: 32,
+            ..LayeredParams::default()
+        };
+        let plain = plateau_contrast(&layered_output(&data, 1, base));
+        let mut previous = plain;
+        for recovery in [0.1, 0.25, 0.5, 1.0] {
+            let contrast = plateau_contrast(&layered_output(
+                &data,
+                1,
+                LayeredParams {
+                    contrast_recovery: recovery,
+                    ..base
+                },
+            ));
+            assert!(contrast >= previous, "{recovery}: {contrast} vs {previous}");
+            previous = contrast;
+        }
+        // Detail gains up to four times, and no more.
+        assert!(previous > plain * 3.0, "{previous} vs {plain}");
+        assert!(previous < plain * 4.01, "{previous} vs {plain}");
+    }
+
+    #[test]
+    fn compression_lowers_a_star_but_not_a_broad_plateau() {
+        let mut data = field();
+        // A smooth plateau of the star's brightness.
+        for y in 30..70 {
+            for x in 70..110 {
+                data[y * FIELD.0 + x] = 0.5;
+            }
+        }
+        let plain = layered_output(&data, 1, LayeredParams::default());
+        let compressed = layered_output(
+            &data,
+            1,
+            LayeredParams {
+                dynamic_range_compression: 1.0,
+                ..LayeredParams::default()
+            },
+        );
+        let star = 48 * FIELD.0 + 30;
+        let plateau = 50 * FIELD.0 + 90;
+        assert!(plain[star] > 0.5 && (plain[star] - plain[plateau]).abs() < 0.01);
+        assert!(
+            compressed[star] < plain[star] - 0.02,
+            "{}",
+            compressed[star]
+        );
+        assert_eq!(compressed[plateau], plain[plateau]);
+    }
+
+    #[test]
+    fn layered_rgb_stays_in_range_and_missing_samples_come_out_zero() {
+        let mono = field();
+        let mut rgb = mono
+            .iter()
+            .flat_map(|&v| [v * 1.3, v, v * 0.7])
+            .collect::<Vec<_>>();
+        rgb[5 * 3] = f32::NAN;
+        rgb[9 * 3 + 2] = f32::INFINITY;
+        let mut mono = mono;
+        mono[11] = f32::NEG_INFINITY;
+        for params in [
+            LayeredParams::default(),
+            LayeredParams {
+                contrast_recovery: 1.0,
+                dynamic_range_compression: 1.0,
+                saturation_amount: 1.0,
+                saturation_boost: 1.0,
+                lightness_mask: false,
+                scale_separation: 8,
+                ..LayeredParams::default()
+            },
+        ] {
+            let output = layered_output(&rgb, 3, params);
+            assert!(output.iter().all(|v| (0.0..=1.0).contains(v)), "{params:?}");
+            assert_eq!(&output[5 * 3..6 * 3], &[0.0; 3]);
+            assert_eq!(&output[9 * 3..10 * 3], &[0.0; 3]);
+            assert_eq!(layered_output(&mono, 1, params)[11], 0.0);
+        }
+    }
+
+    #[test]
+    fn layered_saturation_lifts_colour_and_keeps_hue() {
+        let rgb = field()
+            .iter()
+            .flat_map(|&v| [v * 1.2, v, v * 0.8])
+            .collect::<Vec<_>>();
+        let plain = layered_output(&rgb, 3, LayeredParams::default());
+        let lifted = layered_output(
+            &rgb,
+            3,
+            LayeredParams {
+                saturation_amount: 1.0,
+                ..LayeredParams::default()
+            },
+        );
+        let saturation = |p: &[f32]| {
+            let max = p[0].max(p[1]).max(p[2]);
+            (max - p[0].min(p[1]).min(p[2])) / max
+        };
+        // Near the black point blue clips to 0, so those pixels are fully
+        // saturated already; every other one gains colour.
+        let (mut raised, mut eligible) = (0, 0);
+        for (before, after) in plain.chunks_exact(3).zip(lifted.chunks_exact(3)) {
+            let value = before[0].max(before[1]).max(before[2]);
+            if value < 0.01 {
+                continue;
+            }
+            assert!((value - after[0].max(after[1]).max(after[2])).abs() < 1.0e-6);
+            assert!(saturation(after) >= saturation(before) - 1.0e-6);
+            if saturation(before) < 0.95 {
+                eligible += 1;
+                raised += usize::from(saturation(after) > saturation(before) + 1.0e-4);
+            }
+            // Red stays the largest channel and blue the smallest.
+            assert!(after[0] >= after[1] && after[1] >= after[2], "{after:?}");
+        }
+        assert!(
+            eligible > 100 && raised == eligible,
+            "{raised} of {eligible}"
+        );
+    }
+
+    #[test]
+    fn shape_less_methods_refuse_the_layered_stretch() {
+        let data = field();
+        let stack = StretchStack::new(vec![
+            StretchConfig::auto_mtf(StretchParams::default(), 4096),
+            layered(LayeredParams::default()),
+        ])
+        .unwrap();
+        for error in [
+            stack.apply_f32(&data, 1).unwrap_err(),
+            stack.apply_u8(&data, 1).unwrap_err(),
+            stack.apply_u16(&data, 1).unwrap_err(),
+        ] {
+            assert!(
+                error.to_string().contains("stage 2/2")
+                    && error
+                        .to_string()
+                        .contains("needs the image's width and height"),
+                "{error}"
+            );
+        }
+        let plan = layered(LayeredParams::default())
+            .resolve_for(&data, 1)
+            .unwrap();
+        for error in [
+            plan.apply_f32(&data, 1).unwrap_err(),
+            plan.apply_u8(&data, 1).map(|_| ()).unwrap_err(),
+            plan.apply_u16(&data, 1).map(|_| ()).unwrap_err(),
+        ] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("needs the image's width and height")
+            );
+        }
+        assert!(
+            layered(LayeredParams::default())
+                .resolve_explicit(1)
+                .is_err()
+        );
+        // The shape must match the samples.
+        assert!(
+            stack
+                .apply_f32_image(&data, ImageShape::new(FIELD.0 + 1, FIELD.1, 1))
+                .is_err()
+        );
+        let rgb = data.iter().flat_map(|&v| [v; 3]).collect::<Vec<_>>();
+        assert!(
+            StretchStack::single(StretchConfig {
+                color_strategy: ColorStrategy::Unlinked,
+                ..layered(LayeredParams::default())
+            })
+            .apply_f32_image(&rgb, field_shape(3))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn image_methods_leave_every_other_model_unchanged() {
+        let data = field();
+        let rgb = data
+            .iter()
+            .flat_map(|&v| [v * 1.1, v, v * 0.9])
+            .collect::<Vec<_>>();
+        let stack = StretchStack::new(vec![
+            StretchConfig::percentile_asinh(0.001, 0.999, 50.0, 4096),
+            StretchConfig {
+                color_strategy: ColorStrategy::LuminancePreserving,
+                ..median_anchor(MedianAnchorParams::default())
+            },
+        ])
+        .unwrap();
+        let shape = field_shape(3);
+        assert_eq!(
+            stack.apply_f32_image(&rgb, shape).unwrap(),
+            stack.apply_f32(&rgb, 3).unwrap()
+        );
+        assert_eq!(
+            stack.apply_u8_image(&rgb, shape).unwrap(),
+            stack.apply_u8(&rgb, 3).unwrap()
+        );
+        assert_eq!(
+            stack.apply_u16_image(&rgb, shape).unwrap(),
+            stack.apply_u16(&rgb, 3).unwrap()
+        );
+    }
+
+    #[test]
+    fn layered_refuses_settings_out_of_range_and_round_trips_as_json() {
+        let data = field();
+        for params in [
+            LayeredParams {
+                target_background: 0.0,
+                ..LayeredParams::default()
+            },
+            LayeredParams {
+                aggressiveness: 1.5,
+                ..LayeredParams::default()
+            },
+            LayeredParams {
+                dynamic_range_compression: -0.1,
+                ..LayeredParams::default()
+            },
+            LayeredParams {
+                scale_separation: 4,
+                ..LayeredParams::default()
+            },
+            LayeredParams {
+                scale_separation: 2048,
+                ..LayeredParams::default()
+            },
+            LayeredParams {
+                contrast_recovery: f64::NAN,
+                ..LayeredParams::default()
+            },
+            LayeredParams {
+                saturation_amount: 2.0,
+                ..LayeredParams::default()
+            },
+            LayeredParams {
+                saturation_boost: -1.0,
+                ..LayeredParams::default()
+            },
+        ] {
+            assert!(layered(params).resolve_for(&data, 1).is_err(), "{params:?}");
+        }
+        let model = StretchModel::Layered(LayeredParams {
+            contrast_recovery: 0.6,
+            lightness_mask: false,
+            ..LayeredParams::default()
+        });
+        let json = serde_json::to_string(&model).unwrap();
+        assert!(json.contains("\"type\":\"layered\""), "{json}");
+        assert_eq!(serde_json::from_str::<StretchModel>(&json).unwrap(), model);
+        let terse: StretchModel = serde_json::from_str(
+            r#"{"type":"layered","target_background":0.15,"aggressiveness":0.5}"#,
+        )
+        .unwrap();
+        assert_eq!(terse, StretchModel::Layered(LayeredParams::default()));
+        // The resolved plan serializes for provenance.
+        let plan = layered(LayeredParams::default())
+            .resolve_for(&data, 1)
+            .unwrap();
+        let resolved = serde_json::to_value(&plan).unwrap();
+        assert_eq!(resolved["curves"][0]["type"], "layered");
     }
 }
