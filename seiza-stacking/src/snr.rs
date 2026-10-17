@@ -51,6 +51,10 @@ use serde::{Deserialize, Serialize};
 /// measurement flat across sensor sizes.
 const MAX_SAMPLED_ROWS: usize = 512;
 
+/// Row and column pairs [`photosite_noise`] reads, at most.
+const PHOTOSITE_ROW_PAIRS: usize = 128;
+const PHOTOSITE_COLUMN_PAIRS: usize = 512;
+
 /// Fewer samples than this and the medians are not worth reporting.
 const MIN_SAMPLES: usize = 1024;
 
@@ -286,6 +290,85 @@ pub fn frame_noise(image: &LinearImage) -> Option<Vec<f32>> {
             }
             let noise = second_difference_noise(&mut horizontal)?
                 .max(second_difference_noise(&mut vertical)?);
+            Some(noise as f32)
+        })
+        .collect()
+}
+
+/// Per-channel noise of the samples an image was built from, for the
+/// Lanczos-3 clamp's noise gate.
+///
+/// [`frame_noise`] reads neighbouring pixels, which a demosaiced frame has
+/// correlated: through a bilinear demosaic, red and blue read almost no
+/// noise, since most of their interpolated samples have no second
+/// difference at all, and through Malvar-He-Cutler's about 0.67 of the
+/// photosites' noise. A demosaic leaves each colour's own photosites as
+/// they were, every second pixel on both axes, so this takes second
+/// differences two pixels apart, within each of the four row and column
+/// parities separately, and keeps the noisiest parity and axis. For a
+/// demosaiced channel that is the parity of its photosites, whose noise is
+/// the sensor's; interpolated parities read lower and are passed over. For a
+/// mono or planar frame every parity reads the same noise, and a row or
+/// column pattern alternating every pixel cancels.
+///
+/// At most 256 rows and 1024 columns are read, in adjacent pairs so every
+/// parity is seen, about 65 000 differences per parity and axis: enough to
+/// fix the noise to a fraction of a percent, at a cost that does not grow
+/// with the sensor. Non-finite samples, and differences that touch one, are
+/// skipped. `None` when the image is smaller than 5 by 5 pixels, its buffer
+/// does not match its dimensions, or any parity of any channel has fewer
+/// than 1024 usable differences on either axis.
+pub(crate) fn photosite_noise(image: &LinearImage) -> Option<Vec<f32>> {
+    let (width, height, channels) = (image.width, image.height, image.channels);
+    if width < 5 || height < 5 || channels == 0 {
+        return None;
+    }
+    if width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(channels))
+        != Some(image.data.len())
+    {
+        return None;
+    }
+    let data = &image.data;
+    let (step_x, step_y) = (2 * channels, 2 * width * channels);
+    // Rows 2 + 2p and 3 + 2p for pair p, each with two rows above and below,
+    // and columns likewise.
+    let (row_pairs, column_pairs) = ((height - 4) / 2, (width - 4) / 2);
+    let row_stride = row_pairs.div_ceil(PHOTOSITE_ROW_PAIRS).max(1);
+    let column_stride = column_pairs.div_ceil(PHOTOSITE_COLUMN_PAIRS).max(1);
+    (0..channels)
+        .into_par_iter()
+        .map(|channel| {
+            // By parity, (y % 2) * 2 + x % 2, then axis.
+            let mut differences: [[Vec<f32>; 2]; 4] = Default::default();
+            for row_pair in (0..row_pairs).step_by(row_stride) {
+                for y in [2 + 2 * row_pair, 3 + 2 * row_pair] {
+                    for x in (0..column_pairs)
+                        .step_by(column_stride)
+                        .flat_map(|pair| [2 + 2 * pair, 3 + 2 * pair])
+                    {
+                        let index = (y * width + x) * channels + channel;
+                        let value = data[index];
+                        if !value.is_finite() {
+                            continue;
+                        }
+                        let parity = &mut differences[(y % 2) * 2 + x % 2];
+                        let (left, right) = (data[index - step_x], data[index + step_x]);
+                        if left.is_finite() && right.is_finite() {
+                            parity[0].push(left - 2.0 * value + right);
+                        }
+                        let (above, below) = (data[index - step_y], data[index + step_y]);
+                        if above.is_finite() && below.is_finite() {
+                            parity[1].push(above - 2.0 * value + below);
+                        }
+                    }
+                }
+            }
+            let mut noise = 0.0_f64;
+            for axis in differences.iter_mut().flatten() {
+                noise = noise.max(second_difference_noise(axis)?);
+            }
             Some(noise as f32)
         })
         .collect()

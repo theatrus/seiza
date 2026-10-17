@@ -585,7 +585,8 @@ Frame weighting (`StackOptions::weighting`, the CLI's `--weighting
 inverse-noise`, its default) then counts hazy frames for less. Together with
 quadratic registration and Lanczos interpolation, the CLI's defaults stacked
 M45 in 94 s at 2.42px FWHM and SNR 388, against WBPP's 2.60px and 368 in
-about 28 minutes. The library's defaults stay global, equal, similarity and
+about 28 minutes (measured before Lanczos clamping gained its noise gate,
+below). The library's defaults stay global, equal, similarity and
 bilinear, so existing hosts and contexts are unchanged.
 
 ## Registration
@@ -610,14 +611,20 @@ Registration resamples each frame bilinearly by default.
 `StackOptions::interpolation` set to `Interpolation::Lanczos3` (the CLI's
 `--interpolation lanczos3`) uses Lanczos-3 over the 6x6 nearest samples,
 dropping the negative lobes where they would ring at a high-contrast edge, as
-PixInsight's clamping does. Only taps spanning more than five times the frame's
-noise can clamp: on a faint sky a few times its noise above zero, clamping the
-noise itself raised the background by an amount set by each frame's sub-pixel
-phase, which frames rotated 0.3 degrees against the reference turned into bands
-190 px apart. On the M45 stack it took FWHM from 2.63 to 2.47px
-and SNR from 345 to 354, against 2.60px and 368 for WBPP, and with
-reintegration reached 376; stacking took 66 s instead of 39 s. Reintegration
-resamples with the same choice.
+PixInsight's clamping does. Only taps spanning more than five times the noise
+of the frame's photosites can clamp, read from each colour's own photosites so
+a demosaic's smoothing does not lower it. Without that gate, on a sky only a
+few times its noise above zero, the clamp fired on the noise itself and raised
+the background by an amount set by each frame's sub-pixel phase; frames
+rotated 0.3 degrees against the reference turned that into bands about 190 px
+apart (Sh2 140, PSF Guard). A star too faint to clear the gate rings as
+unclamped Lanczos-3 does, by under 1% of its peak at 2 px FWHM, and that
+ringing does not average down across frames as noise does. The gate costs
+noisier backgrounds than the old clamp gave on such skies, 8-11% on Sh2 140,
+because the old clamp was smoothing their noise. On the M45 stack, before the
+gate, Lanczos-3 took FWHM from 2.63 to 2.47px and SNR from 345 to 354, against
+2.60px and 368 for WBPP, and with reintegration reached 376; stacking took 66 s
+instead of 39 s. Reintegration resamples with the same choice.
 
 `StackOptions::cfa_integration` set to `CfaIntegration::BayerDrizzle` (the
 CLI's `--bayer-drizzle`) integrates photosites instead: each registered pixel

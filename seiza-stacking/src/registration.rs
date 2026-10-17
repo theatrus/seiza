@@ -1262,9 +1262,8 @@ pub enum Interpolation {
     /// amount that follows each frame's sub-pixel phase, and draw bands
     /// across a stack of rotated frames. Sharper: on a 98-frame M45 stack
     /// it took FWHM from 2.63 to 2.47px, at about twice the resampling
-    /// cost. Falls
-    /// back to bilinear within three pixels of the source edge and where
-    /// a tap is not finite.
+    /// cost (measured before the noise gate). Falls back to bilinear within
+    /// three pixels of the source edge and where a tap is not finite.
     Lanczos3,
 }
 
@@ -1650,9 +1649,9 @@ fn resample_row<F>(
 /// threshold does.
 const LANCZOS_CLAMPING: f32 = 0.3;
 
-/// How many times a frame's noise the taps of a 1-D Lanczos pass must span,
-/// highest to lowest, before [`LANCZOS_CLAMPING`] may drop the negative
-/// lobes.
+/// How many times a frame's photosite noise the taps of a 1-D Lanczos pass
+/// must span, highest to lowest, before [`LANCZOS_CLAMPING`] may drop the
+/// negative lobes.
 ///
 /// The share test alone compares sample values with zero, so on a faint
 /// calibrated background, a few times its noise above zero, it fires on
@@ -1663,19 +1662,30 @@ const LANCZOS_CLAMPING: f32 = 0.3;
 /// both by an amount set by the sub-pixel phase. A frame rotated against
 /// the reference sweeps that phase through a whole pixel every
 /// `1 / sin(angle)` pixels, so a stack of frames rotated 0.3 degrees showed
-/// bands 190 pixels apart. Six samples of plain noise span more than five
-/// times its standard deviation in about one pass in 200, and then the
-/// share test must fire too, so noise is left alone; a star, or any edge
-/// whose ringing could stand out of the noise, spans far more and is
-/// clamped as before.
+/// bands about 190 pixels apart. Six samples of plain noise span more than
+/// five times its standard deviation in about one pass in 200, and then the
+/// share test must fire too, so noise is left alone. The second pass's taps
+/// are the first pass's results, whose noise is 0.89 to 1 of the frame's
+/// by phase, yet are held to the frame's own: a slightly stricter gate.
+///
+/// A star whose taps span less than this keeps its full kernel, and rings
+/// as an unclamped Lanczos-3 does. Ringing is a fixed share of the star, so
+/// unlike noise it does not average down across a stack: but for a star of
+/// 2 px FWHM or wider it is under 1% of the peak, and for an undersampled
+/// 1.5 px star about 2-4%, so a star that never clears five times the
+/// noise in one frame rings by at most a fifth of that frame's noise. That
+/// is the ringing a sky bright enough to keep the share test quiet gave
+/// every faint star before this gate existed, as it does in PixInsight.
+/// Brighter stars span far more and are clamped as before.
 const LANCZOS_CLAMPING_NOISE_SPAN: f32 = 5.0;
 
 /// The span, per channel, that a 1-D Lanczos pass's taps must exceed before
 /// it may clamp: [`LANCZOS_CLAMPING_NOISE_SPAN`] times the source's
-/// [`crate::frame_noise`], or zero, clamping as the share test alone says,
-/// where the image is too small to measure its noise.
+/// [`crate::snr::photosite_noise`], which a demosaic does not lower, or
+/// zero, clamping as the share test alone says, where the image is too
+/// small to measure its noise.
 fn lanczos_clamp_spans(source: &LinearImage) -> Vec<f32> {
-    match crate::snr::frame_noise(source) {
+    match crate::snr::photosite_noise(source) {
         Some(noise) => noise
             .into_iter()
             .map(|sigma| {
@@ -1703,14 +1713,17 @@ fn clamped_lanczos(weights: &[f32; 6], taps: &[f32; 6], noise_span: f32) -> f32 
     let positive =
         weights[0] * taps[0] + weights[2] * taps[2] + weights[3] * taps[3] + weights[5] * taps[5];
     let negative = weights[1] * taps[1] + weights[4] * taps[4];
-    if tap_span(taps) > noise_span && negative.abs() > LANCZOS_CLAMPING * positive.abs() {
+    // The span only once the share test fires, which most passes do not.
+    if negative.abs() > LANCZOS_CLAMPING * positive.abs() && tap_span(taps) > noise_span {
         positive / (weights[0] + weights[2] + weights[3] + weights[5])
     } else {
         positive + negative
     }
 }
 
-/// The highest tap less the lowest, skipping non-finite taps.
+/// The highest tap less the lowest. `max` and `min` pass over a NaN tap;
+/// an infinite one makes the span infinite, but then the pass's result is
+/// not finite either way, and the caller falls back to bilinear.
 #[inline(always)]
 fn tap_span(taps: &[f32; 6]) -> f32 {
     let mut highest = f32::NEG_INFINITY;
@@ -2331,15 +2344,16 @@ mod tests {
 
     /// A faint calibrated sky: Gaussian noise of `sigma` about `sky`, as on
     /// the Sh2 140 OIII lights (34 ADU of sky, 12.8 ADU of noise), plus
-    /// `extra` at each pixel.
+    /// `extra` at each pixel, from the noise sequence `seed` names.
     fn noisy_sky(
         width: usize,
         height: usize,
         sky: f64,
         sigma: f64,
+        seed: u64,
         extra: impl Fn(f64, f64) -> f64,
     ) -> LinearImage {
-        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64 ^ seed.wrapping_mul(0xbf58_476d_1ce4_e5b9);
         let mut uniform = || {
             state = state
                 .wrapping_mul(6_364_136_223_846_793_005)
@@ -2358,27 +2372,28 @@ mod tests {
         LinearImage::new(width, height, 1, data).unwrap()
     }
 
-    #[test]
-    fn lanczos_leaves_a_faint_noisy_sky_unbiased_at_every_subpixel_phase() {
-        // A frame rotated 0.3 degrees against the reference: the sub-pixel
-        // phase it is sampled at sweeps a whole pixel every 1 / sin(0.3
-        // degrees), 191 pixels, so anything that depends on the phase draws
-        // bands that far apart across the stack. Clamping the noise of a sky
-        // only 2.7 sigma above zero did: it fired when the negative-lobe
-        // samples happened to be high, lifting the sky about 0.1 sigma at
-        // half-pixel phases and leaving it at whole ones.
-        let (width, height, sky, sigma) = (512, 512, 34.0, 12.8);
-        let source = noisy_sky(width, height, sky, sigma, |_, _| 0.0);
-        let transform = SimilarityTransform {
-            scale: 1.0,
-            rotation_radians: 0.3_f64.to_radians(),
-            translation_x: 0.37,
-            translation_y: -0.21,
-        };
-        let resampled = lanczos(&source, transform);
+    /// A frame rotated 0.3 degrees against the reference: the sub-pixel
+    /// phase it is sampled at sweeps a whole pixel every 1 / sin(0.3
+    /// degrees), about 190 pixels, so anything that depends on the phase
+    /// draws bands that far apart across a stack.
+    const ROTATED: SimilarityTransform = SimilarityTransform {
+        scale: 1.0,
+        rotation_radians: 0.3 * std::f64::consts::PI / 180.0,
+        translation_x: 0.37,
+        translation_y: -0.21,
+    };
+
+    /// The mean of `channel` of `resampled`, a frame carried through
+    /// `transform` onto a grid its own size, where both sub-pixel phases lie
+    /// within a tenth of a pixel of a sample, and where both lie within a
+    /// tenth of the midpoint.
+    fn phase_means(
+        resampled: &LinearImage,
+        transform: SimilarityTransform,
+        channel: usize,
+    ) -> (f64, f64) {
         let inverse = transform.inverse_map();
-        // Mean sky where both phases lie within a tenth of a pixel of a
-        // sample, and where both lie within a tenth of the midpoint.
+        let (width, height) = (resampled.width, resampled.height);
         let (mut whole, mut half) = ((0.0, 0), (0.0, 0));
         for y in 0..height {
             for x in 0..width {
@@ -2392,7 +2407,8 @@ mod tests {
                     phase.min(1.0 - phase)
                 };
                 let (phase_x, phase_y) = (off_sample(source_x), off_sample(source_y));
-                let value = f64::from(resampled.data[y * width + x]);
+                let value =
+                    f64::from(resampled.data[(y * width + x) * resampled.channels + channel]);
                 if phase_x < 0.1 && phase_y < 0.1 {
                     whole = (whole.0 + value, whole.1 + 1);
                 } else if phase_x > 0.4 && phase_y > 0.4 {
@@ -2401,7 +2417,17 @@ mod tests {
             }
         }
         assert!(whole.1 > 5000 && half.1 > 5000, "{whole:?} {half:?}");
-        let (whole, half) = (whole.0 / whole.1 as f64, half.0 / half.1 as f64);
+        (whole.0 / whole.1 as f64, half.0 / half.1 as f64)
+    }
+
+    #[test]
+    fn lanczos_leaves_a_faint_noisy_sky_unbiased_at_every_subpixel_phase() {
+        // Clamping the noise of a sky only 2.7 sigma above zero fired when
+        // the negative-lobe samples happened to be high, lifting the sky
+        // about 0.1 sigma at half-pixel phases and leaving it at whole ones.
+        let (sky, sigma) = (34.0, 12.8);
+        let source = noisy_sky(512, 512, sky, sigma, 0, |_, _| 0.0);
+        let (whole, half) = phase_means(&lanczos(&source, ROTATED), ROTATED, 0);
         // Each mean is good to about 0.01 sigma; the clamped noise put
         // 0.1 sigma between them.
         assert!(
@@ -2412,17 +2438,77 @@ mod tests {
     }
 
     #[test]
+    fn lanczos_leaves_a_demosaiced_faint_sky_unbiased_at_every_subpixel_phase() {
+        // A demosaic correlates neighbouring samples, so noise read from
+        // neighbours comes out low: under a bilinear demosaic red and blue
+        // read none at all, and the gate let the clamp loose on their noise
+        // again. The gate reads the noise of each colour's own photosites.
+        let (sky, sigma) = (34.0, 12.8);
+        let layout = crate::BayerLayout {
+            pattern: seiza_fits::BayerPattern::Rggb,
+            x_offset: 0,
+            y_offset: 0,
+        };
+        for demosaic in [
+            crate::Demosaic::Bilinear,
+            crate::Demosaic::Mhc,
+            crate::Demosaic::Vng,
+        ] {
+            let source = noisy_sky(512, 512, sky, sigma, 1, |_, _| 0.0)
+                .debayer_with(layout, demosaic)
+                .unwrap();
+            let noise = crate::snr::photosite_noise(&source).unwrap();
+            for (channel, &noise) in noise.iter().enumerate() {
+                assert!(
+                    (f64::from(noise) / sigma - 1.0).abs() < 0.1,
+                    "{demosaic:?} channel {channel} read noise {noise}"
+                );
+            }
+            let resampled = lanczos(&source, ROTATED);
+            for channel in 0..3 {
+                let (whole, half) = phase_means(&resampled, ROTATED, channel);
+                assert!(
+                    (half - whole).abs() < 0.04 * sigma,
+                    "{demosaic:?} channel {channel}: sky {whole:.3} at whole-pixel phases \
+                     against {half:.3} at half-pixel ones"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn photosite_noise_reads_a_plain_frame_as_frame_noise_does() {
+        let sigma = 12.8;
+        let source = noisy_sky(256, 256, 34.0, sigma, 2, |x, y| 0.05 * x + 0.02 * y);
+        let photosite = crate::snr::photosite_noise(&source).unwrap()[0];
+        let neighbour = crate::frame_noise(&source).unwrap()[0];
+        assert!(
+            (f64::from(photosite) / sigma - 1.0).abs() < 0.08,
+            "{photosite}"
+        );
+        assert!(
+            (photosite / neighbour - 1.0).abs() < 0.08,
+            "{photosite} {neighbour}"
+        );
+        assert_eq!(
+            crate::snr::photosite_noise(&noisy_sky(40, 40, 34.0, sigma, 2, |_, _| 0.0)),
+            None
+        );
+    }
+
+    #[test]
     fn lanczos_still_clamps_a_bright_star_on_a_faint_noisy_sky() {
-        // The noise threshold must not let a star ring: unclamped, its
-        // negative lobes would dig hundreds of ADU below the sky.
-        let (width, height, sky, sigma) = (64, 64, 34.0, 12.8);
-        let source = noisy_sky(width, height, sky, sigma, |x, y| {
-            let (dx, dy) = (x - 31.5, y - 32.0);
+        // The noise gate must not let a bright star ring: unclamped, its
+        // negative lobes would dig far below the sky.
+        let (width, height, sky, sigma) = (96, 96, 34.0, 12.8);
+        let source = noisy_sky(width, height, sky, sigma, 3, |x, y| {
+            let (dx, dy) = (x - 47.5, y - 48.0);
             20_000.0 * (-(dx * dx + dy * dy) / (2.0 * 0.8 * 0.8)).exp()
         });
+        assert!(lanczos_clamp_spans(&source)[0] > 0.0);
         let sharp = lanczos(&source, shift(0.5, 0.5));
-        for y in 26..39 {
-            for x in 26..39 {
+        for y in 42..55 {
+            for x in 42..55 {
                 let value = sharp.data[y * width + x];
                 assert!(
                     value > (sky - 5.0 * sigma) as f32,
@@ -2430,7 +2516,62 @@ mod tests {
                 );
             }
         }
-        assert!(sharp.data[32 * width + 32] > 5_000.0);
+        assert!(sharp.data[48 * width + 48] > 5_000.0);
+    }
+
+    #[test]
+    fn a_star_too_faint_to_clamp_rings_little_even_stacked() {
+        // A star peaking at six times the noise, which the gate mostly
+        // leaves unclamped, in 128 dithered frames. Its ringing is the same
+        // in every frame while the noise averages down, so check the stack:
+        // around a 1.6 px FWHM star, sharper than most stacks see, no ring
+        // about it dips under the sky by 1% of the peak. It measured 0.1%,
+        // against 0.2% with no clamping at all.
+        let (size, sky, sigma, frames) = (96, 34.0, 12.8, 128);
+        let (peak, psf_sigma) = (6.0 * sigma, 1.6 / 2.3548);
+        let mut state = 0x51_u64;
+        let mut uniform = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        let mut stack = vec![0.0_f64; size * size];
+        for frame in 0..frames {
+            let (dx, dy) = (uniform(), uniform());
+            let source = noisy_sky(size, size, sky, sigma, 100 + frame, |x, y| {
+                let (x, y) = (x - 48.0 - dx, y - 48.0 - dy);
+                peak * (-(x * x + y * y) / (2.0 * psf_sigma * psf_sigma)).exp()
+            });
+            assert!(lanczos_clamp_spans(&source)[0] > 0.0);
+            let aligned = lanczos(&source, shift(-dx, -dy));
+            for (total, &value) in stack.iter_mut().zip(&aligned.data) {
+                *total += f64::from(value) / frames as f64;
+            }
+        }
+        let ring = |inner: f64, outer: f64| {
+            let (mut total, mut count) = (0.0, 0);
+            for y in 8..size - 8 {
+                for x in 8..size - 8 {
+                    let radius = ((x as f64 - 48.0).powi(2) + (y as f64 - 48.0).powi(2)).sqrt();
+                    if radius >= inner && radius < outer {
+                        total += stack[y * size + x];
+                        count += 1;
+                    }
+                }
+            }
+            total / count as f64
+        };
+        let background = ring(14.0, 30.0);
+        let deepest = [1.5, 2.0, 2.5, 3.0, 3.5, 4.0]
+            .into_iter()
+            .map(|inner| ring(inner, inner + 0.5) - background)
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            deepest > -0.01 * peak,
+            "the stacked ring dips {deepest:.3} ADU under the sky, against a {peak} ADU peak"
+        );
+        assert!((ring(0.0, 0.5) - background) > 0.8 * peak);
     }
 
     #[test]
@@ -2930,16 +3071,17 @@ mod tests {
     }
 
     /// The resampling row loop as it was before an RGB pixel's channels ran
-    /// as vector lanes: each channel filtered on its own.
+    /// as vector lanes: each channel filtered on its own, gated by its own
+    /// entry of `clamp_spans`.
     fn resample_per_channel(
         source: &LinearImage,
         region: ReferenceRegion,
         inverse: impl Fn(f64, f64) -> (f64, f64),
         sampling: Sampling,
+        clamp_spans: &[f32],
     ) -> Vec<f32> {
         const COORDINATE_EPSILON: f64 = 1.0e-9;
         let channels = source.channels;
-        let clamp_spans = lanczos_clamp_spans(source);
         let mut data = vec![f32::NAN; region.width * region.height * channels];
         let maximum_source_x = (source.width - 1) as f64;
         let maximum_source_y = (source.height - 1) as f64;
@@ -3062,19 +3204,66 @@ mod tests {
         };
         // Sizes too small for any Lanczos window, and ones whose last pixel
         // has a window ending on the image's last sample; noise with bright
-        // spikes that trip the clamping, and non-finite samples.
-        for (width, height) in [(1, 1), (3, 3), (6, 6), (7, 5), (9, 8), (31, 17)] {
+        // spikes that trip the clamping, and non-finite samples. The largest
+        // is big enough to measure its noise, so the noise gate holds the
+        // clamp back on the plain noise and lets it act on the spikes, with
+        // a different span for each channel.
+        for (width, height) in [(1, 1), (3, 3), (6, 6), (7, 5), (9, 8), (31, 17), (96, 80)] {
             for channels in [1, 3] {
                 let data = (0..width * height * channels)
-                    .map(|_| match next() % 41 {
+                    .enumerate()
+                    .map(|(index, _)| match next() % 41 {
                         0 => f32::NAN,
                         1 => f32::INFINITY,
                         2 => -0.0,
                         3..=6 => 50.0 + (next() % 1000) as f32,
-                        _ => (next() >> 40) as f32 / (1 << 24) as f32,
+                        // A noise level of its own for each channel.
+                        _ => {
+                            (next() >> 40) as f32 / (1 << 24) as f32 * (1 + index % channels) as f32
+                        }
                     })
                     .collect::<Vec<_>>();
                 let source = LinearImage::new(width, height, channels, data).unwrap();
+                let clamp_spans = lanczos_clamp_spans(&source);
+                if width >= 96 {
+                    assert!(
+                        clamp_spans.iter().all(|&span| span > 0.0)
+                            && clamp_spans.windows(2).all(|pair| pair[0] < pair[1]),
+                        "{clamp_spans:?}"
+                    );
+                    // The gate must decide some samples, or this checks nothing.
+                    let ungated = resample_per_channel(
+                        &source,
+                        ReferenceRegion {
+                            x: 0,
+                            y: 0,
+                            width,
+                            height,
+                        },
+                        shift(-0.37, 0.61).inverse_map(),
+                        Sampling::Lanczos3,
+                        &vec![0.0; channels],
+                    );
+                    let gated = resample_per_channel(
+                        &source,
+                        ReferenceRegion {
+                            x: 0,
+                            y: 0,
+                            width,
+                            height,
+                        },
+                        shift(-0.37, 0.61).inverse_map(),
+                        Sampling::Lanczos3,
+                        &clamp_spans,
+                    );
+                    assert!(
+                        ungated
+                            .iter()
+                            .zip(&gated)
+                            .any(|(a, b)| a.to_bits() != b.to_bits()),
+                        "the noise gate changed nothing"
+                    );
+                }
                 let regions = [
                     ReferenceRegion {
                         x: 0,
@@ -3119,6 +3308,7 @@ mod tests {
                                 region,
                                 transform.inverse_map(),
                                 sampling,
+                                &clamp_spans,
                             );
                             check(&format!("{transform:?}"), got, expected);
                         }
@@ -3136,6 +3326,7 @@ mod tests {
                             region,
                             |x, y| warp.apply(x, y),
                             sampling,
+                            &clamp_spans,
                         );
                         check("warp", got, expected);
                     }
