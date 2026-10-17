@@ -93,3 +93,9 @@ lz4_flex = "0.14"
 sha1 = "0.11"
 satkit = { version = "0.24.1", default-features = false }
 font8x8 = "0.3"
+
+# Tests run the image code over whole planes; unoptimised, seiza-calibration's
+# took 33 minutes of a CI runner's 4 cores, and 4 at this level. Debug info,
+# debug assertions and overflow checks stay on.
+[profile.dev]
+opt-level = 1
