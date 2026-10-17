@@ -30,6 +30,7 @@
 
 use super::evidence::{self, BackgroundRatio, Fit, FitOutcome, Side, Verdict};
 use super::metric::{self, Plane};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// Bump when equal backgrounds and candidates may choose differently.
@@ -159,17 +160,23 @@ pub fn choose_response(
     // The background over each candidate, once: every pair it is in
     // weighs the same residual.
     let ratios: Vec<Option<BackgroundRatio>> = candidates
-        .iter()
+        .par_iter()
         .map(|candidate| {
             usable(candidate)
                 .then(|| evidence::background_ratio(candidate, background))
                 .flatten()
         })
         .collect();
-    let mut pairs = Vec::new();
-    for first in 0..candidates.len() {
-        for second in first + 1..candidates.len() {
-            let outcome = if alike(first, second) {
+    // Each pair is fitted on its own, so the pairs run side by side; `alike`
+    // is asked first, here, so the host's closure need not be shared.
+    let to_fit: Vec<(usize, usize, bool)> = (0..candidates.len())
+        .flat_map(|first| (first + 1..candidates.len()).map(move |second| (first, second)))
+        .map(|(first, second)| (first, second, alike(first, second)))
+        .collect();
+    let pairs: Vec<PairFit> = to_fit
+        .into_par_iter()
+        .map(|(first, second, alike)| {
+            let outcome = if alike {
                 PairOutcome::Alike
             } else {
                 match (&ratios[first], &ratios[second]) {
@@ -182,13 +189,13 @@ pub fn choose_response(
                     _ => PairOutcome::Unfitted,
                 }
             };
-            pairs.push(PairFit {
+            PairFit {
                 first,
                 second,
                 outcome,
-            });
-        }
-    }
+            }
+        })
+        .collect();
     let lone = candidates.len() == 1 && usable(&candidates[0]);
     let winners = (0..candidates.len())
         .filter(|candidate| usable(&candidates[*candidate]))

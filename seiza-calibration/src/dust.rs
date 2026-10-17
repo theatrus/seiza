@@ -2534,6 +2534,31 @@ struct CircleDepth {
     ring: f32,
 }
 
+/// The depth sector, of [`DEPTH_SECTORS`] eighths of a turn from -π, that
+/// the offset `dx, dy` from a centre lies in. Away from the eighths'
+/// boundaries the signs and sizes of `dx` and `dy` give it; within a hair
+/// of one, `atan2` does, so a pixel lands where `atan2` alone puts it.
+fn depth_sector(dx: f32, dy: f32) -> usize {
+    const _: () = assert!(DEPTH_SECTORS == 8);
+    let (ax, ay) = (dx.abs(), dy.abs());
+    let (low, high) = (ax.min(ay), ax.max(ay));
+    if low <= 1e-3 * high || high - low <= 1e-3 * high {
+        return (((dy.atan2(dx) + std::f32::consts::PI) / std::f32::consts::TAU
+            * DEPTH_SECTORS as f32) as usize)
+            .min(DEPTH_SECTORS - 1);
+    }
+    match (dx > 0.0, dy > 0.0, ay > ax) {
+        (false, false, false) => 0,
+        (false, false, true) => 1,
+        (true, false, true) => 2,
+        (true, false, false) => 3,
+        (true, true, false) => 4,
+        (true, true, true) => 5,
+        (false, true, true) => 6,
+        (false, true, false) => 7,
+    }
+}
+
 fn measure_circle(
     residual: &[f32],
     width: usize,
@@ -2553,17 +2578,28 @@ fn measure_circle(
     );
     let ring = || -> Vec<Vec<f32>> { vec![Vec::new(); DEPTH_SECTORS] };
     let (mut inside, mut outside, mut rim_in, mut rim_out) = (ring(), ring(), ring(), ring());
+    // Much of the box lies on no ring. A squared distance a pixel clear of
+    // the rings rules a pixel out before its exact distance and angle.
+    let scale = radius.max(1e-3);
+    let square = |d: f32| d.max(0.0) * d.max(0.0);
+    let (near, far) = (square(0.6 * scale - 1.0), square(1.4 * scale + 1.0));
+    let (gap_from, gap_to) = (square(0.95 * scale + 1.0), square(1.05 * scale - 1.0));
     for py in y0..=y1 {
         for px in x0..=x1 {
+            let (dx, dy) = (px as f32 - x, py as f32 - y);
+            let squared = dx * dx + dy * dy;
+            if squared < near || squared > far || (squared > gap_from && squared < gap_to) {
+                continue;
+            }
             let value = residual[py * width + px];
             if !value.is_finite() {
                 continue;
             }
-            let (dx, dy) = (px as f32 - x, py as f32 - y);
-            let d = dx.hypot(dy) / radius.max(1e-3);
-            let sector = (((dy.atan2(dx) + std::f32::consts::PI) / std::f32::consts::TAU
-                * DEPTH_SECTORS as f32) as usize)
-                .min(DEPTH_SECTORS - 1);
+            let d = dx.hypot(dy) / scale;
+            if !(0.6..=0.95).contains(&d) && !(1.05..=1.4).contains(&d) {
+                continue;
+            }
+            let sector = depth_sector(dx, dy);
             if (0.6..=0.88).contains(&d) {
                 inside[sector].push(value);
             }
@@ -2722,22 +2758,31 @@ fn rim_sharpness(
     );
     let mut inner: Vec<Vec<f32>> = vec![Vec::new(); DEPTH_SECTORS];
     let mut outer: Vec<Vec<f32>> = vec![Vec::new(); DEPTH_SECTORS];
+    // The rings are a thin band in a wide box: a squared distance a pixel
+    // clear of the band rules a pixel out before its exact distance.
+    let (near, far) = ((radius - band - 1.0).max(0.0), radius + band + 1.0);
+    let (near, far) = (near * near, far * far);
     for py in y0..=y1 {
         for px in x0..=x1 {
+            let (dx, dy) = (px as f32 - x, py as f32 - y);
+            let square = dx * dx + dy * dy;
+            if square < near || square > far {
+                continue;
+            }
             let value = residual[py * width + px];
             if !value.is_finite() {
                 continue;
             }
-            let (dx, dy) = (px as f32 - x, py as f32 - y);
             let d = dx.hypot(dy) - radius;
-            let sector = (((dy.atan2(dx) + std::f32::consts::PI) / std::f32::consts::TAU
-                * DEPTH_SECTORS as f32) as usize)
-                .min(DEPTH_SECTORS - 1);
-            if (-band..=-0.5).contains(&d) {
-                inner[sector].push(value);
+            let side = if (-band..=-0.5).contains(&d) {
+                &mut inner
             } else if (0.5..=band).contains(&d) {
-                outer[sector].push(value);
-            }
+                &mut outer
+            } else {
+                continue;
+            };
+            let sector = depth_sector(dx, dy);
+            side[sector].push(value);
         }
     }
     let mut contrasts = Vec::new();

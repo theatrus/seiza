@@ -1187,3 +1187,37 @@ fn find_session_dust_drops_what_too_few_flats_show() {
         session_dust_from_lists(&stack, BIN, &views_of(&lists), &options).unwrap();
     assert_eq!(from_lists.features, map.features);
 }
+
+#[test]
+fn depth_sector_matches_atan2_everywhere() {
+    // Centres on whole, half, quarter and odd fractions of a pixel, the
+    // kinds circles and features carry, and offsets out to a large disk.
+    let by_atan2 = |dx: f32, dy: f32| {
+        (((dy.atan2(dx) + std::f32::consts::PI) / std::f32::consts::TAU * DEPTH_SECTORS as f32)
+            as usize)
+            .min(DEPTH_SECTORS - 1)
+    };
+    for (fx, fy) in [
+        (0.0, 0.0),
+        (0.5, 0.5),
+        (0.25, 0.75),
+        (0.3, 0.7),
+        (0.1234, 0.9),
+    ] {
+        for py in -300..=300 {
+            for px in -300..=300 {
+                let (dx, dy) = (px as f32 - fx, py as f32 - fy);
+                assert_eq!(depth_sector(dx, dy), by_atan2(dx, dy), "({dx}, {dy})");
+            }
+        }
+    }
+    for (dx, dy) in [
+        (0.0, 0.0),
+        (-0.0, 0.0),
+        (-5.0, 0.0),
+        (-5.0, -0.0),
+        (0.0, -5.0),
+    ] {
+        assert_eq!(depth_sector(dx, dy), by_atan2(dx, dy), "({dx}, {dy})");
+    }
+}
