@@ -17,7 +17,8 @@
 //! at 16 bits and FITS and XISF as 32-bit floats; [`save_f32`] writes
 //! borrowed samples with FITS header cards, XISF bounds or a chosen format;
 //! [`save_display`] writes a display image, 8 or 16 bits, as PNG, JPEG or
-//! TIFF, or as floats in FITS or XISF.
+//! TIFF, or as floats in FITS or XISF. Exports replace the destination only
+//! after the complete image has been written, flushed and synced.
 //!
 //! FITS rows are read in their stored order, as the rest of Seiza reads
 //! them. [`save`] writes them top-down with a `ROWORDER` card saying so,
@@ -30,6 +31,7 @@ use raster::OrientedRaster;
 use seiza_core::prior::SolvePrior;
 use seiza_fits::{F32ImageData, FitsError, FitsImage, HeaderValue, Pixels, WriteHeaderCard};
 use seiza_xisf::{XisfError, XisfImageInfo, XisfMetadata};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 /// An image file's format, as its extension names it.
@@ -668,9 +670,7 @@ pub fn save_f32(
                     )
                 }
             };
-            image
-                .save_with_format(path, format.raster().expect("a raster format"))
-                .map_err(|error| Error::save(path, error))
+            save_raster(path, &image, format.raster().expect("a raster format"))
         }
         Format::Fits => {
             let mut headers = options.headers.to_vec();
@@ -730,20 +730,170 @@ pub fn save_display(path: &Path, image: &DynamicImage) -> Result<(), Error> {
             } else {
                 DynamicImage::ImageLuma8(image.to_luma8())
             };
-            eight
-                .save_with_format(path, ImageFormat::Jpeg)
-                .map_err(|error| Error::save(path, error))
+            save_raster(path, &eight, ImageFormat::Jpeg)
         }
-        Some(raster) => image
-            .save_with_format(path, raster)
-            .map_err(|error| Error::save(path, error)),
+        Some(raster) => save_raster(path, image, raster),
         None => save(path, &FloatImage::from_display(image)),
     }
+}
+
+// Keep the destination intact until encoding, flushing and syncing all succeed.
+fn save_raster(path: &Path, image: &DynamicImage, format: ImageFormat) -> Result<(), Error> {
+    write_raster_atomic(path, |writer| image.write_to(writer, format))
+}
+
+fn write_raster_atomic(
+    path: &Path,
+    encode: impl FnOnce(&mut BufWriter<&mut std::fs::File>) -> image::ImageResult<()>,
+) -> Result<(), Error> {
+    let write = || -> image::ImageResult<()> {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let prefix = format!(
+            ".{}.",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        );
+        let mut builder = tempfile::Builder::new();
+        builder.prefix(&prefix);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let permissions = std::fs::metadata(path)
+                .map(|metadata| metadata.permissions())
+                .unwrap_or_else(|_| std::fs::Permissions::from_mode(0o666));
+            builder.permissions(permissions);
+        }
+        let mut temporary = builder.tempfile_in(parent)?;
+        let mut writer = BufWriter::new(temporary.as_file_mut());
+        encode(&mut writer)?;
+        writer.flush()?;
+        drop(writer);
+        temporary.as_file().sync_all()?;
+        temporary.persist(path).map_err(|error| error.error)?;
+        Ok(())
+    };
+    write().map_err(|error| Error::save(path, error))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_raster_writes_preserve_existing_files() {
+        for extension in ["png", "tiff", "jpg"] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join(format!("existing.{extension}"));
+            let original = b"previous complete file";
+            std::fs::write(&path, original).unwrap();
+            let result = write_raster_atomic(&path, |writer| {
+                // Flush partial output to disk before failing, rather than merely
+                // failing validation before the destination is opened.
+                writer.write_all(b"partial encoded image")?;
+                writer.flush()?;
+                Err(std::io::Error::other("injected encoding failure").into())
+            });
+            assert!(result.is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_raster_replacement_preserves_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("existing.png");
+        std::fs::write(&path, b"old destination").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        save_display(&path, &DynamicImage::new_rgb8(2, 2)).unwrap();
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+    }
+
+    #[test]
+    fn failed_raster_publication_cleans_up_temporary_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("occupied.png");
+        std::fs::create_dir(&path).unwrap();
+        let sentinel = path.join("keep");
+        std::fs::write(&sentinel, b"keep").unwrap();
+        let image = DynamicImage::new_rgb8(2, 2);
+        assert!(save_display(&path, &image).is_err());
+        assert_eq!(std::fs::read(sentinel).unwrap(), b"keep");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn atomic_display_exports_match_direct_encoding() {
+        let directory = tempfile::tempdir().unwrap();
+        let images = [
+            DynamicImage::ImageRgb8(ImageBuffer::from_fn(7, 5, |x, y| {
+                Rgb([(x * 31) as u8, (y * 47) as u8, 123])
+            })),
+            DynamicImage::ImageLuma16(ImageBuffer::from_fn(7, 5, |x, y| {
+                Luma([(x * 1234 + y * 4321) as u16])
+            })),
+        ];
+        for image in images {
+            for (extension, format) in [
+                ("png", ImageFormat::Png),
+                ("tiff", ImageFormat::Tiff),
+                ("jpg", ImageFormat::Jpeg),
+            ] {
+                let path = directory.path().join(format!("atomic.{extension}"));
+                let direct = directory.path().join(format!("direct.{extension}"));
+                let expected = if format == ImageFormat::Jpeg {
+                    if image.color().has_color() {
+                        DynamicImage::ImageRgb8(image.to_rgb8())
+                    } else {
+                        DynamicImage::ImageLuma8(image.to_luma8())
+                    }
+                } else {
+                    image.clone()
+                };
+                expected.save_with_format(&direct, format).unwrap();
+                std::fs::write(&path, b"old destination").unwrap();
+                save_display(&path, &image).unwrap();
+                assert_eq!(
+                    std::fs::read(&path).unwrap(),
+                    std::fs::read(&direct).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn atomic_float_exports_match_direct_encoding() {
+        let directory = tempfile::tempdir().unwrap();
+        let samples = [-1.0, 0.0, 0.25, 0.5, 1.0, 2.0];
+        let expected = DynamicImage::ImageLuma16(
+            ImageBuffer::from_raw(3, 2, vec![0, 0, 16384, 32768, 65535, 65535]).unwrap(),
+        );
+        for (extension, format) in [("png", ImageFormat::Png), ("tiff", ImageFormat::Tiff)] {
+            let path = directory.path().join(format!("atomic.{extension}"));
+            let direct = directory.path().join(format!("direct.{extension}"));
+            expected.save_with_format(&direct, format).unwrap();
+            std::fs::write(&path, b"old destination").unwrap();
+            save_f32(
+                &path,
+                3,
+                2,
+                F32ImageData::Mono(&samples),
+                &SaveOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                std::fs::read(&direct).unwrap()
+            );
+        }
+    }
 
     #[test]
     fn capture_time_and_optics_come_from_the_header() {

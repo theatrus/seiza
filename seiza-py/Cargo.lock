@@ -1932,6 +1932,7 @@ dependencies = [
  "seiza-fits",
  "seiza-xisf",
  "serde",
+ "tempfile",
  "thiserror",
 ]
 

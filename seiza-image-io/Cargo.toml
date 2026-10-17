@@ -23,7 +23,5 @@ seiza-core.workspace = true
 seiza-fits.workspace = true
 seiza-xisf.workspace = true
 serde.workspace = true
-thiserror.workspace = true
-
-[dev-dependencies]
 tempfile = "3"
+thiserror.workspace = true
