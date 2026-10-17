@@ -311,30 +311,27 @@ pub struct GhsParams {
 /// steps follow in order: a curves boost that lifts the tones above the
 /// target, a soft-knee highlight compression, and a rescale so the brightest
 /// analysed sample reaches 1.
+///
+/// In JSON every field may be left out and takes its default; an explicit
+/// `"black_point_sigma": null` uses the image minimum.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MedianAnchorParams {
     /// Where the background median lands, in `(0, 1)` (default 0.25).
     pub target_median: f64,
-    /// Black point in robust sigmas below the median, at least 0 (default
-    /// 2.7); `None` uses the image minimum.
+    /// Black point in robust sigmas below the median, above 0 (default
+    /// 2.7); `None` uses the image minimum, as does a background with no
+    /// measurable noise.
     pub black_point_sigma: Option<f64>,
     /// Curves boost strength in `[0, 0.9]`: lifts the quarter tones above
     /// the target while black, the target and white stay put (default 0).
-    #[serde(default)]
     pub curves_boost: f64,
     /// Highlight compression in `[0, 1]` above `hdr_knee` (default 0).
-    #[serde(default)]
     pub hdr_amount: f64,
     /// Where highlight compression starts, in `(0, 1)` (default 0.75).
-    #[serde(default = "default_hdr_knee")]
     pub hdr_knee: f64,
     /// Rescale so the brightest analysed sample reaches 1 (default off).
-    #[serde(default)]
     pub normalize: bool,
-}
-
-const fn default_hdr_knee() -> f64 {
-    0.75
 }
 
 impl Default for MedianAnchorParams {
@@ -344,7 +341,7 @@ impl Default for MedianAnchorParams {
             black_point_sigma: Some(2.7),
             curves_boost: 0.0,
             hdr_amount: 0.0,
-            hdr_knee: default_hdr_knee(),
+            hdr_knee: 0.75,
             normalize: false,
         }
     }
@@ -727,17 +724,13 @@ impl Distribution {
     }
 
     /// Robust noise from the samples at or below the median: the normal
-    /// scale times their median absolute deviation from their own median,
-    /// which stars and bright structure cannot inflate.
+    /// scale times their median distance below the median, which stars and
+    /// bright structure cannot inflate. For Gaussian noise that median
+    /// distance is the same 0.6745 sigma as a two-sided MAD.
     fn lower_half_noise(&self) -> f64 {
         let lower = &self.sorted[..=self.sorted.len() / 2];
-        let center = lower[lower.len() / 2];
-        let mut deviations = lower
-            .iter()
-            .map(|value| (*value - center).abs())
-            .collect::<Vec<_>>();
-        deviations.sort_unstable_by(f32::total_cmp);
-        f64::from(deviations[deviations.len() / 2]) * NORMAL_MAD_SCALE
+        let median = lower[lower.len() - 1];
+        f64::from(median - lower[lower.len() / 2]) * NORMAL_MAD_SCALE
     }
 
     fn percentile(&self, percentile: f64) -> f32 {
@@ -892,12 +885,14 @@ impl ResolvedMedianAnchor {
         validate_median_anchor(params)?;
         let median = statistics.median;
         let black = match params.black_point_sigma {
-            Some(sigma) => (median - sigma * noise).max(statistics.min),
-            None => statistics.min,
+            // A background with no measurable noise would put the black point
+            // on the median, which would then map to 0; the minimum is used.
+            Some(sigma) if noise > 0.0 => (median - sigma * noise).max(statistics.min),
+            _ => statistics.min,
         }
         .min(0.99);
-        // A median at or past the black point leaves nothing to place: the
-        // rescaled median is held just inside the curve's domain.
+        // A median at the minimum leaves nothing to place: the rescaled
+        // median is held just inside the curve's domain.
         let rescaled = ((median - black) / (1.0 - black)).clamp(1e-6, 1.0 - 1e-6);
         let boost = (params.curves_boost > 0.0).then(|| {
             let target = params.target_median;
@@ -998,10 +993,10 @@ fn validate_median_anchor(params: MedianAnchorParams) -> Result<()> {
         ));
     }
     if let Some(sigma) = params.black_point_sigma
-        && (!sigma.is_finite() || sigma < 0.0)
+        && (!sigma.is_finite() || sigma <= 0.0)
     {
         return Err(StretchError::Invalid(
-            "black point sigma must be finite and non-negative".into(),
+            "black point sigma must be finite and positive".into(),
         ));
     }
     if !params.curves_boost.is_finite() || !(0.0..=0.9).contains(&params.curves_boost) {
@@ -3178,6 +3173,10 @@ mod tests {
                 ..MedianAnchorParams::default()
             },
             MedianAnchorParams {
+                black_point_sigma: Some(0.0),
+                ..MedianAnchorParams::default()
+            },
+            MedianAnchorParams {
                 curves_boost: 0.95,
                 ..MedianAnchorParams::default()
             },
@@ -3216,5 +3215,75 @@ mod tests {
                 ..MedianAnchorParams::default()
             })
         );
+        // Every setting may be left out, the black point included; null
+        // asks for the image minimum.
+        let bare: StretchModel = serde_json::from_str(r#"{"type":"median-anchor"}"#).unwrap();
+        assert_eq!(
+            bare,
+            StretchModel::MedianAnchor(MedianAnchorParams::default())
+        );
+        let unclipped: StretchModel =
+            serde_json::from_str(r#"{"type":"median-anchor","black_point_sigma":null}"#).unwrap();
+        assert_eq!(
+            unclipped,
+            StretchModel::MedianAnchor(MedianAnchorParams {
+                black_point_sigma: None,
+                ..MedianAnchorParams::default()
+            })
+        );
+    }
+
+    #[test]
+    fn median_anchor_noise_is_the_gaussian_sigma_and_ignores_stars() {
+        // Twelve uniforms sum to a near-Gaussian with sigma 1: here sigma
+        // 0.004 about 0.05, with one sample in fifty a bright star.
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut uniform = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        let data = (0..100_000)
+            .map(|index| {
+                if index % 50 == 0 {
+                    0.8
+                } else {
+                    let normal = (0..12).map(|_| uniform()).sum::<f64>() - 6.0;
+                    (0.05 + 0.004 * normal) as f32
+                }
+            })
+            .collect::<Vec<_>>();
+        let analysis = StretchAnalysis::analyze(&data, 1, 200_000).unwrap();
+        let noise = analysis.linked.lower_half_noise();
+        assert!((noise / 0.004 - 1.0).abs() < 0.03, "{noise}");
+        let ResolvedCurve::MedianAnchor(anchor) =
+            median_anchor_curve(&data, MedianAnchorParams::default())
+        else {
+            panic!("a median anchor curve");
+        };
+        let median = analysis.linked_statistics().median;
+        let sigmas = (median - f64::from(anchor.black)) / 0.004;
+        assert!((sigmas - 2.7).abs() < 0.1, "{sigmas}");
+    }
+
+    #[test]
+    fn median_anchor_without_measurable_noise_uses_the_minimum() {
+        // A quarter and more of the samples sit on the median, so the noise
+        // measures 0; the black point falls back to the minimum and the
+        // median still lands on the target.
+        let data = (0..1_000)
+            .map(|index| match index {
+                0..10 => 0.02,
+                10..600 => 0.1,
+                _ => 0.1 + (index - 600) as f32 * 0.002,
+            })
+            .collect::<Vec<_>>();
+        let curve = median_anchor_curve(&data, MedianAnchorParams::default());
+        let ResolvedCurve::MedianAnchor(anchor) = curve else {
+            panic!("a median anchor curve");
+        };
+        assert_eq!(anchor.black, 0.02);
+        assert!((curve.map(0.1) - 0.25).abs() < 1.0e-5);
     }
 }

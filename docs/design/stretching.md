@@ -72,11 +72,12 @@ pipeline instead of one indeterminate spinner.
   a shadow clipping distance and target median resolve an explicit MTF curve.
 - `MedianAnchor` places the background median exactly on a target with one
   closed-form midtones-family curve. The black point sits a number of robust
-  sigmas below the median, the noise taken as 1.4826 times the MAD of the
-  samples at or below the median so stars cannot inflate it, or at the image
-  minimum. Samples are
-  rescaled so the black point maps to 0 and 1 stays at 1, and with the
-  rescaled median `M` and target `T`,
+  sigmas below the median, or at the image minimum. The noise is 1.4826 times
+  the median distance below the median of the samples at or below it, so stars
+  cannot inflate it; for Gaussian noise that is the true sigma, the same scale
+  as Auto-MTF's shadow clip. A background with no measurable noise uses the
+  minimum. Samples are rescaled so the black point maps to 0 and 1 stays at
+  1, and with the rescaled median `M` and target `T`,
   `S(r) = (M - 1)·T·r / (M·(T + r - 1) - T·r)`, so `S(0) = 0`, `S(1) = 1` and
   `S(M) = T` exactly. Optional steps follow in order: a curves boost that lifts
   the quarter tones above the target (pinned at the target and 1), a
