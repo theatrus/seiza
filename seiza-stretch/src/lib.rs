@@ -3897,6 +3897,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(terse, StretchModel::Layered(LayeredParams::default()));
+        let bare: StretchModel = serde_json::from_str(r#"{"type":"layered"}"#).unwrap();
+        assert_eq!(bare, StretchModel::Layered(LayeredParams::default()));
         // The resolved plan serializes for provenance.
         let plan = layered(LayeredParams::default())
             .resolve_for(&data, 1)

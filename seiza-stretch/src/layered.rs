@@ -25,7 +25,10 @@ use crate::{
 /// range compression pulls star cores, found in a 2-pixel detail layer,
 /// toward a soft-knee highlight curve. Colour follows luminance, and an
 /// optional saturation lift leaves hue and value alone.
+///
+/// In JSON every field may be left out and takes its default.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LayeredParams {
     /// Where the background median lands, in `(0, 1)` (default 0.15).
     pub target_background: f64,
@@ -33,39 +36,21 @@ pub struct LayeredParams {
     /// 0.5): 6 robust sigmas below it at 0, 1.5 at 1.
     pub aggressiveness: f64,
     /// How far star cores are compressed, in `[0, 1]` (default 0).
-    #[serde(default)]
     pub dynamic_range_compression: f64,
     /// Size in pixels that splits large structure from detail, from 8
     /// through 1024 (default 256).
-    #[serde(default = "default_scale_separation")]
     pub scale_separation: u32,
     /// How much of the background's slope detail on bright structure keeps,
     /// in `[0, 1]` (default 0).
-    #[serde(default)]
     pub contrast_recovery: f64,
     /// Saturation lift, in `[0, 1]` (default 0).
-    #[serde(default)]
     pub saturation_amount: f64,
     /// How much the lift favours weakly coloured pixels, in `[0, 1]`
     /// (default 0.5).
-    #[serde(default = "default_saturation_boost")]
     pub saturation_boost: f64,
     /// Scale the saturation lift by each pixel's value, so dark noise gains
     /// little colour (default on).
-    #[serde(default = "default_lightness_mask")]
     pub lightness_mask: bool,
-}
-
-const fn default_scale_separation() -> u32 {
-    256
-}
-
-const fn default_saturation_boost() -> f64 {
-    0.5
-}
-
-const fn default_lightness_mask() -> bool {
-    true
 }
 
 impl Default for LayeredParams {
@@ -74,20 +59,20 @@ impl Default for LayeredParams {
             target_background: 0.15,
             aggressiveness: 0.5,
             dynamic_range_compression: 0.0,
-            scale_separation: default_scale_separation(),
+            scale_separation: 256,
             contrast_recovery: 0.0,
             saturation_amount: 0.0,
-            saturation_boost: default_saturation_boost(),
-            lightness_mask: default_lightness_mask(),
+            saturation_boost: 0.5,
+            lightness_mask: true,
         }
     }
 }
 
 /// The most contrast recovery multiplies detail by.
 const MAX_DETAIL_GAIN: f64 = 4.0;
-/// Blur radius in pixels of the fine layer that finds star cores.
+/// Blur sigma in pixels of the fine layer that finds star cores.
 const FINE_SIGMA: f64 = 2.0;
-/// Highlight curve the compression pulls toward: knee and end slope.
+/// Knee of the highlight curve the compression pulls toward.
 const DRC_KNEE: f64 = 0.5;
 /// Below this, a pixel's rescaled luminance is too dark to carry colour.
 const COLOUR_EPSILON: f64 = 1.0e-6;
