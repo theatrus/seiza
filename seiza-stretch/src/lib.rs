@@ -34,6 +34,16 @@ pub enum StretchError {
 
 pub type Result<T> = std::result::Result<T, StretchError>;
 
+/// The release whose output this build reproduces.
+///
+/// A caller that caches stretched images should key them on this, not on
+/// the crate version, so that a release which changes no output leaves those
+/// caches valid. Set it to the release that ships a change when the change
+/// alters what a stretch produces for the same samples and settings. A new
+/// model or option whose default leaves the output alone does not move it.
+/// `tests/output_version.rs` fails when its fixtures' output changes.
+pub const OUTPUT_VERSION: &str = "0.3.0";
+
 /// Default lower percentile used to map physical linear samples into the
 /// unit-linear domain expected by display stretches.
 pub const DEFAULT_SAMPLE_BLACK_PERCENTILE: f64 = 0.001;

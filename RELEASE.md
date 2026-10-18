@@ -169,6 +169,14 @@ git push origin py-v<version>
 - **`seiza-py` version == `seiza`/workspace version, always.** The Python package
   and the Rust crates are one release; the `v<version>` and `py-v<version>` tags
   carry the same `<version>`.
+- **`OUTPUT_VERSION` moves only with output.** `seiza-stacking` and
+  `seiza-stretch` each export the release whose output they reproduce, and
+  PSF Guard keys its cached stacks, masters and previews on it. A release
+  that leaves it alone keeps those caches; moving it makes every user
+  rebuild every stack. The PR that changes output sets it to the release
+  that will ship the change, and records the new summary in the crate's
+  `tests/output_version.rs`, which fails until both are done. A release
+  bump never touches it.
 - The `v` tag and the `py-v` tag are **separate** — pushing one does not publish
   the other.
 - crates.io publishing is **manual**; only `release.yml`'s OS packages and

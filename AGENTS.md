@@ -51,6 +51,9 @@ stub stays a true account of Python's surface.
 ## Other rules
 
 - Which crate to depend on, and how releases work: `RELEASE.md`.
+- A change to what stacking, master building or a stretch produces moves
+  that crate's `OUTPUT_VERSION` to the release that will ship it, and
+  records the new output in its `tests/output_version.rs` (`RELEASE.md`).
 - Every image file is read and written through `seiza-image-io`, by its
   extension, the C ABI included.
 - Pixels count from 0, with centres on whole numbers; an image's middle is

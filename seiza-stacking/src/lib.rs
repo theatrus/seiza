@@ -148,6 +148,18 @@ use std::path::PathBuf;
 /// The package version of the stacking algorithms used by this build.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The release whose output this build reproduces.
+///
+/// A caller that caches stacks, masters or stack checkpoints should key them
+/// on this, not [`VERSION`], so that a release which changes no output leaves
+/// those caches valid. Set it to the release that ships a change when the
+/// change alters what stacking, master building or registration produces for
+/// the same inputs and options, whether the change is in this crate or in a
+/// crate it calls. A new option whose default leaves the output alone does
+/// not move it. `tests/output_version.rs` fails when its fixtures' output
+/// changes.
+pub const OUTPUT_VERSION: &str = "0.40.0";
+
 /// Anything that can go wrong while calibrating, registering, normalizing, or
 /// stacking frames.
 #[derive(Debug, thiserror::Error)]
