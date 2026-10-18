@@ -1829,7 +1829,7 @@ dependencies = [
 
 [[package]]
 name = "seiza"
-version = "0.36.0"
+version = "0.37.0"
 dependencies = [
  "directories",
  "image",
@@ -1912,7 +1912,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-fits"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "flate2",
  "multiversion",
@@ -1923,7 +1923,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-image-io"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "chrono",
  "image",
@@ -1945,7 +1945,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-parallax"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "ab_glyph",
  "image",
@@ -1962,7 +1962,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-py"
-version = "0.36.0"
+version = "0.37.0"
 dependencies = [
  "image",
  "numpy",
@@ -2015,7 +2015,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-stacking"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "multiversion",
  "postcard",
@@ -2052,7 +2052,7 @@ version = "0.1.0"
 
 [[package]]
 name = "seiza-stretch"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "rayon",
  "seiza-stats",
@@ -2062,7 +2062,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-xisf"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "flate2",
  "lz4_flex",
