@@ -14,6 +14,7 @@ use crate::{
     XisfMetadata,
 };
 use quick_xml::escape::escape;
+use rayon::prelude::*;
 use seiza_fits::{F32ImageData, HeaderValue, WriteHeaderCard};
 use sha2::digest::DynDigest;
 use std::collections::BTreeSet;
@@ -24,9 +25,10 @@ use std::path::Path;
 
 const BLOCK_ALIGNMENT: usize = 4096;
 const PIXEL_CHUNK_BYTES: usize = 1024 * 1024;
-/// The largest block compressed as one unit. Larger blocks are split into
-/// subblocks, which keeps every codec within its input limit.
-const SUBBLOCK_BYTES: usize = 1 << 30;
+/// The length of each compressed subblock, as PixInsight uses. Subblocks
+/// compress in parallel, and one that would not shrink, such as a byte
+/// plane of noise, is stored uncompressed.
+const SUBBLOCK_BYTES: usize = 4 << 20;
 
 /// Choices for [`write_f32_image_with_options`].
 ///
@@ -110,12 +112,6 @@ impl ChecksumAlgorithm {
             Self::Sha3_256 => Box::new(sha3::Sha3_256::default()),
             Self::Sha3_512 => Box::new(sha3::Sha3_512::default()),
         }
-    }
-
-    fn digest(self, bytes: &[u8]) -> String {
-        let mut hasher = self.hasher();
-        hasher.update(bytes);
-        crate::lowercase_hex(&hasher.finalize())
     }
 }
 
@@ -282,7 +278,9 @@ fn write_image(
     writer.write_all(&vec![b' '; data_offset - PREAMBLE_LEN - xml.len()])?;
 
     if let Some(stored) = &block.stored {
-        writer.write_all(stored)?;
+        for subblock in stored {
+            writer.write_all(subblock)?;
+        }
     } else {
         write_samples(&mut writer, width, height, pixels)?;
     }
@@ -494,8 +492,9 @@ impl Carried {
 /// The pixel block as it will be stored, with the `Image` attributes and
 /// `Metadata` properties that describe it.
 struct PreparedBlock {
-    /// The stored bytes, or `None` to stream the samples uncompressed.
-    stored: Option<Vec<u8>>,
+    /// The stored bytes of each subblock, or `None` to stream the samples
+    /// uncompressed.
+    stored: Option<Vec<Vec<u8>>>,
     bytes: usize,
     attributes: String,
     /// The codec identifier, such as `zstd+sh`, when the block is compressed.
@@ -552,18 +551,10 @@ fn prepare_block(
         checksum: options.checksum,
     };
     if let Some(compression) = options.compression {
-        let mut raw = Vec::with_capacity(block.bytes);
-        write_samples(&mut raw, width, height, pixels)?;
         let item_bytes = std::mem::size_of::<f32>();
-        let shuffled;
-        let input = if compression.byte_shuffle {
-            shuffled = shuffle(&raw, item_bytes);
-            &shuffled
-        } else {
-            &raw
-        };
+        let input = block_bytes(width * height, pixels, compression.byte_shuffle);
         let subblocks = input
-            .chunks(subblock_bytes)
+            .par_chunks(subblock_bytes)
             .map(|chunk| {
                 // Revision 2: a subblock that would not shrink is stored
                 // uncompressed, and readers copy a subblock whose stored
@@ -579,14 +570,14 @@ fn prepare_block(
             .collect::<Vec<_>>();
         let compressed_bytes = subblocks.iter().map(|(data, _)| data.len()).sum::<usize>();
         // A block that does not shrink is stored as it is.
-        if compressed_bytes < raw.len() {
+        if compressed_bytes < input.len() {
             let name = codec_name(compression.codec);
             let codec = if compression.byte_shuffle {
                 format!("{name}+sh")
             } else {
                 name.to_string()
             };
-            let _ = write!(block.attributes, " compression=\"{codec}:{}", raw.len());
+            let _ = write!(block.attributes, " compression=\"{codec}:{}", input.len());
             if compression.byte_shuffle {
                 let _ = write!(block.attributes, ":{item_bytes}");
             }
@@ -601,15 +592,27 @@ fn prepare_block(
             }
             block.codec = Some(codec);
             block.level = abstract_compression_level(compression);
-            drop(raw);
-            block.stored = Some(subblocks.into_iter().flat_map(|(data, _)| data).collect());
+            drop(input);
+            block.stored = Some(subblocks.into_iter().map(|(data, _)| data).collect());
         } else {
-            block.stored = Some(raw);
+            drop(subblocks);
+            let raw = if compression.byte_shuffle {
+                block_bytes(width * height, pixels, false)
+            } else {
+                input
+            };
+            block.stored = Some(vec![raw]);
         }
     }
     if let Some(checksum) = options.checksum {
         let digest = match &block.stored {
-            Some(stored) => checksum.digest(stored),
+            Some(stored) => {
+                let mut hasher = checksum.hasher();
+                for subblock in stored {
+                    hasher.update(subblock);
+                }
+                crate::lowercase_hex(&hasher.finalize())
+            }
             // Uncompressed samples are hashed as they stream, rather than
             // gathered into one buffer.
             None => {
@@ -625,7 +628,7 @@ fn prepare_block(
         );
     }
     if let Some(stored) = &block.stored {
-        block.bytes = stored.len();
+        block.bytes = stored.iter().map(Vec::len).sum();
     }
     Ok(block)
 }
@@ -674,8 +677,54 @@ fn abstract_compression_level(compression: WriteCompression) -> Option<i32> {
     Some(1 + ((level - low) * 99 + (high - low) / 2) / (high - low))
 }
 
+/// Bytes one task fills in [`block_bytes`].
+const SHUFFLE_TASK_BYTES: usize = 1 << 20;
+
+/// The samples of `pixels` in planar order as little-endian bytes, built in
+/// parallel. With `byte_shuffle`, they follow the XISF byte shuffle: every
+/// sample's first byte, then every second byte, and so on.
+fn block_bytes(pixel_count: usize, pixels: F32ImageData<'_>, byte_shuffle: bool) -> Vec<u8> {
+    let samples = pixels.samples();
+    let sample = |index: usize| match pixels {
+        F32ImageData::Mono(samples) | F32ImageData::RgbPlanar(samples) => samples[index],
+        F32ImageData::RgbInterleaved(samples) => {
+            samples[index % pixel_count * 3 + index / pixel_count]
+        }
+    };
+    let item_bytes = std::mem::size_of::<f32>();
+    let mut bytes = vec![0_u8; std::mem::size_of_val(samples)];
+    if byte_shuffle {
+        bytes
+            .par_chunks_mut(samples.len())
+            .enumerate()
+            .for_each(|(lane, lane_bytes)| {
+                lane_bytes
+                    .par_chunks_mut(SHUFFLE_TASK_BYTES)
+                    .enumerate()
+                    .for_each(|(task, chunk)| {
+                        let first = task * SHUFFLE_TASK_BYTES;
+                        for (offset, byte) in chunk.iter_mut().enumerate() {
+                            *byte = sample(first + offset).to_le_bytes()[lane];
+                        }
+                    });
+            });
+    } else {
+        bytes
+            .par_chunks_mut(SHUFFLE_TASK_BYTES)
+            .enumerate()
+            .for_each(|(task, chunk)| {
+                let first = task * SHUFFLE_TASK_BYTES / item_bytes;
+                for (offset, item) in chunk.chunks_exact_mut(item_bytes).enumerate() {
+                    item.copy_from_slice(&sample(first + offset).to_le_bytes());
+                }
+            });
+    }
+    bytes
+}
+
 /// The XISF byte shuffle: all first bytes of each item, then all second
 /// bytes, and so on. Trailing bytes that do not form a whole item stay last.
+#[cfg(test)]
 fn shuffle(bytes: &[u8], item_bytes: usize) -> Vec<u8> {
     let items = bytes.len() / item_bytes;
     let mut output = Vec::with_capacity(bytes.len());
@@ -1251,6 +1300,46 @@ mod tests {
     }
 
     #[test]
+    fn splits_compressed_blocks_into_four_mib_subblocks() {
+        let options = WriteOptions {
+            compression: Some(WriteCompression::recommended()),
+            checksum: Some(ChecksumAlgorithm::Sha1),
+            metadata: None,
+            bounds: None,
+        };
+        // Exactly one subblock's worth is compressed whole; more is split.
+        for (height, lengths) in [
+            (1024, Vec::new()),
+            (1100, vec![SUBBLOCK_BYTES, 1024 * 76 * 4]),
+        ] {
+            let values = (0..1024 * height)
+                .map(|index| 0.25 + (index % 251) as f32 / 1000.0)
+                .collect::<Vec<_>>();
+            let mut encoded = Vec::new();
+            write_image(
+                &mut encoded,
+                (1024, height, F32ImageData::Mono(&values)),
+                &[],
+                &options,
+                SUBBLOCK_BYTES,
+            )
+            .unwrap();
+            let read = crate::read_image_from_bytes(&encoded, 0).unwrap();
+            let Pixels::F32(actual) = &read.image.pixels else {
+                panic!("writer must emit f32 pixels");
+            };
+            assert!(actual == &values, "{height} rows");
+            let info = read.info.compression.expect("block must be compressed");
+            let uncompressed = info
+                .subblocks
+                .iter()
+                .map(|&(_, length)| length as usize)
+                .collect::<Vec<_>>();
+            assert_eq!(uncompressed, lengths);
+        }
+    }
+
+    #[test]
     fn rejects_unavailable_codecs_and_levels() {
         let values = smooth_rgb(16, 8);
         let write = |codec, level| {
@@ -1297,6 +1386,45 @@ mod tests {
         assert_eq!(level(CompressionCodec::Zstd, 1), Some(1));
         assert_eq!(level(CompressionCodec::Zstd, 22), Some(100));
         assert_eq!(level(CompressionCodec::Lz4, 0), None);
+    }
+
+    #[test]
+    fn block_bytes_match_the_streamed_samples_and_their_shuffle() {
+        // More than one task's worth in each byte lane.
+        let (width, height) = (1000, 400);
+        let values = (0..width * height * 3)
+            .map(|index| index as f32 * 0.37)
+            .collect::<Vec<_>>();
+        let pixel_count = width * height;
+        let planar = planar_from(&values, pixel_count);
+        for pixels in [
+            F32ImageData::Mono(&values),
+            F32ImageData::RgbPlanar(&values),
+            F32ImageData::RgbInterleaved(&values),
+        ] {
+            let pixel_count = values.len() / pixels.planes();
+            let height = pixel_count / width;
+            let mut streamed = Vec::new();
+            write_samples(&mut streamed, width, height, pixels).unwrap();
+            assert_eq!(block_bytes(pixel_count, pixels, false), streamed);
+            assert_eq!(
+                block_bytes(pixel_count, pixels, true),
+                shuffle(&streamed, 4)
+            );
+        }
+        let mut interleaved = Vec::new();
+        write_samples(
+            &mut interleaved,
+            width,
+            height,
+            F32ImageData::RgbInterleaved(&values),
+        )
+        .unwrap();
+        let planar_bytes = planar
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        assert_eq!(interleaved, planar_bytes);
     }
 
     #[test]

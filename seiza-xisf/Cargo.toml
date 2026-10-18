@@ -15,6 +15,7 @@ categories = ["science", "multimedia::images", "parser-implementations"]
 flate2.workspace = true
 lz4_flex.workspace = true
 quick-xml.workspace = true
+rayon.workspace = true
 seiza-fits.workspace = true
 sha1.workspace = true
 sha2.workspace = true
