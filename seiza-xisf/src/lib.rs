@@ -30,6 +30,7 @@
 //! [`open`] still hands back exactly what is stored.
 
 use flate2::read::ZlibDecoder;
+use rayon::prelude::*;
 use seiza_fits::{FitsImage, HeaderValue, Pixels, parse_header_value};
 use sha1::Sha1;
 use sha2::{Sha256, Sha512};
@@ -61,6 +62,9 @@ const PREAMBLE_BYTES: u64 = 16;
 const MAX_HEADER_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SAMPLES: usize = 2_000_000_000;
 const CHUNK_BYTES: usize = 1024 * 1024;
+/// The most stored bytes read at once for subblocks to decompress in
+/// parallel. A larger subblock is read alone.
+const DECOMPRESS_BATCH_BYTES: usize = 256 << 20;
 
 #[derive(Debug, thiserror::Error)]
 pub enum XisfError {
@@ -2051,12 +2055,23 @@ fn decode_block(reader: &mut (impl Read + Seek), image: &ParsedImage) -> Result<
     Ok(pixels)
 }
 
-/// Decompress a whole data block, one independently compressed subblock at a
-/// time. A block without a `subblocks` attribute is a single subblock.
+/// Decompress a whole data block. A block without a `subblocks` attribute is
+/// a single subblock. Subblocks are read in batches, and each batch
+/// decompresses in parallel, straight into the block's bytes.
 fn decompress(
     stored: &mut dyn Read,
     block: &DataBlock,
     compression: &CompressionInfo,
+) -> Result<Vec<u8>, XisfError> {
+    decompress_in_batches(stored, block, compression, DECOMPRESS_BATCH_BYTES)
+}
+
+/// [`decompress`], reading at most `batch_limit` stored bytes at once.
+fn decompress_in_batches(
+    stored: &mut dyn Read,
+    block: &DataBlock,
+    compression: &CompressionInfo,
+    batch_limit: usize,
 ) -> Result<Vec<u8>, XisfError> {
     let whole = [(block.location.bytes(), block.expected_bytes as u64)];
     let subblocks = if compression.subblocks.is_empty() {
@@ -2064,76 +2079,138 @@ fn decompress(
     } else {
         &compression.subblocks[..]
     };
+    let too_large = || XisfError::Malformed("subblock is too large".into());
+    let lengths = subblocks
+        .iter()
+        .map(|&(compressed, uncompressed)| {
+            Ok((
+                usize::try_from(compressed).map_err(|_| too_large())?,
+                usize::try_from(uncompressed).map_err(|_| too_large())?,
+            ))
+        })
+        .collect::<Result<Vec<_>, XisfError>>()?;
+    let decompressed = lengths
+        .iter()
+        .try_fold(0_usize, |total, &(_, uncompressed)| {
+            total.checked_add(uncompressed)
+        });
+    if decompressed != Some(block.expected_bytes) {
+        return Err(XisfError::Malformed(format!(
+            "subblocks decompress to {decompressed:?} bytes; expected {}",
+            block.expected_bytes
+        )));
+    }
     let mut raw = Vec::new();
     raw.try_reserve_exact(block.expected_bytes)
         .map_err(|_| XisfError::Malformed("decompression allocation failed".into()))?;
-    for &(compressed, uncompressed) in subblocks {
-        let uncompressed = usize::try_from(uncompressed)
-            .map_err(|_| XisfError::Malformed("subblock is too large".into()))?;
-        let compressed = usize::try_from(compressed)
-            .map_err(|_| XisfError::Malformed("subblock is too large".into()))?;
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(compressed)
+    raw.resize(block.expected_bytes, 0);
+    let mut output = raw.as_mut_slice();
+    let mut first = 0;
+    while first < lengths.len() {
+        let mut end = first;
+        let mut batch_bytes = 0_usize;
+        while end < lengths.len() && (end == first || batch_bytes + lengths[end].0 <= batch_limit) {
+            batch_bytes += lengths[end].0;
+            end += 1;
+        }
+        let mut input = Vec::new();
+        input
+            .try_reserve_exact(batch_bytes)
             .map_err(|_| XisfError::Malformed("decompression allocation failed".into()))?;
-        Read::take(&mut *stored, compressed as u64).read_to_end(&mut bytes)?;
-        if bytes.len() != compressed {
+        Read::take(&mut *stored, batch_bytes as u64).read_to_end(&mut input)?;
+        if input.len() != batch_bytes {
             return Err(XisfError::Malformed(
                 "compressed data block is truncated".into(),
             ));
         }
-        let decoded = decompress_subblock(compression.codec, &bytes, uncompressed);
-        // Under Revision 2, a subblock as long as its data is stored
-        // uncompressed. Earlier encoders could write codec output of that
-        // length, so such a subblock is read decoded if it decodes to
-        // exactly its length, and copied as it is otherwise.
-        match decoded {
-            Ok(decoded) => raw.extend_from_slice(&decoded),
-            Err(_) if compressed == uncompressed => raw.extend_from_slice(&bytes),
-            Err(error) => return Err(error),
+        let mut pieces = Vec::with_capacity(end - first);
+        let mut rest = input.as_slice();
+        for &(compressed, uncompressed) in &lengths[first..end] {
+            let (subblock, after) = rest.split_at(compressed);
+            let (target, remaining) = std::mem::take(&mut output).split_at_mut(uncompressed);
+            pieces.push((subblock, target));
+            rest = after;
+            output = remaining;
         }
-    }
-    if raw.len() != block.expected_bytes {
-        return Err(XisfError::Malformed(format!(
-            "decompressed {} bytes; expected {}",
-            raw.len(),
-            block.expected_bytes
-        )));
+        pieces.into_par_iter().try_for_each(|(subblock, target)| {
+            decompress_subblock(compression.codec, subblock, target)
+        })?;
+        first = end;
     }
     Ok(raw)
 }
 
-/// Decompress one subblock to exactly `uncompressed` bytes.
+/// Decompress one subblock into `output`, which it must fill exactly.
 fn decompress_subblock(
     codec: CompressionCodec,
     bytes: &[u8],
-    uncompressed: usize,
-) -> Result<Vec<u8>, XisfError> {
-    let mut output = Vec::new();
-    output
-        .try_reserve_exact(uncompressed)
-        .map_err(|_| XisfError::Malformed("decompression allocation failed".into()))?;
-    match codec {
-        CompressionCodec::Zlib => {
-            read_decompressed(ZlibDecoder::new(bytes), uncompressed, &mut output)?
+    output: &mut [u8],
+) -> Result<(), XisfError> {
+    match decode_subblock(codec, bytes, output) {
+        Ok(()) => Ok(()),
+        // Under Revision 2, a subblock as long as its data is stored
+        // uncompressed. Earlier encoders could write codec output of that
+        // length, so such a subblock is read decoded if it decodes to
+        // exactly its length, and copied as it is otherwise.
+        Err(_) if bytes.len() == output.len() => {
+            output.copy_from_slice(bytes);
+            Ok(())
         }
+        Err(error) => Err(error),
+    }
+}
+
+fn decode_subblock(
+    codec: CompressionCodec,
+    bytes: &[u8],
+    output: &mut [u8],
+) -> Result<(), XisfError> {
+    match codec {
+        CompressionCodec::Zlib => fill_exactly(ZlibDecoder::new(bytes), output),
         CompressionCodec::Zstd => {
             let decoder = zstd::stream::read::Decoder::new(bytes)
                 .map_err(|error| XisfError::Malformed(format!("invalid zstd stream: {error}")))?;
-            read_decompressed(decoder, uncompressed, &mut output)?;
+            fill_exactly(decoder, output)
         }
         CompressionCodec::Lz4 | CompressionCodec::Lz4Hc => {
-            output = lz4_flex::block::decompress(bytes, uncompressed)
+            let decoded = lz4_flex::block::decompress_into(bytes, output)
                 .map_err(|error| XisfError::Malformed(format!("invalid LZ4 block: {error}")))?;
-            if output.len() != uncompressed {
+            if decoded != output.len() {
                 return Err(XisfError::Malformed(format!(
-                    "decompressed {} bytes; expected {uncompressed}",
+                    "decompressed {decoded} bytes; expected {}",
                     output.len()
                 )));
             }
+            Ok(())
         }
     }
-    Ok(output)
+}
+
+/// Fill `output` from `reader`, which must then be at its end.
+fn fill_exactly(mut reader: impl Read, output: &mut [u8]) -> Result<(), XisfError> {
+    let mut filled = 0;
+    while filled < output.len() {
+        match reader.read(&mut output[filled..]) {
+            Ok(0) => break,
+            Ok(bytes) => filled += bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if filled < output.len() {
+        return Err(XisfError::Malformed(format!(
+            "decompressed {filled} bytes; expected {}",
+            output.len()
+        )));
+    }
+    let mut extra = [0_u8; 1];
+    if reader.read(&mut extra)? != 0 {
+        return Err(XisfError::Malformed(format!(
+            "decompressed more than the expected {} bytes",
+            output.len()
+        )));
+    }
+    Ok(())
 }
 
 /// Verify, read, decompress and unshuffle a whole data block.
@@ -2369,22 +2446,28 @@ fn decode_shuffled(bytes: &[u8], image: &ParsedImage) -> Result<Pixels, XisfErro
     let mut pixels = empty_pixels(image.info.sample_format, count)?;
     match (&mut pixels, image.info.sample_format) {
         (Pixels::U8(values), SampleFormat::UInt8) => values.extend_from_slice(bytes),
-        (Pixels::U16(values), SampleFormat::UInt16) => values.extend(
-            (0..count).map(|sample| u16::from_le_bytes([byte_at(sample, 0), byte_at(sample, 1)])),
+        (Pixels::U16(values), SampleFormat::UInt16) => values.par_extend(
+            (0..count)
+                .into_par_iter()
+                .map(|sample| u16::from_le_bytes([byte_at(sample, 0), byte_at(sample, 1)])),
         ),
-        (Pixels::F64(values), SampleFormat::UInt32) => values.extend((0..count).map(|sample| {
-            u32::from_le_bytes(std::array::from_fn(|lane| byte_at(sample, lane))) as f64
-        })),
-        (Pixels::F64(values), SampleFormat::UInt64) => values.extend((0..count).map(|sample| {
-            u64::from_le_bytes(std::array::from_fn(|lane| byte_at(sample, lane))) as f64
-        })),
+        (Pixels::F64(values), SampleFormat::UInt32) => {
+            values.par_extend((0..count).into_par_iter().map(|sample| {
+                u32::from_le_bytes(std::array::from_fn(|lane| byte_at(sample, lane))) as f64
+            }))
+        }
+        (Pixels::F64(values), SampleFormat::UInt64) => {
+            values.par_extend((0..count).into_par_iter().map(|sample| {
+                u64::from_le_bytes(std::array::from_fn(|lane| byte_at(sample, lane))) as f64
+            }))
+        }
         (Pixels::F32(values), SampleFormat::Float32) => {
-            values.extend((0..count).map(|sample| {
+            values.par_extend((0..count).into_par_iter().map(|sample| {
                 f32::from_le_bytes(std::array::from_fn(|lane| byte_at(sample, lane)))
             }))
         }
         (Pixels::F64(values), SampleFormat::Float64) => {
-            values.extend((0..count).map(|sample| {
+            values.par_extend((0..count).into_par_iter().map(|sample| {
                 f64::from_le_bytes(std::array::from_fn(|lane| byte_at(sample, lane)))
             }))
         }
@@ -4361,14 +4444,68 @@ mod tests {
     }
 
     #[test]
+    fn decompresses_subblocks_batch_by_batch() {
+        // Compressed, uncompressed and longer-than-their-data subblocks,
+        // read a few at a time.
+        let raw = (0..12)
+            .flat_map(|index| match index % 3 {
+                0 => vec![index as u8; 40],
+                _ => noise(40, 0x1000 + index),
+            })
+            .collect::<Vec<_>>();
+        let subblocks = raw
+            .chunks(40)
+            .enumerate()
+            .map(|(index, chunk)| match index % 3 {
+                0 | 2 => zstd::bulk::compress(chunk, 3).unwrap(),
+                _ => chunk.to_vec(),
+            })
+            .collect::<Vec<_>>();
+        assert!(subblocks[0].len() < 40 && subblocks[2].len() > 40);
+        let stored = subblocks.concat();
+        let compression = CompressionInfo {
+            codec: CompressionCodec::Zstd,
+            uncompressed_bytes: raw.len(),
+            shuffled_item_bytes: None,
+            subblocks: subblocks
+                .iter()
+                .map(|subblock| (subblock.len() as u64, 40))
+                .collect(),
+        };
+        let block = DataBlock {
+            location: BlockLocation::Inline {
+                bytes: stored.len() as u64,
+            },
+            inline_data: None,
+            compression: Some(compression.clone()),
+            checksum: None,
+            byte_order: ByteOrder::Little,
+            expected_bytes: raw.len(),
+        };
+        for batch_limit in [0, 50, 100, 1000, usize::MAX] {
+            let decoded =
+                decompress_in_batches(&mut stored.as_slice(), &block, &compression, batch_limit)
+                    .unwrap();
+            assert_eq!(decoded, raw, "batches of {batch_limit} bytes");
+            // A block cut short fails in whichever batch it ends.
+            let short = &stored[..stored.len() - 5];
+            assert!(matches!(
+                decompress_in_batches(&mut &short[..], &block, &compression, batch_limit),
+                Err(XisfError::Malformed(message)) if message.contains("truncated")
+            ));
+        }
+    }
+
+    #[test]
     fn a_compressed_subblock_of_the_wrong_length_is_invalid() {
-        // Each subblock declares 50 and 78 bytes, so the totals agree, but
-        // the first decodes to one byte more or less than it declares.
+        // The subblocks declare 50 and 78 bytes, so the declared totals
+        // agree. The second decodes to its 78, but the first to one byte
+        // more or less than its 50.
         let raw = (0..128_u8).map(|value| value / 8).collect::<Vec<_>>();
         for (codec, name) in CODECS {
             for split in [49, 51] {
                 let first = compress_with(codec, &raw[..split]);
-                let second = compress_with(codec, &raw[split..]);
+                let second = compress_with(codec, &raw[50..]);
                 assert_ne!(first.len(), 50, "{name}");
                 let stored = [first.as_slice(), second.as_slice()].concat();
                 let xml = image_element(

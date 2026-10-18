@@ -14,8 +14,9 @@ normal; little- or big-endian UInt8, UInt16, UInt32, UInt64, Float32, and
 Float64 samples; and compressed with zlib, LZ4, LZ4HC, or zstd, with or without
 byte shuffling and subblocks. A subblock as long as its data is stored
 uncompressed and copied as it is; every other subblock must decompress to
-exactly its stated length, or the block is invalid. CIELab images convert
-to RGB through the image's RGB working space. Complex32 and Complex64 images have their own reader,
+exactly its stated length, or the block is invalid. Subblocks decompress
+in parallel. CIELab images convert to RGB through the image's RGB working
+space. Complex32 and Complex64 images have their own reader,
 `read_complex_image`, because `FitsImage` has no complex type. FITS
 compatibility keywords and 2x2 Bayer color filter arrays are exposed through
 the same APIs used by `seiza-fits`. SHA-1, SHA-256, SHA-512, SHA3-256, and
