@@ -7,8 +7,8 @@
 //! failure prints.
 
 use seiza_stretch::{
-    ColorStrategy, GhsParams, ImageShape, LayeredParams, MedianAnchorParams, StretchConfig,
-    StretchModel, StretchParams, StretchStack,
+    ColorStrategy, GhsParams, ImageShape, LayeredParams, MedianAnchorParams, SampleDomain,
+    SampleNormalization, StretchConfig, StretchModel, StretchParams, StretchStack,
 };
 
 const WIDTH: usize = 160;
@@ -18,7 +18,7 @@ const HEIGHT: usize = 128;
 const TOLERANCE: f64 = 1e-5;
 
 #[test]
-fn output_version_is_a_release_no_newer_than_this_one() {
+fn output_version_is_no_newer_than_the_next_minor_version() {
     let parse = |version: &str| {
         version
             .split('.')
@@ -27,7 +27,16 @@ fn output_version_is_a_release_no_newer_than_this_one() {
     };
     let output = parse(seiza_stretch::OUTPUT_VERSION);
     assert_eq!(output.len(), 3, "{}", seiza_stretch::OUTPUT_VERSION);
-    assert!(output <= parse(env!("CARGO_PKG_VERSION")));
+    // A PR that changes output sets the crate's next minor version, and the
+    // release that ships the change bumps the crate to it.
+    let version = parse(env!("CARGO_PKG_VERSION"));
+    let next_minor = vec![version[0], version[1] + 1, 0];
+    assert!(
+        output <= next_minor,
+        "{} is past {}'s next minor",
+        seiza_stretch::OUTPUT_VERSION,
+        env!("CARGO_PKG_VERSION")
+    );
 }
 
 #[test]
@@ -99,6 +108,81 @@ fn every_model_keeps_its_output() {
         let actual = stretch(StretchModel::AutoMtf(StretchParams::default()), strategy);
         failures.extend(compare(case, &actual, expected(case)));
     }
+    assert!(
+        failures.is_empty(),
+        "the output changed. If that is intended, set OUTPUT_VERSION in \
+         seiza-stretch/src/lib.rs to the release that will ship this change, \
+         and record the new output:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// What real images take: one large enough that the analysis reads a bounded
+/// sample of it, samples in physical units mapped to 0 to 1 first, and
+/// integer output.
+#[test]
+fn large_physical_and_integer_output_keep_their_output() {
+    let stack = StretchStack::new(vec![StretchConfig {
+        model: StretchModel::AutoMtf(StretchParams::default()),
+        color_strategy: ColorStrategy::Linked,
+        max_analysis_samples: seiza_stretch::DEFAULT_SAMPLE_ANALYSIS_SAMPLES,
+    }])
+    .unwrap();
+    let mut failures = Vec::new();
+
+    // 640 x 400 x 3 is 768,000 samples, well over the 200,000 analysed.
+    let (width, height) = (640, 400);
+    assert!(width * height * 3 > seiza_stretch::DEFAULT_SAMPLE_ANALYSIS_SAMPLES);
+    let large = stack
+        .apply_f32_image(
+            &field_sized(width, height),
+            ImageShape::new(width, height, 3),
+        )
+        .unwrap();
+    let actual = summary_sized(&large.data, width, height);
+    failures.extend(compare(
+        "AUTO_MTF_LARGE",
+        &actual,
+        expected("AUTO_MTF_LARGE"),
+    ));
+
+    // The same field in ADU above a pedestal, as a stack leaves it.
+    let mut physical = field()
+        .into_iter()
+        .map(|value| 1_000.0 + 4_000.0 * value)
+        .collect::<Vec<_>>();
+    SampleDomain::PhysicalLinear {
+        normalization: SampleNormalization::default(),
+    }
+    .resolve(&physical, 3)
+    .unwrap()
+    .apply_in_place(&mut physical, 3)
+    .unwrap();
+    let output = stack
+        .apply_f32_image(&physical, ImageShape::new(WIDTH, HEIGHT, 3))
+        .unwrap();
+    failures.extend(compare(
+        "PHYSICAL",
+        &summary(&output.data),
+        expected("PHYSICAL"),
+    ));
+
+    let shape = ImageShape::new(WIDTH, HEIGHT, 3);
+    let wide = stack.apply_u16_image(&field(), shape).unwrap();
+    let wide = wide
+        .data
+        .iter()
+        .map(|&value| f32::from(value))
+        .collect::<Vec<_>>();
+    failures.extend(compare("U16", &summary(&wide), expected("U16")));
+    let narrow = stack.apply_u8_image(&field(), shape).unwrap();
+    let narrow = narrow
+        .data
+        .iter()
+        .map(|&value| f32::from(value))
+        .collect::<Vec<_>>();
+    failures.extend(compare("U8", &summary(&narrow), expected("U8")));
+
     assert!(
         failures.is_empty(),
         "the output changed. If that is intended, set OUTPUT_VERSION in \
@@ -287,6 +371,70 @@ fn expected(case: &str) -> &'static [f64] {
             1.3277037e-1, 1.2785414e-1, 1.1134828e-1, 1.8987355e-1, 1.6398804e-1, 1.5270023e-1,
             2.0379126e-1, 1.7149842e-1, 1.6212264e-1, 2.1082191e-1, 2.0049970e-1, 1.7569834e-1,
         ],
+        "AUTO_MTF_LARGE" => &[
+            2.1308219e-1, 2.1883298e-1, 9.8971236e-1, 1.9861362e-1, 2.0518704e-1, 9.6012884e-1,
+            1.8563494e-1, 1.9273196e-1, 9.7786272e-1, 1.3415049e-1, 1.1541909e-1, 8.7438926e-2,
+            1.6825549e-1, 1.5614834e-1, 1.5149757e-1, 2.2178113e-1, 2.0648846e-1, 1.8403684e-1,
+            2.5165522e-1, 2.4411367e-1, 2.3259863e-1, 2.9501921e-1, 2.7087778e-1, 2.7184522e-1,
+            1.2065426e-1, 1.2033788e-1, 1.0013218e-1, 1.7629987e-1, 1.5235607e-1, 1.3299291e-1,
+            2.0944212e-1, 2.0440091e-1, 1.9557267e-1, 2.4692596e-1, 2.4145567e-1, 2.2531995e-1,
+            2.9670161e-1, 2.8428701e-1, 2.5824940e-1, 1.1551645e-1, 1.1683805e-1, 9.9980876e-2,
+            1.7966127e-1, 1.6747351e-1, 1.5190642e-1, 2.0861135e-1, 2.0491138e-1, 1.7783685e-1,
+            2.4352953e-1, 2.3391289e-1, 2.3332936e-1, 2.8042397e-1, 2.7019837e-1, 2.5801444e-1,
+            1.2609513e-1, 1.0147520e-1, 1.0444106e-1, 1.7805795e-1, 1.5522148e-1, 1.4677021e-1,
+            2.2011274e-1, 1.9713573e-1, 1.9338007e-1, 2.5677639e-1, 2.4838404e-1, 2.2637141e-1,
+            2.9742873e-1, 2.7571648e-1, 2.7193415e-1, 1.2190159e-1, 1.1318884e-1, 9.3616910e-2,
+            1.7207585e-1, 1.4513396e-1, 1.5302613e-1, 2.0779319e-1, 2.0614958e-1, 1.9586243e-1,
+            2.4847947e-1, 2.4625568e-1, 2.1931855e-1, 2.8945974e-1, 2.8077617e-1, 2.5989914e-1,
+        ],
+        "PHYSICAL" => &[
+            2.6735605e-1, 2.8926046e-1, 1.0000000e0, 1.9354674e-1, 2.1994533e-1, 1.0000000e0,
+            1.7101142e-1, 2.0448497e-1, 1.0000000e0, 1.4482506e-1, 9.1490038e-2, 7.3158808e-2,
+            1.8407896e-1, 1.5239081e-1, 9.6026182e-2, 2.2538432e-1, 1.7034188e-1, 1.6077903e-1,
+            2.3775883e-1, 2.1623415e-1, 1.9680461e-1, 2.8213483e-1, 1.9530995e-1, 2.0025718e-1,
+            1.7233568e-1, 1.0453398e-1, 8.5149191e-2, 2.0313396e-1, 1.2960412e-1, 1.5309660e-1,
+            3.1934941e-1, 2.3290959e-1, 2.4000792e-1, 3.1939766e-1, 2.5153410e-1, 2.5324288e-1,
+            2.8554571e-1, 2.0765734e-1, 2.0643499e-1, 1.5483373e-1, 1.1737039e-1, 7.3103398e-2,
+            2.4768512e-1, 1.2657693e-1, 1.1753591e-1, 3.6650029e-1, 2.3152442e-1, 2.4069439e-1,
+            3.3397162e-1, 2.1517362e-1, 2.6664773e-1, 2.7930656e-1, 2.4179983e-1, 1.6512853e-1,
+            1.1781653e-1, 7.5411133e-2, 5.9620276e-2, 2.1632546e-1, 1.5073548e-1, 9.8862983e-2,
+            3.0233291e-1, 2.3023082e-1, 2.1061248e-1, 2.8124243e-1, 1.9260168e-1, 2.3082127e-1,
+            4.8700741e-1, 4.6492508e-1, 4.3121624e-1, 1.5496071e-1, 1.0660532e-1, 7.0470817e-2,
+            1.4869098e-1, 1.3175671e-1, 7.0712335e-2, 2.2915366e-1, 1.6235654e-1, 1.3028364e-1,
+            2.4750735e-1, 1.6869877e-1, 1.4333378e-1, 2.3179084e-1, 2.0879760e-1, 1.4885347e-1,
+        ],
+        "U16" => &[
+            1.6603716e4, 1.7643491e4, 6.4694000e4, 1.2895520e4, 1.4062069e4, 6.3746000e4,
+            1.1799186e4, 1.3181325e4, 6.4077000e4, 1.0404000e4, 7.8420000e3, 6.9720000e3,
+            1.2322000e4, 1.0772000e4, 8.0580000e3, 1.4369000e4, 1.1647000e4, 1.1180000e4,
+            1.4988000e4, 1.3913000e4, 1.2949000e4, 1.7232000e4, 1.2875000e4, 1.3120000e4,
+            1.1745000e4, 8.4640000e3, 7.5400000e3, 1.3262000e4, 9.6680000e3, 1.0806000e4,
+            1.9142000e4, 1.4745000e4, 1.5101000e4, 1.9144000e4, 1.5681000e4, 1.5767000e4,
+            1.7406000e4, 1.3486000e4, 1.3426000e4, 1.0890000e4, 9.0790000e3, 6.9700000e3,
+            1.5487000e4, 9.5220000e3, 9.0870000e3, 2.1600000e4, 1.4676000e4, 1.5135000e4,
+            1.9900000e4, 1.3860000e4, 1.6445000e4, 1.7088000e4, 1.5191000e4, 1.1393000e4,
+            9.1000000e3, 7.0790000e3, 6.3340000e3, 1.3917000e4, 1.0691000e4, 8.1930000e3,
+            1.8265000e4, 1.4611000e4, 1.3633000e4, 1.7186000e4, 1.2741000e4, 1.4640000e4,
+            2.8084000e4, 2.6873000e4, 2.5045000e4, 1.0897000e4, 8.5630000e3, 6.8450000e3,
+            1.0592000e4, 9.7720000e3, 6.8570000e3, 1.4557000e4, 1.1257000e4, 9.7010000e3,
+            1.5478000e4, 1.1567000e4, 1.0332000e4, 1.4689000e4, 1.3543000e4, 1.0600000e4,
+        ],
+        "U8" => &[
+            6.4608350e1, 6.8654347e1, 2.5200000e2, 5.0175732e1, 5.4714737e1, 2.4800000e2,
+            4.5912158e1, 5.1290743e1, 2.4900000e2, 4.0000000e1, 3.1000000e1, 2.7000000e1,
+            4.8000000e1, 4.2000000e1, 3.1000000e1, 5.6000000e1, 4.5000000e1, 4.4000000e1,
+            5.8000000e1, 5.4000000e1, 5.0000000e1, 6.7000000e1, 5.0000000e1, 5.1000000e1,
+            4.6000000e1, 3.3000000e1, 2.9000000e1, 5.2000000e1, 3.8000000e1, 4.2000000e1,
+            7.4000000e1, 5.7000000e1, 5.9000000e1, 7.4000000e1, 6.1000000e1, 6.1000000e1,
+            6.8000000e1, 5.2000000e1, 5.2000000e1, 4.2000000e1, 3.5000000e1, 2.7000000e1,
+            6.0000000e1, 3.7000000e1, 3.5000000e1, 8.4000000e1, 5.7000000e1, 5.9000000e1,
+            7.7000000e1, 5.4000000e1, 6.4000000e1, 6.6000000e1, 5.9000000e1, 4.4000000e1,
+            3.5000000e1, 2.8000000e1, 2.5000000e1, 5.4000000e1, 4.2000000e1, 3.2000000e1,
+            7.1000000e1, 5.7000000e1, 5.3000000e1, 6.7000000e1, 5.0000000e1, 5.7000000e1,
+            1.0900000e2, 1.0500000e2, 9.7000000e1, 4.2000000e1, 3.3000000e1, 2.7000000e1,
+            4.1000000e1, 3.8000000e1, 2.7000000e1, 5.7000000e1, 4.4000000e1, 3.8000000e1,
+            6.0000000e1, 4.5000000e1, 4.0000000e1, 5.7000000e1, 5.3000000e1, 4.1000000e1,
+        ],
         _ => &[],
     }
 }
@@ -316,6 +464,10 @@ fn noise(index: usize, amplitude: f32) -> f32 {
 /// A linear colour field on a 0 to 1 scale: a faint tinted sky with a
 /// gradient, a soft nebula, and thirty stars from a small integer generator.
 fn field() -> Vec<f32> {
+    field_sized(WIDTH, HEIGHT)
+}
+
+fn field_sized(width: usize, height: usize) -> Vec<f32> {
     let mut state = 0x2545_f491_u32;
     let mut next = || {
         state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
@@ -323,16 +475,16 @@ fn field() -> Vec<f32> {
     };
     let stars = (0..30)
         .map(|_| {
-            let x = next() * WIDTH as f32;
-            let y = next() * HEIGHT as f32;
+            let x = next() * width as f32;
+            let y = next() * height as f32;
             (x, y, 0.05 + next() * 0.9, 0.6 + next() * 0.4)
         })
         .collect::<Vec<_>>();
     const SKY: [f32; 3] = [0.050, 0.045, 0.040];
     const NEBULA: [f32; 3] = [0.030, 0.010, 0.020];
-    let mut data = Vec::with_capacity(WIDTH * HEIGHT * 3);
-    for y in 0..HEIGHT {
-        for x in 0..WIDTH {
+    let mut data = Vec::with_capacity(width * height * 3);
+    for y in 0..height {
+        for x in 0..width {
             let (fx, fy) = (x as f32, y as f32);
             let (nx, ny) = (fx - 90.0, fy - 60.0);
             let nebula = (-(nx * nx + ny * ny) / 1_800.0).exp();
@@ -354,6 +506,10 @@ fn field() -> Vec<f32> {
 /// Each channel's mean, root mean square and maximum, then the samples on a
 /// 5 by 5 grid of interior points.
 fn summary(data: &[f32]) -> Vec<f64> {
+    summary_sized(data, WIDTH, HEIGHT)
+}
+
+fn summary_sized(data: &[f32], width: usize, height: usize) -> Vec<f64> {
     let mut values = Vec::new();
     for channel in 0..3 {
         let (mut sum, mut squares, mut maximum) = (0.0_f64, 0.0_f64, f64::MIN);
@@ -363,15 +519,15 @@ fn summary(data: &[f32]) -> Vec<f64> {
             squares += sample * sample;
             maximum = maximum.max(sample);
         }
-        let count = (WIDTH * HEIGHT) as f64;
+        let count = (width * height) as f64;
         values.extend([sum / count, (squares / count).sqrt(), maximum]);
     }
     for row in 0..5 {
         for column in 0..5 {
-            let x = 8 + column * (WIDTH - 16) / 4;
-            let y = 8 + row * (HEIGHT - 16) / 4;
+            let x = 8 + column * (width - 16) / 4;
+            let y = 8 + row * (height - 16) / 4;
             for channel in 0..3 {
-                values.push(f64::from(data[(y * WIDTH + x) * 3 + channel]));
+                values.push(f64::from(data[(y * width + x) * 3 + channel]));
             }
         }
     }

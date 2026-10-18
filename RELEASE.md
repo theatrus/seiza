@@ -170,15 +170,23 @@ git push origin py-v<version>
   and the Rust crates are one release; the `v<version>` and `py-v<version>` tags
   carry the same `<version>`.
 - **`OUTPUT_VERSION` moves only with output.** `seiza-stacking` and
-  `seiza-stretch` each export the release whose output they reproduce, and
-  PSF Guard keys its cached stacks, masters and previews on it. A release
-  that leaves it alone keeps those caches; moving it makes every user
-  rebuild every stack. The PR that changes output sets it to the release
-  that will ship the change, and records the new summary in the crate's
-  `tests/output_version.rs`, which fails until both are done. A release
-  bump never touches it. Before tagging, run both crates'
-  `tests/output_version.rs` once more: a failure means a merged PR changed
-  output without moving the version. `AGENTS.md` gives the steps.
+  `seiza-stretch` each export their own crate version whose output they
+  reproduce: a crate version, not a Seiza release. PSF Guard keys its
+  cached stacks, masters and previews on it. A release that leaves it alone
+  keeps those caches; moving it makes every user rebuild every stack.
+  - **The PR that changes output** sets it to the crate's next minor version,
+    and records the new summary in the crate's `tests/output_version.rs`,
+    which fails until both are done. `AGENTS.md` gives the steps.
+  - **The release PR** takes a crate whose `OUTPUT_VERSION` is above its
+    version up to that version, as a minor bump. Otherwise a release never
+    touches it.
+  - **An output change in a crate they call** (`seiza`, `seiza-calibration`,
+    `seiza-imgproc` or `seiza-stats`) takes a minor bump of that crate, never
+    a patch, so published stacking and stretch releases that require it by
+    caret cannot pick it up unseen. It ships with a release of each crate
+    whose output it changes, which moves `OUTPUT_VERSION` and raises the pin.
+  - **Before tagging,** run both crates' `tests/output_version.rs` once more:
+    a failure means a merged PR changed output without moving the version.
 - The `v` tag and the `py-v` tag are **separate** — pushing one does not publish
   the other.
 - crates.io publishing is **manual**; only `release.yml`'s OS packages and

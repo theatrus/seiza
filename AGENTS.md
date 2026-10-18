@@ -51,7 +51,8 @@ stub stays a true account of Python's surface.
 ## Output versions: revise and test, every time
 
 `seiza_stacking::OUTPUT_VERSION` and `seiza_stretch::OUTPUT_VERSION` give the
-release whose output a build reproduces. PSF Guard keys its cached stacks,
+version of that crate, not the Seiza release, whose output a build
+reproduces. PSF Guard keys its cached stacks,
 masters and previews on them. A wrong value is worse than none: if output
 changes and the value stays put, users keep stale stacks and are never told.
 So these steps are not optional, and a PR that skips them is not done.
@@ -76,10 +77,10 @@ So these steps are not optional, and a PR that skips them is not done.
    undo it.
 3. **Make your change and run both tests again.**
    - **If a case fails and you meant to change output:** set that crate's
-     `OUTPUT_VERSION` to the crate's next release and bump the crate to that
-     version in the same PR, since the test requires `OUTPUT_VERSION` to be
-     no newer than the crate. Then record the new summary the failure prints,
-     and give the reason in the PR.
+     `OUTPUT_VERSION` to the crate's next minor version (0.43.0 while it is
+     0.42.x), which the test accepts and the release that ships the change
+     bumps the crate to. Then record the new summary the failure prints, and
+     give the reason in the PR.
    - **If a case fails and you did not mean to change output:** your change
      is not as neutral as you thought. Find out why before going on.
    - **If nothing fails:** say in the PR that both tests pass unchanged, and

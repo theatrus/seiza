@@ -428,7 +428,8 @@ exposes the **superset** of what both apps need.
   `seiza_satellite_catalog_free`. Python's `SatelliteCatalog` is the twin.
 - **Versions** — `seiza_core_version` gives the library release.
   `seiza_stacking_output_version` and `seiza_stretch_output_version` give the
-  release whose stacking and stretch output this library reproduces; key
+  `seiza-stacking` and `seiza-stretch` crate versions, not Seiza releases,
+  whose stacking and stretch output this library reproduces; key
   cached stacks, masters and stretched images on those, since they move only
   when output changes. Python's `__version__`, `STACKING_OUTPUT_VERSION` and
   `STRETCH_OUTPUT_VERSION` are the twins.

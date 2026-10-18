@@ -34,16 +34,19 @@ pub enum StretchError {
 
 pub type Result<T> = std::result::Result<T, StretchError>;
 
-/// The release whose output this build reproduces.
+/// The `seiza-stretch` crate version whose output this build reproduces.
+///
+/// It is a version of this crate, not a Seiza release: "0.3.0" is
+/// seiza-stretch 0.3.0, which shipped in Seiza 0.37.0.
 ///
 /// A caller that caches stretched images should key them on this, not on
 /// the crate version, so that a release which changes no output leaves those
-/// caches valid. Set it to the release that ships a change when the change
-/// alters what a stretch produces for the same samples and settings. A new
-/// model or option whose default leaves the output alone does not move it.
-/// `tests/output_version.rs` fails when its fixtures' output changes.
-/// A change to an option that is not the default moves it as much as a
-/// change to the defaults; `AGENTS.md` gives the steps.
+/// caches valid. A change that alters what a stretch produces for the same
+/// samples and settings, in any model or option and not only the defaults,
+/// sets it to this crate's next minor version, whether the change is in this
+/// crate or in a crate it calls. A new model or option whose default leaves
+/// the output alone does not move it. `tests/output_version.rs` fails when
+/// its fixtures' output changes, and `AGENTS.md` gives the steps.
 pub const OUTPUT_VERSION: &str = "0.3.0";
 
 /// Default lower percentile used to map physical linear samples into the

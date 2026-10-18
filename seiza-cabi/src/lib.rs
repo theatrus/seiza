@@ -1476,18 +1476,19 @@ fn static_c_string(cell: &'static OnceLock<CString>, text: &str) -> *const c_cha
         .as_ptr()
 }
 
-/// The Seiza release whose stacking, master building and registration
-/// output this library reproduces. Key cached stacks and masters on it
-/// rather than on `seiza_core_version`: it moves only when that output
-/// changes. The string is static and is never freed.
+/// The `seiza-stacking` crate version, not the Seiza release, whose
+/// stacking, master building and registration output this library
+/// reproduces. Key cached stacks and masters on it rather than on
+/// `seiza_core_version`: it moves only when that output changes. The string is static and is never freed.
 #[unsafe(no_mangle)]
 pub extern "C" fn seiza_stacking_output_version() -> *const c_char {
     static TEXT: OnceLock<CString> = OnceLock::new();
     static_c_string(&TEXT, seiza_stacking::OUTPUT_VERSION)
 }
 
-/// The Seiza release whose stretch output this library reproduces. Key
-/// cached stretched images on it; it moves only when that output changes.
+/// The `seiza-stretch` crate version, not the Seiza release, whose stretch
+/// output this library reproduces. Key cached stretched images on it; it
+/// moves only when that output changes.
 /// The string is static and is never freed.
 #[unsafe(no_mangle)]
 pub extern "C" fn seiza_stretch_output_version() -> *const c_char {

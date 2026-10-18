@@ -12,7 +12,7 @@ use seiza_stacking::{
     Demosaic, DrizzleOptions, FrameDisposition, FrameWeighting, ImpulseFilterOptions,
     Interpolation, LinearImage, LiveStacker, MasterBuildOptions, MasterFrameKind,
     NormalizationMode, RegistrationModel, RejectionMode, StackOptions, StackSnapshot,
-    build_master_from_fits, detect_defects, write_processed_image_fits_f32,
+    build_master_from_fits, detect_defects, write_master_fits_f32, write_processed_image_fits_f32,
 };
 use std::path::PathBuf;
 
@@ -218,6 +218,33 @@ const MOSAIC: &[f64] = &[
 ];
 
 #[rustfmt::skip]
+const MOSAIC_QUADRATIC: &[f64] = &[
+    2.6184846e2, 5.3270642e2, 6.4287822e3, 1.0098178e2, 1.0197623e2, 1.0388168e2,
+    2.4814735e2, 2.4940155e2, 1.0158381e2, 2.2572668e2, 1.4497437e3, 1.5627357e2,
+    2.0429832e2, 1.0203711e2, 1.0398335e2, 1.9151581e2, 1.5916586e2, 1.0734766e2,
+    1.0271570e2, 1.0331667e2, 1.0390027e2, 1.0628079e2, 1.0931861e2, 1.8415189e2,
+    1.6650204e2, 1.0509101e2, 6.8839563e2, 1.0732013e2,
+];
+
+#[rustfmt::skip]
+const FLAT_MASTER_BIASED: &[f64] = &[
+    9.9507321e-1, 9.9752802e-1, 1.1058390e0, 8.8442200e-1, 9.7103345e-1, 9.9948442e-1,
+    9.7075170e-1, 8.8438344e-1, 9.6391153e-1, 1.0503253e0, 1.0790998e0, 1.0502412e0,
+    9.6402162e-1, 9.9071038e-1, 1.0769354e0, 1.1056914e0, 1.0769274e0, 9.9073726e-1,
+    9.6417946e-1, 1.0502132e0, 1.0793134e0, 1.0504037e0, 9.6409714e-1, 8.8441980e-1,
+    9.7073954e-1, 9.9950612e-1, 9.7100949e-1, 8.8434505e-1,
+];
+
+#[rustfmt::skip]
+const CALIBRATED_LANCZOS: &[f64] = &[
+    7.6405936e1, 2.9063132e2, 4.5017817e3, 2.9910845e1, 3.0009436e1, 3.1982927e1,
+    5.5067642e1, 2.3747440e1, 2.7948290e1, 3.1852222e1, 2.8892441e1, 2.5063713e1,
+    9.6558657e0, 1.9564846e1, 3.4706512e1, 3.1363016e1, 2.4861242e1, 2.1682476e1,
+    3.2296391e1, 2.3311283e1, 2.4124556e1, 2.7315498e1, 2.5832870e1, 3.1812588e1,
+    1.1398070e2, 2.3346869e1, 2.5175215e1, 4.4047523e1,
+];
+
+#[rustfmt::skip]
 const BIAS_MASTER: &[f64] = &[
     3.0007062e2, 3.0007339e2, 3.0441794e2, 2.9925772e2, 3.0073709e2, 2.9994614e2,
     3.0028802e2, 2.9983591e2, 3.0033102e2, 3.0190173e2, 3.0158337e2, 2.9967471e2,
@@ -227,7 +254,7 @@ const BIAS_MASTER: &[f64] = &[
 ];
 
 #[test]
-fn output_version_is_a_released_version_no_newer_than_this_one() {
+fn output_version_is_no_newer_than_the_next_minor_version() {
     let parse = |version: &str| {
         version
             .split('.')
@@ -236,7 +263,16 @@ fn output_version_is_a_released_version_no_newer_than_this_one() {
     };
     let output = parse(seiza_stacking::OUTPUT_VERSION);
     assert_eq!(output.len(), 3, "{}", seiza_stacking::OUTPUT_VERSION);
-    assert!(output <= parse(seiza_stacking::VERSION));
+    // A PR that changes output sets the crate's next minor version, and the
+    // release that ships the change bumps the crate to it.
+    let version = parse(seiza_stacking::VERSION);
+    let next_minor = vec![version[0], version[1] + 1, 0];
+    assert!(
+        output <= next_minor,
+        "{} is past {}'s next minor",
+        seiza_stacking::OUTPUT_VERSION,
+        seiza_stacking::VERSION
+    );
 }
 
 #[test]
@@ -475,12 +511,27 @@ fn a_reintegration_and_its_drizzle_keep_their_output() {
     check("DRIZZLED", &summary(&drizzled.image), DRIZZLED);
 }
 
-/// Two overlapping panels on a canvas that grows to hold them both.
+/// Two overlapping panels on a canvas that grows to hold them both, with
+/// frames related by a similarity and by a quadratic warp.
 #[test]
 fn a_mosaic_keeps_its_output() {
+    for (case, expected, model) in [
+        ("MOSAIC", MOSAIC, RegistrationModel::Similarity),
+        (
+            "MOSAIC_QUADRATIC",
+            MOSAIC_QUADRATIC,
+            RegistrationModel::Quadratic,
+        ),
+    ] {
+        check(case, &summary(&mosaic_stack(model).image), expected);
+    }
+}
+
+fn mosaic_stack(model: RegistrationModel) -> StackSnapshot {
     let directory = tempfile::tempdir().unwrap();
     let paths = mosaic_panels(&directory);
     let mut options = StackOptions::default();
+    options.registration.model = model;
     options.acceptance.minimum_overlap_fraction = 0.1;
     let mut stacker = LiveStacker::with_expanding_reference(
         &paths,
@@ -495,7 +546,94 @@ fn a_mosaic_keeps_its_output() {
     }
     let snapshot = stacker.snapshot().unwrap();
     assert!(snapshot.image.width > MOSAIC_PANEL.0);
-    check("MOSAIC", &summary(&snapshot.image), MOSAIC);
+    snapshot
+}
+
+/// Raw lights on a faint sky, calibrated by a dark master and by a flat
+/// master that a bias master calibrated, then resampled with Lanczos-3: the
+/// path PSF Guard's banded stacks took before #295.
+#[test]
+fn calibrated_faint_lights_and_a_bias_calibrated_flat_keep_their_output() {
+    let directory = tempfile::tempdir().unwrap();
+    // A fixed pattern the dark carries and subtracts.
+    let pattern = |index: usize| 2.0 * (index.wrapping_mul(2_654_435_761) % 7) as f32;
+    let raw = |stem: &str, kind: &str, seed: usize, sample: &dyn Fn(usize) -> f32| {
+        (0..7)
+            .map(|frame| {
+                let data = (0..WIDTH * HEIGHT)
+                    .map(|index| sample(index) + noise(index, seed + frame, 6.0))
+                    .collect();
+                write_raw(&directory, stem, frame, data, kind)
+            })
+            .collect::<Vec<_>>()
+    };
+    let bias = raw("bias", "BIAS", 100, &|_| 300.0);
+    let darks = raw("dark", "DARK", 200, &|index| 325.0 + pattern(index));
+    let flats = raw("flat", "FLAT", 300, &|index| {
+        300.0 + 20_000.0 * vignetting(index)
+    });
+    let bias = build_master_from_fits(&bias, MasterFrameKind::Bias, &MasterBuildOptions::default())
+        .unwrap();
+    let flat = build_master_from_fits(
+        &flats,
+        MasterFrameKind::Flat,
+        &MasterBuildOptions {
+            bias: Some(bias.image),
+            ..MasterBuildOptions::default()
+        },
+    )
+    .unwrap();
+    check(
+        "FLAT_MASTER_BIASED",
+        &summary(&flat.image),
+        FLAT_MASTER_BIASED,
+    );
+    let dark = build_master_from_fits(
+        &darks,
+        MasterFrameKind::Dark,
+        &MasterBuildOptions::default(),
+    )
+    .unwrap();
+    let (dark_path, flat_path) = (
+        directory.path().join("master-dark.fits"),
+        directory.path().join("master-flat.fits"),
+    );
+    write_master_fits_f32(&dark_path, &dark).unwrap();
+    write_master_fits_f32(&flat_path, &flat).unwrap();
+    let lights = (0..SHIFTS.len())
+        .map(|frame| {
+            let sky = faint_field(frame);
+            let data = sky
+                .data
+                .iter()
+                .enumerate()
+                .map(|(index, &value)| 325.0 + pattern(index) + vignetting(index) * value)
+                .collect();
+            write_raw(&directory, "light", frame, data, "LIGHT")
+        })
+        .collect::<Vec<_>>();
+    let options = StackOptions {
+        interpolation: Interpolation::Lanczos3,
+        ..StackOptions::default()
+    };
+    let mut stacker = LiveStacker::open_fits(
+        &lights[0],
+        None,
+        Some(&dark_path),
+        Some(&flat_path),
+        None,
+        options,
+    )
+    .unwrap();
+    for path in &lights[1..] {
+        admit(stacker.push_fits(path).unwrap());
+    }
+    let snapshot = stacker.snapshot().unwrap();
+    check(
+        "CALIBRATED_LANCZOS",
+        &summary(&snapshot.image),
+        CALIBRATED_LANCZOS,
+    );
 }
 
 #[test]
