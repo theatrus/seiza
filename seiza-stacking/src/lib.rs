@@ -158,6 +158,8 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// crate it calls. A new option whose default leaves the output alone does
 /// not move it. `tests/output_version.rs` fails when its fixtures' output
 /// changes.
+/// A change to an option that is not the default moves it as much as a
+/// change to the defaults; `AGENTS.md` gives the steps.
 pub const OUTPUT_VERSION: &str = "0.40.0";
 
 /// Anything that can go wrong while calibrating, registering, normalizing, or

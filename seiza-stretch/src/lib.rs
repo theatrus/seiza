@@ -42,6 +42,8 @@ pub type Result<T> = std::result::Result<T, StretchError>;
 /// alters what a stretch produces for the same samples and settings. A new
 /// model or option whose default leaves the output alone does not move it.
 /// `tests/output_version.rs` fails when its fixtures' output changes.
+/// A change to an option that is not the default moves it as much as a
+/// change to the defaults; `AGENTS.md` gives the steps.
 pub const OUTPUT_VERSION: &str = "0.3.0";
 
 /// Default lower percentile used to map physical linear samples into the

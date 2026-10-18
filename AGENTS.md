@@ -48,12 +48,50 @@ snake_case, with shorter units: `_pc` for `_parsecs`, `_deg` for `_degrees`,
 `seiza-py/tests/test_stub.py` holds `seiza.pyi` to the built module, so the
 stub stays a true account of Python's surface.
 
+## Output versions: revise and test, every time
+
+`seiza_stacking::OUTPUT_VERSION` and `seiza_stretch::OUTPUT_VERSION` give the
+release whose output a build reproduces. PSF Guard keys its cached stacks,
+masters and previews on them. A wrong value is worse than none: if output
+changes and the value stays put, users keep stale stacks and are never told.
+So these steps are not optional, and a PR that skips them is not done.
+
+1. **Before you change anything in `seiza-stacking` or `seiza-stretch`, or in
+   a crate either one calls** (calibration, registration, resampling,
+   rejection, normalization, weighting, demosaicing, drizzle, defect or
+   impulse repair, masters, mosaic canvases, any stretch model), run:
+
+   ```sh
+   cargo test -p seiza-stacking --test output_version
+   cargo test -p seiza-stretch --test output_version
+   ```
+
+2. **Check that a case covers what you are changing, in the mode you are
+   changing**, not only the defaults. If none does, add one first and record
+   it on the unchanged code. The data must be data your code acts on.
+   Lanczos-3's clamp (#295) changed how faint skies stack, and the only
+   Lanczos case, a bright sky, passed both before and after it: only a faint
+   sky a few sigma above zero shows the clamp. A case counts only when a
+   planted change in its mode makes it fail. Plant one, see it fail, and
+   undo it.
+3. **Make your change and run both tests again.**
+   - **If a case fails and you meant to change output:** set that crate's
+     `OUTPUT_VERSION` to the crate's next release and bump the crate to that
+     version in the same PR, since the test requires `OUTPUT_VERSION` to be
+     no newer than the crate. Then record the new summary the failure prints,
+     and give the reason in the PR.
+   - **If a case fails and you did not mean to change output:** your change
+     is not as neutral as you thought. Find out why before going on.
+   - **If nothing fails:** say in the PR that both tests pass unchanged, and
+     which case covers your change.
+4. **Never** re-record a summary without moving `OUTPUT_VERSION`, loosen
+   `TOLERANCE` to make a case pass, or drop a case because it fails.
+   `OUTPUT_VERSION` only moves forward: from "0.40.0" for stacking and
+   "0.3.0" for stretching, each change sets the release that ships it.
+
 ## Other rules
 
 - Which crate to depend on, and how releases work: `RELEASE.md`.
-- A change to what stacking, master building or a stretch produces moves
-  that crate's `OUTPUT_VERSION` to the release that will ship it, and
-  records the new output in its `tests/output_version.rs` (`RELEASE.md`).
 - Every image file is read and written through `seiza-image-io`, by its
   extension, the C ABI included.
 - Pixels count from 0, with centres on whole numbers; an image's middle is

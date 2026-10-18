@@ -176,7 +176,9 @@ git push origin py-v<version>
   rebuild every stack. The PR that changes output sets it to the release
   that will ship the change, and records the new summary in the crate's
   `tests/output_version.rs`, which fails until both are done. A release
-  bump never touches it.
+  bump never touches it. Before tagging, run both crates'
+  `tests/output_version.rs` once more: a failure means a merged PR changed
+  output without moving the version. `AGENTS.md` gives the steps.
 - The `v` tag and the `py-v` tag are **separate** — pushing one does not publish
   the other.
 - crates.io publishing is **manual**; only `release.yml`'s OS packages and
