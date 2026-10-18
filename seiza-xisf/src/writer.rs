@@ -1177,6 +1177,77 @@ mod tests {
     }
 
     #[test]
+    fn stores_incompressible_subblocks_uncompressed() {
+        // Smooth values with random low mantissa bits, as in a noisy image.
+        // After the shuffle, the low byte planes are random and the high
+        // ones constant.
+        let mut state = 0x2545_f491_u32;
+        let values = (0..16 * 8 * 3)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                f32::from_bits(0.25_f32.to_bits() | (state & 0xffff))
+            })
+            .collect::<Vec<_>>();
+        let expected = planar_from(&values, 16 * 8);
+        let raw = expected
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        let input = shuffle(&raw, 4);
+        for codec in [
+            CompressionCodec::Zlib,
+            CompressionCodec::Lz4,
+            CompressionCodec::Zstd,
+        ] {
+            let options = WriteOptions {
+                compression: Some(WriteCompression {
+                    codec,
+                    byte_shuffle: true,
+                    level: None,
+                }),
+                checksum: Some(ChecksumAlgorithm::Sha256),
+                metadata: None,
+                bounds: None,
+            };
+            let encoded = write_to_memory(&values, &options, 128);
+            let read = crate::read_image_from_bytes(&encoded, 0).unwrap();
+            let Pixels::F32(actual) = &read.image.pixels else {
+                panic!("writer must emit f32 pixels");
+            };
+            assert_eq!(actual, &expected, "{codec:?}");
+            let crate::BlockLocation::Attachment { offset, .. } = read.info.location else {
+                panic!("the block must be attached");
+            };
+            let info = read.info.compression.expect("block must be compressed");
+            assert_eq!(info.subblocks.len(), input.len() / 128);
+            let (mut position, mut uncompressed) = (offset as usize, 0);
+            for &(stored, length) in &info.subblocks {
+                let (stored, length) = (stored as usize, length as usize);
+                // Every compressed subblock is shorter than its data, and an
+                // uncompressed one holds the shuffled bytes as they are.
+                assert!(stored <= length, "{codec:?}");
+                if stored == length {
+                    assert_eq!(
+                        &encoded[position..position + stored],
+                        &input[uncompressed..uncompressed + length]
+                    );
+                }
+                position += stored;
+                uncompressed += length;
+            }
+            let lengths = info.subblocks.iter().map(|&(stored, length)| stored == length);
+            let raw_subblocks = lengths.filter(|&is_raw| is_raw).count();
+            assert!(
+                (1..info.subblocks.len()).contains(&raw_subblocks),
+                "{codec:?}: {:?}",
+                info.subblocks
+            );
+        }
+    }
+
+    #[test]
     fn rejects_unavailable_codecs_and_levels() {
         let values = smooth_rgb(16, 8);
         let write = |codec, level| {
