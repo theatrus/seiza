@@ -150,6 +150,12 @@ class Wcs:
     def pixel_to_world(self, x: float, y: float) -> tuple[float, float]: ...
     def world_to_pixel(self, ra: float, dec: float) -> tuple[float, float] | None: ...
     def footprint(self, width: int, height: int) -> list[tuple[float, float]]: ...
+    def transformed(
+        self,
+        matrix: tuple[tuple[float, float], tuple[float, float]],
+        translation_x: float = 0.0,
+        translation_y: float = 0.0,
+    ) -> Wcs: ...
     def fits_header_cards(self) -> dict[str, float | int | str]: ...
 
 class Solution:
@@ -1535,6 +1541,49 @@ def calibrate_color(
     neutralize_background: bool = True,
     calibrator_max_g: float | None = None,
 ) -> ColorCalibration: ...
+
+class ColorCalibrationOutcome:
+    status: str
+    reason: str | None
+    detail: str | None
+    calibration: ColorCalibration | None
+
+class CalibratedStretch:
+    image: npt.NDArray[np.float32]
+    calibration: ColorCalibrationOutcome
+    stretch_plans: list[dict[str, Any]]
+
+def calibrate_color_image(
+    image: npt.NDArray[np.float32],
+    wcs: Wcs | None = None,
+    *,
+    gaia: Sequence[Mapping[str, float | None]] | None = None,
+    catalog: str | Path | None = None,
+    epoch: float | None = None,
+    white_bp_rp: float = ...,
+    fit_bp_rp_range: tuple[float, float] = (0.0, 1.8),
+    aperture_radius: float | None = None,
+    rejection_sigma: float = 3.0,
+    minimum_stars: int = 20,
+    neutralize_background: bool = True,
+    calibrator_max_g: float | None = None,
+) -> tuple[npt.NDArray[np.float32], ColorCalibrationOutcome]: ...
+def calibrate_and_stretch(
+    image: npt.NDArray[np.float32],
+    wcs: Wcs | None = None,
+    *,
+    stretch: Mapping[str, Any] | Sequence[Mapping[str, Any]],
+    gaia: Sequence[Mapping[str, float | None]] | None = None,
+    catalog: str | Path | None = None,
+    epoch: float | None = None,
+    white_bp_rp: float = ...,
+    fit_bp_rp_range: tuple[float, float] = (0.0, 1.8),
+    aperture_radius: float | None = None,
+    rejection_sigma: float = 3.0,
+    minimum_stars: int = 20,
+    neutralize_background: bool = True,
+    calibrator_max_g: float | None = None,
+) -> CalibratedStretch: ...
 
 # Flat sessions and their dust. Planes are 2-D float32 arrays; results are
 # dicts of the core's own JSON, as the C ABI's seiza_flat_* and seiza_dust_*

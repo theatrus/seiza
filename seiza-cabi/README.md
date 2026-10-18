@@ -161,6 +161,15 @@ exposes the **superset** of what both apps need.
   The options also set the colour range of the stars the fits use, their
   outlier rejection, the fewest stars a fit accepts and the faintest
   calibrator, and the result lists every star it measured.
+  `seiza_color_calibrate_image_json` places the Gaia stars itself, from rows
+  or the local catalog, through the image's WCS JSON, and applies the gains
+  in place; `seiza_color_calibrate_and_stretch_json` then display-stretches
+  the buffer with a stretch configuration. Neither fails when calibration
+  cannot run: the JSON outcome gives `status` `skipped` with a `reason`
+  (`no_solution`, `no_catalog`, `no_stars`, `too_few_stars`, `not_rgb`,
+  `invalid_options`) and leaves the pixels uncalibrated.
+  `seiza_wcs_transform_json` carries a solved frame's WCS through a pixel
+  mapping (registration, a turn, a crop) to the image made from it.
 - **Automatic stack reference** — `seiza_stack_choose_reference_json` scores
   an ordered JSON array of FITS/XISF paths using the native stacking algorithm.
   It chooses the flattest background among frames with nearly the best star

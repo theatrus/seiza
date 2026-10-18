@@ -145,4 +145,58 @@ fn color_calibrate_cli_recovers_channel_gains_from_a_gaia_csv() {
         header("CRVAL1").is_some(),
         "the astrometric solution is kept"
     );
+
+    // With a display image the calibrated colours are stretched, linked.
+    let display = directory.path().join("display.png");
+    let run_output = |args: &[&str]| {
+        let result = Command::new(env!("CARGO_BIN_EXE_seiza"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        String::from_utf8_lossy(&result.stdout).into_owned()
+    };
+    let stdout = run_output(&[
+        "color-calibrate",
+        input.to_str().unwrap(),
+        "--output",
+        directory.path().join("stretched.fits").to_str().unwrap(),
+        "--gaia-csv",
+        gaia.to_str().unwrap(),
+        "--display",
+        display.to_str().unwrap(),
+        "--stretch",
+        r#"{"model": {"type": "auto-mtf", "target_median": 0.25, "shadows_clip": -2.8}, "color_strategy": "linked", "max_analysis_samples": 200000}"#,
+    ]);
+    assert!(stdout.contains("gains R"), "{stdout}");
+    let shown = image::open(&display).unwrap().to_rgb8();
+    assert_eq!(shown.dimensions(), (width as u32, height as u32));
+    // The sky, calibrated and linked, comes out grey.
+    let corner = shown.get_pixel(5, 5);
+    assert!(
+        corner.0.iter().max().unwrap() - corner.0.iter().min().unwrap() <= 6,
+        "{corner:?}"
+    );
+
+    // Too few stars: the display is still written, and the reason printed.
+    let few = directory.path().join("few.csv");
+    let rows = std::fs::read_to_string(&gaia).unwrap();
+    std::fs::write(&few, rows.lines().take(6).collect::<Vec<_>>().join("\n")).unwrap();
+    let uncalibrated = directory.path().join("uncalibrated.png");
+    let stdout = run_output(&[
+        "color-calibrate",
+        input.to_str().unwrap(),
+        "--output",
+        directory.path().join("uncalibrated.fits").to_str().unwrap(),
+        "--gaia-csv",
+        few.to_str().unwrap(),
+        "--display",
+        uncalibrated.to_str().unwrap(),
+    ]);
+    assert!(stdout.contains("not colour calibrated"), "{stdout}");
+    assert!(uncalibrated.is_file());
 }

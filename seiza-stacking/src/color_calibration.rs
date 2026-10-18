@@ -12,10 +12,12 @@
 //! camera's response. Background neutralization then offsets each channel so
 //! the sky's median is the same grey in all three.
 
-use crate::{Error, LinearImage, Result};
+use crate::{AffineTransform, Error, LinearImage, Result};
 use rayon::prelude::*;
 use seiza_stats::{median_in_place, robust_sigma_in_place};
-use serde::Serialize;
+use seiza_stretch::{ImageShape, StretchPlan, StretchStack};
+use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 /// The Gaia BP − RP colour of the Sun, a G2V star (Casagrande &
 /// VandenBerg 2018): the default white reference.
@@ -160,7 +162,7 @@ impl Default for ColorCalibrationOptions {
 }
 
 /// A straight-line fit of an instrumental colour against BP − RP.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ColorFit {
     /// The instrumental colour, in magnitudes, at BP − RP = 0.
     pub intercept: f64,
@@ -180,7 +182,7 @@ impl ColorFit {
 }
 
 /// One star's measurement, for diagnostics.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ColorStarMeasurement {
     pub x: f64,
     pub y: f64,
@@ -194,7 +196,7 @@ pub struct ColorStarMeasurement {
 
 /// The result of [`calibrate_color`]: per-channel gains and offsets, and
 /// the evidence for them.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ColorCalibration {
     /// Multipliers for R, G, B; green's is 1.
     pub gains: [f32; 3],
@@ -275,9 +277,19 @@ pub fn calibrate_color(
     stars: &[ColorReferenceStar],
     options: &ColorCalibrationOptions,
 ) -> Result<ColorCalibration> {
+    fit_color(image, stars, options).map_err(|skip| Error::Color(skip.detail))
+}
+
+/// [`calibrate_color`], saying why it could not calibrate.
+fn fit_color(
+    image: &LinearImage,
+    stars: &[ColorReferenceStar],
+    options: &ColorCalibrationOptions,
+) -> std::result::Result<ColorCalibration, ColorCalibrationSkip> {
     if image.channels != 3 {
-        return Err(Error::Color(
-            "colour calibration needs a three-channel image".into(),
+        return Err(ColorCalibrationSkip::new(
+            ColorCalibrationSkipReason::NotRgb,
+            "colour calibration needs a three-channel image",
         ));
     }
     if !options.white_bp_rp.is_finite()
@@ -288,7 +300,10 @@ pub fn calibrate_color(
             .is_some_and(|radius| !(radius.is_finite() && radius >= 1.0))
         || options.minimum_stars < 3
     {
-        return Err(Error::Color("invalid colour calibration options".into()));
+        return Err(ColorCalibrationSkip::new(
+            ColorCalibrationSkipReason::InvalidOptions,
+            "invalid colour calibration options",
+        ));
     }
     let ceilings = channel_ceilings(image);
     let fwhm = measure_fwhm(image, stars, &ceilings);
@@ -296,7 +311,10 @@ pub fn calibrate_color(
         Some(radius) => radius,
         None => {
             2.0 * fwhm.ok_or_else(|| {
-                Error::Color("too few clean catalogue stars to measure the image's FWHM".into())
+                ColorCalibrationSkip::new(
+                    ColorCalibrationSkipReason::TooFewStars,
+                    "too few clean catalogue stars to measure the image's FWHM",
+                )
             })?
         }
     }
@@ -356,23 +374,29 @@ pub fn calibrate_color(
             })
             .collect::<Vec<_>>();
         let (fit, kept) = robust_line(&points, options.rejection_sigma).ok_or_else(|| {
-            Error::Color(format!(
-                "only {} catalogue stars measured cleanly; a colour fit needs more",
-                points.len()
-            ))
+            ColorCalibrationSkip::new(
+                ColorCalibrationSkipReason::TooFewStars,
+                format!(
+                    "only {} catalogue stars measured cleanly; a colour fit needs more",
+                    points.len()
+                ),
+            )
         })?;
         if fit.stars < options.minimum_stars {
-            return Err(Error::Color(format!(
-                "only {} stars survived the {} colour fit; at least {} are needed",
-                fit.stars,
-                if channel == 0 { "red" } else { "blue" },
-                options.minimum_stars
-            )));
+            return Err(ColorCalibrationSkip::new(
+                ColorCalibrationSkipReason::TooFewStars,
+                format!(
+                    "only {} stars survived the {} colour fit; at least {} are needed",
+                    fit.stars,
+                    if channel == 0 { "red" } else { "blue" },
+                    options.minimum_stars
+                ),
+            ));
         }
         for index in kept {
             measurements[index].used[slot] = true;
         }
-        Ok::<_, Error>(fit)
+        Ok::<_, ColorCalibrationSkip>(fit)
     };
     let red_fit = fit_channel(0, 0)?;
     let blue_fit = fit_channel(2, 1)?;
@@ -406,6 +430,275 @@ pub fn calibrate_color(
         stars_offered: stars.len(),
         stars_measured: measurements.len(),
         measurements,
+    })
+}
+
+/// The faintest Gaia G the offline photometry catalog holds.
+const GAIA_PHOTOMETRY_MAX_G: f32 = 15.0;
+
+/// Why an image was not colour calibrated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColorCalibrationSkipReason {
+    /// The image has no astrometric solution.
+    NoSolution,
+    /// No Gaia photometry catalog is installed, or it could not be read.
+    NoCatalog,
+    /// No Gaia star with a colour falls on the image.
+    NoStars,
+    /// Too few stars measured cleanly for the colour fits.
+    TooFewStars,
+    /// The image is not three-channel RGB.
+    NotRgb,
+    /// The calibration options are out of range.
+    InvalidOptions,
+}
+
+/// Why an image was not colour calibrated, with the details.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColorCalibrationSkip {
+    pub reason: ColorCalibrationSkipReason,
+    pub detail: String,
+}
+
+impl ColorCalibrationSkip {
+    fn new(reason: ColorCalibrationSkipReason, detail: impl Into<String>) -> Self {
+        Self {
+            reason,
+            detail: detail.into(),
+        }
+    }
+}
+
+/// What [`calibrate_color_image`] did: the calibration it applied, or why
+/// it left the image as it was.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ColorCalibrationOutcome {
+    Calibrated(ColorCalibration),
+    Skipped(ColorCalibrationSkip),
+}
+
+impl ColorCalibrationOutcome {
+    /// The calibration applied, if any.
+    pub fn calibration(&self) -> Option<&ColorCalibration> {
+        match self {
+            Self::Calibrated(calibration) => Some(calibration),
+            Self::Skipped(_) => None,
+        }
+    }
+}
+
+/// Where colour calibration finds Gaia colours.
+#[derive(Clone, Copy)]
+pub enum GaiaColors<'a> {
+    /// The offline Gaia photometry catalog (`stars-gaia-photometry.bin`),
+    /// already open. Its positions are at its own epoch.
+    Catalog(&'a seiza::catalog::PhotometryCatalog),
+    /// The offline catalog at this path, the file or the directory that
+    /// holds it, or with `None` wherever Seiza's catalogs are installed.
+    CatalogPath(Option<&'a Path>),
+    /// Sources the caller has, such as an archive query, at J2016.0 with
+    /// proper motions; `epoch` is the observation's Julian year.
+    Sources {
+        sources: &'a [GaiaColorSource],
+        epoch: Option<f64>,
+    },
+}
+
+/// The solution of an image made from a solved one by a pixel mapping, such
+/// as registration, a turn, binning, drizzle or a crop. `source_to_image`
+/// takes the solved image's pixels to the new image's; a crop at `(x, y)`
+/// is a translation by `(-x, -y)`, and mappings chain with
+/// [`AffineTransform::then`].
+///
+/// Fails when the mapping cannot be inverted, or when the solution carries
+/// SIP distortion and the mapping is more than a translation: distortion
+/// terms do not carry through a turn or a change of scale.
+pub fn transform_wcs(wcs: &seiza::Wcs, source_to_image: AffineTransform) -> Result<seiza::Wcs> {
+    source_to_image.validate()?;
+    let [[a, b], [c, d]] = source_to_image.matrix;
+    let translation_only = a == 1.0 && b == 0.0 && c == 0.0 && d == 1.0;
+    if wcs.sip.is_some() && !translation_only {
+        return Err(Error::Registration(
+            "SIP distortion does not carry through a turn or a change of scale".into(),
+        ));
+    }
+    // world(p') = world_source(A⁻¹ (p' − t)), so CD' = CD · A⁻¹ and
+    // CRPIX' = A · CRPIX + t.
+    let determinant = a.mul_add(d, -b * c);
+    let inverse = [
+        [d / determinant, -b / determinant],
+        [-c / determinant, a / determinant],
+    ];
+    let cd = wcs.cd;
+    let product = |row: usize, column: usize| {
+        cd[row][0].mul_add(inverse[0][column], cd[row][1] * inverse[1][column])
+    };
+    let crpix = source_to_image.apply(wcs.crpix.0, wcs.crpix.1);
+    Ok(seiza::Wcs {
+        crval: wcs.crval,
+        crpix,
+        cd: [
+            [product(0, 0), product(0, 1)],
+            [product(1, 0), product(1, 1)],
+        ],
+        sip: wcs.sip.clone(),
+    })
+}
+
+/// The sky circle that holds a `width` × `height` image: its centre and
+/// radius in degrees.
+fn image_field(wcs: &seiza::Wcs, width: usize, height: usize) -> ((f64, f64), f64) {
+    let middle = seiza::image_center(width as u32, height as u32);
+    let center = wcs.pixel_to_world(middle.0, middle.1);
+    let (right, bottom) = (width as f64 - 0.5, height as f64 - 0.5);
+    let radius = [(-0.5, -0.5), (right, -0.5), (-0.5, bottom), (right, bottom)]
+        .into_iter()
+        .map(|(x, y)| {
+            let corner = wcs.pixel_to_world(x, y);
+            seiza::catalog::angular_separation_deg(center.0, center.1, corner.0, corner.1)
+        })
+        .fold(0.0_f64, f64::max);
+    (center, radius * 1.02)
+}
+
+/// The catalog's stars over a `width` × `height` image.
+fn catalog_sources(
+    catalog: &seiza::catalog::PhotometryCatalog,
+    wcs: &seiza::Wcs,
+    width: usize,
+    height: usize,
+) -> Vec<GaiaColorSource> {
+    let ((ra, dec), radius) = image_field(wcs, width, height);
+    catalog
+        .cone_search(ra, dec, radius, GAIA_PHOTOMETRY_MAX_G)
+        .into_iter()
+        .map(|star| GaiaColorSource {
+            ra: star.ra,
+            dec: star.dec,
+            pmra: None,
+            pmdec: None,
+            g: star.g,
+            // An unreliable colour still marks a neighbour.
+            bp_rp: star.calibration_bp_rp(),
+            ruwe: None,
+        })
+        .collect()
+}
+
+/// Colour calibrate a linear RGB image in place against Gaia: place the
+/// Gaia stars through `wcs`, the image's own solution, fit the gains with
+/// [`calibrate_color`], and apply them. When calibration cannot run (no
+/// solution, no catalog, too few stars) the image is left as it was and the
+/// outcome says why; this never fails.
+pub fn calibrate_color_image(
+    image: &mut LinearImage,
+    wcs: Option<&seiza::Wcs>,
+    gaia: GaiaColors<'_>,
+    options: &ColorCalibrationOptions,
+) -> ColorCalibrationOutcome {
+    let skip = |reason, detail: String| {
+        ColorCalibrationOutcome::Skipped(ColorCalibrationSkip::new(reason, detail))
+    };
+    if image.channels != 3 {
+        return skip(
+            ColorCalibrationSkipReason::NotRgb,
+            format!(
+                "colour calibration needs a three-channel image, not {}",
+                image.channels
+            ),
+        );
+    }
+    let Some(wcs) = wcs else {
+        return skip(
+            ColorCalibrationSkipReason::NoSolution,
+            "the image has no astrometric solution".into(),
+        );
+    };
+    let (width, height) = (image.width, image.height);
+    let (sources, epoch) = match gaia {
+        GaiaColors::Catalog(catalog) => (catalog_sources(catalog, wcs, width, height), None),
+        GaiaColors::CatalogPath(path) => {
+            let path = match seiza::data_paths::gaia_photometry(path) {
+                Ok(Some(path)) => path,
+                Ok(None) => {
+                    return skip(
+                        ColorCalibrationSkipReason::NoCatalog,
+                        "no Gaia photometry catalog is installed".into(),
+                    );
+                }
+                Err(error) => {
+                    return skip(ColorCalibrationSkipReason::NoCatalog, error.to_string());
+                }
+            };
+            let opened = match seiza::catalog::PhotometryCatalog::open(&path) {
+                Ok(catalog) => catalog,
+                Err(error) => {
+                    return skip(
+                        ColorCalibrationSkipReason::NoCatalog,
+                        format!("could not open {}: {error}", path.display()),
+                    );
+                }
+            };
+            (catalog_sources(&opened, wcs, width, height), None)
+        }
+        GaiaColors::Sources { sources, epoch } => (sources.to_vec(), epoch),
+    };
+    let stars = place_gaia_sources(wcs, width, height, epoch, &sources);
+    if !stars.iter().any(|star| star.bp_rp.is_some()) {
+        return skip(
+            ColorCalibrationSkipReason::NoStars,
+            "no Gaia star with a colour falls on the image".into(),
+        );
+    }
+    match fit_color(image, &stars, options) {
+        Ok(calibration) => match calibration.apply(image) {
+            Ok(()) => ColorCalibrationOutcome::Calibrated(calibration),
+            Err(error) => skip(
+                ColorCalibrationSkipReason::InvalidOptions,
+                error.to_string(),
+            ),
+        },
+        Err(reason) => ColorCalibrationOutcome::Skipped(reason),
+    }
+}
+
+/// A colour-calibrated, stretched image: what [`calibrate_and_stretch`]
+/// returns.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CalibratedStretch {
+    /// The display-referred result.
+    pub image: LinearImage,
+    /// The calibration applied before the stretch, or why there was none.
+    pub calibration: ColorCalibrationOutcome,
+    /// Each stretch stage's resolved plan.
+    pub stretch_plans: Vec<StretchPlan>,
+}
+
+/// Colour calibrate a linear RGB image against Gaia, as
+/// [`calibrate_color_image`] does, then display-stretch it with `stretch`.
+/// A stretch resolved from the image's own statistics, such as Auto-MTF,
+/// sees the calibrated colours, so a linked stretch keeps them.
+///
+/// When calibration cannot run the image is still stretched, and the
+/// outcome says why it was not calibrated. Fails only when the stretch does.
+pub fn calibrate_and_stretch(
+    mut image: LinearImage,
+    wcs: Option<&seiza::Wcs>,
+    gaia: GaiaColors<'_>,
+    options: &ColorCalibrationOptions,
+    stretch: &StretchStack,
+) -> Result<CalibratedStretch> {
+    let calibration = calibrate_color_image(&mut image, wcs, gaia, options);
+    let shape = ImageShape::new(image.width, image.height, image.channels);
+    let output = stretch
+        .apply_f32_image(&image.data, shape)
+        .map_err(|error| Error::Color(format!("stretch failed: {error}")))?;
+    Ok(CalibratedStretch {
+        image: LinearImage::new(image.width, image.height, image.channels, output.data)?,
+        calibration,
+        stretch_plans: output.plans,
     })
 }
 
@@ -1032,5 +1325,250 @@ mod tests {
         // 1"/yr north for ten years is ten 1" pixels.
         assert!(((at_2016.y - at_2026.y).abs() - 10.0).abs() < 0.01);
         assert!((at_2016.x - at_2026.x).abs() < 0.01);
+    }
+
+    /// The solved frame the test field was made from: one-arcsecond pixels
+    /// around (56.75, 24.1), 1100 × 900.
+    fn source_wcs() -> seiza::Wcs {
+        seiza::Wcs::from_center_scale_rotation((56.75, 24.1), (549.5, 449.5), 1.0, 12.0, false)
+    }
+
+    /// How the test field was made from that frame: turned half round on a
+    /// grid twice as fine, then cropped at (300, 150).
+    fn source_to_field() -> AffineTransform {
+        AffineTransform {
+            matrix: [[-2.0, 0.0], [0.0, -2.0]],
+            translation_x: 2.0 * 1099.0,
+            translation_y: 2.0 * 899.0,
+        }
+        .then(AffineTransform {
+            translation_x: -300.0,
+            translation_y: -150.0,
+            ..AffineTransform::IDENTITY
+        })
+    }
+
+    /// The test field's stars as Gaia sources, placed through the source
+    /// frame's solution.
+    fn field_sources(stars: &[ColorReferenceStar]) -> Vec<GaiaColorSource> {
+        let wcs = source_wcs();
+        let to_field = source_to_field();
+        stars
+            .iter()
+            .map(|star| {
+                let (x, y) = to_field.inverse_apply(star.x, star.y);
+                let (ra, dec) = wcs.pixel_to_world(x, y);
+                GaiaColorSource {
+                    ra,
+                    dec,
+                    pmra: None,
+                    pmdec: None,
+                    g: star.g,
+                    bp_rp: star.bp_rp,
+                    ruwe: None,
+                }
+            })
+            .collect()
+    }
+
+    fn auto_stretch() -> StretchStack {
+        StretchStack::single(seiza_stretch::StretchConfig::auto_mtf(
+            seiza_stretch::StretchParams::default(),
+            200_000,
+        ))
+    }
+
+    #[test]
+    fn a_solution_carries_through_registration_turns_and_crops() {
+        let wcs = source_wcs();
+        let field = transform_wcs(&wcs, source_to_field()).unwrap();
+        // A star at source pixel (100, 200) sits at 2 × (1099 − 100) − 300,
+        // 2 × (899 − 200) − 150 on the field.
+        let (ra, dec) = wcs.pixel_to_world(100.0, 200.0);
+        let (x, y) = field.world_to_pixel(ra, dec).unwrap();
+        assert!(
+            (x - 1698.0).abs() < 1e-6 && (y - 1248.0).abs() < 1e-6,
+            "{x} {y}"
+        );
+        assert!((field.scale_arcsec_per_px() - 0.5).abs() < 1e-9);
+
+        // Distortion carries through a crop, but not through a turn.
+        let mut distorted = wcs.clone();
+        distorted.sip = Some(seiza::Sip {
+            order: 2,
+            a: vec![1e-6, 0.0, 0.0],
+            b: vec![0.0, 0.0, 1e-6],
+            ap: Vec::new(),
+            bp: Vec::new(),
+        });
+        let crop = AffineTransform {
+            translation_x: -300.0,
+            translation_y: -150.0,
+            ..AffineTransform::IDENTITY
+        };
+        let cropped = transform_wcs(&distorted, crop).unwrap();
+        let (ra, dec) = distorted.pixel_to_world(900.0, 700.0);
+        let (back_ra, back_dec) = cropped.pixel_to_world(600.0, 550.0);
+        assert!((ra - back_ra).abs() < 1e-9 && (dec - back_dec).abs() < 1e-9);
+        assert!(transform_wcs(&distorted, source_to_field()).is_err());
+        let singular = AffineTransform {
+            matrix: [[0.0, 0.0], [0.0, 0.0]],
+            ..AffineTransform::IDENTITY
+        };
+        assert!(transform_wcs(&wcs, singular).is_err());
+    }
+
+    #[test]
+    fn calibrate_and_stretch_recovers_the_gains_through_a_derived_solution() {
+        let (image, stars) = field();
+        let wcs = transform_wcs(&source_wcs(), source_to_field()).unwrap();
+        let sources = field_sources(&stars);
+
+        // From a photometry catalog on disk, as hosts with Seiza's catalogs
+        // installed use it.
+        let directory = tempfile::tempdir().unwrap();
+        let mut builder = seiza::catalog::PhotometryCatalogBuilder::new(90, 2016.0, "test");
+        for source in &sources {
+            builder.add(seiza::catalog::PhotometricStar {
+                ra: source.ra,
+                dec: source.dec,
+                g: source.g,
+                bp_rp: source.bp_rp,
+                reliable: true,
+            });
+        }
+        builder
+            .write_to(&directory.path().join("stars-gaia-photometry.bin"))
+            .unwrap();
+        let result = calibrate_and_stretch(
+            image.clone(),
+            Some(&wcs),
+            GaiaColors::CatalogPath(Some(directory.path())),
+            &ColorCalibrationOptions::default(),
+            &auto_stretch(),
+        )
+        .unwrap();
+        let calibration = result.calibration.calibration().expect("calibrated");
+        assert!(
+            (calibration.gains[0] - 1.0 / 0.6).abs() < 0.03,
+            "{:?}",
+            calibration.gains
+        );
+        assert!(
+            (calibration.gains[2] - 1.0 / 1.4).abs() < 0.03,
+            "{:?}",
+            calibration.gains
+        );
+        assert_eq!(result.stretch_plans.len(), 1);
+        assert_eq!(result.image.data.len(), image.data.len());
+        assert!(
+            result
+                .image
+                .data
+                .iter()
+                .all(|value| (0.0..=1.0).contains(value))
+        );
+        // Calibrated, the sky is one grey after the linked stretch too.
+        let sky = sky_medians(&result.image);
+        assert!(
+            (sky[0] - sky[1]).abs() < 0.01 && (sky[2] - sky[1]).abs() < 0.01,
+            "{sky:?}"
+        );
+
+        // From sources the caller has: the same answer, and the outcome
+        // serializes for hosts that keep it.
+        let mut calibrated = image.clone();
+        let outcome = calibrate_color_image(
+            &mut calibrated,
+            Some(&wcs),
+            GaiaColors::Sources {
+                sources: &sources,
+                epoch: None,
+            },
+            &ColorCalibrationOptions::default(),
+        );
+        let gains = outcome.calibration().unwrap().gains;
+        assert!((gains[0] - calibration.gains[0]).abs() < 0.01);
+        assert_ne!(calibrated, image);
+        let json = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(json["status"], "calibrated");
+        let back: ColorCalibrationOutcome = serde_json::from_value(json).unwrap();
+        assert_eq!(back, outcome);
+    }
+
+    #[test]
+    fn a_calibration_that_cannot_run_still_stretches_and_says_why() {
+        let (image, stars) = field();
+        let wcs = transform_wcs(&source_wcs(), source_to_field()).unwrap();
+        let sources = field_sources(&stars);
+        let options = ColorCalibrationOptions::default();
+        let uncalibrated = auto_stretch()
+            .apply_f32_image(&image.data, ImageShape::new(image.width, image.height, 3))
+            .unwrap()
+            .data;
+        let reason = |wcs: Option<&seiza::Wcs>, gaia: GaiaColors<'_>| {
+            let result =
+                calibrate_and_stretch(image.clone(), wcs, gaia, &options, &auto_stretch()).unwrap();
+            assert_eq!(result.image.data, uncalibrated);
+            match result.calibration {
+                ColorCalibrationOutcome::Skipped(skip) => skip.reason,
+                calibrated => panic!("{calibrated:?}"),
+            }
+        };
+        let all = GaiaColors::Sources {
+            sources: &sources,
+            epoch: None,
+        };
+        assert_eq!(reason(None, all), ColorCalibrationSkipReason::NoSolution);
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(
+            reason(Some(&wcs), GaiaColors::CatalogPath(Some(empty.path()))),
+            ColorCalibrationSkipReason::NoCatalog
+        );
+        assert_eq!(
+            reason(
+                Some(&wcs),
+                GaiaColors::Sources {
+                    sources: &[],
+                    epoch: None
+                }
+            ),
+            ColorCalibrationSkipReason::NoStars
+        );
+        assert_eq!(
+            reason(
+                Some(&wcs),
+                GaiaColors::Sources {
+                    sources: &sources[..6],
+                    epoch: None
+                }
+            ),
+            ColorCalibrationSkipReason::TooFewStars
+        );
+        // A solution for another field places no star on this one.
+        let elsewhere =
+            seiza::Wcs::from_center_scale_rotation((200.0, -40.0), (600.0, 500.0), 1.0, 0.0, false);
+        assert_eq!(
+            reason(Some(&elsewhere), all),
+            ColorCalibrationSkipReason::NoStars
+        );
+
+        let mut mono = LinearImage::new(10, 10, 1, vec![1.0; 100]).unwrap();
+        let outcome = calibrate_color_image(&mut mono, Some(&wcs), all, &options);
+        assert!(matches!(
+            outcome,
+            ColorCalibrationOutcome::Skipped(ColorCalibrationSkip {
+                reason: ColorCalibrationSkipReason::NotRgb,
+                ..
+            })
+        ));
+        assert_eq!(
+            serde_json::to_value(&outcome).unwrap(),
+            serde_json::json!({
+                "status": "skipped",
+                "reason": "not_rgb",
+                "detail": "colour calibration needs a three-channel image, not 1",
+            })
+        );
     }
 }

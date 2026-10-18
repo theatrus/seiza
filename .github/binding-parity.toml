@@ -673,6 +673,9 @@ seiza_gaia_photometry_cone_json = "gaia_photometry_cone"
 seiza_gaia_photometry_catalog_cone_json = "gaia_photometry_catalog_cone"
 seiza_color_calibrate_json = "calibrate_color"
 seiza_color_calibration_apply = "ColorCalibration.apply"
+seiza_color_calibrate_image_json = "calibrate_color_image"
+seiza_color_calibrate_and_stretch_json = "calibrate_and_stretch"
+seiza_wcs_transform_json = "Wcs.transformed"
 seiza_color_crop_report_json = "crop_report"
 # The C calls read the stacks from files and always write the output;
 # Python composes arrays and writes when given output= (and header=).

@@ -327,6 +327,33 @@ impl PyWcs {
         self.wcs.footprint(width, height).to_vec()
     }
 
+    /// The solution of an image made from this one by a pixel mapping, such
+    /// as registration, a turn, binning or a crop: a pixel `(x, y)` here
+    /// lands at `(a x + b y + translation_x, c x + d y + translation_y)` on
+    /// the new image, with `matrix` `((a, b), (c, d))`. A crop at `(x, y)` is
+    /// the identity matrix with translation `(-x, -y)`. Raises when the
+    /// mapping cannot be inverted, or when the solution has SIP terms and
+    /// the mapping is more than a translation.
+    #[pyo3(signature = (matrix, translation_x=0.0, translation_y=0.0))]
+    fn transformed(
+        &self,
+        matrix: ((f64, f64), (f64, f64)),
+        translation_x: f64,
+        translation_y: f64,
+    ) -> PyResult<Self> {
+        let ((a, b), (c, d)) = matrix;
+        seiza_stacking::transform_wcs(
+            &self.wcs,
+            seiza_stacking::AffineTransform {
+                matrix: [[a, b], [c, d]],
+                translation_x,
+                translation_y,
+            },
+        )
+        .map(|wcs| Self { wcs })
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
     /// SIP distortion order, or `None` for a purely linear solution.
     #[getter]
     fn sip_order(&self) -> Option<u8> {

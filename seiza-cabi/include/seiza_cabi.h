@@ -918,6 +918,98 @@ bool seiza_color_calibration_apply(float *data,
                                    char **error_out);
 
 /*
+ Colour calibrate an interleaved linear RGB image in place against Gaia
+ DR3 star colours: place the Gaia stars through the image's solution, fit
+ the gains, and apply them.
+
+ `wcs_json` is the image's own solution as [`seiza_solve_image_json`]
+ returns it (`crval`, `crpix`, `cd`, optional `sip` and `pixelOrigin`);
+ for an image made from a solved frame, derive it with
+ [`seiza_wcs_transform_json`]. Null means there is none. `gaia_json` is
+ an array of sources as [`seiza_gaia_photometry_cone_json`] returns; when
+ it is null the Gaia colours come from the offline catalog at
+ `catalog_path` (the file or the directory that holds it; null looks in
+ the standard places). `options_json` is as
+ [`seiza_color_calibrate_json`] takes it.
+
+ When calibration cannot run, the image is left as it was. Either way
+ the call returns owned JSON: `{"schemaVersion": 1, "status":
+ "calibrated", "calibration": {...}}` with the calibration as
+ [`seiza_color_calibrate_json`] gives it, or `{"schemaVersion": 1,
+ "status": "skipped", "reason": ..., "detail": ...}` with `reason` one of
+ `no_solution`, `no_catalog`, `no_stars`, `too_few_stars`, `not_rgb` and
+ `invalid_options`. Errors are for malformed arguments only. Free the
+ result, or an `error_out` string, with [`seiza_string_free`].
+
+ # Safety
+ `data` must point to `length` writable floats, `width * height * 3` of
+ them. The JSON and path arguments must each be null or a valid
+ NUL-terminated UTF-8 string. When non-null, `error_out` must point to
+ writable storage for one pointer.
+ */
+char *seiza_color_calibrate_image_json(float *data,
+                                       size_t length,
+                                       size_t width,
+                                       size_t height,
+                                       const char *wcs_json,
+                                       const char *gaia_json,
+                                       const char *catalog_path,
+                                       const char *options_json,
+                                       char **error_out);
+
+/*
+ Colour calibrate an interleaved linear RGB image against Gaia, as
+ [`seiza_color_calibrate_image_json`] does, then display-stretch it, and
+ write the stretched image over `data`. `stretch_json` is a stretch
+ configuration or an array of them applied in order, as
+ [`seiza_rendered_image_open_with_stretch_config`] takes its `stretch`.
+ A statistics-driven stretch such as Auto-MTF sees the calibrated colours,
+ so a linked one keeps them.
+
+ When calibration cannot run, the image is still stretched. Returns
+ owned JSON `{"schemaVersion": 1, "calibration": {...}, "stretchPlans":
+ [...]}`: the calibration outcome as
+ [`seiza_color_calibrate_image_json`] gives it, and each stage's resolved
+ stretch plan. Fails only on malformed arguments or a failed stretch, and
+ then leaves `data` as it was. Free the result, or an `error_out` string,
+ with [`seiza_string_free`].
+
+ # Safety
+ As [`seiza_color_calibrate_image_json`]; `stretch_json` must be a valid
+ NUL-terminated UTF-8 string.
+ */
+char *seiza_color_calibrate_and_stretch_json(float *data,
+                                             size_t length,
+                                             size_t width,
+                                             size_t height,
+                                             const char *wcs_json,
+                                             const char *gaia_json,
+                                             const char *catalog_path,
+                                             const char *options_json,
+                                             const char *stretch_json,
+                                             char **error_out);
+
+/*
+ The solution of an image made from a solved one by a pixel mapping, such
+ as registration, a turn, binning, drizzle or a crop. `wcs_json` is the
+ solved image's WCS as [`seiza_solve_image_json`] returns it;
+ `transform_json` is `{"matrix": [[a, b], [c, d]], "translationX": tx,
+ "translationY": ty}`, taking a solved-image pixel `(x, y)` to `(a x + b
+ y + tx, c x + d y + ty)` on the new image. A crop at `(x, y)` is the
+ identity matrix with translation `(-x, -y)`.
+
+ Returns the new image's WCS as owned JSON in the same form, `crpix`
+ counting from 0. Fails when the mapping cannot be inverted, or when the
+ WCS has SIP terms and the mapping is more than a translation. Free the
+ result, or an `error_out` string, with [`seiza_string_free`].
+
+ # Safety
+ Both JSON arguments must be valid NUL-terminated UTF-8 strings. When
+ non-null, `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_wcs_transform_json(const char *wcs_json, const char *transform_json, char **error_out);
+
+/*
  Choose a reference from an ordered JSON array of FITS or XISF path strings.
  Uses the native stacking reference scorer: among frames with nearly the
  best star quality, choose the flattest background. This only reads inputs;

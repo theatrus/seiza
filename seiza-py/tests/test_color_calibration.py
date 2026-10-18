@@ -115,3 +115,66 @@ def test_color_calibration_apply_refuses_a_mono_image():
 def test_gaia_photometry_catalog_cone_reports_a_missing_catalog(tmp_path):
     with pytest.raises(ValueError):
         seiza.gaia_photometry_catalog_cone(tmp_path / "absent.bin", 56.75, 24.1, 1.0)
+
+
+AUTO_STRETCH = {
+    "model": {"type": "auto-mtf", "target_median": 0.25, "shadows_clip": -2.8},
+    "color_strategy": "linked",
+    "max_analysis_samples": 200_000,
+}
+
+
+def turned_and_cropped(wcs):
+    """A solved frame, and the mapping that turns it half round and crops it
+    at (40, 60)."""
+    to_field = ((-1.0, 0.0), (0.0, -1.0))
+    frame = wcs.transformed(to_field, 1199.0, 999.0)
+    return frame, (to_field, 1199.0 - 40.0, 999.0 - 60.0)
+
+
+def test_wcs_transformed_carries_a_solution_through_a_turn_and_a_crop():
+    wcs = seiza.Wcs.from_center_scale_rotation((56.75, 24.1), (600.0, 500.0), 3.0, 10.0)
+    frame, (matrix, tx, ty) = turned_and_cropped(wcs)
+    field = frame.transformed(matrix, tx, ty)
+    ra, dec = frame.pixel_to_world(100.0, 200.0)
+    x, y = field.world_to_pixel(ra, dec)
+    assert (x, y) == pytest.approx((1199.0 - 100.0 - 40.0, 999.0 - 200.0 - 60.0))
+    with pytest.raises(ValueError):
+        wcs.transformed(((0.0, 0.0), (0.0, 0.0)))
+
+
+def test_calibrate_and_stretch_recovers_the_gains_and_stretches():
+    image, wcs, gaia = synthetic_field()
+    result = seiza.calibrate_and_stretch(image, wcs, stretch=AUTO_STRETCH, gaia=gaia)
+    outcome = result.calibration
+    assert outcome.status == "calibrated" and outcome.reason is None
+    r, g, b = outcome.calibration.gains
+    assert abs(r - 1 / 0.6) < 0.03 and abs(b - 1 / 1.4) < 0.03
+    assert result.image.shape == image.shape
+    assert 0.0 <= result.image.min() and result.image.max() <= 1.0
+    assert len(result.stretch_plans) == 1
+
+    calibrated, alone = seiza.calibrate_color_image(image, wcs, gaia=gaia)
+    assert alone.status == "calibrated"
+    assert alone.calibration.gains == pytest.approx(outcome.calibration.gains)
+    assert not np.array_equal(calibrated, image)
+
+
+def test_calibrate_and_stretch_still_stretches_when_it_cannot_calibrate(tmp_path):
+    image, wcs, gaia = synthetic_field()
+    plain = seiza.calibrate_and_stretch(image, None, stretch=[AUTO_STRETCH], gaia=gaia)
+    assert plain.calibration.status == "skipped"
+    assert plain.calibration.reason == "no_solution"
+    assert plain.calibration.calibration is None
+    assert 0.0 <= plain.image.min() and plain.image.max() <= 1.0
+
+    for kwargs, reason in [
+        ({"catalog": tmp_path}, "no_catalog"),
+        ({"gaia": []}, "no_stars"),
+        ({"gaia": gaia[:6]}, "too_few_stars"),
+    ]:
+        unchanged, outcome = seiza.calibrate_color_image(image, wcs, **kwargs)
+        assert outcome.reason == reason, outcome.detail
+        np.testing.assert_array_equal(unchanged, image)
+    with pytest.raises(ValueError):
+        seiza.calibrate_and_stretch(image, wcs, stretch={"model": "nonsense"}, gaia=gaia)

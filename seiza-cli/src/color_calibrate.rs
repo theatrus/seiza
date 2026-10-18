@@ -2,9 +2,11 @@ use anyhow::{Context, Result};
 use clap::Args;
 use seiza_fits::{HeaderValue, WriteHeaderCard};
 use seiza_stacking::{
-    ColorCalibrationOptions, GaiaColorSource, SOLAR_BP_RP, calibrate_color, place_gaia_sources,
+    ColorCalibration, ColorCalibrationOptions, ColorCalibrationOutcome, GaiaColorSource,
+    GaiaColors, SOLAR_BP_RP, calibrate_and_stretch, calibrate_color, place_gaia_sources,
     write_processed_image_fits_f32,
 };
+use seiza_stretch::{StretchConfig, StretchParams, StretchStack};
 use std::path::{Path, PathBuf};
 
 #[derive(Args)]
@@ -18,6 +20,17 @@ pub(crate) struct ColorCalibrateArgs {
     /// JSON report: gains, offsets, colour fits, and every measured star
     #[arg(long)]
     report: Option<PathBuf>,
+    /// Also write a display-referred PNG, JPEG or TIFF, stretched after
+    /// calibration. When calibration cannot run, the image is stretched
+    /// and written uncalibrated, the linear output too, and the reason is
+    /// printed instead of failing
+    #[arg(long)]
+    display: Option<PathBuf>,
+    /// The display stretch: a stretch configuration as JSON, or a file of
+    /// it, with one stage or an array of stages applied in order (default:
+    /// linked Auto-MTF)
+    #[arg(long, requires = "display")]
+    stretch: Option<String>,
     /// Gaia BP-RP colour to render neutral; the default is the Sun's (G2V)
     #[arg(long, default_value_t = SOLAR_BP_RP)]
     white_bp_rp: f32,
@@ -173,8 +186,77 @@ pub(crate) fn run(args: ColorCalibrateArgs) -> Result<()> {
         neutralize_background: !args.no_background_neutralization,
         ..ColorCalibrationOptions::default()
     };
-    let calibration =
-        calibrate_color(&frame.image, &stars, &options).context("colour calibration failed")?;
+    let calibration = match &args.display {
+        None => {
+            calibrate_color(&frame.image, &stars, &options).context("colour calibration failed")?
+        }
+        Some(display) => {
+            let stretch = display_stretch(args.stretch.as_deref())?;
+            let result = calibrate_and_stretch(
+                frame.image.clone(),
+                Some(&wcs),
+                GaiaColors::Sources {
+                    sources: &sources,
+                    epoch,
+                },
+                &options,
+                &stretch,
+            )
+            .context("display stretch failed")?;
+            let pixels = result
+                .image
+                .data
+                .iter()
+                .map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u8)
+                .collect();
+            crate::preview::write_display_image(display, width, height, 3, pixels)?;
+            match result.calibration {
+                ColorCalibrationOutcome::Calibrated(calibration) => {
+                    crate::common::wrote(display, format_args!("colour-calibrated, stretched"));
+                    calibration
+                }
+                ColorCalibrationOutcome::Skipped(skip) => {
+                    println!("not colour calibrated: {}", skip.detail);
+                    crate::common::wrote(display, format_args!("uncalibrated, stretched"));
+                    write_processed_image_fits_f32(&args.output, &frame.image, &frame.headers, &[])
+                        .with_context(|| format!("could not write {}", args.output.display()))?;
+                    crate::common::wrote(&args.output, format_args!("uncalibrated, linear f32"));
+                    return Ok(());
+                }
+            }
+        }
+    };
+    report_calibration(&calibration);
+    calibration.apply(&mut frame.image)?;
+    write_calibrated(&args, &frame, &calibration)
+}
+
+/// The stretch `--stretch` gives, as JSON or a JSON file, or linked
+/// Auto-MTF.
+fn display_stretch(stretch: Option<&str>) -> Result<StretchStack> {
+    let Some(stretch) = stretch else {
+        return Ok(StretchStack::single(StretchConfig::auto_mtf(
+            StretchParams::default(),
+            crate::preview::MAXIMUM_SAMPLES,
+        )));
+    };
+    let text = if stretch.trim_start().starts_with(['{', '[']) {
+        stretch.to_owned()
+    } else {
+        std::fs::read_to_string(stretch).with_context(|| format!("could not read {stretch}"))?
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(&text).context("the stretch is not JSON")?;
+    if value.is_array() {
+        serde_json::from_value(value).context("invalid stretch stages")
+    } else {
+        serde_json::from_value(value)
+            .map(StretchStack::single)
+            .context("invalid stretch")
+    }
+}
+
+fn report_calibration(calibration: &ColorCalibration) {
     for (name, fit) in [
         ("R/G", &calibration.red_fit),
         ("B/G", &calibration.blue_fit),
@@ -197,8 +279,14 @@ pub(crate) fn run(args: ColorCalibrateArgs) -> Result<()> {
         calibration.stars_measured,
         calibration.stars_offered,
     );
-    calibration.apply(&mut frame.image)?;
+}
 
+/// Write the calibrated linear image and the report.
+fn write_calibrated(
+    args: &ColorCalibrateArgs,
+    frame: &seiza_stacking::FitsFrame,
+    calibration: &ColorCalibration,
+) -> Result<()> {
     let cards = [
         WriteHeaderCard::new("COLORCAL", HeaderValue::String("Gaia DR3 BP-RP".into()))
             .with_comment("photometric colour calibration"),
@@ -231,7 +319,7 @@ pub(crate) fn run(args: ColorCalibrateArgs) -> Result<()> {
     write_processed_image_fits_f32(&args.output, &frame.image, &frame.headers, &cards)
         .with_context(|| format!("could not write {}", args.output.display()))?;
     if let Some(path) = &args.report {
-        crate::provenance::write_json_atomic(path, &calibration)
+        crate::provenance::write_json_atomic(path, calibration)
             .with_context(|| format!("could not write {}", path.display()))?;
     }
     crate::common::wrote(

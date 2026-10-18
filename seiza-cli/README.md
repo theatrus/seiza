@@ -321,6 +321,20 @@ filter-curve method and Seiza's BP−RP fit agree within 0.7% when given the sam
 fluxes. The fluxes differ instead. For 60 isolated stars SPCC's PSF photometry
 reports R/G 0.712, while apertures from 4 to 36 px all give 0.667–0.697.
 
+To see the result, add a display image. The calibrated colours are
+stretched with a linked Auto-MTF unless `--stretch` gives another stretch, as
+JSON or a file of it (one stage, or an array of stages applied in order):
+
+```
+seiza color-calibrate stack.fits --output stack-cc.fits --display stack-cc.png
+seiza color-calibrate stack.fits --output stack-cc.fits --display stack-cc.png \
+  --stretch '{"model": {"type": "auto-mtf", "target_median": 0.25, "shadows_clip": -2.8}, "color_strategy": "linked", "max_analysis_samples": 200000}'
+```
+
+With `--display`, a calibration that cannot run (too few stars, say) does not
+fail the command: it prints the reason and writes both images uncalibrated.
+See the [colour calibration design](../docs/design/color-calibration.md).
+
 The offline catalog is built from Gaia DR3 itself (CC BY-SA 3.0 IGO), not from
 PixInsight's databases. Seiza hosts a prebuilt copy (about 460 MB, downloaded zstd-compressed) that is
 not part of the standard bundle; install it with setup or by name:

@@ -315,6 +315,28 @@ magnitudes brighter than the faintest row given). `calibration.measurements`
 lists every star measured, with its position, `g`, `bp_rp`, R, G, B `flux`,
 and `used`, whether the red and the blue fit kept it.
 
+`calibrate_color_image` and `calibrate_and_stretch` place the Gaia stars
+themselves, from rows or the offline catalog, and never fail because
+calibration cannot run: the outcome says why (`no_solution`, `no_catalog`,
+`no_stars`, `too_few_stars`, `not_rgb`, `invalid_options`) and the image is
+left uncalibrated. `calibrate_and_stretch` then display-stretches the image,
+so a linked stretch keeps the calibrated balance. For an image made from a
+solved frame, `Wcs.transformed` carries the frame's solution through the
+pixel mapping, here a half turn on a 1300 × 1100 grid and a crop at (40, 60):
+
+```python
+wcs = frame_wcs.transformed(((-1.0, 0.0), (0.0, -1.0)), 1299.0 - 40.0, 1099.0 - 60.0)
+result = seiza.calibrate_and_stretch(
+    rgb,
+    wcs,
+    catalog=path,  # or gaia=rows; None searches the installed catalogs
+    stretch={"model": {"type": "auto-mtf", "target_median": 0.25, "shadows_clip": -2.8},
+             "color_strategy": "linked", "max_analysis_samples": 200000},
+)
+print(result.calibration.status, result.calibration.reason)
+display = result.image  # (h, w, 3) float32 in [0, 1]
+```
+
 ## Image stacking
 
 The wheel includes the same linear calibration, registration, normalization,

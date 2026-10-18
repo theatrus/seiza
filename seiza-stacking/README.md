@@ -248,6 +248,15 @@ factors operate on stretched channels. That preparation resolves the shared
 parameterized Auto-MTF model from `seiza-stretch`. `write_color_fits_f32`
 records the palette and transfer semantics alongside preserved reference WCS
 cards. See the [color-composition design](../docs/design/color-composition.md).
+
+`calibrate_color` sets the gains of a linear RGB image from Gaia DR3 star
+colours. `calibrate_color_image` places the Gaia stars itself, from the
+offline photometry catalog or sources the caller has, and applies the gains;
+`calibrate_and_stretch` then display-stretches the result. Neither fails when
+calibration cannot run: the outcome gives a typed reason and the image stays
+uncalibrated. `transform_wcs` carries a reference frame's solution through
+registration, a turn and a crop to a composed image. See the [colour
+calibration design](../docs/design/color-calibration.md).
 The composition functions themselves require aligned inputs. File-oriented
 callers can use `Registrar` plus `resample_to_reference`; the CLI does this
 automatically for every non-reference filter stack. `ColorOptions` controls
