@@ -163,6 +163,12 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// ([`calibrate_color_image`], [`calibrate_and_stretch`]) is outside it: no
 /// fixture holds that output yet. `tests/output_version.rs` fails when its
 /// fixtures' output changes, and `AGENTS.md` gives the steps.
+///
+/// One known difference: on an expanded canvas with a lens or quadratic
+/// model, seiza-stacking 0.42.0 leaves out the samples a strong distortion
+/// folds back onto the frame far beyond it, which 0.40.0 sampled (#307). The
+/// value stayed at "0.40.0" because no cache keyed on it predates 0.42.0,
+/// the first release to export it.
 pub const OUTPUT_VERSION: &str = "0.40.0";
 
 /// Anything that can go wrong while calibrating, registering, normalizing, or
