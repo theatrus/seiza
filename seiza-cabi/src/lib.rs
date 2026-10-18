@@ -1470,6 +1470,31 @@ pub extern "C" fn seiza_core_version() -> *const c_char {
     VERSION.as_ptr().cast()
 }
 
+/// A static, NUL-terminated copy of `text`, made once.
+fn static_c_string(cell: &'static OnceLock<CString>, text: &str) -> *const c_char {
+    cell.get_or_init(|| CString::new(text).expect("version strings hold no NUL"))
+        .as_ptr()
+}
+
+/// The Seiza release whose stacking, master building and registration
+/// output this library reproduces. Key cached stacks and masters on it
+/// rather than on `seiza_core_version`: it moves only when that output
+/// changes. The string is static and is never freed.
+#[unsafe(no_mangle)]
+pub extern "C" fn seiza_stacking_output_version() -> *const c_char {
+    static TEXT: OnceLock<CString> = OnceLock::new();
+    static_c_string(&TEXT, seiza_stacking::OUTPUT_VERSION)
+}
+
+/// The Seiza release whose stretch output this library reproduces. Key
+/// cached stretched images on it; it moves only when that output changes.
+/// The string is static and is never freed.
+#[unsafe(no_mangle)]
+pub extern "C" fn seiza_stretch_output_version() -> *const c_char {
+    static TEXT: OnceLock<CString> = OnceLock::new();
+    static_c_string(&TEXT, seiza_stretch::OUTPUT_VERSION)
+}
+
 #[unsafe(no_mangle)]
 /// Applies damped Richardson-Lucy deconvolution to interleaved linear `float`
 /// samples in place. `channels` must be one or three and `data_length` must
@@ -8645,6 +8670,24 @@ fn set_error(error_out: *mut *mut c_char, error: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_versions_are_the_crates_own() {
+        let read = |pointer: *const c_char| unsafe { CStr::from_ptr(pointer) }.to_str().unwrap();
+        assert_eq!(
+            read(seiza_stacking_output_version()),
+            seiza_stacking::OUTPUT_VERSION
+        );
+        assert_eq!(
+            read(seiza_stretch_output_version()),
+            seiza_stretch::OUTPUT_VERSION
+        );
+        // The same static string each call.
+        assert_eq!(
+            seiza_stacking_output_version(),
+            seiza_stacking_output_version()
+        );
+    }
 
     #[test]
     fn defect_detection_cabi_returns_the_map_stack_options_take() {

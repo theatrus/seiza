@@ -426,7 +426,13 @@ exposes the **superset** of what both apps need.
   counts of the records considered, failed and skipped as stale (over seven
   days from the exposure by default). Release the catalog with
   `seiza_satellite_catalog_free`. Python's `SatelliteCatalog` is the twin.
-- **Memory** — `seiza_core_version`, `seiza_string_free`.
+- **Versions** — `seiza_core_version` gives the library release.
+  `seiza_stacking_output_version` and `seiza_stretch_output_version` give the
+  release whose stacking and stretch output this library reproduces; key
+  cached stacks, masters and stretched images on those, since they move only
+  when output changes. Python's `__version__`, `STACKING_OUTPUT_VERSION` and
+  `STRETCH_OUTPUT_VERSION` are the twins.
+- **Memory** — `seiza_string_free`.
 
 Rendered-image metadata includes input and display histograms plus the requested
 and resolved sample domains used for that render.

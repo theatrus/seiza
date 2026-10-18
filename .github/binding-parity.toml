@@ -709,6 +709,8 @@ seiza_cancel_signal_cancel = { none = "C cancel handle; Python takes a cancel= c
 seiza_cancel_signal_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
 seiza_string_free = { none = "frees a string the C ABI returned; Python manages its own memory" }
 seiza_core_version = "__version__"
+seiza_stacking_output_version = "STACKING_OUTPUT_VERSION"
+seiza_stretch_output_version = "STRETCH_OUTPUT_VERSION"
 
 # Every Python function, constructor and method (not properties) that no C
 # export above gives as its twin: the C export that does the same job

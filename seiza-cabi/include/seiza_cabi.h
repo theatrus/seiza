@@ -72,7 +72,8 @@
  *     state and remain valid only until its next mutable call, finish, or free.
  *   - const float* / uint32_t* from seiza_stack_snapshot_* point INTO the
  *     immutable SeizaStackSnapshot and dangle when the snapshot is freed.
- *   - const char* from seiza_core_version is static and is never freed.
+ *   - const char* from seiza_core_version, seiza_stacking_output_version and
+ *     seiza_stretch_output_version is static and is never freed.
  *   - the `json` argument to a SeizaCatalogSetupProgressCallback is valid only
  *     for the duration of that one callback; copy it if you need it afterward.
  *   - the pixels a SeizaParallaxFrameCallback receives, and the JSON a
@@ -495,6 +496,21 @@ extern "C" {
 #endif // __cplusplus
 
 const char *seiza_core_version(void);
+
+/*
+ The Seiza release whose stacking, master building and registration
+ output this library reproduces. Key cached stacks and masters on it
+ rather than on `seiza_core_version`: it moves only when that output
+ changes. The string is static and is never freed.
+ */
+const char *seiza_stacking_output_version(void);
+
+/*
+ The Seiza release whose stretch output this library reproduces. Key
+ cached stretched images on it; it moves only when that output changes.
+ The string is static and is never freed.
+ */
+const char *seiza_stretch_output_version(void);
 
 /*
  Applies damped Richardson-Lucy deconvolution to interleaved linear `float`

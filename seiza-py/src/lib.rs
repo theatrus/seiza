@@ -1059,5 +1059,9 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("SolveError", m.py().get_type::<SolveError>())?;
     m.add("EngineError", m.py().get_type::<EngineError>())?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    // The releases whose stacking and stretch output this build reproduces:
+    // what a cache of stacks or stretched images keys on.
+    m.add("STACKING_OUTPUT_VERSION", seiza_stacking::OUTPUT_VERSION)?;
+    m.add("STRETCH_OUTPUT_VERSION", seiza_stretch::OUTPUT_VERSION)?;
     Ok(())
 }

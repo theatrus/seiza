@@ -8,6 +8,13 @@ import numpy as np
 import numpy.typing as npt
 
 __version__: str
+STACKING_OUTPUT_VERSION: str
+"""The Seiza release whose stacking, master building and registration output
+this build reproduces. Key cached stacks and masters on it rather than on
+``__version__``: it moves only when that output changes."""
+STRETCH_OUTPUT_VERSION: str
+"""The Seiza release whose stretch output this build reproduces. Key cached
+stretched images on it; it moves only when that output changes."""
 
 StarInput = Union["Star", tuple[float, float, float]]
 

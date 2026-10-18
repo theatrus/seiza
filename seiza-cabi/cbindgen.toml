@@ -75,7 +75,8 @@ after_includes = """
  *     state and remain valid only until its next mutable call, finish, or free.
  *   - const float* / uint32_t* from seiza_stack_snapshot_* point INTO the
  *     immutable SeizaStackSnapshot and dangle when the snapshot is freed.
- *   - const char* from seiza_core_version is static and is never freed.
+ *   - const char* from seiza_core_version, seiza_stacking_output_version and
+ *     seiza_stretch_output_version is static and is never freed.
  *   - the `json` argument to a SeizaCatalogSetupProgressCallback is valid only
  *     for the duration of that one callback; copy it if you need it afterward.
  *   - the pixels a SeizaParallaxFrameCallback receives, and the JSON a
