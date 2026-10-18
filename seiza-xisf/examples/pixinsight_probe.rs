@@ -23,6 +23,20 @@ fn sample_k(x: usize, y: usize, c: usize, seed: u64, mk: f64) -> f64 {
         as f64
 }
 
+/// Xorshift noise from `seed`, one 16-bit count per sample in storage
+/// order. `verify.js` computes the same sequence.
+fn noise_k(seed: u32, count: usize) -> Vec<f64> {
+    let mut state = seed;
+    (0..count)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            f64::from(state & 0xffff)
+        })
+        .collect()
+}
+
 fn main() {
     let args = std::env::args().collect::<Vec<_>>();
     let (from_pi, to_pi) = (Path::new(&args[1]), Path::new(&args[2]));
@@ -230,8 +244,8 @@ fn main() {
             let _ = writeln!(out_manifest, "{out}|{w}|{h}|{ch}|32|1|{seed}|");
         }
     }
-    // Shuffled images large enough for 4 MiB subblocks, whose low byte
-    // planes do not shrink and are stored uncompressed.
+    // Shuffled noise large enough for 4 MiB subblocks. Its low byte planes
+    // do not shrink, so they are stored uncompressed.
     for (i, codec) in [
         CompressionCodec::Zlib,
         CompressionCodec::Lz4,
@@ -241,12 +255,10 @@ fn main() {
     .enumerate()
     {
         let (w, h, seed) = (2048_usize, 2048_usize, 600 + i as u64);
-        let mut samples = vec![0f32; w * h];
-        for y in 0..h {
-            for x in 0..w {
-                samples[y * w + x] = (sample_k(x, y, 0, seed, 65535.0) / 65535.0) as f32;
-            }
-        }
+        let samples = noise_k(seed as u32, w * h)
+            .into_iter()
+            .map(|k| (k / 65535.0) as f32)
+            .collect::<Vec<_>>();
         let options = WriteOptions {
             compression: Some(WriteCompression {
                 codec,
@@ -278,7 +290,11 @@ fn main() {
             .iter()
             .filter(|(stored, length)| stored == length)
             .count();
-        let ok = raw > 0 && raw < subblocks.len();
+        // zlib's Huffman coding still shrinks these planes a little, so
+        // only the other codecs must store some uncompressed.
+        let ok = subblocks.len() == 4
+            && raw < subblocks.len()
+            && (raw > 0 || codec == CompressionCodec::Zlib);
         if ok {
             passed += 1
         } else {
@@ -289,7 +305,7 @@ fn main() {
             if ok { "ok  " } else { "FAIL" },
             subblocks.len()
         );
-        let _ = writeln!(out_manifest, "{out}|{w}|{h}|1|32|1|{seed}|");
+        let _ = writeln!(out_manifest, "{out}|{w}|{h}|1|32|1|{seed}||noise");
     }
     std::fs::write(to_pi.join("manifest.txt"), out_manifest).unwrap();
     println!("read checks: {passed} passed, {failed} failed");

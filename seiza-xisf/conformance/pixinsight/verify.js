@@ -52,6 +52,7 @@ for (var n = 0; n < lines.length; ++n) {
    if (line.length == 0) continue;
    var f = line.split("|");
    var name = f[0], w = +f[1], h = +f[2], ch = +f[3], bits = +f[4], isFloat = f[5] == "1", seed = +f[6], source = f[7];
+   var noise = f[8] == "noise";
    var mk = isFloat ? 65535 : Math.pow(2, bits) - 1;
    var path = BASE + "/to_pi/" + name + ".xisf";
    try {
@@ -61,9 +62,16 @@ for (var n = 0; n < lines.length; ++n) {
       for (var hi = 0; hi < hintsList.length; ++hi) {
          var img = readPixels(path, hintsList[hi]);
          var maxErr = 0;
+         // The probe's xorshift noise, in the same storage order.
+         var state = seed;
          if (img.width != w || img.height != h || img.numberOfChannels != ch) throw "geometry " + img.width + "x" + img.height + "x" + img.numberOfChannels;
          for (var c = 0; c < ch; ++c) for (var y = 0; y < h; ++y) for (var x = 0; x < w; ++x) {
-            var e = Math.abs(img.sample(x, y, c) - sampleK(x, y, c, seed, mk) / mk);
+            var k = sampleK(x, y, c, seed, mk);
+            if (noise) {
+               state ^= state << 13; state ^= state >>> 17; state ^= state << 5;
+               k = state & 0xffff;
+            }
+            var e = Math.abs(img.sample(x, y, c) - k / mk);
             if (e > maxErr) maxErr = e;
          }
          results.push("[" + (hintsList[hi] || "default") + "] max_error=" + maxErr.toExponential(3));

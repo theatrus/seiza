@@ -78,8 +78,10 @@ uncompressed, so readers built on the original 2017 document can open the
 file. `write_f32_image_with_options` adds compression, where
 `WriteCompression::recommended()` is the zstd with byte shuffling the
 specification recommends, a checksum, carried metadata, and the `bounds` to
-declare. It stores a subblock that would not shrink uncompressed, and the
-whole block uncompressed when nothing shrinks. It cannot write LZ4HC, since `lz4_flex` has no LZ4HC encoder.
+declare. Like PixInsight, it compresses 4 MiB subblocks in parallel. It
+stores a subblock that would not shrink uncompressed, and the whole block
+uncompressed when nothing shrinks. It cannot write LZ4HC, since `lz4_flex`
+has no LZ4HC encoder.
 
 Declare the range the samples are meant to have, such as `(0.0, 1.0)` for
 normalized samples or `(0.0, 65535.0)` for 16-bit camera counts. PixInsight

@@ -10,8 +10,10 @@ Checks `seiza-xisf` against PixInsight's XISF module in both directions:
    type plus FITS keywords.
 2. The `pixinsight_probe` example reads each file with seiza, compares the
    samples with the pattern, and writes two kinds of file for PixInsight: a
-   round-trip copy of each source that carries its metadata, and files of
-   seiza's own with every codec and checksum.
+   round-trip copy of each source that carries its metadata, files of
+   seiza's own with every codec and checksum, and three 2048x2048 noise
+   images, byte-shuffled, whose 4 MiB subblocks include some stored
+   uncompressed (XISF 1.0 Revision 2).
 3. `verify.js` makes PixInsight read seiza's files. It compares the pixels
    with the pattern, both as PixInsight loads them by default and with
    `no-normalize`, and compares every property, keyword, thumbnail, color
