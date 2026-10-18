@@ -2,11 +2,11 @@ use anyhow::{Context, Result};
 use clap::Args;
 use seiza_fits::{HeaderValue, WriteHeaderCard};
 use seiza_stacking::{
-    ColorCalibration, ColorCalibrationOptions, ColorCalibrationOutcome, GaiaColorSource,
-    GaiaColors, SOLAR_BP_RP, calibrate_and_stretch, calibrate_color, place_gaia_sources,
-    write_processed_image_fits_f32,
+    ColorCalibration, ColorCalibrationOptions, ColorCalibrationOutcome, ColorCalibrationSkip,
+    ColorCalibrationSkipReason, GaiaColorSource, GaiaColors, SOLAR_BP_RP, calibrate_and_stretch,
+    calibrate_color_image, write_processed_image_fits_f32,
 };
-use seiza_stretch::{StretchConfig, StretchParams, StretchStack};
+use seiza_stretch::{ImageShape, StretchConfig, StretchParams, StretchStack};
 use std::path::{Path, PathBuf};
 
 #[derive(Args)]
@@ -21,9 +21,10 @@ pub(crate) struct ColorCalibrateArgs {
     #[arg(long)]
     report: Option<PathBuf>,
     /// Also write a display-referred PNG, JPEG or TIFF, stretched after
-    /// calibration. When calibration cannot run, the image is stretched
-    /// and written uncalibrated, the linear output too, and the reason is
-    /// printed instead of failing
+    /// calibration. When calibration cannot run (no solution in the
+    /// headers, no Gaia colours to be had, too few stars), both images are
+    /// written uncalibrated, the reason is printed and written to --report,
+    /// and the command succeeds
     #[arg(long)]
     display: Option<PathBuf>,
     /// The display stretch: a stretch configuration as JSON, or a file of
@@ -34,7 +35,8 @@ pub(crate) struct ColorCalibrateArgs {
     /// Gaia BP-RP colour to render neutral; the default is the Sun's (G2V)
     #[arg(long, default_value_t = SOLAR_BP_RP)]
     white_bp_rp: f32,
-    /// Faintest Gaia G magnitude to fetch
+    /// Faintest Gaia G magnitude to fetch from the archive or read from a
+    /// CSV; the offline catalog holds every star to G 15
     #[arg(long, default_value_t = 15.0)]
     gaia_max_mag: f32,
     /// Aperture radius in pixels (default: twice the measured FWHM)
@@ -79,156 +81,189 @@ pub(crate) fn run(args: ColorCalibrateArgs) -> Result<()> {
     let wcs = seiza::Wcs::from_fits_values(
         |key| header(key).and_then(HeaderValue::as_f64),
         |key| header(key).and_then(|value| value.as_str().map(str::to_owned)),
-    )
-    .with_context(|| {
-        format!(
+    );
+    if wcs.is_none() && args.display.is_none() {
+        anyhow::bail!(
             "{} has no TAN astrometric solution in its headers; plate-solve it first",
             args.input.display()
-        )
-    })?;
+        );
+    }
     // Observed at DATE-OBS when the headers say; Gaia positions are J2016.0.
     let epoch = ["DATE-AVG", "DATE-OBS", "DATE-BEG"]
         .iter()
         .find_map(|key| header(key).and_then(|value| value.as_str()))
         .and_then(crate::parse_iso_jd)
         .map(|jd| 2000.0 + (jd - 2_451_545.0) / 365.25);
-
     let (width, height) = (frame.image.width, frame.image.height);
-    // Image sides fit u32: decoders and detection use u32 dimensions.
-    let middle = seiza::image_center(width as u32, height as u32);
-    let center = wcs.pixel_to_world(middle.0, middle.1);
-    let radius = [
-        (0.0, 0.0),
-        (width as f64, 0.0),
-        (0.0, height as f64),
-        (width as f64, height as f64),
-    ]
-    .iter()
-    .map(|&(x, y)| {
-        let corner = wcs.pixel_to_world(x, y);
-        angular_separation(center, corner)
-    })
-    .fold(0.0_f64, f64::max)
-        * 1.02;
-    let catalog = if args.gaia_csv.is_some() {
-        None
-    } else {
-        seiza::data_paths::gaia_photometry(args.gaia_catalog.as_deref())?
-    };
-    // A local catalog's positions are already at its epoch: no proper
-    // motion remains to apply.
-    let mut epoch = epoch;
-    let gaia = match &args.gaia_csv {
-        Some(path) => {
-            let csv = std::fs::read_to_string(path)
-                .with_context(|| format!("could not read {}", path.display()))?;
-            seiza_sources::parse_gaia_photometry(&csv)
-                .with_context(|| format!("{} is not a Gaia photometry CSV", path.display()))?
-                .into_iter()
-                .filter(|star| star.g <= args.gaia_max_mag)
-                .collect()
-        }
-        None if catalog.is_some() => Vec::new(),
-        None => {
-            let cache = args.gaia_cache.clone().unwrap_or_else(default_gaia_cache);
-            gaia_field(&cache, center, radius, args.gaia_max_mag)?
-        }
-    };
-    let sources = gaia
-        .iter()
-        .map(|star| GaiaColorSource {
-            ra: star.ra,
-            dec: star.dec,
-            pmra: star.pmra,
-            pmdec: star.pmdec,
-            g: star.g,
-            bp_rp: star.bp_rp(),
-            ruwe: star.ruwe,
-        })
-        .collect::<Vec<_>>();
-    let sources = match &catalog {
-        Some(path) => {
-            let catalog = seiza::catalog::PhotometryCatalog::open(path)
-                .with_context(|| format!("could not open {}", path.display()))?;
-            println!(
-                "Gaia photometry from {} (epoch {})",
-                path.display(),
-                catalog.epoch()
-            );
-            epoch = None;
-            catalog
-                .cone_search(center.0, center.1, radius, args.gaia_max_mag)
-                .into_iter()
-                .map(|star| GaiaColorSource {
-                    ra: star.ra,
-                    dec: star.dec,
-                    pmra: None,
-                    pmdec: None,
-                    g: star.g,
-                    // An unreliable colour still marks a neighbour.
-                    bp_rp: star.bp_rp.filter(|_| star.reliable),
-                    ruwe: None,
-                })
-                .collect()
-        }
-        None => sources,
-    };
-    let stars = place_gaia_sources(&wcs, width, height, epoch, &sources);
-    println!(
-        "{} Gaia DR3 stars with BP-RP colours in the field (G <= {})",
-        stars.len(),
-        args.gaia_max_mag
-    );
 
+    // Where the Gaia colours come from. With --display, colours that cannot
+    // be had are reported and the image is still stretched.
+    let gaia = match &wcs {
+        Some(wcs) => match gaia_input(&args, wcs, width, height, epoch) {
+            Ok(gaia) => Ok(gaia),
+            Err(error) if args.display.is_some() => Err(ColorCalibrationSkip {
+                reason: ColorCalibrationSkipReason::NoCatalog,
+                detail: format!("{error:#}"),
+            }),
+            Err(error) => return Err(error),
+        },
+        None => Err(ColorCalibrationSkip {
+            reason: ColorCalibrationSkipReason::NoSolution,
+            detail: "the image has no TAN astrometric solution in its headers".into(),
+        }),
+    };
     let options = ColorCalibrationOptions {
         white_bp_rp: args.white_bp_rp,
         aperture_radius: args.aperture,
         neutralize_background: !args.no_background_neutralization,
         ..ColorCalibrationOptions::default()
     };
-    let calibration = match &args.display {
+
+    let outcome = match &args.display {
         None => {
-            calibrate_color(&frame.image, &stars, &options).context("colour calibration failed")?
+            let gaia = gaia.expect("only --display goes on without Gaia colours");
+            let mut image = frame.image.clone();
+            let outcome = calibrate_color_image(&mut image, wcs.as_ref(), gaia.colors(), &options);
+            if let ColorCalibrationOutcome::Skipped(skip) = &outcome {
+                anyhow::bail!("colour calibration failed: {}", skip.detail);
+            }
+            outcome
         }
         Some(display) => {
             let stretch = display_stretch(args.stretch.as_deref())?;
-            let result = calibrate_and_stretch(
-                frame.image.clone(),
-                Some(&wcs),
-                GaiaColors::Sources {
-                    sources: &sources,
-                    epoch,
-                },
-                &options,
-                &stretch,
-            )
-            .context("display stretch failed")?;
-            let pixels = result
-                .image
-                .data
+            let (pixels, outcome) = match &gaia {
+                Ok(gaia) => {
+                    let result = calibrate_and_stretch(
+                        frame.image.clone(),
+                        wcs.as_ref(),
+                        gaia.colors(),
+                        &options,
+                        &stretch,
+                    )
+                    .context("display stretch failed")?;
+                    (result.image.data, result.calibration)
+                }
+                Err(skip) => {
+                    let shape = ImageShape::new(width, height, 3);
+                    let output = stretch
+                        .apply_f32_image(&frame.image.data, shape)
+                        .context("display stretch failed")?;
+                    (output.data, ColorCalibrationOutcome::Skipped(skip.clone()))
+                }
+            };
+            let pixels = pixels
                 .iter()
                 .map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u8)
                 .collect();
             crate::preview::write_display_image(display, width, height, 3, pixels)?;
-            match result.calibration {
-                ColorCalibrationOutcome::Calibrated(calibration) => {
-                    crate::common::wrote(display, format_args!("colour-calibrated, stretched"));
-                    calibration
-                }
-                ColorCalibrationOutcome::Skipped(skip) => {
-                    println!("not colour calibrated: {}", skip.detail);
-                    crate::common::wrote(display, format_args!("uncalibrated, stretched"));
-                    write_processed_image_fits_f32(&args.output, &frame.image, &frame.headers, &[])
-                        .with_context(|| format!("could not write {}", args.output.display()))?;
-                    crate::common::wrote(&args.output, format_args!("uncalibrated, linear f32"));
-                    return Ok(());
-                }
-            }
+            let summary = match &outcome {
+                ColorCalibrationOutcome::Calibrated(_) => "colour-calibrated, stretched",
+                ColorCalibrationOutcome::Skipped(_) => "uncalibrated, stretched",
+            };
+            crate::common::wrote(display, format_args!("{summary}"));
+            outcome
         }
     };
-    report_calibration(&calibration);
-    calibration.apply(&mut frame.image)?;
-    write_calibrated(&args, &frame, &calibration)
+    match outcome {
+        ColorCalibrationOutcome::Calibrated(calibration) => {
+            report_calibration(&calibration);
+            calibration.apply(&mut frame.image)?;
+            write_calibrated(&args, &frame, &calibration)
+        }
+        ColorCalibrationOutcome::Skipped(skip) => {
+            println!("not colour calibrated: {}", skip.detail);
+            write_processed_image_fits_f32(&args.output, &frame.image, &frame.headers, &[])
+                .with_context(|| format!("could not write {}", args.output.display()))?;
+            if let Some(path) = &args.report {
+                crate::provenance::write_json_atomic(
+                    path,
+                    &ColorCalibrationOutcome::Skipped(skip.clone()),
+                )
+                .with_context(|| format!("could not write {}", path.display()))?;
+            }
+            crate::common::wrote(&args.output, format_args!("uncalibrated, linear f32"));
+            Ok(())
+        }
+    }
+}
+
+/// Gaia colours for an image: a CSV, the offline catalog, or ESA's archive.
+enum GaiaInput {
+    Catalog(seiza::catalog::PhotometryCatalog),
+    Sources {
+        sources: Vec<GaiaColorSource>,
+        epoch: Option<f64>,
+    },
+}
+
+impl GaiaInput {
+    fn colors(&self) -> GaiaColors<'_> {
+        match self {
+            Self::Catalog(catalog) => GaiaColors::Catalog(catalog),
+            Self::Sources { sources, epoch } => GaiaColors::Sources {
+                sources,
+                epoch: *epoch,
+            },
+        }
+    }
+}
+
+fn gaia_input(
+    args: &ColorCalibrateArgs,
+    wcs: &seiza::Wcs,
+    width: usize,
+    height: usize,
+    epoch: Option<f64>,
+) -> Result<GaiaInput> {
+    let from_rows = |rows: Vec<seiza_sources::GaiaPhotometry>| GaiaInput::Sources {
+        sources: rows
+            .iter()
+            .filter(|star| star.g <= args.gaia_max_mag)
+            .map(|star| GaiaColorSource {
+                ra: star.ra,
+                dec: star.dec,
+                pmra: star.pmra,
+                pmdec: star.pmdec,
+                g: star.g,
+                bp_rp: star.bp_rp(),
+                ruwe: star.ruwe,
+            })
+            .collect(),
+        epoch,
+    };
+    if let Some(path) = &args.gaia_csv {
+        let csv = std::fs::read_to_string(path)
+            .with_context(|| format!("could not read {}", path.display()))?;
+        let rows = seiza_sources::parse_gaia_photometry(&csv)
+            .with_context(|| format!("{} is not a Gaia photometry CSV", path.display()))?;
+        return Ok(from_rows(rows));
+    }
+    if let Some(path) = seiza::data_paths::gaia_photometry(args.gaia_catalog.as_deref())? {
+        let catalog = seiza::catalog::PhotometryCatalog::open(&path)
+            .with_context(|| format!("could not open {}", path.display()))?;
+        println!(
+            "Gaia photometry from {} (epoch {})",
+            path.display(),
+            catalog.epoch()
+        );
+        return Ok(GaiaInput::Catalog(catalog));
+    }
+    // Image sides fit u32: decoders and detection use u32 dimensions.
+    let middle = seiza::image_center(width as u32, height as u32);
+    let center = wcs.pixel_to_world(middle.0, middle.1);
+    let (right, bottom) = (width as f64 - 0.5, height as f64 - 0.5);
+    let radius = [(-0.5, -0.5), (right, -0.5), (-0.5, bottom), (right, bottom)]
+        .iter()
+        .map(|&(x, y)| angular_separation(center, wcs.pixel_to_world(x, y)))
+        .fold(0.0_f64, f64::max)
+        * 1.02;
+    let cache = args.gaia_cache.clone().unwrap_or_else(default_gaia_cache);
+    Ok(from_rows(gaia_field(
+        &cache,
+        center,
+        radius,
+        args.gaia_max_mag,
+    )?))
 }
 
 /// The stretch `--stretch` gives, as JSON or a JSON file, or linked

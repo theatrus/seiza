@@ -1552,6 +1552,7 @@ class CalibratedStretch:
     image: npt.NDArray[np.float32]
     calibration: ColorCalibrationOutcome
     stretch_plans: list[dict[str, Any]]
+    linked_stages: list[int]
 
 def calibrate_color_image(
     image: npt.NDArray[np.float32],

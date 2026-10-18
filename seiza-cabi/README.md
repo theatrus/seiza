@@ -167,9 +167,13 @@ exposes the **superset** of what both apps need.
   the buffer with a stretch configuration. Neither fails when calibration
   cannot run: the JSON outcome gives `status` `skipped` with a `reason`
   (`no_solution`, `no_catalog`, `no_stars`, `too_few_stars`, `not_rgb`,
-  `invalid_options`) and leaves the pixels uncalibrated.
+  `invalid_options`, `fit_failed`) and leaves the pixels uncalibrated. Once
+  calibration has run, an `unlinked` stretch stage is linked instead and
+  listed in `linkedStages`. `gaia_json` overrides `catalog_path`.
   `seiza_wcs_transform_json` carries a solved frame's WCS through a pixel
-  mapping (registration, a turn, a crop) to the image made from it.
+  mapping (registration, a turn, drizzle or binning, a crop) to the image
+  made from it; the mapping counts pixels from 0 with centres on whole
+  numbers.
 - **Automatic stack reference** — `seiza_stack_choose_reference_json` scores
   an ordered JSON array of FITS/XISF paths using the native stacking algorithm.
   It chooses the flattest background among frames with nearly the best star

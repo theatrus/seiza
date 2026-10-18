@@ -28,18 +28,31 @@ always gives them a picture, calibrated when it can be. Two functions do that.
   | `too_few_stars` | fewer than `minimum_stars` survive a fit, or too few clean stars to measure the FWHM |
   | `not_rgb` | the image is not three-channel |
   | `invalid_options` | the options are out of range |
+  | `fit_failed` | the fits ran but gave no usable (finite, positive) gains |
 
 - `calibrate_and_stretch(image, wcs, gaia, options, stretch)` runs
   `calibrate_color_image` and then the display `StretchStack`. A
   statistics-driven stage such as Auto-MTF resolves from the calibrated
-  image, so a linked stretch keeps the balance. An unlinked stage would pull
-  each channel to its own target median and undo the calibration; that is
-  the caller's choice. The stretch runs whether or not calibration did, so
-  the caller always gets an image, with the outcome saying which.
+  image. An unlinked stage would pull each channel to its own target median
+  and undo the calibration, so once calibration has run, every stage whose
+  colour strategy is `Unlinked` runs linked instead, and
+  `CalibratedStretch::linked_stages` lists them. Linked and
+  luminance-preserving stages run as asked. When calibration cannot run,
+  every stage runs as asked. A host that wants each channel stretched on its
+  own when there is no calibration, as an uncalibrated preview usually is,
+  passes those stages as `Unlinked` and gets both behaviours from one call.
+  The stretch runs whether or not calibration did, so the caller always gets
+  an image, with the outcome saying which.
 
-The outcome serializes with `status` (`calibrated` or `skipped`) beside the
-calibration's fields or the `reason` and `detail`, so hosts can keep it with
-the image.
+The outcome has two JSON forms. Rust's serde form, which hosts written in
+Rust store, is flat and snake_case: `{"status": "calibrated", "gains": [...],
+"red_fit": {...}, ...}`, the `ColorCalibration` fields beside `status`, or
+`{"status": "skipped", "reason": "too_few_stars", "detail": "..."}`. The C ABI
+nests and camelCases it, with a version: `{"schemaVersion": 1, "status":
+"calibrated", "calibration": {"gains": [...], "redFit": {...}, ...}}`, or
+`"reason"` and `"detail"` in place of `"calibration"`. Python gives the C
+form's keys as attributes of `ColorCalibrationOutcome` (`status`, `reason`,
+`detail`, `calibration`).
 
 ## Where the Gaia colours come from
 
@@ -65,15 +78,30 @@ and cropped to the area every channel covers. `transform_wcs(wcs,
 source_to_image)` carries the reference frame's solution through that pixel
 mapping: with `A` the mapping's matrix and `t` its translation, the new
 solution keeps `CRVAL` and has `CD' = CD · A⁻¹` and `CRPIX' = A · CRPIX + t`.
-That is exact for a linear (TAN) solution. A crop at `(x, y)` is a
-translation by `(−x, −y)`, chained with `AffineTransform::then`.
+That is exact for a linear (TAN) solution.
+
+The mapping counts pixels from 0 with centres on whole numbers, as `crpix`
+does inside Seiza (a FITS header's `CRPIX` is 1 more), whatever origin the
+caller's WCS came in with. In that convention:
+
+- a crop at `(x, y)` is a translation by `(−x, −y)`;
+- a half turn of a `w` × `h` image takes `x` to `w − 1 − x` and `y` to
+  `h − 1 − y`;
+- drizzle at scale `s` puts a source pixel centre `x` at `s · x + (s − 1) / 2`,
+  because the output's pixel edges fall at `s` times the source's
+  (`seiza-stacking/src/drizzle.rs`), and binning by `b` is the same mapping
+  with `s = 1 / b`. `AffineTransform::scale_about_pixel_centres(s)` builds
+  it. A mapping of `s · x` alone is half a pixel off for a 2× drizzle.
+
+Steps chain with `AffineTransform::then`.
 
 SIP distortion is defined on offsets from `CRPIX` in the solved image's own
 pixel axes. A translation leaves those offsets unchanged, so SIP terms carry
-through a crop. A turn or a change of scale would need the polynomials
-re-expanded, so `transform_wcs` refuses a SIP solution with any mapping that
-is more than a translation rather than return a solution that is subtly
-wrong.
+through a crop; a fitted mapping within `1e-9` of the identity matrix counts
+as a translation. A turn or a change of scale would need the polynomials
+re-expanded (`f'(d') = A · f(A⁻¹ d')`), which `transform_wcs` does not do: it
+refuses a SIP solution with any other mapping rather than return a solution
+that is subtly wrong.
 
 ## Bindings and the CLI
 
@@ -82,5 +110,9 @@ The C ABI carries both steps as `seiza_color_calibrate_image_json` and
 in place, and `transform_wcs` as `seiza_wcs_transform_json`. Python has
 `calibrate_color_image`, `calibrate_and_stretch` and `Wcs.transformed`.
 `seiza color-calibrate --display out.png [--stretch JSON]` writes the
-stretched result beside the calibrated linear FITS; with `--display` a
-calibration that cannot run is reported instead of failing the command.
+stretched result beside the calibrated linear FITS. With `--display`, a
+calibration that cannot run, from a header with no solution, Gaia colours
+that cannot be fetched or opened, or too few stars, does not fail the
+command: it prints the reason, writes both images uncalibrated, and writes
+the skip to `--report`. In the C ABI, `gaia_json` overrides `catalog_path`,
+and `observationEpoch` applies to `gaia_json` sources only.

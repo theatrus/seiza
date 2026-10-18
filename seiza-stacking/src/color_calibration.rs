@@ -407,6 +407,12 @@ fn fit_color(
         1.0,
         10f64.powf(0.4 * blue_fit.at(white)) as f32,
     ];
+    if gains.iter().any(|gain| !(gain.is_finite() && *gain > 0.0)) {
+        return Err(ColorCalibrationSkip::new(
+            ColorCalibrationSkipReason::FitFailed,
+            format!("the colour fits gave unusable gains {gains:?}"),
+        ));
+    }
     let background = sky_medians(image);
     let offsets = if options.neutralize_background {
         let target = gains[1] * background[1];
@@ -452,6 +458,8 @@ pub enum ColorCalibrationSkipReason {
     NotRgb,
     /// The calibration options are out of range.
     InvalidOptions,
+    /// The colour fits ran but gave no usable gains.
+    FitFailed,
 }
 
 /// Why an image was not colour calibrated, with the details.
@@ -507,18 +515,24 @@ pub enum GaiaColors<'a> {
 }
 
 /// The solution of an image made from a solved one by a pixel mapping, such
-/// as registration, a turn, binning, drizzle or a crop. `source_to_image`
-/// takes the solved image's pixels to the new image's; a crop at `(x, y)`
-/// is a translation by `(-x, -y)`, and mappings chain with
+/// as registration, a turn or a crop. `source_to_image` takes the solved
+/// image's pixels to the new image's, both counted from 0 with pixel
+/// centres on whole numbers (as `crpix` is here; a FITS header's is 1
+/// more). A crop at `(x, y)` is a translation by `(-x, -y)`; a half turn of
+/// a `w` × `h` image takes `x` to `w − 1 − x` and `y` to `h − 1 − y`; a
+/// change of grid, such as drizzle or binning, is
+/// [`AffineTransform::scale_about_pixel_centres`]. Mappings chain with
 /// [`AffineTransform::then`].
 ///
 /// Fails when the mapping cannot be inverted, or when the solution carries
-/// SIP distortion and the mapping is more than a translation: distortion
-/// terms do not carry through a turn or a change of scale.
+/// SIP distortion and the mapping is more than a translation: the
+/// distortion terms are not re-expanded for a turn or a change of scale.
 pub fn transform_wcs(wcs: &seiza::Wcs, source_to_image: AffineTransform) -> Result<seiza::Wcs> {
     source_to_image.validate()?;
     let [[a, b], [c, d]] = source_to_image.matrix;
-    let translation_only = a == 1.0 && b == 0.0 && c == 0.0 && d == 1.0;
+    // A fitted mapping that is a translation in all but rounding still is one.
+    let near = |value: f64, target: f64| (value - target).abs() <= 1e-9;
+    let translation_only = near(a, 1.0) && near(b, 0.0) && near(c, 0.0) && near(d, 1.0);
     if wcs.sip.is_some() && !translation_only {
         return Err(Error::Registration(
             "SIP distortion does not carry through a turn or a change of scale".into(),
@@ -655,10 +669,7 @@ pub fn calibrate_color_image(
     match fit_color(image, &stars, options) {
         Ok(calibration) => match calibration.apply(image) {
             Ok(()) => ColorCalibrationOutcome::Calibrated(calibration),
-            Err(error) => skip(
-                ColorCalibrationSkipReason::InvalidOptions,
-                error.to_string(),
-            ),
+            Err(error) => skip(ColorCalibrationSkipReason::FitFailed, error.to_string()),
         },
         Err(reason) => ColorCalibrationOutcome::Skipped(reason),
     }
@@ -674,15 +685,26 @@ pub struct CalibratedStretch {
     pub calibration: ColorCalibrationOutcome,
     /// Each stretch stage's resolved plan.
     pub stretch_plans: Vec<StretchPlan>,
+    /// The stages, counted from 0, that asked to stretch each channel on
+    /// its own and were linked instead, because calibration ran.
+    pub linked_stages: Vec<usize>,
 }
 
 /// Colour calibrate a linear RGB image against Gaia, as
 /// [`calibrate_color_image`] does, then display-stretch it with `stretch`.
 /// A stretch resolved from the image's own statistics, such as Auto-MTF,
-/// sees the calibrated colours, so a linked stretch keeps them.
+/// sees the calibrated colours.
 ///
-/// When calibration cannot run the image is still stretched, and the
-/// outcome says why it was not calibrated. Fails only when the stretch does.
+/// A calibrated image keeps its balance only through a stretch that treats
+/// the channels alike. Once calibration has run, every stage that asks to
+/// stretch each channel on its own ([`ColorStrategy::Unlinked`]) is linked
+/// instead, and [`CalibratedStretch::linked_stages`] lists those stages.
+/// Linked and luminance-preserving stages run as asked. When calibration
+/// cannot run, every stage runs as asked, so a host that stretches unlinked
+/// keeps its uncalibrated look; the outcome says why calibration did not
+/// run. Fails only when the stretch does.
+///
+/// [`ColorStrategy::Unlinked`]: seiza_stretch::ColorStrategy::Unlinked
 pub fn calibrate_and_stretch(
     mut image: LinearImage,
     wcs: Option<&seiza::Wcs>,
@@ -691,6 +713,28 @@ pub fn calibrate_and_stretch(
     stretch: &StretchStack,
 ) -> Result<CalibratedStretch> {
     let calibration = calibrate_color_image(&mut image, wcs, gaia, options);
+    let mut linked_stages = Vec::new();
+    let relinked;
+    let stretch = if calibration.calibration().is_some() {
+        let stages = stretch
+            .stages()
+            .iter()
+            .enumerate()
+            .map(|(index, stage)| {
+                let mut stage = stage.clone();
+                if stage.color_strategy == seiza_stretch::ColorStrategy::Unlinked {
+                    stage.color_strategy = seiza_stretch::ColorStrategy::Linked;
+                    linked_stages.push(index);
+                }
+                stage
+            })
+            .collect();
+        relinked = StretchStack::new(stages)
+            .map_err(|error| Error::Color(format!("stretch failed: {error}")))?;
+        &relinked
+    } else {
+        stretch
+    };
     let shape = ImageShape::new(image.width, image.height, image.channels);
     let output = stretch
         .apply_f32_image(&image.data, shape)
@@ -699,6 +743,7 @@ pub fn calibrate_and_stretch(
         image: LinearImage::new(image.width, image.height, image.channels, output.data)?,
         calibration,
         stretch_plans: output.plans,
+        linked_stages,
     })
 }
 
@@ -1333,14 +1378,15 @@ mod tests {
         seiza::Wcs::from_center_scale_rotation((56.75, 24.1), (549.5, 449.5), 1.0, 12.0, false)
     }
 
-    /// How the test field was made from that frame: turned half round on a
-    /// grid twice as fine, then cropped at (300, 150).
+    /// How the test field was made from that frame: turned half round,
+    /// drizzled onto a grid twice as fine, then cropped at (300, 150).
     fn source_to_field() -> AffineTransform {
         AffineTransform {
-            matrix: [[-2.0, 0.0], [0.0, -2.0]],
-            translation_x: 2.0 * 1099.0,
-            translation_y: 2.0 * 899.0,
+            matrix: [[-1.0, 0.0], [0.0, -1.0]],
+            translation_x: 1099.0,
+            translation_y: 899.0,
         }
+        .then(AffineTransform::scale_about_pixel_centres(2.0))
         .then(AffineTransform {
             translation_x: -300.0,
             translation_y: -150.0,
@@ -1382,13 +1428,22 @@ mod tests {
     fn a_solution_carries_through_registration_turns_and_crops() {
         let wcs = source_wcs();
         let field = transform_wcs(&wcs, source_to_field()).unwrap();
-        // A star at source pixel (100, 200) sits at 2 × (1099 − 100) − 300,
-        // 2 × (899 − 200) − 150 on the field.
+        // A star at source pixel (100, 200) turns to (999, 699). Drizzled
+        // 2×, that pixel's centre is at 2 × 999 + 0.5, 2 × 699 + 0.5, as
+        // drizzle lays its output out; cropped, at 1698.5, 1248.5.
         let (ra, dec) = wcs.pixel_to_world(100.0, 200.0);
         let (x, y) = field.world_to_pixel(ra, dec).unwrap();
         assert!(
-            (x - 1698.0).abs() < 1e-6 && (y - 1248.0).abs() < 1e-6,
+            (x - 1698.5).abs() < 1e-6 && (y - 1248.5).abs() < 1e-6,
             "{x} {y}"
+        );
+        // Binning is the same mapping the other way: pixels 0 and 1 make
+        // binned pixel 0, so their shared edge, 0.5, is its centre.
+        let bin = AffineTransform::scale_about_pixel_centres(0.5);
+        assert_eq!(bin.apply(0.5, 0.5), (0.0, 0.0));
+        assert_eq!(
+            AffineTransform::scale_about_pixel_centres(2.0).apply(0.0, 0.0),
+            (0.5, 0.5)
         );
         assert!((field.scale_arcsec_per_px() - 0.5).abs() < 1e-9);
 
@@ -1407,6 +1462,13 @@ mod tests {
             ..AffineTransform::IDENTITY
         };
         let cropped = transform_wcs(&distorted, crop).unwrap();
+        // A fitted mapping that is a translation in all but rounding still
+        // carries SIP.
+        let fitted = AffineTransform {
+            matrix: [[1.0 + 1e-12, -1e-13], [1e-13, 1.0 - 1e-12]],
+            ..crop
+        };
+        assert!(transform_wcs(&distorted, fitted).is_ok());
         let (ra, dec) = distorted.pixel_to_world(900.0, 700.0);
         let (back_ra, back_dec) = cropped.pixel_to_world(600.0, 550.0);
         assert!((ra - back_ra).abs() < 1e-9 && (dec - back_dec).abs() < 1e-9);
@@ -1494,6 +1556,52 @@ mod tests {
         assert_eq!(json["status"], "calibrated");
         let back: ColorCalibrationOutcome = serde_json::from_value(json).unwrap();
         assert_eq!(back, outcome);
+    }
+
+    #[test]
+    fn calibration_links_a_per_channel_stretch_and_a_skip_keeps_it() {
+        let (image, stars) = field();
+        let wcs = transform_wcs(&source_wcs(), source_to_field()).unwrap();
+        let sources = field_sources(&stars);
+        let mut unlinked = seiza_stretch::StretchConfig::auto_mtf(
+            seiza_stretch::StretchParams::default(),
+            200_000,
+        );
+        unlinked.color_strategy = seiza_stretch::ColorStrategy::Unlinked;
+        let stack = StretchStack::new(vec![
+            unlinked,
+            seiza_stretch::StretchConfig::auto_mtf(
+                seiza_stretch::StretchParams::default(),
+                200_000,
+            ),
+        ])
+        .unwrap();
+        let gaia = GaiaColors::Sources {
+            sources: &sources,
+            epoch: None,
+        };
+        let options = ColorCalibrationOptions::default();
+
+        let calibrated =
+            calibrate_and_stretch(image.clone(), Some(&wcs), gaia, &options, &stack).unwrap();
+        assert!(calibrated.calibration.calibration().is_some());
+        assert_eq!(calibrated.linked_stages, vec![0]);
+        // Linked, the calibrated sky stays one grey.
+        let sky = sky_medians(&calibrated.image);
+        assert!(
+            (sky[0] - sky[1]).abs() < 0.01 && (sky[2] - sky[1]).abs() < 0.01,
+            "{sky:?}"
+        );
+
+        // Without a solution nothing is calibrated, and the stage runs per
+        // channel as asked.
+        let skipped = calibrate_and_stretch(image.clone(), None, gaia, &options, &stack).unwrap();
+        assert!(skipped.linked_stages.is_empty());
+        let as_asked = stack
+            .apply_f32_image(&image.data, ImageShape::new(image.width, image.height, 3))
+            .unwrap()
+            .data;
+        assert_eq!(skipped.image.data, as_asked);
     }
 
     #[test]

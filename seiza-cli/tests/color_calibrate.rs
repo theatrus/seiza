@@ -199,4 +199,35 @@ fn color_calibrate_cli_recovers_channel_gains_from_a_gaia_csv() {
     ]);
     assert!(stdout.contains("not colour calibrated"), "{stdout}");
     assert!(uncalibrated.is_file());
+
+    // A header without a solution: with --display the image is still
+    // stretched, and the report says why it was not calibrated.
+    let unsolved = directory.path().join("unsolved.fits");
+    write_f32_image(
+        &unsolved,
+        width,
+        height,
+        F32ImageData::RgbInterleaved(&data),
+        &[],
+    )
+    .unwrap();
+    let skip_report = directory.path().join("skip.json");
+    let stdout = run_output(&[
+        "color-calibrate",
+        unsolved.to_str().unwrap(),
+        "--output",
+        directory.path().join("unsolved-out.fits").to_str().unwrap(),
+        "--report",
+        skip_report.to_str().unwrap(),
+        "--gaia-csv",
+        gaia.to_str().unwrap(),
+        "--display",
+        directory.path().join("unsolved.png").to_str().unwrap(),
+    ]);
+    assert!(stdout.contains("not colour calibrated"), "{stdout}");
+    let report: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&skip_report).unwrap()).unwrap();
+    assert_eq!(report["status"], "skipped");
+    assert_eq!(report["reason"], "no_solution");
+    assert!(directory.path().join("unsolved.png").is_file());
 }

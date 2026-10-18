@@ -261,8 +261,8 @@ fn gaia_sources(gaia: &[Bound<'_, PyDict>]) -> PyResult<Vec<GaiaColorSource>> {
 /// What :func:`calibrate_color_image` or :func:`calibrate_and_stretch` did:
 /// `status` is ``"calibrated"``, with the :class:`ColorCalibration` applied,
 /// or ``"skipped"``, with the `reason` (``"no_solution"``, ``"no_catalog"``,
-/// ``"no_stars"``, ``"too_few_stars"``, ``"not_rgb"`` or
-/// ``"invalid_options"``) and its `detail`.
+/// ``"no_stars"``, ``"too_few_stars"``, ``"not_rgb"``, ``"invalid_options"``
+/// or ``"fit_failed"``) and its `detail`.
 #[pyclass(frozen, name = "ColorCalibrationOutcome", module = "seiza")]
 pub(crate) struct PyColorCalibrationOutcome {
     inner: ColorCalibrationOutcome,
@@ -327,6 +327,7 @@ pub(crate) struct PyCalibratedStretch {
     image: Py<PyArrayDyn<f32>>,
     calibration: Py<PyColorCalibrationOutcome>,
     stretch_plans: Py<PyAny>,
+    linked_stages: Vec<usize>,
 }
 
 #[pymethods]
@@ -347,6 +348,13 @@ impl PyCalibratedStretch {
     #[getter]
     fn stretch_plans(&self, py: Python<'_>) -> Py<PyAny> {
         self.stretch_plans.clone_ref(py)
+    }
+
+    /// The stages, counted from 0, that asked to stretch each channel on
+    /// its own and were linked because calibration ran.
+    #[getter]
+    fn linked_stages(&self) -> Vec<usize> {
+        self.linked_stages.clone()
     }
 }
 
@@ -513,8 +521,10 @@ fn calibrate_color_image<'py>(
 /// ``{"model": {"type": "auto-mtf", "target_median": 0.25, "shadows_clip":
 /// -2.8}, "color_strategy": "linked", "max_analysis_samples": 200000}``. A
 /// statistics-driven stretch sees the calibrated colours, so a linked one
-/// keeps them. When calibration cannot run, the image is still stretched
-/// and the result's outcome says why.
+/// keeps them. Once calibration has run, a stage with ``"color_strategy":
+/// "unlinked"`` is linked instead and listed in `linked_stages`. When
+/// calibration cannot run, every stage runs as given, the image is still
+/// stretched, and the result's outcome says why.
 #[pyfunction]
 #[pyo3(signature = (
     image,
@@ -591,6 +601,7 @@ fn calibrate_and_stretch(
             },
         )?,
         stretch_plans: json.call_method1("loads", (plans,))?.unbind(),
+        linked_stages: result.linked_stages,
     })
 }
 

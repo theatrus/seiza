@@ -330,10 +330,14 @@ impl PyWcs {
     /// The solution of an image made from this one by a pixel mapping, such
     /// as registration, a turn, binning or a crop: a pixel `(x, y)` here
     /// lands at `(a x + b y + translation_x, c x + d y + translation_y)` on
-    /// the new image, with `matrix` `((a, b), (c, d))`. A crop at `(x, y)` is
-    /// the identity matrix with translation `(-x, -y)`. Raises when the
-    /// mapping cannot be inverted, or when the solution has SIP terms and
-    /// the mapping is more than a translation.
+    /// the new image, with `matrix` `((a, b), (c, d))`. Pixels count from 0
+    /// with centres on whole numbers. A crop at `(x, y)` is the identity
+    /// matrix with translation `(-x, -y)`; a half turn of a `w` × `h` image is
+    /// `-1` on the diagonal with translation `(w - 1, h - 1)`; drizzle or
+    /// binning by a scale `s` is `s` on the diagonal with translation
+    /// `((s - 1) / 2, (s - 1) / 2)`. Raises when the mapping cannot be
+    /// inverted, or when the solution has SIP terms and the mapping is more
+    /// than a translation.
     #[pyo3(signature = (matrix, translation_x=0.0, translation_y=0.0))]
     fn transformed(
         &self,

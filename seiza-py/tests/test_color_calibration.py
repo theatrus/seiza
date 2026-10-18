@@ -153,6 +153,14 @@ def test_calibrate_and_stretch_recovers_the_gains_and_stretches():
     assert result.image.shape == image.shape
     assert 0.0 <= result.image.min() and result.image.max() <= 1.0
     assert len(result.stretch_plans) == 1
+    assert result.linked_stages == []
+
+    # A per-channel stage is linked once calibration has run.
+    relinked = seiza.calibrate_and_stretch(
+        image, wcs, stretch={**AUTO_STRETCH, "color_strategy": "unlinked"}, gaia=gaia
+    )
+    assert relinked.linked_stages == [0]
+    np.testing.assert_array_equal(relinked.image, result.image)
 
     calibrated, alone = seiza.calibrate_color_image(image, wcs, gaia=gaia)
     assert alone.status == "calibrated"

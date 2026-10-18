@@ -141,6 +141,21 @@ impl AffineTransform {
         translation_y: 0.0,
     };
 
+    /// The mapping onto a grid `scale` times as fine (drizzle at `scale`)
+    /// or as coarse (binning by `1 / scale`) that covers the same area.
+    /// Pixels count from 0 with centres on whole numbers, so a pixel's
+    /// centre `x` lands at `scale · x + (scale − 1) / 2`: with a 2× drizzle,
+    /// source pixel 0, spanning −0.5 to 0.5, covers output pixels 0 and 1,
+    /// and its centre is at 0.5.
+    pub fn scale_about_pixel_centres(scale: f64) -> Self {
+        let offset = (scale - 1.0) / 2.0;
+        Self {
+            matrix: [[scale, 0.0], [0.0, scale]],
+            translation_x: offset,
+            translation_y: offset,
+        }
+    }
+
     /// Check that this transform is finite and invertible.
     pub fn validate(self) -> Result<()> {
         let determinant = self.determinant();

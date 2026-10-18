@@ -318,11 +318,13 @@ and `used`, whether the red and the blue fit kept it.
 `calibrate_color_image` and `calibrate_and_stretch` place the Gaia stars
 themselves, from rows or the offline catalog, and never fail because
 calibration cannot run: the outcome says why (`no_solution`, `no_catalog`,
-`no_stars`, `too_few_stars`, `not_rgb`, `invalid_options`) and the image is
-left uncalibrated. `calibrate_and_stretch` then display-stretches the image,
-so a linked stretch keeps the calibrated balance. For an image made from a
-solved frame, `Wcs.transformed` carries the frame's solution through the
-pixel mapping, here a half turn on a 1300 × 1100 grid and a crop at (40, 60):
+`no_stars`, `too_few_stars`, `not_rgb`, `invalid_options`, `fit_failed`) and
+the image is left uncalibrated. `calibrate_and_stretch` then display-stretches
+the image. Once calibration has run, an unlinked stage is linked instead, so
+the balance survives, and `result.linked_stages` lists those stages. For an
+image made from a solved frame, `Wcs.transformed` carries the frame's
+solution through the pixel mapping, counted from 0 with pixel centres on
+whole numbers; here a half turn on a 1300 × 1100 grid and a crop at (40, 60):
 
 ```python
 wcs = frame_wcs.transformed(((-1.0, 0.0), (0.0, -1.0)), 1299.0 - 40.0, 1099.0 - 60.0)
