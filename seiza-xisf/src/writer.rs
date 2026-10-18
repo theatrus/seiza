@@ -565,9 +565,9 @@ fn prepare_block(
         let subblocks = input
             .chunks(subblock_bytes)
             .map(|chunk| {
-                // As PixInsight does, a subblock that would not shrink is
-                // stored as it is; readers copy a subblock whose stored and
-                // uncompressed lengths are equal.
+                // Revision 2: a subblock that would not shrink is stored
+                // uncompressed, and readers copy a subblock whose stored
+                // and uncompressed lengths are equal.
                 let compressed = compress(chunk, compression);
                 let stored = if compressed.len() >= chunk.len() {
                     chunk.to_vec()
@@ -1237,8 +1237,11 @@ mod tests {
                 position += stored;
                 uncompressed += length;
             }
-            let lengths = info.subblocks.iter().map(|&(stored, length)| stored == length);
-            let raw_subblocks = lengths.filter(|&is_raw| is_raw).count();
+            let raw_subblocks = info
+                .subblocks
+                .iter()
+                .filter(|&&(stored, length)| stored == length)
+                .count();
             assert!(
                 (1..info.subblocks.len()).contains(&raw_subblocks),
                 "{codec:?}: {:?}",

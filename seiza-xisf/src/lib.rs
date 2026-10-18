@@ -1,6 +1,6 @@
 //! Practical XISF 1.0 image reading and writing for Seiza.
 //!
-//! The reader follows XISF 1.0, Revision 1: monolithic files and local
+//! The reader follows XISF 1.0, Revision 2: monolithic files and local
 //! distributed units, attached, inline, embedded or external pixel blocks,
 //! planar or normal storage, and every standard codec, subblocks included.
 //! An image it cannot decode is unavailable on its own and leaves the rest of
@@ -153,9 +153,9 @@ pub struct CompressionInfo {
     pub codec: CompressionCodec,
     pub uncompressed_bytes: usize,
     pub shuffled_item_bytes: Option<usize>,
-    /// `(compressed, uncompressed)` byte lengths of each independently
-    /// compressed subblock, in storage order. Empty when the block was
-    /// compressed whole.
+    /// `(compressed, uncompressed)` byte lengths of each subblock, in
+    /// storage order. A subblock whose lengths are equal is stored
+    /// uncompressed. Empty when the block was compressed whole.
     pub subblocks: Vec<(u64, u64)>,
 }
 
@@ -2083,10 +2083,10 @@ fn decompress(
             ));
         }
         let decoded = decompress_subblock(compression.codec, &bytes, uncompressed);
-        // PixInsight stores a subblock as it is when compressing it would not
-        // shrink it, so a subblock exactly as long as its uncompressed data
-        // that does not decode is raw. Codec output of that length from
-        // another encoder still decodes first.
+        // Under Revision 2, a subblock as long as its data is stored
+        // uncompressed. Earlier encoders could write codec output of that
+        // length, so such a subblock is read decoded if it decodes to
+        // exactly its length, and copied as it is otherwise.
         match decoded {
             Ok(decoded) => raw.extend_from_slice(&decoded),
             Err(_) if compressed == uncompressed => raw.extend_from_slice(&bytes),
@@ -4187,9 +4187,7 @@ mod tests {
                 encoder.write_all(bytes).unwrap();
                 encoder.finish().unwrap()
             }
-            CompressionCodec::Lz4 | CompressionCodec::Lz4Hc => {
-                lz4_flex::block::compress(bytes)
-            }
+            CompressionCodec::Lz4 | CompressionCodec::Lz4Hc => lz4_flex::block::compress(bytes),
             CompressionCodec::Zstd => zstd::bulk::compress(bytes, 3).unwrap(),
         }
     }
@@ -4223,7 +4221,10 @@ mod tests {
                 "",
             );
             let image = from_bytes(&monolithic(xml, &[&stored])).unwrap();
-            assert!(matches!(image.pixels, Pixels::U8(ref actual) if actual == &raw), "{name}");
+            assert!(
+                matches!(image.pixels, Pixels::U8(ref actual) if actual == &raw),
+                "{name}"
+            );
 
             // A block without a subblocks attribute is one subblock.
             let whole = compress_with(codec, &raw);
@@ -4237,7 +4238,10 @@ mod tests {
                 "",
             );
             let image = from_bytes(&monolithic(xml, &[&whole])).unwrap();
-            assert!(matches!(image.pixels, Pixels::U8(ref actual) if actual == &raw), "{name}");
+            assert!(
+                matches!(image.pixels, Pixels::U8(ref actual) if actual == &raw),
+                "{name}"
+            );
         }
     }
 
