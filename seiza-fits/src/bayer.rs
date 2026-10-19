@@ -260,6 +260,79 @@ fn debayer_interleaved<T: DebayerSample + Send + Sync>(
     data
 }
 
+/// The luminance of [`debayer_rgb16`]'s image, as [`RgbImage16::to_luma_u16`]
+/// computes it, without holding the RGB image or passing over it twice.
+///
+/// Red and blue weigh the same in that luminance, `(r + 2g + b) / 4`, so an
+/// interior pixel's value depends only on whether its site is green, and
+/// [`luma_row_interior`] computes it with whole-number sums of the same
+/// neighbors and the same flooring divisions as [`debayer_rows`]. Edge
+/// pixels take [`debayer_edge_pixel`], as there.
+pub(crate) fn debayer_luma16(
+    mosaic: &[u16],
+    width: usize,
+    height: usize,
+    pattern: BayerPattern,
+    x_offset: usize,
+    y_offset: usize,
+) -> Vec<u16> {
+    assert_eq!(mosaic.len(), width * height);
+    let mut luma = vec![0u16; width * height];
+    if width == 0 {
+        return luma;
+    }
+    let edge = |x: usize, y: usize| {
+        let mut px = [0u16; 3];
+        debayer_edge_pixel(
+            mosaic, width, height, pattern, x_offset, y_offset, x, y, &mut px,
+        );
+        luma_of(px)
+    };
+    luma.par_chunks_mut(width * BAND_ROWS)
+        .enumerate()
+        .for_each(|(band, rows)| {
+            for (band_row, out) in rows.chunks_exact_mut(width).enumerate() {
+                let y = band * BAND_ROWS + band_row;
+                if y == 0 || y + 1 == height || width < 3 {
+                    for (x, out) in out.iter_mut().enumerate() {
+                        *out = edge(x, y);
+                    }
+                    continue;
+                }
+                let row = |y: usize| &mosaic[y * width..(y + 1) * width];
+                let green_parity = usize::from(pattern.channel_at(0, y, x_offset, y_offset) != 1);
+                luma_row_interior(row(y - 1), row(y), row(y + 1), green_parity, out);
+                out[0] = edge(0, y);
+                out[width - 1] = edge(width - 1, y);
+            }
+        });
+    luma
+}
+
+fn luma_of(px: [u16; 3]) -> u16 {
+    ((u32::from(px[0]) + 2 * u32::from(px[1]) + u32::from(px[2])) / 4) as u16
+}
+
+/// The luminance of a row's interior pixels, `out[1..width - 1]`, from the
+/// rows above and below. Green sites are those whose column has the parity
+/// `green_parity`. A green site's other two channels are the averages of its
+/// left and right neighbors and of those above and below; a red or blue
+/// site's are the averages of its four edge and four corner neighbors.
+fn luma_row_interior(up: &[u16], mid: &[u16], down: &[u16], green_parity: usize, out: &mut [u16]) {
+    let width = mid.len();
+    for (x, out) in out.iter_mut().enumerate().take(width - 1).skip(1) {
+        let at = |row: &[u16], x: usize| u32::from(row[x]);
+        let centre = at(mid, x);
+        let (left, right) = (at(mid, x - 1), at(mid, x + 1));
+        let (above, below) = (at(up, x), at(down, x));
+        let green = ((left + right) / 2 + 2 * centre + (above + below) / 2) / 4;
+        let cross = (above + left + right + below) / 4;
+        let corners = (at(up, x - 1) + at(up, x + 1) + at(down, x - 1) + at(down, x + 1)) / 4;
+        let other = (centre + 2 * cross + corners) / 4;
+        *out = if x & 1 == green_parity { green } else { other } as u16;
+    }
+}
+
 /// Every carrier of a channel in the 3×3 neighborhood, averaged. Interior
 /// pixels take a fixed shape by site: at a red or blue site the other two
 /// channels sit on the four edge and four corner neighbors; at a green site
@@ -364,6 +437,38 @@ fn debayer_edge_pixel<T: DebayerSample>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn luma_by_bands_matches_the_luma_of_the_full_debayer() {
+        // Heights that end mid-band, widths of one and two pixels, and every
+        // pattern and offset.
+        let mut state = 0x9e37_79b9u32;
+        for (width, height) in [(37, 70), (1, 40), (2, 3), (64, 33)] {
+            let mosaic: Vec<u16> = (0..width * height)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    state as u16
+                })
+                .collect();
+            for pattern in [
+                BayerPattern::Rggb,
+                BayerPattern::Bggr,
+                BayerPattern::Grbg,
+                BayerPattern::Gbrg,
+            ] {
+                for (x_off, y_off) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let full = debayer_rgb16(&mosaic, width, height, pattern, x_off, y_off);
+                    assert_eq!(
+                        debayer_luma16(&mosaic, width, height, pattern, x_off, y_off),
+                        full.to_luma_u16(),
+                        "{width}x{height} {pattern:?} {x_off},{y_off}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn pattern_parsing() {

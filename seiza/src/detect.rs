@@ -159,7 +159,7 @@ fn detect_stars_luma<T: DetectionSample>(
         &noise,
         config.sigma,
     );
-    extract_stars(&excess, width, height, config)
+    extract_stars(excess, width, height, config)
 }
 
 trait DetectionSample: Copy {
@@ -182,12 +182,26 @@ trait DetectionSample: Copy {
         sigma: f32,
     ) -> Vec<Self>;
 
+    /// The excess of a pixel below the threshold, and of one already
+    /// gathered into a star.
+    const ZERO: Self;
+
     fn is_positive(self) -> bool;
     fn normalized(self) -> f32;
+
+    /// The first pixel at or after `from` in `row` whose excess is positive,
+    /// or `row.len()`.
+    fn next_positive(row: &[Self], from: usize) -> usize {
+        row[from..]
+            .iter()
+            .position(|value| value.is_positive())
+            .map_or(row.len(), |offset| from + offset)
+    }
 }
 
 impl DetectionSample for f32 {
     type Background = f32;
+    const ZERO: Self = 0.0;
 
     fn estimate_background(
         pixels: &[Self],
@@ -221,6 +235,29 @@ impl DetectionSample for f32 {
 
 impl DetectionSample for u8 {
     type Background = u8;
+    const ZERO: Self = 0;
+
+    /// Most of a sky is below the threshold: blocks of 32 pixels are tested
+    /// at once, which the compiler runs as a few vector instructions, and
+    /// only a block with an excess in it is searched pixel by pixel.
+    fn next_positive(row: &[Self], from: usize) -> usize {
+        const BLOCK: usize = 32;
+        let mut at = from;
+        while at + BLOCK <= row.len() {
+            if row[at..at + BLOCK]
+                .iter()
+                .fold(0u8, |any, &value| any | value)
+                != 0
+            {
+                break;
+            }
+            at += BLOCK;
+        }
+        row[at..]
+            .iter()
+            .position(|&value| value != 0)
+            .map_or(row.len(), |offset| at + offset)
+    }
 
     fn estimate_background(
         pixels: &[Self],
@@ -253,23 +290,28 @@ impl DetectionSample for u8 {
 }
 
 fn extract_stars<T: DetectionSample>(
-    excess: &[T],
+    mut excess: Vec<T>,
     width: u32,
     height: u32,
     config: &DetectConfig,
 ) -> Vec<DetectedStar> {
     // Connected components over the thresholded mask (8-connectivity),
-    // iterative flood fill to keep the stack bounded.
-    let mut visited = vec![false; (width * height) as usize];
+    // iterative flood fill to keep the stack bounded. A pixel is zeroed as
+    // it joins a star, so it is never gathered twice, and its excess rides
+    // on the stack until it is added in.
     let mut stars = Vec::new();
-    let mut stack = Vec::new();
+    let mut stack: Vec<(u32, u32, T)> = Vec::new();
+    let row_len = width as usize;
 
     for y in 0..height {
-        for x in 0..width {
-            let idx = (y * width + x) as usize;
-            if visited[idx] || !excess[idx].is_positive() {
-                continue;
+        let row_start = y as usize * row_len;
+        let mut x = 0usize;
+        loop {
+            x = T::next_positive(&excess[row_start..row_start + row_len], x);
+            if x >= row_len {
+                break;
             }
+            let idx = row_start + x;
 
             let mut flux = 0.0f64;
             let mut sx = 0.0f64;
@@ -280,10 +322,10 @@ fn extract_stars<T: DetectionSample>(
             let mut peak = 0.0f32;
             let mut area = 0u32;
 
-            stack.push((x, y));
-            visited[idx] = true;
-            while let Some((cx, cy)) = stack.pop() {
-                let value = excess[(cy * width + cx) as usize].normalized();
+            stack.push((x as u32, y, excess[idx]));
+            excess[idx] = T::ZERO;
+            while let Some((cx, cy, value)) = stack.pop() {
+                let value = value.normalized();
                 let v = value as f64;
                 flux += v;
                 sx += cx as f64 * v;
@@ -299,13 +341,14 @@ fn extract_stars<T: DetectionSample>(
                 for ny in y0..=(cy + 1).min(height - 1) {
                     for nx in x0..=(cx + 1).min(width - 1) {
                         let nidx = (ny * width + nx) as usize;
-                        if !visited[nidx] && excess[nidx].is_positive() {
-                            visited[nidx] = true;
-                            stack.push((nx, ny));
+                        if excess[nidx].is_positive() {
+                            stack.push((nx, ny, excess[nidx]));
+                            excess[nidx] = T::ZERO;
                         }
                     }
                 }
             }
+            x += 1;
 
             if area >= config.min_area && area <= config.max_area && flux > 0.0 {
                 let (cx, cy) = (sx / flux, sy / flux);
@@ -391,13 +434,26 @@ fn estimate_background_u8(
             let x1 = ((tx + 1) * tile_size).min(width);
             let y0 = ty * tile_size;
             let y1 = ((ty + 1) * tile_size).min(height);
-            let mut histogram = [0u32; 256];
+            // Four histograms, summed at the end: runs of equal pixels, the
+            // usual case in a flat sky, then increment different counters
+            // instead of each waiting on the last.
+            let mut lanes = [[0u32; 256]; 4];
             for y in y0..y1 {
                 let row = (y * width) as usize;
-                for &value in &pixels[row + x0 as usize..row + x1 as usize] {
-                    histogram[value as usize] += 1;
+                let values = &pixels[row + x0 as usize..row + x1 as usize];
+                let mut quads = values.chunks_exact(4);
+                for quad in &mut quads {
+                    lanes[0][quad[0] as usize] += 1;
+                    lanes[1][quad[1] as usize] += 1;
+                    lanes[2][quad[2] as usize] += 1;
+                    lanes[3][quad[3] as usize] += 1;
+                }
+                for &value in quads.remainder() {
+                    lanes[0][value as usize] += 1;
                 }
             }
+            let histogram: [u32; 256] =
+                std::array::from_fn(|bin| lanes.iter().map(|lane| lane[bin]).sum());
             let count = ((x1 - x0) * (y1 - y0)) as usize;
             let target = count / 2 + 1;
             let mut cumulative = 0usize;
@@ -426,6 +482,19 @@ fn estimate_background_u8(
         .unzip()
 }
 
+/// The largest 8-bit excess that does not clear `threshold`: a whole
+/// number clears it exactly when it exceeds its floor, so the comparison
+/// stays in `u8`, which the compiler runs many pixels at a time. A negative
+/// threshold passes every excess, but an excess of 0 is written as 0 either
+/// way; one of 255 or more, or NaN, passes none.
+fn u8_threshold_floor(threshold: f32) -> u8 {
+    if threshold.is_nan() || threshold >= 255.0 {
+        u8::MAX
+    } else {
+        threshold.max(0.0).floor() as u8
+    }
+}
+
 fn threshold_excess_u8(
     pixels: &[u8],
     width: u32,
@@ -448,13 +517,11 @@ fn threshold_excess_u8(
                 let x0 = (tx * tile_size) as usize;
                 let x1 = ((tx + 1) * tile_size).min(width) as usize;
                 let tile = (ty * tiles_x + tx) as usize;
-                let threshold = sigma * noise[tile];
+                let floor = u8_threshold_floor(sigma * noise[tile]);
                 let background = background[tile];
                 for (value, excess) in input[x0..x1].iter().zip(&mut output[x0..x1]) {
                     let difference = value.saturating_sub(background);
-                    if difference as f32 > threshold {
-                        *excess = difference;
-                    }
+                    *excess = if difference > floor { difference } else { 0 };
                 }
             }
         });
@@ -569,6 +636,83 @@ mod tests {
                 0.0
             };
             assert_eq!(out.to_bits(), expected.to_bits(), "pixel {i}");
+        }
+    }
+
+    #[test]
+    fn the_u8_threshold_floor_passes_exactly_the_excesses_f32_would() {
+        let mut thresholds = vec![f32::NAN, f32::NEG_INFINITY, f32::INFINITY, -0.0, 0.0];
+        thresholds.extend((-40..=1100).map(|step| step as f32 * 0.25));
+        thresholds.extend([0.999_999, 1.000_001, 254.999_98, 255.000_02, 1e9]);
+        for threshold in thresholds {
+            let floor = u8_threshold_floor(threshold);
+            for difference in 0..=u8::MAX {
+                let f32_excess = if difference as f32 > threshold {
+                    difference
+                } else {
+                    0
+                };
+                let u8_excess = if difference > floor { difference } else { 0 };
+                assert_eq!(u8_excess, f32_excess, "{difference} against {threshold}");
+            }
+        }
+    }
+
+    #[test]
+    fn u8_background_maps_match_a_single_histogram() {
+        // Tiles whose widths are not multiples of four, a ragged last tile
+        // each way, and a flat region.
+        let (width, height, tile) = (71u32, 45u32, 17u32);
+        let mut state = 0x2545_f491u32;
+        let pixels: Vec<u8> = (0..width * height)
+            .map(|i| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                if i % width < 20 {
+                    40
+                } else {
+                    (state % 90) as u8 + 20
+                }
+            })
+            .collect();
+        let (background, noise) = estimate_background_u8(&pixels, width, height, tile);
+        let tiles_x = width.div_ceil(tile);
+        for t in 0..background.len() as u32 {
+            let (x0, y0) = ((t % tiles_x) * tile, (t / tiles_x) * tile);
+            let (x1, y1) = ((x0 + tile).min(width), (y0 + tile).min(height));
+            let mut histogram = [0u32; 256];
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    histogram[pixels[(y * width + x) as usize] as usize] += 1;
+                }
+            }
+            let target = ((x1 - x0) * (y1 - y0)) as usize / 2 + 1;
+            let mut cumulative = 0usize;
+            let median = histogram
+                .iter()
+                .position(|&bin| {
+                    cumulative += bin as usize;
+                    cumulative >= target
+                })
+                .unwrap();
+            let mut inside = histogram[median] as usize;
+            let mut mad = 0usize;
+            while inside < target && mad < 255 {
+                mad += 1;
+                if median + mad < 256 {
+                    inside += histogram[median + mad] as usize;
+                }
+                if mad <= median {
+                    inside += histogram[median - mad] as usize;
+                }
+            }
+            assert_eq!(background[t as usize], median as u8, "tile {t}");
+            assert_eq!(
+                noise[t as usize].to_bits(),
+                (1.4826 * mad as f32).max(255.0e-6).to_bits(),
+                "tile {t}"
+            );
         }
     }
     use image::{DynamicImage, ImageBuffer, Luma, Rgb};

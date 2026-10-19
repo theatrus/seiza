@@ -999,8 +999,8 @@ impl FitsImage {
     /// N.I.N.A.-compatible MTF autostretch straight to 8-bit grayscale.
     /// Raw one-shot-color mosaics are debayered to luminance first.
     pub fn stretch_to_u8(&self, params: &StretchParams) -> Vec<u8> {
-        let data = match self.debayer() {
-            Some(rgb) => std::borrow::Cow::Owned(rgb.to_luma_u16()),
+        let data = match self.debayer_luma() {
+            Some(luma) => std::borrow::Cow::Owned(luma),
             None => self.to_u16(),
         };
         let stats = statistics_u16(&data);
@@ -1010,8 +1010,8 @@ impl FitsImage {
     /// N.I.N.A.-compatible MTF autostretch to full-range 16-bit grayscale.
     /// Raw one-shot-color mosaics are debayered to luminance first.
     pub fn stretch_to_u16(&self, params: &StretchParams) -> Vec<u16> {
-        let data = match self.debayer() {
-            Some(rgb) => std::borrow::Cow::Owned(rgb.to_luma_u16()),
+        let data = match self.debayer_luma() {
+            Some(luma) => std::borrow::Cow::Owned(luma),
             None => self.to_u16(),
         };
         let stats = statistics_u16(&data);
@@ -1025,9 +1025,8 @@ impl FitsImage {
     /// significance while retaining more-than-8-bit sample distinctions.
     /// Raw one-shot-color mosaics are debayered to luminance first.
     pub fn to_luma_f32(&self) -> Vec<f32> {
-        if let Some(rgb) = self.debayer() {
-            return rgb
-                .to_luma_u16()
+        if let Some(luma) = self.debayer_luma() {
+            return luma
                 .into_iter()
                 .map(|value| value as f32 / u16::MAX as f32)
                 .collect();
@@ -1079,6 +1078,25 @@ impl FitsImage {
         let x_off = self.header_f64("XBAYROFF").unwrap_or(0.0) as usize;
         let y_off = self.header_f64("YBAYROFF").unwrap_or(0.0) as usize;
         Some(debayer_rgb16(
+            &self.to_u16(),
+            self.width,
+            self.height,
+            pattern,
+            x_off,
+            y_off,
+        ))
+    }
+
+    /// [`Self::debayer`]'s luminance ([`RgbImage16::to_luma_u16`]), without
+    /// the RGB image: the same values from one pass over the mosaic.
+    fn debayer_luma(&self) -> Option<Vec<u16>> {
+        if self.planes != 1 {
+            return None;
+        }
+        let pattern = self.bayer_pattern_in_storage_order()?;
+        let x_off = self.header_f64("XBAYROFF").unwrap_or(0.0) as usize;
+        let y_off = self.header_f64("YBAYROFF").unwrap_or(0.0) as usize;
+        Some(bayer::debayer_luma16(
             &self.to_u16(),
             self.width,
             self.height,

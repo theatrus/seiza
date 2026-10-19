@@ -18,6 +18,7 @@ use crate::CancelSignal;
 use crate::catalog::{CatalogStar, StarCatalog, angular_separation_deg};
 use crate::detect::DetectedStar;
 use crate::wcs::Wcs;
+use rayon::prelude::*;
 use std::time::{Duration, Instant};
 
 /// Approximate knowledge required to seed a solve.
@@ -329,47 +330,55 @@ fn solve_search(
         }
     }
 
-    let mut candidates: Vec<(f64, Affine)> = Vec::new();
-    for &(ox, oy) in &windows {
-        limits.check()?;
-        let mut in_window: Vec<(f64, f64)> = cat
-            .iter()
-            .filter(|&&(x, y, _)| (x - ox).hypot(y - oy) <= fov_radius_deg)
-            .map(|&(x, y, _)| (x, y))
-            .collect();
-        in_window.truncate(N_CATALOG_TRIANGLE_STARS);
-        let mut cat_tris = triangles(&in_window);
-        cat_tris.sort_by(|a, b| a.ratio_ba.total_cmp(&b.ratio_ba));
+    // Windows are independent, so they run in parallel; collecting keeps
+    // their order, so the stable sort below sees the same list as a loop.
+    let per_window = windows
+        .par_iter()
+        .map(|&(ox, oy)| -> Result<Vec<(f64, Affine)>, crate::Error> {
+            limits.check()?;
+            let mut in_window: Vec<(f64, f64)> = cat
+                .iter()
+                .filter(|&&(x, y, _)| (x - ox).hypot(y - oy) <= fov_radius_deg)
+                .map(|&(x, y, _)| (x, y))
+                .collect();
+            in_window.truncate(N_CATALOG_TRIANGLE_STARS);
+            let mut cat_tris = triangles(&in_window);
+            cat_tris.sort_by(|a, b| a.ratio_ba.total_cmp(&b.ratio_ba));
 
-        for it in &img_tris {
-            // Catalog triangles are sorted by ratio_ba: visit only the
-            // tolerance window instead of the full cross product
-            let start = cat_tris.partition_point(|t| t.ratio_ba < it.ratio_ba - RATIO_TOLERANCE);
-            for ct in &cat_tris[start..] {
-                if ct.ratio_ba > it.ratio_ba + RATIO_TOLERANCE {
-                    break;
+            let mut candidates = Vec::new();
+            for it in &img_tris {
+                // Catalog triangles are sorted by ratio_ba: visit only the
+                // tolerance window instead of the full cross product
+                let start =
+                    cat_tris.partition_point(|t| t.ratio_ba < it.ratio_ba - RATIO_TOLERANCE);
+                for ct in &cat_tris[start..] {
+                    if ct.ratio_ba > it.ratio_ba + RATIO_TOLERANCE {
+                        break;
+                    }
+                    if (it.ratio_ca - ct.ratio_ca).abs() > RATIO_TOLERANCE {
+                        continue;
+                    }
+                    let err = (it.ratio_ba - ct.ratio_ba)
+                        .abs()
+                        .max((it.ratio_ca - ct.ratio_ca).abs());
+                    // The tangent/pixel side length ratio must match the scale hint
+                    let tri_scale = ct.longest / it.longest;
+                    if (tri_scale / scale_deg - 1.0).abs() > hint.scale_tolerance {
+                        continue;
+                    }
+                    let Some(affine) = Affine::from_three_points(&it.vertices, &ct.vertices) else {
+                        continue;
+                    };
+                    if !affine.is_similarity_like(scale_deg, hint.scale_tolerance) {
+                        continue;
+                    }
+                    candidates.push((err, affine));
                 }
-                if (it.ratio_ca - ct.ratio_ca).abs() > RATIO_TOLERANCE {
-                    continue;
-                }
-                let err = (it.ratio_ba - ct.ratio_ba)
-                    .abs()
-                    .max((it.ratio_ca - ct.ratio_ca).abs());
-                // The tangent/pixel side length ratio must match the scale hint
-                let tri_scale = ct.longest / it.longest;
-                if (tri_scale / scale_deg - 1.0).abs() > hint.scale_tolerance {
-                    continue;
-                }
-                let Some(affine) = Affine::from_three_points(&it.vertices, &ct.vertices) else {
-                    continue;
-                };
-                if !affine.is_similarity_like(scale_deg, hint.scale_tolerance) {
-                    continue;
-                }
-                candidates.push((err, affine));
             }
-        }
-    }
+            Ok(candidates)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut candidates: Vec<(f64, Affine)> = per_window.into_iter().flatten().collect();
     if candidates.is_empty() {
         return Err(crate::Error::Solve(
             "no plausible triangle correspondences found".to_string(),
@@ -386,17 +395,26 @@ fn solve_search(
         .collect();
     let match_tol = MATCH_TOLERANCE_PX * scale_deg;
     let grid = CatGrid::build(&cat, match_tol);
-    let mut best: Option<(usize, Affine)> = None;
-    for (index, (_, affine)) in candidates.iter().enumerate() {
-        if index % CANDIDATES_PER_CHECK == 0 {
+    // Candidates are counted in parallel, a block at a time between checks
+    // of the limits; the first with the most inliers wins, as in a loop.
+    let inliers = candidates
+        .par_chunks(CANDIDATES_PER_CHECK)
+        .map(|block| -> Result<Vec<usize>, crate::Error> {
             limits.check()?;
-        }
-        let inliers = count_inliers(affine, &vote_stars, &cat, &grid, match_tol);
-        if best.as_ref().is_none_or(|(count, _)| inliers > *count) {
-            best = Some((inliers, affine.clone()));
+            Ok(block
+                .iter()
+                .map(|(_, affine)| count_inliers(affine, &vote_stars, &cat, &grid, match_tol))
+                .collect())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut best: Option<(usize, usize)> = None;
+    for (index, &count) in inliers.iter().flatten().enumerate() {
+        if best.is_none_or(|(most, _)| count > most) {
+            best = Some((count, index));
         }
     }
-    let (votes, affine) = best.unwrap();
+    let (votes, winner) = best.unwrap();
+    let affine = candidates[winner].1.clone();
     if votes < MIN_INLIERS.min(vote_stars.len() * 2 / 3) {
         return Err(crate::Error::Solve(format!(
             "best candidate matched only {votes} of {} stars",
