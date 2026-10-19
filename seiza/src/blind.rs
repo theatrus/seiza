@@ -21,6 +21,8 @@ use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::ops::Range;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone)]
 pub struct BlindParams {
@@ -111,6 +113,14 @@ const ANCHORS_PER_CHECK: usize = 64;
 /// engages the rank-robust fallback ([`coarse_match_count`] projects
 /// zero or one for random descriptor collisions).
 const RR_VERIFY_COARSE_FLOOR: usize = 10;
+/// A region with at least this many votes, and [`STANDOUT_RATIO`] times
+/// the next region's, is verified before the others are scored. A field
+/// that solves gets tens or hundreds of votes against a handful for the
+/// next region (263 to 5 for a 26 MP M45 frame, 47 to 4 for a 2 MP
+/// galaxy); fields that need the coarse score lead by one or two.
+const STANDOUT_VOTES: u32 = 20;
+/// See [`STANDOUT_VOTES`].
+const STANDOUT_RATIO: u32 = 4;
 /// Bound the temporary per-anchor vectors created by parallel index
 /// generation. Deep Gaia tiers contain tens of millions of stars; collecting
 /// one `Vec` per anchor for an entire tier can otherwise consume gigabytes
@@ -1033,10 +1043,6 @@ fn solve_blind_with_global_ladder(
         ranked.push((votes, implied, scale, coarse_wcs));
     }
 
-    // Deep, small-field tiers often yield only one or two matching quads;
-    // vote-only ordering buries those among whole-sky descriptor collisions.
-    // Re-rank every multi-vote region (and at least the verification budget)
-    // by cheaply projecting catalog stars through the quad's coarse WCS.
     let score_count = ranked
         .partition_point(|hypothesis| hypothesis.0 >= 2)
         .max(params.max_hypotheses)
@@ -1046,25 +1052,100 @@ fn solve_blind_with_global_ladder(
         stars.iter().take(200),
         (width.min(height) / 250.0).clamp(8.0, 32.0),
     );
+    let score = |(votes, center, scale, coarse_wcs): (u32, (f64, f64), f64, Wcs)| {
+        // A stopped solve scores nothing more; the check after the map
+        // returns the reason.
+        if limits.stopped() {
+            return (0, votes, center, scale, coarse_wcs);
+        }
+        let matches = coarse_match_count(
+            &coarse_wcs,
+            center,
+            scale,
+            dimensions,
+            catalog,
+            &detection_grid,
+        );
+        (matches, votes, center, scale, coarse_wcs)
+    };
+
+    let hint_for = |center: (f64, f64), scale: f64| {
+        // The implied center is precise and its error scales with the
+        // field, so the search radius does too: a fixed radius makes
+        // fine-scale verification cover dozens of FOV-sized triangle
+        // windows, and a whole-sky search verifies hundreds of fine-scale
+        // junk hypotheses per image
+        let fov_radius_deg = (width.hypot(height) / 2.0) * scale / 3600.0;
+        SolveHint {
+            center,
+            radius_deg: (fov_radius_deg * 0.25).clamp(0.02, 0.4),
+            scale_arcsec_px: scale,
+            scale_tolerance: 0.15,
+            sip_order: 0,
+        }
+    };
+    // Blind acceptance is stricter than the hinted floor: across a
+    // whole-sky search, chance alignments of a few stars are routine.
+    let accepted = |solution: Solution, scale: f64| {
+        (solution.matched_stars >= params.min_matches
+            && solution.rms_arcsec < params.max_rms_px * scale
+            && solution.false_match_probability * score_count.max(1) as f64
+                <= params.max_false_match_probability)
+            .then_some(solution)
+    };
+    let verify = |batch: &[RankedHypothesis]| {
+        first_verified(batch, limits, |hypothesis, limits| {
+            let (coarse_matches, _, center, scale, _) = *hypothesis;
+            // The rank-robust fallback is reserved for hypotheses whose
+            // position-only coarse score shows real catalog agreement
+            // (random collisions project zero or one): a correct field
+            // defeated by untrustworthy flux ordering is rescued, while the
+            // hundreds of junk hypotheses fail at plain triangle cost.
+            let rank_robust = (coarse_matches >= RR_VERIFY_COARSE_FLOOR).then_some(rr_tables);
+            crate::solve::solve_for_blind_hypothesis(
+                stars,
+                catalog,
+                &hint_for(center, scale),
+                dimensions,
+                rank_robust,
+                limits,
+            )
+            .ok()
+            .and_then(|solution| accepted(solution, scale))
+        })
+    };
+
+    // Verify a region that stands out by votes before scoring anything
+    // else: scoring every multi-vote region costs a catalog cone search
+    // each, far more than verifying one.
+    let standout = match ranked.as_slice() {
+        [first, second, ..] => {
+            first.0 >= STANDOUT_VOTES && first.0 >= STANDOUT_RATIO.saturating_mul(second.0)
+        }
+        [first] => first.0 >= STANDOUT_VOTES,
+        [] => false,
+    };
+    let leaders: Vec<RankedHypothesis> = ranked
+        .iter()
+        .take(usize::from(standout))
+        .cloned()
+        .map(score)
+        .collect();
+    limits.check()?;
+    if let Some(solution) = verify(&leaders) {
+        return Ok((solution, score_count));
+    }
+
+    // Deep, small-field tiers often yield only one or two matching quads;
+    // vote-only ordering buries those among whole-sky descriptor collisions.
+    // Re-rank every other multi-vote region (and at least the verification
+    // budget) by cheaply projecting catalog stars through the quad's coarse
+    // WCS.
     let mut ranked: Vec<RankedHypothesis> = ranked
         .into_par_iter()
         .take(score_count)
-        .map(|(votes, center, scale, coarse_wcs)| {
-            // A stopped solve scores nothing more; the check after the
-            // map returns the reason.
-            if limits.stopped() {
-                return (0, votes, center, scale, coarse_wcs);
-            }
-            let matches = coarse_match_count(
-                &coarse_wcs,
-                center,
-                scale,
-                dimensions,
-                catalog,
-                &detection_grid,
-            );
-            (matches, votes, center, scale, coarse_wcs)
-        })
+        .skip(leaders.len())
+        .map(score)
         .collect();
     limits.check()?;
     ranked.par_sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
@@ -1080,68 +1161,27 @@ fn solve_blind_with_global_ladder(
                 a_sep.total_cmp(&b_sep)
             });
             eprintln!(
-                "blind-debug: {} hypotheses; nearest-to-truth rank {:?}",
+                "blind-debug: {} hypotheses after {} standout; nearest-to-truth rank {:?}",
                 ranked.len(),
+                leaders.len(),
                 near.map(|(rank, h)| (rank, h.0, h.1, h.2, h.3))
             );
         }
     }
 
-    ranked.truncate(params.max_hypotheses);
+    ranked.truncate(params.max_hypotheses.saturating_sub(leaders.len()));
 
-    // Verify hypotheses in vote order. The true field usually ranks first,
+    // Verify the rest in score order. The true field usually ranks first,
     // so begin with a small batch instead of speculatively launching one
     // full triangle solve per logical CPU. Widen after misses to recover
     // the machine's full throughput on difficult or unsolvable fields.
-    // Blind acceptance is stricter than the hinted floor: across a
-    // whole-sky search, chance alignments of a few stars are routine.
     let max_batch = rayon::current_num_threads().max(1);
     let mut batch = max_batch.min(4);
     let mut attempted = 0;
     while attempted < ranked.len() {
         limits.check()?;
         let end = (attempted + batch).min(ranked.len());
-        let chunk = &ranked[attempted..end];
-        let solution = chunk.par_iter().find_map_any(
-            |(coarse_matches, _votes, center, scale, _coarse_wcs)| {
-                // The implied center is precise and its error scales with
-                // the field, so the search radius does too: a fixed radius
-                // makes fine-scale verification cover dozens of FOV-sized
-                // triangle windows, and a whole-sky search verifies
-                // hundreds of fine-scale junk hypotheses per image
-                let fov_radius_deg = (width.hypot(height) / 2.0) * *scale / 3600.0;
-                let hint = SolveHint {
-                    center: *center,
-                    radius_deg: (fov_radius_deg * 0.25).clamp(0.02, 0.4),
-                    scale_arcsec_px: *scale,
-                    scale_tolerance: 0.15,
-                    sip_order: 0,
-                };
-                // The rank-robust fallback is reserved for hypotheses
-                // whose position-only coarse score shows real catalog
-                // agreement (random collisions project zero or one): a
-                // correct field defeated by untrustworthy flux ordering
-                // is rescued, while the hundreds of junk hypotheses fail
-                // at plain triangle cost.
-                let rank_robust = (*coarse_matches >= RR_VERIFY_COARSE_FLOOR).then_some(rr_tables);
-                crate::solve::solve_for_blind_hypothesis(
-                    stars,
-                    catalog,
-                    &hint,
-                    dimensions,
-                    rank_robust,
-                    limits,
-                )
-                .ok()
-                .filter(|s| {
-                    s.matched_stars >= params.min_matches
-                        && s.rms_arcsec < params.max_rms_px * *scale
-                        && s.false_match_probability * score_count.max(1) as f64
-                            <= params.max_false_match_probability
-                })
-            },
-        );
-        if let Some(solution) = solution {
+        if let Some(solution) = verify(&ranked[attempted..end]) {
             return Ok((solution, score_count));
         }
         attempted = end;
@@ -1155,6 +1195,34 @@ fn solve_blind_with_global_ladder(
         "no hypothesis verified (tried {})",
         ranked.len()
     )))
+}
+
+/// The first of `items` that `verify` accepts, trying them in parallel.
+/// Once one is accepted, the others still running see their limits as
+/// stopped, so the batch ends with its first success rather than with its
+/// slowest wrong hypothesis. A stop from `limits` reaches every one too.
+fn first_verified<T: Sync, S: Send>(
+    items: &[T],
+    limits: &SolveLimits,
+    verify: impl Fn(&T, &SolveLimits) -> Option<S> + Sync,
+) -> Option<S> {
+    let found = Arc::new(AtomicBool::new(false));
+    let caller = limits.cancel.clone();
+    let seen = Arc::clone(&found);
+    let batch_limits = SolveLimits {
+        deadline: limits.deadline,
+        cancel: Some(crate::CancelSignal::new(move || {
+            seen.load(Ordering::Relaxed)
+                || caller
+                    .as_ref()
+                    .is_some_and(crate::CancelSignal::is_cancelled)
+        })),
+    };
+    items.par_iter().find_map_any(|item| {
+        let verified = verify(item, &batch_limits)?;
+        found.store(true, Ordering::Relaxed);
+        Some(verified)
+    })
 }
 
 struct DetectionGrid {
@@ -1678,6 +1746,49 @@ pub(crate) mod tests {
         let result = solve(&SolveLimits::default().with_cancel(cancel));
         assert!(matches!(result, Err(crate::Error::Cancelled)), "{result:?}");
         assert!(asked.load(std::sync::atomic::Ordering::Relaxed) > 5);
+    }
+
+    #[test]
+    fn a_verified_hypothesis_stops_the_rest_of_its_batch() {
+        // Item 0 verifies after a moment; the others are wrong fields whose
+        // searches would run for a minute unless told to stop.
+        let started = std::time::Instant::now();
+        let items: Vec<usize> = (0..8).collect();
+        let verified = first_verified(&items, &SolveLimits::default(), |&item, limits| {
+            if item == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                return Some(item);
+            }
+            while started.elapsed() < std::time::Duration::from_secs(60) {
+                if limits.stopped() {
+                    return None;
+                }
+                std::thread::yield_now();
+            }
+            None
+        });
+        assert_eq!(verified, Some(0));
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn a_callers_stop_reaches_every_hypothesis_of_a_batch() {
+        let items: Vec<usize> = (0..8).collect();
+        let cancel = crate::CancelSignal::new(|| true);
+        let verified = first_verified(
+            &items,
+            &SolveLimits::default().with_cancel(cancel),
+            |&item, limits| (!limits.stopped()).then_some(item),
+        );
+        assert_eq!(verified, None);
+        let passed = SolveLimits {
+            deadline: Some(std::time::Instant::now()),
+            cancel: None,
+        };
+        let verified = first_verified(&items, &passed, |&item, limits| {
+            (!limits.stopped()).then_some(item)
+        });
+        assert_eq!(verified, None);
     }
 
     #[test]
