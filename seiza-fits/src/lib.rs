@@ -95,6 +95,74 @@ pub enum Pixels {
     F64(Vec<f64>),
 }
 
+/// An image's linear samples on a grid fit for measuring stars, read from
+/// the stored pixels without a copy.
+///
+/// A raw one-shot-colour mosaic is read 2×2 binned: every 2×2 block of a
+/// Bayer mosaic holds one red, one blue and two green pixels, whatever the
+/// pattern, so the block's sum is a brightness free of the colour pattern
+/// without a debayer. Other images are read at their own pixels, planar RGB
+/// as the sum of its planes. Samples are in storage order, as stored,
+/// before `BZERO` and `BSCALE` where the pixels keep them: offsets and
+/// positive scales do not move a centroid. A blank or non-finite sample is
+/// NaN.
+#[derive(Clone, Copy)]
+pub struct LinearSampler<'a> {
+    image: &'a FitsImage,
+    binning: usize,
+    blank: Option<i32>,
+    width: usize,
+    height: usize,
+}
+
+impl LinearSampler<'_> {
+    /// Columns of the sample grid.
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    /// Rows of the sample grid.
+    pub fn height(&self) -> usize {
+        self.height
+    }
+
+    /// Image pixels per grid sample along each axis: 2 for a raw colour
+    /// mosaic, else 1. Grid sample `(x, y)` covers image pixels
+    /// `binning * x ..` and `binning * y ..`, so its centre is image pixel
+    /// `binning * x + (binning - 1) / 2`.
+    pub fn binning(&self) -> usize {
+        self.binning
+    }
+
+    /// The sample at grid `(x, y)`, which must lie inside the grid.
+    pub fn get(&self, x: usize, y: usize) -> f32 {
+        let image = self.image;
+        let plane = image.width * image.height;
+        let value = |index: usize| -> f32 {
+            match &image.pixels {
+                Pixels::U8(data) => f32::from(data[index]),
+                Pixels::U16(data) => f32::from(data[index]),
+                Pixels::I32(data) => match self.blank {
+                    Some(blank) if data[index] == blank => f32::NAN,
+                    _ => data[index] as f32,
+                },
+                Pixels::F32(data) => data[index],
+                Pixels::F64(data) => data[index] as f32,
+            }
+        };
+        let mut sum = 0.0f32;
+        for dy in 0..self.binning {
+            for dx in 0..self.binning {
+                let at = (y * self.binning + dy) * image.width + x * self.binning + dx;
+                for p in 0..image.planes {
+                    sum += value(p * plane + at);
+                }
+            }
+        }
+        if sum.is_finite() { sum } else { f32::NAN }
+    }
+}
+
 /// A decoded FITS image: pixels plus the parsed header cards.
 #[derive(Debug, Clone)]
 pub struct FitsImage {
@@ -973,6 +1041,23 @@ impl FitsImage {
             height: self.height,
             data,
         })
+    }
+
+    /// The image's linear samples, read in place, for measuring stars:
+    /// see [`LinearSampler`].
+    pub fn linear_sampler(&self) -> LinearSampler<'_> {
+        let binning = if self.planes == 1 && self.bayer_pattern().is_some() {
+            2
+        } else {
+            1
+        };
+        LinearSampler {
+            image: self,
+            binning,
+            blank: self.i32_blank(),
+            width: self.width / binning,
+            height: self.height / binning,
+        }
     }
 
     /// The full stored pixel buffer (all planes, planar order) as u16.

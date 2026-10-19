@@ -129,6 +129,38 @@ def test_detect_finds_synthetic_stars_f32_and_u8():
     assert len(stars_u8) >= len(positions)
 
 
+def _star_on_a_gradient(height, width, truth, sigma, peak, slope):
+    yy, xx = np.mgrid[0:height, 0:width]
+    star = peak * np.exp(-((xx - truth[0]) ** 2 + (yy - truth[1]) ** 2) / (2 * sigma**2))
+    return (1000.0 + slope * xx + star).astype(np.float32)
+
+
+def test_refine_centroids_finds_a_star_on_a_sky_gradient():
+    truth = (47.3, 38.6)
+    image = _star_on_a_gradient(80, 96, truth, 1.5, 2000.0, 4.0)
+    seed = seiza.Star(x=truth[0] + 0.7, y=truth[1] - 0.6, flux=1.0, area=30)
+    (refined,) = seiza.refine_centroids([seed], image)
+    assert math.hypot(refined.x - truth[0], refined.y - truth[1]) < 0.03
+    assert refined.flux == seed.flux
+    # The same samples as uint16.
+    (as_u16,) = seiza.refine_centroids([seed], image.astype(np.uint16))
+    assert math.hypot(as_u16.x - truth[0], as_u16.y - truth[1]) < 0.05
+
+
+def test_refine_centroids_on_a_binned_mosaic_returns_full_resolution_positions():
+    truth = (95.8, 77.2)
+    image = _star_on_a_gradient(160, 192, truth, 3.0, 2000.0, 2.0)
+    binned = image.reshape(80, 2, 96, 2).sum(axis=(1, 3), dtype=np.float32)
+    seed = seiza.Star(x=truth[0] - 0.9, y=truth[1] + 0.8, flux=1.0, area=120)
+    (refined,) = seiza.refine_centroids([seed], binned, binning=2)
+    assert math.hypot(refined.x - truth[0], refined.y - truth[1]) < 0.05
+
+
+def test_refine_centroids_rejects_a_zero_binning():
+    with pytest.raises(ValueError):
+        seiza.refine_centroids([], np.zeros((32, 32), np.float32), binning=0)
+
+
 def test_wcs_transform_round_trip():
     wcs = seiza.Wcs.from_center_scale_rotation((10.0, -45.0), (500.0, 400.0), 1.5, 33.0)
     ra, dec = wcs.pixel_to_world(123.0, 456.0)

@@ -73,17 +73,45 @@ fn read_astronomy_headers(
 
 pub(crate) enum LoadedImage {
     Dynamic(image::DynamicImage),
+    /// A FITS or XISF image's compact 8-bit stretch, which detection runs
+    /// on, and the image itself, whose linear samples the detected stars are
+    /// measured again on (see [`refine_on_source`]).
+    Astronomy {
+        gray: image::GrayImage,
+        source: Box<seiza_fits::FitsImage>,
+    },
     LinearF32 {
         luma: Vec<f32>,
         width: u32,
         height: u32,
+        /// The FITS or XISF image the luma came from, for [`refine_on_source`].
+        source: Option<Box<seiza_fits::FitsImage>>,
     },
+}
+
+/// Measure `stars` again on `source`'s linear samples: the positions a
+/// solve fits, free of the 8-bit stretch and of tile-background bias
+/// (see [`seiza::detect::refine_centroids`]).
+fn refine_on_source(
+    source: &seiza_fits::FitsImage,
+    mut stars: Vec<DetectedStar>,
+) -> Vec<DetectedStar> {
+    let sampler = source.linear_sampler();
+    seiza::detect::refine_centroids(
+        &mut stars,
+        sampler.width(),
+        sampler.height(),
+        sampler.binning(),
+        &|x, y| sampler.get(x, y),
+    );
+    stars
 }
 
 impl LoadedImage {
     pub(crate) fn dimensions(&self) -> (u32, u32) {
         match self {
             Self::Dynamic(image) => (image.width(), image.height()),
+            Self::Astronomy { gray, .. } => gray.dimensions(),
             Self::LinearF32 { width, height, .. } => (*width, *height),
         }
     }
@@ -91,11 +119,24 @@ impl LoadedImage {
     pub(crate) fn detect_stars(&self, config: &DetectConfig) -> Vec<DetectedStar> {
         match self {
             Self::Dynamic(image) => seiza::detect_stars(image, config),
+            Self::Astronomy { gray, source } => {
+                // Detection reads the image; the clone of its 8-bit buffer
+                // is what DynamicImage needs to own.
+                let image = image::DynamicImage::ImageLuma8(gray.clone());
+                refine_on_source(source, seiza::detect_stars(&image, config))
+            }
             Self::LinearF32 {
                 luma,
                 width,
                 height,
-            } => seiza::detect_stars_luma_f32(luma, *width, *height, config),
+                source,
+            } => {
+                let stars = seiza::detect_stars_luma_f32(luma, *width, *height, config);
+                match source {
+                    Some(source) => refine_on_source(source, stars),
+                    None => stars,
+                }
+            }
         }
     }
 
@@ -113,10 +154,12 @@ impl LoadedImage {
     fn to_rgb8(&self) -> image::RgbImage {
         match self {
             Self::Dynamic(image) => image.to_rgb8(),
+            Self::Astronomy { gray, .. } => image::DynamicImage::ImageLuma8(gray.clone()).to_rgb8(),
             Self::LinearF32 {
                 luma,
                 width,
                 height,
+                ..
             } => {
                 let mut rgb = Vec::with_capacity(luma.len() * 3);
                 for &value in luma {
@@ -132,10 +175,12 @@ impl LoadedImage {
     fn to_luma8(&self) -> image::GrayImage {
         match self {
             Self::Dynamic(image) => image.to_luma8(),
+            Self::Astronomy { gray, .. } => gray.clone(),
             Self::LinearF32 {
                 luma,
                 width,
                 height,
+                ..
             } => {
                 let luma = luma
                     .iter()
@@ -163,14 +208,16 @@ pub(crate) fn load_image(path: &std::path::Path, backend: DetectBackend) -> Resu
                 luma: image.to_luma_f32(),
                 width,
                 height,
+                source: Some(Box::new(image)),
             });
         }
         let stretched = image.stretch_to_u8(&seiza_fits::StretchParams::default());
-        let buffer = image::GrayImage::from_raw(width, height, stretched)
+        let gray = image::GrayImage::from_raw(width, height, stretched)
             .ok_or_else(|| anyhow::anyhow!("image dimensions mismatch"))?;
-        return Ok(LoadedImage::Dynamic(image::DynamicImage::ImageLuma8(
-            buffer,
-        )));
+        return Ok(LoadedImage::Astronomy {
+            gray,
+            source: Box::new(image),
+        });
     }
     Ok(LoadedImage::Dynamic(
         seiza_image_io::open_raster(path)?.pixels,
@@ -194,6 +241,13 @@ fn redetect_f32(
         backend: DetectBackend::F32,
         ..config.clone()
     };
+    if let LoadedImage::Astronomy { source, .. } = image {
+        // The image is at hand: its linear luma, without reading it again.
+        let (width, height) = image.dimensions();
+        let luma = source.to_luma_f32();
+        let stars = seiza::detect_stars_luma_f32(&luma, width, height, &config);
+        return Ok(refine_on_source(source, stars));
+    }
     if is_astronomy_image_path(path) {
         return Ok(load_image(path, DetectBackend::F32)?.detect_stars(&config));
     }
@@ -4895,10 +4949,7 @@ mod cli_tests {
         let compact = load_image(&path, DetectBackend::Auto).unwrap();
         let precise = load_image(&path, DetectBackend::F32).unwrap();
 
-        assert!(matches!(
-            compact,
-            LoadedImage::Dynamic(image::DynamicImage::ImageLuma8(_))
-        ));
+        assert!(matches!(compact, LoadedImage::Astronomy { .. }));
         let LoadedImage::LinearF32 { luma, .. } = precise else {
             panic!("forced f32 astronomy image must retain a linear f32 buffer");
         };

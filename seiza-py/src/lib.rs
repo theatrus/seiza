@@ -690,6 +690,57 @@ fn detect(
     Ok(stars.into_iter().map(Star::from).collect())
 }
 
+/// Measure detected stars again on an image's linear samples, for the
+/// positions a plate solve fits. ``image`` is a 2D ``float32`` or ``uint16``
+/// array (rows are ``y``) of linear samples covering the image in blocks of
+/// ``binning`` x ``binning`` pixels: the raw pixels of a mono frame, or a raw
+/// colour mosaic summed in 2 x 2 blocks with ``binning=2``. Each star's
+/// background is a plane fitted to an annulus around it and its centroid is
+/// iterated with a Gaussian weight, which removes the bias that a stretched
+/// detection image and a sky gradient give. Stars that cannot be measured
+/// keep their positions; flux, peak and area stay as detected.
+#[pyfunction]
+#[pyo3(signature = (stars, image, *, binning=1))]
+fn refine_centroids(
+    py: Python<'_>,
+    stars: &Bound<'_, PyAny>,
+    image: &Bound<'_, PyAny>,
+    binning: usize,
+) -> PyResult<Vec<Star>> {
+    if binning == 0 {
+        return Err(PyValueError::new_err("binning must be at least 1"));
+    }
+    let mut stars = extract_stars(stars)?;
+    if let Ok(array) = image.extract::<PyReadonlyArray2<'_, f32>>() {
+        let dims = array.shape();
+        let (height, width) = (dims[0], dims[1]);
+        let pixels = array
+            .as_slice()
+            .map_err(|_| PyValueError::new_err("image array is not contiguous"))?;
+        py.detach(|| {
+            seiza::detect::refine_centroids(&mut stars, width, height, binning, &|x, y| {
+                pixels[y * width + x]
+            })
+        });
+    } else if let Ok(array) = image.extract::<PyReadonlyArray2<'_, u16>>() {
+        let dims = array.shape();
+        let (height, width) = (dims[0], dims[1]);
+        let pixels = array
+            .as_slice()
+            .map_err(|_| PyValueError::new_err("image array is not contiguous"))?;
+        py.detach(|| {
+            seiza::detect::refine_centroids(&mut stars, width, height, binning, &|x, y| {
+                f32::from(pixels[y * width + x])
+            })
+        });
+    } else {
+        return Err(PyValueError::new_err(
+            "image must be a 2D numpy array of float32 or uint16",
+        ));
+    }
+    Ok(stars.into_iter().map(Star::from).collect())
+}
+
 /// Plate solve with an approximate position and pixel-scale hint.
 #[pyfunction]
 #[pyo3(signature = (stars, catalog, width, height, *, ra, dec, scale_arcsec_px,
@@ -1035,6 +1086,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<satellites::PyTrackSample>()?;
     m.add_class::<satellites::PyTrackSearchResult>()?;
     m.add_function(wrap_pyfunction!(detect, m)?)?;
+    m.add_function(wrap_pyfunction!(refine_centroids, m)?)?;
     m.add_function(wrap_pyfunction!(solve, m)?)?;
     m.add_function(wrap_pyfunction!(solve_blind, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_catalogs, m)?)?;

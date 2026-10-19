@@ -50,6 +50,22 @@ catalog = seiza.StarCatalog.open("data")   # directory
 catalog = seiza.StarCatalog.open()         # after seiza setup
 ```
 
+A solution is only as exact as the star positions it fits. When the array
+you detect on is stretched, or the sky has a gradient, measure the stars
+again on the image's linear samples before solving. `refine_centroids` fits
+each star's background as a plane over an annulus around it and iterates a
+Gaussian-weighted centroid, which is how the CLI and the C ABI place the stars
+of a FITS or XISF image. For a raw colour mosaic, pass it summed in 2 × 2
+blocks, so every sample holds one red, one blue and two green pixels:
+
+```python
+stars = seiza.detect(stretched_u8)
+stars = seiza.refine_centroids(stars, raw_samples.astype(np.float32))
+# A raw colour mosaic (height and width even), binned 2 x 2:
+binned = raw.reshape(h // 2, 2, w // 2, 2).sum(axis=(1, 3), dtype=np.float32)
+stars = seiza.refine_centroids(stars, binned, binning=2)
+```
+
 Stars can also be plain `(x, y, flux)` tuples from any other detector — the
 solver only needs positions and relative brightness:
 
